@@ -19,7 +19,7 @@ try{
  await call({op:'open',width:1440,height:1000,mobile:false});
  for(const size of [{name:'phone',width:390,height:844,mobile:true},{name:'desktop',width:1440,height:1000,mobile:false}]){
   await call({op:'viewport',...size});await navigate('/#s-the-big-idea');await wait("!!document.querySelector('#s-the-big-idea')");
-  const top=await evaluate("({title:document.title,w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth,failed:document.querySelectorAll('.cell.failed,.ms-errors,.review-errors').length})");
+  const top=await evaluate("({title:document.title,w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth,failed:document.querySelectorAll('.cell.failed,.ms-errors,.review-errors,.cl-errors,.lt-errors').length})");
   check(size.name+': readable page width',top.sw<=top.w+2,top);check(size.name+': no failed cells or declarations',top.failed===0,top);
   await shot(size.name+'-introduction');
   await navigate('/#s-could-beam-lisp-be-fully-formal');
@@ -38,6 +38,24 @@ try{
   await wait("!!document.querySelector('[data-source-id=\"story-lab\"] iframe')?.contentDocument?.querySelector('.fl-app')");
   check(size.name+': preview uses public source components',await evaluate("!!document.querySelector('[data-source-id=\"story-lab\"] iframe').contentDocument.querySelector('[data-ui-component=\"formal-answer\"]')"));
   await shot(size.name+'-source-preview');
+  await click('#claims-formal-promises [data-claims-filter="open"]');
+  check(size.name+': promises ledger keeps future work visibly open',await evaluate("(()=>{const r=document.querySelector('#claims-formal-promises');const rows=[...r.querySelectorAll('.cl-row')].filter(e=>!e.hidden);return rows.length===2&&rows.every(e=>e.dataset.open==='1')})()"));
+  await shot(size.name+'-open-promises');
+  await click('#claims-formal-promises [data-claims-filter="open"]');
+  await click('#claims-formal-promises [data-claims-view="maps"]');
+  await wait("!!document.querySelector('#claims-formal-promises .cl-frame')?.contentDocument?.querySelector('[data-ui-composition=\"maps\"]')");
+  check(size.name+': promise opens its actual source-backed view',await evaluate("document.querySelector('#claims-formal-promises .cl-dialog').open"));
+  await shot(size.name+'-promise-view');
+  await call({op:'key',key:'Escape'});
+  check(size.name+': promise dialog restores focus',await evaluate("!document.querySelector('#claims-formal-promises .cl-dialog').open&&document.activeElement===document.querySelector('#claims-formal-promises [data-claims-view=\"maps\"]')"));
+  await navigate('/#s-could-beam-lisp-be-fully-formal');
+  await click('#lifetime-formal-proof-lifetime .lt-scroll [data-lt-item="s1"]');
+  check(size.name+': proof lifetime opens the selected explanation',await evaluate("!document.querySelector('#lifetime-formal-proof-lifetime [data-lt-detail=\"s1\"]').hidden"));
+  check(size.name+': proof lifetime contains scrolling within its panel',await evaluate("document.documentElement.scrollWidth<=document.documentElement.clientWidth+2"));
+  await shot(size.name+'-proof-lifetime');
+  await call({op:'key',key:'Escape'});
+  check(size.name+': proof lifetime Escape clears detail',await evaluate("[...document.querySelectorAll('#lifetime-formal-proof-lifetime [data-lt-detail]')].every(e=>e.hidden)"));
+  await navigate('/#s-try-the-language-ideas');
   await click('[data-source-id="story-lab"] [data-source-highlight]');
   check(size.name+': source link highlighting remains available',await evaluate("document.querySelector('[data-source-id=\"story-lab\"] [data-source-highlight]').getAttribute('aria-pressed')==='true'"));
   await click('[data-source-id="story-lab"] [data-source-highlight]');
