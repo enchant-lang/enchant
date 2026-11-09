@@ -12,11 +12,29 @@ implemented fragments and deferred work distinguished per family. It does not
 claim 46 complete solver theories. [CONTRACT.md](CONTRACT.md) defines the shared
 data contract; [INTEGRATION.md](INTEGRATION.md) describes the production cutover.
 
-Open the [standalone interactive atlas](evidence/dossier/atlas.html) to explore
-connected cards and source evidence. Its [browser audit](evidence/dossier/browser-audit/audit.json)
-passes 184 checks over all 12 graphs at desktop and phone sizes, including
-navigation/Back, map selection, fullscreen/Escape, overflow and themes. Local
-feedback is read-only, and rendering starts no server or application.
+The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
+experiment through approachable examples, source-discovered BL components,
+connected theory cards and recorded browser evidence. Its
+[fully formal language chapter](https://work.tailcb5318.ts.net:18100/#s-could-beam-lisp-be-fully-formal)
+distinguishes precise semantics, checked proofs, an optional total core,
+verified compilation and application correctness. It proposes a small specified
+core, explicit effects and assumptions, independently checked proof objects,
+and a visible compiler/runtime trust boundary. These are design directions;
+this experiment has no proof kernel or verified compiler.
+
+The canonical source remains [ATLAS.bl.org](ATLAS.bl.org). Owner feedback saves
+into that file explicitly; anonymous readers cannot write. The live host is
+owned by this integration session. Use `research/formal-logic/review url` to
+find it and `research/formal-logic/review stop` to retire it. It uses the
+local `~/projects/enchanted-skills` dossier and codebase-review kits. The
+[presentation evidence](evidence/story/README.md) records their observed source
+identity, browser checks, executable cells, recorded frames and limitations.
+
+The older [standalone interactive atlas](evidence/dossier/atlas.html) is a
+retained snapshot with read-only feedback. Its historical
+[browser audit](evidence/dossier/browser-audit/audit.json) passes 184 checks
+over 12 graphs. It is separate from the new live presentation and starts no
+server or application.
 
 Owner: the integration session in the repository's `main` checkout. The
 requested `prototype/oxiz-worker` worktree supplied isolation for this
