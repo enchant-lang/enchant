@@ -50,7 +50,7 @@ async function dispatch(message) {
   session=(await rpc('Target.attachToTarget',{targetId:target.targetId,flatten:true})).sessionId;
   await rpc('Page.enable');await rpc('Runtime.enable');await rpc('Network.enable');
   await rpc('Network.setBlockedURLs',{urls:['https://fonts.googleapis.com/*','https://fonts.gstatic.com/*']});
-  await rpc('Emulation.setDeviceMetricsOverride',{width:message.width||390,height:message.height||844,deviceScaleFactor:1,mobile:true});
+  await rpc('Emulation.setDeviceMetricsOverride',{width:message.width||390,height:message.height||844,deviceScaleFactor:1,mobile:message.mobile??true});
   await rpc('Emulation.setEmulatedMedia',{features:[{name:'prefers-color-scheme',value:'light'},{name:'prefers-reduced-motion',value:'reduce'}]});
   return {pid:browser.pid,width:message.width||390,height:message.height||844};
  }
@@ -59,6 +59,13 @@ async function dispatch(message) {
   for(let i=0;i<150;i++){if(await evaluate("document.readyState==='complete'").catch(()=>false))break;await sleep(50);}
   await sleep(150);return true;
  case 'eval':return evaluate(message.expression);
+ case 'viewport':await rpc('Emulation.setDeviceMetricsOverride',{width:message.width,height:message.height,deviceScaleFactor:1,mobile:message.mobile??false});return true;
+ case 'key':
+  await rpc('Input.dispatchKeyEvent',{type:'keyDown',key:message.key,code:message.key,windowsVirtualKeyCode:message.key==='Escape'?27:9});
+  await rpc('Input.dispatchKeyEvent',{type:'keyUp',key:message.key,code:message.key,windowsVirtualKeyCode:message.key==='Escape'?27:9});return true;
+ case 'fill':
+  await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(message.selector)});if(!e)throw Error('Missing input');e.focus();e.select();})()`);
+  await rpc('Input.insertText',{text:message.text});return true;
  case 'wait':
   for(let i=0;i<120;i++){if(await evaluate(message.expression).catch(()=>false))return true;await sleep(50);}
   throw Error('Timed out waiting for '+message.expression);
