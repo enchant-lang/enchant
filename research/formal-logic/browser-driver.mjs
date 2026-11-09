@@ -59,6 +59,8 @@ async function dispatch(message) {
   for(let i=0;i<150;i++){if(await evaluate("document.readyState==='complete'").catch(()=>false))break;await sleep(50);}
   await sleep(150);return true;
  case 'eval':return evaluate(message.expression);
+ case 'headers':await rpc('Network.setExtraHTTPHeaders',{headers:message.headers});return true;
+ case 'block':await rpc('Network.setBlockedURLs',{urls:message.urls});return true;
  case 'viewport':await rpc('Emulation.setDeviceMetricsOverride',{width:message.width,height:message.height,deviceScaleFactor:1,mobile:message.mobile??false});return true;
  case 'key':
   await rpc('Input.dispatchKeyEvent',{type:'keyDown',key:message.key,code:message.key,windowsVirtualKeyCode:message.key==='Escape'?27:9});
