@@ -80,6 +80,8 @@ try{
   await wait("document.querySelectorAll('#witness-formal-browser-witness .witness-steps button').length>=5");
   await click('#witness-formal-browser-witness [data-witness-move="1"]');
   check(size.name+': witness advances recorded claim',await evaluate("document.querySelector('#witness-formal-browser-witness [data-witness-position]').innerText.startsWith('2 /')"));
+  await evaluate("document.querySelector('#witness-formal-browser-witness .witness-stage:not([hidden]) img').scrollIntoView({block:'center'})");
+  await wait("[...document.querySelectorAll('#witness-formal-browser-witness .witness-stage:not([hidden]) img')].some(i=>i.complete&&i.naturalWidth>0)");
   check(size.name+': witnessed frame is an actual loaded image',await evaluate("[...document.querySelectorAll('#witness-formal-browser-witness .witness-stage:not([hidden]) img')].every(i=>i.complete&&i.naturalWidth>0)"));
   await shot(size.name+'-witness');
   await navigate('/#s-the-presentation-language');
