@@ -35,9 +35,20 @@ try{
   await evaluate("fetch('/doc').then(r=>r.json()).then(d=>{window.__auditDoc=d;return true})");
   check(size.name+': live refresh endpoint retains selected milestone',await evaluate("!document.querySelector('[data-milestone-detail=\"M3\"]').hidden&&!!window.__auditDoc.rev"));
   await navigate('/#s-try-the-language-ideas');
-  await wait("!!document.querySelector('[data-graph=\"story-lab\"] iframe')?.contentDocument?.querySelector('.fl-app')");
-  check(size.name+': preview uses public source components',await evaluate("!!document.querySelector('[data-graph=\"story-lab\"] iframe').contentDocument.querySelector('[data-ui-component=\"formal-answer\"]')"));
+  await wait("!!document.querySelector('[data-source-id=\"story-lab\"] iframe')?.contentDocument?.querySelector('.fl-app')");
+  check(size.name+': preview uses public source components',await evaluate("!!document.querySelector('[data-source-id=\"story-lab\"] iframe').contentDocument.querySelector('[data-ui-component=\"formal-answer\"]')"));
   await shot(size.name+'-source-preview');
+  await click('[data-source-id="story-lab"] [data-source-highlight]');
+  check(size.name+': source link highlighting remains available',await evaluate("document.querySelector('[data-source-id=\"story-lab\"] [data-source-highlight]').getAttribute('aria-pressed')==='true'"));
+  await click('[data-source-id="story-lab"] [data-source-highlight]');
+  await click('[data-source-id="story-lab"] [data-source-inspect]');
+  check(size.name+': source component inspection remains available',await evaluate("document.querySelector('[data-source-id=\"story-lab\"] [data-source-inspect]').getAttribute('aria-pressed')==='true'"));
+  await click('[data-source-id="story-lab"] [data-source-inspect]');
+  await click('[data-source-id="story-lab"] [data-source-mode]');
+  await wait("document.querySelectorAll('[data-source-id=\"story-lab\"] .sg-node').length>=5");
+  check(size.name+': source graph discovers all five declared views',await evaluate("document.querySelectorAll('[data-source-id=\"story-lab\"] .sg-node').length===5"));
+  await shot(size.name+'-source-map');
+  await click('[data-source-id="story-lab"] [data-source-mode]');
   for(const view of ['maps','accounts','bits','fp','evidence']){
    await navigate('/views?view='+view);
    check(size.name+'/'+view+': rendered shared composition',await evaluate(`!!document.querySelector('[data-ui-composition="${view}"]')`));
@@ -56,6 +67,26 @@ try{
   await navigate('/#s-the-presentation-language');
   await click('#theme');check(size.name+': dark theme changes document',await evaluate("document.documentElement.dataset.theme==='dark'"));
   await shot(size.name+'-night');await click('#theme');
+  await navigate('/#all');
+  const graphs=await evaluate("[...document.querySelectorAll('.screen-graph[data-graph]')].filter(g=>g.querySelector('.review-app')).map(g=>g.dataset.graph)");
+  for(const id of graphs){
+   const root=`[data-graph="${id}"]`;
+   await click(root+' [data-sg-reset]');
+   const start=await evaluate(`document.querySelector('${root} .sg-stage>[data-view]:not([hidden])').dataset.view`);
+   const target=await evaluate(`(()=>{const g=document.querySelector('${root}');return [...g.querySelectorAll('.review-index [data-sg-to]')].find(e=>e.dataset.sgTo!==${JSON.stringify(start)})?.dataset.sgTo})()`);
+   await click(root+` .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="${target}"]`);
+   check(size.name+'/'+id+': connected topic opens',await evaluate(`document.querySelector('${root} .sg-stage>[data-view]:not([hidden])').dataset.view===${JSON.stringify(target)}`));
+   await click(root+' [data-sg-back]');
+   check(size.name+'/'+id+': Back restores the topic',await evaluate(`document.querySelector('${root} .sg-stage>[data-view]:not([hidden])').dataset.view===${JSON.stringify(start)}`));
+   await click(root+' [data-sg-mode]');
+   check(size.name+'/'+id+': map contains every topic',await evaluate(`(()=>{const g=document.querySelector('${root}');return g.querySelectorAll('.sg-overview .sg-node').length===g.querySelectorAll('.sg-stage>[data-view]').length})()`));
+   await click(root+` .sg-overview .sg-node[data-sg-to="${target}"]`);
+   check(size.name+'/'+id+': map selection returns to detail',await evaluate(`document.querySelector('${root} .sg-stage>[data-view]:not([hidden])').dataset.view===${JSON.stringify(target)}`));
+   await click(root+' [data-sg-expand]');
+   check(size.name+'/'+id+': full-screen focus scope opens',await evaluate(`document.querySelector('${root}').classList.contains('sg-expanded')&&document.querySelector('${root} .sg-workbench').getAttribute('aria-modal')==='true'`));
+   await call({op:'key',key:'Escape'});
+   check(size.name+'/'+id+': Escape returns focus',await evaluate(`!document.querySelector('${root}').classList.contains('sg-expanded')&&document.activeElement===document.querySelector('${root} [data-sg-expand]')`));
+  }
  }
  const record=await fetch(base+'/explorer.json?q=family:Comparison').then(r=>r.json());
  check('Catalog comes from three annotated renderer definitions',record.length===1&&record[0].qualified==='formal.presentation/comparison-card'&&record[0].source.endsWith('presentation.bl'));
