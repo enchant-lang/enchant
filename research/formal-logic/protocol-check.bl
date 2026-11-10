@@ -1,0 +1,59 @@
+(ns formal.protocol-check
+ (:require [formal.api :as formal] [formal.term :as t] [formal.value :as v] [interop]))
+
+(def account
+ {:name "protocol-account" :state {"balance" t/Int}
+  :init (fn [s] (t/eq (get s "balance") (t/int 0)))
+  :invariant (fn [s] (t/ge (get s "balance") (t/int 0)))
+  :transitions [{:name "deposit" :inputs {"amount" t/Int}
+                 :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+                 :next (fn [s in] {"balance" (t/add (get s "balance") (get in "amount"))})}
+                {:name "withdraw" :inputs {"amount" t/Int}
+                 :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+                 :guard (fn [s in] (t/le (get in "amount") (get s "balance")))
+                 :next (fn [s in] {"balance" (t/sub (get s "balance") (get in "amount"))})}]})
+(def cases
+ [{:id :guarded-account :spec account :expected :checked :trace-status :replayed :safety :holds
+   :initial {"balance" 0} :events [{:transition "deposit" :inputs {"amount" 3}}
+                                   {:transition "withdraw" :inputs {"amount" 2}}]}
+  {:id :unguarded-withdrawal :spec (assoc-in account [:transitions 1 :guard] (t/bool true))
+   :expected :obligation-refuted :trace-status :replayed :safety :violated
+   :initial {"balance" 0} :events [{:transition "withdraw" :inputs {"amount" 1}}]}
+  {:id :guard-failure :spec {:name "guard-failure" :state {}
+                             :transitions [{:name "attempt" :guard (v/undefined (t/bool false) :guard-error) :next {}}]}
+   :expected :obligation-refuted :trace-status :replayed :safety :violated :initial {}
+   :events [{:transition "attempt" :inputs {}} {:stutter true}]}
+  {:id :update-failure :spec (assoc account :name "update-failure" :transitions
+             [{:name "attempt" :next {"balance" (v/undefined (t/int 0) :declined)}}])
+   :expected :obligation-refuted :trace-status :replayed :safety :violated :initial {"balance" 0}
+   :events [{:transition "attempt" :inputs {}}]}
+  {:id :inconsistent-initial-state :spec (assoc account :name "empty-account" :init (t/bool false))
+   :expected :vacuous :trace-status :invalid :initial {"balance" 0} :events []}
+  {:id :unreachable-induction-countermodel
+   :spec {:name "loose-invariant" :state {"i" t/Int}
+          :init (fn [s] (t/eq (get s "i") (t/int 0)))
+          :invariant (fn [s] (t/any [(t/eq (get s "i") (t/int 0)) (t/eq (get s "i") (t/int 2))]))
+          :transitions [{:name "decrement" :guard (fn [s in] (t/gt (get s "i") (t/int 0)))
+                         :next (fn [s in] {"i" (t/sub (get s "i") (t/int 1))})}]}
+   :expected :obligation-refuted :trace-status :replayed :safety :holds :initial {"i" 0} :events []}])
+(def results
+ (mapv (fn [sample]
+  (let [definition (formal/protocol (:spec sample))
+        answers (mapv (fn [engine]
+                  (let [answer (formal/check {:backend engine} definition)]
+                   (assert (= (:expected sample) (:status answer)) (pr-str {:case (:id sample) :engine engine :answer answer}))
+                   (when (:proof answer) (assert (= :checked-obligations
+                                                    (:status (formal/check-protocol-proof definition (:proof answer))))))
+                   {:engine engine :answer answer})) [:z3 :oxiz])
+        trace (formal/replay-protocol-trace definition (:initial sample) (:events sample))]
+   (assert (= (:trace-status sample) (:status trace)) (pr-str trace))
+   (when (:safety sample) (assert (= (:safety sample) (:safety trace)) (pr-str trace)))
+   {:id (:id sample) :definition definition :expected (:expected sample) :results answers
+    :execution {:initial (:initial sample) :events (:events sample) :result trace}
+    :execution-origin :authored-example-not-extracted-from-the-induction-countermodel})) cases))
+(File/write! "research/formal-logic/evidence/protocol/examples.json"
+ (interop/->json {:schema :enchant.formal.protocol-examples-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope :declared-model-induction-and-separately-authored-finite-traces
+                 :compiler-proof-authority false :cases results}))
+(println {:cases (count results) :native-comparisons (* 2 (count results)) :replayed-traces (count results)})

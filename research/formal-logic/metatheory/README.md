@@ -53,3 +53,13 @@ controller and a well-founded back-edge relation; their audits are empty too.
 The twenty-two-theorem compiled artifact,
 log and individual axiom lists are retained separately in `../evidence/loops/`;
 the initial eighteen-theorem receipt remains historical evidence.
+
+The state/protocol extension adds three general induction theorems. Initiation
+and one-step preservation imply an invariant on every reachable state; a
+separate failure-exclusion premise then rules out failed attempts there. A
+third result gives the invariant at every position of a permitted Nat-indexed
+trace. None asserts trace existence, delivery fairness or eventual progress.
+Their printed axiom audits are empty. The current 25-theorem source and its
+compiled artifact/audit are retained under `../evidence/protocol/`. Connecting
+the BL state definition, induction obligations and concrete model executor to
+these mathematical rules remains reviewed code, not a mechanized bridge.
