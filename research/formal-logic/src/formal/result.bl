@@ -82,19 +82,39 @@
                            :implementation-soundness :not-mechanically-proved}
               :native (mapv (fn [{:keys [id result]}]
                               {:id id :solver-status (:solver-status result) :verdict (:verdict result)
+                               :phase (:phase result) :preflight-status (get-in result [:preflight :status])
                                :identity (:identity result) :certificate (:certificate result)
                                :validation (:validation result) :model-status (:model-status result)
                                :witness-provenance (:witness-provenance result)}) (native-rows subject raw execution))
               :authority {:compiler false :promotion :disabled}})))
 
+(defn- native-feasibility [row]
+ (or (:preflight-status row) (when (= :assumption-consistency (:phase row)) (:solver-status row))
+     (when (= :sat (:solver-status row)) :sat)))
+(defn- native-signature [row]
+ [(:id row) (:phase row) (:solver-status row) (native-feasibility row)])
 (defn comparison [subject reference candidate]
  (let [a (get-in reference [:evidence :claim :verdict]) b (get-in candidate [:evidence :claim :verdict])
-       decisive? #(contains? #{:entails :refuted :obligation-refuted :sat :unsat :vacuous} %)]
-  {:subject-kind (kind subject) :definition (subject-id subject)
+       decisive? #(contains? #{:entails :refuted :obligation-refuted :sat :unsat :vacuous} %)
+       native-a (get-in reference [:evidence :native]) native-b (get-in candidate [:evidence :native])
+       native-decisive? #(contains? #{:sat :unsat} %)
+       covered? (and (seq native-a) (= (mapv :id native-a) (mapv :id native-b)))
+       logical-agreement (and (decisive? a) (decisive? b) (= a b))
+       logical-disagreement (and (decisive? a) (decisive? b) (not= a b))
+       native-agreement (boolean (and covered? (every? #(native-decisive? (:solver-status %)) (concat native-a native-b))
+                                      (= (mapv native-signature native-a) (mapv native-signature native-b))))
+       native-disagreement (boolean (and covered? (some true?
+        (map (fn [x y]
+               (or (and (= (:phase x) (:phase y)) (native-decisive? (:solver-status x)) (native-decisive? (:solver-status y))
+                         (not= (:solver-status x) (:solver-status y)))
+                   (and (native-decisive? (native-feasibility x)) (native-decisive? (native-feasibility y))
+                         (not= (native-feasibility x) (native-feasibility y))))) native-a native-b))))]
+  {:formal/comparison 1 :subject-kind (kind subject) :definition (subject-id subject)
    :reference-engine :z3 :authority :none :compiler-proof-authority false
    :decision reference :candidate candidate :results {:z3 reference :oxiz candidate}
-   :status-agreement (and (decisive? a) (decisive? b) (= a b))
-   :disagreement (and (decisive? a) (decisive? b) (not= a b))
+   :status-agreement native-agreement :backend-status-agreement native-agreement
+   :logical-agreement logical-agreement :logical-disagreement logical-disagreement
+   :backend-disagreement native-disagreement :disagreement (or logical-disagreement native-disagreement)
    :certificate-statuses {:z3 (get-in reference [:evidence :certificate :status])
                           :oxiz (get-in candidate [:evidence :certificate :status])}
    :promotion :disabled}))
