@@ -241,3 +241,18 @@ normal-return and state relation, compare concrete executions with actual BL
 handlers, then add live actor observation hooks. Mailbox, scheduler, crash,
 external-effect and liveness semantics remain further required work; the pure
 record-handler path cannot stand in for them.
+
+The first pinned-SDK observations are retained in
+`evidence/record-handlers/probe.json`. Five source samples compiled and six
+runtime probes ran. In these observations, map literals preserve their field
+evaluation order, `assoc` evaluates supplied updates in argument order, a
+projection retains failure in another constructed field, an untaken record
+branch stays unevaluated, and an update preserves other fields. These finite
+observations guide the implementation; they are not preservation proofs.
+
+The actual ANF uses ordered `:map/:pairs`; literal keys are wrapped in the
+reviewed runtime's `hash_key` call. `get` and `assoc` are remote calls into that
+runtime. The two-argument function has an outer self-application scaffold and
+an inner unguarded variable-pattern clause. Recognize those exact shapes and
+identities, retaining evaluation order and refusing unreviewed key operations,
+computed calls or incompatible handler patterns.
