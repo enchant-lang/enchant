@@ -1,0 +1,91 @@
+(ns formal.context-check (:require [formal.api :as formal] [formal.term :as t] [interop]))
+
+(def text "(fn [s msg] (assoc s \"n\" (+ (get s \"n\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))")
+(def spec {:name "context-examples" :state {"n" t/Int "flag" t/Bool}
+           :init (fn [s] (t/all [(t/eq (get s "n") (t/int 0)) (get s "flag")]))
+           :invariant (fn [s] (t/ge (get s "n") (t/int 0)))
+           :handlers [{:name "step" :inputs {"amount" t/Int}
+                        :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))]) :source text}]})
+(def declared (formal/source-protocol spec))
+(def closed (formal/source-protocol (assoc spec :bindings :closed-records)))
+(def initial {"n" 0 "flag" true})
+(def events [{:transition "step" :inputs {"amount" 2}} {:stutter true}])
+(defn row [id definition initial events status safety]
+ (let [observed (formal/observe-protocol-trace definition initial events)]
+  (assert (= status (:status observed)) (pr-str observed))
+  (assert (= safety (get-in observed [:checking :runtime-safety])))
+  (assert (= false (get-in observed [:receipt :cleanup :actor-alive])))
+  (assert (every? #(and (:retired %) (not (:loaded %))) (get-in observed [:receipt :cleanup :modules])))
+  {:id id :definition definition :observation observed}))
+(def ordinary (row :default-closed closed initial events :observed :holds))
+(def child (BeamLisp.Env/fork))
+(def shadow-calls (atom 0))
+(def shadow
+ (try
+  (BeamLisp.Env/with_env child
+   (fn []
+    (BeamLisp.Env/intern "formal.core.intrinsics" "assoc"
+     (fn [& arguments] (swap! shadow-calls inc) {"n" 999 "flag" true}))
+    [(row :shadowed-ordinary declared initial events :disagreement :not-established)
+     (row :shadowed-closed closed initial events :observed :holds)]))
+  (finally (BeamLisp.Env/destroy child))))
+(assert (= 1 @shadow-calls))
+(def hidden (formal/source-protocol
+             {:name "context-hidden" :bindings :closed-records :state {"n" t/Int "flag" t/Bool}
+              :handlers [{:name "step" :source "(fn [s msg] (assoc s \"n\" (get {\"ok\" 3 \"hidden\" (quot 1 0)} \"ok\") \"flag\" false))"}]}))
+(def empty-failure (formal/source-protocol
+                     {:name "context-empty-error" :bindings :closed-records :state {}
+                      :handlers [{:name "step" :source "(fn [s msg] (do (quot 1 0) {}))"}]}))
+(def modulus (formal/source-protocol
+               {:name "context-signed-mod" :bindings :closed-records :state {"n" t/Int "flag" t/Bool}
+                :handlers [{:name "step" :source "(fn [s msg] (assoc s \"n\" (mod (get s \"n\") -3) \"flag\" false))"}]}))
+(def initial-failure (formal/source-protocol
+                      {:name "context-initial" :bindings :closed-records :state {"n" t/Int}
+                       :init (fn [s] (t/eq (get s "n") (t/int 0)))
+                       :invariant (fn [s] (t/gt (get s "n") (t/int 0))) :handlers []}))
+(def direct
+ (into [ordinary] (concat shadow
+   [(row :hidden-failure hidden initial [{:transition "step" :inputs {}} {:stutter true}] :observed :violated)
+    (row :empty-state-failure empty-failure {} [{:transition "step" :inputs {}}] :observed :violated)
+    (row :signed-modulus modulus {"n" -7 "flag" true} [{:transition "step" :inputs {}}] :observed :holds)
+    (row :initial-violation initial-failure {"n" 0} [] :observed :violated)])))
+(def unsafe (formal/source-protocol
+              (-> spec (assoc :name "context-unsafe-examples" :bindings :closed-records)
+                  (assoc-in [:handlers 0 :source]
+                    "(fn [s msg] (assoc s \"n\" (- (get s \"n\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))"))))
+(def native
+ (mapv (fn [engine]
+         (let [subject (formal/protocol-trace unsafe 1)
+               answer (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject)
+               observation (formal/observe-protocol-counterexample subject (get-in answer [:backend :property]))]
+          (assert (= :refuted (:status answer)))
+          (assert (= :observed (:status observation)) (pr-str observation))
+          (assert (= :violated (get-in observation [:checking :runtime-safety])))
+          (assert (= false (get-in observation [:receipt :cleanup :actor-alive])))
+          (assert (every? #(and (:retired %) (not (:loaded %))) (get-in observation [:receipt :cleanup :modules])))
+          {:id engine :definition unsafe :model-answer answer :observation observation})) [:z3 :oxiz]))
+(def binding (get-in closed [:handlers 0 :context]))
+(def contract (formal/program-contract
+               {:name "context-function-examples" :context binding
+                :ensures (fn [input output]
+                           (t/eq (get output "n") (t/add (get-in input ["state" "n"]) (get-in input ["message" "amount"]))))}))
+(def contracts (mapv (fn [engine]
+                       (let [result (formal/check {:backend engine} contract)]
+                        (assert (= :checked (:status result))) {:backend engine :definition contract :result result})) [:z3 :oxiz]))
+(def data {:schema :enchant.formal.context-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :direct direct :native native :contracts contracts :context-check (formal/check-source-context binding)
+           :shadow-var-calls @shadow-calls :compiler-proof-authority false})
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! root)
+(def bytes (erlang/term_to_binary data))
+(File/write! (Path/join root "examples.etf") bytes)
+(File/write! (Path/join root "examples.json") (interop/->json data))
+(File/write! (Path/join root "examples-pin.json")
+ (interop/->json {:schema :enchant.formal.trusted-runtime-archive-v1 :bytes (erlang/byte_size bytes)
+                 :sha256 (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower)))
+                 :decoder-scope :trusted-research-archive}))
+(println {:direct (count direct) :native-counterexamples (count native) :native-function-contracts (count contracts)
+          :shadow-var-calls @shadow-calls
+          :outcomes (mapv (fn [r] [(:id r) (get-in r [:observation :status]) (get-in r [:observation :checking :runtime-safety])])
+                         (into direct native))})
