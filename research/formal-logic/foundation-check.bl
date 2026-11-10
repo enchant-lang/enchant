@@ -1,0 +1,45 @@
+(ns formal.foundation-check
+ (:require [formal.term :as t] [formal.query :as q] [formal.api :as formal]
+           [formal.logic :as logic] [formal.source :as source] [interop]))
+
+(def x (t/variable "foundation.x" t/Int))
+(def y (t/variable "foundation.y" t/Int))
+(def p (t/variable "foundation.p" t/Bool))
+(def source-prepared (source/prepare "(>= (+ x 1) 1)" {"x" x}))
+(assert (= :translated (:status source-prepared)))
+(def samples
+ [{:id :increment :claim (t/gt (t/add x (t/int 1)) x) :assumptions [] :expected :checked}
+  {:id :weighted-bound :claim (t/ge (t/add (t/mul (t/int 2) x) y) (t/int 7))
+   :assumptions [(t/ge x (t/int 2)) (t/ge y (t/int 3))] :expected :checked}
+  {:id :relational-bound :claim (t/ge y (t/int 3))
+   :assumptions [(t/ge x (t/int 0)) (t/ge y (t/add x (t/int 3)))] :expected :checked}
+  {:id :integer-parity :claim (t/not (t/eq (t/mul (t/int 2) x) (t/int 1))) :assumptions [] :expected :checked}
+  {:id :negative-rounding :claim (t/le x (t/int -1))
+   :assumptions [(t/le (t/mul (t/int 2) x) (t/int -1))] :expected :checked}
+  {:id :boolean-cases :claim (t/any [p (t/not p)]) :assumptions [] :expected :checked}
+  {:id :anf-term-contract :claim (:value source-prepared) :assumptions [(t/ge x (t/int 0))]
+   :origin {:basis :reviewed-anf-lowering :source "(>= (+ x 1) 1)"} :expected :checked}
+  {:id :false-claim :claim (t/gt x (t/int 0)) :assumptions [] :expected :unknown}
+  {:id :nonlinear :claim (t/ge (t/mul x x) (t/int 0)) :assumptions [] :expected :unsupported}])
+(def results
+ (mapv (fn [sample]
+  (let [problem (q/prove (:claim sample) {:id (:id sample) :assumptions (:assumptions sample)
+                   :origin (:origin sample) :profile :bl/boolean-linear-integer-v1
+                   :scope {:mode :exact :integers :unbounded}})
+        result (formal/certify problem)
+        engines (mapv (fn [engine]
+                   (select-keys (logic/run {:backend engine} problem)
+                    [:backend :verdict :solver-status :identity :certificate :validation :trusted])) [:z3 :oxiz])]
+   (assert (= (:expected sample) (:status result)) (pr-str {:sample (:id sample) :result result}))
+   (when (= :checked (:status result))
+    (assert (= :checked (:status (formal/check-certificate problem (:certificate result)))))
+    (assert (not-any? (fn [r] (= :sat (:solver-status r))) engines)))
+   {:id (:id sample) :expected (:expected sample) :result result :engines engines})) samples))
+(def receipt
+ {:schema :enchant.formal.foundation-examples-v1
+  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+  :scope "Conditional Bool/linear Int entailments; checker implementation and ANF source connection are not mechanically verified. Native engines are observations, not checker authority."
+  :results results})
+(File/mkdir_p! "research/formal-logic/evidence/foundation")
+(File/write! "research/formal-logic/evidence/foundation/examples.json" (interop/->json receipt))
+(println {:examples (count results) :checked (count (filter #(= :checked (get-in % [:result :status])) results))})
