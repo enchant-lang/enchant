@@ -63,3 +63,13 @@ Their printed axiom audits are empty. The current 25-theorem source and its
 compiled artifact/audit are retained under `../evidence/protocol/`. Connecting
 the BL state definition, induction obligations and concrete model executor to
 these mathematical rules remains reviewed code, not a mechanized bridge.
+
+The bounded-trace extension defines explicit finite runs with idle, successful
+and failed-attempt steps. Failure retains the old state; only idle steps are
+permitted afterwards. Five additional theorems check that failure is persistent,
+idle padding is allowed, run states are reachable by successful steps, checked
+induction premises imply run safety, and every reachable state has a finite
+successful run. Their audits are empty. The current 30-theorem compiled model
+and receipt are retained under `../evidence/protocol-traces/`. The BL unroller,
+witness decoder and concrete executor are still unproved implementation
+connections; the mathematical model does not qualify live actor behavior.

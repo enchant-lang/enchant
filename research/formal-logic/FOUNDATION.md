@@ -188,7 +188,15 @@ schedules; eventual-delivery and response claims must name their fairness and
 failure assumptions. Do not turn a bounded mailbox or a finite trace into an
 unbounded actor guarantee.
 
-## Next protocol work
+## Native bounded safety subjects
+
+This slice is implemented in `formal.protocol-trace`, including independent
+execution replay, observation comparison, portable proof rechecking and the
+common facade. The initial combined run passed 473 assertions, including 103
+trace assertions; nine examples ran with both backends and ten native unsafe
+answers became independently replayed executions. The generic Lean run model
+now formalizes stuttering and persistent failure too. `BOUNDED-TRACES.md` records
+the exact behavior and remaining implementation/model boundary.
 
 Connect `formal.transition/safety` bounded questions to the new closed protocol
 subject and concrete executor. A bounded safety subject should contain its
@@ -210,3 +218,26 @@ specified outcomes and effect boundaries rather than claiming a state-model
 proof automatically verifies asynchronous actor behavior. Live mailbox and
 scheduler semantics, trace refinement, handler summaries and progress/fairness
 arguments remain required parts of the full goal.
+
+## Next source-handler connection
+
+Prioritize an actual source-backed handler path after the bounded witness
+connection. A handler should consume declared state/message records and return
+a new state record with an explicit whole-program outcome. Extract its real
+resolved ANF; do not substitute a separately authored update callback as proof
+of that handler's implementation.
+
+The current core has only scalar results. Add a precisely specified product or
+closed-record form before lowering a handler field by field. Record creation
+must preserve the compiler's actual field evaluation order, shared bindings,
+selected branches and the first named failure. Projecting one field must retain
+any failure from evaluating the whole record. Symbolic fields share one overall
+definedness/error outcome. This avoids erasing a failing field just because a
+postcondition observes a different one.
+
+Connect that core to the existing closed state subject while retaining exact
+source/ANF/core identities and profile versions. Prove or validate the lowered
+normal-return and state relation, compare concrete executions with actual BL
+handlers, then add live actor observation hooks. Mailbox, scheduler, crash,
+external-effect and liveness semantics remain further required work; the pure
+record-handler path cannot stand in for them.
