@@ -3,8 +3,9 @@
 ;; This is the checking boundary. No native solver, independent model evaluator,
 ;; compiler traversal or search implementation is called from this namespace.
 (def legacy-rules :bl/boolean-linear-integer-v1)
-(def rules :bl/boolean-piecewise-linear-integer-v2)
-(def supported-rules #{legacy-rules rules})
+(def choice-rules :bl/boolean-piecewise-linear-integer-v2)
+(def rules :bl/piecewise-ground-integer-v3)
+(def supported-rules #{legacy-rules choice-rules rules})
 (def limits {:terms 1024 :atoms 32 :nodes 8192 :depth 64 :weight-bits 4096})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.certificate: " message) {}))))
@@ -21,27 +22,34 @@
   :constant (+ (:constant a) (* scale (:constant b)))})
 (defn- affine-scale [a n]
  {:coeff (coefficients {} (:coeff a) n) :constant (* n (:constant a))})
-(defn- affine [term]
+(defn- affine [term ground?]
  (require! (= t/Int (:sort term)) "linear expressions must have Int sort")
  (let [op (:op term) args (:args term)]
   (case op
    :int {:coeff {} :constant (:data term)}
    :var {:coeff {(:data term) 1} :constant 0}
-   :add (affine-add (affine (first args)) (affine (second args)) 1)
-   :sub (affine-add (affine (first args)) (affine (second args)) -1)
-   :neg (affine-scale (affine (first args)) -1)
-   :mul (let [a (affine (first args)) b (affine (second args))]
+   :add (affine-add (affine (first args) ground?) (affine (second args) ground?) 1)
+   :sub (affine-add (affine (first args) ground?) (affine (second args) ground?) -1)
+   :neg (affine-scale (affine (first args) ground?) -1)
+   :mul (let [a (affine (first args) ground?) b (affine (second args) ground?)]
          (cond (empty? (:coeff a)) (affine-scale b (:constant a))
                (empty? (:coeff b)) (affine-scale a (:constant b))
                :else (throw (ex-info "formal.certificate: nonlinear multiplication" {}))))
-   (throw (ex-info "formal.certificate: operation outside the linear Int fragment" {:operation op})))))
+   (if (and ground? (contains? #{:div :mod} op))
+    (let [a (affine (first args) ground?) b (affine (second args) ground?)
+          _ (require! (and (empty? (:coeff a)) (empty? (:coeff b)) (not= 0 (:constant b)))
+                      "only ground nonzero Euclidean division is checked")
+          x (:constant a) y (:constant b) q (erlang/div x y) r (erlang/rem x y)
+          quotient (if (< r 0) (if (> y 0) (dec q) (inc q)) q)]
+     {:coeff {} :constant (if (= :div op) quotient (- x (* y quotient)))})
+    (throw (ex-info "formal.certificate: operation outside the linear Int fragment" {:operation op}))))))
 (defn- tighten [row]
  (let [g (reduce (fn [g [_ n]] (gcd g n)) 0 (:coeff row))]
   (if (<= g 1) row
    {:coeff (into {} (map (fn [[x n]] [x (erlang/div n g)]) (:coeff row)))
     :bound (floor-div (:bound row) g)})))
-(defn- relation [a b strict?]
- (let [difference (affine-add (affine a) (affine b) -1)]
+(defn- relation [a b strict? ground?]
+ (let [difference (affine-add (affine a ground?) (affine b ground?) -1)]
   (tighten {:coeff (:coeff difference) :bound (- (if strict? -1 0) (:constant difference))})))
 
 (defn- integer-choice [term]
@@ -68,7 +76,7 @@
        roots (conj (mapv :term assertions) (t/not claim))
        _ (require! (<= (count (t/walk roots)) (:terms limits)) "term capacity exceeded")
        _ (t/validate! roots)
-       atoms (atom []) ids (atom {}) visits (atom 0)
+       atoms (atom []) ids (atom {}) visits (atom 0) modern? (= rules rule-system)
        register (fn [atom]
                   (if (contains? @ids atom) [:atom (get @ids atom)]
                    (let [id (count @atoms)]
@@ -77,14 +85,25 @@
        linear (fn [row]
                 (if (empty? (:coeff row)) [:const (<= 0 (:bound row))]
                  (register (assoc row :kind :linear))))]
-  (letfn [(ordered [a b strict?]
-           (if-let [choice (when (= rules rule-system) (or (integer-choice a) (integer-choice b)))]
+  (letfn [(negate [form]
+           (if (and modern? (= :const (first form))) [:const (not (second form))] [:not form]))
+          (junction [kind terms]
+           (if-not modern? [kind (mapv boolean terms)]
+            (loop [remaining terms forms []]
+             (if (empty? remaining)
+              (case (count forms) 0 [:const (= :and kind)] 1 (first forms) [kind forms])
+              (let [form (boolean (first remaining)) constant? (= :const (first form))]
+               (if (and constant? (= (= :or kind) (second form))) form
+                (recur (rest remaining) (if constant? forms (conj forms form)))))))))
+          (ordered [a b strict?]
+           (if-let [choice (when (not= legacy-rules rule-system) (or (integer-choice a) (integer-choice b)))]
             (let [[condition yes no] (:args choice)
                   branch (fn [value] (ordered (replace-choice a choice value) (replace-choice b choice value) strict?))]
              (if (= :bool (:op condition)) (branch (if (:data condition) yes no))
               (let [c (boolean condition)]
-               [:or [[:and [c (branch yes)]] [:and [[:not c] (branch no)]]]])))
-            (linear (relation a b strict?))))
+               (if (and modern? (= :const (first c))) (branch (if (second c) yes no))
+                [:or [[:and [c (branch yes)]] [:and [[:not c] (branch no)]]]]))))
+            (linear (relation a b strict? modern?))))
           (boolean [term]
            (require! (<= (swap! visits inc) 4096) "normalization capacity exceeded")
            (require! (= t/Bool (:sort term)) "expected Boolean term")
@@ -92,16 +111,22 @@
             (case op
              :bool [:const (:data term)]
              :var (register {:kind :boolean :name (:data term)})
-             :not [:not (boolean a)]
-             :and [:and (mapv boolean args)]
-             :or [:or (mapv boolean args)]
-             :implies [:or [[:not (boolean a)] (boolean b)]]
+             :not (negate (boolean a))
+             :and (junction :and args)
+             :or (junction :or args)
+             :implies (let [a (boolean a)]
+                        (if (and modern? (= :const (first a)))
+                         (if (second a) (boolean b) [:const true])
+                         [:or [[:not a] (boolean b)]]))
              :xor (let [a (boolean a) b (boolean b)]
                    [:or [[:and [a [:not b]]] [:and [[:not a] b]]]])
-             :ite (if (and (= rules rule-system) (= :bool (:op a)))
+             :ite (if (and (not= legacy-rules rule-system) (= :bool (:op a)))
                     (boolean (if (:data a) b (nth args 2)))
-                    (let [c (boolean a) yes (boolean b) no (boolean (nth args 2))]
-                     [:or [[:and [c yes]] [:and [[:not c] no]]]]))
+                    (let [c (boolean a)]
+                     (if (and modern? (= :const (first c)))
+                      (boolean (if (second c) b (nth args 2)))
+                      (let [yes (boolean b) no (boolean (nth args 2))]
+                       [:or [[:and [c yes]] [:and [[:not c] no]]]]))))
              :eq (cond
                    (= t/Int (:sort a)) [:and [(ordered a b false) (ordered b a false)]]
                    (= t/Bool (:sort a)) (let [a (boolean a) b (boolean b)]

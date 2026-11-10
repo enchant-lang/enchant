@@ -97,15 +97,25 @@
   Term replay and core execution are separate evidence, with separate limits."
  [definition prepared native]
  (when (= :refuted (:verdict native))
-  (let [assignment (into {} (map (fn [[name _]] [name (get-in native [:witness (str "input/" name)])])
+  (let [completion (into {} (map (fn [[name sort]]
+                     (let [observed (get-in native [:witness (str "input/" name)])
+                           missing? (or (nil? observed) (replay/unavailable? observed))]
+                      [name {:value (if missing? (if (= t/Bool sort) false 0) observed)
+                             :source (if missing? :explicit-replay-completion :backend-observation)}]))
                                 (:parameters definition)))
+        assignment (into {} (map (fn [[name entry]] [name (:value entry)]) completion))
+        terms (merge (:assignments native)
+                (into {} (map (fn [[name term]] [(:data term) (get assignment name)]) (:inputs prepared))))
+        term-check (replay/validate (conj (:assertions (:problem prepared)) (:counterexample (:problem prepared))) terms)
         a (core/evaluate (:before definition) (:parameters definition) assignment)
         b (core/evaluate (:after definition) (:parameters definition) assignment)
-        pre (replay/value (:requires definition) (:assignments native))
+        pre (replay/value (:requires definition) terms)
         ka (outcome-key a) kb (outcome-key b)]
-   {:status (cond (not= true pre) :invalid (or (nil? ka) (nil? kb)) :incomplete
+   {:status (cond (not= :valid (:status term-check)) :incomplete
+                  (not= true pre) :invalid (or (nil? ka) (nil? kb)) :incomplete
                   (= ka kb) :invalid :else :valid)
-    :assignment assignment :requires-holds pre :before a :after b
+    :assignment assignment :input-provenance completion :term-replay term-check
+    :requires-holds pre :before a :after b
     :scope :concrete-core-outcomes :source-connection :reviewed-not-mechanically-proved})))
 
 (defn verify
@@ -139,6 +149,7 @@
                    inconsistent? :vacuous
                    (or (= :unsat (:verdict feasible)) (= :vacuous (:verdict native))) :vacuous
                    (and (= :refuted (:verdict native)) (= :valid (:status concrete))) :refuted
+                   (and (= :refuted (:verdict native)) (= :incomplete (:status concrete))) :candidate
                    (= :refuted (:verdict native)) :disagreement
                    checked? :checked
                    (= :proved (:verdict native)) :uncertified

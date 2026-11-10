@@ -162,3 +162,29 @@
   (is (= :checked (:status result)))
   (is (= :unsupported (:status (proof/produce problem {:rules c/legacy-rules}))))
   (is (= :rejected (:status (c/check problem (assoc (:certificate result) :rules c/legacy-rules)))))))
+
+(deftest piecewise-v2-certificates-remain-checkable-after-ground-extension
+ (let [problem (obligation (t/ge (t/ite p (t/int 1) (t/int 2)) (t/int 0)) [])
+       result (proof/produce problem {:rules c/choice-rules})]
+  (is (= :checked (:status result)))
+  (is (= c/choice-rules (get-in result [:certificate :rules])))
+  (is (= :checked (:status (c/check problem (:certificate result)))))))
+
+(deftest ground-division-and-logical-dead-arms-have-explicit-rules
+ (doseq [a [-7 -1 0 1 7] b [-3 -1 1 3]]
+  (let [r (erlang/rem a b) q (erlang/div a b)
+        quotient (if (< r 0) (if (> b 0) (dec q) (inc q)) q)
+        modulus (- a (* b quotient))]
+   (doseq [[expression expected] [[(t/div (t/int a) (t/int b)) quotient]
+                                  [(t/mod (t/int a) (t/int b)) modulus]]]
+    (is (checked? (obligation (t/eq expression (t/int expected)) [])))
+    (is (= :unknown (:status (proof/produce (obligation (t/eq expression (t/int (inc expected))) [])))))
+    (is (= expected (ev/value expression {}))))))
+ (doseq [claim [(t/implies (t/bool false) (t/eq (t/div x (t/int 0)) x))
+                (t/any [(t/bool true) (t/eq (t/mul x x) y)])
+                (t/not (t/all [(t/bool false) (t/eq (t/div x (t/int 0)) y)]))
+                (t/eq (t/ite (t/lt (t/int 7) (t/int 0)) (t/div x (t/int 0)) x) x)]]
+  (let [problem (obligation claim [])]
+   (is (checked? problem))
+   (is (= :unsupported (:status (proof/produce problem {:rules c/choice-rules}))))))
+ (is (= :unsupported (:status (proof/produce (obligation (t/eq (t/div (t/int 7) (t/int 0)) (t/int 0)) []))))))
