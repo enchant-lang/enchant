@@ -143,13 +143,13 @@ theorem sequence_failure (reason : String) (body : Expr Γ β) (env : Env Γ) :
     eval (.seq (.raise (τ := Ty.int) reason) body) env = .raised reason := rfl
 
 theorem quotient_zero_raises (a : Int) :
-    IntOp.apply .quot a 0 = .raised "zero-divisor" := by simp [IntOp.apply]
+    IntOp.apply .quot a 0 = .raised "zero-divisor" := rfl
 
 theorem remainder_zero_raises (a : Int) :
-    IntOp.apply .rem a 0 = .raised "zero-divisor" := by simp [IntOp.apply]
+    IntOp.apply .rem a 0 = .raised "zero-divisor" := rfl
 
 theorem modulus_zero_raises (a : Int) :
-    IntOp.apply .mod a 0 = .raised "zero-divisor" := by simp [IntOp.apply]
+    IntOp.apply .mod a 0 = .raised "zero-divisor" := rfl
 
 theorem quotient_negative_divisor :
     IntOp.apply .quot 7 (-3) = .returned (-2) := by decide
