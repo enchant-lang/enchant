@@ -121,3 +121,44 @@
   ;; Connecting ANF to terms is still reviewed implementation, not a theorem
   ;; about the real compiler or the source program's runtime behavior.
   (is (= :not-established (get-in result [:checking :source-connection])))))
+
+(deftest integer-choices-are-checked-by-boolean-cases
+ (let [choice (t/ite p x y)
+       absolute (t/ite (t/ge x (t/int 0)) x (t/neg x))
+       claims [(t/eq (t/add choice (t/int 1))
+                     (t/ite p (t/add x (t/int 1)) (t/add y (t/int 1))))
+               (t/eq (t/sub choice choice) (t/int 0))
+               (t/ge absolute (t/int 0))
+               (t/eq (t/ite p (t/ite r x y) (t/int 0))
+                     (t/ite (t/all [p r]) x (t/ite p y (t/int 0))))
+               (t/eq (t/mul (t/int 2) choice)
+                     (t/ite p (t/add x x) (t/add y y))))]]
+  (doseq [claim claims]
+   (let [problem (obligation claim []) result (proof/produce problem)]
+    (is (= :checked (:status result)) (pr-str result))
+    (is (= c/rules (get-in result [:certificate :rules])))
+    (doseq [a [-2 0 3] b [-1 2] pv [false true] rv [false true]]
+     (is (= true (ev/value claim {"proof.x" a "proof.y" b "proof.p" pv "proof.r" rv})))))))
+ (is (= :unknown (:status (proof/produce
+   (obligation (t/eq (t/ite p x y) x) [])))))
+ (is (= :unsupported (:status (proof/produce
+   (obligation (t/eq (t/ite p (t/mul x x) y) x) [])))))
+ ;; Literal dead arms do not need an arithmetic interpretation. A symbolic
+ ;; condition still requires both arms to be in the checking fragment.
+ (is (checked? (obligation (t/eq (t/ite (t/bool true) x (t/mul x x)) x) [])))
+ (is (checked? (obligation (t/ite (t/bool false)
+                            (t/eq (t/mul x x) y) (t/bool true)) []))))
+
+(deftest legacy-certificates-keep-their-original-normalizer
+ (let [problem (obligation (t/ge (t/add x (t/int 1)) x) [])
+       old (proof/produce problem {:rules c/legacy-rules})
+       saved (erlang/binary_to_term (erlang/term_to_binary (:certificate old)))]
+  (is (= :checked (:status old)))
+  (is (= c/legacy-rules (:rules saved)))
+  (is (= :checked (:status (c/check problem saved))))
+  (is (= c/legacy-rules (:rules (c/check problem saved)))))
+ (let [problem (obligation (t/ge (t/ite p (t/int 1) (t/int 2)) (t/int 0)) [])
+       result (proof/produce problem)]
+  (is (= :checked (:status result)))
+  (is (= :unsupported (:status (proof/produce problem {:rules c/legacy-rules}))))
+  (is (= :rejected (:status (c/check problem (assoc (:certificate result) :rules c/legacy-rules)))))))
