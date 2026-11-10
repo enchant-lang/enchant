@@ -284,7 +284,9 @@ itself mechanically verified and does not certify all SMT theories.
   including strict operand order, named failures and signed arithmetic. Four
   exports come from prepared contracts and bind the exact question identities.
   The closed data codec, general lowerer and Source-to-Core semantics retain
-  their reviewed status. `CORE.md` describes the packet, checker and scope.
+  their reviewed status. The integration run passed 9,426 assertions across
+  35 files and matched all 187 earlier native verdicts. `CORE.md` describes
+  the packet, checker and scope.
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
