@@ -22,12 +22,14 @@ try{
   const top=await evaluate("({title:document.title,w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth,failed:document.querySelectorAll('.cell.failed,.ms-errors,.review-errors,.cl-errors,.lt-errors').length})");
   check(size.name+': readable page width',top.sw<=top.w+2,top);check(size.name+': no failed cells or declarations',top.failed===0,top);
   check(size.name+': model proofs retain their implementation boundary',await evaluate("document.body.innerText.includes('18 theorems')&&document.body.innerText.includes('not that the BL implementation or compiler faithfully implements it')"));
+  check(size.name+': loop model exposes its proof-rule assumptions',await evaluate("document.body.innerText.includes('twenty-two checked theorems')&&document.body.innerText.includes('Classical.choice')"));
   await shot(size.name+'-introduction');
   await navigate('/#s-could-beam-lisp-be-fully-formal');
   check(size.name+': full formality discussion present',await evaluate("document.body.innerText.includes('Can it still feel like a Lisp?')&&document.body.innerText.includes('Self-hosting a checker in BL does not verify')&&document.body.innerText.includes('first executable fragment')"));
   await shot(size.name+'-formal-language');
   await navigate('/#s-the-model-running');
   check(size.name+': executable certificate example shows its checked result',await evaluate("/:proof\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':source-connection :not-established')"));
+  check(size.name+': executable loop example remains a model argument',await evaluate("/:loop-model\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':conditional-normal-return-of-loop-model')"));
   await navigate('/#s-a-path-we-can-actually-build');
   await click('#milestones-formal-delivery [data-milestone-to="M3"]');
   check(size.name+': milestone selects its own detail',await evaluate("!document.querySelector('[data-milestone-detail=\"M3\"]').hidden"));
@@ -115,7 +117,7 @@ try{
  check('Catalog comes from three annotated renderer definitions',record.length===1&&record[0].qualified==='formal.presentation/comparison-card'&&record[0].source.endsWith('presentation.bl'));
  check('Unknown preview routes refuse explicitly',(await fetch(base+'/views?view=missing')).status===404);
  check('Anonymous answer writes are denied',(await fetch(base+'/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'formal-total-core-direction',answer:'agree'})})).status===403);
- for(const path of ['/metatheory/Core.lean','/evidence/metatheory/qualification.json','/evidence/contracts/qualification.json','/src/formal/certificate.bl']){
+ for(const path of ['/metatheory/Core.lean','/evidence/metatheory/qualification.json','/evidence/contracts/qualification.json','/src/formal/certificate.bl','/LOOPS.md','/evidence/loops/examples.json','/evidence/loops/qualification.json','/evidence/loops/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared source/evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
