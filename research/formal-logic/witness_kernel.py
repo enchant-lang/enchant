@@ -76,9 +76,9 @@ def values(packet, integers, booleans):
 
 def source(packet, integers, booleans):
     ints, bools = values(packet, integers, booleans)
-    return (HEADER + k.emit_list(packet['assertions'], lambda node: t.emit_term(node, integers, booleans)) + WITNESS
-            + '(Witness.mk ' + k.emit_list(ints, k.emit_int) + ' '
-            + k.emit_list(bools, lambda value: str(value).lower()) + ')' + TAIL)
+    return (HEADER + k.emit_list([t.emit_term(node, integers, booleans) for node in packet['assertions']]) + WITNESS
+            + '(Witness.mk ' + k.emit_list([k.emit_int(value) for value in ints]) + ' '
+            + k.emit_list([str(value).lower() for value in bools]) + ')' + TAIL)
 
 
 def verify_source(text, packet, integers, booleans):

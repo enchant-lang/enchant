@@ -90,7 +90,7 @@ class WitnessChecks(unittest.TestCase):
                 self.assertNotIn(name, text)
         packet = PACKETS['integer']; integers, booleans = w.validate(packet)
         text = w.source(packet, integers, booleans)
-        for changed in [text.replace('(Witness.mk [7]', '(Witness.mk [8]'),
+        for changed in [text.replace('(Witness.mk [(Int.ofNat 7)]', '(Witness.mk [(Int.ofNat 8)]'),
                         text.replace('(Term.inputInt 0)', '(Term.inputInt 1)'),
                         text.replace('by decide', 'by sorry'), text + '\naxiom forged : False\n']:
             with self.assertRaises(ValueError):
