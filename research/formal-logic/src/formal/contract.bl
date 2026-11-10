@@ -1,7 +1,8 @@
 (ns formal.contract
  (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
            [formal.elaborate :as elaborate] [formal.term :as t] [formal.query :as q]
-           [formal.proof :as proof] [formal.logic :as logic] [formal.backend :as backend]))
+           [formal.proof :as proof] [formal.logic :as logic] [formal.backend :as backend]
+           [formal.core-inputs :as inputs] [formal.evaluate :as replay] [formal.value :as v]))
 
 ;; Builders run once and produce ordinary data. Verification reconstructs the
 ;; question from that data; no supplied cached query can replace the program.
@@ -24,19 +25,33 @@
                          (contains? #{:var :bool :int :not :and :or :implies :xor :eq :distinct :ite
                                       :add :sub :neg :mul :div :mod :lt :le :gt :ge} (:op node))))
                    (t/walk terms)) "contract predicates require the declared Bool/Int term vocabulary")
- (let [allowed (set (vals inputs))]
+ (let [allowed (set (mapcat symbolic/payload-terms (vals inputs)))]
   (require! (every? #(contains? allowed %) (t/variables terms)) "contract contains an undeclared input identity")))
+(defn- prepare-source [source declarations]
+ (cond
+  (nil? source) nil
+  (string? source) (elaborate/prepare source declarations)
+  (and (map? source) (= #{:function :parameter-order} (set (keys source)))
+       (string? (:function source)) (vector? (:parameter-order source))
+       (= (count declarations) (count (:parameter-order source)))
+       (= (set (keys declarations)) (set (:parameter-order source))))
+   (elaborate/prepare-function (:function source) (mapv (fn [name] [name (get declarations name)]) (:parameter-order source)))
+  :else (throw (ex-info "Invalid stored source expression/function descriptor" {}))))
 
 (defn define
- "Build a closed, portable Int/Bool program contract. :requires receives input
+ "Build a closed, portable scalar/record program contract. :requires receives input
   terms; :ensures receives input terms and the symbolic returned value.
   Builders construct a model; this does not verify their BL implementations."
  [specification]
- (let [name (:name specification) declarations (:parameters specification)
+ (let [name (:name specification) function-source (:function-source specification)
+       _ (when function-source (require! (vector? (:parameters specification)) "source function parameters must be ordered [role sort] pairs"))
+       declarations (if function-source (into {} (:parameters specification)) (:parameters specification))
        _ (t/variable name t/Bool)
-       source (:source specification) authored (:core specification)
-       _ (require! (not= (some? source) (some? authored)) "provide exactly one source expression or core program")
-       elaborated (when source (elaborate/prepare source declarations))
+       _ (require! (= 1 (count (filter some? [(:source specification) function-source (:core specification)])))
+                   "provide exactly one source expression, source function or core program")
+       source (if function-source {:function function-source :parameter-order (mapv first (:parameters specification))} (:source specification))
+       authored (:core specification)
+       elaborated (prepare-source source declarations)
        _ (when source (require! (= :elaborated (:status elaborated)) (str "source is outside the core: " (:reason elaborated))))
        body (core/canonicalize (or authored (:core elaborated)) declarations) prefix (str "contract." name)
        lowered (symbolic/lower body declarations {:prefix prefix})
@@ -52,7 +67,7 @@
        _ (require! (contains? #{:must :may} returns) "returns must be :must or :may")
        definition {:formal/contract 1 :name name :parameters declarations :body body :source source
                    :requires pre :ensures post :raises raises :effects effects :returns returns
-                   :prefix prefix :profile core/profile}]
+                   :prefix prefix :profile (:profile lowered)}]
   (assoc definition :identity (identity-of definition))))
 
 (defn prepare
@@ -61,15 +76,21 @@
  [definition]
  (try
   (require! (and (map? definition) (= fields (set (keys definition)))
-                 (= 1 (:formal/contract definition)) (= core/profile (:profile definition))
+                 (= 1 (:formal/contract definition)) (contains? #{core/profile core/record-profile} (:profile definition))
                  (= (:identity definition) (identity-of definition))) "changed or noncanonical contract identity")
   (t/variable (:name definition) t/Bool)
   (require! (and (= (:prefix definition) (str "contract." (:name definition)))
                  (contains? #{:must :may} (:returns definition))
                  (set? (:raises definition)) (every? keyword? (:raises definition))
                  (set? (:effects definition)) (every? #{:raise} (:effects definition))) "invalid contract policy")
-  (let [lowered (symbolic/lower (:body definition) (:parameters definition) {:prefix (:prefix definition)})
+  (let [source (prepare-source (:source definition) (:parameters definition))
+        _ (when source
+            (require! (and (= :elaborated (:status source))
+                           (= (:identity source) (core/identity (:body definition) (:parameters definition))))
+                      "stored core does not match the freshly elaborated source"))
+        lowered (symbolic/lower (:body definition) (:parameters definition) {:prefix (:prefix definition)})
         _ (require! (= :translated (:status lowered)) (str "core interpretation refused: " (:reason lowered)))
+        _ (require! (= (:profile lowered) (:profile definition)) "contract core profile mismatch")
         pre (bool! (:requires definition)) post (bool! (:ensures definition))
         _ (check-free! [pre post] (:inputs lowered))
         out (:outcome lowered) allowed (t/any (keep (fn [reason]
@@ -77,17 +98,53 @@
         must-return (or (= :must (:returns definition)) (not (contains? (:effects definition) :raise)))
         claim (if must-return (t/all [(:ok out) post])
                 (t/all [(t/implies (:ok out) post) (t/implies (t/not (:ok out)) allowed)]))
+        observed-inputs (into {} (map (fn [[name payload]] [name (symbolic/observation payload)]) (:inputs lowered)))
         problem (q/prove claim {:id (:name definition) :assumptions [(q/assertion "requires" pre)]
-                    :profile core/profile :scope {:mode :exact}
+                    :profile (:profile definition) :scope {:mode :exact :contract (:identity definition) :core (:core lowered)}
                     :relation :return-value-and-declared-errors
-                    :observe (merge (into {} (map (fn [[name term]] [(str "input/" name) term]) (:inputs lowered)))
-                               {"returned" (:ok out) "value" (:value out) "error-code" (:error out)})
+                    :observe (merge (into {} (map (fn [[name value]] [(str "input/" name) value]) observed-inputs))
+                               {"returned" (:ok out)
+                                "value" (if (core/record-sort? (get-in lowered [:typing :sort])) (symbolic/as-value lowered) (:value out))
+                                "error-code" (:error out)})
                     :origin {:contract (:identity definition) :core (:core lowered)
                              :basis :reviewed-core-interpretation :source (:source definition)}})]
    {:status :ready :definition (:identity definition) :core (:core lowered) :problem problem
-    :inputs (:inputs lowered) :outcome out :errors (:errors lowered) :typing (:typing lowered)
+    :inputs (:inputs lowered) :observed-inputs observed-inputs :outcome out :errors (:errors lowered) :typing (:typing lowered)
     :source-connection :reviewed-not-mechanically-proved})
   (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn- replay-in [definition prepared native]
+ (when (= :refuted (:verdict native))
+  (let [completed (inputs/complete (:parameters definition) (:inputs prepared) native)
+        assignment (:assignment completed) terms (:term-assignments completed)
+        term-check (replay/validate (conj (:assertions (:problem prepared)) (:counterexample (:problem prepared))) terms)
+        result (core/evaluate (:body definition) (:parameters definition) assignment)
+        outcome (:outcome prepared)
+        expected-ok (replay/value (:ok outcome) terms)
+        returned? (= :returned (:status result)) raised? (= :raised (:status result))
+        expected-value (when returned? (v/decode (symbolic/observation (:value outcome)) #(replay/value % terms)))
+        expected-value (if (and (map? expected-value) (contains? expected-value :domain)) (:value expected-value) expected-value)
+        expected-error (when raised? (replay/value (:error outcome) terms))
+        matches? (and (= returned? expected-ok)
+                      (if returned? (= (:value result) expected-value)
+                       (and raised? (= (get (:errors prepared) (:error result)) expected-error))))
+        post (when returned? (replay/value (:ensures definition) terms))
+        must-return (or (= :must (:returns definition)) (not (contains? (:effects definition) :raise)))
+        violation? (if returned? (= false post)
+                     (and raised? (or must-return (not (contains? (:raises definition) (:error result))))))]
+   {:status (cond (not= :valid (:status term-check)) :incomplete
+                  (not (or returned? raised?)) :incomplete
+                  (not matches?) :invalid violation? :valid :else :invalid)
+    :assignment assignment :input-provenance (:provenance completed) :term-replay term-check
+    :execution result :outcome-matches matches? :postcondition post :violation violation?
+    :scope :concrete-core-contract :source-connection :reviewed-not-mechanically-proved})))
+
+(defn replay-counterexample [definition native]
+ (let [prepared (prepare definition)]
+  (cond (not= :ready (:status prepared)) (assoc prepared :status :rejected)
+        (not (and (= (:profile definition) (:profile native)) (= (get-in prepared [:problem :scope]) (:scope native))))
+         {:status :rejected :reason :native-observation-subject-mismatch}
+        :else (replay-in definition prepared native))))
 
 (defn verify
  "Check the conditional term contract. An optional backend also searches for
@@ -100,16 +157,17 @@
     (let [problem (:problem prepared) search (get options :search {})
           checked (proof/produce problem search)
           inconsistent (proof/produce
-             (q/prove (t/bool false) {:assumptions (:assertions problem) :profile core/profile :scope {:mode :exact}}) search)
+             (q/prove (t/bool false) {:assumptions (:assertions problem) :profile (:profile definition) :scope (:scope problem)}) search)
           observations
           (when (:backend options)
            (backend/with-session options
             (fn [session]
              {:feasibility (logic/solve-in session
                 (q/sat {:id (str (:name definition) "/requires") :assumptions (:assertions problem)
-                        :observe (:inputs prepared) :profile core/profile :scope {:mode :exact}}))
+                        :observe (:observed-inputs prepared) :profile (:profile definition) :scope (:scope problem)}))
               :property (logic/solve-in session problem)})))
           native (:property observations) feasible (:feasibility observations)
+          concrete (replay-in definition prepared native)
           checked? (= :checked (:status checked))
           inconsistent? (= :checked (:status inconsistent))
           status (cond
@@ -118,13 +176,15 @@
                    inconsistent? :vacuous
                    (= :unsat (:verdict feasible)) :vacuous
                    (= :vacuous (:verdict native)) :vacuous
-                   (= :refuted (:verdict native)) :refuted
+                   (and (= :refuted (:verdict native)) (= :valid (:status concrete))) :refuted
+                   (and (= :refuted (:verdict native)) (= :incomplete (:status concrete))) :candidate
+                   (= :refuted (:verdict native)) :disagreement
                    checked? :checked
                    (= :proved (:verdict native)) :uncertified
                    :else (:status checked))]
      {:status status :definition (:identity definition) :name (:name definition)
-      :scope :conditional-core-term-contract :profile core/profile
-      :proof checked :inconsistency-proof inconsistent :backend observations
+      :scope :conditional-core-term-contract :profile (:profile definition)
+      :proof checked :inconsistency-proof inconsistent :backend observations :counterexample concrete
       :assumption-consistency (cond inconsistent? :inconsistent-checked
                                     (= :sat (:verdict feasible)) :replayed-witness
                                     (= :unsat (:verdict feasible)) :inconsistent

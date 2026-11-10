@@ -1,0 +1,245 @@
+(ns formal.record-test
+ (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
+           [formal.elaborate :as elaborate] [formal.term :as t] [formal.value :as v]
+           [formal.evaluate :as ev] [formal.contract :as contract]
+           [formal.translation :as translation] [formal.api :as formal]
+           [formal.optimize :as optimizer] [formal.loop-core :as lc]))
+
+(defn lit [x] (core/literal x))
+(defn op [name & args] (core/operation name (vec args)))
+(def state-type (core/record-sort {"balance" t/Int "flag" t/Bool}))
+(def message-type (core/record-sort {"amount" t/Int}))
+(def state (core/variable "state" state-type))
+(def message (core/variable "message" message-type))
+(def parameters {"state" state-type "message" message-type})
+(defn execution [program declarations assignment]
+ (select-keys (core/evaluate program declarations assignment) [:status :sort :value :error]))
+(defn rehash [definition]
+ (assoc definition :identity
+  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
+                 (list (tuple :case :lower)))))
+
+(deftest records-are-closed-and-canonical-with-ordered-construction
+ (let [a (core/record [["z" (lit 1)] ["a" (lit false)]])
+       b (core/record [["a" (lit false)] ["z" (lit 1)]])]
+  (is (= ["z" "a"] (:data a)))
+  (is (= [:record [["a" t/Bool] ["z" t/Int]]] (:sort a)))
+  (is (= (:sort a) (:sort b)))
+  (is (not= (core/identity a {}) (core/identity b {})))
+  (is (= core/record-profile (:profile (core/typecheck a {}))))
+  (is (= {"a" false "z" 1} (:value (core/evaluate a {} {})))))
+ (is (= {} (:value (core/evaluate (core/record []) {} {}))))
+ (doseq [schema [[:record [["b" t/Int] ["a" t/Int]]]
+                 [:record [["a" t/Int] ["a" t/Bool]]]
+                 [:record [["a" [:real]]]] [:record [[1 t/Int]]]
+                 [:record [] :extra]]]
+  (is (= false (core/sort? schema))))
+ (is (thrown? (core/record [["a" (lit 1)] ["a" (lit 2)]])))
+ (is (thrown? (core/field state "missing")))
+ (is (thrown? (core/record-assoc state [["missing" (lit 1)]])))
+ (is (thrown? (core/record-assoc state [["flag" (lit 1)]])))
+ (doseq [value [{"balance" 1} {"balance" false "flag" true}
+                {"balance" 1 "flag" true "extra" 3}]]
+  (is (= :invalid-input (:status (core/evaluate state {"state" state-type} {"state" value}))))))
+
+(deftest field-selection-and-updates-preserve-the-whole-first-failure
+ (let [first (core/raise-error :first t/Int) second (core/raise-error :second t/Int)
+       z-first (core/record [["z" first] ["a" second]])
+       a-first (core/record [["a" second] ["z" first]])
+       base (core/record [["a" (lit 1)] ["z" (lit 2)]])]
+  (doseq [[program error] [[(core/field z-first "a") :first]
+                           [(core/field a-first "z") :second]
+                           [(core/record-assoc z-first [["z" (lit 9)]]) :first]
+                           [(core/record-assoc base [["z" first] ["a" second]]) :first]
+                           [(core/record-assoc base [["a" second] ["z" first]]) :second]
+                           [(core/record-assoc base [["a" first] ["a" (lit 3)]]) :first]
+                           [(core/field base "a" second) :second]]]
+   (is (= error (:error (core/evaluate program {} {})))))
+  (is (= {"a" 3 "z" 2} (:value (core/evaluate (core/record-assoc base [["a" (lit 9)] ["a" (lit 3)]]) {} {}))))
+  (is (= 1 (:value (core/evaluate (core/field (core/choose (lit true) base z-first) "a") {} {}))))))
+
+(deftest recursive-record-outcomes-agree-between-concrete-and-symbolic-evaluation
+ (let [x (core/variable "x" t/Int) y (core/variable "y" t/Int) p (core/variable "p" t/Bool)
+       declarations {"x" t/Int "y" t/Int "p" t/Bool}
+       record (core/record [["flag" p] ["quotient" (op :quot x y)]])
+       other (core/record [["flag" (op :not p)] ["quotient" (core/raise-error :branch t/Int)]])
+       programs [record (core/field record "flag") (core/field record "flag" (op :rem x y))
+                 (core/record-assoc record [["quotient" (op :add x y)] ["flag" (op :not p)]])
+                 (core/choose p record other)
+                 (core/record [["nested" record] ["empty" (core/record [])]])
+                 (op :eq record record)
+                 (core/let-in "r" record (core/field (core/variable "r" (:sort record)) "quotient"))]]
+  (doseq [program programs]
+   (let [lowered (symbolic/lower program declarations)]
+    (is (= :translated (:status lowered)) (pr-str lowered))
+    (doseq [a [-7 0 7] b [-3 0 3] flag [false true]]
+     (let [assignment {"x" a "y" b "p" flag}
+           bindings (symbolic/bind-inputs (:inputs lowered) assignment)
+           result (core/evaluate program declarations assignment)
+           observed (v/decode (symbolic/as-value lowered) #(ev/value % bindings))
+           error (ev/value (get-in lowered [:outcome :error]) bindings)]
+      (is (= (= :returned (:status result)) (:defined observed)))
+      (if (= :returned (:status result))
+       (do (is (= (:value result) (:value observed))) (is (= 0 error)))
+       (is (= (get (:errors lowered) (:error result)) error)))
+      (is (<= (:steps result) (get-in lowered [:typing :syntax-nodes])))))))))
+
+(deftest structured-input-paths-are-injective-even-for-empty-and-nul-field-keys
+ (let [weird (core/record-sort {"" t/Int "a/field/2:61" t/Int "\u0000" t/Bool
+                               "λ" (core/record-sort {"/" t/Int})})
+       declarations {"record" weird "record/field/0:" t/Int}
+       expr (core/variable "record" weird) lowered (symbolic/lower expr declarations)
+       leaves (mapcat symbolic/payload-terms (vals (:inputs lowered)))
+       assignment {"record" {"" 5 "a/field/2:61" 7 "\u0000" true "λ" {"/" -2}}
+                   "record/field/0:" 99}
+       bindings (symbolic/bind-inputs (:inputs lowered) assignment)]
+  (is (= :translated (:status lowered)))
+  (is (= 5 (count leaves)))
+  (is (= 5 (count (set (map :data leaves)))))
+  (is (every? #(not (String/contains? (:data %) "\u0000")) leaves))
+  (is (= (get assignment "record") (:value (v/decode (symbolic/as-value lowered) #(ev/value % bindings)))))
+  (is (= :unsupported (:status (symbolic/lower expr declarations {:input-encoding :legacy})))))
+ (let [scalar (symbolic/lower (core/variable "x" t/Int) {"x" t/Int})]
+  (is (= core/profile (:profile scalar)))
+  (is (= "core.x" (get-in scalar [:inputs "x" :data])))))
+
+(deftest source-expressions-use-actual-map-get-and-assoc-identities-and-evaluation-order
+ (let [samples [{:source "{\"z\" (+ x 1) \"a\" (< x 0)}"
+                 :runtime (fn [x] {"z" (+ x 1) "a" (< x 0)})}
+                {:source "(get {\"a\" x} \"a\" false)" :runtime (fn [x] (get {"a" x} "a" false))}
+                {:source "(get {\"a\" x} \"absent\" (+ x 2))" :runtime (fn [x] (get {"a" x} "absent" (+ x 2)))}
+                {:source "(assoc {\"a\" x \"b\" false} \"a\" (+ x 1) \"a\" (+ x 2))"
+                 :runtime (fn [x] (assoc {"a" x "b" false} "a" (+ x 1) "a" (+ x 2)))}
+                {:source "(get (if (< x 0) {\"a\" (- x)} {\"a\" x}) \"a\")"
+                 :runtime (fn [x] (get (if (< x 0) {"a" (- x)} {"a" x}) "a"))}]]
+  (doseq [{:keys [source runtime]} samples]
+   (let [prepared (elaborate/prepare source {"x" t/Int})]
+    (is (= :elaborated (:status prepared)) (pr-str prepared))
+    (when (= :elaborated (:status prepared))
+     (doseq [x [-7 0 7]]
+      (is (= (runtime x) (:value (core/evaluate (:core prepared) {"x" t/Int} {"x" x})))))))))
+ (doseq [source ["(get {\"a\" 1 \"unused\" (quot 1 0)} \"a\")"
+                 "(get {\"a\" 1} \"a\" (quot 1 0))"
+                 "(get {\"a\" (quot 1 0)} \"absent\" 2)"
+                 "(assoc {\"a\" 1} \"a\" (quot 1 0) \"a\" 3)"]]
+  (let [prepared (elaborate/prepare source {})]
+   (is (= :elaborated (:status prepared)) (pr-str prepared))
+   (is (= :zero-divisor (:error (core/evaluate (:core prepared) {} {}))))))
+ (doseq [source ["(get {\"a\" 1} \"absent\")" "(assoc {\"a\" 1} \"new\" 2)"
+                 "(get {\"a\" 1} key)" "{1 2}" "{\"a\" \"string-value\"}"]]
+  (is (= :unsupported (:status (elaborate/prepare source {"key" t/Int}))))))
+
+(def deposit-source
+ "(fn [s msg] (assoc s \"balance\" (+ (get s \"balance\") (get msg \"amount\"))))")
+(def withdraw-source
+ "(fn [s msg] (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\"))))")
+(defn nonnegative-inputs [in]
+ (t/all [(t/ge (get-in in ["state" "balance"]) (t/int 0))
+          (t/ge (get-in in ["message" "amount"]) (t/int 0))]))
+(defn account-spec [name source]
+ {:name name :function-source source :parameters [["state" state-type] ["message" message-type]]
+  :requires nonnegative-inputs
+  :ensures (fn [in out] (t/all [(t/ge (get out "balance") (t/int 0))
+                                (t/eq (get out "flag") (get-in in ["state" "flag"]))]))})
+
+(deftest function-extraction-uses-real-lexical-parameters-and-is-stable
+ (let [ordered [["state" state-type] ["message" message-type]]
+       a (formal/source-function deposit-source ordered)
+       b (formal/source-function deposit-source ordered)
+       c (formal/source-function "(fn [old event] (assoc old \"balance\" (+ (get old \"balance\") (get event \"amount\"))))" ordered)
+       runtime (fn [s msg] (assoc s "balance" (+ (get s "balance") (get msg "amount"))))]
+  (is (= :elaborated (:status a)) (pr-str a))
+  (is (= (:identity a) (:identity b)))
+  (is (= (:identity a) (:identity c)))
+  (is (= ["state" "message"] (:parameter-order a)))
+  (when (= :elaborated (:status a))
+   (doseq [balance [-3 0 9] amount [-2 0 7] flag [false true]]
+    (let [s {"balance" balance "flag" flag} msg {"amount" amount}]
+     (is (= (runtime s msg) (:value (core/evaluate (:core a) parameters {"state" s "message" msg}))))))))
+ (doseq [[source ordered] [["(fn [x] x)" [["state" state-type] ["message" message-type]]]
+                            ["(fn [x] (println x))" [["x" t/Int]]]
+                            ["(fn f [x] (f x))" [["x" t/Int]]]
+                            ["(fn [f x] (f x))" [["f" t/Int] ["x" t/Int]]]
+                            [deposit-source [["same" state-type] ["same" message-type]]]]]
+  (is (= :unsupported (:status (formal/source-function source ordered))))))
+
+(deftest record-function-contracts-produce-portable-proofs-for-both-backends
+ (let [definition (contract/define (account-spec "record-deposit" deposit-source))]
+  (is (= core/record-profile (:profile definition)))
+  (is (= definition (contract/define (account-spec "record-deposit" deposit-source))))
+  (doseq [options [{} {:backend :z3} {:backend :oxiz}]]
+   (let [result (formal/verify-contract options definition)]
+    (is (= :checked (:status result)) (pr-str result))
+    (is (= false (:compiler-proof-authority result)))
+    (is (= :checked (get-in result [:proof :checking :status])))
+    (when (:backend options)
+     (is (= :proved (get-in result [:backend :property :verdict])))
+     (is (= :not-checked (get-in result [:backend :property :certificate :status]))))))
+  ;; Rehashing a substituted source/body does not create a trusted source link.
+  (doseq [changed [(assoc definition :source {:function withdraw-source :parameter-order ["state" "message"]})
+                   (assoc-in definition [:source :parameter-order] ["message" "state"])
+                   (assoc definition :body state)]]
+   (is (= :unsupported (:status (contract/prepare (rehash changed))))))))
+
+(deftest native-record-counterexamples-must-replay-the-entire-core-contract
+ (let [definition (contract/define (account-spec "record-unsafe-withdraw" withdraw-source))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (formal/verify-contract {:backend engine} definition)
+         native (get-in result [:backend :property]) concrete (:counterexample result)
+         assignment (:assignment concrete)]
+    (is (= :refuted (:status result)) (pr-str result))
+    (is (= :valid (:status concrete)))
+    (is (= :valid (get-in concrete [:term-replay :status])))
+    (is (= true (:outcome-matches concrete)))
+    (is (= true (:violation concrete)))
+    (is (< (get-in concrete [:execution :value "balance"]) 0))
+    (is (= (get-in assignment ["state" "flag"]) (get-in concrete [:execution :value "flag"])))
+    (is (= :valid (:status (formal/replay-contract-counterexample definition native))))
+    (is (= :rejected (:status (formal/replay-contract-counterexample definition (assoc native :scope {:mode :exact}))))))))
+ (let [definition (contract/define {:name "unused-failing-field" :parameters {}
+                     :source "{\"answer\" 42 \"unused\" (quot 1 0)}"
+                     :ensures (fn [in out] (t/eq (get out "answer") (t/int 42)))})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (contract/verify {:backend engine} definition)]
+    (is (= :refuted (:status result)))
+    (is (= :raised (get-in result [:counterexample :execution :status])))
+    (is (= :zero-divisor (get-in result [:counterexample :execution :error])))))))
+
+(deftest translations-and-optimizer-gates-compare-whole-record-outcomes
+ (let [before (core/record [["balance" (op :add (core/field state "balance") (lit 0))]
+                             ["flag" (core/field state "flag")]])
+       after (core/record [["flag" (core/field state "flag")]
+                            ["balance" (core/field state "balance")]])
+       definition (translation/define {:name "record-equality" :parameters parameters :before before :after after})
+       result (translation/verify definition)
+       optimized (optimizer/optimize before parameters)]
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :checked (:status (formal/check-translation-proof definition (get-in result [:proof :object])))))
+  (is (= :optimized (:status optimized)) (pr-str optimized))
+  (is (= false (:compiler-proof-authority optimized)))
+  (is (= (execution before parameters {"state" {"balance" 5 "flag" true} "message" {"amount" 2}})
+         (execution (:output optimized) parameters {"state" {"balance" 5 "flag" true} "message" {"amount" 2}}))))
+ (let [x (core/variable "x" t/Int)
+       before (core/field (core/record [["a" x]]) "a")
+       definition (translation/define {:name "mixed-profiles" :parameters {"x" t/Int} :before before :after x})]
+  (is (= core/record-profile (:profile definition)))
+  (is (= :checked (:status (translation/verify definition)))))
+ (doseq [engine [:z3 :oxiz]
+         [name before after] [["record-erased-failure"
+                                (core/field (core/record [["a" (lit 1)] ["unused" (core/raise-error :retained t/Int)]]) "a")
+                                (lit 1)]
+                               ["record-error-order"
+                                (core/record [["a" (core/raise-error :one t/Int)] ["b" (core/raise-error :two t/Int)]])
+                                (core/record [["b" (core/raise-error :two t/Int)] ["a" (core/raise-error :one t/Int)]])]]]
+  (let [definition (translation/define {:name name :parameters {} :before before :after after})
+        result (translation/verify {:backend engine} definition)]
+   (is (= :refuted (:status result)) (pr-str result))
+   (is (= :valid (get-in result [:counterexample :status])))
+   (is (= :valid (:status (formal/replay-translation-counterexample definition (get-in result [:backend :property]))))))))
+
+(deftest legacy-loop-profile-does-not-silently-admit-the-extended-grammar
+ (let [prepared (lc/prepare "(loop [i 1] (if (> i 0) (recur (- i 1)) i))" {})
+       program (:program prepared)
+       changed (assoc program :body {:control :return :value (core/field (core/record [["a" (lit 1)]]) "a")})]
+  (is (= :elaborated (:status prepared)))
+  (is (= :unsupported (:status (lc/check changed))))))

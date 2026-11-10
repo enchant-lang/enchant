@@ -24,6 +24,29 @@
     (core/operation (if (= name "inc") :add :sub) [a (core/literal 1)])
    :else (refuse (str "unreviewed intrinsic " name) node))))
 
+(defn- field-key [node allow-hash?]
+ (let [node (if (and allow-hash? (= :remote (:op node)) (= :Elixir.BeamLisp.Ns.Rt (:mod node))
+                           (= :hash_key (:fun node)) (= 1 (count (:args node)))) (first (:args node)) node)]
+  (when-not (and (= :lit (:op node)) (string? (:val node)))
+   (refuse "record field keys must be literal strings" node)) (:val node)))
+
+(declare from-anf)
+(defn- record-call [call node bindings]
+ (when (and (= :remote (:mode call)) (= :Elixir.BeamLisp.Ns.Rt (:mod call))
+             (contains? #{:get :assoc} (:fun call)))
+  (let [args (vec (:args call)) n (count args)]
+   (case (:fun call)
+    :get (do (when-not (contains? #{2 3} n) (refuse "record get requires one literal field and optional eager default" node))
+             (let [record (from-anf (first args) bindings) key (field-key (second args) false)]
+              (when-not (core/record-sort? (:sort record)) (refuse "record get requires a declared record" node))
+              (if (= n 2) (core/field record key)
+               (let [default (from-anf (nth args 2) bindings)]
+                (if (contains? (into {} (second (:sort record))) key) (core/field record key default)
+                 (core/block [record default]))))))
+    :assoc (do (when-not (and (>= n 3) (= 1 (erlang/rem n 2))) (refuse "record assoc requires ordered field/value pairs" node))
+               (core/record-assoc (from-anf (first args) bindings)
+                (mapv (fn [i] [(field-key (nth args i) false) (from-anf (nth args (inc i)) bindings)]) (range 1 n 2))))))))
+
 (defn from-anf [node bindings]
  (let [op (:op node)]
   (case op
@@ -39,11 +62,13 @@
            (core/choose (truthy (from-anf (:test node) bindings))
              (from-anf (:then node) bindings) (from-anf (:else node) bindings)))
    :do (core/block (mapv #(from-anf % bindings) (:stmts node)))
+   :map (core/record (mapv (fn [pair] [(field-key (first pair) true) (from-anf (second pair) bindings)]) (:pairs node)))
    :arith (let [call (ir/arith-bif node)]
             (intrinsic (name (:fun call)) (mapv #(from-anf % bindings) (:args call)) node))
    (let [call (ir/call-site node)]
     (when (or (nil? call) (:rest call)) (refuse "computed or unresolved call" node))
-    (let [args (mapv #(from-anf % bindings) (:args call))]
+    (or (record-call call node bindings)
+     (let [args (mapv #(from-anf % bindings) (:args call))]
      (cond
       (= :remote (:mode call))
        (do (when-not (contains? #{:erlang :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Num} (:mod call))
@@ -54,11 +79,11 @@
         (when (or (contains? bindings (:name callee)) (= :exact (:lookup callee)))
           (refuse "callee is not the declared intrinsic" node))
         (intrinsic (:name callee) args node))
-      :else (refuse "first-class functions require checked summaries" node)))))))
+      :else (refuse "first-class functions require checked summaries" node))))))))
 
 (defn prepare
  "Elaborate one BL expression through compiler ANF into the typed pure core.
-  Input declarations are Bool/Int sorts; no application code is evaluated."
+  Input declarations are Bool/Int or closed records; no application code is evaluated."
  [source declarations]
  (try
   (let [forms (BeamLisp.Reader/read_string source)
@@ -69,7 +94,39 @@
         typing (core/typecheck expression declarations)]
    (if (= :typed (:status typing))
     {:status :elaborated :core expression :identity (core/identity expression declarations)
-     :typing typing :source source :anf anf :profile core/profile
+     :typing typing :source source :anf anf :profile (:profile typing)
      :basis :compiler-anf :assurance :reviewed-elaboration :metatheory :not-mechanized}
     {:status :unsupported :reason (:reason typing) :source source :basis :compiler-anf}))
+  (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))
+
+(defn prepare-function
+ "Extract one actual compiler function scaffold into the core. Parameter
+  declarations are an ordered vector of [role sort] pairs; source parameter
+  names are lexical aliases, never input identities or executable callbacks."
+ [source parameters]
+ (try
+  (when-not (and (vector? parameters) (<= (count parameters) 16)
+                 (every? #(and (vector? %) (= 2 (count %))) parameters)
+                 (= (count parameters) (count (set (map first parameters)))))
+   (refuse "ordered distinct function parameter declarations required" {}))
+  (let [forms (BeamLisp.Reader/read_string source)
+        _ (when-not (= 1 (count forms)) (refuse "one source function required" {}))
+        anf (compiler/compile (first forms) (compiler/new-env "formal.core.intrinsics"))
+        _ (when-not (ir/self-scaffold? anf) (refuse "one top-level compiler function scaffold required" anf))
+        clauses (:clauses (ir/scaffold-inner anf)) clause (first clauses) patterns (:pats clause)
+        _ (when-not (and (= 1 (count clauses)) (nil? (:guard clause)) (= (count patterns) (count parameters))
+                         (every? #(= :pvar (:pop %)) patterns)
+                         (= (count patterns) (count (set (map :name patterns)))))
+            (refuse "one unguarded clause with distinct variable parameters required" anf))
+        declarations (into {} parameters)
+        _ (doseq [[name sort] declarations]
+            (t/variable name t/Int) (when-not (core/sort? sort) (refuse "function input sort" anf)))
+        bindings (into {} (map-indexed (fn [i pattern]
+                            [(:name pattern) (core/variable (first (nth parameters i)) (second (nth parameters i)))]) patterns))
+        body (core/canonicalize (from-anf (:body clause) bindings) declarations)
+        typing (core/typecheck body declarations)]
+   (when-not (= :typed (:status typing)) (refuse (:reason typing) anf))
+   {:status :elaborated :core body :identity (core/identity body declarations) :typing typing
+    :parameters declarations :parameter-order (mapv first parameters) :source source :anf anf
+    :profile (:profile typing) :basis :compiler-anf :assurance :reviewed-function-elaboration :metatheory :not-mechanized})
   (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))

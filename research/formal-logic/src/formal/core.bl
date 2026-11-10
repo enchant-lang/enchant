@@ -3,11 +3,47 @@
 ;; A specified first-order core. It has lexical binding and explicit outcomes,
 ;; and no recursion, eval, host calls, mutation or implicit coercion.
 (def profile :bl/core-int-bool-outcomes-v1)
+(def record-profile :bl/core-record-outcomes-v2)
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.core: " message) {}))))
 (defn- scalar-sort? [sort] (contains? #{[:int] [:bool]} sort))
 (defn- name! [name]
  (t/variable name t/Int) name)
+(defn- field-name! [field]
+ (require! (string? field) "closed record field keys must be strings") field)
+(defn record-sort? [sort] (and (vector? sort) (= :record (first sort))))
+(defn sort? [sort]
+ (try
+  (let [visits (atom 0)]
+   (letfn [(visit [sort depth]
+            (require! (and (<= depth 8) (<= (swap! visits inc) 128)) "record sort capacity")
+            (if (scalar-sort? sort) true
+             (do (require! (and (record-sort? sort) (= 2 (count sort)) (vector? (second sort))
+                                (<= (count (second sort)) 16)) "closed record sort required")
+                 (doseq [field (second sort)]
+                  (require! (and (vector? field) (= 2 (count field))) "record field declaration")
+                  (field-name! (first field)) (visit (second field) (inc depth)))
+                 (let [names (mapv first (second sort))]
+                  (require! (and (= names (vec (sort-by str names))) (= (count names) (count (set names))))
+                            "record fields must be distinct and canonical")) true)))]
+    (visit sort 0)))
+  (catch _ false)))
+(defn record-sort [schema]
+ (require! (map? schema) "record schema must be a field map")
+ (let [sort [:record (mapv (fn [field] [field (get schema field)]) (sort-by str (keys schema)))]]
+  (require! (sort? sort) "invalid record schema") sort))
+(defn field-sort [sort field]
+ (field-name! field) (require! (and (sort? sort) (record-sort? sort)) "field access requires a closed record")
+ (let [schema (into {} (second sort))]
+  (require! (contains? schema field) "field is not declared in this record") (get schema field)))
+(defn inhabits? [sort value]
+ (and (sort? sort)
+  (cond (= t/Bool sort) (contains? #{true false} value)
+       (= t/Int sort) (int? value)
+       (record-sort? sort)
+        (and (map? value) (= (set (keys value)) (set (map first (second sort))))
+             (every? (fn [[field sort]] (inhabits? sort (get value field))) (second sort)))
+       :else false)))
 (defn- node [op sort args data]
  {:core/node 1 :op op :sort sort :args (vec args) :data data})
 (defn literal [value]
@@ -24,7 +60,7 @@
    (contains? #{:lt :le :gt :ge} op)
     (do (require! (and (= n 2) ints?) "integer comparison operands required") t/Bool)
    (= op :eq) (do (require! (and (= n 2) (= (first sorts) (second sorts))
-                                 (scalar-sort? (first sorts))) "same-sort scalar equality required") t/Bool)
+                                 (sort? (first sorts))) "same-sort core equality required") t/Bool)
    (= op :not) (do (require! (and (= n 1) bools?) "Boolean negation operand required") t/Bool)
    (contains? #{:and :or} op) (do (require! bools? "Boolean operands required") t/Bool)
    :else (throw (ex-info "Unknown core primitive" {:operation op})))))
@@ -33,6 +69,19 @@
 (defn let-in [name initial body] (name! name) (node :let (:sort body) [initial body] name))
 (defn block [expressions] (node :do (:sort (last expressions)) expressions nil))
 (defn raise-error [reason sort] (node :raise sort [] reason))
+(defn record [pairs]
+ (require! (and (vector? pairs) (every? #(and (vector? %) (= 2 (count %))) pairs)) "ordered record pairs required")
+ (let [fields (mapv first pairs) values (mapv second pairs)]
+  (require! (= (count fields) (count (set fields))) "record literal fields must be distinct")
+  (node :record (record-sort (into {} (map (fn [[field value]] [field (:sort value)]) pairs))) values fields)))
+(defn field
+ ([record field] (node :field (field-sort (:sort record) field) [record] field))
+ ([record field default] (node :field (field-sort (:sort record) field) [record default] field)))
+(defn record-assoc [record pairs]
+ (require! (and (record-sort? (:sort record)) (vector? pairs)
+                (every? #(and (vector? %) (= 2 (count %))) pairs)) "ordered closed-record updates required")
+ (doseq [[field value] pairs] (require! (= (field-sort (:sort record) field) (:sort value)) "record update changes a field sort"))
+ (node :record-assoc (:sort record) (into [record] (mapv second pairs)) (mapv first pairs)))
 
 (defn typecheck
  "Check the entire canonical core tree against declared input sorts. The
@@ -40,13 +89,14 @@
  [program declarations]
  (try
   (require! (map? declarations) "input declarations must be a map")
-  (doseq [[name sort] declarations] (name! name) (require! (scalar-sort? sort) "input sort outside the core"))
-  (let [visits (atom 0) effects (atom #{}) errors (atom #{})]
+  (doseq [[name sort] declarations] (name! name) (require! (sort? sort) "input sort outside the core"))
+  (let [visits (atom 0) effects (atom #{}) errors (atom #{}) records? (atom (boolean (some record-sort? (vals declarations))))]
    (letfn [(visit [expr env depth]
             (require! (and (map? expr) (= 1 (:core/node expr))
                            (= #{:core/node :op :sort :args :data} (set (keys expr)))
-                           (scalar-sort? (:sort expr)) (vector? (:args expr))) "noncanonical core node")
+                           (sort? (:sort expr)) (vector? (:args expr))) "noncanonical core node")
             (require! (and (<= depth 128) (<= (swap! visits inc) 4096)) "core syntax capacity")
+            (when (record-sort? (:sort expr)) (reset! records? true))
             (let [op (:op expr) args (:args expr) data (:data expr) n (count args)
                   inferred
                   (case op
@@ -64,14 +114,32 @@
                              (require! (= a b) "branch sorts differ") a))
                    :do (do (require! (and (pos? n) (nil? data)) "nonempty block required")
                             (last (mapv #(visit % env (inc depth)) args)))
+                   :record (do (require! (and (vector? data) (= n (count data)) (= n (count (set data)))) "record construction shape")
+                               (record-sort (into {} (map (fn [i] [(nth data i) (visit (nth args i) env (inc depth))]) (range n)))))
+                   :field (do (require! (contains? #{1 2} n) "field projection arity")
+                              (let [base (visit (first args) env (inc depth))]
+                               (when (= 2 n) (visit (second args) env (inc depth)))
+                               (field-sort base data)))
+                   :record-assoc
+                    (do (require! (and (pos? n) (vector? data) (= (count data) (dec n))) "record update shape")
+                        (let [base (visit (first args) env (inc depth))]
+                         (require! (record-sort? base) "record update needs a record operand")
+                         (doseq [i (range (count data))]
+                          (require! (= (field-sort base (nth data i)) (visit (nth args (inc i)) env (inc depth)))
+                                    "record update changes a field sort")) base))
                    (do (require! (nil? data) "primitive data must be nil")
                        (when (contains? #{:quot :rem :mod} op) (swap! effects conj :raise) (swap! errors conj :zero-divisor))
                        (primitive-sort op (mapv #(visit % env (inc depth)) args))))]
              (require! (= inferred (:sort expr)) "forged core result sort") inferred))]
     (let [sort (visit program declarations 0)]
-     {:status :typed :sort sort :profile profile :effects @effects :errors @errors
+     {:status :typed :sort sort :profile (if @records? record-profile profile) :effects @effects :errors @errors
       :evaluation :structural :syntax-nodes @visits :metatheory :not-mechanized})))
   (catch error {:status :unsupported :reason (ex-message error) :profile profile})))
+
+(defn profile-of [program declarations] (:profile (typecheck program declarations)))
+(defn join-profile [profiles]
+ (require! (every? #{profile record-profile} profiles) "unknown core profile")
+ (if (some #(= record-profile %) profiles) record-profile profile))
 
 (defn canonicalize
  "Canonical lexical names, avoiding all free input identities. Compiler fresh
@@ -92,11 +160,11 @@
    (visit program {}))))
 
 (defn identity [program declarations]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary [profile declarations (canonicalize program declarations)]))
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary [(profile-of program declarations) declarations (canonicalize program declarations)]))
                 (list (tuple :case :lower))))
 
 (defn- returned [value sort] {:status :returned :value value :sort sort})
-(defn- primitive [op args sort]
+(defn- primitive [op args sort data]
  (let [a (first args) b (second args)]
   (if (and (contains? #{:quot :rem :mod} op) (= b 0)) {:status :raised :error :zero-divisor :sort sort}
    (returned
@@ -105,7 +173,10 @@
      :lt (< a b) :le (<= a b) :gt (> a b) :ge (>= a b) :eq (= a b)
      :not (not a) :and (every? #(= true %) args) :or (boolean (some #(= true %) args))
      :quot (erlang/div a b) :rem (erlang/rem a b)
-     :mod (let [r (erlang/rem a b)] (if (and (not= r 0) (not= (< r 0) (< b 0))) (+ r b) r))) sort))))
+     :mod (let [r (erlang/rem a b)] (if (and (not= r 0) (not= (< r 0) (< b 0))) (+ r b) r))
+     :record (into {} (map-indexed (fn [i field] [field (nth args i)]) data))
+     :field (get a data)
+     :record-assoc (reduce (fn [record i] (assoc record (nth data i) (nth args (inc i)))) a (range (count data)))) sort))))
 
 (defn evaluate
  "Reference, left-to-right big-step evaluation with explicit raised outcomes.
@@ -116,9 +187,7 @@
    (cond
     (not= :typed (:status typing)) typing
     (not (and (map? assignment) (= (set (keys declarations)) (set (keys assignment)))
-               (every? (fn [[name sort]]
-                        (let [v (get assignment name)]
-                         (if (= sort t/Bool) (or (= v true) (= v false)) (int? v)))) declarations)))
+               (every? (fn [[name sort]] (inhabits? sort (get assignment name))) declarations)))
      {:status :invalid-input :reason :declaration-value-mismatch}
     (not (and (int? fuel) (<= 0 fuel 1000000))) {:status :invalid-input :reason :invalid-step-limit}
     :else
@@ -140,9 +209,9 @@
                         (let [r (visit (first remaining) env)]
                          (if (= :returned (:status r)) (recur (rest remaining) r) r))))
                  (loop [remaining args values []]
-                  (if (empty? remaining) (primitive op values sort)
+                  (if (empty? remaining) (primitive op values sort data)
                    (let [r (visit (first remaining) env)]
                     (if (= :returned (:status r)) (recur (rest remaining) (conj values (:value r))) r)))))))]
-       (assoc (visit program assignment) :sort (:sort program) :steps @steps :profile profile))
+       (assoc (visit program assignment) :sort (:sort program) :steps @steps :profile (:profile typing)))
       (catch error (if (:core/fuel (ex-data error)) {:status :incomplete :reason :step-limit :steps @steps}
                     {:status :error :reason (ex-message error) :steps @steps})))))))

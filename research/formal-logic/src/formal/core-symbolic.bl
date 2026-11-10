@@ -9,6 +9,37 @@
   (let [names (vec (sort-by str (disj (set (mapcat errors programs)) :zero-divisor)))]
    (into {:zero-divisor 1} (map-indexed (fn [i name] [name (+ i 2)]) names)))))
 (defn- success [term] {:value term :ok (t/bool true) :error (t/int 0)})
+(defn payload-terms [payload]
+ (if (t/term? payload) [payload] (vec (mapcat payload-terms (vals payload)))))
+(defn payload-equal [a b]
+ (if (and (t/term? a) (t/term? b)) (t/eq a b)
+  (do (when-not (and (map? a) (map? b) (= (set (keys a)) (set (keys b))))
+        (throw (ex-info "Core record payload shapes differ" {})))
+      (t/all (mapv (fn [field] (payload-equal (get a field) (get b field))) (sort-by str (keys a)))))))
+(defn observation [payload]
+ (if (t/term? payload) payload
+  (v/make payload {:domain {:kind :core-record :profile core/record-profile}})))
+(defn- placeholder [sort]
+ (if (core/record-sort? sort)
+  (into {} (map (fn [[field sort]] [field (placeholder sort)]) (second sort)))
+  (t/literal sort (if (= t/Bool sort) false 0))))
+(defn- component [name]
+ ;; String field keys may be empty or contain NUL. Solver symbols never carry
+ ;; those bytes directly; hexadecimal components also prevent path aliasing.
+ (let [encoded (Base/encode16 name (list (tuple :case :lower)))] (str (count encoded) ":" encoded)))
+(defn- input-payload [prefix sort]
+ (if (core/record-sort? sort)
+  (into {} (map (fn [[field sort]] [field (input-payload (str prefix "/field/" (component field)) sort)]) (second sort)))
+  (t/variable prefix sort)))
+(defn bind-inputs
+ "Bind a concrete, shaped input assignment to the scalar variable leaves."
+ [inputs assignment]
+ (letfn [(bind [payload value]
+           (if (t/term? payload)
+            (do (when-not (= :var (:op payload)) (throw (ex-info "Input leaf must be a variable" {})))
+                {(:data payload) value})
+            (into {} (mapcat (fn [[field child]] (seq (bind child (get value field)))) payload))))]
+  (into {} (mapcat (fn [[name payload]] (seq (bind payload (get assignment name)))) inputs))))
 (defn- all-terms [terms]
  (cond
   (some #(= (t/bool false) %) terms) (t/bool false)
@@ -16,12 +47,16 @@
           (case (count remaining) 0 (t/bool true) 1 (first remaining) (t/all remaining)))))
 (defn- choose-term [condition yes no]
  (cond (= condition (t/bool true)) yes (= condition (t/bool false)) no
-       (= yes no) yes :else (t/ite condition yes no)))
+       (= yes no) yes
+       (and (t/term? yes) (t/term? no)) (t/ite condition yes no)
+       (and (map? yes) (map? no) (= (set (keys yes)) (set (keys no))))
+        (into {} (map (fn [field] [field (choose-term condition (get yes field) (get no field))]) (keys yes)))
+       :else (throw (ex-info "Core conditional payload shapes differ" {}))))
 (defn- merge-outcome [term operands local-ok local-error]
  {:value term :ok (all-terms (conj (mapv :ok operands) local-ok))
   :error (reduce (fn [fallback operand] (choose-term (:ok operand) fallback (:error operand)))
                 local-error (reverse operands))})
-(defn- primitive [op operands errors]
+(defn- primitive [op operands errors data]
  (let [args (mapv :value operands) a (first args) b (second args)]
   (if (contains? #{:quot :rem :mod} op)
    (let [out ((get {:quot n/quotient :rem n/remainder :mod n/modulus} op) a b)
@@ -30,8 +65,11 @@
    (merge-outcome
     (case op
      :add (t/add a b) :sub (t/sub a b) :mul (t/mul a b) :neg (t/neg a)
-     :eq (t/eq a b) :lt (t/lt a b) :le (t/le a b) :gt (t/gt a b) :ge (t/ge a b)
-     :not (t/not a) :and (t/all args) :or (t/any args))
+     :eq (payload-equal a b) :lt (t/lt a b) :le (t/le a b) :gt (t/gt a b) :ge (t/ge a b)
+     :not (t/not a) :and (t/all args) :or (t/any args)
+     :record (into {} (map-indexed (fn [i field] [field (nth args i)]) data))
+     :field (get a data)
+     :record-assoc (reduce (fn [record i] (assoc record (nth data i) (nth args (inc i)))) a (range (count data))))
     operands (t/bool true) (t/int 0)))))
 
 (defn lower
@@ -50,13 +88,19 @@
          _ (doseq [reason (:errors typing)]
              (when-not (contains? errors reason) (throw (ex-info "Missing declared error identity" {:error reason}))))
          prefix (get options :prefix "core")
-         inputs (into {} (map (fn [[name sort]] [name (t/variable (str prefix "." name) sort)]) declarations))]
+         encoding (get options :input-encoding (if (= core/record-profile (:profile typing)) :record-paths-v2 :legacy))
+         _ (when-not (contains? #{:record-paths-v2 :legacy} encoding) (throw (ex-info "Unknown core input encoding" {})))
+         _ (when (and (= :legacy encoding) (= core/record-profile (:profile typing)))
+             (throw (ex-info "Record programs require injective input paths" {})))
+         inputs (into {} (map (fn [[name sort]]
+                          [name (input-payload (if (= :legacy encoding) (str prefix "." name)
+                                               (str prefix ".input/" (component name))) sort)]) declarations))]
     (letfn [(visit [expr env]
              (let [op (:op expr) args (:args expr) data (:data expr)]
               (case op
                :const (success (t/literal (:sort expr) data))
                :local (get env data)
-               :raise {:value (t/literal (:sort expr) (if (= t/Bool (:sort expr)) false 0))
+               :raise {:value (placeholder (:sort expr))
                        :ok (t/bool false) :error (t/int (get errors data))}
                :let (let [initial (visit (first args) env)
                           body (visit (second args) (assoc env data (success (:value initial))))]
@@ -68,10 +112,10 @@
                      {:value (choose-term c (:value yes) (:value no))
                       :ok (all-terms [(:ok condition) (choose-term c (:ok yes) (:ok no))])
                       :error (choose-term (:ok condition) (choose-term c (:error yes) (:error no)) (:error condition))})
-               (primitive op (mapv #(visit % env) args) errors))))]
+               (primitive op (mapv #(visit % env) args) errors data))))]
      (let [outcome (visit program (into {} (map (fn [[name term]] [name (success term)]) inputs)))]
-      (t/validate! [(:value outcome) (:ok outcome) (:error outcome)])
-      {:status :translated :profile core/profile :core (core/identity program declarations)
+      (t/validate! (vec (concat (payload-terms (:value outcome)) [(:ok outcome) (:error outcome)])))
+      {:status :translated :profile (:profile typing) :core (core/identity program declarations)
        :typing typing :inputs inputs :outcome outcome :errors errors
        :assurance :reviewed-implementation :metatheory :not-mechanized})))
    (catch error {:status :unsupported :reason (ex-message error) :profile core/profile}))))
@@ -81,7 +125,9 @@
  (let [out (:outcome lowered)]
   (v/make (:value out)
    {:defined (:ok out) :scope {:mode :exact}
-    :domain {:kind :scalar :profile core/profile}
+    :domain (if (core/record-sort? (get-in lowered [:typing :sort]))
+              {:kind :core-record :sort (get-in lowered [:typing :sort]) :profile (:profile lowered)}
+              {:kind :scalar :profile (:profile lowered)})
     :errors (into {} (map (fn [[reason code]] [reason (t/eq (:error out) (t/int code))]) (:errors lowered)))})))
 
 (defn equivalence-problem
@@ -90,16 +136,18 @@
  ([left right declarations] (equivalence-problem left right declarations {}))
  ([left right declarations options]
   (try
-   (let [options (assoc options :errors (error-catalog [left right]))
+   (let [profile (core/join-profile [(core/profile-of left declarations) (core/profile-of right declarations)])
+         options (assoc options :errors (error-catalog [left right])
+                    :input-encoding (if (= core/record-profile profile) :record-paths-v2 :legacy))
          a (lower left declarations options) b (lower right declarations options)]
     (if-not (and (= :translated (:status a)) (= :translated (:status b)))
      {:status :unsupported :left a :right b}
      (let [a-out (:outcome a) b-out (:outcome b)
            claim (t/all [(t/eq (:ok a-out) (:ok b-out))
-                         (t/implies (:ok a-out) (t/eq (:value a-out) (:value b-out)))
+                         (t/implies (:ok a-out) (payload-equal (:value a-out) (:value b-out)))
                          (t/implies (t/not (:ok a-out)) (t/eq (:error a-out) (:error b-out)))])]
       {:status :translated :left a :right b
        :problem (q/prove claim (merge options
-         {:profile core/profile :scope {:mode :exact} :relation :return-value-and-named-error
+         {:profile profile :scope {:mode :exact} :relation :return-value-and-named-error
           :origin {:left-core (:core a) :right-core (:core b) :basis :reviewed-core-symbolic-interpretation}}))})))
    (catch error {:status :unsupported :reason (ex-message error)}))))

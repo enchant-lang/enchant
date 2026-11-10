@@ -1,0 +1,27 @@
+(ns formal.core-inputs
+ (:require [formal.core :as core] [formal.core-symbolic :as symbolic] [formal.term :as t]
+           [formal.evaluate :as replay]))
+
+(defn complete
+ "Decode scalar/record model inputs without replacing concrete assignments.
+  Missing leaves get explicit completion provenance. This function establishes
+  no claim: callers must replay their full context and concrete program."
+ [parameters inputs native]
+ (let [missing? #(or (nil? %) (replay/unavailable? %))]
+  (letfn [(fill [sort payload observed]
+           (if (core/record-sort? sort)
+            (let [fields (into {} (map (fn [[field sort]] [field (fill sort (get payload field) (get observed field))]) (second sort)))]
+             {:value (into {} (map (fn [[field entry]] [field (:value entry)]) fields))
+              :source :structured-input :fields fields})
+            (let [assignment (get (:assignments native) (:data payload) (replay/unavailable :missing-variable))
+                  value (if (missing? assignment) observed assignment) absent? (missing? value)]
+             {:value (if absent? (if (= t/Bool sort) false 0) value)
+              :source (cond absent? :explicit-replay-completion
+                            (missing? assignment) :backend-observation :else :backend-assignment)})))]
+   (let [provenance (into {} (map (fn [[name sort]]
+                             (let [observed (get-in native [:witness (str "input/" name)])
+                                   observed (if (and (map? observed) (contains? observed :domain)) (:value observed) observed)]
+                              [name (fill sort (get inputs name) observed)])) parameters))
+         assignment (into {} (map (fn [[name entry]] [name (:value entry)]) provenance))]
+    {:assignment assignment :provenance provenance
+     :term-assignments (merge (:assignments native) (symbolic/bind-inputs inputs assignment))}))))
