@@ -1,0 +1,20 @@
+(ns formal.anf-inputs (:require [compiler :as compiler] [reader-node :as reader]))
+
+;; Declared expression/loop inputs are actual compiler lexical parameters.
+;; Their aliases cannot equal compiler fresh-var names, which end in _N.
+;; Function-source parameter roles are independent and do not use this module.
+(defn prepare [namespace values]
+ (when-not (and (map? values) (<= (count values) 4096))
+  (throw (ex-info "Formal expression inputs require a bounded map" {})))
+ (doseq [name (keys values)]
+  (when-not (and (string? name) (<= 1 (erlang/byte_size name) 512) (not (String/contains? name "/")))
+   (throw (ex-info "Formal expression inputs need unqualified source names" {})))
+  (let [forms (BeamLisp.Reader/read_string name) node (reader/node-form (first forms))]
+   (when-not (and (= 1 (count forms)) (= :symbol (reader/node-tag node))
+                  (= name (reader/node-name node)))
+    (throw (ex-info "Formal input name must be one exact source identifier" {})))))
+ (let [names (vec (sort-by str (keys values)))
+       aliases (into {} (map-indexed (fn [at name] [name (str "formal/input/" at)]) names))]
+  {:environment (assoc (compiler/new-env namespace) :locals aliases)
+   :bindings (into {} (map (fn [name] [(get aliases name) (get values name)]) names))
+   :aliases aliases}))

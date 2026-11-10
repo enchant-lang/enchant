@@ -1,6 +1,6 @@
 (ns formal.elaborate
  (:require [compiler :as compiler] [system.ir :as ir] [formal.core :as core] [formal.term :as t]
-           [formal.intrinsics :as intrinsics]))
+           [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs]))
 
 ;; This consumes the real resolved ANF. It is a reviewed front end into the
 ;; specified core, not a second evaluator for the surface language.
@@ -34,7 +34,7 @@
   (when-not (and (= :lit (:op node)) (string? (:val node)))
    (refuse "record field keys must be literal strings" node)) (:val node)))
 
-(declare from-anf)
+(declare lower-node)
 (defn- literal-arguments [node]
  (loop [node node out []]
   (when (> (count out) 64) (refuse "record update argument capacity" node))
@@ -42,7 +42,7 @@
    :enil out
    :cons (recur (:tail node) (conj out (:head node)))
    (refuse "record variadic updates require a literal proper argument list" node))))
-(defn- record-call [call node bindings]
+(defn- record-call [call node bindings context]
  (let [callee (:callee call)
        ;; The compiler leaves variadic assoc as a fetched Var. Preserve that
        ;; declared-core assumption only in our explicit elaboration namespace;
@@ -63,43 +63,47 @@
         n (count args)]
    (case (if (= :assoc_variadic target) :assoc target)
     :get (do (when-not (contains? #{2 3} n) (refuse "record get requires one literal field and optional eager default" node))
-             (let [record (from-anf (first args) bindings) key (field-key (second args) false)]
+             (let [record (lower-node (first args) bindings context) key (field-key (second args) false)]
               (when-not (core/record-sort? (:sort record)) (refuse "record get requires a declared record" node))
               (if (= n 2) (core/field record key)
-               (let [default (from-anf (nth args 2) bindings)]
+               (let [default (lower-node (nth args 2) bindings context)]
                 (if (contains? (into {} (second (:sort record))) key) (core/field record key default)
                  (core/block [record default]))))))
     :assoc (do (when-not (and (>= n 3) (= 1 (erlang/rem n 2))) (refuse "record assoc requires ordered field/value pairs" node))
-               (core/record-assoc (from-anf (first args) bindings)
+               (core/record-assoc (lower-node (first args) bindings context)
                 (mapv (fn [index]
                         (let [i (inc (* 2 index))]
-                         [(field-key (nth args i) false) (from-anf (nth args (inc i)) bindings)]))
+                         [(field-key (nth args i) false) (lower-node (nth args (inc i)) bindings context)]))
                       (range (erlang/div (dec n) 2))))))))))
 
-(defn from-anf [node bindings]
+(defn- fresh-core-name [context]
+ (let [name (str "#anf/local" (swap! (:next context) inc))]
+  (if (contains? (:reserved context) name) (fresh-core-name context) name)))
+
+(defn- lower-node [node bindings context]
  (let [op (:op node)]
   (case op
    :lit (core/literal (:val node))
    :var (or (get bindings (:name node)) (refuse "unbound variable" node))
    :binding (refuse "selected bindings require the selected Source adapter" node)
-   :global (or (when (intrinsics/declared-input? node "formal.core.intrinsics") (get bindings (:name node)))
-               (refuse "unbound global identity" node))
-   :let (let [initial (from-anf (:init node) bindings)
-              local (core/variable (:name node) (:sort initial))
-              body (from-anf (:body node) (assoc bindings (:name node) local))]
-          (core/let-in (:name node) initial body))
+   :global (refuse "global values require actual selected Source resolution" node)
+   :let (let [initial (lower-node (:init node) bindings context)
+              name (fresh-core-name context)
+              local (core/variable name (:sort initial))
+              body (lower-node (:body node) (assoc bindings (:name node) local) context)]
+          (core/let-in name initial body))
    :if (do (when (nil? (:test node)) (refuse "conditional ANF shape" node))
-           (core/choose (truthy (from-anf (:test node) bindings))
-             (from-anf (:then node) bindings) (from-anf (:else node) bindings)))
-   :do (core/block (mapv #(from-anf % bindings) (:stmts node)))
-   :map (core/record (mapv (fn [pair] [(field-key (first pair) true) (from-anf (second pair) bindings)]) (:pairs node)))
+           (core/choose (truthy (lower-node (:test node) bindings context))
+             (lower-node (:then node) bindings context) (lower-node (:else node) bindings context)))
+   :do (core/block (mapv #(lower-node % bindings context) (:stmts node)))
+   :map (core/record (mapv (fn [pair] [(field-key (first pair) true) (lower-node (second pair) bindings context)]) (:pairs node)))
    :arith (let [meaning (intrinsics/arith-meaning node)]
             (when-not meaning (refuse "unreviewed canonical arithmetic identity" node))
-            (intrinsic meaning (mapv #(from-anf % bindings) (:args node)) node))
+            (intrinsic meaning (mapv #(lower-node % bindings context) (:args node)) node))
    (let [call (ir/call-site node)]
     (when (or (nil? call) (:rest call)) (refuse "computed or unresolved call" node))
-    (or (record-call call node bindings)
-     (let [args (mapv #(from-anf % bindings) (:args call))]
+    (or (record-call call node bindings context)
+     (let [args (mapv #(lower-node % bindings context) (:args call))]
      (cond
       (= :remote (:mode call))
        (let [meaning (intrinsics/remote-meaning (:mod call) (:fun call) (:arity call))]
@@ -109,6 +113,20 @@
        (refuse "unresolved global calls require checked resolution and summaries" node)
       :else (refuse "first-class functions require checked summaries" node))))))))
 
+(defn from-anf
+ "Interpret supplied ANF with lexical bindings only. Input roles and compiler
+  aliases are distinct: every resulting Core binder gets a fresh identity."
+ [node bindings]
+ (let [visited (atom 0) names (atom #{})]
+  (letfn [(reserve [value depth]
+            (when-not (and (<= (swap! visited inc) 16384) (<= depth 128)
+                           (map? value) (= 1 (:core/node value)) (vector? (:args value)))
+             (refuse "bounded Core values required for lexical bindings" node))
+            (when (= :local (:op value)) (swap! names conj (:data value)))
+            (doseq [argument (:args value)] (reserve argument (inc depth))))]
+   (doseq [value (vals bindings)] (reserve value 0))
+   (lower-node node bindings {:next (atom 0) :reserved @names}))))
+
 (defn prepare
  "Elaborate one BL expression through compiler ANF into the typed pure core.
   Input declarations are Bool/Int or closed records; no application code is evaluated."
@@ -116,8 +134,10 @@
  (try
   (let [forms (BeamLisp.Reader/read_string source)
         _ (when-not (= 1 (count forms)) (refuse "one source expression is required" {}))
-        anf (compiler/compile (first forms) (compiler/new-env "formal.core.intrinsics"))
         bindings (into {} (map (fn [[name sort]] [name (core/variable name sort)]) declarations))
+        inputs (anf-inputs/prepare "formal.core.intrinsics" bindings)
+        anf (compiler/compile (first forms) (:environment inputs))
+        bindings (:bindings inputs)
         raw (from-anf anf bindings) expression (core/canonicalize raw declarations)
         typing (core/typecheck expression declarations)]
    (if (= :typed (:status typing))

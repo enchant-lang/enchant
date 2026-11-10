@@ -1,0 +1,108 @@
+(ns formal.hygiene-test
+ (:require [compiler :as compiler] [system.ir :as ir] [anf :as anf]
+           [formal.elaborate :as elaborate] [formal.source :as source] [formal.core :as core]
+           [formal.value :as value] [formal.term :as t] [formal.evaluate :as evaluate]
+           [formal.api :as formal] [formal.loop-core :as loops] [formal.identity :as identity]))
+
+(def function-text "(fn [a] (let [local 10] (erlang/+ a local)))")
+(defn prepared [text role]
+ (compiler/with-fresh-names #(elaborate/prepare-function text [[role t/Int]])))
+(defn raw-local-name []
+ (:name (:body (first (:clauses (ir/scaffold-inner (:anf (prepared function-text "input"))))))))
+
+(deftest semantic-input-roles-cannot-be-captured-by-compiler-or-core-locals
+ (let [alias (raw-local-name)]
+  (doseq [role [alias "#anf/local1" "#anf/local2" "#core/local1" "formal/input/0" "state/local" "a_2"]]
+   (let [p (prepared function-text role)]
+    (is (= :elaborated (:status p)) (pr-str p))
+    (doseq [input [-20 0 7 100]]
+     (let [out (core/evaluate (:core p) {role t/Int} {role input})]
+      (is (= :returned (:status out))) (is (= (+ input 10) (:value out)))))))))
+
+(deftest changing-source-aliases-and-fresh-counters-keeps-the-semantic-program
+ (let [role (raw-local-name) a (prepared function-text role)
+       b (prepared "(fn [other] (let [temp 10] (erlang/+ other temp)))" role)
+       c (compiler/with-fresh-names
+          (fn []
+           (compiler/compile (first (BeamLisp.Reader/read_string "(let [w 1] w)")) (compiler/new-env "formal.core.intrinsics"))
+           (elaborate/prepare-function function-text [[role t/Int]])))]
+  (is (= (:identity a) (:identity b)))
+  (is (= (:identity a) (:identity c)))
+  (is (= (:core a) (:core b)))
+  (is (= (:core a) (:core c)))))
+
+(deftest expression-inputs-and-compiler-lexical-aliases-have-separate-identities
+ (doseq [name ["local_1" "local_2" "a_1" "x_1"]]
+  (let [text (str "(let [local 10] (erlang/+ " name " local))")
+        p (compiler/with-fresh-names #(elaborate/prepare text {name t/Int}))
+        v (compiler/with-fresh-names #(source/prepare text {name (t/int 7)}))]
+   (is (= :elaborated (:status p)) (pr-str p))
+   (is (= 17 (:value (core/evaluate (:core p) {name t/Int} {name 7}))))
+   (is (= :translated (:status v)) (pr-str v))
+   (is (= 17 (evaluate/value (value/term (:value v)) {}))))))
+
+(deftest scalar-inputs-shadow-intrinsic-call-names-in-the-actual-compiler
+ (doseq [[name expression] [["inc" "(inc inc)"] ["quot" "(quot quot 2)"] ["+" "(+ + 2)"]
+                           ["not" "(not not)"] ["get" "(get get \"n\")"]]]
+  (is (= :unsupported (:status (elaborate/prepare expression {name t/Int}))) expression)
+  (is (= :unsupported (:status (source/prepare expression {name (t/int 7)}))) expression)
+  (let [p (elaborate/prepare name {name t/Int}) v (source/prepare name {name (t/int 7)})]
+   (is (= :elaborated (:status p)))
+   (is (= 7 (:value (core/evaluate (:core p) {name t/Int} {name 7}))))
+   (is (= :translated (:status v))) (is (= 7 (evaluate/value (value/term (:value v)) {}))))))
+
+(deftest globals-cannot-borrow-a-function-parameter-or-local-alias
+ (let [base (prepared function-text "input")
+       parameter (:name (first (:pats (first (:clauses (ir/scaffold-inner (:anf base)))))))
+       local (raw-local-name)]
+  (doseq [global [parameter local "formal.core.intrinsics/a"]]
+   (is (= :unsupported (:status (prepared (str "(fn [a] " global ")") "input"))))))
+ (doseq [node [(anf/global "formal.core.intrinsics" "x") (anf/global "formal.source.intrinsics" "x")
+               (anf/global "foreign" "x") (anf/global-exact "formal.core.intrinsics" "x")]]
+  (is (= :refused (try (elaborate/from-anf node {"x" (core/variable "x" t/Int)}) :admitted (catch _ :refused))))
+  (is (= :refused (try (source/lower node {"x" (value/lift (t/int 7))} {}) :admitted (catch _ :refused))))))
+
+(deftest raw-anf-elaboration-reserves-free-identities-inside-supplied-core-values
+ (let [a (core/variable "#anf/local1" t/Int)
+       expression (core/operation :add [a (core/literal 1)])
+       node (anf/lett "compiler-local" (anf/lit 10)
+              (anf/remote :erlang :+ (list (anf/var "provided") (anf/var "compiler-local"))))
+       lowered (elaborate/from-anf node {"provided" expression})]
+  (is (= 18 (:value (core/evaluate lowered {"#anf/local1" t/Int} {"#anf/local1" 7}))))
+  (is (not= "#anf/local1" (:data lowered)))))
+
+(deftest the-old-constant-twenty-source-promise-is-now-refuted
+ (let [role (raw-local-name)
+       definition (formal/program-contract
+                    {:name "hygiene-not-twenty" :function-source function-text :parameters [[role t/Int]]
+                     :requires (fn [in] (t/eq (get in role) (t/int 7)))
+                     :ensures (fn [in out] (t/eq out (t/int 20)))})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine} definition)]
+    (is (= :refuted (:status answer)) (pr-str answer))
+    (is (= 17 (get-in answer [:counterexample :execution :value])))
+    (is (= :valid (get-in answer [:counterexample :status])))))
+  (let [changed (assoc definition :body (core/literal 20))
+        changed (assoc changed :identity (identity/of changed))]
+   (is (= :unsupported (:status (formal/describe changed)))))))
+
+(deftest the-original-source-observer-agrees-on-the-colliding-role
+ (let [role (raw-local-name)
+       context (formal/selected-source-context
+                {:sources [{:namespace 'formal.hygiene.original :revision 'current :file "hygiene.bl"
+                            :source "(ns formal.hygiene.original) (defn answer [a] (let [local 10] (erlang/+ a local)))"}]
+                 :entry ['formal.hygiene.original 'current] :target 'answer :parameters [[role t/Int]]})
+       definition (formal/program-contract {:name "hygiene-original" :context context
+                    :ensures (fn [in out] (t/eq out (t/add (get in role) (t/int 10))))})
+       observed (formal/observe-contract definition {role 7})]
+  (is (= :observed (:status observed)) (pr-str observed))
+  (is (= 17 (get-in observed [:receipt :outcome :value])))
+  (is (= :holds (get-in observed [:checking :contract-safety])))
+  (is (= 0 (get-in observed [:receipt :cleanup :remaining])))
+  (is (every? #(= false (:loaded %)) (get-in observed [:receipt :cleanup :modules])))))
+
+(deftest loop-inputs-cannot-collide-with-compiler-local-spellings
+ (let [source "(loop [i local_1] (if (> i 0) (recur (- i 1)) i))"
+       p (compiler/with-fresh-names #(loops/prepare source {"local_1" t/Int}))]
+  (is (= :elaborated (:status p)) (pr-str p))
+  (doseq [n [0 1 7]] (is (= 0 (:value (loops/evaluate (:program p) {"local_1" n})))))))

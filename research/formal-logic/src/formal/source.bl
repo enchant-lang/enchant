@@ -1,7 +1,7 @@
 (ns formal.source
  (:require [compiler :as compiler] [system.ir :as ir]
            [formal.term :as t] [formal.value :as v] [formal.data :as d]
-           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics]))
+           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs]))
 
 ;; Consume the compiler's resolved ANF, never a second surface-language walker.
 ;; This initial source environment allows the declared variables and a reviewed
@@ -69,10 +69,9 @@
            (string? value) (v/lift (t/text value))
            (and (keyword? value) (:keyword-universe opts)) (d/key-literal (:keyword-universe opts) value)
            :else (refuse "literal needs a declared semantic domain" node)))
-   (contains? #{:var :global :binding} op)
-    (or (when (or (= :var op) (intrinsics/declared-input? node "formal.source.intrinsics"))
-          (get bindings (:name node)))
-        (refuse (str "unbound source identity " (pr-str (ir/global-key node))) node))
+   (= :var op)
+    (or (get bindings (:name node)) (refuse "unbound lexical input identity" node))
+   (contains? #{:global :binding} op) (refuse "global values require actual selected Source resolution" node)
    (= op :let)
     (let [initial (lower (:init node) bindings opts)
           body (lower (:body node) (assoc bindings (:name node) initial) opts)]
@@ -113,7 +112,6 @@
    (let [forms (BeamLisp.Reader/read_string source)
          _ (when-not (= 1 (count forms)) (refuse "exactly one source expression is required" {}))
          form (first forms)
-         anf (compiler/compile form (compiler/new-env "formal.source.intrinsics"))
          bindings (into {} (map (fn [[name value]] [(if (string? name) name (str name)) (v/lift value)]) bindings))
          _ (doseq [[_ value] bindings]
              (let [domain (:domain value) kind (:kind domain)
@@ -121,7 +119,9 @@
                          (when (= :scalar kind) (t/sort-of (v/term value))))]
               (when-not (contains? #{[:int] [:bool] [:string]} sort)
                (refuse "binding requires a reviewed runtime scalar profile" {}))))
-         value (lower anf bindings opts)]
+         inputs (anf-inputs/prepare "formal.source.intrinsics" bindings)
+         anf (compiler/compile form (:environment inputs))
+         value (lower anf (:bindings inputs) opts)]
     {:status :translated :value value :profile :bl/int-bool-intrinsics-v1
      :basis :compiler-anf :intrinsic-profile intrinsics/profile :source source :anf anf :scope (v/scope value)})
    (catch error {:status :unsupported :reason (ex-message error) :source source

@@ -1,6 +1,6 @@
 (ns formal.loop-core
  (:require [compiler :as compiler] [system.ir :as ir]
-           [formal.elaborate :as elaborate] [formal.core :as core] [formal.term :as t]))
+           [formal.elaborate :as elaborate] [formal.core :as core] [formal.term :as t] [formal.anf-inputs :as anf-inputs]))
 
 (def profile :bl/tail-loop-int-bool-v1)
 (defn- require! [ok message]
@@ -69,7 +69,9 @@
  (try
   (let [forms (BeamLisp.Reader/read_string source)
         _ (require! (= 1 (count forms)) "one loop expression required")
-        anf (compiler/compile (first forms) (compiler/new-env "formal.core.intrinsics"))
+        inputs (anf-inputs/prepare "formal.core.intrinsics"
+                 (into {} (map (fn [[name sort]] [name (core/variable (str "input/" name) sort)]) parameters)))
+        anf (compiler/compile (first forms) (:environment inputs))
         _ (require! (ir/anf-loop? anf) "one top-level compiler loop scaffold required")
         inner (ir/scaffold-inner (:fn anf)) clauses (:clauses inner)
         _ (require! (and (= 1 (count clauses)) (nil? (:guard (first clauses)))
@@ -79,7 +81,7 @@
         aliases (mapv #(String/replace % (Regex/compile! "_[0-9]+$") "") vars)
         _ (require! (= (count aliases) (count (set aliases))) "duplicate source state aliases")
         input-types (input-declarations parameters)
-        bindings (into {} (map (fn [[name sort]] [name (core/variable (str "input/" name) sort)]) parameters))
+        bindings (:bindings inputs)
         expression (fn [node env declarations] (core/canonicalize (elaborate/from-anf node env) declarations))
         initial (mapv #(expression % bindings input-types) initial-anf)
         state (mapv (fn [i] {:name (nth aliases i) :id (str "state/" (nth aliases i)) :sort (:sort (nth initial i))}) (range (count vars)))
