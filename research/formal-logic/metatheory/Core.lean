@@ -1,19 +1,31 @@
 import Std
 
-/- A mathematical model of the Int/Bool core. This formalizes the typed model,
-   not the BL implementation, ANF elaborator, runtime or compiler bridge. -/
+/- A mathematical model of the scalar and finite-product core. Products model
+   nested closed record values. The correspondence of ordered map construction
+   and canonical named-field layouts with these products remains unproved, as
+   does the BL implementation, ANF elaborator, runtime and compiler bridge. -/
 namespace BeamLispCore
 
 inductive Ty where
-  | int | bool
+  | int | bool | unit | prod : Ty → Ty → Ty
   deriving DecidableEq
 
 abbrev Value : Ty → Type
   | .int => Int
   | .bool => Bool
+  | .unit => Unit
+  | .prod α β => Value α × Value β
 
-instance (τ : Ty) : DecidableEq (Value τ) := by
-  cases τ <;> exact inferInstance
+def valueDecidableEq : (τ : Ty) → DecidableEq (Value τ)
+  | .int => inferInstance
+  | .bool => inferInstance
+  | .unit => inferInstance
+  | .prod α β =>
+    letI : DecidableEq (Value α) := valueDecidableEq α
+    letI : DecidableEq (Value β) := valueDecidableEq β
+    inferInstance
+
+instance (τ : Ty) : DecidableEq (Value τ) := valueDecidableEq τ
 
 inductive Var : List Ty → Ty → Type where
   | zero : Var (τ :: Γ) τ
@@ -74,6 +86,8 @@ def BoolOp.apply (op : BoolOp) (a b : Bool) : Bool :=
 def valueEq : (τ : Ty) → Value τ → Value τ → Bool
   | .int, a, b => decide (a = b)
   | .bool, a, b => decide (a = b)
+  | .unit, _, _ => true
+  | .prod α β, a, b => valueEq α a.1 b.1 && valueEq β a.2 b.2
 
 inductive Expr : List Ty → Ty → Type where
   | literal : Value τ → Expr Γ τ
@@ -87,6 +101,12 @@ inductive Expr : List Ty → Ty → Type where
   | boolNot : Expr Γ .bool → Expr Γ .bool
   | boolOp : BoolOp → Expr Γ .bool → Expr Γ .bool → Expr Γ .bool
   | equal : (α : Ty) → Expr Γ α → Expr Γ α → Expr Γ .bool
+  | pair : Expr Γ α → Expr Γ β → Expr Γ (.prod α β)
+  | first : Expr Γ (.prod α β) → Expr Γ α
+  | second : Expr Γ (.prod α β) → Expr Γ β
+  | firstDefault : Expr Γ (.prod α β) → Expr Γ γ → Expr Γ α
+  | setFirst : Expr Γ (.prod α β) → Expr Γ α → Expr Γ (.prod α β)
+  | setSecond : Expr Γ (.prod α β) → Expr Γ β → Expr Γ (.prod α β)
   | raise : String → Expr Γ τ
 
 /- Lean checks structural recursion here. The model evaluator has no fuel,
@@ -109,6 +129,16 @@ def eval : Expr Γ τ → Env Γ → Outcome τ
     (eval left env).bind fun a => (eval right env).bind fun b => .returned (op.apply a b)
   | .equal α left right, env =>
     (eval left env).bind fun a => (eval right env).bind fun b => .returned (valueEq α a b)
+  | .pair left right, env =>
+    (eval left env).bind fun a => (eval right env).bind fun b => .returned (a, b)
+  | .first record, env => (eval record env).bind fun value => .returned value.1
+  | .second record, env => (eval record env).bind fun value => .returned value.2
+  | .firstDefault record fallback, env =>
+    (eval record env).bind fun value => (eval fallback env).bind fun _ => .returned value.1
+  | .setFirst record replacement, env =>
+    (eval record env).bind fun value => (eval replacement env).bind fun newValue => .returned (newValue, value.2)
+  | .setSecond record replacement, env =>
+    (eval record env).bind fun value => (eval replacement env).bind fun newValue => .returned (value.1, newValue)
   | .raise reason, _ => .raised reason
 
 theorem typed_total (expression : Expr Γ τ) (env : Env Γ) :
@@ -159,6 +189,56 @@ theorem remainder_dividend_sign :
 
 theorem modulus_divisor_sign :
     IntOp.apply .mod 7 (-3) = .returned (-2) := by decide
+
+theorem valueEq_true_iff (τ : Ty) (a b : Value τ) : valueEq τ a b = true ↔ a = b := by
+  induction τ with
+  | int => simp [valueEq]
+  | bool => simp [valueEq]
+  | unit => cases a; cases b; simp [valueEq]
+  | prod α β ihα ihβ =>
+    cases a with
+    | mk a₁ a₂ =>
+      cases b with
+      | mk b₁ b₂ => simp [valueEq, ihα, ihβ]
+
+theorem product_returns_in_order (left : Expr Γ α) (right : Expr Γ β) (env : Env Γ)
+    (hl : eval left env = .returned a) (hr : eval right env = .returned b) :
+    eval (.pair left right) env = .returned (a, b) := by simp [eval, hl, hr, Outcome.bind]
+
+theorem product_first_failure (reason : String) (right : Expr Γ β) (env : Env Γ) :
+    eval (.pair (.raise (τ := α) reason) right) env = .raised reason := rfl
+
+theorem product_second_failure (left : Expr Γ α) (env : Env Γ)
+    (hl : eval left env = .returned a) (reason : String) :
+    eval (.pair left (.raise (τ := β) reason)) env = .raised reason := by
+  simp [eval, hl, Outcome.bind]
+
+theorem projection_preserves_hidden_failure (a : Value α) (reason : String) (env : Env Γ) :
+    eval (.first (.pair (.literal a) (.raise (τ := β) reason))) env = .raised reason := rfl
+
+theorem second_projection_preserves_first_failure (b : Value β) (reason : String) (env : Env Γ) :
+    eval (.second (.pair (.raise (τ := α) reason) (.literal b))) env = .raised reason := rfl
+
+theorem present_field_evaluates_default (a : Value α) (b : Value β) (reason : String) (env : Env Γ) :
+    eval (.firstDefault (.literal (τ := .prod α β) (a, b)) (.raise (τ := γ) reason)) env =
+      .raised reason := rfl
+
+theorem projection_default_preserves_base_failure (fallback : Expr Γ γ) (reason : String) (env : Env Γ) :
+    eval (.firstDefault (.raise (τ := .prod α β) reason) fallback) env = .raised reason := rfl
+
+theorem update_preserves_base_failure (replacement : Expr Γ α) (reason : String) (env : Env Γ) :
+    eval (.setFirst (.raise (τ := .prod α β) reason) replacement) env = .raised reason := rfl
+
+theorem update_preserves_replacement_failure (a : Value α) (b : Value β) (reason : String) (env : Env Γ) :
+    eval (.setFirst (.literal (τ := .prod α β) (a, b)) (.raise reason)) env = .raised reason := rfl
+
+theorem update_preserves_other_field (a replacement : Value α) (b : Value β) (env : Env Γ) :
+    eval (.setFirst (.literal (τ := .prod α β) (a, b)) (.literal replacement)) env =
+      .returned (replacement, b) := rfl
+
+theorem second_update_preserves_other_field (a : Value α) (b replacement : Value β) (env : Env Γ) :
+    eval (.setSecond (.literal (τ := .prod α β) (a, b)) (.literal replacement)) env =
+      .returned (a, replacement) := rfl
 
 /- A generic ranking rule for the next language layer. Its premise still
    needs a checked proof for each program's actual transition relation. -/
@@ -371,6 +451,18 @@ theorem reachable_has_modelRun (initial : State → Prop) (step : State → Stat
 #print axioms quotient_negative_divisor
 #print axioms remainder_dividend_sign
 #print axioms modulus_divisor_sign
+#print axioms valueEq_true_iff
+#print axioms product_returns_in_order
+#print axioms product_first_failure
+#print axioms product_second_failure
+#print axioms projection_preserves_hidden_failure
+#print axioms second_projection_preserves_first_failure
+#print axioms present_field_evaluates_default
+#print axioms projection_default_preserves_base_failure
+#print axioms update_preserves_base_failure
+#print axioms update_preserves_replacement_failure
+#print axioms update_preserves_other_field
+#print axioms second_update_preserves_other_field
 #print axioms natural_rank_accessible
 #print axioms natural_rank_wellFounded
 #print axioms ranked_relation_wellFounded
