@@ -24,6 +24,18 @@
 (defn css [] (str (asset "style.css") (File/read! (str review-kit "/review.css"))
                   (asset "roster.css") (File/read! (str root "/dossier-local.css"))))
 (defn scripts [] (str (asset "live.js") (asset "roster.js")))
+(defn linked-file [text route]
+ ;; Evidence links are declarations, not a general file browser. Resolve every
+ ;; candidate beneath the trusted project root, including symlink targets.
+ (let [refs (Regex/scan (Regex/compile! "\\[\\[file:([^]]+)\\]") text
+                         (list (tuple :capture :all_but_first)))
+       reference (first (keep (fn [row]
+                          (let [path (first row)]
+                           (when (= route (str "/" path)) path))) refs))]
+  (when (and reference (contains? #{".md" ".bl" ".org" ".lean" ".json" ".txt" ".patch"} (Path/extname reference)))
+   (when-let [file (roster/resolve-file root directory reference)]
+    (when (<= (:size (File/stat! file)) 8388608)
+     {:file file :mime (if (= ".json" (Path/extname file)) "application/json" "text/plain")})))))
 (defn readonly-script []
  "document.querySelectorAll('form.fb').forEach(f=>{f.querySelectorAll('button,textarea,input,select').forEach(c=>c.disabled=true);const s=f.querySelector('.fb-state');if(s)s.textContent='Only the dossier owner can save a review.'});")
 (defn standalone [body extra-css extra-js]
@@ -92,7 +104,8 @@
        params (URI/decode_query (web/query request))
        text (File/read! path)
        frame (Regex/run (Regex/compile! "^/witness-media/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)
-       roster-frame (Regex/run (Regex/compile! "^/roster-media/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)]
+       roster-frame (Regex/run (Regex/compile! "^/roster-media/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)
+       linked (when (= method "get") (linked-file text route))]
   (cond
    (and (= method "post") (contains? #{"/answer" "/roster-note"} route))
     (if-not (owner? request) (web/json request 403 {:error "Only the configured dossier owner can save a review."})
@@ -120,6 +133,7 @@
    (= route "/rev") (web/json request {:rev (revision (document text request))})
    (= route "/doc") (let [doc (document text request)]
       (web/json request {:rev (revision doc) :html (join "" (map h/hiccup->html (page/doc-h doc)))}))
+   linked (web/bytes request (:mime linked) (File/read! (:file linked)))
    (= route "/") (let [doc (document text request)]
      (web/html request (str "<!doctype html>" (h/hiccup->html (page/page-h doc (css)
                           (str (scripts) (when-not (owner? request) (readonly-script))))))))

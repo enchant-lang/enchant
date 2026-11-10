@@ -47,6 +47,13 @@ integrated ten-file run passed 4,575 assertions. Derived scalar observations can
 use labelled replay when OxiZ leaves a compound value opaque; native model
 availability and certificate authority remain separate.
 
+[metatheory/Core.lean](metatheory/Core.lean) adds a separate typed mathematical
+model checked by pinned Lean 4.34.1. All 18 theorem audits report no axiom
+dependencies, including natural and lexicographic ranking rules. This does not
+prove the BL implementation, canonicalizer, ANF bridge or compiler correct;
+[the metatheory notes](metatheory/README.md) state the boundary. Canonical lexical
+identities also passed a 3,302-assertion core/contract/API follow-up.
+
 The canonical source remains [ATLAS.bl.org](ATLAS.bl.org). Owner feedback saves
 into that file explicitly; anonymous readers cannot write. The live host is
 owned by this integration session. Use `research/formal-logic/review url` to
