@@ -1,0 +1,43 @@
+(ns formal.intrinsics-probe
+ (:require [formal.api :as formal] [formal.elaborate :as elaborate]
+           [formal.term :as t] [compiler :as compiler] [system.ir :as ir] [interop]))
+
+;; Retain actual compiler call identities before tightening source admission.
+;; No arbitrary host callback is substituted for an admitted source handler.
+(def expressions
+ ["(+ x y)" "(- x y)" "(* x y)" "(< x y)" "(<= x y)" "(= x y)" "(== x y)"
+  "(quot x y)" "(rem x y)" "(mod x y)" "(inc x)" "(dec x)" "(not x)"
+  "(pos? x)" "(neg? x)" "(zero? x)" "(erlang/div x y)" "(erlang/rem x y)"
+  "(BeamLisp.Num/div x y)" "(BeamLisp.Num/neg x)" "(BeamLisp.Num/pos? x)"
+  "(erlang/mod x y)" "(BeamLisp.Ns.Core/div x y)" "(BeamLisp.Ns.Rt/quot x y)"])
+(def readings
+ (mapv (fn [expression]
+         (let [source (str "(fn [x y] " expression ")")
+               anf (compiler/compile (first (BeamLisp.Reader/read_string source))
+                                     (compiler/new-env "formal.core.intrinsics"))
+               prepared (elaborate/prepare-function source [["x" t/Int] ["y" t/Int]])]
+          {:source source :admission (select-keys prepared [:status :reason :core :identity])
+           :calls (vec (keep (fn [node]
+                              (when-let [call (ir/call-site node)]
+                               (select-keys call [:mode :mod :fun :arity :callee])))
+                            (tree-seq ir/node? ir/child-nodes anf)))})) expressions))
+(def misleading-source
+ "(fn [s msg] (assoc s \"n\" (BeamLisp.Num/div (get s \"n\") 2)))")
+(def definition
+ (formal/source-protocol {:name "numeric-host-div-is-not-integer-quotient" :state {"n" t/Int}
+                         :handlers [{:name "step" :source misleading-source}]}))
+(def events [{:transition "step" :inputs {}}])
+(def runtime (formal/observe-protocol-trace definition {"n" 7} events))
+(assert (= :disagreement (:status runtime)))
+(assert (= 3.5 (BeamLisp.Num/div 7 2)))
+(def data {:schema :enchant.formal.intrinsic-identity-probe-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :readings readings :misleading-source misleading-source
+           :model (formal/replay-source-protocol-trace definition {"n" 7} events)
+           :runtime runtime :actual-host-div 3.5 :compiler-proof-authority false})
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "intrinsics-probe.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json data))
+(println {:expressions (count readings) :actual-host-div 3.5
+          :reference-state (get-in data [:model :state])
+          :actual-adapter (:status runtime) :compiler-proof-authority false})
