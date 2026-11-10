@@ -101,9 +101,11 @@ try{
   const refutation=await evaluate("document.querySelector('#cell-story-refutation')?.innerText||''");
   check(size.name+': actual normalized packet reconstructs and altered proof is rejected',refutation.includes(':normalized-packet :ready')&&refutation.includes(':data-connection :checked-data-connection')&&refutation.includes(':rehashed-wrong-proof :rejected'));
   check(size.name+': data export keeps external proof execution separate',refutation.includes(':kernel-execution :not-run')&&refutation.includes(':normalization :reviewed-not-mechanically-proved')&&refutation.includes(':compiler-proof-authority false'));
+  await navigate('/#a-proof-checker-with-a-proof');
   check(size.name+': executable kernel theorem keeps original normalization as next bridge',await evaluate("document.body.innerText.includes('every proof it accepts rules out every model of its normalized problem')&&document.body.innerText.includes('Eleven actual BL certificate exports')&&document.body.innerText.includes('Prove original-term normalization')"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('A proof checker with a proof')).scrollIntoView({block:'start'})");
   await shot(size.name+'-refutation-kernel');
+  await navigate('/#s-the-model-running');
   await evaluate("document.querySelector('#cell-story-refutation').scrollIntoView({block:'center'})");
   await shot(size.name+'-refutation');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
