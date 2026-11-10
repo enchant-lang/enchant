@@ -703,7 +703,37 @@ theorem rename_preserves_outcome (expression : Expr Δ τ) :
     funext value
     exact body_ih (lift mapping) (.cons value definition) (.cons value caller)
       (agree_lift mapping definition caller agreement value)
-  all_goals simp_all [rename, eval]
+  case literal => rfl
+  case raise => rfl
+  case cond test yes no ht hy hn =>
+    simp only [rename, eval, ht mapping definition caller agreement,
+      hy mapping definition caller agreement, hn mapping definition caller agreement]
+  case seq initial body hi hb =>
+    simp only [rename, eval, hi mapping definition caller agreement, hb mapping definition caller agreement]
+  case neg value hv =>
+    simp only [rename, eval, hv mapping definition caller agreement]
+  case intOp op left right hl hr =>
+    simp only [rename, eval, hl mapping definition caller agreement, hr mapping definition caller agreement]
+  case comparison op left right hl hr =>
+    simp only [rename, eval, hl mapping definition caller agreement, hr mapping definition caller agreement]
+  case boolNot value hv =>
+    simp only [rename, eval, hv mapping definition caller agreement]
+  case boolOp op left right hl hr =>
+    simp only [rename, eval, hl mapping definition caller agreement, hr mapping definition caller agreement]
+  case equal α left right hl hr =>
+    simp only [rename, eval, hl mapping definition caller agreement, hr mapping definition caller agreement]
+  case pair left right hl hr =>
+    simp only [rename, eval, hl mapping definition caller agreement, hr mapping definition caller agreement]
+  case first record hr =>
+    simp only [rename, eval, hr mapping definition caller agreement]
+  case second record hr =>
+    simp only [rename, eval, hr mapping definition caller agreement]
+  case firstDefault record fallback hr hf =>
+    simp only [rename, eval, hr mapping definition caller agreement, hf mapping definition caller agreement]
+  case setFirst record replacement hr hv =>
+    simp only [rename, eval, hr mapping definition caller agreement, hv mapping definition caller agreement]
+  case setSecond record replacement hr hv =>
+    simp only [rename, eval, hr mapping definition caller agreement, hv mapping definition caller agreement]
 
 theorem weaken_agree (caller : Env Γ) (value : Value α) : Agree weaken caller (.cons value caller) := by
   intro τ index
