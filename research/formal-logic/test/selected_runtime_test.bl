@@ -78,8 +78,33 @@
    (is (= :raised (get-in result [:receipt :outcome :status])))
    (is (= stage (get-in result [:receipt :stage])))
    (is (= :holds (get-in result [:checking :contract-safety])))
-   (is (= true (get-in result [:checking :error-stack-bound-to-artifact])))
+   (is (= :recorded-original-source-instance-boundary (get-in result [:checking :failure-origin])))
+   (is (= (if (= :initializing stage) :initialize :invoke-export) (get-in result [:receipt :boundary :operation])))
+   (when (= :export-entered stage)
+    ;; This pinned Source tail call deliberately has no application frame.
+    ;; The checked relation names the recorded original invocation boundary.
+    (is (= false (get-in result [:checking :error-stack-bound-to-artifact]))))
+   (let [invalid-cause (-> (:receipt result) (assoc-in [:outcome :frames 0 :arguments] [7 2]) rehash)
+         missing-cause (-> (:receipt result) (assoc-in [:outcome :frames] []) rehash)]
+    (is (= :incomplete (:status (formal/check-contract-observation definition invalid-cause))))
+    (is (= :incomplete (:status (formal/check-contract-observation definition missing-cause)))))
    (is (clean? (:receipt result))))))
+
+(deftest both-engines-can-supply-an-exact-replayed-counterexample-to-observe
+ (let [definition (rehash (assoc basic :ensures (t/bool false)))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine} definition) native (get-in answer [:backend :property])
+         observed (formal/observe-contract-counterexample definition native)]
+    (is (= :refuted (:status answer)))
+    (is (= :observed (:status observed)) (pr-str observed))
+    (is (= :violated (get-in observed [:checking :contract-safety])))
+    (is (= :valid (get-in observed [:model-counterexample :status])))
+    (is (= (:identity definition) (get-in observed [:model-counterexample :subject])))
+    (is (clean? (:receipt observed)))
+    (doseq [[target candidate] [[basic native] [definition (assoc native :profile :unreviewed)]
+                               [definition (assoc native :scope {})]]]
+     (let [rejected (formal/observe-contract-counterexample target candidate)]
+      (is (= :rejected (:status rejected))) (is (= false (:execution-started rejected)))))))))
 
 (deftest imported-hygienic-transformer-still-executes-the-selected-private-helper
  (let [provider {:namespace 'formal.observed.library :revision 'v1 :file "../inert-provider-coordinate.bl"
@@ -105,6 +130,11 @@
                   (assoc-in receipt [:artifact :module] "Elixir.BeamLisp.Env")
                   (assoc-in receipt [:artifact :members 0 :beam-sha256] "wrong")
                   (assoc-in receipt [:artifact :original-unit] "wrong")
+                  (assoc-in receipt [:boundary :operation] :initialize)
+                  (assoc-in receipt [:boundary :target-reference] "wrong")
+                  (assoc-in receipt [:boundary :module] "Elixir.BeamLisp.Env")
+                  (assoc-in receipt [:boundary :context] "wrong")
+                  (assoc receipt :sdk-stage :before-source-instance)
                   (assoc-in receipt [:cleanup :worker-alive] true) (assoc-in receipt [:cleanup :parent-closed] false)
                   (assoc-in receipt [:cleanup :remaining] 1) (assoc-in receipt [:cleanup :preparations :pending] 1)
                   (assoc-in receipt [:cleanup :modules 0 :loaded] true) (assoc-in receipt [:monitor :status] :unconfirmed)
@@ -113,7 +143,7 @@
   (doseq [changed [(assoc-in receipt [:outcome :value] 43) (assoc receipt :assignment {"x" 3})]]
    (is (= :disagreement (:status (formal/check-contract-observation basic (rehash changed))))))
   (is (= :incomplete (:status (formal/check-contract-observation basic
-                     (rehash (assoc receipt :outcome nil :termination :timeout :stage :export-entered))))))
+                     (rehash (assoc receipt :outcome nil :boundary nil :termination :timeout :stage :export-entered))))))
   (is (clean? receipt))))
 
 (deftest preconditions-shapes-and-zero-deadline-refuse-before-instance-execution

@@ -7,10 +7,11 @@
 
 (def profile :bl/selected-contract-observation-v1)
 (def adapter :initialize-source-instance-and-call-once-v1)
+(def projection :bl/source-instance-integer-error-projection-v1)
 (def limits {:deadline-ms 30000 :receipt-bytes 2097152})
 (def ^:private fields
- #{:formal/contract-observation :profile :adapter :projection :definition :sdk :artifact
-   :assignment :outcome :stage :termination :monitor :cleanup :deadline-ms :identity-profile :identity})
+ #{:formal/contract-observation :profile :adapter :projection :definition :sdk :sdk-stage :artifact
+   :assignment :outcome :boundary :stage :termination :monitor :cleanup :deadline-ms :identity-profile :identity})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.selected-runtime: " message) {}))))
 (defn- shape! [value fields]
@@ -34,25 +35,34 @@
 (defn- child [parent ticket owner compiled reference args return-sort]
  (BeamLisp.Env/with_env owner
   (fn []
-   (let [graph (atom nil) stage (atom :preparing-instance) observed (atom nil) retirement (atom nil)]
+   (let [graph (atom nil) stage (atom :preparing-instance) observed (atom nil) retirement (atom nil)
+         boundary (atom nil) sdk (atom nil)
+         base {:profile :bl/source-instance-boundary-v1 :context (get-in compiled [:manifest :context])
+               :module (get-in compiled [:manifest :module]) :target-reference (get-in compiled [:manifest :target-reference])}]
     (try
      (let [g (execution/prepare-captured-unit! (:compiled compiled))]
       (reset! graph g)
+      (reset! sdk (artifact/sdk-identity))
       (reset! stage :initializing)
       (erlang/send parent [ticket :stage :initializing])
-      (reset! observed
-       (outcome/capture
-        (fn [_ _]
-         (execution/initialize-instance! g)
+      (reset! boundary (assoc base :operation :initialize))
+      (let [initialized (outcome/capture (fn [_ _] (execution/initialize-instance! g) true) nil nil #(= true %))]
+       (if-not (= :returned (:status initialized)) (reset! observed initialized)
+        (do
+         (reset! stage :initialized)
          (execution/complete-preparation! (:cache-key g) g)
          (reset! stage :export-entered) (erlang/send parent [ticket :stage :export-entered])
-         (let [value (execution/invoke-instance-binding! g reference args)]
-          (reset! stage :export-returned) value)) nil nil #(core/inhabits? return-sort %))))
+         (reset! boundary (assoc base :operation :invoke-export))
+         (reset! observed
+          (outcome/capture
+           (fn [_ _]
+            (let [value (execution/invoke-instance-binding! g reference args)]
+             (reset! stage :export-returned) value)) nil nil #(core/inhabits? return-sort %)))))))
      (catch error
       (reset! observed {:status :adapter-failure :reason (String/slice (ex-message error) 0 4096)}))
      (finally
       (when @graph (reset! retirement (generation/retire! @graph)))))
-    (erlang/send parent [ticket :outcome {:outcome @observed :stage @stage
+    (erlang/send parent [ticket :outcome {:outcome @observed :stage @stage :boundary @boundary :sdk @sdk
                                          :retirement @retirement}])))))
 (defn- drain [ticket]
  (receive [seen :stage _] :when (= seen ticket) (drain ticket)
@@ -106,7 +116,7 @@
   (require! (and (map? receipt) (<= (erlang/external_size receipt) (:receipt-bytes limits))) "receipt capacity")
   (shape! receipt fields)
   (require! (and (= 1 (:formal/contract-observation receipt)) (= profile (:profile receipt))
-                 (= adapter (:adapter receipt)) (= outcome/profile (:projection receipt))
+                 (= adapter (:adapter receipt)) (= projection (:projection receipt))
                  (identity/valid? receipt) (= (:identity definition) (:definition receipt))
                  (int? (:deadline-ms receipt)) (<= 1 (:deadline-ms receipt) (:deadline-ms limits))) "receipt identity/profile")
   (let [sdk (artifact/check-sdk (:sdk receipt))
@@ -126,22 +136,29 @@
                          (contains? #{true false} (:forced monitor)) (string? (:raw-reason monitor)) (<= (count (:raw-reason monitor)) 4096)) "monitor outcome")
         termination (:termination receipt) raw (:outcome receipt) stage (:stage receipt)
         _ (require! (and (contains? #{:completed :timeout :process-death} termination)
-                         (contains? #{:preparing-instance :initializing :export-entered :export-returned} stage)) "observation stage/termination")
+                         (contains? #{:before-source-instance :instance-prepared} (:sdk-stage receipt))
+                         (contains? #{:preparing-instance :initializing :initialized :export-entered :export-returned} stage)) "observation stage/termination")
         _ (when (= :completed termination)
-            (require! (and (= :normal (:reason monitor)) (= false (:forced monitor)) (outcome/valid? raw)
+            (shape! (:boundary receipt) #{:profile :context :module :target-reference :operation})
+            (require! (= (:boundary receipt)
+                         {:profile :bl/source-instance-boundary-v1 :context (get-in compiled [:manifest :context])
+                          :module (get-in compiled [:manifest :module]) :target-reference (get-in compiled [:manifest :target-reference])
+                          :operation (if (= :initializing stage) :initialize :invoke-export)}) "Source-owner invocation boundary differs from the original artifact/export")
+            (require! (and (= :instance-prepared (:sdk-stage receipt))
+                           (= :normal (:reason monitor)) (= false (:forced monitor)) (outcome/valid? raw)
                            (if (contains? #{:returned :invalid-return} (:status raw)) (= :export-returned stage)
                             (contains? #{:initializing :export-entered} stage))) "completed outcome/monitor/stage"))
-        _ (when-not (= :completed termination) (require! (nil? raw) "unfinished observation cannot carry a completed outcome"))
+        _ (when-not (= :completed termination) (require! (and (nil? raw) (nil? (:boundary receipt))) "unfinished observation cannot carry a completed outcome or boundary"))
         _ (when (= :returned (:status raw))
             (require! (core/inhabits? (get-in prepared [:typing :sort]) (:value raw)) "returned value outside the declared core sort"))
         compared (when (= :completed termination) (outcome/compare-core raw reference))
         stack-bound (or (not= :raised (:status raw))
                         (some #(= (get-in compiled [:manifest :module]) (:module %)) (:frames raw)))
-        compared (if (and (= :raised (:status raw)) (not stack-bound)) :unclassified compared)
         status (case compared :matches :conforming :disagreement :disagreement :incomplete)]
    {:status status :scope :finite-original-selected-source-contract-conformance
     :contract-safety (if (= :conforming status) (safety definition bindings reference) :not-established)
     :reference-outcome reference :comparison compared :error-stack-bound-to-artifact (boolean stack-bound)
+    :failure-origin :recorded-original-source-instance-boundary :error-projection projection
     :binding-context (:binding-context prepared) :sdk-check sdk
     :attestation :observer-trusted-not-cryptographically-attested
     :universal-runtime-refinement :not-established :specialization-preservation :not-mechanically-proved
@@ -169,9 +186,11 @@
        (if (= :adapter-failure (:status raw))
         {:status :incomplete :reason (:reason raw) :stage (:stage observed) :execution-started :unknown
          :cleanup (:cleanup observed) :compiler-proof-authority false}
-        (let [receipt (identity/seal {:formal/contract-observation 1 :profile profile :adapter adapter :projection outcome/profile
-                        :definition (:identity definition) :sdk sdk :artifact (:manifest compiled) :assignment assignment
-                        :outcome raw :stage (:stage observed) :termination (:termination observed) :monitor (:monitor observed)
+        (let [receipt (identity/seal {:formal/contract-observation 1 :profile profile :adapter adapter :projection projection
+                        :definition (:identity definition) :sdk (or (:sdk observed) sdk)
+                        :sdk-stage (if (:sdk observed) :instance-prepared :before-source-instance)
+                        :artifact (:manifest compiled) :assignment assignment
+                        :outcome raw :boundary (:boundary observed) :stage (:stage observed) :termination (:termination observed) :monitor (:monitor observed)
                         :cleanup (:cleanup observed) :deadline-ms deadline-ms})
               checked (check definition receipt)]
          {:status (if (= :conforming (:status checked)) :observed (:status checked)) :receipt receipt :checking checked
