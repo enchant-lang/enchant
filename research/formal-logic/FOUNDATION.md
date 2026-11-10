@@ -274,7 +274,9 @@ itself mechanically verified and does not certify all SMT theories.
   and claim. Seventeen exports contain 39 checked leaves and 11 applied claim
   theorems. Initial feasibility can accompany incomplete coverage. A model
   with complete conditional coverage can also have inconsistent assumptions.
-  `OBLIGATIONS.md` describes the v2 opt-in and the exact term-model scope.
+  The integration run passed 9,267 assertions across 34 files. All 187 earlier
+  native verdicts match. `OBLIGATIONS.md` describes the v2 opt-in and the exact
+  term-model scope.
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both

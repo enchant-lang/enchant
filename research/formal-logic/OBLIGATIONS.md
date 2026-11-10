@@ -55,10 +55,9 @@ is rejected even if all remaining certificates and a smaller manifest are
 self-consistent. A missing required proof makes the bundle `:incomplete`.
 Unknown and unsupported searches cannot establish satisfiability.
 
-A SAT question requires witness evidence. The refutation facet records
-`:requires-witness`, rather than accepting empty proof coverage. Feasibility
-rows for conditional models are auxiliary; they do not block a conditional
-property proof, but remain visibly unproved. A separately checked false-goal
+A SAT question requires witness evidence. A pending SAT row records
+`:requires-witness`. Feasibility rows for conditional models are auxiliary.
+They can stay pending alongside complete conditional proof coverage. A separately checked false-goal
 proof can establish inconsistency of the contained initial term context.
 That is distinct from an unreachable transition or a positive initial witness.
 
