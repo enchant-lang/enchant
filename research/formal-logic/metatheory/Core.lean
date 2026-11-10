@@ -656,9 +656,9 @@ abbrev Renaming (Δ Γ : List Ty) := {τ : Ty} → Var Δ τ → Var Γ τ
 
 def lift (mapping : Renaming Δ Γ) : Renaming (α :: Δ) (α :: Γ)
   | _, .zero => .zero
-  | _, .succ variable => .succ (mapping variable)
+  | _, .succ index => .succ (mapping index)
 
-def weaken : Renaming Γ (α :: Γ) := fun {_} variable => .succ variable
+def weaken : Renaming Γ (α :: Γ) := fun {_} index => .succ index
 
 def rename (mapping : Renaming Δ Γ) : Expr Δ τ → Expr Γ τ
   | .literal value => .literal value
@@ -681,21 +681,21 @@ def rename (mapping : Renaming Δ Γ) : Expr Δ τ → Expr Γ τ
   | .raise reason => .raise reason
 
 def Agree (mapping : Renaming Δ Γ) (definition : Env Δ) (caller : Env Γ) : Prop :=
-  ∀ {τ} (variable : Var Δ τ), caller.lookup (mapping variable) = definition.lookup variable
+  ∀ {τ} (index : Var Δ τ), caller.lookup (mapping index) = definition.lookup index
 
 theorem agree_lift (mapping : Renaming Δ Γ) (definition : Env Δ) (caller : Env Γ)
     (agreement : Agree mapping definition caller) (value : Value α) :
     Agree (lift mapping) (.cons value definition) (.cons value caller) := by
-  intro τ variable
-  cases variable with
+  intro τ index
+  cases index with
   | zero => rfl
-  | succ variable => exact agreement variable
+  | succ index => exact agreement index
 
 theorem rename_preserves_outcome (expression : Expr Δ τ) :
     ∀ {Γ} (mapping : Renaming Δ Γ) (definition : Env Δ) (caller : Env Γ),
       Agree mapping definition caller → eval (rename mapping expression) caller = eval expression definition := by
   induction expression <;> intro Γ mapping definition caller agreement
-  case variable index => exact congrArg Outcome.returned (agreement index)
+  case «variable» index => exact congrArg Outcome.returned (agreement index)
   case bind initial body initial_ih body_ih =>
     simp only [rename, eval]
     rw [initial_ih mapping definition caller agreement]
@@ -706,7 +706,7 @@ theorem rename_preserves_outcome (expression : Expr Δ τ) :
   all_goals simp_all [rename, eval]
 
 theorem weaken_agree (caller : Env Γ) (value : Value α) : Agree weaken caller (.cons value caller) := by
-  intro τ variable
+  intro τ index
   rfl
 
 theorem eager_call_preserves_captured_environment (mapping : Renaming Δ Γ)
@@ -728,9 +728,9 @@ theorem two_eager_arguments_preserve_caller_order (mapping : Renaming Δ Γ)
         (fun b => eval body (.cons b (.cons a definition)))) := by
   simp only [eval]
   cases result : eval first caller with
-  | raised reason => simp only [result, Outcome.bind]
+  | raised reason => simp only [Outcome.bind]
   | returned value =>
-    simp only [result, Outcome.bind]
+    simp only [Outcome.bind]
     rw [rename_preserves_outcome second weaken caller (.cons value caller) (weaken_agree caller value)]
     apply congrArg (fun next => (eval second caller).bind next)
     funext secondValue
