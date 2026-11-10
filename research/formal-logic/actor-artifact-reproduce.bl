@@ -1,6 +1,6 @@
 (ns formal.actor-artifact-reproduce
  (:require [formal.core :as core] [formal.elaborate :as elaborate] [formal.term :as t]
-           [anf :as anf] [lower :as lower] [interop]))
+           [anf :as anf] [lower :as lower] [formal.identity :as identity] [interop]))
 
 ;; Reproduce the retained original artifact identities without loading code or
 ;; claiming another historical execution. Only exact recorded bytes are saved.
@@ -14,7 +14,6 @@
          (let [source (get row "source")
                extracted (elaborate/prepare-function source parameters)
                _ (assert (= :elaborated (:status extracted)))
-               _ (assert (= (get row "core") (:identity extracted)))
                name (get-in row ["artifact" "module"])
                _ (assert (String/starts_with? name "Elixir.Formal.RuntimeProbe.M"))
                module (erlang/binary_to_atom name)
@@ -24,10 +23,15 @@
                bytes (elem (lower/descriptor->beam descriptor) 1)
                hash (digest bytes)]
           (assert (= hash (get-in row ["artifact" "beam-sha256"])) (str name " differs from the original artifact"))
-          (File/write! (get row "beam") bytes)
-          {:id (get row "id") :beam (get row "beam") :sha256 hash :loaded false}))
+          (if (File/exists? (get row "beam")) (assert (= bytes (File/read! (get row "beam"))))
+           (File/write! (get row "beam") bytes))
+          {:id (get row "id") :beam (get row "beam") :sha256 hash :loaded false
+           :recorded-core-identity (get row "core") :recorded-core-identity-profile :legacy-default-etf
+           :current-core-identity (:identity extracted) :current-identity-profile identity/profile
+           :core-identities :not-equated-across-encodings}))
        (get original "observations")))
-(File/write! "research/formal-logic/evidence/actor-runtime/artifact-reproduction.json"
+(File/write! (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "original-byte-reproduction.json")
  (interop/->json {:schema :enchant.formal.beam-probe-reproduction-v1 :artifacts results
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
                  :runtime-executions 0 :purpose :exact-original-byte-recovery}))
 (println {:exact-original-artifacts (count results) :runtime-executions 0})
