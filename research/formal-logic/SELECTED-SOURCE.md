@@ -68,8 +68,11 @@ target. An uncalled helper's latent body is not a proved function contract.
    admission remains false; it does not establish general effect safety.
 3. The new bounded specializer follows lexical closures in that actual ANF.
    Calls become fresh lexical argument bindings and specialized bodies.
-   Initializers remain ordered. Only then does the existing typed core
-   elaborator interpret the specialized ANF.
+   Initializers remain ordered. A separate unit/ANF relation checker now compares
+   that proposed reduction against the original SDK unit. It derives the input
+   alias map consumed by the following independent ANF/Core check. Only then
+   can the prepared formal model back a contract. The producers and checkers
+   remain reviewed code with unproved implementation soundness.
 4. A context stores exact sources, entry, target, parameters, canonical core
    identity, actual selected target reference and canonical identities of the
    unit, selection, reference table and expansion records. Fresh preparation
@@ -120,3 +123,13 @@ qualification are retained in `evidence/source-selection/`.
 VM. Its archive decoder is for bounded, hash-pinned trusted project artifacts;
 it is not a public ETF endpoint. The pinned SDK and production defaults remain
 unchanged. This milestone adds no Lean theorem or universal refinement proof.
+
+The subsequent [specialization checkpoint](SPECIALIZATION.md) adds an independent
+reduction check and a distinct typed-model proof scope. The model proves lexical
+renaming preserves complete outcomes, and one-/two-argument eager-call laws
+preserve the caller's argument order and the definition's captured environment.
+These mathematical laws do not establish the named unit encoding, arbitrary-
+arity closure machine or BL checker soundness. `formal/prepare-source-context`
+returns the full reconstructed Core and both ordinary-data translation objects;
+`formal/check-specialization` and `formal/check-elaboration` check those supplied
+objects without another compiler or specializer invocation.

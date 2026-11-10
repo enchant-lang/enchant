@@ -52,6 +52,15 @@ A typed mathematical ANF model has a universal lowering-preservation theorem
 in Lean; connecting the BL validator, named ANF and Source specialization to
 that model remains unproved.
 
+[SPECIALIZATION.md](SPECIALIZATION.md) checks the earlier selected-unit to ANF
+reduction too. It retains ordered initializers, compares eager argument bindings
+under the caller environment and helper bodies under their captured environment,
+then derives the alias map for the following ANF/Core gate. An altered capture
+can produce a consistent 102-valued residual model for a Source call that returns
+42; the new earlier gate rejects that mismatch. Complete prepared context proof
+objects are available through `formal/prepare-source-context`. Neither relation
+check is a mechanized proof of the original Source compiler's correctness.
+
 `formal/certify` produces and independently checks Boolean/linear Int proof
 objects. `formal/check-certificate` checks a retained object against its exact
 statement, assumptions, profile and scope without either native solver.

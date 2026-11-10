@@ -112,3 +112,22 @@ checkpoints, 44 audits are empty, four use only `propext`, six use `propext` and
 The actual compiled artifact, complete audit and qualification are retained
 under `../evidence/elaboration/`. The initial failed proof log is historical
 evidence of unclosed goals, excluded from successful qualification.
+
+The lexical-call extension adds `Lexical.Renaming` and a complete renaming of
+the typed Core grammar. The universal preservation law requires agreement
+between the old and new environments through that mapping. Lifting a mapping
+through a binding retains the new parameter value. Eager-call laws evaluate
+arguments in the caller environment and the body in its captured definition
+environment; the two-argument law explicitly weakens the second argument so the
+first binding cannot capture it. Exact first/second failure laws prevent the
+later argument or body from hiding an earlier failure.
+
+Seven new audited laws bring the model to 63 theorems. The lifting, weakening
+and first-failure laws have empty audits; the other four use `propext` and
+`Quot.sound`. The complete audit has 47 empty lists, four using only `propext`,
+ten using `propext` and `Quot.sound`, and the two prior integer ranking results
+with their three standard assumptions. The checkpoint is retained in
+`../evidence/specialization/`. No named-unit encoding, arbitrary-arity closure
+machine, Source-specializer soundness or BL checker implementation theorem
+follows from these results. Their environment-agreement hypotheses require
+separate connection proofs for that implementation.

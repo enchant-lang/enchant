@@ -64,6 +64,13 @@ call a solver; Source expansion and selected-unit specialization are earlier,
 still-unproved bridges. See [ELABORATION.md](ELABORATION.md) for the exact rules
 and the distinct mathematical model preservation theorem.
 
+Selected-unit contexts additionally expose `:specialization` in that connection
+ledger. The independent unit/ANF checker derives the aliases consumed by the
+ANF/Core checker, binding both relations at the residual program and ordered
+input roles. Other contract sources report `:not-applicable` for this earlier
+gate. [SPECIALIZATION.md](SPECIALIZATION.md) specifies its SDK-wellformedness
+premise, exact reduction scope and remaining implementation bridges.
+
 ## Displaying a counterexample
 
 Inputs, returned value, return status and error code are separate observations.
