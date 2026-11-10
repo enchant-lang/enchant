@@ -1,0 +1,33 @@
+(ns formal.obligations-check
+ (:require [formal.api :as formal] [formal.obligation-examples :as examples]
+           [formal.identity :as identity] [formal.runtime-artifact :as artifact] [interop]))
+
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! (Path/join output "manifests"))
+(File/mkdir_p! (Path/join output "archives"))
+(def rows
+ (mapv (fn [item]
+         (let [made (formal/certify-obligations (:subject item)) bundle (:bundle made)
+               checked (formal/check-obligation-proof-data (:subject item) bundle)
+               data {:schema :enchant.formal.obligation-example-v1 :id (:id item) :subject (:subject item)
+                     :expected (:expected item) :bundle bundle}
+               bytes (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2)))
+               archive (str "archives/" (:id item) ".etf") manifest (str "manifests/" (:id item) ".json")]
+          (assert (= (:expected item) (:status made)) (pr-str made))
+          (assert (= :checked-data-connection (:status checked)) (pr-str checked))
+          (assert (<= (erlang/byte_size bytes) 8388608))
+          (File/write! (Path/join output archive) bytes)
+          (File/write! (Path/join output manifest) (interop/->json (:manifest bundle)))
+          {:id (:id item) :expected (:expected item) :subject-kind (get-in bundle [:plan :subject :kind])
+           :plan (get-in bundle [:plan :identity]) :bundle (:identity bundle) :manifest (get-in bundle [:manifest :identity])
+           :coverage (:coverage made) :manifest-file manifest
+           :archive {:file archive :bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}})) examples/examples))
+(File/write! (Path/join output "summary.json") (interop/->json
+ {:schema :enchant.formal.obligation-examples-v1 :rows rows
+  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+  :kernel-execution :not-run :composition :reviewed-not-mechanically-proved :compiler-proof-authority false}))
+(println {:subjects (count rows) :ready (count (filter #(= :ready (:expected %)) rows))
+          :required (reduce + (map #(get-in % [:coverage :required]) rows))
+          :ready-required (reduce + (map #(get-in % [:coverage :ready]) rows))
+          :unreachable (reduce + (map #(get-in % [:coverage :unreachable]) rows))
+          :kernel-execution :not-run :compiler-proof-authority false})
