@@ -42,6 +42,8 @@ structure Row where
   deriving Repr, DecidableEq
 
 def Row.holds (row : Row) (env : Nat → Int) : Prop := dot row.coefficients env ≤ row.bound
+instance (row : Row) (env : Nat → Int) : Decidable (row.holds env) :=
+  inferInstanceAs (Decidable (dot row.coefficients env ≤ row.bound))
 def Row.zero : Row := ⟨[], 0⟩
 def Row.add (a b : Row) : Row := ⟨addCoefficients a.coefficients b.coefficients, a.bound + b.bound⟩
 def Row.scale (weight : Nat) (row : Row) : Row :=
@@ -268,7 +270,8 @@ theorem check_from_sound (problem : Problem) (proof : Proof) (integers : Nat →
     intro assignment consistent satisfied accepted
     simp only [checkFrom] at accepted
     split at accepted
-    · have parts := Bool.and_eq_true.mp accepted
+    · have parts : checkFrom problem yes (write assignment id true) = true ∧
+          checkFrom problem no (write assignment id false) = true := by simpa using accepted
       cases value : problem.values integers booleans id with
       | false => exact hn _ (consistent_write assignment _ id false consistent value) satisfied parts.2
       | true => exact hy _ (consistent_write assignment _ id true consistent value) satisfied parts.1
