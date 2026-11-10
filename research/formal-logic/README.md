@@ -32,6 +32,13 @@ implementation, source connection and compiler/runtime trust are explicit;
 these tests are not a mechanical proof of soundness. Native solver result
 certificates retain their original unchecked status.
 
+[CORE.md](CORE.md) specifies the first executable Int/Bool core. It has lexical
+bindings, selective conditionals, left-to-right evaluation and exact named
+failures, with separate reference and symbolic interpreters and real ANF
+elaboration. Its focused file passed 3,194 assertions. Core equivalence includes
+the error identity as well as successful values. The source/core and core/term
+connections remain reviewed implementations with unmechanized metatheory.
+
 The canonical source remains [ATLAS.bl.org](ATLAS.bl.org). Owner feedback saves
 into that file explicitly; anonymous readers cannot write. The live host is
 owned by this integration session. Use `research/formal-logic/review url` to
