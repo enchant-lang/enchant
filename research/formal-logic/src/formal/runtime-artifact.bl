@@ -10,7 +10,11 @@
 (def critical-modules
  [:Elixir.BeamLisp.Compiler :Elixir.BeamLisp.Ns.Lower :Elixir.BeamLisp.Ns.Body.Lower
   :Elixir.BeamLisp.Ns.Anf :Elixir.BeamLisp.Ns.Body.Anf :Elixir.BeamLisp.Num
-  :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Env :Elixir.BeamLisp.Refs])
+  :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Body.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Ns.Body.Core
+  :Elixir.BeamLisp.Env :Elixir.BeamLisp.Refs])
+(def compilation-modules
+ #{"Elixir.BeamLisp.Compiler" "Elixir.BeamLisp.Ns.Lower" "Elixir.BeamLisp.Ns.Body.Lower"
+   "Elixir.BeamLisp.Ns.Anf" "Elixir.BeamLisp.Ns.Body.Anf"})
 (defn sdk-identity []
  (let [sdk (System/get_env "BL_SDK_PRODUCT")]
   (require! (and (string? sdk) (String/starts_with? sdk "/nix/store/")) "an immutable SDK product is required")
@@ -29,6 +33,31 @@
                           {:module (str module) :loaded-md5 loaded :image-md5 image :matches-selected-image (= loaded image)}))
                        critical-modules)
    :otp (erlang/list_to_binary (erlang/system_info :otp_release)) :elixir (System/version)}))
+(defn check-sdk [recorded]
+ (let [current (sdk-identity) md5? #(and (string? %) (Regex/match? (Regex/compile! "^[0-9a-f]{32}$") %))
+       floor (:runtime-floor recorded)]
+  (require! (and (map? recorded) (= (set (keys recorded)) (set (keys current)))
+                 (= (select-keys recorded [:sdk :descriptor-sha256 :otp :elixir])
+                    (select-keys current [:sdk :descriptor-sha256 :otp :elixir]))) "recorded compiler SDK differs from this checker")
+  (require! (or (= {:status :not-adopted} floor)
+                 (and (map? floor) (= #{:status :sha256} (set (keys floor))) (= :adopted (:status floor))
+                      (string? (:sha256 floor)) (Regex/match? (Regex/compile! "^[0-9a-f]{64}$") (:sha256 floor))))
+            "invalid recorded floor identity")
+  (require! (and (vector? (:critical-code recorded))
+                 (= (mapv :module (:critical-code current)) (mapv :module (:critical-code recorded)))) "critical code coverage mismatch")
+  (doseq [at (range (count (:critical-code current)))]
+   (let [old (nth (:critical-code recorded) at) live (nth (:critical-code current) at)]
+    (require! (and (map? old) (= #{:module :loaded-md5 :image-md5 :matches-selected-image} (set (keys old)))
+                   (md5? (:loaded-md5 old)) (= (:image-md5 old) (:image-md5 live))
+                   (= (:matches-selected-image old) (= (:loaded-md5 old) (:image-md5 old)))) "invalid recorded runtime code snapshot")
+    (when (contains? compilation-modules (:module old))
+     (require! (= (:loaded-md5 old) (:loaded-md5 live)) "recorded compilation code differs from this checker"))))
+  ;; Historical observation data can be checked after a runtime projection has
+  ;; changed. This is not a claim that old execution occurred or will repeat.
+  {:compiler-code-match-current true
+   :runtime-code-match-current (= (:critical-code recorded) (:critical-code current))
+   :runtime-floor-match-current (= floor (:runtime-floor current))
+   :runtime-provenance :recorded-observer-snapshot}))
 (defn module-name [run index] (str "Elixir.Formal.Observed.M" run ".H" index))
 (defn compile-handler [handler module-name]
  (require! (and (string? module-name) (<= (count module-name) 80)

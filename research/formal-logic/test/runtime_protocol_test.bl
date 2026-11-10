@@ -100,6 +100,15 @@
                    (assoc-in sample [:frames 0 :module] "other")]]
    (is (= nil (outcome/error-name changed))))))
 
+(deftest empty-adapters-and-stuttering-have-no-fabricated-handler-execution
+ (let [definition (formal/source-protocol {:name "observed-empty" :state {} :handlers []})
+       result (formal/observe-protocol-trace definition {} [{:stutter true}])]
+  (is (= :observed (:status result)) (pr-str result))
+  (is (= [] (get-in result [:receipt :artifacts])))
+  (is (= 2 (count (get-in result [:receipt :frames]))))
+  (is (= :none (get-in result [:receipt :frames 1 :runtime-event])))
+  (is (clean? (:receipt result)))))
+
 (deftest receipt-checking-refuses-artifact-and-source-substitutions-without-loading-code
  (let [observed (formal/observe-protocol-trace bank initial [(event "deposit" 3)]) receipt (:receipt observed)
        before (BeamLisp.Env/module_info :md5)]
@@ -114,6 +123,16 @@
                    (assoc-in receipt [:frames 1 :state-committed] false)]]
    (is (= :rejected (:status (formal/check-runtime-observation bank (rehash changed))))))
   (is (= before (BeamLisp.Env/module_info :md5)))
+  (let [old (get-in receipt [:sdk :critical-code])
+        index (first (keep-indexed (fn [at m] (when (= "Elixir.BeamLisp.Ns.Core" (:module m)) at)) old))
+        changed (rehash (-> receipt
+                          (assoc-in [:sdk :critical-code index :loaded-md5] "00000000000000000000000000000000")
+                          (assoc-in [:sdk :critical-code index :matches-selected-image] false)))
+        historical (formal/check-runtime-observation bank changed)]
+   ;; A data-only historical fixture, not a claimed live module replacement.
+   (is (= :conforming (:status historical)))
+   (is (= false (get-in historical [:sdk-check :runtime-code-match-current])))
+   (is (= :recorded-observer-snapshot (get-in historical [:sdk-check :runtime-provenance]))))
   (is (= :rejected (:status (formal/check-runtime-observation bank (assoc receipt :deadline-ms 1)))))
   (let [frame (get-in receipt [:frames 1])
         bad-value {"balance" 99 "flag" true}
