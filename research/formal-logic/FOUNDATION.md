@@ -264,7 +264,9 @@ itself mechanically verified and does not certify all SMT theories.
   obligation and witness boundaries share the shape and typed-root checks.
   Expanded serialization limits belong to evidence formats; native shared
   term graphs stay usable. Witness checking validates canonical packet identity
-  separately from ordinary Lisp equality. The next common bundle format should
+  separately from ordinary Lisp equality. The integration run passed 9,213
+  assertions across 33 files; all 187 native verdicts remain unchanged.
+  The next common bundle format should
   carry witness leaves and distinguish positive feasibility from conditional
   proof coverage. The qualified v1 format keeps its historical witness gap.
 
