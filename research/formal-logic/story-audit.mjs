@@ -134,6 +134,18 @@ try{
   check(size.name+': opened foundation panel shows actual classical dependencies and alternative proof boundary',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-obligation-plan\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Two actual obligation proofs use Classical.choice')&&t.includes('does not show that no choice-free proof exists')})()"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('One proof plan for a whole promise')).scrollIntoView({block:'start'})");
   await shot(size.name+'-obligation-plan');
+  await navigate('/#show-that-a-state-can-exist');
+  check(size.name+': positive evidence chapter distinguishes existence from conditional promises',await evaluate("document.body.innerText.includes('actual values that satisfy them')&&document.body.innerText.includes('Thirty-two original packets pass')&&document.body.innerText.includes('twenty-two authored assignments and ten native models')"));
+  await click('[data-graph="formal-positive-witness"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="existence"]');
+  check(size.name+': constructive witness panel retains actual foundations',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-positive-witness\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Classical.choice is not admitted')&&t.includes('total integer and Boolean environments')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Show that a state can exist')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-positive-witness');
+  await navigate('/#s-the-model-running');
+  const positive=await evaluate("document.querySelector('#cell-story-positive-witness')?.innerText||''");
+  check(size.name+': executable positive witness keeps original replay and wrong-value rejection',positive.includes(':evidence :positive-sat-witness')&&positive.includes(':data-connection :checked-data-connection')&&positive.includes(':wrong-value :rejected'));
+  check(size.name+': positive replay keeps observers and external proof execution separate',positive.includes(':watchers :no-added-assumptions')&&positive.includes(':existence :checked-by-bl-replay')&&positive.includes(':kernel-execution :not-run')&&positive.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-positive-witness').scrollIntoView({block:'center'})");
+  await shot(size.name+'-positive-data');
   await navigate('/#s-the-model-running');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
@@ -297,6 +309,16 @@ try{
  const policyComparison=await fetch(base+'/evidence/obligations/policy-comparison.json').then(r=>r.json());
  check('Recorded axiom-policy comparison retains actual choice and alternative-proof distinction',policyComparison.standard.status==='accepted'&&policyComparison.choice_free.status==='rejected-by-axiom-policy'&&policyComparison.choice_free.observed_dependency==='Classical.choice'&&policyComparison.statement_requires_classical_choice==='not-established'&&policyComparison.compiler_proof_authority===false);
  check('Trusted common-obligation archive stays unavailable to the browser',(await fetch(base+'/evidence/obligations/examples/archives/loop.etf')).status===404);
+ for(const path of ['/WITNESSES.md','/src/formal/query.bl','/src/formal/witness.bl','/src/formal/witness-examples.bl','/test/query_test.bl','/test/witness_test.bl','/witness-check.bl','/witness-recheck.bl','/metatheory/Witness.lean','/metatheory/witness-pin.json','/evidence/witnesses/model-check.txt','/evidence/witnesses/examples/summary.json','/evidence/witnesses/execution/accepted.json','/evidence/witnesses/execution/rejected.json','/evidence/witnesses/execution/nonlinear/Check.lean','/evidence/witnesses/execution/nonlinear/result.json','/evidence/witnesses/bridge-check.txt','/evidence/witnesses/fresh/witnesses-fresh.json','/evidence/witnesses/checks.txt','/evidence/witnesses/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared constructive witness evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ const witnessAccepted=await fetch(base+'/evidence/witnesses/execution/accepted.json').then(r=>r.json());
+ check('Positive witness reports retain constructive typed existence and the original-query bridge',witnessAccepted.length===32&&witnessAccepted.every(r=>r.status==='checked-term-satisfiability'&&r.full_query_connection==='requires-fresh-BL-question-reconstruction'&&r.backend_attestation==='not-established'&&r.compiler_proof_authority===false&&Object.values(r.axioms).flat().every(a=>['propext','Quot.sound'].includes(a))));
+ const witnessRejected=await fetch(base+'/evidence/witnesses/execution/rejected.json').then(r=>r.json());
+ check('Six changed false or undefined assignments retain Lean rejection',witnessRejected.length===6&&witnessRejected.every(r=>r.status==='rejected-by-lean'));
+ check('Trusted constructive witness archive stays unavailable to the browser',(await fetch(base+'/evidence/witnesses/examples/witnesses.etf')).status===404);
+ check('Compiled constructive witness model stays unavailable to the browser',(await fetch(base+'/evidence/witnesses/Witness.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
