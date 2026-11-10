@@ -59,7 +59,7 @@ def canonical_identity(packet):
     return hashlib.sha256(wire).hexdigest()
 
 
-def validate_roots(roots):
+def validate_roots(roots, expected_sorts=None):
     """Validate the shared partial Int/Bool grammar, without proof case limits."""
     variables, visits = {}, 0
 
@@ -104,8 +104,10 @@ def validate_roots(roots):
         return sort
 
     require(type(roots) is list and len(roots) <= 4097, "original root list")
-    for root in roots:
-        require(term(root) == "bool", "original question roots must be Boolean")
+    sorts = ["bool"] * len(roots) if expected_sorts is None else expected_sorts
+    require(len(sorts) == len(roots), "original term root sort layout")
+    for root, expected in zip(roots, sorts):
+        require(term(root) == expected, "original term root sort mismatch")
     return variables
 
 

@@ -1,0 +1,71 @@
+(ns formal.core-term-examples
+ (:require [formal.core :as c] [formal.term :as t] [formal.api :as formal]
+           [formal.obligation-examples :as obligations]))
+
+(def integers {"x" t/Int "y" t/Int})
+(def x (c/variable "x" t/Int))
+(def y (c/variable "y" t/Int))
+(def p (c/variable "p" t/Bool))
+(def yes (c/literal true))
+(def no (c/literal false))
+(def zero (c/literal 0))
+(defn binary [op a b] (c/operation op [a b]))
+(defn fixture [id body declarations] {:id id :body body :declarations declarations})
+(defn fail [name sort] (c/raise-error name sort))
+(def r-sort (c/record-sort {"balance" t/Int "flag" t/Bool}))
+(def r (c/variable "r" r-sort))
+(def unicode-sort (c/record-sort {"" t/Int "\u0000" t/Bool "λ" (c/record-sort {"/" t/Int})}))
+(def unicode-record (c/variable "λ" unicode-sort))
+(def sourced-record
+ (formal/program-contract {:name "core-terms-source-record" :parameters {"x" t/Int}
+  :source "(assoc {\"a\" x \"b\" false} \"a\" (+ x 1) \"a\" (+ x 2))"
+  :ensures (fn [inputs result] (t/gt (get result "a") (get inputs "x")))}))
+(def authored-error
+ (formal/program-contract {:name "core-terms-allowed-error" :parameters integers
+  :core (binary :quot x y) :returns :may :effects #{:raise} :raises #{:zero-divisor}}))
+(def rows
+ (vec (concat
+  [(fixture "arithmetic" (binary :sub (binary :mul (binary :add x y) y) (c/operation :neg [x])) integers)
+   (fixture "comparison" (c/operation :and [(binary :lt x y) (binary :le x y) (binary :gt y x) (binary :ge y x)]) integers)
+   (fixture "strict-bool" (c/operation :and [no (fail :phase/right t/Bool) p]) {"p" t/Bool})
+   (fixture "strict-or" (c/operation :or [yes (fail :phase/right t/Bool)]) {})
+   (fixture "boolean-conditional" (c/choose p (c/operation :not [p]) (binary :eq p yes)) {"p" t/Bool})
+   (fixture "integer-conditional" (c/choose (binary :lt x zero) (c/operation :neg [x]) x) {"x" t/Int})
+   (fixture "named-conditional-error" (c/choose p (fail :phase/left t/Int) (fail :phase/right t/Int)) {"p" t/Bool})
+   (fixture "condition-raises" (c/choose (fail :phase/condition t/Bool) (fail :phase/arm t/Int) x) {"x" t/Int})
+   (fixture "named-first-error" (binary :add (fail :phase/left t/Int) (fail :phase/right t/Int)) {})
+   (fixture "local-shadow" (c/let-in "x" (binary :lt x zero) (c/choose (c/variable "x" t/Bool) y zero)) integers)
+   (fixture "bind-then-return" (c/let-in "shadow" (binary :add x y) (binary :mul (c/variable "shadow" t/Int) y)) integers)
+   (fixture "binding-raises" (c/let-in "x" (fail :phase/bind t/Int) (fail :phase/body t/Bool)) {})
+   (fixture "sequence" (c/block [x (fail :phase/first t/Bool) (fail :phase/second t/Int)]) {"x" t/Int})
+   (fixture "first-error-before-zero-divisor" (binary :quot (fail :phase/left t/Int) y) {"y" t/Int})
+   (fixture "selected-division" (c/choose p (binary :quot x y) (fail :phase/else t/Int)) (assoc integers "p" t/Bool))
+   (fixture "quotient" (binary :quot x y) integers)
+   (fixture "remainder" (binary :rem x y) integers)
+   (fixture "modulus" (binary :mod x y) integers)
+   (fixture "large-int" (binary :add x (c/literal (erlang/bsl 1 200))) {"x" t/Int})
+   (fixture "record-construction" (c/record [["z" x] ["a" p]]) {"x" t/Int "p" t/Bool})
+   (fixture "empty-record" (c/record []) {})
+   (fixture "record-order" (c/record [["z" (fail :phase/first t/Int)] ["a" (fail :phase/second t/Bool)]]) {})
+   (fixture "eager-default" (c/field r "balance" (fail :phase/default t/Bool)) {"r" r-sort})
+   (fixture "projection-hidden-failure" (c/field (c/record [["balance" x] ["unused" (fail :phase/hidden t/Bool)]]) "balance") {"x" t/Int})
+   (fixture "repeated-update" (c/record-assoc r [["balance" x] ["balance" y] ["flag" p]]) {"r" r-sort "x" t/Int "y" t/Int "p" t/Bool})
+   (fixture "overwritten-failure" (c/record-assoc r [["balance" (fail :phase/overwritten t/Int)] ["balance" x]]) {"r" r-sort "x" t/Int})
+   (fixture "record-equality" (binary :eq r (c/record [["flag" p] ["balance" x]])) {"r" r-sort "x" t/Int "p" t/Bool})
+   (fixture "record-branch" (c/choose p r (c/record [["flag" no] ["balance" x]])) {"r" r-sort "x" t/Int "p" t/Bool})
+   (fixture "named-paths" (c/field (c/field unicode-record "λ") "/") {"λ" unicode-sort})
+   (assoc (fixture "custom-errors" (c/choose p x (fail :phase/sparse t/Int)) {"p" t/Bool "x" t/Int})
+    :options {:prefix "selected" :input-encoding :record-paths-v2 :errors {:zero-divisor 1 :phase/sparse 19}})]
+  [{:id "authored-contract" :contract obligations/authored}
+   {:id "source-contract" :contract obligations/sourced}
+   {:id "source-record-contract" :contract sourced-record}
+   {:id "allowed-error-contract" :contract authored-error}]))))
+
+(defn export [row]
+ (if-let [contract (:contract row)]
+  (formal/core-term-data contract)
+  (formal/core-term-data (:body row) (:declarations row) (get row :options {}))))
+(defn recheck [row packet]
+ (if-let [contract (:contract row)]
+  (formal/check-core-term-data contract packet)
+  (formal/check-core-term-data (:body row) (:declarations row) (get row :options {}) packet)))

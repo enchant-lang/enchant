@@ -1,0 +1,57 @@
+(ns formal.core-terms
+ (:require [formal.core :as core] [formal.core-symbolic :as symbolic] [formal.contract :as contract]
+           [formal.term-model :as terms] [formal.identity :as identity]))
+
+(def profile :bl/core-term-data-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.core-terms: " reason) {}))))
+(defn- payload [sort value]
+ ;; Record field names are data, including empty and NUL-bearing strings.
+ (if (core/record-sort? sort)
+  (mapv (fn [[field child]] [field (payload child (get value field))]) (second sort))
+  value))
+(defn- packet [body declarations options lowered subject]
+ (let [sort (get-in lowered [:typing :sort]) outcome (:outcome lowered)
+       roots (concat (symbolic/payload-terms (:value outcome)) [(:ok outcome) (:error outcome)])]
+  (require! (terms/supported? (vec roots)) "symbolic outcomes need partial Int/Bool leaves")
+  (identity/seal
+   {:formal/core-term-data 1 :profile profile :semantics terms/semantics
+    :core-profile (:profile lowered) :core (:core lowered) :body body :subject subject
+    :prefix (get options :prefix "core")
+    :input-encoding (get options :input-encoding (if (= core/record-profile (:profile lowered)) :record-paths-v2 :legacy))
+    :inputs (mapv (fn [[name sort]] [name sort (payload sort (get (:inputs lowered) name))]) (sort-by first declarations))
+    :errors (mapv vec (sort-by (comp str first) (:errors lowered)))
+    :outcome {:ok (:ok outcome) :value (payload sort (:value outcome)) :error (:error outcome)}})))
+(defn- ready [packet]
+ {:status :ready :packet packet :kernel-execution :not-run :compiler-proof-authority false})
+(defn- refused [error]
+ {:status :unsupported :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})
+(defn prepare
+ "Export the original Core tree and exact symbolic outcome. The external
+  checker proves agreement of their typed interpretations for this tree."
+ ([body declarations] (prepare body declarations {}))
+ ([body declarations options]
+  (try
+   (require! (and (map? options) (every? #{:prefix :input-encoding :errors} (keys options))
+                  (string? (get options :prefix "core"))) "supported lowering options required")
+   (let [lowered (symbolic/lower body declarations options)]
+    (require! (= :translated (:status lowered)) (:reason lowered))
+    (ready (packet body declarations options lowered {:kind :core :identity (:core lowered) :question nil})))
+   (catch error (refused error)))))
+(defn for-contract
+ "Export the exact outcome and input layout used by the freshly prepared contract."
+ [definition]
+ (try
+  (let [prepared (contract/prepare definition)]
+   (require! (= :ready (:status prepared)) (:reason prepared))
+   (let [lowered (assoc prepared :profile (:profile definition))]
+    (ready (packet (:body definition) (:parameters definition) {:prefix (:prefix definition)} lowered
+             {:kind :contract :identity (:identity definition) :question (identity/hash (:problem prepared))}))))
+  (catch error (refused error))))
+(defn check-data [prepared saved]
+ (try
+  (require! (= :ready (:status prepared)) (:reason prepared))
+  (require! (and (identity/valid? saved) (= saved (:packet prepared))) "packet differs from fresh Core and term reconstruction")
+  {:status :checked-data-connection :packet (:identity saved) :core (:core saved) :subject (:subject saved)
+   :kernel-execution :not-run :compiler-proof-authority false}
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))

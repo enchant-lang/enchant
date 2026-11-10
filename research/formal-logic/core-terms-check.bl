@@ -1,0 +1,22 @@
+(ns formal.core-terms-check
+ (:require [formal.core-term-examples :as examples] [formal.runtime-artifact :as artifact] [interop]))
+(def out (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! out)
+(def rows
+ (mapv (fn [row]
+         (let [made (examples/export row) packet (:packet made)]
+          (assert (= :ready (:status made)) (pr-str {:id (:id row) :result made}))
+          (assert (= :checked-data-connection (:status (examples/recheck row packet))))
+          (File/write! (Path/join out (str (:id row) ".json")) (interop/->json packet))
+          (assoc row :packet packet))) examples/rows))
+(def snapshot {:schema :enchant.formal.core-term-examples-v1 :rows rows
+               :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))})
+(def bytes (erlang/term_to_binary snapshot (list :deterministic (tuple :minor_version 2))))
+(assert (<= (erlang/byte_size bytes) 8388608))
+(File/write! (Path/join out "core-terms.etf") bytes)
+(File/write! (Path/join out "summary.json") (interop/->json
+ {:schema (:schema snapshot) :source-commit (:source-commit snapshot)
+  :archive {:bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}
+  :rows (mapv (fn [row] (merge {:id (:id row) :packet (get-in row [:packet :identity])}
+                                (select-keys (:packet row) [:subject :core-profile]))) rows)}))
+(println {:examples (count rows) :contracts (count (filter :contract rows)) :kernel-execution :not-run})

@@ -1,0 +1,28 @@
+(ns formal.core-terms-test
+ (:require [formal.api :as formal] [formal.core-term-examples :as examples] [formal.contract :as contract]
+           [formal.identity :as identity] [formal.term :as t]))
+
+(deftest preserve-actual-core-and-contract-term-subjects
+ (doseq [row examples/rows]
+  (let [exported (examples/export row) packet (:packet exported)]
+   (is (= :ready (:status exported)) (pr-str {:id (:id row) :reason (:reason exported)}))
+   (is (identity/valid? packet))
+   (is (= :checked-data-connection (:status (examples/recheck row packet))))
+   (is (= :not-run (:kernel-execution exported)))
+   (when-let [definition (:contract row)]
+    (let [prepared (contract/prepare definition)]
+     (is (= (:identity definition) (get-in packet [:subject :identity])))
+     (is (= (identity/hash (:problem prepared)) (get-in packet [:subject :question])))
+     (is (= (get-in prepared [:outcome :ok]) (get-in packet [:outcome :ok])))
+     (is (= (get-in prepared [:outcome :error]) (get-in packet [:outcome :error])))))))
+
+(deftest rehashed-values-errors-layouts-and-source-attribution-must-match-the-original
+ (let [row (first (filter #(= "source-record-contract" (:id %)) examples/rows))
+       packet (:packet (examples/export row))]
+  (doseq [changed [(assoc-in packet [:outcome :ok] (t/bool false))
+                   (assoc-in packet [:outcome :error] (t/int 999))
+                   (update-in packet [:outcome :value] #(vec (reverse %)))
+                   (assoc-in packet [:subject :question] (apply str (repeat 64 "0")))
+                   (assoc-in packet [:errors 0 1] 100)
+                   (assoc-in packet [:inputs 0 0] "new-source-name")]]
+   (is (= :rejected (:status (examples/recheck row (identity/seal changed))))))))
