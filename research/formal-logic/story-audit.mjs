@@ -193,6 +193,11 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared binding/identity evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
+ for(const path of ['/SELECTED-SOURCE.md','/src/formal/selected.bl','/src/formal/source.bl','/test/selected_test.bl','/test/source_test.bl','/evidence/source-selection/checks.txt','/evidence/source-selection/selected-third-check.txt','/evidence/source-selection/examples/selected-examples.json','/evidence/source-selection/fresh/selected-fresh-replay.json','/evidence/source-selection/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared selected Source evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ check('Trusted selected Source ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/source-selection/examples/selected-examples.etf')).status===404);
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
