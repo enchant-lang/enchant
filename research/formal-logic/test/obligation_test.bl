@@ -1,0 +1,84 @@
+(ns formal.obligation-test
+ (:require [formal.api :as formal] [formal.obligation-examples :as examples]
+           [formal.identity :as identity] [formal.result :as result] [formal.term :as t]))
+
+(def bundles
+ (mapv (fn [item] (assoc item :data (formal/certify-obligations (:subject item)))) examples/examples))
+
+(deftest every-subject-kind-has-explicit-closed-required-and-auxiliary-coverage
+ (is (= #{:query :contract :loop :translation :protocol :source-protocol :protocol-trace}
+        (set (map #(result/kind (:subject %)) bundles))))
+ (doseq [{:keys [id subject data expected]} bundles]
+  (let [planned (formal/obligation-plan subject) plan (:plan planned) rows (:rows plan)
+        checked (formal/check-obligation-proof-data subject (:bundle data))]
+   (is (= :ready (:status planned)) (pr-str planned))
+   (is (= expected (:status data)) (pr-str {:id id :data data}))
+   (is (identity/valid? plan))
+   (is (= (identity/hash subject) (get-in plan [:subject :data])))
+   (is (= (result/subject-id subject) (get-in plan [:subject :identity])))
+   (is (pos? (count (filter :required rows))))
+   (is (= (count rows) (count (set (map :label rows)))))
+   (is (= :checked-data-connection (:status checked)) (pr-str checked))
+   (is (= (:coverage data) (:coverage checked)))
+   (is (= :not-run (:kernel-execution checked)))
+   (is (= false (:compiler-proof-authority checked)))
+   (is (= :not-established (:feasibility checked)))
+   (is (= :reviewed-not-mechanically-proved (:composition checked)))
+   (is (= :reviewed-not-mechanically-proved (:model-connection checked)))
+   (doseq [linked (get-in plan [:connection :model-interpretation :questions])]
+    (is (= (:identity linked) (identity/hash (:question (first (filter #(= (:label linked) (:label %)) rows))))))))))
+
+(deftest incomplete-coverage-and-sat-witnesses-cannot-become-vacuous-success
+ (doseq [id ["unknown" "sat"]]
+  (let [data (:data (first (filter #(= id (:id %)) bundles))) covered (:coverage data)]
+   (is (= :incomplete (:status data)))
+   (is (= false (:complete covered)))
+   (is (pos? (count (:pending covered))))))
+ (let [data (:data (last bundles)) rows (get-in data [:bundle :rows])]
+  (is (= 1 (count rows))))
+  (is (= :requires-witness (:status (first rows))))
+  (is (= :witness (:via (first rows))))
+  (is (nil? (:packet (first rows))))))
+
+(deftest unreachable-branch-and-inconsistent-initial-context-are-distinct
+ (let [unreachable (:data (first (filter #(= "unreachable" (:id %)) bundles)))
+       vacuous (:data (first (filter #(= "vacuous" (:id %)) bundles)))]
+  (is (= :ready (:status unreachable)))
+  (is (pos? (get-in unreachable [:coverage :unreachable])))
+  (is (= :ready (:status vacuous)))
+  (is (= :ready (:status (first (get-in vacuous [:bundle :rows])))))
+  (is (= :not-established (get-in vacuous [:bundle :manifest :feasibility])))))
+
+(deftest caller-supplied-certificates-use-the-same-data-path-without-search
+ (doseq [{:keys [subject data]} (take 3 bundles)]
+  (let [rows (get-in data [:bundle :rows])
+        supplied (into {} (keep (fn [row] (when (= :ready (:status row)) [(:label row) (select-keys row [:via :certificate])])) rows))
+        packaged (formal/obligation-proof-data subject supplied)]
+   (is (= :ready (:status packaged)))
+   (is (= :checked-data-connection (:status (formal/check-obligation-proof-data subject (:bundle packaged)))))
+   (is (= (get-in data [:bundle :manifest :rows]) (get-in packaged [:bundle :manifest :rows])))))
+ (let [subject (:subject (first bundles))]
+  (is (= :rejected (:status (formal/obligation-proof-data subject {"invented" {:via :entailment :certificate {}}})))))
+  (is (= :incomplete (:status (formal/obligation-proof-data subject {}))))))
+
+(deftest rehashing-cannot-change-the-required-plan-manifest-or-proof-target
+ (let [{:keys [subject data]} (first (filter #(= "contract" (:id %)) bundles))
+       bundle (:bundle data) row-index 2]
+  (doseq [changed [(update bundle :rows pop)
+                  (update bundle :rows #(vec (reverse %)))
+                  (assoc-in bundle [:plan :rows row-index :required] false)
+                  (assoc-in bundle [:rows row-index :packet :claim] (t/bool false))
+                  (assoc-in bundle [:rows row-index :via] :unreachable)
+                  (assoc-in bundle [:manifest :rows row-index :required] false)
+                  (assoc bundle :extra true)]]
+   (is (= :rejected (:status (formal/check-obligation-proof-data subject (identity/seal changed))))))
+  (is (= :rejected (:status (formal/check-obligation-proof-data examples/unknown bundle))))))
+
+(deftest model-interpretation-source-status-and-live-actor-scope-do-not-upgrade
+ (doseq [{:keys [subject data]} (filter #(= :ready (get-in % [:data :status])) bundles)]
+  (let [plan (get-in data [:bundle :plan]) kind (result/kind subject)]
+   (is (= :reviewed-not-mechanically-proved (get-in plan [:composition :status])))
+   (is (= :not-established (get-in plan [:composition :source-runtime-refinement])))
+   (is (= false (:compiler-proof-authority plan)))
+   (when (not= :query kind)
+    (is (= :reviewed-not-mechanically-proved (get-in plan [:connection :model-interpretation :status])))))))

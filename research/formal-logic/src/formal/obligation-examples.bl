@@ -1,0 +1,48 @@
+(ns formal.obligation-examples
+ (:require [formal.api :as formal] [formal.core :as core] [formal.term :as t] [formal.query :as q]))
+
+(def x (t/variable "obligation.x" t/Int))
+(def authored (formal/program-contract {:name "obligation-authored" :parameters {"x" t/Int}
+ :core (core/operation :add [(core/variable "x" t/Int) (core/literal 1)])
+ :ensures (fn [in out] (t/gt out (get in "x")))}))
+(def sourced (formal/program-contract {:name "obligation-source" :parameters {"x" t/Int} :source "(+ x 1)"
+ :ensures (fn [in out] (t/gt out (get in "x")))}))
+(def translation (formal/translation {:name "obligation-change" :parameters {"x" t/Int}
+ :before (core/operation :add [(core/variable "x" t/Int) (core/literal 1)])
+ :after (core/operation :sub [(core/variable "x" t/Int) (core/literal -1)])}))
+(def countdown (formal/loop-contract {:name "obligation-countdown" :parameters {"n" t/Int}
+ :source "(loop [i n acc 0] (if (> i 0) (recur (- i 1) (+ acc 1)) acc))"
+ :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+ :invariant (fn [in state] (t/all [(t/ge (get state "i") (t/int 0))
+                                (t/eq (t/add (get state "i") (get state "acc")) (get in "n"))]))
+ :rank (fn [in state] [(get state "i")])
+ :ensures (fn [in state out] (t/eq out (get in "n")))}))
+(def state-spec {:name "obligation-counter" :state {"n" t/Int}
+ :init (fn [state] (t/eq (get state "n") (t/int 0)))
+ :invariant (fn [state] (t/ge (get state "n") (t/int 0)))
+ :transitions [{:name "increment" :next (fn [state event] {"n" (t/add (get state "n") (t/int 1))})}]})
+(def state-model (formal/protocol state-spec))
+(def source-model (formal/source-protocol (assoc (dissoc state-spec :transitions) :name "obligation-source-counter"
+ :handlers [{:name "increment" :source "(fn [s msg] (assoc s \"n\" (inc (get s \"n\"))))"}])))
+(def unreachable-model (formal/protocol (assoc state-spec :name "obligation-unreachable"
+ :transitions (conj (:transitions state-spec)
+                {:name "dead-division" :guard (t/bool false)
+                 :next (fn [state event] {"n" (t/div (get state "n") (get state "n"))})}))))
+(def vacuous (formal/program-contract {:name "obligation-vacuous" :parameters {} :core (core/literal 5)
+ :requires (t/bool false) :ensures (t/bool false)}))
+(def unknown (formal/program-contract {:name "obligation-unknown" :parameters {"x" t/Int}
+ :core (core/variable "x" t/Int) :ensures (fn [in out] (t/gt out (t/int 0)))}))
+(def examples
+ [{:id "query" :subject (q/prove (t/gt (t/add x (t/int 1)) x)) :expected :ready}
+  {:id "contract" :subject authored :expected :ready}
+  {:id "source-contract" :subject sourced :expected :ready}
+  {:id "translation" :subject translation :expected :ready}
+  {:id "loop" :subject countdown :expected :ready}
+  {:id "protocol" :subject state-model :expected :ready}
+  {:id "source-protocol" :subject source-model :expected :ready}
+  {:id "trace" :subject (formal/protocol-trace state-model 1) :expected :ready}
+  {:id "source-trace" :subject (formal/protocol-trace source-model 1) :expected :ready}
+  {:id "unreachable" :subject unreachable-model :expected :ready}
+  {:id "vacuous" :subject vacuous :expected :ready}
+  {:id "unknown" :subject unknown :expected :incomplete}
+  {:id "sat" :subject (q/sat {:assumptions [(t/ge x (t/int 0))] :observe {"x" x}}) :expected :incomplete}])
