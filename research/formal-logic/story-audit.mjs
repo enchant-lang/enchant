@@ -122,6 +122,19 @@ try{
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Carry the proof back to the question')).scrollIntoView({block:'start'})");
   await shot(size.name+'-term-connection');
   await navigate('/#s-the-model-running');
+  const obligations=await evaluate("document.querySelector('#cell-story-obligations')?.innerText||''");
+  check(size.name+': common loop proof data retains all eight required premises',obligations.includes(':required 8')&&obligations.includes(':ready 8')&&obligations.includes(':data-connection :checked-data-connection')&&obligations.includes(':missing-premise :rejected'));
+  check(size.name+': proof foundations can change without changing the model plan',obligations.includes(':default-policy :lean-standard-v1')&&obligations.includes(':stricter-policy :choice-free-v1')&&obligations.includes(':same-model-plan true'));
+  check(size.name+': common proof data keeps external execution and model composition separate',obligations.includes(':kernel-execution :not-run')&&obligations.includes(':feasibility :not-established')&&obligations.includes(':composition :reviewed-not-mechanically-proved')&&obligations.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-obligations').scrollIntoView({block:'center'})");
+  await shot(size.name+'-obligation-data');
+  await navigate('/#one-proof-plan-for-a-whole-promise');
+  check(size.name+': shared plan chapter distinguishes proof coverage from a SAT witness',await evaluate("document.body.innerText.includes('eight separate reasons')&&document.body.innerText.includes('A conditional model promise can have complete required proofs while its initial-state witness remains unavailable')"));
+  await click('[data-graph="formal-obligation-plan"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="foundations"]');
+  check(size.name+': opened foundation panel shows actual classical dependencies and alternative proof boundary',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-obligation-plan\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Two actual obligation proofs use Classical.choice')&&t.includes('does not show that no choice-free proof exists')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('One proof plan for a whole promise')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-obligation-plan');
+  await navigate('/#s-the-model-running');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -275,6 +288,15 @@ try{
  check('Recorded original-term proof keeps checked question and reviewed semantic data separate',originalReceipt.status==='checked-term-entailment'&&originalReceipt.normalization_connection==='checked-countermodel-preservation-for-this-question'&&originalReceipt.general_bl_normalizer_soundness==='not-established'&&originalReceipt.term_data_model_correspondence==='reviewed-data-semantics-bridge'&&originalReceipt.compiler_proof_authority===false);
  check('Trusted original-term archive stays unavailable to the browser',(await fetch(base+'/evidence/term-refutation/examples/terms.etf')).status===404);
  check('Compiled typed term model stays unavailable to the browser',(await fetch(base+'/evidence/term-refutation/Terms.olean')).status===404);
+ for(const path of ['/OBLIGATIONS.md','/src/formal/obligation.bl','/src/formal/obligation-examples.bl','/test/obligation_test.bl','/obligations-check.bl','/obligations-recheck.bl','/evidence/obligations/examples/summary.json','/evidence/obligations/execution/results.json','/evidence/obligations/policy-comparison.json','/evidence/obligations/bridge-check.txt','/evidence/obligations/prior-term-regression-check.txt','/evidence/obligations/fresh/obligations-fresh.json','/evidence/obligations/checks.txt','/evidence/obligations/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared common-obligation evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ const obligationResults=await fetch(base+'/evidence/obligations/execution/results.json').then(r=>r.json());
+ check('Common obligation receipts preserve complete versus incomplete declared coverage',obligationResults.length===13&&obligationResults.filter(r=>r.status==='checked-required-term-evidence').length===11&&obligationResults.filter(r=>r.status==='incomplete-obligation-evidence').length===2&&obligationResults.every(r=>r.model_theorem==='not-established-by-this-runner'&&r.compiler_proof_authority===false));
+ const policyComparison=await fetch(base+'/evidence/obligations/policy-comparison.json').then(r=>r.json());
+ check('Recorded axiom-policy comparison retains actual choice and alternative-proof distinction',policyComparison.standard.status==='accepted'&&policyComparison.choice_free.status==='rejected-by-axiom-policy'&&policyComparison.choice_free.observed_dependency==='Classical.choice'&&policyComparison.statement_requires_classical_choice==='not-established'&&policyComparison.compiler_proof_authority===false);
+ check('Trusted common-obligation archive stays unavailable to the browser',(await fetch(base+'/evidence/obligations/examples/archives/loop.etf')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
