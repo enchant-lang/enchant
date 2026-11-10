@@ -115,8 +115,10 @@ try{
   await evaluate("document.querySelector('#cell-story-term-connection').scrollIntoView({block:'center'})");
   await shot(size.name+'-original-terms');
   await navigate('/#carry-the-proof-back-to-the-question');
-  check(size.name+': original proof chapter explains universal per-question countermodel preservation',await evaluate("document.body.innerText.includes('any counterexample to the original question would also satisfy the normalized problem')&&document.body.innerText.includes('Seventeen real exports')&&document.body.innerText.includes('no blanket BL normalizer theorem')"));
+  check(size.name+': original proof chapter explains universal per-question countermodel preservation',await evaluate("document.body.innerText.includes('any counterexample to the original question would also satisfy the normalized problem')&&document.body.innerText.includes('Seventeen real exports')&&document.body.innerText.includes('every integer and Boolean input of that particular typed question')"));
   check(size.name+': original proof chapter keeps undefined results and the implementation bridge explicit',await evaluate("document.body.innerText.includes('returning no value cannot pass')&&document.body.innerText.includes('The reviewed interpretation of BL term data as this typed model')"));
+  await click('[data-graph="formal-term-connection"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="connection"]');
+  check(size.name+': opened connection panel keeps general normalizer correctness separate',await evaluate("document.querySelector('[data-graph=\"formal-term-connection\"] .sg-stage>[data-view]:not([hidden])').innerText.includes('no blanket BL normalizer theorem')"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Carry the proof back to the question')).scrollIntoView({block:'start'})");
   await shot(size.name+'-term-connection');
   await navigate('/#s-the-model-running');
