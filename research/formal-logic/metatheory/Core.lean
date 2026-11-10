@@ -227,6 +227,41 @@ theorem integer_pair_rank_wellFounded {State : Type} (rank : State → Int × In
     rw [heq]
     exact Prod.Lex.right _ ((Int.toNat_lt_toNat (Int.lt_of_le_of_lt (nonnegative next).2 h)).2 h)
 
+inductive LoopStep (State Result : Type) where
+  | finished : Result → LoopStep State Result
+  | again : State → LoopStep State Result
+
+/- Given a total finite controller and a well-founded back-edge relation,
+   this definition builds an unbounded loop evaluator in the checked logic. -/
+def runLoop (body : State → LoopStep State Result)
+    (wf : WellFounded (fun next current => body current = .again next)) : State → Result :=
+  wf.fix fun state recurse =>
+    match h : body state with
+    | .finished result => result
+    | .again next => recurse next h
+
+theorem runLoop_equation (body : State → LoopStep State Result)
+    (wf : WellFounded (fun next current => body current = .again next)) (state : State) :
+    runLoop body wf state = match body state with
+      | .finished result => result
+      | .again next => runLoop body wf next := by
+  unfold runLoop
+  rw [WellFounded.fix_eq]
+  split <;> rfl
+
+theorem runLoop_postcondition (body : State → LoopStep State Result)
+    (wf : WellFounded (fun next current => body current = .again next))
+    (post : Result → Prop)
+    (finishes : ∀ state result, body state = .finished result → post result) :
+    ∀ state, post (runLoop body wf state) := by
+  intro state
+  induction state using wf.induction with
+  | h state ih =>
+    rw [runLoop_equation]
+    cases hbody : body state with
+    | finished result => exact finishes state result hbody
+    | again next => exact ih next hbody
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
@@ -247,5 +282,7 @@ theorem integer_pair_rank_wellFounded {State : Type} (rank : State → Int × In
 #print axioms lexicographic_pair_rank_wellFounded
 #print axioms integer_rank_wellFounded
 #print axioms integer_pair_rank_wellFounded
+#print axioms runLoop_equation
+#print axioms runLoop_postcondition
 
 end BeamLispCore
