@@ -195,7 +195,7 @@ try{
   }
   await navigate('/#s-the-model-running');
   const composed=await evaluate("document.querySelector('#cell-story-core-contract-composition')?.innerText||''");
-  check(size.name+': contract cell records its input and exact policy replay',composed.includes(':admitted-x 4')&&composed.includes(':declared-inputs 4')&&composed.includes(':witness-inputs 2')&&composed.includes(':must-return true')&&composed.includes(':changed-policy :rejected')&&composed.includes(':kernel-execution :not-run'));
+  check(size.name+': contract cell records its input and exact policy replay',composed.includes(':admitted-x 4')&&composed.includes(':core-value 5')&&composed.includes(':declared-inputs 4')&&composed.includes(':witness-inputs 2')&&composed.includes(':must-return true')&&composed.includes(':changed-policy :rejected')&&composed.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-contract-composition').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-contract-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
