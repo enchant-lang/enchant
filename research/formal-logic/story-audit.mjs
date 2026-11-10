@@ -154,7 +154,7 @@ try{
   await navigate('/#give-the-proof-a-real-starting-point');
   check(size.name+': mixed evidence chapter names an actual countdown input',await evaluate("document.body.innerText.includes('The binding n = 3 supplies one such input')&&document.body.innerText.includes('A witness and an open proof obligation')"));
   await click('[data-graph="formal-witnessed-obligations"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="apply"]');
-  check(size.name+': mixed proof panel shows the applied theorem scope',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-witnessed-obligations\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('applies the imported universal entailment')&&text.includes('contained typed term question')})()"));
+  check(size.name+': mixed proof panel shows the applied theorem scope',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-witnessed-obligations\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('applies the imported universal entailment')&&text.includes('this original typed term question')})()"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Give the proof a real starting point')).scrollIntoView({block:'start'})");
   await shot(size.name+'-witnessed-obligations');
   if(size.name==='phone'){
