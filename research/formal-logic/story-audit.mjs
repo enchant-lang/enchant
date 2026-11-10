@@ -150,6 +150,10 @@ try{
  for(const path of ['/sdk-pin.json','/metatheory/tool-pin.json','/evidence/metatheory/Core.olean']){
   check('Undeclared or binary project file stays unavailable: '+path,(await fetch(base+path)).status===404);
  }
+ for(const path of ['/RECORD-HANDLERS.md','/src/formal/source-protocol.bl','/test/source_trace_test.bl','/evidence/source-traces/checks.txt','/evidence/source-traces/examples.json','/evidence/source-traces/qualification.json','/evidence/source-traces/model-qualification.json','/evidence/record-handlers/examples.json','/evidence/record-handlers/implementation-qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared source handler/trace evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
