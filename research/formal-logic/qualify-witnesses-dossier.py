@@ -37,7 +37,7 @@ require(audit["passed"] and all(row["passed"] for row in audit["checks"]), "succ
 graphs = sorted({row["name"].split("/")[1].split(":")[0] for row in audit["checks"] if row["name"].endswith(": connected topic opens")})
 require(len(graphs) == 25 and "formal-positive-witness" in graphs, "all connected graphs, including new constructive witness graph")
 images = {name: sha(E / "browser-audit" / name) for name in audit["screenshots"]}
-manual = ["phone-positive-witness.png", "desktop-positive-witness.png", "phone-positive-data.png", "desktop-positive-data.png"]
+manual = ["phone-positive-witness.png", "phone-positive-panel.png", "desktop-positive-witness.png", "phone-positive-data.png", "desktop-positive-data.png"]
 require(all(name in images for name in manual), "recorded manually inspected frames")
 blocks = Counter(re.findall(r"^#\+begin_([\w-]+)", text, re.M | re.I))
 result = {

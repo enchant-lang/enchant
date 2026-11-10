@@ -135,11 +135,15 @@ try{
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('One proof plan for a whole promise')).scrollIntoView({block:'start'})");
   await shot(size.name+'-obligation-plan');
   await navigate('/#show-that-a-state-can-exist');
-  check(size.name+': positive evidence chapter distinguishes existence from conditional promises',await evaluate("document.body.innerText.includes('actual values that satisfy them')&&document.body.innerText.includes('Thirty-two original packets pass')&&document.body.innerText.includes('twenty-two authored assignments and ten native models')"));
+  check(size.name+': positive evidence chapter distinguishes existence from conditional promises',await evaluate("document.body.innerText.includes('Choosing 6 for x and 7 for y makes it true')&&document.body.innerText.includes('actual values that satisfy them')&&document.body.innerText.includes('Thirty-two original packets pass')&&document.body.innerText.includes('twenty-two authored assignments and ten native models')"));
   await click('[data-graph="formal-positive-witness"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="existence"]');
   check(size.name+': constructive witness panel retains actual foundations',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-positive-witness\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Classical.choice is not admitted')&&t.includes('total integer and Boolean environments')})()"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Show that a state can exist')).scrollIntoView({block:'start'})");
   await shot(size.name+'-positive-witness');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-positive-witness\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-positive-panel');
+  }
   await navigate('/#s-the-model-running');
   const positive=await evaluate("document.querySelector('#cell-story-positive-witness')?.innerText||''");
   check(size.name+': executable positive witness keeps original replay and wrong-value rejection',positive.includes(':evidence :positive-sat-witness')&&positive.includes(':data-connection :checked-data-connection')&&positive.includes(':wrong-value :rejected'));
