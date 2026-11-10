@@ -51,7 +51,7 @@ def typed_payload(sort, value):
     return terms.typed_term(value)
 
 
-def canonical_identity(packet):
+def typed_packet(packet):
     data = dict(packet)
     for field in ['profile', 'semantics', 'core-profile', 'input-encoding', 'identity-profile']:
         data[field] = k.Keyword(data[field])
@@ -61,6 +61,11 @@ def canonical_identity(packet):
     data['errors'] = [[k.Keyword(name), code] for name, code in data['errors']]
     data['outcome'] = {'ok': terms.typed_term(data['outcome']['ok']), 'error': terms.typed_term(data['outcome']['error']),
                        'value': typed_payload(packet['body']['sort'], data['outcome']['value'])}
+    return data
+
+
+def canonical_identity(packet):
+    data = typed_packet(packet)
     del data['identity']
     return data_digest(data)
 
@@ -422,16 +427,7 @@ def verify_source(text, packet, integers, booleans):
         require(decoder.at == len(decoder.tokens), 'trailing Core declaration data')
 
 
-def run(path, output, axiom_policy='lean-standard'):
-    require(axiom_policy in terms.AXIOM_POLICIES, 'supported Core term axiom policy')
-    output.mkdir(parents=True, exist_ok=True)
-    (output / 'Check.olean').unlink(missing_ok=True)
-    (output / 'result.json').unlink(missing_ok=True)
-    require(path.stat().st_size <= k.MAX_BYTES, 'Core term packet byte capacity')
-    packet = k.load_packet(path)
-    integers, booleans = validate(packet)
-    text = source(packet, integers, booleans)
-    verify_source(text, packet, integers, booleans)
+def checked_kernel():
     pin = json.loads((P / 'metatheory/core-terms-pin.json').read_text())
     tool = json.loads((P / 'metatheory/tool-pin.json').read_text())
     lean = Path(tool['path']) / 'bin/lean'
@@ -446,12 +442,34 @@ def run(path, output, axiom_policy='lean-standard'):
     for record_pin in libraries.values():
         for key in ['source', 'compiled']:
             require(k.sha(P / record_pin[key]['path']) == record_pin[key]['sha256'], 'Core term model artifact pin')
+    return lean, libraries
+
+
+def copy_library(library, libraries):
+    library.mkdir()
+    for module, pin in libraries.items():
+        shutil.copyfile(P / pin['compiled']['path'], library / (module + '.olean'))
+
+
+def run(path, output, axiom_policy='lean-standard', *, module='Check'):
+    require(axiom_policy in terms.AXIOM_POLICIES, 'supported Core term axiom policy')
+    require(module in {'Check', 'CoreCheck'}, 'Core term check module')
+    output.mkdir(parents=True, exist_ok=True)
+    (output / 'Check.olean').unlink(missing_ok=True)
+    (output / 'result.json').unlink(missing_ok=True)
+    require(path.stat().st_size <= k.MAX_BYTES, 'Core term packet byte capacity')
+    packet = k.load_packet(path)
+    integers, booleans = validate(packet)
+    text = source(packet, integers, booleans)
+    verify_source(text, packet, integers, booleans)
+    lean, libraries = checked_kernel()
     (output / 'Check.lean').write_text(text)
     with tempfile.TemporaryDirectory(prefix='enchant-core-terms-') as temporary:
-        work = Path(temporary); library = work / 'library'; library.mkdir()
-        for module, record_pin in libraries.items():
-            shutil.copyfile(P / record_pin['compiled']['path'], library / (module + '.olean'))
-        check = work / 'Check.lean'; check.write_text(text)
+        work = Path(temporary)
+        library = work / 'library'
+        copy_library(library, libraries)
+        check = work / (module + '.lean')
+        check.write_text(text)
         with (output / 'lean.txt').open('w') as log:
             completed = subprocess.run([str(lean), '--root=' + str(work), '-o', str(work / 'Check.olean'), str(check)],
                                        cwd=work, env=dict(os.environ, LEAN_PATH=str(library)), stdout=log,

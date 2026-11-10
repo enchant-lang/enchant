@@ -1,0 +1,57 @@
+(ns formal.core-contracts
+ (:require [formal.contract :as contract] [formal.core-terms :as core]
+           [formal.refutation :as refutation] [formal.identity :as identity]
+           [formal.witness :as witness]))
+
+(def profile :bl/core-contract-data-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.core-contracts: " reason) {}))))
+(defn- rejected [error]
+ {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})
+
+(defn feasibility [definition]
+ (let [prepared (contract/prepare definition)]
+  (if (= :ready (:status prepared))
+   {:status :ready :question (contract/feasibility-question definition prepared)}
+   prepared)))
+
+(defn- checked-witness [question supplied]
+ (require! (map? supplied) "witness needs explicit :bindings or a :packet")
+ (case (set (keys supplied))
+  #{:bindings}
+   (let [made (witness/prepare question (:bindings supplied))]
+    (require! (= :ready (:status made)) (:reason made))
+    (:packet made))
+  #{:packet}
+   (let [saved (:packet supplied) checked (witness/check-data question saved)]
+    (require! (= :checked-data-connection (:status checked)) (:reason checked))
+    saved)
+  (throw (ex-info "witness needs exactly one of :bindings or :packet" {}))))
+
+(defn prepare [definition certificate options]
+ (try
+  (require! (and (map? options) (every? #{:witness} (keys options))) "supported composition options required")
+  (let [prepared (contract/prepare definition)]
+   (if (not= :ready (:status prepared)) prepared
+    (let [refutation (refutation/prepare-terms (:problem prepared) certificate)]
+     (if (not= :ready (:status refutation)) refutation
+      (let [question (contract/feasibility-question definition prepared)]
+       {:status :ready :kernel-execution :not-run :compiler-proof-authority false
+        :packet (identity/seal
+          {:formal/core-contract-data 1 :profile profile
+           :core (core/prepared-contract-packet definition prepared)
+           :entailment (:packet refutation) :policy (:policy prepared)
+           :witness-question (identity/hash question)
+           :witness (when (contains? options :witness) (checked-witness question (:witness options)))})})))))
+  (catch error (rejected error))))
+
+(defn check-data [definition certificate packet]
+ (try
+  (require! (and (map? packet) (identity/valid? packet)) "closed canonical packet identity required")
+  (let [fresh (prepare definition certificate
+                 (if-let [witness (:witness packet)] {:witness {:packet witness}} {}))]
+   (require! (= :ready (:status fresh)) (:reason fresh))
+   (require! (= packet (:packet fresh)) "packet differs from the reconstructed contract, proof or witness")
+   {:status :checked-data-connection :packet (:identity packet)
+    :contract (get-in packet [:core :subject :identity]) :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error (rejected error))))

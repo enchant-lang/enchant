@@ -283,8 +283,9 @@ AXIOM_POLICIES = {"choice-free": {"propext", "Quot.sound"},
                   "lean-standard": {"propext", "Classical.choice", "Quot.sound"}}
 
 
-def run(path, output, axiom_policy="choice-free"):
+def run(path, output, axiom_policy="choice-free", *, module="Check"):
     require(axiom_policy in AXIOM_POLICIES, "unknown axiom policy")
+    require(module in {"Check", "EntailmentCheck"}, "term refutation check module")
     require(path.stat().st_size <= k.MAX_BYTES, "term packet byte capacity")
     packet = k.load_packet(path)
     integers, booleans = validate(packet)
@@ -306,7 +307,7 @@ def run(path, output, axiom_policy="choice-free"):
         work = Path(temporary); library = work / "library"; library.mkdir()
         for pin, module in zip(pins, ["Refutation", "Terms"]):
             shutil.copyfile(P / pin["compiled"]["path"], library / (module + ".olean"))
-        check = work / "Check.lean"; check.write_text(text)
+        check = work / (module + ".lean"); check.write_text(text)
         with (output / "lean.txt").open("w") as log:
             completed = subprocess.run([str(lean), "--root=" + str(work), "-o", str(work / "Check.olean"), str(check)], cwd=work,
                                        env=dict(os.environ, LEAN_PATH=str(library)), text=True, stdout=log, stderr=subprocess.STDOUT, timeout=120)

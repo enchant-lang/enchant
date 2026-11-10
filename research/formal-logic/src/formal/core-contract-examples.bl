@@ -1,0 +1,43 @@
+(ns formal.core-contract-examples
+ (:require [formal.api :as formal] [formal.contract :as contract] [formal.core :as c]
+           [formal.core-term-examples :as core] [formal.obligation-examples :as obligations]
+           [formal.term :as t]))
+
+(def slotted
+ (formal/program-contract
+  {:name "core-contract-slots"
+   :parameters {"a-unused" t/Int "b-unused" t/Bool "p" t/Bool "x" t/Int}
+   :core (c/choose core/p (core/binary :add core/x (c/literal 1)) core/x)
+   :requires (fn [in] (t/all [(get in "p") (t/ge (get in "x") (t/int 0))]))
+   :ensures (fn [in out] (t/gt out (get in "x")))}))
+
+(def allowed-errors
+ (formal/program-contract
+  {:name "core-contract-named-branches" :parameters {"p" t/Bool "q" t/Bool}
+   :core (c/choose core/p (c/literal 7)
+          (c/choose (c/variable "q" t/Bool) (core/fail :phase/left t/Int) (core/fail :phase/right t/Int)))
+   :returns :may :effects #{:raise} :raises #{:phase/left :phase/right}
+   :ensures (fn [_ out] (t/eq out (t/int 7)))}))
+
+(def eager-default
+ (formal/program-contract
+  {:name "core-contract-eager-default" :parameters {"r" core/r-sort}
+   :core (c/field core/r "balance" (core/fail :phase/default t/Bool))
+   :returns :may :effects #{:raise} :raises #{:phase/default}}))
+
+(def rows
+ [{:id "authored" :definition obligations/authored :bindings {}}
+  {:id "source" :definition obligations/sourced}
+  {:id "source-record" :definition core/sourced-record :bindings {}}
+  {:id "unused-slots" :definition slotted
+   :bindings {"contract.core-contract-slots.p" true "contract.core-contract-slots.x" 4}}
+  {:id "named-errors" :definition allowed-errors :bindings {}}
+  {:id "eager-default" :definition eager-default :bindings {}}
+  {:id "allowed-division" :definition core/authored-error :bindings {}}
+  {:id "vacuous" :definition obligations/vacuous}])
+
+(defn certify [definition]
+ (formal/certify (:problem (contract/prepare definition))))
+(defn export [row certificate]
+ (formal/core-contract-data (:definition row) certificate
+  (if (contains? row :bindings) {:witness {:bindings (:bindings row)}} {})))

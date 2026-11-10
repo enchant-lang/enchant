@@ -102,8 +102,9 @@
         _ (require! (= (:profile lowered) (:profile definition)) "contract core profile mismatch")
         pre (bool! (:requires definition)) post (bool! (:ensures definition))
         _ (check-free! [pre post] (:inputs lowered))
-        out (:outcome lowered) allowed (t/any (keep (fn [reason]
-                         (when-let [code (get (:errors lowered) reason)] (t/eq (:error out) (t/int code)))) (:raises definition)))
+        out (:outcome lowered)
+        allowed-codes (vec (keep #(get (:errors lowered) %) (:raises definition)))
+        allowed (t/any (mapv #(t/eq (:error out) (t/int %)) allowed-codes))
         must-return (or (= :must (:returns definition)) (not (contains? (:effects definition) :raise)))
         claim (if must-return (t/all [(:ok out) post])
                 (t/all [(t/implies (:ok out) post) (t/implies (t/not (:ok out)) allowed)]))
@@ -118,6 +119,7 @@
                     :origin {:contract (:identity definition) :core (:core lowered)
                              :basis :reviewed-core-interpretation :source (:source definition)}})]
    {:status :ready :definition (:identity definition) :core (:core lowered) :problem problem
+    :policy {:pre pre :post post :must-return must-return :allowed-codes allowed-codes}
     :inputs (:inputs lowered) :observed-inputs observed-inputs :outcome out :errors (:errors lowered) :typing (:typing lowered)
     :binding-context (:binding-context source)
     :elaboration (if source (get-in source [:elaboration :check]) {:status :not-applicable :reason :authored-core})
@@ -128,6 +130,11 @@
                             (:binding-context source) :reviewed-context-linking-not-mechanically-proved
                             :else :reviewed-not-mechanically-proved)})
   (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn feasibility-question [definition prepared]
+ (let [problem (:problem prepared)]
+  (q/sat {:id (str (:name definition) "/requires") :assumptions (:assertions problem)
+          :observe (:observed-inputs prepared) :profile (:profile definition) :scope (:scope problem)})))
 
 (defn- replay-in [definition prepared native]
  (when (= :refuted (:verdict native))
@@ -179,9 +186,7 @@
           (when (:backend options)
            (backend/with-session options
             (fn [session]
-             {:feasibility (logic/solve-in session
-                (q/sat {:id (str (:name definition) "/requires") :assumptions (:assertions problem)
-                        :observe (:observed-inputs prepared) :profile (:profile definition) :scope (:scope problem)}))
+             {:feasibility (logic/solve-in session (feasibility-question definition prepared))
               :property (logic/solve-in session problem)})))
           native (:property observations) feasible (:feasibility observations)
           concrete (replay-in definition prepared native)
