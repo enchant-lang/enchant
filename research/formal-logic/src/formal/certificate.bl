@@ -60,6 +60,16 @@
 (defn- replace-choice [term choice replacement]
  (cond (= term choice) replacement (empty? (:args term)) term
        :else (t/app (:op term) (:sort term) (mapv #(replace-choice % choice replacement) (:args term)) (:data term))))
+(defn- fold-form [formula]
+ (let [kind (first formula) body (second formula)]
+  (case kind
+   :not (let [a (fold-form body)] (if (= :const (first a)) [:const (not (second a))] [:not a]))
+   (:and :or)
+    (let [parts (mapv fold-form body) decisive (= :or kind)]
+     (if (some #(= [:const decisive] %) parts) [:const decisive]
+      (let [remaining (vec (remove #(= :const (first %)) parts))]
+       (case (count remaining) 0 [:const (not decisive)] 1 (first remaining) [kind remaining]))))
+   formula)))
 
 (defn prepare
  "Reconstruct the exact conditional entailment and its atom vocabulary.
@@ -107,8 +117,8 @@
           (boolean [term]
            (require! (<= (swap! visits inc) 4096) "normalization capacity exceeded")
            (require! (= t/Bool (:sort term)) "expected Boolean term")
-           (let [op (:op term) args (:args term) a (first args) b (second args)]
-            (case op
+           (let [op (:op term) args (:args term) a (first args) b (second args)
+                 formula (case op
              :bool [:const (:data term)]
              :var (register {:kind :boolean :name (:data term)})
              :not (negate (boolean a))
@@ -136,7 +146,8 @@
              :lt (ordered a b true)
              :ge (ordered b a false)
              :gt (ordered b a true)
-             (throw (ex-info "formal.certificate: Boolean operation outside the proof fragment" {:operation op})))))]
+             (throw (ex-info "formal.certificate: Boolean operation outside the proof fragment" {:operation op}))))]
+            (if modern? (fold-form formula) formula)))]
    (let [formulas (mapv boolean roots)
          statement {:mode :prove :claim claim
                     :assertions (mapv (fn [a] (select-keys a [:label :term])) assertions)
