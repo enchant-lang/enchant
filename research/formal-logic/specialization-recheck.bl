@@ -1,0 +1,92 @@
+(ns formal.specialization-recheck
+ (:require [formal.api :as formal] [formal.selected :as selected] [formal.elaborate :as producer]
+           [formal.core :as core] [formal.backend :as backend] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [compiler :as compiler] [expand :as expand] [interop]))
+
+;; Bounded, exactly hash-pinned trusted project ETF only; no public decoder.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)) "Pass a trusted archive directory after --")
+(def directory (Path/expand (first args)))
+(def file (Path/join directory "specialization.etf"))
+(assert (<= (:size (File/stat! file)) 8388608))
+(def bytes (File/read! file))
+(def pin (interop/json-> (File/read! (Path/join directory "specialization-pin.json"))))
+(assert (= "enchant.formal.specialization-archive-v1" (get pin "schema")))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def data (elem decoded 0))
+(assert (= :enchant.formal.specialization-examples-v1 (:schema data)))
+(defn mfa [function]
+ (let [info (erlang/fun_info function)] (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity))))
+(defn named-patterns [module label name]
+ (mapv (fn [row] {:id label :pattern (tuple module (elem row 0) (elem row 1))})
+  (filter #(String/contains? (str (elem % 0)) name) (erlang/apply module :module_info (list :functions)))))
+(def private-patterns (named-patterns (elem (mfa selected/prepare) 0) "specializer" "specialize"))
+(def evaluator-patterns (named-patterns (elem (mfa core/canonicalize) 0) "core-evaluator" "evaluate"))
+(assert (and (seq private-patterns) (seq evaluator-patterns)))
+(def patterns
+ (into (into [{:id "compiler" :pattern (mfa compiler/compile)}
+              {:id "expander" :pattern (mfa expand/program)}
+              {:id "elaborator" :pattern (mfa producer/from-anf)}
+              {:id "canonicalizer" :pattern (mfa core/canonicalize)}
+              {:id "native-session" :pattern (mfa backend/with-session)}] private-patterns) evaluator-patterns))
+(def by-pattern (into {} (map (fn [row] [(:pattern row) (:id row)]) patterns)))
+(def empty-counts (into {} (map (fn [row] [(:id row) 0]) patterns)))
+(defn barrier []
+ (let [reference (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen reference) :ok (after 5000 (throw :trace-deadline)))))
+(defn recheck []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       tracer (spawn (fn [] (loop [counts empty-counts]
+         (receive
+          [:trace _ :call [module function arguments]]
+           (let [id (get by-pattern (tuple module function (count arguments)))] (recur (if id (update counts id inc) counts)))
+          [:reset seen] :when (= seen ticket)
+           (do (erlang/send parent [:calibration ticket counts]) (recur empty-counts))
+          [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket counts])
+          _ (recur counts)))))]
+  (try
+   (doseq [row patterns] (assert (pos? (erlang/trace_pattern (:pattern row) true (list :local)))))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   ;; Actual unrelated Source selection and execution-model calibration occurs
+   ;; before the checking window. No archived Source is expanded or executed.
+   (let [context (formal/selected-source-context
+                  {:sources [{:namespace 'formal.specialization.calibration :revision 'current :file "calibration.bl"
+                              :source "(ns formal.specialization.calibration) (defn answer [] 3)"}]
+                   :entry ['formal.specialization.calibration 'current] :target 'answer :parameters []})
+         p (:prepared (selected/prepare context))]
+    (assert (= 3 (:value (core/evaluate (:core p) {} {})))))
+   (backend/with-session {:backend :z3} (fn [session] (assert (:hello session))))
+   (barrier) (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:calibration seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))
+         _ (assert (every? pos? (vals calibration)) (pr-str calibration))
+         rows (mapv (fn [row]
+                      (let [answer (formal/check-specialization (:object row)) late (formal/check-elaboration (:elaboration row))]
+                       (assert (= (:checking row) answer) (pr-str answer)) (assert (= :checked (:status late)))
+                       (assert (= (:input-aliases answer) (get-in row [:elaboration :aliases])))
+                       {:id (:id row) :checking answer :elaboration (:status late)})) (:rows data))
+         forged (formal/check-specialization (get-in data [:forged :object]))
+         forged-late (formal/check-elaboration (get-in data [:forged :elaboration]))]
+    (assert (= (get-in data [:forged :checking]) forged))
+    (assert (= :rejected (:status forged))) (assert (= :checked (:status forged-late)))
+    (barrier) (erlang/send tracer [:finish ticket])
+    (let [counts (receive [:finished seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))]
+     (assert (= empty-counts counts) (pr-str counts))
+     {:rows rows :forged {:specialization (:status forged) :elaboration (:status forged-late)}
+      :calibration calibration :checking counts}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (doseq [row patterns] (erlang/trace_pattern (:pattern row) false (list :local)))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def result (recheck))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "specialization-fresh.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge result {:schema :enchant.formal.specialization-recheck-v1 :archive-directory directory
+                :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                :scope :supplied-unit-reduction-and-final-anf-core :source-provenance :not-authenticated
+                :identity-profile identity/profile :compiler-proof-authority false})))
+(println {:pairs (count (:rows result)) :forged (:forged result)
+          :calibration (:calibration result) :checking (:checking result) :compiler-proof-authority false})

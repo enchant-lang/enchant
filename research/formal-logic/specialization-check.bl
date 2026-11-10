@@ -1,0 +1,87 @@
+(ns formal.specialization-check
+ (:require [formal.api :as formal] [formal.selected :as selected] [formal.elaborate :as elaborate]
+           [formal.elaboration :as elaboration] [formal.core :as core] [formal.identity :as identity]
+           [formal.term :as t] [formal.runtime-artifact :as artifact] [system.ir :as ir] [interop]))
+
+(defn specification [text]
+ {:sources [{:namespace 'formal.specialization.archive :revision 'current :file "specialization.bl"
+             :source (str "(ns formal.specialization.archive) " text)}]
+  :entry ['formal.specialization.archive 'current] :target 'answer :parameters [["input" t/Int]]})
+(defn example [id text]
+ (let [context (formal/selected-source-context (specification text)) p (:prepared (selected/prepare context))
+       object (get-in p [:specialization :object]) answer (formal/check-specialization object)]
+  (assert (= :checked (:status answer)) (pr-str answer))
+  {:id id :context context :object object :checking answer :elaboration (get-in p [:elaboration :object])}))
+(def capture
+ (example "definition-environment"
+  "(def bias 40) (defn- helper [x] (erlang/+ bias x)) (defn answer [x] (let [bias 100] (helper x)))"))
+(def rows
+ [capture
+  (example "nested-eager-calls" "(defn- f [x] (erlang/+ x 1)) (defn answer [x] (erlang/+ (f x) (f (f x))))")
+  (example "unused-failing-initializer" "(def hidden (erlang/div 1 0)) (defn answer [x] x)")
+  (example "ordered-record-updates" "(defn- bump [r] (Elixir.BeamLisp.Ns.Rt/assoc r \"n\" 1 \"n\" 2)) (defn answer [x] {\"changed\" (bump {\"n\" x}) \"old\" x})")
+  (example "captured-local-helper" "(defn answer [x] (let [f (fn [y] (erlang/+ x y))] (f 3)))")])
+(def original (:object capture))
+(def captured (:name (:anf original)))
+(def shadow (:name (first (filter #(and (= :let (:op %)) (= :lit (get-in % [:init :op])) (= 100 (get-in % [:init :val])))
+                           (tree-seq ir/node? ir/child-nodes (:anf original))))))
+(assert (string? shadow))
+(def forged
+ (identity/seal (assoc original :anf
+  (ir/rewrite (fn [node] (if (and (= :var (:op node)) (= captured (:name node))) (assoc node :name shadow) node)) (:anf original)))))
+(def forged-check (formal/check-specialization forged))
+(assert (= :rejected (:status forged-check)))
+(def aliases (get-in capture [:checking :input-aliases]))
+(def declarations {"input" t/Int})
+(def bindings (into {} (map (fn [[alias role]] [alias (core/variable role t/Int)]) aliases)))
+(def forged-core (core/canonicalize (elaborate/from-anf (:anf forged) bindings) declarations))
+(def forged-elaboration (elaboration/claim (:anf forged) forged-core (:parameters forged) aliases))
+(def forged-late-check (formal/check-elaboration forged-elaboration))
+(assert (= :checked (:status forged-late-check)))
+(assert (= 102 (:value (core/evaluate forged-core declarations {"input" 2}))))
+(def source-promise
+ (formal/program-contract {:name "specialization-source-40" :context (:context capture)
+  :ensures (fn [in out] (t/eq out (t/add (get in "input") (t/int 40))))}))
+(def wrong-model-promise
+ (formal/program-contract {:name "specialization-authored-core-100" :core forged-core :parameters declarations
+  :ensures (fn [in out] (t/eq out (t/add (get in "input") (t/int 100))))}))
+(def wrong-source-promise
+ (formal/program-contract {:name "specialization-source-is-not-100" :context (:context capture)
+  :ensures (fn [in out] (t/eq out (t/add (get in "input") (t/int 100))))}))
+(def native
+ (mapv (fn [engine]
+         (let [real (formal/check {:backend engine} source-promise)
+               model (formal/check {:backend engine} wrong-model-promise)
+               refuted (formal/check {:backend engine} wrong-source-promise)]
+          (assert (= :checked (:status real))) (assert (= :checked (:status model)))
+          (assert (= :refuted (:status refuted)))
+          {:engine engine :source real :authored-wrong-model model :wrong-source-promise refuted})) [:z3 :oxiz]))
+(def actual (formal/observe-contract source-promise {"input" 2}))
+(assert (= :observed (:status actual)) (pr-str actual))
+(assert (= 42 (get-in actual [:receipt :outcome :value])))
+(assert (= :conforming (get-in actual [:checking :status])))
+(def data {:schema :enchant.formal.specialization-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :rows rows :forged {:object forged :checking forged-check :elaboration forged-elaboration :late-check forged-late-check :model-value 102}
+           :source-promise source-promise :actual actual :native native
+           :identity-profile identity/profile :compiler-proof-authority false})
+(identity/bytes data)
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! output)
+(def bytes (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "specialization.etf") bytes)
+(File/write! (Path/join output "specialization-pin.json") (interop/->json
+ {:schema :enchant.formal.specialization-archive-v1 :bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}))
+(File/write! (Path/join output "specialization.json") (interop/->json
+ {:schema (:schema data) :source-commit (:source-commit data) :rows (mapv #(select-keys % [:id :checking]) rows)
+  :adversarial {:specialization (:status forged-check) :late-anf-core-check (:status forged-late-check)
+                :forged-model-value 102 :actual-source-value 42}
+  :original-source {:status (:status actual) :checking (get-in actual [:checking :status])
+                    :contract-safety (get-in actual [:checking :contract-safety]) :outcome (get-in actual [:receipt :outcome])
+                    :cleanup (get-in actual [:receipt :cleanup])}
+  :native (mapv (fn [row] {:engine (:engine row) :source (get-in row [:source :status])
+                          :authored-wrong-model (get-in row [:authored-wrong-model :status])
+                          :wrong-source-promise (get-in row [:wrong-source-promise :status])}) native)
+  :unit-wellformedness :assumed-sdk-compiled-unit :checker-soundness :reviewed-rule-checker :compiler-proof-authority false}))
+(println {:pairs (count rows) :altered-unit-reduction (:status forged-check) :altered-anf-core (:status forged-late-check)
+          :altered-model 102 :original-source 42 :compiler-proof-authority false})
