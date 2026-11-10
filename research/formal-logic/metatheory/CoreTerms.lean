@@ -24,6 +24,30 @@ def agrees (actual : Outcome τ) (ok : Option Bool) (value : Option (Value τ))
   | .returned result => ok = some true ∧ value = some result ∧ error = some 0
   | .raised reason => ok = some false ∧ error = some (code reason)
 
+@[simp] theorem agrees_returned (result : Value τ) (ok : Option Bool)
+    (value : Option (Value τ)) (error : Option Int) (code : String → Int) :
+    agrees (.returned result) ok value error code ↔
+      ok = some true ∧ value = some result ∧ error = some 0 := Iff.rfl
+
+@[simp] theorem agrees_raised (reason : String) (ok : Option Bool)
+    (value : Option (Value τ)) (error : Option Int) (code : String → Int) :
+    agrees (.raised reason) ok value error code ↔
+      ok = some false ∧ error = some (code reason) := Iff.rfl
+
+@[simp] theorem agrees_choice (test : Prop) [Decidable test] (yes no : Outcome τ)
+    (ok : Option Bool) (value : Option (Value τ)) (error : Option Int) (code : String → Int) :
+    agrees (if test then yes else no) ok value error code =
+      (if test then agrees yes ok value error code else agrees no ok value error code) := by
+  by_cases branch : test <;> simp [branch]
+
+@[simp] theorem bind_choice (test : Prop) [Decidable test] (yes no : Outcome α) (next : Value α → Outcome β) :
+    (if test then yes else no).bind next = (if test then yes.bind next else no.bind next) := by
+  by_cases branch : test <;> simp [branch]
+
+@[simp] theorem select_known (condition : Bool) (yes no : Option α) :
+    (match some condition with | some true => yes | some false => no | none => none) =
+      (if condition then yes else no) := by cases condition <;> rfl
+
 abbrev intLit {context : List BeamLispCore.Ty} (value : Int) : Expr context .int := .literal value
 abbrev boolLit {context : List BeamLispCore.Ty} (value : Bool) : Expr context .bool := .literal value
 abbrev unitLit {context : List BeamLispCore.Ty} : Expr context .unit := .literal ()
@@ -104,6 +128,11 @@ theorem apply_mod (a b : Int) : IntOp.apply .mod a b =
     if b = 0 then .raised "zero-divisor" else .returned (modulusValue a b) := by
   by_cases zero : b = 0 <;> simp [IntOp.apply, zero, modulus_value]
 
+#print axioms agrees_returned
+#print axioms agrees_raised
+#print axioms agrees_choice
+#print axioms bind_choice
+#print axioms select_known
 #print axioms quotient_value
 #print axioms remainder_value
 #print axioms modulus_value

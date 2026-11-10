@@ -349,6 +349,7 @@ HEADER = '''import CoreTerms
 set_option maxRecDepth 5000
 set_option maxHeartbeats 6000000
 set_option linter.unusedSimpArgs false
+set_option linter.unusedVariables false
 open BeamLispCore FormalTerms FormalRefutation CoreTerms
 '''
 TAIL = '''
@@ -360,13 +361,16 @@ theorem coreTermCorrespondence : ∀ (i : Nat → Int) (b : Nat → Bool),
   simp [originalProgram, originalInputs, symbolicOK, symbolicValue, symbolicError, errorCodes,
     BeamLispCore.eval, Env.lookup, Outcome.bind, Payload.eval, Term.eval, strict₂, partial₂,
     apply_quot, apply_rem, apply_mod, Comparison.apply, BoolOp.apply, valueEq]
-  all_goals try simp [agrees, IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
+  all_goals try simp [IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName]
-  all_goals repeat' (split <;> simp_all [agrees, IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
+  all_goals repeat' (split <;> simp_all [IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
-  all_goals omega
+  all_goals first | rfl | decide | omega
+
+theorem errorCatalogueRoundTrip : errorCodes.all (fun code => errorCode errorCodes (errorName code) == Int.ofNat code) = true := by decide
 
 #print axioms coreTermCorrespondence
+#print axioms errorCatalogueRoundTrip
 '''
 
 
@@ -446,8 +450,8 @@ def run(path, output, axiom_policy='lean-standard'):
                                        stderr=subprocess.STDOUT, timeout=120)
         transcript = (output / 'lean.txt').read_text()
         require(completed.returncode == 0 and 'sorryAx' not in transcript and 'warning:' not in transcript, 'Lean did not accept Core term correspondence')
-        audits = proof_tools.theorem_audits(transcript, {'coreTermCorrespondence'})
-        require(set(audits['coreTermCorrespondence']) <= terms.AXIOM_POLICIES[axiom_policy], 'Core term axioms exceed policy')
+        audits = proof_tools.theorem_audits(transcript, {'coreTermCorrespondence', 'errorCatalogueRoundTrip'})
+        require(all(set(deps) <= terms.AXIOM_POLICIES[axiom_policy] for deps in audits.values()), 'Core term axioms exceed policy')
         shutil.copyfile(work / 'Check.olean', output / 'Check.olean')
     result = {'schema': 'enchant.formal.core-term-execution.v1', 'status': 'checked-core-term-correspondence',
               'packet': packet['identity'], 'core': packet['core'], 'subject': packet['subject'],
