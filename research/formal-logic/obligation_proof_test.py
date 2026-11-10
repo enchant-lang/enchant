@@ -60,6 +60,7 @@ class ObligationChecks(unittest.TestCase):
     def test_manifest_schema_preserves_obligation_witness_and_authority_distinctions(self):
         edits = [lambda m: m.update(identity="0" * 64), lambda m: m.update(**{"compiler-proof-authority": True}),
                  lambda m: m.update(feasibility="proved-sat"), lambda m: m.update(composition="proved"),
+                 lambda m: m.update(**{"axiom-policy": "unreviewed"}),
                  lambda m: m.update(rows=[]), lambda m: m["rows"][2].update(required=1),
                  lambda m: m["rows"][2].update(required=False), lambda m: m["rows"][2].update(via="witness"),
                  lambda m: m["rows"][2].update(question="0" * 64), lambda m: m["rows"][0].update(packet=m["rows"][2]["packet"]),
@@ -95,6 +96,24 @@ class ObligationChecks(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["status"], "incomplete-obligation-evidence")
         self.assertFalse((OUTPUT / "sat-cli/rows").exists())
+
+    def test_choice_free_policy_rejects_an_actual_classical_loop_proof(self):
+        manifest = copy.deepcopy(MANIFESTS["loop"])
+        manifest["rows"] = [manifest["rows"][7]]
+        self.assertTrue(manifest["rows"][0]["required"])
+        target = OUTPUT / "policy-comparison"; target.mkdir(parents=True, exist_ok=True)
+        reseal(manifest)
+        path = target / "standard.json"; path.write_text(json.dumps(manifest) + "\n")
+        standard = o.run(path, target / "standard")
+        self.assertEqual(standard["axiom_policy"], "lean-standard-v1")
+        self.assertIn("Classical.choice", standard["axioms_used"])
+        manifest["axiom-policy"] = "choice-free-v1"; reseal(manifest)
+        path = target / "choice-free.json"; path.write_text(json.dumps(manifest) + "\n")
+        with self.assertRaisesRegex(ValueError, "exceed policy"):
+            o.run(path, target / "choice-free")
+        rejected = target / "choice-free/rows/0000"
+        self.assertIn("Classical.choice", (rejected / "lean.txt").read_text())
+        self.assertFalse((rejected / "Check.olean").exists())
 
 
 if __name__ == "__main__":
