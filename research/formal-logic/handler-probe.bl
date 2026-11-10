@@ -1,0 +1,53 @@
+(ns formal.handler-probe (:require [compiler :as compiler] [interop]))
+
+;; Observe the pinned compiler/runtime before choosing record-core semantics.
+;; These are probes, not a source-handler verification implementation.
+(def sources
+ [{:id :record-literal :source "{\"z\" (+ x 1) \"a\" (+ x 2)}"}
+  {:id :record-get :source "(get state \"count\")"}
+  {:id :record-assoc :source "(assoc state \"count\" (+ (get state \"count\") (get message \"amount\")))"}
+  {:id :handler-function :source "(fn [state message] (assoc state \"count\" (+ (get state \"count\") (get message \"amount\"))))"}
+  {:id :projection-with-failure :source "(get {\"value\" 1 \"fault\" (throw (ex-info \"other-field\" {}))} \"value\")"}])
+(def compiled
+ (mapv (fn [sample]
+  (try
+   (assoc sample :status :compiled
+     :anf (compiler/compile (first (BeamLisp.Reader/read_string (:source sample)))
+                           (compiler/new-env "formal.handler.intrinsics")))
+   (catch error (assoc sample :status :unsupported :reason (ex-message error))))) sources))
+(defn observe [f]
+ (try {:status :returned :value (f)}
+  (catch error {:status :raised :message (ex-message error) :data (ex-data error)})))
+(def observations
+ [{:id :unobserved-field-failure
+   :result (observe (fn [] (get {"value" 1 "fault" (throw (ex-info "other-field" {:tag :other-field}))} "value")))}
+  {:id :literal-z-before-a
+   :result (observe (fn [] {"z" (throw (ex-info "z-first" {:tag :z-first}))
+                           "a" (throw (ex-info "a-second" {:tag :a-second}))}))}
+  {:id :literal-a-before-z
+   :result (observe (fn [] {"a" (throw (ex-info "a-first" {:tag :a-first}))
+                           "z" (throw (ex-info "z-second" {:tag :z-second}))}))}
+  {:id :assoc-b-before-a
+   :result (observe (fn [] (assoc {"a" 0 "b" 0}
+                            "b" (throw (ex-info "b-first" {:tag :b-first}))
+                            "a" (throw (ex-info "a-second" {:tag :a-second})))))}
+  {:id :selected-record-branch
+   :result (observe (fn [] (get (if true {"value" 1}
+                                 {"value" (throw (ex-info "untaken" {:tag :untaken}))}) "value")))}
+  {:id :handler-preserves-other-fields
+   :result (observe (fn []
+             ((fn [state message] (assoc state "count" (+ (get state "count") (get message "amount"))))
+              {"count" 3 "flag" true} {"amount" 2})))}])
+(assert (= :raised (get-in (first observations) [:result :status])))
+(assert (= :other-field (get-in (first observations) [:result :data :tag])))
+(assert (= 1 (get-in (nth observations 4) [:result :value])))
+(assert (= {"count" 5 "flag" true} (get-in (nth observations 5) [:result :value])))
+(File/write! "research/formal-logic/evidence/record-handlers/probe.json"
+ (interop/->json {:schema :enchant.formal.record-handler-probe-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope :pinned-sdk-compiler-and-runtime-observations
+                 :compiler-probes compiled :runtime-probes observations
+                 :source-handler-verification :not-implemented :compiler-proof-authority false}))
+(println {:compiled (count (filter #(= :compiled (:status %)) compiled))
+          :runtime-observations (count observations)
+          :outcomes (mapv (fn [sample] [(:id sample) (:result sample)]) observations)})
