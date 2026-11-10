@@ -297,6 +297,66 @@ theorem invariant_on_every_trace_position (initial : State → Prop) (step : Sta
   | zero => exact starts _ begins
   | succ n ih => exact preserves _ _ ih (advances n)
 
+/- Explicit finite model runs. The Bool flag records a past failed attempt;
+   failure retains the old state and permits only idle events afterwards. -/
+inductive ModelStep (step : State → State → Prop) (failedAttempt : State → Prop) :
+    (State × Bool) → (State × Bool) → Prop where
+  | idle (state : State) (failed : Bool) : ModelStep step failedAttempt (state, failed) (state, failed)
+  | success {current next} : step current next → ModelStep step failedAttempt (current, false) (next, false)
+  | failure {state} : failedAttempt state → ModelStep step failedAttempt (state, false) (state, true)
+
+inductive ModelRun (initial : State → Prop) (step : State → State → Prop)
+    (failedAttempt : State → Prop) : Nat → (State × Bool) → Prop where
+  | initial {state} : initial state → ModelRun initial step failedAttempt 0 (state, false)
+  | append {n current next} : ModelRun initial step failedAttempt n current →
+      ModelStep step failedAttempt current next → ModelRun initial step failedAttempt (n + 1) next
+
+theorem modelStep_after_failure (step : State → State → Prop) (failedAttempt : State → Prop)
+    {state next} (event : ModelStep step failedAttempt (state, true) next) : next = (state, true) := by
+  cases event
+  rfl
+
+theorem modelRun_append_idle (initial : State → Prop) (step : State → State → Prop)
+    (failedAttempt : State → Prop) {n state failed}
+    (run : ModelRun initial step failedAttempt n (state, failed)) :
+    ModelRun initial step failedAttempt (n + 1) (state, failed) :=
+  .append run (.idle state failed)
+
+theorem modelRun_state_reachable (initial : State → Prop) (step : State → State → Prop)
+    (failedAttempt : State → Prop) {n outcome} (run : ModelRun initial step failedAttempt n outcome) :
+    StateReachable initial step outcome.1 := by
+  induction run with
+  | initial h => exact .initial h
+  | append _ event ih =>
+    cases event with
+    | idle _ _ => exact ih
+    | success h => exact .advance ih h
+    | failure _ => exact ih
+
+theorem modelRun_safety (initial : State → Prop) (step : State → State → Prop)
+    (failedAttempt invariant : State → Prop)
+    (starts : ∀ state, initial state → invariant state)
+    (preserves : ∀ current next, invariant current → step current next → invariant next)
+    (excludesFailure : ∀ state, invariant state → ¬ failedAttempt state)
+    {n outcome} (run : ModelRun initial step failedAttempt n outcome) :
+    invariant outcome.1 ∧ outcome.2 = false := by
+  induction run with
+  | initial h => exact ⟨starts _ h, rfl⟩
+  | append _ event ih =>
+    cases event with
+    | idle _ _ => exact ih
+    | success h => exact ⟨preserves _ _ ih.1 h, rfl⟩
+    | failure h => exact False.elim (excludesFailure _ ih.1 h)
+
+theorem reachable_has_modelRun (initial : State → Prop) (step : State → State → Prop)
+    (failedAttempt : State → Prop) {state} (reachable : StateReachable initial step state) :
+    ∃ n, ModelRun initial step failedAttempt n (state, false) := by
+  induction reachable with
+  | initial h => exact ⟨0, .initial h⟩
+  | advance _ hstep ih =>
+    obtain ⟨n, run⟩ := ih
+    exact ⟨n + 1, .append run (.success hstep)⟩
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
@@ -322,5 +382,10 @@ theorem invariant_on_every_trace_position (initial : State → Prop) (step : Sta
 #print axioms invariant_on_reachable
 #print axioms no_failed_attempt_on_reachable
 #print axioms invariant_on_every_trace_position
+#print axioms modelStep_after_failure
+#print axioms modelRun_append_idle
+#print axioms modelRun_state_reachable
+#print axioms modelRun_safety
+#print axioms reachable_has_modelRun
 
 end BeamLispCore
