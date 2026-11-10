@@ -106,7 +106,10 @@ source connection that is reconstructed whenever evidence is accepted.
        "(fn [s msg] (assoc s \"count\" (+ (get s \"count\") (get msg \"amount\"))))"}]})
 ```
 
-State and message schemas here are flat scalar records. Each handler must return
+State and message schemas here are flat scalar records and retain the existing
+protocol field-name rules: nonempty strings without NUL. The more permissive
+record keys above are available in core programs and function contracts.
+Each handler must return
 the exact state shape. Users author initial-state predicates, invariants and
 input assumptions; `:next`, `:guard`, arbitrary effects and mailbox policies are
 refused. The handler's conditional behavior belongs in its actual source.

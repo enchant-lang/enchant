@@ -1,6 +1,9 @@
 # Record and source-handler evidence
 
 The record core and source-derived protocol path are now implemented.
+`combined-check.txt` qualifies 4,902 assertions across ten files on the final
+implementation. `implementation-qualification.json` binds its exact source,
+SDK, worker, library, examples and log hashes. The checks below overlap it.
 `source-check.txt` passed 1,292 assertions across six files: 689 record, 125
 source-protocol, 133 existing protocol, 108 bounded trace, 199 facade and 38 API
 assertions. `examples.json` retains six source subjects compared with both
@@ -20,6 +23,13 @@ failures and the pinned range/variadic-call repairs. `record-qualification.txt`
 is the successful 689-assertion follow-up. These overlapping checks must not be
 added together as distinct coverage. The combined final run and source/model
 receipts identify exact source hashes independently of the original probe.
+
+The dossier executes thirteen cells and reproduces their results unchanged.
+The final browser audit passed 294 checks and retained thirty screenshots at
+390-pixel phone and 1440-pixel desktop widths. The two earlier audit folders
+retain audit-navigation mistakes: an incorrect subsection anchor, then checks
+run after leaving their visible chapter. The final flow fixes both. These are
+presentation checks, not additional formal-logic assertions.
 
 ## Original preparation observations
 
