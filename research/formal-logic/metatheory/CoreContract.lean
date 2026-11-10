@@ -97,8 +97,9 @@ theorem named_allowed (catalogue allowed : List Nat) (reason : String)
   cases found : catalogue.find? (fun n => errorName n == reason) with
   | none => simp [found] at codeEq; omega
   | some index =>
-    have equal : index = code := by simpa [found] using codeEq
-    have actual : errorName index = reason := beq_iff_eq.mp (List.find?_some found)
+    have equal : index = code := Int.ofNat.inj (by simpa [found] using codeEq)
+    have acceptedName : (errorName index == reason) = true := List.find?_some found
+    have actual : errorName index = reason := beq_iff_eq.mp acceptedName
     exact List.mem_map.mpr ⟨code, member, equal ▸ actual⟩
 
 theorem checked_claim_holds (pre post ok : Term .boolean) (error : Term .integer)
