@@ -123,7 +123,7 @@ def validate(packet):
     require(packet["formal/normalized-refutation"] == 1 and type(packet["formal/normalized-refutation"]) is int, "packet version")
     require(packet["profile"] == "bl/normalized-refutation-v1", "packet profile")
     require(packet["identity-profile"] == "bl/canonical-formal-data-v1", "identity profile")
-    require(packet["rules"] in {"bl/boolean-linear-integer-v1", "bl/boolean-piecewise-linear-integer-v2", "bl/piecewise-ground-integer-v3"}, "rule system")
+    require(type(packet["rules"]) is str and packet["rules"] in {"bl/boolean-linear-integer-v1", "bl/boolean-piecewise-linear-integer-v2", "bl/piecewise-ground-integer-v3"}, "rule system")
     for key in ["statement", "question", "identity"]:
         require(type(packet[key]) is str and HEX.fullmatch(packet[key]), key + " digest")
     variables = packet["variables"]
@@ -153,6 +153,7 @@ def validate(packet):
         visits += 1
         require(visits <= 65536 and depth <= 128 and type(node) is list and node, "formula capacity/shape")
         tag = node[0]
+        require(type(tag) is str, "formula tag")
         if tag == "constant":
             require(len(node) == 2 and type(node[1]) is bool, "Boolean constant")
         elif tag == "atom":
@@ -175,6 +176,7 @@ def validate(packet):
         nodes += 1
         require(nodes <= 8192 and depth <= 64 and type(node) is list and node, "proof capacity/shape")
         tag = node[0]
+        require(type(tag) is str, "proof tag")
         if tag == "boolean":
             require(len(node) == 1, "Boolean proof shape")
         elif tag == "split":
