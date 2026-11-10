@@ -85,6 +85,61 @@ Diagnostics on pending rows describe production history, not theorem content.
 The same valid certificates may therefore be packaged with different pending
 diagnostics while retaining identical proof targets and packet identities.
 
+## Put a witness and its entailment in one bundle
+
+Select `{:format :v2}` to use the mixed format. The existing operation names
+and subject plans serve both versions. `obligation-proof-data` accepts supplied
+certificates and witnesses keyed by exact row label. `certify-obligations`
+accepts the same map under `:supplied` and searches the remaining proof rows.
+
+```clojure
+(def mixed
+  (formal/certify-obligations subject
+    {:format :v2
+     :supplied {"initial-state" {:via :witness :bindings [[input 3]]}}}))
+(formal/check-obligation-proof-data subject (:bundle mixed))
+```
+
+Supply concrete `:bindings` or an existing `:packet` from `term-witness` or
+`term-witness-from-result`. A native result enters the bundle through the
+checked packet adapter. Its discovery metadata can travel separately. The
+same packet schema works with both backends. A direct SAT subject uses the
+required row `"property"`. A conditional model uses the auxiliary row
+`"initial-state"`. An explicit empty assignment can witness an empty context.
+
+In v2, `:coverage` counts required entailments, unreachable paths and witnesses.
+The top-level `:initial-evidence` records a ready witness, an inconsistency
+proof, pending evidence or an inapplicable initial-state facet. The BL checker
+replays the witness and returns `:kernel-execution :not-run`. A model can have
+feasible assumptions and incomplete required proofs, as in the `unknown`
+example. A model can also have complete conditional proofs and inconsistent
+assumptions, as in the `vacuous` example.
+
+Each manifest row carries an assertion-context identity. This hashes the sorted
+unique original term digests after removing literal `true`. Labels, order,
+duplicates and literal `true` padding leave conjunction satisfaction unchanged.
+Other trees remain distinct. The external checker independently reconstructs
+this identity from each ready packet. Initial feasibility and inconsistency
+rows must refer to the same context. A ready witness conflicts with a ready
+false-goal route for that context. The fresh BL check reconstructs the exact
+plan and complete row order, including the contexts of pending rows.
+
+When a required entailment has the witnessed context, the runner imports its
+freshly compiled Lean proof. It projects concrete values into the entailment's
+integer and Boolean layouts by original name and sort. The witness convention
+supplies zero or false for claim inputs outside the given bindings. Lean
+reduces every original assertion at those values, applies the universal
+entailment and constructs `originalQuestionHasSatisfyingClaim`. The report
+records the proof object digest, witness packet digest and actual axioms. A
+countdown's initial witness therefore supports its initial normality obligation.
+Preservation, rank and branch obligations have their own premises.
+
+The same `check-obligation-manifest` command handles both formats. Its v2
+report distinguishes `positive_feasibility`, `coverage` and `checked_instances`.
+The exit status still describes required coverage. Instance proofs apply to the
+contained typed questions. Model-rule composition, Source and compiler
+correspondence remain reviewed or open at their respective boundaries.
+
 ## Explicit proof-foundation policies
 
 The axiom policy belongs to the proof bundle and its external manifest, not the
@@ -161,9 +216,7 @@ calibrated window that counts certificate-search and formal-backend entry calls.
 Source preparation remains allowed in that window; no claim about every
 compiler-internal operation follows from those two counters.
 
-[Constructive witnesses](WITNESSES.md) are now implemented as standalone
-typed-term packets. This v1 format retains its existing `:requires-witness`
-interpretation. A new mixed format can add these packets and keep positive
-feasibility separate from required proof coverage. Broader theory rules,
-mechanized model composition and data/Source/compiler correspondence remain
-work toward the full formal-language goal.
+The v2 qualification covers all seven subject kinds and includes both native
+backends, an explicit empty witness, an incomplete SAT question, and a claim
+with a different variable layout from its witness. See the
+[recorded qualification](evidence/mixed-obligations/qualification.json).

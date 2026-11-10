@@ -109,9 +109,7 @@ it to the original query. The term-data/Lean semantics bridge and local executio
 custody remain reviewed. No Source function, compiler, runtime or cryptographic
 attestation theorem follows from this result.
 
-The existing common-obligation v1 format deliberately retains its missing-witness
-status. The next format can combine these positive packets with conditional
-proofs, report feasibility separately from required proof coverage, and freshly
-reconstruct the complete model plan. Existing v1 evidence must keep its original
-interpretation. Model-to-question soundness and model composition remain distinct
-work after that integration.
+The [common obligation format](OBLIGATIONS.md) accepts these packets with
+`{:format :v2}`. It applies a matching entailment to the chosen values in Lean
+and records the resulting existence theorem alongside the universal proof.
+Model interpretation and composition remain separate from those term theorems.
