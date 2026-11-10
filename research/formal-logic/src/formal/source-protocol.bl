@@ -1,0 +1,171 @@
+(ns formal.source-protocol
+ (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
+           [formal.elaborate :as elaborate] [formal.protocol :as protocol]
+           [formal.protocol-run :as execution] [formal.term :as t] [formal.value :as v]
+           [formal.evaluate :as replay]))
+
+;; A source connection around the existing state-model boundary. Preparation
+;; re-extracts every real function and compares every derived guard/update.
+;; User builders specify state predicates and input assumptions, never updates.
+(def profile :bl/source-record-handlers-v1)
+(def ^:private fields #{:formal/source-protocol :protocol :handlers :profile :identity})
+(def ^:private handler-fields #{:name :source :core})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.source-protocol: " message) {}))))
+(defn- identity-of [definition]
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
+                (list (tuple :case :lower))))
+(defn- extract [schema inputs source]
+ (let [parameters [["state" (core/record-sort schema)] ["message" (core/record-sort inputs)]]
+       extracted (elaborate/prepare-function source parameters)
+       _ (require! (= :elaborated (:status extracted)) (str "source handler refused: " (:reason extracted)))
+       _ (require! (= (second (first parameters)) (get-in extracted [:typing :sort])) "handler must return the exact state record shape")
+       lowered (symbolic/lower (:core extracted) (into {} parameters))]
+  (require! (= :translated (:status lowered)) (:reason lowered))
+  {:source source :core (:identity extracted) :body (:core extracted)
+   :parameters (into {} parameters) :lowered lowered}))
+(defn- derive [extracted state inputs]
+ (let [lowered (:lowered extracted)
+       replacements (into {} (concat
+                        (map (fn [[field term]] [term (get state field)]) (get-in lowered [:inputs "state"]))
+                        (map (fn [[field term]] [term (get inputs field)]) (get-in lowered [:inputs "message"]))))
+       subst #(t/substitute % replacements)
+       outcome (:outcome lowered) ok (subst (:ok outcome))
+       errors (into {} (map (fn [[reason code]] [reason (subst (t/eq (:error outcome) (t/int code)))]) (:errors lowered)))
+       opts {:defined ok :errors errors :domain {:kind :scalar :profile core/record-profile}}]
+  ;; Whole-handler admission is explicit even for an empty state schema. It
+  ;; is a model guard failure, never a false guard that erases a failed attempt.
+  {:guard (v/make (t/bool true) opts)
+   :next (into {} (map (fn [[field payload]] [field (v/make (subst payload) opts)]) (:value outcome)))}))
+
+(declare prepare check-proof)
+(defn define
+ "Close source state/message handlers into a source-bound protocol subject.
+  State and message fields are exact scalar Bool/Int records. Only init,
+  invariants and input assumptions are authored model builders. Each handler
+  is a real single-clause source function, not an authored update callback."
+ [specification]
+ (require! (and (map? specification)
+                (every? #{:name :state :init :invariant :invariants :handlers} (keys specification))
+                (not (and (contains? specification :invariant) (contains? specification :invariants)))
+                (vector? (:handlers specification)) (<= (count (:handlers specification)) 16))
+           "unknown source protocol policy or handler capacity")
+ (let [schema (:state specification)
+       compiled (mapv (fn [row]
+                   (require! (and (map? row) (every? #{:name :inputs :source :assumptions} (keys row))
+                                   (string? (:source row))) "handler requires source, not authored guard/next/effect callbacks")
+                   (assoc (extract schema (get row :inputs {}) (:source row)) :name (:name row) :spec row))
+                  (:handlers specification))
+       base (select-keys specification [:name :state :init :invariant :invariants])
+       model (protocol/define (assoc base :transitions
+               (mapv (fn [item]
+                       {:name (:name item) :inputs (get (:spec item) :inputs {})
+                        :assumptions (get (:spec item) :assumptions [])
+                        :guard (fn [state inputs] (:guard (derive item state inputs)))
+                        :next (fn [state inputs] (:next (derive item state inputs)))}) compiled)))
+       definition {:formal/source-protocol 1 :protocol model
+                   :handlers (mapv #(select-keys % [:name :source :core]) compiled) :profile profile}
+       definition (assoc definition :identity (identity-of definition))
+       prepared (prepare definition)]
+  (require! (= :ready (:status prepared)) (:reason prepared)) definition))
+
+(defn prepare
+ "Validate the closed model and freshly derive every update and whole-handler
+  outcome from compiler ANF. A rehashed substituted source/model is rejected
+  unless its complete source connection is rebuilt as a new subject."
+ [definition]
+ (try
+  (require! (and (map? definition) (= fields (set (keys definition))) (= 1 (:formal/source-protocol definition))
+                 (= profile (:profile definition)) (= (:identity definition) (identity-of definition))
+                 (vector? (:handlers definition)) (<= (count (:handlers definition)) 16)) "changed or noncanonical source protocol")
+  (let [model (:protocol definition) prepared (protocol/prepare model)
+        _ (require! (= :ready (:status prepared)) (:reason prepared))
+        _ (require! (= (mapv :name (:handlers definition)) (mapv :name (:transitions model))) "handler coverage/order mismatch")
+        state (get-in prepared [:model :state])
+        handlers (mapv (fn [index]
+                    (let [stored (nth (:handlers definition) index) row (nth (:transitions model) index)
+                          _ (require! (= handler-fields (set (keys stored))) "noncanonical stored handler")
+                          extracted (extract (:schema model) (:input-schema row) (:source stored))
+                          _ (require! (= (:core stored) (:core extracted)) "source/core identity mismatch")
+                          inputs (get-in prepared [:model :transitions index :inputs])
+                          derived (derive extracted state inputs)]
+                     (require! (= derived (select-keys row [:guard :next])) "stored transition differs from freshly extracted whole handler")
+                     (assoc extracted :name (:name stored)))) (range (count (:handlers definition))))]
+   {:status :ready :definition (:identity definition) :protocol model :protocol-prepared prepared
+    :handlers handlers :obligations (:obligations prepared)
+    :source-connection :reviewed-source-anf-core-state-model :live-actor-connection :not-established})
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn check-proof [definition object]
+ (let [prepared (prepare definition)]
+  (cond
+   (not= :ready (:status prepared)) (assoc prepared :status :rejected)
+   (not (and (map? object) (= #{:formal/source-protocol-proof :definition :protocol-proof} (set (keys object)))
+              (= 1 (:formal/source-protocol-proof object)) (= (:identity definition) (:definition object))))
+    {:status :rejected :reason :source-protocol-proof-subject-mismatch}
+   :else
+    (let [checked (protocol/check-proof (:protocol prepared) (:protocol-proof object))]
+     (assoc checked :model-definition (:definition checked) :definition (:identity definition)
+       :scope :all-finite-prefixes-of-source-extracted-state-model
+       :source-connection (:source-connection prepared) :live-actor-connection :not-established
+       :compiler-proof-authority false)))))
+
+(defn verify
+ ([definition] (verify {} definition))
+ ([options definition]
+  (let [prepared (prepare definition)]
+   (if-not (= :ready (:status prepared)) prepared
+    (let [result (protocol/verify options (:protocol prepared))
+          object (when (:proof result) {:formal/source-protocol-proof 1 :definition (:identity definition)
+                                        :protocol-proof (:proof result)})
+          checking (when object (check-proof definition object))]
+     (assoc result :definition (:identity definition) :model-definition (:identity (:protocol prepared))
+       :profile profile :proof object :checking checking
+       :status (if (and (= :checked (:status result)) (not= :checked-obligations (:status checking))) :error (:status result))
+       :scope :all-finite-prefixes-of-source-extracted-state-model
+       :source-connection (:source-connection prepared) :live-actor-connection :not-established
+       :handler-termination {:basis :finite-source-extracted-core :metatheory-connection :reviewed-not-mechanically-proved}
+       :compiler-proof-authority false))))))
+
+(defn- replay-step [prepared state event model-step]
+ (let [handler (first (filter #(= (:transition event) (:name %)) (:handlers prepared)))
+       assignment {"state" state "message" (:inputs event)}
+       result (core/evaluate (:body handler) (:parameters handler) assignment)
+       lowered (:lowered handler) terms (symbolic/bind-inputs (:inputs lowered) assignment)
+       ok (replay/value (get-in lowered [:outcome :ok]) terms)
+       code (replay/value (get-in lowered [:outcome :error]) terms)
+       matches? (case (:status model-step)
+                  :stepped (and (= :returned (:status result)) (= true ok) (= 0 code) (= (:value result) (:state model-step)))
+                  :failed (and (= :raised (:status result)) (= false ok) (= code (get (:errors lowered) (:error result)))
+                               (= state (:state model-step)) (= false (:state-committed model-step))) false)]
+  (assoc model-step :status (cond (contains? #{:incomplete :error} (:status result)) :incomplete
+                                matches? (:status model-step) :else :disagreement)
+    :model-phase (:phase model-step) :phase :handler :handler-core (:core handler)
+    :core-execution result :source-replay {:status (if matches? :valid :invalid)
+                                        :scope :concrete-source-extracted-core-and-state-model})))
+(defn step [definition state event]
+ (let [prepared (prepare definition)]
+  (if-not (= :ready (:status prepared)) prepared
+   (let [model-step (execution/step (:protocol prepared) state event)]
+    (assoc (if (contains? #{:stepped :failed} (:status model-step)) (replay-step prepared state event model-step) model-step)
+      :scope :source-extracted-state-model-step :source-connection (:source-connection prepared)
+      :live-actor-connection :not-established)))))
+
+(defn replay-trace
+ "Run the existing finite model trace and separately execute each real
+  extracted handler core. Only validated trace frames get source replay."
+ [definition initial events]
+ (let [prepared (prepare definition)]
+  (if-not (= :ready (:status prepared)) prepared
+   (let [result (execution/replay-trace (:protocol prepared) initial events)]
+    (if-not (= :replayed (:status result)) result
+     (let [frames (mapv (fn [index]
+                         (let [frame (nth (:frames result) index)]
+                          (if (contains? #{:stepped :failed} (:status frame))
+                           (replay-step prepared (:before frame) (nth events (dec index)) frame) frame)))
+                        (range (count (:frames result))))
+           bad (first (filter #(contains? #{:incomplete :disagreement} (:status %)) frames))]
+      (assoc result :status (if bad (:status bad) :replayed) :frames frames
+        :source-replay {:status (if bad :invalid :valid) :handlers (count (filter :core-execution frames))}
+        :scope :finite-source-extracted-state-model-trace
+        :source-connection (:source-connection prepared) :live-actor-connection :not-established)))))))

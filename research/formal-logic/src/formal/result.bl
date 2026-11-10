@@ -3,7 +3,7 @@
 ;; An evidence projection, not a new checker. Raw results remain available and
 ;; no projection can grant compiler authority or complete missing evidence.
 (def tags {:formal/query :query :formal/contract :contract :formal/loop :loop :formal/translation :translation
-           :formal/protocol :protocol :formal/protocol-trace :protocol-trace})
+           :formal/protocol :protocol :formal/source-protocol :source-protocol :formal/protocol-trace :protocol-trace})
 (defn kind [subject]
  (let [present (if (map? subject) (vec (filter #(contains? subject %) (keys tags))) [])]
   (if (and (= 1 (count present)) (= 1 (get subject (first present))))
@@ -30,6 +30,9 @@
   :protocol {:kind :portable-protocol-obligations
              :status (if (= :checked-obligations (get-in raw [:checking :status])) :checked :not-established)
              :object (:proof raw) :checking (:checking raw)}
+  :source-protocol {:kind :portable-source-protocol-obligations
+                    :status (if (= :checked-obligations (get-in raw [:checking :status])) :checked :not-established)
+                    :object (:proof raw) :checking (:checking raw)}
   {:kind :none :status :not-established}))
 (defn- native-rows [subject raw execution]
  (case (kind subject)
@@ -38,6 +41,8 @@
                       [{:id :feasibility :result feasible}]) (get-in raw [:backend :obligations])))
   :protocol (vec (concat (when-let [feasible (get-in raw [:backend :feasibility])]
                           [{:id :feasibility :result feasible}]) (get-in raw [:backend :obligations])))
+  :source-protocol (vec (concat (when-let [feasible (get-in raw [:backend :feasibility])]
+                                 [{:id :feasibility :result feasible}]) (get-in raw [:backend :obligations])))
   (vec (keep (fn [key] (when-let [result (get-in raw [:backend key])] {:id key :result result}))
              [:feasibility :property]))))
 (defn attach
@@ -47,8 +52,8 @@
  (let [type (kind subject) cert (certificate subject raw execution)
        status (or (:verdict raw) (:status raw))
        verdict (get {:checked :entails :proved :entails :uncertified :entails} status status)
-       ledger (if (contains? #{:loop :protocol} type)
-                {:kind :per-obligation :input-precondition (get subject :requires (:init subject))
+       ledger (if (contains? #{:loop :protocol :source-protocol} type)
+                {:kind :per-obligation :input-precondition (get subject :requires (get subject :init (get-in subject [:protocol :init])))
                  :rows (mapv (fn [row] {:id (:id row) :kind (:kind row)
                                         :assumptions (get-in row [:proof :checking :assumptions])}) (:obligations raw))}
                 {:kind :single-statement :assertions
@@ -68,11 +73,12 @@
                       :relation (get subject :relation (get {:contract :return-value-and-declared-errors
                                                             :loop :normal-return-and-postcondition
                                                             :protocol :normal-step-and-state-invariant
+                                                            :source-protocol :normal-step-and-state-invariant
                                                             :protocol-trace :finite-prefix-state-and-normal-step-safety} type))
                       :profile (:profile subject)
                       :basis (cond (= :checked (:status cert)) :checked-certificate
                                    (contains? #{:proved :uncertified} status) :solver-verdict
-                                   (and (= :translation type) (= :refuted status)) :term-and-core-replay
+                                   (and (contains? #{:contract :translation} type) (= :refuted status)) :term-and-core-replay
                                    (and (= :protocol-trace type) (= :refuted status)) :term-and-state-trace-replay
                                    (contains? #{:sat :refuted :obligation-refuted} status) :independent-term-replay
                                    :else :reported-evidence)

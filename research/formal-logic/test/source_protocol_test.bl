@@ -1,0 +1,142 @@
+(ns formal.source-protocol-test
+ (:require [formal.source-protocol :as source] [formal.protocol :as protocol]
+           [formal.api :as formal] [formal.term :as t] [formal.core :as core]))
+
+(defn rehash [definition]
+ (assoc definition :identity
+  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
+                 (list (tuple :case :lower)))))
+(def bank-spec
+ {:name "source-bank" :state {"balance" t/Int "credits" t/Int "debits" t/Int}
+  :init (fn [s] (t/all (mapv #(t/eq % (t/int 0)) (vals s))))
+  :invariants {"nonnegative" (fn [s] (t/ge (get s "balance") (t/int 0)))
+               "conserved" (fn [s] (t/eq (get s "balance") (t/sub (get s "credits") (get s "debits"))))}
+  :handlers [{:name "deposit" :inputs {"amount" t/Int}
+               :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+               :source "(fn [state message] (assoc state \"balance\" (+ (get state \"balance\") (get message \"amount\")) \"credits\" (+ (get state \"credits\") (get message \"amount\"))))"}
+              {:name "withdraw" :inputs {"amount" t/Int}
+               :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+               :source "(fn [s msg] (if (<= (get msg \"amount\") (get s \"balance\")) (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\")) \"debits\" (+ (get s \"debits\") (get msg \"amount\"))) s))"}]})
+(def bank (source/define bank-spec))
+(def zero-state {"balance" 0 "credits" 0 "debits" 0})
+(defn event [name amount] {:transition name :inputs {"amount" amount}})
+
+(deftest closed-source-handlers-are-derived-repeatedly-from-real-anf
+ (let [saved (erlang/binary_to_term (erlang/term_to_binary bank)) prepared (source/prepare saved)
+       result (formal/check saved) description (formal/describe saved)]
+  (is (= bank saved))
+  (is (= bank (source/define bank-spec)))
+  (is (= :ready (:status prepared)) (pr-str prepared))
+  (is (= :source-protocol (:subject-kind result)))
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :checked (get-in result [:evidence :certificate :status])))
+  (is (= :portable-source-protocol-obligations (get-in result [:evidence :certificate :kind])))
+  (is (= :per-obligation (get-in result [:evidence :assumptions :kind])))
+  (is (= :all-finite-prefixes-of-source-extracted-state-model (:scope result)))
+  (is (= :reviewed-source-anf-core-state-model (:source-connection result)))
+  (is (= :not-established (:live-actor-connection result)))
+  (is (= false (get-in result [:evidence :authority :compiler])))
+  (is (= "source-bank" (:name description)))
+  (is (= (get-in bank [:protocol :schema]) (:state-schema description)))
+  (is (= ["deposit" "withdraw"] (:transitions description)))
+  (is (= 2 (count (:handlers description))))
+  (is (= 3 (count (:obligations description))))
+  (is (= :checked-obligations (:status (formal/check-source-protocol-proof bank (:proof result)))))
+  (is (= :rejected (:status (formal/check-source-protocol-proof bank (get-in result [:proof :protocol-proof])))))
+  (is (= :rejected (:status (formal/check-source-protocol-proof bank (assoc (:proof result) :definition "other")))))))
+
+(deftest source-extracted-induction-is-common-to-both-engines
+ (let [comparison (formal/compare bank {:initial-state zero-state})]
+  (is (= true (:logical-agreement comparison)) (pr-str comparison))
+  (is (= true (:backend-status-agreement comparison)))
+  (is (= false (:disagreement comparison)))
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (get-in comparison [:results engine])]
+    (is (= :checked (:status result)))
+    (is (= :replayed-initial-state (:assumption-consistency result)))
+    (is (= :checked (get-in result [:evidence :certificate :status])))
+    (is (= 4 (count (get-in result [:evidence :native]))))
+    (is (every? #(= :not-checked (get-in % [:result :certificate :status])) (get-in result [:backend :obligations])))))))
+
+(deftest finite-source-traces-execute-each-handler-core-separately
+ (let [events [(event "deposit" 10) (event "withdraw" 3) (event "withdraw" 100)
+                {:stutter true} (event "deposit" 2)]
+       result (formal/replay-source-protocol-trace bank zero-state events)
+       frames (filter :core-execution (:frames result))]
+  (is (= :replayed (:status result)) (pr-str result))
+  (is (= :holds (:safety result)))
+  (is (= {"balance" 9 "credits" 12 "debits" 3} (:state result)))
+  (is (= :valid (get-in result [:source-replay :status])))
+  (is (= 4 (get-in result [:source-replay :handlers])))
+  (is (= :not-established (:live-actor-connection result)))
+  (is (every? #(= :valid (get-in % [:source-replay :status])) frames))
+  (is (every? #(= :returned (get-in % [:core-execution :status])) frames)))
+ (is (= :outside-assumptions (:status (formal/source-protocol-step bank zero-state (event "deposit" -1)))))
+ (is (= :invalid (:status (formal/source-protocol-step bank zero-state {:transition "missing" :inputs {}}))))
+ (is (= :invalid (:status (formal/replay-source-protocol-trace bank {"balance" 1 "credits" 0 "debits" 0} []))))
+ (doseq [balance [0 1 7] amount [0 2 10]]
+  (let [state {"balance" balance "credits" balance "debits" 0}
+        result (formal/source-protocol-step bank state (event "withdraw" amount))]
+   (is (= :stepped (:status result)))
+   (is (= (if (<= amount balance) (- balance amount) balance) (get-in result [:state "balance"])))
+   (is (= :valid (get-in result [:source-replay :status]))))))
+
+(deftest whole-handler-failure-is-an-attempt-even-for-empty-state
+ (doseq [[name schema source initial]
+          [["empty-failure" {} "(fn [s msg] (do (quot 1 0) {}))" {}]
+           ["hidden-failure" {"value" t/Int}
+             "(fn [s msg] (get {\"next\" s \"unobserved\" (quot 1 0)} \"next\"))" {"value" 0}]]]
+  (let [definition (source/define {:name name :state schema
+                     :handlers [{:name "attempt" :source source}]})
+        event {:transition "attempt" :inputs {}}
+        step (formal/source-protocol-step definition initial event)
+        trace (formal/replay-source-protocol-trace definition initial [event {:stutter true}])]
+   (is (= :failed (:status step)) (pr-str step))
+   (is (= :handler (:phase step)))
+   (is (= :guard (:model-phase step)))
+   (is (= false (:state-committed step)))
+   (is (= initial (:state step)))
+   (is (= :zero-divisor (get-in step [:core-execution :error])))
+   (is (= :valid (get-in step [:source-replay :status])))
+   (is (= :replayed (:status trace)))
+   (is (= :violated (:safety trace)))
+   (is (= true (:failed trace)))
+   (is (= :valid (get-in trace [:source-replay :status])))
+   (is (= :invalid (:status (formal/replay-source-protocol-trace definition initial [event event]))))
+   (doseq [engine [:z3 :oxiz]]
+    (is (= :obligation-refuted (:status (formal/check {:backend engine} definition))))))))
+
+(deftest induction-refutation-is-distinct-from-source-trace-refutation
+ (let [definition (source/define {:name "source-loose-invariant" :state {"i" t/Int}
+                    :init (fn [s] (t/eq (get s "i") (t/int 0)))
+                    :invariant (fn [s] (t/any [(t/eq (get s "i") (t/int 0)) (t/eq (get s "i") (t/int 2))]))
+                    :handlers [{:name "decrement" :source "(fn [s msg] (if (> (get s \"i\") 0) (assoc s \"i\" (- (get s \"i\") 1)) s))"}]})]
+  (doseq [engine [:z3 :oxiz]]
+   (is (= :obligation-refuted (:status (formal/check {:backend engine} definition)))))
+  (is (= :holds (:safety (source/replay-trace definition {"i" 0} [{:transition "decrement" :inputs {}}]))))))
+
+(deftest proof-caches-cannot-substitute-source-or-author-updates
+ (let [checked (formal/check bank) object (:proof checked)
+       changed-source "(fn [s msg] (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\"))))"]
+  (doseq [changed [(assoc bank :model {}) (assoc bank :source-connection :mechanically-proved)
+                   (assoc bank :profile :live-actors)
+                   (assoc-in bank [:handlers 0 :source] changed-source)
+                   (assoc-in bank [:handlers 0 :core] "false-core")
+                   (update bank :handlers pop)
+                   (assoc bank :protocol (rehash (assoc-in (:protocol bank) [:transitions 0 :guard :value] (t/bool false))))
+                   (assoc bank :protocol (rehash (assoc-in (:protocol bank) [:transitions 0 :next "balance" :value] (t/int 999))))]]
+   (let [changed (rehash changed)]
+    (is (= :unsupported (:status (source/prepare changed))))
+    (is (= :rejected (:status (formal/check-source-protocol-proof changed object))))))
+  ;; Equal core behavior with different source spelling is a distinct source
+  ;; subject. Its model proof can be reused only through a new outer object.
+  (let [other (source/define (assoc-in bank-spec [:handlers 1 :source]
+                   "(fn [state message] (if (<= (get message \"amount\") (get state \"balance\")) (assoc state \"balance\" (- (get state \"balance\") (get message \"amount\")) \"debits\" (+ (get state \"debits\") (get message \"amount\"))) state))"))]
+   (is (not= (:identity bank) (:identity other)))
+   (is (= :rejected (:status (formal/check-source-protocol-proof other object))))))
+ (doseq [bad [(assoc bank-spec :mailbox :unbounded)
+              (assoc-in bank-spec [:handlers 0 :next] (fn [s in] s))
+              (assoc-in bank-spec [:handlers 0 :guard] (t/bool true))
+              (assoc-in bank-spec [:handlers 0 :source] "(fn [s msg] (println s))")
+              (assoc-in bank-spec [:handlers 0 :source] "(fn [s msg] (get s \"balance\"))")]]
+  (is (thrown? (source/define bad)))))
