@@ -34,7 +34,7 @@ for name, digest in snapshot['sha256'].items():
 log = (E / 'checks.txt').read_text()
 counts = {name: int(count) for name, count in re.findall(r'✓\s+(formal\.[\w-]+)\s+(\d+) passed', log)}
 require(len(counts) == 33 and '33 file(s) passed, 0 failed, 0 incoherent' in log, 'green thirty-three-file integration')
-require(counts['formal.witness-test'] == 274 and counts['formal.query-test'] == 76, 'witness and shared-query regression coverage')
+require(counts['formal.witness-test'] == 277 and counts['formal.query-test'] == 76, 'witness and shared-query regression coverage')
 require('Ran 5 tests' in (E / 'bridge-check.txt').read_text() and '\nOK\n' in (E / 'bridge-check.txt').read_text(), 'independent constructive checker tests')
 require('Ran 4 tests' in (E / 'prior-term-regression-check.txt').read_text() and '\nOK\n' in (E / 'prior-term-regression-check.txt').read_text(), 'original term-checker regressions after shared grammar extraction')
 pins = {name: read(P / ('metatheory/' + name + '-pin.json')) for name in ['refutation', 'terms', 'witness']}
