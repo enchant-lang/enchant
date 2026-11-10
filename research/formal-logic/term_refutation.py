@@ -169,13 +169,13 @@ def faithful(node, ast, integers, booleans):
     return len(ast) == len(args) + 1 and ast[0] == tag and all(faithful(child, decoded, integers, booleans) for child, decoded in zip(args, ast[1:]))
 
 
-HEADER = "import Terms\nset_option maxRecDepth 5000\nset_option maxHeartbeats 2000000\nopen FormalRefutation FormalTerms\n\ndef originalQuestion : Question :=\n"
+HEADER = "import Terms\nset_option maxRecDepth 5000\nset_option maxHeartbeats 2000000\nset_option linter.unusedSimpArgs false\nopen FormalRefutation FormalTerms\n\ndef originalQuestion : Question :=\n"
 PROBLEM = "\n\ndef packetProblem : Problem :=\n"
 PROOF = "\n\ndef packetProof : Proof :=\n"
 MAP_I = "\n\ndef integerMap (integers : Nat → Int) (index : Nat) : Int := integers (("
 MAP_B = "\n\ndef booleanMap (booleans : Nat → Bool) (index : Nat) : Bool := booleans (("
 MAP_END = " : List Nat)[index]?.getD 0)"
-SIMPS = "Term.eval, strict₂, partial₂, divide, modulus, Problem.values, Formula.eval, Row.holds, dot, integerMap, booleanMap"
+SIMPS = "Term.eval, strict₂, partial₂, divide, modulus, Row.holds, dot, integerMap, booleanMap"
 
 
 def tail(boolean_count):
@@ -192,6 +192,8 @@ theorem normalizationConnected : ∀ integers booleans,
   simp only [originalQuestion] at failed
   simp only [Problem.satisfied, packetProblem]
   simp only [List.mem_cons, List.not_mem_nil, forall_eq_or_imp, forall_eq, forall_false, implies_true, and_true]
+  dsimp only [Formula.eval]
+  dsimp only [Problem.values]
 """ + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat first | omega | split at * | progress simp_all [{SIMPS}])\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
@@ -266,13 +268,14 @@ def run(path, output):
         for pin, module in zip(pins, ["Refutation", "Terms"]):
             shutil.copyfile(P / pin["compiled"]["path"], library / (module + ".olean"))
         check = work / "Check.lean"; check.write_text(text)
-        completed = subprocess.run([str(lean), "--root=" + str(work), "-o", str(work / "Check.olean"), str(check)], cwd=work,
-                                   env=dict(os.environ, LEAN_PATH=str(library)), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
-        (output / "lean.txt").write_text(completed.stdout)
-        require(completed.returncode == 0 and "sorryAx" not in completed.stdout and "warning:" not in completed.stdout, "Lean did not accept original-term connection/refutation")
+        with (output / "lean.txt").open("w") as log:
+            completed = subprocess.run([str(lean), "--root=" + str(work), "-o", str(work / "Check.olean"), str(check)], cwd=work,
+                                       env=dict(os.environ, LEAN_PATH=str(library)), text=True, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+        transcript = (output / "lean.txt").read_text()
+        require(completed.returncode == 0 and "sorryAx" not in transcript and "warning:" not in transcript, "Lean did not accept original-term connection/refutation")
         import re
         audits = {}
-        for line in completed.stdout.splitlines():
+        for line in transcript.splitlines():
             match = re.fullmatch(r"'([^']+)' (?:does not depend on any axioms|depends on axioms: \[(.*)\])", line)
             require(match is not None, "unexpected term theorem audit")
             audits[match[1]] = match[2].split(", ") if match[2] else []
