@@ -1,0 +1,60 @@
+(ns formal.runtime-recheck
+ (:require [formal.api :as formal] [formal.runtime-outcome :as outcome] [interop]))
+
+;; This command checks the ETF records in a fresh VM. It starts no observation
+;; actor, loads no recorded BEAM and calls no recorded application handler.
+(def data (erlang/binary_to_term (File/read! "research/formal-logic/evidence/actor-runtime/examples.etf") (list :safe)))
+(defn inspect-checks [action]
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       capture (erlang/fun_info outcome/capture)
+       capture-module (Keyword/get capture :module) capture-name (Keyword/get capture :name)
+       tracer (spawn (fn [] (loop [calls 0 loads []]
+                       (receive
+                        [:trace _ :call [module function arguments]]
+                         (recur (if (and (= module capture-module) (= function capture-name)) (inc calls) calls)
+                           (if (and (= :code module) (= :load_binary function)
+                                    (String/starts_with? (str (first arguments)) "Elixir.Formal.Observed."))
+                            (conj loads (str (first arguments))) loads))
+                        [:reset seen] :when (= seen ticket) (do (erlang/send parent [:reset-done ticket calls]) (recur 0 []))
+                        [:finish seen] :when (= seen ticket) (erlang/send parent [:check-traces ticket {:handler-captures calls :observed-module-loads loads}])
+                        _ (recur calls loads)))))
+       patterns [(tuple :code :load_binary 3) (tuple capture-module capture-name (Keyword/get capture :arity))]]
+  (try
+   (doseq [pattern patterns] (erlang/trace_pattern pattern true (list :local)))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   ;; Calibrate the capture trace with a synthetic function, before the actual
+   ;; record-check window. It is not a recorded application handler.
+   (outcome/capture (fn [s msg] s) {} {} map?)
+   (let [barrier (erlang/trace_delivered :all)]
+    (receive [:trace_delivered :all seen] :when (= seen barrier) :ok (after 5000 (throw :trace-deadline))))
+   (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:reset-done seen calls] :when (= seen ticket) calls (after 5000 (throw :trace-deadline)))]
+    (assert (pos? calibration) "Capture trace calibration failed")
+    (let [value (action) barrier (erlang/trace_delivered :all)]
+     (receive [:trace_delivered :all seen] :when (= seen barrier) :ok (after 5000 (throw :trace-deadline)))
+     (erlang/send tracer [:finish ticket])
+     {:records value :calibration-calls calibration
+      :trace (receive [:check-traces seen result] :when (= seen ticket) result (after 5000 (throw :trace-deadline)))}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (doseq [pattern patterns] (erlang/trace_pattern pattern false (list :local)))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def inspected
+ (inspect-checks (fn []
+ (mapv (fn [row]
+         (let [result (formal/check-runtime-observation (:definition row) (get-in row [:observation :receipt]))]
+          (assert (= :conforming (:status result)) (pr-str result))
+          (assert (= (get-in row [:observation :checking :runtime-safety]) (:runtime-safety result)))
+          {:id (:id row) :status (:status result) :runtime-safety (:runtime-safety result)
+           :sdk-check (:sdk-check result)})) (into (:direct data) (:native data))))))
+(def results (:records inspected))
+(assert (= 0 (get-in inspected [:trace :handler-captures])))
+(assert (= [] (get-in inspected [:trace :observed-module-loads])))
+(File/write! "research/formal-logic/evidence/actor-runtime/fresh-replay.json"
+ (interop/->json {:schema :enchant.formal.actual-runtime-recheck-v1
+                 :records results :trace (:trace inspected) :calibration-calls (:calibration-calls inspected)
+                 :recorded-handler-invocations 0 :recorded-beam-loads 0
+                 :scope :fresh-vm-recorded-conformance-check :compiler-proof-authority false}))
+(println {:records (count results) :conforming (count (filter #(= :conforming (:status %)) results))
+          :runtime-code-matches-current (count (filter #(get-in % [:sdk-check :runtime-code-match-current]) results))
+          :recorded-beam-loads 0 :recorded-handler-invocations 0})

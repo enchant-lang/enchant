@@ -1,0 +1,64 @@
+(ns formal.runtime-check
+ (:require [formal.api :as formal] [formal.term :as t] [interop]))
+
+(def account
+ {:name "runtime-account" :state {"balance" t/Int "flag" t/Bool}
+  :init (fn [s] (t/all [(t/eq (get s "balance") (t/int 0)) (get s "flag")]))
+  :invariant (fn [s] (t/ge (get s "balance") (t/int 0)))
+  :handlers [{:name "deposit" :inputs {"amount" t/Int}
+               :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))])
+               :source "(fn [s msg] (assoc s \"balance\" (+ (get s \"balance\") (get msg \"amount\"))))"}
+              {:name "withdraw" :inputs {"amount" t/Int}
+               :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))])
+               :source "(fn [s msg] (if (<= (get msg \"amount\") (get s \"balance\")) (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\"))) s))"}]})
+(def cases
+ [{:id :safe-account :spec account :initial {"balance" 0 "flag" true} :safety :holds
+   :events [{:transition "deposit" :inputs {"amount" 3}} {:transition "withdraw" :inputs {"amount" 2}} {:stutter true}]}
+  {:id :unsafe-withdrawal :spec (assoc-in (assoc account :name "runtime-unsafe") [:handlers 1 :source]
+                 "(fn [s msg] (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\"))))")
+   :initial {"balance" 0 "flag" true} :safety :violated :events [{:transition "withdraw" :inputs {"amount" 1}}]}
+  {:id :hidden-field-failure :spec {:name "runtime-hidden" :state {"n" t/Int}
+            :handlers [{:name "attempt" :source "(fn [s msg] (get {\"next\" s \"hidden\" (quot 1 0)} \"next\"))"}]}
+   :initial {"n" 5} :safety :violated :events [{:transition "attempt" :inputs {}} {:stutter true}]}
+  {:id :empty-state-failure :spec {:name "runtime-empty-failure" :state {}
+            :handlers [{:name "attempt" :source "(fn [s msg] (do (quot 1 0) {}))"}]}
+   :initial {} :safety :violated :events [{:transition "attempt" :inputs {}} {:stutter true}]}
+  {:id :signed-modulus :spec {:name "runtime-modulus" :state {"n" t/Int}
+            :handlers [{:name "step" :inputs {"divisor" t/Int}
+                         :source "(fn [s msg] (assoc s \"n\" (mod (get s \"n\") (get msg \"divisor\"))))"}]}
+   :initial {"n" -7} :safety :holds :events [{:transition "step" :inputs {"divisor" -3}}]}
+  {:id :unsafe-given-initial-state :spec {:name "runtime-initial" :state {"x" t/Int}
+            :init (fn [s] (t/eq (get s "x") (t/int 0)))
+            :invariant (fn [s] (t/gt (get s "x") (t/int 0))) :handlers []}
+   :initial {"x" 0} :safety :violated :events []}])
+(defn validate! [definition result]
+ (assert (= :observed (:status result)) (pr-str result))
+ (assert (= :conforming (get-in result [:checking :status])))
+ (let [receipt (:receipt result)]
+  (assert (= :conforming (:status (formal/check-runtime-observation definition
+                  (erlang/binary_to_term (erlang/term_to_binary receipt) (list :safe))))))
+  (assert (= false (get-in receipt [:cleanup :actor-alive])))
+  (assert (every? #(and (:retired %) (not (:loaded %))) (get-in receipt [:cleanup :modules])))) result)
+(def direct
+ (mapv (fn [sample]
+         (let [definition (formal/source-protocol (:spec sample))
+               result (validate! definition (formal/observe-protocol-trace definition (:initial sample) (:events sample)))]
+          (assert (= (:safety sample) (get-in result [:checking :runtime-safety])))
+          {:id (:id sample) :definition definition :observation result})) cases))
+(def unsafe (formal/source-protocol (:spec (nth cases 1))))
+(def native
+ (mapv (fn [engine]
+         (let [subject (formal/protocol-trace unsafe 1)
+               answer (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject)
+               observed (validate! unsafe (formal/observe-protocol-counterexample subject (get-in answer [:backend :property])))]
+          (assert (= :refuted (:status answer)))
+          (assert (= :violated (get-in observed [:checking :runtime-safety])))
+          {:id engine :definition unsafe :model-answer answer :observation observed})) [:z3 :oxiz]))
+(def data {:schema :enchant.formal.actual-runtime-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :direct direct :native native :compiler-proof-authority false})
+(File/write! "research/formal-logic/evidence/actor-runtime/examples.etf" (erlang/term_to_binary data))
+(File/write! "research/formal-logic/evidence/actor-runtime/examples.json" (interop/->json data))
+(println {:direct (count direct) :native-counterexamples (count native)
+          :outcomes (mapv (fn [r] [(:id r) (get-in r [:observation :status]) (get-in r [:observation :checking :runtime-safety])])
+                         (into direct native))})
