@@ -8,13 +8,21 @@
  (when-not ok (throw (ex-info (str "formal.refutation: " reason) {}))))
 (defn- gcd [a b]
  (loop [a (abs a) b (abs b)] (if (= b 0) a (recur b (erlang/rem a b)))))
+(declare binary-form)
+(defn- joined [tag identity forms]
+ (let [forms (vec forms) n (count forms)]
+  (case n
+   0 [:constant identity]
+   1 (binary-form (first forms))
+   (let [middle (erlang/div n 2)]
+    [tag (joined tag identity (take middle forms)) (joined tag identity (drop middle forms))]))))
 (defn- binary-form [form]
  (case (first form)
   :const [:constant (second form)]
   :atom [:atom (second form)]
   :not [:neg (binary-form (second form))]
-  :and (reduce (fn [right left] [:both (binary-form left) right]) [:constant true] (reverse (second form)))
-  :or (reduce (fn [right left] [:either (binary-form left) right]) [:constant false] (reverse (second form)))
+  :and (joined :both true (second form))
+  :or (joined :either false (second form))
   (throw (ex-info "formal.refutation: unknown normalized Boolean constructor" {}))))
 (defn- proof-data [proof]
  (case (:rule proof)
@@ -44,7 +52,8 @@
                           (require! (= 1 (reduce gcd 0 (vals (:coeff atom)))) "primitive normalized coefficients required")
                           [:linear (mapv #(get (:coeff atom) % 0) variables) (:bound atom)])
                         (throw (ex-info "formal.refutation: unknown normalized atom" {})))) (:atoms prepared))
-         booleans (vec (keep-indexed (fn [index atom] (when (= :boolean (:kind atom)) [index (:name atom)])) (:atoms prepared)))
+         booleans (vec (keep (fn [[index atom]] (when (= :boolean (:kind atom)) [index (:name atom)]))
+                         (map-indexed (fn [index atom] [index atom]) (:atoms prepared))))
          kernel {:atoms atoms :formulas (mapv binary-form (:formulas prepared)) :proof (proof-data (:proof object))}
          packet (identity/seal
                   {:formal/normalized-refutation 1 :profile profile :rules (:rules prepared)
