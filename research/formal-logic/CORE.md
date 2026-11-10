@@ -69,3 +69,9 @@ certificate checker can handle the Boolean/linear Int subset of those questions;
 division, nonlinear operations and nonconstant Int-valued branches may still
 require unsupported proof rules. Solver support and independent proof support
 are reported separately.
+
+The separate [Lean model](metatheory/README.md) now mechanically checks typed
+model outcomes, selected evaluation laws and ranking rules. Its proof receipt
+keeps the BL implementation/ANF/term/compiler correspondences explicitly
+unproved. Bound names in the BL core are canonicalized to avoid free-name
+capture and compiler fresh-counter changes in semantic identities.
