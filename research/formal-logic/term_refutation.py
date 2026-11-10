@@ -175,7 +175,7 @@ PROOF = "\n\ndef packetProof : Proof :=\n"
 MAP_I = "\n\ndef integerMap (integers : Nat → Int) (index : Nat) : Int := integers (("
 MAP_B = "\n\ndef booleanMap (booleans : Nat → Bool) (index : Nat) : Bool := booleans (("
 MAP_END = " : List Nat)[index]?.getD 0)"
-SIMPS = "Term.eval, strict₂, partial₂, divide, modulus, Row.holds, dot, integerMap, booleanMap"
+SIMPS = "Term.eval, strict₂, partial₂, divide, modulus"
 
 
 def tail(boolean_count):
@@ -194,6 +194,10 @@ theorem normalizationConnected : ∀ integers booleans,
   simp only [List.mem_cons, List.not_mem_nil, forall_eq_or_imp, forall_eq, forall_false, implies_true, and_true]
   dsimp only [Formula.eval]
   dsimp only [Problem.values]
+  simp only [List.getElem?_cons, List.getElem?_nil]
+  simp only [Row.holds]
+  dsimp only [dot]
+  simp [integerMap, booleanMap]
 """ + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat first | omega | split at * | progress simp_all [{SIMPS}])\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
