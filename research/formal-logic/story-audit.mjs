@@ -31,7 +31,11 @@ try{
   check(size.name+': executable certificate example shows its checked result',await evaluate("/:proof\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':source-connection :not-established')"));
   check(size.name+': executable loop example remains a model argument',await evaluate("/:loop-model\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':conditional-normal-return-of-loop-model')"));
   check(size.name+': core change is gated by checked outcome evidence',await evaluate("/:core-change\\s+:optimized/.test(document.body.innerText)&&document.body.innerText.includes(':return-value-and-named-error')"));
-  check(size.name+': four subject kinds share the checked interface',await evaluate("document.body.innerText.includes(':subjects [:query :contract :loop :translation]')&&document.body.innerText.includes(':common-term-interface true')"));
+  check(size.name+': five subject kinds share the checked interface',await evaluate("document.body.innerText.includes(':subjects [:query :contract :loop :translation :protocol]')&&document.body.innerText.includes(':common-term-interface true')"));
+  check(size.name+': protocol proof retains its unbounded model scope',await evaluate("/:protocol-model\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':all-finite-prefixes-of-the-declared-state-model')"));
+  check(size.name+': protocol evidence retains the actor and progress boundary',await evaluate("document.body.innerText.includes(':source-connection :authored-model-not-live-beam-actor')&&/:liveness\\s+:not-established/.test(document.body.innerText)"));
+  await evaluate("[...document.querySelectorAll('pre')].find(e=>e.innerText.includes(':protocol-model :checked'))?.scrollIntoView({block:'center'})");
+  await shot(size.name+'-protocol-proof');
   await navigate('/#s-the-big-idea');
   check(size.name+': comparison reference role grants no authority',await evaluate("document.body.innerText.includes('Z3 is now called the reference engine')&&document.body.innerText.includes('That role gives it no compiler authority')"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Let the optimizer propose'))?.scrollIntoView({block:'start'})");
@@ -124,7 +128,7 @@ try{
  check('Catalog comes from three annotated renderer definitions',record.length===1&&record[0].qualified==='formal.presentation/comparison-card'&&record[0].source.endsWith('presentation.bl'));
  check('Unknown preview routes refuse explicitly',(await fetch(base+'/views?view=missing')).status===404);
  check('Anonymous answer writes are denied',(await fetch(base+'/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'formal-total-core-direction',answer:'agree'})})).status===403);
- for(const path of ['/metatheory/Core.lean','/evidence/metatheory/qualification.json','/evidence/contracts/qualification.json','/src/formal/certificate.bl','/LOOPS.md','/evidence/loops/examples.json','/evidence/loops/qualification.json','/evidence/loops/model-qualification.json','/TRANSLATION.md','/src/formal/translation.bl','/src/formal/optimize.bl','/src/formal/result.bl','/src/formal/api.bl','/evidence/translation/qualification.json','/evidence/translation/examples.json']){
+ for(const path of ['/metatheory/Core.lean','/evidence/metatheory/qualification.json','/evidence/contracts/qualification.json','/src/formal/certificate.bl','/LOOPS.md','/evidence/loops/examples.json','/evidence/loops/qualification.json','/evidence/loops/model-qualification.json','/TRANSLATION.md','/src/formal/translation.bl','/src/formal/optimize.bl','/src/formal/result.bl','/src/formal/api.bl','/evidence/translation/qualification.json','/evidence/translation/examples.json','/PROTOCOLS.md','/src/formal/protocol.bl','/src/formal/protocol-run.bl','/evidence/protocol/model-qualification.json','/evidence/protocol/examples.json','/evidence/protocol/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared source/evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
