@@ -24,7 +24,14 @@ def agrees (actual : Outcome τ) (ok : Option Bool) (value : Option (Value τ))
   | .returned result => ok = some true ∧ value = some result ∧ error = some 0
   | .raised reason => ok = some false ∧ error = some (code reason)
 
+abbrev intLit {context : List BeamLispCore.Ty} (value : Int) : Expr context .int := .literal value
+abbrev boolLit {context : List BeamLispCore.Ty} (value : Bool) : Expr context .bool := .literal value
+abbrev unitLit {context : List BeamLispCore.Ty} : Expr context .unit := .literal ()
+abbrev localExpr (sort : BeamLispCore.Ty) (index : Var context sort) : Expr context sort := .variable index
+
 def errorName (code : Nat) : String := if code = 1 then "zero-divisor" else "core-error/" ++ toString code
+
+abbrev raiseExpr (sort : BeamLispCore.Ty) (code : Nat) : Expr context sort := .raise (errorName code)
 
 def errorCode (codes : List Nat) (reason : String) : Int :=
   Int.ofNat ((codes.find? fun code => errorName code == reason).getD 0)
@@ -42,7 +49,7 @@ def modulusValue (a b : Int) : Int :=
 
 theorem quotient_value (a b : Int) (nonzero : b ≠ 0) : quotientValue a b = a.tdiv b := by
   have nonnegative := Int.emod_nonneg a nonzero
-  rw [Int.tdiv_eq_ediv, Int.dvd_iff_emod_eq_zero]
+  simp only [Int.tdiv_eq_ediv, Int.dvd_iff_emod_eq_zero]
   by_cases negative : a < 0
   · have notNonneg : ¬ 0 ≤ a := by omega
     by_cases exactDivision : a % b = 0
