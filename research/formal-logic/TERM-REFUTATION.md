@@ -103,9 +103,14 @@ The existing normalized checker limits also apply. The proof process has a
 proof is `not-accepted`, not a counterexample to the claim. These are limits of
 this generator and transport, not finite bounds on the theorem's integers.
 
-Accepted final theorem audits list `propext` and `Quot.sound`; computed
-normalized acceptance lists `propext`. The per-question connection's actual
-audit is recorded separately. The model's 14 general results have one empty
+The seventeen original checkpoint examples' final theorem audits list `propext`
+and `Quot.sound`; computed normalized acceptance lists `propext`. The default
+standalone axiom policy remains `choice-free`, permitting those two foundations.
+`--axiom-policy lean-standard` additionally permits `Classical.choice`; the
+larger [common loop obligation](OBLIGATIONS.md) actually uses it in a generated
+arithmetic proof. Every connection and final theorem's actual audit is recorded
+and checked against the selected policy. A rejected choice-free proof does not
+show that no choice-free proof of the statement exists. The model's 14 general results have one empty
 audit, twelve using only `propext`, and the composition rule using `propext`
 and `Quot.sound`. Neither an admitted theorem nor a native-evaluation axiom is
 accepted. Receipts are local checker observations, not cryptographic execution
