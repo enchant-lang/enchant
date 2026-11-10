@@ -76,6 +76,12 @@ itself mechanically verified and does not certify all SMT theories.
 - Lean metatheory: the pinned tool checks a separate intrinsically typed model
   and ranking rules. This does not verify the BL implementation or compiler
   bridge; the metatheory directory records its actual checked scope.
+- Ranked loops: 3,404 focused assertions, six retained examples on both native
+  backends, and 22 checked Lean model theorems with explicit axiom dependencies.
+- Checked core translations and optimizer candidates: 4,432 combined assertions
+  and nine retained examples on both native backends. Common facade: 199 new
+  assertions in a separate focused run of 481 assertions. See
+  `evidence/translation/qualification.json` for exact qualified sources.
 
 ## Loops with checked ranking obligations
 
