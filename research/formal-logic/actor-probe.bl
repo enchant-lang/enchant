@@ -1,0 +1,102 @@
+(ns formal.actor-probe
+ (:require [formal.core :as core] [formal.elaborate :as elaborate] [formal.term :as t]
+           [anf :as anf] [lower :as lower] [interop]))
+
+;; Qualify the exact pinned compiler/callable/custody boundary before choosing
+;; a public actor observation interface. Each owned process invokes one admitted
+;; handler. This is not an arbitrary actor/refinement or universal proof.
+(def directory "research/formal-logic/evidence/actor-runtime")
+(File/mkdir_p! directory)
+(def state-type (core/record-sort {"count" t/Int "flag" t/Bool}))
+(def message-type (core/record-sort {"amount" t/Int}))
+(def parameters [["state" state-type] ["message" message-type]])
+(def samples
+ [{:id :ordinary-update :source "(fn [s msg] (assoc s \"count\" (+ (get s \"count\") (get msg \"amount\"))))"
+   :state {"count" 4 "flag" true} :message {"amount" 2}}
+  {:id :variadic-update :source "(fn [s msg] (assoc s \"count\" (+ (get s \"count\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))"
+   :state {"count" 4 "flag" true} :message {"amount" 2}}
+  {:id :signed-quotient :source "(fn [s msg] (assoc s \"count\" (quot (get s \"count\") (get msg \"amount\"))))"
+   :state {"count" 7 "flag" true} :message {"amount" -3}}
+  {:id :zero-divisor :source "(fn [s msg] (assoc s \"count\" (quot (get s \"count\") (get msg \"amount\"))))"
+   :state {"count" 7 "flag" true} :message {"amount" 0}}
+  {:id :hidden-field-failure :source "(fn [s msg] (get {\"next\" s \"unused\" (quot 1 0)} \"next\"))"
+   :state {"count" 7 "flag" true} :message {"amount" 3}}])
+(defn hex [bytes] (Base/encode16 bytes (list (tuple :case :lower))))
+(defn digest [bytes] (hex (crypto/hash :sha256 bytes)))
+(defn code-md5 [bytes] (elem (elem (beam_lib/md5 bytes) 1) 1))
+(defn descriptor [module node]
+ (anf/module module (list {:op :defn-clause :fname :run :params (list) :guard nil :body node :ann {}})
+                    (list [:run 0]) (list)))
+(defn outcome [function state message]
+ (try {:status :returned :value (function state message)}
+  (catch error {:status :raised :class (str (get error :__struct__)) :message (ex-message error)
+                :data (pr-str (ex-data error)) :raw (pr-str error) :runtime-error-name :unmapped})))
+(defn actor-call [function state message]
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       pair (spawn-monitor (fn [] (erlang/send parent [ticket (outcome function state message)])))
+       pid (elem pair 0) monitor (elem pair 1)]
+  (try
+   (let [result (receive [seen value] :when (= seen ticket) value (after 10000 {:status :timeout}))
+         down (receive [:DOWN seen :process child reason] :when (and (= seen monitor) (= child pid))
+                 {:status :observed :reason (pr-str reason)}
+                 (after 10000 {:status :timeout}))]
+    {:outcome result :monitor down :actor-alive (Process/alive? pid)})
+   (finally
+    (when (Process/alive? pid) (erlang/exit pid :kill))
+    (Process/demonitor monitor (list :flush))))))
+
+(defn probe [sample]
+ (try
+  (let [extracted (elaborate/prepare-function (:source sample) parameters)
+        _ (assert (= :elaborated (:status extracted)) (pr-str extracted))
+        repeated (elaborate/prepare-function (:source sample) parameters)
+        module (erlang/binary_to_atom (str "Elixir.Formal.RuntimeProbe.M" (System/unique_integer (list :positive))))
+        pair (lower/descriptor->beam (descriptor module (:anf extracted)))
+        again (lower/descriptor->beam (descriptor module (:anf repeated)))
+        bytes (elem pair 1) path (str directory "/" (name (:id sample)) ".beam")
+        _ (assert (= module (elem pair 0)))
+        _ (File/write! path bytes)
+        lease (BeamLisp.Env/retain_exact_binary! pair path)
+        cleanup (atom nil)
+        observed
+        (try
+         (BeamLisp.Env/with_code_lease (list module)
+          (fn []
+           (let [function (erlang/apply module :run (list))
+                 native? (erlang/is_function function 2)
+                 identity {:callable-kind (if native? :native-two-argument-function :other-callable)
+                           :module (when native? (str (elem (erlang/fun_info function :module) 1)))
+                           :arity (when native? (elem (erlang/fun_info function :arity) 1))
+                           :loaded-md5 (hex (erlang/apply module :module_info (list :md5)))
+                           :beam-md5 (hex (code-md5 bytes)) :beam-sha256 (digest bytes)
+                           :repeated-source-beam-sha256 (digest (elem again 1))
+                           :repeated-source-code-md5 (hex (code-md5 (elem again 1)))}
+                 result (actor-call function (:state sample) (:message sample))
+                 reference (core/evaluate (:core extracted) (into {} parameters)
+                              {"state" (:state sample) "message" (:message sample)})]
+            (assert (= (:loaded-md5 identity) (:beam-md5 identity)))
+            (assert (= (:identity extracted) (:identity repeated)))
+            {:artifact identity :runtime result :reference reference
+             :status-shape-matches (= (:status reference) (get-in result [:outcome :status]))
+             :returned-value-matches (when (= :returned (:status reference)) (= (:value reference) (get-in result [:outcome :value])))})))
+         (finally
+          (BeamLisp.Env/release_code! lease)
+          (reset! cleanup {:retired (BeamLisp.Env/retire_module! module) :still-loaded (erlang/module_loaded module)})))]
+   (merge {:id (:id sample) :source (:source sample) :core (:identity extracted)
+           :state (:state sample) :message (:message sample) :status :observed :beam path
+           :cleanup @cleanup :scope :single-owned-handler-invocation
+           :runtime-refinement :not-established :compiler-proof-authority false} observed))
+  (catch error {:id (:id sample) :status :probe-error :reason (ex-message error) :raw (pr-str error)})))
+(def results (mapv probe samples))
+(File/write! (str directory "/probe.json")
+ (interop/->json {:schema :enchant.formal.beam-handler-probe-v1
+  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+  :observations results :runtime-refinement :not-established :compiler-proof-authority false}))
+(println {:observations (mapv (fn [r] [(:id r) (:status r) (:status-shape-matches r)
+                                       (:returned-value-matches r) (:runtime r) (:cleanup r)]) results)})
+(assert (every? #(= :observed (:status %)) results) (pr-str results))
+(assert (every? :status-shape-matches results))
+(assert (every? #(or (nil? (:returned-value-matches %)) (:returned-value-matches %)) results))
+(assert (every? #(and (= :observed (get-in % [:runtime :monitor :status]))
+                       (= false (get-in % [:runtime :actor-alive]))
+                       (= false (get-in % [:cleanup :still-loaded]))) results))
