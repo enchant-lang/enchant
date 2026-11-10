@@ -169,13 +169,13 @@ def faithful(node, ast, integers, booleans):
     return len(ast) == len(args) + 1 and ast[0] == tag and all(faithful(child, decoded, integers, booleans) for child, decoded in zip(args, ast[1:]))
 
 
-HEADER = "import Terms\nset_option maxRecDepth 100000\nset_option maxHeartbeats 20000000\nopen FormalRefutation FormalTerms\n\ndef originalQuestion : Question :=\n"
+HEADER = "import Terms\nset_option maxRecDepth 5000\nset_option maxHeartbeats 2000000\nopen FormalRefutation FormalTerms\n\ndef originalQuestion : Question :=\n"
 PROBLEM = "\n\ndef packetProblem : Problem :=\n"
 PROOF = "\n\ndef packetProof : Proof :=\n"
 MAP_I = "\n\ndef integerMap (integers : Nat → Int) (index : Nat) : Int := integers (("
 MAP_B = "\n\ndef booleanMap (booleans : Nat → Bool) (index : Nat) : Bool := booleans (("
 MAP_END = " : List Nat)[index]?.getD 0)"
-SIMPS = "Question.assumed, originalQuestion, Term.eval, strict₂, partial₂, divide, modulus, packetProblem, Problem.satisfied, Problem.values, Formula.eval, Row.holds, dot, integerMap, booleanMap"
+SIMPS = "Term.eval, strict₂, partial₂, divide, modulus, Problem.values, Formula.eval, Row.holds, dot, integerMap, booleanMap"
 
 
 def tail(boolean_count):
@@ -188,6 +188,10 @@ theorem normalizationConnected : ∀ integers booleans,
     originalQuestion.claim.eval integers booleans ≠ some true →
     packetProblem.satisfied (integerMap integers) (booleanMap booleans) := by
   intro integers booleans assumed failed
+  simp [Question.assumed, originalQuestion] at assumed
+  simp only [originalQuestion] at failed
+  simp only [Problem.satisfied, packetProblem]
+  simp only [List.mem_cons, List.not_mem_nil, forall_eq_or_imp, forall_eq, forall_false, implies_true, and_true]
 """ + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat first | omega | split at * | progress simp_all [{SIMPS}])\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
