@@ -1,0 +1,97 @@
+(ns formal.contract-test
+ (:require [formal.contract :as contract] [formal.api :as formal]
+           [formal.core :as core] [formal.term :as t]))
+
+(def safe-increment
+ (formal/program-contract
+  {:name "safe-increment" :parameters {"x" t/Int} :source "(+ x 1)"
+   :requires (fn [in] (t/ge (get in "x") (t/int 0)))
+   :ensures (fn [in result] (t/ge result (t/int 1)))}))
+
+(deftest definitions-are-closed-data-bound-to-the-actual-core-and-contract
+ (let [roundtrip (erlang/binary_to_term (erlang/term_to_binary safe-increment))
+       prepared (contract/prepare roundtrip) result (formal/verify-contract roundtrip)]
+  (is (= :ready (:status prepared)))
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :not-checked (:assumption-consistency result)))
+  (is (= :conditional-core-term-contract (:scope result)))
+  (is (= :reviewed-not-mechanically-proved (:source-connection result)))
+  (is (= false (:compiler-proof-authority result)))
+  (doseq [tampered [(assoc safe-increment :body (core/literal -1))
+                   (assoc safe-increment :ensures (t/bool false))
+                   (assoc safe-increment :requires (t/bool false))
+                   (assoc safe-increment :profile :pretend-language)
+                   (assoc safe-increment :prefix "someone.else")
+                   (assoc safe-increment :problem (:problem prepared))]]
+   (is (= :unsupported (:status (contract/prepare tampered)))))))
+
+(deftest modeled-contracts-retain-feasibility-separately-from-entailment
+ (doseq [engine [:z3 :oxiz]]
+  (let [result (formal/verify-contract {:backend engine} safe-increment)]
+   (is (= :checked (:status result)) (pr-str result))
+   (is (= :replayed-witness (:assumption-consistency result)))
+   (is (= :proved (get-in result [:backend :property :verdict])))
+   (is (= :not-checked (get-in result [:backend :property :certificate :status])))
+   (is (= :checked (get-in result [:proof :checking :status]))))))
+
+(deftest a-real-account-contract-can-carry-a-weighted-integer-proof
+ (let [definition (contract/define
+        {:name "withdraw" :parameters {"balance" t/Int "amount" t/Int} :source "(- balance amount)"
+         :requires (fn [in] (t/all [(t/ge (get in "balance") (t/int 0))
+                                   (t/ge (get in "amount") (t/int 0))
+                                   (t/le (get in "amount") (get in "balance"))]))
+         :ensures (fn [in result] (t/ge result (t/int 0)))})
+       result (contract/verify definition)]
+  (is (= :checked (:status result)))
+  (is (= :entails (get-in result [:proof :checking :verdict])))
+  (is (= (:identity definition) (:definition result)))))
+
+(deftest an-unsafe-contract-has-an-executable-input-counterexample
+ (let [definition (contract/define
+        {:name "unsafe-withdraw" :parameters {"balance" t/Int "amount" t/Int} :source "(- balance amount)"
+         :requires (fn [in] (t/all [(t/ge (get in "balance") (t/int 0)) (t/ge (get in "amount") (t/int 0))]))
+         :ensures (fn [in result] (t/ge result (t/int 0)))})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (contract/verify {:backend engine} definition)
+         witness (get-in result [:backend :property :witness])
+         balance (get witness "input/balance") amount (get witness "input/amount")]
+    (is (= :refuted (:status result)) (pr-str result))
+    (is (= :valid (get-in result [:backend :property :validation :status])))
+    (is (>= balance 0)) (is (>= amount 0))
+    (is (< (- balance amount) 0))
+    (is (= (- balance amount) (get witness "value")))))))
+
+(deftest exact-error-and-effect-contracts-are-part-of-the-property
+ (let [spec {:name "allowed-failure" :parameters {} :core (core/raise-error :declined t/Int)
+             :returns :may :effects #{:raise} :raises #{:declined}}]
+  (is (= :checked (:status (contract/verify (contract/define spec)))))
+  (doseq [changed [(assoc spec :raises #{:another}) (assoc spec :effects #{}) (assoc spec :returns :must)]]
+   (doseq [engine [:z3 :oxiz]]
+    (is (= :refuted (:status (contract/verify {:backend engine} (contract/define changed)))))))))
+
+(deftest vacuity-is-visible-even-on-the-certificate-only-path
+ (let [definition (contract/define
+        {:name "impossible-input" :parameters {"x" t/Int} :source "x"
+         :requires (fn [in] (t/all [(t/lt (get in "x") (t/int 0)) (t/ge (get in "x") (t/int 0))]))
+         :ensures (t/bool false)})]
+  (doseq [opts [{} {:backend :z3} {:backend :oxiz}]]
+   (let [result (contract/verify opts definition)]
+    (is (= :vacuous (:status result)))
+    (is (= :inconsistent-checked (:assumption-consistency result)))
+    (is (= :checked (get-in result [:inconsistency-proof :status])))))))
+
+(deftest unsupported-domains-do-not-turn-solver-answers-into-checked-evidence
+ (let [definition (contract/define
+        {:name "square" :parameters {"x" t/Int} :source "(* x x)"
+         :ensures (fn [in result] (t/ge result (t/int 0)))})
+       checked (contract/verify definition) native (contract/verify {:backend :z3} definition)]
+  (is (= :unsupported (:status checked)))
+  (is (= :uncertified (:status native)))
+  (is (= false (:compiler-proof-authority native))))
+ (is (thrown? (contract/define {:name "foreign-input" :parameters {} :core (core/literal 1)
+                    :requires (t/variable "undeclared" t/Bool)})))
+ (is (thrown? (contract/define {:name "undeclared-function" :parameters {} :core (core/literal 1)
+                    :requires (t/uf "mystery" [] t/Bool [])})))
+ (is (thrown? (contract/define {:name "effect" :parameters {} :core (core/literal 1) :effects #{:io}})))
+ (is (thrown? (contract/define {:name "either" :parameters {} :core (core/literal 1) :source "1"})))
+ (is (thrown? (contract/define {:name "effect-source" :parameters {} :source "(println 1)"}))))
