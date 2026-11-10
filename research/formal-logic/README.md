@@ -47,6 +47,16 @@ integrated ten-file run passed 4,575 assertions. Derived scalar observations can
 use labelled replay when OxiZ leaves a compound value opaque; native model
 availability and certificate authority remain separate.
 
+[RECORD-HANDLERS.md](RECORD-HANDLERS.md) extends the core to closed records and
+actual source functions, preserves eager whole-record outcomes, and derives
+protocol state updates from real handler ANF. `formal/source-protocol` joins
+the common check/compare/describe interface; accepted source traces also execute
+every handler in the concrete core. The focused record/source-protocol run
+passed 1,292 assertions across six files. Six retained examples compare both
+native engines. The separate product/core model now checks 42 theorems with
+explicit axiom audits. Source/model correspondence and live actor semantics
+remain unproved; compiler authority remains disabled.
+
 [metatheory/Core.lean](metatheory/Core.lean) adds a separate typed mathematical
 model checked by pinned Lean 4.34.1. All 18 theorem audits report no axiom
 dependencies, including natural and lexicographic ranking rules. This does not
