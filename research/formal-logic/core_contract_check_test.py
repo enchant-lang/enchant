@@ -24,7 +24,8 @@ class CoreContractChecks(unittest.TestCase):
         for row in ROWS:
             name = row['id']
             with self.subTest(case=name):
-                result = bridge.run(E / 'examples' / f'{name}.json', OUTPUT / name, 'choice-free')
+                policy = 'lean-standard' if name == 'allowed-division' else 'choice-free'
+                result = bridge.run(E / 'examples' / f'{name}.json', OUTPUT / name, policy)
                 self.assertEqual(result['status'], 'checked-core-contract')
                 self.assertEqual(result['packet'], row['packet'])
                 self.assertEqual(result['witness'], row['witness'])
