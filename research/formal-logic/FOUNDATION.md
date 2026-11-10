@@ -242,6 +242,12 @@ itself mechanically verified and does not certify all SMT theories.
   choice-free proof exists. Standalone term checking retains its choice-free
   default. The original seventeen accepted term cases and five rejected
   alterations still pass after this policy extension.
+  The coherent run passed 8,860 assertions across 31 BL files, including 302
+  common coverage/policy assertions; all 187 backend verdicts remain unchanged.
+  All thirteen saved bundles reconstruct in a fresh VM and repackage supplied
+  certificates with positively calibrated proof-search/formal-session entries
+  observed before the window and zero inside it. Source phase preparation is
+  explicitly allowed, and no broader compiler-internal absence claim follows.
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
