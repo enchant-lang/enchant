@@ -1,7 +1,7 @@
 #+title: Beam Lisp, with reasons you can inspect
 #+subtitle: One language for programs, contracts and the evidence behind them.
 #+kicker: ENCHANT · FORMAL LOGIC LAB
-#+status: Autonomous implementation on main · core, contracts, ranked loops, checked changes and replayed bounded traces · source/runtime bridges in progress
+#+status: Autonomous implementation on main · records, source-function contracts and source-derived handler protocols · runtime and proof bridges in progress
 #+design: forest
 #+TODO: TODO NEXT DOING WAIT REVIEW | DONE DROP
 
@@ -123,7 +123,7 @@ The combined core/contract/loop/translation run passed 4,432 assertions, includi
 Read [[file:TRANSLATION.md][the interface and outcome relation]], [[file:src/formal/translation.bl][the independent translation boundary]], [[file:src/formal/optimize.bl][the candidate optimizer]], [[file:evidence/translation/checks.txt][its focused checks]], [[file:evidence/translation/examples.json][the actual examples and proofs]] and [[file:evidence/translation/qualification.json][the qualified source and artifacts]].
 
 ** The same conversation for every kind of promise
-The public =check=, =compare= and =describe= functions now accept a term question, a program contract, a loop contract, a translation, a protocol state model or a bounded trace subject. Each subject is ordinary BL data. The same evidence envelope explains the answer, its certificate, assumptions, input feasibility, source connection and native observations. The original detailed results remain available.
+The public =check=, =compare= and =describe= functions now accept a term question, a program contract, a loop contract, a translation, a protocol state model, a source-derived handler protocol or a bounded trace subject. Each subject is ordinary BL data. The same evidence envelope explains the answer, its certificate, assumptions, input feasibility, source connection and native observations. The original detailed results remain available.
 
 #+begin_rosetta
 What you want to know | Subject | What a checked answer concerns
@@ -182,9 +182,41 @@ Comparisons also distinguish native status agreement from logical agreement. Two
 
 Nine examples ran on both backends: ten unsafe answers became independently replayed traces, four safe answers had checked portable proofs, two safe answers remained solver-only, and two initial domains were vacuous. The combined run passed 473 assertions, including 103 trace assertions; a follow-up adds checks that repairing the final state cannot erase an earlier violation.
 
-The current Lean model now checks 30 theorems. Five new laws formalize finite model runs, stuttering, retained state and persistent failure, including the connection between successful finite runs and reachable states. Their printed axiom audits are empty. The correspondence to the BL unroller and executor remains reviewed and unproved.
+The bounded-run checkpoint checks 30 Lean theorems. Five laws formalize finite model runs, stuttering, retained state and persistent failure, including the connection between successful finite runs and reachable states. Their printed axiom audits are empty. The correspondence to the BL unroller and executor remains reviewed and unproved.
 
 See [[file:BOUNDED-TRACES.md][the bounded subject and replay rules]], [[file:src/formal/protocol-trace.bl][the decoder and independent checks]], [[file:evidence/protocol-traces/checks.txt][the combined check log]], [[file:evidence/protocol-traces/prefix-checks.txt][the repaired-prefix follow-up]], [[file:evidence/protocol-traces/examples.json][the actual native answers and replayed executions]], [[file:evidence/protocol-traces/qualification.json][the exact qualified artifacts]] and [[file:evidence/protocol-traces/model-qualification.json][the mathematical model and axiom ledger]].
+
+** A promise about the function you actually wrote
+The next connection is now implemented: ordinary record-shaped source functions can carry contracts, and state transitions can be derived from actual handler source. You write a function that reads a state and a message and returns the next state. The interface extracts its real compiler ANF; it does not ask you to rewrite that update as a second model callback.
+
+Records keep one whole-expression outcome. Reading a useful field cannot hide an error in another field. Updates evaluate their arguments in order, and an eager lookup default can still fail when the key is present. These details make the source promise meaningful.
+
+#+begin_sequence :title "The handler earns a source connection"
+lanes source · ordinary BL | core · closed records | model · state promises | checker · evidence | run · concrete trace
+source -> core : Compile real function ANF and check its record core.
+core -> model : Derive every state field and the whole-handler outcome.
+model -> checker : Rebuild the source connection and check all induction premises.
+checker --> model : Return a source-bound proof object.
+model -> run : Replay the model and execute the handler core for each step.
+note source, run : Live actor behavior needs its own observation and refinement contract.
+#+end_sequence
+
+#+begin_rosetta
+Language behavior | What the formal path preserves | Why it matters
+An error in an unused field | The whole record raises | Projection cannot manufacture a successful function.
+Several updates to the same field | Every argument is evaluated; the last successful value wins | A later update cannot erase an earlier failure.
+A handler fails before returning | The old state remains; the attempt stays visible | Even an empty state record cannot hide the error.
+A conditional returns the old state | A successful no-change step | It is distinct from a failed attempt.
+Two engines inspect a handler | The same source-bound subject and separate native receipts | A common checked proof does not invent native solver support.
+#+end_rosetta
+
+The focused source/record run passed 1,292 assertions across six files, including 689 record and 125 source-protocol assertions. The separate mathematical model now checks 42 theorems. Twelve added laws describe finite products, eager defaults, updates and whole-product failures. Thirty-seven theorem audits have no axiom dependencies; three use =propext= and the two integer ranking rules retain their listed standard assumptions.
+
+#+begin_honest :title "A source handler is one part of a running actor"
+The current source-protocol path supports flat integer/Boolean state and message records. Function contracts also support nested closed records. The source, core, term model and mathematical products are connected by reviewed implementations; their correspondence is not mechanically proved. Live actors, mailbox order, sending, crashes, fairness and progress still need explicit semantics and observation/refinement work.
+#+end_honest
+
+Read [[file:RECORD-HANDLERS.md][the record and source-handler interface]], [[file:src/formal/source-protocol.bl][the rebuilt source connection]], [[file:test/record_test.bl][record semantics checks]], [[file:test/source_protocol_test.bl][source-protocol checks]], [[file:evidence/record-handlers/source-check.txt][the focused check log]] and [[file:evidence/record-handlers/model-check.txt][the actual 42-theorem axiom audit]].
 
 * Try the language ideas
 A total solver array has an entry at every index. A BL map can have no entry at all. That small difference is why the language layer matters.
@@ -793,6 +825,48 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-native-bounded-trace
 : {:bound 2, :states [{"i" 0} {"i" 1} {"i" 2}], :compiler-proof-authority false, :native-solver-certificate :not-checked, :source-connection :authored-model-not-live-beam-actor, :choices [1 1], :bounded-search :refuted, :execution-replay :valid}
 
+
+#+begin_src beam-lisp :id story-record-contract
+(def record-deposit
+ (formal/program-contract
+  {:name "dossier-record-deposit"
+   :parameters [["state" (core/record-sort {"balance" t/Int "flag" t/Bool})]
+                ["message" (core/record-sort {"amount" t/Int})]]
+   :function-source "(fn [s msg] (assoc s \"balance\" (+ (get s \"balance\") (get msg \"amount\"))))"
+   :requires (fn [in] (t/all [(t/ge (get-in in ["state" "balance"]) (t/int 0))
+                              (t/ge (get-in in ["message" "amount"]) (t/int 0))]))
+   :ensures (fn [in out] (t/all [(t/ge (get out "balance") (t/int 0))
+                                 (t/eq (get out "flag") (get-in in ["state" "flag"]))]))}))
+(def record-argument (formal/check record-deposit))
+(assert (= :checked (:status record-argument)))
+{:record-function-contract (:status record-argument)
+ :profile (:profile record-deposit)
+ :whole-record-outcomes true :compiler-proof-authority false}
+#+end_src
+
+#+begin_src beam-lisp :id story-source-handler
+(def source-counter
+ (formal/source-protocol
+  {:name "dossier-source-counter" :state {"count" t/Int}
+   :init (fn [s] (t/eq (get s "count") (t/int 0)))
+   :invariant (fn [s] (t/ge (get s "count") (t/int 0)))
+   :handlers [{:name "add" :inputs {"amount" t/Int}
+                :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))])
+                :source "(fn [s msg] (assoc s \"count\" (+ (get s \"count\") (get msg \"amount\"))))"}]}))
+(def source-argument (formal/check source-counter))
+(def source-execution
+ (formal/replay-source-protocol-trace source-counter {"count" 0}
+  [{:transition "add" :inputs {"amount" 3}} {:stutter true}]))
+(assert (= :checked (:status source-argument)))
+(assert (= :checked-obligations (:status (formal/check-source-protocol-proof source-counter (:proof source-argument)))))
+(assert (= :valid (get-in source-execution [:source-replay :status])))
+{:source-handler-protocol (:status source-argument)
+ :scope (:scope source-argument) :final-state (:state source-execution)
+ :handler-core-replay (get-in source-execution [:source-replay :status])
+ :source-connection (:source-connection source-argument)
+ :live-actor-connection (:live-actor-connection source-argument)
+ :compiler-proof-authority false}
+#+end_src
 
 #+begin_src beam-lisp :id story-common-evidence
 (def common-subjects
@@ -2019,7 +2093,7 @@ note author, evidence : unsupported and unknown remain visible; no backend vote 
 :AREA: Foundation
 :NEXT_ACTION: Connect the BL implementation to the checked model and extend source and translation validation.
 :PROOF: [[file:evidence/core/checks.txt][3,194 initial core assertions]]; [[file:evidence/metatheory/qualification.json][18 checked Lean model theorems]]
-:BUILD: Typed core, reference/symbolic semantics and ANF elaboration implemented
+:BUILD: Typed scalar/record core, whole outcomes, reference/symbolic semantics and real source-function ANF implemented
 :CHECKED: Implementation tests and separate model proofs passed; their correspondence remains unproved
 :LIVE: Compiler authority unchanged
 :END:
@@ -2051,11 +2125,11 @@ note author, evidence : unsupported and unknown remain visible; no backend vote 
 :OWNER: integration
 :AREA: Foundation
 :BLOCKED_BY: FL-CONTRACTS
-:NEXT_ACTION: Connect native bounded witnesses to concrete protocol replay, then source handlers and actor observation semantics.
-:BUILD: Closed state models, checked induction obligations and concrete trace execution implemented
+:NEXT_ACTION: Bind bounded source-handler witnesses to both state and core execution replay, then define live actor observations/refinement.
+:BUILD: Closed state models, bounded native replay and source-derived handler protocols implemented
 :PROOF: [[file:evidence/protocol/checks.txt][648 focused assertions; 133 protocol assertions]]
 :CHECKED: Model induction and separate Lean rules checked; live actor and implementation/model correspondence remain
-:LIVE: Authored state model only; no live actor or compiler authority
+:LIVE: Authored and source-extracted state models; no live actor or compiler authority
 :END:
 *** DONE Attach per-case feature/native/advanced receipts to implemented public fragments
 :PROPERTIES:

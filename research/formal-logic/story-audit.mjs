@@ -31,7 +31,12 @@ try{
   check(size.name+': executable certificate example shows its checked result',await evaluate("/:proof\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':source-connection :not-established')"));
   check(size.name+': executable loop example remains a model argument',await evaluate("/:loop-model\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':conditional-normal-return-of-loop-model')"));
   check(size.name+': core change is gated by checked outcome evidence',await evaluate("/:core-change\\s+:optimized/.test(document.body.innerText)&&document.body.innerText.includes(':return-value-and-named-error')"));
-  check(size.name+': six subject kinds share the checked interface',await evaluate("document.body.innerText.includes(':subjects [:query :contract :loop :translation :protocol :protocol-trace]')&&document.body.innerText.includes(':common-term-interface true')"));
+  check(size.name+': seven subject kinds share the checked interface',await evaluate("document.body.innerText.includes(':subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace]')&&document.body.innerText.includes(':common-term-interface true')"));
+  check(size.name+': source functions keep whole-record outcomes',await evaluate("/:record-function-contract\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':bl/core-record-outcomes-v2')"));
+  check(size.name+': source handler evidence retains the live actor boundary',await evaluate("/:source-handler-protocol\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':handler-core-replay :valid')&&document.body.innerText.includes(':live-actor-connection :not-established')"));
+  await navigate('/#s-a-promise-about-the-function-you-actually-wrote');
+  check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
+  await shot(size.name+'-source-handler');
   check(size.name+': protocol proof retains its unbounded model scope',await evaluate("/:protocol-model\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':all-finite-prefixes-of-the-declared-state-model')"));
   check(size.name+': protocol evidence retains the actor and progress boundary',await evaluate("document.body.innerText.includes(':source-connection :authored-model-not-live-beam-actor')&&/:liveness\\s+:not-established/.test(document.body.innerText)"));
   await evaluate("[...document.querySelectorAll('pre')].find(e=>e.innerText.includes(':protocol-model :checked'))?.scrollIntoView({block:'center'})");

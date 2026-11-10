@@ -73,3 +73,13 @@ successful run. Their audits are empty. The current 30-theorem compiled model
 and receipt are retained under `../evidence/protocol-traces/`. The BL unroller,
 witness decoder and concrete executor are still unproved implementation
 connections; the mathematical model does not qualify live actor behavior.
+
+The record extension adds Unit and finite products to `Ty`, structural recursive
+equality, ordered pair construction, both projections, an eager-default
+projection and field updates. Twelve further laws check value equality and
+whole-product outcome behavior, including failure in a projected-away field.
+The new 42-theorem compiled model and printed audit are retained in
+`../evidence/record-handlers/`. Thirty-seven audits are empty; value equality and
+two construction laws use `propext`, and the two integer rank rules retain their
+three standard assumptions above. The named-field layout/construction-order
+translation to products and the BL/source/symbolic connections remain unproved.

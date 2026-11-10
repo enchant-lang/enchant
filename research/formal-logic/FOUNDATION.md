@@ -219,7 +219,19 @@ proof automatically verifies asynchronous actor behavior. Live mailbox and
 scheduler semantics, trace refinement, handler summaries and progress/fairness
 arguments remain required parts of the full goal.
 
-## Next source-handler connection
+## Source-handler connection
+
+The scalar/record core and actual source-function extraction are implemented.
+The first source-derived protocol slice passed 1,292 focused assertions across
+six files, including 689 record and 125 source-protocol checks. `Core.lean` now
+checks 42 model theorems, with the actual axiom ledger retained separately.
+`RECORD-HANDLERS.md` describes the closed interfaces and exact remaining scope.
+The BL/source/symbolic/model connections remain reviewed and unproved.
+
+The design below led to that implementation. Next bind bounded source-protocol
+questions and native witnesses to both state-model and handler-core replay;
+then define explicit live actor observations and refinement. Neither source
+extraction nor a finite trace establishes mailbox, scheduling or progress laws.
 
 Prioritize an actual source-backed handler path after the bounded witness
 connection. A handler should consume declared state/message records and return
