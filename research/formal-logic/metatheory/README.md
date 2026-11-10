@@ -8,6 +8,12 @@ assignments, independent data decoding, fresh original-query replay and the
 remaining implementation boundary. These are existence proofs, separate from
 conditional entailment.
 
+Mixed obligation checking imports a freshly checked entailment object and
+supplies a concrete witness in its variable layout. Lean checks the original
+premises at those values and constructs a theorem that the premises and claim
+hold together. The proof source and actual axiom dependencies are retained.
+[Mixed obligation data](../OBLIGATIONS.md) describes the full subject check.
+
 [Terms.lean](Terms.lean) adds a typed partial Int/Bool term model and a composition
 rule for original-term entailment through checked countermodel preservation.
 Generated proofs establish that premise for actual original question trees,

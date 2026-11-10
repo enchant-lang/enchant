@@ -266,9 +266,15 @@ itself mechanically verified and does not certify all SMT theories.
   term graphs stay usable. Witness checking validates canonical packet identity
   separately from ordinary Lisp equality. The integration run passed 9,213
   assertions across 33 files; all 187 native verdicts remain unchanged.
-  The next common bundle format should
-  carry witness leaves and distinguish positive feasibility from conditional
-  proof coverage. The qualified v1 format keeps its historical witness gap.
+- Mixed obligation evidence: format v2 carries refutations and constructive
+  witnesses in the same plan. The external checker independently compares
+  assertion contexts and applies each matching entailment in Lean. Concrete
+  bindings follow original variable names and sorts into the proof's layout.
+  The resulting theorem exhibits values satisfying the original assumptions
+  and claim. Seventeen exports contain 39 checked leaves and 11 applied claim
+  theorems. Initial feasibility can accompany incomplete coverage. A model
+  with complete conditional coverage can also have inconsistent assumptions.
+  `OBLIGATIONS.md` describes the v2 opt-in and the exact term-model scope.
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
