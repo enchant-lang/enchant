@@ -134,6 +134,33 @@ itself mechanically verified and does not certify all SMT theories.
   the old claim, the actual old object is refused on fresh source reconstruction,
   and the original selected Source call returns 17. `HYGIENE.md` specifies the
   boundary. Universal elaborator/compiler soundness remains unproved.
+- Independent ANF/Core validation: the source front ends and final selected-ANF
+  lowering now pass a separate syntax-directed relation checker. It checks
+  lexical mappings, capture-free Core locals, exact primitive identities,
+  selective branches and eager scalar/record outcomes without regenerating
+  the Core. The coherent 26-file run passed 8,059 assertions, including 499 new
+  relation checks. Five archived pairs recheck in another VM with calibrated
+  zero compiler, elaborator, canonicalizer, evaluator and native-session calls;
+  the actual retained pre-repair pair is rejected. All 187 native corpus
+  questions retain their per-case verdicts. Eight prior original Source runtime
+  records still recheck unchanged with zero recorded-code loads or invocations.
+  `ELABORATION.md` specifies the checked relation and remaining premises.
+- Model elaboration preservation: a separately evaluated, intrinsically typed
+  mathematical ANF lowers to the existing Lean Core. A universal preservation
+  theorem covers every model expression/environment and exact returned or
+  named-error outcome. Ten new audited laws bring the model to 56 theorems:
+  44 empty audits, four using only `propext`, six using `propext` and `Quot.sound`,
+  and the two previous integer ranking laws with their three standard axioms.
+  The named ANF encoding, BL relation checker, primitive dispatcher, selected
+  specialization and actual Source/compiler bridges remain unproved.
+
+The next preservation boundary is the selected unit's specialization before
+this final ANF gate: closure construction, lexical captures, eager call
+arguments, fresh beta expansion and ordered scalar initializers. Validate that
+against the actual SDK unit and linkage; do not let a proof of the final
+ANF/Core pair certify an unchecked earlier transformation. Connect the named
+representation and accepted rule relation to the typed model separately from
+proof-kernel soundness, runtime refinement and production term-backend cutover.
 
 ## Loops with checked ranking obligations
 
