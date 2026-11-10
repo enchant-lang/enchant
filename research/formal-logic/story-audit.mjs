@@ -39,7 +39,7 @@ try{
   check(size.name+': preview uses public source components',await evaluate("!!document.querySelector('[data-source-id=\"story-lab\"] iframe').contentDocument.querySelector('[data-ui-component=\"formal-answer\"]')"));
   await shot(size.name+'-source-preview');
   await click('#claims-formal-promises [data-claims-filter="open"]');
-  check(size.name+': promises ledger keeps future work visibly open',await evaluate("(()=>{const r=document.querySelector('#claims-formal-promises');const rows=[...r.querySelectorAll('.cl-row')].filter(e=>!e.hidden);return rows.length===2&&rows.every(e=>e.dataset.open==='1')})()"));
+  check(size.name+': promises ledger keeps missing screens visibly open',await evaluate("(()=>{const r=document.querySelector('#claims-formal-promises');const rows=[...r.querySelectorAll('.cl-row')].filter(e=>!e.hidden);return rows.length===2&&rows.every(e=>e.dataset.open==='1')})()"));
   await shot(size.name+'-open-promises');
   await click('#claims-formal-promises [data-claims-filter="open"]');
   await click('#claims-formal-promises [data-claims-view="maps"]');
