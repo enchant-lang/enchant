@@ -125,6 +125,15 @@ itself mechanically verified and does not certify all SMT theories.
   recorded original-instance boundary. Source tail-call frame loss is explicit;
   the older handler projection is unchanged. `SELECTED-RUNTIME.md` specifies the
   profile, initialize-then-call scope and remaining universal proof obligations.
+- Source/Core lexical hygiene: a real pre-repair probe modeled 20 where the
+  source returned 17, because a semantic role captured a compiler-local alias.
+  Expression/loop inputs now enter the actual compiler as lexical parameters;
+  every ANF let receives a Core identity fresh for all supplied role references.
+  Global values cannot borrow local aliases. The coherent 25-file run passed
+  7,560 assertions, including 164 adversarial hygiene checks. Both engines refute
+  the old claim, the actual old object is refused on fresh source reconstruction,
+  and the original selected Source call returns 17. `HYGIENE.md` specifies the
+  boundary. Universal elaborator/compiler soundness remains unproved.
 
 ## Loops with checked ranking obligations
 

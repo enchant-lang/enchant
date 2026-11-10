@@ -75,6 +75,11 @@ try{
   check(size.name+': selected runtime keeps cleanup and proof boundaries visible',selectedRuntime.includes(':sdk-snapshot-stage :instance-prepared')&&selectedRuntime.includes(':bl/source-instance-integer-error-projection-v1')&&selectedRuntime.includes(':worker-alive false')&&selectedRuntime.includes(':remaining-preparations 0')&&selectedRuntime.includes(':universal-refinement :not-established')&&selectedRuntime.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-selected-runtime').scrollIntoView({block:'center'})");
   await shot(size.name+'-selected-runtime');
+  const hygiene=await evaluate("document.querySelector('#cell-story-hygiene')?.innerText||''");
+  check(size.name+': colliding role preserves seventeen and both engines refute twenty',hygiene.includes(':semantic-role "local_3"')&&hygiene.includes(':model-value 17')&&hygiene.includes(':wrong-twenty-promise [:refuted :refuted]'));
+  check(size.name+': lexical repair keeps its preservation boundary explicit',hygiene.includes(':source-binding :lexical')&&hygiene.includes(':core-binding :fresh-for-input-roles')&&hygiene.includes(':source-preservation :reviewed-not-mechanically-proved')&&hygiene.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-hygiene').scrollIntoView({block:'center'})");
+  await shot(size.name+'-hygiene');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -208,6 +213,10 @@ try{
   check('Declared original selected runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  check('Trusted original selected runtime ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/selected-runtime/examples/original-selected.etf')).status===404);
+ for(const path of ['/HYGIENE.md','/src/formal/anf-inputs.bl','/test/hygiene_test.bl','/hygiene-check.bl','/evidence/hygiene/baseline/probe.json','/evidence/hygiene/repaired/hygiene.json','/evidence/hygiene/checks.txt','/evidence/hygiene/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared hygiene evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
