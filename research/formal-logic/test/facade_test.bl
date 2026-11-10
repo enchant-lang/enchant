@@ -1,0 +1,111 @@
+(ns formal.facade-test
+ (:require [formal.api :as formal] [formal.query :as q] [formal.term :as t]
+           [formal.core :as core] [formal.result :as result]))
+
+(def x (t/variable "facade.x" t/Int))
+(def question (q/prove (t/ge (t/add x (t/int 1)) (t/int 1))
+                {:assumptions [(t/ge x (t/int 0))] :scope {:mode :exact}}))
+(def contract (formal/program-contract
+ {:name "facade-increment" :parameters {"x" t/Int} :source "(+ x 1)"
+  :ensures (fn [in value] (t/gt value (get in "x")))}))
+(def loop-contract (formal/loop-contract
+ {:name "facade-loop" :parameters {"n" t/Int}
+  :source "(loop [i n] (if (> i 0) (recur (- i 1)) i))"
+  :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+  :invariant (fn [in state] (t/ge (get state "i") (t/int 0)))
+  :rank (fn [in state] [(get state "i")])
+  :ensures (fn [in state value] (t/eq value (t/int 0)))}))
+(def change (formal/translation
+ {:name "facade-add-zero" :parameters {"x" t/Int}
+  :before (core/operation :add [(core/variable "x" t/Int) (core/literal 0)])
+  :after (core/variable "x" t/Int)}))
+(def subjects [question contract loop-contract change])
+
+(deftest one-portable-check-interface-carries-all-four-subjects
+ (doseq [subject subjects]
+  (let [saved (erlang/binary_to_term (erlang/term_to_binary subject))
+        answer (formal/check saved) kind (result/kind subject)]
+   (is (= :checked (:status answer)) (pr-str answer))
+   (is (= kind (:subject-kind answer)))
+   (is (= 1 (get-in answer [:evidence :formal/evidence])))
+   (is (= (result/subject-id subject) (get-in answer [:evidence :subject :identity])))
+   (is (= :entails (get-in answer [:evidence :claim :verdict])))
+   (is (= :checked-certificate (get-in answer [:evidence :claim :basis])))
+   (is (some? (get-in answer [:evidence :claim :scope])))
+   (is (= :checked (get-in answer [:evidence :certificate :status])))
+   (is (= true (get-in answer [:evidence :claim :conditional])))
+   (is (= false (get-in answer [:evidence :authority :compiler])))
+   (is (= :disabled (get-in answer [:evidence :authority :promotion])))
+   (is (= :not-mechanically-proved (get-in answer [:evidence :connection :implementation-soundness])))
+   (is (empty? (get-in answer [:evidence :native]))))))
+
+(deftest native-checks-preserve-the-same-envelope-without-upgrading-a-solver-proof
+ (doseq [engine [:z3 :oxiz] subject subjects]
+  (let [answer (formal/check {:backend engine} subject) kind (result/kind subject)
+        native (get-in answer [:evidence :native])]
+   (is (= :entails (get-in answer [:evidence :claim :verdict])))
+   (is (= (if (= :query kind) :not-checked :checked) (get-in answer [:evidence :certificate :status])))
+   (is (= (if (= :query kind) :solver-verdict :checked-certificate) (get-in answer [:evidence :claim :basis])))
+   (is (seq native))
+   (is (every? #(= engine (get-in % [:identity :backend])) native))
+   (is (every? #(= :not-checked (get-in % [:certificate :status])) native))
+   (is (= false (get-in answer [:evidence :authority :compiler])))
+   (when (= :query kind) (is (= :proved (:verdict answer)))))))
+
+(deftest compare-accepts-the-same-subjects-and-distinguishes-reference-from-authority
+ (doseq [subject subjects]
+  (let [pair (formal/compare subject)]
+   (is (= :z3 (:reference-engine pair)))
+   (is (= :none (:authority pair)))
+   (is (= false (:compiler-proof-authority pair)))
+   (is (= true (:status-agreement pair)))
+   (is (= false (:disagreement pair)))
+   (is (= :disabled (:promotion pair)))
+   (is (= :entails (get-in pair [:decision :evidence :claim :verdict])))
+   (is (= :entails (get-in pair [:candidate :evidence :claim :verdict])))
+   (is (= (:decision pair) (get-in pair [:results :z3])))
+   (is (= (:candidate pair) (get-in pair [:results :oxiz]))))))
+
+(deftest descriptions-and-capabilities-report-subjects-and-proof-paths-separately
+ (doseq [subject subjects]
+  (let [description (formal/describe subject)]
+   (is (= (result/kind subject) (:subject-kind description)))
+   (is (= (result/subject-id subject) (:identity description)))
+   (is (some? (:profile description)))))
+ (let [caps (formal/construction-capabilities)]
+  (is (= [:query :contract :loop :translation] (:subjects caps)))
+  (is (= :implemented (get-in caps [:portable-certificate :status])))
+  (is (= 3 (count (get-in caps [:portable-certificate :rules]))))
+  (is (= :not-mechanically-proved (get-in caps [:portable-certificate :soundness])))
+  (is (= :not-checked (get-in caps [:native-solver-certificate :status])))
+  (is (nil? (:native-advertisement caps))))
+ (doseq [engine [:z3 :oxiz]]
+  (let [caps (formal/construction-capabilities {:backend engine})]
+   (is (= engine (get-in caps [:identity :backend])))
+   (is (some? (:native-advertisement caps)))
+   (is (= :not-checked (get-in caps [:native-solver-certificate :status]))))))
+
+(deftest malformed-subjects-and-unknown-results-cannot-acquire-checked-evidence
+ (doseq [subject [nil {} {:formal/query 1 :formal/contract 1}
+                  {:formal/query 2} (assoc change :after (core/literal 99))]]
+  (let [answer (formal/check subject)]
+   (is (= :unsupported (:status answer)))
+   (is (= :not-established (get-in answer [:evidence :certificate :status])))
+   (is (= false (get-in answer [:evidence :authority :compiler])))))
+ (let [answer (formal/check (q/prove (t/gt x (t/int 0))))]
+  (is (= :unknown (:status answer)))
+  (is (= :unknown (get-in answer [:evidence :claim :verdict])))
+  (is (= :not-established (get-in answer [:evidence :certificate :status]))))
+ (is (= :unsupported (:status (formal/check (q/sat {}))))))
+
+(deftest conditional-proof-status-never-erases-inconsistent-inputs-or-the-trust-boundary
+ (let [definition (formal/program-contract
+                   {:name "facade-vacuous" :parameters {} :core (core/literal 1)
+                    :requires (t/bool false) :ensures (t/bool false)})
+       answer (formal/check definition)]
+  (is (= :vacuous (:status answer)))
+  (is (= :vacuous (get-in answer [:evidence :claim :verdict])))
+  (is (= :checked (get-in answer [:evidence :certificate :status])))
+  (is (= :inconsistent-checked (get-in answer [:evidence :feasibility :status])))
+  (is (seq (get-in answer [:evidence :assumptions :assertions])))
+  (is (= false (get-in answer [:evidence :authority :compiler])))))

@@ -5,7 +5,8 @@
            [formal.logic :as logic] [formal.backend :as backend]
            [formal.proof :as proof] [formal.certificate :as certificate]
            [formal.contract :as contracts] [formal.loop :as loops]
-           [formal.translation :as translations] [formal.optimize :as optimizer]))
+           [formal.translation :as translations] [formal.optimize :as optimizer]
+           [formal.result :as result]))
 
 ;; One functional BL facade. Declarations, callbacks and questions stay pure
 ;; ordinary language data until check/compare. Callbacks construct a model;
@@ -52,7 +53,23 @@
                 :assumptions (build (get specification :assumptions []) symbols)
                 :observe (build (get specification :observe symbols) symbols)})))
 
-(defn check [options question] (logic/run options question))
+(defn check
+ "Check an explicit query, program contract, loop or translation subject.
+  Without a backend a proof query uses the portable producer/checker. Every
+  path adds the same evidence envelope and retains its original result fields."
+ ([subject] (check {} subject))
+ ([options subject]
+  (let [type (result/kind subject)
+        execution (if (:backend options) :native :portable)
+        raw (case type
+              :query (if (:backend options) (logic/run options subject)
+                       (if (= :prove (:mode subject)) (proof/produce subject (get options :search {}))
+                        {:status :unsupported :reason :sat-search-needs-an-explicit-backend}))
+              :contract (contracts/verify options subject)
+              :loop (loops/verify options subject)
+              :translation (translations/verify options subject)
+              {:status :unsupported :reason :one-supported-formal-subject-tag-required})]
+   (result/attach subject raw execution))))
 (defn certify
  "Produce and independently check a certificate for the supported fragment.
   Unlike check, this path needs no native solver. Failure stays unknown or
@@ -78,18 +95,51 @@
  ([program declarations] (optimizer/optimize program declarations))
  ([program declarations options] (optimizer/optimize program declarations options)))
 (defn compare
- ([question] (logic/compare question))
- ([question options] (logic/compare question options)))
-(defn describe [question]
+ ([subject] (compare subject {}))
+ ([subject options]
+  (if (= :query (result/kind subject))
+   (let [pair (logic/compare subject options)
+         a (result/attach subject (:decision pair) :native)
+         b (result/attach subject (:candidate pair) :native)]
+    (merge pair {:subject-kind :query :decision a :candidate b :results {:z3 a :oxiz b}
+                 :certificate-statuses {:z3 (get-in a [:evidence :certificate :status])
+                                        :oxiz (get-in b [:evidence :certificate :status])}}))
+   (result/comparison subject (check (assoc options :backend :z3) subject)
+                              (check (assoc options :backend :oxiz) subject)))))
+(defn- describe-question [question]
  (let [roots (query/roots question) nodes (t/walk roots)]
   {:id (:id question) :mode (:mode question) :scope (:scope question)
    :profile (:profile question) :profiles (:profiles question)
    :assumptions (:assumptions question) :question-sha256 (t/digest roots)
    :terms (count nodes) :operations (frequencies (map :op nodes))
    :variables (mapv (fn [term] {:name (:data term) :sort (:sort term)}) (t/variables roots))}))
-(defn construction-capabilities [options]
- (backend/with-session options
-  (fn [session]
-   {:identity (:identity session) :native-advertisement (backend/hello session)
-    :qualification :requires-retained-per-fragment-evidence
-    :certificate :not-checked :promotion :disabled})))
+(defn describe [subject]
+ (let [type (result/kind subject)
+       prepared (case type :contract (contracts/prepare subject) :loop (loops/prepare subject)
+                           :translation (translations/prepare subject) nil)]
+  (cond
+   (= :query type) (assoc (describe-question subject) :subject-kind type :identity (result/subject-id subject))
+   (= :ready (:status prepared))
+    (merge {:subject-kind type :identity (:identity subject) :profile (:profile subject)
+            :name (:name subject) :parameters (:parameters subject)
+            :source-connection (:source-connection prepared)}
+     (if (= :loop type)
+      {:rank-dimension (:rank-dimension prepared)
+       :obligations (mapv (fn [row] {:id (:id row) :question (describe-question (:problem row))}) (:obligations prepared))}
+      {:question (describe-question (:problem prepared))}))
+   prepared (assoc prepared :subject-kind type)
+   :else {:status :unsupported :reason :one-supported-formal-subject-tag-required})))
+(defn construction-capabilities
+ ([] (construction-capabilities {}))
+ ([options]
+  (let [base {:qualification :requires-retained-per-fragment-evidence
+              :subjects [:query :contract :loop :translation]
+              :certificate :not-checked
+              :native-solver-certificate {:status :not-checked}
+              :portable-certificate {:status :implemented :rules (vec (sort-by str certificate/supported-rules))
+                                     :scope :bool-piecewise-linear-int-and-ground-nonzero-division
+                                     :soundness :not-mechanically-proved}
+              :compiler-proof-authority false :promotion :disabled}]
+   (if (:backend options)
+    (backend/with-session options (fn [session]
+      (assoc base :identity (:identity session) :native-advertisement (backend/hello session)))) base))))
