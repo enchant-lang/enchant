@@ -597,6 +597,12 @@ theorem bind_associative (result : Outcome α) (f : Value α → Outcome β)
     (result.bind f).bind g = result.bind (fun value => (f value).bind g) := by
   cases result <;> rfl
 
+theorem returned_bind (value : Value α) (next : Value α → Outcome β) :
+    (Outcome.returned value).bind next = next value := rfl
+
+theorem raised_bind (reason : String) (next : Value α → Outcome β) :
+    (Outcome.raised reason : Outcome α).bind next = .raised reason := rfl
+
 theorem condition_preserves_outcome (τ : Ty) (expression : Expr Γ τ) (env : Env Γ) :
     eval (condition τ expression) env = (eval expression env).bind (fun value => .returned (truthy τ value)) := by
   cases τ <;> simp only [condition, eval, truthy]
@@ -605,7 +611,7 @@ theorem condition_preserves_outcome (τ : Ty) (expression : Expr Γ τ) (env : E
 theorem lower_preserves_outcome (expression : Anf Γ τ) (env : Env Γ) :
     eval (lower expression) env = run expression env := by
   induction expression <;>
-    simp_all [lower, run, eval, condition_preserves_outcome, bind_associative, Outcome.bind, IntOp.apply]
+    simp_all [lower, run, eval, condition_preserves_outcome, bind_associative, returned_bind, raised_bind, IntOp.apply]
 
 theorem lower_preserves_return (expression : Anf Γ τ) (env : Env Γ) (value : Value τ) :
     eval (lower expression) env = .returned value ↔ run expression env = .returned value := by
@@ -629,6 +635,8 @@ theorem hidden_field_failure_survives_projection (a : Value α) (reason : String
   rw [lower_preserves_outcome]; rfl
 
 #print axioms bind_associative
+#print axioms returned_bind
+#print axioms raised_bind
 #print axioms condition_preserves_outcome
 #print axioms lower_preserves_outcome
 #print axioms lower_preserves_return
