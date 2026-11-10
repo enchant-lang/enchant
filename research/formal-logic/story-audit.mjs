@@ -108,6 +108,18 @@ try{
   await navigate('/#s-the-model-running');
   await evaluate("document.querySelector('#cell-story-refutation').scrollIntoView({block:'center'})");
   await shot(size.name+'-refutation');
+  const originalTerms=await evaluate("document.querySelector('#cell-story-term-connection')?.innerText||''");
+  check(size.name+': original term trees and old normalized packet remain bound together',originalTerms.includes(':original-terms :retained')&&originalTerms.includes(':normalized-packet :unchanged')&&originalTerms.includes(':data-connection :checked-data-connection'));
+  check(size.name+': changed original question is rejected after rehashing',originalTerms.includes(':rehashed-false-original :rejected')&&originalTerms.includes(':compiler-proof-authority false'));
+  check(size.name+': pure original export keeps semantic profile and unexecuted proof status visible',originalTerms.includes(':term-semantics :bl/partial-mathematical-int-bool-v1')&&originalTerms.includes(':term-connection :not-run')&&originalTerms.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-term-connection').scrollIntoView({block:'center'})");
+  await shot(size.name+'-original-terms');
+  await navigate('/#carry-the-proof-back-to-the-question');
+  check(size.name+': original proof chapter explains universal per-question countermodel preservation',await evaluate("document.body.innerText.includes('any counterexample to the original question would also satisfy the normalized problem')&&document.body.innerText.includes('Seventeen real exports')&&document.body.innerText.includes('no blanket BL normalizer theorem')"));
+  check(size.name+': original proof chapter keeps undefined results and the implementation bridge explicit',await evaluate("document.body.innerText.includes('returning no value cannot pass')&&document.body.innerText.includes('The reviewed interpretation of BL term data as this typed model')"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Carry the proof back to the question')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-term-connection');
+  await navigate('/#s-the-model-running');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -253,6 +265,14 @@ try{
  check('Recorded kernel run preserves its normalized subject and bridge scope',refutationReceipt.status==='checked-normalized-refutation'&&refutationReceipt.term_normalization==='reviewed-not-mechanically-proved'&&refutationReceipt.compiler_proof_authority===false);
  check('Trusted normalized archive stays unavailable to the browser',(await fetch(base+'/evidence/refutation-kernel/examples/refutation.etf')).status===404);
  check('Compiled normalized kernel stays unavailable to the browser',(await fetch(base+'/evidence/refutation-kernel/Refutation.olean')).status===404);
+ for(const path of ['/TERM-REFUTATION.md','/metatheory/Terms.lean','/metatheory/terms-pin.json','/test/term_refutation_test.bl','/term-refutation-check.bl','/term-refutation-recheck.bl','/evidence/term-refutation/model-check.txt','/evidence/term-refutation/bridge-check.txt','/evidence/term-refutation/execution/accepted.json','/evidence/term-refutation/execution/rejected.json','/evidence/term-refutation/execution/weighted/Check.lean','/evidence/term-refutation/execution/weighted/result.json','/evidence/term-refutation/fresh/terms-fresh.json','/evidence/term-refutation/checks.txt','/evidence/term-refutation/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared original-term proof evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ const originalReceipt=await fetch(base+'/evidence/term-refutation/execution/weighted/result.json').then(r=>r.json());
+ check('Recorded original-term proof keeps checked question and reviewed semantic data separate',originalReceipt.status==='checked-term-entailment'&&originalReceipt.normalization_connection==='checked-countermodel-preservation-for-this-question'&&originalReceipt.general_bl_normalizer_soundness==='not-established'&&originalReceipt.term_data_model_correspondence==='reviewed-data-semantics-bridge'&&originalReceipt.compiler_proof_authority===false);
+ check('Trusted original-term archive stays unavailable to the browser',(await fetch(base+'/evidence/term-refutation/examples/terms.etf')).status===404);
+ check('Compiled typed term model stays unavailable to the browser',(await fetch(base+'/evidence/term-refutation/Terms.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
