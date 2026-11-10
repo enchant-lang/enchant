@@ -176,6 +176,20 @@ itself mechanically verified and does not certify all SMT theories.
   with their three standard axioms. No named-unit encoding, arbitrary-arity
   closure machine or BL specialization-checker soundness theorem follows.
 
+- Separate interpretation ledger: authored Core contracts and Core/Core
+  comparisons now explicitly carry no BL Source claim. Every model subject
+  exposes a versioned reviewed model-to-term record, identifying its exact
+  model and prepared property/obligation questions. Direct term questions and
+  failed preparation retain distinct not-applicable/not-established states.
+  The coherent 28-file run passed 8,396 assertions, including 189 connection
+  checks. Four old certificates, two old counterexamples and one original
+  Source observation remain valid without regeneration or re-signing. Four
+  saved connection records reconstruct identically in another VM with one
+  positively calibrated native session before the window and zero within it.
+  All 187 backend verdicts remain unchanged. `CONNECTIONS.md` specifies these
+  records as reviewed implementation links; no proof gate accepts them as
+  certificates. This checkpoint adds no Lean theorem or soundness claim.
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical
