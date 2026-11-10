@@ -23,6 +23,13 @@ and a visible compiler/runtime trust boundary. The first narrow certificate
 checker is now implemented; the wider foundation and verified compiler remain
 work ahead. [FOUNDATION.md](FOUNDATION.md) tracks the autonomous implementation.
 
+[SELECTED-SOURCE.md](SELECTED-SOURCE.md) adds contexts for actual named Source
+functions. The SDK selects exact revisions, private helpers, captured values
+and hygienic macro bindings; a bounded specializer brings that lexical program
+into the existing contract/core interface. Both engines can check the same
+context-backed promise. Its initialize-then-call scope, unproved specialization
+bridge and remaining native runtime assumptions are explicit.
+
 `formal/certify` produces and independently checks Boolean/linear Int proof
 objects. `formal/check-certificate` checks a retained object against its exact
 statement, assumptions, profile and scope without either native solver.

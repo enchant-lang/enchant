@@ -1,0 +1,82 @@
+(ns formal.selected-check
+ (:require [formal.api :as formal] [formal.selected :as selected] [formal.core :as core]
+           [formal.term :as t] [formal.identity :as identity] [interop]))
+
+(defn source [namespace revision file text]
+ {:namespace namespace :revision revision :file file :source text})
+(defn specification [text]
+ {:sources [(source 'formal.selected.examples 'current "selected-examples.bl" (str "(ns formal.selected.examples) " text))]
+  :entry ['formal.selected.examples 'current] :target 'answer :parameters [["input" t/Int]]})
+(def plain
+ (formal/selected-source-context
+  (specification "(def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))")))
+(def provider
+ (source 'formal.selected.helpers 'v1 "selected-helpers.bl"
+  "(ns formal.selected.helpers) (defn- shifted [x] (erlang/+ x 40)) (defsyntax shift [form ctx] `(shifted ~(syntax-arg form 1)))"))
+(def client
+ (source 'formal.selected.examples 'current "selected-examples.bl"
+  "(ns formal.selected.examples) (import-world 'formal.selected.helpers 'v1 :only [shift]) (defn answer [x] (shift x))"))
+(def macro-context (formal/selected-source-context (assoc (specification "") :sources [provider client])))
+(def record-context
+ (formal/selected-source-context
+  (-> (specification "(defn answer [s] {\"next\" (erlang/+ (Elixir.BeamLisp.Ns.Rt/get s \"n\") 1) \"old\" s})")
+      (assoc :parameters [["state" (core/record-sort {"n" t/Int "flag" t/Bool})]]))))
+(def failed-initialization
+ (formal/selected-source-context
+  (-> (specification "(def hidden (erlang/div 1 0)) (defn answer [] 42)") (assoc :parameters []))))
+(def contexts [plain macro-context record-context failed-initialization])
+(def contracts
+ [(formal/program-contract {:name "selected-plain" :context plain
+    :ensures (fn [inputs output] (t/eq output (t/add (get inputs "input") (t/int 40))))})
+  (formal/program-contract {:name "selected-macro" :context macro-context
+    :ensures (fn [inputs output] (t/eq output (t/add (get inputs "input") (t/int 40))))})
+  (formal/program-contract {:name "selected-record" :context record-context
+    :ensures (fn [inputs output] (t/all [(t/eq (get output "next") (t/add (get-in inputs ["state" "n"]) (t/int 1)))
+                                        (t/eq (get-in output ["old" "flag"]) (get-in inputs ["state" "flag"]))]))})
+  (formal/program-contract {:name "selected-initializer-error" :context failed-initialization
+    :returns :may :effects #{:raise} :raises #{:zero-divisor}})])
+(def checked
+ (vec (for [definition contracts engine [:z3 :oxiz]]
+        (let [answer (formal/check {:backend engine} definition)]
+         (assert (= :checked (:status answer)) (pr-str answer))
+         {:backend engine :definition definition :answer answer}))))
+(def unsafe
+ (formal/program-contract {:name "selected-wrong-promise" :context plain
+  :ensures (fn [inputs output] (t/eq output (t/add (get inputs "input") (t/int 41))))}))
+(def refuted
+ (mapv (fn [engine]
+         (let [answer (formal/check {:backend engine} unsafe)]
+          (assert (= :refuted (:status answer)) (pr-str answer))
+          {:backend engine :definition unsafe :answer answer})) [:z3 :oxiz]))
+(def data {:schema :enchant.formal.selected-source-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :contexts contexts :contracts checked :counterexamples refuted
+           :identity-profile identity/profile :runtime-initializers-executed 0 :target-invocations 0
+           :compiler-proof-authority false})
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! root)
+(def bytes (erlang/term_to_binary data))
+(File/write! (Path/join root "selected-examples.etf") bytes)
+(File/write! (Path/join root "selected-examples-pin.json")
+ (interop/->json {:schema :enchant.formal.selected-source-archive-v1 :bytes (erlang/byte_size bytes)
+                 :sha256 (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower)))
+                 :decoder-scope :trusted-research-archive}))
+(defn answer-row [row]
+ {:name (get-in row [:definition :name]) :backend (:backend row) :status (get-in row [:answer :status])
+  :definition (get-in row [:definition :identity]) :binding-context (get-in row [:answer :binding-context])
+  :certificate (get-in row [:answer :proof :status]) :assumption-consistency (get-in row [:answer :assumption-consistency])})
+(File/write! (Path/join root "selected-examples.json")
+ (interop/->json {:schema (:schema data) :source-commit (:source-commit data)
+  :contexts (mapv (fn [definition]
+                    (let [prepared (selected/prepare definition)]
+                     {:identity (:identity definition) :profile (:profile definition) :target (str (:target definition))
+                      :parameters (:parameters definition) :source-units (mapv #(select-keys % [:namespace :revision :file :source]) (:sources definition))
+                      :core (:core definition) :expansions (get-in definition [:expansion :count])
+                      :linkage {:target-reference (Base/encode16 (get-in definition [:linkage :target :id]) (list (tuple :case :lower)))
+                                :unit (get-in definition [:linkage :unit]) :initializers (count (get-in definition [:linkage :initializers]))}
+                      :specialization (get-in prepared [:prepared :specialization])
+                      :check (dissoc prepared :prepared)})) contexts)
+  :contracts (mapv answer-row checked) :counterexamples (mapv answer-row refuted)
+  :runtime-initializers-executed 0 :target-invocations 0 :compiler-proof-authority false}))
+(println {:selected-contexts (count contexts) :native-checked-contracts (count checked)
+          :native-replayed-counterexamples (count refuted) :target-invocations 0 :runtime-initializers-executed 0})

@@ -1,9 +1,27 @@
 # A callee is part of a program's meaning
 
-The source front end now uses the reviewed catalog in `formal.intrinsics`,
+Both source front ends now use the reviewed catalog in `formal.intrinsics`,
 profile `:bl/exact-intrinsic-identities-v1`. A remote call is identified by
 module, function **and arity**, then checked against its typed core operation.
 Sharing a spelling does not establish sharing a meaning.
+
+The selected-Source work found that the older semantic-value front end
+(`formal.source`, separate from `formal.elaborate`) still used the former
+name-only policy. Its retained ground probe modeled `Num.div(7,2)` as 3 although
+the actual call returned 3.5, and modeled `erlang:not(7)` as a successful false
+although the actual call raised ArgumentError. Both front ends now use the same
+module/function/arity catalog and matching canonical arithmetic pairs. Strict
+Erlang negation refuses nullable Bool as well as Int and String in this profile;
+accepted Boolean operands retain unsuccessful evaluation.
+
+Declared scalar inputs also require the synthetic compilation namespace and
+ordinary unqualified lookup. A qualified foreign `x` cannot borrow the meaning
+of input `x`; unresolved selected binding references require the actual Source
+adapter. Loop compilation now uses the same declared intrinsic namespace. The
+five-file follow-up passed 3,600 assertions, including 62 source checks. The
+pre-repair observations and exact logs remain in `evidence/source-selection/`.
+[SELECTED-SOURCE.md](SELECTED-SOURCE.md) explains the actual SDK selection path
+now used by named function contexts.
 
 The actual-BEAM observer exposed a concrete earlier error. The old front end
 read `BeamLisp.Num/div` as integer quotient. For a state containing `7`, the

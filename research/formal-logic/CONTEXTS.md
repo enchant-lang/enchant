@@ -126,8 +126,15 @@ during the actor call reports `:unknown`; a returned actor call establishes
 entry. This avoids claiming that no execution occurred merely because the
 adapter did not return normally. It does not authorize retrying unknown effects.
 
-Next extend these declarations toward actual selected Source units, explicit
-compile-time and transitive dependencies, effect/summary contracts and checked
+An additional context profile now selects actual Source functions and follows
+their lexical helpers and captured constants. It uses the real SDK catalog,
+imports and hygienic expansion, without an ambient Var fallback. See
+[SELECTED-SOURCE.md](SELECTED-SOURCE.md) for the implemented profile and its
+initialize-then-call scope. The older record-linking context above remains
+separate and retains its declared-binding equivalence precondition.
+
+Next extend the selected profile toward explicit runtime dependency assurance,
+effect/summary contracts and checked
 compiler preservation. Ordinary quoted source forms and general runtime
 function-contract execution still need their own qualified interface. This
 context is a foundation for that work, not its completion.

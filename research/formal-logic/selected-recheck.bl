@@ -1,0 +1,82 @@
+(ns formal.selected-recheck
+ (:require [formal.api :as formal] [formal.selected :as selected] [formal.contract :as contracts]
+           [formal.identity :as identity] [formal.backend :as backend] [interop]))
+
+;; Bounded, hash-pinned project archives only. This is not an HTTP ETF decoder.
+;; Fresh reconstruction expands selected phase code under the SDK constructor;
+;; it does not execute a selected runtime initializer or target function.
+(def arguments (vec *command-line-args*))
+(assert (= 1 (count arguments)) "Pass one trusted archive directory after --")
+(def archive-directory (Path/expand (first arguments)))
+(def file (Path/join archive-directory "selected-examples.etf"))
+(assert (<= (:size (File/stat! file)) 8388608))
+(def bytes (File/read! file))
+(def pin (interop/json-> (File/read! (Path/join archive-directory "selected-examples-pin.json"))))
+(assert (= "enchant.formal.selected-source-archive-v1" (get pin "schema")))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower)))))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def data (elem decoded 0))
+(assert (= :enchant.formal.selected-source-examples-v1 (:schema data)))
+(assert (= identity/profile (:identity-profile data)))
+
+;; Calibrate tracing against a real backend session before the checking window.
+;; The fresh window must reconstruct and check the saved evidence with no native
+;; session, including for the two refuted contracts' independent core replay.
+(def info (erlang/fun_info backend/with-session))
+(def pattern (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity)))
+(def parent (erlang/self))
+(def ticket (erlang/make_ref))
+(def tracer
+ (spawn (fn [] (loop [calls 0]
+               (receive
+                [:trace _ :call _] (recur (inc calls))
+                [:reset seen] :when (= seen ticket) (do (erlang/send parent [:calibrated ticket calls]) (recur 0))
+                [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket calls])
+                _ (recur calls))))))
+(defn barrier []
+ (let [delivered (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen delivered) :ok (after 5000 (throw :trace-deadline)))))
+(def result
+ (try
+  (assert (pos? (erlang/trace_pattern pattern true (list :local))))
+  (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+  (backend/with-session {:backend :z3} (fn [_] :calibration))
+  (barrier) (erlang/send tracer [:reset ticket])
+  (let [calibration (receive [:calibrated seen calls] :when (= seen ticket) calls (after 5000 (throw :trace-deadline)))
+        _ (assert (pos? calibration))
+        contexts (mapv (fn [definition]
+                         (let [checked (formal/check-source-context definition)]
+                          (assert (= :checked-context (:status checked)) (pr-str checked)) checked)) (:contexts data))
+        proofs (mapv (fn [row]
+                       (let [prepared (contracts/prepare (:definition row))
+                             _ (assert (= :ready (:status prepared)))
+                             checked (formal/check-certificate (:problem prepared) (get-in row [:answer :proof :certificate]))]
+                        (assert (= :checked (:status checked)))
+                        {:name (get-in row [:definition :name]) :backend (:backend row) :status (:status checked)})) (:contracts data))
+        witnesses (mapv (fn [row]
+                          (let [checked (contracts/replay-counterexample (:definition row) (get-in row [:answer :backend :property]))]
+                           (assert (= :valid (:status checked)) (pr-str checked))
+                           {:name (get-in row [:definition :name]) :backend (:backend row) :status (:status checked)
+                            :assignment (:assignment checked) :execution (:execution checked)})) (:counterexamples data))]
+   (barrier) (erlang/send tracer [:finish ticket])
+   (let [sessions (receive [:finished seen calls] :when (= seen ticket) calls (after 5000 (throw :trace-deadline)))]
+    (assert (= 0 sessions))
+    {:contexts contexts :contracts proofs :counterexamples witnesses :calibration-sessions calibration :native-sessions-during-check sessions}))
+  (finally
+   (erlang/trace :all false (list :call :set_on_spawn))
+   (erlang/trace_pattern pattern false (list :local))
+   (when (Process/alive? tracer) (erlang/exit tracer :kill)))))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "selected-fresh-replay.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge result {:schema :enchant.formal.selected-source-recheck-v1
+                :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                :archive-directory archive-directory :identity-profile identity/profile
+                :archive-decoding :bounded-hash-pinned-trusted-etf :phase-expansion :sdk-constructor-session
+                :runtime-initializers-executed 0 :target-invocations 0 :compiler-proof-authority false})))
+(println {:contexts (count (:contexts result)) :checked-certificates (count (:contracts result))
+          :replayed-counterexamples (count (:counterexamples result))
+          :calibration-sessions (:calibration-sessions result) :native-sessions-during-check (:native-sessions-during-check result)
+          :target-invocations 0 :runtime-initializers-executed 0})
