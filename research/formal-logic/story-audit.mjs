@@ -34,9 +34,6 @@ try{
   check(size.name+': seven subject kinds share the checked interface',await evaluate("document.body.innerText.includes(':subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace]')&&document.body.innerText.includes(':common-term-interface true')"));
   check(size.name+': source functions keep whole-record outcomes',await evaluate("/:record-function-contract\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':bl/core-record-outcomes-v2')"));
   check(size.name+': source handler evidence retains the live actor boundary',await evaluate("/:source-handler-protocol\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':handler-core-replay :valid')&&document.body.innerText.includes(':live-actor-connection :not-established')"));
-  await navigate('/#a-promise-about-the-function-you-actually-wrote');
-  check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
-  await shot(size.name+'-source-handler');
   check(size.name+': protocol proof retains its unbounded model scope',await evaluate("/:protocol-model\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':all-finite-prefixes-of-the-declared-state-model')"));
   check(size.name+': protocol evidence retains the actor and progress boundary',await evaluate("document.body.innerText.includes(':source-connection :authored-model-not-live-beam-actor')&&/:liveness\\s+:not-established/.test(document.body.innerText)"));
   await evaluate("[...document.querySelectorAll('pre')].find(e=>e.innerText.includes(':protocol-model :checked'))?.scrollIntoView({block:'center'})");
@@ -45,6 +42,9 @@ try{
   check(size.name+': bounded witness retains its bound and unchecked native certificate',await evaluate("/:bound\\s+2/.test(document.body.innerText)&&document.body.innerText.includes(':native-solver-certificate :not-checked')"));
   await evaluate("[...document.querySelectorAll('pre')].find(e=>e.innerText.includes(':bounded-search :refuted'))?.scrollIntoView({block:'center'})");
   await shot(size.name+'-bounded-counterexample');
+  await navigate('/#a-promise-about-the-function-you-actually-wrote');
+  check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
+  await shot(size.name+'-source-handler');
   await navigate('/#s-the-big-idea');
   check(size.name+': comparison reference role grants no authority',await evaluate("document.body.innerText.includes('Z3 is now called the reference engine')&&document.body.innerText.includes('That role gives it no compiler authority')"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Let the optimizer propose'))?.scrollIntoView({block:'start'})");
