@@ -1,0 +1,88 @@
+(ns formal.obligations-recheck
+ (:require [formal.api :as formal] [formal.backend :as backend] [formal.proof :as proof]
+           [formal.query :as q] [formal.term :as t] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+;; Trusted bounded repository archives only. Original Source preparation may
+;; compile/expand phase code. The counted entries are this experiment's proof
+;; producer and native backend session, not all compiler-internal operations.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)))
+(def directory (Path/expand (first args)))
+(def index (interop/json-> (File/read! (Path/join directory "summary.json")))))
+(assert (= "enchant.formal.obligation-examples-v1" (get index "schema")))
+(def archived
+ (mapv (fn [row]
+         (let [pin (get row "archive") file (Path/expand (get pin "file") directory)]
+          (assert (String/starts_with? file (str directory "/archives/")))
+          (assert (<= (:size (File/stat! file)) 8388608))
+          (let [bytes (File/read! file) _ (assert (= (get pin "bytes") (erlang/byte_size bytes)))
+                _ (assert (= (get pin "sha256") (artifact/digest bytes)))
+                decoded (erlang/binary_to_term bytes (list :used)) data (elem decoded 0)]
+           (assert (= (elem decoded 1) (erlang/byte_size bytes)))
+           (assert (= :enchant.formal.obligation-example-v1 (:schema data)))
+           (assert (= (get row "id") (:id data)))
+           data))) (get index "rows")))
+(defn fixed-function [value arity]
+ (if (erlang/is_function value) value
+  (do (assert (and (erlang/is_tuple value) (= 3 (erlang/tuple_size value)) (= :"$blfn" (elem value 0))))
+      (erlang/map_get arity (elem value 1)))))
+(defn mfa [function]
+ (let [info (erlang/fun_info function)] (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity))))
+(def patterns [{:id "proof-search" :pattern (mfa (fixed-function proof/produce 2))}
+               {:id "formal-native-session" :pattern (mfa backend/with-session)}])
+(def by-pattern (into {} (map (fn [item] [(:pattern item) (:id item)]) patterns)))
+(def zero-counts (into {} (map (fn [item] [(:id item) 0]) patterns)))
+(defn barrier []
+ (let [reference (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen reference) :ok (after 5000 (throw :trace-deadline)))))
+(defn recheck []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       tracer (spawn (fn [] (loop [counts zero-counts]
+         (receive
+          [:trace _ :call [module function arguments]]
+           (let [key (get by-pattern (tuple module function (count arguments)))]
+            (recur (if key (update counts key inc) counts)))
+          [:reset seen] :when (= seen ticket) (do (erlang/send parent [:calibration ticket counts]) (recur zero-counts))
+          [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket counts])
+          _ (recur counts)))))]
+  (try
+   (doseq [item patterns] (assert (pos? (erlang/trace_pattern (:pattern item) true (list :local)))))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   (assert (= :checked (:status (proof/produce (q/prove (t/bool true)) {}))))
+   (backend/with-session {:backend :z3} (fn [session] (assert (:hello session))))
+   (barrier) (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:calibration seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))
+         _ (assert (every? pos? (vals calibration)))
+         rows (mapv (fn [data]
+                      (let [subject (:subject data) bundle (:bundle data)
+                            checked (formal/check-obligation-proof-data subject bundle)
+                            supplied (into {} (keep (fn [row] (when (= :ready (:status row)) [(:label row) (select-keys row [:via :certificate])])) (:rows bundle)))
+                            packaged (formal/obligation-proof-data subject supplied {:axiom-policy (:axiom-policy bundle)})
+                            altered (identity/seal (update bundle :rows pop))]
+                       (assert (= :checked-data-connection (:status checked)) (pr-str checked))
+                       (assert (= (:expected data) (:status packaged)))
+                       (assert (= :checked-data-connection (:status (formal/check-obligation-proof-data subject (:bundle packaged)))))
+                       (assert (= (mapv :packet (:rows bundle)) (mapv :packet (get-in packaged [:bundle :rows]))))
+                       (assert (= :rejected (:status (formal/check-obligation-proof-data subject altered))))
+                       {:id (:id data) :status (:status checked) :coverage (:coverage checked) :plan (:plan checked)
+                        :manifest (:manifest checked) :axiom-policy (:axiom-policy checked)
+                        :supplied-certificate-packaging (:status packaged) :missing-row :rejected
+                        :kernel-execution :not-run})) archived)]
+    (barrier) (erlang/send tracer [:finish ticket])
+    (let [counts (receive [:finished seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))]
+     (assert (= zero-counts counts)) {:rows rows :calibration calibration :checking-window counts}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (doseq [item patterns] (erlang/trace_pattern (:pattern item) false (list :local)))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def checked (recheck))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "obligations-fresh.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge checked {:schema :enchant.formal.obligation-recheck-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope :fresh-full-subject-plan-and-certificate-packet-data :source-preparation :phase-execution-allowed
+                 :kernel-execution :not-run :composition :reviewed-not-mechanically-proved :compiler-proof-authority false})))
+(println {:subjects (count (:rows checked)) :calibration (:calibration checked) :checking-window (:checking-window checked)
+          :source-preparation :phase-execution-allowed :kernel-execution :not-run :compiler-proof-authority false})
