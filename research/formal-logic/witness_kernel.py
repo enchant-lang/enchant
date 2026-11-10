@@ -82,8 +82,28 @@ def values(packet, integers, booleans):
 def source(packet, integers, booleans):
     ints, bools = values(packet, integers, booleans)
     return (HEADER + k.emit_list([t.emit_term(node, integers, booleans) for node in packet['assertions']]) + WITNESS
-            + '(Witness.mk ' + k.emit_list([k.emit_int(value) for value in ints]) + ' '
-            + k.emit_list([str(value).lower() for value in bools]) + ')' + TAIL)
+            + emit_witness(ints, bools) + TAIL)
+
+
+def emit_witness(integers, booleans):
+    return ('(Witness.mk ' + k.emit_list(map(k.emit_int, integers)) + ' '
+            + k.emit_list(str(value).lower() for value in booleans) + ')')
+
+
+def decode_witness(text):
+    parser = k.Decoder(text)
+    parser.take('('); parser.take('Witness.mk')
+    integers = parser.list(parser.int)
+
+    def boolean():
+        value = parser.take()
+        require(value in {'true', 'false'}, 'generated witness Boolean')
+        return value == 'true'
+
+    booleans = parser.list(boolean)
+    parser.take(')')
+    require(parser.at == len(parser.tokens), 'trailing witness values')
+    return integers, booleans
 
 
 def verify_source(text, packet, integers, booleans):
@@ -93,15 +113,36 @@ def verify_source(text, packet, integers, booleans):
     roots = parser.list(parser.term)
     require(parser.at == len(parser.tokens), 'trailing witness context data')
     require(len(roots) == len(packet['assertions']) and all(t.faithful(node, ast, integers, booleans) for node, ast in zip(packet['assertions'], roots)), 'generated witness terms differ from original')
-    parser = k.Decoder(witness)
-    parser.take('('); parser.take('Witness.mk')
-    ints = parser.list(parser.int)
-    def boolean():
-        value = parser.take(); require(value in {'true', 'false'}, 'generated witness Boolean')
-        return value == 'true'
-    bools = parser.list(boolean)
-    parser.take(')'); require(parser.at == len(parser.tokens), 'trailing witness values')
-    require((ints, bools) == values(packet, integers, booleans), 'generated concrete values differ from supplied witness')
+    require(decode_witness(witness) == values(packet, integers, booleans), 'generated concrete values differ from supplied witness')
+
+
+def checked_kernel():
+    tool = json.loads((P / 'metatheory/tool-pin.json').read_text())
+    lean = Path(tool['path']) / 'bin/lean'
+    require(k.sha(lean) == tool['binary_sha256'], 'Lean executable pin')
+    pins = [json.loads((P / ('metatheory/' + name + '-pin.json')).read_text()) for name in ['refutation', 'terms', 'witness']]
+    require(k.sha(P / 'metatheory/refutation-pin.json') == pins[1]['normalized_kernel_pin_sha256'], 'term normalized dependency pin')
+    require(k.sha(P / 'metatheory/terms-pin.json') == pins[2]['typed_term_pin_sha256'], 'witness typed dependency pin')
+    for pin in pins:
+        for key in ['source', 'compiled']:
+            require(k.sha(P / pin[key]['path']) == pin[key]['sha256'], 'witness/model/kernel artifact pin')
+    return lean, pins
+
+
+def copy_library(library, pins):
+    library.mkdir()
+    for pin, module in zip(pins, ['Refutation', 'Terms', 'Witness']):
+        shutil.copyfile(P / pin['compiled']['path'], library / (module + '.olean'))
+
+
+def theorem_audits(transcript, expected):
+    audits = {}
+    for line in transcript.splitlines():
+        match = re.fullmatch(r"'([^']+)' (?:does not depend on any axioms|depends on axioms: \[(.*)\])", line)
+        require(match is not None and match[1] not in audits, 'unexpected theorem audit')
+        audits[match[1]] = match[2].split(', ') if match[2] else []
+    require(set(audits) == expected, 'theorem audit names')
+    return audits
 
 
 def run(path, output):
@@ -113,34 +154,18 @@ def run(path, output):
     integers, booleans = validate(packet)
     text = source(packet, integers, booleans)
     verify_source(text, packet, integers, booleans)
-    tool = json.loads((P / 'metatheory/tool-pin.json').read_text())
-    lean = Path(tool['path']) / 'bin/lean'
-    require(k.sha(lean) == tool['binary_sha256'], 'Lean executable pin')
-    pins = [json.loads((P / ('metatheory/' + name + '-pin.json')).read_text()) for name in ['refutation', 'terms', 'witness']]
-    require(k.sha(P / 'metatheory/refutation-pin.json') == pins[1]['normalized_kernel_pin_sha256'], 'term normalized dependency pin')
-    require(k.sha(P / 'metatheory/terms-pin.json') == pins[2]['typed_term_pin_sha256'], 'witness typed dependency pin')
-    for pin in pins:
-        for key in ['source', 'compiled']:
-            require(k.sha(P / pin[key]['path']) == pin[key]['sha256'], 'witness/model/kernel artifact pin')
-    output.mkdir(parents=True, exist_ok=True)
+    lean, pins = checked_kernel()
     (output / 'Check.lean').write_text(text)
-    (output / 'Check.olean').unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix='enchant-witness-') as temporary:
-        work = Path(temporary); library = work / 'library'; library.mkdir()
-        for pin, module in zip(pins, ['Refutation', 'Terms', 'Witness']):
-            shutil.copyfile(P / pin['compiled']['path'], library / (module + '.olean'))
+        work = Path(temporary); library = work / 'library'
+        copy_library(library, pins)
         check = work / 'Check.lean'; check.write_text(text)
         with (output / 'lean.txt').open('w') as log:
             completed = subprocess.run([str(lean), '--root=' + str(work), '-o', str(work / 'Check.olean'), str(check)], cwd=work,
                                        env=dict(os.environ, LEAN_PATH=str(library)), text=True, stdout=log, stderr=subprocess.STDOUT, timeout=120)
         transcript = (output / 'lean.txt').read_text()
         require(completed.returncode == 0 and 'sorryAx' not in transcript and 'warning:' not in transcript, 'Lean did not accept typed-term witness')
-        audits = {}
-        for line in transcript.splitlines():
-            match = re.fullmatch(r"'([^']+)' (?:does not depend on any axioms|depends on axioms: \[(.*)\])", line)
-            require(match is not None and match[1] not in audits, 'unexpected witness theorem audit')
-            audits[match[1]] = match[2].split(', ') if match[2] else []
-        require(set(audits) == {'packetAccepted', 'originalContextHolds', 'originalContextSatisfiable'}, 'witness theorem audit names')
+        audits = theorem_audits(transcript, {'packetAccepted', 'originalContextHolds', 'originalContextSatisfiable'})
         require(all(set(deps) <= {'propext', 'Quot.sound'} for deps in audits.values()), 'constructive witness axiom dependency')
         shutil.copyfile(work / 'Check.olean', output / 'Check.olean')
     result = {'schema': 'enchant.formal.typed-term-witness-execution.v1', 'status': 'checked-term-satisfiability',

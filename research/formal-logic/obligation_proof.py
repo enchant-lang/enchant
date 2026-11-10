@@ -12,6 +12,7 @@ import subprocess
 
 import term_refutation as terms
 import witness_kernel as witnesses
+import obligation_instance as instances
 
 P = terms.P
 require = terms.require
@@ -189,11 +190,19 @@ def run(path, output):
                                   witnesses=sum(row["required"] and row["via"] == "witness" for row in checked))
         initial = next((row for row in checked if row["role"] == "feasibility"), None)
         result["entailments_with_witnessed_context"] = []
+        result["checked_instances"] = []
         if initial:
             result["positive_feasibility"] = "satisfiable-in-contained-typed-term-model"
             result["initial_assumption_consistency"] = result["positive_feasibility"]
-            result["entailments_with_witnessed_context"] = [row["label"] for row in checked if row["required"] and
-                                                            row["via"] == "entailment" and row["context"] == initial["context"]]
+            witness = manifest["rows"][initial["index"]]["packet"]
+            for row in checked:
+                if row["required"] and row["via"] == "entailment" and row["context"] == initial["context"]:
+                    index = row["index"]
+                    instance = instances.run(manifest["rows"][index]["packet"], row,
+                                             output / "rows" / f"{index:04d}" / "Check.olean", witness,
+                                             output / "instances" / f"{index:04d}")
+                    result["entailments_with_witnessed_context"].append(row["label"])
+                    result["checked_instances"].append({"index": index, "label": row["label"], **instance})
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
