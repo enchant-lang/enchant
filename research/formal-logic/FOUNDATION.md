@@ -116,6 +116,15 @@ itself mechanically verified and does not certify all SMT theories.
   the initialize-then-call scope and the unproved specialization/runtime bridges.
   Four contexts, eight conditional certificates and two native witnesses recheck
   in a fresh VM with no native session in its calibrated checking window.
+- Original selected Source execution: contracts now observe the normal SDK's
+  actual factory and selected export. Structured byte capture preserves original
+  source coordinates without writing at them; emitted unit identities match the
+  formal context. The coherent 24-file run passed 7,396 assertions, including
+  130 runtime checks. Eight actual observations and a fresh calibrated window
+  retain finite conformance, separate contract safety, exact BIF causes and the
+  recorded original-instance boundary. Source tail-call frame loss is explicit;
+  the older handler projection is unchanged. `SELECTED-RUNTIME.md` specifies the
+  profile, initialize-then-call scope and remaining universal proof obligations.
 
 ## Loops with checked ranking obligations
 

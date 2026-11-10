@@ -70,6 +70,11 @@ try{
   check(size.name+': selected Source promise retains initialization and preservation scope',selectedSource.includes(':scope :initialize-unit-then-call')&&selectedSource.includes(':binding-closure :selected-source-and-lexical-callees')&&selectedSource.includes(':actual-selected-execution :not-observed')&&selectedSource.includes(':source-core-preservation :reviewed-not-mechanically-proved')&&selectedSource.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-selected-source').scrollIntoView({block:'center'})");
   await shot(size.name+'-selected-source');
+  const selectedRuntime=await evaluate("document.querySelector('#cell-story-selected-runtime')?.innerText||''");
+  check(size.name+': original selected Source executes and keeps its finite promise',selectedRuntime.includes(':actual-selected-source :observed')&&selectedRuntime.includes(':returned-value 5')&&selectedRuntime.includes(':original-unit :matched')&&selectedRuntime.includes(':receipt-check :conforming')&&selectedRuntime.includes(':contract-safety :holds'));
+  check(size.name+': selected runtime keeps cleanup and proof boundaries visible',selectedRuntime.includes(':sdk-snapshot-stage :instance-prepared')&&selectedRuntime.includes(':bl/source-instance-integer-error-projection-v1')&&selectedRuntime.includes(':worker-alive false')&&selectedRuntime.includes(':remaining-preparations 0')&&selectedRuntime.includes(':universal-refinement :not-established')&&selectedRuntime.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-selected-runtime').scrollIntoView({block:'center'})");
+  await shot(size.name+'-selected-runtime');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -198,6 +203,11 @@ try{
   check('Declared selected Source evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  check('Trusted selected Source ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/source-selection/examples/selected-examples.etf')).status===404);
+ for(const path of ['/SELECTED-RUNTIME.md','/src/formal/selected-artifact.bl','/src/formal/selected-runtime.bl','/test/selected_runtime_test.bl','/selected-runtime-recheck.bl','/evidence/selected-runtime/examples/original-selected.json','/evidence/selected-runtime/fresh/original-selected-fresh.json','/evidence/selected-runtime/checks.txt','/evidence/selected-runtime/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared original selected runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ check('Trusted original selected runtime ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/selected-runtime/examples/original-selected.etf')).status===404);
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
