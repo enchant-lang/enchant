@@ -1,0 +1,38 @@
+(ns formal.context-probe
+ (:require [formal.api :as formal] [formal.source-protocol :as source]
+           [formal.elaborate :as elaborate] [formal.core :as core] [formal.term :as t]
+           [system.ir :as ir] [interop]))
+
+(def text "(fn [s msg] (assoc s \"n\" (+ (get s \"n\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))")
+(def spec {:name "binding-context-probe" :state {"n" t/Int "flag" t/Bool}
+           :handlers [{:name "step" :inputs {"amount" t/Int} :source text}]})
+(def definition (formal/source-protocol spec))
+(def initial {"n" 4 "flag" true})
+(def events [{:transition "step" :inputs {"amount" 2}}])
+(def default (formal/observe-protocol-trace definition initial events))
+(assert (= :observed (:status default)))
+(def extracted (elaborate/prepare-function text [["state" (core/record-sort (:state spec))]
+                                                ["message" (core/record-sort {"amount" t/Int})]]))
+(def calls (vec (keep ir/call-site (tree-seq ir/node? ir/child-nodes (:anf extracted)))))
+(def child (BeamLisp.Env/fork))
+(def changed
+ (try
+  (BeamLisp.Env/with_env child
+   (fn []
+    ;; Only this owned child and synthetic project namespace are changed.
+    ;; No SDK/core Var or operator Source is modified.
+    (BeamLisp.Env/intern "formal.core.intrinsics" "assoc" (fn [& arguments] {"n" 999 "flag" true}))
+    {:preparation (select-keys (source/prepare definition) [:status :reason])
+     :observation (formal/observe-protocol-trace definition initial events)}))
+  (finally (BeamLisp.Env/destroy child))))
+(def after (formal/observe-protocol-trace definition initial events))
+(assert (= :observed (:status after)))
+(def data {:schema :enchant.formal.caller-binding-probe-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :source text :calls calls :default default :child changed :restored after
+           :scope :owned-child-env-synthetic-namespace-only :compiler-proof-authority false})
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "probe.json"))
+(File/mkdir_p! (Path/dirname output)) (File/write! output (interop/->json data))
+(println {:default (:status default) :changed-preparation (get-in changed [:preparation :status])
+          :changed-runtime (get-in changed [:observation :status]) :restored (:status after)
+          :global-callees (mapv :callee (filter #(= :invoke (:mode %)) calls))})
