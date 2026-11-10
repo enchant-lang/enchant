@@ -79,7 +79,7 @@
   (doseq [engine [:z3 :oxiz]]
    (let [result (loops/verify {:backend engine} definition)
          bad (filter #(= :refuted (get-in % [:result :verdict])) (get-in result [:backend :obligations]))]
-    (is (= :refuted (:status result)) (pr-str result))
+    (is (= :obligation-refuted (:status result)) (pr-str result))
     (is (some #(String/contains? (:id %) "decrease") bad))
     (is (every? #(= :valid (get-in % [:result :validation :status])) bad))))))
 
@@ -95,13 +95,45 @@
   (is (some #(= :unreachable (:kind %)) (:obligations result)))
   (is (= 0 (:value (lc/evaluate (:program good) {"n" 4}))))
   (let [bad (loops/define (assoc base :source "(loop [i n] (if (= i 0) (quot 1 0) (recur (- i 1))))"))]
-   (is (= :refuted (:status (loops/verify {:backend :z3} bad)))))))
+   (is (= :obligation-refuted (:status (loops/verify {:backend :z3} bad)))))))
+
+(deftest refuting-an-induction-template-does-not-refute-an-actual-execution
+ (let [spec {:name "loose-invariant" :parameters {"n" t/Int}
+             :source "(loop [i n] (if (> i 0) (recur (- i 1)) i))"
+             :requires (fn [in] (t/eq (get in "n") (t/int 0)))
+             :invariant (fn [in state] (t/any [(t/eq (get state "i") (t/int 0)) (t/eq (get state "i") (t/int 2))]))
+             :rank (fn [in state] [(get state "i")])}
+       definition (loops/define spec) result (loops/verify {:backend :z3} definition)]
+  (is (= :obligation-refuted (:status result)))
+  (is (= :not-established (:termination-status result)))
+  (is (= 0 (:value (lc/evaluate (:program definition) {"n" 0}))))))
+
+(deftest input-vacuity-and-nonrecursive-control-have-distinct-justifications
+ (let [definition (loops/define (assoc countdown-spec :requires (t/bool false)))
+       result (loops/verify definition)]
+  (is (= :vacuous (:status result)))
+  (is (= :inconsistent-checked (:assumption-consistency result))))
+ (let [definition (loops/define {:name "no-recurrence" :parameters {} :source "(loop [] 7)"})
+       result (loops/verify definition)]
+  (is (= :checked (:status result)))
+  (is (= :finite-control-v1 (get-in result [:checking :ranking-rule :kind])))
+  (is (= 7 (:value (lc/evaluate (:program definition) {}))))))
+
+(deftest a-loop-model-agrees-with-actual-bl-over-a-family-of-inputs
+ (let [definition (loops/define countdown-spec)
+       actual (fn [n] (loop [i n acc 0] (if (> i 0) (recur (- i 1) (+ acc 1)) acc)))]
+  (doseq [n (range 16)]
+   (let [result (lc/evaluate (:program definition) {"n" n})]
+    (is (= (actual n) (:value result)))
+    (is (every? (fn [frame] (= n (+ (get-in frame [:state "i"]) (get-in frame [:state "acc"])) )) (:trace result)))))))
 
 (deftest malformed-or-unreviewed-loops-are-refused
  (doseq [source ["(+ n 1)" "(loop [i n] (do (println i) (recur (- i 1))))"
                   "(loop [i n] (if (> i 0) (recur false) i))"]]
   (is (= :unsupported (:status (lc/prepare source {"n" t/Int})))) )
  (is (thrown? (loops/define (dissoc countdown-spec :rank))))
+ (is (thrown? (loops/define (assoc countdown-spec :returns :may))))
+ (is (thrown? (loops/define (assoc countdown-spec :effects #{:io}))))
  (let [definition (loops/define countdown-spec)]
   (is (= :unsupported (:status (loops/prepare (assoc definition :rank [(t/int 0)])))))
   (is (= :unsupported (:status (lc/check (assoc (:program definition) :sort t/Bool)))))))

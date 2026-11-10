@@ -29,7 +29,10 @@
   postcondition builders receive immutable inputs and the current named state.
   Initializers determine state sorts; author decreasing assertions grant no proof."
  [specification]
- (let [name (:name specification) _ (t/variable name t/Bool)
+ (let [_ (require! (and (= :must (get specification :returns :must))
+                         (empty? (get specification :effects #{})) (empty? (get specification :raises #{})))
+                       "this loop profile requires normal return without effects")
+       name (:name specification) _ (t/variable name t/Bool)
        extracted (lc/prepare (:source specification) (:parameters specification))
        _ (require! (= :elaborated (:status extracted)) (:reason extracted))
        program (:program extracted) prefix (str "loop." name)
@@ -145,7 +148,7 @@
   (let [prepared (prepare definition)]
    (require! (= :ready (:status prepared)) (:reason prepared))
    (require! (and (= 1 (:formal/loop-proof object)) (= (:identity definition) (:definition object))
-                  (= :natural-lexicographic-v1 (:rule object))
+                  (= (if (zero? (get-in prepared [:typing :backedges])) :finite-control-v1 :natural-lexicographic-v1) (:rule object))
                   (= (mapv :id (:obligations prepared)) (mapv :id (:obligations object)))) "loop proof shape or definition mismatch")
    (doseq [i (range (count (:obligations prepared)))]
     (let [row (nth (:obligations object) i) problem (:problem (nth (:obligations prepared) i))
@@ -153,7 +156,7 @@
                    (throw (ex-info "Unknown obligation proof kind" {})))]
      (require! (= :checked (:status (certificate/check target (:certificate row)))) "obligation certificate rejected")))
    {:status :checked-obligations :definition (:identity definition) :obligations (count (:obligations prepared))
-    :ranking-rule {:kind :natural-lexicographic-v1 :dimension (:rank-dimension prepared)
+    :ranking-rule {:kind (:rule object) :dimension (:rank-dimension prepared)
                    :mathematical-model :lean-checked :bl-model-connection :reviewed-not-mechanically-proved}
     :scope :conditional-normal-return-of-loop-model :compiler-proof-authority false})
   (catch error {:status :rejected :reason (ex-message error)})))
@@ -172,7 +175,9 @@
                                            (= :checked (:status absent)) :unreachable :else :undischarged)
                          :proof (if (= :checked (:status absent)) absent direct)})) (:obligations prepared))
           all? (every? #(= :checked (get-in % [:proof :status])) rows)
-          object (when all? {:formal/loop-proof 1 :rule :natural-lexicographic-v1 :definition (:identity definition)
+          object (when all? {:formal/loop-proof 1
+                             :rule (if (zero? (get-in prepared [:typing :backedges])) :finite-control-v1 :natural-lexicographic-v1)
+                             :definition (:identity definition)
                              :obligations (mapv (fn [row] {:id (:id row) :kind (:kind row)
                                                          :certificate (get-in row [:proof :certificate])}) rows)})
           checked (when object (check-proof definition object))
@@ -187,10 +192,14 @@
           contradiction? (or (and inconsistent? (= :sat (:verdict feasible)))
                              (and all? (some #(= :sat (get-in % [:result :solver-status])) (:obligations native))))]
      {:status (cond contradiction? :disagreement inconsistent? :vacuous (= :unsat (:verdict feasible)) :vacuous
-                     refuted? :refuted (= :checked-obligations (:status checked)) :checked
+                     refuted? :obligation-refuted (= :checked-obligations (:status checked)) :checked
                      all? :error (and native (every? #(= :proved (get-in % [:result :verdict])) (:obligations native))) :uncertified
                      :else :unknown)
       :definition (:identity definition) :scope :conditional-normal-return-of-loop-model
+      :termination-status (if (and (= :checked-obligations (:status checked)) (not contradiction?) (not inconsistent?))
+                            (if (zero? (get-in prepared [:typing :backedges])) :finite-control :conditional-ranking-argument)
+                            :not-established)
+      :returns :must :effects #{}
       :proof object :checking checked :obligations rows :backend native :inconsistency-proof inconsistent
       :assumption-consistency (cond inconsistent? :inconsistent-checked (= :sat (:verdict feasible)) :replayed-witness
                                     (= :unsat (:verdict feasible)) :backend-inconsistent :else :not-established)

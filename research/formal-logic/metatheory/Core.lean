@@ -200,6 +200,33 @@ theorem lexicographic_pair_rank_wellFounded {State : Type}
   ranked_relation_wellFounded (Prod.Lex Nat.lt Nat.lt)
     (Prod.lex Nat.lt_wfRel Nat.lt_wfRel).wf rank step decreases
 
+theorem integer_rank_wellFounded {State : Type} (rank : State → Int)
+    (step : State → State → Prop) (nonnegative : ∀ state, 0 ≤ rank state)
+    (decreases : ∀ {current next}, step current next → rank next < rank current) :
+    WellFounded (fun next current => step current next) := by
+  apply natural_rank_wellFounded (fun state => (rank state).toNat) step
+  intro current next hstep
+  have h := decreases hstep
+  exact (Int.toNat_lt_toNat (Int.lt_of_le_of_lt (nonnegative next) h)).2 h
+
+theorem integer_pair_rank_wellFounded {State : Type} (rank : State → Int × Int)
+    (step : State → State → Prop)
+    (nonnegative : ∀ state, 0 ≤ (rank state).1 ∧ 0 ≤ (rank state).2)
+    (decreases : ∀ {current next}, step current next →
+      (rank next).1 < (rank current).1 ∨
+        ((rank next).1 = (rank current).1 ∧ (rank next).2 < (rank current).2)) :
+    WellFounded (fun next current => step current next) := by
+  apply lexicographic_pair_rank_wellFounded
+    (fun state => ((rank state).1.toNat, (rank state).2.toNat)) step
+  intro current next hstep
+  rcases decreases hstep with h | ⟨same, h⟩
+  · exact Prod.Lex.left _ _ ((Int.toNat_lt_toNat (Int.lt_of_le_of_lt (nonnegative next).1 h)).2 h)
+  · have heq := congrArg Int.toNat same
+    change Prod.Lex Nat.lt Nat.lt ((rank next).1.toNat, (rank next).2.toNat)
+      ((rank current).1.toNat, (rank current).2.toNat)
+    rw [heq]
+    exact Prod.Lex.right _ ((Int.toNat_lt_toNat (Int.lt_of_le_of_lt (nonnegative next).2 h)).2 h)
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
@@ -218,5 +245,7 @@ theorem lexicographic_pair_rank_wellFounded {State : Type}
 #print axioms natural_rank_wellFounded
 #print axioms ranked_relation_wellFounded
 #print axioms lexicographic_pair_rank_wellFounded
+#print axioms integer_rank_wellFounded
+#print axioms integer_pair_rank_wellFounded
 
 end BeamLispCore
