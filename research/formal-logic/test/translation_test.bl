@@ -1,0 +1,134 @@
+(ns formal.translation-test
+ (:require [formal.api :as formal] [formal.translation :as translation]
+           [formal.optimize :as optimizer] [formal.core :as core]
+           [formal.term :as t] [formal.certificate :as certificate]
+           [formal.elaborate :as elaborate]))
+
+(def x (core/variable "x" t/Int))
+(def p (core/variable "p" t/Bool))
+(def declarations {"x" t/Int "p" t/Bool})
+(defn lit [value] (core/literal value))
+(defn op [name & args] (core/operation name (vec args)))
+(defn subject [name a b]
+ (formal/translation {:name name :parameters declarations :before a :after b}))
+(defn outcome [program assignment]
+ (select-keys (core/evaluate program declarations assignment) [:status :sort :value :error]))
+
+(deftest translation-objects-bind-both-programs-and-their-exact-context
+ (let [definition (subject "commute" (op :add x (lit 1)) (op :add (lit 1) x))
+       result (formal/verify-translation definition)
+       object (get-in result [:proof :object])
+       saved (erlang/binary_to_term (erlang/term_to_binary object))]
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :checked (:status (formal/check-translation-proof definition saved))))
+  (is (= :return-value-and-named-error (:relation result)))
+  (is (= :not-checked (:assumption-consistency result)))
+  (is (= :reviewed-not-mechanically-proved (:source-connection result)))
+  (is (= false (:compiler-proof-authority result)))
+  (doseq [changed [(assoc definition :before (lit 99)) (assoc definition :after (lit 99))
+                   (assoc definition :requires (t/bool false)) (assoc definition :profile :other)
+                   (assoc definition :relation :successful-value-only) (assoc definition :parameters {})
+                   (assoc definition :problem (:problem (translation/prepare definition)))]]
+   (is (= :rejected (:status (formal/check-translation-proof changed saved)))))
+  (doseq [changed [(dissoc saved :certificate) (assoc saved :definition "other")
+                   (assoc saved :certificate {}) (assoc saved :extra :ignored)]]
+   (is (= :rejected (:status (formal/check-translation-proof definition changed)))))
+  ;; Even a semantically equal but structurally different pair gets a distinct
+  ;; subject. A raw certificate cannot bypass the aggregate object's identity.
+  (let [other (subject "commute" (op :add (lit 0) (op :add x (lit 1))) (op :add (lit 1) x))
+        raw (:certificate saved)]
+   (is (not= (:identity definition) (:identity other)))
+   (is (= :rejected (:status (certificate/check (:problem (translation/prepare other)) raw)))))))
+
+(deftest conditional-arithmetic-can-be-checked-without-a-native-solver
+ (let [a (op :add (core/choose p x (lit 2)) (lit 1))
+       b (core/choose p (op :add x (lit 1)) (lit 3))
+       definition (subject "branch-lifting" a b)
+       result (translation/verify definition)]
+  (is (= :checked (:status result)) (pr-str result))
+  (doseq [n [-100 -1 0 1 100] flag [false true]]
+   (is (= (outcome a {"x" n "p" flag}) (outcome b {"x" n "p" flag}))))))
+
+(deftest preconditions-are-visible-and-never-silently-strengthened
+ (let [absolute (core/choose (op :lt x (lit 0)) (op :neg x) x)
+       guarded (translation/define {:name "absolute-nonnegative" :parameters declarations
+                   :before absolute :after x
+                   :requires (fn [in] (t/ge (get in "x") (t/int 0)))})
+       unrestricted (subject "absolute-all" absolute x)]
+  (is (= :checked (:status (translation/verify guarded))))
+  (is (= :unknown (:status (translation/verify unrestricted))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [safe (translation/verify {:backend engine} guarded)
+         unsafe (translation/verify {:backend engine} unrestricted)]
+    (is (= :checked (:status safe)) (pr-str safe))
+    (is (= :replayed-witness (:assumption-consistency safe)))
+    (is (= :refuted (:status unsafe)) (pr-str unsafe))
+    (is (= :valid (get-in unsafe [:counterexample :status])))
+    (is (< (get-in unsafe [:counterexample :assignment "x"]) 0))))))
+
+(deftest failures-and-failure-order-are-part-of-translation-equivalence
+ (let [first-error (core/raise-error :first t/Int)
+       second-error (core/raise-error :second t/Int)
+       erased (subject "erased-failure" (op :mul first-error (lit 0)) (lit 0))
+       reordered (subject "reordered-failures" (op :add first-error second-error) (op :add second-error first-error))]
+  (doseq [engine [:z3 :oxiz] definition [erased reordered]]
+   (let [result (translation/verify {:backend engine} definition)]
+    (is (= :refuted (:status result)) (pr-str result))
+    (is (= :valid (get-in result [:counterexample :status])))
+    (is (= :raised (get-in result [:counterexample :before :status])))))
+  (let [preserved (subject "preserved-failure" (op :mul first-error (lit 0)) (core/block [first-error (lit 0)]))]
+   (is (= :checked (:status (translation/verify preserved)))))))
+
+(deftest solver-answers-and-vacuity-do-not-open-the-optimizer-gate
+ (let [nonlinear (subject "square" (op :mul x x) (op :mul x x))
+       result (translation/verify {:backend :z3} nonlinear)]
+  (is (= :uncertified (:status result)))
+  (is (= false (:compiler-proof-authority result))))
+ (let [definition (translation/define {:name "vacuous" :parameters declarations :before x :after (lit 99)
+                   :requires (t/bool false)})
+       result (translation/verify definition)]
+  (is (= :vacuous (:status result)))
+  (is (= :inconsistent-checked (:assumption-consistency result))))
+ (is (thrown? (translation/define {:name "hidden" :parameters {} :before (lit 0) :after (lit 0)
+                                  :requires (t/variable "foreign" t/Bool)})))
+ (is (thrown? (translation/define {:name "sort-change" :parameters {} :before (lit 0) :after (lit false)}))))
+
+(deftest optimizer-proposes-real-changes-and-checks-the-whole-result
+ (let [programs [(op :add x (lit 0)) (op :mul (lit 1) x)
+                 (op :mul x (lit 0))
+                 (op :mul (core/raise-error :must-survive t/Int) (lit 0))
+                 (core/choose (core/raise-error :test-failed t/Bool) x x)
+                 (core/choose (lit true) (op :add x (lit 0)) (core/raise-error :dead t/Int))
+                 (core/let-in "a" (op :add x (lit 0)) (core/variable "a" t/Int))
+                 (core/block [(lit 3) (lit false) (op :mul x (lit 1))])
+                 (op :not (op :not p)) (op :quot (lit 7) (lit -3))
+                 (op :mod (lit 7) (lit 0))
+                 (op :and (lit false) (core/raise-error :eager t/Bool))]]
+  (doseq [program programs]
+   (let [result (formal/optimize-core program declarations)
+         candidate (:output result)]
+    (is (= :optimized (:status result)) (pr-str result))
+    (is (= true (:applied result)))
+    (is (seq (get-in result [:proposal :rewrites])))
+    (is (= :checked (get-in result [:validation :proof :checking :status])))
+    (is (= :checked (:status (translation/check-proof (:translation result) (get-in result [:validation :proof :object])))))
+    (doseq [n [-10 -1 0 1 10] flag [false true]]
+     (is (= (outcome program {"x" n "p" flag}) (outcome candidate {"x" n "p" flag})))))))
+ (let [program (op :add (op :mul x x) (lit 0)) result (optimizer/optimize program declarations {:backend :z3})]
+  (is (= :retained (:status result)))
+  (is (= false (:applied result)))
+  (is (= program (:output result)))
+  (is (= :uncertified (get-in result [:validation :status]))))
+ (let [result (optimizer/optimize x declarations)]
+  (is (= :unchanged (:status result)))
+  (is (= false (:applied result)))))
+
+(deftest the-gate-can-start-from-real-compiler-anf
+ (let [source "(let [a (+ x 0)] (if (< a 0) (+ (- a) 0) (* a 1)))"
+       extracted (elaborate/prepare source {"x" t/Int})
+       result (optimizer/optimize (:core extracted) {"x" t/Int})]
+  (is (= :elaborated (:status extracted)))
+  (is (= :optimized (:status result)) (pr-str result))
+  (doseq [n [-7 -1 0 1 7]]
+   (is (= (if (< n 0) (- n) n)
+          (:value (core/evaluate (:output result) {"x" t/Int} {"x" n})))))))

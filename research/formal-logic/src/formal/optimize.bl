@@ -1,0 +1,68 @@
+(ns formal.optimize
+ (:require [formal.core :as core] [formal.translation :as translation] [formal.term :as t]))
+
+;; The optimizer is an untrusted candidate producer. Only the separately
+;; reconstructed translation question and checked certificate admit a change.
+(defn- fingerprint [value]
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary value)) (list (tuple :case :lower))))
+(defn propose [program declarations]
+ (let [typing (core/typecheck program declarations) rewrites (atom [])]
+  (if-not (= :typed (:status typing)) typing
+   (letfn [(replace [before after rule path]
+            (when (not= before after)
+             (swap! rewrites conj {:rule rule :path path :before (fingerprint before) :after (fingerprint after)})) after)
+           (constant? [node value] (and (= :const (:op node)) (= value (:data node))))
+           (visit [original path]
+            (let [node (assoc original :args (mapv (fn [i] (visit (nth (:args original) i) (conj path i)))
+                                                 (range (count (:args original)))))
+                  op (:op node) args (:args node) a (first args) b (second args)
+                  primitive? (contains? #{:add :sub :mul :neg :quot :rem :mod :lt :le :gt :ge :eq :not :and :or} op)]
+             (cond
+              (and primitive? (every? #(= :const (:op %)) args))
+               (let [out (core/evaluate node {} {})]
+                (replace node (case (:status out) :returned (core/literal (:value out))
+                                                 :raised (core/raise-error (:error out) (:sort node)) node)
+                         :constant-fold path))
+              (and (= :if op) (= :const (:op a)))
+               (replace node (if (:data a) b (nth args 2)) :literal-branch path)
+              (and (= :if op) (= b (nth args 2)))
+               (replace node (core/block [a b]) :equal-branches-preserve-test path)
+              (and (= :let op) (= :local (:op b)) (= (:data node) (:data b)))
+               (replace node a :return-binding path)
+              (= :do op)
+               (let [remaining (conj (vec (remove #(= :const (:op %)) (butlast args))) (last args))]
+                (replace node (if (= 1 (count remaining)) (first remaining) (core/block remaining))
+                         :discard-literal-prefix path))
+              (and (= :add op) (constant? a 0)) (replace node b :add-zero-left path)
+              (and (contains? #{:add :sub} op) (constant? b 0)) (replace node a :additive-zero-right path)
+              (and (= :mul op) (constant? a 1)) (replace node b :multiply-one-left path)
+              (and (= :mul op) (constant? b 1)) (replace node a :multiply-one-right path)
+              (and (= :mul op) (constant? a 0))
+               (replace node (core/block [b (core/literal 0)]) :multiply-zero-preserve-right path)
+              (and (= :mul op) (constant? b 0))
+               (replace node (core/block [a (core/literal 0)]) :multiply-zero-preserve-left path)
+              (and (= :not op) (= :not (:op a))) (replace node (first (:args a)) :double-negation path)
+              :else node)))]
+    (let [candidate (core/canonicalize (visit program []) declarations)]
+     {:status :proposed :before (core/identity program declarations) :after (core/identity candidate declarations)
+      :candidate candidate :rewrites @rewrites :trusted false})))))
+
+(defn optimize
+ "Return the candidate only after a checked conditional outcome comparison.
+  All other results retain the original program and explain the failed gate."
+ ([program declarations] (optimize program declarations {}))
+ ([program declarations options]
+  (let [proposal (propose program declarations)]
+   (if-not (= :proposed (:status proposal)) proposal
+    (if (= (:before proposal) (:after proposal))
+     {:status :unchanged :output program :proposal proposal :applied false :compiler-proof-authority false}
+     (let [definition (translation/define
+                       {:name (get options :name "core-optimizer") :parameters declarations
+                        :before program :after (:candidate proposal)
+                        :requires (get options :requires (t/bool true))})
+           validation (translation/verify options definition)
+           admitted? (= :checked (:status validation))]
+      {:status (if admitted? :optimized :retained) :output (if admitted? (:candidate proposal) program)
+       :applied admitted? :proposal proposal :translation definition :validation validation
+       :scope :conditional-core-model-optimization :requires (:requires definition)
+       :source-connection :reviewed-not-mechanically-proved :compiler-proof-authority false}))))))

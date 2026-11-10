@@ -1,0 +1,156 @@
+(ns formal.translation
+ (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
+           [formal.term :as t] [formal.query :as q] [formal.proof :as proof]
+           [formal.certificate :as certificate] [formal.logic :as logic]
+           [formal.backend :as backend] [formal.evaluate :as replay]))
+
+;; This boundary checks two core models, not the compiler that extracted them.
+;; Neither a cached query nor an optimizer's own claimed identity is accepted.
+(def relation :return-value-and-named-error)
+(def ^:private fields
+ #{:formal/translation :name :parameters :before :after :requires :prefix
+   :profile :relation :identity})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.translation: " message) {}))))
+(defn- identity-of [definition]
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
+                (list (tuple :case :lower))))
+(defn- precondition! [pre inputs]
+ (t/validate! [pre])
+ (require! (= t/Bool (:sort pre)) "the precondition must be Boolean")
+ (require! (every? (fn [node]
+                    (and (contains? #{[:bool] [:int]} (:sort node))
+                         (contains? #{:var :bool :int :not :and :or :implies :xor :eq :distinct :ite
+                                      :add :sub :neg :mul :div :mod :lt :le :gt :ge} (:op node))))
+                   (t/walk [pre])) "precondition outside the declared Int/Bool vocabulary")
+ (require! (every? #(contains? (set (vals inputs)) %) (t/variables [pre]))
+           "precondition contains an undeclared input identity") pre)
+(defn define
+ "A closed translation subject. Builders only construct the precondition;
+  the compared programs are validated, canonical typed core data."
+ [specification]
+ (let [name (:name specification) _ (t/variable name t/Bool)
+       declarations (:parameters specification)
+       before (core/canonicalize (:before specification) declarations)
+       after (core/canonicalize (:after specification) declarations)
+       _ (require! (= (:sort before) (:sort after)) "translation changes the result sort")
+       prefix (str "translation." name)
+       inputs (:inputs (symbolic/lower before declarations {:prefix prefix}))
+       authored (get specification :requires (t/bool true))
+       pre (precondition! (if (fn? authored) (authored inputs) authored) inputs)
+       definition {:formal/translation 1 :name name :parameters declarations
+                   :before before :after after :requires pre :prefix prefix
+                   :profile core/profile :relation relation}]
+  (assoc definition :identity (identity-of definition))))
+
+(defn prepare
+ "Rebuild the exact outcome comparison and bind its certificate subject to
+  both core identities, the precondition, the profile and the relation."
+ [definition]
+ (try
+  (require! (and (map? definition) (= fields (set (keys definition)))
+                 (= 1 (:formal/translation definition)) (= core/profile (:profile definition))
+                 (= relation (:relation definition))
+                 (= (:identity definition) (identity-of definition))) "changed or noncanonical translation identity")
+  (t/variable (:name definition) t/Bool)
+  (require! (= (:prefix definition) (str "translation." (:name definition))) "changed input namespace")
+  (let [before (:before definition) after (:after definition) declarations (:parameters definition)
+        _ (require! (= (:sort before) (:sort after)) "translation changes the result sort")
+        a-id (core/identity before declarations) b-id (core/identity after declarations)
+        lowered (symbolic/equivalence-problem before after declarations {:prefix (:prefix definition)})
+        _ (require! (= :translated (:status lowered)) "programs outside the symbolic core")
+        inputs (get-in lowered [:left :inputs]) pre (precondition! (:requires definition) inputs)
+        a (get-in lowered [:left :outcome]) b (get-in lowered [:right :outcome])
+        scope {:mode :exact :translation {:definition (:identity definition) :before a-id :after b-id}}
+        observations (merge (into {} (map (fn [[name term]] [(str "input/" name) term]) inputs))
+                      {"before/returned" (:ok a) "before/value" (:value a) "before/error" (:error a)
+                       "after/returned" (:ok b) "after/value" (:value b) "after/error" (:error b)})
+        problem (q/prove (get-in lowered [:problem :claim])
+                 {:id (:name definition) :assumptions [(q/assertion "requires" pre)]
+                  :profile core/profile :scope scope :relation relation :observe observations
+                  :origin {:translation (:identity definition) :basis :reviewed-core-symbolic-interpretation}})]
+   {:status :ready :definition (:identity definition) :before a-id :after b-id
+    :problem problem :inputs inputs :errors (get-in lowered [:left :errors])
+    :source-connection :reviewed-not-mechanically-proved})
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn check-proof
+ "Check portable evidence against a freshly reconstructed translation. This
+  calls neither native solvers, proof search nor the candidate optimizer."
+ [definition object]
+ (let [prepared (prepare definition)]
+  (cond
+   (not= :ready (:status prepared)) (assoc prepared :status :rejected)
+   (not (and (map? object) (= #{:formal/translation-proof :definition :certificate} (set (keys object)))
+             (= 1 (:formal/translation-proof object)) (= (:definition prepared) (:definition object))))
+    {:status :rejected :reason :translation-proof-subject-mismatch}
+   :else
+    (assoc (certificate/check (:problem prepared) (:certificate object))
+      :definition (:definition prepared) :relation relation
+      :source-connection :reviewed-not-mechanically-proved :compiler-proof-authority false))))
+
+(defn- outcome-key [out]
+ (case (:status out) :returned [:returned (:sort out) (:value out)]
+                    :raised [:raised (:sort out) (:error out)] nil))
+(defn replay-counterexample
+ "Re-execute both concrete core programs on a native model's exact input.
+  Term replay and core execution are separate evidence, with separate limits."
+ [definition prepared native]
+ (when (= :refuted (:verdict native))
+  (let [assignment (into {} (map (fn [[name _]] [name (get-in native [:witness (str "input/" name)])])
+                                (:parameters definition)))
+        a (core/evaluate (:before definition) (:parameters definition) assignment)
+        b (core/evaluate (:after definition) (:parameters definition) assignment)
+        pre (replay/value (:requires definition) (:assignments native))
+        ka (outcome-key a) kb (outcome-key b)]
+   {:status (cond (not= true pre) :invalid (or (nil? ka) (nil? kb)) :incomplete
+                  (= ka kb) :invalid :else :valid)
+    :assignment assignment :requires-holds pre :before a :after b
+    :scope :concrete-core-outcomes :source-connection :reviewed-not-mechanically-proved})))
+
+(defn verify
+ "Certificates gate the translation. Optional native queries can find a
+  replayed counterexample or feasibility witness, never replace a certificate."
+ ([definition] (verify {} definition))
+ ([options definition]
+  (let [prepared (prepare definition)]
+   (if-not (= :ready (:status prepared)) prepared
+    (let [problem (:problem prepared) search (get options :search {})
+          produced (proof/produce problem search)
+          object (when (= :checked (:status produced))
+                   {:formal/translation-proof 1 :definition (:definition prepared) :certificate (:certificate produced)})
+          checking (when object (check-proof definition object))
+          inconsistent (proof/produce
+            (q/prove (t/bool false) {:assumptions (:assertions problem)
+                                   :profile core/profile :scope (:scope problem)}) search)
+          observations (when (:backend options)
+           (backend/with-session options
+            (fn [session]
+             {:feasibility (logic/solve-in session (q/sat
+               {:assumptions (:assertions problem) :observe (:inputs prepared)
+                :profile core/profile :scope (:scope problem)}))
+              :property (logic/solve-in session problem)})))
+          native (:property observations) feasible (:feasibility observations)
+          concrete (replay-counterexample definition prepared native)
+          checked? (= :checked (:status checking)) inconsistent? (= :checked (:status inconsistent))
+          status (cond
+                   (and inconsistent? (= :sat (:verdict feasible))) :disagreement
+                   (and checked? (= :sat (:solver-status native))) :disagreement
+                   inconsistent? :vacuous
+                   (or (= :unsat (:verdict feasible)) (= :vacuous (:verdict native))) :vacuous
+                   (and (= :refuted (:verdict native)) (= :valid (:status concrete))) :refuted
+                   (= :refuted (:verdict native)) :disagreement
+                   checked? :checked
+                   (= :proved (:verdict native)) :uncertified
+                   :else (:status produced))]
+     {:status status :definition (:definition prepared) :name (:name definition)
+      :scope :conditional-core-translation :profile core/profile :relation relation
+      :before (:before prepared) :after (:after prepared)
+      :proof {:status (if checking (:status checking) (:status produced))
+              :object object :checking checking :production produced}
+      :inconsistency-proof inconsistent :backend observations :counterexample concrete
+      :assumption-consistency (cond inconsistent? :inconsistent-checked
+                                    (= :sat (:verdict feasible)) :replayed-witness
+                                    (= :unsat (:verdict feasible)) :inconsistent
+                                    (nil? feasible) :not-checked :else :undecided)
+      :source-connection :reviewed-not-mechanically-proved :compiler-proof-authority false})))))
