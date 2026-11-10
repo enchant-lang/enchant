@@ -92,3 +92,23 @@ empty. The 46-theorem checkpoint and compiled artifact are retained in
 assumptions listed above. The rules require universal return/failure simulation
 premises. Concrete finite replays test instances, not those universal premises;
 the BL source/core/symbolic/record-layout and live actor bridges remain unproved.
+
+The elaboration extension defines a second typed syntax, `Elaboration.Anf`, with
+its own structural evaluator and a lowering to `Expr`. Its general preservation
+theorem covers every typed model expression and environment, preserving both
+returned values and exact named failures. The model includes lexical binding,
+truthiness, negation and scalar sugars, selective branches, eager sequencing,
+arithmetic, products, projections, eager defaults and updates. The primitive
+mathematical operations are shared semantic definitions. This is a preservation
+theorem for that translation, not a proof about the SDK's named ANF maps, MFA
+dispatcher, BL pair checker, named/index encoding, selected-unit specializer or
+actual Source compiler. Those bridges remain active work.
+
+The ten new laws bring the audited model to 56 theorems. Three outcome-bind laws
+have empty audits; the condition law uses `propext`; general preservation and
+five consequences use `propext` and `Quot.sound`. Combined with the earlier
+checkpoints, 44 audits are empty, four use only `propext`, six use `propext` and
+`Quot.sound`, and two retain `propext`, `Classical.choice` and `Quot.sound`.
+The actual compiled artifact, complete audit and qualification are retained
+under `../evidence/elaboration/`. The initial failed proof log is historical
+evidence of unclosed goals, excluded from successful qualification.

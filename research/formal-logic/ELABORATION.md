@@ -64,3 +64,22 @@ The separate term certificate checker proves a different proposition: the
 conditional Core contract. Keeping these two results visible prevents a good
 mathematical proof of the wrong source model from being presented as a source
 proof. The prior naming repair demonstrated why this matters.
+
+The mathematical extension in `metatheory/Core.lean` now defines a separate
+intrinsically typed `Elaboration.Anf`, its structurally recursive `run`, and a
+lowering into the existing Core `Expr`. `lower_preserves_outcome` quantifies
+over every such typed expression and environment: lowering preserves its
+entire returned value or exact named failure. Conditional truthiness and BL
+negation, increment/decrement, sign tests, lexical binding, sequencing,
+arithmetic and product operations are included. Native mathematical primitive
+operations are shared semantic definitions, not an encoding of the SDK's MFA
+dispatch table. Ten new audited theorems include the general preservation law
+and its return/failure consequences.
+
+The typed model uses indices rather than the SDK's named maps. Its constructors
+do not include selected Source worlds or closure specialization. The checker
+does not emit a Lean proof or invoke Lean at run time. These facts keep the
+mechanized theorem useful without claiming that it proves the BL validator.
+The new general preservation proof and five consequences use `propext` and
+`Quot.sound`; the truthiness law uses `propext`; the three bind laws have empty
+axiom audits. The retained model qualification lists all 56 theorem audits.

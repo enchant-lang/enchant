@@ -611,7 +611,7 @@ theorem condition_preserves_outcome (τ : Ty) (expression : Expr Γ τ) (env : E
 theorem lower_preserves_outcome (expression : Anf Γ τ) (env : Env Γ) :
     eval (lower expression) env = run expression env := by
   induction expression <;>
-    simp_all [lower, run, eval, condition_preserves_outcome, bind_associative, returned_bind, raised_bind, IntOp.apply]
+    simp_all [lower, run, eval, condition_preserves_outcome, bind_associative, returned_bind, IntOp.apply]
 
 theorem lower_preserves_return (expression : Anf Γ τ) (env : Env Γ) (value : Value τ) :
     eval (lower expression) env = .returned value ↔ run expression env = .returned value := by

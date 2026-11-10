@@ -80,6 +80,12 @@ try{
   check(size.name+': lexical repair keeps its preservation boundary explicit',hygiene.includes(':source-binding :lexical')&&hygiene.includes(':core-binding :fresh-for-input-roles')&&hygiene.includes(':source-preservation :reviewed-not-mechanically-proved')&&hygiene.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-hygiene').scrollIntoView({block:'center'})");
   await shot(size.name+'-hygiene');
+  const elaboration=await evaluate("document.querySelector('#cell-story-elaboration')?.innerText||''");
+  check(size.name+': independent ANF/Core gate rejects a freshly rehashed wrong model',elaboration.includes(':anf-core :checked')&&elaboration.includes(':changed-core :rejected')&&elaboration.includes(':pair-bound true'));
+  check(size.name+': relation checking does not invoke a producer, solver or evaluator',elaboration.includes(':elaborator-called false')&&elaboration.includes(':solver-called false')&&elaboration.includes(':program-evaluated false'));
+  check(size.name+': checked relation retains its soundness and Source boundaries',elaboration.includes(':checker-soundness :reviewed-rule-checker')&&elaboration.includes(':source-to-anf :not-established')&&elaboration.includes(':selected-specialization :not-established')&&elaboration.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-elaboration').scrollIntoView({block:'center'})");
+  await shot(size.name+'-elaboration');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -213,6 +219,10 @@ try{
   check('Declared original selected runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  check('Trusted original selected runtime ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/selected-runtime/examples/original-selected.etf')).status===404);
+ for(const path of ['/ELABORATION.md','/src/formal/elaboration.bl','/test/elaboration_test.bl','/elaboration-check.bl','/elaboration-recheck.bl','/evidence/elaboration/examples/elaboration.json','/evidence/elaboration/fresh/elaboration-fresh.json','/evidence/elaboration/checks.txt','/evidence/elaboration/qualification.json','/evidence/elaboration/model-qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared elaboration evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
  for(const path of ['/HYGIENE.md','/src/formal/anf-inputs.bl','/test/hygiene_test.bl','/hygiene-check.bl','/evidence/hygiene/baseline/probe.json','/evidence/hygiene/repaired/hygiene.json','/evidence/hygiene/checks.txt','/evidence/hygiene/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared hygiene evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));

@@ -43,6 +43,15 @@ modeled 20. Declared inputs are now compiler lexical parameters, Core binders
 are fresh for the referenced roles, and unresolved globals cannot borrow local
 aliases. The retained old contract is checked afresh through this boundary.
 
+[ELABORATION.md](ELABORATION.md) adds a separate ANF/Core translation validator.
+`formal/check-elaboration` reads a saved pair without calling the compiler,
+elaborator, canonicalizer, evaluator or either native backend. It checks lexical
+bindings, exact intrinsic identities and whole-record evaluation order. Source
+front ends now require that gate, separately from the conditional term proof.
+A typed mathematical ANF model has a universal lowering-preservation theorem
+in Lean; connecting the BL validator, named ANF and Source specialization to
+that model remains unproved.
+
 `formal/certify` produces and independently checks Boolean/linear Int proof
 objects. `formal/check-certificate` checks a retained object against its exact
 statement, assumptions, profile and scope without either native solver.
