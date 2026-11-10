@@ -19,12 +19,17 @@ P = k.PROJECT
 require = k.require
 
 
-def canonical_identity(packet):
+def typed_packet(packet):
     data = dict(packet)
     for name in ['profile', 'semantics', 'mode', 'completion', 'identity-profile']:
         data[name] = k.Keyword(data[name])
     data['assertions'] = [t.typed_term(term) for term in data['assertions']]
     data['bindings'] = [[name, [k.Keyword(sort[0])], value] for name, sort, value in data['bindings']]
+    return data
+
+
+def canonical_identity(packet):
+    data = typed_packet(packet)
     del data['identity']
     wire = b'\x83' + k.etf(('bl/canonical-formal-data-v1', t.normal(data)))
     require(len(wire) <= k.MAX_BYTES, 'witness canonical capacity')

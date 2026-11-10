@@ -1,15 +1,46 @@
 (ns formal.obligations-check
  (:require [formal.api :as formal] [formal.obligation-examples :as examples]
-           [formal.identity :as identity] [formal.runtime-artifact :as artifact] [interop]))
+           [formal.query :as q] [formal.term :as t] [formal.logic :as logic]
+           [formal.runtime-artifact :as artifact] [interop]))
 
+(def args (vec *command-line-args*))
+(assert (or (empty? args) (= ["v2"] args)))
+(def mixed? (= ["v2"] args))
+(def sat-subject (:subject (last examples/examples)))
+(def subjects
+ (if mixed?
+  (into (mapv #(if (= "sat" (:id %)) (assoc % :expected :ready) %) examples/examples)
+        [{:id "sat-z3" :subject sat-subject :expected :ready}
+         {:id "sat-no-witness" :subject sat-subject :expected :incomplete}
+         {:id "empty-sat" :subject (q/sat {:id :empty-context}) :expected :ready}])
+  examples/examples))
+(def native-cases {"source-protocol" :z3 "trace" :z3 "source-trace" :z3 "sat" :oxiz "sat-z3" :z3})
+(defn witness-input [id subject]
+ (when-not (contains? #{"vacuous" "sat-no-witness"} id)
+  (let [planned (formal/obligation-plan subject)
+        _ (assert (= :ready (:status planned)) (pr-str planned))
+        row (first (filter #(= :sat (get-in % [:question :mode])) (get-in planned [:plan :rows])))
+        question (:question row)
+        engine (get native-cases id)
+        made (if engine
+               (formal/term-witness-from-result question (logic/run {:backend engine} question))
+               (formal/term-witness question
+                (mapv (fn [variable] [variable (if (= t/Bool (t/sort-of variable)) false (if (= "loop" id) 3 0))])
+                      (t/variables (mapv :term (:assertions question))))))]
+   (assert (= :ready (:status made)) (pr-str {:id id :witness made}))
+   {:supplied {(:label row) {:via :witness :packet (:packet made)}}
+    :discovery (or (:discovery made) {:kind :explicit-bindings})})))
 (def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
 (File/mkdir_p! (Path/join output "manifests"))
 (File/mkdir_p! (Path/join output "archives"))
 (def rows
  (mapv (fn [item]
-         (let [made (formal/certify-obligations (:subject item)) bundle (:bundle made)
+         (let [input (when mixed? (witness-input (:id item) (:subject item)))
+               made (formal/certify-obligations (:subject item) (if mixed? {:format :v2 :supplied (get input :supplied {})} {}))
+               bundle (:bundle made)
                checked (formal/check-obligation-proof-data (:subject item) bundle)
-               data {:schema :enchant.formal.obligation-example-v1 :id (:id item) :subject (:subject item)
+               data {:schema (if mixed? :enchant.formal.obligation-example-v2 :enchant.formal.obligation-example-v1)
+                     :id (:id item) :subject (:subject item)
                      :expected (:expected item) :bundle bundle}
                bytes (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2)))
                archive (str "archives/" (:id item) ".etf") manifest (str "manifests/" (:id item) ".json")]
@@ -18,12 +49,14 @@
           (assert (<= (erlang/byte_size bytes) 8388608))
           (File/write! (Path/join output archive) bytes)
           (File/write! (Path/join output manifest) (interop/->json (:manifest bundle)))
-          {:id (:id item) :expected (:expected item) :subject-kind (get-in bundle [:plan :subject :kind])
+          (cond-> {:id (:id item) :expected (:expected item) :subject-kind (get-in bundle [:plan :subject :kind])
            :plan (get-in bundle [:plan :identity]) :bundle (:identity bundle) :manifest (get-in bundle [:manifest :identity])
            :coverage (:coverage made) :manifest-file manifest
-           :archive {:file archive :bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}})) examples/examples))
+           :archive {:file archive :bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}}
+           mixed? (merge (select-keys checked [:initial-evidence :entailments-with-witnessed-context])
+                         {:discovery (:discovery input)})))) subjects))
 (File/write! (Path/join output "summary.json") (interop/->json
- {:schema :enchant.formal.obligation-examples-v1 :rows rows
+ {:schema (if mixed? :enchant.formal.obligation-examples-v2 :enchant.formal.obligation-examples-v1) :rows rows
   :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
   :kernel-execution :not-run :composition :reviewed-not-mechanically-proved :compiler-proof-authority false}))
 (println {:subjects (count rows) :ready (count (filter #(= :ready (:expected %)) rows))

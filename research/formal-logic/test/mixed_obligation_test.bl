@@ -1,0 +1,71 @@
+(ns formal.mixed-obligation-test
+ (:require [formal.api :as formal] [formal.query :as q] [formal.term :as t]
+           [formal.identity :as identity] [formal.obligation-examples :as examples]))
+
+(def mixed {:format :v2})
+(defn sat-row [subject]
+ (first (filter #(= :sat (get-in % [:question :mode])) (get-in (formal/obligation-plan subject) [:plan :rows]))))
+(defn zero-bindings [question]
+ (mapv (fn [variable] [variable (if (= t/Bool (t/sort-of variable)) false 0)])
+       (t/variables (mapv :term (:assertions question)))))
+(defn initial-input [subject]
+ {"initial-state" {:via :witness :bindings (zero-bindings (:question (sat-row subject)))}})
+
+(deftest required-sat-coverage-uses-the-exact-portable-witness
+ (let [subject (:subject (last examples/examples))
+       legacy (formal/certify-obligations subject)
+       pending (formal/certify-obligations subject mixed)
+       supplied {"property" {:via :witness :bindings [[examples/x 3]]}}
+       made (formal/obligation-proof-data subject supplied mixed)
+       packet (get-in made [:bundle :rows 0 :packet])
+       supplied-packet {"property" {:via :witness :packet packet}}
+       checked (formal/check-obligation-proof-data subject (:bundle made))]
+  (is (= :incomplete (:status legacy)))
+  (is (= :incomplete (:status pending)))
+  (is (= :requires-witness (get-in pending [:bundle :rows 0 :status])))
+  (is (= :ready (:status made)))
+  (is (= {:required 1 :ready 1 :entailments 0 :witnesses 1 :unreachable 0 :complete true :pending []} (:coverage checked)))
+  (is (= :checked-data-connection (:status checked)))
+  (is (= :not-applicable (:initial-evidence checked)))
+  (is (= :not-run (:kernel-execution checked)))
+  (is (= (get-in legacy [:bundle :plan]) (get-in made [:bundle :plan])))
+  (is (= (:bundle made) (:bundle (formal/obligation-proof-data subject supplied-packet mixed))))
+  (is (= (:bundle made) (:bundle (formal/certify-obligations subject (assoc mixed :supplied supplied-packet)))))
+  (is (= :rejected (:status (formal/obligation-proof-data subject supplied))))
+  (is (= :rejected (:status (formal/obligation-proof-data (assoc subject :id :changed-query) supplied-packet mixed))))
+  (is (= :rejected (:status (formal/obligation-proof-data subject {"property" {:via :witness :bindings [[examples/x -1]]}} mixed))))
+  (is (= :rejected (:status (formal/obligation-proof-data subject {"property" {:via :witness :bindings []}} mixed))))
+  (is (= :rejected (:status (formal/obligation-proof-data subject {"property" {:via :witness :bindings [] :packet packet}} mixed))))
+  (is (= :ready (:status (formal/obligation-proof-data (q/sat {}) {"property" {:via :witness :bindings {}}} mixed))))))
+
+(deftest feasibility-and-required-proofs-remain-separate-in-the-same-bundle
+ (doseq [[subject expected matching] [[examples/authored :ready ["property"]]
+                                      [examples/unknown :incomplete []]
+                                      [examples/countdown :ready ["obligation/initial/normal"]]
+                                      [examples/unreachable-model :ready ["obligation/[:initiation]"]]]]
+  (let [supplied (initial-input subject)
+        result (formal/certify-obligations subject (assoc mixed :supplied supplied))
+        bundle (:bundle result) checked (formal/check-obligation-proof-data subject bundle)
+        initial (get-in bundle [:manifest :rows 1]) consistency (get-in bundle [:manifest :rows 0])]
+   (is (= expected (:status result)) (pr-str (:reason result)))
+   (is (= :checked-data-connection (:status checked)) (pr-str checked))
+   (is (= :witness-ready (:initial-evidence checked)))
+   (is (= :checked-by-bl-replay (:feasibility checked)))
+   (is (= (:context initial) (:context consistency)))
+   (is (= 0 (get-in checked [:coverage :witnesses])))
+   (is (= matching (:entailments-with-witnessed-context checked)) (pr-str checked))))
+ (let [result (formal/certify-obligations examples/vacuous mixed)]
+  (is (= :ready (:status result)))
+  (is (= :inconsistency-proof-ready (:initial-evidence result)))
+  (is (= :rejected (:status (formal/certify-obligations examples/vacuous (assoc mixed :supplied (initial-input examples/vacuous))))))))
+
+(deftest rehashed-rows-cannot-change-the-witness-context-or-required-coverage
+ (let [subject examples/authored bundle (:bundle (formal/certify-obligations subject (assoc mixed :supplied (initial-input subject))))
+       packet (get-in bundle [:rows 1 :packet])]
+  (doseq [altered [(assoc-in bundle [:rows 1 :certificate] {})
+                   (assoc-in bundle [:rows 1 :packet] (identity/seal (assoc packet :question (apply str (repeat 64 "0")))))
+                   (assoc bundle :manifest (identity/seal (assoc-in (:manifest bundle) [:rows 1 :context] (apply str (repeat 64 "0")))))
+                   (update bundle :rows pop)
+                   (assoc bundle :formal/obligation-proof-data 2.0)
+                   (assoc bundle :manifest (assoc (:manifest bundle) :formal/obligation-term-manifest 2.0))]]
+   (is (= :rejected (:status (formal/check-obligation-proof-data subject (identity/seal altered))))))))

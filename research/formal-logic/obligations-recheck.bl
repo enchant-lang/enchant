@@ -10,7 +10,8 @@
 (assert (= 1 (count args)))
 (def directory (Path/expand (first args)))
 (def index (interop/json-> (File/read! (Path/join directory "summary.json"))))
-(assert (= "enchant.formal.obligation-examples-v1" (get index "schema")))
+(assert (contains? #{"enchant.formal.obligation-examples-v1" "enchant.formal.obligation-examples-v2"} (get index "schema")))
+(def mixed? (= "enchant.formal.obligation-examples-v2" (get index "schema")))
 (def archived
  (mapv (fn [row]
          (let [pin (get row "archive") file (Path/expand (get pin "file") directory)]
@@ -20,7 +21,7 @@
                 _ (assert (= (get pin "sha256") (artifact/digest bytes)))
                 decoded (erlang/binary_to_term bytes (list :used)) data (elem decoded 0)]
            (assert (= (elem decoded 1) (erlang/byte_size bytes)))
-           (assert (= :enchant.formal.obligation-example-v1 (:schema data)))
+           (assert (= (if mixed? :enchant.formal.obligation-example-v2 :enchant.formal.obligation-example-v1) (:schema data)))
            (assert (= (get row "id") (:id data)))
            data))) (get index "rows")))
 (defn fixed-function [value arity]
@@ -62,18 +63,22 @@
          rows (mapv (fn [data]
                       (let [subject (:subject data) bundle (:bundle data)
                             checked (formal/check-obligation-proof-data subject bundle)
-                            supplied (into {} (keep (fn [row] (when (= :ready (:status row)) [(:label row) (select-keys row [:via :certificate])])) (:rows bundle)))
-                            packaged (formal/obligation-proof-data subject supplied {:axiom-policy (:axiom-policy bundle)})
+                            supplied (into {} (keep (fn [row]
+                                                      (when (= :ready (:status row))
+                                                       [(:label row) (select-keys row (if (= :witness (:via row)) [:via :packet] [:via :certificate]))])) (:rows bundle)))
+                            packaged (formal/obligation-proof-data subject supplied
+                                       {:axiom-policy (:axiom-policy bundle) :format (if mixed? :v2 :v1)})
                             altered (identity/seal (update bundle :rows pop))]
                        (assert (= :checked-data-connection (:status checked)) (pr-str checked))
                        (assert (= (:expected data) (:status packaged)))
                        (assert (= :checked-data-connection (:status (formal/check-obligation-proof-data subject (:bundle packaged)))))
                        (assert (= (mapv :packet (:rows bundle)) (mapv :packet (get-in packaged [:bundle :rows]))))
                        (assert (= :rejected (:status (formal/check-obligation-proof-data subject altered))))
-                       {:id (:id data) :status (:status checked) :coverage (:coverage checked) :plan (:plan checked)
+                       (cond-> {:id (:id data) :status (:status checked) :coverage (:coverage checked) :plan (:plan checked)
                         :manifest (:manifest checked) :axiom-policy (:axiom-policy checked)
                         :supplied-certificate-packaging (:status packaged) :missing-row :rejected
-                        :kernel-execution :not-run})) archived)]
+                        :kernel-execution :not-run}
+                        mixed? (merge (select-keys checked [:initial-evidence :entailments-with-witnessed-context]))))) archived)]
     (barrier) (erlang/send tracer [:finish ticket])
     (let [counts (receive [:finished seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))]
      (assert (= zero-counts counts)) {:rows rows :calibration calibration :checking-window counts}))
@@ -85,7 +90,7 @@
 (def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "obligations-fresh.json"))
 (File/mkdir_p! (Path/dirname output))
 (File/write! output (interop/->json
- (merge checked {:schema :enchant.formal.obligation-recheck-v1
+ (merge checked {:schema (if mixed? :enchant.formal.obligation-recheck-v2 :enchant.formal.obligation-recheck-v1)
                  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
                  :scope :fresh-full-subject-plan-and-certificate-packet-data :source-preparation :phase-execution-allowed
                  :kernel-execution :not-run :composition :reviewed-not-mechanically-proved :compiler-proof-authority false})))
