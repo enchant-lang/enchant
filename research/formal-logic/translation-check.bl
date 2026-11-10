@@ -1,0 +1,48 @@
+(ns formal.translation-check
+ (:require [formal.core :as core] [formal.term :as t]
+           [formal.translation :as translation] [formal.optimize :as optimizer]
+           [formal.elaborate :as elaborate] [interop]))
+
+(def x (core/variable "x" t/Int))
+(def p (core/variable "p" t/Bool))
+(def declarations {"x" t/Int "p" t/Bool})
+(defn lit [value] (core/literal value))
+(defn op [name & args] (core/operation name (vec args)))
+(def absolute (core/choose (op :lt x (lit 0)) (op :neg x) x))
+(def cases
+ [{:id :branch-lifting :before (op :add (core/choose p x (lit 2)) (lit 1))
+   :after (core/choose p (op :add x (lit 1)) (lit 3)) :expected :checked}
+  {:id :guarded-absolute :before absolute :after x :expected :checked
+   :requires (fn [in] (t/ge (get in "x") (t/int 0)))}
+  {:id :unguarded-absolute :before absolute :after x :expected :refuted}
+  {:id :erased-error :before (op :mul (core/raise-error :first t/Int) (lit 0))
+   :after (lit 0) :expected :refuted}
+  {:id :error-order :before (op :add (core/raise-error :first t/Int) (core/raise-error :second t/Int))
+   :after (op :add (core/raise-error :second t/Int) (core/raise-error :first t/Int)) :expected :refuted}
+  {:id :constant-quotient :before (op :quot (lit 7) (lit -3)) :after (lit -2) :expected :checked}
+  {:id :zero-divisor :before (op :mod (lit 7) (lit 0))
+   :after (core/raise-error :zero-divisor t/Int) :expected :checked}
+  {:id :inconsistent-input :before x :after (lit 99) :requires (t/bool false) :expected :vacuous}
+  {:id :nonlinear-identity :before (op :mul x x) :after (op :mul x x) :expected :uncertified}])
+(def results
+ (mapv (fn [sample]
+  (let [definition (translation/define
+                   (merge {:name (str "example-" (name (:id sample))) :parameters declarations}
+                          (select-keys sample [:before :after :requires])))
+        answers (mapv (fn [engine]
+                  (let [answer (translation/verify {:backend engine} definition)]
+                   (assert (= (:expected sample) (:status answer)) (pr-str {:case (:id sample) :engine engine :answer answer}))
+                   (when-let [object (get-in answer [:proof :object])]
+                    (assert (= :checked (:status (translation/check-proof definition object)))))
+                   {:engine engine :answer answer})) [:z3 :oxiz])]
+   {:id (:id sample) :definition definition :expected (:expected sample) :results answers})) cases))
+(def source "(let [a (+ x 0)] (if (< a 0) (+ (- a) 0) (* a 1)))")
+(def extracted (elaborate/prepare source {"x" t/Int}))
+(def optimized (optimizer/optimize (:core extracted) {"x" t/Int}))
+(assert (= :optimized (:status optimized)) (pr-str optimized))
+(File/write! "research/formal-logic/evidence/translation/examples.json"
+ (interop/->json {:schema :enchant.formal.translation-examples-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope :core-model-outcome-comparisons :compiler-proof-authority false
+                 :cases results :source-optimizer {:source source :extraction extracted :result optimized}}))
+(println {:cases (count results) :native-comparisons (* 2 (count results)) :optimizer (:status optimized)})

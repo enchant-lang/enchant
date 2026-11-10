@@ -28,7 +28,8 @@ existence does not imply the whole language, compiler or BEAM is verified.
 ## First proof system
 
 `formal.certificate` checks a refutation of the assumptions together with the
-negated claim. Its own normalization recognizes only Bool and linear Int terms.
+negated claim. Its own normalization recognizes Bool and piecewise linear Int
+terms, with ground nonzero Euclidean division in the current version.
 It rewrites strict integer inequalities exactly, and can divide an inequality
 by the positive gcd of its variable coefficients while rounding the bound down.
 
@@ -43,7 +44,7 @@ It never calls a solver or trusts a producer's intermediate conclusion.
 `formal.proof` searches for such objects separately, using case splits and
 Fourier–Motzkin elimination with retained weights. Search is incomplete for
 integer arithmetic and bounded by explicit budgets. Failure is `unknown`,
-never a proof of satisfiability. Nonlinear multiplication, division, arrays,
+never a proof of satisfiability. Nonlinear multiplication, variable division, arrays,
 quantifiers, floating point and unreviewed source effects are refused by this
 proof system even when a solver can decide them.
 
@@ -76,7 +77,12 @@ itself mechanically verified and does not certify all SMT theories.
   and ranking rules. This does not verify the BL implementation or compiler
   bridge; the metatheory directory records its actual checked scope.
 
-## Next slice: loops with checked ranking obligations
+## Loops with checked ranking obligations
+
+This slice is implemented in `formal.loop-core` and `formal.loop`; `LOOPS.md`
+specifies the interface. The focused loop/core/contract/API check passed 3,404
+assertions, six examples ran with both engines, and the separate Lean model now
+checks 22 theorems. The specification below records the boundaries it follows.
 
 Build a separate loop layer around finite core expressions; do not add unchecked
 recursion to the core while retaining its structural-evaluation claim. Consume
@@ -127,3 +133,13 @@ checking capabilities. In comparisons, a reference engine is a comparison role,
 not compiler proof authority. The old experimental `:authority :z3` label needs
 this semantic cleanup when the common evidence facade lands; production oracle
 defaults remain a separate, qualified migration.
+
+## Translation validation and optimizer candidates
+
+`formal.translation` now binds portable evidence to two exact core programs,
+their precondition and a return/value/named-error relation. A separate candidate
+optimizer implements real core rewrites; it retains the original when the
+independent translation gate cannot check the whole result. Native model replay
+and concrete execution remain distinct evidence. `TRANSLATION.md` specifies the
+gate and versioned normalizers. Qualification is retained under
+`evidence/translation`; this is not a production compiler pass.

@@ -1,7 +1,7 @@
 #+title: Beam Lisp, with reasons you can inspect
 #+subtitle: One language for programs, contracts and the evidence behind them.
 #+kicker: ENCHANT · FORMAL LOGIC LAB
-#+status: Autonomous implementation on main · core, contracts and ranked loops implemented · model/compiler bridges in progress
+#+status: Autonomous implementation on main · core, contracts, ranked loops and checked core changes · model/compiler bridges in progress
 #+design: forest
 #+TODO: TODO NEXT DOING WAIT REVIEW | DONE DROP
 
@@ -95,6 +95,30 @@ The focused loop/core/contract/API run passed 3,404 assertions, including 102 lo
 The Lean model now has twenty-two checked theorems. In addition to ranking orders, it defines an unbounded evaluator from a total controller and a well-founded back-edge relation, and proves that exit postconditions carry through that evaluation. Twenty theorem audits have empty axiom dependency lists. The two nonnegative integer ranking proofs use Lean's standard =propext=, =Classical.choice= and =Quot.sound= assumptions, which are listed in the receipt and returned rule metadata. The correspondence between the BL implementation and that mathematical model remains reviewed and unproved.
 
 See [[file:LOOPS.md][the loop interface and its exact meaning]], [[file:evidence/loops/qualification.json][the scoped qualification]], [[file:evidence/loops/checks.txt][the focused checks]], [[file:evidence/loops/examples.json][the actual definitions, proof objects and backend observations]], and [[file:evidence/loops/model-qualification.json][the model and axiom ledger]].
+
+** Let the optimizer propose; make the evidence decide
+The next piece compares two exact core programs. It asks whether they return the same value or raise the same named error under the same precondition. A separate optimizer now proposes real rewrites, and the translation boundary reconstructs the comparison from both programs. Only an independently checked proof lets that gate return the changed core. Other answers keep the original.
+
+This catches a subtle mistake: multiplying an expression by zero still evaluates that expression. If it raises, replacing the whole computation with zero changes the program. Our rewrite keeps that evaluation before returning zero. Equal conditional branches likewise keep evaluation of the condition.
+
+#+begin_sequence :title "A proposed change earns its evidence"
+lanes optimizer · untrusted candidate | subject · exact core models | checker · portable proof | caller · explicit precondition
+optimizer -> subject : Supply the original and changed programs.
+subject -> checker : Rebuild the value, return and named-error relation.
+checker --> subject : Check every case and arithmetic contradiction.
+subject => caller : Return the changed core only with a checked comparison.
+note subject, caller : An unknown, unsupported, vacuous or solver-only answer keeps the original.
+#+end_sequence
+
+The proof rules now handle conditionals inside linear integer arithmetic and ground division by a nonzero integer. Known logical guards let the checker ignore a value that cannot be observed after a failure. General nonlinear arithmetic and variable division still need broader evidence; an unproved rewrite stays behind the gate.
+
+Native counterexamples also run through both concrete core programs. When OxiZ leaves an unused input opaque, BL can choose an explicitly labelled completion and recheck the whole counterexample. The chosen value never becomes a claimed native observation.
+
+#+begin_honest :title "Where the gate lives"
+This is an implemented gate for core models in the research library. It can start from real compiler ANF, but it does not yet emit optimized BEAM or prove that the compiler preserves those models. The source/core/symbolic correspondence and checker implementation still carry their stated trust boundary.
+#+end_honest
+
+Read [[file:TRANSLATION.md][the interface and outcome relation]], [[file:src/formal/translation.bl][the independent translation boundary]], [[file:src/formal/optimize.bl][the candidate optimizer]] and [[file:evidence/translation/checks.txt][its focused checks]].
 
 * Try the language ideas
 A total solver array has an entry at every index. A BL map can have no entry at all. That small difference is why the language layer matters.
@@ -441,7 +465,7 @@ milestone M3 | active | Check proof objects | Formal foundation
 needs M2
 step The first Bool/linear Int format and independent checker are implemented; connect them to the specified core.
 check Reject malformed proofs and proofs for the wrong claim or assumptions.
-milestone M4 | proposed | Connect compilation | Compiler
+milestone M4 | active | Connect compilation | Compiler
 needs M2 M3
 step Prove selected passes or validate their translations.
 check Qualify meaning preservation against the specified core and target boundary.
@@ -629,6 +653,24 @@ These cells execute the actual shared interface. Their stored results are writte
 #+end_src
 #+RESULTS: story-loop-argument
 : {:scope :conditional-normal-return-of-loop-model, :compiler-proof-authority false, :source-connection :reviewed-not-mechanically-proved, :loop-model :checked, :ranking-dimension 1, :iteration-bound-in-proof :none}
+
+#+begin_src beam-lisp :id story-checked-optimization
+(def candidate-input
+ (elaborate/prepare "(let [a (+ x 0)] (if (< a 0) (+ (- a) 0) (* a 1)))" {"x" t/Int}))
+(def checked-optimization (formal/optimize-core (:core candidate-input) {"x" t/Int}))
+(assert (= :optimized (:status checked-optimization)))
+(assert (= :checked
+           (:status (formal/check-translation-proof
+                      (:translation checked-optimization)
+                      (get-in checked-optimization [:validation :proof :object])))))
+{:core-change (:status checked-optimization)
+ :evidence (get-in checked-optimization [:validation :proof :checking :status])
+ :relation (get-in checked-optimization [:validation :relation])
+ :rewrite-count (count (get-in checked-optimization [:proposal :rewrites]))
+ :scope (:scope checked-optimization)
+ :source-connection (:source-connection checked-optimization)
+ :compiler-proof-authority (:compiler-proof-authority checked-optimization)}
+#+end_src
 
 
 * Watch the evidence
@@ -1848,13 +1890,24 @@ note author, evidence : unsupported and unknown remain visible; no backend vote 
 :ID: FL-CONTRACTS
 :OWNER: integration
 :AREA: Foundation
-:NEXT_ACTION: Add checked ranking obligations and extend the current pure core effect contract.
+:NEXT_ACTION: Add checked recursive-call summaries and extend the pure core effect contract.
 :PROOF: [[file:evidence/contracts/checks.txt][4,575 assertions across ten files; 61 program contract assertions]]
 :BUILD: Portable core contracts, exact error policy, consistency proofs and counterexamples implemented
 :CHECKED: Integrated implementation checks passed; recursive totality and metatheory remain
 :LIVE: Compiler authority unchanged
 :END:
-*** TODO Extend checked evidence to actor traces and compiler translation validation
+*** DOING Validate concrete core translations before applying optimizer candidates
+:PROPERTIES:
+:ID: FL-TRANSLATION
+:OWNER: integration
+:AREA: Foundation
+:NEXT_ACTION: Qualify the outcome gate and connect compiler emission with an explicit observation relation.
+:BUILD: Closed translation subjects, portable proof rechecking and an untrusted candidate optimizer implemented
+:PROOF: [[file:evidence/translation/checks.txt][focused translation and core regression checks]]
+:CHECKED: Source/core/symbolic correspondence and implementation soundness remain unproved
+:LIVE: Research core output only; compiler authority unchanged
+:END:
+*** TODO Extend checked evidence to actor traces
 :PROPERTIES:
 :ID: FL-TRACES
 :OWNER: integration
