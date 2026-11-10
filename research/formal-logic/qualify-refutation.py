@@ -83,7 +83,7 @@ for name in ["advanced", "features", "native"]:
     now, before = read(E / "corpora" / (name + ".json")), read(P / "evidence/connections/corpora" / (name + ".json"))
     signatures = lambda data: {row["id"]: {engine: row[engine]["verdict"] for engine in ["z3", "oxiz"]} for row in data["cases"]}
     require(signatures(now) == signatures(before), "backend verdict drift: " + name)
-    require(now["disagreements"] == 0 and now["invalid-models"] == 0, "backend disagreement or invalid model")
+    require(now["disagreements"] == [] and now["invalid-models"] == [], "backend disagreement or invalid model")
     corpora.append({"corpus": name, "questions": len(now["cases"]), "per_case_verdicts_unchanged": True,
                     "disagreements": 0, "invalid_models": 0, "summary": now["summary"]})
 require(sum(row["questions"] for row in corpora) == 187, "full comparison corpus")
