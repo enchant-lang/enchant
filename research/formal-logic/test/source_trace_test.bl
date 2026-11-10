@@ -1,0 +1,202 @@
+(ns formal.source-trace-test
+ (:require [formal.api :as formal] [formal.protocol-trace :as bounded]
+           [formal.source-protocol :as source] [formal.term :as t]
+           [formal.evaluate :as ev] [formal.certificate :as certificate]))
+
+(defn rehash [definition]
+ (assoc definition :identity
+  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
+                 (list (tuple :case :lower)))))
+(def safe-spec
+ {:name "source-bounded-safe" :state {"count" t/Int "unused" t/Bool}
+  :init (fn [s] (t/eq (get s "count") (t/int 0)))
+  :invariant (fn [s] (t/ge (get s "count") (t/int 0)))
+  :handlers [{:name "add" :inputs {"amount" t/Int "ignored" t/Bool}
+               :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))])
+               :source "(fn [s msg] (assoc s \"count\" (+ (get s \"count\") (get msg \"amount\"))))"}]})
+(def safe (source/define safe-spec))
+(def unsafe (source/define (assoc-in (assoc safe-spec :name "source-bounded-unsafe") [:handlers 0 :source]
+                             "(fn [s msg] (assoc s \"count\" (- (get s \"count\") (get msg \"amount\"))))")))
+(defn native-check [engine subject] (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject))
+
+(deftest one-trace-constructor-binds-both-source-and-model-identities
+ (let [subject (formal/protocol-trace safe 0) saved (erlang/binary_to_term (erlang/term_to_binary subject))
+       prepared (bounded/prepare saved) answer (formal/check saved)
+       object (get-in answer [:proof :object]) description (formal/describe saved)
+       plain (formal/protocol-trace (:protocol safe) 0)]
+  (is (= :protocol-trace (:subject-kind answer)))
+  (is (= bounded/source-profile (:profile saved)))
+  (is (= bounded/profile (:profile plain)))
+  (is (= :ready (:status prepared)) (pr-str prepared))
+  (is (= (:identity safe) (get-in prepared [:scope :source-protocol])))
+  (is (= (get-in safe [:protocol :identity]) (get-in prepared [:scope :state-model])))
+  (is (= :reviewed-source-anf-core-state-model (:source-connection prepared)))
+  (is (= :checked (:status answer)) (pr-str answer))
+  (is (= :checked (:status (formal/check-protocol-trace-proof saved object))))
+  (is (= :not-established (:live-actor-connection answer)))
+  (is (= false (:compiler-proof-authority answer)))
+  (is (= :bounded (get-in answer [:scope :mode])))
+  (is (= 0 (get-in answer [:scope :max-transitions])))
+  (is (= (mapv #(select-keys % [:name :core]) (:handlers safe)) (:handler-cores description)))
+  (is (= [bounded/profile bounded/source-profile] (:trace-profiles (formal/construction-capabilities))))
+  (doseq [other [plain (formal/protocol-trace safe 1) (formal/protocol-trace unsafe 0)]]
+   (is (= :rejected (:status (formal/check-protocol-trace-proof other object)))))
+  (is (= :rejected (:status (certificate/check (:problem (bounded/prepare plain)) (:certificate object)))))))
+
+(deftest native-source-counterexamples-replay-model-and-handler-cores
+ (doseq [engine [:z3 :oxiz]]
+  (let [subject (formal/protocol-trace unsafe 1) answer (native-check engine subject)
+        witness (:counterexample answer) native (get-in answer [:backend :property])
+        frame (first (filter :core-execution (get-in witness [:execution :frames])))]
+   (is (= :refuted (:status answer)) (pr-str answer))
+   (is (= :valid (:status witness)))
+   (is (= :valid (get-in witness [:term-replay :status])))
+   (is (= :valid (get-in witness [:source-replay :status])))
+   (is (= 1 (get-in witness [:source-replay :handlers])))
+   (is (= true (get-in witness [:source-replay :state-sequence-matches])))
+   (is (= true (get-in witness [:source-replay :outcomes-match])))
+   (is (= :violated (get-in witness [:model-execution :safety])))
+   (is (= :violated (get-in witness [:execution :safety])))
+   (is (= :returned (get-in frame [:core-execution :status])))
+   (is (= (:state frame) (get-in frame [:core-execution :value])))
+   (is (< (get-in witness [:execution :state "count"]) 0))
+   (is (= :replayed-source-trace (:assumption-consistency answer)))
+   (is (= :term-state-and-handler-core-replay (get-in answer [:evidence :claim :basis])))
+   (is (= bounded/source-profile (:profile native)))
+   (is (= :not-checked (get-in native [:certificate :status])))
+   (is (= :valid (:status (formal/replay-protocol-counterexample subject native))))
+   (is (= :rejected (:status (formal/replay-protocol-counterexample (formal/protocol-trace unsafe 2) native))))
+   (is (= :rejected (:status (formal/replay-protocol-counterexample subject (assoc native :profile bounded/profile)))))
+   (is (every? :matches (:state-comparison witness)))
+   (is (every? :matches (:observation-comparison witness)))
+   (when (= :oxiz engine)
+    (is (some #(= :explicit-replay-completion (:source %)) (vals (:variable-provenance witness))))))))
+
+(deftest source-identity-is-not-replaced-by-an-equivalent-cached-state-model
+ (let [other (source/define (assoc-in safe-spec [:handlers 0 :source]
+                   "(fn [old event] (assoc old \"count\" (+ (get old \"count\") (get event \"amount\"))))"))
+       subject (formal/protocol-trace safe 0) equivalent (formal/protocol-trace other 0)
+       proof (get-in (formal/check subject) [:proof :object])
+       native (get-in (native-check :z3 subject) [:backend :property])]
+  (is (= (:protocol safe) (:protocol other)))
+  (is (not= (:identity safe) (:identity other)))
+  (is (not= (:identity subject) (:identity equivalent)))
+  (is (= :rejected (:status (formal/check-protocol-trace-proof equivalent proof))))
+  (is (= :rejected (:status (formal/replay-protocol-counterexample equivalent native))))))
+
+(deftest a-shallow-safe-source-question-does-not-cover-a-later-source-failure
+ (let [definition (source/define {:name "source-later" :state {"i" t/Int}
+                    :init (fn [s] (t/eq (get s "i") (t/int 0)))
+                    :invariant (fn [s] (t/lt (get s "i") (t/int 2)))
+                    :handlers [{:name "tick" :source "(fn [s msg] (assoc s \"i\" (+ (get s \"i\") 1)))"}]})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [shallow (native-check engine (formal/protocol-trace definition 1))
+         deep (native-check engine (formal/protocol-trace definition 2))]
+    (is (contains? #{:checked :uncertified} (:status shallow)) (pr-str shallow))
+    (is (= :proved (get-in shallow [:backend :property :verdict])))
+    (is (= 1 (get-in shallow [:scope :max-transitions])))
+    (is (= :refuted (:status deep)) (pr-str deep))
+    (is (= [1 1] (get-in deep [:counterexample :choices])))
+    (is (= 2 (get-in deep [:counterexample :source-replay :handlers])))
+    (is (= {"i" 2} (get-in deep [:counterexample :execution :state])))))))
+
+(deftest bounded-source-failures-retain-state-even-with-no-observable-fields
+ (doseq [[name schema body initial]
+          [["source-empty-fail" {} "(fn [s msg] (do (quot 1 0) {}))" {}]
+           ["source-hidden-fail" {"n" t/Int}
+             "(fn [s msg] (get {\"next\" s \"unseen\" (quot 1 0)} \"next\"))" {"n" 5}]]]
+  (let [definition (source/define {:name name :state schema
+                     :init (fn [s] (if (empty? schema) (t/bool true) (t/eq (get s "n") (t/int 5))))
+                     :handlers [{:name "attempt" :source body}]})
+        subject (formal/protocol-trace definition 2)]
+   (doseq [engine [:z3 :oxiz]]
+    (let [answer (native-check engine subject) witness (:counterexample answer)
+          frames (filter :core-execution (get-in witness [:execution :frames]))]
+     (is (= :refuted (:status answer)) (pr-str answer))
+     (is (= :valid (get-in witness [:source-replay :status])))
+     (is (= true (get-in witness [:execution :failed])))
+     (is (= initial (get-in witness [:execution :state])))
+     (is (= 1 (count frames)))
+     (is (= :handler (:phase (first frames))))
+     (is (= :guard (:model-phase (first frames))))
+     (is (= :zero-divisor (get-in (first frames) [:core-execution :error])))
+     (is (= false (:state-committed (first frames)))))))))
+
+(deftest opaque-derived-state-can-be-completed-but-concrete-conflicts-stay-visible
+ (let [subject (formal/protocol-trace unsafe 1) prepared (bounded/prepare subject)
+       answer (native-check :z3 subject) native (get-in answer [:backend :property])
+       state-terms (vec (mapcat vals (rest (get-in prepared [:trace :states]))))
+       opaque (reduce (fn [native term]
+                (let [labels (keep (fn [[label observed]] (when (= observed term) label)) (get-in prepared [:problem :observe]))]
+                 (reduce (fn [r label] (assoc-in r [:witness label] (ev/unavailable :hidden-test-state)))
+                   (assoc-in native [:assignments (:data term)] (ev/unavailable :hidden-test-state)) labels))) native state-terms)
+       result (formal/replay-protocol-counterexample subject opaque)]
+  (is (= :valid (:status result)) (pr-str result))
+  (is (= :valid (get-in result [:source-replay :status])))
+  (is (every? #(= :model-execution-completion (get-in result [:variable-provenance (:data %) :source])) state-terms))
+  (let [term (get-in prepared [:trace :states 1 "count"])
+        changed (formal/replay-protocol-counterexample subject (assoc-in opaque [:assignments (:data term)] 99))
+        [label _] (first (filter (fn [[_ observed]] (= term observed)) (get-in prepared [:problem :observe])))
+        conflicting (formal/replay-protocol-counterexample subject (assoc-in native [:witness label] 99))]
+   (is (not= :valid (:status changed)))
+   (is (= 99 (get-in changed [:variable-provenance (:data term) :value])))
+   (is (= :backend-assignment (get-in changed [:variable-provenance (:data term) :source])))
+   (is (= :invalid (:status conflicting)))
+   (is (some #(= false (:matches %)) (:observation-comparison conflicting))))))
+
+(deftest an-earlier-source-violation-survives-a-later-source-repair
+ ;; An authored SAT-shaped fixture tests this prefix, not backend discovery.
+ (let [definition (source/define {:name "source-prefix" :state {"x" t/Int}
+                    :init (fn [s] (t/eq (get s "x") (t/int 0)))
+                    :invariant (fn [s] (t/ge (get s "x") (t/int 0)))
+                    :handlers [{:name "dip" :source "(fn [s msg] (if (= (get s \"x\") 0) (assoc s \"x\" -1) s))"}
+                               {:name "repair" :source "(fn [s msg] (if (< (get s \"x\") 0) (assoc s \"x\" 0) s))"}]})
+       subject (formal/protocol-trace definition 2) prepared (bounded/prepare subject) trace (:trace prepared)
+       assignments (into {} (concat
+                       (mapv (fn [at] [(:data (get (nth (:states trace) at) "x")) (nth [0 -1 0] at)]) (range 3))
+                       (mapv (fn [at] [(:data (nth (:choices trace) at)) (nth [1 2] at)]) (range 2))))
+       fixture {:id (:identity subject) :scope (:scope prepared) :profile bounded/source-profile
+                :solver-status :sat :assignments assignments :witness {}}
+       result (formal/replay-protocol-counterexample subject fixture)]
+  (is (= :valid (:status result)) (pr-str result))
+  (is (= :valid (get-in result [:source-replay :status])))
+  (is (= 2 (get-in result [:source-replay :handlers])))
+  (is (= {"x" -1} (get-in result [:execution :frames 1 :core-execution :value])))
+  (is (= {"x" 0} (get-in result [:execution :state])))
+  (is (= :violated (get-in result [:execution :safety])))))
+
+(deftest initial-violations-vacuity-and-untaken-failing-branches-remain-distinct
+ (let [zero (source/define {:name "source-zero-unsafe" :state {"x" t/Int}
+              :init (fn [s] (t/eq (get s "x") (t/int 0)))
+              :invariant (fn [s] (t/gt (get s "x") (t/int 0))) :handlers []})
+       empty (source/define {:name "source-inconsistent" :state {} :init (t/bool false) :handlers []})
+       safe (source/define {:name "source-untaken-failure" :state {"x" t/Int}
+              :init (fn [s] (t/eq (get s "x") (t/int 0)))
+              :invariant (fn [s] (t/ge (get s "x") (t/int 0)))
+              :handlers [{:name "attempt" :source "(fn [s msg] (if (< (get s \"x\") 0) (do (quot 1 0) s) s))"}]})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [zero (native-check engine (formal/protocol-trace zero 0))
+         empty (native-check engine (formal/protocol-trace empty 1))
+         safe (native-check engine (formal/protocol-trace safe 1))]
+    (is (= :refuted (:status zero)))
+    (is (= [] (get-in zero [:counterexample :events])))
+    (is (= 0 (get-in zero [:counterexample :source-replay :handlers])))
+    (is (= :valid (get-in zero [:counterexample :source-replay :status])))
+    (is (= :vacuous (:status empty)))
+    (is (= :inconsistent-checked (:assumption-consistency empty)))
+    (is (contains? #{:checked :uncertified} (:status safe)) (pr-str safe))
+    (is (= :proved (get-in safe [:backend :property :verdict])))))))
+
+(deftest cached-source-models-and-profile-substitutions-are-refused
+ (let [subject (formal/protocol-trace safe 0)
+       modified-source (rehash (assoc-in safe [:handlers 0 :source]
+                         "(fn [s msg] (assoc s \"count\" (- (get s \"count\") (get msg \"amount\"))))"))
+       changed-model (rehash (assoc-in (:protocol safe) [:transitions 0 :next "count" :value] (t/int 999)))
+       modified-model (rehash (assoc safe :protocol changed-model))]
+  (doseq [changed [(assoc subject :query {}) (assoc subject :prepared {})
+                   (assoc subject :source-replay {:status :valid})
+                   (assoc subject :protocol modified-source) (assoc subject :protocol modified-model)
+                   (assoc subject :profile bounded/profile)
+                   (assoc (formal/protocol-trace (:protocol safe) 0) :profile bounded/source-profile)]]
+   (is (= :unsupported (:status (bounded/prepare (rehash changed))))))
+  (doseq [depth [-1 17 1.0 false "1"]] (is (thrown? (formal/protocol-trace safe depth))))))
