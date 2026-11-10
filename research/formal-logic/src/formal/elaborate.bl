@@ -1,0 +1,74 @@
+(ns formal.elaborate
+ (:require [compiler :as compiler] [system.ir :as ir] [formal.core :as core] [formal.term :as t]))
+
+;; This consumes the real resolved ANF. It is a reviewed front end into the
+;; specified core, not a second evaluator for the surface language.
+(defn- refuse [message node]
+ (throw (ex-info (str "formal.elaborate: " message) {:operation (:op node) :origin (:ann node)})))
+(defn- truthy [expression]
+ (if (= t/Bool (:sort expression)) expression
+  ;; Every Int is truthy in BL, but evaluating it can still raise.
+  (core/block [expression (core/literal true)])))
+(defn- intrinsic [name args node]
+ (let [a (first args) n (count args)]
+  (cond
+   (and (= name "neg") (= n 1)) (core/operation :neg args)
+   (and (= name "-") (= n 1)) (core/operation :neg args)
+   (contains? #{"+" "-" "*" "<" "<=" "=<" ">" ">=" "=" "eqv" "==" "=:=" "quot" "div" "rem" "mod"} name)
+    (core/operation (get {"+" :add "-" :sub "*" :mul "<" :lt "<=" :le "=<" :le ">" :gt ">=" :ge
+                          "=" :eq "eqv" :eq "==" :eq "=:=" :eq "quot" :quot "div" :quot "rem" :rem "mod" :mod} name) args)
+   (and (= name "not") (= n 1)) (core/operation :not [(truthy a)])
+   (and (contains? #{"pos?" "neg?" "zero?"} name) (= n 1))
+    (core/operation (get {"pos?" :gt "neg?" :lt "zero?" :eq} name) [a (core/literal 0)])
+   (and (contains? #{"inc" "dec"} name) (= n 1))
+    (core/operation (if (= name "inc") :add :sub) [a (core/literal 1)])
+   :else (refuse (str "unreviewed intrinsic " name) node))))
+
+(defn from-anf [node bindings]
+ (let [op (:op node)]
+  (case op
+   :lit (core/literal (:val node))
+   :var (or (get bindings (:name node)) (refuse "unbound variable" node))
+   :binding (or (get bindings (:name node)) (refuse "unbound binding" node))
+   :global (or (get bindings (:name node)) (get bindings (ir/global-key node)) (refuse "unbound global identity" node))
+   :let (let [initial (from-anf (:init node) bindings)
+              local (core/variable (:name node) (:sort initial))
+              body (from-anf (:body node) (assoc bindings (:name node) local))]
+          (core/let-in (:name node) initial body))
+   :if (do (when (nil? (:test node)) (refuse "conditional ANF shape" node))
+           (core/choose (truthy (from-anf (:test node) bindings))
+             (from-anf (:then node) bindings) (from-anf (:else node) bindings)))
+   :do (core/block (mapv #(from-anf % bindings) (:stmts node)))
+   :arith (let [call (ir/arith-bif node)]
+            (intrinsic (name (:fun call)) (mapv #(from-anf % bindings) (:args call)) node))
+   (let [call (ir/call-site node)]
+    (when (or (nil? call) (:rest call)) (refuse "computed or unresolved call" node))
+    (let [args (mapv #(from-anf % bindings) (:args call))]
+     (cond
+      (= :remote (:mode call))
+       (do (when-not (contains? #{:erlang :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Num} (:mod call))
+             (refuse "foreign effects and unreviewed calls are outside the core" node))
+           (intrinsic (if (= :not_ (:fun call)) "not" (name (:fun call))) args node))
+      (and (= :invoke (:mode call)) (= :global (:op (:callee call))))
+       (let [callee (:callee call)]
+        (when (or (contains? bindings (:name callee)) (= :exact (:lookup callee)))
+          (refuse "callee is not the declared intrinsic" node))
+        (intrinsic (:name callee) args node))
+      :else (refuse "first-class functions require checked summaries" node)))))))
+
+(defn prepare
+ "Elaborate one BL expression through compiler ANF into the typed pure core.
+  Input declarations are Bool/Int sorts; no application code is evaluated."
+ [source declarations]
+ (try
+  (let [forms (BeamLisp.Reader/read_string source)
+        _ (when-not (= 1 (count forms)) (refuse "one source expression is required" {}))
+        anf (compiler/compile (first forms) (compiler/new-env "formal.core.intrinsics"))
+        bindings (into {} (map (fn [[name sort]] [name (core/variable name sort)]) declarations))
+        expression (from-anf anf bindings) typing (core/typecheck expression declarations)]
+   (if (= :typed (:status typing))
+    {:status :elaborated :core expression :identity (core/identity expression declarations)
+     :typing typing :source source :anf anf :profile core/profile
+     :basis :compiler-anf :assurance :reviewed-elaboration :metatheory :not-mechanized}
+    {:status :unsupported :reason (:reason typing) :source source :basis :compiler-anf}))
+  (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))

@@ -1,0 +1,131 @@
+(ns formal.core (:require [formal.term :as t]))
+
+;; A specified first-order core. It has lexical binding and explicit outcomes,
+;; and no recursion, eval, host calls, mutation or implicit coercion.
+(def profile :bl/core-int-bool-outcomes-v1)
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.core: " message) {}))))
+(defn- scalar-sort? [sort] (contains? #{[:int] [:bool]} sort))
+(defn- name! [name]
+ (t/variable name t/Int) name)
+(defn- node [op sort args data]
+ {:core/node 1 :op op :sort sort :args (vec args) :data data})
+(defn literal [value]
+ (cond (or (= true value) (= false value)) (node :const t/Bool [] value)
+       (int? value) (node :const t/Int [] value)
+       :else (throw (ex-info "Core literals are Bool or Int" {}))))
+(defn variable [name sort] (name! name) (node :local sort [] name))
+(defn- primitive-sort [op sorts]
+ (let [n (count sorts) ints? (every? #(= t/Int %) sorts) bools? (every? #(= t/Bool %) sorts)]
+  (cond
+   (contains? #{:add :sub :mul :quot :rem :mod} op)
+    (do (require! (and (= n 2) ints?) "binary integer operands required") t/Int)
+   (= op :neg) (do (require! (and (= n 1) ints?) "integer negation operand required") t/Int)
+   (contains? #{:lt :le :gt :ge} op)
+    (do (require! (and (= n 2) ints?) "integer comparison operands required") t/Bool)
+   (= op :eq) (do (require! (and (= n 2) (= (first sorts) (second sorts))
+                                 (scalar-sort? (first sorts))) "same-sort scalar equality required") t/Bool)
+   (= op :not) (do (require! (and (= n 1) bools?) "Boolean negation operand required") t/Bool)
+   (contains? #{:and :or} op) (do (require! bools? "Boolean operands required") t/Bool)
+   :else (throw (ex-info "Unknown core primitive" {:operation op})))))
+(defn operation [op args] (node op (primitive-sort op (mapv :sort args)) args nil))
+(defn choose [condition yes no] (node :if (:sort yes) [condition yes no] nil))
+(defn let-in [name initial body] (name! name) (node :let (:sort body) [initial body] name))
+(defn block [expressions] (node :do (:sort (last expressions)) expressions nil))
+(defn raise-error [reason sort] (node :raise sort [] reason))
+
+(defn typecheck
+ "Check the entire canonical core tree against declared input sorts. The
+  structural termination argument is not a mechanized metatheory proof."
+ [program declarations]
+ (try
+  (require! (map? declarations) "input declarations must be a map")
+  (doseq [[name sort] declarations] (name! name) (require! (scalar-sort? sort) "input sort outside the core"))
+  (let [visits (atom 0) effects (atom #{}) errors (atom #{})]
+   (letfn [(visit [expr env depth]
+            (require! (and (map? expr) (= 1 (:core/node expr))
+                           (= #{:core/node :op :sort :args :data} (set (keys expr)))
+                           (scalar-sort? (:sort expr)) (vector? (:args expr))) "noncanonical core node")
+            (require! (and (<= depth 128) (<= (swap! visits inc) 4096)) "core syntax capacity")
+            (let [op (:op expr) args (:args expr) data (:data expr) n (count args)
+                  inferred
+                  (case op
+                   :const (do (require! (= n 0) "literal arity") (:sort (literal data)))
+                   :local (do (require! (= n 0) "variable arity") (name! data)
+                              (require! (contains? env data) "unbound core identity") (get env data))
+                   :raise (do (require! (and (= n 0) (keyword? data)) "explicit error name required")
+                              (swap! effects conj :raise) (swap! errors conj data) (:sort expr))
+                   :let (do (require! (= n 2) "let arity") (name! data)
+                             (let [initial (visit (first args) env (inc depth))]
+                              (visit (second args) (assoc env data initial) (inc depth))))
+                   :if (do (require! (and (= n 3) (nil? data)) "conditional shape")
+                            (require! (= t/Bool (visit (first args) env (inc depth))) "core conditions are explicitly Boolean")
+                            (let [a (visit (second args) env (inc depth)) b (visit (nth args 2) env (inc depth))]
+                             (require! (= a b) "branch sorts differ") a))
+                   :do (do (require! (and (pos? n) (nil? data)) "nonempty block required")
+                            (last (mapv #(visit % env (inc depth)) args)))
+                   (do (require! (nil? data) "primitive data must be nil")
+                       (when (contains? #{:quot :rem :mod} op) (swap! effects conj :raise) (swap! errors conj :zero-divisor))
+                       (primitive-sort op (mapv #(visit % env (inc depth)) args))))]
+             (require! (= inferred (:sort expr)) "forged core result sort") inferred))]
+    (let [sort (visit program declarations 0)]
+     {:status :typed :sort sort :profile profile :effects @effects :errors @errors
+      :evaluation :structural :syntax-nodes @visits :metatheory :not-mechanized})))
+  (catch error {:status :unsupported :reason (ex-message error) :profile profile})))
+
+(defn identity [program declarations]
+ (let [typing (typecheck program declarations)]
+  (require! (= :typed (:status typing)) "only typed core programs have a semantic identity")
+  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary [profile declarations program])) (list (tuple :case :lower)))))
+
+(defn- returned [value sort] {:status :returned :value value :sort sort})
+(defn- primitive [op args sort]
+ (let [a (first args) b (second args)]
+  (if (and (contains? #{:quot :rem :mod} op) (= b 0)) {:status :raised :error :zero-divisor :sort sort}
+   (returned
+    (case op
+     :add (+ a b) :sub (- a b) :mul (* a b) :neg (- a)
+     :lt (< a b) :le (<= a b) :gt (> a b) :ge (>= a b) :eq (= a b)
+     :not (not a) :and (every? #(= true %) args) :or (boolean (some #(= true %) args))
+     :quot (erlang/div a b) :rem (erlang/rem a b)
+     :mod (let [r (erlang/rem a b)] (if (and (not= r 0) (not= (< r 0) (< b 0))) (+ r b) r))) sort))))
+
+(defn evaluate
+ "Reference, left-to-right big-step evaluation with explicit raised outcomes.
+  A resource limit is :incomplete, never a modeled language exception."
+ ([program declarations assignment] (evaluate program declarations assignment {}))
+ ([program declarations assignment options]
+  (let [typing (typecheck program declarations) steps (atom 0) fuel (get options :steps 10000)]
+   (cond
+    (not= :typed (:status typing)) typing
+    (not (and (map? assignment) (= (set (keys declarations)) (set (keys assignment)))
+               (every? (fn [[name sort]]
+                        (let [v (get assignment name)]
+                         (if (= sort t/Bool) (or (= v true) (= v false)) (int? v)))) declarations)))
+     {:status :invalid-input :reason :declaration-value-mismatch}
+    (not (and (int? fuel) (<= 0 fuel 1000000))) {:status :invalid-input :reason :invalid-step-limit}
+    :else
+     (try
+      (letfn [(visit [expr env]
+               (when (> (swap! steps inc) fuel) (throw (ex-info "Core evaluation step limit" {:core/fuel true})))
+               (let [op (:op expr) args (:args expr) data (:data expr) sort (:sort expr)]
+                (case op
+                 :const (returned data sort)
+                 :local (returned (get env data) sort)
+                 :raise {:status :raised :error data :sort sort}
+                 :let (let [initial (visit (first args) env)]
+                        (if (= :returned (:status initial)) (visit (second args) (assoc env data (:value initial))) initial))
+                 :if (let [condition (visit (first args) env)]
+                       (if (= :returned (:status condition))
+                        (visit (if (:value condition) (second args) (nth args 2)) env) condition))
+                 :do (loop [remaining args latest nil]
+                       (if (empty? remaining) latest
+                        (let [r (visit (first remaining) env)]
+                         (if (= :returned (:status r)) (recur (rest remaining) r) r))))
+                 (loop [remaining args values []]
+                  (if (empty? remaining) (primitive op values sort)
+                   (let [r (visit (first remaining) env)]
+                    (if (= :returned (:status r)) (recur (rest remaining) (conj values (:value r))) r)))))))]
+       (assoc (visit program assignment) :sort (:sort program) :steps @steps :profile profile))
+      (catch error (if (:core/fuel (ex-data error)) {:status :incomplete :reason :step-limit :steps @steps}
+                    {:status :error :reason (ex-message error) :steps @steps})))))))

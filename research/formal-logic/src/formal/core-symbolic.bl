@@ -1,0 +1,105 @@
+(ns formal.core-symbolic
+ (:require [formal.core :as core] [formal.term :as t] [formal.numeric :as n]
+           [formal.value :as v] [formal.query :as q]))
+
+;; Symbolic interpretation is separate from the concrete reference interpreter.
+;; Returning, the returned value and the exact named error are distinct terms.
+(defn error-catalog [programs]
+ (letfn [(errors [p] (concat (when (= :raise (:op p)) [(:data p)]) (mapcat errors (:args p))))]
+  (let [names (vec (sort-by str (disj (set (mapcat errors programs)) :zero-divisor)))]
+   (into {:zero-divisor 1} (map-indexed (fn [i name] [name (+ i 2)]) names)))))
+(defn- success [term] {:value term :ok (t/bool true) :error (t/int 0)})
+(defn- all-terms [terms]
+ (cond
+  (some #(= (t/bool false) %) terms) (t/bool false)
+  :else (let [remaining (vec (remove #(= (t/bool true) %) terms))]
+          (case (count remaining) 0 (t/bool true) 1 (first remaining) (t/all remaining)))))
+(defn- choose-term [condition yes no]
+ (cond (= condition (t/bool true)) yes (= condition (t/bool false)) no
+       (= yes no) yes :else (t/ite condition yes no)))
+(defn- merge-outcome [term operands local-ok local-error]
+ {:value term :ok (all-terms (conj (mapv :ok operands) local-ok))
+  :error (reduce (fn [fallback operand] (choose-term (:ok operand) fallback (:error operand)))
+                local-error (reverse operands))})
+(defn- primitive [op operands errors]
+ (let [args (mapv :value operands) a (first args) b (second args)]
+  (if (contains? #{:quot :rem :mod} op)
+   (let [out ((get {:quot n/quotient :rem n/remainder :mod n/modulus} op) a b)
+         ok (v/defined out)]
+    (merge-outcome (v/term out) operands ok (t/ite ok (t/int 0) (t/int (:zero-divisor errors)))))
+   (merge-outcome
+    (case op
+     :add (t/add a b) :sub (t/sub a b) :mul (t/mul a b) :neg (t/neg a)
+     :eq (t/eq a b) :lt (t/lt a b) :le (t/le a b) :gt (t/gt a b) :ge (t/ge a b)
+     :not (t/not a) :and (t/all args) :or (t/any args))
+    operands (t/bool true) (t/int 0)))))
+
+(defn lower
+ "Interpret typed core as ordinary terms, retaining exact error identity.
+  This implementation is tested, not mechanically proved semantics-preserving."
+ ([program declarations] (lower program declarations {}))
+ ([program declarations options]
+  (try
+   (let [typing (core/typecheck program declarations)
+         _ (when-not (= :typed (:status typing)) (throw (ex-info (:reason typing) {})))
+         errors (get options :errors (error-catalog [program]))
+         _ (when-not (and (map? errors) (= 1 (:zero-divisor errors))
+                          (every? keyword? (keys errors)) (every? #(and (int? %) (pos? %)) (vals errors))
+                          (= (count errors) (count (set (vals errors)))))
+             (throw (ex-info "Error codes must be unique positive integers with zero-divisor at 1" {})))
+         _ (doseq [reason (:errors typing)]
+             (when-not (contains? errors reason) (throw (ex-info "Missing declared error identity" {:error reason}))))
+         prefix (get options :prefix "core")
+         inputs (into {} (map (fn [[name sort]] [name (t/variable (str prefix "." name) sort)]) declarations))]
+    (letfn [(visit [expr env]
+             (let [op (:op expr) args (:args expr) data (:data expr)]
+              (case op
+               :const (success (t/literal (:sort expr) data))
+               :local (get env data)
+               :raise {:value (t/literal (:sort expr) (if (= t/Bool (:sort expr)) false 0))
+                       :ok (t/bool false) :error (t/int (get errors data))}
+               :let (let [initial (visit (first args) env)
+                          body (visit (second args) (assoc env data (success (:value initial))))]
+                      (merge-outcome (:value body) [initial body] (t/bool true) (t/int 0)))
+               :do (let [values (mapv #(visit % env) args)]
+                     (merge-outcome (:value (last values)) values (t/bool true) (t/int 0)))
+               :if (let [condition (visit (first args) env)
+                         yes (visit (second args) env) no (visit (nth args 2) env) c (:value condition)]
+                     {:value (choose-term c (:value yes) (:value no))
+                      :ok (all-terms [(:ok condition) (choose-term c (:ok yes) (:ok no))])
+                      :error (choose-term (:ok condition) (choose-term c (:error yes) (:error no)) (:error condition))})
+               (primitive op (mapv #(visit % env) args) errors))))]
+     (let [outcome (visit program (into {} (map (fn [[name term]] [name (success term)]) inputs)))]
+      (t/validate! [(:value outcome) (:ok outcome) (:error outcome)])
+      {:status :translated :profile core/profile :core (core/identity program declarations)
+       :typing typing :inputs inputs :outcome outcome :errors errors
+       :assurance :reviewed-implementation :metatheory :not-mechanized})))
+   (catch error {:status :unsupported :reason (ex-message error) :profile core/profile}))))
+
+(defn as-value [lowered]
+ (when-not (= :translated (:status lowered)) (throw (ex-info "A translated core outcome is required" {})))
+ (let [out (:outcome lowered)]
+  (v/make (:value out)
+   {:defined (:ok out) :scope {:mode :exact}
+    :domain {:kind :scalar :profile core/profile}
+    :errors (into {} (map (fn [[reason code]] [reason (t/eq (:error out) (t/int code))]) (:errors lowered)))})))
+
+(defn equivalence-problem
+ "An exact core outcome relation: return/raise, successful value and named
+  error. Effects beyond these pure outcomes are outside this core."
+ ([left right declarations] (equivalence-problem left right declarations {}))
+ ([left right declarations options]
+  (try
+   (let [options (assoc options :errors (error-catalog [left right]))
+         a (lower left declarations options) b (lower right declarations options)]
+    (if-not (and (= :translated (:status a)) (= :translated (:status b)))
+     {:status :unsupported :left a :right b}
+     (let [a-out (:outcome a) b-out (:outcome b)
+           claim (t/all [(t/eq (:ok a-out) (:ok b-out))
+                         (t/implies (:ok a-out) (t/eq (:value a-out) (:value b-out)))
+                         (t/implies (t/not (:ok a-out)) (t/eq (:error a-out) (:error b-out)))])]
+      {:status :translated :left a :right b
+       :problem (q/prove claim (merge options
+         {:profile core/profile :scope {:mode :exact} :relation :return-value-and-named-error
+          :origin {:left-core (:core a) :right-core (:core b) :basis :reviewed-core-symbolic-interpretation}}))})))
+   (catch error {:status :unsupported :reason (ex-message error)}))))

@@ -1,0 +1,110 @@
+(ns formal.core-test
+ (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
+           [formal.elaborate :as elaborate] [formal.term :as t]
+           [formal.evaluate :as ev] [formal.proof :as proof] [formal.logic :as logic]))
+
+(def x (core/variable "x" t/Int))
+(def y (core/variable "y" t/Int))
+(def p (core/variable "p" t/Bool))
+(def declarations {"x" t/Int "y" t/Int "p" t/Bool})
+(defn op [name & args] (core/operation name (vec args)))
+(defn lit [value] (core/literal value))
+
+(deftest core-is-typed-lexically-and-has-explicit-outcomes
+ (let [program (core/let-in "x" (lit 3)
+                 (core/let-in "x" (lit false)
+                  (core/choose (core/variable "x" t/Bool) (lit 1) (lit 2))))
+       result (core/evaluate program {"x" t/Int} {"x" 999})]
+  (is (= :typed (:status (core/typecheck program {"x" t/Int}))))
+  (is (= :returned (:status result)))
+  (is (= 2 (:value result)))
+  (is (<= (:steps result) (:syntax-nodes (core/typecheck program {"x" t/Int})))))
+ (let [program (core/choose (lit true) (lit 7) (core/raise-error :unreachable t/Int))]
+  (is (= 7 (:value (core/evaluate program {} {}))))
+  (is (= #{:raise} (:effects (core/typecheck program {}))))))
+
+(deftest exact-failures-and-left-to-right-evaluation-are-observable
+ (let [program (op :lt (core/raise-error :first t/Int) (core/raise-error :second t/Int))
+       result (core/evaluate program {} {})]
+  (is (= :raised (:status result)))
+  (is (= :first (:error result)))
+  (is (= t/Bool (:sort result))))
+ (is (= :first (:error (core/evaluate (core/block [(core/raise-error :first t/Int)
+                                                   (core/raise-error :second t/Int)]) {} {}))))
+ (doseq [operator [:quot :rem :mod]]
+  (let [result (core/evaluate (op operator (lit 1) (lit 0)) {} {})]
+   (is (= :raised (:status result)))
+   (is (= :zero-divisor (:error result)))))
+ (is (= :incomplete (:status (core/evaluate (lit 1) {} {} {:steps 0})))))
+
+(deftest signed-integer-division-profiles-match-their-stated-examples
+ (doseq [[a b quotient remainder modulus] [[7 3 2 1 1] [7 -3 -2 1 -2]
+                                         [-7 3 -2 -1 2] [-7 -3 2 -1 -1]]]
+  (doseq [[operator expected] [[:quot quotient] [:rem remainder] [:mod modulus]]]
+   (is (= expected (:value (core/evaluate (op operator (lit a) (lit b)) {} {})))))))
+
+(deftest forged-or-unmodeled-core-programs-are-refused
+ (doseq [program [(assoc (lit 1) :sort t/Bool)
+                  (assoc (lit 1) :extra true)
+                  (assoc (lit 1) :op :host-call)
+                  (core/variable "missing" t/Int)
+                  (core/choose (lit 0) (lit 1) (lit 2))
+                  (core/choose (lit true) (lit 1) (lit false))
+                  (core/block []) (core/raise-error "not-an-error-name" t/Int)]]
+  (is (= :unsupported (:status (core/typecheck program {}))) (pr-str program)))
+ (is (= :invalid-input (:status (core/evaluate x {"x" t/Int} {"x" false})) ))
+ (is (= :invalid-input (:status (core/evaluate x {"x" t/Int} {}))))
+ (is (= :invalid-input (:status (core/evaluate (lit 1) {} {"extra" 1})))))
+
+(deftest concrete-and-symbolic-interpretations-agree-on-values-and-errors
+ (let [programs [(op :add x y) (op :mul x y) (op :quot x y) (op :rem x y) (op :mod x y)
+                 (core/choose p (op :quot x y) (core/raise-error :rejected t/Int))
+                 (core/choose (op :lt x (lit 0)) (op :neg x) x)
+                 (op :and (op :le x y) p)
+                 (core/block [(core/raise-error :first t/Int) (op :quot x y)])]]
+  (doseq [program programs]
+   (let [lowered (symbolic/lower program declarations) outcome (:outcome lowered)]
+    (is (= :translated (:status lowered)) (pr-str lowered))
+    (doseq [a (range -4 5) b [-3 -1 0 1 3] flag [false true]]
+     (let [assignment {"x" a "y" b "p" flag}
+           term-assignment {"core.x" a "core.y" b "core.p" flag}
+           result (core/evaluate program declarations assignment)
+           ok (ev/value (:ok outcome) term-assignment)
+           error (ev/value (:error outcome) term-assignment)]
+      (is (= (= :returned (:status result)) ok) (pr-str {:program program :inputs assignment :result result :outcome outcome}))
+      (if (= :returned (:status result))
+       (do (is (= (:value result) (ev/value (:value outcome) term-assignment))) (is (= 0 error)))
+       (is (= (get (:errors lowered) (:error result)) error)))
+      (is (<= (:steps result) (:syntax-nodes (:typing lowered))))))))))
+
+(deftest source-elaboration-uses-real-anf-and-preserves-reviewed-runtime-examples
+ (let [samples [{:source "(let [a (+ x 1)] (+ a 2))" :runtime (fn [x y] (+ x 3))}
+                {:source "(if (< x 0) (- x) x)" :runtime (fn [x y] (if (< x 0) (- x) x))}
+                {:source "(quot x y)" :runtime (fn [x y] (quot x y))}
+                {:source "(rem x y)" :runtime (fn [x y] (rem x y))}
+                {:source "(mod x y)" :runtime (fn [x y] (mod x y))}
+                {:source "(if x 7 8)" :runtime (fn [x y] (if x 7 8))}
+                {:source "(not x)" :runtime (fn [x y] (not x))}]]
+  (doseq [sample samples]
+   (let [elaborated (elaborate/prepare (:source sample) {"x" t/Int "y" t/Int})]
+    (is (= :elaborated (:status elaborated)) (pr-str elaborated))
+    (when (= :elaborated (:status elaborated))
+     (doseq [a [-7 0 7] b [-3 3]]
+      (let [result (core/evaluate (:core elaborated) {"x" t/Int "y" t/Int} {"x" a "y" b})]
+       (is (= :returned (:status result)))
+       (is (= ((:runtime sample) a b) (:value result)))))))))
+ (doseq [source ["(do (println x) x)" "(mystery x)" "(+ x 0.5)" "nil" "(+ x 1) (+ x 2)"]]
+  (is (= :unsupported (:status (elaborate/prepare source {"x" t/Int}))))))
+
+(deftest equivalence-distinguishes-error-identity-and-produces-checkable-linear-claims
+ (let [left (op :add x (lit 1)) right (op :add (lit 1) x)
+       prepared (symbolic/equivalence-problem left right {"x" t/Int})
+       result (proof/produce (:problem prepared))]
+  (is (= :translated (:status prepared)))
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :return-value-and-named-error (get-in prepared [:problem :relation])))
+  (is (= :not-established (get-in result [:checking :source-connection]))))
+ (let [prepared (symbolic/equivalence-problem (core/raise-error :one t/Int) (core/raise-error :two t/Int) {})]
+  (is (= :translated (:status prepared)))
+  (doseq [engine [:z3 :oxiz]]
+   (is (= :refuted (:verdict (logic/run {:backend engine} (:problem prepared))))))))
