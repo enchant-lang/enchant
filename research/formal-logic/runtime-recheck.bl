@@ -3,7 +3,19 @@
 
 ;; This command checks the ETF records in a fresh VM. It starts no observation
 ;; actor, loads no recorded BEAM and calls no recorded application handler.
-(def data (erlang/binary_to_term (File/read! "research/formal-logic/evidence/actor-runtime/examples.etf") (list :safe)))
+;; This is our committed, hash-pinned archive, not a public ETF decoder. A
+;; :safe decode in a fresh VM refuses keywords introduced only by the producer
+;; (including the sample IDs). Verify the bounded exact archive before allowing
+;; its recorded atoms to be interned. Public receipt checking accepts BL data.
+(def archive (File/read! "research/formal-logic/evidence/actor-runtime/examples.etf"))
+(def archive-pin (interop/json-> (File/read! "research/formal-logic/evidence/actor-runtime/examples-pin.json")))
+(assert (<= (erlang/byte_size archive) 2097152))
+(assert (= (get archive-pin "bytes") (erlang/byte_size archive)))
+(assert (= (get archive-pin "sha256")
+           (Base/encode16 (crypto/hash :sha256 archive) (list (tuple :case :lower)))))
+(def decoded (erlang/binary_to_term archive (list :used)))
+(assert (= (erlang/byte_size archive) (elem decoded 1)))
+(def data (elem decoded 0))
 (defn inspect-checks [action]
  (let [parent (erlang/self) ticket (erlang/make_ref)
        capture (erlang/fun_info outcome/capture)
@@ -53,6 +65,7 @@
 (File/write! "research/formal-logic/evidence/actor-runtime/fresh-replay.json"
  (interop/->json {:schema :enchant.formal.actual-runtime-recheck-v1
                  :records results :trace (:trace inspected) :calibration-calls (:calibration-calls inspected)
+                 :archive-decoding :bounded-hash-pinned-trusted-etf
                  :recorded-handler-invocations 0 :recorded-beam-loads 0
                  :scope :fresh-vm-recorded-conformance-check :compiler-proof-authority false}))
 (println {:records (count results) :conforming (count (filter #(= :conforming (:status %)) results))
