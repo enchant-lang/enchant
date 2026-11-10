@@ -106,6 +106,14 @@ itself mechanically verified and does not certify all SMT theories.
   A coherent 22-file run passed 7,099 assertions. Nine execution records and
   three portable proof records recheck in a fresh VM; historical raw-ETF data
   remains separate. `DATA-IDENTITY.md` specifies the format and version boundary.
+- Selected Source contexts: actual SDK world/revision selection and hygienic
+  expansion now feed a bounded lexical-call specializer and the existing typed
+  core/contract interface. Private helpers, captured values and ordered scalar
+  initialization are retained. The coherent 23-file run passed 7,266 assertions,
+  including 118 selected-context checks. Both source expression front ends now
+  share exact callee admission and reject foreign inputs posing as local ones;
+  loops reuse the same declared-input namespace. `SELECTED-SOURCE.md` records
+  the initialize-then-call scope and the unproved specialization/runtime bridges.
 
 ## Loops with checked ranking obligations
 

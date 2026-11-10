@@ -65,6 +65,11 @@ try{
   await navigate('/#s-the-model-running');
   await evaluate("document.querySelector('#cell-story-binding-context').scrollIntoView({block:'center'})");
   await shot(size.name+'-binding-context');
+  const selectedSource=await evaluate("document.querySelector('#cell-story-selected-source')?.innerText||''");
+  check(size.name+': selected Source function and both engines share one promise',selectedSource.includes(':selected-source :checked-context')&&selectedSource.includes(':contract-statuses [:checked :checked]')&&selectedSource.includes(':bl/selected-source-context-v1')&&selectedSource.includes(':phase-check :proved'));
+  check(size.name+': selected Source promise retains initialization and preservation scope',selectedSource.includes(':scope :initialize-unit-then-call')&&selectedSource.includes(':binding-closure :selected-source-and-lexical-callees')&&selectedSource.includes(':actual-selected-execution :not-observed')&&selectedSource.includes(':source-core-preservation :reviewed-not-mechanically-proved')&&selectedSource.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-selected-source').scrollIntoView({block:'center'})");
+  await shot(size.name+'-selected-source');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
