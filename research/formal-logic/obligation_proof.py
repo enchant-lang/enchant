@@ -25,7 +25,7 @@ def typed_term_packet(packet):
 
 def canonical_identity(manifest):
     value = dict(manifest)
-    for key in ["profile", "subject-kind", "model-connection", "composition", "feasibility", "kernel-execution", "identity-profile"]:
+    for key in ["profile", "subject-kind", "axiom-policy", "model-connection", "composition", "feasibility", "kernel-execution", "identity-profile"]:
         value[key] = terms.k.Keyword(value[key])
     value["rows"] = []
     for row in manifest["rows"]:
@@ -51,13 +51,14 @@ def digest(value, name):
 
 
 def validate(manifest):
-    require(type(manifest) is dict and set(manifest) == {"formal/obligation-term-manifest", "profile", "subject-kind", "subject", "plan", "rows", "model-connection", "composition", "feasibility", "kernel-execution", "compiler-proof-authority", "identity-profile", "identity"}, "obligation manifest fields")
+    require(type(manifest) is dict and set(manifest) == {"formal/obligation-term-manifest", "profile", "axiom-policy", "subject-kind", "subject", "plan", "rows", "model-connection", "composition", "feasibility", "kernel-execution", "compiler-proof-authority", "identity-profile", "identity"}, "obligation manifest fields")
     require(type(manifest["formal/obligation-term-manifest"]) is int and manifest["formal/obligation-term-manifest"] == 1, "obligation manifest version")
     require(manifest["profile"] == "bl/obligation-term-manifest-v1" and manifest["identity-profile"] == "bl/canonical-formal-data-v1", "obligation manifest profile")
     require(type(manifest["subject-kind"]) is str and manifest["subject-kind"] in {"query", "contract", "loop", "translation", "protocol", "source-protocol", "protocol-trace"}, "formal subject kind")
     require(manifest["model-connection"] == manifest["composition"] == "reviewed-not-mechanically-proved", "reviewed model/composition connection")
     require(manifest["feasibility"] == "not-established" and manifest["kernel-execution"] == "not-run", "export cannot assert execution/feasibility")
     require(manifest["compiler-proof-authority"] is False, "no compiler authority")
+    require(manifest["axiom-policy"] in ["choice-free-v1", "lean-standard-v1"], "supported manifest axiom policy")
     for key in ["subject", "plan", "identity"]:
         digest(manifest[key], key)
     rows = manifest["rows"]
@@ -117,19 +118,20 @@ def run(path, output):
         target.mkdir(parents=True, exist_ok=True)
         packet = target / "packet.json"
         packet.write_text(json.dumps(row["packet"]) + "\n")
-        receipt = terms.run(packet, target)
+        receipt = terms.run(packet, target, "choice-free" if manifest["axiom-policy"] == "choice-free-v1" else "lean-standard")
         if row["required"]:
             ready_required += 1
             unreachable += int(row["via"] == "unreachable")
         inconsistent = inconsistent or row["role"] == "inconsistency"
         checked.append({"index": index, "label": row["label"], "role": row["role"], "required": row["required"], "via": row["via"],
                         "packet": row["packet"]["identity"], "proof_source_sha256": receipt["proof_source_sha256"],
-                        "proof_olean_sha256": receipt["proof_olean_sha256"], "axioms": receipt["axioms"]})
+                        "proof_olean_sha256": receipt["proof_olean_sha256"], "axioms": receipt["axioms"], "axiom_policy": receipt["axiom_policy"]})
     result = {"schema": "enchant.formal.obligation-term-execution.v1",
               "status": "checked-required-term-evidence" if not pending else "incomplete-obligation-evidence",
               "manifest": manifest["identity"], "subject_kind": manifest["subject-kind"], "subject": manifest["subject"], "plan": manifest["plan"],
               "coverage": {"required": required, "ready": ready_required, "unreachable": unreachable, "complete": not pending},
-              "checked": checked, "pending": pending,
+              "checked": checked, "pending": pending, "axiom_policy": manifest["axiom-policy"],
+              "axioms_used": sorted({a for row in checked for a in row["axioms"]["originalQuestionEntails"]}),
               "initial_assumption_consistency": "inconsistent-in-contained-typed-term-model" if inconsistent else "not-established",
               "positive_feasibility": "not-established", "scope": "checked-stated-term-leaves-and-required-coverage",
               "model_connection": "requires-fresh-BL-subject-plan-reconstruction", "model_composition": "reviewed-not-mechanically-proved",

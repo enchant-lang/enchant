@@ -270,7 +270,12 @@ def verify_source(text, packet, integers, booleans):
     require(tuple(recovered) == mappings(packet, integers, booleans), "variable mappings differ from original names")
 
 
-def run(path, output):
+AXIOM_POLICIES = {"choice-free": {"propext", "Quot.sound"},
+                  "lean-standard": {"propext", "Classical.choice", "Quot.sound"}}
+
+
+def run(path, output, axiom_policy="choice-free"):
+    require(axiom_policy in AXIOM_POLICIES, "unknown axiom policy")
     require(path.stat().st_size <= k.MAX_BYTES, "term packet byte capacity")
     packet = k.load_packet(path)
     integers, booleans = validate(packet)
@@ -305,13 +310,17 @@ def run(path, output):
             require(match is not None, "unexpected term theorem audit")
             audits[match[1]] = match[2].split(", ") if match[2] else []
         require(set(audits) == {"packetAccepted", "normalizationConnected", "originalQuestionEntails"}, "term theorem audit names")
-        require(audits["packetAccepted"] == ["propext"] and audits["originalQuestionEntails"] == ["propext", "Quot.sound"] and tuple(audits["normalizationConnected"]) in {(), ("propext",), ("propext", "Quot.sound")}, "term theorem axiom dependencies")
+        connection_axioms = set(audits["normalizationConnected"])
+        final_axioms = set(audits["originalQuestionEntails"])
+        require(audits["packetAccepted"] == ["propext"] and connection_axioms <= AXIOM_POLICIES[axiom_policy]
+                and final_axioms == {"propext", "Quot.sound"} | connection_axioms, "term theorem axiom dependencies exceed policy")
         shutil.copyfile(work / "Check.olean", output / "Check.olean")
     result = {"schema": "enchant.formal.typed-term-refutation-execution.v1", "status": "checked-term-entailment",
               "packet": packet["identity"], "normalized_packet": packet["normalized"]["identity"], "question": packet["normalized"]["question"],
               "semantics": packet["semantics"], "proof_source_sha256": k.sha(output / "Check.lean"), "proof_olean_sha256": k.sha(output / "Check.olean"),
               "term_model_source_sha256": pins[1]["source"]["sha256"], "term_model_olean_sha256": pins[1]["compiled"]["sha256"],
-              "axioms": audits, "canonical_packet_identity": "independently-recomputed", "source_data": "independently-decoded-and-compared",
+              "axioms": audits, "axiom_policy": axiom_policy, "allowed_axioms": sorted(AXIOM_POLICIES[axiom_policy]),
+              "canonical_packet_identity": "independently-recomputed", "source_data": "independently-decoded-and-compared",
               "normalization_connection": "checked-countermodel-preservation-for-this-question", "general_bl_normalizer_soundness": "not-established",
               "term_data_model_correspondence": "reviewed-data-semantics-bridge", "source_compiler_preservation": "not-established",
               "runtime_attestation": "local-checker-observation-not-cryptographic-attestation", "compiler_proof_authority": False}
@@ -322,9 +331,10 @@ def run(path, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("packet", type=Path); parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--axiom-policy", choices=sorted(AXIOM_POLICIES), default="choice-free")
     args = parser.parse_args()
     try:
-        result = run(args.packet, args.output)
+        result = run(args.packet, args.output, args.axiom_policy)
         print(json.dumps({"status": result["status"], "packet": result["packet"], "compiler_proof_authority": False}))
     except (ValueError, OSError, subprocess.TimeoutExpired, RecursionError, IndexError) as error:
         args.output.mkdir(parents=True, exist_ok=True)

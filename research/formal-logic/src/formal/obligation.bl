@@ -10,6 +10,8 @@
 (def profile :bl/obligation-plan-v1)
 (def proof-profile :bl/obligation-proof-data-v1)
 (def manifest-profile :bl/obligation-term-manifest-v1)
+(def default-axiom-policy :lean-standard-v1)
+(def axiom-policies #{:choice-free-v1 :lean-standard-v1})
 (def model-kinds #{:contract :loop :translation :protocol :source-protocol :protocol-trace})
 (defn- require! [ok reason] (when-not ok (throw (ex-info (str "formal.obligation: " reason) {}))))
 (defn prepare-subject
@@ -102,7 +104,7 @@
     {:label (:label item) :status (:status selected) :via (if unreachable? :unreachable :entailment)
      :certificate (:certificate selected) :packet (:packet selected)
      :diagnostic (when (:reason selected) (str (:reason selected)))})))
-(defn- manifest [prepared rows]
+(defn- manifest [prepared rows axiom-policy]
  (identity/seal
   {:formal/obligation-term-manifest 1 :profile manifest-profile
    :subject-kind (get-in prepared [:subject :kind]) :subject (get-in prepared [:subject :identity]) :plan (:identity prepared)
@@ -111,7 +113,7 @@
                   :question (identity/hash (:question item)) :unreachable (when (:unreachable item) (identity/hash (:unreachable item)))
                   :status (:status evidence) :via (:via evidence) :packet (:packet evidence)
                   :diagnostic (:diagnostic evidence)}) (:rows prepared) rows)
-   :model-connection :reviewed-not-mechanically-proved :composition :reviewed-not-mechanically-proved
+   :axiom-policy axiom-policy :model-connection :reviewed-not-mechanically-proved :composition :reviewed-not-mechanically-proved
    :feasibility :not-established :kernel-execution :not-run :compiler-proof-authority false}))
 (defn- coverage [prepared rows]
  (let [required (mapv (fn [item evidence] (when (:required item) evidence)) (:rows prepared) rows)
@@ -120,18 +122,21 @@
   {:required (count required) :ready (count ready) :complete (= (count required) (count ready))
    :unreachable (count (filter #(= :unreachable (:via %)) ready))
    :pending (mapv :label (remove #(= :ready (:status %)) required))}))
-(defn- assembled [object rows]
+(defn- assembled [object rows axiom-policy]
  (let [covered (coverage object rows)
-       bundle (identity/seal {:formal/obligation-proof-data 1 :profile proof-profile :plan object :rows rows
-                              :manifest (manifest object rows)})]
+       bundle (identity/seal {:formal/obligation-proof-data 1 :profile proof-profile :axiom-policy axiom-policy :plan object :rows rows
+                              :manifest (manifest object rows axiom-policy)})]
   {:status (if (:complete covered) :ready :incomplete) :bundle bundle :coverage covered
    :kernel-execution :not-run :model-connection :reviewed-not-mechanically-proved :compiler-proof-authority false}))
 (defn package
  "Package caller-supplied certificates by exact obligation label, without
   search. Missing entries remain pending; stale or invalid supplied proofs fail."
- [subject supplied]
+ ([subject supplied] (package subject supplied {}))
+ ([subject supplied options]
  (try
-  (let [prepared (plan subject) object (:plan prepared)
+  (let [_ (require! (and (map? options) (every? #{:axiom-policy} (keys options))
+                         (contains? axiom-policies (get options :axiom-policy default-axiom-policy))) "explicit supported axiom policy required")
+        prepared (plan subject) object (:plan prepared)
         _ (require! (= :ready (:status prepared)) (:reason prepared))
         labels (set (map :label (:rows object)))
         _ (require! (and (map? supplied) (every? labels (keys supplied))) "unknown supplied proof label")
@@ -150,28 +155,34 @@
                         (require! (= :ready (:status ready)) (str "supplied certificate refused: " (:reason ready)))
                         {:label (:label item) :status :ready :via (:via provided) :certificate (:certificate provided)
                          :packet (:packet ready) :diagnostic nil})))) (:rows object))]
-   (assembled object rows))
-  (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))
+   (assembled object rows (get options :axiom-policy default-axiom-policy)))
+  (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false}))))
 (defn produce
  "Build complete or visibly partial proof data for a common formal subject.
   It invokes BL proof search, never a native solver or external proof process."
  ([subject] (produce subject {}))
  ([subject options]
+ (if-not (and (map? options) (every? #{:search :axiom-policy} (keys options))
+               (or (not (contains? options :search)) (map? (:search options)))
+               (contains? axiom-policies (get options :axiom-policy default-axiom-policy)))
+  {:status :unsupported :reason :unsupported-proof-search-or-axiom-policy :compiler-proof-authority false}
  (let [prepared (plan subject)]
   (if-not (= :ready (:status prepared)) prepared
    (try
     (let [object (:plan prepared) rows (mapv #(discharge % (get options :search {})) (:rows object))]
-     (assembled object rows))
-    (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false}))))))
+     (assembled object rows (get options :axiom-policy default-axiom-policy)))
+    (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))))))
 (defn check-data
  "Reconstruct the whole subject plan and check exact row coverage, certificates
-  and original-term packet data without proof search or native/Lean execution."
+  and original-term packet data without certificate search or this experiment's
+  native/Lean backends. Source preparation can execute phase semantics."
  [subject bundle]
  (try
   (let [prepared (plan subject) object (:plan prepared)]
    (require! (= :ready (:status prepared)) (:reason prepared))
-   (require! (and (map? bundle) (= #{:formal/obligation-proof-data :profile :plan :rows :manifest :identity-profile :identity} (set (keys bundle)))
+   (require! (and (map? bundle) (= #{:formal/obligation-proof-data :profile :axiom-policy :plan :rows :manifest :identity-profile :identity} (set (keys bundle)))
                   (= 1 (:formal/obligation-proof-data bundle)) (= proof-profile (:profile bundle)) (identity/valid? bundle)
+                  (contains? axiom-policies (:axiom-policy bundle))
                   (= object (:plan bundle)) (vector? (:rows bundle))
                   (= (mapv :label (:rows object)) (mapv :label (:rows bundle)))) "proof-data subject or complete coverage mismatch")
    (doseq [[item evidence] (map (fn [a b] [a b]) (:rows object) (:rows bundle))]
@@ -187,9 +198,9 @@
       (require! (= :checked-data-connection (:status checked)) "term certificate or original packet mismatch"))
      (do (require! (and (nil? (:certificate evidence)) (nil? (:packet evidence))) "pending row cannot carry accepted proof data")
          (require! (= (= :sat (get-in item [:question :mode])) (= :requires-witness (:status evidence))) "SAT witness status mismatch"))))
-   (require! (= (manifest object (:rows bundle)) (:manifest bundle)) "manifest differs from freshly reconstructed coverage")
+   (require! (= (manifest object (:rows bundle) (:axiom-policy bundle)) (:manifest bundle)) "manifest differs from freshly reconstructed coverage")
    {:status :checked-data-connection :profile proof-profile :bundle (:identity bundle) :plan (:identity object)
-    :manifest (get-in bundle [:manifest :identity]) :coverage (coverage object (:rows bundle))
+    :manifest (get-in bundle [:manifest :identity]) :coverage (coverage object (:rows bundle)) :axiom-policy (:axiom-policy bundle)
     :model-connection :reviewed-not-mechanically-proved :composition :reviewed-not-mechanically-proved
     :feasibility :not-established :kernel-execution :not-run :compiler-proof-authority false})
   (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))
