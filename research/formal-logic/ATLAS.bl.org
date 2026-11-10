@@ -925,6 +925,53 @@ The qualification checked 39 term leaves and applied 11 entailments to witnesses
 
 Read [[file:OBLIGATIONS.md][the mixed bundle interface]], [[file:src/formal/obligation.bl][plan and context reconstruction]], [[file:test/mixed_obligation_test.bl][the mixed BL checks]], [[file:evidence/mixed-obligations/examples/summary.json][the 17 subject exports]], [[file:evidence/mixed-obligations/execution/results.json][the checked leaves and applied claims]], [[file:evidence/mixed-obligations/execution/named-layout/instances/0002/Instance.lean][the named-layout proof]], [[file:evidence/mixed-obligations/execution/loop/instances/0002/Instance.lean][the countdown initialization proof]], [[file:evidence/mixed-obligations/fresh/obligations-fresh.json][the fresh VM reconstruction]], [[file:evidence/mixed-obligations/bridge-check.txt][the independent checks]], and [[file:evidence/mixed-obligations/qualification.json][the qualification]].
 
+** Check what the Core terms mean
+Consider a record lookup with a default expression that raises an error. The record already has the requested field. Core still evaluates the default as a call argument, so the lookup raises. Its symbolic outcome must say the same thing.
+
+The checker now takes the original Core tree and the actual terms used by the contract machinery. Lean proves that they agree for every typed input to that tree. The proof checks whether it returns, the value on return and the name of a raised error.
+
+#+begin_rosetta
+What Core does | What the terms must establish
+Returns a value | The success term is true, the payload has that value and the error code is zero.
+Raises a named error | The success term is false and the error code names the same error.
+Evaluates several operands | The first raised operand determines the error.
+Chooses a branch | Only the selected branch contributes an outcome.
+#+end_rosetta
+
+#+begin_code_graph :id formal-core-term-correspondence :title "Check the Core tree and the terms used by its contract" :start tree
+node tree | code | Retain the original Core tree | implemented
+summary The export keeps the declared inputs, original tree, error catalogue and exact symbolic outcome. A prepared contract also binds its question identity.
+source research/formal-logic/src/formal/core-terms.bl | Core and contract export | Fresh reconstruction checks the original subject and the whole packet.
+node order | code | Preserve evaluation order in a record | observed
+summary The contained Core model evaluates operands in their written order. It then assembles the record in named field slots.
+field Example | A present field can still have a default that raises. A later update can overwrite a value whose earlier operand would raise.
+source research/formal-logic/evidence/core-terms/execution/eager-default/Check.lean | Checked eager-default example | The proof covers every typed input record.
+node arithmetic | code | Check the signed arithmetic formulas | observed
+summary The solver terms use Euclidean division. Core uses a toward-zero quotient, a dividend-sign remainder and a divisor-sign modulus. The checked arithmetic lemmas connect those formulas.
+field Division by zero | The proof checks the named zero-divisor error. Successful payloads are checked on the returning branch.
+source research/formal-logic/metatheory/CoreTerms.lean | Checked outcome and arithmetic laws | The audits list the logical dependencies used by each law.
+node theorem | code | Prove agreement for every typed input | observed
+summary Lean compares evaluation of the original typed tree with the exact emitted success, payload and error terms. The error catalogue has a separate finite round-trip check.
+field Scope | The named-data codec and the connection from Source to Core remain reviewed. The theorem applies to the contained typed tree and symbolic outcome.
+source research/formal-logic/evidence/core-terms/execution/source-record-contract/Check.lean | Applied source-record contract proof | The selected Core tree and lowered terms come from actual contract preparation.
+node rejected | code | Reject a changed meaning | observed
+summary Six well-formed substitutions fail the checker. They include reversed record evaluation order, a changed error name and a Euclidean quotient in place of the Core quotient.
+source research/formal-logic/evidence/core-terms/execution/rejected.json | Semantic substitution checks | Each attempted packet has its own recomputed identity.
+node fresh | code | Reconnect the packet after transfer | observed
+summary A fresh Beam Lisp VM reconstructs the original packet. It checks the exact exported data even when a changed placeholder would have no effect on a raised outcome.
+source research/formal-logic/evidence/core-terms/fresh/core-terms-fresh.json | Rechecked original subjects | The checking window records zero calls to the counted proof-search and native session entries.
+edge tree -> order | binds the actual operand order
+edge tree -> arithmetic | carries the emitted signed arithmetic terms
+edge order -> theorem | compares both outcomes
+edge arithmetic -> theorem | applies the checked formulas
+edge theorem -> rejected | exercises incorrect alternatives
+edge tree -> fresh | binds the full original data again
+#+end_code_graph
+
+The checker accepted 34 original exports, including four contracts. The six rejected substitutions change a successful value, return status, named error, record operand order, signed quotient or returned record field. The failure placeholder has a separate check because a raised outcome has no returned value.
+
+Read [[file:CORE.md][the Core semantics and checker interface]], [[file:src/formal/core-terms.bl][the exact BL export]], [[file:test/core_terms_test.bl][the fresh subject checks]], [[file:metatheory/CoreTerms.lean][the checked model laws]], [[file:metatheory/core-terms-pin.json][the pinned proof model]], [[file:evidence/core-terms/model-check.txt][the model audits]], [[file:evidence/core-terms/examples/summary.json][the original exports]], [[file:evidence/core-terms/execution/accepted.json][the all-input correspondence reports]], [[file:evidence/core-terms/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-terms/execution/eager-default/Check.lean][the eager-default proof]], [[file:evidence/core-terms/execution/source-record-contract/Check.lean][the source-record contract proof]], [[file:evidence/core-terms/fresh/core-terms-fresh.json][the fresh reconstruction]], and [[file:evidence/core-terms/qualification.json][the recorded qualification]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -2003,6 +2050,23 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-witnessed-obligations
 : {:kernel-execution :not-run, :data-connection :checked-data-connection, :initial-evidence :witness-ready, :initial-value 3, :required-claims 8, :ready-claims 8, :matching-entailments ["obligation/initial/normal"]}
 
+
+#+begin_src beam-lisp :id story-core-term-agreement
+(def eager-record-sort (core/record-sort {"balance" t/Int "flag" t/Bool}))
+(def eager-record (core/variable "r" eager-record-sort))
+(def eager-program (core/field eager-record "balance" (core/raise-error :phase/default t/Bool)))
+(def eager-declarations {"r" eager-record-sort})
+(def eager-export (formal/core-term-data eager-program eager-declarations))
+(def eager-packet (:packet eager-export))
+(def eager-reference (core/evaluate eager-program eager-declarations {"r" {"balance" 7 "flag" false}}))
+(def eager-recheck (formal/check-core-term-data eager-program eager-declarations eager-packet))
+(assert (= :raised (:status eager-reference)))
+(assert (= :phase/default (:error eager-reference)))
+(assert (= :checked-data-connection (:status eager-recheck)))
+{:present-field "balance" :core-outcome (:status eager-reference) :named-error (:error eager-reference)
+ :symbolic-success (get-in eager-packet [:outcome :ok :data]) :data-connection (:status eager-recheck)
+ :kernel-execution (:kernel-execution eager-recheck)}
+#+end_src
 
 #+begin_src beam-lisp :id story-canonical-identity
 (def data-one (data-identity/seal {:formal/example 1 :state {"n" 1 "flag" true}}))

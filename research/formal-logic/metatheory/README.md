@@ -1,5 +1,13 @@
 # A mechanically checked model, with an explicit bridge boundary
 
+`CoreTerms.lean` connects a particular Core evaluation to the exact success,
+value and error terms exported by the symbolic lowerer. Its checked laws cover
+partial operators, selection and signed integer arithmetic. Generated proofs
+check the contained tree for every typed input, including records encoded as
+products. The runner retains the actual theorem dependencies. The named-data
+codec and Source/compiler correspondence have their own assurance boundaries.
+[Core outcome correspondence](../CORE.md)
+
 [Witness.lean](Witness.lean) checks concrete satisfying assignments over the same
 partial typed terms as `Terms.lean`. Four audited results connect executable
 acceptance to explicit satisfying environments and distinguish empty from false

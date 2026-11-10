@@ -48,6 +48,64 @@ the declared inputs. A configured evaluation step limit produces `:incomplete`,
 never a modeled error. Implementation or host resource failure is outside the
 core's mathematical exception semantics.
 
+## Check the exact symbolic outcome against Core
+
+`formal/core-term-data` exports an original typed Core tree with its declared
+input layout, error catalogue, and the exact success, value and error terms
+from `formal.core-symbolic/lower`. The contract arity exports the outcome
+used by fresh contract preparation and records the exact question identity.
+
+```clojure
+(def raw (formal/core-term-data body declarations))
+(formal/check-core-term-data body declarations (:packet raw))
+
+(def from-contract (formal/core-term-data definition))
+(formal/check-core-term-data definition (:packet from-contract))
+```
+
+The BL check reconstructs the exact packet. It reports
+`:checked-data-connection` and `:kernel-execution :not-run`. The raw export
+also accepts the lowerer's prefix, input encoding and error catalogue options.
+Contract reconstruction may execute expansion-phase code.
+
+```sh
+research/formal-logic/check-core-terms \
+  research/formal-logic/evidence/core-terms/examples/eager-default.json \
+  --output /tmp/core-term-agreement
+```
+
+The runner checks the closed packet and independently decodes the generated
+Lean data. It imports the pinned Core and term models. The theorem
+`coreTermCorrespondence` quantifies over every typed input of this contained
+Core tree and its exact symbolic outcome. A returned value requires a true
+success flag, the same typed value and error code zero. A raised outcome
+requires a false success flag and the code of the same named error. The
+failure payload has no role in the outcome relation. Fresh BL reconstruction
+still requires the exact exported placeholder. A separate finite theorem
+checks the error catalogue round trip.
+
+Lexical names become typed slots. The reviewed Core codec encodes closed
+records as products with slots in canonical field order. It evaluates
+construction fields and update operands in written order using nested
+bindings. It then assembles the product. An eager default is evaluated even
+when the field exists. A replacement can overwrite an earlier field value
+while that earlier operand still determines the result if it raises.
+
+The arithmetic lemmas connect the lowerer's Euclidean term expressions to
+Core's toward-zero quotient, dividend-sign remainder and divisor-sign modulus.
+Each proof also covers the zero-divisor outcome where applicable. The standard
+axiom policy admits the recorded `Classical.choice` dependency in the signed
+arithmetic proofs. The `--axiom-policy choice-free` check rejects those proof
+artifacts and prints their actual dependencies.
+
+The qualification covers 34 exported trees, including four contract subjects,
+and six well-formed semantic substitutions that the Lean checker rejects.
+The named-data codec and the contract's Source-to-Core connection remain
+reviewed. This is per-tree validation for the contained mathematical Core
+and term models. A general lowerer theorem, contract-rule composition and
+compiler/runtime preservation are separate proof boundaries.
+[Qualification](evidence/core-terms/qualification.json)
+
 ## Three independent paths
 
 - `formal.core/typecheck` validates canonical data, lexical scope and types.

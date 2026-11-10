@@ -46,6 +46,11 @@ and check included term leaves externally. Fresh subject reconstruction binds
 complete coverage; model composition and Source/runtime correspondence remain
 reviewed connections.
 
+The Core term checker proves that each accepted original Core tree agrees
+with its exported success, value and error terms on every typed input. The
+record and arithmetic cases include eager defaults, repeated updates, signed
+quotient, remainder and modulus. [Core outcome correspondence](CORE.md)
+
 [WITNESSES.md](WITNESSES.md) adds positive SAT evidence with term-native
 bindings. Authored assignments and models from either backend are independently
 replayed against the original assertions and checked by a constructive Lean
