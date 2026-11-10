@@ -78,6 +78,12 @@ instrumented check window. Conformance and safety are distinct, and the observer
 caller environment, intrinsic meanings and compiler remain explicit trust
 boundaries. No universal runtime refinement or compiler authority follows.
 
+[INTRINSICS.md](INTRINSICS.md) records a source-admission repair discovered by
+that observer: `Num/div` cannot borrow integer quotient semantics, and raw
+Erlang negation cannot borrow BL truthiness. Remote calls now use reviewed
+module/function/arity identities. The declared Var assumption for scoped record
+operations remains explicit; this does not freeze mutable environments.
+
 [metatheory/Core.lean](metatheory/Core.lean) adds a separate typed mathematical
 model checked by pinned Lean 4.34.1. All 18 theorem audits report no axiom
 dependencies, including natural and lexicographic ranking rules. This does not

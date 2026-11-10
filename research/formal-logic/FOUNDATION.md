@@ -88,6 +88,12 @@ itself mechanically verified and does not certify all SMT theories.
   are implemented. The fresh checker loads no recorded handler BEAM and invokes
   no recorded handlers in the instrumented window. Environment/intrinsic,
   effect and universal implementation/model correspondence work remains.
+- Exact source intrinsic admission: the actual observer exposed a host division
+  mismatch. Remote callee/arity and canonical arithmetic identities are now
+  checked; Erlang Boolean negation is distinct from BL truthiness. A focused
+  nine-file follow-up passed 4,877 assertions, including 135 identity regressions.
+  Declared record Vars retain an explicit binding assumption. `INTRINSICS.md`
+  records this repair and the remaining source-environment boundary.
 
 ## Loops with checked ranking obligations
 
