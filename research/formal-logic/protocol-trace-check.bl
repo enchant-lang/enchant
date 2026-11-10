@@ -1,0 +1,63 @@
+(ns formal.protocol-trace-check
+ (:require [formal.api :as formal] [formal.term :as t] [formal.value :as v] [interop]))
+
+(def late-model
+ (formal/protocol {:name "example-late-violation" :state {"i" t/Int}
+   :init (fn [s] (t/eq (get s "i") (t/int 0)))
+   :invariant (fn [s] (t/lt (get s "i") (t/int 2)))
+   :transitions [{:name "tick" :next (fn [s in] {"i" (t/add (get s "i") (t/int 1))})}]}))
+(def cases
+ [{:id :depth-one-safe :model late-model :depth 1 :expected #{:checked :uncertified}}
+  {:id :depth-two-violation :model late-model :depth 2 :expected #{:refuted}}
+  {:id :unsafe-initial :depth 0 :expected #{:refuted}
+   :model (formal/protocol {:name "example-unsafe-initial" :state {"i" t/Int}
+             :init (fn [s] (t/eq (get s "i") (t/int 0)))
+             :invariant (fn [s] (t/gt (get s "i") (t/int 0))) :transitions []})}
+  {:id :failed-update-retains-state :depth 2 :expected #{:refuted}
+   :model (formal/protocol {:name "example-failed-update" :state {"n" t/Int}
+             :init (fn [s] (t/eq (get s "n") (t/int 5)))
+             :transitions [{:name "fail" :next {"n" (v/undefined (t/int 0) :declined)}}]})}
+  {:id :failed-guard :depth 1 :expected #{:refuted}
+   :model (formal/protocol {:name "example-failed-guard" :state {}
+             :transitions [{:name "attempt" :guard (v/undefined (t/bool false) :guard-error) :next {}}]})}
+  {:id :empty-initial-domain :depth 2 :expected #{:vacuous}
+   :model (formal/protocol {:name "example-no-initial" :state {} :init (t/bool false) :transitions []})}
+  {:id :disabled-failing-body :depth 1 :expected #{:checked :uncertified}
+   :model (formal/protocol {:name "example-disabled-body" :state {"x" t/Int}
+             :transitions [{:name "never" :guard (t/bool false) :next {"x" (v/undefined (t/int 0) :unused)}}]})}
+  {:id :unused-opaque-input :depth 1 :expected #{:refuted}
+   :model (formal/protocol {:name "example-opaque-input" :state {"count" t/Int "unused" t/Bool}
+             :init (fn [s] (t/eq (get s "count") (t/int 0)))
+             :invariant (fn [s] (t/ge (get s "count") (t/int 0)))
+             :transitions [{:name "subtract" :inputs {"amount" t/Int "ignored" t/Bool}
+                            :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+                            :next (fn [s in] {"count" (t/sub (get s "count") (get in "amount"))})}]})}
+  {:id :positive-counter :depth 2 :expected #{:checked :uncertified}
+   :model (formal/protocol {:name "example-positive-counter" :state {"count" t/Int}
+             :init (fn [s] (t/eq (get s "count") (t/int 0)))
+             :invariant (fn [s] (t/ge (get s "count") (t/int 0)))
+             :transitions [{:name "add" :inputs {"amount" t/Int}
+                            :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+                            :next (fn [s in] {"count" (t/add (get s "count") (get in "amount"))})}]})}])
+(def results
+ (mapv (fn [sample]
+  (let [subject (formal/protocol-trace (:model sample) (:depth sample))
+        answers (mapv (fn [engine]
+                  (let [answer (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject)]
+                   (assert (contains? (:expected sample) (:status answer)) (pr-str {:case (:id sample) :engine engine :answer answer}))
+                   (when-let [object (get-in answer [:proof :object])]
+                    (assert (= :checked (:status (formal/check-protocol-trace-proof subject object)))))
+                   (when (= :refuted (:status answer))
+                    (assert (= :valid (get-in answer [:counterexample :status])))
+                    (assert (= :valid (get-in answer [:counterexample :term-replay :status])))
+                    (assert (= :violated (get-in answer [:counterexample :execution :safety]))))
+                   {:engine engine :answer answer})) [:z3 :oxiz])]
+   {:id (:id sample) :subject subject :expected (vec (:expected sample)) :results answers})) cases))
+(def all-answers (mapcat #(map :answer (:results %)) results))
+(File/write! "research/formal-logic/evidence/protocol-traces/examples.json"
+ (interop/->json {:schema :enchant.formal.bounded-protocol-examples-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope :bounded-declared-state-models :compiler-proof-authority false :cases results}))
+(println {:cases (count results) :native-comparisons (count all-answers)
+          :replayed-native-counterexamples (count (filter #(= :refuted (:status %)) all-answers))
+          :statuses (frequencies (map :status all-answers))})
