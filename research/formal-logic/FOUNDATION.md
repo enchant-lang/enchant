@@ -114,6 +114,8 @@ itself mechanically verified and does not certify all SMT theories.
   share exact callee admission and reject foreign inputs posing as local ones;
   loops reuse the same declared-input namespace. `SELECTED-SOURCE.md` records
   the initialize-then-call scope and the unproved specialization/runtime bridges.
+  Four contexts, eight conditional certificates and two native witnesses recheck
+  in a fresh VM with no native session in its calibrated checking window.
 
 ## Loops with checked ranking obligations
 
