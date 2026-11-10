@@ -360,11 +360,10 @@ theorem coreTermCorrespondence : ∀ (i : Nat → Int) (b : Nat → Bool),
   simp [originalProgram, originalInputs, symbolicOK, symbolicValue, symbolicError, errorCodes,
     BeamLispCore.eval, Env.lookup, Outcome.bind, Payload.eval, Term.eval, strict₂, partial₂,
     apply_quot, apply_rem, apply_mod, Comparison.apply, BoolOp.apply, valueEq]
-  all_goals repeat' first
-    | (split <;> simp_all [agrees, IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
-        known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
-    | (progress simp_all [agrees, IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
-        known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
+  all_goals try simp [agrees, IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
+    known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName]
+  all_goals repeat' (split <;> simp_all [agrees, IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
+    known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
   all_goals omega
 
 #print axioms coreTermCorrespondence
