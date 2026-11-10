@@ -19,8 +19,18 @@ connected theory cards and recorded browser evidence. Its
 distinguishes precise semantics, checked proofs, an optional total core,
 verified compilation and application correctness. It proposes a small specified
 core, explicit effects and assumptions, independently checked proof objects,
-and a visible compiler/runtime trust boundary. These are design directions;
-this experiment has no proof kernel or verified compiler.
+and a visible compiler/runtime trust boundary. The first narrow certificate
+checker is now implemented; the wider foundation and verified compiler remain
+work ahead. [FOUNDATION.md](FOUNDATION.md) tracks the autonomous implementation.
+
+`formal/certify` produces and independently checks Boolean/linear Int proof
+objects. `formal/check-certificate` checks a retained object against its exact
+statement, assumptions, profile and scope without either native solver.
+Search is incomplete and does not turn a failure into SAT. A focused run passed
+577 assertions, including 511 for the certificate boundary. The checker's
+implementation, source connection and compiler/runtime trust are explicit;
+these tests are not a mechanical proof of soundness. Native solver result
+certificates retain their original unchecked status.
 
 The canonical source remains [ATLAS.bl.org](ATLAS.bl.org). Owner feedback saves
 into that file explicitly; anonymous readers cannot write. The live host is

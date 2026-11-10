@@ -23,7 +23,7 @@ try{
   check(size.name+': readable page width',top.sw<=top.w+2,top);check(size.name+': no failed cells or declarations',top.failed===0,top);
   await shot(size.name+'-introduction');
   await navigate('/#s-could-beam-lisp-be-fully-formal');
-  check(size.name+': full formality discussion present',await evaluate("document.body.innerText.includes('Can it still feel like a Lisp?')&&document.body.innerText.includes('Self-hosting a checker in BL does not verify')"));
+  check(size.name+': full formality discussion present',await evaluate("document.body.innerText.includes('Can it still feel like a Lisp?')&&document.body.innerText.includes('Self-hosting a checker in BL does not verify')&&document.body.innerText.includes('first executable fragment')"));
   await shot(size.name+'-formal-language');
   await navigate('/#s-a-path-we-can-actually-build');
   await click('#milestones-formal-delivery [data-milestone-to="M3"]');
