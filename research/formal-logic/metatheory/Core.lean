@@ -262,6 +262,41 @@ theorem runLoop_postcondition (body : State → LoopStep State Result)
     | finished result => exact finishes state result hbody
     | again next => exact ih next hbody
 
+/- Reachability ranges over every finite successful prefix, with no depth cap.
+   Failure exclusion is a separate premise, not hidden in the step relation. -/
+inductive StateReachable (initial : State → Prop) (step : State → State → Prop) : State → Prop where
+  | initial {state} : initial state → StateReachable initial step state
+  | advance {current next} : StateReachable initial step current → step current next →
+      StateReachable initial step next
+
+theorem invariant_on_reachable (initial : State → Prop) (step : State → State → Prop)
+    (invariant : State → Prop)
+    (starts : ∀ state, initial state → invariant state)
+    (preserves : ∀ current next, invariant current → step current next → invariant next)
+    {state} (reachable : StateReachable initial step state) : invariant state := by
+  induction reachable with
+  | initial h => exact starts _ h
+  | advance _ hstep ih => exact preserves _ _ ih hstep
+
+theorem no_failed_attempt_on_reachable (initial : State → Prop) (step : State → State → Prop)
+    (invariant failedAttempt : State → Prop)
+    (starts : ∀ state, initial state → invariant state)
+    (preserves : ∀ current next, invariant current → step current next → invariant next)
+    (excludesFailure : ∀ state, invariant state → ¬ failedAttempt state)
+    {state} (reachable : StateReachable initial step state) : ¬ failedAttempt state :=
+  excludesFailure state (invariant_on_reachable initial step invariant starts preserves reachable)
+
+theorem invariant_on_every_trace_position (initial : State → Prop) (step : State → State → Prop)
+    (invariant : State → Prop)
+    (starts : ∀ state, initial state → invariant state)
+    (preserves : ∀ current next, invariant current → step current next → invariant next)
+    (trace : Nat → State) (begins : initial (trace 0))
+    (advances : ∀ n, step (trace n) (trace (n + 1))) : ∀ n, invariant (trace n) := by
+  intro n
+  induction n with
+  | zero => exact starts _ begins
+  | succ n ih => exact preserves _ _ ih (advances n)
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
@@ -284,5 +319,8 @@ theorem runLoop_postcondition (body : State → LoopStep State Result)
 #print axioms integer_pair_rank_wellFounded
 #print axioms runLoop_equation
 #print axioms runLoop_postcondition
+#print axioms invariant_on_reachable
+#print axioms no_failed_attempt_on_reachable
+#print axioms invariant_on_every_trace_position
 
 end BeamLispCore

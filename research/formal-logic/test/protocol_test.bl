@@ -1,0 +1,178 @@
+(ns formal.protocol-test
+ (:require [formal.api :as formal] [formal.protocol :as protocol]
+           [formal.protocol-run :as execution] [formal.term :as t] [formal.value :as v]))
+
+(def bank-spec
+ {:name "checked-bank" :state {"balance" t/Int "credits" t/Int "debits" t/Int}
+  :init (fn [s] (t/all (map #(t/eq % (t/int 0)) (vals s))))
+  :invariants {"balance-nonnegative" (fn [s] (t/ge (get s "balance") (t/int 0)))
+               "credits-nonnegative" (fn [s] (t/ge (get s "credits") (t/int 0)))
+               "debits-nonnegative" (fn [s] (t/ge (get s "debits") (t/int 0)))
+               "conservation" (fn [s] (t/eq (get s "balance") (t/sub (get s "credits") (get s "debits"))))}
+  :transitions [{:name "deposit" :inputs {"amount" t/Int}
+                 :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+                 :next (fn [s in] {"balance" (t/add (get s "balance") (get in "amount"))
+                                   "credits" (t/add (get s "credits") (get in "amount"))})}
+                {:name "withdraw" :inputs {"amount" t/Int}
+                 :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+                 :guard (fn [s in] (t/le (get in "amount") (get s "balance")))
+                 :next (fn [s in] {"balance" (t/sub (get s "balance") (get in "amount"))
+                                   "debits" (t/add (get s "debits") (get in "amount"))})}]})
+(def bank (formal/protocol bank-spec))
+(def zero-state {"balance" 0 "credits" 0 "debits" 0})
+(defn event [name amount] {:transition name :inputs {"amount" amount}})
+(defn reidentify [definition]
+ (assoc definition :identity (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
+                                          (list (tuple :case :lower)))))
+
+(deftest checked-induction-covers-initialization-and-every-transition
+ (let [saved (erlang/binary_to_term (erlang/term_to_binary bank))
+       answer (formal/check {:initial-state zero-state} saved)
+       object (erlang/binary_to_term (erlang/term_to_binary (:proof answer)))]
+  (is (= :checked (:status answer)) (pr-str answer))
+  (is (= :checked-obligations (:status (formal/check-protocol-proof bank object))))
+  (is (= :replayed-initial-state (:assumption-consistency answer)))
+  (is (= :conditional-inductive-invariant (:safety-status answer)))
+  (is (= :all-finite-prefixes-of-the-declared-state-model (:scope answer)))
+  (is (= [[:initiation] [:preservation "deposit"] [:preservation "withdraw"]] (mapv :id (:obligations answer))))
+  (is (= :not-established (:liveness answer)))
+  (is (= :authored-model-not-live-beam-actor (:source-connection answer)))
+  (is (= false (:compiler-proof-authority answer)))
+  (is (= :protocol (:subject-kind answer)))
+  (is (= :checked (get-in answer [:evidence :certificate :status])))
+  (is (= :per-obligation (get-in answer [:evidence :assumptions :kind])))
+  (doseq [changed [(update object :obligations #(vec (rest %)))
+                   (update object :obligations #(vec (reverse %)))
+                   (assoc-in object [:obligations 1 :certificate] (get-in object [:obligations 0 :certificate]))
+                   (assoc-in object [:obligations 0 :kind] :unexamined)
+                   (assoc object :definition "another-model") (assoc object :rule :author-assertion)
+                   (assoc object :cached-valid true)]]
+   (is (= :rejected (:status (protocol/check-proof bank changed)))))))
+
+(deftest both-native-engines-observe-the-same-conditional-invariant-proof
+ (doseq [engine [:z3 :oxiz]]
+  (let [answer (formal/check {:backend engine} bank)]
+   (is (= :checked (:status answer)) (pr-str answer))
+   (is (= :replayed-witness (:assumption-consistency answer)))
+   (is (every? #(= :proved (get-in % [:result :verdict])) (get-in answer [:backend :obligations])))
+   (is (every? #(= :not-checked (get-in % [:certificate :status])) (get-in answer [:evidence :native])))))
+ (let [pair (formal/compare bank) description (formal/describe bank)]
+  (is (= true (:status-agreement pair)))
+  (is (= :none (:authority pair)))
+  (is (= :protocol (:subject-kind description)))
+  (is (= 3 (count (:obligations description))))))
+
+(deftest concrete-traces-preserve-conservation-and-make-environment-assumptions-visible
+ (doseq [deposit [0 1 3 10] withdrawal [0 1 3 11]]
+  (let [events [(event "deposit" deposit) (event "withdraw" withdrawal)]
+        answer (formal/replay-protocol-trace bank zero-state events)]
+   (if (<= withdrawal deposit)
+    (do (is (= :replayed (:status answer))) (is (= :holds (:safety answer)))
+        (is (= {"balance" (- deposit withdrawal) "credits" deposit "debits" withdrawal} (:state answer))))
+    (do (is (= :invalid (:status answer))) (is (= :disabled (:reason answer)))))))
+ (let [answer (execution/step bank zero-state (event "deposit" -1))]
+  (is (= :outside-assumptions (:status answer)))
+  (is (= zero-state (:state answer))))
+ (is (= :invalid (:status (execution/replay-trace bank zero-state [(event "deposit" -1)]))))
+ (is (= :invalid (:status (execution/replay-trace bank {"balance" 1 "credits" 0 "debits" 0} []))))
+ (is (= :invalid (:status (execution/step bank zero-state {:transition "deposit" :inputs {}})))))
+
+(deftest simultaneous-replacement-and-failed-attempts-are-concrete-model-behavior
+ (let [spec {:name "swap" :state {"x" t/Int "y" t/Int}
+             :init (fn [s] (t/all [(t/eq (get s "x") (t/int 1)) (t/eq (get s "y") (t/int 2))]))
+             :transitions [{:name "swap" :next (fn [s in] {"x" (get s "y") "y" (get s "x")})}]}
+       model (protocol/define spec) event {:transition "swap" :inputs {}}
+       first (execution/step model {"x" 1 "y" 2} event)
+       twice (execution/replay-trace model {"x" 1 "y" 2} [event {:stutter true} event])]
+  (is (= {"x" 2 "y" 1} (:state first)))
+  (is (= {"x" 1 "y" 2} (:state twice)))
+  (is (= :holds (:safety twice)))
+  (let [bad (protocol/define (assoc spec :transitions
+              [{:name "fail" :next (fn [s in] {"x" (t/add (get s "x") (t/int 1))
+                                               "y" (v/undefined (t/int 0) :declined)})}]))
+        failed {:transition "fail" :inputs {}}
+        step (execution/step bad {"x" 1 "y" 2} failed)
+        trace (execution/replay-trace bad {"x" 1 "y" 2} [failed {:stutter true}])]
+   (is (= :failed (:status step)))
+   (is (= false (:state-committed step)))
+   (is (= {"x" 1 "y" 2} (:state step)))
+   (is (= :replayed (:status trace)))
+   (is (= :violated (:safety trace)))
+   (is (= :invalid (:status (execution/replay-trace bad {"x" 1 "y" 2} [failed failed]))))
+   (doseq [engine [:z3 :oxiz]]
+    (is (= :obligation-refuted (:status (protocol/verify {:backend engine} bad))))))))
+
+(deftest false-guards-disable-and-raising-guards-remain-failed-attempts
+ (let [spec {:name "guard-outcome" :state {}
+             :transitions [{:name "try" :guard (t/bool false) :next {}}]}
+       disabled (protocol/define spec)
+       failed (protocol/define (assoc-in spec [:transitions 0 :guard] (v/undefined (t/bool false) :guard-error)))
+       event {:transition "try" :inputs {}}]
+  (is (= :checked (:status (protocol/verify disabled))))
+  (is (= :disabled (:status (execution/step disabled {} event))))
+  (is (= :failed (:status (execution/step failed {} event))))
+  (doseq [engine [:z3 :oxiz]]
+   (is (= :obligation-refuted (:status (protocol/verify {:backend engine} failed)))))))
+
+(deftest an-induction-countermodel-need-not-be-a-reachable-execution
+ (let [model (protocol/define
+              {:name "loose-state-invariant" :state {"i" t/Int}
+               :init (fn [s] (t/eq (get s "i") (t/int 0)))
+               :invariant (fn [s] (t/any [(t/eq (get s "i") (t/int 0)) (t/eq (get s "i") (t/int 2))]))
+               :transitions [{:name "decrement" :guard (fn [s in] (t/gt (get s "i") (t/int 0)))
+                              :next (fn [s in] {"i" (t/sub (get s "i") (t/int 1))})}]})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (protocol/verify {:backend engine} model)]
+    (is (= :obligation-refuted (:status answer)))
+    (is (= :not-established (:safety-status answer)))))
+  (is (= :holds (:safety (execution/replay-trace model {"i" 0} []))))))
+
+(deftest initial-feasibility-and-solver-only-evidence-stay-separate
+ (let [empty (protocol/define (assoc bank-spec :name "empty-bank" :init (t/bool false)))]
+  (doseq [options [{} {:backend :z3} {:backend :oxiz}]]
+   (let [answer (protocol/verify options empty)]
+    (is (= :vacuous (:status answer)))
+    (is (= :inconsistent-checked (:assumption-consistency answer)))
+    (is (= :not-established (:safety-status answer))))))
+ (let [answer (protocol/verify {:initial-state {"balance" 1 "credits" 0 "debits" 0}} bank)]
+  (is (= :invalid (get-in answer [:initial-witness :status])))
+  (is (= :not-established (:assumption-consistency answer))))
+ (let [model (protocol/define {:name "nonlinear-state" :state {"x" t/Int}
+               :init (fn [s] (t/eq (get s "x") (t/int 0)))
+               :invariant (fn [s] (t/ge (get s "x") (t/int 0)))
+               :transitions [{:name "square" :next (fn [s in] {"x" (t/mul (get s "x") (get s "x"))})}]})
+       answer (protocol/verify {:backend :z3} model)]
+  (is (= :uncertified (:status answer)))
+  (is (= false (:compiler-proof-authority answer)))))
+
+(deftest cached-derived-facts-and-hidden-constraints-cannot-replace-a-checked-model
+ (doseq [changed [(assoc bank :model {}) (assoc bank :proof {:status :checked})
+                  (assoc bank :profile :live-beam-actors)
+                  (assoc-in bank [:transitions 0 :defined] (t/bool true))
+                  (assoc-in bank [:transitions 0 :guard :within] (t/bool false))
+                  (assoc-in bank [:transitions 0 :guard :constraints] [(t/bool false)])
+                  (assoc-in bank [:transitions 0 :guard :defined] (t/variable "hidden" t/Bool))]]
+  (is (= :unsupported (:status (protocol/prepare (reidentify changed)))))
+  (is (= :unsupported (:status (formal/check changed)))))
+ (doseq [spec [(assoc bank-spec :fairness :eventually-delivered)
+               (assoc-in bank-spec [:transitions 0 :effects] #{:send})
+               (assoc bank-spec :state {"x" t/Real})
+               (assoc bank-spec :invariant (t/bool true))]]
+  (is (thrown? (protocol/define spec)))))
+
+(deftest punctuated-message-and-input-names-do-not-alias
+ (let [model (protocol/define
+              {:name "punctuation" :state {"value" t/Int}
+               :init (fn [s] (t/eq (get s "value") (t/int 0)))
+               :transitions [{:name "a.b" :inputs {"c" t/Int}
+                              :next (fn [s in] {"value" (get in "c")})}
+                             {:name "a" :inputs {"b.c" t/Int}
+                              :next (fn [s in] {"value" (get in "b.c")})}]})
+       prepared (protocol/prepare model)
+       result (execution/replay-trace model {"value" 0}
+                [{:transition "a.b" :inputs {"c" 1}} {:transition "a" :inputs {"b.c" 2}}])]
+  (is (not= (get-in prepared [:model :transitions 0 :inputs "c"])
+            (get-in prepared [:model :transitions 1 :inputs "b.c"])))
+  (is (= :replayed (:status result)))
+  (is (= {"value" 2} (:state result)))
+  (is (= :checked (:status (protocol/verify model))))))

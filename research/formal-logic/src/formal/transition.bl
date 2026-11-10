@@ -1,8 +1,13 @@
 (ns formal.transition (:require [formal.term :as t] [formal.value :as v]))
 
 (defn- sorted-fields [schema] (vec (sort-by str (keys schema))))
-(defn- variables [prefix schema]
- (into {} (map (fn [field] [field (t/variable (str prefix "." (str field)) (get schema field))]) (sorted-fields schema))))
+(defn- component [value encoding]
+ (let [text (str value)] (if (= :length-prefixed-v1 encoding) (str (count text) ":" text) text)))
+(defn- variables
+ ([prefix schema] (variables prefix schema nil))
+ ([prefix schema encoding]
+  (into {} (map (fn [field] [field (t/variable (str prefix "." (component field encoding)) (get schema field))])
+                (sorted-fields schema)))))
 (defn- invoke-or-term [value state]
  (v/lift (if (fn? value) (value state) value)))
 (defn- boolean! [value]
@@ -20,7 +25,10 @@
   machines contain terms and data, never backend handles or executable code.
   State and per-transition input names are explicit and namespaced."
  [name state-schema specification]
- (let [state (variables (str name ".state") state-schema)
+ (let [encoding (:identity-encoding specification)
+       _ (when-not (contains? #{nil :length-prefixed-v1} encoding)
+           (throw (ex-info "Unknown transition identity encoding" {})))
+       state (variables (str name ".state") state-schema encoding)
        initial (boolean! (invoke-or-term (get specification :init (t/bool true)) state))
        invariant-specs (or (:invariants specification)
                            {:invariant (get specification :invariant (t/bool true))})
@@ -28,7 +36,7 @@
        transitions (mapv (fn [description]
           (let [label (:name description)
                 input-schema (get description :inputs {})
-                inputs (variables (str name ".input." (str label)) input-schema)
+                inputs (variables (str name ".input." (component label encoding)) input-schema encoding)
                 guard-builder (get description :guard (fn [_ _] (t/bool true)))
                 guard (boolean! (v/lift (if (fn? guard-builder) (guard-builder state inputs) guard-builder)))
                 next-builder (:next description)
@@ -54,9 +62,10 @@
         (:transitions specification))]
   (when-not (= (count transitions) (count (distinct (map :name transitions))))
    (throw (ex-info "Transition names must be distinct" {})))
-  {:formal/machine 1 :name name :schema state-schema :state state :init initial
+  (cond-> {:formal/machine 1 :name name :schema state-schema :state state :init initial
    :invariants invariants :transitions transitions
-   :scope (get specification :scope {:mode :exact :profile :formal/pure-transition-model-v1})}))
+   :scope (get specification :scope {:mode :exact :profile :formal/pure-transition-model-v1})}
+   encoding (assoc :identity-encoding encoding))))
 
 (defn- replacements [before after]
  (into {} (map (fn [[field term]] [term (get after field)]) before)))
@@ -80,7 +89,8 @@
  [model depth fresh-prefix]
  (when-not (and (string? fresh-prefix) (int? depth) (<= 0 depth) (<= depth 16))
   (throw (ex-info "Trace requires an explicit fresh prefix and depth 0..16" {})))
- (let [states (mapv (fn [i] (variables (str fresh-prefix ".state." i) (:schema model))) (range (inc depth)))
+ (let [encoding (:identity-encoding model)
+       states (mapv (fn [i] (variables (str fresh-prefix ".state." i) (:schema model) encoding)) (range (inc depth)))
        initial-replace (replacements (:state model) (first states))
        init (:init model)
        initial (vec (concat [(instantiate (v/defined init) initial-replace)
@@ -110,7 +120,7 @@
           transitions (:transitions model) alive (t/all step-defined)
           compiled (mapv (fn [i]
              (let [tr (nth transitions i)
-                   input (variables (str fresh-prefix ".input." at "." (str (:name tr))) (:input-schema tr))
+                   input (variables (str fresh-prefix ".input." at "." (component (:name tr) encoding)) (:input-schema tr) encoding)
                    replace (merge (replacements (:state model) before) (replacements (:inputs tr) input))
                    picked (t/eq choice (t/int (inc i)))
                    guard (instantiate (guard-attempt (:guard tr)) replace)
