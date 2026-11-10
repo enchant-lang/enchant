@@ -1,0 +1,196 @@
+(ns formal.protocol-trace
+ (:require [formal.protocol :as protocol] [formal.protocol-run :as execution]
+           [formal.transition :as transition] [formal.term :as t] [formal.value :as v]
+           [formal.query :as q] [formal.proof :as proof] [formal.certificate :as certificate]
+           [formal.logic :as logic] [formal.evaluate :as replay]))
+
+(def profile :bl/pure-state-trace-v1)
+(def relation :finite-prefix-state-and-normal-step-safety)
+(def limits {:depth 16 :unroll-work 32768})
+(def ^:private fields #{:formal/protocol-trace :protocol :depth :profile :identity})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.protocol-trace: " message) {}))))
+(defn- identity-of [subject]
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc subject :identity))) (list (tuple :case :lower))))
+(defn- depth! [depth]
+ (require! (and (int? depth) (<= 0 depth (:depth limits))) "depth must be an integer from zero to sixteen"))
+(defn define
+ "A closed bounded safety subject. Its exact model and depth are fundamental;
+  a producer cannot supply the unrolled query or cached transition relation."
+ [definition depth]
+ (depth! depth)
+ (let [ready (protocol/prepare definition)
+       _ (require! (= :ready (:status ready)) (:reason ready))
+       subject {:formal/protocol-trace 1 :protocol definition :depth depth :profile profile}]
+  (assoc subject :identity (identity-of subject))))
+(defn- model-roots [model]
+ (vec (concat (v/terms (:init model)) (mapcat v/terms (vals (:invariants model)))
+        (mapcat (fn [row] (concat (v/terms (:guard row)) (:assumptions row)
+                                  (mapcat v/terms (vals (:next row))))) (:transitions model)))))
+(defn prepare
+ "Rebuild bounded safety from the validated protocol. Scope and certificate
+  identity include the model, bound and complete closed subject identity."
+ [subject]
+ (try
+  (require! (and (map? subject) (= fields (set (keys subject))) (= 1 (:formal/protocol-trace subject))
+                 (= profile (:profile subject)) (= (:identity subject) (identity-of subject)))
+            "changed or noncanonical trace subject")
+  (depth! (:depth subject))
+  (let [prepared (protocol/prepare (:protocol subject))
+        _ (require! (= :ready (:status prepared)) (:reason prepared))
+        model (:model prepared)
+        work (* (inc (:depth subject)) (+ (count (t/walk (model-roots model)))
+                                          (count (:schema model)) (count (:transitions model))))
+        _ (require! (<= work (:unroll-work limits)) "bounded unrolling work capacity")
+        trace (transition/safety model (:depth subject) (str "bounded." (:identity subject)))
+        scope (assoc (:scope trace) :subject (:identity subject) :protocol (:identity (:protocol subject)))
+        problem (q/prove (:property trace)
+                  {:id (:identity subject) :assumptions (:assumptions trace) :observe (:observations trace)
+                   :scope scope :profile profile :relation relation
+                   :origin {:trace (:identity subject) :protocol (:identity (:protocol subject))
+                            :basis :reviewed-bounded-state-model}})]
+   {:status :ready :definition (:identity subject) :protocol (:identity (:protocol subject))
+    :problem problem :trace trace :model model :scope scope :unroll-work work
+    :source-connection :authored-model-not-live-beam-actor})
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn check-proof
+ "Check portable evidence against a freshly rebuilt bounded trace subject.
+  This path calls neither native solvers, proof search nor witness execution."
+ [subject object]
+ (let [prepared (prepare subject)]
+  (cond
+   (not= :ready (:status prepared)) (assoc prepared :status :rejected)
+   (not (and (map? object) (= #{:formal/protocol-trace-proof :definition :certificate} (set (keys object)))
+             (= 1 (:formal/protocol-trace-proof object)) (= (:identity subject) (:definition object))))
+    {:status :rejected :reason :trace-proof-subject-mismatch}
+   :else (assoc (certificate/check (:problem prepared) (:certificate object))
+           :definition (:identity subject) :scope (:scope prepared) :relation relation
+           :source-connection :authored-model-not-live-beam-actor :compiler-proof-authority false))))
+
+(defn- scalar? [sort value]
+ (if (= t/Bool sort) (contains? #{true false} value) (int? value)))
+(defn- replay-in
+ "Decode choices and inputs, independently execute the model, then recheck
+  every query assertion and native observation. Missing scalars get explicit
+  completion provenance; concrete native values are never replaced."
+ [subject prepared native]
+ (try
+  (require! (and (= :ready (:status prepared)) (= (:identity subject) (:definition prepared))) "prepared subject mismatch")
+  (require! (= :sat (:solver-status native)) "a native SAT observation is required")
+  (require! (and (= (:identity subject) (:id native)) (= profile (:profile native)) (= (:scope prepared) (:scope native)))
+            "SAT observation belongs to a different bounded subject")
+  (let [problem (:problem prepared) trace (:trace prepared) model (:model prepared)
+        variables (t/variables (q/roots problem)) original (:assignments native)
+        observed-variables (into {} (keep (fn [[label term]]
+                                (let [observed (get-in native [:witness label] (replay/unavailable :missing-observation))]
+                                 (when (and (= :var (:op term)) (scalar? (:sort term) observed))
+                                  [(:data term) {:value observed :label label}]))) (:observe problem)))
+        provenance (atom (into {} (map (fn [term]
+                     (let [name (:data term) assignment (get original name (replay/unavailable :missing-variable))
+                           assignment-missing? (replay/unavailable? assignment)
+                           watched (get observed-variables name)
+                           observed (if (and assignment-missing? watched) (:value watched) assignment)
+                           missing? (replay/unavailable? observed)]
+                      (require! (or missing? (scalar? (:sort term) observed)) "native variable has the wrong scalar sort")
+                      [name {:value (if missing? (if (= t/Bool (:sort term)) false 0) observed)
+                             :sort (:sort term) :source (cond missing? :explicit-replay-completion
+                                                             assignment-missing? :backend-observation :else :backend-assignment)
+                             :native-availability (if missing? :unavailable :concrete)
+                             :native-assignment-availability (if assignment-missing? :unavailable :concrete)
+                             :native-reason (when missing? (:formal/unavailable observed))}])) variables)))
+        assignments (fn [] (into {} (map (fn [[name entry]] [name (:value entry)]) @provenance)))
+        env (assignments) value (fn [term] (replay/value term env))
+        initial (into {} (map (fn [[field term]] [field (value term)]) (first (:states trace))))
+        choices (mapv value (:choices trace))
+        _ (require! (every? #(and (int? %) (<= 0 % (count (:transitions model)))) choices) "choice outside the model transition variants")
+        events (mapv (fn [at]
+                  (let [choice (nth choices at)]
+                   (if (= choice 0) {:stutter true}
+                    (let [index (dec choice) row (nth (:transitions model) index)
+                          inputs (get-in trace [:inputs at index])]
+                     {:transition (:name row) :inputs (into {} (map (fn [[field term]] [field (value term)]) inputs))}))))
+                     (range (:depth subject)))
+        executed (execution/replay-trace (:protocol subject) initial events)
+        _ (when (= :replayed (:status executed))
+            (doseq [at (range (count (:states trace))) [field term] (nth (:states trace) at)]
+             (when (= :unavailable (get-in @provenance [(:data term) :native-availability]))
+              (swap! provenance update (:data term)
+                #(assoc % :value (get-in executed [:frames at :state field])
+                          :source (if (= at 0) :explicit-replay-completion :model-execution-completion))))))
+        completed (assignments)
+        term-check (replay/validate (conj (:assertions problem) (:counterexample problem)) completed)
+        state-checks (when (= :replayed (:status executed))
+                      (vec (mapcat (fn [at]
+                             (map (fn [[field term]]
+                                    {:at at :field field :native-or-completed (get completed (:data term))
+                                     :executed (get-in executed [:frames at :state field])
+                                     :matches (= (get completed (:data term)) (get-in executed [:frames at :state field]))})
+                                  (nth (:states trace) at))) (range (count (:states trace))))))
+        observation-checks (vec (keep (fn [[label term]]
+                               (let [observed (get-in native [:witness label] (replay/unavailable :missing-observation))]
+                                (when-not (replay/unavailable? observed)
+                                 {:label label :observed observed :replayed (replay/value term completed)
+                                  :matches (and (scalar? (:sort term) observed) (= observed (replay/value term completed)))})))
+                                   (:observe problem)))
+        status (cond
+                 (not= :valid (:status term-check)) :incomplete
+                 (= :incomplete (:status executed)) :incomplete
+                 (not= :replayed (:status executed)) :invalid
+                 (or (not (every? :matches state-checks)) (not (every? :matches observation-checks))) :invalid
+                 (= :violated (:safety executed)) :valid
+                 (= :holds (:safety executed)) :invalid
+                 :else :incomplete)]
+   {:status status :initial initial :choices choices :events events :execution executed
+    :assignments completed :variable-provenance @provenance :term-replay term-check
+    :state-comparison state-checks :observation-comparison observation-checks
+    :scope (:scope prepared) :source-connection :authored-model-not-live-beam-actor})
+  (catch error {:status :incomplete :reason (ex-message error)
+                :source-connection :authored-model-not-live-beam-actor})))
+
+(defn replay-counterexample
+ "Rebuild the subject before checking a supplied SAT observation. No cached
+  prepared model or query can be supplied at this public checking boundary."
+ [subject native]
+ (let [prepared (prepare subject)]
+  (cond
+   (not= :ready (:status prepared)) (assoc prepared :status :rejected)
+   (not (and (= (:identity subject) (:id native)) (= profile (:profile native)) (= (:scope prepared) (:scope native))))
+    {:status :rejected :reason :native-observation-subject-mismatch}
+   :else (replay-in subject prepared native))))
+
+(defn verify
+ ([subject] (verify {} subject))
+ ([options subject]
+  (let [prepared (prepare subject)]
+   (if-not (= :ready (:status prepared)) prepared
+    (let [problem (:problem prepared) search (merge {:nodes 2048 :rows 512} (:search options))
+          produced (proof/produce problem search)
+          object (when (= :checked (:status produced))
+                   {:formal/protocol-trace-proof 1 :definition (:identity subject) :certificate (:certificate produced)})
+          checking (when object (check-proof subject object))
+          inconsistent (proof/produce (q/prove (t/bool false)
+                           {:assumptions (:assertions problem) :profile profile :scope (:scope problem)}) search)
+          native (when (:backend options) (logic/run options problem))
+          counterexample (when (= :sat (:solver-status native)) (replay-in subject prepared native))
+          checked? (= :checked (:status checking)) inconsistent? (= :checked (:status inconsistent))
+          status (cond
+                   (and (or checked? inconsistent?) (= :sat (:solver-status native))) :disagreement
+                   (or inconsistent? (= :vacuous (:verdict native))) :vacuous
+                   (= :valid (:status counterexample)) :refuted
+                   (= :invalid (:status counterexample)) :disagreement
+                   checked? :checked
+                   (= :proved (:verdict native)) :uncertified
+                   (= :sat (:solver-status native)) :candidate
+                   (contains? #{:unknown :unsupported :error :invalid-model} (:verdict native)) (:verdict native)
+                   :else (:status produced))]
+     {:status status :definition (:identity subject) :protocol (:protocol prepared) :profile profile
+      :scope (:scope prepared) :relation relation :depth (:depth subject)
+      :proof {:status (if checking (:status checking) (:status produced))
+              :object object :checking checking :production produced}
+      :inconsistency-proof inconsistent :backend (when native {:property native})
+      :assumptions (:assertions problem) :counterexample counterexample
+      :assumption-consistency (cond inconsistent? :inconsistent-checked (= :valid (:status counterexample)) :replayed-trace
+                                    (= :vacuous (:verdict native)) :backend-inconsistent
+                                    (= :sat (get-in native [:preflight :status])) :backend-sat :else :not-established)
+      :source-connection :authored-model-not-live-beam-actor :compiler-proof-authority false})))))

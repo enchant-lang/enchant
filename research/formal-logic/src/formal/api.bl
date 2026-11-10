@@ -7,7 +7,7 @@
            [formal.contract :as contracts] [formal.loop :as loops]
            [formal.translation :as translations] [formal.optimize :as optimizer]
            [formal.result :as result] [formal.protocol :as protocols]
-           [formal.protocol-run :as protocol-run]))
+           [formal.protocol-run :as protocol-run] [formal.protocol-trace :as protocol-traces]))
 
 ;; One functional BL facade. Declarations, callbacks and questions stay pure
 ;; ordinary language data until check/compare. Callbacks construct a model;
@@ -55,7 +55,8 @@
                 :observe (build (get specification :observe symbols) symbols)})))
 
 (defn check
- "Check an explicit query, program contract, loop or translation subject.
+ "Check a term query, program contract, loop, translation, protocol state model
+  or bounded protocol trace subject.
   Without a backend a proof query uses the portable producer/checker. Every
   path adds the same evidence envelope and retains its original result fields."
  ([subject] (check {} subject))
@@ -70,6 +71,7 @@
               :loop (loops/verify options subject)
               :translation (translations/verify options subject)
               :protocol (protocols/verify options subject)
+              :protocol-trace (protocol-traces/verify options subject)
               {:status :unsupported :reason :one-supported-formal-subject-tag-required})]
    (result/attach subject raw execution))))
 (defn certify
@@ -100,6 +102,9 @@
 (defn check-protocol-proof [definition object] (protocols/check-proof definition object))
 (defn protocol-step [definition state event] (protocol-run/step definition state event))
 (defn replay-protocol-trace [definition initial events] (protocol-run/replay-trace definition initial events))
+(defn protocol-trace [definition depth] (protocol-traces/define definition depth))
+(defn check-protocol-trace-proof [subject object] (protocol-traces/check-proof subject object))
+(defn replay-protocol-counterexample [subject observation] (protocol-traces/replay-counterexample subject observation))
 (defn compare
  ([subject] (compare subject {}))
  ([subject options]
@@ -122,7 +127,8 @@
 (defn describe [subject]
  (let [type (result/kind subject)
        prepared (case type :contract (contracts/prepare subject) :loop (loops/prepare subject)
-                           :translation (translations/prepare subject) :protocol (protocols/prepare subject) nil)]
+                           :translation (translations/prepare subject) :protocol (protocols/prepare subject)
+                           :protocol-trace (protocol-traces/prepare subject) nil)]
   (cond
    (= :query type) (assoc (describe-question subject) :subject-kind type :identity (result/subject-id subject))
    (= :ready (:status prepared))
@@ -133,14 +139,15 @@
       (merge {:obligations (mapv (fn [row] {:id (:id row) :question (describe-question (:problem row))}) (:obligations prepared))}
         (if (= :loop type) {:rank-dimension (:rank-dimension prepared)}
           {:state-schema (:schema subject) :transitions (mapv :name (:transitions subject))}))
-      {:question (describe-question (:problem prepared))}))
+      (merge {:question (describe-question (:problem prepared))}
+        (when (= :protocol-trace type) {:protocol (:protocol prepared) :depth (:depth subject) :scope (:scope prepared)}))))
    prepared (assoc prepared :subject-kind type)
    :else {:status :unsupported :reason :one-supported-formal-subject-tag-required})))
 (defn construction-capabilities
  ([] (construction-capabilities {}))
  ([options]
   (let [base {:qualification :requires-retained-per-fragment-evidence
-              :subjects [:query :contract :loop :translation :protocol]
+              :subjects [:query :contract :loop :translation :protocol :protocol-trace]
               :certificate :not-checked
               :native-solver-certificate {:status :not-checked}
               :portable-certificate {:status :implemented :rules (vec (sort-by str certificate/supported-rules))
