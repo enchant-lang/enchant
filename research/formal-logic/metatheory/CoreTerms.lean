@@ -40,6 +40,10 @@ def agrees (actual : Outcome τ) (ok : Option Bool) (value : Option (Value τ))
       (if test then agrees yes ok value error code else agrees no ok value error code) := by
   by_cases branch : test <;> simp [branch]
 
+@[simp] theorem proposition_choice (test yes no : Prop) [Decidable test] :
+    (if test then yes else no) ↔ (test → yes) ∧ (¬ test → no) := by
+  by_cases branch : test <;> simp [branch]
+
 @[simp] theorem bind_choice (test : Prop) [Decidable test] (yes no : Outcome α) (next : Value α → Outcome β) :
     (if test then yes else no).bind next = (if test then yes.bind next else no.bind next) := by
   by_cases branch : test <;> simp [branch]
@@ -161,6 +165,7 @@ theorem apply_mod (a b : Int) : IntOp.apply .mod a b =
 #print axioms agrees_returned
 #print axioms agrees_raised
 #print axioms agrees_choice
+#print axioms proposition_choice
 #print axioms bind_choice
 #print axioms strict_values
 #print axioms strict_left_none

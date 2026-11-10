@@ -371,6 +371,7 @@ theorem coreTermCorrespondence : ∀ (i : Nat → Int) (b : Nat → Bool),
   all_goals repeat' (split <;> simp_all [IntOp.apply, Outcome.bind, divide, modulus,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
   all_goals try dsimp (config := { instances := true }) only [FormalTerms.Ty.Value, BeamLispCore.Value] at *
+  all_goals try simp_all
   all_goals first | rfl | decide | omega
 
 theorem errorCatalogueRoundTrip : errorCodes.all (fun code => errorCode errorCodes (errorName code) == Int.ofNat code) = true := by decide
@@ -422,6 +423,7 @@ def verify_source(text, packet, integers, booleans):
 
 
 def run(path, output, axiom_policy='lean-standard'):
+    require(axiom_policy in terms.AXIOM_POLICIES, 'supported Core term axiom policy')
     output.mkdir(parents=True, exist_ok=True)
     (output / 'Check.olean').unlink(missing_ok=True)
     (output / 'result.json').unlink(missing_ok=True)
