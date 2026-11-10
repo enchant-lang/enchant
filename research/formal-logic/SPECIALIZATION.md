@@ -62,3 +62,21 @@ Limits are 4 MiB per object, 128 initializers, 16 parameters, 64 packed argument
 following Core relation impose additional bounds. Refusing a capacity is not a
 modeled language exception. Checking invokes no runtime initializer, application
 function, specializer, compiler or solver.
+
+`formal/prepare-source-context` returns the reconstructed program under
+`:prepared`, including `:specialization {:object ... :check ...}` and
+`:elaboration {:object ... :check ...}`. This preparation can execute SDK
+expansion-phase semantics. The two standalone check operations consume only
+their already supplied data objects and execute no Source expansion.
+
+The separate Lean model now proves lexical renaming preserves every typed Core
+outcome when the old and new environments agree through that renaming. Its eager
+call laws compare arguments in the caller environment and bodies in the
+captured definition environment. One- and two-argument laws preserve exact
+failures and left-to-right order. Seven new audited laws bring the model to
+63 theorems: the three simple environment/failure laws have empty audits; the
+other four use `propext` and `Quot.sound`. These proofs do not encode the SDK's
+named unit representation, arbitrary-arity closure machine, BL relation checker
+or actual Source compiler. Their environment-agreement premises still require
+implementation-specific discharge. No unit-specializer soundness theorem has
+been established.
