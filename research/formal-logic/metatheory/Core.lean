@@ -647,6 +647,122 @@ theorem hidden_field_failure_survives_projection (a : Value α) (reason : String
 
 end Elaboration
 
+/- Lexical renaming and eager closure calls. The relation between typed indices
+   and the SDK's named unit/closure environments remains an implementation bridge.
+   These laws do not assert that the BL specialization checker implements them. -/
+namespace Lexical
+
+abbrev Renaming (Δ Γ : List Ty) := {τ : Ty} → Var Δ τ → Var Γ τ
+
+def lift (mapping : Renaming Δ Γ) : Renaming (α :: Δ) (α :: Γ)
+  | _, .zero => .zero
+  | _, .succ variable => .succ (mapping variable)
+
+def weaken : Renaming Γ (α :: Γ) := fun {_} variable => .succ variable
+
+def rename (mapping : Renaming Δ Γ) : Expr Δ τ → Expr Γ τ
+  | .literal value => .literal value
+  | .variable index => .variable (mapping index)
+  | .bind initial body => .bind (rename mapping initial) (rename (lift mapping) body)
+  | .cond test yes no => .cond (rename mapping test) (rename mapping yes) (rename mapping no)
+  | .seq initial body => .seq (rename mapping initial) (rename mapping body)
+  | .neg value => .neg (rename mapping value)
+  | .intOp op left right => .intOp op (rename mapping left) (rename mapping right)
+  | .comparison op left right => .comparison op (rename mapping left) (rename mapping right)
+  | .boolNot value => .boolNot (rename mapping value)
+  | .boolOp op left right => .boolOp op (rename mapping left) (rename mapping right)
+  | .equal α left right => .equal α (rename mapping left) (rename mapping right)
+  | .pair left right => .pair (rename mapping left) (rename mapping right)
+  | .first record => .first (rename mapping record)
+  | .second record => .second (rename mapping record)
+  | .firstDefault record fallback => .firstDefault (rename mapping record) (rename mapping fallback)
+  | .setFirst record replacement => .setFirst (rename mapping record) (rename mapping replacement)
+  | .setSecond record replacement => .setSecond (rename mapping record) (rename mapping replacement)
+  | .raise reason => .raise reason
+
+def Agree (mapping : Renaming Δ Γ) (definition : Env Δ) (caller : Env Γ) : Prop :=
+  ∀ {τ} (variable : Var Δ τ), caller.lookup (mapping variable) = definition.lookup variable
+
+theorem agree_lift (mapping : Renaming Δ Γ) (definition : Env Δ) (caller : Env Γ)
+    (agreement : Agree mapping definition caller) (value : Value α) :
+    Agree (lift mapping) (.cons value definition) (.cons value caller) := by
+  intro τ variable
+  cases variable with
+  | zero => rfl
+  | succ variable => exact agreement variable
+
+theorem rename_preserves_outcome (expression : Expr Δ τ) :
+    ∀ {Γ} (mapping : Renaming Δ Γ) (definition : Env Δ) (caller : Env Γ),
+      Agree mapping definition caller → eval (rename mapping expression) caller = eval expression definition := by
+  induction expression <;> intro Γ mapping definition caller agreement
+  case variable index => exact congrArg Outcome.returned (agreement index)
+  case bind initial body initial_ih body_ih =>
+    simp only [rename, eval]
+    rw [initial_ih mapping definition caller agreement]
+    apply congrArg (fun next => (eval initial definition).bind next)
+    funext value
+    exact body_ih (lift mapping) (.cons value definition) (.cons value caller)
+      (agree_lift mapping definition caller agreement value)
+  all_goals simp_all [rename, eval]
+
+theorem weaken_agree (caller : Env Γ) (value : Value α) : Agree weaken caller (.cons value caller) := by
+  intro τ variable
+  rfl
+
+theorem eager_call_preserves_captured_environment (mapping : Renaming Δ Γ)
+    (definition : Env Δ) (caller : Env Γ) (agreement : Agree mapping definition caller)
+    (argument : Expr Γ α) (body : Expr (α :: Δ) β) :
+    eval (.bind argument (rename (lift mapping) body)) caller =
+      (eval argument caller).bind (fun value => eval body (.cons value definition)) := by
+  simp only [eval]
+  apply congrArg (fun next => (eval argument caller).bind next)
+  funext value
+  exact rename_preserves_outcome body (lift mapping) (.cons value definition) (.cons value caller)
+    (agree_lift mapping definition caller agreement value)
+
+theorem two_eager_arguments_preserve_caller_order (mapping : Renaming Δ Γ)
+    (definition : Env Δ) (caller : Env Γ) (agreement : Agree mapping definition caller)
+    (first : Expr Γ α) (second : Expr Γ β) (body : Expr (β :: α :: Δ) γ) :
+    eval (.bind first (.bind (rename weaken second) (rename (lift (lift mapping)) body))) caller =
+      (eval first caller).bind (fun a => (eval second caller).bind
+        (fun b => eval body (.cons b (.cons a definition)))) := by
+  simp only [eval]
+  cases result : eval first caller with
+  | raised reason => simp only [result, Outcome.bind]
+  | returned value =>
+    simp only [result, Outcome.bind]
+    rw [rename_preserves_outcome second weaken caller (.cons value caller) (weaken_agree caller value)]
+    apply congrArg (fun next => (eval second caller).bind next)
+    funext secondValue
+    exact rename_preserves_outcome body (lift (lift mapping)) (.cons secondValue (.cons value definition))
+      (.cons secondValue (.cons value caller))
+      (agree_lift (lift mapping) (.cons value definition) (.cons value caller)
+        (agree_lift mapping definition caller agreement value) secondValue)
+
+theorem first_argument_failure_preempts_second (mapping : Renaming Δ Γ) (caller : Env Γ)
+    (reason : String) (second : Expr Γ β) (body : Expr (β :: α :: Δ) γ) :
+    eval (.bind (.raise reason : Expr Γ α)
+      (.bind (rename weaken second) (rename (lift (lift mapping)) body))) caller = .raised reason := rfl
+
+theorem second_argument_failure_preempts_body (mapping : Renaming Δ Γ)
+    (definition : Env Δ) (caller : Env Γ) (agreement : Agree mapping definition caller)
+    (first : Expr Γ α) (value : Value α) (returned : eval first caller = .returned value)
+    (reason : String) (body : Expr (β :: α :: Δ) γ) :
+    eval (.bind first (.bind (rename weaken (.raise reason : Expr Γ β))
+      (rename (lift (lift mapping)) body))) caller = .raised reason := by
+  rw [two_eager_arguments_preserve_caller_order mapping definition caller agreement]
+  simp only [returned, eval, Outcome.bind]
+
+#print axioms agree_lift
+#print axioms rename_preserves_outcome
+#print axioms weaken_agree
+#print axioms eager_call_preserves_captured_environment
+#print axioms two_eager_arguments_preserve_caller_order
+#print axioms first_argument_failure_preempts_second
+#print axioms second_argument_failure_preempts_body
+
+end Lexical
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
