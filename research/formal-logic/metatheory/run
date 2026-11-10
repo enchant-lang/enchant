@@ -2,6 +2,21 @@
 set -euo pipefail
 project=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 root=$(CDPATH='' cd "$project/../../.." && pwd -P)
+lean_paths="$project"
+if [[ "${1:-}" == --with-refutation ]]; then
+  shift
+  checked_library=$(python3 - "$project" <<'PY'
+import hashlib,json,pathlib,sys
+project=pathlib.Path(sys.argv[1]).parent
+pin=json.loads((project/'metatheory/refutation-pin.json').read_text())
+for key in ['source','compiled']:
+    artifact=project/pin[key]['path']
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest()==pin[key]['sha256']
+print((project/pin['compiled']['path']).parent)
+PY
+)
+  lean_paths="$lean_paths:$checked_library"
+fi
 lean_tool=$(python3 - "$project/tool-pin.json" <<'PY'
 import hashlib,json,pathlib,sys
 p=json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -13,5 +28,5 @@ PY
 exec systemd-run --user --quiet --collect --wait --pipe \
   --working-directory="$root" --property=MemoryMax=2G --property=MemorySwapMax=0 \
   --property=RuntimeMaxSec=900 --property=KillMode=control-group \
-  --setenv=LEAN_PATH="$project" \
+  --setenv=LEAN_PATH="$lean_paths" \
   "$lean_tool" --root="$project" "$@"
