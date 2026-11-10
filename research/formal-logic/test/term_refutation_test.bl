@@ -1,0 +1,48 @@
+(ns formal.term-refutation-test
+ (:require [formal.api :as formal] [formal.term :as t] [formal.query :as q] [formal.identity :as identity]))
+
+(def x (t/variable "original.x" t/Int))
+(def y (t/variable "original.y" t/Int))
+(def p (t/variable "original.p" t/Bool))
+(def questions
+ [(q/prove (t/gt (t/add x (t/int 1)) x))
+  (q/prove (t/ge x (t/int 0)) {:assumptions [(t/ge x (t/int 1))]})
+  (q/prove (t/eq (t/ite p (t/not p) p) (t/bool false)))
+  (q/prove (t/implies (t/bool false) (t/eq (t/div x (t/int 0)) y)))])
+
+(deftest original-question-is-retained-even-when-normalized-variables-disappear
+ (doseq [question questions]
+  (let [made (formal/certify question) normalized (formal/normalized-refutation question (:certificate made))
+        ready (formal/term-refutation question (:certificate made)) packet (:packet ready)]
+   (is (= :checked (:status made)))
+   (is (= :ready (:status ready)) (pr-str ready))
+   (is (= (:claim question) (:claim packet)))
+   (is (= (mapv :term (:assertions question)) (:assertions packet)))
+   (is (= (:packet normalized) (:normalized packet)))
+   (is (identity/valid? packet))
+   (is (= :checked-data-connection (:status (formal/check-term-refutation-data question (:certificate made) packet))))
+   (is (= :not-run (:kernel-execution ready)))
+   (is (= :not-run (:term-connection ready)))
+   (is (= false (:compiler-proof-authority ready)))))
+ (let [question (first questions) packet (:packet (formal/term-refutation question (:certificate (formal/certify question))))]
+  (is (= [] (get-in packet [:normalized :variables])))
+  (is (some #(= "original.x" (:data %)) (t/walk [(:claim packet)])))))
+
+(deftest freshly-rehashed-original-trees-cannot-borrow-a-saved-certificate-connection
+ (let [question (second questions) certificate (:certificate (formal/certify question))
+       packet (:packet (formal/term-refutation question certificate))]
+  (doseq [altered [(assoc packet :claim (t/bool false)) (assoc packet :assertions [])
+                  (assoc packet :semantics :invented)
+                  (assoc-in packet [:normalized :variables] ["another"])
+                  (assoc packet :extra true)]]
+   (is (= :rejected (:status (formal/check-term-refutation-data question certificate (identity/seal altered))))))
+  (is (= :rejected (:status (formal/check-term-refutation-data (q/prove (t/bool false)) certificate packet))))))
+
+(deftest unrepresented-original-data-is-explicit-even-when-logically-dead
+ (doseq [dead [(t/eq (t/real 1 2) (t/real 1 2))
+               (t/eq (t/app :add t/Int [x (t/int 1)] "unused-payload") (t/add x (t/int 1)))]]
+  (let [question (q/prove (t/implies (t/bool false) dead)) made (formal/certify question)
+        exported (formal/term-refutation question (:certificate made))]
+   (is (= :checked (:status made)))
+   (is (= :unsupported (:status exported)))
+   (is (= :original-term-outside-partial-int-bool-model (:reason exported)))))))
