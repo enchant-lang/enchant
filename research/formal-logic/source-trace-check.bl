@@ -1,0 +1,63 @@
+(ns formal.source-trace-check
+ (:require [formal.api :as formal] [formal.term :as t] [interop]))
+
+(def counter
+ {:name "bounded-source-counter" :state {"count" t/Int "unused" t/Bool}
+  :init (fn [s] (t/eq (get s "count") (t/int 0)))
+  :invariant (fn [s] (t/ge (get s "count") (t/int 0)))
+  :handlers [{:name "add" :inputs {"amount" t/Int "ignored" t/Bool}
+               :assumptions (fn [s in] [(t/ge (get in "amount") (t/int 0))])
+               :source "(fn [s msg] (assoc s \"count\" (+ (get s \"count\") (get msg \"amount\"))))"}]})
+(def later
+ {:name "bounded-source-later" :state {"i" t/Int}
+  :init (fn [s] (t/eq (get s "i") (t/int 0)))
+  :invariant (fn [s] (t/lt (get s "i") (t/int 2)))
+  :handlers [{:name "tick" :source "(fn [s msg] (assoc s \"i\" (+ (get s \"i\") 1)))"}]})
+(def cases
+ [{:id :safe-source-zero :spec counter :depth 0 :expected #{:checked}}
+  {:id :safe-source-step :spec counter :depth 1 :expected #{:checked :uncertified}}
+  {:id :unsafe-source-step :depth 1 :expected #{:refuted} :handlers 1
+   :spec (assoc-in (assoc counter :name "bounded-source-unsafe") [:handlers 0 :source]
+           "(fn [s msg] (assoc s \"count\" (- (get s \"count\") (get msg \"amount\"))))")}
+  {:id :late-source-shallow :spec later :depth 1 :expected #{:checked :uncertified}}
+  {:id :late-source-deep :spec later :depth 2 :expected #{:refuted} :handlers 2}
+  {:id :empty-state-failure :depth 2 :expected #{:refuted} :handlers 1
+   :spec {:name "bounded-source-empty-failure" :state {}
+          :handlers [{:name "attempt" :source "(fn [s msg] (do (quot 1 0) {}))"}]}}
+  {:id :hidden-field-failure :depth 2 :expected #{:refuted} :handlers 1
+   :spec {:name "bounded-source-hidden-failure" :state {"n" t/Int}
+          :init (fn [s] (t/eq (get s "n") (t/int 5)))
+          :handlers [{:name "attempt" :source "(fn [s msg] (get {\"next\" s \"unobserved\" (quot 1 0)} \"next\"))"}]}}
+  {:id :inconsistent-source-initial :depth 1 :expected #{:vacuous}
+   :spec {:name "bounded-source-inconsistent" :state {} :init (t/bool false) :handlers []}}
+  {:id :unsafe-source-initial :depth 0 :expected #{:refuted} :handlers 0
+   :spec {:name "bounded-source-initial" :state {"x" t/Int}
+          :init (fn [s] (t/eq (get s "x") (t/int 0)))
+          :invariant (fn [s] (t/gt (get s "x") (t/int 0))) :handlers []}}])
+(def search {:nodes 128 :rows 128})
+(def results
+ (mapv (fn [sample]
+         (let [definition (formal/source-protocol (:spec sample))
+               subject (formal/protocol-trace definition (:depth sample))
+               comparison (formal/compare subject {:search search})]
+          (doseq [engine [:z3 :oxiz]]
+           (let [answer (get-in comparison [:results engine]) witness (:counterexample answer)]
+            (assert (contains? (:expected sample) (:status answer)) (pr-str {:case (:id sample) :engine engine :result answer}))
+            (when (= :refuted (:status answer))
+             (assert (= :valid (:status witness)))
+             (assert (= :valid (get-in witness [:term-replay :status])))
+             (assert (= :valid (get-in witness [:source-replay :status])))
+             (assert (= (:handlers sample) (get-in witness [:source-replay :handlers])))
+             (assert (= :violated (get-in witness [:model-execution :safety])))
+             (assert (= :violated (get-in witness [:execution :safety]))))))
+          {:id (:id sample) :depth (:depth sample) :subject subject :comparison comparison})) cases))
+(File/write! "research/formal-logic/evidence/source-traces/examples.json"
+ (interop/->json {:schema :enchant.formal.source-bounded-examples-v1
+  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+  :search search :cases results :scope :bounded-source-extracted-core-and-state-model
+  :live-actor-connection :not-established :compiler-proof-authority false}))
+(println {:cases (count results) :native-runs (* 2 (count results))
+          :statuses (mapv (fn [sample]
+                        [(:id sample) (:depth sample)
+                         (get-in sample [:comparison :results :z3 :status])
+                         (get-in sample [:comparison :results :oxiz :status])]) results)})
