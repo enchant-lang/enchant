@@ -188,15 +188,15 @@ theorem normalizationConnected : ∀ integers booleans,
     originalQuestion.claim.eval integers booleans ≠ some true →
     packetProblem.satisfied (integerMap integers) (booleanMap booleans) := by
   intro integers booleans assumed failed
-  simp [Question.assumed, originalQuestion] at assumed
-  simp only [originalQuestion] at failed
-  simp only [Problem.satisfied, packetProblem]
-  simp only [List.mem_cons, List.not_mem_nil, forall_eq_or_imp, forall_eq, forall_false, implies_true, and_true]
-  dsimp only [Formula.eval]
-  dsimp only [Problem.values]
-  simp only [List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil]
-  simp [Row.holds, dot, integerMap, booleanMap]
-""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat (first | omega | (split at * <;> simp_all [{SIMPS}])))\n" + """
+  all_goals simp [Question.assumed, originalQuestion] at assumed
+  all_goals simp only [originalQuestion] at failed
+  all_goals simp only [Problem.satisfied, packetProblem]
+  all_goals simp only [List.mem_cons, List.not_mem_nil, forall_eq_or_imp, forall_eq, forall_false, implies_true, and_true]
+  all_goals try dsimp only [Formula.eval]
+  all_goals try dsimp only [Problem.values]
+  all_goals simp only [List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil]
+  all_goals simp [Row.holds, dot, integerMap, booleanMap]
+""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals try dsimp (config := {{ instances := true }}) only [Ty.Value] at *\n  all_goals (repeat (first | omega | (split at * <;> simp_all [{SIMPS}] <;> try dsimp (config := {{ instances := true }}) only [Ty.Value] at *)))\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
 #print axioms packetAccepted
