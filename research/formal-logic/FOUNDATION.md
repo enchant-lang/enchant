@@ -190,6 +190,21 @@ itself mechanically verified and does not certify all SMT theories.
   records as reviewed implementation links; no proof gate accepts them as
   certificates. This checkpoint adds no Lean theorem or soundness claim.
 
+- Executable normalized proof kernel: `Refutation.lean` supplies 17 audited
+  results proving soundness of its actual Boolean/linear-integer checker.
+  Eleven real BL certificate exports have checked Lean applications of that
+  theorem; five well-shaped, rehashed false refutations are rejected by Lean.
+  The BL facade exports a closed normalized packet and freshly reconstructs it
+  from the exact original question/certificate. The capped external checker
+  independently reconstructs canonical identities and parses its generated
+  constructors/template before invoking the pinned Lean kernel. Computed
+  acceptance audits use `propext`; the general and applied unsatisfiability
+  theorems use `propext` and `Quot.sound`. The next missing theorem connects
+  original typed term semantics to this normalized problem. BL normalization,
+  data encoding, BL checker correspondence and Source/compiler bridges remain
+  reviewed, with no new production compiler authority. See
+  `REFUTATION-KERNEL.md` for the executable interface and exact proof scope.
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical
