@@ -31,11 +31,23 @@
    (refuse "record field keys must be literal strings" node)) (:val node)))
 
 (declare from-anf)
+(defn- literal-arguments [node]
+ (loop [node node out []]
+  (when (> (count out) 64) (refuse "record update argument capacity" node))
+  (case (:op node)
+   :enil out
+   :cons (recur (:tail node) (conj out (:head node)))
+   (refuse "record variadic updates require a literal proper argument list" node))))
 (defn- record-call [call node bindings]
  (when (and (= :remote (:mode call)) (= :Elixir.BeamLisp.Ns.Rt (:mod call))
-             (contains? #{:get :assoc} (:fun call)))
-  (let [args (vec (:args call)) n (count args)]
-   (case (:fun call)
+             (contains? #{:get :assoc :assoc_variadic} (:fun call)))
+  (let [original (vec (:args call))
+        _ (when (and (= :assoc_variadic (:fun call)) (not= 4 (count original)))
+            (refuse "record variadic update runtime arity" node))
+        args (if (= :assoc_variadic (:fun call))
+               (into (vec (take 3 original)) (literal-arguments (nth original 3))) original)
+        n (count args)]
+   (case (if (= :assoc_variadic (:fun call)) :assoc (:fun call))
     :get (do (when-not (contains? #{2 3} n) (refuse "record get requires one literal field and optional eager default" node))
              (let [record (from-anf (first args) bindings) key (field-key (second args) false)]
               (when-not (core/record-sort? (:sort record)) (refuse "record get requires a declared record" node))
