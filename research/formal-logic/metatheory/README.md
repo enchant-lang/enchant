@@ -1,5 +1,14 @@
 # A mechanically checked model, with an explicit bridge boundary
 
+[Refutation.lean](Refutation.lean) is now a second, executable proof-checking
+artifact. Seventeen audited lemmas/theorems establish that every accepted
+normalized Boolean/linear-integer refutation excludes all models of its input.
+Actual packets exported from BL are checked by this exact definition, using
+`by decide` and the soundness theorem. [The kernel interface](../REFUTATION-KERNEL.md)
+explains the independent data decoding, printed axioms and remaining unproved
+normalization/implementation connections. This has a different scope from the
+Core semantic model below; neither artifact proves the BL compiler sound.
+
 [Core.lean](Core.lean) defines an intrinsically typed mathematical Int/Bool
 language, lexical environments and a structurally recursive evaluator with
 returned values and named raised outcomes. It formalizes the reference profile's

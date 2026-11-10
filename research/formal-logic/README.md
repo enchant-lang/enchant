@@ -23,6 +23,14 @@ and a visible compiler/runtime trust boundary. The first narrow certificate
 checker is now implemented; the wider foundation and verified compiler remain
 work ahead. [FOUNDATION.md](FOUNDATION.md) tracks the autonomous implementation.
 
+[REFUTATION-KERNEL.md](REFUTATION-KERNEL.md) adds a sound executable Lean checker
+for normalized Boolean/linear-integer refutations, applied to eleven real BL
+certificate exports. BL exposes pure packet export and fresh data reconstruction;
+a separate capped runner checks the exact packet with the pinned proof kernel.
+Term normalization, encoding, BL checker correspondence and Source/compiler
+connections remain separate reviewed bridges. Existing solver and compiler
+authority policies are unchanged.
+
 [SELECTED-SOURCE.md](SELECTED-SOURCE.md) adds contexts for actual named Source
 functions. The SDK selects exact revisions, private helpers, captured values
 and hygienic macro bindings; a bounded specializer brings that lexical program
