@@ -7,8 +7,11 @@
 ;; :safe decode in a fresh VM refuses keywords introduced only by the producer
 ;; (including the sample IDs). Verify the bounded exact archive before allowing
 ;; its recorded atoms to be interned. Public receipt checking accepts BL data.
-(def archive (File/read! "research/formal-logic/evidence/actor-runtime/examples.etf"))
-(def archive-pin (interop/json-> (File/read! "research/formal-logic/evidence/actor-runtime/examples-pin.json")))
+(def arguments (vec *command-line-args*))
+(assert (<= (count arguments) 1) "Expected at most one trusted archive directory after --")
+(def archive-directory (Path/expand (get arguments 0 "research/formal-logic/evidence/actor-runtime")))
+(def archive (File/read! (Path/join archive-directory "examples.etf")))
+(def archive-pin (interop/json-> (File/read! (Path/join archive-directory "examples-pin.json"))))
 (assert (<= (erlang/byte_size archive) 2097152))
 (assert (= (get archive-pin "bytes") (erlang/byte_size archive)))
 (assert (= (get archive-pin "sha256")
@@ -32,7 +35,8 @@
                         _ (recur calls loads)))))
        patterns [(tuple :code :load_binary 3) (tuple capture-module capture-name (Keyword/get capture :arity))]]
   (try
-   (doseq [pattern patterns] (erlang/trace_pattern pattern true (list :local)))
+   (doseq [pattern patterns]
+    (assert (pos? (erlang/trace_pattern pattern true (list :local))) "Required call trace pattern is unavailable"))
    (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
    ;; Calibrate the capture trace with a synthetic function, before the actual
    ;; record-check window. It is not a recorded application handler.
@@ -58,6 +62,7 @@
           (assert (= :conforming (:status result)) (pr-str result))
           (assert (= (get-in row [:observation :checking :runtime-safety]) (:runtime-safety result)))
           {:id (:id row) :status (:status result) :runtime-safety (:runtime-safety result)
+           :profile (get-in row [:observation :receipt :profile]) :binding-context (:binding-context result)
            :sdk-check (:sdk-check result)})) (into (:direct data) (:native data))))))
 (def results (:records inspected))
 (assert (= 0 (get-in inspected [:trace :handler-captures])))
@@ -67,6 +72,7 @@
 (File/write! output
  (interop/->json {:schema :enchant.formal.actual-runtime-recheck-v1
                  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :archive-directory archive-directory
                  :records results :trace (:trace inspected) :calibration-calls (:calibration-calls inspected)
                  :archive-decoding :bounded-hash-pinned-trusted-etf
                  :recorded-handler-invocations 0 :recorded-beam-loads 0
