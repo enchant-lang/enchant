@@ -1,6 +1,43 @@
 (ns formal.source-test
  (:require [formal.source :as source] [formal.term :as t] [formal.logic :as logic]
-           [formal.query :as q]))
+           [formal.query :as q] [formal.elaborate :as elaborate] [formal.value :as v]
+           [formal.evaluate :as evaluate] [formal.data :as d]))
+
+(deftest both-source-frontends-refuse-names-with-another-binding-identity
+ (doseq [expression ["foreign/x" "formal.source.intrinsics/x" "formal.core.intrinsics/x"]]
+  (is (= :unsupported (:status (source/prepare expression {"x" (t/int 7)}))) expression)
+  (is (= :unsupported (:status (elaborate/prepare expression {"x" t/Int}))) expression))
+ (is (= :translated (:status (source/prepare "x" {"x" (t/int 7)}))))
+ (is (= :elaborated (:status (elaborate/prepare "x" {"x" t/Int})))))
+
+(deftest semantic-values-share-the-exact-reviewed-callee-catalog
+ (doseq [expression ["(BeamLisp.Num/div x y)" "(/ x y)" "(erlang/mod x y)" "(erlang/inc x)"
+                    "(BeamLisp.Num/quot x y)" "(BeamLisp.Ns.Rt/mod x y)" "(BeamLisp.Ns.Core/rem x y)"
+                    "(erlang/eqv x y)" "(BeamLisp.Num/not_ x)" "(erlang/div x)" "(BeamLisp.Num/neg x y)"]]
+  (is (= :unsupported (:status (source/prepare expression {"x" (t/int 7) "y" (t/int 2)}))) expression))
+ (doseq [[expression expected] [["(BeamLisp.Num/neg x)" -7] ["(BeamLisp.Num/add x y)" 9]
+                              ["(erlang/div x y)" 3] ["(erlang/rem x y)" 1]
+                              ["(BeamLisp.Num/num_eq x y)" false] ["(not x)" false]]]
+  (let [p (source/prepare expression {"x" (t/int 7) "y" (t/int 2)})]
+   (is (= :translated (:status p)) (pr-str p))
+   (when (= :translated (:status p))
+    (is (= expected (evaluate/value (v/term (:value p)) {}))))))
+ (doseq [node [{:op :arith :fun :add :bif :* :args [{:op :lit :val 2} {:op :lit :val 3}]}
+               {:op :arith :fun :div :bif :div :args [{:op :lit :val 7} {:op :lit :val 2}]}
+               {:op :invoke :callee {:op :global :ns "foreign" :name "inc"}
+                :arguments {:op :cons :head {:op :lit :val 1} :tail {:op :enil}}}]]
+  (is (= :refused (try (source/lower node {} {}) :admitted (catch _ :refused))))))
+
+(deftest strict-boolean-not-retains-definedness-and-refuses-nullability
+ (doseq [value [true false]]
+  (let [p (source/prepare "(erlang/not flag)" {"flag" (t/bool value)})]
+   (is (= :translated (:status p)))
+   (is (= (not value) (evaluate/value (v/term (:value p)) {})))))
+ (doseq [value [(t/int 7) (t/text "hello") (d/nullable "maybe" t/Bool)]]
+  (is (= :unsupported (:status (source/prepare "(erlang/not flag)" {"flag" value})))))
+ (let [p (source/prepare "(erlang/not (= (quot 1 0) 0))" {})]
+  (is (= :translated (:status p)))
+  (is (= false (evaluate/value (v/defined (:value p)) {})))))
 
 (deftest compiler-anf-expressions-enter-the-same-term-interface
  (let [x (t/variable "source.x" t/Int) y (t/variable "source.y" t/Int)

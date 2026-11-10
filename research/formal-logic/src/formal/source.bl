@@ -1,7 +1,7 @@
 (ns formal.source
  (:require [compiler :as compiler] [system.ir :as ir]
            [formal.term :as t] [formal.value :as v] [formal.data :as d]
-           [formal.numeric :as n] [formal.query :as q]))
+           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics]))
 
 ;; Consume the compiler's resolved ANF, never a second surface-language walker.
 ;; This initial source environment allows the declared variables and a reviewed
@@ -38,10 +38,13 @@
      (if (and (= name "-") (= size 1)) (integer-binary t/sub (t/int 0) a node) (refuse "arithmetic arity" node)))
    (and (contains? #{"=" "eqv" "==" "=:="} name) (= size 2)) (v/equal a b)
    (and (= name "not") (= size 1)) (result (t/not (v/term (truthy a))) [a])
+   (and (= name "strict-not") (= size 1))
+    (do (when-not (and (= :scalar (get-in (v/lift a) [:domain :kind])) (= t/Bool (t/sort-of (v/term a))))
+          (refuse "erlang/not requires Bool, not BL truthiness or nullable Bool" node))
+        (result (t/not (v/term a)) [a]))
    (and (= name "quot") (= size 2)) (n/quotient a b)
    (and (= name "rem") (= size 2)) (n/remainder a b)
    (and (= name "mod") (= size 2)) (n/modulus a b)
-   (and (= name "div") (= size 2)) (n/quotient a b)
    (and (contains? #{"pos?" "neg?" "zero?"} name) (= size 1))
     (result ((get {"pos?" t/gt "neg?" t/lt "zero?" t/eq} name) (v/term a) (t/int 0)) [a])
    (and (contains? #{"inc" "dec"} name) (= size 1))
@@ -67,7 +70,8 @@
            (and (keyword? value) (:keyword-universe opts)) (d/key-literal (:keyword-universe opts) value)
            :else (refuse "literal needs a declared semantic domain" node)))
    (contains? #{:var :global :binding} op)
-    (or (get bindings (:name node)) (get bindings (ir/global-key node))
+    (or (when (or (= :var op) (intrinsics/declared-input? node "formal.source.intrinsics"))
+          (get bindings (:name node)))
         (refuse (str "unbound source identity " (pr-str (ir/global-key node))) node))
    (= op :let)
     (let [initial (lower (:init node) bindings opts)
@@ -84,24 +88,20 @@
      (when (empty? values) (refuse "empty do" node))
      (v/make (:value last-value) (merge (v/context values) {:domain (:domain last-value)})))
    (= op :arith)
-    (let [call (ir/arith-bif node) args (mapv #(lower % bindings opts) (:args call))]
-     (intrinsic (name (:fun call)) args node))
+    (let [meaning (intrinsics/arith-meaning node)]
+     (when-not meaning (refuse "unreviewed canonical arithmetic identity" node))
+     (intrinsic meaning (mapv #(lower % bindings opts) (:args node)) node))
    :else
     (let [call (ir/call-site node)]
      (when (or (nil? call) (:rest call)) (refuse "unresolved/computed call" node))
      (let [args (mapv #(lower % bindings opts) (:args call))]
       (cond
        (= :remote (:mode call))
-        (let [module (:mod call) function (:fun call)
-              allowed (or (= module :erlang)
-                          (contains? #{:Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Num} module))]
-         (when-not allowed (refuse "unreviewed remote call" node))
-         (intrinsic (if (= function :not_) "not" (name function)) args node))
+        (let [meaning (intrinsics/remote-meaning (:mod call) (:fun call) (:arity call))]
+         (when-not meaning (refuse "unreviewed module/function/arity identity" node))
+         (intrinsic meaning args node))
        (and (= :invoke (:mode call)) (= :global (:op (:callee call))))
-        (let [callee (:callee call) identity (ir/global-key callee)]
-         (when (or (contains? bindings (:name callee)) (= :exact (:lookup callee)))
-          (refuse "source callee is not a reviewed intrinsic binding" node))
-         (intrinsic (:name callee) args node))
+        (refuse "unresolved global calls require checked resolution and summaries" node)
        :else (refuse "first-class/user calls need explicit checked summaries" node)))))))
 
 (defn prepare
@@ -123,7 +123,7 @@
                (refuse "binding requires a reviewed runtime scalar profile" {}))))
          value (lower anf bindings opts)]
     {:status :translated :value value :profile :bl/int-bool-intrinsics-v1
-     :basis :compiler-anf :source source :anf anf :scope (v/scope value)})
+     :basis :compiler-anf :intrinsic-profile intrinsics/profile :source source :anf anf :scope (v/scope value)})
    (catch error {:status :unsupported :reason (ex-message error) :source source
                  :basis :compiler-anf :profile :bl/int-bool-intrinsics-v1}))))
 
