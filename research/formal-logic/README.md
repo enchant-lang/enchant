@@ -163,7 +163,7 @@ receipt; the atlas carries the detailed contracts and open questions.
 | Optimization / MaxSMT / Pareto | Exact bounded integer optimization; native optimization/soft constraints remain |
 | Synthesis / abduction / repair | Finite grammar candidate search and universal checks; general synthesis remains |
 | Enumeration / shrinking / counting | Scalar projection enumeration with UNSAT completeness; counting/shrinking remain |
-| Cores / witnesses / certificates | Native Z3 cores, shared deletion explanations, independent replay; certificates remain unchecked |
+| Cores / witnesses / certificates | Native Z3 cores, shared deletion explanations, independent replay; separate Bool/linear Int certificates are checked; native solver certificates remain unchecked |
 | Operational observations | Captured runtime canaries; facts carry explicit assumptions and never grant authority |
 
 The same `formal.query` is used for theorems, counterexamples, relation laws,

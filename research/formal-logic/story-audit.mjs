@@ -2,7 +2,7 @@ import {spawn} from 'node:child_process';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 const base=process.argv[2]||'http://127.0.0.1:24089';
-const output=resolve('research/formal-logic/evidence/story/browser-audit');
+const output=resolve(process.argv[3]||'research/formal-logic/evidence/story/browser-audit');
 await mkdir(output,{recursive:true});
 const helper=spawn('/home/othman/.nix-profile/bin/node',['research/formal-logic/browser-driver.mjs',output],{stdio:['pipe','pipe','inherit']});
 let buffer=Buffer.alloc(0),waiting=[];
@@ -25,6 +25,8 @@ try{
   await navigate('/#s-could-beam-lisp-be-fully-formal');
   check(size.name+': full formality discussion present',await evaluate("document.body.innerText.includes('Can it still feel like a Lisp?')&&document.body.innerText.includes('Self-hosting a checker in BL does not verify')&&document.body.innerText.includes('first executable fragment')"));
   await shot(size.name+'-formal-language');
+  await navigate('/#s-the-model-running');
+  check(size.name+': executable certificate example shows its checked result',await evaluate("/:proof\\s+:checked/.test(document.body.innerText)&&document.body.innerText.includes(':source-connection :not-established')"));
   await navigate('/#s-a-path-we-can-actually-build');
   await click('#milestones-formal-delivery [data-milestone-to="M3"]');
   check(size.name+': milestone selects its own detail',await evaluate("!document.querySelector('[data-milestone-detail=\"M3\"]').hidden"));
