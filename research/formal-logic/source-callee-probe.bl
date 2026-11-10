@@ -1,0 +1,35 @@
+(ns formal.source-callee-probe
+ (:require [formal.source :as source] [formal.term :as t] [formal.value :as v]
+           [formal.evaluate :as evaluate] [expand :as expand] [interop]))
+
+;; A retained pre-repair observation of the older semantic-value front end.
+;; Only the two explicitly written host operations run; no selected Source
+;; runtime initializer or target definition executes during expansion.
+(defn actual [action]
+ (try {:status :returned :value (action)}
+  (catch error {:status :raised :class (:__struct__ error)})))
+(defn row [expression action]
+ (let [prepared (source/prepare expression {})]
+  {:source expression :prepared prepared :actual (actual action)
+   :modeled (when (= :translated (:status prepared))
+              (v/decode (:value prepared) #(evaluate/value % {})))}))
+(def observations
+ [(row "(BeamLisp.Num/div 7 2)" #(BeamLisp.Num/div 7 2))
+  (row "(erlang/not 7)" #(erlang/not 7))])
+(def input {:namespace 'formal.selected.example :revision 'current :file "formal-selected-example.bl"
+            :source "(ns formal.selected.example) (def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))"})
+(def selected (expand/program [input] ['formal.selected.example 'current]))
+(def data {:schema :enchant.formal.source-callee-probe-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :observations observations
+           :selected-input input :selected-program selected
+           :runtime-initializers-executed 0 :target-invocations 0
+           :compiler-proof-authority false})
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! root)
+(File/write! (Path/join root "source-callee-probe.etf") (erlang/term_to_binary data))
+(File/write! (Path/join root "source-callee-probe.json") (interop/->json data))
+(println {:observations (mapv #(select-keys % [:source :actual :modeled]) observations)
+          :selected-initializers (mapv #(select-keys % [:slot :name :reference]) (get-in selected [:unit :initializers]))
+          :selected-steps (get-in selected [:unit :steps])
+          :constructor (:constructor selected) :target-invocations 0})
