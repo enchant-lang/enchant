@@ -59,13 +59,8 @@ def canonical_identity(packet):
     return hashlib.sha256(wire).hexdigest()
 
 
-def validate(packet):
-    require(type(packet) is dict and set(packet) == {"formal/term-refutation", "profile", "semantics", "assertions", "claim", "normalized", "identity-profile", "identity"}, "term packet fields")
-    require(type(packet["formal/term-refutation"]) is int and packet["formal/term-refutation"] == 1, "term packet version")
-    require(packet["profile"] == "bl/typed-term-refutation-v1" and packet["semantics"] == "bl/partial-mathematical-int-bool-v1", "term profile/semantics")
-    require(packet["identity-profile"] == "bl/canonical-formal-data-v1", "term identity profile")
-    require(type(packet["identity"]) is str and k.HEX.fullmatch(packet["identity"]), "term packet digest")
-    k.validate(packet["normalized"])
+def validate_roots(roots):
+    """Validate the shared partial Int/Bool grammar, without proof case limits."""
     variables, visits = {}, 0
 
     def term(node, depth=0):
@@ -108,9 +103,21 @@ def validate(packet):
             require(op == "ite" and children == ["bool", sort, sort], "typed choice or unsupported operation")
         return sort
 
-    require(type(packet["assertions"]) is list and len(packet["assertions"]) <= 4096, "original assertion list")
-    for root in [*packet["assertions"], packet["claim"]]:
+    require(type(roots) is list and len(roots) <= 4097, "original root list")
+    for root in roots:
         require(term(root) == "bool", "original question roots must be Boolean")
+    return variables
+
+
+def validate(packet):
+    require(type(packet) is dict and set(packet) == {"formal/term-refutation", "profile", "semantics", "assertions", "claim", "normalized", "identity-profile", "identity"}, "term packet fields")
+    require(type(packet["formal/term-refutation"]) is int and packet["formal/term-refutation"] == 1, "term packet version")
+    require(packet["profile"] == "bl/typed-term-refutation-v1" and packet["semantics"] == "bl/partial-mathematical-int-bool-v1", "term profile/semantics")
+    require(packet["identity-profile"] == "bl/canonical-formal-data-v1", "term identity profile")
+    require(type(packet["identity"]) is str and k.HEX.fullmatch(packet["identity"]), "term packet digest")
+    k.validate(packet["normalized"])
+    require(type(packet["assertions"]) is list and len(packet["assertions"]) <= 4096, "original assertion list")
+    variables = validate_roots([*packet["assertions"], packet["claim"]])
     integers = sorted(name for name, sort in variables.items() if sort == "int")
     booleans = sorted(name for name, sort in variables.items() if sort == "bool")
     require(len(integers) <= 1024 and len(booleans) <= 12, "original input/Boolean case proof capacity")
