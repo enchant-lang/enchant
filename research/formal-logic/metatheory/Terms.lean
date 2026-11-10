@@ -6,16 +6,16 @@ import Refutation
 namespace FormalTerms
 open FormalRefutation
 
-inductive Sort where
+inductive Ty where
   | integer
   | boolean
   deriving DecidableEq, Repr
 
-def Sort.Value : Sort → Type
+def Ty.Value : Ty → Type
   | .integer => Int
   | .boolean => Bool
 
-inductive Term : Sort → Type where
+inductive Term : Ty → Type where
   | int : Int → Term .integer
   | bool : Bool → Term .boolean
   | inputInt : Nat → Term .integer
@@ -35,7 +35,7 @@ inductive Term : Sort → Type where
   | or : Term .boolean → Term .boolean → Term .boolean
   | implies : Term .boolean → Term .boolean → Term .boolean
   | xor : Term .boolean → Term .boolean → Term .boolean
-  | ite {sort : Sort} : Term .boolean → Term sort → Term sort → Term sort
+  | ite {sort : Ty} : Term .boolean → Term sort → Term sort → Term sort
 
 def strict₂ (operation : α → β → γ) (a : Option α) (b : Option β) : Option γ :=
   match a, b with
@@ -49,7 +49,7 @@ def partial₂ (operation : α → β → Option γ) (a : Option α) (b : Option
   | some x, some y => operation x y
   | _, _ => none
 
-def Term.eval : {sort : Sort} → Term sort → (Nat → Int) → (Nat → Bool) → Option sort.Value
+def Term.eval : {sort : Ty} → Term sort → (Nat → Int) → (Nat → Bool) → Option sort.Value
   | _, .int value, _, _ => some value
   | _, .bool value, _, _ => some value
   | _, .inputInt index, integers, _ => some (integers index)
@@ -100,9 +100,9 @@ theorem connected_refutation_entails (question : Question) (problem : Problem) (
 
 theorem division_zero (a : Int) : divide a 0 = none := by simp [divide]
 theorem modulus_zero (a : Int) : modulus a 0 = none := by simp [modulus]
-theorem selected_true {sort : Sort} (yes no : Term sort) (integers booleans) :
+theorem selected_true {sort : Ty} (yes no : Term sort) (integers booleans) :
     (Term.ite (.bool true) yes no).eval integers booleans = yes.eval integers booleans := rfl
-theorem selected_false {sort : Sort} (yes no : Term sort) (integers booleans) :
+theorem selected_false {sort : Ty} (yes no : Term sort) (integers booleans) :
     (Term.ite (.bool false) yes no).eval integers booleans = no.eval integers booleans := rfl
 theorem false_dominates (value : Option Bool) : pAnd (some false) value = some false := rfl
 theorem true_dominates (value : Option Bool) : pOr (some true) value = some true := rfl
