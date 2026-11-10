@@ -84,6 +84,21 @@ Erlang negation cannot borrow BL truthiness. Remote calls now use reviewed
 module/function/arity identities. The declared Var assumption for scoped record
 operations remains explicit; this does not freeze mutable environments.
 
+[CONTEXTS.md](CONTEXTS.md) now implements an opt-in explicit record binding
+context as portable BL data. One context can back a function contract or a
+source-derived protocol; contextual traces and actual artifacts bind its exact
+identity. Linked execution avoids the probed ambient record Var while preserving
+ordered whole-record outcomes. The canonical-identity follow-up passed 7,099
+assertions across 22 files, including 139 context and 50 identity checks.
+Transitive runtime closure, macro/source context,
+compiler preservation and general effects remain further work.
+
+[DATA-IDENTITY.md](DATA-IDENTITY.md) specifies the new canonical data identity
+profile. It fixes a real fresh-VM receipt mismatch, normalizes collection
+contents and keeps namespaces and data kinds distinct. New closed objects carry
+an explicit identity-profile marker. Earlier default-ETF objects remain
+historical evidence for their recorded code, rather than being silently migrated.
+
 [metatheory/Core.lean](metatheory/Core.lean) adds a separate typed mathematical
 model checked by pinned Lean 4.34.1. All 18 theorem audits report no axiom
 dependencies, including natural and lexicographic ranking rules. This does not

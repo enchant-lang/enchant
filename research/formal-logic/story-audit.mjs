@@ -57,6 +57,18 @@ try{
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('identity changes the mathematics')).scrollIntoView({block:'start'})");
   check(size.name+': source callee repair and remaining Var assumption are explained',await evaluate("document.body.innerText.includes('4,877 assertions')&&document.body.innerText.includes('actual compiled handler returned 3.5')&&document.body.innerText.includes('Freezing or checking that runtime binding is a separate next step')"));
   await shot(size.name+'-callee-identity');
+  const bindingContext=await evaluate("document.querySelector('#cell-story-binding-context')?.innerText||''");
+  const linkedState=bindingContext.match(/:linked-state\s+\{([^}]*)\}/)?.[1]||'';
+  check(size.name+': explicit binding context demonstrates the ambient mismatch and linked execution',bindingContext.includes(':ordinary-when-rebound :disagreement')&&bindingContext.includes(':linked-when-rebound :observed')&&/"n"\s+2\b/.test(linkedState)&&/"flag"\s+false\b/.test(linkedState));
+  check(size.name+': binding context can also back a function contract',bindingContext.includes(':binding-context :checked-context')&&bindingContext.includes(':function-contract :checked'));
+  check(size.name+': local ANF closure retains the transitive and equivalence boundary',bindingContext.includes(':body-closure :no-fetched-vars-in-function-anf')&&bindingContext.includes(':transitive-runtime-closure :not-established')&&bindingContext.includes(':ambient-equivalence :requires-declared-bindings')&&bindingContext.includes(':compiler-proof-authority false'));
+  await navigate('/#s-the-model-running');
+  await evaluate("document.querySelector('#cell-story-binding-context').scrollIntoView({block:'center'})");
+  await shot(size.name+'-binding-context');
+  const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
+  check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
+  await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
+  await shot(size.name+'-canonical-identity');
   await navigate('/#a-promise-about-the-function-you-actually-wrote');
   check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
   await shot(size.name+'-source-handler');
@@ -171,6 +183,10 @@ try{
  for(const path of ['/INTRINSICS.md','/src/formal/intrinsics.bl','/src/formal/elaborate.bl','/test/intrinsics_test.bl','/evidence/intrinsics/intrinsics-probe.json','/evidence/intrinsics/checks.txt','/evidence/intrinsics/fresh-replay.json','/evidence/intrinsics/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared callee-identity evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/CONTEXTS.md','/DATA-IDENTITY.md','/src/formal/context.bl','/src/formal/identity.bl','/src/formal/contract.bl','/test/context_test.bl','/test/identity_test.bl','/context-check.bl','/evidence/contexts/probe.json','/evidence/contexts/checks.txt','/evidence/contexts/examples.json','/evidence/contexts/fresh-replay.json','/evidence/contexts/qualification.json','/evidence/contexts/canonical-fixtures.json','/evidence/contexts/original-byte-reproduction.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared binding/identity evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{

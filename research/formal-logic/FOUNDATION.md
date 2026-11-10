@@ -94,6 +94,18 @@ itself mechanically verified and does not certify all SMT theories.
   nine-file follow-up passed 4,877 assertions, including 135 identity regressions.
   Declared record Vars retain an explicit binding assumption. `INTRINSICS.md`
   records this repair and the remaining source-environment boundary.
+- First-class binding contexts: explicit fixed record-call linking is shared
+  by function contracts, source protocols, bounded native questions and observed
+  artifacts. A focused fourteen-file run passed 5,494 assertions, including 139
+  context checks. An owned child-Env probe demonstrates the original ambient
+  disagreement and its absence in the explicitly linked execution. `CONTEXTS.md`
+  distinguishes function-ANF closure from transitive runtime/source closure.
+- Canonical formal data identity: a real fresh-VM receipt mismatch exposed the
+  default-ETF hashing assumption. A shared tagged codec and explicit identity
+  profile now cover formal objects, core/term/proof digests and cache keys.
+  A coherent 22-file run passed 7,099 assertions. Nine execution records and
+  three portable proof records recheck in a fresh VM; historical raw-ETF data
+  remains separate. `DATA-IDENTITY.md` specifies the format and version boundary.
 
 ## Loops with checked ranking obligations
 

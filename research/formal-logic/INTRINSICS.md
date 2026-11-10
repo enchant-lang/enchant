@@ -65,6 +65,13 @@ for the repaired admission policy.
 
 ## The next architectural boundary
 
+The first explicit context slice is now implemented in `formal.context` and
+specified in `CONTEXTS.md`. It links declared record Vars to fixed reviewed
+runtime calls and can back both a function contract and a source protocol.
+Actual execution avoids the probed ambient Var dependency. Its claim concerns
+the explicitly linked program; transitive SDK/runtime and macro/source context
+closure remain ahead. The longer-term boundary below remains active work.
+
 An eventual formal source declaration should carry a closed compilation context:
 its actual resolved intrinsic identities, semantic profiles and immutable code
 dependencies. Logical assumptions about inputs and runtime assumptions about

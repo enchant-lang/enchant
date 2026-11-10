@@ -19,6 +19,11 @@ survives an Erlang external-term round trip. The readable JSON rendering is
 diagnostic: it does not preserve every keyword/string distinction and is not
 the semantic interchange format.
 
+Current receipts and closed source definitions carry the canonical
+`:identity-profile` specified in `DATA-IDENTITY.md`. Pre-canonical default-ETF
+objects remain historical evidence tied to their recorded checker commit; the
+current checker does not silently migrate those identities.
+
 The fresh-VM research script reads a bounded, hash-pinned trusted ETF archive.
 It does not expose an arbitrary ETF decoder. A fresh `:safe` decode otherwise
 refuses archive keywords that the new VM has not interned, including sample
