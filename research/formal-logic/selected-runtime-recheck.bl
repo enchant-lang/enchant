@@ -1,0 +1,89 @@
+(ns formal.selected-runtime-recheck
+ (:require [formal.api :as formal] [formal.term :as t] [formal.runtime-artifact :as artifact]
+           [formal.identity :as identity] [reload.execution :as execution] [interop]))
+
+;; Trusted, exact project archive only. Public APIs consume bounded BL data;
+;; no arbitrary external ETF decoder is exposed by this command.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)) "Pass one trusted archive directory after --")
+(def directory (Path/expand (first args)))
+(def file (Path/join directory "original-selected.etf"))
+(assert (<= (:size (File/stat! file)) 8388608))
+(def bytes (File/read! file))
+(def pin (interop/json-> (File/read! (Path/join directory "original-selected-pin.json"))))
+(assert (= "enchant.formal.original-selected-runtime-archive-v1" (get pin "schema")))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def data (elem decoded 0))
+(assert (= :enchant.formal.original-selected-runtime-examples-v1 (:schema data)))
+(def rows (into (:direct data) (:native data)))
+(defn mfa [function]
+ (let [info (erlang/fun_info function)] (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity))))
+(def init-pattern (mfa execution/initialize-instance!))
+(def call-pattern (mfa execution/invoke-instance-binding!))
+(def load-pattern (tuple :code :load_binary 3))
+(defn barrier []
+ (let [reference (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen reference) :ok (after 5000 (throw :trace-deadline)))))
+(defn inspect-records []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       init-module (elem init-pattern 0) init-name (elem init-pattern 1)
+       call-module (elem call-pattern 0) call-name (elem call-pattern 1)
+       tracer
+       (spawn (fn [] (loop [inits 0 calls 0 loads []]
+         (receive
+          [:trace _ :call [module function arguments]]
+           (recur (if (and (= module init-module) (= function init-name)) (inc inits) inits)
+                  (if (and (= module call-module) (= function call-name)) (inc calls) calls)
+                  (if (and (= module :code) (= function :load_binary)
+                           (String/starts_with? (str (first arguments)) "Elixir.Formal.Selected.M"))
+                   (conj loads (str (first arguments))) loads))
+          [:reset seen] :when (= seen ticket)
+           (do (erlang/send parent [:calibration ticket {:initializers inits :exports calls :loads loads}]) (recur 0 0 []))
+          [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket {:initializers inits :exports calls :loads loads}])
+          _ (recur inits calls loads)))))]
+  (try
+   (doseq [pattern [init-pattern call-pattern load-pattern]]
+    (assert (pos? (erlang/trace_pattern pattern true (list :local)))))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   ;; Real Source calibration is outside the checking window and unrelated to
+   ;; the archive's definitions. No recorded target is invoked to check it.
+   (let [ctx (formal/selected-source-context {:sources [{:namespace 'formal.recheck.calibration :revision 'current
+                        :file "calibration.bl" :source "(ns formal.recheck.calibration) (defn answer [] 0)"}]
+                    :entry ['formal.recheck.calibration 'current] :target 'answer :parameters []})
+         definition (formal/program-contract {:name "selected-recheck-calibration" :context ctx})
+         observed (formal/observe-contract definition {})]
+    (assert (= :observed (:status observed)) (pr-str observed)))
+   (barrier) (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:calibration seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))
+         _ (assert (and (pos? (:initializers calibration)) (pos? (:exports calibration)) (seq (:loads calibration))))
+         checked (mapv (fn [row]
+                         (let [receipt (get-in row [:observation :receipt])
+                               result (formal/check-contract-observation (:definition row) receipt)]
+                          (assert (= (get-in row [:observation :checking :status]) (:status result)) (pr-str result))
+                          (assert (= (get-in row [:observation :checking :contract-safety]) (:contract-safety result)))
+                          {:id (:id row) :status (:status result) :contract-safety (:contract-safety result)
+                           :error-stack-bound-to-artifact (:error-stack-bound-to-artifact result)
+                           :failure-origin (:failure-origin result) :sdk-check (:sdk-check result)})) rows)]
+    (barrier) (erlang/send tracer [:finish ticket])
+    (let [counts (receive [:finished seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))]
+     (assert (= {:initializers 0 :exports 0 :loads []} counts) (pr-str counts))
+     {:records checked :calibration calibration :checking counts}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (doseq [pattern [init-pattern call-pattern load-pattern]] (erlang/trace_pattern pattern false (list :local)))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def result (inspect-records))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "original-selected-fresh.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge result {:schema :enchant.formal.original-selected-runtime-recheck-v1
+                :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                :archive-directory directory :identity-profile identity/profile
+                :scope :fresh-vm-recorded-original-source-conformance :attestation :observer-trusted-not-cryptographically-attested
+                :compiler-proof-authority false})))
+(println {:records (count (:records result)) :conforming (count (filter #(= :conforming (:status %)) (:records result)))
+          :violated-promises (count (filter #(= :violated (:contract-safety %)) (:records result)))
+          :checking (:checking result) :calibration (:calibration result) :compiler-proof-authority false})

@@ -30,6 +30,13 @@ into the existing contract/core interface. Both engines can check the same
 context-backed promise. Its initialize-then-call scope, unproved specialization
 bridge and remaining native runtime assumptions are explicit.
 
+[SELECTED-RUNTIME.md](SELECTED-RUNTIME.md) connects those contracts to actual
+original Source factories and exports. `formal/observe-contract` records one
+initialize-then-call execution through the normal SDK owner, while
+`formal/check-contract-observation` reconstructs the artifacts and checks the
+record without invoking the selected code. Finite conformance, contract safety,
+error cause, invocation boundary and universal refinement remain separate facts.
+
 `formal/certify` produces and independently checks Boolean/linear Int proof
 objects. `formal/check-certificate` checks a retained object against its exact
 statement, assumptions, profile and scope without either native solver.

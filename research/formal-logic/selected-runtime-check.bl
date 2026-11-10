@@ -1,0 +1,75 @@
+(ns formal.selected-runtime-check
+ (:require [formal.api :as formal] [formal.term :as t] [formal.core :as core]
+           [formal.identity :as identity] [formal.runtime-artifact :as artifact] [interop]))
+
+(defn context [body parameters]
+ (formal/selected-source-context
+  {:sources [{:namespace 'formal.actual.examples :revision 'current :file "/inert-source-coordinate/../example.bl"
+              :source (str "(ns formal.actual.examples) " body)}]
+   :entry ['formal.actual.examples 'current] :target 'answer :parameters parameters}))
+(def basic (context "(def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))" [["x" t/Int]]))
+(def safe (formal/program-contract {:name "actual-selected-safe" :context basic
+            :ensures (fn [in out] (t/eq out (t/add (get in "x") (t/int 40))))}))
+(def unsafe (formal/program-contract {:name "actual-selected-wrong-promise" :context basic
+              :ensures (fn [in out] (t/eq out (t/add (get in "x") (t/int 41))))}))
+(def provider {:namespace 'formal.actual.library :revision 'v1 :file "../macro-provider-coordinate.bl"
+               :source "(ns formal.actual.library) (defn- shifted [x] (erlang/+ x 40)) (defsyntax shift [form ctx] `(shifted ~(syntax-arg form 1)))"})
+(def client {:namespace 'formal.actual.examples :revision 'current :file "macro-client-coordinate.bl"
+             :source "(ns formal.actual.examples) (import-world 'formal.actual.library 'v1 :only [shift]) (defn answer [x] (shift x))"})
+(def macro-definition
+ (formal/program-contract {:name "actual-selected-macro"
+  :context (formal/selected-source-context {:sources [provider client] :entry ['formal.actual.examples 'current]
+                                         :target 'answer :parameters [["x" t/Int]]})}))
+(def record-definition
+ (formal/program-contract {:name "actual-selected-record"
+  :context (context "(defn answer [s] {\"n\" (erlang/+ (Elixir.BeamLisp.Ns.Rt/get s \"n\") 1) \"old\" s})"
+                    [["state" (core/record-sort {"n" t/Int "flag" t/Bool})]])}))
+(defn failing [name source]
+ (formal/program-contract {:name name :context (context source [["x" t/Int]])
+                           :returns :may :effects #{:raise} :raises #{:zero-divisor}}))
+(def initialization (failing "actual-selected-init-error" "(def hidden (erlang/div 1 0)) (defn answer [x] x)"))
+(def invocation (failing "actual-selected-call-error" "(defn- divide [x] (erlang/div x 0)) (defn answer [x] (divide x))"))
+(defn row [id definition assignment expected]
+ (let [observed (formal/observe-contract definition assignment)]
+  (assert (= :observed (:status observed)) (pr-str observed))
+  (assert (= expected (get-in observed [:checking :contract-safety])))
+  (assert (= false (get-in observed [:receipt :cleanup :worker-alive])))
+  (assert (= 0 (get-in observed [:receipt :cleanup :remaining])))
+  (assert (every? #(= false (:loaded %)) (get-in observed [:receipt :cleanup :modules])))
+  {:id id :definition definition :observation observed}))
+(def direct
+ [(row :scalar safe {"x" 2} :holds)
+  (row :macro macro-definition {"x" 2} :holds)
+  (row :record record-definition {"state" {"n" 7 "flag" false}} :holds)
+  (row :initialization initialization {"x" 7} :holds)
+  (row :invocation invocation {"x" 7} :holds)
+  (row :wrong-promise unsafe {"x" 2} :violated)])
+(def native
+ (mapv (fn [engine]
+         (let [answer (formal/check {:backend engine} unsafe)
+               observed (formal/observe-contract-counterexample unsafe (get-in answer [:backend :property]))]
+          (assert (= :refuted (:status answer)))
+          (assert (= :observed (:status observed)) (pr-str observed))
+          (assert (= :violated (get-in observed [:checking :contract-safety])))
+          {:id engine :definition unsafe :native-answer answer :observation observed})) [:z3 :oxiz]))
+(def data {:schema :enchant.formal.original-selected-runtime-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :identity-profile identity/profile :direct direct :native native :compiler-proof-authority false})
+;; The public receipts and archive must contain no live function, PID, Env or lease.
+(identity/bytes data)
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! root)
+(def bytes (erlang/term_to_binary data))
+(File/write! (Path/join root "original-selected.etf") bytes)
+(File/write! (Path/join root "original-selected-pin.json")
+ (interop/->json {:schema :enchant.formal.original-selected-runtime-archive-v1 :bytes (erlang/byte_size bytes)
+                 :sha256 (artifact/digest bytes) :decoder-scope :trusted-research-archive}))
+(File/write! (Path/join root "original-selected.json")
+ (interop/->json {:schema (:schema data) :source-commit (:source-commit data)
+  :records (mapv (fn [row] {:id (:id row) :contract (get-in row [:definition :identity])
+                           :source-context (get-in row [:definition :source :identity]) :observation (:observation row)}) (into direct native))
+  :identity-profile identity/profile :compiler-proof-authority false}))
+(println {:observations (+ (count direct) (count native)) :conforming 8 :violated-promises 3
+          :initialization-attempts 8 :target-invocations 7
+          :tail-call-error-stack-bound (get-in (nth direct 4) [:observation :checking :error-stack-bound-to-artifact])
+          :source-owner :normal-sdk-source-instance-owner :compiler-proof-authority false})

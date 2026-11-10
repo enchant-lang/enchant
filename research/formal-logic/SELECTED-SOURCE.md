@@ -85,11 +85,12 @@ Preparation does execute expansion-phase semantics. It runs no selected runtime
 initializer or target function. The macro, specializer, BL checker and compiler
 implementations are reviewed code, not mechanically proved implementations.
 
-The specialized ANF is a derived program. This milestone does not emit and
-observe the original selected unit, or prove preservation from that unit to the
-specialized core. The earlier actor observer remains a separate, narrower
-source-handler experiment. General selected-function execution observations
-and an independent specialization/simulation proof remain next work.
+The specialized ANF is a derived program. The next implemented slice now emits
+and observes the **original** selected unit through its normal SDK Source owner,
+then checks finite outcome conformance against this core. See
+[SELECTED-RUNTIME.md](SELECTED-RUNTIME.md). This does not prove universal
+preservation from the original unit to the specialized core. The earlier actor
+observer remains a separate source-handler experiment with its own profile.
 
 ## Closure and limits
 
