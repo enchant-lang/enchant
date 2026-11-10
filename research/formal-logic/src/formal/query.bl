@@ -23,6 +23,8 @@
  (let [mode (get opts :mode :prove) claim (:claim opts)
        _ (when-not (contains? #{:sat :prove} mode)
            (throw (ex-info "Unknown formal query mode" {:mode mode})))
+       _ (when (and (= :sat mode) (some? claim))
+           (throw (ex-info "A SAT query uses assumptions; a claim would be silently discarded" {})))
        inputs (vec (get opts :inputs []))
        context (vec (concat inputs (when claim [claim])))
        assumptions (normalize-assumptions (vec (get opts :assumptions [])))
@@ -60,6 +62,25 @@
  (vec (concat (map :term (:assertions problem)) (when (:claim problem) [(:claim problem)])
               (mapcat (fn [[_ item]] (v/terms item))
                       (sort-by (fn [[label _]] (identity/bytes label)) (:observe problem))))))
+(defn validate!
+ "Give every backend and checker the same question meaning. Counterexamples
+  are derived from proof claims; SAT has no extra counterexample assertion."
+ [problem]
+ (letfn [(require! [ok reason] (when-not ok (throw (ex-info (str "formal.query: " reason) {}))))
+         (assertion? [item] (and (map? item) (string? (:label item)) (= t/Bool (t/sort-of (:term item)))))]
+  (require! (and (map? problem) (= 1 (:formal/query problem)) (contains? #{:prove :sat} (:mode problem)))
+            "one proof or SAT question required")
+  (require! (and (vector? (:assertions problem)) (every? assertion? (:assertions problem))) "Boolean assertion vector required")
+  (require! (or (nil? (:observe problem)) (map? (:observe problem))) "observations must be a map")
+  (if (= :prove (:mode problem))
+   (do (require! (= t/Bool (t/sort-of (:claim problem))) "Boolean proof claim required")
+       (require! (and (assertion? (:counterexample problem))
+                      (= (t/not (:claim problem)) (get-in problem [:counterexample :term])))
+                 "counterexample must be exactly the negated claim"))
+   (require! (and (nil? (:claim problem)) (nil? (:counterexample problem))) "SAT has neither claim nor counterexample"))
+  (identity/bytes problem)
+  (t/validate! (roots problem))
+  problem))
 (defn cache-key
  "A backend result cache cannot cross profiles, bounds, artifacts, settings or
   requested evidence. This key never grants trusted compiler authority."

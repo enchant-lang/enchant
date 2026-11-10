@@ -1,0 +1,44 @@
+(ns formal.query-test
+ (:require [formal.query :as q] [formal.term :as t] [formal.api :as formal]
+           [formal.logic :as logic] [formal.backend :as backend]))
+
+(deftest a-query-has-one-meaning-at-every-checking-boundary
+ (let [proved (q/prove (t/bool true)) sat (q/sat {:assumptions [(t/bool true)]})
+       malformed [(assoc sat :counterexample (q/assertion "hidden" (t/bool false)))
+                  (assoc sat :claim (t/bool true))
+                  (assoc proved :counterexample nil)
+                  (assoc-in proved [:counterexample :term] (t/bool true))
+                  (assoc proved :observe [])
+                  (assoc proved :assertions (list (q/assertion "list" (t/bool true))))]]
+  (is (= proved (q/validate! proved)))
+  (is (= sat (q/validate! sat)))
+  (is (= (assoc sat :observe nil) (q/validate! (assoc sat :observe nil))))
+  (doseq [question malformed]
+   (is (thrown? (q/validate! question)))
+   (is (= :unsupported (:status (formal/certify question))))
+   (is (= :unsupported (:status (formal/obligation-plan question))))
+   ;; Invalid data is rejected before a session is dereferenced.
+   (is (= :not-run (:solver-status (logic/solve-in nil question))))
+   (is (= :frontend (:phase (logic/solve-in nil question)))))
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session {:backend engine}
+    (fn [session]
+     (doseq [question malformed]
+      (let [answer (logic/solve-in session question)]
+       (is (= :error (:verdict answer)))
+       (is (= :not-run (:solver-status answer)))))
+     (is (= :sat (:verdict (logic/solve-in session sat))))
+     (is (= :proved (:verdict (logic/solve-in session proved)))))))))
+
+(deftest sat-does-not-silently-discard-a-supplied-predicate
+ (is (thrown? (q/sat {:claim (t/bool false)})))
+ (is (= :sat (:mode (q/sat {:claim nil}))))
+ (is (= :unsat (:verdict (logic/run {:backend :z3} (q/sat {:assumptions [(t/bool false)]}))))))
+
+(deftest watchers-share-symbol-sorts-but-do-not-add-assumptions
+ (let [x (t/variable "same" t/Int)
+       question (q/sat {:assumptions [(t/eq x (t/int 3))]
+                        :observe {"dead" (t/div x (t/int 0))}})]
+  (is (= question (q/validate! question)))
+  (is (thrown? (q/validate! (assoc question :observe {"wrong" (t/variable "same" t/Bool)}))))
+  (is (= :sat (:verdict (logic/run {:backend :z3} question))))))
