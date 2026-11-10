@@ -55,6 +55,14 @@ the solver proved a question outside the independent checker fragment. A valid
 counterexample is `refuted`; an opposing solver/certificate result is a visible
 `disagreement`. None of these statuses silently becomes compiler authority.
 The source and symbolic interpretation remain reviewed, unmechanized code.
+Source preparation now also requires an independently checked ANF/Core pair:
+`:elaboration {:status :checked ...}` records that relation separately from the
+conditional term proof. The common evidence envelope exposes it under
+`:evidence/:connection/:elaboration`. A Core-only authored contract reports
+`:not-applicable` there. The relation checker does not regenerate a Core or
+call a solver; Source expansion and selected-unit specialization are earlier,
+still-unproved bridges. See [ELABORATION.md](ELABORATION.md) for the exact rules
+and the distinct mathematical model preservation theorem.
 
 ## Displaying a counterexample
 
