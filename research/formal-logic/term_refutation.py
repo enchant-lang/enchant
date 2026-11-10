@@ -32,6 +32,21 @@ def typed_term(term):
             "args": [typed_term(child) for child in term["args"]]}
 
 
+def guards(packet):
+    result, seen = [], set()
+    def visit(node):
+        for child in node["args"]:
+            visit(child)
+        if node["op"] == "ite":
+            condition = node["args"][0]
+            key = json.dumps(condition, sort_keys=True)
+            if key not in seen:
+                seen.add(key); result.append(condition)
+    for root in [*packet["assertions"], packet["claim"]]:
+        visit(root)
+    return result
+
+
 def canonical_identity(packet):
     value = {**packet, "profile": k.Keyword(packet["profile"]), "semantics": k.Keyword(packet["semantics"]),
              "identity-profile": k.Keyword(packet["identity-profile"]),
@@ -99,6 +114,7 @@ def validate(packet):
     integers = sorted(name for name, sort in variables.items() if sort == "int")
     booleans = sorted(name for name, sort in variables.items() if sort == "bool")
     require(len(integers) <= 1024 and len(booleans) <= 12, "original input/Boolean case proof capacity")
+    require(len(booleans) + len(guards(packet)) <= 12, "original Boolean/choice case proof capacity")
     normalized = packet["normalized"]
     require(all(name in integers for name in normalized["variables"]), "normalized integer name is not an original input")
     require(all(name in booleans for _, name in normalized["booleans"]), "normalized Boolean name is not an original input")
@@ -178,8 +194,11 @@ MAP_END = " : List Nat)[index]?.getD 0)"
 SIMPS = "Term.eval, strict₂, partial₂, divide, modulus"
 
 
-def tail(boolean_count):
-    cases = "".join(f"  all_goals cases h{index} : booleans {index}\n" for index in range(boolean_count))
+def tail(packet, integers, booleans):
+    cases = "".join(f"  all_goals cases h{index} : booleans {index}\n" for index in range(len(booleans)))
+    for index, condition in enumerate(guards(packet)):
+        expression = emit_term(condition, integers, booleans)
+        cases += f"  all_goals\n    cases hGuard{index} : {expression}.eval integers booleans with\n    | none => simp_all [{SIMPS}]\n    | some value => cases value <;> simp_all [{SIMPS}]\n"
     return """
 
 theorem packetAccepted : check packetProblem packetProof = true := by decide
@@ -196,7 +215,7 @@ theorem normalizationConnected : ∀ integers booleans,
   all_goals try dsimp only [Problem.values]
   all_goals simp only [List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil]
   all_goals simp [Row.holds, dot, integerMap, booleanMap]
-""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals try dsimp (config := {{ instances := true }}) only [Ty.Value] at *\n  all_goals (repeat (first | omega | (split at * <;> simp_all [{SIMPS}] <;> try dsimp (config := {{ instances := true }}) only [Ty.Value] at *)))\n" + """
+""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals try dsimp (config := {{ instances := true }}) only [Ty.Value] at *\n  all_goals omega\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
 #print axioms packetAccepted
@@ -219,11 +238,11 @@ def source(packet, integers, booleans):
     kernel = packet["normalized"]["kernel"]
     problem = "(Problem.mk " + k.emit_list([k.emit_atom(a) for a in kernel["atoms"]]) + " " + k.emit_list([k.emit_formula(f) for f in kernel["formulas"]]) + ")"
     i, b = mappings(packet, integers, booleans)
-    return HEADER + question + PROBLEM + problem + PROOF + k.emit_proof(kernel["proof"]) + MAP_I + k.emit_list(list(map(str, i))) + MAP_END + MAP_B + k.emit_list(list(map(str, b))) + MAP_END + tail(len(booleans))
+    return HEADER + question + PROBLEM + problem + PROOF + k.emit_proof(kernel["proof"]) + MAP_I + k.emit_list(list(map(str, i))) + MAP_END + MAP_B + k.emit_list(list(map(str, b))) + MAP_END + tail(packet, integers, booleans)
 
 
 def verify_source(text, packet, integers, booleans):
-    ending = tail(len(booleans))
+    ending = tail(packet, integers, booleans)
     require(text.startswith(HEADER) and text.endswith(ending), "original proof source template")
     question, rest = text[len(HEADER):-len(ending)].split(PROBLEM)
     problem, rest = rest.split(PROOF)
