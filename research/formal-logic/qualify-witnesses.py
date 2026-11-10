@@ -57,6 +57,15 @@ originals = {row['id']: row for row in read(E / 'examples/summary.json')['rows']
 require(len(accepted) == len(originals) == 32 and len(rejected) == 6, 'accepted/rejected evidence counts')
 origins = Counter(row['discovery'].get('backend', row['discovery']['kind']) for row in originals.values())
 require(origins == Counter({'explicit-bindings': 22, 'z3': 5, 'oxiz': 5}), 'authored and dual native origins')
+sdk = read(P / 'sdk-pin.json')
+worker_sha = sha(R / 'research/oxiz-prototype/worker/target/release/formal-worker')
+z3_sha = sha(Path(sdk['sdk']) / 'image/priv/z3/bin/libz3.so')
+for row in originals.values():
+    discovery = row['discovery']
+    if discovery['kind'] == 'native-model':
+        origin = discovery['identity']
+        require(discovery['origin'] == 'claimed-not-cryptographically-attested' and origin['backend'] == discovery['backend'] and origin['worker-sha256'] == worker_sha and origin['sdk'] == sdk['sdk'], 'recorded native discovery artifact labels')
+        require(origin['library-sha256'] == (z3_sha if discovery['backend'] == 'z3' else None), 'recorded discovery library label')
 for row in accepted:
     target = E / 'execution' / row['id']
     packet = read(E / 'examples' / (row['id'] + '.json'))
@@ -81,13 +90,14 @@ for name in ['advanced', 'features', 'native']:
     require(signature(current) == signature(prior) and current['disagreements'] == [] and current['invalid-models'] == [], 'native drift: ' + name)
     corpora.append({'corpus': name, 'questions': len(current['cases']), 'per_case_verdicts_unchanged': True, 'summary': current['summary']})
 require(sum(row['questions'] for row in corpora) == 187, 'complete existing native corpus')
+regression = next(row for row in read(E / 'serialization-regression/features.json')['cases'] if row['id'] == 'relation/closure-is-transitive')
+repaired = next(row for row in read(E / 'corpora/features.json')['cases'] if row['id'] == regression['id'])
+require(all(regression[engine]['verdict'] == 'error' and 'data walk capacity' in regression[engine]['error'] and repaired[engine]['verdict'] == 'proved' for engine in ['z3', 'oxiz']), 'retained and repaired native term-sharing regression')
 archive_pin = read(E / 'examples/archive-pin.json')
 require(sha(E / 'examples/witnesses.etf') == archive_pin['sha256'] and (E / 'examples/witnesses.etf').stat().st_size == archive_pin['bytes'], 'original archive custody')
 artifacts = {f.relative_to(P).as_posix(): sha(f) for f in sorted(E.rglob('*')) if f.is_file() and f.name not in {'qualification.json', 'dossier-qualification.json'} and not any(part.startswith('browser') for part in f.parts)}
 result = {'schema': 'enchant.formal.constructive-witness-qualification.v1', 'checkpoint': 19,
-          'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': read(P / 'sdk-pin.json'),
-          'worker_sha256': sha(R / 'research/oxiz-prototype/worker/target/release/formal-worker'),
-          'z3_library_sha256': sha(Path(read(P / 'sdk-pin.json')['sdk']) / 'image/priv/z3/bin/libz3.so'),
+          'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': sdk, 'worker_sha256': worker_sha, 'z3_library_sha256': z3_sha,
           'checks': {'source_snapshot': snapshot, 'files': counts, 'total_assertions': sum(counts.values()), 'failures': 0},
           'witness_model': {'pin': pins['witness'], 'tool': tool, 'general_audits': audits, 'semantics': pins['witness']['semantics']},
           'applied_witnesses': {'accepted_originals': 32, 'authored_assignments': 22, 'native_models': {'z3': 5, 'oxiz': 5}, 'rejected_false_or_undefined': 6,
@@ -97,6 +107,8 @@ result = {'schema': 'enchant.formal.constructive-witness-qualification.v1', 'che
           'previous_universal_proofs': {'accepted': 17, 'rejected_altered_originals': 5, 'unchanged_semantics': True},
           'common_v1_bundle_witness_facet': 'still-pending-format-composition',
           'shared_query_boundary': 'native-certificate-obligation-and-witness-counterexample-consistency',
+          'shared_relation_regression': {'question': regression['id'], 'earlier': 'expanded-identity-capacity-error',
+                                         'repaired_verdicts': {engine: repaired[engine]['verdict'] for engine in ['z3', 'oxiz']}},
           'remaining_trust': ['term-data/typed-semantics correspondence and codec', 'model-to-question interpretation and composition',
                               'Source elaboration/specialization correspondence', 'BL compiler and BEAM runtime', 'local execution custody'],
           'retained_failed_attempts': 'Static assertion delimiters, xor constructor spelling, actual backend metadata adaptation, and a whole-query serialization limit reached by a previously accepted shared relation graph. The corrected shared validator preserves the DAG boundary; failed attempts are excluded from accepted evidence.',
