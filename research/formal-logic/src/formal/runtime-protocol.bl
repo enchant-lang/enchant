@@ -10,7 +10,8 @@
  #{:formal/runtime-observation :profile :adapter :projection :definition :sdk :artifacts
    :initial :events :frames :termination :at :monitor :cleanup :deadline-ms :identity})
 (defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.runtime-protocol: " message) {}))))
-(defn- shape! [data keys] (require! (and (map? data) (= keys (set (keys data)))) "noncanonical observation data"))
+(defn- shape! [data expected-keys]
+ (require! (and (map? data) (= expected-keys (set (keys data)))) "noncanonical observation data"))
 (defn- reference! [definition initial events]
  (require! (and (vector? events) (<= (count events) (:events limits))) "event capacity")
  (let [prepared (source/prepare definition)
@@ -50,7 +51,7 @@
      :runtime-error (outcome/error-name raw) :error-stack-bound-to-artifact (boolean bound-error?)
      :reference-outcome (:core-execution expected)}))))
 
-(defn check
+(defn- check-in
  "Reconstruct the exact source/model and emitted artifact identities. Compare
   recorded observations without loading their BEAM, starting actors or calling
   application handlers. This validates data; it does not attest execution."
@@ -108,6 +109,15 @@
   (catch error {:status :rejected :reason (ex-message error) :scope :finite-recorded-beam-adapter-conformance
                 :compiler-proof-authority false})))
 
+(defn check [definition receipt]
+ (try
+  ;; Load the fixed SDK metadata readers before retaining their actual code.
+  ;; No observed handler module is loaded or invoked by this path.
+  (artifact/sdk-identity)
+  (BeamLisp.Env/with_code_lease artifact/critical-modules (fn [] (check-in definition receipt)))
+  (catch error {:status :rejected :reason (ex-message error) :scope :finite-recorded-beam-adapter-conformance
+                :compiler-proof-authority false})))
+
 (defn observe
  "Compile only the admitted source, retain its exact bytes, and run one owned
   sequential trap-and-stop adapter. Native solver answers are not required.
@@ -121,11 +131,12 @@
           _ (require! (and (int? deadline-ms) (<= 0 deadline-ms (:deadline-ms limits))) "invalid runtime deadline")
           {:keys [prepared reference state-type]} (reference! definition initial events)]
      (if (= 0 deadline-ms) {:status :incomplete :reason :deadline-expired :execution-started false :compiler-proof-authority false}
-      (let [sdk (artifact/sdk-identity) run (System/unique_integer (list :positive))
+      (let [_ (artifact/sdk-identity) sdk (atom nil) run (System/unique_integer (list :positive))
             observed
             (try
              (BeamLisp.Env/with_code_lease artifact/critical-modules
               (fn []
+              (reset! sdk (artifact/sdk-identity))
               (let [functions (into {} (map-indexed
                               (fn [at handler]
                                (let [compiled (artifact/compile-handler handler (artifact/module-name run at))
@@ -136,7 +147,7 @@
               (reset! native result) result)))
              (finally (reset! cleanup (artifact/close! @resources))))
             data {:formal/runtime-observation 1 :profile profile :adapter adapter :projection outcome/profile
-                  :definition (:identity definition) :sdk sdk
+                  :definition (:identity definition) :sdk @sdk
                   :artifacts (mapv #(get-in % [:compiled :manifest]) @resources)
                   :initial initial :events events :frames (:frames observed) :termination (:termination observed) :at (:at observed)
                   :monitor (:monitor observed) :cleanup {:actor-alive (:actor-alive observed) :modules @cleanup}
