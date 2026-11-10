@@ -94,13 +94,14 @@
 (defn- discharge [item search]
  (cond
   (= :sat (get-in item [:question :mode]))
-   {:label (:label item) :status :requires-witness :via :witness :certificate nil :packet nil}
+   {:label (:label item) :status :requires-witness :via :witness :certificate nil :packet nil :diagnostic "Witness evidence is separate from this proof facet."}
   :else
    (let [direct (leaf (:question item) search)
          absent (when (and (:required item) (not= :ready (:status direct))) (leaf (:unreachable item) search))
          unreachable? (= :ready (:status absent)) selected (if unreachable? absent direct)]
     {:label (:label item) :status (:status selected) :via (if unreachable? :unreachable :entailment)
-     :certificate (:certificate selected) :packet (:packet selected)})))
+     :certificate (:certificate selected) :packet (:packet selected)
+     :diagnostic (when (:reason selected) (str (:reason selected)))})))
 (defn- manifest [prepared rows]
  (identity/seal
   {:formal/obligation-term-manifest 1 :profile manifest-profile
@@ -108,7 +109,8 @@
    :rows (mapv (fn [item evidence]
                  {:label (:label item) :role (:role item) :required (:required item) :mode (get-in item [:question :mode])
                   :question (identity/hash (:question item)) :unreachable (when (:unreachable item) (identity/hash (:unreachable item)))
-                  :status (:status evidence) :via (:via evidence) :packet (:packet evidence)}) (:rows prepared) rows)
+                  :status (:status evidence) :via (:via evidence) :packet (:packet evidence)
+                  :diagnostic (:diagnostic evidence)}) (:rows prepared) rows)
    :model-connection :reviewed-not-mechanically-proved :composition :reviewed-not-mechanically-proved
    :feasibility :not-established :kernel-execution :not-run :compiler-proof-authority false}))
 (defn- coverage [prepared rows]
@@ -118,6 +120,38 @@
   {:required (count required) :ready (count ready) :complete (= (count required) (count ready))
    :unreachable (count (filter #(= :unreachable (:via %)) ready))
    :pending (mapv :label (remove #(= :ready (:status %)) required))}))
+(defn- assembled [object rows]
+ (let [covered (coverage object rows)
+       bundle (identity/seal {:formal/obligation-proof-data 1 :profile proof-profile :plan object :rows rows
+                              :manifest (manifest object rows)})]
+  {:status (if (:complete covered) :ready :incomplete) :bundle bundle :coverage covered
+   :kernel-execution :not-run :model-connection :reviewed-not-mechanically-proved :compiler-proof-authority false}))
+(defn package
+ "Package caller-supplied certificates by exact obligation label, without
+  search. Missing entries remain pending; stale or invalid supplied proofs fail."
+ [subject supplied]
+ (try
+  (let [prepared (plan subject) object (:plan prepared)
+        _ (require! (= :ready (:status prepared)) (:reason prepared))
+        labels (set (map :label (:rows object)))
+        _ (require! (and (map? supplied) (every? labels (keys supplied))) "unknown supplied proof label")
+        rows (mapv (fn [item]
+                     (let [provided (get supplied (:label item))]
+                      (if (nil? provided)
+                       {:label (:label item) :status (if (= :sat (get-in item [:question :mode])) :requires-witness :unknown)
+                        :via (if (= :sat (get-in item [:question :mode])) :witness :entailment)
+                        :certificate nil :packet nil :diagnostic "No certificate supplied."}
+                       (let [_ (require! (and (map? provided) (= #{:via :certificate} (set (keys provided)))
+                                               (contains? #{:entailment :unreachable} (:via provided))
+                                               (not= :sat (get-in item [:question :mode]))) "supplied proof route/shape")
+                             _ (when (= :unreachable (:via provided)) (require! (:unreachable item) "unreachability not allowed here"))
+                             target (if (= :unreachable (:via provided)) (:unreachable item) (:question item))
+                             ready (refutation/prepare-terms target (:certificate provided))]
+                        (require! (= :ready (:status ready)) (str "supplied certificate refused: " (:reason ready)))
+                        {:label (:label item) :status :ready :via (:via provided) :certificate (:certificate provided)
+                         :packet (:packet ready) :diagnostic nil})))) (:rows object))]
+   (assembled object rows))
+  (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))
 (defn produce
  "Build complete or visibly partial proof data for a common formal subject.
   It invokes BL proof search, never a native solver or external proof process."
@@ -126,13 +160,8 @@
  (let [prepared (plan subject)]
   (if-not (= :ready (:status prepared)) prepared
    (try
-    (let [object (:plan prepared) rows (mapv #(discharge % (get options :search {})) (:rows object))
-          covered (coverage object rows)
-          bundle (identity/seal {:formal/obligation-proof-data 1 :profile proof-profile :plan object :rows rows
-                                 :manifest (manifest object rows)})]
-     {:status (if (:complete covered) :ready :incomplete) :bundle bundle :coverage covered
-      :kernel-execution :not-run :model-connection :reviewed-not-mechanically-proved
-      :compiler-proof-authority false})
+    (let [object (:plan prepared) rows (mapv #(discharge % (get options :search {})) (:rows object))]
+     (assembled object rows))
     (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false}))))))
 (defn check-data
  "Reconstruct the whole subject plan and check exact row coverage, certificates
@@ -146,13 +175,15 @@
                   (= object (:plan bundle)) (vector? (:rows bundle))
                   (= (mapv :label (:rows object)) (mapv :label (:rows bundle)))) "proof-data subject or complete coverage mismatch")
    (doseq [[item evidence] (map (fn [a b] [a b]) (:rows object) (:rows bundle))]
-    (require! (= #{:label :status :via :certificate :packet} (set (keys evidence))) "closed evidence row required")
-    (require! (contains? #{:ready :unknown :unsupported :requires-witness} (:status evidence)) "unknown proof-data status")
+    (require! (= #{:label :status :via :certificate :packet :diagnostic} (set (keys evidence))) "closed evidence row required")
+    (require! (or (nil? (:diagnostic evidence)) (string? (:diagnostic evidence))) "text diagnostic required")
+    (require! (contains? #{:ready :unknown :unsupported :error :requires-witness} (:status evidence)) "unknown proof-data status")
     (require! (contains? (if (= :sat (get-in item [:question :mode])) #{:witness} #{:entailment :unreachable}) (:via evidence)) "proof route mismatch")
     (when (= :unreachable (:via evidence)) (require! (and (:required item) (:unreachable item)) "unreachability is not allowed for this row"))
     (if (= :ready (:status evidence))
      (let [question (if (= :unreachable (:via evidence)) (:unreachable item) (:question item))
            checked (refutation/check-term-data question (:certificate evidence) (:packet evidence))]
+      (require! (nil? (:diagnostic evidence)) "accepted proof row cannot carry a failure diagnostic")
       (require! (= :checked-data-connection (:status checked)) "term certificate or original packet mismatch"))
      (do (require! (and (nil? (:certificate evidence)) (nil? (:packet evidence))) "pending row cannot carry accepted proof data")
          (require! (= (= :sat (get-in item [:question :mode])) (= :requires-witness (:status evidence))) "SAT witness status mismatch"))))
