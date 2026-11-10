@@ -53,6 +53,10 @@ try{
   check(size.name+': finite observation retains its trust boundary',actualRuntime.includes(':universal-runtime-refinement :not-established')&&actualRuntime.includes(':execution-attestation :observer-trusted-not-cryptographically-attested')&&actualRuntime.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-actual-runtime').scrollIntoView({block:'center'})");
   await shot(size.name+'-actual-beam-observation');
+  await navigate('/#s-the-big-idea');
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('identity changes the mathematics')).scrollIntoView({block:'start'})");
+  check(size.name+': source callee repair and remaining Var assumption are explained',await evaluate("document.body.innerText.includes('4,877 assertions')&&document.body.innerText.includes('actual compiled handler returned 3.5')&&document.body.innerText.includes('Freezing or checking that runtime binding is a separate next step')"));
+  await shot(size.name+'-callee-identity');
   await navigate('/#a-promise-about-the-function-you-actually-wrote');
   check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
   await shot(size.name+'-source-handler');
@@ -163,6 +167,10 @@ try{
  for(const path of ['/RUNTIME-OBSERVATIONS.md','/src/formal/runtime-protocol.bl','/src/formal/runtime-artifact.bl','/src/formal/runtime-outcome.bl','/src/formal/runtime-actor.bl','/test/runtime_protocol_test.bl','/evidence/actor-runtime/integrated-checks.txt','/evidence/actor-runtime/examples.json','/evidence/actor-runtime/fresh-replay.json','/evidence/actor-runtime/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared actual-runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/INTRINSICS.md','/src/formal/intrinsics.bl','/src/formal/elaborate.bl','/test/intrinsics_test.bl','/evidence/intrinsics/intrinsics-probe.json','/evidence/intrinsics/checks.txt','/evidence/intrinsics/fresh-replay.json','/evidence/intrinsics/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared callee-identity evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{

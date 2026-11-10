@@ -12,6 +12,12 @@ reported disagreement and refused that value as an integer state. The raw
 pre-fix source, compiler calls, model and observation are retained in
 `evidence/intrinsics/intrinsics-probe.json` (probe commit `5d4724548`).
 
+The repaired front end passed 4,877 assertions across nine focused files,
+including 135 identity regressions. The eight prior runtime observations also
+passed fresh-VM validation through the repaired front end, with no handler
+capture calls or observed-module loads in the calibrated record-check window.
+These checks qualify this implementation; they do not establish its soundness.
+
 The formal Int/Bool core now refuses that call. The BL language function keeps
 its existing floating/decimal behavior. Modeling it needs the corresponding
 source numeric domain; it cannot borrow the integer-quotient contract.
