@@ -1,0 +1,107 @@
+(ns formal.loop-test
+ (:require [formal.loop-core :as lc] [formal.loop :as loops] [formal.api :as formal]
+           [formal.term :as t]))
+
+(def countdown-spec
+ {:name "countdown" :parameters {"n" t/Int}
+  :source "(loop [i n acc 0] (if (> i 0) (recur (- i 1) (+ acc 1)) acc))"
+  :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+  :invariant (fn [in state] (t/all [(t/ge (get state "i") (t/int 0))
+                  (t/eq (t/add (get state "i") (get state "acc")) (get in "n"))]))
+  :rank (fn [in state] [(get state "i")])
+  :ensures (fn [in state value] (t/eq value (get in "n")))})
+
+(deftest real-anf-loop-has-typed-canonical-control-and-reference-execution
+ (let [prepared (lc/prepare (:source countdown-spec) (:parameters countdown-spec))]
+  (is (= :elaborated (:status prepared)) (pr-str prepared))
+  (when (= :elaborated (:status prepared))
+   (is (= ["i" "acc"] (mapv :name (get-in prepared [:program :state]))))
+   (is (= :typed (:status (lc/check (:program prepared)))))
+   (doseq [n [0 1 2 9 100]]
+    (let [result (lc/evaluate (:program prepared) {"n" n})]
+     (is (= :returned (:status result)) (pr-str result))
+     (is (= n (:value result)))
+     (is (= n (:iterations result)))))
+   (is (= :incomplete (:status (lc/evaluate (:program prepared) {"n" 100} {:iterations 2}))))
+   (is (= :incomplete (:status (lc/evaluate (:program prepared) {"n" 1} {:steps 0})))))))
+
+(deftest recurrence-replaces-state-simultaneously
+ (let [source "(loop [a 1 b 2 i 1] (if (> i 0) (recur b a (- i 1)) (+ (* a 10) b)))"
+       prepared (lc/prepare source {})]
+  (is (= :elaborated (:status prepared)) (pr-str prepared))
+  (is (= 21 (:value (lc/evaluate (:program prepared) {}))))))
+
+(deftest countdown-is-certified-symbolically-without-a-bound-on-n
+ (let [definition (formal/loop-contract countdown-spec) result (formal/verify-loop definition)
+       proof (:proof result) copied (erlang/binary_to_term (erlang/term_to_binary proof))]
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :conditional-normal-return-of-loop-model (:scope result)))
+  (is (= :checked-obligations (:status (formal/check-loop-proof definition copied))))
+  (is (= :reviewed-not-mechanically-proved (:source-connection result)))
+  (is (= false (:compiler-proof-authority result)))
+  (is (= (:identity definition) (:identity (formal/loop-contract countdown-spec))))
+  (is (= :rejected (:status (loops/check-proof definition (update proof :obligations pop)))))
+  (is (= :rejected (:status (loops/check-proof definition (assoc proof :definition "a different loop")))))
+  (is (= :rejected (:status (loops/check-proof definition (assoc-in proof [:obligations 0 :certificate :proof] {:rule :unknown})))))))
+
+(deftest lexicographic-reset-needs-a-pair-rather-than-a-sum
+ (let [spec {:name "nested-reset" :parameters {"n" t/Int "m" t/Int}
+             :source "(loop [outer n inner m] (if (> inner 0) (recur outer (- inner 1)) (if (> outer 0) (recur (- outer 1) 3) (+ outer inner))))"
+             :requires (fn [in] (t/all [(t/ge (get in "n") (t/int 0)) (t/ge (get in "m") (t/int 0))]))
+             :invariant (fn [in state] (t/all [(t/ge (get state "outer") (t/int 0)) (t/ge (get state "inner") (t/int 0))]))
+             :rank (fn [in state] [(get state "outer") (get state "inner")])
+             :ensures (fn [in state result] (t/eq result (t/int 0)))}
+       definition (loops/define spec) result (loops/verify definition)
+       execution (lc/evaluate (:program definition) {"n" 3 "m" 2})]
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= 2 (get-in result [:checking :ranking-rule :dimension])))
+  (is (= :returned (:status execution)))
+  (is (= 0 (:value execution)))
+  (is (> (:iterations execution) 3))))
+
+(deftest both-native-backends-receive-the-same-unbounded-obligations
+ (let [definition (loops/define countdown-spec)]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (loops/verify {:backend engine} definition)]
+    (is (= :checked (:status result)) (pr-str result))
+    (is (= :replayed-witness (:assumption-consistency result)))
+    (is (every? #(= :proved (get-in % [:result :verdict])) (get-in result [:backend :obligations])))))))
+
+(deftest growth-and-author-decreasing-assertions-do-not-prove-termination
+ (let [spec {:name "grows" :parameters {"n" t/Int}
+             :source "(loop ^{:decreasing n} [i n] (recur (+ i 1)))"
+             :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+             :invariant (fn [in state] (t/ge (get state "i") (t/int 0)))
+             :rank (fn [in state] [(get state "i")])}
+       definition (loops/define spec)]
+  (is (= true (:author-assertions-ignored definition)))
+  (is (not= :checked (:status (loops/verify definition))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (loops/verify {:backend engine} definition)
+         bad (filter #(= :refuted (get-in % [:result :verdict])) (get-in result [:backend :obligations]))]
+    (is (= :refuted (:status result)) (pr-str result))
+    (is (some #(String/contains? (:id %) "decrease") bad))
+    (is (every? #(= :valid (get-in % [:result :validation :status])) bad))))))
+
+(deftest unreachable-failure-and-reachable-failure-have-different-proof-obligations
+ (let [base {:name "guarded-failure" :parameters {"n" t/Int}
+             :source "(loop [i n] (if (< i 0) (quot 1 0) (if (> i 0) (recur (- i 1)) i)))"
+             :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+             :invariant (fn [in state] (t/ge (get state "i") (t/int 0)))
+             :rank (fn [in state] [(get state "i")])
+             :ensures (fn [in state result] (t/eq result (t/int 0)))}
+       good (loops/define base) result (loops/verify good)]
+  (is (= :checked (:status result)) (pr-str result))
+  (is (some #(= :unreachable (:kind %)) (:obligations result)))
+  (is (= 0 (:value (lc/evaluate (:program good) {"n" 4}))))
+  (let [bad (loops/define (assoc base :source "(loop [i n] (if (= i 0) (quot 1 0) (recur (- i 1))))"))]
+   (is (= :refuted (:status (loops/verify {:backend :z3} bad)))))))
+
+(deftest malformed-or-unreviewed-loops-are-refused
+ (doseq [source ["(+ n 1)" "(loop [i n] (do (println i) (recur (- i 1))))"
+                  "(loop [i n] (if (> i 0) (recur false) i))"]]
+  (is (= :unsupported (:status (lc/prepare source {"n" t/Int})))) )
+ (is (thrown? (loops/define (dissoc countdown-spec :rank))))
+ (let [definition (loops/define countdown-spec)]
+  (is (= :unsupported (:status (loops/prepare (assoc definition :rank [(t/int 0)])))))
+  (is (= :unsupported (:status (lc/check (assoc (:program definition) :sort t/Bool)))))))

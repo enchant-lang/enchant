@@ -1,0 +1,197 @@
+(ns formal.loop
+ (:require [formal.loop-core :as lc] [formal.core-symbolic :as symbolic]
+           [formal.term :as t] [formal.query :as q] [formal.proof :as proof]
+           [formal.certificate :as certificate] [formal.logic :as logic]
+           [formal.backend :as backend]))
+
+(def ^:private fields
+ #{:formal/loop :name :program :source :requires :invariant :rank :ensures
+   :result :prefix :profile :author-assertions-ignored :identity})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.loop: " message) {}))))
+(defn- identity-of [definition]
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity))) (list (tuple :case :lower))))
+(defn- build [value args] (if (fn? value) (apply value args) value))
+(defn- check-terms! [terms allowed]
+ (t/validate! terms)
+ (require! (every? #(contains? (set allowed) %) (t/variables terms)) "undeclared predicate identity")
+ (require! (every? (fn [node]
+                   (and (contains? #{[:int] [:bool]} (:sort node))
+                        (contains? #{:var :bool :int :not :and :or :implies :xor :eq :distinct :ite
+                                     :add :sub :neg :mul :div :mod :lt :le :gt :ge} (:op node)))) (t/walk terms))
+           "predicate operation outside the Int/Bool vocabulary"))
+(defn- symbols [program prefix]
+ {:inputs (into {} (map (fn [[name sort]] [name (t/variable (str prefix ".input/" name) sort)]) (:parameters program)))
+  :state (into {} (map (fn [slot] [(:name slot) (t/variable (str prefix "." (:id slot)) (:sort slot))]) (:state program)))})
+
+(defn define
+ "Build a portable loop contract from real compiler ANF. Invariant, rank and
+  postcondition builders receive immutable inputs and the current named state.
+  Initializers determine state sorts; author decreasing assertions grant no proof."
+ [specification]
+ (let [name (:name specification) _ (t/variable name t/Bool)
+       extracted (lc/prepare (:source specification) (:parameters specification))
+       _ (require! (= :elaborated (:status extracted)) (:reason extracted))
+       program (:program extracted) prefix (str "loop." name)
+       {:keys [inputs state]} (symbols program prefix)
+       result (t/variable (str prefix ".result") (:sort program))
+       pre (build (get specification :requires (t/bool true)) [inputs])
+       inv (build (get specification :invariant (t/bool true)) [inputs state])
+       ranks (vec (build (get specification :rank []) [inputs state]))
+       post (build (get specification :ensures (t/bool true)) [inputs state result])
+       _ (require! (and (= t/Bool (t/sort-of pre)) (= t/Bool (t/sort-of inv))
+                        (= t/Bool (t/sort-of post))) "Boolean requires, invariant and ensures required")
+       _ (require! (and (<= (count ranks) 2) (every? #(= t/Int (t/sort-of %)) ranks)
+                        (or (zero? (get-in extracted [:typing :backedges])) (pos? (count ranks)))) "one or two integer ranks required on recursive loops")
+       _ (check-terms! [pre] (vals inputs))
+       _ (check-terms! (conj ranks inv) (concat (vals inputs) (vals state)))
+       _ (check-terms! [post] (concat (vals inputs) (vals state) [result]))
+       definition {:formal/loop 1 :name name :program program :source (:source specification)
+                   :requires pre :invariant inv :rank ranks :ensures post :result result :prefix prefix
+                   :profile lc/profile :author-assertions-ignored (:author-assertions-ignored extracted)}]
+  (assoc definition :identity (identity-of definition))))
+
+(defn- lower [expression declarations env]
+ (let [translated (symbolic/lower expression declarations {:prefix "loop-local"})]
+  (require! (= :translated (:status translated)) (:reason translated))
+  (let [replacements (into {} (map (fn [[name term]] [term (get env name)]) (:inputs translated)))]
+   (into {} (map (fn [[key term]] [key (t/substitute term replacements)]) (:outcome translated))))))
+(defn- lex-less [next current]
+ (t/any (mapv (fn [i] (t/all (conj (mapv (fn [j] (t/eq (nth next j) (nth current j))) (range i))
+                                  (t/lt (nth next i) (nth current i))))) (range (count current)))))
+
+(defn prepare
+ "Rebuild every path obligation from closed program data. Initial consistency
+  and unreachable path vacuity are separate questions. No bounded execution is
+  used to establish termination."
+ [definition]
+ (try
+  (require! (and (= 1 (:formal/loop definition)) (= fields (set (keys definition)))
+                 (= lc/profile (:profile definition)) (= (:identity definition) (identity-of definition))
+                 (string? (:source definition)) (contains? #{true false} (:author-assertions-ignored definition))) "changed or noncanonical loop definition")
+  (let [program (:program definition) typed (lc/check program)
+        _ (require! (= :typed (:status typed)) (:reason typed))
+        prefix (str "loop." (:name definition))
+        _ (require! (= prefix (:prefix definition)) "loop prefix identity")
+        {:keys [inputs state]} (symbols program prefix)
+        expected-result (t/variable (str prefix ".result") (:sort program))
+        _ (require! (= expected-result (:result definition)) "result placeholder identity")
+        pre (:requires definition) inv (:invariant definition) ranks (:rank definition) post (:ensures definition)
+        _ (require! (and (vector? ranks) (<= (count ranks) 2) (every? #(= t/Int (t/sort-of %)) ranks)
+                         (or (zero? (:backedges typed)) (pos? (count ranks)))) "ranking dimension/sort")
+        _ (require! (every? #(= t/Bool (t/sort-of %)) [pre inv post]) "Boolean predicates required")
+        _ (check-terms! [pre] (vals inputs))
+        _ (check-terms! (conj ranks inv) (concat (vals inputs) (vals state)))
+        _ (check-terms! [post] (concat (vals inputs) (vals state) [expected-result]))
+        input-types (lc/input-declarations (:parameters program))
+        input-env (into {} (map (fn [[name term]] [(str "input/" name) term]) inputs))
+        state-env (into {} (map (fn [slot] [(:id slot) (get state (:name slot))]) (:state program)))
+        declarations (merge input-types (lc/state-declarations (:state program)))
+        env (merge input-env state-env) obligations (atom [])
+        initial (mapv #(lower % input-types input-env) (:initial program))
+        initial-ok (t/all (map :ok initial))
+        substitute-state (fn [values]
+                           (into {} (map-indexed (fn [i slot] [(get state (:name slot)) (nth values i)]) (:state program))))
+        observe (merge (into {} (map (fn [[name term]] [(str "input/" name) term]) inputs))
+                       (into {} (map (fn [[name term]] [(str "state/" name) term]) state)))
+        add! (fn [id claim facts extra]
+               (swap! obligations conj
+                {:id id :problem (q/prove claim {:id (str (:name definition) "/" id)
+                   :assumptions (vec (concat [(q/assertion "requires" pre)]
+                                   (map-indexed (fn [i fact] (q/assertion (str "fact/" i) fact)) facts)))
+                   :profile lc/profile :scope {:mode :exact :state :unbounded-int-bool}
+                   :vacuity :allow :observe (merge observe extra)
+                   :origin {:loop (:identity definition) :path id :basis :reviewed-anf-core-loop}})}))]
+   (add! "initial/normal" initial-ok [] {})
+   (add! "initial/invariant" (t/substitute inv (substitute-state (mapv :value initial))) [initial-ok] {})
+   (add! "rank/nonnegative" (t/all (map #(t/ge % (t/int 0)) ranks)) [inv] {})
+   (letfn [(visit [node declarations env facts path]
+            (case (:control node)
+             :return (let [r (lower (:value node) declarations env)
+                           claim (t/all [(:ok r) (t/substitute post {expected-result (:value r)})])]
+                       (add! (str path "/return") claim (conj facts inv) {"result" (:value r)}))
+             :recur (let [values (mapv #(lower % declarations env) (:values node)) ok (t/all (map :ok values))
+                          replacement (substitute-state (mapv :value values))
+                          extra (into {} (map-indexed (fn [i slot] [(str "next/" (:name slot)) (:value (nth values i))]) (:state program)))]
+                      (add! (str path "/step-normal") ok (conj facts inv) extra)
+                      (add! (str path "/invariant") (t/substitute inv replacement) (conj facts inv ok) extra)
+                      (add! (str path "/decrease") (lex-less (mapv #(t/substitute % replacement) ranks) ranks)
+                            (conj facts inv ok) extra))
+             :if (let [condition (lower (:test node) declarations env)]
+                   (add! (str path "/test-normal") (:ok condition) (conj facts inv) {})
+                   (visit (:then node) declarations env (conj facts (:ok condition) (:value condition)) (str path "/then"))
+                   (visit (:else node) declarations env (conj facts (:ok condition) (t/not (:value condition))) (str path "/else")))
+             :let (let [initial (lower (:initial node) declarations env)]
+                    (add! (str path "/binding-normal") (:ok initial) (conj facts inv) {})
+                    (visit (:body node) (assoc declarations (:name node) (:sort (:initial node)))
+                      (assoc env (:name node) (:value initial)) (conj facts (:ok initial)) (str path "/body")))
+             :do (let [values (mapv #(lower % declarations env) (:prefix node)) ok (t/all (map :ok values))]
+                   (add! (str path "/prefix-normal") ok (conj facts inv) {})
+                   (visit (:body node) declarations env (conj facts ok) (str path "/body")))))]
+    (visit (:body program) declarations env [] "body"))
+   {:status :ready :definition (:identity definition) :obligations @obligations :inputs inputs :state state
+    :typing typed :rank-dimension (count ranks)
+    :consistency (q/prove (t/bool false) {:assumptions [pre] :profile lc/profile :scope {:mode :exact}})} )
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn- impossible [problem]
+ (q/prove (t/bool false) {:assumptions (:assertions problem) :profile lc/profile :scope (:scope problem)}))
+(defn check-proof
+ "Recheck every obligation and every unreachable-path justification from the
+  exact definition. The well-founded composition/model bridge remains reviewed;
+  these are not a proof of the BL compiler or its runtime execution."
+ [definition object]
+ (try
+  (let [prepared (prepare definition)]
+   (require! (= :ready (:status prepared)) (:reason prepared))
+   (require! (and (= 1 (:formal/loop-proof object)) (= (:identity definition) (:definition object))
+                  (= :natural-lexicographic-v1 (:rule object))
+                  (= (mapv :id (:obligations prepared)) (mapv :id (:obligations object)))) "loop proof shape or definition mismatch")
+   (doseq [i (range (count (:obligations prepared)))]
+    (let [row (nth (:obligations object) i) problem (:problem (nth (:obligations prepared) i))
+          target (case (:kind row) :entailment problem :unreachable (impossible problem)
+                   (throw (ex-info "Unknown obligation proof kind" {})))]
+     (require! (= :checked (:status (certificate/check target (:certificate row)))) "obligation certificate rejected")))
+   {:status :checked-obligations :definition (:identity definition) :obligations (count (:obligations prepared))
+    :ranking-rule {:kind :natural-lexicographic-v1 :dimension (:rank-dimension prepared)
+                   :mathematical-model :lean-checked :bl-model-connection :reviewed-not-mechanically-proved}
+    :scope :conditional-normal-return-of-loop-model :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error)})))
+
+(defn verify
+ ([definition] (verify {} definition))
+ ([options definition]
+  (let [prepared (prepare definition)]
+   (if-not (= :ready (:status prepared)) prepared
+    (let [search (merge {:nodes 8192 :rows 1024} (:search options))
+          inconsistent (proof/produce (:consistency prepared) search)
+          rows (mapv (fn [{:keys [id problem]}]
+                       (let [direct (proof/produce problem search)
+                             absent (when-not (= :checked (:status direct)) (proof/produce (impossible problem) search))]
+                        {:id id :kind (cond (= :checked (:status direct)) :entailment
+                                           (= :checked (:status absent)) :unreachable :else :undischarged)
+                         :proof (if (= :checked (:status absent)) absent direct)})) (:obligations prepared))
+          all? (every? #(= :checked (get-in % [:proof :status])) rows)
+          object (when all? {:formal/loop-proof 1 :rule :natural-lexicographic-v1 :definition (:identity definition)
+                             :obligations (mapv (fn [row] {:id (:id row) :kind (:kind row)
+                                                         :certificate (get-in row [:proof :certificate])}) rows)})
+          checked (when object (check-proof definition object))
+          native (when (:backend options)
+                   (backend/with-session options (fn [session]
+                    {:feasibility (logic/solve-in session (q/sat {:id (str (:name definition) "/requires")
+                        :assumptions (:assertions (:consistency prepared)) :observe (:inputs prepared)
+                        :profile lc/profile :scope {:mode :exact}}))
+                     :obligations (mapv (fn [obligation] {:id (:id obligation) :result (logic/solve-in session (:problem obligation))}) (:obligations prepared))})))
+          refuted? (some #(= :refuted (get-in % [:result :verdict])) (:obligations native))
+          inconsistent? (= :checked (:status inconsistent)) feasible (:feasibility native)
+          contradiction? (or (and inconsistent? (= :sat (:verdict feasible)))
+                             (and all? (some #(= :sat (get-in % [:result :solver-status])) (:obligations native))))]
+     {:status (cond contradiction? :disagreement inconsistent? :vacuous (= :unsat (:verdict feasible)) :vacuous
+                     refuted? :refuted (= :checked-obligations (:status checked)) :checked
+                     all? :error (and native (every? #(= :proved (get-in % [:result :verdict])) (:obligations native))) :uncertified
+                     :else :unknown)
+      :definition (:identity definition) :scope :conditional-normal-return-of-loop-model
+      :proof object :checking checked :obligations rows :backend native :inconsistency-proof inconsistent
+      :assumption-consistency (cond inconsistent? :inconsistent-checked (= :sat (:verdict feasible)) :replayed-witness
+                                    (= :unsat (:verdict feasible)) :backend-inconsistent :else :not-established)
+      :source-connection :reviewed-not-mechanically-proved :compiler-proof-authority false})))))

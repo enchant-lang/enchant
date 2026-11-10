@@ -1,0 +1,172 @@
+(ns formal.loop-core
+ (:require [compiler :as compiler] [system.ir :as ir]
+           [formal.elaborate :as elaborate] [formal.core :as core] [formal.term :as t]))
+
+(def profile :bl/tail-loop-int-bool-v1)
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.loop-core: " message) {}))))
+(defn input-declarations [parameters]
+ (into {} (map (fn [[name sort]] [(str "input/" name) sort]) parameters)))
+(defn state-declarations [state]
+ (into {} (map (fn [slot] [(:id slot) (:sort slot)]) state)))
+(defn- scalar? [sort] (contains? #{[:bool] [:int]} sort))
+(defn check
+ "Validate closed loop control and every embedded finite core expression.
+  This admits tail recurrence; it makes no termination claim by itself."
+ [program]
+ (try
+  (require! (and (= 1 (:formal/loop-core program)) (= profile (:profile program))
+                 (= #{:formal/loop-core :profile :parameters :state :initial :body :sort} (set (keys program)))
+                 (map? (:parameters program)) (<= (count (:parameters program)) 16)
+                 (vector? (:state program)) (<= (count (:state program)) 16)
+                 (vector? (:initial program)) (= (count (:initial program)) (count (:state program)))
+                 (scalar? (:sort program))) "invalid loop program shape")
+  (doseq [[name sort] (:parameters program)] (t/variable name sort) (require! (scalar? sort) "input sort"))
+  (doseq [slot (:state program)]
+   (require! (and (= #{:name :id :sort} (set (keys slot))) (string? (:name slot))
+                  (= (:id slot) (str "state/" (:name slot))) (scalar? (:sort slot))) "invalid state slot")
+   (t/variable (:id slot) (:sort slot)))
+  (require! (= (count (:state program)) (count (set (map :name (:state program))))) "duplicate state alias")
+  (let [parameters (input-declarations (:parameters program)) visits (atom 0) backedges (atom 0)]
+   (letfn [(expression [expr declarations]
+            (let [typed (core/typecheck expr declarations)]
+             (require! (= :typed (:status typed)) (str "embedded expression: " (:reason typed))) (:sort typed)))
+           (control [node declarations depth]
+            (require! (and (map? node) (<= depth 64) (<= (swap! visits inc) 256)) "control capacity or shape")
+            (case (:control node)
+             :return (do (require! (= #{:control :value} (set (keys node))) "return shape")
+                         (require! (= (:sort program) (expression (:value node) declarations)) "return sort"))
+             :recur (do (require! (and (= #{:control :values} (set (keys node))) (vector? (:values node))
+                                       (= (count (:values node)) (count (:state program)))) "recurrence arity")
+                        (doseq [i (range (count (:state program)))]
+                         (require! (= (:sort (nth (:state program) i)) (expression (nth (:values node) i) declarations)) "recurrence changes state sort"))
+                        (swap! backedges inc))
+             :if (do (require! (= #{:control :test :then :else} (set (keys node))) "conditional shape")
+                     (require! (= t/Bool (expression (:test node) declarations)) "explicit Boolean test required")
+                     (control (:then node) declarations (inc depth)) (control (:else node) declarations (inc depth)))
+             :let (do (require! (= #{:control :name :initial :body} (set (keys node))) "binding shape")
+                      (t/variable (:name node) t/Int)
+                      (require! (not (contains? declarations (:name node))) "control binding must be fresh")
+                      (let [sort (expression (:initial node) declarations)]
+                       (control (:body node) (assoc declarations (:name node) sort) (inc depth))))
+             :do (do (require! (and (= #{:control :prefix :body} (set (keys node)))
+                                    (vector? (:prefix node)) (pos? (count (:prefix node)))) "sequencing shape")
+                     (doseq [expr (:prefix node)] (expression expr declarations))
+                     (control (:body node) declarations (inc depth)))
+             (throw (ex-info "Unknown loop control" {}))))]
+    (doseq [i (range (count (:state program)))]
+     (require! (= (:sort (nth (:state program) i)) (expression (nth (:initial program) i) parameters)) "initializer sort"))
+    (control (:body program) (merge parameters (state-declarations (:state program))) 0)
+    {:status :typed :profile profile :sort (:sort program) :controls @visits :backedges @backedges
+     :termination :not-established}))
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn prepare
+ "Recognize one real compiler ANF loop. Author-supplied decreasing metadata
+  is diagnostic only; no assertion becomes a checked termination proof."
+ [source parameters]
+ (try
+  (let [forms (BeamLisp.Reader/read_string source)
+        _ (require! (= 1 (count forms)) "one loop expression required")
+        anf (compiler/compile (first forms) (compiler/new-env "formal.loop.intrinsics"))
+        _ (require! (ir/anf-loop? anf) "one top-level compiler loop scaffold required")
+        inner (ir/scaffold-inner (:fn anf)) clauses (:clauses inner)
+        _ (require! (and (= 1 (count clauses)) (nil? (:guard (first clauses)))
+                         (every? #(= :pvar (:pop %)) (:pats (first clauses)))) "loop needs one unguarded variable clause")
+        parts (ir/loop-parts anf) vars (vec (:vars parts)) initial-anf (vec (:inits parts))
+        _ (require! (and (= (count vars) (count (set vars))) (= (count vars) (count initial-anf))) "loop parameter identities/arity")
+        aliases (mapv #(String/replace % (Regex/compile! "_[0-9]+$") "") vars)
+        _ (require! (= (count aliases) (count (set aliases))) "duplicate source state aliases")
+        input-types (input-declarations parameters)
+        bindings (into {} (map (fn [[name sort]] [name (core/variable (str "input/" name) sort)]) parameters))
+        expression (fn [node env declarations] (core/canonicalize (elaborate/from-anf node env) declarations))
+        initial (mapv #(expression % bindings input-types) initial-anf)
+        state (mapv (fn [i] {:name (nth aliases i) :id (str "state/" (nth aliases i)) :sort (:sort (nth initial i))}) (range (count vars)))
+        env (merge bindings (into {} (map-indexed (fn [i name] [name (core/variable (:id (nth state i)) (:sort (nth state i)))]) vars)))
+        declarations (merge input-types (state-declarations state)) fresh (atom 0) return-sorts (atom #{}) visits (atom 0)]
+   (letfn [(control [node env declarations depth]
+            (require! (and (<= depth 64) (<= (swap! visits inc) 256)) "control extraction capacity")
+            (cond
+             (ir/recur? node (:self parts))
+              (let [callee (:fn node) self-args (:args callee)]
+               (require! (and (= 1 (count self-args)) (= :var (:op (first self-args)))
+                              (= (:self parts) (:name (first self-args)))) "exact self application required")
+               {:control :recur :values (mapv #(expression % env declarations) (ir/recur-vals node))})
+             (= :let (:op node))
+              (let [initial (expression (:init node) env declarations) name (str "#loop/local" (swap! fresh inc))]
+               {:control :let :name name :initial initial
+                :body (control (:body node) (assoc env (:name node) (core/variable name (:sort initial)))
+                         (assoc declarations name (:sort initial)) (inc depth))})
+             (= :if (:op node))
+              (let [test (expression (:test node) env declarations)
+                    test (if (= t/Bool (:sort test)) test (core/block [test (core/literal true)]))]
+               {:control :if :test test :then (control (:then node) env declarations (inc depth))
+                :else (control (:else node) env declarations (inc depth))})
+             (= :do (:op node))
+              (let [stmts (vec (:stmts node))]
+               (require! (pos? (count stmts)) "nonempty sequencing")
+               (if (= 1 (count stmts)) (control (first stmts) env declarations (inc depth))
+                {:control :do :prefix (mapv #(expression % env declarations) (butlast stmts))
+                 :body (control (last stmts) env declarations (inc depth))}))
+             :else (let [value (expression node env declarations)]
+                     (swap! return-sorts conj (:sort value)) {:control :return :value value})))]
+    (let [body (control (:body parts) env declarations 0)
+          _ (require! (<= (count @return-sorts) 1) "return branches have different sorts")
+          program {:formal/loop-core 1 :profile profile :parameters parameters :state state :initial initial
+                   :body body :sort (or (first @return-sorts) t/Int)}
+          typing (check program)]
+     (require! (= :typed (:status typing)) (:reason typing))
+     {:status :elaborated :program program :typing typing :source source :basis :compiler-anf
+      :author-assertions-ignored (contains? (:ann anf) :decreasing)
+      :source-connection :reviewed-not-mechanically-proved})))
+  (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))
+
+(defn evaluate
+ "Execute tail-loop control with immutable input parameters and simultaneous
+  recurrence. Resource ceilings yield incomplete work, never nontermination."
+ ([program assignment] (evaluate program assignment {}))
+ ([program assignment options]
+  (let [typed (check program) iterations (get options :iterations 1000) fuel (get options :steps 100000)
+        steps (atom 0) trace (atom []) trace-limit (get options :trace 16)]
+   (if-not (= :typed (:status typed)) typed
+    (try
+     (require! (and (int? iterations) (<= 0 iterations 100000) (int? fuel) (<= 0 fuel 1000000)
+                    (int? trace-limit) (<= 0 trace-limit 64)) "evaluation limits")
+     (let [input-types (input-declarations (:parameters program))
+           inputs (into {} (map (fn [[name value]] [(str "input/" name) value]) assignment))
+           input-check (core/evaluate (core/literal 0) input-types inputs)]
+      (require! (= :returned (:status input-check)) "input values do not match declarations")
+      (letfn [(expression [expr declarations env]
+               (let [r (core/evaluate expr declarations env {:steps (max 0 (- fuel @steps))})]
+                (swap! steps + (get r :steps 0)) r))
+              (values [exprs declarations env]
+               (loop [remaining exprs out []]
+                (if (empty? remaining) {:status :returned :values out}
+                 (let [r (expression (first remaining) declarations env)]
+                  (if (= :returned (:status r)) (recur (rest remaining) (conj out (:value r))) r)))))
+              (control [node declarations env]
+               (if (> (swap! steps inc) fuel) {:status :incomplete :reason :step-limit}
+                (case (:control node)
+                 :return (expression (:value node) declarations env)
+                 :recur (let [r (values (:values node) declarations env)]
+                          (if (= :returned (:status r)) (assoc r :status :recur) r))
+                 :if (let [r (expression (:test node) declarations env)]
+                       (if (= :returned (:status r)) (control (if (:value r) (:then node) (:else node)) declarations env) r))
+                 :let (let [r (expression (:initial node) declarations env)]
+                        (if (= :returned (:status r))
+                         (control (:body node) (assoc declarations (:name node) (:sort (:initial node)))
+                            (assoc env (:name node) (:value r))) r))
+                 :do (let [r (values (:prefix node) declarations env)]
+                       (if (= :returned (:status r)) (control (:body node) declarations env) r)))))]
+       (let [initial (values (:initial program) input-types inputs)
+             declarations (merge input-types (state-declarations (:state program)))
+             finish (fn [r iteration] (assoc r :iterations iteration :steps @steps :trace @trace :profile profile :sort (:sort program)))]
+        (if-not (= :returned (:status initial)) (finish initial 0)
+         (loop [state-values (:values initial) iteration 0]
+          (if (>= iteration iterations) (finish {:status :incomplete :reason :iteration-limit} iteration)
+           (let [state (into {} (map-indexed (fn [i slot] [(:id slot) (nth state-values i)]) (:state program)))
+                 _ (when (< (count @trace) trace-limit)
+                     (swap! trace conj {:iteration iteration :state (into {} (map-indexed (fn [i slot] [(:name slot) (nth state-values i)]) (:state program)))}))
+                 r (control (:body program) declarations (merge inputs state))]
+            (if (= :recur (:status r)) (recur (:values r) (inc iteration)) (finish r iteration)))))))))
+     (catch error {:status :invalid-input :reason (ex-message error) :steps @steps}))))))
