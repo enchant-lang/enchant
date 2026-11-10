@@ -71,6 +71,15 @@ input roles. Other contract sources report `:not-applicable` for this earlier
 gate. [SPECIALIZATION.md](SPECIALIZATION.md) specifies its SDK-wellformedness
 premise, exact reduction scope and remaining implementation bridges.
 
+Authored Core contracts now explicitly report
+`:source-connection :authored-core-no-source-claim`. Actual Source contracts
+retain their reviewed extraction/linking status. The separate
+`:model-interpretation` record binds the typed Core identity to its exact
+prepared whole-outcome question, and appears in the common connection envelope.
+Its status is `:reviewed-not-mechanically-proved`; it does not replace a term
+certificate or establish Source/runtime correspondence. See
+[CONNECTIONS.md](CONNECTIONS.md) for all seven subject kinds.
+
 ## Displaying a counterexample
 
 Inputs, returned value, return status and error code are separate observations.

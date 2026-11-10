@@ -12,6 +12,15 @@ question supplied by an optimizer. The certificate statement also contains the
 translation identity and both core identities. Even a different pair that
 happens to lower to an identical arithmetic claim needs its own evidence.
 
+This compares two Core data programs and therefore reports
+`:source-connection :authored-core-no-source-claim`. A separate
+`:model-interpretation` record identifies both Core programs and the exact
+prepared equivalence question. The interpretation remains reviewed,
+unmechanized implementation code even when the resulting term certificate is
+checked. An earlier Source extraction, a later compiler lowering and actual
+runtime preservation each need their own connection. [CONNECTIONS.md](CONNECTIONS.md)
+defines the common assurance fields.
+
 ```clojure
 (def change
  (formal/translation

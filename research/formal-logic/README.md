@@ -61,6 +61,13 @@ can produce a consistent 102-valued residual model for a Source call that return
 objects are available through `formal/prepare-source-context`. Neither relation
 check is a mechanized proof of the original Source compiler's correctness.
 
+[CONNECTIONS.md](CONNECTIONS.md) separates authored Core, actual Source and
+reviewed symbolic interpretation in the common evidence ledger. Core-only
+contracts and Core/Core comparisons explicitly carry no BL Source claim.
+Every model kind exposes a canonically identified interpretation record naming
+its exact model and prepared questions. That record remains a reviewed
+implementation connection; no proof gate accepts it as a certificate.
+
 `formal/certify` produces and independently checks Boolean/linear Int proof
 objects. `formal/check-certificate` checks a retained object against its exact
 statement, assumptions, profile and scope without either native solver.
