@@ -198,7 +198,7 @@ theorem normalizationConnected : ∀ integers booleans,
   simp only [Row.holds]
   dsimp only [dot]
   simp [integerMap, booleanMap]
-""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat first | omega | split at * | progress simp_all [{SIMPS}])\n" + """
+""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat (first | omega | (split at * <;> simp_all [{SIMPS}])))\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
 #print axioms packetAccepted
