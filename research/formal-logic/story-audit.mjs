@@ -86,6 +86,12 @@ try{
   check(size.name+': checked relation retains its soundness and Source boundaries',elaboration.includes(':checker-soundness :reviewed-rule-checker')&&elaboration.includes(':source-to-anf :not-established')&&elaboration.includes(':selected-specialization :not-established')&&elaboration.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-elaboration').scrollIntoView({block:'center'})");
   await shot(size.name+'-elaboration');
+  const specialization=await evaluate("document.querySelector('#cell-story-specialization')?.innerText||''");
+  check(size.name+': captured helper keeps its own environment in the original Source call',specialization.includes(':unit-anf :checked')&&specialization.includes(':promise :checked')&&specialization.includes(':original-source-value 42'));
+  check(size.name+': earlier reduction gate rejects a wrong capture accepted by the later pair gate',specialization.includes(':changed-capture-value 102')&&specialization.includes(':changed-unit-anf :rejected')&&specialization.includes(':changed-anf-core :checked'));
+  check(size.name+': reduction result keeps SDK unit and checker soundness premises explicit',specialization.includes(':unit-wellformedness :assumed-sdk-compiled-unit')&&specialization.includes(':checker-soundness :reviewed-rule-checker')&&specialization.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-specialization').scrollIntoView({block:'center'})");
+  await shot(size.name+'-specialization');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -219,6 +225,10 @@ try{
   check('Declared original selected runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  check('Trusted original selected runtime ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/selected-runtime/examples/original-selected.etf')).status===404);
+ for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
  for(const path of ['/ELABORATION.md','/src/formal/elaboration.bl','/test/elaboration_test.bl','/elaboration-check.bl','/elaboration-recheck.bl','/evidence/elaboration/examples/elaboration.json','/evidence/elaboration/fresh/elaboration-fresh.json','/evidence/elaboration/checks.txt','/evidence/elaboration/qualification.json','/evidence/elaboration/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared elaboration evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
