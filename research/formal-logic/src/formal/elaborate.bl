@@ -1,5 +1,6 @@
 (ns formal.elaborate
- (:require [compiler :as compiler] [system.ir :as ir] [formal.core :as core] [formal.term :as t]))
+ (:require [compiler :as compiler] [system.ir :as ir] [formal.core :as core] [formal.term :as t]
+           [formal.intrinsics :as intrinsics]))
 
 ;; This consumes the real resolved ANF. It is a reviewed front end into the
 ;; specified core, not a second evaluator for the surface language.
@@ -17,6 +18,9 @@
    (contains? #{"+" "-" "*" "<" "<=" "=<" ">" ">=" "=" "eqv" "==" "=:=" "quot" "div" "rem" "mod"} name)
     (core/operation (get {"+" :add "-" :sub "*" :mul "<" :lt "<=" :le "=<" :le ">" :gt ">=" :ge
                           "=" :eq "eqv" :eq "==" :eq "=:=" :eq "quot" :quot "div" :quot "rem" :rem "mod" :mod} name) args)
+   (and (= name "strict-not") (= n 1))
+    (do (when-not (= t/Bool (:sort a)) (refuse "erlang/not requires Bool, not BL truthiness" node))
+        (core/operation :not [a]))
    (and (= name "not") (= n 1)) (core/operation :not [(truthy a)])
    (and (contains? #{"pos?" "neg?" "zero?"} name) (= n 1))
     (core/operation (get {"pos?" :gt "neg?" :lt "zero?" :eq} name) [a (core/literal 0)])
@@ -39,14 +43,9 @@
    :cons (recur (:tail node) (conj out (:head node)))
    (refuse "record variadic updates require a literal proper argument list" node))))
 (defn- record-call [call node bindings]
- (let [callee (:callee call)
-       intrinsic? (and (= :invoke (:mode call)) (= :global (:op callee))
-                        (not (contains? bindings (:name callee))) (not= :exact (:lookup callee))
-                        (contains? #{"get" "assoc"} (:name callee)))
-       target (if intrinsic? (keyword (:name callee)) (:fun call))]
- (when (or intrinsic?
-           (and (= :remote (:mode call)) (= :Elixir.BeamLisp.Ns.Rt (:mod call))
-                 (contains? #{:get :assoc :assoc_variadic} target)))
+ (let [target (:fun call)]
+ (when (and (= :remote (:mode call)) (= :Elixir.BeamLisp.Ns.Rt (:mod call))
+            (contains? #{:get :assoc :assoc_variadic} target))
   (let [original (vec (:args call))
         _ (when (and (= :assoc_variadic target) (not= 4 (count original)))
             (refuse "record variadic update runtime arity" node))
@@ -84,22 +83,20 @@
              (from-anf (:then node) bindings) (from-anf (:else node) bindings)))
    :do (core/block (mapv #(from-anf % bindings) (:stmts node)))
    :map (core/record (mapv (fn [pair] [(field-key (first pair) true) (from-anf (second pair) bindings)]) (:pairs node)))
-   :arith (let [call (ir/arith-bif node)]
-            (intrinsic (name (:fun call)) (mapv #(from-anf % bindings) (:args call)) node))
+   :arith (let [meaning (intrinsics/arith-meaning node)]
+            (when-not meaning (refuse "unreviewed canonical arithmetic identity" node))
+            (intrinsic meaning (mapv #(from-anf % bindings) (:args node)) node))
    (let [call (ir/call-site node)]
     (when (or (nil? call) (:rest call)) (refuse "computed or unresolved call" node))
     (or (record-call call node bindings)
      (let [args (mapv #(from-anf % bindings) (:args call))]
      (cond
       (= :remote (:mode call))
-       (do (when-not (contains? #{:erlang :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Num} (:mod call))
-             (refuse "foreign effects and unreviewed calls are outside the core" node))
-           (intrinsic (if (= :not_ (:fun call)) "not" (name (:fun call))) args node))
+       (let [meaning (intrinsics/remote-meaning (:mod call) (:fun call) (:arity call))]
+        (when-not meaning (refuse "unreviewed module/function/arity identity" node))
+        (intrinsic meaning args node))
       (and (= :invoke (:mode call)) (= :global (:op (:callee call))))
-       (let [callee (:callee call)]
-        (when (or (contains? bindings (:name callee)) (= :exact (:lookup callee)))
-          (refuse "callee is not the declared intrinsic" node))
-        (intrinsic (:name callee) args node))
+       (refuse "unresolved global calls require checked resolution and summaries" node)
       :else (refuse "first-class functions require checked summaries" node))))))))
 
 (defn prepare
