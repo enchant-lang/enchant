@@ -1,0 +1,45 @@
+(ns formal.refutation-check
+ (:require [formal.api :as formal] [formal.term :as t] [formal.query :as q]
+           [formal.identity :as identity] [formal.runtime-artifact :as artifact] [interop]))
+
+(def x (t/variable "kernel.x" t/Int))
+(def y (t/variable "kernel.y" t/Int))
+(def p (t/variable "kernel.p" t/Bool))
+(def r (t/variable "kernel.r" t/Bool))
+(def hostile (t/variable "not code: \" ); axiom forged : False -- λ" t/Int))
+(def samples
+ [["increment" (q/prove (t/gt (t/add x (t/int 1)) x))]
+  ["weighted" (q/prove (t/ge (t/add (t/mul (t/int 2) x) y) (t/int 7))
+                {:assumptions [(t/ge x (t/int 2)) (t/ge y (t/int 3))]})]
+  ["negative-floor" (q/prove (t/le x (t/int -1)) {:assumptions [(t/le (t/mul (t/int 2) x) (t/int -1))]})]
+  ["parity" (q/prove (t/not (t/eq (t/mul (t/int 2) x) (t/int 1))))]
+  ["boolean" (q/prove (t/eq (t/not (t/all [p r])) (t/any [(t/not p) (t/not r)])))]
+  ["piecewise" (q/prove (t/ge (t/ite p (t/add x (t/int 1)) (t/add x (t/int 2))) x))]
+  ["ground-division" (q/prove (t/eq (t/div (t/int -7) (t/int -3)) (t/int 3)))]
+  ["ground-modulus" (q/prove (t/eq (t/mod (t/int -7) (t/int -3)) (t/int 2)))]
+  ["vacuous" (q/prove (t/bool false) {:assumptions [(t/bool false)]})]
+  ["names-as-data" (q/prove (t/ge (t/add hostile (t/int 1)) hostile))]])
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! output)
+(def rows
+ (mapv (fn [[id question]]
+         (let [produced (formal/certify question) certificate (:certificate produced)
+               exported (formal/normalized-refutation question certificate) packet (:packet exported)]
+          (assert (= :checked (:status produced)) (pr-str produced))
+          (assert (= :ready (:status exported)) (pr-str exported))
+          (assert (= :checked-data-connection (:status (formal/check-normalized-refutation-data question certificate packet))))
+          (File/write! (Path/join output (str id ".json")) (interop/->json packet))
+          {:id id :question question :certificate certificate :packet packet})) samples))
+(def data {:schema :enchant.formal.normalized-refutation-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :rows rows :identity-profile identity/profile :normalization :reviewed-not-mechanically-proved :compiler-proof-authority false})
+(identity/bytes data)
+(def bytes (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "refutation.etf") bytes)
+(File/write! (Path/join output "refutation-pin.json") (interop/->json
+ {:schema :enchant.formal.normalized-refutation-archive-v1 :bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}))
+(File/write! (Path/join output "summary.json") (interop/->json
+ {:schema (:schema data) :source-commit (:source-commit data)
+  :rows (mapv (fn [row] {:id (:id row) :packet (get-in row [:packet :identity]) :statement (get-in row [:packet :statement])}) rows)
+  :normalization :reviewed-not-mechanically-proved :kernel-execution :not-yet-run :compiler-proof-authority false}))
+(println {:exported (count rows) :kernel-execution :not-yet-run :normalization :reviewed-not-mechanically-proved :compiler-proof-authority false})

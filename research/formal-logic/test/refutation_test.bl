@@ -1,0 +1,62 @@
+(ns formal.refutation-test
+ (:require [formal.api :as formal] [formal.term :as t] [formal.query :as q]
+           [formal.identity :as identity] [formal.certificate :as certificate]))
+
+(def x (t/variable "kernel.x" t/Int))
+(def y (t/variable "kernel.y" t/Int))
+(def p (t/variable "kernel.p" t/Bool))
+(def r (t/variable "kernel.r" t/Bool))
+(def samples
+ [(q/prove (t/gt (t/add x (t/int 1)) x))
+  (q/prove (t/ge (t/add (t/mul (t/int 2) x) y) (t/int 7)) {:assumptions [(t/ge x (t/int 2)) (t/ge y (t/int 3))]})
+  (q/prove (t/not (t/eq (t/mul (t/int 2) x) (t/int 1))))
+  (q/prove (t/le x (t/int -1)) {:assumptions [(t/le (t/mul (t/int 2) x) (t/int -1))]})
+  (q/prove (t/eq (t/not (t/all [p r])) (t/any [(t/not p) (t/not r)])))
+  (q/prove (t/ge (t/ite p (t/add x (t/int 1)) (t/add x (t/int 2))) x))
+  (q/prove (t/eq (t/div (t/int -7) (t/int -3)) (t/int 3)))
+  (q/prove (t/bool false) {:assumptions [(t/bool false)]})])
+
+(deftest actual-certificate-exports-retain-the-exact-subject-and-data-kinds
+ (doseq [question samples]
+  (let [produced (formal/certify question) certificate (:certificate produced)
+        exported (formal/normalized-refutation question certificate) packet (:packet exported)
+        copied (erlang/binary_to_term (erlang/term_to_binary packet) (list :safe))]
+   (is (= :checked (:status produced)) (pr-str produced))
+   (is (= :ready (:status exported)) (pr-str exported))
+   (is (identity/valid? packet))
+   (is (= copied packet))
+   (is (= (:statement certificate) (:statement packet)))
+   (is (= (identity/hash question) (:question packet)))
+   (is (= :checked-data-connection (:status (formal/check-normalized-refutation-data question certificate copied))))
+   (is (= :not-run (:kernel-execution exported)))
+   (is (= :reviewed-not-mechanically-proved (:normalization exported)))
+   (is (= false (:compiler-proof-authority exported)))
+   (is (every? #(and (vector? %) (contains? #{:boolean :linear} (first %))) (get-in packet [:kernel :atoms]))))))
+
+(deftest data-hashes-cannot-substitute-for-fresh-subject-reconstruction
+ (let [question (first samples) certificate (:certificate (formal/certify question))
+       packet (:packet (formal/normalized-refutation question certificate))]
+  (doseq [changed [(assoc packet :statement (identity/hash :other))
+                  (assoc packet :question (identity/hash :other))
+                  (assoc packet :variables ["wrong-variable"])
+                  (assoc-in packet [:kernel :proof] [:boolean])
+                  (assoc packet :profile :unknown) (assoc packet :extra true)]]
+   (is (= :rejected (:status (formal/check-normalized-refutation-data question certificate (identity/seal changed))))))
+  (is (= :rejected (:status (formal/normalized-refutation (q/prove (t/bool false)) certificate)))))
+  (is (= :rejected (:status (formal/normalized-refutation question (assoc certificate :proof {:rule :boolean}))))))))
+
+(deftest legacy-rule-systems-use-the-same-closed-normalized-kernel-vocabulary
+ (let [question (q/prove (t/eq (t/add x (t/int 1)) (t/add (t/int 1) x)))]
+  (doseq [rules [certificate/legacy-rules certificate/choice-rules certificate/rules]]
+   (let [produced (formal/certify question {:rules rules}) exported (formal/normalized-refutation question (:certificate produced))]
+    (is (= :checked (:status produced)))
+    (is (= :ready (:status exported)))
+    (is (= rules (get-in exported [:packet :rules])))))))
+
+(deftest variable-names-remain-data-and-never-become-code
+ (let [name "a\"\n); axiom forged : False -- λ" variable (t/variable name t/Int)
+       question (q/prove (t/ge (t/add variable (t/int 1)) variable))
+       exported (formal/normalized-refutation question (:certificate (formal/certify question)))]
+  (is (= :ready (:status exported)))
+  (is (= [name] (get-in exported [:packet :variables])))
+  (is (every? int? (second (first (filter #(= :linear (first %)) (get-in exported [:packet :kernel :atoms]))))))))
