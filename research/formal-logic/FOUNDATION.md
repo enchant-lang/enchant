@@ -154,13 +154,35 @@ itself mechanically verified and does not certify all SMT theories.
   The named ANF encoding, BL relation checker, primitive dispatcher, selected
   specialization and actual Source/compiler bridges remain unproved.
 
-The next preservation boundary is the selected unit's specialization before
-this final ANF gate: closure construction, lexical captures, eager call
-arguments, fresh beta expansion and ordered scalar initializers. Validate that
-against the actual SDK unit and linkage; do not let a proof of the final
-ANF/Core pair certify an unchecked earlier transformation. Connect the named
-representation and accepted rule relation to the typed model separately from
-proof-kernel soundness, runtime refinement and production term-backend cutover.
+- Selected-unit reduction validation: a separate checker now compares the
+  original SDK unit with its proposed residual ANF. It checks captured lexical
+  environments, eager caller arguments, fresh beta bindings and every ordered
+  scalar initializer, then derives the alias map consumed by the ANF/Core gate.
+  The coherent 27-file run passed 8,207 assertions, including 148 new reduction
+  checks. Five saved current pairs reproduce in a fresh VM; a deliberate
+  capture forgery returns 102 instead of the original Source call's 42 and is
+  rejected even though its consistent ANF/Core pair passes the later gate.
+  Positive calibration observes compiler, expander, specializer, elaborator,
+  canonicalizer, evaluator and native-session calls; all seven counts are zero
+  while checking saved pairs. The 187 native questions retain their verdicts,
+  and eight earlier original Source records recheck unchanged with no recorded
+  code loads, initializations or exports. `SPECIALIZATION.md` states the exact
+  SDK-wellformedness and leaf-admission premises.
+- Lexical-call model laws: seven new audited results prove typed Core renaming
+  preserves complete outcomes under environment agreement, and one-/two-
+  argument eager-call laws retain definition captures and caller order. The
+  full model now has 63 theorem audits: 47 empty, four with only `propext`, ten
+  with `propext` and `Quot.sound`, and the two earlier integer ranking results
+  with their three standard axioms. No named-unit encoding, arbitrary-arity
+  closure machine or BL specialization-checker soundness theorem follows.
+
+The selected unit's reduction now has an independent implementation gate, in
+addition to the final ANF/Core gate. Connect the named representation and both
+accepted rule relations to the typed model. Unit wellformedness, pure lexical
+closure construction, environment agreement and reviewed intrinsic meanings
+are explicit premises, not facts supplied by a solver. Keep that work separate
+from proof-kernel soundness, recursive summaries, broader Source theory domains,
+effects/process refinement and the production term-backend cutover.
 
 ## Loops with checked ranking obligations
 

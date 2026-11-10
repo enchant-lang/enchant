@@ -35,6 +35,9 @@ leaves, ordered map pairs and literal list cells retain their complete shapes
 and operand order. The checker neither evaluates a native leaf nor assigns its
 meaning. Unchanged leaf identity is a different fact from admitting that leaf as
 a pure formal intrinsic. The following ANF/Core checker owns that admission.
+The reduction rules use pure lexical closure construction; observations of
+allocation or other runtime effects are outside that model. Standalone relation
+checking does not establish those runtime semantics from a native leaf's name.
 
 The selected-source producer now requires both checks. The specialization
 checker derives the residual-input alias-to-role map from the target's ordered
