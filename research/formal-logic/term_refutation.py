@@ -201,7 +201,8 @@ def tail(packet, integers, booleans):
         cases += f"  all_goals cases hGuard{index} : {expression}.eval integers booleans\n"
         cases += f"  all_goals first | (rename_i guardValue{index}; cases guardValue{index}) | skip\n"
         cases += f"  all_goals simp only [{SIMPS}, known_and, known_or, known_not, FormalTerms.false_and, FormalTerms.and_false, FormalTerms.true_or, FormalTerms.or_true] at *\n"
-        cases += f"  all_goals simp only [hGuard{index}] at *\n"
+        cases += f"  all_goals try simp only [hGuard{index}] at failed\n"
+        cases += f"  all_goals try simp only [hGuard{index}] at assumed\n"
     return """
 
 theorem packetAccepted : check packetProblem packetProof = true := by decide
