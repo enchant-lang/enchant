@@ -82,6 +82,12 @@ itself mechanically verified and does not certify all SMT theories.
   and nine retained examples on both native backends. Common facade: 199 new
   assertions in a separate focused run of 481 assertions. See
   `evidence/translation/qualification.json` for exact qualified sources.
+- Actual compiled handler observation: 921 integrated assertions, including
+  159 new runtime checks, eight observed traces and eight fresh-VM receipt
+  checks. Exact source/artifact custody and finite state/outcome conformance
+  are implemented. The fresh checker loads no recorded handler BEAM and invokes
+  no recorded handlers in the instrumented window. Environment/intrinsic,
+  effect and universal implementation/model correspondence work remains.
 
 ## Loops with checked ranking obligations
 
@@ -275,7 +281,17 @@ an inner unguarded variable-pattern clause. Recognize those exact shapes and
 identities, retaining evaluation order and refusing unreviewed key operations,
 computed calls or incompatible handler patterns.
 
-## Next actual BEAM observation boundary
+## Actual BEAM observation boundary
+
+The first sequential adapter described below is now implemented. It compiles
+only the freshly admitted source, retains its exact BEAM through the SDK's code
+custody, observes an owned actor, and separately reconstructs recorded
+state/return/named-failure conformance without executing the recorded handlers.
+`RUNTIME-OBSERVATIONS.md` specifies the public APIs and exact remaining scope.
+Its finite relation does not prove universal runtime refinement. Caller
+environment/intrinsic meanings, unobserved effects and the observer itself
+remain explicit assumptions. The design below records the boundary that guided
+the implementation; broader runtime and soundness work remains active.
 
 The source-bound replay path now supplies a concrete source/core/model witness.
 The next implementation should observe the corresponding compiled source in an

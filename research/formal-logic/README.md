@@ -66,6 +66,18 @@ The separate mathematical model now checks 46 theorems; universal source/model
 simulation premises remain unproved. [BOUNDED-TRACES.md](BOUNDED-TRACES.md) states
 the two trace profiles and exact retained scope.
 
+[RUNTIME-OBSERVATIONS.md](RUNTIME-OBSERVATIONS.md) adds explicit actual BEAM
+observation. The producer compiles only the admitted source and runs one owned
+sequential actor under exact artifact custody. The separate receipt checker
+reproduces artifacts and compares recorded outcomes without loading their BEAM
+or calling their handlers. The integrated run passed 921 assertions, including
+159 runtime checks. Eight retained observations, including counterexamples from
+both engines, matched their models; all eight also passed fresh-VM record
+validation with no recorded-handler calls or observed-module loads in the
+instrumented check window. Conformance and safety are distinct, and the observer,
+caller environment, intrinsic meanings and compiler remain explicit trust
+boundaries. No universal runtime refinement or compiler authority follows.
+
 [metatheory/Core.lean](metatheory/Core.lean) adds a separate typed mathematical
 model checked by pinned Lean 4.34.1. All 18 theorem audits report no axiom
 dependencies, including natural and lexicographic ranking rules. This does not

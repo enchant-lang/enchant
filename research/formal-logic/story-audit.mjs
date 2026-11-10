@@ -47,6 +47,12 @@ try{
   check(size.name+': source-bounded counterexample retains its semantic and runtime limits',sourceBounded.includes(':bl/source-record-trace-v1')&&sourceBounded.includes(':handler-core-replay :valid')&&sourceBounded.includes(':native-solver-certificate :not-checked')&&sourceBounded.includes(':live-actor-connection :not-established'));
   await evaluate("document.querySelector('#cell-story-source-bounded').scrollIntoView({block:'center'})");
   await shot(size.name+'-source-bounded-counterexample');
+  const actualRuntime=await evaluate("document.querySelector('#cell-story-actual-runtime')?.innerText||''");
+  check(size.name+': actual BEAM counterexample is conforming and unsafe',actualRuntime.includes(':actual-beam :observed')&&actualRuntime.includes(':recorded-conformance :conforming')&&actualRuntime.includes(':finite-safety :violated')&&actualRuntime.includes(':observed-states [{\"i\" 0} {\"i\" 1} {\"i\" 2}]'));
+  check(size.name+': actual observer records owned resource cleanup',actualRuntime.includes(':actor-alive false')&&actualRuntime.includes(':handler-artifacts-retired true'));
+  check(size.name+': finite observation retains its trust boundary',actualRuntime.includes(':universal-runtime-refinement :not-established')&&actualRuntime.includes(':execution-attestation :observer-trusted-not-cryptographically-attested')&&actualRuntime.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-actual-runtime').scrollIntoView({block:'center'})");
+  await shot(size.name+'-actual-beam-observation');
   await navigate('/#a-promise-about-the-function-you-actually-wrote');
   check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
   await shot(size.name+'-source-handler');
@@ -147,12 +153,16 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared source/evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
- for(const path of ['/sdk-pin.json','/metatheory/tool-pin.json','/evidence/metatheory/Core.olean']){
+ for(const path of ['/sdk-pin.json','/metatheory/tool-pin.json','/evidence/metatheory/Core.olean','/evidence/actor-runtime/examples.etf','/evidence/actor-runtime/ordinary-update.beam']){
   check('Undeclared or binary project file stays unavailable: '+path,(await fetch(base+path)).status===404);
  }
  for(const path of ['/RECORD-HANDLERS.md','/src/formal/source-protocol.bl','/test/source_trace_test.bl','/evidence/source-traces/checks.txt','/evidence/source-traces/examples.json','/evidence/source-traces/qualification.json','/evidence/source-traces/model-qualification.json','/evidence/record-handlers/examples.json','/evidence/record-handlers/implementation-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared source handler/trace evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/RUNTIME-OBSERVATIONS.md','/src/formal/runtime-protocol.bl','/src/formal/runtime-artifact.bl','/src/formal/runtime-outcome.bl','/src/formal/runtime-actor.bl','/test/runtime_protocol_test.bl','/evidence/actor-runtime/integrated-checks.txt','/evidence/actor-runtime/examples.json','/evidence/actor-runtime/fresh-replay.json','/evidence/actor-runtime/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared actual-runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
