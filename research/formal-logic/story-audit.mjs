@@ -98,6 +98,12 @@ try{
   check(size.name+': an interpretation record cannot substitute for a certificate',connections.includes(':connection-as-proof :rejected')&&connections.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-connections').scrollIntoView({block:'center'})");
   await shot(size.name+'-connections');
+  const refutation=await evaluate("document.querySelector('#cell-story-refutation')?.innerText||''");
+  check(size.name+': actual normalized packet reconstructs and altered proof is rejected',refutation.includes(':normalized-packet :ready')&&refutation.includes(':data-connection :checked-data-connection')&&refutation.includes(':rehashed-wrong-proof :rejected'));
+  check(size.name+': data export keeps external proof execution separate',refutation.includes(':kernel-execution :not-run')&&refutation.includes(':normalization :reviewed-not-mechanically-proved')&&refutation.includes(':compiler-proof-authority false'));
+  check(size.name+': executable kernel theorem keeps original normalization as next bridge',await evaluate("document.body.innerText.includes('every proof it accepts rules out every model of its normalized problem')&&document.body.innerText.includes('Eleven actual BL certificate exports')&&document.body.innerText.includes('Prove original-term normalization')"));
+  await evaluate("document.querySelector('#cell-story-refutation').scrollIntoView({block:'center'})");
+  await shot(size.name+'-refutation');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -235,6 +241,14 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared connection evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
+ for(const path of ['/REFUTATION-KERNEL.md','/src/formal/refutation.bl','/test/refutation_test.bl','/refutation-check.bl','/refutation-recheck.bl','/metatheory/Refutation.lean','/metatheory/refutation-pin.json','/evidence/refutation-kernel/model-check-3.txt','/evidence/refutation-kernel/bridge-check.txt','/evidence/refutation-kernel/execution/accepted.json','/evidence/refutation-kernel/execution/rejected.json','/evidence/refutation-kernel/examples/weighted.json','/evidence/refutation-kernel/execution/weighted/Check.lean','/evidence/refutation-kernel/execution/weighted/result.json','/evidence/refutation-kernel/fresh/refutation-fresh.json','/evidence/refutation-kernel/checks.txt','/evidence/refutation-kernel/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared normalized-kernel evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ const refutationReceipt=await fetch(base+'/evidence/refutation-kernel/execution/weighted/result.json').then(r=>r.json());
+ check('Recorded kernel run preserves its normalized subject and bridge scope',refutationReceipt.status==='checked-normalized-refutation'&&refutationReceipt.term_normalization==='reviewed-not-mechanically-proved'&&refutationReceipt.compiler_proof_authority===false);
+ check('Trusted normalized archive stays unavailable to the browser',(await fetch(base+'/evidence/refutation-kernel/examples/refutation.etf')).status===404);
+ check('Compiled normalized kernel stays unavailable to the browser',(await fetch(base+'/evidence/refutation-kernel/Refutation.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
