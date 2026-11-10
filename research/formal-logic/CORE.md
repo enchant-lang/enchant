@@ -4,6 +4,10 @@ The executable definition is `formal.core`, profile
 `:bl/core-int-bool-outcomes-v1`. This is a specified fragment for the formal
 foundation, not a claim to specify all current BL or OTP behavior.
 
+This page specifies the preserved version-one scalar profile. The implemented
+version-two closed-record extension, real function extraction and whole-record
+outcome rules are described in [RECORD-HANDLERS.md](RECORD-HANDLERS.md).
+
 ```
 T ::= Int | Bool
 e ::= integer | boolean | x | let x = e in e | if e then e else e

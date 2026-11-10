@@ -1,6 +1,6 @@
 # Checked changes to a core program
 
-`formal.translation` compares two typed Int/Bool core programs. Its observation
+`formal.translation` compares two typed scalar/record core programs. Its observation
 relation includes whether evaluation returns or raises, the successful value,
 and the exact named error. This is a pure core: external effects, actor traces
 and arbitrary calls require richer relations before they can pass this gate.

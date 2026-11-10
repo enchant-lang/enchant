@@ -69,7 +69,7 @@ and failed-attempt steps. Failure retains the old state; only idle steps are
 permitted afterwards. Five additional theorems check that failure is persistent,
 idle padding is allowed, run states are reachable by successful steps, checked
 induction premises imply run safety, and every reachable state has a finite
-successful run. Their audits are empty. The current 30-theorem compiled model
+successful run. Their audits are empty. That checkpoint's 30-theorem compiled model
 and receipt are retained under `../evidence/protocol-traces/`. The BL unroller,
 witness decoder and concrete executor are still unproved implementation
 connections; the mathematical model does not qualify live actor behavior.

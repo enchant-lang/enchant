@@ -3,7 +3,10 @@
 `formal/program-contract` elaborates a reviewed BL expression, or accepts an
 explicit core tree, then builds a closed data definition. Verification derives
 the question from that definition afresh. The first profile is the specified
-Int/Bool core; it does not admit arbitrary BL functions or host effects.
+scalar/record core; it does not admit arbitrary BL functions or host effects.
+The initial scalar path below is extended by real function source, ordered
+record parameters and concrete core counterexample replay in
+[RECORD-HANDLERS.md](RECORD-HANDLERS.md).
 
 ```clojure
 (ns accounts (:require [formal.api :as formal] [formal.term :as t]))
