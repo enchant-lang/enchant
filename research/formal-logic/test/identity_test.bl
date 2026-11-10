@@ -1,0 +1,38 @@
+(ns formal.identity-test (:require [formal.identity :as identity]))
+
+(defn refused? [value] (try (identity/hash value) false (catch _ true)))
+(deftest canonical-data-identity-normalizes-map-set-and-vector-storage
+ (let [entries (mapv (fn [i] [(str "field/" i) [i (odd? i)]]) (range 70))
+       a (into {} entries) b (into {} (reverse entries))
+       left (vec (range 100)) right (into [] (concat (range 37) (range 37 100)))]
+  (is (= (identity/hash a) (identity/hash b)))
+  (is (= (identity/bytes a) (identity/bytes b)))
+  (is (= (identity/hash left) (identity/hash right)))
+  (is (= (identity/hash (set (range 70))) (identity/hash (set (reverse (range 70))))))
+  (is (= (identity/hash a) (identity/hash (erlang/binary_to_term (erlang/term_to_binary a) (list :safe))))))
+ (doseq [value [nil true false 0 -1 9999999999999999999999999999999 0.5 "" "é" :a/b 'a/b [] (list) {} #{} (tuple 1 :a)]]
+  (is (= (identity/hash value) (identity/hash value)))
+  (is (= 64 (count (identity/hash value))))))
+
+(deftest canonical-data-identity-retains-data-kinds-and-exact-scalar-values
+ (doseq [[a b] [[nil false] [false 0] [0 0.0] [1 1.0] [0.0 -0.0] ["x" :x] [:x 'x]
+                 [[1 2] (list 1 2)] [(list 1) (tuple 1)] [#{} {}] ["é" "é"]]]
+  (is (not= (identity/hash a) (identity/hash b)))))
+
+(deftest closed-object-identities-state-their-encoding-policy
+ (let [a (identity/seal {:formal/example 1 :state {"x" 1}})
+       changed (assoc a :state {"x" 2})]
+  (is (= identity/profile (:identity-profile a)))
+  (is (identity/valid? a))
+  (is (not (identity/valid? changed)))
+  (is (not (identity/valid? (dissoc a :identity-profile))))
+  (is (not (identity/valid? (assoc a :identity-profile :legacy-default-etf))))
+  (is (identity/valid? (identity/seal changed)))
+  (is (not= (:identity a) (:identity (identity/seal changed))))))
+
+(deftest canonical-identity-refuses-live-and-unmodeled-values
+ (doseq [value [(erlang/self) (erlang/make_ref) (fn [] 1)
+                {:nested [(erlang/make_ref)]} (with-meta [1] {:owner (fn [] :not-data)})
+                (repeat 1)]]
+  (is (refused? value)))
+ (is (refused? (reduce (fn [value _] [value]) nil (range 200)))))

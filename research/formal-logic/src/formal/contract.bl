@@ -3,18 +3,17 @@
            [formal.elaborate :as elaborate] [formal.term :as t] [formal.query :as q]
            [formal.proof :as proof] [formal.logic :as logic] [formal.backend :as backend]
            [formal.core-inputs :as inputs] [formal.evaluate :as replay] [formal.value :as v]
-           [formal.context :as context]))
+           [formal.context :as context] [formal.identity :as identity]))
 
 ;; Builders run once and produce ordinary data. Verification reconstructs the
 ;; question from that data; no supplied cached query can replace the program.
 (def ^:private fields
  #{:formal/contract :name :parameters :body :source :requires :ensures
-   :raises :effects :returns :prefix :profile :identity})
+   :raises :effects :returns :prefix :profile :identity-profile :identity})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.contract: " message) {}))))
-(defn- identity-of [definition]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
-                (list (tuple :case :lower))))
+(defn- identity-of [definition] (identity/of definition))
+
 (defn- build-pre [value inputs] (if (fn? value) (value inputs) value))
 (defn- build-post [value inputs output] (if (fn? value) (value inputs output) value))
 (defn- bool! [expression]
@@ -78,7 +77,7 @@
        definition {:formal/contract 1 :name name :parameters declarations :body body :source source
                    :requires pre :ensures post :raises raises :effects effects :returns returns
                    :prefix prefix :profile (:profile lowered)}]
-  (assoc definition :identity (identity-of definition))))
+  (identity/seal definition)))
 
 (defn prepare
  "Reconstruct the property, outcomes and assumption ledger for this exact
@@ -87,7 +86,7 @@
  (try
   (require! (and (map? definition) (= fields (set (keys definition)))
                  (= 1 (:formal/contract definition)) (contains? #{core/profile core/record-profile} (:profile definition))
-                 (= (:identity definition) (identity-of definition))) "changed or noncanonical contract identity")
+                 (identity/valid? definition)) "changed or noncanonical contract identity")
   (t/variable (:name definition) t/Bool)
   (require! (and (= (:prefix definition) (str "contract." (:name definition)))
                  (contains? #{:must :may} (:returns definition))

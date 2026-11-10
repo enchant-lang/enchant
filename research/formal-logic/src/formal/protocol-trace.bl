@@ -1,7 +1,7 @@
 (ns formal.protocol-trace
  (:require [formal.protocol :as protocol] [formal.protocol-run :as execution]
            [formal.transition :as transition] [formal.term :as t] [formal.value :as v]
-           [formal.query :as q] [formal.proof :as proof] [formal.certificate :as certificate]
+           [formal.identity :as identity] [formal.query :as q] [formal.proof :as proof] [formal.certificate :as certificate]
            [formal.logic :as logic] [formal.evaluate :as replay]
            [formal.source-protocol :as source]))
 
@@ -14,11 +14,11 @@
   (if (= source/context-profile (:profile definition)) context-profile source-profile) profile))
 (def relation :finite-prefix-state-and-normal-step-safety)
 (def limits {:depth 16 :unroll-work 32768})
-(def ^:private fields #{:formal/protocol-trace :protocol :depth :profile :identity})
+(def ^:private fields #{:formal/protocol-trace :protocol :depth :profile :identity-profile :identity})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.protocol-trace: " message) {}))))
-(defn- identity-of [subject]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc subject :identity))) (list (tuple :case :lower))))
+(defn- identity-of [definition] (identity/of definition))
+
 (defn- depth! [depth]
  (require! (and (int? depth) (<= 0 depth (:depth limits))) "depth must be an integer from zero to sixteen"))
 (defn define
@@ -30,7 +30,7 @@
        ready (if source? (source/prepare definition) (protocol/prepare definition))
        _ (require! (= :ready (:status ready)) (:reason ready))
        subject {:formal/protocol-trace 1 :protocol definition :depth depth :profile (profile-for definition)}]
-  (assoc subject :identity (identity-of subject))))
+  (identity/seal subject)))
 (defn- model-roots [model]
  (vec (concat (v/terms (:init model)) (mapcat v/terms (vals (:invariants model)))
         (mapcat (fn [row] (concat (v/terms (:guard row)) (:assumptions row)
@@ -41,7 +41,7 @@
  [subject]
  (try
   (require! (and (map? subject) (= fields (set (keys subject))) (= 1 (:formal/protocol-trace subject))
-                 (= (profile-for (:protocol subject)) (:profile subject)) (= (:identity subject) (identity-of subject)))
+                 (= (profile-for (:protocol subject)) (:profile subject)) (identity/valid? subject))
             "changed or noncanonical trace subject")
   (depth! (:depth subject))
   (let [source? (source-profile? (:profile subject))

@@ -1,17 +1,17 @@
 (ns formal.protocol
  (:require [formal.term :as t] [formal.value :as v] [formal.transition :as transition]
-           [formal.query :as q] [formal.proof :as proof] [formal.certificate :as certificate]
+           [formal.identity :as identity] [formal.query :as q] [formal.proof :as proof] [formal.certificate :as certificate]
            [formal.backend :as backend] [formal.logic :as logic] [formal.evaluate :as replay]))
 
 (def profile :bl/pure-state-int-bool-v1)
 (def rule :finite-trace-invariant-v1)
-(def ^:private fields #{:formal/protocol :name :schema :init :invariants :transitions :profile :identity})
+(def ^:private fields #{:formal/protocol :name :schema :init :invariants :transitions :profile :identity-profile :identity})
 (def ^:private value-fields #{:formal/value :value :defined :within :constraints :scope :domain :errors})
 (def ^:private transition-fields #{:name :input-schema :guard :next :assumptions})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.protocol: " message) {}))))
-(defn- identity-of [definition]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity))) (list (tuple :case :lower))))
+(defn- identity-of [definition] (identity/of definition))
+
 (defn- name! [name] (t/variable name t/Bool) name)
 (defn- schema! [schema limit]
  (require! (and (map? schema) (<= (count schema) limit)) "state/input schema capacity")
@@ -69,7 +69,7 @@
        definition {:formal/protocol 1 :name name :schema schema :init (:init model)
                    :invariants (:invariants model) :profile profile
                    :transitions (mapv #(select-keys % [:name :input-schema :guard :next :assumptions]) (:transitions model))}
-       definition (assoc definition :identity (identity-of definition))
+       definition (identity/seal definition)
        ready (prepare definition)]
   (require! (= :ready (:status ready)) (:reason ready)) definition))
 
@@ -79,7 +79,7 @@
  [definition]
  (try
   (require! (and (map? definition) (= fields (set (keys definition))) (= 1 (:formal/protocol definition))
-                 (= profile (:profile definition)) (= (:identity definition) (identity-of definition)))
+                 (= profile (:profile definition)) (identity/valid? definition))
             "changed or noncanonical protocol definition")
   (name! (:name definition)) (schema! (:schema definition) 16)
   (require! (and (map? (:invariants definition)) (pos? (count (:invariants definition)))

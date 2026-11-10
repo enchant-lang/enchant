@@ -1,13 +1,13 @@
 (ns formal.context
  (:require [formal.elaborate :as elaborate] [formal.intrinsics :as intrinsics]
-           [system.ir :as ir] [anf :as anf]))
+           [formal.identity :as identity] [system.ir :as ir] [anf :as anf]))
 
 (def profile :bl/record-intrinsic-context-v1)
 (def limits {:source-bytes 65536 :walk-nodes 16384 :depth 128})
-(def ^:private fields #{:formal/source-context :profile :intrinsic-profile :source :parameters :core :bindings :identity})
+(def ^:private fields #{:formal/source-context :profile :intrinsic-profile :source :parameters :core :bindings :identity-profile :identity})
 (defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.context: " message) {}))))
-(defn identity-of [data]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc data :identity))) (list (tuple :case :lower))))
+(defn identity-of [data] (identity/of data))
+
 (defn- packed [args] (reduce (fn [tail head] (anf/cons-cell head tail)) (anf/empty-list-node) (reverse args)))
 (defn- link-call [node bindings]
  (let [call (ir/call-site node) callee (:callee call) args (:args call) n (count args)]
@@ -51,7 +51,7 @@
                         (= (:identity original) (:identity interpreted))) "linked ANF changed its canonical core")
        definition {:formal/source-context 1 :profile profile :intrinsic-profile intrinsics/profile
                    :source source :parameters parameters :core (:identity original) :bindings (:bindings linked)}
-       definition (assoc definition :identity (identity-of definition))]
+       definition (identity/seal definition)]
   {:definition definition :original original
    :prepared (assoc interpreted :source source :context definition :basis :explicit-record-binding-context
                     :assurance :reviewed-context-linking :metatheory :not-mechanized)}))
@@ -60,7 +60,7 @@
  (try
   (require! (and (map? definition) (<= (erlang/external_size definition) 2097152)
                  (= fields (set (keys definition))) (= 1 (:formal/source-context definition))
-                 (= profile (:profile definition)) (= (:identity definition) (identity-of definition))) "context identity/profile")
+                 (= profile (:profile definition)) (identity/valid? definition)) "context identity/profile")
   (let [fresh (build (:source definition) (:parameters definition))]
    (require! (= definition (:definition fresh)) "context differs from freshly reconstructed binding declaration")
    {:status :ready :definition (:identity definition) :prepared (:prepared fresh)

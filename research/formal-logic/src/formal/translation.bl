@@ -2,19 +2,18 @@
  (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
            [formal.term :as t] [formal.query :as q] [formal.proof :as proof]
            [formal.certificate :as certificate] [formal.logic :as logic]
-           [formal.backend :as backend] [formal.evaluate :as replay] [formal.core-inputs :as inputs]))
+           [formal.identity :as identity] [formal.backend :as backend] [formal.evaluate :as replay] [formal.core-inputs :as inputs]))
 
 ;; This boundary checks two core models, not the compiler that extracted them.
 ;; Neither a cached query nor an optimizer's own claimed identity is accepted.
 (def relation :return-value-and-named-error)
 (def ^:private fields
  #{:formal/translation :name :parameters :before :after :requires :prefix
-   :profile :relation :identity})
+   :profile :relation :identity-profile :identity})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.translation: " message) {}))))
-(defn- identity-of [definition]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
-                (list (tuple :case :lower))))
+(defn- identity-of [definition] (identity/of definition))
+
 (defn- precondition! [pre inputs]
  (t/validate! [pre])
  (require! (= t/Bool (:sort pre)) "the precondition must be Boolean")
@@ -43,7 +42,7 @@
        definition {:formal/translation 1 :name name :parameters declarations
                    :before before :after after :requires pre :prefix prefix
                    :profile (get-in lowered [:problem :profile]) :relation relation}]
-  (assoc definition :identity (identity-of definition))))
+  (identity/seal definition)))
 
 (defn prepare
  "Rebuild the exact outcome comparison and bind its certificate subject to
@@ -53,7 +52,7 @@
   (require! (and (map? definition) (= fields (set (keys definition)))
                  (= 1 (:formal/translation definition)) (contains? #{core/profile core/record-profile} (:profile definition))
                  (= relation (:relation definition))
-                 (= (:identity definition) (identity-of definition))) "changed or noncanonical translation identity")
+                 (identity/valid? definition)) "changed or noncanonical translation identity")
   (t/variable (:name definition) t/Bool)
   (require! (= (:prefix definition) (str "translation." (:name definition))) "changed input namespace")
   (let [before (:before definition) after (:after definition) declarations (:parameters definition)

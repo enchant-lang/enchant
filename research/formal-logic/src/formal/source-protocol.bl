@@ -2,20 +2,19 @@
  (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
            [formal.elaborate :as elaborate] [formal.protocol :as protocol]
            [formal.protocol-run :as execution] [formal.term :as t] [formal.value :as v]
-           [formal.evaluate :as replay] [formal.context :as context]))
+           [formal.identity :as identity] [formal.evaluate :as replay] [formal.context :as context]))
 
 ;; A source connection around the existing state-model boundary. Preparation
 ;; re-extracts every real function and compares every derived guard/update.
 ;; User builders specify state predicates and input assumptions, never updates.
 (def profile :bl/source-record-handlers-v1)
 (def context-profile :bl/context-record-handlers-v2)
-(def ^:private fields #{:formal/source-protocol :protocol :handlers :profile :identity})
+(def ^:private fields #{:formal/source-protocol :protocol :handlers :profile :identity-profile :identity})
 (def ^:private handler-fields #{:name :source :core})
 (defn- require! [ok message]
  (when-not ok (throw (ex-info (str "formal.source-protocol: " message) {}))))
-(defn- identity-of [definition]
- (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
-                (list (tuple :case :lower))))
+(defn- identity-of [definition] (identity/of definition))
+
 (defn- extract [schema inputs source binding-context]
  (let [parameters [["state" (core/record-sort schema)] ["message" (core/record-sort inputs)]]
        checked (when binding-context (context/prepare binding-context))
@@ -77,7 +76,7 @@
        definition {:formal/source-protocol 1 :protocol model
                    :handlers (mapv #(select-keys % (if contextual? [:name :source :core :context] [:name :source :core])) compiled)
                    :profile (if contextual? context-profile profile)}
-       definition (assoc definition :identity (identity-of definition))
+       definition (identity/seal definition)
        prepared (prepare definition)]
   (require! (= :ready (:status prepared)) (:reason prepared)) definition))
 
@@ -88,7 +87,7 @@
  [definition]
  (try
   (require! (and (map? definition) (= fields (set (keys definition))) (= 1 (:formal/source-protocol definition))
-                 (contains? #{profile context-profile} (:profile definition)) (= (:identity definition) (identity-of definition))
+                 (contains? #{profile context-profile} (:profile definition)) (identity/valid? definition)
                  (vector? (:handlers definition)) (<= (count (:handlers definition)) 16)) "changed or noncanonical source protocol")
   (let [contextual? (= context-profile (:profile definition))
         model (:protocol definition) prepared (protocol/prepare model)
