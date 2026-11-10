@@ -1,0 +1,64 @@
+(ns formal.connections-recheck
+ (:require [formal.api :as formal] [formal.backend :as backend] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+;; Trusted bounded project archive only. Reconstruct records from their exact
+;; subjects; hashing an arbitrary record alone does not check its correspondence.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)))
+(def directory (Path/expand (first args)))
+(def file (Path/join directory "connections.etf"))
+(assert (<= (:size (File/stat! file)) 8388608))
+(def bytes (File/read! file))
+(def pin (interop/json-> (File/read! (Path/join directory "connections-pin.json"))))
+(assert (= "enchant.formal.connections-archive-v1" (get pin "schema")))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def data (elem decoded 0))
+(assert (= :enchant.formal.connection-examples-v1 (:schema data)))
+(defn mfa [function]
+ (let [info (erlang/fun_info function)] (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity))))
+(def pattern (mfa backend/with-session))
+(defn barrier []
+ (let [reference (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen reference) :ok (after 5000 (throw :trace-deadline)))))
+(defn recheck []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       tracer (spawn (fn [] (loop [calls 0]
+         (receive
+          [:trace _ :call _] (recur (inc calls))
+          [:reset seen] :when (= seen ticket)
+           (do (erlang/send parent [:calibration ticket calls]) (recur 0))
+          [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket calls])
+          _ (recur calls)))))]
+  (try
+   (assert (pos? (erlang/trace_pattern pattern true (list :local))))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   (backend/with-session {:backend :z3} (fn [session] (assert (:hello session))))
+   (barrier) (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:calibration seen count] :when (= seen ticket) count (after 5000 (throw :trace-deadline)))
+         _ (assert (pos? calibration))
+         rows (mapv (fn [row]
+                      (let [description (formal/describe (:subject row)) connection (:model-interpretation description)]
+                       (assert (= (:common-source row) (:source-connection description)))
+                       (assert (= (:connection row) connection) (pr-str description))
+                       {:id (:id row) :source (:source-connection description) :connection connection})) (:rows data))]
+    (barrier) (erlang/send tracer [:finish ticket])
+    (let [calls (receive [:finished seen count] :when (= seen ticket) count (after 5000 (throw :trace-deadline)))]
+     (assert (= 0 calls)) {:rows rows :calibration-native-sessions calibration :reconstruction-native-sessions calls}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (erlang/trace_pattern pattern false (list :local))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def result (recheck))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "connections-fresh.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge result {:schema :enchant.formal.connections-recheck-v1
+                :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                :scope :reconstructed-reviewed-model-question-links :source-expansion :allowed-during-preparation
+                :independent-interpretation-soundness-proof false :compiler-proof-authority false})))
+(println {:connections (count (:rows result)) :calibration (:calibration-native-sessions result)
+          :native-sessions-during-reconstruction (:reconstruction-native-sessions result) :compiler-proof-authority false})

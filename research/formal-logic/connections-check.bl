@@ -1,0 +1,72 @@
+(ns formal.connections-check
+ (:require [formal.api :as formal] [formal.contract :as contracts] [formal.identity :as identity]
+           [formal.term :as t] [formal.core :as core] [formal.runtime-artifact :as artifact] [interop]))
+
+;; Use the actual prior source/forged-model archive. The old proof and runtime
+;; objects are not regenerated or silently re-signed for this metadata change.
+(def baseline (Path/expand "research/formal-logic/evidence/specialization/examples"))
+(def file (Path/join baseline "specialization.etf"))
+(assert (<= (:size (File/stat! file)) 8388608))
+(def bytes (File/read! file))
+(def pin (interop/json-> (File/read! (Path/join baseline "specialization-pin.json"))))
+(assert (= "enchant.formal.specialization-archive-v1" (get pin "schema")))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def old (elem decoded 0))
+(assert (= :enchant.formal.specialization-examples-v1 (:schema old)))
+(def sourced (:source-promise old))
+(def authored
+ (formal/program-contract {:name "specialization-authored-core-100" :parameters {"input" t/Int}
+  :core (get-in old [:forged :elaboration :core])
+  :ensures (fn [in out] (t/eq out (t/add (get in "input") (t/int 100))))}))
+(def wrong-source
+ (formal/program-contract {:name "specialization-source-is-not-100" :context (:source sourced)
+  :ensures (fn [in out] (t/eq out (t/add (get in "input") (t/int 100))))}))
+(def historical
+ (mapv (fn [row]
+         (assert (= (:identity sourced) (get-in row [:source :definition])))
+         (assert (= (:identity authored) (get-in row [:authored-wrong-model :definition])))
+         (assert (= (:identity wrong-source) (get-in row [:wrong-source-promise :definition])))
+         (let [source-check (formal/check-certificate (:problem (contracts/prepare sourced)) (get-in row [:source :proof :certificate]))
+               core-check (formal/check-certificate (:problem (contracts/prepare authored)) (get-in row [:authored-wrong-model :proof :certificate]))
+               replay (formal/replay-contract-counterexample wrong-source (get-in row [:wrong-source-promise :backend :property]))]
+          (assert (= :checked (:status source-check))) (assert (= :checked (:status core-check)))
+          (assert (= :valid (:status replay)))
+          {:engine (:engine row) :source-certificate (:status source-check) :authored-certificate (:status core-check)
+           :source-statement (:statement source-check) :authored-statement (:statement core-check)
+           :source-counterexample (:status replay)})) (:native old)))
+(def historical-runtime (formal/check-contract-observation sourced (get-in old [:actual :receipt])))
+(assert (= :conforming (:status historical-runtime)))
+(assert (= :holds (:contract-safety historical-runtime)))
+(defn row [id subject]
+ (let [answer (formal/check subject)]
+  (assert (= :checked (:status answer)) (pr-str answer))
+  {:id id :subject subject :status (:status answer) :source (:source-connection answer)
+   :common-source (get-in answer [:evidence :connection :source])
+   :connection (get-in answer [:evidence :connection :model-interpretation])}))
+(def rows [(row "authored-core" authored) (row "actual-selected-source" sourced)
+           (row "core-comparison" (formal/translation {:name "connection-example-pair" :parameters {}
+                                  :before (core/literal 5) :after (core/operation :add [(core/literal 2) (core/literal 3)])}))
+           (row "direct-terms" (formal/question {} {:mode :prove :claim (t/bool true)}))])
+(assert (= :authored-core-no-source-claim (:source (first rows))))
+(assert (= :reviewed-context-linking-not-mechanically-proved (:source (second rows))))
+(assert (= :not-applicable-direct-term-query (:common-source (last rows))))
+(def data {:schema :enchant.formal.connection-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :baseline-source-commit (:source-commit old) :baseline-archive-sha256 (artifact/digest bytes)
+           :rows rows :historical historical :historical-runtime historical-runtime
+           :identity-profile identity/profile :compiler-proof-authority false})
+(identity/bytes data)
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! output)
+(def encoded (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "connections.etf") encoded)
+(File/write! (Path/join output "connections-pin.json") (interop/->json
+ {:schema :enchant.formal.connections-archive-v1 :bytes (erlang/byte_size encoded) :sha256 (artifact/digest encoded)}))
+(File/write! (Path/join output "connections.json") (interop/->json
+ (-> data (dissoc :rows) (assoc :rows (mapv #(dissoc % :subject) rows)))))
+(println {:connections (count rows) :old-certificates (* 2 (count historical)) :old-counterexamples (count historical)
+          :old-runtime (:status historical-runtime) :source-statuses (mapv :common-source rows)
+          :compiler-proof-authority false})
