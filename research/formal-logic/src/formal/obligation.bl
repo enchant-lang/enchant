@@ -1,0 +1,164 @@
+(ns formal.obligation
+ (:require [formal.term :as t] [formal.query :as q] [formal.identity :as identity]
+           [formal.result :as result] [formal.connection :as connection]
+           [formal.contract :as contracts] [formal.loop :as loops] [formal.translation :as translations]
+           [formal.protocol :as protocols] [formal.source-protocol :as sources] [formal.protocol-trace :as traces]
+           [formal.proof :as proof] [formal.refutation :as refutation]))
+
+;; Closed plans name the model-to-question boundary. Their proof-data checker
+;; reconstructs that boundary; a plan identity alone establishes no theorem.
+(def profile :bl/obligation-plan-v1)
+(def proof-profile :bl/obligation-proof-data-v1)
+(def manifest-profile :bl/obligation-term-manifest-v1)
+(def model-kinds #{:contract :loop :translation :protocol :source-protocol :protocol-trace})
+(defn- require! [ok reason] (when-not ok (throw (ex-info (str "formal.obligation: " reason) {}))))
+(defn prepare-subject
+ "Shared model preparation for description and obligation export. Source
+  preparation can execute expansion-phase code; term proof checking cannot."
+ [subject]
+ (case (result/kind subject)
+  :contract (contracts/prepare subject)
+  :loop (loops/prepare subject)
+  :translation (translations/prepare subject)
+  :protocol (protocols/prepare subject)
+  :source-protocol (sources/prepare subject)
+  :protocol-trace (traces/prepare subject)
+  {:status :unsupported :reason :model-subject-required}))
+(defn- query! [question]
+ (require! (and (map? question) (= 1 (:formal/query question)) (contains? #{:prove :sat} (:mode question))
+                (vector? (:assertions question))
+                (every? #(and (map? %) (string? (:label %)) (= t/Bool (t/sort-of (:term %)))) (:assertions question))
+                (if (= :prove (:mode question)) (= t/Bool (t/sort-of (:claim question))) (nil? (:claim question))))
+           "well-formed proof or SAT question required")
+ (identity/bytes question)
+ (t/validate! (q/roots question))
+ question)
+(defn- impossible [question]
+ (q/prove (t/bool false) {:assumptions (:assertions question) :profile (:profile question) :scope (:scope question)}))
+(defn- feasibility [question]
+ (q/sat {:assumptions (:assertions question) :profile (:profile question) :scope (:scope question)}))
+(defn- row [label key role required question]
+ (query! question)
+ {:label label :key key :role role :required required :question question
+  :unreachable (when (and required (= :prove (:mode question))) (impossible question))})
+(defn plan
+ "Expose every required property and separate consistency/witness questions.
+  The exact prepared model connection stays reviewed, never proof authority."
+ [subject]
+ (try
+  (let [kind (result/kind subject)
+        _ (require! (or (= :query kind) (contains? model-kinds kind)) "one supported subject required")
+        prepared (if (= :query kind) {:status :ready :problem (query! subject)
+                                     :source-connection :not-applicable-direct-term-query
+                                     :model-interpretation (connection/direct-terms)} (prepare-subject subject))
+        _ (require! (= :ready (:status prepared)) (:reason prepared))
+        child (if (= :source-protocol kind) (:protocol-prepared prepared) prepared)
+        multiple? (contains? #{:loop :protocol :source-protocol} kind)
+        property (:problem prepared)
+        consistency (if multiple? (:consistency child) (impossible property))
+        initial (or (:initial child) (feasibility (if multiple? consistency property)))
+        required (if multiple?
+                   (mapv (fn [item] (row (str "obligation/" (:id item)) (:id item) :obligation true (:problem item))) (:obligations prepared))
+                   [(row (if (= :protocol-trace kind) "bounded-property" "property") :property
+                      (if (= :sat (:mode property)) :witness :property) true property)])
+        rows (if (and (= :query kind) (= :sat (:mode subject))) required
+               (into [(row "consistency" :consistency :inconsistency false consistency)
+                      (row "initial-state" :initial-state :feasibility false initial)] required))
+        _ (require! (and (seq required) (= (count rows) (count (set (map :label rows))))) "nonempty unique required coverage")
+        object (identity/seal
+                 {:formal/obligation-plan 1 :profile profile
+                  :subject {:kind kind :identity (result/subject-id subject) :data (identity/hash subject)}
+                  :rows rows
+                  :connection {:source (:source-connection prepared) :model-interpretation (:model-interpretation prepared)
+                               :binding-context (:binding-context prepared) :elaboration (:elaboration prepared)
+                               :specialization (:specialization prepared) :implementation-soundness :reviewed-not-mechanically-proved}
+                  :composition {:status :reviewed-not-mechanically-proved
+                                :kind (get {:loop :ranking-and-control-obligations :protocol :state-induction
+                                            :source-protocol :source-state-induction :protocol-trace :bounded-trace-safety
+                                            :contract :whole-outcome-contract :translation :whole-outcome-equivalence
+                                            :query :direct-term-question} kind)
+                                :rank-dimension (:rank-dimension prepared)
+                                :source-runtime-refinement :not-established}
+                  :compiler-proof-authority false})]
+   {:status :ready :plan object :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
+
+(defn- leaf [question search]
+ (let [made (proof/produce question search)]
+  (if (= :checked (:status made))
+   (let [ready (refutation/prepare-terms question (:certificate made))]
+    (if (= :ready (:status ready))
+     {:status :ready :certificate (:certificate made) :packet (:packet ready)}
+     {:status (:status ready) :reason (:reason ready)}))
+   {:status (:status made) :reason (:reason made)})))
+(defn- discharge [item search]
+ (cond
+  (= :sat (get-in item [:question :mode]))
+   {:label (:label item) :status :requires-witness :via :witness :certificate nil :packet nil}
+  :else
+   (let [direct (leaf (:question item) search)
+         absent (when (and (:required item) (not= :ready (:status direct))) (leaf (:unreachable item) search))
+         unreachable? (= :ready (:status absent)) selected (if unreachable? absent direct)]
+    {:label (:label item) :status (:status selected) :via (if unreachable? :unreachable :entailment)
+     :certificate (:certificate selected) :packet (:packet selected)})))
+(defn- manifest [prepared rows]
+ (identity/seal
+  {:formal/obligation-term-manifest 1 :profile manifest-profile
+   :subject-kind (get-in prepared [:subject :kind]) :subject (get-in prepared [:subject :identity]) :plan (:identity prepared)
+   :rows (mapv (fn [item evidence]
+                 {:label (:label item) :role (:role item) :required (:required item) :mode (get-in item [:question :mode])
+                  :question (identity/hash (:question item)) :unreachable (when (:unreachable item) (identity/hash (:unreachable item)))
+                  :status (:status evidence) :via (:via evidence) :packet (:packet evidence)}) (:rows prepared) rows)
+   :model-connection :reviewed-not-mechanically-proved :composition :reviewed-not-mechanically-proved
+   :feasibility :not-established :kernel-execution :not-run :compiler-proof-authority false}))
+(defn- coverage [prepared rows]
+ (let [required (mapv (fn [item evidence] (when (:required item) evidence)) (:rows prepared) rows)
+       required (vec (remove nil? required))
+       ready (filter #(= :ready (:status %)) required)]
+  {:required (count required) :ready (count ready) :complete (= (count required) (count ready))
+   :unreachable (count (filter #(= :unreachable (:via %)) ready))
+   :pending (mapv :label (remove #(= :ready (:status %)) required))}))
+(defn produce
+ "Build complete or visibly partial proof data for a common formal subject.
+  It invokes BL proof search, never a native solver or external proof process."
+ ([subject] (produce subject {}))
+ ([subject options]
+ (let [prepared (plan subject)]
+  (if-not (= :ready (:status prepared)) prepared
+   (try
+    (let [object (:plan prepared) rows (mapv #(discharge % (get options :search {})) (:rows object))
+          covered (coverage object rows)
+          bundle (identity/seal {:formal/obligation-proof-data 1 :profile proof-profile :plan object :rows rows
+                                 :manifest (manifest object rows)})]
+     {:status (if (:complete covered) :ready :incomplete) :bundle bundle :coverage covered
+      :kernel-execution :not-run :model-connection :reviewed-not-mechanically-proved
+      :compiler-proof-authority false})
+    (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false}))))))
+(defn check-data
+ "Reconstruct the whole subject plan and check exact row coverage, certificates
+  and original-term packet data without proof search or native/Lean execution."
+ [subject bundle]
+ (try
+  (let [prepared (plan subject) object (:plan prepared)]
+   (require! (= :ready (:status prepared)) (:reason prepared))
+   (require! (and (map? bundle) (= #{:formal/obligation-proof-data :profile :plan :rows :manifest :identity-profile :identity} (set (keys bundle)))
+                  (= 1 (:formal/obligation-proof-data bundle)) (= proof-profile (:profile bundle)) (identity/valid? bundle)
+                  (= object (:plan bundle)) (vector? (:rows bundle))
+                  (= (mapv :label (:rows object)) (mapv :label (:rows bundle)))) "proof-data subject or complete coverage mismatch")
+   (doseq [[item evidence] (map (fn [a b] [a b]) (:rows object) (:rows bundle))]
+    (require! (= #{:label :status :via :certificate :packet} (set (keys evidence))) "closed evidence row required")
+    (require! (contains? #{:ready :unknown :unsupported :requires-witness} (:status evidence)) "unknown proof-data status")
+    (require! (contains? (if (= :sat (get-in item [:question :mode])) #{:witness} #{:entailment :unreachable}) (:via evidence)) "proof route mismatch")
+    (when (= :unreachable (:via evidence)) (require! (and (:required item) (:unreachable item)) "unreachability is not allowed for this row"))
+    (if (= :ready (:status evidence))
+     (let [question (if (= :unreachable (:via evidence)) (:unreachable item) (:question item))
+           checked (refutation/check-term-data question (:certificate evidence) (:packet evidence))]
+      (require! (= :checked-data-connection (:status checked)) "term certificate or original packet mismatch"))
+     (do (require! (and (nil? (:certificate evidence)) (nil? (:packet evidence))) "pending row cannot carry accepted proof data")
+         (require! (= (= :sat (get-in item [:question :mode])) (= :requires-witness (:status evidence))) "SAT witness status mismatch"))))
+   (require! (= (manifest object (:rows bundle)) (:manifest bundle)) "manifest differs from freshly reconstructed coverage")
+   {:status :checked-data-connection :profile proof-profile :bundle (:identity bundle) :plan (:identity object)
+    :manifest (get-in bundle [:manifest :identity]) :coverage (coverage object (:rows bundle))
+    :model-connection :reviewed-not-mechanically-proved :composition :reviewed-not-mechanically-proved
+    :feasibility :not-established :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))
