@@ -31,7 +31,10 @@ theorem dot_scale (weight : Int) (xs : List Int) (env : Nat → Int) :
     dot (scaleCoefficients weight xs) env = weight * dot xs env := by
   induction xs generalizing env with
   | nil => simp [scaleCoefficients, dot]
-  | cons x xs ih => simp [scaleCoefficients, dot, ih, Int.mul_add, Int.mul_assoc]
+  | cons x xs ih =>
+    change weight * x * env 0 + dot (scaleCoefficients weight xs) (fun i => env (i + 1)) = _
+    rw [ih]
+    simp [dot, Int.mul_add, Int.mul_assoc]
 
 structure Row where
   coefficients : List Int
@@ -100,12 +103,12 @@ def pOr : Option Bool → Option Bool → Option Bool
   | some false, some false => some false
   | _, _ => none
 
-def SoundOption (partial : Option Bool) (value : Bool) : Prop :=
-  ∀ b, partial = some b → value = b
+def SoundOption (observed : Option Bool) (value : Bool) : Prop :=
+  ∀ b, observed = some b → value = b
 
-theorem not_sound (partial : Option Bool) (value : Bool) (h : SoundOption partial value) :
-    SoundOption (pNot partial) (!value) := by
-  cases partial <;> cases value <;> simp_all [SoundOption, pNot]
+theorem not_sound (observed : Option Bool) (value : Bool) (h : SoundOption observed value) :
+    SoundOption (pNot observed) (!value) := by
+  cases observed <;> cases value <;> simp_all [SoundOption, pNot]
 theorem and_sound (a b : Option Bool) (x y : Bool) (ha : SoundOption a x) (hb : SoundOption b y) :
     SoundOption (pAnd a b) (x && y) := by
   cases a <;> cases b <;> cases x <;> cases y <;> simp_all [SoundOption, pAnd]
