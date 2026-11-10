@@ -47,6 +47,11 @@ setter and ordinary, untrusted `input`/`change` events: CDP text insertion does
 not edit them. Invalid civil values restore the existing draft and refuse;
 disabled or readonly controls are left untouched. This only edits form inputs.
 
+`browser.page/key!` sends Enter's carriage-return text with its keydown, so a
+focused button receives one trusted activation and a textarea receives a newline.
+The keyup carries no text. Navigation keys and native select input use the same
+key path.
+
 X11 is an explicit compatibility choice, with no silent fallback:
 
 ```sh

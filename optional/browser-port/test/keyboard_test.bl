@@ -1,0 +1,27 @@
+(ns browser.keyboard-test (:require [browser.page :as page]))
+
+(deftest keyboard-activation-and-enter-text-are-trusted-native-input
+  (let [root (str "/tmp/bl-keyboard-test-" (erlang/unique_integer (list :positive)))
+        p (page/open! {:width 800 :height 600
+                       :launch {"profile" (str root "/profile") "runtime" (str root "/runtime")
+                                "chromium" (System/get_env "CHROMIUM") "compositor" (System/get_env "SWAY")
+                                "vnc" (System/get_env "WAYVNC") "width" 800 "height" 700}})]
+    (try
+      (page/navigate! p (str "data:text/html;base64," (Base/encode64
+        "<button id='activate' type='button'>Activate</button><textarea id='notes'></textarea><script>window.clicks=[];window.keys=[];document.querySelector('#activate').addEventListener('click',e=>window.clicks.push(e.isTrusted));for(const type of ['keydown','keypress','keyup'])document.addEventListener(type,e=>window.keys.push({type:e.type,key:e.key,trusted:e.isTrusted}))</script>")))
+      (page/wait! p "!!document.querySelector('#notes')")
+      (page/key! p "Tab")
+      (is (= "activate" (page/evaluate! p "document.activeElement.id")))
+      (page/key! p "Enter")
+      (is (= [true] (page/evaluate! p "window.clicks")) "Enter activates a focused button exactly once")
+      (is (page/evaluate! p "window.keys.some(e=>e.type==='keypress'&&e.key==='Enter'&&e.trusted)"))
+      (let [before (page/evaluate! p "window.clicks.length")]
+        (page/key! p " ")
+        (is (= (inc before) (page/evaluate! p "window.clicks.length")) "Space retains its native button activation"))
+      (page/key! p "Tab")
+      (is (= "notes" (page/evaluate! p "document.activeElement.id")))
+      (page/key! p "Enter")
+      (is (= "\n" (page/evaluate! p "document.querySelector('#notes').value")) "Enter supplies the text event needed for a newline")
+      (is (page/evaluate! p "window.keys.every(e=>e.trusted)&&window.clicks.every(Boolean)"))
+      (println :native-keyboard-events (page/evaluate! p "({clicks:window.clicks,keys:window.keys})"))
+      (finally (page/close! p) (File/rm_rf! root)))))
