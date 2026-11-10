@@ -62,6 +62,9 @@ interface retains this distinction and does not call the program nonterminating.
 The concrete reference executor is separately bounded by iteration and step
 ceilings. Exhaustion reports incomplete work. A bounded successful run or an
 unfinished run does not establish termination or nontermination for all inputs.
+The retained example execution is explicitly a raw model run, with its exact
+input and whether the contract precondition holds recorded beside it. Contract
+verification does not silently wrap the source program with runtime admission.
 
 ## Remaining trust
 
