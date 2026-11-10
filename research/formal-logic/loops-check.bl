@@ -1,0 +1,61 @@
+(ns formal.loops-check
+ (:require [formal.loop :as loops] [formal.loop-core :as lc] [formal.term :as t] [interop]))
+
+(def countdown
+ {:name "example-countdown" :parameters {"n" t/Int}
+  :source "(loop [i n acc 0] (if (> i 0) (recur (- i 1) (+ acc 1)) acc))"
+  :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+  :invariant (fn [in state] (t/all [(t/ge (get state "i") (t/int 0))
+                   (t/eq (t/add (get state "i") (get state "acc")) (get in "n"))]))
+  :rank (fn [in state] [(get state "i")])
+  :ensures (fn [in state value] (t/eq value (get in "n")))})
+(def reset-loop
+ {:name "example-reset" :parameters {"n" t/Int "m" t/Int}
+  :source "(loop [outer n inner m] (if (> inner 0) (recur outer (- inner 1)) (if (> outer 0) (recur (- outer 1) 3) (+ outer inner))))"
+  :requires (fn [in] (t/all [(t/ge (get in "n") (t/int 0)) (t/ge (get in "m") (t/int 0))]))
+  :invariant (fn [in state] (t/all [(t/ge (get state "outer") (t/int 0)) (t/ge (get state "inner") (t/int 0))]))
+  :rank (fn [in state] [(get state "outer") (get state "inner")])
+  :ensures (fn [in state result] (t/eq result (t/int 0)))})
+(def growth
+ {:name "example-growth" :parameters {"n" t/Int}
+  :source "(loop ^{:decreasing n} [i n] (recur (+ i 1)))"
+  :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+  :invariant (fn [in state] (t/ge (get state "i") (t/int 0)))
+  :rank (fn [in state] [(get state "i")])})
+(def loose-invariant
+ {:name "example-unreachable-countermodel" :parameters {"n" t/Int}
+  :source "(loop [i n] (if (> i 0) (recur (- i 1)) i))"
+  :requires (fn [in] (t/eq (get in "n") (t/int 0)))
+  :invariant (fn [in state] (t/any [(t/eq (get state "i") (t/int 0)) (t/eq (get state "i") (t/int 2))]))
+  :rank (fn [in state] [(get state "i")])})
+(def guarded-failure
+ {:name "example-unreachable-failure" :parameters {"n" t/Int}
+  :source "(loop [i n] (if (< i 0) (quot 1 0) (if (> i 0) (recur (- i 1)) i)))"
+  :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+  :invariant (fn [in state] (t/ge (get state "i") (t/int 0)))
+  :rank (fn [in state] [(get state "i")])
+  :ensures (fn [in state result] (t/eq result (t/int 0)))})
+(def cases
+ [{:id :countdown :spec countdown :input {"n" 8} :expected :checked}
+  {:id :lexicographic-reset :spec reset-loop :input {"n" 2 "m" 1} :expected :checked}
+  {:id :growth :spec growth :input {"n" 0} :expected :obligation-refuted}
+  {:id :loose-invariant :spec loose-invariant :input {"n" 0} :expected :obligation-refuted}
+  {:id :unreachable-failure :spec guarded-failure :input {"n" 4} :expected :checked}
+  {:id :inconsistent-input :spec (assoc countdown :name "example-empty-input" :requires (t/bool false))
+   :input {"n" 0} :expected :vacuous}])
+(def results
+ (mapv (fn [sample]
+  (let [definition (loops/define (:spec sample))
+        result (mapv (fn [engine]
+                  (let [r (loops/verify {:backend engine} definition)]
+                   (assert (= (:expected sample) (:status r)) (pr-str {:id (:id sample) :engine engine :result r}))
+                   (when (:proof r) (assert (= :checked-obligations (:status (loops/check-proof definition (:proof r))))))
+                   {:engine engine :result r})) [:z3 :oxiz])]
+   {:id (:id sample) :expected (:expected sample) :definition definition :results result
+    :execution (lc/evaluate (:program definition) (:input sample) {:iterations 100 :trace 16})})) cases))
+(File/write! "research/formal-logic/evidence/loops/examples.json"
+ (interop/->json {:schema :enchant.formal.loop-examples-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope "Conditional loop-model arguments and obligation countermodels, not verified BL compiler/runtime guarantees."
+                 :cases results}))
+(println {:cases (count results) :native-comparisons (* 2 (count results))})
