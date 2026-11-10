@@ -94,7 +94,10 @@ obligation planning and witnesses. A proof counterexample must be exactly the
 negation of its claim. SAT has neither claim nor counterexample. `q/sat` rejects
 a supplied nonnil claim, which the previous constructor would silently discard;
 put the condition in `:assumptions`. Root sorts, portable contents and observers
-are validated at the same boundary. Watchers remain observations.
+are validated at the same boundary. Watchers remain observations. This is a
+shared subject rule: a backend may interpret division by zero with a totalized
+SMT operation, while this witness profile requires the partial evaluation to
+return true. A solver verdict alone does not bridge those semantics.
 
 ## Remaining connections
 
