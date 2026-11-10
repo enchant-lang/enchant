@@ -113,6 +113,28 @@
    (is (= :invalid (:status wrong)))
    (is (some #(= false (:matches %)) (:observation-comparison wrong))))))
 
+(deftest a-repaired-final-state-cannot-erase-an-earlier-invariant-violation
+ ;; An authored SAT-shaped replay fixture, not a claimed backend observation.
+ ;; It checks the unrolled relation against concrete execution at every prefix.
+ (let [model (formal/protocol
+              {:name "transient-violation" :state {"x" t/Int}
+               :init (fn [s] (t/eq (get s "x") (t/int 0)))
+               :invariant (fn [s] (t/ge (get s "x") (t/int 0)))
+               :transitions [{:name "dip" :guard (fn [s in] (t/eq (get s "x") (t/int 0))) :next {"x" (t/int -1)}}
+                             {:name "repair" :guard (fn [s in] (t/lt (get s "x") (t/int 0))) :next {"x" (t/int 0)}}]})
+       subject (formal/protocol-trace model 2) prepared (bounded/prepare subject) trace (:trace prepared)
+       assignment (into {} (concat
+                    (mapv (fn [at] [(:data (get (nth (:states trace) at) "x")) (nth [0 -1 0] at)]) (range 3))
+                    (mapv (fn [at] [(:data (nth (:choices trace) at)) (nth [1 2] at)]) (range 2))))
+       fixture {:id (:identity subject) :scope (:scope prepared) :profile bounded/profile
+                :solver-status :sat :assignments assignment :witness {}}
+       result (formal/replay-protocol-counterexample subject fixture)]
+  (is (= :valid (:status result)) (pr-str result))
+  (is (= :valid (get-in result [:term-replay :status])))
+  (is (= {"x" -1} (get-in result [:execution :frames 1 :state])))
+  (is (= {"x" 0} (get-in result [:execution :state])))
+  (is (= :violated (get-in result [:execution :safety])))))
+
 (deftest zero-step-violations-vacuity-and-disabled-failing-bodies-are-distinct
  (let [bad-initial (formal/protocol
                    {:name "unsafe-initial" :state {"x" t/Int}
