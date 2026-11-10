@@ -1,0 +1,204 @@
+(ns formal.specialization
+ (:require [formal.identity :as identity] [formal.core :as core]))
+
+;; Independent contextual-unit/residual-ANF relation. No selected specializer,
+;; compiler, expander, ANF constructor/walker, Core lowering or solver is called.
+(def profile :bl/selected-specialization-validation-v1)
+(def limits {:bytes 4194304 :initializers 128 :parameters 16 :arguments 64
+             :nodes 65536 :depth 128 :calls 256})
+(def ^:private fields
+ #{:formal/specialization :profile :unit :target :parameters :arguments :anf :identity-profile :identity})
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.specialization: " reason) {}))))
+(defn- shape! [node operation fields]
+ (require! (and (map? node) (= operation (:op node))
+                (= (conj fields :op) (set (keys (dissoc node :ann))))) "ANF shape"))
+(defn- sequence! [values]
+ (require! (or (list? values) (vector? values)) "finite ordered operands") values)
+(defn- pattern? [pattern]
+ (and (map? pattern) (= #{:pop :name} (set (keys (dissoc pattern :ann))))
+      (= :pvar (:pop pattern)) (string? (:name pattern))))
+(defn- clause! [function]
+ (shape! function :fn #{:clauses}) (sequence! (:clauses function))
+ (require! (= 1 (count (:clauses function))) "one function clause")
+ (let [clause (first (:clauses function)) pats (:pats clause)]
+  (require! (and (= #{:pats :guard :body} (set (keys clause))) (nil? (:guard clause))
+                 (or (list? pats) (vector? pats)) (<= (count pats) (:parameters limits))
+                 (every? pattern? pats) (= (count pats) (count (set (map :name pats))))) "fixed lexical parameters")
+  clause))
+(defn- function-clause [node]
+ (cond
+  (= :fn (:op node)) {:clause (clause! node)}
+  ;; This coarse candidate is followed by exact checks of the complete knot.
+  (and (= :let (:op node)) (= :fn (get-in node [:init :op])))
+   (do (shape! node :let #{:name :init :body})
+       (let [outer (clause! (:init node)) self (:name node) knot (:body node)]
+        (require! (and (string? self) (= 1 (count (:pats outer))) (= self (:name (first (:pats outer))))) "self parameter")
+        (shape! knot :apply #{:fn :args}) (shape! (:fn knot) :var #{:name})
+        (sequence! (:args knot))
+        (require! (and (= self (:name (:fn knot))) (= 1 (count (:args knot)))) "self application")
+        (shape! (first (:args knot)) :var #{:name})
+        (require! (= self (:name (first (:args knot)))) "self argument")
+        (let [inner (clause! (:body outer))]
+         (require! (not (contains? (set (map :name (:pats inner))) self)) "self shadows parameter")
+         {:clause inner :self self})))
+  :else nil))
+(defn- arguments! [node]
+ (loop [node node args []]
+  (require! (<= (count args) (:arguments limits)) "packed argument capacity")
+  (case (:op node)
+   :enil (do (shape! node :enil #{}) args)
+   :cons (do (shape! node :cons #{:head :tail}) (recur (:tail node) (conj args (:head node))))
+   (throw (ex-info "formal.specialization: computed argument list" {})))))
+(defn claim
+ "Package the original SDK unit and proposed residual ANF. Argument aliases
+  are ordered by the target's parameter roles. Construction grants no authority."
+ [unit target parameters arguments anf]
+ (identity/seal {:formal/specialization 1 :profile profile :unit unit :target target
+                 :parameters parameters :arguments arguments :anf anf}))
+
+(defn check
+ "Validate closure elimination and eager beta expansion without regenerating
+  a residual program. This reviewed rule checker assumes SDK unit wellformedness;
+  it neither authenticates Source provenance nor admits native leaf semantics."
+ [object]
+ (try
+  (require! (and (map? object) (<= (erlang/external_size object) (:bytes limits))
+                 (= fields (set (keys object))) (= 1 (:formal/specialization object))
+                 (= profile (:profile object)) (identity/valid? object)) "identity, profile or capacity")
+  (let [unit (:unit object) parameters (:parameters object) arguments (:arguments object)
+        _ (require! (and (map? unit) (= #{:version :kind :initializers :steps :entry :exports} (set (keys unit)))
+                         (= 2 (:version unit)) (= :compiled-contextual-unit (:kind unit))) "SDK unit grammar")
+        _ (require! (and (vector? parameters) (<= (count parameters) (:parameters limits))
+                         (every? #(and (vector? %) (= 2 (count %)) (core/sort? (second %))) parameters)
+                         (= (count parameters) (count (set (map first parameters))))) "distinct typed parameter roles")
+        _ (doseq [[role sort] parameters] (core/variable role sort))
+        _ (require! (and (vector? arguments) (= (count parameters) (count arguments))
+                         (every? #(and (string? %) (pos? (erlang/byte_size %))) arguments)
+                         (= (count arguments) (count (set arguments)))) "ordered distinct input aliases")
+        _ (doseq [values [(:initializers unit) (:steps unit) (:exports unit)]] (sequence! values))
+        rows (:initializers unit) steps (:steps unit) exports (:exports unit)
+        _ (require! (and (<= 1 (count rows) (:initializers limits)) (= (count rows) (count steps))
+                         (<= (count exports) (:initializers limits))
+                         (every? #(and (map? %) (= #{:name :reference :slot :node} (set (keys %)))
+                                       (string? (:name %)) (string? (:slot %))) rows)
+                         (= (count rows) (count (set (map :reference rows))))
+                         (= (count rows) (count (set (map :slot rows))))
+                         (every? #(and (map? %) (= #{:op :reference} (set (keys %))) (= :initialize (:op %))) steps)
+                         (= (count steps) (count (set (map :reference steps))))
+                         (= (set (map :reference rows)) (set (map :reference steps)))
+                         (= (count exports) (count (set exports)))
+                         (every? #(contains? (set (map :reference rows)) %) exports)
+                         (contains? (set exports) (:target object))) "complete unique initializer schedule and selected export")
+        _ (shape! (:entry unit) :lit #{:val})
+        _ (require! (nil? (get-in unit [:entry :val])) "declaration-only unit entry")
+        indexed (into {} (map (fn [row] [(:reference row) row]) rows))
+        visits (atom 0) calls (atom 0) closures (atom 0) scalar-initializers (atom 0)
+        binders (atom (set arguments)) rules (atom {})]
+   (letfn [(tick [rule depth]
+             (require! (and (<= (swap! visits inc) (:nodes limits)) (<= depth (:depth limits))) "relation capacity")
+             (swap! rules update rule (fn [n] (inc (or n 0)))))
+           (fresh! [node]
+             (shape! node :let #{:name :init :body})
+             (let [name (:name node)]
+              (require! (and (string? name) (pos? (erlang/byte_size name)) (not (contains? @binders name))) "residual binder captures an input or another binder")
+              (swap! binders conj name) name))
+           (closure [node env path depth]
+             (if (= :var (:op node))
+              (do (shape! node :var #{:name})
+                  (let [value (get env (:name node))] (when (= :closure (:kind value)) value)))
+              (when-let [function (function-clause node)]
+               (tick :closure depth) (swap! closures inc)
+               {:kind :closure :clause (:clause function)
+                :environment (if (:self function) (assoc env (:self function) {:kind :recursive-self}) env) :path path})))
+           (call [function args residual caller path depth stack]
+             (require! (= :closure (:kind function)) "callee must be a selected lexical closure")
+             (require! (not (contains? stack (:path function))) "recursive calls need checked summaries")
+             (require! (<= (swap! calls inc) (:calls limits)) "expanded call capacity")
+             (let [clause (:clause function) pats (:pats clause)]
+              (require! (= (count pats) (count args)) "call arity")
+              (tick :eager-beta depth)
+              (loop [index 0 remaining residual captured (:environment function)]
+               (if (= index (count args))
+                (visit (:body clause) remaining captured (conj (:path function) :body) (inc depth) (conj stack (:path function)))
+                (let [name (fresh! remaining)]
+                 ;; Arguments use the CALLER environment; the body uses the
+                 ;; DEFINITION environment extended with those argument values.
+                 (visit (nth args index) (:init remaining) caller (conj path index) (inc depth) stack)
+                 (recur (inc index) (:body remaining) (assoc captured (:name (nth pats index)) {:kind :scalar :alias name})))))))
+           (ordered [nodes residuals env path depth stack]
+             (sequence! nodes) (sequence! residuals)
+             (require! (= (count nodes) (count residuals)) "ordered operand count")
+             (doseq [index (range (count nodes))]
+              (visit (nth nodes index) (nth residuals index) env (conj path index) (inc depth) stack)))
+           (visit [node residual env path depth stack]
+             (tick (:op node) depth)
+             (case (:op node)
+              :var (do (shape! node :var #{:name}) (shape! residual :var #{:name})
+                       (let [value (get env (:name node))]
+                        (require! (and (= :scalar (:kind value)) (= (:alias value) (:name residual))) "captured lexical reference mismatch")))
+              :let (do (shape! node :let #{:name :init :body})
+                       (require! (string? (:name node)) "source lexical identity")
+                       (if-let [function (closure (:init node) env (conj path :init) (inc depth))]
+                        (do (tick :eliminate-closure-let depth)
+                            (visit (:body node) residual (assoc env (:name node) function) (conj path :body) (inc depth) stack))
+                        (let [name (fresh! residual)]
+                         (visit (:init node) (:init residual) env (conj path :init) (inc depth) stack)
+                         (visit (:body node) (:body residual) (assoc env (:name node) {:kind :scalar :alias name}) (conj path :body) (inc depth) stack))))
+              :invoke (do (shape! node :invoke #{:callee :arguments})
+                          (let [function (closure (:callee node) env (conj path :callee) (inc depth))]
+                           (call function (arguments! (:arguments node)) residual env (conj path :arguments) depth stack)))
+              :apply (do (shape! node :apply #{:fn :args}) (sequence! (:args node))
+                         (require! (<= (count (:args node)) (:arguments limits)) "native application argument capacity")
+                         (call (closure (:fn node) env (conj path :fn) (inc depth)) (:args node) residual env (conj path :args) depth stack))
+              :lit (do (shape! node :lit #{:val}) (shape! residual :lit #{:val})
+                       (require! (= (:val node) (:val residual)) "literal payload changed"))
+              :if (do (shape! node :if #{:test :then :else}) (shape! residual :if #{:test :then :else})
+                      (doseq [field [:test :then :else]] (visit (get node field) (get residual field) env (conj path field) (inc depth) stack)))
+              :do (do (shape! node :do #{:stmts}) (shape! residual :do #{:stmts})
+                      (ordered (:stmts node) (:stmts residual) env (conj path :stmts) depth stack))
+              :remote (do (shape! node :remote #{:mod :fun :args}) (shape! residual :remote #{:mod :fun :args})
+                          (require! (= [(:mod node) (:fun node)] [(:mod residual) (:fun residual)]) "native leaf identity changed")
+                          (ordered (:args node) (:args residual) env (conj path :args) depth stack))
+              :arith (do (shape! node :arith #{:fun :bif :args}) (shape! residual :arith #{:fun :bif :args})
+                         (require! (= [(:fun node) (:bif node)] [(:fun residual) (:bif residual)]) "canonical arithmetic identity changed")
+                         (ordered (:args node) (:args residual) env (conj path :args) depth stack))
+              :map (do (shape! node :map #{:pairs}) (shape! residual :map #{:pairs})
+                       (sequence! (:pairs node)) (sequence! (:pairs residual))
+                       (require! (= (count (:pairs node)) (count (:pairs residual))) "record construction count")
+                       (doseq [index (range (count (:pairs node)))]
+                        (let [a (nth (:pairs node) index) b (nth (:pairs residual) index)]
+                         (require! (and (= 2 (count a)) (= 2 (count b))) "record pair shape")
+                         (ordered a b env (conj path index) depth stack))))
+              :cons (do (shape! node :cons #{:head :tail}) (shape! residual :cons #{:head :tail})
+                        (visit (:head node) (:head residual) env (conj path :head) (inc depth) stack)
+                        (visit (:tail node) (:tail residual) env (conj path :tail) (inc depth) stack))
+              :enil (do (shape! node :enil #{}) (shape! residual :enil #{}))
+              (throw (ex-info "formal.specialization: unsupported operation or escaping function" {}))))
+           (initialize [index residual env]
+             (if (= index (count steps))
+              (let [row (get indexed (:target object)) function (get env (:slot row))
+                    inputs (mapv (fn [name] {:op :var :name name}) arguments)
+                    input-env (into {} (map (fn [name] [name {:kind :scalar :alias name}]) arguments))]
+               (call function inputs residual input-env [:selected-entry] 0 #{}))
+              (let [row (get indexed (:reference (nth steps index))) path [:initializer index]
+                    function (closure (:node row) env path 0)]
+               (if function
+                (initialize (inc index) residual (assoc env (:slot row) function))
+                (let [name (fresh! residual)]
+                 (swap! scalar-initializers inc) (tick :retain-initializer 0)
+                 (visit (:node row) (:init residual) env path 0 #{})
+                 (initialize (inc index) (:body residual) (assoc env (:slot row) {:kind :scalar :alias name})))))))]
+    (initialize 0 (:anf object) {})
+    {:status :checked :profile profile :object (:identity object)
+     :unit (identity/hash unit) :target (identity/hash (:target object)) :anf (identity/hash (:anf object))
+     :scope :initialize-supplied-unit-then-call-once
+     :input-aliases (into {} (map (fn [alias parameter] [alias (first parameter)]) arguments parameters))
+     :rule-counts @rules :visited @visits :expanded-calls @calls :closure-constructions @closures
+     :retained-scalar-initializers @scalar-initializers :unit-initializers (count rows)
+     :callee-environment :definition :arguments-environment :caller :output-binders :globally-fresh
+     :unit-wellformedness :assumed-sdk-compiled-unit :source-provenance :supplied-unit-only
+     :leaf-semantics :unchanged-native-leaves-not-admitted :latent-closure-bodies :not-contracted
+     :soundness :reviewed-rule-checker :compiler-called false :specializer-called false
+     :program-evaluated false :solver-called false :compiler-proof-authority false}))
+  (catch error {:status :rejected :profile profile :reason (ex-message error) :compiler-proof-authority false})))

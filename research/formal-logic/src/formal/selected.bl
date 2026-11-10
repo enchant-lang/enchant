@@ -2,7 +2,7 @@
  (:require [expand :as expand] [system.phase :as phase] [system.ir :as ir] [anf :as anf]
            [formal.elaborate :as elaborate] [formal.core :as core] [formal.term :as t]
            [formal.identity :as identity] [formal.intrinsics :as intrinsics]
-           [formal.elaboration :as validation]))
+           [formal.elaboration :as validation] [formal.specialization :as specialization]))
 
 ;; Source owns selection/expansion/linkage. This adapter specializes its actual
 ;; lexical unit into the first-order core; it never invents binding references,
@@ -116,17 +116,23 @@
          bindings (into {} (map (fn [[arg [role sort]]] [(:name arg) (core/variable role sort)]) (map (fn [a b] [a b]) args parameters)))
          body (invoke function args 0 #{})
          body (reduce (fn [body [name initial]] (anf/lett name initial body)) body (reverse (:prefix initialized)))
+         specialization-object (specialization/claim unit target parameters (mapv :name args) body)
+         specialization-check (specialization/check specialization-object)
+         _ (require! (= :checked (:status specialization-check)) (str "independent unit/ANF validation: " (:reason specialization-check)))
          declarations (into {} parameters)
          core (core/canonicalize (elaborate/from-anf body bindings) declarations)
          typing (core/typecheck core declarations)
-         object (validation/claim body core parameters (into {} (map (fn [[alias value]] [alias (:data value)]) bindings)))
+         ;; The second gate uses aliases DERIVED BY THE FIRST CHECKER, rather
+         ;; than borrowing the elaboration producer's input-binding map.
+         object (validation/claim body core parameters (:input-aliases specialization-check))
          checked (validation/check object)]
     (require! (= :typed (:status typing)) (:reason typing))
     (require! (= :checked (:status checked)) (str "independent specialized ANF/Core validation: " (:reason checked)))
     {:core core :identity (core/identity core declarations) :typing typing :anf body
      :elaboration {:object object :check checked}
      :parameters declarations :parameter-order (mapv first parameters)
-     :specialization {:calls @calls :helper-closures (count @used) :visited @visits}}))))
+     :specialization {:calls @calls :helper-closures (count @used) :visited @visits
+                      :object specialization-object :check specialization-check}}))))
 
 (defn- build [spec]
  (inputs! spec)
@@ -165,6 +171,7 @@
    {:status :ready :definition (:identity definition) :prepared (:prepared fresh) :phase (:phase fresh)
     :closure :selected-source-and-lexical-callees :model-connection :freshly-reconstructed-core
     :ambient-equivalence :no-ambient-vars-in-selected-unit :expansion :sdk-constructor-session
+    :specialization (get-in fresh [:prepared :specialization :check])
     :transitive-runtime-closure :not-established :compiler-proof-authority false})
   (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
 (defn check [definition]

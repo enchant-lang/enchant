@@ -1,0 +1,146 @@
+(ns formal.specialization-test
+ (:require [formal.api :as formal] [formal.specialization :as validation] [formal.selected :as selected]
+           [formal.elaborate :as elaborate] [formal.elaboration :as elaboration]
+           [formal.core :as core] [formal.identity :as identity] [formal.term :as t] [system.ir :as ir] [anf :as anf]))
+
+(defn specification [text]
+ {:sources [{:namespace 'formal.specialization.demo :revision 'current :file "specialization.bl"
+             :source (str "(ns formal.specialization.demo) " text)}]
+  :entry ['formal.specialization.demo 'current] :target 'answer :parameters [["input" t/Int]]})
+(defn prepare [text]
+ (let [context (formal/selected-source-context (specification text)) prepared (selected/prepare context)]
+  (is (= :ready (:status prepared)) (pr-str prepared))
+  (:prepared prepared)))
+(defn object [prepared] (get-in prepared [:specialization :object]))
+(defn rehash [value] (identity/seal (dissoc value :identity :identity-profile)))
+(defn reject [value]
+ (let [answer (formal/check-specialization (rehash value))]
+  (is (= :rejected (:status answer)) (pr-str answer))
+  (is (= false (:compiler-proof-authority answer)))))
+(defn reference-core [object]
+ (let [declarations (into {} (:parameters object))
+       bindings (into {} (map (fn [alias [role sort]] [alias (core/variable role sort)]) (:arguments object) (:parameters object)))]
+  (core/canonicalize (elaborate/from-anf (:anf object) bindings) declarations)))
+(defn execute [object input]
+ (core/evaluate (reference-core object) (into {} (:parameters object)) {"input" input}))
+
+(deftest actual-selected-units-have-a-separate-reduction-check
+ (doseq [[text expected]
+         [["(def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))" 42]
+          ["(defn- f [x] (erlang/+ x 1)) (defn answer [x] (erlang/+ (f x) (f (f x))))" 7]
+          ["(def bias 10) (defn- helper [x] (erlang/+ bias x)) (defn answer [a] (let [bias 100 f (fn [y] (erlang/+ a y))] (erlang/+ (helper a) (f bias))))" 114]
+          ["(defn- helper [x] (erlang/+ x 40)) (def other-helper helper) (defn answer [x] (other-helper x))" 42]
+          ["(defn answer [x] (if (erlang/> x 0) (erlang/+ x 1) (erlang/- x 1)))" 3]]]
+  (let [p (prepare text) o (object p) answer (formal/check-specialization o)]
+   (is (= :checked (:status answer)) (pr-str answer))
+   (is (= expected (:value (execute o 2))))
+   (is (= (:input-aliases answer) (get-in p [:elaboration :object :aliases])))
+   (is (= :checked (get-in p [:elaboration :check :status])))
+   (is (= :definition (:callee-environment answer)))
+   (is (= :caller (:arguments-environment answer)))
+   (is (= :assumed-sdk-compiled-unit (:unit-wellformedness answer)))
+   (is (= :supplied-unit-only (:source-provenance answer)))
+   (is (= false (:program-evaluated answer)))
+   (is (= false (:specializer-called answer)))
+   (is (= false (:compiler-called answer)))
+   (is (= false (:solver-called answer))))))
+
+(deftest a-consistent-anf-core-pair-can-still-have-the-wrong-captured-environment
+ (let [p (prepare "(def bias 40) (defn- helper [x] (erlang/+ bias x)) (defn answer [x] (let [bias 100] (helper x)))")
+       o (object p) captured (:name (:anf o))
+       shadow (:name (first (filter #(and (= :let (:op %)) (= :lit (get-in % [:init :op])) (= 100 (get-in % [:init :val])))
+                             (tree-seq ir/node? ir/child-nodes (:anf o)))))
+       _ (is (string? shadow))
+       changed (assoc o :anf (ir/rewrite (fn [node]
+                               (if (and (= :var (:op node)) (= captured (:name node))) (assoc node :name shadow) node)) (:anf o)))
+       wrong-core (reference-core changed)
+       second-gate (elaboration/claim (:anf changed) wrong-core (:parameters changed)
+                    (get-in p [:elaboration :object :aliases]))]
+  (is (= 42 (:value (execute o 2))))
+  (is (= 102 (:value (execute changed 2))))
+  (is (= :checked (:status (formal/check-elaboration second-gate))))
+  ;; The previous gate correctly validates this residual/Core pair. Only the
+  ;; new original-unit/residual relation can reject the earlier capture error.
+  (reject changed)))
+
+(deftest eager-call-arguments-cannot-be-swapped-or-dropped
+ (let [p (prepare "(defn answer [x] (let [f (fn [a b] (erlang/- a b))] (f (erlang/- x 1) (erlang/+ x 2))))")
+       o (object p) first-arg (get-in o [:anf :body :init]) second-arg (get-in o [:anf :body :body :init])
+       changed (-> o (assoc-in [:anf :body :init] second-arg) (assoc-in [:anf :body :body :init] first-arg))]
+  (is (= -3 (:value (execute o 7))))
+  (is (= 3 (:value (execute changed 7))))
+  (reject changed))
+ (let [o (object (prepare "(defn answer [x] (let [ignore (fn [unused] 7)] (ignore (erlang/div x 0))))"))
+       changed (update-in o [:anf :body] :body)]
+  (is (= :zero-divisor (:error (execute o 7))))
+  (is (= 7 (:value (execute changed 7))))
+  (reject changed)))
+
+(deftest every-scalar-initializer-is-retained-once-in-order
+ (let [p (prepare "(def hidden (erlang/div 1 0)) (defn answer [x] x)") o (object p)]
+  (is (= 1 (get-in p [:specialization :check :retained-scalar-initializers])))
+  (is (= :zero-divisor (:error (execute o 7))))
+  (reject (update o :anf :body)))
+ (let [o (object (prepare "(def a (erlang/- 10 1)) (def b (erlang/- 20 2)) (defn answer [x] (erlang/+ a b))"))
+       a (get-in o [:anf :init]) b (get-in o [:anf :body :init])]
+  (is (= 27 (:value (execute o 7))))
+  (reject (-> o (assoc-in [:anf :init] b) (assoc-in [:anf :body :init] a)))
+  (reject (update-in o [:unit :steps] #(vec (reverse %))))))
+
+(deftest alpha-renaming-is-allowed-but-residual-capture-is-refused
+ (let [o (object (prepare "(def bias 40) (defn answer [x] (let [y (erlang/+ x 1)] (erlang/+ bias y)))"))
+       rename #(str "reviewed/" %)
+       changed (-> o (update :arguments #(mapv rename %))
+                    (update :anf #(ir/rewrite (fn [node] (if (contains? #{:let :var} (:op node)) (update node :name rename) node)) %)))
+       answer (formal/check-specialization (rehash changed))]
+  (is (= :checked (:status answer)) (pr-str answer))
+  (is (= (reference-core o) (reference-core changed)))
+  (is (= 48 (:value (execute changed 7))))
+  (reject (assoc-in o [:anf :name] (first (:arguments o))))
+  (reject (assoc-in o [:anf :body :name] (:name (:anf o)))))))
+
+(deftest unit-schedules-targets-entry-and-knot-shapes-are-not-claims-of-authority
+ (let [o (object (prepare "(defn other [x] 99) (defn answer [x] 42)"))
+       other (first (remove #(= (:target o) %) (get-in o [:unit :exports])))]
+  (is (some? other))
+  (reject (assoc o :target other))
+  (doseq [changed [(assoc-in o [:unit :entry] (anf/lit 1))
+                  (update-in o [:unit :steps] #(vec (drop 1 %)))
+                  (update-in o [:unit :steps] #(conj (vec %) (first %)))
+                  (assoc-in o [:unit :exports] [])
+                  (assoc-in o [:unit :version] 3)
+                  (assoc o :status :checked)
+                  (assoc o :arguments ["same" "same"])
+                  (assoc o :profile :unqualified)
+                  (update-in o [:unit :initializers]
+                    (fn [rows] (mapv #(assoc-in % [:node :body :args] [(anf/var "not-self")]) rows)))]]
+   (reject changed)))
+ (is (= :rejected (:status (formal/check-specialization {:status :checked})))))
+
+(deftest map-field-order-and-repeated-updates-survive-specialization
+ (let [p (prepare "(defn- bump [r] (Elixir.BeamLisp.Ns.Rt/assoc r \"n\" 1 \"n\" 2)) (defn answer [x] {\"a\" (bump {\"n\" x}) \"b\" x})")
+       o (object p)]
+  (is (= {"a" {"n" 2} "b" 7} (:value (execute o 7))))
+  (reject (update o :anf #(ir/rewrite (fn [node] (if (= :map (:op node)) (update node :pairs (fn [pairs] (vec (reverse pairs)))) node)) %)))
+  (reject (update o :anf #(ir/rewrite (fn [node] (if (and (= :remote (:op node)) (= :assoc_variadic (:fun node)))
+                                                (assoc node :fun :assoc) node)) %)))))
+
+(deftest latent-bodies-are-not-executed-or-contracted
+ (erlang/erase :formal-specialization-latent)
+ (let [p (prepare "(defn- latent [x] (erlang/put :formal-specialization-latent x)) (defn answer [x] x)")]
+  (is (= :not-contracted (get-in p [:specialization :check :latent-closure-bodies])))
+  (is (= :undefined (erlang/get :formal-specialization-latent)))
+  (is (= 7 (:value (execute (object p) 7))))))
+
+(deftest contracts-expose-two-checked-relations-beside-the-term-proof
+ (let [context (formal/selected-source-context (specification "(def bias 40) (defn answer [x] (erlang/+ bias x))"))
+       definition (formal/program-contract {:name "two-source-relations" :context context
+                    :ensures (fn [in out] (t/eq out (t/add (get in "input") (t/int 40))))})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine} definition)]
+    (is (= :checked (:status answer)))
+    (is (= :checked (get-in answer [:proof :status])))
+    (is (= :checked (get-in answer [:evidence :connection :specialization :status])))
+    (is (= :checked (get-in answer [:evidence :connection :elaboration :status])))
+    (is (= :reviewed-context-linking-not-mechanically-proved (:source-connection answer)))
+    (is (= false (get-in answer [:evidence :authority :compiler])))))))
