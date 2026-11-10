@@ -1,6 +1,7 @@
 (ns formal.elaborate
  (:require [compiler :as compiler] [system.ir :as ir] [formal.core :as core] [formal.term :as t]
-           [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs]))
+           [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs]
+           [formal.elaboration :as validation]))
 
 ;; This consumes the real resolved ANF. It is a reviewed front end into the
 ;; specified core, not a second evaluator for the surface language.
@@ -129,7 +130,8 @@
 
 (defn prepare
  "Elaborate one BL expression through compiler ANF into the typed pure core.
-  Input declarations are Bool/Int or closed records; no application code is evaluated."
+  Input declarations are Bool/Int or closed records. Runtime application code
+  is not executed; macro expansion can execute compiler-phase code."
  [source declarations]
  (try
   (let [forms (BeamLisp.Reader/read_string source)
@@ -139,11 +141,16 @@
         anf (compiler/compile (first forms) (:environment inputs))
         bindings (:bindings inputs)
         raw (from-anf anf bindings) expression (core/canonicalize raw declarations)
-        typing (core/typecheck expression declarations)]
+        typing (core/typecheck expression declarations)
+        object (validation/claim anf expression (mapv (fn [name] [name (get declarations name)]) (sort (keys declarations)))
+                 (into {} (map (fn [[alias value]] [alias (:data value)]) bindings)) :declared)
+        checked (validation/check object)
+        _ (when-not (= :checked (:status checked)) (refuse (str "independent ANF/Core validation: " (:reason checked)) anf))]
    (if (= :typed (:status typing))
     {:status :elaborated :core expression :identity (core/identity expression declarations)
      :typing typing :source source :anf anf :profile (:profile typing)
-     :basis :compiler-anf :assurance :reviewed-elaboration :metatheory :not-mechanized}
+     :elaboration {:object object :check checked}
+     :basis :compiler-anf :assurance :checked-anf-core-relation :metatheory :not-mechanized}
     {:status :unsupported :reason (:reason typing) :source source :basis :compiler-anf}))
   (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))
 
@@ -164,9 +171,13 @@
         bindings (into {} (map-indexed (fn [i pattern]
                             [(:name pattern) (core/variable (first (nth parameters i)) (second (nth parameters i)))]) patterns))
         body (core/canonicalize (from-anf (:body clause) bindings) declarations)
-        typing (core/typecheck body declarations)]
+        typing (core/typecheck body declarations)
+        object (validation/function-claim anf body parameters :declared)
+        checked (validation/check object)]
    (when-not (= :typed (:status typing)) (refuse (:reason typing) anf))
+   (when-not (= :checked (:status checked)) (refuse (str "independent ANF/Core validation: " (:reason checked)) anf))
    {:status :elaborated :core body :identity (core/identity body declarations) :typing typing
+    :elaboration {:object object :check checked}
     :parameters declarations :parameter-order (mapv first parameters) :anf anf :profile (:profile typing)}))
 
 (defn prepare-function-anf

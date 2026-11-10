@@ -1,0 +1,134 @@
+(ns formal.elaboration-test
+ (:require [formal.elaboration :as validation] [formal.elaborate :as producer]
+           [formal.core :as core] [formal.term :as t] [formal.identity :as identity]
+           [formal.api :as formal] [formal.contract :as contracts] [formal.selected :as selected] [formal.context :as contexts]
+           [compiler :as compiler] [anf :as anf]))
+
+(defn checked [prepared]
+ (is (= :elaborated (:status prepared)) (pr-str prepared))
+ (let [object (get-in prepared [:elaboration :object]) answer (formal/check-elaboration object)]
+  (is (= :checked (:status answer)) (pr-str answer))
+  (is (= (:identity object) (:object answer)))
+  (is (= false (:elaborator-called answer)))
+  (is (= false (:solver-called answer)))
+  (is (= false (:program-evaluated answer)))
+  (is (= false (:compiler-proof-authority answer)))
+  object))
+(defn reject [object]
+ (let [answer (formal/check-elaboration (identity/seal (dissoc object :identity :identity-profile))) ]
+  (is (= :rejected (:status answer)) (pr-str answer))
+  (is (= false (:compiler-proof-authority answer)))))
+(defn expression [text declarations] (checked (producer/prepare text declarations)))
+
+(deftest actual-scalar-compiler-output-is-checked-without-producing-it-again
+ (doseq [source ["(+ x y)" "(- x y)" "(* x y)" "(- x)" "(< x y)" "(<= x y)" "(> x y)" "(>= x y)"
+                 "(= x y)" "(== x y)" "(quot x y)" "(rem x y)" "(mod x y)" "(inc x)" "(dec x)"
+                 "(pos? x)" "(neg? x)" "(zero? x)" "(not x)"
+                 "(let [z (+ x 1)] (* z y))" "(if x y 10)" "(if (quot x y) 1 2)" "(do (quot x y) x)"
+                 "(erlang/div x y)" "(erlang/rem x y)" "(BeamLisp.Num/neg x)" "(BeamLisp.Ns.Rt/eqv x y)"]]
+  (expression source {"x" t/Int "y" t/Int}))
+ (doseq [source ["(if flag 1 2)" "(not flag)" "(erlang/not flag)" "(= flag true)" "(do flag false)"]]
+  (expression source {"flag" t/Bool})))
+
+(deftest record-relation-retains-ordered-construction-updates-and-eager-defaults
+ (doseq [source ["{\"n\" x \"flag\" true}" "(get {\"n\" x \"flag\" true} \"n\")"
+                 "(get {\"n\" x} \"n\" (quot x 0))" "(get {\"n\" x} \"missing\" (+ x 1))"
+                 "(assoc {\"n\" x \"flag\" true} \"n\" 2 \"n\" 3)"
+                 "(get (assoc {\"n\" x \"flag\" true} \"n\" 2 \"flag\" false) \"n\")"
+                 "(if {\"n\" (quot x 0)} 1 2)" "(= {\"n\" x} {\"n\" 2})"]]
+  (expression source {"x" t/Int}))
+ (let [sort (core/record-sort {"n" t/Int "flag" t/Bool})]
+  (doseq [source ["(get record \"n\")" "(assoc record \"flag\" false)" "(if record 1 2)"]]
+   (expression source {"record" sort}))))
+
+(deftest function-input-map-is-reconstructed-from-the-actual-scaffold
+ (doseq [role ["local_3" "#core/local1" "#anf/local1" "formal/input/0" "state/n"]]
+  (let [p (compiler/with-fresh-names #(producer/prepare-function "(fn [a] (let [local 10] (erlang/+ a local)))" [[role t/Int]]))
+        object (checked p)]
+   (is (nil? (:aliases object)))
+   (is (= 17 (:value (core/evaluate (:core object) {role t/Int} {role 7}))))
+   (reject (assoc object :aliases {"a_2" role}))
+   (reject (assoc-in object [:anf :body :args] [(anf/var "not-self")]))
+   (reject (assoc-in object [:anf :init :clauses 0 :guard] (anf/lit true))))))
+
+(deftest the-previous-capture-passes-typing-but-fails-the-independent-relation
+ (let [node (anf/lett "local_3" (anf/lit 10)
+              (anf/remote :erlang :+ [(anf/var "a_2") (anf/var "local_3")]))
+       captured (core/let-in "local_3" (core/literal 10)
+                  (core/operation :add [(core/variable "local_3" t/Int) (core/variable "local_3" t/Int)]))
+       claim (validation/claim node captured [["local_3" t/Int]] {"a_2" "local_3"})]
+  (is (= :typed (:status (core/typecheck captured {"local_3" t/Int}))))
+  (is (= 20 (:value (core/evaluate captured {"local_3" t/Int} {"local_3" 7}))))
+  (reject claim)
+  (let [correct (core/let-in "fresh" (core/literal 10)
+                 (core/operation :add [(core/variable "local_3" t/Int) (core/variable "fresh" t/Int)]))]
+   (is (= :checked (:status (validation/check (validation/claim node correct [["local_3" t/Int]] {"a_2" "local_3"}))))))))
+
+(deftest a-valid-identity-does-not-authorize-altered-semantics
+ (let [object (expression "(erlang/- x y)" {"x" t/Int "y" t/Int})]
+  (doseq [changed [(assoc-in object [:core :op] :add)
+                  (update-in object [:core :args] #(vec (reverse %)))
+                  (assoc-in object [:anf :fun] :+)
+                  (assoc-in object [:anf :mod] :unreviewed)
+                  (assoc-in object [:anf :args] [(anf/global "formal.core.intrinsics" "x") (second (get-in object [:anf :args]))])
+                  (assoc object :aliases {"formal/input/0" "y" "formal/input/1" "x"})
+                  (assoc object :aliases {"formal/input/0" "x"})
+                  (assoc object :status :checked)]]
+   (reject changed)))
+ (let [object (expression "(if flag 1 2)" {"flag" t/Bool})]
+  (reject (update-in object [:core :args] (fn [args] [(first args) (nth args 2) (second args)]))))
+ (let [object (expression "(if (quot x 0) 1 2)" {"x" t/Int})]
+  (reject (assoc-in object [:core :args 0] (core/literal true))))
+ (let [object (expression "(get {\"n\" x} \"n\" (quot x 0))" {"x" t/Int})]
+  (reject (update-in object [:core :args] #(vec (take 1 %)))))
+ (let [object (expression "(assoc {\"n\" x} \"n\" 1 \"n\" 2)" {"x" t/Int})]
+  (reject (update-in object [:core :args] (fn [args] [(first args) (nth args 2) (second args)])))))
+
+(deftest canonical-arithmetic-and-native-division-have-exact-identities
+ (let [model (core/operation :add [(core/literal 2) (core/literal 3)])
+       good (validation/claim (anf/arith :add :+ [(anf/lit 2) (anf/lit 3)]) model [] {})]
+  (is (= :checked (:status (validation/check good))))
+  (reject (assoc-in good [:anf :bif] :*)))
+ (let [model (core/operation :quot [(core/literal 7) (core/literal 2)])]
+  (doseq [[module function] [[:Elixir.BeamLisp.Num :div] [:erlang :quot] [:foreign :div]]]
+   (reject (validation/claim (anf/remote module function [(anf/lit 7) (anf/lit 2)]) model [] {})))))
+
+(deftest declaration-policy-and-closed-runtime-calls-remain-distinct
+ (let [object (expression "(assoc {\"n\" x} \"n\" 1 \"n\" 2)" {"x" t/Int})
+       answer (validation/check object)]
+  (is (= #{:ambient-record-var-must-match-declaration} (:assumptions answer)))
+  (reject (assoc object :record-vars :forbid)))
+ (let [definition (formal/source-context "(fn [s] (assoc s \"n\" 1 \"n\" 2))" [["s" (core/record-sort {"n" t/Int})]])
+       p (:prepared (contexts/prepare definition))]
+  (checked p)
+  (is (= #{} (get-in p [:elaboration :check :assumptions])))))
+
+(deftest selected-source-exposes-checked-final-elaboration-without-claiming-specialization
+ (let [context (formal/selected-source-context
+                {:sources [{:namespace 'formal.elaboration.selected :revision 'current :file "checked.bl"
+                            :source "(ns formal.elaboration.selected) (def base 10) (defn helper [x] (erlang/+ x base)) (defn answer [a] (helper a))"}]
+                 :entry ['formal.elaboration.selected 'current] :target 'answer :parameters [["local_3" t/Int]]})
+       p (:prepared (selected/prepare context)) object (checked p)
+       definition (formal/program-contract {:name "checked-selected" :context context
+                    :ensures (fn [in out] (t/eq out (t/add (get in "local_3") (t/int 10))))})
+       result (formal/check definition)]
+  (is (= :checked (:status result)))
+  (is (= :checked (get-in result [:elaboration :status])))
+  (is (= :not-established (get-in result [:elaboration :selected-specialization])))
+  (is (= :not-established (get-in result [:evidence :connection :elaboration :source-to-anf])))
+  (is (= false (get-in result [:evidence :authority :compiler])))
+  (reject (assoc-in object [:core :args 1 :args 1 :op] :sub)))))
+
+(deftest malformed-unbounded-or-forged-pairs-are-refused
+ (let [object (validation/claim (anf/lit 1) (core/literal 1) [] {})]
+  (is (= :checked (:status (validation/check object))))
+  (doseq [changed [(assoc object :profile :invented) (assoc object :parameters [["x" t/Int] ["x" t/Int]])
+                  (assoc object :record-vars :implicit) (assoc object :input :trusted)
+                  (assoc-in object [:anf :extra] (anf/remote :erlang :halt []))
+                  (assoc-in object [:core :sort] t/Bool)
+                  (assoc object :anf (anf/global "formal.core.intrinsics" "x"))]]
+   (reject changed))
+  (is (= :rejected (:status (validation/check (assoc object :identity "forged")))))
+  (is (= :rejected (:status (validation/check {:status :checked})))))
+ (let [deep (reduce (fn [body _] (anf/doo [body])) (anf/lit 1) (range 130))]
+  (is (= :rejected (:status (validation/check (validation/claim deep (core/literal 1) [] {}))))))))
