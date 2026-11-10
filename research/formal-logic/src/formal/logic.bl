@@ -16,10 +16,24 @@
        watched (into {} (map (fn [i] [(nth (:watched rows) i)
                                       (get values (str "watch/" i) (replay/unavailable :missing-observation))])
                               (range (count (:watched rows)))))
-       resolver (fn [term] (get watched term (replay/value term assignments)))
+       resolved (into {} (map (fn [[term native]]
+                    (let [derived (when (replay/unavailable? native) (replay/value term assignments))
+                          replayed? (and (replay/unavailable? native) (not (replay/unavailable? derived)))]
+                     [term {:value (if replayed? derived native)
+                            :source (cond replayed? :independent-replay (replay/unavailable? native) :unavailable :else :backend)
+                            :native-availability (if (replay/unavailable? native) :unavailable :concrete)
+                            :native-reason (when (replay/unavailable? native) (:formal/unavailable native))}])) watched))
+       resolver (fn [term] (if (contains? resolved term) (get-in resolved [term :value]) (replay/value term assignments)))
        witness (into {} (map (fn [[name descriptor]]
-                      [name (if (v/value? descriptor) (v/decode descriptor resolver) (resolver descriptor))]) (:observe problem)))]
-  {:assignments assignments :witness witness :validation (replay/validate assertions assignments)}))
+                      [name (if (v/value? descriptor) (v/decode descriptor resolver) (resolver descriptor))]) (:observe problem)))
+       provenance (into {} (map (fn [[name descriptor]]
+                     [name {:terms (mapv (fn [term]
+                                    (assoc (select-keys (get resolved term) [:source :native-availability :native-reason])
+                                           :term (t/digest [term]))) (v/terms descriptor))}]) (:observe problem)))]
+  ;; Display fallback never participates in the assertion-validation decision.
+  ;; Native model status remains in base-result; every replayed field is labelled.
+  {:assignments assignments :witness witness :witness-provenance provenance
+   :validation (replay/validate assertions assignments)}))
 
 (defn- base-result [problem reply]
  {:id (:id problem) :profile (:profile problem) :profiles (:profiles problem)
