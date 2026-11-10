@@ -14,7 +14,7 @@ The experiment gives Beam Lisp a common language of typed terms. Z3 and OxiZ can
 
 #+begin_stats
 187 | shared questions | language values, native theories and machine arithmetic
-795 | passing assertions | seven focused files on a pinned SDK
+795 | initial prototype assertions | historical seven-file qualification on the pinned SDK
 2 | native backends | one portable BL question
 46 | interface families | implemented fragments and future directions
 #+end_stats
@@ -84,6 +84,17 @@ The mathematical core model now has a mechanically checked foundation too. Pinne
 Local binding names are now canonical: recompiling the same source no longer changes a contract identity just because the compiler picked fresh temporary names. The follow-up core/contract/API run passed 3,302 assertions.
 
 Read [[file:metatheory/README.md][the exact mechanized scope]], [[file:metatheory/Core.lean][the checked model and proofs]], [[file:evidence/metatheory/qualification.json][the proof receipt]], and [[file:evidence/contracts/identity-checks.txt][the identity follow-up log]].
+
+** Ordinary loops, with an unbounded argument
+The next implementation accepts an ordinary BL =loop/recur= expression through the real compiler's ANF. A contract supplies a precondition, invariant, integer ranking vector and result condition. The tool checks initialization, normal evaluation on each reachable path, invariant preservation, strict rank decrease and the exit result. One decreasing counter handles a countdown; a lexicographic pair handles an inner counter that resets when an outer counter decreases.
+
+These are symbolic arguments with no iteration bound. The separate reference executor has resource ceilings and reports incomplete work when it reaches one. A bad invariant or rank yields =obligation-refuted=: its countermodel may be unreachable in the actual execution. That does not establish nontermination of the program.
+
+The focused loop/core/contract/API run passed 3,404 assertions, including 102 loop assertions. Six examples ran on both native backends with the expected results: three checked model arguments, a growing-loop rank failure, a loose invariant with an unreachable countermodel, and inconsistent inputs. An unused failing branch can carry an explicit inconsistency certificate. An author's =decreasing= assertion cannot replace a checked argument.
+
+The Lean model now has twenty checked theorems. The original eighteen retain empty axiom dependency lists. The two nonnegative integer ranking proofs use Lean's standard =propext=, =Classical.choice= and =Quot.sound= assumptions, which are listed in the receipt and returned rule metadata. The correspondence between the BL implementation and that mathematical model remains reviewed and unproved.
+
+See [[file:LOOPS.md][the loop interface and its exact meaning]], [[file:evidence/loops/checks.txt][the focused checks]], [[file:evidence/loops/examples.json][the actual definitions, proof objects and backend observations]], and [[file:evidence/loops/model-qualification.json][the twenty-theorem model and axiom ledger]].
 
 * Try the language ideas
 A total solver array has an entry at every index. A BL map can have no entry at all. That small difference is why the language layer matters.
@@ -593,6 +604,29 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-program-contract
 : {:assumption-consistency :not-checked, :compiler-proof-authority false, :meaning "The withdrawal result is nonnegative under its stated precondition.", :source-connection :reviewed-not-mechanically-proved, :contract :checked}
 
+
+#+begin_src beam-lisp :id story-loop-argument
+(def countdown-contract
+ (formal/loop-contract
+  {:name "dossier-countdown" :parameters {"n" t/Int}
+   :source "(loop [i n acc 0] (if (> i 0) (recur (- i 1) (+ acc 1)) acc))"
+   :requires (fn [in] (t/ge (get in "n") (t/int 0)))
+   :invariant (fn [in state]
+                (t/all [(t/ge (get state "i") (t/int 0))
+                        (t/eq (t/add (get state "i") (get state "acc")) (get in "n"))]))
+   :rank (fn [in state] [(get state "i")])
+   :ensures (fn [in state result] (t/eq result (get in "n")))}))
+(def countdown-argument (formal/verify-loop countdown-contract))
+(assert (= :checked (:status countdown-argument)))
+(assert (= :checked-obligations
+           (:status (formal/check-loop-proof countdown-contract (:proof countdown-argument)))))
+{:loop-model (:status countdown-argument)
+ :scope (:scope countdown-argument)
+ :ranking-dimension (get-in countdown-argument [:checking :ranking-rule :dimension])
+ :iteration-bound-in-proof :none
+ :source-connection (:source-connection countdown-argument)
+ :compiler-proof-authority (:compiler-proof-authority countdown-argument)}
+#+end_src
 
 * Watch the evidence
 The gallery below records the November 9 design review. The newer implementation receipts linked above separately record the checker, core, contracts and mathematical model proofs.

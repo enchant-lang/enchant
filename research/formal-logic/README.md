@@ -54,6 +54,15 @@ prove the BL implementation, canonicalizer, ANF bridge or compiler correct;
 [the metatheory notes](metatheory/README.md) state the boundary. Canonical lexical
 identities also passed a 3,302-assertion core/contract/API follow-up.
 
+[LOOPS.md](LOOPS.md) adds ordinary source `loop/recur` contracts with invariants,
+scalar or lexicographic integer ranks and exit conditions. Proof objects carry
+certificates for every obligation, including unreachable-path justifications.
+The focused loop/core/contract/API run passed 3,404 assertions, and six examples
+have retained Z3/OxiZ observations. A failed template is `obligation-refuted`,
+which does not establish divergence of the actual program. The twenty-theorem
+Lean model exposes the extra standard axiom dependencies of its integer rules;
+compiler/model connections remain unproved.
+
 The canonical source remains [ATLAS.bl.org](ATLAS.bl.org). Owner feedback saves
 into that file explicitly; anonymous readers cannot write. The live host is
 owned by this integration session. Use `research/formal-logic/review url` to

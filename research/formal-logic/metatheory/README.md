@@ -43,3 +43,10 @@ hash. This separate proof tool does not replace or rebuild the pinned BL SDK.
 The actual proof log and compiled artifact are retained in
 `../evidence/metatheory/`; axiom reports are the tool's output, not hand-written
 claims about an unchecked file.
+
+The loop extension adds nonnegative integer scalar and pair ranking rules.
+Their current proofs depend on `propext`, `Classical.choice` and `Quot.sound`
+through the library's integer-to-natural comparison lemma. The initial eighteen
+theorems retain their empty axiom audits. The twenty-theorem compiled artifact,
+log and individual axiom lists are retained separately in `../evidence/loops/`;
+the initial eighteen-theorem receipt remains historical evidence.
