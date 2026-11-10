@@ -112,3 +112,18 @@ reset loop, growing/nondecreasing counterexamples, selective failure paths and
 ignored author assertions. Native counterexamples should expose input, current
 and next state with per-field observation provenance. No bounded execution count
 may substitute for a ranking proof or for compiler admission authority.
+
+## Evidence facade follow-up
+
+As program and loop subjects mature, make the public facade dispatch on explicit
+query/contract/loop data tags. Keep a common result envelope for the logical
+verdict, conditional certificate status, assumption feasibility, source/model
+assurance, counterexample provenance and compiler admission. Preserve existing
+query fields deliberately while adding the richer subjects; do not silently
+equate a solver proof label with a checked source theorem.
+
+Expose native solver-proof availability separately from portable certificate
+checking capabilities. In comparisons, a reference engine is a comparison role,
+not compiler proof authority. The old experimental `:authority :z3` label needs
+this semantic cleanup when the common evidence facade lands; production oracle
+defaults remain a separate, qualified migration.
