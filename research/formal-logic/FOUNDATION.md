@@ -150,3 +150,33 @@ independent translation gate cannot check the whole result. Native model replay
 and concrete execution remain distinct evidence. `TRANSLATION.md` specifies the
 gate and versioned normalizers. Qualification is retained under
 `evidence/translation`; this is not a production compiler pass.
+
+## Next slice: checked state and protocol invariants
+
+The existing `formal.transition` already constructs portable machines, bounded
+traces and initiation/preservation questions. Extend that model with a checked
+aggregate subject rather than introducing a second transition engine. A new
+boundary must reconstruct every obligation from a validated closed definition;
+cached `defined`, `within`, next-state constraints or authored proof labels
+cannot replace their derivation. Validate free identities, schemas, guard and
+update sorts, every transition and the exact profile/scope. Keep assignments
+simultaneous and the distinction between a false guard and a raising guard.
+
+Start with Bool/Int state, finite named message/transition variants and pure
+term updates. Independently check initiation, normal successful evaluation and
+invariant preservation for every transition. Prove the general finite-trace
+induction rule in the Lean model, while retaining the unproved connection to
+the BL obligation generator. Initial feasibility remains separate; a failed
+induction template yields an obligation countermodel, not an actual execution
+trace. Bounded exploration should provide independently replayed model traces
+and keep model capacity separate from language failure.
+
+This first protocol slice specifies a state machine, not live BEAM actor
+correctness. Actor integration needs a deliberate observation boundary: send
+and receive events, message identity, per-sender ordering, selective receive,
+mailbox capacity assumptions, crashes and external effects. A handler that
+terminates, a service that keeps responding, and a process that eventually
+finishes are different properties. Safety should hold for all permitted
+schedules; eventual-delivery and response claims must name their fairness and
+failure assumptions. Do not turn a bounded mailbox or a finite trace into an
+unbounded actor guarantee.
