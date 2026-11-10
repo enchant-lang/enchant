@@ -1,0 +1,122 @@
+(ns formal.certificate-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.certificate :as c]
+           [formal.proof :as proof] [formal.api :as formal] [formal.evaluate :as ev]
+           [formal.source :as source]))
+
+(def x (t/variable "proof.x" t/Int))
+(def y (t/variable "proof.y" t/Int))
+(def p (t/variable "proof.p" t/Bool))
+(def r (t/variable "proof.r" t/Bool))
+(defn obligation [claim assumptions]
+ (q/prove claim {:assumptions assumptions :profile :bl/integer-proof-test-v1
+                 :scope {:mode :exact :integers :unbounded}}))
+(defn checked? [problem] (= :checked (:status (proof/produce problem))))
+(defn object [problem] (:certificate (proof/produce problem)))
+
+(deftest proof-objects-are-portable-and-bound-to-the-whole-statement
+ (let [problem (obligation (t/ge y (t/int 3)) [(t/ge x (t/int 0)) (t/ge y (t/add x (t/int 3)))])
+       result (formal/certify problem) certificate (:certificate result)
+       roundtrip (erlang/binary_to_term (erlang/term_to_binary certificate))]
+  (is (= :checked (:status result)) (pr-str result))
+  (is (= :checked (:status (formal/check-certificate problem roundtrip))))
+  (is (= :entails (get-in result [:checking :verdict])))
+  (is (= :not-established (get-in result [:checking :feasibility])))
+  (is (= :not-established (get-in result [:checking :source-connection])))
+  (is (= 2 (count (get-in result [:checking :assumptions]))))
+  (doseq [different [(assoc problem :profile :different-language)
+                    (assoc problem :scope {:mode :bounded :integers [0 5]})
+                    (assoc problem :claim (t/ge y (t/int 4)))
+                    (assoc problem :assertions [])
+                    (assoc problem :relation :different-observations)
+                    (assoc-in problem [:assertions 0 :label] "another premise")]]
+   (is (= :rejected (:status (c/check different certificate)))))
+  ;; An observed solver build is provenance, not a logical premise.
+  (is (= :checked (:status (c/check problem (assoc certificate :producer {:backend :another-engine}))))))))
+
+(deftest integer-discreteness-and-negative-floor-rounding-are-checked
+ (is (checked? (obligation (t/gt (t/add x (t/int 1)) x) [])))
+ (is (checked? (obligation (t/ge x (t/int 1)) [(t/gt x (t/int 0))])))
+ (is (checked? (obligation (t/le x (t/int -1)) [(t/le (t/mul (t/int 2) x) (t/int -1))])))
+ (is (checked? (obligation (t/not (t/eq (t/mul (t/int 2) x) (t/int 1))) [])))
+ (is (checked? (obligation (t/eq (t/mul (t/int -3) x) (t/neg (t/add x (t/add x x)))) [])))
+ (is (checked? (obligation (t/ge (t/add (t/mul (t/int 2) x) y) (t/int 7))
+                          [(t/ge x (t/int 2)) (t/ge y (t/int 3))]))))
+
+(deftest all-supported-boolean-forms-retain-their-truth-tables
+ (doseq [claim [(t/implies (t/all [p r]) p)
+                (t/eq (t/not (t/all [p r])) (t/any [(t/not p) (t/not r)]))
+                (t/eq (t/app :xor t/Bool [p r] nil) (t/not (t/eq p r)))
+                (t/eq (t/ite p r (t/not r)) (t/eq p r))
+                (t/eq (t/any []) (t/bool false))
+                (t/eq (t/all []) (t/bool true))]]
+  (is (checked? (obligation claim [])) (pr-str claim)))
+ (is (checked? (obligation r [(t/implies p r) p])))
+ (is (checked? (obligation (t/ge x (t/int 0)) [(t/any [(t/ge x (t/int 3)) (t/eq x (t/int 0))])]))))
+
+(deftest vacuous-entailment-is-never-reported-as-assumption-feasibility
+ (let [result (proof/produce (obligation (t/bool false) [(t/bool false)]))]
+  (is (= :checked (:status result)))
+  (is (= :not-established (get-in result [:checking :feasibility])))
+  (is (= :entails (get-in result [:checking :verdict])))))
+
+(deftest invalid-proof-rules-cannot-manufacture-a-theorem
+ (let [problem (obligation p []) prepared (c/prepare problem)
+       base {:formal/certificate 1 :rules c/rules :statement (:statement prepared)}
+       invalid [{:rule :boolean}
+                {:rule :unknown}
+                {:rule :linear :weights [[0 1]]}
+                {:rule :split :atom 0 :yes {:rule :boolean}}
+                {:rule :split :atom 90 :yes {:rule :boolean} :no {:rule :boolean}}
+                {:rule :split :atom 0 :yes {:rule :split :atom 0 :yes {:rule :boolean} :no {:rule :boolean}}
+                  :no {:rule :boolean}}]]
+  (doseq [bad invalid] (is (= :rejected (:status (c/check problem (assoc base :proof bad)))))))
+ (let [problem (obligation (t/gt x (t/int 0)) []) prepared (c/prepare problem)
+       base {:formal/certificate 1 :rules c/rules :statement (:statement prepared)}]
+  (doseq [weights [[] [[0 -1]] [[0 0]] [[0 0.5]] [[0 nil]] [[0 (erlang/bsl 1 4096)]] [[0 1]] [[99 1]]]]
+   (is (= :rejected (:status (c/check problem
+      (assoc base :proof {:rule :split :atom 0 :yes {:rule :boolean} :no {:rule :linear :weights weights}})))))))
+ (let [problem (obligation (t/bool true) []) cert (object problem)]
+  (is (= :rejected (:status (c/check problem (assoc cert :rules :imaginary-rules)))))
+  (is (= :rejected (:status (c/check problem (assoc cert :formal/certificate 2)))))
+  (is (= :rejected (:status (c/check (assoc problem :claim (assoc (t/bool true) :sort t/Int)) cert)))))
+  (is (= :rejected (:status (c/check (assoc problem :claim (assoc (t/bool true) :data 1)) cert)))))))
+
+(deftest unsuccessful-search-is-not-a-proof-or-a-counterexample
+ (doseq [problem [(obligation p []) (obligation (t/gt x (t/int 0)) [])
+                  (obligation (t/le x (t/int 0)) [(t/le x (t/int 1))])]]
+  (is (= :unknown (:status (proof/produce problem)))))
+ (is (= :unknown (:status (proof/produce (obligation (t/eq p p) []) {:nodes 1}))))
+ (is (= :unsupported (:status (proof/produce (obligation (t/bool true) []) {:rows 0}))))
+ (doseq [claim [(t/eq (t/mul x x) (t/int 1))
+                (t/eq (t/div x (t/int 2)) (t/int 0))
+                (t/eq (t/text "a") (t/text "a"))
+                (t/eq (t/real 1 2) (t/real 1 2))]]
+  (is (= :unsupported (:status (proof/produce (obligation claim []))))))
+ (is (= :rejected (:status (c/check (q/sat {}) {})))))
+
+(deftest accepted-theorems-survive-independent-small-integer-observations
+ ;; This is a counterexample-finding cross-check of the checker, not a proof
+ ;; of its soundness. The replay evaluator does not participate in checking.
+ (doseq [a [-3 -1 0 1 2] b [-2 0 3] threshold [-3 0 2]]
+  (let [expression (t/add (t/mul (t/int a) x) (t/int b))
+        premise (t/le expression (t/int threshold))
+        claims [(t/le expression (t/int (inc threshold)))
+                (t/gt expression (t/int threshold))]
+        assignments (mapv (fn [n] {"proof.x" n}) (range -4 5))]
+   (doseq [claim claims]
+    (let [problem (obligation claim [premise]) result (proof/produce problem)]
+     (when (= :checked (:status result))
+      (doseq [assignment assignments]
+       (is (or (= false (ev/value premise assignment)) (= true (ev/value claim assignment)))
+           (pr-str {:a a :b b :threshold threshold :assignment assignment :claim claim})))))))))
+
+(deftest a-real-anf-contract-can-request-checked-term-evidence
+ (let [translated (source/prepare "(>= (+ x 1) 1)" {"x" x})
+       problem (q/prove (:value translated) {:assumptions [(t/ge x (t/int 0))]
+                                             :profile (:profile translated) :origin {:source (:source translated)}})
+       result (formal/certify problem)]
+  (is (= :translated (:status translated)))
+  (is (= :checked (:status result)) (pr-str result))
+  ;; Connecting ANF to terms is still reviewed implementation, not a theorem
+  ;; about the real compiler or the source program's runtime behavior.
+  (is (= :not-established (get-in result [:checking :source-connection])))))
