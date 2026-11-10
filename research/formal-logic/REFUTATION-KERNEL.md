@@ -113,11 +113,13 @@ are rejected there. Schema, identity and generated-source tampering are checked
 separately. `refutation_kernel_test.py` runs these checks sequentially under one
 resource cap.
 
-The next valuable theorem connects **original typed term semantics** to the
-normalized problem. It should establish that a satisfying assignment for the
-assertions and negated claim induces a satisfying assignment for the exported
-atoms/formulas. Combined with this kernel theorem, that would justify the
-conditional original term claim. The connection needs explicit variable
-layouts, gcd floor tightening, integer complements, choice expansion, and the
-v3 ground arithmetic rules. Source/Core interpretation and compiler preservation
-remain later, separately named connections.
+The following [original-term checkpoint](TERM-REFUTATION.md) now checks
+countermodel preservation for each accepted original question. It retains the
+original typed trees, proves that a failed or undefined claim under the original
+assertions would satisfy this normalized problem, and applies the sound checker
+theorem. This establishes conditional entailment in the contained typed partial
+term model. It is per-question validation, not a general correctness theorem
+for the BL normalizer's variable layouts, gcd floor tightening, integer
+complements, choice expansion and ground arithmetic. The term-data encoding,
+Source/Core interpretation and compiler preservation retain separately named
+connections.

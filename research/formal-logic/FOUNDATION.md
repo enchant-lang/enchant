@@ -207,6 +207,19 @@ itself mechanically verified and does not certify all SMT theories.
   The coherent 29-file run passed 8,504 assertions, including 108 new export
   checks; all 187 native question verdicts remain unchanged.
 
+- Original typed term entailment: `Terms.lean` defines partial Int/Bool term
+  values and the countermodel-preservation composition rule, with 14 audited
+  general results. The external runner proves that premise for each accepted
+  original question tree, then applies the normalized refutation theorem.
+  Seventeen real BL exports have checked universal original-term entailments;
+  five rehashed false or undefined original claims/assumption changes are
+  rejected despite unchanged accepted normalized refutations. This closes the
+  original-to-normalized premise for those questions in the contained typed
+  model. The data/semantic encoding remains reviewed; it is not a general BL
+  normalizer, term-evaluator implementation or Source/compiler proof.
+  `TERM-REFUTATION.md` specifies partial arithmetic, guarded proof search,
+  original erased inputs, provenance reconstruction and the separate pure API.
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

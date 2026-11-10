@@ -31,6 +31,13 @@ Term normalization, encoding, BL checker correspondence and Source/compiler
 connections remain separate reviewed bridges. Existing solver and compiler
 authority policies are unchanged.
 
+[TERM-REFUTATION.md](TERM-REFUTATION.md) carries checked refutations back to the
+contained original Int/Bool term trees. Each accepted packet has a Lean-checked
+countermodel-preservation proof and a universal conditional entailment theorem.
+Undefined arithmetic stays explicit. These are per-question proofs, with a
+reviewed term-data/semantic encoding; a general BL normalizer theorem and
+Source/compiler preservation remain separate work.
+
 [SELECTED-SOURCE.md](SELECTED-SOURCE.md) adds contexts for actual named Source
 functions. The SDK selects exact revisions, private helpers, captured values
 and hygienic macro bindings; a bounded specializer brings that lexical program

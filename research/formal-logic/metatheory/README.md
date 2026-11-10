@@ -1,5 +1,13 @@
 # A mechanically checked model, with an explicit bridge boundary
 
+[Terms.lean](Terms.lean) adds a typed partial Int/Bool term model and a composition
+rule for original-term entailment through checked countermodel preservation.
+Generated proofs establish that premise for actual original question trees,
+then apply the normalized checker theorem. [The term interface](../TERM-REFUTATION.md)
+states the explicit undefined arithmetic, per-question proof scope, independently
+decoded data and remaining BL implementation/Source connections. Its 14 general
+results and the actual applied proofs are audited separately from Core semantics.
+
 [Refutation.lean](Refutation.lean) is now a second, executable proof-checking
 artifact. Seventeen audited lemmas/theorems establish that every accepted
 normalized Boolean/linear-integer refutation excludes all models of its input.
