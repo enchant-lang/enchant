@@ -21,6 +21,7 @@ try{
   await call({op:'viewport',...size});await navigate('/#s-the-big-idea');await wait("!!document.querySelector('#s-the-big-idea')");
   const top=await evaluate("({title:document.title,w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth,failed:document.querySelectorAll('.cell.failed,.ms-errors,.review-errors,.cl-errors,.lt-errors').length})");
   check(size.name+': readable page width',top.sw<=top.w+2,top);check(size.name+': no failed cells or declarations',top.failed===0,top);
+  check(size.name+': model proofs retain their implementation boundary',await evaluate("document.body.innerText.includes('18 theorems')&&document.body.innerText.includes('not that the BL implementation or compiler faithfully implements it')"));
   await shot(size.name+'-introduction');
   await navigate('/#s-could-beam-lisp-be-fully-formal');
   check(size.name+': full formality discussion present',await evaluate("document.body.innerText.includes('Can it still feel like a Lisp?')&&document.body.innerText.includes('Self-hosting a checker in BL does not verify')&&document.body.innerText.includes('first executable fragment')"));
@@ -114,6 +115,13 @@ try{
  check('Catalog comes from three annotated renderer definitions',record.length===1&&record[0].qualified==='formal.presentation/comparison-card'&&record[0].source.endsWith('presentation.bl'));
  check('Unknown preview routes refuse explicitly',(await fetch(base+'/views?view=missing')).status===404);
  check('Anonymous answer writes are denied',(await fetch(base+'/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'formal-total-core-direction',answer:'agree'})})).status===403);
+ for(const path of ['/metatheory/Core.lean','/evidence/metatheory/qualification.json','/evidence/contracts/qualification.json','/src/formal/certificate.bl']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared source/evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/sdk-pin.json','/metatheory/tool-pin.json','/evidence/metatheory/Core.olean']){
+  check('Undeclared or binary project file stays unavailable: '+path,(await fetch(base+path)).status===404);
+ }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
