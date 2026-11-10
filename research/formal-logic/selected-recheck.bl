@@ -26,19 +26,17 @@
 ;; session, including for the two refuted contracts' independent core replay.
 (def info (erlang/fun_info backend/with-session))
 (def pattern (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity)))
-(def parent (erlang/self))
-(def ticket (erlang/make_ref))
-(def tracer
- (spawn (fn [] (loop [calls 0]
+(defn barrier []
+ (let [delivered (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen delivered) :ok (after 5000 (throw :trace-deadline)))))
+(defn inspect-records []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       tracer (spawn (fn [] (loop [calls 0]
                (receive
                 [:trace _ :call _] (recur (inc calls))
                 [:reset seen] :when (= seen ticket) (do (erlang/send parent [:calibrated ticket calls]) (recur 0))
                 [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket calls])
-                _ (recur calls))))))
-(defn barrier []
- (let [delivered (erlang/trace_delivered :all)]
-  (receive [:trace_delivered :all seen] :when (= seen delivered) :ok (after 5000 (throw :trace-deadline)))))
-(def result
+                _ (recur calls)))))]
  (try
   (assert (pos? (erlang/trace_pattern pattern true (list :local))))
   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
@@ -67,7 +65,8 @@
   (finally
    (erlang/trace :all false (list :call :set_on_spawn))
    (erlang/trace_pattern pattern false (list :local))
-   (when (Process/alive? tracer) (erlang/exit tracer :kill)))))
+   (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def result (inspect-records))
 (def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "selected-fresh-replay.json"))
 (File/mkdir_p! (Path/dirname output))
 (File/write! output (interop/->json
