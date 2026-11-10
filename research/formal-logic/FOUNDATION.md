@@ -119,20 +119,21 @@ ignored author assertions. Native counterexamples should expose input, current
 and next state with per-field observation provenance. No bounded execution count
 may substitute for a ranking proof or for compiler admission authority.
 
-## Evidence facade follow-up
+## Common evidence facade
 
-As program and loop subjects mature, make the public facade dispatch on explicit
-query/contract/loop data tags. Keep a common result envelope for the logical
+The public `formal/check`, `formal/compare` and `formal/describe` functions now
+dispatch on explicit query/contract/loop/translation data tags. They keep a common result envelope for the logical
 verdict, conditional certificate status, assumption feasibility, source/model
 assurance, counterexample provenance and compiler admission. Preserve existing
 query fields deliberately while adding the richer subjects; do not silently
 equate a solver proof label with a checked source theorem.
 
-Expose native solver-proof availability separately from portable certificate
-checking capabilities. In comparisons, a reference engine is a comparison role,
-not compiler proof authority. The old experimental `:authority :z3` label needs
-this semantic cleanup when the common evidence facade lands; production oracle
-defaults remain a separate, qualified migration.
+Capabilities expose native solver-proof availability separately from portable
+certificate checking. A comparison identifies Z3 as its reference engine and
+reports authority as none. This replaces the misleading experimental
+`:authority :z3` label; production oracle defaults remain a separate, qualified
+migration. The evidence projection in `formal.result` does not perform checking
+or fill in missing proof, model, feasibility or source assurance.
 
 ## Translation validation and optimizer candidates
 

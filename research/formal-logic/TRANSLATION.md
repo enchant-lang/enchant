@@ -28,6 +28,16 @@ feasibility and counterexamples too. Native UNSAT alone is `uncertified`, never
 an accepted translation. Contradictory inputs are `vacuous`. Both remain
 distinct from a checked conditional comparison with unknown input feasibility.
 
+The common facade also accepts this subject through `(formal/check change)`,
+`(formal/check {:backend :oxiz} change)`, `(formal/compare change)` and
+`(formal/describe change)`. The same functions accept term queries, program
+contracts and loop contracts. Original result fields remain available; the
+additional `:evidence` map keeps the claim, certificate, assumption ledger,
+feasibility, source connection, native observations and authority separate.
+Z3 is a comparison reference engine, and the comparison explicitly has no
+compiler proof authority. Native UNSAT and portable checked evidence are
+different fields even when both backends agree.
+
 Native counterexamples get two checks: independent term replay, then concrete
 execution of both core programs. OxiZ sometimes leaves unused inputs opaque.
 The second check can complete an absent Bool with false or an absent Int with
