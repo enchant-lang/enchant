@@ -1,0 +1,83 @@
+(ns formal.witness-test
+ (:require [formal.api :as formal] [formal.term :as t] [formal.query :as q] [formal.identity :as identity]
+           [formal.witness-examples :as examples] [formal.logic :as logic] [formal.backend :as backend]))
+
+(deftest concrete-witnesses-preserve-original-trees-and-names
+ (doseq [row examples/rows]
+  (let [question (:question row) made (formal/term-witness question (:bindings row)) packet (:packet made)]
+   (is (= :ready (:status made)) (pr-str [(:id row) made]))
+   (is (identity/valid? packet))
+   (is (= :valid (get-in made [:validation :status])))
+   (is (= (mapv :term (:assertions question)) (:assertions packet)))
+   (is (= (identity/hash question) (:question packet)))
+   (is (= :checked-data-connection (:status (formal/check-term-witness-data question packet))))
+   (is (= :not-run (:kernel-execution made)))
+   (is (= false (:compiler-proof-authority made))))))
+
+(deftest explicit-empty-is-a-witness-and-missing-data-is-not
+ (let [question (q/sat {})]
+  (is (= :ready (:status (formal/term-witness question {}))))
+  (is (= :ready (:status (formal/term-witness question []))))
+  (is (= :rejected (:status (formal/term-witness question nil)))))
+ (is (= :rejected (:status (formal/term-witness (q/prove (t/bool true)) {})))))
+
+(deftest no-implicit-bindings-or-kind-confusion
+ (let [x examples/x p examples/p question (q/sat {:assumptions [(t/eq x (t/int 7)) p]})]
+  (doseq [bindings [nil {} [] [[x 7]] [[x 7] [p true] [x 7]] [[x 7] [p 1]] [[x true] [p true]]
+                   [[(t/variable "witness.x" t/Bool) true] [p true]]
+                   [[(t/add x (t/int 0)) 7] [p true]]
+                   {"witness.x" 7 "witness.p" true "extra" 0}
+                   {"witness.x" 7.0 "witness.p" true}]]
+   (is (= :rejected (:status (formal/term-witness question bindings))) (pr-str bindings)))
+  (is (= :ready (:status (formal/term-witness question {"witness.x" 7 "witness.p" true}))))
+  (is (= :ready (:status (formal/term-witness question [[p true] [x 7]]))))))
+
+(deftest false-and-undefined-assertions-cannot-be-witnessed
+ (doseq [[assertion bindings] [[(t/bool false) {}]
+                               [examples/dead [[examples/x 3]]]
+                               [(t/eq (t/ite examples/p (t/div examples/x (t/int 0)) examples/x) examples/x)
+                                [[examples/p true] [examples/x 3]]]
+                               [(t/eq (t/mul examples/x examples/y) (t/int 42)) [[examples/x 5] [examples/y 7]]]]]
+  (is (= :rejected (:status (formal/term-witness (q/sat {:assumptions [assertion]}) bindings))))))
+
+(deftest an-independent-semantic-profile-rejects-unrepresented-trees-even-in-dead-arms
+ (doseq [term [(t/eq (t/real 1 2) (t/real 1 2))
+               (t/eq (t/app :add t/Int [examples/x (t/int 1)] "payload") examples/x)]]
+  (let [answer (formal/term-witness (q/sat {:assumptions [(t/implies (t/bool false) term)]}) {})]
+   (is (= :unsupported (:status answer)))
+   (is (= :original-term-outside-partial-int-bool-model (:reason answer))))))
+
+(deftest resealing-does-not-restore-the-full-query-connection
+ (let [question (q/sat {:assumptions [(t/eq examples/x (t/int 7))]})
+       packet (:packet (formal/term-witness question [[examples/x 7]]))]
+  (doseq [altered [(assoc packet :assertions []) (assoc packet :question (apply str (repeat 64 "0")))
+                  (assoc packet :mode :prove) (assoc packet :completion :implicit)
+                  (assoc packet :extra true) (assoc-in packet [:bindings 0 2] 8)
+                  (assoc-in packet [:bindings 0 1] t/Bool) (update packet :bindings conj (first (:bindings packet)))]]
+   (is (= :rejected (:status (formal/check-term-witness-data question (identity/seal altered))))))
+  (is (= :rejected (:status (formal/check-term-witness-data (assoc question :observe {"new" examples/x}) packet))))
+  (is (= :rejected (:status (formal/check-term-witness-data (assoc question :counterexample (q/assertion "hidden" (t/bool false))) packet)))))))
+
+(deftest both-backends-contribute-replayed-assignments-through-one-interface
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (doseq [row (filter #(contains? examples/native-ids (:id %)) examples/rows)]
+     (let [question (:question row) answer (logic/solve-in session question)
+           made (formal/term-witness-from-result question answer)]
+      (is (= :sat (:solver-status answer)))
+      (is (= :ready (:status made)) (pr-str made))
+      (is (= engine (get-in made [:discovery :backend])))
+      (is (= :checked-data-connection (:status (formal/check-term-witness-data question (:packet made)))))
+      (is (= (:packet made) (:packet (formal/term-witness-from-result question (assoc answer :witness {"invented" false}
+                                                                                                          :validation {:status :invalid}))))))))))))
+
+(deftest native-origin-does-not-grant-witness-truth
+ (let [question (q/sat {:assumptions [(t/eq examples/x (t/int 7))]})
+       base {:backend :oxiz :mode :sat :phase :query :solver-status :sat :assignments {"witness.x" 7}}]
+  (is (= :ready (:status (formal/term-witness-from-result question base))))
+  (is (= :rejected (:status (formal/term-witness-from-result question (assoc base :assignments {"witness.x" 8}))))
+  (is (= :rejected (:status (formal/term-witness-from-result question (assoc base :solver-status :unknown)))))
+  (is (= :rejected (:status (formal/term-witness-from-result question (assoc base :assignments {})))))
+  ;; Unavailable observation-only data never completes or constrains assertions.
+  (is (= :ready (:status (formal/term-witness-from-result question (assoc-in base [:assignments "watcher"] {:formal/unavailable :not-needed})))))))

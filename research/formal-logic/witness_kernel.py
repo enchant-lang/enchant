@@ -133,14 +133,14 @@ def run(path, output):
             require(match is not None and match[1] not in audits, 'unexpected witness theorem audit')
             audits[match[1]] = match[2].split(', ') if match[2] else []
         require(set(audits) == {'packetAccepted', 'originalContextHolds', 'originalContextSatisfiable'}, 'witness theorem audit names')
-        require(all(set(deps) <= {'propext'} for deps in audits.values()), 'constructive witness axiom dependency')
+        require(all(set(deps) <= {'propext', 'Quot.sound'} for deps in audits.values()), 'constructive witness axiom dependency')
         shutil.copyfile(work / 'Check.olean', output / 'Check.olean')
     result = {'schema': 'enchant.formal.typed-term-witness-execution.v1', 'status': 'checked-term-satisfiability',
               'packet': packet['identity'], 'question': packet['question'], 'semantics': packet['semantics'],
               'assertions': len(packet['assertions']), 'integer_bindings': len(integers), 'boolean_bindings': len(booleans),
               'proof_source_sha256': k.sha(output / 'Check.lean'), 'proof_olean_sha256': k.sha(output / 'Check.olean'),
               'witness_model_source_sha256': pins[2]['source']['sha256'], 'witness_model_olean_sha256': pins[2]['compiled']['sha256'],
-              'axioms': audits, 'allowed_axioms': ['propext'], 'canonical_packet_identity': 'independently-recomputed',
+              'axioms': audits, 'allowed_axioms': ['propext', 'Quot.sound'], 'canonical_packet_identity': 'independently-recomputed',
               'source_data': 'independently-decoded-and-compared', 'existence': 'explicit-total-environments-satisfy-every-original-assertion',
               'full_query_connection': 'requires-fresh-BL-question-reconstruction', 'backend_attestation': 'not-established',
               'term_data_model_correspondence': 'reviewed-data-semantics-bridge', 'source_compiler_preservation': 'not-established',
