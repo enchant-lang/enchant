@@ -151,6 +151,22 @@ try{
   await evaluate("document.querySelector('#cell-story-positive-witness').scrollIntoView({block:'center'})");
   await shot(size.name+'-positive-data');
   await navigate('/#s-the-model-running');
+  await navigate('/#give-the-proof-a-real-starting-point');
+  check(size.name+': mixed evidence chapter names an actual countdown input',await evaluate("document.body.innerText.includes('The binding n = 3 supplies one such input')&&document.body.innerText.includes('A witness and an open proof obligation')"));
+  await click('[data-graph="formal-witnessed-obligations"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="apply"]');
+  check(size.name+': mixed proof panel shows the applied theorem scope',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-witnessed-obligations\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('applies the imported universal entailment')&&text.includes('contained typed term question')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Give the proof a real starting point')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-witnessed-obligations');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-witnessed-obligations\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-witnessed-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const mixed=await evaluate("document.querySelector('#cell-story-witnessed-obligations')?.innerText||''");
+  check(size.name+': mixed countdown cell has all required claims and one initial witness',mixed.includes(':initial-value 3')&&mixed.includes(':initial-evidence :witness-ready')&&mixed.includes(':required-claims 8')&&mixed.includes(':ready-claims 8'));
+  check(size.name+': only the matching countdown entailment uses the witness',mixed.includes(':matching-entailments ["obligation/initial/normal"]')&&mixed.includes(':data-connection :checked-data-connection')&&mixed.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-witnessed-obligations').scrollIntoView({block:'center'})");
+  await shot(size.name+'-witnessed-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -323,6 +339,17 @@ try{
  check('Six changed false or undefined assignments retain Lean rejection',witnessRejected.length===6&&witnessRejected.every(r=>r.status==='rejected-by-lean'));
  check('Trusted constructive witness archive stays unavailable to the browser',(await fetch(base+'/evidence/witnesses/examples/witnesses.etf')).status===404);
  check('Compiled constructive witness model stays unavailable to the browser',(await fetch(base+'/evidence/witnesses/Witness.olean')).status===404);
+ for(const path of ['/test/mixed_obligation_test.bl','/evidence/mixed-obligations/examples/summary.json','/evidence/mixed-obligations/execution/results.json','/evidence/mixed-obligations/execution/named-layout/instances/0002/Instance.lean','/evidence/mixed-obligations/execution/loop/instances/0002/Instance.lean','/evidence/mixed-obligations/fresh/obligations-fresh.json','/evidence/mixed-obligations/bridge-check.txt','/evidence/mixed-obligations/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared mixed obligation evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const mixedResults=await fetch(base+'/evidence/mixed-obligations/execution/results.json').then(response=>response.json());
+ const bySubject=Object.fromEntries(mixedResults.map(row=>[row.id,row]));
+ check('The mixed report separates feasibility from proof coverage',mixedResults.length===17&&bySubject.unknown.positive_feasibility==='satisfiable-in-contained-typed-term-model'&&!bySubject.unknown.coverage.complete&&bySubject.vacuous.coverage.complete&&bySubject.vacuous.initial_assumption_consistency==='inconsistent-in-contained-typed-term-model');
+ check('Both engines supplied the same checked direct SAT packet',bySubject.sat.checked[0].packet===bySubject['sat-z3'].checked[0].packet&&bySubject.sat.coverage.witnesses===1&&bySubject['sat-z3'].coverage.witnesses===1&&!bySubject['sat-no-witness'].coverage.complete);
+ check('Eleven witnessed entailments have an applied Lean theorem',mixedResults.flatMap(row=>row.checked_instances).length===11&&bySubject.loop.checked_instances.length===1&&bySubject.loop.checked_instances[0].label==='obligation/initial/normal'&&mixedResults.every(row=>row.model_theorem==='not-established-by-this-runner'&&row.compiler_proof_authority===false));
+ check('Trusted mixed bundle archive stays unavailable to the browser',(await fetch(base+'/evidence/mixed-obligations/examples/archives/loop.etf')).status===404);
+ check('Compiled mixed instance stays unavailable to the browser',(await fetch(base+'/evidence/mixed-obligations/execution/loop/instances/0002/Instance.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
