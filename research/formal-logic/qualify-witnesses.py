@@ -99,7 +99,7 @@ result = {'schema': 'enchant.formal.constructive-witness-qualification.v1', 'che
           'shared_query_boundary': 'native-certificate-obligation-and-witness-counterexample-consistency',
           'remaining_trust': ['term-data/typed-semantics correspondence and codec', 'model-to-question interpretation and composition',
                               'Source elaboration/specialization correspondence', 'BL compiler and BEAM runtime', 'local execution custody'],
-          'retained_failed_attempts': 'Static assertion delimiters, xor constructor spelling and actual native backend metadata adaptation; excluded from accepted evidence.',
+          'retained_failed_attempts': 'Static assertion delimiters, xor constructor spelling, actual backend metadata adaptation, and a whole-query serialization limit reached by a previously accepted shared relation graph. The corrected shared validator preserves the DAG boundary; failed attempts are excluded from accepted evidence.',
           'production_default_changed': False, 'compiler_proof_authority': False, 'artifact_sha256': artifacts}
 (E / 'qualification.json').write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps({'assertions': sum(counts.values()), 'files': len(counts), 'existence_proofs': 32, 'semantic_rejections': 6, 'unchanged_native_questions': 187}))
