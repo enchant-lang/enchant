@@ -44,9 +44,25 @@ def agrees (actual : Outcome τ) (ok : Option Bool) (value : Option (Value τ))
     (if test then yes else no).bind next = (if test then yes.bind next else no.bind next) := by
   by_cases branch : test <;> simp [branch]
 
-@[simp] theorem select_known (condition : Bool) (yes no : Option α) :
-    (match some condition with | some true => yes | some false => no | none => none) =
-      (if condition then yes else no) := by cases condition <;> rfl
+def selectOption (condition : Option Bool) (yes no : Option α) : Option α :=
+  match condition with
+  | some flag => if flag then yes else no
+  | none => none
+
+@[simp] theorem select_some (condition : Bool) (yes no : Option α) :
+    selectOption (some condition) yes no = (if condition then yes else no) := rfl
+
+@[simp] theorem select_none (yes no : Option α) : selectOption none yes no = none := rfl
+
+@[simp] theorem select_values (test : Prop) [Decidable test] (yes no : α) :
+    (if test then some yes else some no) = some (if test then yes else no) := by
+  by_cases branch : test <;> simp [branch]
+
+theorem eval_choice (condition : Term .boolean) (yes no : Term sort) (i : Nat → Int) (b : Nat → Bool) :
+    (Term.ite condition yes no).eval i b = selectOption (condition.eval i b) (yes.eval i b) (no.eval i b) := by
+  cases evaluated : condition.eval i b with
+  | none => simp [Term.eval, evaluated]
+  | some flag => cases flag <;> simp [Term.eval, evaluated]
 
 abbrev intLit {context : List BeamLispCore.Ty} (value : Int) : Expr context .int := .literal value
 abbrev boolLit {context : List BeamLispCore.Ty} (value : Bool) : Expr context .bool := .literal value
@@ -132,7 +148,10 @@ theorem apply_mod (a b : Int) : IntOp.apply .mod a b =
 #print axioms agrees_raised
 #print axioms agrees_choice
 #print axioms bind_choice
-#print axioms select_known
+#print axioms select_some
+#print axioms select_none
+#print axioms select_values
+#print axioms eval_choice
 #print axioms quotient_value
 #print axioms remainder_value
 #print axioms modulus_value

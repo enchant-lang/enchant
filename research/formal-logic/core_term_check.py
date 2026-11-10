@@ -359,12 +359,17 @@ theorem coreTermCorrespondence : ∀ (i : Nat → Int) (b : Nat → Bool),
       (symbolicOK.eval i b) (symbolicValue.eval i b) (symbolicError.eval i b) (errorCode errorCodes) := by
   intro i b
   simp [originalProgram, originalInputs, symbolicOK, symbolicValue, symbolicError, errorCodes,
-    BeamLispCore.eval, Env.lookup, Outcome.bind, Payload.eval, Term.eval, strict₂, partial₂,
+    BeamLispCore.eval, Env.lookup, Outcome.bind, Payload.eval, eval_choice,
+    Term.eval.eq_1, Term.eval.eq_2, Term.eval.eq_3, Term.eval.eq_4, Term.eval.eq_5,
+    Term.eval.eq_6, Term.eval.eq_7, Term.eval.eq_8, Term.eval.eq_9, Term.eval.eq_10,
+    Term.eval.eq_11, Term.eval.eq_12, Term.eval.eq_13, Term.eval.eq_14, Term.eval.eq_15,
+    Term.eval.eq_16, Term.eval.eq_17, Term.eval.eq_18, Term.eval.eq_19, strict₂, partial₂,
     apply_quot, apply_rem, apply_mod, Comparison.apply, BoolOp.apply, valueEq]
   all_goals try simp [IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName]
   all_goals repeat' (split <;> simp_all [IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
+  all_goals try dsimp (config := { instances := true }) only [FormalTerms.Ty.Value, BeamLispCore.Value] at *
   all_goals first | rfl | decide | omega
 
 theorem errorCatalogueRoundTrip : errorCodes.all (fun code => errorCode errorCodes (errorName code) == Int.ofNat code) = true := by decide
