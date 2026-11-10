@@ -8,7 +8,7 @@ inductive Ty where
   | int | bool
   deriving DecidableEq
 
-def Value : Ty → Type
+abbrev Value : Ty → Type
   | .int => Int
   | .bool => Bool
 
@@ -25,7 +25,7 @@ inductive Env : List Ty → Type where
 
 def Env.lookup : Env Γ → Var Γ τ → Value τ
   | .cons v _, .zero => v
-  | .cons _ env, .succ variable => env.lookup variable
+  | .cons _ env, .succ index => env.lookup index
 
 inductive Outcome (τ : Ty) where
   | returned : Value τ → Outcome τ
@@ -93,7 +93,7 @@ inductive Expr : List Ty → Ty → Type where
    unchecked recursive definition, or host evaluator inside its semantics. -/
 def eval : Expr Γ τ → Env Γ → Outcome τ
   | .literal value, _ => .returned value
-  | .variable variable, env => .returned (env.lookup variable)
+  | .variable index, env => .returned (env.lookup index)
   | .bind initial body, env =>
     (eval initial env).bind fun value => eval body (.cons value env)
   | .cond condition yes no, env =>
@@ -119,8 +119,8 @@ theorem no_stuck_typed_outcome (expression : Expr Γ τ) (env : Env Γ) :
     (∃ value : Value τ, eval expression env = .returned value) ∨
     (∃ reason : String, eval expression env = .raised reason) := by
   cases h : eval expression env with
-  | returned value => exact Or.inl ⟨value, h⟩
-  | raised reason => exact Or.inr ⟨reason, h⟩
+  | returned value => exact Or.inl ⟨value, rfl⟩
+  | raised reason => exact Or.inr ⟨reason, rfl⟩
 
 theorem deterministic (expression : Expr Γ τ) (env : Env Γ)
     (h₁ : eval expression env = first) (h₂ : eval expression env = second) :
@@ -168,8 +168,8 @@ theorem natural_rank_accessible {State : Type} (rank : State → Nat)
     ∀ state, Acc (fun next current => step current next) state := by
   have all : ∀ n, ∀ state, rank state = n → Acc (fun next current => step current next) state := by
     intro n
-    induction n using Nat.strong_induction_on with
-    | h n ih =>
+    induction n using Nat.strongRecOn with
+    | ind n ih =>
       intro state hstate
       refine Acc.intro state ?_
       intro next hstep
