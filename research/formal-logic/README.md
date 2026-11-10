@@ -39,6 +39,14 @@ elaboration. Its focused file passed 3,194 assertions. Core equivalence includes
 the error identity as well as successful values. The source/core and core/term
 connections remain reviewed implementations with unmechanized metatheory.
 
+[CONTRACTS.md](CONTRACTS.md) exposes `formal/program-contract` and
+`formal/verify-contract`: closed program definitions with preconditions,
+postconditions and exact permitted failures, conditional certificates, checked
+inconsistency evidence and optional native feasibility/counterexamples. The
+integrated ten-file run passed 4,575 assertions. Derived scalar observations can
+use labelled replay when OxiZ leaves a compound value opaque; native model
+availability and certificate authority remain separate.
+
 The canonical source remains [ATLAS.bl.org](ATLAS.bl.org). Owner feedback saves
 into that file explicitly; anonymous readers cannot write. The live host is
 owned by this integration session. Use `research/formal-logic/review url` to
