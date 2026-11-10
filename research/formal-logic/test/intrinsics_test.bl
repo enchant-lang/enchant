@@ -1,6 +1,7 @@
 (ns formal.intrinsics-test
  (:require [formal.elaborate :as elaborate] [formal.intrinsics :as intrinsics]
-           [formal.core :as core] [formal.term :as t] [formal.api :as formal]))
+           [formal.core :as core] [formal.term :as t] [formal.api :as formal]
+           [formal.source-protocol :as source]))
 
 (def declarations {"x" t/Int "y" t/Int})
 (def assignment {"x" 7 "y" 2})
@@ -48,7 +49,19 @@
          (formal/source-protocol
           {:name "not-integer-division" :state {"n" t/Int}
            :handlers [{:name "step" :source "(fn [s msg] (assoc s \"n\" (BeamLisp.Num/div (get s \"n\") 2)))"}]})
-         :admitted (catch _ :refused)))))
+         :admitted (catch _ :refused))))
+ (let [base (formal/source-protocol
+              {:name "historical-quotient-model" :state {"n" t/Int}
+               :handlers [{:name "step" :source "(fn [s msg] (assoc s \"n\" (erlang/div (get s \"n\") 2)))"}]})
+       historical (assoc-in base [:handlers 0 :source]
+                     "(fn [s msg] (assoc s \"n\" (BeamLisp.Num/div (get s \"n\") 2)))")
+       historical (assoc historical :identity
+                    (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc historical :identity)))
+                                   (list (tuple :case :lower))))]
+  ;; This old source/core pairing was admitted by the previous implementation.
+  ;; Fresh preparation refuses it before any old proof can be considered.
+  (is (= :unsupported (:status (source/prepare historical))))
+  (is (= :rejected (:status (formal/check-source-protocol-proof historical nil))))))
 
 (deftest inconsistent-canonical-arithmetic-and-unresolved-globals-are-refused
  (doseq [node [{:op :arith :fun :add :bif :* :args [{:op :lit :val 2} {:op :lit :val 3}]}
