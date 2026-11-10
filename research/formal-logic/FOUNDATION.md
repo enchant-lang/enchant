@@ -204,6 +204,8 @@ itself mechanically verified and does not certify all SMT theories.
   data encoding, BL checker correspondence and Source/compiler bridges remain
   reviewed, with no new production compiler authority. See
   `REFUTATION-KERNEL.md` for the executable interface and exact proof scope.
+  The coherent 29-file run passed 8,504 assertions, including 108 new export
+  checks; all 187 native question verdicts remain unchanged.
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
