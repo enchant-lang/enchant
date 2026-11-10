@@ -38,6 +38,14 @@ Undefined arithmetic stays explicit. These are per-question proofs, with a
 reviewed term-data/semantic encoding; a general BL normalizer theorem and
 Source/compiler preservation remain separate work.
 
+[OBLIGATIONS.md](OBLIGATIONS.md) gives all seven formal subject kinds one closed
+plan and proof-data interface. Required properties, unreachable paths, initial
+inconsistency and missing SAT witnesses stay distinct. Callers can package
+supplied certificates or use the BL producer, select an explicit axiom policy,
+and check included term leaves externally. Fresh subject reconstruction binds
+complete coverage; model composition and Source/runtime correspondence remain
+reviewed connections.
+
 [SELECTED-SOURCE.md](SELECTED-SOURCE.md) adds contexts for actual named Source
 functions. The SDK selects exact revisions, private helpers, captured values
 and hygienic macro bindings; a bounded specializer brings that lexical program

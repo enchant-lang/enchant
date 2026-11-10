@@ -224,6 +224,25 @@ itself mechanically verified and does not certify all SMT theories.
   Seventeen archived packets reconstruct in a fresh VM with positive native
   calibration before the window and zero native sessions during reconstruction.
 
+- Common obligation proof data: all seven subject kinds expose a closed plan
+  and labelled required/auxiliary questions. BL can search for certificates or
+  package another producer's supplied certificates, then freshly check full
+  coverage and original-term packet data. Thirteen exports include eleven
+  complete declared bundles and two visibly incomplete ones. External checking
+  proves 22 required leaves (21 entailments and one unreachable path), plus
+  one auxiliary initial-inconsistency leaf. A manifest-only check does not
+  reconstruct a whole model: omitted loop premises are rejected by the fresh
+  BL subject checker, while external reports retain their declared-leaf scope
+  and reviewed model-composition boundary. `OBLIGATIONS.md` specifies the routes.
+- Explicit proof foundations: common bundles name `:lean-standard-v1` or
+  `:choice-free-v1`. Two countdown obligation proofs actually use
+  `Classical.choice` through Lean's arithmetic tactic; standard policy records
+  them and choice-free policy rejects the same proof source. Actual theorem
+  dependencies are retained per leaf, without implying that no alternative
+  choice-free proof exists. Standalone term checking retains its choice-free
+  default. The original seventeen accepted term cases and five rejected
+  alterations still pass after this policy extension.
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

@@ -103,8 +103,8 @@ under that policy. External checking records each theorem's actual dependencies
 and rejects dependencies outside the selected policy. Unknown policies are
 rejected; they cannot expand the trusted axiom list.
 
-The larger countdown example exposed a genuine printed `Classical.choice`
-dependency in Lean's arithmetic proof of one obligation. The standard policy
+The larger countdown example exposed genuine printed `Classical.choice`
+dependencies in Lean's arithmetic proofs of two obligations. The standard policy
 accepts it and lists it; the choice-free policy rejects the same proof source.
 That does not show that no choice-free proof of the statement exists. A proof's
 use of classical choice is also distinct from a runtime effect in the BL
