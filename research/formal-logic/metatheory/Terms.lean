@@ -11,7 +11,7 @@ inductive Ty where
   | boolean
   deriving DecidableEq, Repr
 
-def Ty.Value : Ty → Type
+abbrev Ty.Value : Ty → Type
   | .integer => Int
   | .boolean => Bool
 
