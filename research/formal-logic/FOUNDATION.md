@@ -249,6 +249,25 @@ itself mechanically verified and does not certify all SMT theories.
   observed before the window and zero inside it. Source phase preparation is
   explicitly allowed, and no broader compiler-internal absence claim follows.
 
+- Constructive SAT witnesses: `WITNESSES.md` defines explicit typed assertion
+  bindings, pure original-query reconstruction and a separate Lean existence
+  check. Z3 and OxiZ models use the same adapter and ordinary data packet;
+  original assertion replay determines acceptance. Thirty-two packets pass
+  the external checker, including five from each engine, and six false or
+  undefined replacements fail. Concrete nonlinear multiplication and nonzero
+  variable division work without the entailment generator's Boolean case limit.
+  Four general results and all applied proofs retain their exact dependency
+  audits without `Classical.choice`. Fresh VM replay distinguishes full query
+  attribution from the theorem over the contained typed assertions.
+- Shared query meaning: proof counterexamples must match their negated claims,
+  and SAT cannot carry a hidden claim or counterexample. Native, certificate,
+  obligation and witness boundaries share the shape and typed-root checks.
+  Expanded serialization limits belong to evidence formats; native shared
+  term graphs stay usable. Witness checking validates canonical packet identity
+  separately from ordinary Lisp equality. The next common bundle format should
+  carry witness leaves and distinguish positive feasibility from conditional
+  proof coverage. The qualified v1 format keeps its historical witness gap.
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

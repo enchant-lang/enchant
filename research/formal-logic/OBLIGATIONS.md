@@ -161,6 +161,9 @@ calibrated window that counts certificate-search and formal-backend entry calls.
 Source preparation remains allowed in that window; no claim about every
 compiler-internal operation follows from those two counters.
 
-Broader theory proof rules, positive witness evidence in this facet, mechanized
-model composition and data/Source/compiler correspondence remain work toward
-the full formal-language goal.
+[Constructive witnesses](WITNESSES.md) are now implemented as standalone
+typed-term packets. This v1 format retains its existing `:requires-witness`
+interpretation. A new mixed format can add these packets and keep positive
+feasibility separate from required proof coverage. Broader theory rules,
+mechanized model composition and data/Source/compiler correspondence remain
+work toward the full formal-language goal.
