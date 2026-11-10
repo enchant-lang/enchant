@@ -1,0 +1,33 @@
+(ns formal.actor-artifact-reproduce
+ (:require [formal.core :as core] [formal.elaborate :as elaborate] [formal.term :as t]
+           [anf :as anf] [lower :as lower] [interop]))
+
+;; Reproduce the retained original artifact identities without loading code or
+;; claiming another historical execution. Only exact recorded bytes are saved.
+(def original (interop/json-> (File/read! "research/formal-logic/evidence/actor-runtime/probe.json")))
+(def parameters [["state" (core/record-sort {"count" t/Int "flag" t/Bool})]
+                 ["message" (core/record-sort {"amount" t/Int})]])
+(defn digest [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(def results
+ (mapv (fn [row]
+         (let [source (get row "source")
+               extracted (elaborate/prepare-function source parameters)
+               _ (assert (= :elaborated (:status extracted)))
+               _ (assert (= (get row "core") (:identity extracted)))
+               name (get-in row ["artifact" "module"])
+               _ (assert (String/starts_with? name "Elixir.Formal.RuntimeProbe.M"))
+               module (erlang/binary_to_atom name)
+               descriptor (anf/module module
+                  (list {:op :defn-clause :fname :run :params (list) :guard nil :body (:anf extracted) :ann {}})
+                  (list [:run 0]) (list))
+               bytes (elem (lower/descriptor->beam descriptor) 1)
+               hash (digest bytes)]
+          (assert (= hash (get-in row ["artifact" "beam-sha256"])) (str name " differs from the original artifact"))
+          (File/write! (get row "beam") bytes)
+          {:id (get row "id") :beam (get row "beam") :sha256 hash :loaded false}))
+       (get original "observations")))
+(File/write! "research/formal-logic/evidence/actor-runtime/artifact-reproduction.json"
+ (interop/->json {:schema :enchant.formal.beam-probe-reproduction-v1 :artifacts results
+                 :runtime-executions 0 :purpose :exact-original-byte-recovery}))
+(println {:exact-original-artifacts (count results) :runtime-executions 0})
