@@ -151,7 +151,14 @@ and concrete execution remain distinct evidence. `TRANSLATION.md` specifies the
 gate and versioned normalizers. Qualification is retained under
 `evidence/translation`; this is not a production compiler pass.
 
-## Next slice: checked state and protocol invariants
+## Checked state and protocol invariants
+
+This slice is implemented in `formal.protocol` and `formal.protocol-run`, with
+`formal.transition` reused underneath. The first focused check passed 648
+assertions, including 133 protocol assertions. The current Lean source checks
+25 model theorems; the three new reachable-state, failure-exclusion and trace
+induction audits are empty. `PROTOCOLS.md` specifies the actual interface and
+its boundary to live actors. The design constraints below remain in force.
 
 The existing `formal.transition` already constructs portable machines, bounded
 traces and initiation/preservation questions. Extend that model with a checked
@@ -180,3 +187,26 @@ finishes are different properties. Safety should hold for all permitted
 schedules; eventual-delivery and response claims must name their fairness and
 failure assumptions. Do not turn a bounded mailbox or a finite trace into an
 unbounded actor guarantee.
+
+## Next protocol work
+
+Connect `formal.transition/safety` bounded questions to the new closed protocol
+subject and concrete executor. A bounded safety subject should contain its
+exact protocol definition and depth, rebuild the question afresh, retain an
+explicit bounded scope, and participate in the common check/compare/describe
+facade. Certificates must bind both identities and the requested scope.
+
+Native SAT needs a complete execution witness, separate from an induction
+countermodel. Decode its initial state, choices and selected transition inputs,
+explicitly label any completion of opaque unused scalars, and replay the
+executor. Fill missing derived state observations from that execution while
+retaining every concrete native observation for comparison. Revalidate every
+query assertion and the negated safety claim with the completed assignment.
+Only a valid term replay and a matching unsafe concrete model trace establish a
+trace refutation. Invalid, unsupported or incomplete replay remains visible.
+
+Then connect actual source handlers and actor events. Reuse the precisely
+specified outcomes and effect boundaries rather than claiming a state-model
+proof automatically verifies asynchronous actor behavior. Live mailbox and
+scheduler semantics, trace refinement, handler summaries and progress/fairness
+arguments remain required parts of the full goal.
