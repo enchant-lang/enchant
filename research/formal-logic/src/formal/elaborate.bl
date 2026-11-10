@@ -39,15 +39,21 @@
    :cons (recur (:tail node) (conj out (:head node)))
    (refuse "record variadic updates require a literal proper argument list" node))))
 (defn- record-call [call node bindings]
- (when (and (= :remote (:mode call)) (= :Elixir.BeamLisp.Ns.Rt (:mod call))
-             (contains? #{:get :assoc :assoc_variadic} (:fun call)))
+ (let [callee (:callee call)
+       intrinsic? (and (= :invoke (:mode call)) (= :global (:op callee))
+                        (not (contains? bindings (:name callee))) (not= :exact (:lookup callee))
+                        (contains? #{"get" "assoc"} (:name callee)))
+       target (if intrinsic? (keyword (:name callee)) (:fun call))]
+ (when (or intrinsic?
+           (and (= :remote (:mode call)) (= :Elixir.BeamLisp.Ns.Rt (:mod call))
+                 (contains? #{:get :assoc :assoc_variadic} target)))
   (let [original (vec (:args call))
-        _ (when (and (= :assoc_variadic (:fun call)) (not= 4 (count original)))
+        _ (when (and (= :assoc_variadic target) (not= 4 (count original)))
             (refuse "record variadic update runtime arity" node))
-        args (if (= :assoc_variadic (:fun call))
+        args (if (= :assoc_variadic target)
                (into (vec (take 3 original)) (literal-arguments (nth original 3))) original)
         n (count args)]
-   (case (if (= :assoc_variadic (:fun call)) :assoc (:fun call))
+   (case (if (= :assoc_variadic target) :assoc target)
     :get (do (when-not (contains? #{2 3} n) (refuse "record get requires one literal field and optional eager default" node))
              (let [record (from-anf (first args) bindings) key (field-key (second args) false)]
               (when-not (core/record-sort? (:sort record)) (refuse "record get requires a declared record" node))
@@ -60,7 +66,7 @@
                 (mapv (fn [index]
                         (let [i (inc (* 2 index))]
                          [(field-key (nth args i) false) (from-anf (nth args (inc i)) bindings)]))
-                      (range (erlang/div (dec n) 2)))))))))
+                      (range (erlang/div (dec n) 2))))))))))
 
 (defn from-anf [node bindings]
  (let [op (:op node)]
