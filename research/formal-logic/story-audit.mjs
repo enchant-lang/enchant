@@ -92,6 +92,12 @@ try{
   check(size.name+': reduction result keeps SDK unit and checker soundness premises explicit',specialization.includes(':unit-wellformedness :assumed-sdk-compiled-unit')&&specialization.includes(':checker-soundness :reviewed-rule-checker')&&specialization.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-specialization').scrollIntoView({block:'center'})");
   await shot(size.name+'-specialization');
+  const connections=await evaluate("document.querySelector('#cell-story-connections')?.innerText||''");
+  check(size.name+': equal Core models retain different authored and actual Source claims',connections.includes(':same-core true')&&connections.includes(':promises [:checked :checked]')&&connections.includes(':authored-source :authored-core-no-source-claim')&&connections.includes(':actual-source :reviewed-not-mechanically-proved'));
+  check(size.name+': model interpretation keeps its reviewed implementation status',connections.includes(':interpretation :reviewed-not-mechanically-proved')&&connections.includes(':purpose :implementation-connection-not-proof'));
+  check(size.name+': an interpretation record cannot substitute for a certificate',connections.includes(':connection-as-proof :rejected')&&connections.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-connections').scrollIntoView({block:'center'})");
+  await shot(size.name+'-connections');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -225,6 +231,10 @@ try{
   check('Declared original selected runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  check('Trusted original selected runtime ETF archive stays unavailable to the browser',(await fetch(base+'/evidence/selected-runtime/examples/original-selected.etf')).status===404);
+ for(const path of ['/CONNECTIONS.md','/src/formal/connection.bl','/test/connection_test.bl','/connections-check.bl','/connections-recheck.bl','/evidence/connections/examples/connections.json','/evidence/connections/fresh/connections-fresh.json','/evidence/connections/checks.txt','/evidence/connections/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared connection evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
