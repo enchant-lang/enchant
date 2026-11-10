@@ -7,6 +7,11 @@
 
 (def profile :bl/pure-state-trace-v1)
 (def source-profile :bl/source-record-trace-v1)
+(def context-profile :bl/context-record-trace-v2)
+(defn source-profile? [candidate] (contains? #{source-profile context-profile} candidate))
+(defn- profile-for [definition]
+ (if (= 1 (:formal/source-protocol definition))
+  (if (= source/context-profile (:profile definition)) context-profile source-profile) profile))
 (def relation :finite-prefix-state-and-normal-step-safety)
 (def limits {:depth 16 :unroll-work 32768})
 (def ^:private fields #{:formal/protocol-trace :protocol :depth :profile :identity})
@@ -24,7 +29,7 @@
  (let [source? (= 1 (:formal/source-protocol definition))
        ready (if source? (source/prepare definition) (protocol/prepare definition))
        _ (require! (= :ready (:status ready)) (:reason ready))
-       subject {:formal/protocol-trace 1 :protocol definition :depth depth :profile (if source? source-profile profile)}]
+       subject {:formal/protocol-trace 1 :protocol definition :depth depth :profile (profile-for definition)}]
   (assoc subject :identity (identity-of subject))))
 (defn- model-roots [model]
  (vec (concat (v/terms (:init model)) (mapcat v/terms (vals (:invariants model)))
@@ -36,10 +41,10 @@
  [subject]
  (try
   (require! (and (map? subject) (= fields (set (keys subject))) (= 1 (:formal/protocol-trace subject))
-                 (contains? #{profile source-profile} (:profile subject)) (= (:identity subject) (identity-of subject)))
+                 (= (profile-for (:protocol subject)) (:profile subject)) (= (:identity subject) (identity-of subject)))
             "changed or noncanonical trace subject")
   (depth! (:depth subject))
-  (let [source? (= source-profile (:profile subject))
+  (let [source? (source-profile? (:profile subject))
         connected (if source? (source/prepare (:protocol subject)) (protocol/prepare (:protocol subject)))
         _ (require! (= :ready (:status connected)) (:reason connected))
         definition (if source? (:protocol connected) (:protocol subject))
@@ -62,7 +67,7 @@
     :problem problem :trace trace :model model :scope scope :unroll-work work
     :execution-protocol definition :source-protocol (when source? (:protocol subject))
     :handler-cores (when source? (mapv #(select-keys % [:name :core]) (:handlers connected)))
-    :source-connection (:source-connection connected) :live-actor-connection :not-established})
+    :source-connection (:source-connection connected) :binding-context (:binding-context connected) :live-actor-connection :not-established})
   (catch error {:status :unsupported :reason (ex-message error)})))
 
 (defn check-proof
@@ -77,7 +82,7 @@
     {:status :rejected :reason :trace-proof-subject-mismatch}
    :else (assoc (certificate/check (:problem prepared) (:certificate object))
            :definition (:identity subject) :scope (:scope prepared) :relation relation
-           :source-connection (:source-connection prepared) :live-actor-connection :not-established
+           :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established
            :compiler-proof-authority false))))
 
 (defn- check-source-run [model-execution executed]
@@ -91,7 +96,7 @@
    :state-sequence-matches states-match? :outcomes-match outcomes-match?
    :handlers (get-in executed [:source-replay :handlers])
    :scope :concrete-source-handler-core-and-state-model-trace
-   :source-connection :reviewed-source-anf-core-state-model :live-actor-connection :not-established}))
+   :source-connection (:source-connection executed) :binding-context (:binding-context executed) :live-actor-connection :not-established}))
 
 (defn- scalar? [sort value]
  (if (= t/Bool sort) (contains? #{true false} value) (int? value)))
@@ -175,10 +180,10 @@
    (cond-> {:status status :initial initial :choices choices :events events :execution executed
     :assignments completed :variable-provenance @provenance :term-replay term-check
     :state-comparison state-checks :observation-comparison observation-checks
-    :scope (:scope prepared) :source-connection (:source-connection prepared) :live-actor-connection :not-established}
+    :scope (:scope prepared) :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established}
     source-check (assoc :source-replay source-check :model-execution model-execution)))
   (catch error {:status :incomplete :reason (ex-message error)
-                :source-connection (:source-connection prepared) :live-actor-connection :not-established})))
+                :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established})))
 
 (defn replay-counterexample
  "Rebuild the subject before checking a supplied SAT observation. No cached
@@ -227,5 +232,5 @@
                                     (= :valid (:status counterexample)) :replayed-trace
                                     (= :vacuous (:verdict native)) :backend-inconsistent
                                     (= :sat (get-in native [:preflight :status])) :backend-sat :else :not-established)
-      :source-connection (:source-connection prepared) :live-actor-connection :not-established
+      :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established
       :compiler-proof-authority false})))))

@@ -4,6 +4,9 @@
            [formal.runtime-outcome :as outcome]))
 
 (def profile :bl/owned-beam-observation-v1)
+(def context-profile :bl/context-beam-observation-v2)
+(defn observation-profile [definition]
+ (if (= source/context-profile (:profile definition)) context-profile profile))
 (def adapter :sequential-trap-and-stop-v1)
 (def limits {:events 64 :receipt-bytes 2097152 :deadline-ms 30000})
 (def ^:private fields
@@ -59,7 +62,7 @@
  (try
   (require! (and (map? receipt) (<= (erlang/external_size receipt) (:receipt-bytes limits))) "observation capacity")
   (shape! receipt fields)
-  (require! (and (= 1 (:formal/runtime-observation receipt)) (= profile (:profile receipt))
+  (require! (and (= 1 (:formal/runtime-observation receipt)) (= (observation-profile definition) (:profile receipt))
                  (= adapter (:adapter receipt)) (= outcome/profile (:projection receipt))
                  (= (:identity receipt) (artifact/identity-of receipt))
                  (= (:identity definition) (:definition receipt))
@@ -102,13 +105,15 @@
    {:status status :definition (:identity definition) :observation (:identity receipt)
     :scope :finite-recorded-beam-adapter-conformance :comparison comparisons
     :relation :state-return-and-named-integer-failure
-    :assumptions {:intrinsic-meanings :declared-core :execution-context :caller-env-conveyed
+    :binding-context (:binding-context prepared)
+    :assumptions {:intrinsic-meanings :declared-core
+                  :execution-context (if (= context-profile (:profile receipt)) :explicit-record-binding-context :caller-env-conveyed)
                   :external-effects :outside-observation :observer :trusted-reporting
                   :compiler-correctness :not-proved}
     :model-safety (:safety reference) :runtime-safety (if (= :conforming status) (:safety reference) :not-established)
     :source-model-execution reference :artifact-count (count manifests) :sdk-check sdk-check
     :attestation :observer-trusted-not-cryptographically-attested
-    :source-connection :reviewed-source-anf-core-state-model
+    :source-connection (:source-connection prepared)
     :universal-runtime-refinement :not-established :compiler-proof-authority false})
   (catch error {:status :rejected :reason (ex-message error) :scope :finite-recorded-beam-adapter-conformance
                 :compiler-proof-authority false})))
@@ -128,7 +133,7 @@
   Unsafe but admitted traces may conform: conformance is not program safety."
  ([definition initial events] (observe definition initial events {}))
  ([definition initial events options]
-  (let [resources (atom []) cleanup (atom []) native (atom nil)]
+  (let [resources (atom []) cleanup (atom []) phase (atom :before-actor)]
    (try
     (require! (and (map? options) (every? #{:deadline-ms} (keys options))) "unknown runtime observation option")
     (let [deadline-ms (get options :deadline-ms 10000)
@@ -147,10 +152,11 @@
                                      resource (artifact/publish! compiled)]
                                 (swap! resources conj resource)
                                 [(:name handler) (artifact/callable! resource)])) (:handlers prepared)))
+                   _ (reset! phase :actor-call-entered)
                    result (actor/run! functions state-type initial events (:frames reference) deadline-ms)]
-              (reset! native result) result)))
+              (reset! phase :actor-call-returned) result)))
              (finally (reset! cleanup (artifact/close! @resources))))
-            data {:formal/runtime-observation 1 :profile profile :adapter adapter :projection outcome/profile
+            data {:formal/runtime-observation 1 :profile (observation-profile definition) :adapter adapter :projection outcome/profile
                   :definition (:identity definition) :sdk @sdk
                   :artifacts (mapv #(get-in % [:compiled :manifest]) @resources)
                   :initial initial :events events :frames (:frames observed) :termination (:termination observed) :at (:at observed)
@@ -162,5 +168,7 @@
         :receipt receipt :checking checked :scope :owned-sequential-beam-observation
         :compiler-proof-authority false})))
     (catch error
-     {:status :error :reason (ex-message error) :execution-started (boolean @native)
+     {:status :error :reason (ex-message error)
+      :execution-started (case @phase :before-actor false :actor-call-returned true :unknown)
+      :execution-stage @phase
       :cleanup @cleanup :compiler-proof-authority false})))))

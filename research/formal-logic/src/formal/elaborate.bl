@@ -126,20 +126,12 @@
     {:status :unsupported :reason (:reason typing) :source source :basis :compiler-anf}))
   (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))
 
-(defn prepare-function
- "Extract one actual compiler function scaffold into the core. Parameter
-  declarations are an ordered vector of [role sort] pairs; source parameter
-  names are lexical aliases, never input identities or executable callbacks."
- [source parameters]
- (try
+(defn- function-anf! [anf parameters]
   (when-not (and (vector? parameters) (<= (count parameters) 16)
                  (every? #(and (vector? %) (= 2 (count %))) parameters)
                  (= (count parameters) (count (set (map first parameters)))))
    (refuse "ordered distinct function parameter declarations required" {}))
-  (let [forms (BeamLisp.Reader/read_string source)
-        _ (when-not (= 1 (count forms)) (refuse "one source function required" {}))
-        anf (compiler/compile (first forms) (compiler/new-env "formal.core.intrinsics"))
-        _ (when-not (ir/self-scaffold? anf) (refuse "one top-level compiler function scaffold required" anf))
+  (let [_ (when-not (ir/self-scaffold? anf) (refuse "one top-level compiler function scaffold required" anf))
         clauses (:clauses (ir/scaffold-inner anf)) clause (first clauses) patterns (:pats clause)
         _ (when-not (and (= 1 (count clauses)) (nil? (:guard clause)) (= (count patterns) (count parameters))
                          (every? #(= :pvar (:pop %)) patterns)
@@ -154,6 +146,22 @@
         typing (core/typecheck body declarations)]
    (when-not (= :typed (:status typing)) (refuse (:reason typing) anf))
    {:status :elaborated :core body :identity (core/identity body declarations) :typing typing
-    :parameters declarations :parameter-order (mapv first parameters) :source source :anf anf
-    :profile (:profile typing) :basis :compiler-anf :assurance :reviewed-function-elaboration :metatheory :not-mechanized})
+    :parameters declarations :parameter-order (mapv first parameters) :anf anf :profile (:profile typing)}))
+
+(defn prepare-function-anf
+ "Interpret a supplied function scaffold. This makes no source provenance claim."
+ [anf parameters]
+ (try (assoc (function-anf! anf parameters) :basis :supplied-anf :assurance :reviewed-function-elaboration)
+  (catch error {:status :unsupported :reason (ex-message error) :basis :supplied-anf})))
+
+(defn prepare-function
+ "Extract one actual compiler function scaffold into the core. Parameter
+  declarations are ordered [role sort] pairs; source names are lexical aliases."
+ [source parameters]
+ (try
+  (let [forms (BeamLisp.Reader/read_string source)
+        _ (when-not (= 1 (count forms)) (refuse "one source function required" {}))
+        anf (compiler/compile (first forms) (compiler/new-env "formal.core.intrinsics"))]
+   (assoc (function-anf! anf parameters) :source source :basis :compiler-anf
+          :assurance :reviewed-function-elaboration :metatheory :not-mechanized))
   (catch error {:status :unsupported :reason (ex-message error) :source source :basis :compiler-anf})))

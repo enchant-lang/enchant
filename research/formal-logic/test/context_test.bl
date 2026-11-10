@@ -1,0 +1,153 @@
+(ns formal.context-test
+ (:require [formal.api :as formal] [formal.context :as context] [formal.elaborate :as elaborate]
+           [formal.core :as core] [formal.source-protocol :as source] [formal.protocol-trace :as trace]
+           [formal.runtime-protocol :as runtime] [formal.term :as t] [system.ir :as ir]))
+
+(def text "(fn [s msg] (assoc s \"n\" (+ (get s \"n\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))")
+(def spec {:name "context-counter" :state {"n" t/Int "flag" t/Bool}
+           :init (fn [s] (t/all [(t/eq (get s "n") (t/int 0)) (get s "flag")]))
+           :invariant (fn [s] (t/ge (get s "n") (t/int 0)))
+           :handlers [{:name "step" :inputs {"amount" t/Int}
+                        :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))]) :source text}]})
+(def parameters [["state" (core/record-sort (:state spec))] ["message" (core/record-sort {"amount" t/Int})]])
+(def binding (formal/source-context text parameters))
+(def declared (formal/source-protocol spec))
+(def closed (formal/source-protocol (assoc spec :bindings :closed-records)))
+(def initial {"n" 0 "flag" true})
+(def events [{:transition "step" :inputs {"amount" 2}}])
+(defn rehash [data] (assoc data :identity (context/identity-of data)))
+(defn clean? [result]
+ (and (= false (get-in result [:receipt :cleanup :actor-alive]))
+      (every? #(and (:retired %) (not (:loaded %))) (get-in result [:receipt :cleanup :modules]))))
+
+(deftest formal-binding-context-is-closed-data-and-reconstructed-linking
+ (let [saved (erlang/binary_to_term (erlang/term_to_binary binding) (list :safe))
+       result (formal/check-source-context saved) linked (:prepared (context/prepare saved))
+       original (elaborate/prepare-function text parameters)
+       nodes (tree-seq ir/node? ir/child-nodes (:anf linked))]
+  (is (= binding saved))
+  (is (= :checked-context (:status result)))
+  (is (= :no-fetched-vars-in-handler-anf (:closure result)))
+  (is (= :identical-canonical-cores (:model-connection result)))
+  (is (= :requires-declared-bindings (:ambient-equivalence result)))
+  (is (= :not-established (:transitive-runtime-closure result)))
+  (is (= false (:compiler-proof-authority result)))
+  (is (= (:core original) (:core linked)))
+  (is (= (:identity original) (:core binding)))
+  (is (not-any? #(contains? #{:global :binding :invoke} (:op %)) nodes))
+  (is (= "assoc_variadic" (get-in binding [:bindings 0 :target :function])))
+  (is (= 5 (get-in binding [:bindings 0 :arity])))
+  (is (= 4 (get-in binding [:bindings 0 :target :arity])))
+  (is (= binding (formal/source-context text parameters)))
+  (doseq [n [-2 0 5] amount [-3 0 4] flag [true false]]
+   (let [input {"state" {"n" n "flag" flag} "message" {"amount" amount}}
+         a (core/evaluate (:core original) (into {} parameters) input)
+         b (core/evaluate (:core linked) (into {} parameters) input)]
+    (is (= (select-keys a [:status :value :error]) (select-keys b [:status :value :error])))
+    (is (= {"n" (+ n amount) "flag" (not flag)} (:value b)))))))
+
+(deftest context-cache-identity-and-link-targets-cannot-replace-fresh-reconstruction
+ (doseq [changed [(assoc binding :profile :ambient-source)
+                  (assoc binding :intrinsic-profile :anything-with-the-same-name)
+                  (assoc binding :core "wrong")
+                  (assoc binding :source "(fn [s msg] s)")
+                  (assoc binding :bindings [])
+                  (assoc binding :parameters (vec (reverse parameters)))
+                  (assoc-in binding [:bindings 0 :target :module] "Elixir.System")
+                  (assoc-in binding [:bindings 0 :target :function] "cmd")
+                  (assoc binding :certificate {:status :checked})]]
+  (is (= :unsupported (:status (formal/check-source-context (rehash changed))))))
+ (doseq [source ["(fn [s msg] (assoc s \"n\" (BeamLisp.Num/div 7 2)))"
+                "(fn [s msg] (do (println :must-not-run) s))"
+                "(fn [s msg] (foreign/assoc s \"n\" 3))"]]
+  (is (= :refused (try (formal/source-context source parameters) :admitted (catch _ :refused))))))
+
+(deftest context-source-protocols-share-the-state-model-and-common-evidence-facade
+ (let [result (formal/check closed) description (formal/describe closed)]
+  (is (= (:protocol declared) (:protocol closed)))
+  (is (not= (:identity declared) (:identity closed)))
+  (is (= source/context-profile (:profile closed)))
+  (is (= :checked (:status result)))
+  (is (= :source-protocol (:subject-kind result)))
+  (is (= :checked-obligations (:status (formal/check-source-protocol-proof closed (:proof result)))))
+  (is (= :closed-records (get-in result [:evidence :connection :binding-context :policy])))
+  (is (= :requires-declared-bindings (get-in description [:binding-context :ambient-equivalence])))
+  (is (= :replayed (:status (formal/replay-source-protocol-trace closed initial events))))
+  (is (= :rejected (:status (formal/check-source-protocol-proof declared (:proof result))))))
+ (doseq [changed [(assoc-in closed [:handlers 0 :context] nil)
+                  (assoc closed :profile source/profile)
+                  (assoc-in closed [:handlers 0 :context :core] "forged")]]
+  (is (= :unsupported (:status (source/prepare (rehash changed))))))
+ (is (= :refused (try (formal/source-protocol (assoc spec :bindings :ambient-but-claimed-closed)) :admitted (catch _ :refused)))))
+
+(deftest explicit-context-eliminates-the-probed-ambient-record-var-dependency
+ (let [child (BeamLisp.Env/fork) calls (atom 0)]
+  (try
+   (BeamLisp.Env/with_env child
+    (fn []
+     (BeamLisp.Env/intern "formal.core.intrinsics" "assoc"
+      (fn [& arguments] (swap! calls inc) {"n" 999 "flag" true}))
+     (let [ordinary (formal/observe-protocol-trace declared initial events)
+           linked (formal/observe-protocol-trace closed initial events)
+           receipt (:receipt linked)]
+      (is (= :disagreement (:status ordinary)))
+      (is (= :observed (:status linked)) (pr-str linked))
+      (is (= 1 @calls))
+      (is (= {"n" 2 "flag" false} (get-in receipt [:frames 1 :outcome :value])))
+      (is (= runtime/context-profile (:profile receipt)))
+      (is (= :explicit-record-binding-context (get-in linked [:checking :assumptions :execution-context])))
+      (is (= :not-established (get-in linked [:checking :binding-context :transitive-runtime-closure])))
+      (is (= (get-in closed [:handlers 0 :context :identity]) (get-in receipt [:artifacts 0 :context])))
+      (is (= :conforming (:status (formal/check-runtime-observation closed receipt))))
+      (is (clean? ordinary))
+      (is (clean? linked)))))
+   (finally (BeamLisp.Env/destroy child))))
+ (let [result (formal/observe-protocol-trace declared initial events)]
+  (is (= :observed (:status result)))
+  (is (= {"n" 2 "flag" false} (get-in result [:receipt :frames 1 :outcome :value])))))
+
+(deftest native-questions-and-actual-counterexamples-bind-the-context-profile
+ (let [safe (formal/protocol-trace closed 1)
+       unsafe (formal/source-protocol
+                (-> spec (assoc :name "context-unsafe" :bindings :closed-records)
+                    (assoc-in [:handlers 0 :source]
+                     "(fn [s msg] (assoc s \"n\" (- (get s \"n\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))")))
+       subject (formal/protocol-trace unsafe 1)]
+  (is (= trace/context-profile (:profile subject)))
+  (is (= :unsupported (:status (trace/prepare (rehash (assoc subject :profile trace/source-profile))))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [good (formal/check {:backend engine :search {:nodes 128 :rows 128}} safe)
+         answer (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject)
+         observed (formal/observe-protocol-counterexample subject (get-in answer [:backend :property]))]
+    (is (= :checked (:status good)))
+    (is (= :refuted (:status answer)))
+    (is (= :valid (get-in answer [:counterexample :source-replay :status])))
+    (is (= :closed-records (get-in answer [:evidence :connection :binding-context :policy])))
+    (is (= :observed (:status observed)) (pr-str observed))
+    (is (= :conforming (get-in observed [:checking :status])))
+    (is (= :violated (get-in observed [:checking :runtime-safety])))
+    (is (= runtime/context-profile (get-in observed [:receipt :profile])))
+    (is (clean? observed))))))
+
+(deftest linked-variadic-updates-retain-hidden-and-first-failures
+ (doseq [source ["(fn [s msg] (assoc s \"n\" (quot 1 0) \"flag\" false))"
+                "(fn [s msg] (assoc s \"n\" (get {\"ok\" 3 \"hidden\" (quot 1 0)} \"ok\") \"flag\" false))"]]
+  (let [definition (formal/source-protocol
+                    {:name "context-failure" :bindings :closed-records :state (:state spec)
+                     :handlers [{:name "step" :source source}]})
+        result (formal/observe-protocol-trace definition initial [{:transition "step" :inputs {}} {:stutter true}])]
+   (is (= :observed (:status result)) (pr-str result))
+   (is (= :raised (get-in result [:receipt :frames 1 :outcome :status])))
+   (is (= initial (get-in result [:receipt :frames 1 :state])))
+   (is (= false (get-in result [:receipt :frames 1 :state-committed])))
+   (is (= :violated (get-in result [:checking :runtime-safety])))
+   (is (clean? result)))))
+
+(deftest context-runtime-errors-before-entry-have-truthful-execution-evidence
+ (let [result (formal/observe-protocol-trace closed initial events {:unknown true})]
+  (is (= :error (:status result)))
+  (is (= false (:execution-started result)))
+  (is (= :before-actor (:execution-stage result))))
+ (let [result (formal/observe-protocol-trace closed initial events {:deadline-ms 0})]
+  (is (= :incomplete (:status result)))
+  (is (= false (:execution-started result)))))

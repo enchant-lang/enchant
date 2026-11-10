@@ -1,5 +1,5 @@
 (ns formal.runtime-artifact
- (:require [formal.elaborate :as elaborate] [anf :as anf] [lower :as lower]))
+ (:require [formal.elaborate :as elaborate] [formal.context :as context] [anf :as anf] [lower :as lower]))
 
 ;; Compilation is separate from publication and user-handler execution.
 ;; Receipt checking compiles into bytes only; it never loads supplied code.
@@ -64,7 +64,11 @@
                  (Regex/match? (Regex/compile! "^Elixir\\.Formal\\.Observed\\.M[0-9]{1,24}\\.H([0-9]|1[0-5])$") module-name))
            "invalid owned observation module name")
  (let [parameters (mapv (fn [role] [role (get (:parameters handler) role)]) ["state" "message"])
-       extracted (elaborate/prepare-function (:source handler) parameters)
+       checked (when (:context handler) (context/prepare (:context handler)))
+       _ (when (:context handler)
+           (require! (and (= :ready (:status checked)) (= parameters (get-in handler [:context :parameters]))
+                          (= (:source handler) (get-in handler [:context :source]))) "artifact binding context mismatch"))
+       extracted (if (:context handler) (:prepared checked) (elaborate/prepare-function (:source handler) parameters))
        _ (require! (and (= :elaborated (:status extracted)) (= (:core handler) (:identity extracted))) "source/core identity changed")
        module (erlang/binary_to_atom module-name)
        descriptor (anf/module module
@@ -72,9 +76,10 @@
           (list [:run 0]) (list))
        pair (lower/descriptor->beam descriptor) bytes (elem pair 1)]
   (require! (= module (elem pair 0)) "compiled module mismatch")
-  {:pair pair :manifest {:name (:name handler) :source (:source handler) :core (:core handler)
+  {:pair pair :manifest (cond-> {:name (:name handler) :source (:source handler) :core (:core handler)
                         :module module-name :arity 2 :beam-sha256 (digest bytes)
-                        :code-md5 (hex (elem (elem (beam_lib/md5 bytes) 1) 1))}}))
+                        :code-md5 (hex (elem (elem (beam_lib/md5 bytes) 1) 1))}
+                        (:context handler) (assoc :context (get-in handler [:context :identity])))}))
 (defn publish! [compiled]
  (let [pair (:pair compiled) module (elem pair 0)
        lease (BeamLisp.Env/retain_exact_binary! pair (str (get-in compiled [:manifest :module]) ".beam"))]

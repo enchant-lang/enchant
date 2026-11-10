@@ -2,12 +2,13 @@
  (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
            [formal.elaborate :as elaborate] [formal.protocol :as protocol]
            [formal.protocol-run :as execution] [formal.term :as t] [formal.value :as v]
-           [formal.evaluate :as replay]))
+           [formal.evaluate :as replay] [formal.context :as context]))
 
 ;; A source connection around the existing state-model boundary. Preparation
 ;; re-extracts every real function and compares every derived guard/update.
 ;; User builders specify state predicates and input assumptions, never updates.
 (def profile :bl/source-record-handlers-v1)
+(def context-profile :bl/context-record-handlers-v2)
 (def ^:private fields #{:formal/source-protocol :protocol :handlers :profile :identity})
 (def ^:private handler-fields #{:name :source :core})
 (defn- require! [ok message]
@@ -15,15 +16,20 @@
 (defn- identity-of [definition]
  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc definition :identity)))
                 (list (tuple :case :lower))))
-(defn- extract [schema inputs source]
+(defn- extract [schema inputs source binding-context]
  (let [parameters [["state" (core/record-sort schema)] ["message" (core/record-sort inputs)]]
-       extracted (elaborate/prepare-function source parameters)
+       checked (when binding-context (context/prepare binding-context))
+       _ (when binding-context
+           (require! (and (= :ready (:status checked)) (= source (:source binding-context))
+                          (= parameters (:parameters binding-context))) "handler binding context mismatch"))
+       extracted (if binding-context (:prepared checked) (elaborate/prepare-function source parameters))
        _ (require! (= :elaborated (:status extracted)) (str "source handler refused: " (:reason extracted)))
        _ (require! (= (second (first parameters)) (get-in extracted [:typing :sort])) "handler must return the exact state record shape")
        lowered (symbolic/lower (:core extracted) (into {} parameters))]
   (require! (= :translated (:status lowered)) (:reason lowered))
-  {:source source :core (:identity extracted) :body (:core extracted)
-   :parameters (into {} parameters) :lowered lowered}))
+  (cond-> {:source source :core (:identity extracted) :body (:core extracted)
+           :parameters (into {} parameters) :lowered lowered}
+   binding-context (assoc :context binding-context))))
 (defn- derive [extracted state inputs]
  (let [lowered (:lowered extracted)
        replacements (into {} (concat
@@ -46,15 +52,20 @@
   is a real single-clause source function, not an authored update callback."
  [specification]
  (require! (and (map? specification)
-                (every? #{:name :state :init :invariant :invariants :handlers} (keys specification))
+                (every? #{:name :state :init :invariant :invariants :handlers :bindings} (keys specification))
+                (contains? #{:declared :closed-records} (get specification :bindings :declared))
                 (not (and (contains? specification :invariant) (contains? specification :invariants)))
                 (vector? (:handlers specification)) (<= (count (:handlers specification)) 16))
            "unknown source protocol policy or handler capacity")
- (let [schema (:state specification)
+ (let [schema (:state specification) contextual? (= :closed-records (:bindings specification))
        compiled (mapv (fn [row]
                    (require! (and (map? row) (every? #{:name :inputs :source :assumptions} (keys row))
                                    (string? (:source row))) "handler requires source, not authored guard/next/effect callbacks")
-                   (assoc (extract schema (get row :inputs {}) (:source row)) :name (:name row) :spec row))
+                   (let [inputs (get row :inputs {})
+                         binding-context (when contextual?
+                           (context/define (:source row) [["state" (core/record-sort schema)]
+                                                         ["message" (core/record-sort inputs)]]))]
+                    (assoc (extract schema inputs (:source row) binding-context) :name (:name row) :spec row)))
                   (:handlers specification))
        base (select-keys specification [:name :state :init :invariant :invariants])
        model (protocol/define (assoc base :transitions
@@ -64,7 +75,8 @@
                         :guard (fn [state inputs] (:guard (derive item state inputs)))
                         :next (fn [state inputs] (:next (derive item state inputs)))}) compiled)))
        definition {:formal/source-protocol 1 :protocol model
-                   :handlers (mapv #(select-keys % [:name :source :core]) compiled) :profile profile}
+                   :handlers (mapv #(select-keys % (if contextual? [:name :source :core :context] [:name :source :core])) compiled)
+                   :profile (if contextual? context-profile profile)}
        definition (assoc definition :identity (identity-of definition))
        prepared (prepare definition)]
   (require! (= :ready (:status prepared)) (:reason prepared)) definition))
@@ -76,16 +88,18 @@
  [definition]
  (try
   (require! (and (map? definition) (= fields (set (keys definition))) (= 1 (:formal/source-protocol definition))
-                 (= profile (:profile definition)) (= (:identity definition) (identity-of definition))
+                 (contains? #{profile context-profile} (:profile definition)) (= (:identity definition) (identity-of definition))
                  (vector? (:handlers definition)) (<= (count (:handlers definition)) 16)) "changed or noncanonical source protocol")
-  (let [model (:protocol definition) prepared (protocol/prepare model)
+  (let [contextual? (= context-profile (:profile definition))
+        model (:protocol definition) prepared (protocol/prepare model)
         _ (require! (= :ready (:status prepared)) (:reason prepared))
         _ (require! (= (mapv :name (:handlers definition)) (mapv :name (:transitions model))) "handler coverage/order mismatch")
         state (get-in prepared [:model :state])
         handlers (mapv (fn [index]
                     (let [stored (nth (:handlers definition) index) row (nth (:transitions model) index)
-                          _ (require! (= handler-fields (set (keys stored))) "noncanonical stored handler")
-                          extracted (extract (:schema model) (:input-schema row) (:source stored))
+                          _ (require! (= (if contextual? (conj handler-fields :context) handler-fields) (set (keys stored))) "noncanonical stored handler")
+                          _ (require! (= contextual? (map? (:context stored))) "handler context policy mismatch")
+                          extracted (extract (:schema model) (:input-schema row) (:source stored) (:context stored))
                           _ (require! (= (:core stored) (:core extracted)) "source/core identity mismatch")
                           inputs (get-in prepared [:model :transitions index :inputs])
                           derived (derive extracted state inputs)]
@@ -93,7 +107,13 @@
                      (assoc extracted :name (:name stored)))) (range (count (:handlers definition))))]
    {:status :ready :definition (:identity definition) :protocol model :protocol-prepared prepared
     :handlers handlers :obligations (:obligations prepared)
-    :source-connection :reviewed-source-anf-core-state-model :live-actor-connection :not-established})
+    :binding-context (if contextual?
+                       {:profile context/profile :policy :closed-records :closure :no-fetched-vars-in-handler-anf
+                        :contexts (mapv #(get-in % [:context :identity]) handlers)
+                        :ambient-equivalence :requires-declared-bindings :transitive-runtime-closure :not-established}
+                       {:policy :declared :runtime-bindings :assumed})
+    :source-connection (if contextual? :reviewed-context-source-anf-core-state-model :reviewed-source-anf-core-state-model)
+    :live-actor-connection :not-established})
   (catch error {:status :unsupported :reason (ex-message error)})))
 
 (defn check-proof [definition object]
@@ -107,7 +127,7 @@
     (let [checked (protocol/check-proof (:protocol prepared) (:protocol-proof object))]
      (assoc checked :model-definition (:definition checked) :definition (:identity definition)
        :scope :all-finite-prefixes-of-source-extracted-state-model
-       :source-connection (:source-connection prepared) :live-actor-connection :not-established
+       :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established
        :compiler-proof-authority false)))))
 
 (defn verify
@@ -123,7 +143,7 @@
        :profile profile :proof object :checking checking
        :status (if (and (= :checked (:status result)) (not= :checked-obligations (:status checking))) :error (:status result))
        :scope :all-finite-prefixes-of-source-extracted-state-model
-       :source-connection (:source-connection prepared) :live-actor-connection :not-established
+       :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established
        :handler-termination {:basis :finite-source-extracted-core :metatheory-connection :reviewed-not-mechanically-proved}
        :compiler-proof-authority false))))))
 
@@ -148,7 +168,7 @@
   (if-not (= :ready (:status prepared)) prepared
    (let [model-step (execution/step (:protocol prepared) state event)]
     (assoc (if (contains? #{:stepped :failed} (:status model-step)) (replay-step prepared state event model-step) model-step)
-      :scope :source-extracted-state-model-step :source-connection (:source-connection prepared)
+      :scope :source-extracted-state-model-step :source-connection (:source-connection prepared) :binding-context (:binding-context prepared)
       :live-actor-connection :not-established)))))
 
 (defn replay-trace
@@ -168,4 +188,4 @@
       (assoc result :status (if bad (:status bad) :replayed) :frames frames
         :source-replay {:status (if bad :invalid :valid) :handlers (count (filter :core-execution frames))}
         :scope :finite-source-extracted-state-model-trace
-        :source-connection (:source-connection prepared) :live-actor-connection :not-established)))))))
+        :source-connection (:source-connection prepared) :binding-context (:binding-context prepared) :live-actor-connection :not-established)))))))

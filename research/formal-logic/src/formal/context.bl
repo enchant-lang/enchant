@@ -1,0 +1,73 @@
+(ns formal.context
+ (:require [formal.elaborate :as elaborate] [formal.intrinsics :as intrinsics]
+           [system.ir :as ir] [anf :as anf]))
+
+(def profile :bl/record-intrinsic-context-v1)
+(def limits {:source-bytes 65536 :walk-nodes 16384 :depth 128})
+(def ^:private fields #{:formal/source-context :profile :intrinsic-profile :source :parameters :core :bindings :identity})
+(defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.context: " message) {}))))
+(defn identity-of [data]
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary (dissoc data :identity))) (list (tuple :case :lower))))
+(defn- packed [args] (reduce (fn [tail head] (anf/cons-cell head tail)) (anf/empty-list-node) (reverse args)))
+(defn- link-call [node bindings]
+ (let [call (ir/call-site node) callee (:callee call) args (:args call) n (count args)]
+  (require! (and (= :invoke (:mode call)) (nil? (:rest call)) (= :global (:op callee))
+                 (= "formal.core.intrinsics" (:ns callee)) (nil? (:lookup callee)))
+            "only explicitly declared record Vars can be linked")
+  (let [name (:name callee)
+        target (case name
+                 "get" (do (require! (contains? #{2 3} n) "get arity") :get)
+                 "assoc" (do (require! (and (>= n 3) (odd? n)) "assoc arity")
+                              (if (= n 3) :assoc :assoc_variadic))
+                 (throw (ex-info "formal.context: undeclared Var" {})))
+        linked-args (if (= target :assoc_variadic) (conj (vec (take 3 args)) (packed (drop 3 args))) args)
+        binding {:namespace (:ns callee) :name name :arity n
+                 :target {:module "Elixir.BeamLisp.Ns.Rt" :function (str target) :arity (count linked-args)}
+                 :meaning (if (= name "get") :closed-record-get :ordered-record-assoc)
+                 :ambient-equivalence :requires-declared-binding}]
+   (swap! bindings assoc [(:namespace binding) name n] binding)
+   (assoc (anf/remote :Elixir.BeamLisp.Ns.Rt target (to-list linked-args)) :ann (:ann node)))))
+(defn- linked-anf [root]
+ (let [counted (atom 0) bindings (atom {})]
+  (letfn [(walk [value depth]
+            (swap! counted inc)
+            (require! (and (<= @counted (:walk-nodes limits)) (<= depth (:depth limits))) "link walk capacity")
+            (cond
+             (map? value)
+              (let [node (if (= :invoke (:op value)) (link-call value bindings) value)]
+               (require! (not (contains? #{:global :binding :invoke} (:op node))) "unlinked handler reference")
+               (into {} (map (fn [[key child]] [key (if (= :ann key) child (walk child (inc depth)))]) node)))
+             (vector? value) (mapv #(walk % (inc depth)) value)
+             (list? value) (to-list (map #(walk % (inc depth)) value))
+             :else value))]
+   {:anf (walk root 0) :bindings (mapv second (sort-by #(pr-str (first %)) @bindings))})))
+(defn- build [source parameters]
+ (require! (and (string? source) (<= (erlang/byte_size source) (:source-bytes limits))) "source capacity")
+ (let [original (elaborate/prepare-function source parameters)
+       _ (require! (= :elaborated (:status original)) (:reason original))
+       linked (linked-anf (:anf original))
+       interpreted (elaborate/prepare-function-anf (:anf linked) parameters)
+       _ (require! (and (= :elaborated (:status interpreted)) (= (:core original) (:core interpreted))
+                        (= (:identity original) (:identity interpreted))) "linked ANF changed its canonical core")
+       definition {:formal/source-context 1 :profile profile :intrinsic-profile intrinsics/profile
+                   :source source :parameters parameters :core (:identity original) :bindings (:bindings linked)}
+       definition (assoc definition :identity (identity-of definition))]
+  {:definition definition :original original
+   :prepared (assoc interpreted :source source :context definition :basis :explicit-record-binding-context
+                    :assurance :reviewed-context-linking :metatheory :not-mechanized)}))
+(defn define [source parameters] (:definition (build source parameters)))
+(defn prepare [definition]
+ (try
+  (require! (and (map? definition) (<= (erlang/external_size definition) 2097152)
+                 (= fields (set (keys definition))) (= 1 (:formal/source-context definition))
+                 (= profile (:profile definition)) (= (:identity definition) (identity-of definition))) "context identity/profile")
+  (let [fresh (build (:source definition) (:parameters definition))]
+   (require! (= definition (:definition fresh)) "context differs from freshly reconstructed binding declaration")
+   {:status :ready :definition (:identity definition) :prepared (:prepared fresh)
+    :closure :no-fetched-vars-in-handler-anf :model-connection :identical-canonical-cores
+    :ambient-equivalence :requires-declared-bindings :transitive-runtime-closure :not-established
+    :compiler-proof-authority false})
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
+(defn check [definition]
+ (let [prepared (prepare definition)]
+  (if (= :ready (:status prepared)) (-> prepared (dissoc :prepared) (assoc :status :checked-context)) prepared)))

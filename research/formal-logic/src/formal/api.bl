@@ -9,7 +9,8 @@
            [formal.result :as result] [formal.protocol :as protocols]
            [formal.protocol-run :as protocol-run] [formal.protocol-trace :as protocol-traces]
            [formal.elaborate :as elaborate] [formal.core :as core]
-           [formal.source-protocol :as source-protocols] [formal.runtime-protocol :as runtime-protocols]))
+           [formal.source-protocol :as source-protocols] [formal.runtime-protocol :as runtime-protocols]
+           [formal.context :as contexts]))
 
 ;; One functional BL facade. Declarations, callbacks and questions stay pure
 ;; ordinary language data until check/compare. Callbacks construct a model;
@@ -86,6 +87,8 @@
 (defn check-certificate [question object] (certificate/check question object))
 (defn program-contract [specification] (contracts/define specification))
 (defn source-function [source parameters] (elaborate/prepare-function source parameters))
+(defn source-context [source parameters] (contexts/define source parameters))
+(defn check-source-context [definition] (contexts/check definition))
 (defn verify-contract
  ([definition] (contracts/verify definition))
  ([options definition] (contracts/verify options definition)))
@@ -122,7 +125,7 @@
 (defn observe-protocol-counterexample
  ([subject native] (observe-protocol-counterexample subject native {}))
  ([subject native options]
-  (if-not (= protocol-traces/source-profile (:profile subject))
+  (if-not (protocol-traces/source-profile? (:profile subject))
    {:status :rejected :reason :source-bound-trace-required :execution-started false}
    (let [replayed (protocol-traces/replay-counterexample subject native)]
     (if-not (= :valid (:status replayed))
@@ -158,7 +161,7 @@
    (= :ready (:status prepared))
     (merge {:subject-kind type :identity (:identity subject) :profile (:profile subject)
             :name (get subject :name (get-in subject [:protocol :name])) :parameters (:parameters subject)
-            :source-connection (:source-connection prepared)}
+            :source-connection (:source-connection prepared) :binding-context (:binding-context prepared)}
      (if (contains? #{:loop :protocol :source-protocol} type)
       (merge {:obligations (mapv (fn [row] {:id (:id row) :question (describe-question (:problem row))}) (:obligations prepared))}
         (if (= :loop type) {:rank-dimension (:rank-dimension prepared)}
@@ -177,8 +180,10 @@
   (let [base {:qualification :requires-retained-per-fragment-evidence
               :subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace]
               :core-profiles [core/profile core/record-profile]
-              :trace-profiles [protocol-traces/profile protocol-traces/source-profile]
-              :runtime-observations {:profile runtime-protocols/profile :scope :owned-sequential-trap-and-stop
+              :trace-profiles [protocol-traces/profile protocol-traces/source-profile protocol-traces/context-profile]
+              :source-context {:profile contexts/profile :closure :no-fetched-vars-in-handler-anf
+                               :ambient-equivalence :requires-declared-bindings :transitive-runtime-closure :not-established}
+              :runtime-observations {:profile runtime-protocols/profile :context-profile runtime-protocols/context-profile :scope :owned-sequential-trap-and-stop
                                      :universal-refinement :not-established :attestation :observer-trusted}
               :certificate :not-checked
               :native-solver-certificate {:status :not-checked}
