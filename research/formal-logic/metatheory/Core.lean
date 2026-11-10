@@ -437,6 +437,63 @@ theorem reachable_has_modelRun (initial : State → Prop) (step : State → Stat
     obtain ⟨n, run⟩ := ih
     exact ⟨n + 1, .append run (.success hstep)⟩
 
+/- A mathematical source-handler refinement rule. The handler is a total typed
+   function with named returned/raised outcomes. The BL extraction and symbolic
+   interpretation must still establish the two universal simulation premises;
+   testing concrete runs does not discharge them for every input. -/
+inductive HandlerStep {τ : Ty} {Message : Type} (handle : Value τ → Message → Outcome τ) :
+    (Value τ × Bool) → (Value τ × Bool) → Prop where
+  | idle (state : Value τ) (failed : Bool) : HandlerStep handle (state, failed) (state, failed)
+  | success {state next} (message : Message) : handle state message = .returned next →
+      HandlerStep handle (state, false) (next, false)
+  | failure {state} (message : Message) (reason : String) : handle state message = .raised reason →
+      HandlerStep handle (state, false) (state, true)
+
+inductive HandlerRun {τ : Ty} {Message : Type} (initial : Value τ → Prop)
+    (handle : Value τ → Message → Outcome τ) : Nat → (Value τ × Bool) → Prop where
+  | initial {state} : initial state → HandlerRun initial handle 0 (state, false)
+  | append {n current next} : HandlerRun initial handle n current →
+      HandlerStep handle current next → HandlerRun initial handle (n + 1) next
+
+theorem handlerStep_after_failure {τ : Ty} {Message : Type}
+    (handle : Value τ → Message → Outcome τ) {state next}
+    (event : HandlerStep handle (state, true) next) : next = (state, true) := by
+  cases event
+  rfl
+
+theorem handlerStep_refines_modelStep {τ : Ty} {Message : Type}
+    (handle : Value τ → Message → Outcome τ)
+    (step : Value τ → Value τ → Prop) (failedAttempt : Value τ → Prop)
+    (returns : ∀ state message next, handle state message = .returned next → step state next)
+    (raises : ∀ state message reason, handle state message = .raised reason → failedAttempt state)
+    {current next} (event : HandlerStep handle current next) : ModelStep step failedAttempt current next := by
+  cases event with
+  | idle state failed => exact .idle state failed
+  | success message h => exact .success (returns _ message _ h)
+  | failure message reason h => exact .failure (raises _ message reason h)
+
+theorem handlerRun_refines_modelRun {τ : Ty} {Message : Type}
+    (handle : Value τ → Message → Outcome τ)
+    (initial : Value τ → Prop) (step : Value τ → Value τ → Prop) (failedAttempt : Value τ → Prop)
+    (returns : ∀ state message next, handle state message = .returned next → step state next)
+    (raises : ∀ state message reason, handle state message = .raised reason → failedAttempt state)
+    {n outcome} (run : HandlerRun initial handle n outcome) : ModelRun initial step failedAttempt n outcome := by
+  induction run with
+  | initial h => exact .initial h
+  | append _ event ih => exact .append ih (handlerStep_refines_modelStep handle step failedAttempt returns raises event)
+
+theorem handlerRun_safety {τ : Ty} {Message : Type}
+    (handle : Value τ → Message → Outcome τ)
+    (initial : Value τ → Prop) (step : Value τ → Value τ → Prop) (failedAttempt invariant : Value τ → Prop)
+    (returns : ∀ state message next, handle state message = .returned next → step state next)
+    (raises : ∀ state message reason, handle state message = .raised reason → failedAttempt state)
+    (starts : ∀ state, initial state → invariant state)
+    (preserves : ∀ current next, invariant current → step current next → invariant next)
+    (excludesFailure : ∀ state, invariant state → ¬ failedAttempt state)
+    {n outcome} (run : HandlerRun initial handle n outcome) : invariant outcome.1 ∧ outcome.2 = false :=
+  modelRun_safety initial step failedAttempt invariant starts preserves excludesFailure
+    (handlerRun_refines_modelRun handle initial step failedAttempt returns raises run)
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
@@ -479,5 +536,9 @@ theorem reachable_has_modelRun (initial : State → Prop) (step : State → Stat
 #print axioms modelRun_state_reachable
 #print axioms modelRun_safety
 #print axioms reachable_has_modelRun
+#print axioms handlerStep_after_failure
+#print axioms handlerStep_refines_modelStep
+#print axioms handlerRun_refines_modelRun
+#print axioms handlerRun_safety
 
 end BeamLispCore
