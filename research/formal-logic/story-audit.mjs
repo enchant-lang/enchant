@@ -42,6 +42,11 @@ try{
   check(size.name+': bounded witness retains its bound and unchecked native certificate',await evaluate("/:bound\\s+2/.test(document.body.innerText)&&document.body.innerText.includes(':native-solver-certificate :not-checked')"));
   await evaluate("[...document.querySelectorAll('pre')].find(e=>e.innerText.includes(':bounded-search :refuted'))?.scrollIntoView({block:'center'})");
   await shot(size.name+'-bounded-counterexample');
+  const sourceBounded=await evaluate("document.querySelector('#cell-story-source-bounded')?.innerText||''");
+  check(size.name+': source-bounded counterexample shows matching model and handler states',/:source-bounded-search\s+:refuted/.test(sourceBounded)&&sourceBounded.includes(':model-states [{"i" 0} {"i" 1} {"i" 2}]')&&sourceBounded.includes(':handler-states [{"i" 1} {"i" 2}]'));
+  check(size.name+': source-bounded counterexample retains its semantic and runtime limits',sourceBounded.includes(':bl/source-record-trace-v1')&&sourceBounded.includes(':handler-core-replay :valid')&&sourceBounded.includes(':native-solver-certificate :not-checked')&&sourceBounded.includes(':live-actor-connection :not-established'));
+  await evaluate("document.querySelector('#cell-story-source-bounded').scrollIntoView({block:'center'})");
+  await shot(size.name+'-source-bounded-counterexample');
   await navigate('/#a-promise-about-the-function-you-actually-wrote');
   check(size.name+': source handler semantics are readable',await evaluate("document.body.innerText.includes('A promise about the function you actually wrote')&&document.body.innerText.includes('Even an empty state record cannot hide the error.')"));
   await shot(size.name+'-source-handler');

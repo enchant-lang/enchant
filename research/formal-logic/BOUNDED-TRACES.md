@@ -1,7 +1,7 @@
 # From a native search to an independently replayed trace
 
 `formal/protocol-trace` constructs a closed bounded safety subject from an exact
-protocol definition and a depth from zero to sixteen. `check`, `compare` and
+authored or source-derived protocol and a depth from zero to sixteen. `check`, `compare` and
 `describe` accept it through the same interface as the other formal subjects.
 
 ```clojure
@@ -72,6 +72,50 @@ checked portable argument. `status-agreement` consistently denotes the native
 comparison. A shared proof cannot manufacture a backend capability, and a raw
 backend contradiction remains visible even when portable evidence agrees.
 
+## The source-backed path
+
+Pass a `formal/source-protocol` definition to the same constructor. Its closed
+subject selects `:bl/source-record-trace-v1`; authored protocols retain
+`:bl/pure-state-trace-v1`, their original identities and their existing term
+questions. A source-backed question binds the exact full source protocol, its
+derived state model and the depth in its identity, profile and scope. Equal
+state behavior under a differently spelled source function does not authorize
+reusing a proof or native observation for the other source subject.
+
+Preparation re-extracts every handler from real compiler ANF, checks its core
+identity and compares the model's complete guard/updates with fresh lowering.
+It then builds the bounded question. Native backends receive that source-bound
+question directly, rather than a renamed result from an unrelated model query.
+
+Replay first executes the pure state model. It then independently re-extracts
+the source connection and replays each selected handler through the concrete
+core. Every returned state or named failure must match the model; both complete
+state sequences, failure outcomes and accumulated safety must agree. Only then
+can a valid full term replay and unsafe trace yield `refuted`.
+
+The counterexample retains `:model-execution`, source-enriched `:execution`
+frames, per-handler `:core-execution`, and `:source-replay` with a handler count
+and sequence/outcome comparisons. Zero-step initial violations have zero handler
+executions. Missing derived states may be completed from model execution, with
+the existing provenance; the separate source execution must still reproduce
+them. Concrete native observations cannot be replaced. A repaired final state
+cannot erase an earlier source violation, and failed handlers retain state and
+permit only stuttering afterwards.
+
+Portable proofs bind the complete source subject too. Source/profile swaps,
+altered bounds and source/model substitutions are rejected before rechecking.
+The common result envelope describes accepted source counterexamples as
+`:term-state-and-handler-core-replay` and assumption feasibility as
+`:replayed-source-trace`. Neither changes the native certificate status.
+
+`Core.lean` adds a typed handler step/run model and four generic refinement
+laws. They show how universal return/failure simulation premises connect a
+handler to the state model and carry model safety to handler runs. Those
+universal premises are not established by testing a finite trace. The actual
+BL/source/symbolic correspondence remains reviewed and unproved. The compiled
+46-theorem model, its exact axiom ledger, 762 focused assertions and nine paired
+native examples are retained in `evidence/source-traces/`.
+
 ## Limits and the next connection
 
 The maximum depth is sixteen. A preflight check caps estimated model-unrolling
@@ -81,8 +125,9 @@ budgets. Runtime, memory and solver deadlines remain controlled by the runners
 and backend sessions. These resource limits do not become language exceptions
 or proofs of nontermination.
 
-This searches and executes an authored pure state model. The source-handler,
-live actor, mailbox and scheduler connections remain unproved. A safe bounded
+This searches authored or source-extracted pure state models. The implemented
+source-handler connection remains reviewed; its mechanized correctness and
+the live actor, mailbox and scheduler connections remain unproved. A safe bounded
 answer covers its declared depth; an unbounded induction argument is a separate
 subject. Delivery fairness, crashes, external effects and liveness need their
 own semantics and evidence. No compiler proof authority is granted.

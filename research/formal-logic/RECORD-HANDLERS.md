@@ -147,9 +147,11 @@ ANF extraction, certificate checker or runtime.
 
 This handler path executes no live actor. Mailbox order, selective receive,
 sending, crashes, persistence, scheduling, fairness and progress remain outside
-its claims. A useful next slice is a source-bound bounded trace subject whose
-native witnesses pass both state replay and handler-core replay, followed by
-explicit live actor observation/refinement. Recursive summaries and broader
+its claims. Source-bound bounded trace questions now use the same
+`formal/protocol-trace` constructor and require both state-model and handler-core
+counterexample replay; [BOUNDED-TRACES.md](BOUNDED-TRACES.md) records their distinct
+profile, source identities and evidence. Explicit live actor observation and
+refinement remain next. Recursive summaries and broader
 source domains are separate extensions with their own profiles and evidence.
 
 Evidence is retained under `evidence/record-handlers/`. Probe, initial failing

@@ -53,9 +53,18 @@ protocol state updates from real handler ANF. `formal/source-protocol` joins
 the common check/compare/describe interface; accepted source traces also execute
 every handler in the concrete core. The focused record/source-protocol run
 passed 1,292 assertions across six files. Six retained examples compare both
-native engines. The separate product/core model now checks 42 theorems with
+native engines. That separate product/core checkpoint checks 42 theorems with
 explicit axiom audits. Source/model correspondence and live actor semantics
 remain unproved; compiler authority remains disabled.
+
+Source protocols now also use the same `formal/protocol-trace` constructor for
+bounded safety. Questions bind the exact source and depth; accepted native
+counterexamples pass both state-model and extracted handler-core execution
+replay. The focused source-bounded/protocol/facade run passed 762 assertions,
+including 159 new source-trace checks, and nine examples ran with both engines.
+The separate mathematical model now checks 46 theorems; universal source/model
+simulation premises remain unproved. [BOUNDED-TRACES.md](BOUNDED-TRACES.md) states
+the two trace profiles and exact retained scope.
 
 [metatheory/Core.lean](metatheory/Core.lean) adds a separate typed mathematical
 model checked by pinned Lean 4.34.1. All 18 theorem audits report no axiom

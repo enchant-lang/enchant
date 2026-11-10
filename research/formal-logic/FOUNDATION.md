@@ -223,14 +223,20 @@ arguments remain required parts of the full goal.
 
 The scalar/record core and actual source-function extraction are implemented.
 The first source-derived protocol slice passed 1,292 focused assertions across
-six files, including 689 record and 125 source-protocol checks. `Core.lean` now
-checks 42 model theorems, with the actual axiom ledger retained separately.
+six files, including 689 record and 125 source-protocol checks. That model
+checkpoint checks 42 theorems, with the actual axiom ledger retained separately.
 `RECORD-HANDLERS.md` describes the closed interfaces and exact remaining scope.
 The BL/source/symbolic/model connections remain reviewed and unproved.
 
-The design below led to that implementation. Next bind bounded source-protocol
-questions and native witnesses to both state-model and handler-core replay;
-then define explicit live actor observations and refinement. Neither source
+The next bounded connection is now implemented too: one `protocol-trace`
+constructor accepts either protocol kind with distinct profiles. Source-backed
+native questions bind the exact source and depth; accepted counterexamples pass
+both state-model and handler-core replay. Its focused run passed 762 assertions
+and the separate mathematical model now checks 46 theorems, including explicit
+handler simulation premises. `BOUNDED-TRACES.md` records the connection.
+
+The design below led to those implementations. Next define explicit live actor
+observations and refinement. Neither source
 extraction nor a finite trace establishes mailbox, scheduling or progress laws.
 
 Prioritize an actual source-backed handler path after the bounded witness
@@ -239,7 +245,7 @@ a new state record with an explicit whole-program outcome. Extract its real
 resolved ANF; do not substitute a separately authored update callback as proof
 of that handler's implementation.
 
-The current core has only scalar results. Add a precisely specified product or
+The original core had only scalar results. Its extension needed a specified product or
 closed-record form before lowering a handler field by field. Record creation
 must preserve the compiler's actual field evaluation order, shared bindings,
 selected branches and the first named failure. Projecting one field must retain

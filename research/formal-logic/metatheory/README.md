@@ -83,3 +83,12 @@ The new 42-theorem compiled model and printed audit are retained in
 two construction laws use `propext`, and the two integer rank rules retain their
 three standard assumptions above. The named-field layout/construction-order
 translation to products and the BL/source/symbolic connections remain unproved.
+
+The source-bounded extension adds typed `HandlerStep` and `HandlerRun` relations.
+Four further theorems check persistent failure, one-step simulation, whole-run
+simulation and safety inherited through that simulation. Their audits are
+empty. The 46-theorem checkpoint and compiled artifact are retained in
+`../evidence/source-traces/`; 41 audits are empty and the other five retain the
+assumptions listed above. The rules require universal return/failure simulation
+premises. Concrete finite replays test instances, not those universal premises;
+the BL source/core/symbolic/record-layout and live actor bridges remain unproved.
