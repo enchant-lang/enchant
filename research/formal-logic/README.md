@@ -51,6 +51,12 @@ with its exported success, value and error terms on every typed input. The
 record and arithmetic cases include eager defaults, repeated updates, signed
 quotient, remainder and modulus. [Core outcome correspondence](CORE.md)
 
+[CORE-CONTRACTS.md](CORE-CONTRACTS.md) applies a checked term entailment to
+the exact Core outcome on every admitted input. A witness adds a checked
+existence theorem. The composed proof checks the full question after aligning
+input slots by name and sort. Its report records the two premise proofs and
+the axioms used by the final theorem.
+
 [WITNESSES.md](WITNESSES.md) adds positive SAT evidence with term-native
 bindings. Authored assignments and models from either backend are independently
 replayed against the original assertions and checked by a constructive Lean
