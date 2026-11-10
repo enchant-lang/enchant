@@ -494,6 +494,151 @@ theorem handlerRun_safety {τ : Ty} {Message : Type}
   modelRun_safety initial step failedAttempt invariant starts preserves excludesFailure
     (handlerRun_refines_modelRun handle initial step failedAttempt returns raises run)
 
+/- A second, independently evaluated syntax for the elaboration rules. This is
+   a typed mathematical ANF model, not the SDK's named ANF data representation.
+   The BL validator and the name/index encoding are not proved by this model. -/
+namespace Elaboration
+
+def truthy : (τ : Ty) → Value τ → Bool
+  | .bool, value => value
+  | .int, _ => true
+  | .unit, _ => true
+  | .prod _ _, _ => true
+
+def condition (τ : Ty) (expression : Expr Γ τ) : Expr Γ .bool :=
+  match τ with
+  | .bool => expression
+  | .int => .seq expression (.literal true)
+  | .unit => .seq expression (.literal true)
+  | .prod _ _ => .seq expression (.literal true)
+
+inductive Anf : List Ty → Ty → Type where
+  | literal : Value τ → Anf Γ τ
+  | variable : Var Γ τ → Anf Γ τ
+  | bind : Anf Γ α → Anf (α :: Γ) β → Anf Γ β
+  | cond : Anf Γ α → Anf Γ β → Anf Γ β → Anf Γ β
+  | seq : Anf Γ α → Anf Γ β → Anf Γ β
+  | neg : Anf Γ .int → Anf Γ .int
+  | intCall : IntOp → Anf Γ .int → Anf Γ .int → Anf Γ .int
+  | compare : Comparison → Anf Γ .int → Anf Γ .int → Anf Γ .bool
+  | equal : (α : Ty) → Anf Γ α → Anf Γ α → Anf Γ .bool
+  | strictNot : Anf Γ .bool → Anf Γ .bool
+  | blNot : Anf Γ α → Anf Γ .bool
+  | increment : Anf Γ .int → Anf Γ .int
+  | decrement : Anf Γ .int → Anf Γ .int
+  | signTest : Comparison → Anf Γ .int → Anf Γ .bool
+  | zeroTest : Anf Γ .int → Anf Γ .bool
+  | pair : Anf Γ α → Anf Γ β → Anf Γ (.prod α β)
+  | first : Anf Γ (.prod α β) → Anf Γ α
+  | second : Anf Γ (.prod α β) → Anf Γ β
+  | firstDefault : Anf Γ (.prod α β) → Anf Γ γ → Anf Γ α
+  | setFirst : Anf Γ (.prod α β) → Anf Γ α → Anf Γ (.prod α β)
+  | setSecond : Anf Γ (.prod α β) → Anf Γ β → Anf Γ (.prod α β)
+  | raise : String → Anf Γ τ
+
+def run : Anf Γ τ → Env Γ → Outcome τ
+  | .literal value, _ => .returned value
+  | .variable index, env => .returned (env.lookup index)
+  | .bind initial body, env => (run initial env).bind fun value => run body (.cons value env)
+  | .cond (α := α) test yes no, env =>
+    (run test env).bind fun value => if truthy α value then run yes env else run no env
+  | .seq initial body, env => (run initial env).bind fun _ => run body env
+  | .neg value, env => (run value env).bind fun a => .returned (-a)
+  | .intCall op left right, env =>
+    (run left env).bind fun a => (run right env).bind fun b => op.apply a b
+  | .compare op left right, env =>
+    (run left env).bind fun a => (run right env).bind fun b => .returned (op.apply a b)
+  | .equal α left right, env =>
+    (run left env).bind fun a => (run right env).bind fun b => .returned (valueEq α a b)
+  | .strictNot value, env => (run value env).bind fun a => .returned (!a)
+  | .blNot (α := α) value, env => (run value env).bind fun a => .returned (!(truthy α a))
+  | .increment value, env => (run value env).bind fun a => .returned (a + 1)
+  | .decrement value, env => (run value env).bind fun a => .returned (a - 1)
+  | .signTest op value, env => (run value env).bind fun a => .returned (op.apply a 0)
+  | .zeroTest value, env => (run value env).bind fun a => .returned (valueEq .int a 0)
+  | .pair left right, env =>
+    (run left env).bind fun a => (run right env).bind fun b => .returned (a, b)
+  | .first record, env => (run record env).bind fun value => .returned value.1
+  | .second record, env => (run record env).bind fun value => .returned value.2
+  | .firstDefault record fallback, env =>
+    (run record env).bind fun value => (run fallback env).bind fun _ => .returned value.1
+  | .setFirst record replacement, env =>
+    (run record env).bind fun value => (run replacement env).bind fun a => .returned (a, value.2)
+  | .setSecond record replacement, env =>
+    (run record env).bind fun value => (run replacement env).bind fun b => .returned (value.1, b)
+  | .raise reason, _ => .raised reason
+
+def lower : Anf Γ τ → Expr Γ τ
+  | .literal value => .literal value
+  | .variable index => .variable index
+  | .bind initial body => .bind (lower initial) (lower body)
+  | .cond (α := α) test yes no => .cond (condition α (lower test)) (lower yes) (lower no)
+  | .seq initial body => .seq (lower initial) (lower body)
+  | .neg value => .neg (lower value)
+  | .intCall op left right => .intOp op (lower left) (lower right)
+  | .compare op left right => .comparison op (lower left) (lower right)
+  | .equal α left right => .equal α (lower left) (lower right)
+  | .strictNot value => .boolNot (lower value)
+  | .blNot (α := α) value => .boolNot (condition α (lower value))
+  | .increment value => .intOp .add (lower value) (.literal 1)
+  | .decrement value => .intOp .sub (lower value) (.literal 1)
+  | .signTest op value => .comparison op (lower value) (.literal 0)
+  | .zeroTest value => .equal .int (lower value) (.literal 0)
+  | .pair left right => .pair (lower left) (lower right)
+  | .first record => .first (lower record)
+  | .second record => .second (lower record)
+  | .firstDefault record fallback => .firstDefault (lower record) (lower fallback)
+  | .setFirst record replacement => .setFirst (lower record) (lower replacement)
+  | .setSecond record replacement => .setSecond (lower record) (lower replacement)
+  | .raise reason => .raise reason
+
+theorem bind_associative (result : Outcome α) (f : Value α → Outcome β)
+    (g : Value β → Outcome γ) :
+    (result.bind f).bind g = result.bind (fun value => (f value).bind g) := by
+  cases result <;> rfl
+
+theorem condition_preserves_outcome (τ : Ty) (expression : Expr Γ τ) (env : Env Γ) :
+    eval (condition τ expression) env = (eval expression env).bind (fun value => .returned (truthy τ value)) := by
+  cases τ <;> simp only [condition, eval, truthy]
+  case bool => cases eval expression env <;> rfl
+
+theorem lower_preserves_outcome (expression : Anf Γ τ) (env : Env Γ) :
+    eval (lower expression) env = run expression env := by
+  induction expression <;>
+    simp_all [lower, run, eval, condition_preserves_outcome, bind_associative, Outcome.bind, IntOp.apply]
+
+theorem lower_preserves_return (expression : Anf Γ τ) (env : Env Γ) (value : Value τ) :
+    eval (lower expression) env = .returned value ↔ run expression env = .returned value := by
+  rw [lower_preserves_outcome]
+
+theorem lower_preserves_named_failure (expression : Anf Γ τ) (env : Env Γ) (reason : String) :
+    eval (lower expression) env = .raised reason ↔ run expression env = .raised reason := by
+  rw [lower_preserves_outcome]
+
+theorem integer_condition_keeps_failure (reason : String) (yes no : Anf Γ τ) (env : Env Γ) :
+    eval (lower (.cond (.raise reason : Anf Γ .int) yes no)) env = .raised reason := by
+  rw [lower_preserves_outcome]; rfl
+
+theorem present_projection_keeps_default_failure (a : Value α) (b : Value β)
+    (reason : String) (env : Env Γ) :
+    eval (lower (.firstDefault (.literal (a, b)) (.raise reason : Anf Γ γ))) env = .raised reason := by
+  rw [lower_preserves_outcome]; rfl
+
+theorem hidden_field_failure_survives_projection (a : Value α) (reason : String) (env : Env Γ) :
+    eval (lower (.first (.pair (.literal a) (.raise reason : Anf Γ β)))) env = .raised reason := by
+  rw [lower_preserves_outcome]; rfl
+
+#print axioms bind_associative
+#print axioms condition_preserves_outcome
+#print axioms lower_preserves_outcome
+#print axioms lower_preserves_return
+#print axioms lower_preserves_named_failure
+#print axioms integer_condition_keeps_failure
+#print axioms present_projection_keeps_default_failure
+#print axioms hidden_field_failure_survives_projection
+
+end Elaboration
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
