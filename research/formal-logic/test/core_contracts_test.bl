@@ -1,0 +1,50 @@
+(ns formal.core-contracts-test
+ (:require [formal.api :as formal] [formal.core-contract-examples :as examples]
+           [formal.identity :as identity] [formal.logic :as logic] [formal.term :as t]))
+
+(deftest compose-exact-core-entailment-and-admission-data
+ (doseq [row examples/rows]
+  (let [definition (:definition row) certificate (:certificate (examples/certify definition))
+        ready (examples/export row certificate) packet (:packet ready)
+        feasible (formal/core-contract-feasibility definition)]
+   (is (= :ready (:status ready)) (pr-str [(:id row) (:reason ready)]))
+   (is (= :not-run (:kernel-execution ready)))
+   (is (= false (:compiler-proof-authority ready)))
+   (is (identity/valid? packet))
+   (is (= (:identity definition) (get-in packet [:core :subject :identity])))
+   (is (= (get-in packet [:core :subject :question]) (get-in packet [:entailment :normalized :question])))
+   (is (= :checked-data-connection (:status (formal/check-core-contract-data definition certificate packet))))
+   (is (= (:witness-question packet) (identity/hash (:question feasible))))
+   (if (contains? row :bindings)
+    (is (= (get-in packet [:entailment :assertions]) (get-in packet [:witness :assertions])))
+    (is (nil? (:witness packet)))))))
+
+(deftest exact-subject-replay-refuses-resealed-substitutions
+ (let [row (first (filter #(= "unused-slots" (:id %)) examples/rows))
+       definition (:definition row) certificate (:certificate (examples/certify definition))
+       packet (:packet (examples/export row certificate))]
+  (doseq [changed [(assoc-in packet [:policy :pre] (t/bool true))
+                   (assoc-in packet [:policy :post] (t/bool true))
+                   (assoc-in packet [:policy :must-return] false)
+                   (assoc-in packet [:policy :allowed-codes] [1])
+                   (update packet :core #(identity/seal (assoc-in % [:outcome :error] (t/int 100))))
+                   (update packet :entailment #(identity/seal (update % :assertions pop)))
+                   (update packet :witness #(identity/seal (assoc-in % [:bindings 0 2] false)))]]
+   (is (= :rejected (:status (formal/check-core-contract-data definition certificate (identity/seal changed))))))
+  (is (not= :ready (:status (formal/core-contract-data definition certificate {:witness {:bindings {}}}))))
+  (is (not= :ready (:status (formal/core-contract-data definition certificate {:witness nil}))))
+  (is (not= :ready (:status (formal/core-contract-data definition {}))))
+  (is (not= :ready (:status (formal/core-contract-data examples/allowed-errors certificate))))))
+
+(deftest both-native-backends-can-find-admitted-inputs
+ (let [definition examples/slotted certificate (:certificate (examples/certify definition))
+       question (:question (formal/core-contract-feasibility definition))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [native (logic/run {:backend engine} question)
+         witness (formal/term-witness-from-result question native)
+         made (formal/core-contract-data definition certificate {:witness {:packet (:packet witness)}})]
+    (is (= :sat (:solver-status native)) (pr-str (:reason native)))
+    (is (= :ready (:status witness)) (pr-str (:reason witness)))
+    (is (= :ready (:status made)) (pr-str (:reason made)))
+    (is (= 2 (count (get-in made [:packet :witness :bindings]))))
+    (is (= :checked-data-connection (:status (formal/check-core-contract-data definition certificate (:packet made)))))))))
