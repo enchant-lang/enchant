@@ -194,10 +194,8 @@ theorem normalizationConnected : ∀ integers booleans,
   simp only [List.mem_cons, List.not_mem_nil, forall_eq_or_imp, forall_eq, forall_false, implies_true, and_true]
   dsimp only [Formula.eval]
   dsimp only [Problem.values]
-  simp only [List.getElem?_cons, List.getElem?_nil]
-  simp only [Row.holds]
-  dsimp only [dot]
-  simp [integerMap, booleanMap]
+  simp only [List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil]
+  simp [Row.holds, dot, integerMap, booleanMap]
 """ + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals (repeat (first | omega | (split at * <;> simp_all [{SIMPS}])))\n" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
