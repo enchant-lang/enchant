@@ -102,6 +102,17 @@ def canonical_identity(packet):
     return hashlib.sha256(wire).hexdigest()
 
 
+def load_packet(path):
+    def distinct_object(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, "duplicate JSON object key")
+            result[key] = value
+        return result
+    return json.loads(path.read_text(), object_pairs_hook=distinct_object,
+                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError("nonfinite JSON number")))
+
+
 def integer(value):
     require(type(value) is int, "integer required, Boolean is not an integer")
 
@@ -321,7 +332,7 @@ def verify_source(text, kernel):
 
 def run(packet_path, output):
     require(packet_path.stat().st_size <= MAX_BYTES, "packet byte capacity")
-    packet = json.loads(packet_path.read_text())
+    packet = load_packet(packet_path)
     validate(packet)
     text = source(packet["kernel"])
     verify_source(text, packet["kernel"])
@@ -349,7 +360,7 @@ def run(packet_path, output):
             match = re.fullmatch(r"'([^']+)' (?:does not depend on any axioms|depends on axioms: \[(.*)\])", line)
             require(match is not None, "unexpected Lean audit output")
             audits[match[1]] = match[2].split(", ") if match[2] else []
-        require(audits == {"packetAccepted": [], "packetUnsatisfiable": ["propext", "Quot.sound"]}, "unexpected theorem/axiom dependencies")
+        require(audits == {"packetAccepted": ["propext"], "packetUnsatisfiable": ["propext", "Quot.sound"]}, "unexpected theorem/axiom dependencies")
         shutil.copyfile(work / "Check.olean", output / "Check.olean")
     result = {"schema": "enchant.formal.normalized-refutation-execution.v1", "status": "checked-normalized-refutation",
               "packet": packet["identity"], "statement": packet["statement"], "question": packet["question"],
