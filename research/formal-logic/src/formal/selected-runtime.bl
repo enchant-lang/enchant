@@ -1,0 +1,181 @@
+(ns formal.selected-runtime
+ (:require [formal.selected-artifact :as selected-artifact] [formal.selected :as selected]
+           [formal.runtime-artifact :as artifact] [formal.runtime-outcome :as outcome]
+           [formal.contract :as contract] [formal.core :as core] [formal.core-symbolic :as symbolic]
+           [formal.evaluate :as evaluate] [formal.identity :as identity]
+           [reload.execution :as execution] [reload.generation :as generation]))
+
+(def profile :bl/selected-contract-observation-v1)
+(def adapter :initialize-source-instance-and-call-once-v1)
+(def limits {:deadline-ms 30000 :receipt-bytes 2097152})
+(def ^:private fields
+ #{:formal/contract-observation :profile :adapter :projection :definition :sdk :artifact
+   :assignment :outcome :stage :termination :monitor :cleanup :deadline-ms :identity-profile :identity})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.selected-runtime: " message) {}))))
+(defn- shape! [value fields]
+ (require! (and (map? value) (= fields (set (keys value)))) "noncanonical receipt data"))
+(defn- reference! [definition assignment]
+ (require! (= selected/profile (get-in definition [:source :profile])) "a selected Source contract is required")
+ (let [prepared (contract/prepare definition)
+       _ (require! (= :ready (:status prepared)) (:reason prepared))
+       _ (require! (and (map? assignment) (= (set (keys assignment)) (set (keys (:parameters definition))))
+                        (every? (fn [[name sort]] (core/inhabits? sort (get assignment name))) (:parameters definition))) "exact typed input assignment required")
+       bindings (symbolic/bind-inputs (:inputs prepared) assignment)
+       _ (require! (= true (evaluate/value (:requires definition) bindings)) "contract precondition is not satisfied")
+       reference (core/evaluate (:body definition) (:parameters definition) assignment)
+       _ (require! (contains? #{:returned :raised} (:status reference)) "reference execution is incomplete")]
+  {:prepared prepared :bindings bindings :reference reference}))
+(defn- safety [definition bindings reference]
+ (if (= :returned (:status reference))
+  (case (evaluate/value (:ensures definition) bindings) true :holds false :violated :not-established)
+  (if (and (= :may (:returns definition)) (contains? (:effects definition) :raise)
+            (contains? (:raises definition) (:error reference))) :holds :violated)))
+(defn- child [parent ticket owner compiled reference args return-sort]
+ (BeamLisp.Env/with_env owner
+  (fn []
+   (let [graph (atom nil) stage (atom :preparing-instance) observed (atom nil) retirement (atom nil)]
+    (try
+     (let [g (execution/prepare-captured-unit! (:compiled compiled))]
+      (reset! graph g)
+      (reset! stage :initializing)
+      (erlang/send parent [ticket :stage :initializing])
+      (reset! observed
+       (outcome/capture
+        (fn [_ _]
+         (execution/initialize-instance! g)
+         (execution/complete-preparation! (:cache-key g) g)
+         (reset! stage :export-entered) (erlang/send parent [ticket :stage :export-entered])
+         (let [value (execution/invoke-instance-binding! g reference args)]
+          (reset! stage :export-returned) value)) nil nil #(core/inhabits? return-sort %))))
+     (catch error
+      (reset! observed {:status :adapter-failure :reason (String/slice (ex-message error) 0 4096)}))
+     (finally
+      (when @graph (reset! retirement (generation/retire! @graph)))))
+    (erlang/send parent [ticket :outcome {:outcome @observed :stage @stage
+                                         :retirement @retirement}])))))
+(defn- drain [ticket]
+ (receive [seen :stage _] :when (= seen ticket) (drain ticket)
+          [seen :outcome _] :when (= seen ticket) (drain ticket) (after 0 :ok)))
+(defn- run! [compiled assignment parameters return-sort deadline-ms]
+ (let [owner (BeamLisp.Env/fork) parent (erlang/self) ticket (erlang/make_ref)
+       deadline (+ (System/monotonic_time :millisecond) deadline-ms)
+       args (mapv #(get assignment (first %)) parameters)
+       pair (spawn-monitor #(child parent ticket owner compiled (:target compiled) args return-sort))
+       pid (elem pair 0) monitor (elem pair 1) stage (atom :preparing-instance)
+       received (atom nil) down (atom nil) forced (atom false) cleanup (atom nil)]
+  (try
+   (reset! received
+    (loop []
+     (receive
+      [seen :stage current] :when (= seen ticket) (do (reset! stage current) (recur))
+      [seen :outcome result] :when (= seen ticket) (do (reset! stage (:stage result)) (assoc result :termination :completed))
+      [:DOWN seen :process child reason] :when (and (= seen monitor) (= child pid))
+       (do (reset! down {:status :down :reason :abnormal :forced false :raw-reason (String/slice (pr-str reason) 0 4096)})
+           {:outcome nil :stage @stage :termination :process-death})
+      (after (max 0 (- deadline (System/monotonic_time :millisecond)))
+       {:outcome nil :stage @stage :termination :timeout}))))
+   (finally
+    (when (and (Process/alive? pid) (not= :completed (:termination @received)))
+     (reset! forced true) (erlang/exit pid :kill))
+    (when-not @down
+     (reset! down
+      (receive [:DOWN seen :process child reason] :when (and (= seen monitor) (= child pid))
+       {:status :down :reason (if (= :normal reason) :normal :abnormal) :forced @forced
+        :raw-reason (String/slice (pr-str reason) 0 4096)}
+       (after 5000 {:status :unconfirmed :reason :unknown :forced @forced :raw-reason "cleanup deadline"}))))
+    (when (Process/alive? pid) (reset! forced true) (erlang/exit pid :kill))
+    (Process/demonitor monitor (list :flush)) (drain ticket)
+    ;; Closing the real parent fences new Source preparations; the original
+    ;; owner drains even reservations left by a killed child. Public state flags
+    ;; are not accepted as retirement authority.
+    (BeamLisp.Env/destroy owner)
+    (reset! cleanup (generation/retire-contextual-children! owner))))
+  (assoc @received :monitor @down
+   :cleanup {:worker-alive (Process/alive? pid) :parent-closed (= :retired (BeamLisp.Env/with_scope_commit owner (fn [] :alive)))
+             :preparations @cleanup :remaining (count (execution/contextual-preparations owner))
+             :modules (mapv (fn [row] {:module (:module row)
+                                       :loaded (erlang/module_loaded (erlang/binary_to_atom (:module row)))})
+                           (get-in compiled [:manifest :members]))})))
+
+(defn check
+ "Reproduce original Source artifacts and compare recorded outcomes. This
+  function never initializes a Source instance or invokes a recorded export."
+ [definition receipt]
+ (try
+  (require! (and (map? receipt) (<= (erlang/external_size receipt) (:receipt-bytes limits))) "receipt capacity")
+  (shape! receipt fields)
+  (require! (and (= 1 (:formal/contract-observation receipt)) (= profile (:profile receipt))
+                 (= adapter (:adapter receipt)) (= outcome/profile (:projection receipt))
+                 (identity/valid? receipt) (= (:identity definition) (:definition receipt))
+                 (int? (:deadline-ms receipt)) (<= 1 (:deadline-ms receipt) (:deadline-ms limits))) "receipt identity/profile")
+  (let [sdk (artifact/check-sdk (:sdk receipt))
+        {:keys [prepared bindings reference]} (reference! definition (:assignment receipt))
+        compiled (selected-artifact/compile (:source definition) (get-in receipt [:artifact :module]))
+        _ (require! (= (:manifest compiled) (:artifact receipt)) "recorded original artifact differs from fresh Source emission")
+        cleanup (:cleanup receipt) monitor (:monitor receipt)
+        _ (shape! cleanup #{:worker-alive :parent-closed :preparations :remaining :modules})
+        _ (shape! (:preparations cleanup) #{:status :pending :retired})
+        _ (require! (and (= false (:worker-alive cleanup)) (= true (:parent-closed cleanup)) (= 0 (:remaining cleanup))
+                         (= :retired (get-in cleanup [:preparations :status])) (= 0 (get-in cleanup [:preparations :pending]))
+                         (int? (get-in cleanup [:preparations :retired])) (<= 0 (get-in cleanup [:preparations :retired]) 1)
+                         (= (:modules cleanup) (mapv (fn [row] {:module (:module row) :loaded false}) (get-in compiled [:manifest :members]))))
+                    "Source instance/worker/artifact cleanup is unconfirmed")
+        _ (shape! monitor #{:status :reason :forced :raw-reason})
+        _ (require! (and (= :down (:status monitor)) (contains? #{:normal :abnormal} (:reason monitor))
+                         (contains? #{true false} (:forced monitor)) (string? (:raw-reason monitor)) (<= (count (:raw-reason monitor)) 4096)) "monitor outcome")
+        termination (:termination receipt) raw (:outcome receipt) stage (:stage receipt)
+        _ (require! (and (contains? #{:completed :timeout :process-death} termination)
+                         (contains? #{:preparing-instance :initializing :export-entered :export-returned} stage)) "observation stage/termination")
+        _ (when (= :completed termination)
+            (require! (and (= :normal (:reason monitor)) (= false (:forced monitor)) (outcome/valid? raw)
+                           (if (contains? #{:returned :invalid-return} (:status raw)) (= :export-returned stage)
+                            (contains? #{:initializing :export-entered} stage))) "completed outcome/monitor/stage"))
+        _ (when-not (= :completed termination) (require! (nil? raw) "unfinished observation cannot carry a completed outcome"))
+        _ (when (= :returned (:status raw))
+            (require! (core/inhabits? (get-in prepared [:typing :sort]) (:value raw)) "returned value outside the declared core sort"))
+        compared (when (= :completed termination) (outcome/compare-core raw reference))
+        stack-bound (or (not= :raised (:status raw))
+                        (some #(= (get-in compiled [:manifest :module]) (:module %)) (:frames raw)))
+        compared (if (and (= :raised (:status raw)) (not stack-bound)) :unclassified compared)
+        status (case compared :matches :conforming :disagreement :disagreement :incomplete)]
+   {:status status :scope :finite-original-selected-source-contract-conformance
+    :contract-safety (if (= :conforming status) (safety definition bindings reference) :not-established)
+    :reference-outcome reference :comparison compared :error-stack-bound-to-artifact (boolean stack-bound)
+    :binding-context (:binding-context prepared) :sdk-check sdk
+    :attestation :observer-trusted-not-cryptographically-attested
+    :universal-runtime-refinement :not-established :specialization-preservation :not-mechanically-proved
+    :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :scope :finite-original-selected-source-contract-conformance
+                :compiler-proof-authority false})))
+(defn observe
+ "Initialize the original selected Source unit and invoke its actual export
+  once under the SDK owner. Native solving is not part of this operation."
+ ([definition assignment] (observe definition assignment {}))
+ ([definition assignment options]
+  (let [phase (atom :before-execution)]
+   (try
+    (require! (and (map? options) (every? #{:deadline-ms} (keys options))) "unknown observation option")
+    (let [deadline-ms (get options :deadline-ms 10000)
+          _ (require! (and (int? deadline-ms) (<= 0 deadline-ms (:deadline-ms limits))) "deadline capacity")
+          {:keys [prepared]} (reference! definition assignment)]
+     (if (= 0 deadline-ms) {:status :incomplete :reason :deadline-expired :execution-started false :compiler-proof-authority false}
+      (let [sdk (artifact/sdk-identity)
+            compiled (selected-artifact/compile (:source definition) (selected-artifact/module-name (System/unique_integer (list :positive))))
+            _ (reset! phase :worker-entered)
+            observed (run! compiled assignment (get-in definition [:source :parameters]) (get-in prepared [:typing :sort]) deadline-ms)
+            _ (reset! phase :worker-returned)
+            raw (:outcome observed)]
+       (if (= :adapter-failure (:status raw))
+        {:status :incomplete :reason (:reason raw) :stage (:stage observed) :execution-started :unknown
+         :cleanup (:cleanup observed) :compiler-proof-authority false}
+        (let [receipt (identity/seal {:formal/contract-observation 1 :profile profile :adapter adapter :projection outcome/profile
+                        :definition (:identity definition) :sdk sdk :artifact (:manifest compiled) :assignment assignment
+                        :outcome raw :stage (:stage observed) :termination (:termination observed) :monitor (:monitor observed)
+                        :cleanup (:cleanup observed) :deadline-ms deadline-ms})
+              checked (check definition receipt)]
+         {:status (if (= :conforming (:status checked)) :observed (:status checked)) :receipt receipt :checking checked
+          :scope :initialize-original-selected-unit-and-call-once :compiler-proof-authority false})))))
+    (catch error {:status :error :reason (ex-message error) :execution-stage @phase
+                  :execution-started (if (= :before-execution @phase) false :unknown)
+                  :compiler-proof-authority false})))))

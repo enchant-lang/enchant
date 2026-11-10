@@ -1,0 +1,54 @@
+(ns formal.selected-artifact
+ (:require [formal.selected :as selected] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [compile.world :as world]))
+
+;; A byte-capture adapter, not a binding resolver or admission authority. The
+;; SDK consumes these exact Source units, checks their phases, emits its actual
+;; Source-guarded factory and owns subsequent instance admission separately.
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.selected-artifact: " message) {}))))
+(defn module-name [run] (str "Elixir.Formal.Selected.M" run))
+(defn- module! [name]
+ (require! (and (string? name) (Regex/match? (Regex/compile! "^Elixir\\.Formal\\.Selected\\.M[0-9]{1,24}$") name))
+           "invalid owned module name")
+ (erlang/binary_to_atom name))
+(defn compile
+ "Reconstruct and emit the original selected unit to bytes. No instance,
+  runtime initializer, export invocation or application publication occurs."
+ [definition name]
+ (let [module (module! name) checked (selected/prepare definition)
+       _ (require! (= :ready (:status checked)) (:reason checked))
+       root (Path/join (System/tmp_dir!) (str "formal-selected-capture-" (artifact/hex (crypto/strong_rand_bytes 12))))]
+  (File/mkdir_p! root)
+  (try
+   (let [sources (:sources definition)
+         inputs (mapv (fn [at]
+                        (let [bytes (:source (nth sources at)) path (Path/join root (str "unit-" at ".input"))]
+                         (File/write! path bytes)
+                         {:path path :digest (crypto/hash :sha256 bytes) :bytes (erlang/byte_size bytes)})) (range (count sources)))
+         ;; Preserve original Source coordinates without ever writing at them.
+         ;; No manifest expression is printed or evaluated. All executable
+         ;; syntax is read from the exact supplied Source bytes by the SDK.
+         manifest {:version 1 :profile 'syntax-v1 :entry (mapv (fn [x] x) (:entry definition))
+                   :sources (mapv #(select-keys % [:namespace :revision :file]) sources) :libraries []}
+         captured {:manifest manifest :inputs inputs :sdk-inputs [] :sources sources :library-bytes []}
+         prepared (world/prepare-captured captured)
+         unit-id (identity/hash (get-in prepared [:program :unit]))
+         target (get-in definition [:linkage :target])
+         _ (require! (and (= unit-id (get-in definition [:linkage :unit]))
+                          (some #(= target %) (get-in prepared [:program :unit :exports]))) "original unit/export differs from the formal Source context")
+         compiled (BeamLisp.AOT/compile_unit (world/prepare-unit prepared module))
+         members (BeamLisp.AOT/contextual_unit_members! compiled)
+         runtime-modules (set (map first (:runtime-beams members)))
+         manifests (mapv (fn [pair]
+                           {:module (str (first pair)) :role (if (contains? runtime-modules (first pair)) :runtime :phase)
+                            :beam-sha256 (artifact/digest (second pair))
+                            :code-md5 (artifact/hex (elem (elem (beam_lib/md5 (second pair)) 1) 1))}) (:beams compiled))
+         manifest {:module name :context (:identity definition) :original-unit unit-id
+                   :target-reference (artifact/hex (:id target)) :factory-abi (get-in members [:metadata :factory-abi])
+                   :metadata (identity/hash (:metadata members)) :members manifests}]
+    (require! (and (= 2 (:factory-abi manifest)) (= 2 (count manifests))
+                   (= #{:runtime :phase} (set (map :role manifests)))) "one original runtime factory and phase companion required")
+    {:compiled compiled :manifest manifest :target target
+     :runtime-modules (mapv first (:runtime-beams members)) :prepared (:prepared checked)})
+   (finally (File/rm_rf! root)))))

@@ -1,0 +1,128 @@
+(ns formal.selected-runtime-test
+ (:require [formal.api :as formal] [formal.selected-runtime :as runtime]
+           [formal.selected-artifact :as artifact] [formal.identity :as identity]
+           [formal.term :as t] [formal.core :as core]))
+
+(defn context [body parameters]
+ (formal/selected-source-context
+  {:sources [{:namespace 'formal.observed :revision 'current
+              ;; Coordinates must never be filesystem destinations.
+              :file "/formal-source-coordinates-only/../virtual.bl" :source (str "(ns formal.observed) " body)}]
+   :entry ['formal.observed 'current] :target 'answer :parameters parameters}))
+(defn promise [name body]
+ (formal/program-contract {:name name :context (context body [["x" t/Int]])
+  :ensures (fn [inputs output] (t/eq output (t/add (get inputs "x") (t/int 40))))}))
+(def basic (promise "selected-observed" "(def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))"))
+(defn rehash [data] (assoc data :identity (identity/of data)))
+(defn clean? [receipt]
+ (let [cleanup (:cleanup receipt)]
+  (and (= false (:worker-alive cleanup)) (= true (:parent-closed cleanup)) (= 0 (:remaining cleanup))
+       (= :retired (get-in cleanup [:preparations :status])) (= 0 (get-in cleanup [:preparations :pending]))
+       (every? #(= false (:loaded %)) (:modules cleanup)))))
+
+(deftest original-source-factory-and-export-run-with-real-instance-custody
+ (let [observed (formal/observe-contract basic {"x" 2}) receipt (:receipt observed)
+       checked (:checking observed) saved (erlang/binary_to_term (erlang/term_to_binary receipt))]
+  (is (= :observed (:status observed)) (pr-str observed))
+  (is (= :conforming (:status checked)) (pr-str checked))
+  (is (= :holds (:contract-safety checked)))
+  (is (= :finite-original-selected-source-contract-conformance (:scope checked)))
+  (is (= 42 (get-in receipt [:outcome :value])))
+  (is (= :export-returned (:stage receipt)))
+  (is (= :normal (get-in receipt [:monitor :reason])))
+  (is (= false (get-in receipt [:monitor :forced])))
+  (is (= 2 (get-in receipt [:artifact :factory-abi])))
+  (is (= (get-in basic [:source :identity]) (get-in receipt [:artifact :context])))
+  (is (= (get-in basic [:source :linkage :unit]) (get-in receipt [:artifact :original-unit])))
+  (is (= #{:runtime :phase} (set (map :role (get-in receipt [:artifact :members])))))
+  (is (= :observer-trusted-not-cryptographically-attested (:attestation checked)))
+  (is (= :not-established (:universal-runtime-refinement checked)))
+  (is (= :not-mechanically-proved (:specialization-preservation checked)))
+  (is (= false (:compiler-proof-authority checked)))
+  (is (clean? receipt))
+  (is (= receipt saved))
+  (is (= :conforming (:status (formal/check-contract-observation basic saved))))
+  (doseq [member (get-in receipt [:artifact :members])]
+   (is (= false (erlang/module_loaded (erlang/binary_to_atom (:module member)))))
+   (is (= 64 (count (:beam-sha256 member)))))))
+
+(deftest finite-conformance-and-the-contract-promise-are-separate
+ (let [definition (assoc basic :ensures (t/bool false)) definition (rehash definition)
+       observed (formal/observe-contract definition {"x" 2})]
+  (is (= :observed (:status observed)) (pr-str observed))
+  (is (= :conforming (get-in observed [:checking :status])))
+  (is (= :violated (get-in observed [:checking :contract-safety])))
+  (is (= 42 (get-in observed [:receipt :outcome :value])))
+  (is (clean? (:receipt observed)))))
+
+(deftest exact-records-booleans-and-signed-arithmetic-use-the-original-unit
+ (doseq [[body parameters assignment expected]
+         [["(defn answer [x] (erlang/div x -3))" [["x" t/Int]] {"x" 7} -2]
+          ["(defn answer [x] (erlang/not x))" [["flag" t/Bool]] {"flag" true} false]
+          ["(defn- bump [r] (Elixir.BeamLisp.Ns.Rt/assoc r \"n\" (erlang/+ (Elixir.BeamLisp.Ns.Rt/get r \"n\") 1))) (defn answer [r] {\"next\" (bump r) \"old\" (Elixir.BeamLisp.Ns.Rt/get r \"n\")})"
+           [["state" (core/record-sort {"n" t/Int "flag" t/Bool})]] {"state" {"n" 7 "flag" false}} {"next" {"n" 8 "flag" false} "old" 7}]]]
+  (let [definition (formal/program-contract {:name "selected-original-domain" :context (context body parameters)})
+        result (formal/observe-contract definition assignment)]
+   (is (= :observed (:status result)) (pr-str result))
+   (is (= expected (get-in result [:receipt :outcome :value])))
+   (is (= :holds (get-in result [:checking :contract-safety])))
+   (is (clean? (:receipt result))))))
+
+(deftest actual-initializer-and-export-failures-retain-their-named-cause
+ (doseq [[body stage] [["(def hidden (erlang/div 1 0)) (defn answer [x] x)" :initializing]
+                       ["(defn- divide [x] (erlang/div x 0)) (defn answer [x] (divide x))" :export-entered]]]
+  (let [definition (formal/program-contract {:name "selected-original-error" :context (context body [["x" t/Int]])
+                     :returns :may :effects #{:raise} :raises #{:zero-divisor}})
+        result (formal/observe-contract definition {"x" 7})]
+   (is (= :observed (:status result)) (pr-str result))
+   (is (= :raised (get-in result [:receipt :outcome :status])))
+   (is (= stage (get-in result [:receipt :stage])))
+   (is (= :holds (get-in result [:checking :contract-safety])))
+   (is (= true (get-in result [:checking :error-stack-bound-to-artifact])))
+   (is (clean? (:receipt result))))))
+
+(deftest imported-hygienic-transformer-still-executes-the-selected-private-helper
+ (let [provider {:namespace 'formal.observed.library :revision 'v1 :file "../inert-provider-coordinate.bl"
+                 :source "(ns formal.observed.library) (defn- plus-forty [x] (erlang/+ x 40)) (defsyntax shifted [form ctx] `(plus-forty ~(syntax-arg form 1)))"}
+       client {:namespace 'formal.observed :revision 'current :file "inert-client-coordinate.bl"
+               :source "(ns formal.observed) (import-world 'formal.observed.library 'v1 :only [shifted]) (defn answer [x] (shifted x))"}
+       ctx (formal/selected-source-context {:sources [provider client] :entry ['formal.observed 'current]
+                                            :target 'answer :parameters [["x" t/Int]]})
+       definition (formal/program-contract {:name "selected-original-macro" :context ctx})
+       result (formal/observe-contract definition {"x" 2})]
+  (is (= :observed (:status result)) (pr-str result))
+  (is (= 1 (get-in ctx [:expansion :count])))
+  (is (= 42 (get-in result [:receipt :outcome :value])))
+  (is (clean? (:receipt result)))))
+
+(deftest receipt-data-cannot-replace-inputs-artifacts-cleanup-or-the-definition
+ (let [result (formal/observe-contract basic {"x" 2}) receipt (:receipt result)]
+  (is (= :observed (:status result)) (pr-str result))
+  (doseq [changed [(assoc receipt :definition "other") (assoc receipt :profile :forged)
+                  (assoc receipt :adapter :unchecked) (assoc receipt :projection :message-only)
+                  (assoc receipt :extra :ignored) (assoc receipt :deadline-ms 30001)
+                  (assoc receipt :assignment {"x" true}) (assoc receipt :assignment {"x" 2 "other" 3})
+                  (assoc-in receipt [:artifact :module] "Elixir.BeamLisp.Env")
+                  (assoc-in receipt [:artifact :members 0 :beam-sha256] "wrong")
+                  (assoc-in receipt [:artifact :original-unit] "wrong")
+                  (assoc-in receipt [:cleanup :worker-alive] true) (assoc-in receipt [:cleanup :parent-closed] false)
+                  (assoc-in receipt [:cleanup :remaining] 1) (assoc-in receipt [:cleanup :preparations :pending] 1)
+                  (assoc-in receipt [:cleanup :modules 0 :loaded] true) (assoc-in receipt [:monitor :status] :unconfirmed)
+                  (assoc-in receipt [:outcome :value] true) (assoc receipt :stage :initializing)]]
+   (is (= :rejected (:status (formal/check-contract-observation basic (rehash changed)))) (pr-str changed)))
+  (doseq [changed [(assoc-in receipt [:outcome :value] 43) (assoc receipt :assignment {"x" 3})]]
+   (is (= :disagreement (:status (formal/check-contract-observation basic (rehash changed))))))
+  (is (= :incomplete (:status (formal/check-contract-observation basic
+                     (rehash (assoc receipt :outcome nil :termination :timeout :stage :export-entered))))))
+  (is (clean? receipt))))
+
+(deftest preconditions-shapes-and-zero-deadline-refuse-before-instance-execution
+ (let [prepared (formal/program-contract {:name "selected-precondition" :context (:source basic)
+                  :requires (fn [inputs] (t/gt (get inputs "x") (t/int 0)))})]
+  (doseq [[definition assignment options]
+          [[prepared {"x" 0} {}] [basic {"x" false} {}] [basic {} {}] [basic {"x" 2 "extra" 3} {}]
+           [basic {"x" 2} {:deadline-ms -1}] [basic {"x" 2} {:callback (fn [] 1)}]]]
+   (let [result (formal/observe-contract definition assignment options)]
+    (is (= :error (:status result))) (is (= false (:execution-started result)))))
+  (let [result (formal/observe-contract basic {"x" 2} {:deadline-ms 0})]
+   (is (= :incomplete (:status result))) (is (= false (:execution-started result))))))
