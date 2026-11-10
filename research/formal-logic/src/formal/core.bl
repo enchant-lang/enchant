@@ -73,10 +73,27 @@
       :evaluation :structural :syntax-nodes @visits :metatheory :not-mechanized})))
   (catch error {:status :unsupported :reason (ex-message error) :profile profile})))
 
+(defn canonicalize
+ "Canonical lexical names, avoiding all free input identities. Compiler fresh
+  counters and alpha-renaming do not change a program's semantic identity."
+ [program declarations]
+ (require! (= :typed (:status (typecheck program declarations))) "canonicalization requires a typed core program")
+ (let [next (atom 0) reserved (atom (set (keys declarations)))]
+  (letfn [(fresh []
+           (let [name (str "#core/local" (swap! next inc))]
+            (if (contains? @reserved name) (fresh) (do (swap! reserved conj name) name))))
+          (visit [expr aliases]
+           (case (:op expr)
+            :local (assoc expr :data (get aliases (:data expr) (:data expr)))
+            :let (let [initial (visit (first (:args expr)) aliases) name (fresh)
+                       body (visit (second (:args expr)) (assoc aliases (:data expr) name))]
+                   (assoc expr :data name :args [initial body]))
+            (assoc expr :args (mapv #(visit % aliases) (:args expr)))))]
+   (visit program {}))))
+
 (defn identity [program declarations]
- (let [typing (typecheck program declarations)]
-  (require! (= :typed (:status typing)) "only typed core programs have a semantic identity")
-  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary [profile declarations program])) (list (tuple :case :lower)))))
+ (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary [profile declarations (canonicalize program declarations)]))
+                (list (tuple :case :lower))))
 
 (defn- returned [value sort] {:status :returned :value value :sort sort})
 (defn- primitive [op args sort]
