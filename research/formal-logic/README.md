@@ -59,7 +59,7 @@ scalar or lexicographic integer ranks and exit conditions. Proof objects carry
 certificates for every obligation, including unreachable-path justifications.
 The focused loop/core/contract/API run passed 3,404 assertions, and six examples
 have retained Z3/OxiZ observations. A failed template is `obligation-refuted`,
-which does not establish divergence of the actual program. The twenty-theorem
+which does not establish divergence of the actual program. The twenty-two-theorem
 Lean model exposes the extra standard axiom dependencies of its integer rules;
 compiler/model connections remain unproved.
 

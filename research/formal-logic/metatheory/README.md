@@ -47,6 +47,9 @@ claims about an unchecked file.
 The loop extension adds nonnegative integer scalar and pair ranking rules.
 Their current proofs depend on `propext`, `Classical.choice` and `Quot.sound`
 through the library's integer-to-natural comparison lemma. The initial eighteen
-theorems retain their empty axiom audits. The twenty-theorem compiled artifact,
+theorems retain their empty axiom audits. Two further theorems give the equation
+and exit-postcondition law for an unbounded evaluator built from a total
+controller and a well-founded back-edge relation; their audits are empty too.
+The twenty-two-theorem compiled artifact,
 log and individual axiom lists are retained separately in `../evidence/loops/`;
 the initial eighteen-theorem receipt remains historical evidence.

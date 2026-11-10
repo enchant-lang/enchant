@@ -40,6 +40,8 @@ One rank decreases in the natural-number order. Two ranks decrease
 lexicographically: an outer counter can decrease while an inner counter resets
 upward. Invariants keep both ranks nonnegative. The separate Lean model checks
 the natural and lexicographic rules and their nonnegative integer versions.
+It also defines an unbounded evaluator from a total controller and that
+well-founded relation, and checks the propagation of exit postconditions.
 The current integer-rule proofs expose `propext`, `Classical.choice` and
 `Quot.sound` in their axiom audits; returned rule metadata retains these names.
 The earlier eighteen model theorems retain their empty axiom dependency lists.
