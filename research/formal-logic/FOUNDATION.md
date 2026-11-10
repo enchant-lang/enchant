@@ -274,3 +274,51 @@ runtime. The two-argument function has an outer self-application scaffold and
 an inner unguarded variable-pattern clause. Recognize those exact shapes and
 identities, retaining evaluation order and refusing unreviewed key operations,
 computed calls or incompatible handler patterns.
+
+## Next actual BEAM observation boundary
+
+The source-bound replay path now supplies a concrete source/core/model witness.
+The next implementation should observe the corresponding compiled source in an
+owned BEAM process. Keep that effectful producer separate from pure question
+construction, portable proof checking and recorded-trace replay. An observation
+receipt must not become a theorem about every future execution.
+
+First qualify the pinned SDK's actual compiler/loader and callable boundary.
+The current repository has `compiler/eval_form`, `lower/descriptor->beam` and
+`lower/eval-anf` paths; their existence in current source does not qualify their
+exact pinned-SDK behavior. Retain the emitted module identity/bytes or code
+fingerprint, exact admitted source and core identity, SDK identity, successful
+returns, raw failure class and owned-process monitor outcomes. Probe ordinary
+record updates, variadic updates, signed division and hidden-field failures
+before choosing an error normalizer or public runtime interface.
+
+The runtime producer should compile the exact freshly admitted source, not
+accept an unrelated callback claimed to match it. Its plain-data receipt should
+bind source, core, loaded artifact, initial state, ordered event identities and
+each observed outcome. Logical participant IDs belong in the portable data;
+live PIDs and function values are custody handles of that one execution, not
+logical constants that can be reused after serialization.
+
+Start with one owned sequential actor adapter and explicit delivery/reply
+handshakes. Distinguish an accepted message, successful state commit, modeled
+named error, unclassified runtime failure, process death, timeout and resource
+limit. Only a successful returned state commits. A failed process leaves a last
+committed observation; that is not a promise that a dead actor retains live
+state. Explain precisely how this adapter's terminal failure maps to the pure
+model's retained-state flag. Model stuttering after failure is padding of the
+observation, not evidence of a running actor or a delivered message.
+
+A separate checker must rebuild the exact source/model connection and compare
+the recorded runtime states/outcomes with both existing reference executions.
+It should reject changed source/artifact bindings and partial/inconsistent
+records. The execution receipt still depends on the observer and runtime;
+replaying ordinary data does not cryptographically attest that an execution
+occurred. Keep observed finite conformance, logical certificates, artifact
+custody and mechanized correspondence as distinct evidence fields.
+
+Every actor, monitor and temporary module belongs to the capped cold run and
+must be retired through the qualified SDK's lifecycle. No persistent project
+daemon, operator Source change, compiler authority, arbitrary mailbox policy or
+fairness/progress claim follows from this first adapter. Broader OTP actors,
+selective receive, sending, crashes/restarts, recursive summaries, general
+effects and the checker/compiler soundness bridges remain parts of the goal.

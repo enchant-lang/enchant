@@ -31,3 +31,9 @@ This evidence covers a bounded source-extracted state model and concrete core
 execution, not a live actor. Mailboxes, scheduling, crashes, external effects,
 fairness, progress, recursive summaries and compiler/runtime verification remain
 separate work. No runtime default or production compiler authority changed.
+
+The live dossier executes fourteen cells and reproduces their stored results
+unchanged. `dossier-qualification.json` binds that document and the passing
+307-check browser audit, with thirty-two phone/desktop screenshots. The source
+counterexample cell displays the model states 0, 1, 2 beside handler returns 1,
+2 and retains the unchecked native-certificate and unproved live-actor fields.
