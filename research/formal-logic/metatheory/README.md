@@ -1,5 +1,13 @@
 # A mechanically checked model, with an explicit bridge boundary
 
+[Witness.lean](Witness.lean) checks concrete satisfying assignments over the same
+partial typed terms as `Terms.lean`. Four audited results connect executable
+acceptance to explicit satisfying environments and distinguish empty from false
+contexts. [The witness interface](../WITNESSES.md) includes authored and native
+assignments, independent data decoding, fresh original-query replay and the
+remaining implementation boundary. These are existence proofs, separate from
+conditional entailment.
+
 [Terms.lean](Terms.lean) adds a typed partial Int/Bool term model and a composition
 rule for original-term entailment through checked countermodel preservation.
 Generated proofs establish that premise for actual original question trees,

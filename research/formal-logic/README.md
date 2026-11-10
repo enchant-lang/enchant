@@ -46,6 +46,13 @@ and check included term leaves externally. Fresh subject reconstruction binds
 complete coverage; model composition and Source/runtime correspondence remain
 reviewed connections.
 
+[WITNESSES.md](WITNESSES.md) adds positive SAT evidence with term-native
+bindings. Authored assignments and models from either backend are independently
+replayed against the original assertions and checked by a constructive Lean
+existence theorem. Concrete nonlinear arithmetic, nonzero variable division and
+selected dead branches are supported. Feasibility stays separate from conditional
+proof coverage; the common v1 bundle still marks its witness facet as pending.
+
 [SELECTED-SOURCE.md](SELECTED-SOURCE.md) adds contexts for actual named Source
 functions. The SDK selects exact revisions, private helpers, captured values
 and hygienic macro bindings; a bounded specializer brings that lexical program

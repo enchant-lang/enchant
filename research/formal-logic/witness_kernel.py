@@ -100,6 +100,9 @@ def verify_source(text, packet, integers, booleans):
 
 
 def run(path, output):
+    output.mkdir(parents=True, exist_ok=True)
+    (output / 'Check.olean').unlink(missing_ok=True)
+    (output / 'result.json').unlink(missing_ok=True)
     require(path.stat().st_size <= k.MAX_BYTES, 'witness packet byte capacity')
     packet = k.load_packet(path)
     integers, booleans = validate(packet)
