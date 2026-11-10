@@ -49,6 +49,18 @@ def partial₂ (operation : α → β → Option γ) (a : Option α) (b : Option
   | some x, some y => operation x y
   | _, _ => none
 
+@[simp] theorem known_and (a b : Bool) : pAnd (some a) (some b) = some (a && b) := by cases a <;> cases b <;> rfl
+@[simp] theorem known_or (a b : Bool) : pOr (some a) (some b) = some (a || b) := by cases a <;> cases b <;> rfl
+@[simp] theorem known_not (a : Bool) : pNot (some a) = some (!a) := rfl
+@[simp] theorem false_and (a : Option Bool) : pAnd (some false) a = some false := rfl
+@[simp] theorem and_false (a : Option Bool) : pAnd a (some false) = some false := by cases a with
+  | none => rfl
+  | some a => cases a <;> rfl
+@[simp] theorem true_or (a : Option Bool) : pOr (some true) a = some true := rfl
+@[simp] theorem or_true (a : Option Bool) : pOr a (some true) = some true := by cases a with
+  | none => rfl
+  | some a => cases a <;> rfl
+
 def Term.eval : {sort : Ty} → Term sort → (Nat → Int) → (Nat → Bool) → Option sort.Value
   | _, .int value, _, _ => some value
   | _, .bool value, _, _ => some value
@@ -114,4 +126,11 @@ theorem true_dominates (value : Option Bool) : pOr (some true) value = some true
 #print axioms false_dominates
 #print axioms true_dominates
 #print axioms connected_refutation_entails
+#print axioms known_and
+#print axioms known_or
+#print axioms known_not
+#print axioms false_and
+#print axioms and_false
+#print axioms true_or
+#print axioms or_true
 end FormalTerms
