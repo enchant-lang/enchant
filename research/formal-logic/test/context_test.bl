@@ -27,7 +27,7 @@
        nodes (tree-seq ir/node? ir/child-nodes (:anf linked))]
   (is (= binding saved))
   (is (= :checked-context (:status result)))
-  (is (= :no-fetched-vars-in-handler-anf (:closure result)))
+  (is (= :no-fetched-vars-in-function-anf (:closure result)))
   (is (= :identical-canonical-cores (:model-connection result)))
   (is (= :requires-declared-bindings (:ambient-equivalence result)))
   (is (= :not-established (:transitive-runtime-closure result)))
@@ -61,6 +61,26 @@
                 "(fn [s msg] (do (println :must-not-run) s))"
                 "(fn [s msg] (foreign/assoc s \"n\" 3))"]]
   (is (= :refused (try (formal/source-context source parameters) :admitted (catch _ :refused))))))
+
+(deftest the-same-first-class-context-can-carry-a-function-contract
+ (let [definition (formal/program-contract
+                   {:name "context-function" :context binding
+                    :ensures (fn [input output]
+                               (t/eq (get output "n") (t/add (get-in input ["state" "n"]) (get-in input ["message" "amount"]))))})
+       result (formal/check definition) description (formal/describe definition)]
+  (is (= :checked (:status result)))
+  (is (= :contract (:subject-kind result)))
+  (is (= binding (:source definition)))
+  (is (= (into {} parameters) (:parameters definition)))
+  (is (= :no-fetched-vars-in-function-anf (get-in result [:evidence :connection :binding-context :closure])))
+  (is (= :requires-declared-bindings (get-in description [:binding-context :ambient-equivalence])))
+  (is (= :refused (try (formal/program-contract {:name "conflicting-context" :context binding :parameters {}})
+                   :admitted (catch _ :refused))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine} definition)]
+    (is (= :checked (:status answer)))
+    (is (= :replayed-witness (:assumption-consistency answer)))
+    (is (= :no-fetched-vars-in-function-anf (get-in answer [:binding-context :closure])))))))
 
 (deftest context-source-protocols-share-the-state-model-and-common-evidence-facade
  (let [result (formal/check closed) description (formal/describe closed)]

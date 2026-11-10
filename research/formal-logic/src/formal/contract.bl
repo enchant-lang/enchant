@@ -2,7 +2,8 @@
  (:require [formal.core :as core] [formal.core-symbolic :as symbolic]
            [formal.elaborate :as elaborate] [formal.term :as t] [formal.query :as q]
            [formal.proof :as proof] [formal.logic :as logic] [formal.backend :as backend]
-           [formal.core-inputs :as inputs] [formal.evaluate :as replay] [formal.value :as v]))
+           [formal.core-inputs :as inputs] [formal.evaluate :as replay] [formal.value :as v]
+           [formal.context :as context]))
 
 ;; Builders run once and produce ordinary data. Verification reconstructs the
 ;; question from that data; no supplied cached query can replace the program.
@@ -31,6 +32,10 @@
  (cond
   (nil? source) nil
   (string? source) (elaborate/prepare source declarations)
+  (and (map? source) (= 1 (:formal/source-context source)))
+   (let [checked (context/prepare source)]
+    (require! (and (= :ready (:status checked)) (= declarations (into {} (:parameters source)))) "contract source context mismatch")
+    (assoc (:prepared checked) :binding-context (dissoc checked :prepared :status)))
   (and (map? source) (= #{:function :parameter-order} (set (keys source)))
        (string? (:function source)) (vector? (:parameter-order source))
        (= (count declarations) (count (:parameter-order source)))
@@ -43,13 +48,18 @@
   terms; :ensures receives input terms and the symbolic returned value.
   Builders construct a model; this does not verify their BL implementations."
  [specification]
- (let [name (:name specification) function-source (:function-source specification)
+ (let [name (:name specification) function-source (:function-source specification) binding-context (:context specification)
+       _ (when binding-context
+           (require! (not (contains? specification :parameters)) "context parameters belong to the context declaration"))
        _ (when function-source (require! (vector? (:parameters specification)) "source function parameters must be ordered [role sort] pairs"))
-       declarations (if function-source (into {} (:parameters specification)) (:parameters specification))
+       declarations (cond binding-context (into {} (:parameters binding-context))
+                          function-source (into {} (:parameters specification)) :else (:parameters specification))
        _ (t/variable name t/Bool)
-       _ (require! (= 1 (count (filter some? [(:source specification) function-source (:core specification)])))
-                   "provide exactly one source expression, source function or core program")
-       source (if function-source {:function function-source :parameter-order (mapv first (:parameters specification))} (:source specification))
+       _ (require! (= 1 (count (filter some? [(:source specification) function-source (:core specification) binding-context])))
+                   "provide exactly one source expression, source function, binding context or core program")
+       source (cond binding-context binding-context
+                    function-source {:function function-source :parameter-order (mapv first (:parameters specification))}
+                    :else (:source specification))
        authored (:core specification)
        elaborated (prepare-source source declarations)
        _ (when source (require! (= :elaborated (:status elaborated)) (str "source is outside the core: " (:reason elaborated))))
@@ -110,7 +120,8 @@
                              :basis :reviewed-core-interpretation :source (:source definition)}})]
    {:status :ready :definition (:identity definition) :core (:core lowered) :problem problem
     :inputs (:inputs lowered) :observed-inputs observed-inputs :outcome out :errors (:errors lowered) :typing (:typing lowered)
-    :source-connection :reviewed-not-mechanically-proved})
+    :binding-context (:binding-context source)
+    :source-connection (if (:binding-context source) :reviewed-context-linking-not-mechanically-proved :reviewed-not-mechanically-proved)})
   (catch error {:status :unsupported :reason (ex-message error)})))
 
 (defn- replay-in [definition prepared native]
@@ -137,7 +148,7 @@
                   (not matches?) :invalid violation? :valid :else :invalid)
     :assignment assignment :input-provenance (:provenance completed) :term-replay term-check
     :execution result :outcome-matches matches? :postcondition post :violation violation?
-    :scope :concrete-core-contract :source-connection :reviewed-not-mechanically-proved})))
+    :scope :concrete-core-contract :source-connection (:source-connection prepared) :binding-context (:binding-context prepared)})))
 
 (defn replay-counterexample [definition native]
  (let [prepared (prepare definition)]
@@ -189,6 +200,6 @@
                                     (= :sat (:verdict feasible)) :replayed-witness
                                     (= :unsat (:verdict feasible)) :inconsistent
                                     (nil? feasible) :not-checked :else :undecided)
-      :source-connection :reviewed-not-mechanically-proved
+      :source-connection (:source-connection prepared) :binding-context (:binding-context prepared)
       :termination {:basis :finite-core-syntax :normal-return :separate-contract-obligation :metatheory :not-mechanized}
       :compiler-proof-authority false})))))
