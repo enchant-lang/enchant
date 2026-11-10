@@ -219,6 +219,10 @@ itself mechanically verified and does not certify all SMT theories.
   normalizer, term-evaluator implementation or Source/compiler proof.
   `TERM-REFUTATION.md` specifies partial arithmetic, guarded proof search,
   original erased inputs, provenance reconstruction and the separate pure API.
+  Qualification passed 8,558 assertions across 30 BL files, including 54 new
+  original-tree binding checks. All 187 backend verdicts remain unchanged.
+  Seventeen archived packets reconstruct in a fresh VM with positive native
+  calibration before the window and zero native sessions during reconstruction.
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
