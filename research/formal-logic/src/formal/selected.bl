@@ -1,0 +1,167 @@
+(ns formal.selected
+ (:require [expand :as expand] [system.phase :as phase] [system.ir :as ir] [anf :as anf]
+           [formal.elaborate :as elaborate] [formal.core :as core] [formal.term :as t]
+           [formal.identity :as identity] [formal.intrinsics :as intrinsics]))
+
+;; Source owns selection/expansion/linkage. This adapter specializes its actual
+;; lexical unit into the first-order core; it never invents binding references,
+;; fetches an ambient Var, loads a target or executes a runtime initializer.
+(def profile :bl/selected-source-context-v1)
+(def limits {:sources 8 :source-bytes 65536 :total-source-bytes 131072
+             :initializers 128 :walk-nodes 65536 :depth 128 :calls 256})
+(def ^:private fields
+ #{:formal/selected-context :profile :intrinsic-profile :sources :entry :target
+   :parameters :core :linkage :expansion :identity-profile :identity})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.selected: " message) {}))))
+(defn- scalar-node! [value]
+ (require! (and (map? value) (keyword? (:op value)) (not (:formal/inline-closure value)))
+           "functions cannot escape or be passed as formal values") value)
+(defn- inputs! [spec]
+ (require! (and (map? spec) (= #{:sources :entry :target :parameters} (set (keys spec)))) "selection fields")
+ (let [sources (:sources spec) parameters (:parameters spec)]
+  (require! (and (vector? sources) (<= 1 (count sources) (:sources limits))) "bounded source vector")
+  (doseq [source sources]
+   (require! (and (map? source) (= #{:namespace :revision :source :file} (set (keys source)))
+                  (symbol? (:namespace source)) (symbol? (:revision source))
+                  (string? (:source source)) (<= (erlang/byte_size (:source source)) (:source-bytes limits))
+                  (string? (:file source)) (<= (erlang/byte_size (:file source)) 1024)) "source descriptor"))
+  (require! (<= (reduce + 0 (map #(erlang/byte_size (:source %)) sources)) (:total-source-bytes limits)) "source byte capacity")
+  (require! (and (vector? (:entry spec)) (= 2 (count (:entry spec))) (every? symbol? (:entry spec))
+                 (symbol? (:target spec))) "entry and named target")
+  (require! (and (vector? parameters) (<= (count parameters) 16)
+                 (every? #(and (vector? %) (= 2 (count %)) (core/sort? (second %))) parameters)
+                 (= (count parameters) (count (set (map first parameters))))) "ordered distinct typed parameters")
+  (doseq [[role _] parameters] (t/variable role t/Int))
+  ;; Refuse opaque handles and metadata before the expander sees the input.
+  (identity/bytes spec)) spec)
+
+(defn- specialize [program target parameters]
+ (let [unit (:unit program) rows (into {} (map (fn [row] [(:reference row) row]) (:initializers unit)))
+       _ (require! (and (<= (count rows) (:initializers limits))
+                        (= :lit (get-in unit [:entry :op])) (nil? (get-in unit [:entry :val]))
+                        (every? #(= :initialize (:op %)) (:steps unit)))
+                   "only declaration-only units; entry expressions and captures need their own contract")
+       sequence-id (atom 0) visits (atom 0) calls (atom 0) used (atom #{})
+       reserved (set (map first parameters))]
+  (letfn [(fresh []
+            (let [name (str "formal.selected.local." (swap! sequence-id inc))]
+             (if (contains? reserved name) (fresh) name)))
+          (tick [depth]
+            (require! (and (<= (swap! visits inc) (:walk-nodes limits)) (<= depth (:depth limits))) "specialization capacity"))
+          (closure [node env]
+            (let [inner (if (ir/self-scaffold? node) (ir/scaffold-inner node) node)
+                  clauses (:clauses inner) clause (first clauses) pats (:pats clause)]
+             (require! (and (= :fn (:op inner)) (= 1 (count clauses)) (nil? (:guard clause))
+                            (<= (count pats) 16) (every? #(= :pvar (:pop %)) pats)
+                            (= (count pats) (count (set (map :name pats))))) "one unguarded fixed-arity variable clause")
+             {:formal/inline-closure 1 :id (fresh) :clause clause :env env}))
+          (invoke [function args depth stack]
+            (require! (= 1 (:formal/inline-closure function)) "callee is not a selected lexical function")
+            (require! (not (contains? stack (:id function))) "recursive calls need a checked termination summary")
+            (require! (<= (swap! calls inc) (:calls limits)) "call expansion capacity")
+            (let [clause (:clause function) pats (:pats clause)
+                  _ (require! (= (count pats) (count args)) "selected call arity")
+                  names (mapv (fn [_] (fresh)) pats)
+                  env (reduce (fn [env [pat name]] (assoc env (:name pat) (anf/var name))) (:env function) (map vector pats names))
+                  body (scalar-node! (walk (:body clause) env (inc depth) (conj stack (:id function))))]
+             (reduce (fn [body [name value]] (anf/lett name (scalar-node! value) body)) body (reverse (map vector names args)))))
+          (data [value env depth stack]
+            (tick depth)
+            (cond
+             (and (map? value) (:op value)) (scalar-node! (walk value env depth stack))
+             (map? value) (into {} (map (fn [[key child]] [key (data child env (inc depth) stack)]) value))
+             (vector? value) (mapv #(data % env (inc depth) stack) value)
+             (list? value) (to-list (map #(data % env (inc depth) stack) value))
+             (erlang/is_tuple value) (erlang/list_to_tuple (to-list (map #(data % env (inc depth) stack) (erlang/tuple_to_list value))))
+             :else value))
+          (walk [node env depth stack]
+            (tick depth)
+            (cond
+             (or (ir/self-scaffold? node) (= :fn (:op node))) (closure node env)
+             (= :var (:op node)) (or (get env (:name node)) (throw (ex-info "formal.selected: unbound lexical value or recursive self" {})))
+             (contains? #{:global :binding} (:op node)) (throw (ex-info "formal.selected: unlinked reference" {}))
+             (= :let (:op node))
+              (let [initial (walk (:init node) env (inc depth) stack)]
+               (if (:formal/inline-closure initial)
+                (scalar-node! (walk (:body node) (assoc env (:name node) initial) (inc depth) stack))
+                (let [name (fresh) body (walk (:body node) (assoc env (:name node) (anf/var name)) (inc depth) stack)]
+                 (anf/lett name (scalar-node! initial) (scalar-node! body)))))
+             (contains? #{:invoke :apply} (:op node))
+              (let [call (ir/call-site node) callee (:callee call)]
+               (require! (and call (nil? (:rest call))
+                              (or (= :var (:op callee)) (= :fn (:op callee)) (ir/self-scaffold? callee)))
+                         "computed calls and recursive control need explicit summaries")
+               (let [function (walk callee env (inc depth) stack)
+                     args (mapv #(scalar-node! (walk % env (inc depth) stack)) (:args call))]
+                (swap! used conj (:id function)) (invoke function args depth stack)))
+             (contains? #{:lit :remote :arith :if :do :map :cons :enil} (:op node))
+              (into {} (map (fn [[key child]] [key (if (contains? #{:op :ann :mod :fun :bif :val} key) child
+                                                     (data child env (inc depth) stack))]) node))
+             :else (throw (ex-info (str "formal.selected: unsupported ANF operation " (:op node)) {}))))]
+   (let [initialized
+         (reduce (fn [state step]
+                   (let [row (get rows (:reference step))
+                         _ (require! row "initializer reference")
+                         value (walk (:node row) (:env state) 0 #{})]
+                    (if (:formal/inline-closure value)
+                     (assoc-in state [:env (:slot row)] value)
+                     (let [name (fresh)]
+                      (-> state (assoc-in [:env (:slot row)] (anf/var name))
+                          (update :prefix conj [name (scalar-node! value)]))))))
+                 {:env {} :prefix []} (:steps unit))
+         target-row (get rows target) function (get (:env initialized) (:slot target-row))
+         args (mapv (fn [_] (anf/var (fresh))) parameters)
+         bindings (into {} (map (fn [[arg [role sort]]] [(:name arg) (core/variable role sort)]) (map vector args parameters)))
+         body (invoke function args 0 #{})
+         body (reduce (fn [body [name initial]] (anf/lett name initial body)) body (reverse (:prefix initialized)))
+         declarations (into {} parameters)
+         core (core/canonicalize (elaborate/from-anf body bindings) declarations)
+         typing (core/typecheck core declarations)]
+    (require! (= :typed (:status typing)) (:reason typing))
+    {:core core :identity (core/identity core declarations) :typing typing :anf body
+     :parameters declarations :parameter-order (mapv first parameters)
+     :specialization {:calls @calls :helper-closures (count @used) :visited @visits}}))))
+
+(defn- build [spec]
+ (inputs! spec)
+ (let [program (expand/program (:sources spec) (:entry spec))
+       report (phase/check program)
+       _ (require! (= :proved (:status report)) "SDK binding and phase check")
+       targets (filter (fn [reference]
+                        (let [declaration (get-in program [:selection :by-id (:declaration reference)])]
+                         (and (= (:target spec) (:name declaration)) (= :function (:kind declaration))
+                              (= (first (:entry spec)) (:namespace declaration)) (= 0 (:phase reference)))))
+                       (get-in program [:unit :exports]))
+       _ (require! (= 1 (count targets)) "one public phase-zero function target in the entry unit")
+       target (first targets) prepared (specialize program target (:parameters spec))
+       linkage {:target target :unit (identity/hash (:unit program))
+                :selection (identity/hash (:selection program)) :references (identity/hash (:references program))
+                :initializers (mapv :reference (get-in program [:unit :initializers]))}
+       expansion {:identity (identity/hash (:expansions program)) :count (count (:expansions program))
+                  :implementation-images (get-in program [:coverage :transformer-implementation-images])
+                  :legacy-datum-macros (get-in program [:coverage :legacy-datum-macros])}
+       definition (identity/seal (merge spec {:formal/selected-context 1 :profile profile
+                     :intrinsic-profile intrinsics/profile :core (:identity prepared) :linkage linkage :expansion expansion}))]
+  {:definition definition
+   :prepared (assoc prepared :status :elaborated :profile (get-in prepared [:typing :profile])
+                    :context definition :basis :selected-source-unit :assurance :reviewed-selected-source-specialization
+                    :metatheory :not-mechanized)
+   :phase (select-keys report [:status :scope :references :native-admission])
+   :constructor (:constructor program)}))
+(defn define [spec] (:definition (build spec)))
+(defn prepare [definition]
+ (try
+  (require! (and (map? definition) (<= (erlang/external_size definition) 2097152)
+                 (= fields (set (keys definition))) (= 1 (:formal/selected-context definition))
+                 (= profile (:profile definition)) (identity/valid? definition)) "context identity/profile")
+  (let [fresh (build (select-keys definition [:sources :entry :target :parameters]))]
+   (require! (= definition (:definition fresh)) "context differs from fresh Source selection and specialization")
+   {:status :ready :definition (:identity definition) :prepared (:prepared fresh) :phase (:phase fresh)
+    :closure :selected-source-and-lexical-callees :model-connection :freshly-reconstructed-core
+    :ambient-equivalence :no-ambient-vars-in-selected-unit :expansion :sdk-constructor-session
+    :transitive-runtime-closure :not-established :compiler-proof-authority false})
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
+(defn check [definition]
+ (let [prepared (prepare definition)]
+  (if (= :ready (:status prepared)) (-> prepared (dissoc :prepared) (assoc :status :checked-context)) prepared)))

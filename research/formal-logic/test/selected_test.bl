@@ -1,0 +1,147 @@
+(ns formal.selected-test
+ (:require [formal.api :as formal] [formal.selected :as selected] [formal.context :as context]
+           [formal.contract :as contract] [formal.core :as core] [formal.term :as t]
+           [formal.identity :as identity] [system.ir :as ir]))
+
+(defn spec [body]
+ {:sources [{:namespace 'formal.selected.demo :revision 'current :file "selected-demo.bl"
+             :source (str "(ns formal.selected.demo) " body)}]
+  :entry ['formal.selected.demo 'current] :target 'answer :parameters [["x" t/Int]]})
+(def basic-text "(def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))")
+(defn refuse? [spec] (try (formal/selected-source-context spec) false (catch _ true)))
+(defn rehash [value] (assoc value :identity (identity/of value)))
+
+(deftest real-selected-source-functions-and-captures-enter-the-core
+ (let [definition (formal/selected-source-context (spec basic-text))
+       prepared (selected/prepare definition) checked (formal/check-source-context definition)
+       saved (erlang/binary_to_term (erlang/term_to_binary definition) (list :safe))]
+  (is (= :ready (:status prepared)) (pr-str prepared))
+  (is (= :checked-context (:status checked)))
+  (is (= :selected-source-and-lexical-callees (:closure checked)))
+  (is (= :no-ambient-vars-in-selected-unit (:ambient-equivalence checked)))
+  (is (= :not-established (:transitive-runtime-closure checked)))
+  (is (= false (:compiler-proof-authority checked)))
+  (is (= :proved (get-in checked [:phase :status])))
+  (is (= :contextual-binding-resolution (get-in checked [:phase :scope])))
+  (is (= selected/profile (:profile definition)))
+  (is (= definition saved))
+  (is (= definition (formal/selected-source-context (spec basic-text))))
+  (is (= :checked-context (:status (context/check saved))))
+  (is (= 3 (count (get-in definition [:linkage :initializers]))))
+  (is (>= (get-in prepared [:prepared :specialization :calls]) 2))
+  (is (not-any? #(contains? #{:invoke :apply :global :binding :fn} (:op %))
+                (tree-seq ir/node? ir/child-nodes (get-in prepared [:prepared :anf]))))
+  (doseq [x [-100 -1 0 1 2 7 100]]
+   (let [out (core/evaluate (get-in prepared [:prepared :core]) {"x" t/Int} {"x" x})]
+    (is (= :returned (:status out))) (is (= (+ x 40) (:value out)))))))
+
+(deftest selected-contexts-back-the-existing-contract-and-backend-interface
+ (let [binding (formal/selected-source-context (spec basic-text))
+       definition (formal/program-contract
+                   {:name "selected-function-contract" :context binding
+                    :ensures (fn [input output] (t/eq output (t/add (get input "x") (t/int 40))))})]
+  (is (= binding (:source definition)))
+  (is (= :ready (:status (contract/prepare definition))))
+  (is (= :checked (:status (formal/check definition))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine} definition)]
+    (is (= :checked (:status answer)) (pr-str answer))
+    (is (= :replayed-witness (:assumption-consistency answer)))
+    (is (= :selected-source-and-lexical-callees (get-in answer [:binding-context :closure])))
+    (is (= false (:compiler-proof-authority answer)))))))
+
+(deftest helpers-retain-lexical-scope-evaluation-order-and-first-failure
+ (doseq [[body expected]
+         [["(def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (let [bias 100 x (bump x)] (erlang/+ bias (bump x))))" 182]
+          ["(defn- f [x] (let [x (erlang/+ x 1)] x)) (defn answer [x] (erlang/+ (f x) (f (f x))))" 7]
+          ["(defn answer [x] (let [f (fn [y] (erlang/+ x y))] (f 3)))" 5]]]
+  (let [definition (formal/selected-source-context (spec body)) p (selected/prepare definition)
+        out (core/evaluate (get-in p [:prepared :core]) {"x" t/Int} {"x" 2})]
+   (is (= :ready (:status p))) (is (= expected (:value out)) (pr-str out))))
+ (doseq [body ["(def hidden (erlang/div 1 0)) (defn answer [x] x)"
+              "(defn- ignore [x y] 7) (defn answer [x] (ignore (erlang/div 1 0) (erlang/rem 2 0)))"]]
+  (let [d (formal/selected-source-context (spec body)) p (selected/prepare d)
+        out (core/evaluate (get-in p [:prepared :core]) {"x" t/Int} {"x" 2})]
+   (is (= :ready (:status p))) (is (= :raised (:status out))) (is (= :zero-divisor (:error out))))))
+
+(deftest selected-parameter-roles-cannot-capture-generated-lexical-names
+ (let [specification (assoc (spec "(defn answer [a] (let [b (erlang/+ a 1)] (erlang/+ a b)))")
+                           :parameters [["formal.selected.local.2" t/Int]])
+       definition (formal/selected-source-context specification) p (selected/prepare definition)
+       out (core/evaluate (get-in p [:prepared :core]) (into {} (:parameters specification)) {"formal.selected.local.2" 5})]
+  (is (= :ready (:status p))) (is (= 11 (:value out)))))
+
+(deftest closed-records-and-direct-record-leaves-preserve-nested-values
+ (let [parameters [["state" (core/record-sort {"n" t/Int "flag" t/Bool})]]
+       specification (-> (spec "(defn- bump [r] (BeamLisp.Ns.Rt/assoc r \"n\" (erlang/+ (BeamLisp.Ns.Rt/get r \"n\") 1))) (defn answer [r] {\"changed\" (bump r) \"old\" (BeamLisp.Ns.Rt/get r \"n\")})")
+                         (assoc :parameters parameters))
+       definition (formal/selected-source-context specification) p (selected/prepare definition)]
+  (is (= :ready (:status p)) (pr-str p))
+  (doseq [n [-2 0 7] flag [true false]]
+   (let [out (core/evaluate (get-in p [:prepared :core]) (into {} parameters) {"state" {"n" n "flag" flag}})]
+    (is (= :returned (:status out)))
+    (is (= {"changed" {"n" (inc n) "flag" flag} "old" n} (:value out)))))))
+
+(deftest source-selection-can-follow-an-explicit-import-and-hygienic-macro
+ (let [provider {:namespace 'formal.selected.library :revision 'v1 :file "selected-library.bl"
+                 :source "(ns formal.selected.library) (defn shift [x] (erlang/+ x 40)) (defsyntax shifted [form context] `(shift ~(syntax-arg form 1)))"}
+       client {:namespace 'formal.selected.demo :revision 'current :file "selected-demo.bl"
+               :source "(ns formal.selected.demo) (import-world 'formal.selected.library 'v1 :only [shifted]) (defn answer [x] (shifted x))"}
+       definition (formal/selected-source-context (assoc (spec "") :sources [provider client]))
+       p (selected/prepare definition) out (core/evaluate (get-in p [:prepared :core]) {"x" t/Int} {"x" 2})]
+  (is (= :ready (:status p)) (pr-str p))
+  (is (= 1 (get-in definition [:expansion :count])))
+  (is (= false (get-in definition [:expansion :legacy-datum-macros])))
+  (is (= true (get-in definition [:expansion :implementation-images])))
+  (is (= 42 (:value out)))
+  (is (= :undefined (erlang/get :bl_contextual_constructor_sessions)))
+  (is (refuse? (assoc (spec "(defn answer [x] (shifted x))") :sources [client])))))
+
+(deftest ambient-shadowing-does-not-change-selected-source-meaning
+ (let [definition (formal/selected-source-context (spec basic-text)) child (BeamLisp.Env/fork) called (atom 0)]
+  (try
+   (BeamLisp.Env/with_env child
+    (fn []
+     (BeamLisp.Env/intern "formal.selected.demo" "bias" 999)
+     (BeamLisp.Env/intern "formal.selected.demo" "bump" (fn [& args] (swap! called inc) 999))
+     (let [same (formal/selected-source-context (spec basic-text)) p (selected/prepare definition)]
+      (is (= definition same))
+      (is (= 42 (:value (core/evaluate (get-in p [:prepared :core]) {"x" t/Int} {"x" 2})))))))
+   (finally (BeamLisp.Env/destroy child)))
+  (is (= 0 @called))))
+
+(deftest selecting-source-never-executes-refused-initializers-or-callees
+ (erlang/erase :formal-selected-must-not-run)
+ (doseq [body ["(def poison (erlang/put :formal-selected-must-not-run true)) (defn answer [x] x)"
+              "(defn answer [x] (erlang/put :formal-selected-must-not-run x))"
+              "(defn answer [x] (BeamLisp.Num/div x 2))"
+              "(defn answer [x] (erlang/not x))"
+              "(defn answer [x] (missing x))"
+              "(defn answer [x] (if (erlang/> x 0) (answer (erlang/- x 1)) 0))"
+              "(defn answer [x & more] x)"
+              "(defn answer [x] (fn [y] y))"
+              "(defn- answer [x] x)"
+              "(defn answer [x] x) (erlang/put :formal-selected-must-not-run true)"
+              "(defn answer [x] x) nil"]]
+  (is (refuse? (spec body)) body)
+  (is (= :undefined (erlang/get :formal-selected-must-not-run))))
+ (is (= :undefined (erlang/get :bl_contextual_constructor_sessions))))
+
+(deftest stale-source-links-phase-targets-and-core-identities-cannot-be-rehashed-into-a-proof
+ (let [definition (formal/selected-source-context (spec basic-text))]
+  (doseq [changed [(assoc definition :core "wrong") (assoc definition :profile :unqualified)
+                  (assoc definition :intrinsic-profile :name-only) (assoc definition :target 'bump)
+                  (assoc definition :entry ['formal.selected.demo 'different])
+                  (assoc-in definition [:linkage :target :phase] 1)
+                  (assoc-in definition [:linkage :target :world] (crypto/hash :sha256 "wrong"))
+                  (assoc-in definition [:linkage :unit] "wrong") (assoc definition :linkage {})
+                  (assoc definition :expansion {})
+                  (assoc-in definition [:sources 0 :source] (str "(ns formal.selected.demo) " (String/replace basic-text "40" "41")))
+                  (assoc definition :parameters [["x" t/Bool]]) (assoc definition :extra true)]]
+   (is (= :unsupported (:status (formal/check-source-context (rehash changed)))))))
+ (doseq [changed [(assoc (spec basic-text) :parameters [["x" t/Int] ["x" t/Int]])
+                  (assoc (spec basic-text) :parameters [["x" t/Real]])
+                  (assoc (spec basic-text) :sources (vec (repeat 9 (first (:sources (spec basic-text))))))
+                  (assoc (spec basic-text) :sources [(assoc (first (:sources (spec basic-text))) :source (String/duplicate "x" 65537))])
+                  (assoc (spec basic-text) :target (fn [] 1))]]
+  (is (refuse? changed))))
