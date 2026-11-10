@@ -1,0 +1,72 @@
+(ns formal.selected-runtime-probe
+ (:require [formal.api :as formal] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [compile.world :as world]
+           [reload.execution :as execution] [reload.generation :as generation] [interop]))
+
+;; Exercise the normal SDK world producer and original Source instance owner.
+;; No derived specialized ANF is emitted, and no reference/grant is fabricated.
+(defn probe []
+ (let [parent (BeamLisp.Env/fork)
+       root (Path/join (System/tmp_dir!) (str "formal-selected-probe-" (artifact/hex (crypto/strong_rand_bytes 12))))
+       stage (atom :not-prepared) graph (atom nil) modules (atom [])
+       text "(ns formal.selected.execution) (def bias 40) (defn- bump [x] (erlang/+ bias x)) (defn answer [x] (bump x))"
+       source {:namespace 'formal.selected.execution :revision 'current :file "main.bl" :source text}
+       definition (formal/selected-source-context {:sources [source] :entry ['formal.selected.execution 'current]
+                    :target 'answer :parameters [["x" [:int]]]})
+       manifest {:version 1 :profile 'syntax-v1 :entry ['formal.selected.execution 'current]
+                 :sources [(dissoc source :source)] :libraries []}
+       data (atom nil) retired (atom nil)]
+  (File/mkdir_p! root)
+  (try
+   (BeamLisp.Env/with_env parent
+    (fn []
+     (File/write! (Path/join root "main.bl") text)
+     (File/write! (Path/join root "world.bl") (pr-str manifest))
+     (let [sdk-before (artifact/sdk-identity)
+           prepared (world/prepare (Path/join root "world.bl"))
+           unit-id (identity/hash (get-in prepared [:program :unit]))
+           _ (assert (= (get-in definition [:linkage :unit]) unit-id) "World capture differs from the selected context's original unit")
+           target (get-in definition [:linkage :target])
+           _ (assert (some #(= target %) (get-in prepared [:program :unit :exports])))
+           module :Elixir.Formal.Selected.Probe
+           _ (reset! stage :source-unit-prepared)
+           input (world/prepare-unit prepared module)
+           _ (reset! stage :artifact-prepared)
+           compiled (BeamLisp.AOT/compile_unit input)
+           _ (reset! stage :artifact-compiled)
+           members (BeamLisp.AOT/contextual_unit_members! compiled)
+           _ (reset! modules (mapv #(str (first %)) (:runtime-beams members)))
+           manifests (mapv (fn [pair] {:module (str (first pair)) :sha256 (artifact/digest (second pair))}) (:beams compiled))
+           g (execution/prepare-captured-unit! compiled)
+           _ (reset! graph g)
+           _ (reset! stage :instance-prepared)
+           _ (execution/initialize-instance! g)
+           _ (reset! stage :instance-initialized)
+           _ (execution/complete-preparation! (:cache-key g) g)
+           _ (reset! stage :export-entered)
+           value (execution/invoke-instance-binding! g target [2])]
+      (reset! stage :export-returned)
+      (reset! data {:status :returned :value value :source-context (:identity definition)
+                    :unit unit-id :target-reference (artifact/hex (:id target)) :artifacts manifests
+                    :factory-abi (get-in members [:metadata :factory-abi]) :sdk-before sdk-before
+                    :sdk-after (artifact/sdk-identity)}))))
+   (catch error
+    (reset! data {:status :refused :stage @stage :reason (ex-message error)
+                 :kind (:kind (ex-data error)) :original (pr-str (BeamLisp.ExInfo/ex_original error))}))
+   (finally
+    (when @graph
+     (reset! retired (BeamLisp.Env/with_env parent #(generation/retire! @graph))))
+    (BeamLisp.Env/destroy parent)
+    (generation/retire-contextual-children! parent)
+    (File/rm_rf! root)))
+  (assoc @data :stage @stage :retirement @retired
+         :graph-retired (when @graph (:retired @(:state @graph)))
+         :modules-after (mapv (fn [name] {:module name :loaded (erlang/module_loaded (erlang/binary_to_atom name))}) @modules)
+         :owned-directory-removed (not (File/exists? root))
+         :authority :normal-sdk-source-instance-owner :compiler-proof-authority false)))
+(def data {:schema :enchant.formal.selected-runtime-probe-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0)) :probe (probe)})
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "probe.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json data))
+(println data)
