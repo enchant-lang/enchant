@@ -1,0 +1,82 @@
+(ns formal.core-contracts-recheck
+ (:require [formal.api :as formal] [formal.backend :as backend] [formal.proof :as proof]
+           [formal.query :as q] [formal.term :as t] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+;; Bounded trusted repository archive. Source contracts may expand phase code.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)))
+(def directory (Path/expand (first args)))
+(def index (interop/json-> (File/read! (Path/join directory "summary.json"))))
+(assert (= "enchant.formal.core-contract-examples-v1" (get index "schema")))
+(def path (Path/join directory "core-contracts.etf"))
+(assert (<= (:size (File/stat! path)) 8388608))
+(def bytes (File/read! path))
+(assert (= (get-in index ["archive" "bytes"]) (erlang/byte_size bytes)))
+(assert (= (get-in index ["archive" "sha256"]) (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (elem decoded 1) (erlang/byte_size bytes)))
+(def archived (elem decoded 0))
+(assert (= :enchant.formal.core-contract-examples-v1 (:schema archived)))
+(defn check-row [row packet]
+ (formal/check-core-contract-data (:definition row) (:certificate row) packet))
+(defn fixed-function [value arity]
+ (if (erlang/is_function value) value
+  (do (assert (and (erlang/is_tuple value) (= 3 (erlang/tuple_size value)) (= :"$blfn" (elem value 0))))
+      (erlang/map_get arity (elem value 1)))))
+(defn patterns-for [id function]
+ (let [info (erlang/fun_info function) module (Keyword/get info :module) name (Keyword/get info :name)
+       ;; Local fun entry arity can include captured variables. Match actual
+       ;; module entries for its exact name, then require positive calibration.
+       entries (filter #(= name (elem % 0)) (erlang/apply module :module_info (list :functions)))]
+  (assert (seq entries))
+  (mapv (fn [entry] {:id id :pattern (tuple module (elem entry 0) (elem entry 1))}) entries)))
+(def patterns (into (patterns-for "proof-search" (fixed-function proof/produce 2))
+                   (patterns-for "formal-native-session" backend/with-session)))
+(def by-pattern (into {} (map (fn [item] [(:pattern item) (:id item)]) patterns)))
+(def zero-counts (into {} (map (fn [item] [(:id item) 0]) patterns)))
+(defn barrier []
+ (let [reference (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen reference) :ok (after 5000 (throw :trace-deadline)))))
+(defn recheck []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       tracer (spawn (fn [] (loop [counts zero-counts]
+         (receive
+          [:trace _ :call [module function arguments]]
+           (let [key (get by-pattern (tuple module function (count arguments)))]
+            (recur (if key (update counts key inc) counts)))
+          [:reset seen] :when (= seen ticket) (do (erlang/send parent [:calibration ticket counts]) (recur zero-counts))
+          [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket counts])
+          _ (recur counts)))))]
+  (try
+   (doseq [item patterns] (assert (pos? (erlang/trace_pattern (:pattern item) true (list :local)))))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   (assert (= :checked (:status (proof/produce (q/prove (t/bool true)) {}))))
+   (backend/with-session {:backend :z3} (fn [session] (assert (:hello session))))
+   (barrier) (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:calibration seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))
+         _ (assert (every? pos? (vals calibration)))
+         rows (mapv (fn [row]
+                      (let [packet (:packet row) checked (check-row row packet)
+                            changed (identity/seal (assoc-in packet [:policy :must-return] (not (get-in packet [:policy :must-return]))))]
+                       (assert (= :checked-data-connection (:status checked)) (pr-str checked))
+                       (assert (= :rejected (:status (check-row row changed))))
+                       {:id (:id row) :status (:status checked) :packet (:packet checked)
+                        :contract (:contract checked) :rehashed-policy :rejected :kernel-execution :not-run})) (:rows archived))]
+    (barrier) (erlang/send tracer [:finish ticket])
+    (let [counts (receive [:finished seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))]
+     (assert (= zero-counts counts)) {:rows rows :calibration calibration :checking-window counts}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (doseq [item patterns] (erlang/trace_pattern (:pattern item) false (list :local)))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def checked (recheck))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "core-contracts-fresh.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge checked {:schema :enchant.formal.core-contract-recheck-v1
+                 :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                 :scope :fresh-contract-core-proof-and-witness :source-preparation :phase-execution-allowed
+                 :kernel-execution :not-run :compiler-proof-authority false})))
+(println {:subjects (count (:rows checked)) :calibration (:calibration checked) :checking-window (:checking-window checked)
+          :source-preparation :phase-execution-allowed :kernel-execution :not-run :compiler-proof-authority false})

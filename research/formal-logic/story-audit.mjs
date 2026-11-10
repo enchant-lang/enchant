@@ -183,6 +183,21 @@ try{
   check(size.name+': pure Core packet replay records its external execution boundary',eager.includes(':data-connection :checked-data-connection')&&eager.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-term-agreement').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-term-data');
+  await navigate('/#prove-the-promise-on-the-core-program');
+  check(size.name+': contract chapter explains the return promise and one admitted input',await evaluate("document.body.innerText.includes('A must-return policy rules out the raised case')&&document.body.innerText.includes('x = 4')"));
+  await click('[data-graph="formal-core-contract-composition"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="layout"]');
+  check(size.name+': contract proof panel shows exact name and sort transport',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-core-contract-composition\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('Both proof slots move from index zero to index one')&&text.includes('match the exact assumptions and the whole outcome policy')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Prove the promise on the Core program')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-core-contract');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-core-contract-composition\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-core-contract-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const composed=await evaluate("document.querySelector('#cell-story-core-contract-composition')?.innerText||''");
+  check(size.name+': contract cell records its input and exact policy replay',composed.includes(':admitted-x 4')&&composed.includes(':declared-inputs 4')&&composed.includes(':witness-inputs 2')&&composed.includes(':must-return true')&&composed.includes(':changed-policy :rejected')&&composed.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-core-contract-composition').scrollIntoView({block:'center'})");
+  await shot(size.name+'-core-contract-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -376,6 +391,16 @@ try{
  check('Six changed Core outcome packets were rejected',coreRejected.length===6&&coreRejected.every(row=>row.status==='not-accepted-by-Lean'));
  check('Trusted Core term archive stays unavailable to the browser',(await fetch(base+'/evidence/core-terms/examples/core-terms.etf')).status===404);
  check('Compiled Core term model stays unavailable to the browser',(await fetch(base+'/evidence/core-terms/CoreTerms.olean')).status===404);
+ for(const path of ['/CORE-CONTRACTS.md','/src/formal/core-contracts.bl','/metatheory/CoreContract.lean','/evidence/core-contracts/execution/unused-slots/CoreContractCheck.lean','/evidence/core-contracts/execution/accepted.json','/evidence/core-contracts/execution/rejected.json','/evidence/core-contracts/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared Core contract evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const contracts=await fetch(base+'/evidence/core-contracts/execution/accepted.json').then(response=>response.json());
+ check('Eight composed Core contract proofs and six admission proofs',contracts.length===8&&contracts.filter(row=>row.axioms.originalCoreHasAdmittedOutcome).length===6&&contracts.every(row=>row.axioms.originalCoreSatisfiesContract&&row.compiler_proof_authority===false));
+ check('The vacuous example has no admission proof',contracts.some(row=>row.id==='vacuous'&&row.admission==='witness-not-provided'&&!row.axioms.originalCoreHasAdmittedOutcome));
+ check('The quotient example records its standard axiom policy',contracts.some(row=>row.id==='allowed-division'&&row.axiom_policy==='lean-standard'&&row.axioms.originalCoreSatisfiesContract.includes('Classical.choice')));
+ check('Trusted Core contract archive stays unavailable to the browser',(await fetch(base+'/evidence/core-contracts/examples/core-contracts.etf')).status===404);
+ check('Compiled Core contract proof stays unavailable to the browser',(await fetch(base+'/evidence/core-contracts/execution/unused-slots/CoreContractCheck.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
