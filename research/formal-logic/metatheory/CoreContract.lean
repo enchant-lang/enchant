@@ -90,8 +90,8 @@ theorem named_allowed (catalogue allowed : List Nat) (reason : String)
     (positive : ∀ n ∈ allowed, 0 < n)
     (accepted : (allowed.any fun n => decide (errorCode catalogue reason = Int.ofNat n)) = true) :
     reason ∈ allowed.map errorName := by
-  obtain ⟨code, member, matches⟩ := List.any_eq_true.mp accepted
-  have codeEq : errorCode catalogue reason = Int.ofNat code := of_decide_eq_true matches
+  obtain ⟨code, member, acceptedCode⟩ := List.any_eq_true.mp accepted
+  have codeEq : errorCode catalogue reason = Int.ofNat code := of_decide_eq_true acceptedCode
   have pos := positive code member
   unfold errorCode at codeEq
   cases found : catalogue.find? (fun n => errorName n == reason) with
@@ -111,7 +111,7 @@ theorem checked_claim_holds (pre post ok : Term .boolean) (error : Term .integer
   | returned result =>
     obtain ⟨returned, payload, _⟩ := agrees_returned _ _ _ _ _ |>.mp agreement
     refine ⟨payload, ?_⟩
-    cases mustReturn <;> simpa [policyQuestion, both, Term.eval, returned, pNot, pOr] using claim
+    cases mustReturn <;> simpa [policyQuestion, both, Term.eval, returned, pNot] using claim
   | raised reason =>
     obtain ⟨failed, errorKnown⟩ := agrees_raised _ _ _ _ _ |>.mp agreement
     cases mustReturn with
@@ -119,7 +119,7 @@ theorem checked_claim_holds (pre post ok : Term .boolean) (error : Term .integer
     | false =>
       refine ⟨rfl, named_allowed catalogue allowed reason positive ?_⟩
       simpa [policyQuestion, both, Term.eval.eq_1, Term.eval.eq_2, Term.eval.eq_15,
-        Term.eval.eq_16, Term.eval.eq_18, failed, pNot, allowed_eval error allowed i b _ errorKnown, pOr] using claim
+        Term.eval.eq_16, Term.eval.eq_18, failed, pNot, allowed_eval error allowed i b _ errorKnown] using claim
 
 theorem composed_contract (body : Expr context τ) (inputs : (Nat → Int) → (Nat → Bool) → Env context)
     (pre post ok : Term .boolean) (payload : Payload τ) (error : Term .integer)
