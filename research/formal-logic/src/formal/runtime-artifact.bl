@@ -7,11 +7,27 @@
 (defn hex [bytes] (Base/encode16 bytes (list (tuple :case :lower))))
 (defn digest [bytes] (hex (crypto/hash :sha256 bytes)))
 (defn identity-of [data] (digest (erlang/term_to_binary (dissoc data :identity))))
+(def critical-modules
+ [:Elixir.BeamLisp.Compiler :Elixir.BeamLisp.Ns.Lower :Elixir.BeamLisp.Ns.Body.Lower
+  :Elixir.BeamLisp.Ns.Anf :Elixir.BeamLisp.Ns.Body.Anf :Elixir.BeamLisp.Num
+  :Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Env :Elixir.BeamLisp.Refs])
 (defn sdk-identity []
  (let [sdk (System/get_env "BL_SDK_PRODUCT")]
   (require! (and (string? sdk) (String/starts_with? sdk "/nix/store/")) "an immutable SDK product is required")
   {:sdk sdk :descriptor-sha256 (digest (File/read! (str sdk "/artifact.json")))
-   :runtime-floor-sha256 (digest (erlang/term_to_binary (BeamLisp.Env/runtime_floor_key!)))
+   :runtime-floor (try {:status :adopted :sha256 (digest (erlang/term_to_binary (BeamLisp.Env/runtime_floor_key!)))}
+                   (catch error
+                    (if (String/contains? (ex-message error) "runtime_floor_required") {:status :not-adopted}
+                     (throw error))))
+   ;; This launch may have no adopted floor. Record actual critical code and
+   ;; its image relation without installing a floor or claiming a full graph.
+   :critical-code (mapv (fn [module]
+                         (require! (= (tuple :module module) (code/ensure_loaded module)) "critical SDK module is unavailable")
+                         (let [path (str sdk "/image/ebin/" module ".beam")
+                               loaded (hex (erlang/apply module :module_info (list :md5)))
+                               image (hex (elem (elem (beam_lib/md5 (File/read! path)) 1) 1))]
+                          {:module (str module) :loaded-md5 loaded :image-md5 image :matches-selected-image (= loaded image)}))
+                       critical-modules)
    :otp (str (erlang/system_info :otp_release)) :elixir (System/version)}))
 (defn module-name [run index] (str "Elixir.Formal.Observed.M" run ".H" index))
 (defn compile-handler [handler module-name]
