@@ -167,6 +167,22 @@ try{
   check(size.name+': only the matching countdown entailment uses the witness',mixed.includes(':matching-entailments ["obligation/initial/normal"]')&&mixed.includes(':data-connection :checked-data-connection')&&mixed.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-witnessed-obligations').scrollIntoView({block:'center'})");
   await shot(size.name+'-witnessed-data');
+  await navigate('/#check-what-the-core-terms-mean');
+  check(size.name+': Core chapter explains eager defaults and whole outcomes',await evaluate("document.body.innerText.includes('Core still evaluates the default as a call argument')&&document.body.innerText.includes('agree for every typed input to that tree')"));
+  await click('[data-graph="formal-core-term-correspondence"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="theorem"]');
+  check(size.name+': Core proof panel identifies the exact term theorem and reviewed codec',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-core-term-correspondence\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('exact emitted success, payload and error terms')&&text.includes('named-data codec')&&text.includes('contained typed tree and symbolic outcome')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Check what the Core terms mean')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-core-term-agreement');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-core-term-correspondence\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-core-term-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const eager=await evaluate("document.querySelector('#cell-story-core-term-agreement')?.innerText||''");
+  check(size.name+': eager default cell shows a present field and the named error',eager.includes(':present-field "balance"')&&eager.includes(':core-outcome :raised')&&eager.includes(':named-error :phase/default')&&eager.includes(':symbolic-success false'));
+  check(size.name+': pure Core packet replay records its external execution boundary',eager.includes(':data-connection :checked-data-connection')&&eager.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-core-term-agreement').scrollIntoView({block:'center'})");
+  await shot(size.name+'-core-term-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -350,6 +366,16 @@ try{
  check('Eleven witnessed entailments have an applied Lean theorem',mixedResults.flatMap(row=>row.checked_instances).length===11&&bySubject.loop.checked_instances.length===1&&bySubject.loop.checked_instances[0].label==='obligation/initial/normal'&&mixedResults.every(row=>row.model_theorem==='not-established-by-this-runner'&&row.compiler_proof_authority===false));
  check('Trusted mixed bundle archive stays unavailable to the browser',(await fetch(base+'/evidence/mixed-obligations/examples/archives/loop.etf')).status===404);
  check('Compiled mixed instance stays unavailable to the browser',(await fetch(base+'/evidence/mixed-obligations/execution/loop/instances/0002/Instance.olean')).status===404);
+ for(const path of ['/CORE.md','/src/formal/core-terms.bl','/test/core_terms_test.bl','/metatheory/CoreTerms.lean','/metatheory/core-terms-pin.json','/evidence/core-terms/model-check.txt','/evidence/core-terms/examples/summary.json','/evidence/core-terms/execution/accepted.json','/evidence/core-terms/execution/rejected.json','/evidence/core-terms/execution/eager-default/Check.lean','/evidence/core-terms/execution/source-record-contract/Check.lean','/evidence/core-terms/fresh/core-terms-fresh.json','/evidence/core-terms/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared Core term evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const coreResults=await fetch(base+'/evidence/core-terms/execution/accepted.json').then(response=>response.json());
+ check('The Core report has 34 all-input proofs and exact contract-question bindings',coreResults.length===34&&coreResults.filter(row=>row.subject.kind==='contract').length===4&&coreResults.every(row=>row.scope==='all-typed-inputs-of-this-contained-core-and-exact-symbolic-outcome'&&row.core_data_model_codec==='reviewed'&&row.compiler_proof_authority===false));
+ const coreRejected=await fetch(base+'/evidence/core-terms/execution/rejected.json').then(response=>response.json());
+ check('Six changed Core outcome packets were rejected',coreRejected.length===6&&coreRejected.every(row=>row.status==='not-accepted-by-Lean'));
+ check('Trusted Core term archive stays unavailable to the browser',(await fetch(base+'/evidence/core-terms/examples/core-terms.etf')).status===404);
+ check('Compiled Core term model stays unavailable to the browser',(await fetch(base+'/evidence/core-terms/CoreTerms.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
