@@ -37,6 +37,12 @@ initialize-then-call execution through the normal SDK owner, while
 record without invoking the selected code. Finite conformance, contract safety,
 error cause, invocation boundary and universal refinement remain separate facts.
 
+[HYGIENE.md](HYGIENE.md) repairs an observed source/Core capture error: a
+semantic input role could share a compiler-local spelling and change 17 into a
+modeled 20. Declared inputs are now compiler lexical parameters, Core binders
+are fresh for the referenced roles, and unresolved globals cannot borrow local
+aliases. The retained old contract is checked afresh through this boundary.
+
 `formal/certify` produces and independently checks Boolean/linear Int proof
 objects. `formal/check-certificate` checks a retained object against its exact
 statement, assumptions, profile and scope without either native solver.

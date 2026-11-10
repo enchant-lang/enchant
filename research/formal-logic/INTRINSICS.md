@@ -14,10 +14,13 @@ module/function/arity catalog and matching canonical arithmetic pairs. Strict
 Erlang negation refuses nullable Bool as well as Int and String in this profile;
 accepted Boolean operands retain unsuccessful evaluation.
 
-Declared scalar inputs also require the synthetic compilation namespace and
-ordinary unqualified lookup. A qualified foreign `x` cannot borrow the meaning
-of input `x`; unresolved selected binding references require the actual Source
-adapter. Loop compilation now uses the same declared intrinsic namespace. The
+Declared scalar inputs now enter the actual compiler as lexical parameters.
+A qualified foreign `x` cannot borrow input `x`, and a global cannot borrow a
+parameter's compiled alias. The caller's input role and the compiler/Core
+local identities remain separate. [HYGIENE.md](HYGIENE.md) records the actual
+capture counterexample and its repair. Unresolved selected binding references
+require the actual Source adapter. Loop compilation uses the same lexical
+input adapter and declared intrinsic namespace. The
 five-file follow-up passed 3,600 assertions, including 62 source checks. The
 pre-repair observations and exact logs remain in `evidence/source-selection/`.
 [SELECTED-SOURCE.md](SELECTED-SOURCE.md) explains the actual SDK selection path

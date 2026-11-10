@@ -1,0 +1,78 @@
+(ns formal.hygiene-check
+ (:require [compiler :as compiler] [formal.api :as formal] [formal.elaborate :as elaborate]
+           [formal.source :as source] [formal.core :as core] [formal.term :as t]
+           [formal.value :as value] [formal.evaluate :as evaluate] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+;; Check the actual old source/core object, not a newly invented approximation.
+;; Decoding is restricted to this bounded, exact, hash-pinned project archive.
+(def baseline-root (Path/expand "research/formal-logic/evidence/hygiene/baseline"))
+(def bytes (File/read! (Path/join baseline-root "probe.etf")))
+(def pin (interop/json-> (File/read! (Path/join baseline-root "probe-pin.json"))))
+(assert (<= (erlang/byte_size bytes) 2097152))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def baseline (elem decoded 0))
+(def text (get-in baseline [:function :source]))
+(def role (get-in baseline [:function :semantic-role]))
+(def historic (get-in baseline [:function :contract]))
+(def historical-check (compiler/with-fresh-names #(formal/describe historic)))
+(assert (= :unsupported (:status historical-check)) (pr-str historical-check))
+(def prepared (compiler/with-fresh-names #(elaborate/prepare-function text [[role t/Int]])))
+(assert (= :elaborated (:status prepared)))
+(def model (core/evaluate (:core prepared) {role t/Int} {role 7}))
+(assert (= 17 (:value model)))
+(def expression (get-in baseline [:expression :source]))
+(def expression-name (get-in baseline [:expression :input]))
+(def expression-core (compiler/with-fresh-names #(elaborate/prepare expression {expression-name t/Int})))
+(def expression-value (compiler/with-fresh-names #(source/prepare expression {expression-name (t/int 7)})))
+(assert (= 17 (:value (core/evaluate (:core expression-core) {expression-name t/Int} {expression-name 7}))))
+(assert (= 17 (evaluate/value (value/term (:value expression-value)) {})))
+(def global-check (compiler/with-fresh-names
+                   #(elaborate/prepare-function (get-in baseline [:free-global :source]) [["input" t/Int]])))
+(assert (= :unsupported (:status global-check)))
+(def wrong
+ (formal/program-contract {:name "hygiene-repaired-twenty" :function-source text :parameters [[role t/Int]]
+   :requires (fn [in] (t/eq (get in role) (t/int 7))) :ensures (fn [in out] (t/eq out (t/int 20)))}))
+(def right
+ (formal/program-contract {:name "hygiene-repaired-seventeen" :function-source text :parameters [[role t/Int]]
+   :requires (fn [in] (t/eq (get in role) (t/int 7))) :ensures (fn [in out] (t/eq out (t/int 17)))}))
+(def answers
+ (mapv (fn [engine]
+         (let [a (formal/check {:backend engine} wrong) b (formal/check {:backend engine} right)]
+          (assert (= :refuted (:status a))) (assert (= :checked (:status b)))
+          (assert (= 17 (get-in a [:counterexample :execution :value])))
+          {:backend engine :wrong a :right b})) [:z3 :oxiz]))
+(def context
+ (formal/selected-source-context {:sources [{:namespace 'formal.hygiene.repaired :revision 'current :file "hygiene-role.bl"
+                 :source "(ns formal.hygiene.repaired) (defn answer [a] (let [local 10] (erlang/+ a local)))"}]
+  :entry ['formal.hygiene.repaired 'current] :target 'answer :parameters [[role t/Int]]}))
+(def original-definition
+ (formal/program-contract {:name "hygiene-original-check" :context context
+  :ensures (fn [in out] (t/eq out (t/add (get in role) (t/int 10))))}))
+(def original (formal/observe-contract original-definition {role 7}))
+(assert (= :observed (:status original)) (pr-str original))
+(assert (= 17 (get-in original [:receipt :outcome :value])))
+(def data {:schema :enchant.formal.hygiene-repair-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :role role :baseline-source-commit (:source-commit baseline) :historical-object-check historical-check
+           :old-modeled-value (get-in baseline [:function :core-outcome :value]) :old-conditional-proof (get-in baseline [:function :conditional-proof-status])
+           :actual (:value model) :repaired-core (:core prepared) :expression-value 17 :free-global (:status global-check)
+           :answers answers :original-definition original-definition :original original
+           :identity-profile identity/profile :compiler-proof-authority false})
+(identity/bytes data)
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! root)
+(def archive (erlang/term_to_binary data))
+(File/write! (Path/join root "hygiene.etf") archive)
+(File/write! (Path/join root "hygiene-pin.json")
+ (interop/->json {:schema :enchant.formal.hygiene-repair-archive-v1 :bytes (erlang/byte_size archive)
+                 :sha256 (artifact/digest archive) :decoder-scope :trusted-research-archive}))
+(File/write! (Path/join root "hygiene.json")
+ (interop/->json (-> data (dissoc :original-definition :answers)
+                    (assoc :answers (mapv #(assoc (select-keys % [:backend]) :wrong (get-in % [:wrong :status]) :right (get-in % [:right :status])) answers)))))
+(println {:role role :historical-object (:status historical-check) :old-model 20 :actual 17 :repaired-model (:value model)
+          :backends (mapv (fn [r] [(:backend r) (get-in r [:wrong :status]) (get-in r [:right :status])]) answers)
+          :original (get-in original [:receipt :outcome :value]) :free-global (:status global-check) :compiler-proof-authority false})

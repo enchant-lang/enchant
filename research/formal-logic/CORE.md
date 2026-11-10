@@ -74,6 +74,13 @@ division, nonlinear operations and nonconstant Int-valued branches may still
 require unsupported proof rules. Solver support and independent proof support
 are reported separately.
 
+[HYGIENE.md](HYGIENE.md) records a source/Core capture bug found by a caller role
+that matched a compiler-generated local name. Declared expression/loop inputs
+now enter the real compiler as lexical parameters, and every lowered let gets
+a Core identity fresh for all referenced input roles. Global values require
+actual Source selection. The corrected binding policy is an implementation
+repair; universal source preservation remains unproved.
+
 The separate [Lean model](metatheory/README.md) now mechanically checks typed
 model outcomes, selected evaluation laws and ranking rules. Its proof receipt
 keeps the BL implementation/ANF/term/compiler correspondences explicitly
