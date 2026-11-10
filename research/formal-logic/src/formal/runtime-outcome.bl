@@ -1,0 +1,59 @@
+(ns formal.runtime-outcome)
+
+;; A deliberately small, versioned projection of actual recorded VM outcomes.
+;; An ArithmeticError's class/message alone never identifies a zero divisor.
+(def profile :bl/integer-bif-error-projection-v1)
+(defn scalar? [value] (or (int? value) (string? value) (contains? #{true false nil} value)))
+(defn stack-frame [frame]
+ (let [args (elem frame 2) values (when (erlang/is_list args) (vec (take 17 args)))]
+  {:module (str (elem frame 0)) :function (str (elem frame 1))
+   :arity (if (erlang/is_list args) (count args) args)
+   :arguments (when (and values (<= (count values) 16) (every? scalar? values)) values)}))
+(defn capture [function state message state-valid?]
+ (try
+  (let [value (function state message)]
+   (if (state-valid? value) {:status :returned :value value}
+    {:status :invalid-return :representation (String/slice (pr-str value) 0 2048)}))
+  (catch error
+   {:status :raised :class (if (map? error) (str (get error :__struct__)) "unclassified")
+    :message (String/slice (try (ex-message error) (catch _ (pr-str error))) 0 4096)
+    :kind __EXCEPTION_KIND__ :frames (mapv stack-frame (take 8 __STACKTRACE__))})))
+(defn valid? [outcome]
+ (and (map? outcome)
+  (case (:status outcome)
+   :returned (= #{:status :value} (set (keys outcome)))
+   :invalid-return (and (= #{:status :representation} (set (keys outcome)))
+                        (string? (:representation outcome)) (<= (count (:representation outcome)) 2048))
+   :raised (and (= #{:status :class :message :kind :frames} (set (keys outcome)))
+                (contains? #{:error :throw :exit} (:kind outcome))
+                (string? (:class outcome)) (<= (count (:class outcome)) 256)
+                (string? (:message outcome)) (<= (count (:message outcome)) 4096)
+                (vector? (:frames outcome)) (<= (count (:frames outcome)) 8)
+                (every? (fn [frame]
+                          (and (map? frame) (= #{:module :function :arity :arguments} (set (keys frame)))
+                               (string? (:module frame)) (<= (count (:module frame)) 256)
+                               (string? (:function frame)) (<= (count (:function frame)) 256)
+                               (int? (:arity frame)) (<= 0 (:arity frame) 255)
+                               (or (nil? (:arguments frame))
+                                   (and (vector? (:arguments frame)) (<= (count (:arguments frame)) 16)
+                                        (= (:arity frame) (count (:arguments frame)))
+                                        (every? scalar? (:arguments frame)))))) (:frames outcome)))
+   false)))
+(defn error-name [outcome]
+ (let [frame (first (:frames outcome)) args (:arguments frame)]
+  (when (and (valid? outcome) (= :raised (:status outcome)) (= :error (:kind outcome))
+              (= "Elixir.ArithmeticError" (:class outcome)) (= "erlang" (:module frame))
+              (contains? #{"div" "rem"} (:function frame)) (= 2 (:arity frame))
+              (vector? args) (= 2 (count args)) (int? (first args)) (= 0 (second args)))
+   :zero-divisor)))
+(defn compare-core [outcome reference]
+ (cond
+  (not (valid? outcome)) :invalid
+  (= :invalid-return (:status outcome)) :disagreement
+  (= :returned (:status outcome))
+   (if (and (= :returned (:status reference)) (= (:value outcome) (:value reference))) :matches :disagreement)
+  (= :raised (:status outcome))
+   (if-let [name (error-name outcome)]
+    (if (and (= :raised (:status reference)) (= name (:error reference))) :matches :disagreement)
+    :unclassified)
+  :else :invalid))

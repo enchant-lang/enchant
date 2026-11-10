@@ -1,0 +1,149 @@
+(ns formal.runtime-protocol
+ (:require [formal.source-protocol :as source] [formal.core :as core]
+           [formal.runtime-artifact :as artifact] [formal.runtime-actor :as actor]
+           [formal.runtime-outcome :as outcome]))
+
+(def profile :bl/owned-beam-observation-v1)
+(def adapter :sequential-trap-and-stop-v1)
+(def limits {:events 64 :receipt-bytes 2097152 :deadline-ms 30000})
+(def ^:private fields
+ #{:formal/runtime-observation :profile :adapter :projection :definition :sdk :artifacts
+   :initial :events :frames :termination :at :monitor :cleanup :deadline-ms :identity})
+(defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.runtime-protocol: " message) {}))))
+(defn- shape! [data keys] (require! (and (map? data) (= keys (set (keys data)))) "noncanonical observation data"))
+(defn- reference! [definition initial events]
+ (require! (and (vector? events) (<= (count events) (:events limits))) "event capacity")
+ (let [prepared (source/prepare definition)
+       _ (require! (= :ready (:status prepared)) (:reason prepared))
+       reference (source/replay-trace definition initial events)]
+  (require! (and (= :replayed (:status reference)) (= :valid (get-in reference [:source-replay :status])))
+            (str "trace is not admitted by source/core/model: " (:reason reference)))
+  {:prepared prepared :reference reference
+   :state-type (core/record-sort (get-in definition [:protocol :schema]))}))
+(defn- monitor! [monitor]
+ (shape! monitor #{:status :reason :raw-reason :forced})
+ (require! (and (= :down (:status monitor)) (contains? #{:normal :abnormal} (:reason monitor))
+                (string? (:raw-reason monitor)) (<= (count (:raw-reason monitor)) 4096)
+                (contains? #{true false} (:forced monitor))) "unconfirmed monitor outcome"))
+(defn- frame-comparison [frame at event previous expected state-type manifest]
+ (if (= {:stutter true} event)
+  (do
+   (shape! frame #{:kind :at :state :state-committed :runtime-event})
+   (require! (and (= :stutter (:kind frame)) (= at (:at frame)) (= previous (:state frame))
+                  (= false (:state-committed frame)) (= :none (:runtime-event frame))) "invalid observation padding")
+   {:at at :status (if (= (:state expected) (:state frame)) :matches :disagreement) :kind :stutter})
+  (do
+   (shape! frame #{:kind :at :transition :inputs :before :outcome :state :state-committed})
+   (require! (and (= :handler (:kind frame)) (= at (:at frame)) (= (:transition event) (:transition frame))
+                  (= (:inputs event) (:inputs frame)) (= previous (:before frame))
+                  (core/inhabits? state-type (:state frame)) (outcome/valid? (:outcome frame))) "invalid observed handler frame")
+   (let [raw (:outcome frame) returned? (= :returned (:status raw))
+         _ (require! (= returned? (:state-committed frame)) "state commit differs from observed outcome")
+         _ (require! (if returned? (and (core/inhabits? state-type (:value raw)) (= (:state frame) (:value raw)))
+                         (= previous (:state frame))) "outcome/state chain mismatch")
+         compared (outcome/compare-core raw (:core-execution expected))
+         bound-error? (or (not= :raised (:status raw))
+                          (some #(= (:module manifest) (:module %)) (:frames raw)))]
+    {:at at :kind :handler :transition (:transition event)
+     :status (if (and (= :raised (:status raw)) (not bound-error?)) :unclassified
+               (if (and (= :matches compared) (not= (:state frame) (:state expected))) :disagreement compared))
+     :runtime-error (outcome/error-name raw) :error-stack-bound-to-artifact (boolean bound-error?)
+     :reference-outcome (:core-execution expected)}))))
+
+(defn check
+ "Reconstruct the exact source/model and emitted artifact identities. Compare
+  recorded observations without loading their BEAM, starting actors or calling
+  application handlers. This validates data; it does not attest execution."
+ [definition receipt]
+ (try
+  (require! (and (map? receipt) (<= (erlang/external_size receipt) (:receipt-bytes limits))) "observation capacity")
+  (shape! receipt fields)
+  (require! (and (= 1 (:formal/runtime-observation receipt)) (= profile (:profile receipt))
+                 (= adapter (:adapter receipt)) (= outcome/profile (:projection receipt))
+                 (= (:identity receipt) (artifact/identity-of receipt))
+                 (= (:identity definition) (:definition receipt))
+                 (int? (:deadline-ms receipt)) (<= 1 (:deadline-ms receipt) (:deadline-ms limits))) "observation identity/profile mismatch")
+  (require! (= (artifact/sdk-identity) (:sdk receipt)) "recorded SDK/runtime floor differs from this checker")
+  (let [{:keys [prepared reference state-type]} (reference! definition (:initial receipt) (:events receipt))
+        handlers (:handlers prepared) manifests (:artifacts receipt)
+        _ (require! (and (vector? manifests) (= (count handlers) (count manifests))
+                         (= (count manifests) (count (set (map :module manifests))))) "artifact coverage mismatch")
+        _ (doseq [at (range (count handlers))]
+            (let [stored (nth manifests at)
+                  fresh (artifact/compile-handler (nth handlers at) (:module stored))]
+             (require! (= stored (:manifest fresh)) "recorded artifact differs from freshly compiled source")))
+        _ (shape! (:cleanup receipt) #{:actor-alive :modules})
+        _ (require! (and (= false (get-in receipt [:cleanup :actor-alive]))
+                         (= (mapv (fn [m] {:module (:module m) :retired true :loaded false}) manifests)
+                            (get-in receipt [:cleanup :modules]))) "owned actor/module cleanup is unconfirmed")
+        _ (monitor! (:monitor receipt))
+        frames (:frames receipt) events (:events receipt)
+        _ (require! (and (vector? frames) (<= (count frames) (inc (count events)))
+                         (contains? #{:completed :timeout :process-death :source-runtime-disagreement :unclassified-failure} (:termination receipt))
+                         (int? (:at receipt)) (<= 0 (:at receipt) (count events))) "observation extent/termination mismatch")
+        _ (when (= :completed (:termination receipt))
+            (require! (and (= (count frames) (inc (count events))) (= (count events) (:at receipt))) "incomplete completed observation"))
+        _ (when (seq frames)
+            (shape! (first frames) #{:kind :state})
+            (require! (and (= :initial (:kind (first frames))) (core/inhabits? state-type (:state (first frames)))) "invalid initial observation"))
+        by-name (into {} (map (fn [m] [(:name m) m]) manifests))
+        comparisons (when (seq frames)
+                     (into [{:at :initial :status (if (= (:initial receipt) (:state (first frames))) :matches :disagreement)}]
+                      (mapv (fn [at]
+                              (frame-comparison (nth frames (inc at)) at (nth events at)
+                               (:state (nth frames at)) (nth (:frames reference) (inc at)) state-type
+                               (get by-name (:transition (nth events at))))) (range (dec (count frames))))))
+        status (cond (some #(= :disagreement (:status %)) comparisons) :disagreement
+                     (some #(contains? #{:invalid :unclassified} (:status %)) comparisons) :incomplete
+                     (and (= :completed (:termination receipt)) (= :normal (get-in receipt [:monitor :reason]))
+                           (= false (get-in receipt [:monitor :forced]))) :conforming
+                     :else :incomplete)]
+   {:status status :definition (:identity definition) :observation (:identity receipt)
+    :scope :finite-recorded-beam-adapter-conformance :comparison comparisons
+    :model-safety (:safety reference) :runtime-safety (if (= :conforming status) (:safety reference) :not-established)
+    :source-model-execution reference :artifact-count (count manifests)
+    :attestation :observer-trusted-not-cryptographically-attested
+    :source-connection :reviewed-source-anf-core-state-model
+    :universal-runtime-refinement :not-established :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :scope :finite-recorded-beam-adapter-conformance
+                :compiler-proof-authority false})))
+
+(defn observe
+ "Compile only the admitted source, retain its exact bytes, and run one owned
+  sequential trap-and-stop adapter. Native solver answers are not required.
+  Unsafe but admitted traces may conform: conformance is not program safety."
+ ([definition initial events] (observe definition initial events {}))
+ ([definition initial events options]
+  (let [resources (atom []) cleanup (atom []) native (atom nil)]
+   (try
+    (require! (and (map? options) (every? #{:deadline-ms} (keys options))) "unknown runtime observation option")
+    (let [deadline-ms (get options :deadline-ms 10000)
+          _ (require! (and (int? deadline-ms) (<= 0 deadline-ms (:deadline-ms limits))) "invalid runtime deadline")
+          {:keys [prepared reference state-type]} (reference! definition initial events)]
+     (if (= 0 deadline-ms) {:status :incomplete :reason :deadline-expired :execution-started false :compiler-proof-authority false}
+      (let [sdk (artifact/sdk-identity) run (System/unique_integer (list :positive))
+            observed
+            (try
+             (let [functions (into {} (map-indexed
+                              (fn [at handler]
+                               (let [compiled (artifact/compile-handler handler (artifact/module-name run at))
+                                     resource (artifact/publish! compiled)]
+                                (swap! resources conj resource)
+                                [(:name handler) (artifact/callable! resource)])) (:handlers prepared)))
+                   result (actor/run! functions state-type initial events (:frames reference) deadline-ms)]
+              (reset! native result) result)
+             (finally (reset! cleanup (artifact/close! @resources))))
+            data {:formal/runtime-observation 1 :profile profile :adapter adapter :projection outcome/profile
+                  :definition (:identity definition) :sdk sdk
+                  :artifacts (mapv #(get-in % [:compiled :manifest]) @resources)
+                  :initial initial :events events :frames (:frames observed) :termination (:termination observed) :at (:at observed)
+                  :monitor (:monitor observed) :cleanup {:actor-alive (:actor-alive observed) :modules @cleanup}
+                  :deadline-ms deadline-ms}
+            receipt (assoc data :identity (artifact/identity-of data))
+            checked (check definition receipt)]
+       {:status (if (= :conforming (:status checked)) :observed (:status checked))
+        :receipt receipt :checking checked :scope :owned-sequential-beam-observation
+        :compiler-proof-authority false})))
+    (catch error
+     {:status :error :reason (ex-message error) :execution-started (boolean @native)
+      :cleanup @cleanup :compiler-proof-authority false})))))

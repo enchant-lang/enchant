@@ -1,0 +1,83 @@
+(ns formal.runtime-actor
+ (:require [formal.core :as core] [formal.runtime-outcome :as outcome]))
+
+;; The effectful transport engine makes no source or proof claim. The public
+;; producer supplies actual admitted artifacts and the independent checker
+;; reconstructs all expected behavior. Tests may exercise this engine directly.
+(defn- now [] (System/monotonic_time :millisecond))
+(defn- remaining [deadline] (max 0 (- deadline (now))))
+(defn- actor-loop [parent ticket functions state-type initial]
+ (erlang/send parent [ticket :ready initial])
+ (loop [state initial]
+  (receive
+   [seen :stop] :when (= seen ticket) :ok
+   [seen :step at transition message] :when (= seen ticket)
+    (let [result (outcome/capture (get functions transition) state message #(core/inhabits? state-type %))
+          returned? (= :returned (:status result))
+          frame {:kind :handler :at at :transition transition :inputs message :before state
+                 :outcome result :state (if returned? (:value result) state) :state-committed returned?}]
+     (erlang/send parent [ticket :outcome at frame])
+     (when returned? (recur (:value result)))))))
+(defn- await-ready [pid monitor ticket deadline]
+ (receive
+  [seen :ready state] :when (= seen ticket) {:status :ready :state state}
+  [:DOWN seen :process child reason] :when (and (= seen monitor) (= child pid))
+    {:status :process-death :reason (pr-str reason)}
+  (after (remaining deadline) {:status :timeout})))
+(defn- await-step [pid monitor ticket at deadline]
+ (receive
+  [seen :outcome index frame] :when (and (= seen ticket) (= index at)) {:status :outcome :frame frame}
+  [:DOWN seen :process child reason] :when (and (= seen monitor) (= child pid))
+    {:status :process-death :reason (pr-str reason)}
+  (after (remaining deadline) {:status :timeout})))
+(defn- drain [ticket]
+ (receive
+  [seen :ready _] :when (= seen ticket) (drain ticket)
+  [seen :outcome _ _] :when (= seen ticket) (drain ticket)
+  (after 0 :ok)))
+(defn run!
+ [functions state-type initial events reference-frames deadline-ms]
+ (let [parent (erlang/self) ticket (erlang/make_ref) deadline (+ (now) deadline-ms)
+       pair (spawn-monitor (fn [] (actor-loop parent ticket functions state-type initial)))
+       pid (elem pair 0) monitor (elem pair 1)
+       forced (atom false) down (atom nil) result (atom nil)]
+  (try
+   (let [ready (await-ready pid monitor ticket deadline)]
+    (when (= :process-death (:status ready)) (reset! down {:status :down :reason :abnormal :raw-reason (:reason ready) :forced false}))
+    (reset! result
+     (if-not (= :ready (:status ready)) {:frames [] :termination (:status ready) :at 0}
+      (if-not (= initial (:state ready)) {:frames [{:kind :initial :state (:state ready)}] :termination :source-runtime-disagreement :at 0}
+       (loop [at 0 state initial halted? false frames [{:kind :initial :state (:state ready)}]]
+        (if (= at (count events)) {:frames frames :termination :completed :at at}
+         (let [event (nth events at)]
+          (if (= {:stutter true} event)
+           (recur (inc at) state halted? (conj frames {:kind :stutter :at at :state state :state-committed false :runtime-event :none}))
+           (if halted? {:frames frames :termination :illegal-continuation :at at}
+            (do
+             (erlang/send pid [ticket :step at (:transition event) (:inputs event)])
+             (let [received (await-step pid monitor ticket at deadline)]
+              (when (= :process-death (:status received))
+               (reset! down {:status :down :reason :abnormal :raw-reason (:reason received) :forced false}))
+              (if-not (= :outcome (:status received)) {:frames frames :termination (:status received) :at at}
+               (let [frame (:frame received) expected (nth reference-frames (inc at))
+                     compared (outcome/compare-core (:outcome frame) (:core-execution expected))
+                     frames (conj frames frame)]
+                (case compared
+                 :matches (recur (inc at) (:state frame) (= :raised (get-in frame [:outcome :status])) frames)
+                 :unclassified {:frames frames :termination :unclassified-failure :at at}
+                 {:frames frames :termination :source-runtime-disagreement :at at})))))))))))))
+   (finally
+    ;; A handler error stops the adapter after its reply; a normal end sends an
+    ;; explicit stop. Deadline/transport failure forces termination, never a
+    ;; fabricated language exception or a claimed unobserved state commit.
+    (when (Process/alive? pid)
+     (if (= :completed (:termination @result)) (erlang/send pid [ticket :stop])
+      (do (reset! forced true) (erlang/exit pid :kill))))
+    (when-not @down
+     (reset! down
+      (receive [:DOWN seen :process child reason] :when (and (= seen monitor) (= child pid))
+        {:status :down :reason (if (= reason :normal) :normal :abnormal) :raw-reason (pr-str reason) :forced @forced}
+        (after 5000 {:status :unconfirmed :reason :unknown :raw-reason "cleanup deadline" :forced @forced}))))
+    (when (Process/alive? pid) (reset! forced true) (erlang/exit pid :kill))
+    (Process/demonitor monitor (list :flush)) (drain ticket)))
+  (assoc @result :monitor @down :actor-alive (Process/alive? pid)))))

@@ -9,7 +9,7 @@
            [formal.result :as result] [formal.protocol :as protocols]
            [formal.protocol-run :as protocol-run] [formal.protocol-trace :as protocol-traces]
            [formal.elaborate :as elaborate] [formal.core :as core]
-           [formal.source-protocol :as source-protocols]))
+           [formal.source-protocol :as source-protocols] [formal.runtime-protocol :as runtime-protocols]))
 
 ;; One functional BL facade. Declarations, callbacks and questions stay pure
 ;; ordinary language data until check/compare. Callbacks construct a model;
@@ -115,6 +115,21 @@
 (defn protocol-trace [definition depth] (protocol-traces/define definition depth))
 (defn check-protocol-trace-proof [subject object] (protocol-traces/check-proof subject object))
 (defn replay-protocol-counterexample [subject observation] (protocol-traces/replay-counterexample subject observation))
+(defn observe-protocol-trace
+ ([definition initial events] (runtime-protocols/observe definition initial events))
+ ([definition initial events options] (runtime-protocols/observe definition initial events options)))
+(defn check-runtime-observation [definition receipt] (runtime-protocols/check definition receipt))
+(defn observe-protocol-counterexample
+ ([subject native] (observe-protocol-counterexample subject native {}))
+ ([subject native options]
+  (if-not (= protocol-traces/source-profile (:profile subject))
+   {:status :rejected :reason :source-bound-trace-required :execution-started false}
+   (let [replayed (protocol-traces/replay-counterexample subject native)]
+    (if-not (= :valid (:status replayed))
+     {:status :rejected :reason :invalid-source-counterexample :replay replayed :execution-started false}
+     (assoc (runtime-protocols/observe (:protocol subject) (:initial replayed) (:events replayed) options)
+       :model-counterexample {:subject (:identity subject) :scope (:scope replayed) :status :valid
+                              :native-identity (:identity native) :native-certificate (:certificate native)}))))))
 (defn compare
  ([subject] (compare subject {}))
  ([subject options]
@@ -163,6 +178,8 @@
               :subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace]
               :core-profiles [core/profile core/record-profile]
               :trace-profiles [protocol-traces/profile protocol-traces/source-profile]
+              :runtime-observations {:profile runtime-protocols/profile :scope :owned-sequential-trap-and-stop
+                                     :universal-refinement :not-established :attestation :observer-trusted}
               :certificate :not-checked
               :native-solver-certificate {:status :not-checked}
               :portable-certificate {:status :implemented :rules (vec (sort-by str certificate/supported-rules))

@@ -1,0 +1,170 @@
+(ns formal.runtime-protocol-test
+ (:require [formal.api :as formal] [formal.runtime-protocol :as runtime]
+           [formal.runtime-artifact :as artifact] [formal.runtime-outcome :as outcome]
+           [formal.runtime-actor :as actor] [formal.core :as core] [formal.term :as t]))
+
+(def spec
+ {:name "observed-bank" :state {"balance" t/Int "flag" t/Bool}
+  :init (fn [s] (t/all [(t/eq (get s "balance") (t/int 0)) (get s "flag")]))
+  :invariant (fn [s] (t/ge (get s "balance") (t/int 0)))
+  :handlers [{:name "deposit" :inputs {"amount" t/Int}
+               :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))])
+               :source "(fn [s msg] (assoc s \"balance\" (+ (get s \"balance\") (get msg \"amount\"))))"}
+              {:name "withdraw" :inputs {"amount" t/Int}
+               :assumptions (fn [s msg] [(t/ge (get msg "amount") (t/int 0))])
+               :source "(fn [s msg] (if (<= (get msg \"amount\") (get s \"balance\")) (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\"))) s))"}]})
+(def bank (formal/source-protocol spec))
+(def initial {"balance" 0 "flag" true})
+(defn event [name amount] {:transition name :inputs {"amount" amount}})
+(defn rehash [data] (assoc data :identity (artifact/identity-of data)))
+(defn clean? [receipt]
+ (and (= false (get-in receipt [:cleanup :actor-alive]))
+      (every? #(and (= true (:retired %)) (= false (:loaded %))) (get-in receipt [:cleanup :modules]))))
+
+(deftest actual-handler-artifacts-run-in-one-owned-sequential-adapter
+ (let [events [(event "deposit" 3) (event "withdraw" 2) (event "withdraw" 100) {:stutter true}]
+       observed (formal/observe-protocol-trace bank initial events)
+       receipt (:receipt observed) checked (:checking observed)
+       saved (erlang/binary_to_term (erlang/term_to_binary receipt))]
+  (is (= :observed (:status observed)) (pr-str observed))
+  (is (= :conforming (:status checked)) (pr-str checked))
+  (is (= :holds (:runtime-safety checked)))
+  (is (= :finite-recorded-beam-adapter-conformance (:scope checked)))
+  (is (= :observer-trusted-not-cryptographically-attested (:attestation checked)))
+  (is (= :not-established (:universal-runtime-refinement checked)))
+  (is (= false (:compiler-proof-authority observed)))
+  (is (= receipt saved))
+  (is (= :conforming (:status (formal/check-runtime-observation bank saved))))
+  (is (= 2 (count (:artifacts receipt))))
+  (is (= 5 (count (:frames receipt))))
+  (is (= 3 (count (filter #(= :handler (:kind %)) (:frames receipt)))))
+  (is (= {"balance" 1 "flag" true} (:state (last (:frames receipt)))))
+  (is (= :none (:runtime-event (last (:frames receipt)))))
+  (is (= :normal (get-in receipt [:monitor :reason])))
+  (is (= false (get-in receipt [:monitor :forced])))
+  (is (clean? receipt))
+  (doseq [manifest (:artifacts receipt)]
+   (is (= 64 (count (:beam-sha256 manifest))))
+   (is (= 32 (count (:code-md5 manifest))))
+   (is (= false (erlang/module_loaded (erlang/binary_to_existing_atom (:module manifest))))))))
+
+(deftest variadic-updates-and-signed-division-run-as-real-beam-functions
+ (doseq [[name source start message expected]
+          [["variadic" "(fn [s msg] (assoc s \"balance\" (+ (get s \"balance\") (get msg \"amount\")) \"flag\" (not (get s \"flag\"))))"
+             {"balance" 4 "flag" true} {"amount" 2} {"balance" 6 "flag" false}]
+           ["signed" "(fn [s msg] (assoc s \"balance\" (quot (get s \"balance\") (get msg \"amount\"))))"
+             {"balance" 7 "flag" true} {"amount" -3} {"balance" -2 "flag" true}]]]
+  (let [definition (formal/source-protocol {:name name :state {"balance" t/Int "flag" t/Bool}
+                     :handlers [{:name "step" :inputs {"amount" t/Int} :source source}]})
+        result (formal/observe-protocol-trace definition start [{:transition "step" :inputs message}])]
+   (is (= :observed (:status result)) (pr-str result))
+   (is (= expected (get-in result [:receipt :frames 1 :outcome :value])))
+   (is (= :conforming (get-in result [:checking :status])))
+   (is (clean? (:receipt result))))))
+
+(deftest exact-integer-bif-failures-map-to-named-core-errors-without-committing
+ (doseq [[name source] [["quotient" "(fn [s msg] (assoc s \"balance\" (quot (get s \"balance\") (get msg \"amount\"))))"]
+                        ["remainder" "(fn [s msg] (assoc s \"balance\" (rem (get s \"balance\") (get msg \"amount\"))))"]
+                        ["modulus" "(fn [s msg] (assoc s \"balance\" (mod (get s \"balance\") (get msg \"amount\"))))"]
+                        ["hidden" "(fn [s msg] (get {\"next\" s \"hidden\" (quot 1 0)} \"next\"))"]]]
+  (let [definition (formal/source-protocol {:name name :state {"balance" t/Int "flag" t/Bool}
+                     :handlers [{:name "attempt" :inputs {"amount" t/Int} :source source}]})
+        start {"balance" 7 "flag" true}
+        result (formal/observe-protocol-trace definition start [(event "attempt" 0) {:stutter true}])
+        receipt (:receipt result) frame (get-in receipt [:frames 1]) raw (:outcome frame)]
+   (is (= :observed (:status result)) (pr-str result))
+   (is (= :conforming (get-in result [:checking :status])))
+   (is (= :violated (get-in result [:checking :runtime-safety])))
+   (is (= :raised (:status raw)))
+   (is (= :zero-divisor (outcome/error-name raw)))
+   (is (= "erlang" (get-in raw [:frames 0 :module])))
+   (is (= 0 (second (get-in raw [:frames 0 :arguments]))))
+   (is (= false (:state-committed frame)))
+   (is (= start (:state frame)))
+   (is (= start (get-in receipt [:frames 2 :state])))
+   (is (= :none (get-in receipt [:frames 2 :runtime-event])))
+   (is (= :normal (get-in receipt [:monitor :reason])))
+   (is (clean? receipt))
+   (let [unclassified (rehash (assoc-in receipt [:frames 1 :outcome :frames] []))]
+    (is (= :incomplete (:status (formal/check-runtime-observation definition unclassified))))))))
+
+(deftest an-arithmetic-error-class-alone-is-never-a-zero-divisor-certificate
+ (let [sample {:status :raised :class "Elixir.ArithmeticError" :message "anything" :kind :error
+               :frames [{:module "erlang" :function "div" :arity 2 :arguments [7 0]}]}]
+  (is (= :zero-divisor (outcome/error-name sample)))
+  (doseq [changed [(assoc sample :frames []) (assoc sample :kind :throw)
+                   (assoc sample :class "Elixir.SystemLimitError")
+                   (assoc-in sample [:frames 0 :arguments] [false 0])
+                   (assoc-in sample [:frames 0 :arguments] [7 3])
+                   (assoc-in sample [:frames 0 :function] "unknown")
+                   (assoc-in sample [:frames 0 :module] "other")]]
+   (is (= nil (outcome/error-name changed))))))
+
+(deftest receipt-checking-refuses-artifact-and-source-substitutions-without-loading-code
+ (let [observed (formal/observe-protocol-trace bank initial [(event "deposit" 3)]) receipt (:receipt observed)
+       before (BeamLisp.Env/module_info :md5)]
+  (doseq [changed [(assoc receipt :definition "another-source")
+                   (assoc receipt :certificate {:status :checked})
+                   (assoc receipt :profile :verified-compiler)
+                   (assoc-in receipt [:sdk :descriptor-sha256] "wrong")
+                   (assoc-in receipt [:artifacts 0 :module] "Elixir.BeamLisp.Env")
+                   (assoc-in receipt [:artifacts 0 :beam-sha256] "wrong")
+                   (assoc-in receipt [:artifacts 0 :source] "(do (println :must-not-run) (fn [s msg] s))")
+                   (assoc-in receipt [:cleanup :actor-alive] true)
+                   (assoc-in receipt [:frames 1 :state-committed] false)]]
+   (is (= :rejected (:status (formal/check-runtime-observation bank (rehash changed))))))
+  (is (= before (BeamLisp.Env/module_info :md5)))
+  (is (= :rejected (:status (formal/check-runtime-observation bank (assoc receipt :deadline-ms 1)))))
+  (let [frame (get-in receipt [:frames 1])
+        bad-value {"balance" 99 "flag" true}
+        changed (rehash (assoc-in (assoc-in receipt [:frames 1 :outcome :value] bad-value) [:frames 1 :state] bad-value))
+        result (formal/check-runtime-observation bank changed)]
+   (is (= :disagreement (:status result)))
+   (is (= :not-established (:runtime-safety result))))))
+
+(deftest inadmissible-plans-and-expired-budgets-do-not-start-actors
+ (let [expired (formal/observe-protocol-trace bank initial [] {:deadline-ms 0})]
+  (is (= :incomplete (:status expired)))
+  (is (= false (:execution-started expired))))
+ (doseq [[start events opts] [[{"balance" 1 "flag" true} [] {}]
+                              [initial [(event "deposit" -1)] {}]
+                              [initial [{:transition "missing" :inputs {}}] {}]
+                              [initial [] {:deadline-ms -1}]
+                              [initial [] {:deadline-ms 30001}]
+                              [initial [] {:handler (fn [] (throw :must-not-run))}]]]
+  (let [result (formal/observe-protocol-trace bank start events opts)]
+   (is (= :error (:status result)) (pr-str result))
+   (is (= false (:execution-started result)))
+   (is (= [] (:cleanup result))))))
+
+(deftest native-source-counterexamples-can-be-observed-in-the-real-runtime
+ (let [definition (formal/source-protocol (assoc-in (assoc spec :name "observed-unsafe") [:handlers 1 :source]
+                         "(fn [s msg] (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\"))))"))
+       subject (formal/protocol-trace definition 1)]
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject)
+         native (get-in answer [:backend :property])
+         observed (formal/observe-protocol-counterexample subject native)]
+    (is (= :refuted (:status answer)))
+    (is (= :observed (:status observed)) (pr-str observed))
+    (is (= :conforming (get-in observed [:checking :status])))
+    (is (= :violated (get-in observed [:checking :runtime-safety])))
+    (is (= :not-checked (get-in observed [:model-counterexample :native-certificate :status])))
+    (is (clean? (:receipt observed)))
+    (is (= :rejected (:status (formal/observe-protocol-counterexample subject (assoc native :id "wrong"))))))))
+ (is (= :rejected (:status (formal/observe-protocol-counterexample (formal/protocol-trace (:protocol bank) 0) {})))))
+
+(deftest transport-deadlines-and-process-death-do-not-become-language-errors
+ ;; Owned transport fixtures, deliberately not claimed as source artifacts.
+ (let [type (core/record-sort {"n" t/Int}) start {"n" 0} event {:transition "attempt" :inputs {}}
+       expected [{:state start} {:state start :core-execution {:status :returned :value start}}]
+       timeout (actor/run! {"attempt" (fn [s msg] (receive :never nil))} type start [event] expected 5)
+       death (actor/run! {"attempt" (fn [s msg] (erlang/exit (erlang/self) :kill))} type start [event] expected 1000)]
+  (is (= :timeout (:termination timeout)))
+  (is (= false (:actor-alive timeout)))
+  (is (= :down (get-in timeout [:monitor :status])))
+  (is (= true (get-in timeout [:monitor :forced])))
+  (is (= :process-death (:termination death)))
+  (is (= false (:actor-alive death)))
+  (is (= :down (get-in death [:monitor :status])))
+  (is (= false (get-in death [:monitor :forced])))))

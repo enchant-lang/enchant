@@ -1,0 +1,50 @@
+(ns formal.runtime-artifact
+ (:require [formal.elaborate :as elaborate] [anf :as anf] [lower :as lower]))
+
+;; Compilation is separate from publication and user-handler execution.
+;; Receipt checking compiles into bytes only; it never loads supplied code.
+(defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.runtime-artifact: " message) {}))))
+(defn hex [bytes] (Base/encode16 bytes (list (tuple :case :lower))))
+(defn digest [bytes] (hex (crypto/hash :sha256 bytes)))
+(defn identity-of [data] (digest (erlang/term_to_binary (dissoc data :identity))))
+(defn sdk-identity []
+ (let [sdk (System/get_env "BL_SDK_PRODUCT")]
+  (require! (and (string? sdk) (String/starts_with? sdk "/nix/store/")) "an immutable SDK product is required")
+  {:sdk sdk :descriptor-sha256 (digest (File/read! (str sdk "/artifact.json")))
+   :runtime-floor-sha256 (digest (erlang/term_to_binary (BeamLisp.Env/runtime_floor_key!)))
+   :otp (str (erlang/system_info :otp_release)) :elixir (System/version)}))
+(defn module-name [run index] (str "Elixir.Formal.Observed.M" run ".H" index))
+(defn compile-handler [handler module-name]
+ (require! (and (string? module-name) (<= (count module-name) 80)
+                 (Regex/match? (Regex/compile! "^Elixir\\.Formal\\.Observed\\.M[0-9]{1,24}\\.H([0-9]|1[0-5])$") module-name))
+           "invalid owned observation module name")
+ (let [parameters (mapv (fn [role] [role (get (:parameters handler) role)]) ["state" "message"])
+       extracted (elaborate/prepare-function (:source handler) parameters)
+       _ (require! (and (= :elaborated (:status extracted)) (= (:core handler) (:identity extracted))) "source/core identity changed")
+       module (erlang/binary_to_atom module-name)
+       descriptor (anf/module module
+          (list {:op :defn-clause :fname :run :params (list) :guard nil :body (:anf extracted) :ann {}})
+          (list [:run 0]) (list))
+       pair (lower/descriptor->beam descriptor) bytes (elem pair 1)]
+  (require! (= module (elem pair 0)) "compiled module mismatch")
+  {:pair pair :manifest {:name (:name handler) :source (:source handler) :core (:core handler)
+                        :module module-name :arity 2 :beam-sha256 (digest bytes)
+                        :code-md5 (hex (elem (elem (beam_lib/md5 bytes) 1) 1))}}))
+(defn publish! [compiled]
+ (let [pair (:pair compiled) module (elem pair 0)
+       lease (BeamLisp.Env/retain_exact_binary! pair (str (get-in compiled [:manifest :module]) ".beam"))]
+  {:compiled compiled :module module :lease lease}))
+(defn callable! [resource]
+ (let [module (:module resource) manifest (get-in resource [:compiled :manifest])]
+  (BeamLisp.Env/with_code_lease (list module)
+   (fn []
+    (let [function (erlang/apply module :run (list))]
+     (require! (and (erlang/is_function function 2) (= module (elem (erlang/fun_info function :module) 1))
+                    (= (:code-md5 manifest) (hex (erlang/apply module :module_info (list :md5)))))
+               "actual callable differs from emitted artifact") function)))))
+(defn close! [resources]
+ (doseq [resource resources] (BeamLisp.Env/release_code! (:lease resource)))
+ (mapv (fn [resource]
+         {:module (get-in resource [:compiled :manifest :module])
+          :retired (BeamLisp.Env/retire_module! (:module resource))
+          :loaded (erlang/module_loaded (:module resource))}) resources))
