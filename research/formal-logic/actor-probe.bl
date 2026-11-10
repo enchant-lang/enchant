@@ -5,7 +5,7 @@
 ;; Qualify the exact pinned compiler/callable/custody boundary before choosing
 ;; a public actor observation interface. Each owned process invokes one admitted
 ;; handler. This is not an arbitrary actor/refinement or universal proof.
-(def directory "research/formal-logic/evidence/actor-runtime")
+(def directory (or (System/get_env "ENCHANT_FORMAL_RUNTIME_PROBE") "research/formal-logic/evidence/actor-runtime"))
 (File/mkdir_p! directory)
 (def state-type (core/record-sort {"count" t/Int "flag" t/Bool}))
 (def message-type (core/record-sort {"amount" t/Int}))
@@ -20,7 +20,11 @@
   {:id :zero-divisor :source "(fn [s msg] (assoc s \"count\" (quot (get s \"count\") (get msg \"amount\"))))"
    :state {"count" 7 "flag" true} :message {"amount" 0}}
   {:id :hidden-field-failure :source "(fn [s msg] (get {\"next\" s \"unused\" (quot 1 0)} \"next\"))"
-   :state {"count" 7 "flag" true} :message {"amount" 3}}])
+   :state {"count" 7 "flag" true} :message {"amount" 3}}
+  {:id :zero-remainder :source "(fn [s msg] (assoc s \"count\" (rem (get s \"count\") (get msg \"amount\"))))"
+   :state {"count" 7 "flag" true} :message {"amount" 0}}
+  {:id :zero-modulus :source "(fn [s msg] (assoc s \"count\" (mod (get s \"count\") (get msg \"amount\"))))"
+   :state {"count" 7 "flag" true} :message {"amount" 0}}])
 (defn hex [bytes] (Base/encode16 bytes (list (tuple :case :lower))))
 (defn digest [bytes] (hex (crypto/hash :sha256 bytes)))
 (defn code-md5 [bytes] (elem (elem (beam_lib/md5 bytes) 1) 1))
@@ -30,7 +34,14 @@
 (defn outcome [function state message]
  (try {:status :returned :value (function state message)}
   (catch error {:status :raised :class (str (get error :__struct__)) :message (ex-message error)
-                :data (pr-str (ex-data error)) :raw (pr-str error) :runtime-error-name :unmapped})))
+                :data (pr-str (ex-data error)) :raw (pr-str error) :runtime-error-name :unmapped
+                :exception-kind __EXCEPTION_KIND__
+                :frames (mapv (fn [frame]
+                               (let [arguments (elem frame 2)]
+                                {:module (str (elem frame 0)) :function (str (elem frame 1))
+                                 :arity (if (erlang/is_list arguments) (count arguments) arguments)
+                                 :arguments (when (erlang/is_list arguments) (vec arguments))}))
+                              __STACKTRACE__)})))
 (defn actor-call [function state message]
  (let [parent (erlang/self) ticket (erlang/make_ref)
        pair (spawn-monitor (fn [] (erlang/send parent [ticket (outcome function state message)])))
