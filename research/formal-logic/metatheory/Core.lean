@@ -182,10 +182,41 @@ theorem natural_rank_wellFounded {State : Type} (rank : State → Nat)
     WellFounded (fun next current => step current next) :=
   ⟨natural_rank_accessible rank step decreases⟩
 
+theorem ranked_relation_wellFounded {State Rank : Type}
+    (order : Rank → Rank → Prop) (wf : WellFounded order)
+    (rank : State → Rank) (step : State → State → Prop)
+    (decreases : ∀ {current next}, step current next → order (rank next) (rank current)) :
+    WellFounded (fun next current => step current next) := by
+  apply Subrelation.wf (r := InvImage order rank)
+  · intro next current hstep
+    exact decreases hstep
+  · exact InvImage.wf rank wf
+
+theorem lexicographic_pair_rank_wellFounded {State : Type}
+    (rank : State → Nat × Nat) (step : State → State → Prop)
+    (decreases : ∀ {current next}, step current next →
+      Prod.Lex Nat.lt Nat.lt (rank next) (rank current)) :
+    WellFounded (fun next current => step current next) :=
+  ranked_relation_wellFounded (Prod.Lex Nat.lt Nat.lt)
+    (Prod.lex Nat.lt_wfRel Nat.lt_wfRel).wf rank step decreases
+
 #print axioms typed_total
 #print axioms no_stuck_typed_outcome
 #print axioms deterministic
+#print axioms lexical_binding
+#print axioms true_branch_only
+#print axioms false_branch_only
 #print axioms first_failure_wins
+#print axioms sequence_failure
+#print axioms quotient_zero_raises
+#print axioms remainder_zero_raises
+#print axioms modulus_zero_raises
+#print axioms quotient_negative_divisor
+#print axioms remainder_dividend_sign
+#print axioms modulus_divisor_sign
+#print axioms natural_rank_accessible
 #print axioms natural_rank_wellFounded
+#print axioms ranked_relation_wellFounded
+#print axioms lexicographic_pair_rank_wellFounded
 
 end BeamLispCore
