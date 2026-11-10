@@ -1,0 +1,48 @@
+(ns formal.hygiene-probe
+ (:require [compiler :as compiler] [system.ir :as ir] [formal.elaborate :as elaborate]
+           [formal.source :as source] [formal.core :as core] [formal.term :as t]
+           [formal.value :as value] [formal.evaluate :as evaluate] [formal.api :as formal] [interop]))
+
+;; Retain evidence before repairing the source/core scope bridge. Source names,
+;; compiler lexical aliases and caller-chosen semantic roles are different IDs.
+(def text "(fn [a] (let [local 10] (erlang/+ a local)))")
+(def baseline (compiler/with-fresh-names #(elaborate/prepare-function text [["input" t/Int]])))
+(def body (:body (first (:clauses (ir/scaffold-inner (:anf baseline))))))
+(def role (:name body))
+(assert (= :let (:op body)))
+(def collided (compiler/with-fresh-names #(elaborate/prepare-function text [[role t/Int]])))
+(def model (core/evaluate (:core collided) {role t/Int} {role 7}))
+(def actual ((fn [a] (let [local 10] (erlang/+ a local))) 7))
+(def definition
+ (compiler/with-fresh-names
+  #(formal/program-contract {:name "colliding-role-probe" :function-source text :parameters [[role t/Int]]
+                             :ensures (fn [inputs output] (t/eq output (t/int 20)))})))
+(def checked (compiler/with-fresh-names #(formal/check definition)))
+(def expression-name
+ (:name (compiler/with-fresh-names
+          #(compiler/compile (first (BeamLisp.Reader/read_string "(let [local 10] (erlang/+ input local))"))
+             (compiler/new-env "formal.core.intrinsics")))))
+(def expression (str "(let [local 10] (erlang/+ " expression-name " local))"))
+(def expression-core (compiler/with-fresh-names #(elaborate/prepare expression {expression-name t/Int})))
+(def expression-value (compiler/with-fresh-names #(source/prepare expression {expression-name (t/int 7)})))
+(def parameter-name (:name (first (:pats (first (:clauses (ir/scaffold-inner (:anf baseline))))))))
+(def free-global (str "(fn [a] " parameter-name ")"))
+(def global-prepared (compiler/with-fresh-names #(elaborate/prepare-function free-global [["input" t/Int]])))
+(def data {:schema :enchant.formal.pre-repair-hygiene-probe-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :function {:source text :compiler-local role :semantic-role role :actual actual :core-outcome model
+                      :prepared collided :contract definition :conditional-proof-status (:status checked)}
+           :expression {:source expression :input expression-name :actual 17
+                        :core-outcome (core/evaluate (:core expression-core) {expression-name t/Int} {expression-name 7})
+                        :semantic-value (when (= :translated (:status expression-value))
+                                          (value/decode (:value expression-value) #(evaluate/value % {})))}
+           :free-global {:source free-global :parameter-alias parameter-name :status (:status global-prepared)}
+           :scope :compiler-fresh-names-and-semantic-roles :compiler-proof-authority false})
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! root)
+(File/write! (Path/join root "probe.etf") (erlang/term_to_binary data))
+(File/write! (Path/join root "probe.json") (interop/->json data))
+(println {:actual actual :role role :modeled (:value model) :conditional-proof (:status checked)
+          :expression-name expression-name :expression-core (get-in data [:expression :core-outcome :value])
+          :expression-value (get-in data [:expression :semantic-value :value])
+          :free-global-status (:status global-prepared) :compiler-proof-authority false})
