@@ -363,11 +363,12 @@ theorem coreTermCorrespondence : ∀ (i : Nat → Int) (b : Nat → Bool),
     Term.eval.eq_1, Term.eval.eq_2, Term.eval.eq_3, Term.eval.eq_4, Term.eval.eq_5,
     Term.eval.eq_6, Term.eval.eq_7, Term.eval.eq_8, Term.eval.eq_9, Term.eval.eq_10,
     Term.eval.eq_11, Term.eval.eq_12, Term.eval.eq_13, Term.eval.eq_14, Term.eval.eq_15,
-    Term.eval.eq_16, Term.eval.eq_17, Term.eval.eq_18, Term.eval.eq_19, strict₂, partial₂,
+    Term.eval.eq_16, Term.eval.eq_17, Term.eval.eq_18, Term.eval.eq_19,
     apply_quot, apply_rem, apply_mod, Comparison.apply, BoolOp.apply, valueEq]
-  all_goals try simp [IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
+  all_goals try simp [IntOp.apply, Outcome.bind, divide, modulus,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName]
-  all_goals repeat' (split <;> simp_all [IntOp.apply, Outcome.bind, divide, modulus, strict₂, partial₂,
+  all_goals try dsimp (config := { instances := true }) only [FormalTerms.Ty.Value, BeamLispCore.Value] at *
+  all_goals repeat' (split <;> simp_all [IntOp.apply, Outcome.bind, divide, modulus,
     known_and, known_or, known_not, quotientValue, remainderValue, modulusValue, errorCode, errorName])
   all_goals try dsimp (config := { instances := true }) only [FormalTerms.Ty.Value, BeamLispCore.Value] at *
   all_goals first | rfl | decide | omega

@@ -44,6 +44,20 @@ def agrees (actual : Outcome τ) (ok : Option Bool) (value : Option (Value τ))
     (if test then yes else no).bind next = (if test then yes.bind next else no.bind next) := by
   by_cases branch : test <;> simp [branch]
 
+@[simp] theorem strict_values (operation : α → β → γ) (left : α) (right : β) :
+    strict₂ operation (some left) (some right) = some (operation left right) := rfl
+@[simp] theorem strict_left_none (operation : α → β → γ) (right : Option β) :
+    strict₂ operation none right = none := rfl
+@[simp] theorem strict_right_none (operation : α → β → γ) (left : Option α) :
+    strict₂ operation left none = none := by cases left <;> rfl
+
+@[simp] theorem partial_values (operation : α → β → Option γ) (left : α) (right : β) :
+    partial₂ operation (some left) (some right) = operation left right := rfl
+@[simp] theorem partial_left_none (operation : α → β → Option γ) (right : Option β) :
+    partial₂ operation none right = none := rfl
+@[simp] theorem partial_right_none (operation : α → β → Option γ) (left : Option α) :
+    partial₂ operation left none = none := by cases left <;> rfl
+
 def selectOption (condition : Option Bool) (yes no : Option α) : Option α :=
   match condition with
   | some flag => if flag then yes else no
@@ -148,6 +162,12 @@ theorem apply_mod (a b : Int) : IntOp.apply .mod a b =
 #print axioms agrees_raised
 #print axioms agrees_choice
 #print axioms bind_choice
+#print axioms strict_values
+#print axioms strict_left_none
+#print axioms strict_right_none
+#print axioms partial_values
+#print axioms partial_left_none
+#print axioms partial_right_none
 #print axioms select_some
 #print axioms select_none
 #print axioms select_values
