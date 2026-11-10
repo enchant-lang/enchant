@@ -1,0 +1,62 @@
+(ns formal.elaboration-check
+ (:require [formal.api :as formal] [formal.elaboration :as validation] [formal.elaborate :as producer]
+           [formal.core :as core] [formal.identity :as identity] [formal.term :as t]
+           [formal.query :as query] [formal.backend :as backend] [formal.selected :as selected]
+           [formal.runtime-artifact :as artifact] [compiler :as compiler] [interop]))
+
+;; Produce portable pairs from actual compiler output. Rechecking is a separate
+;; command/VM; no closure, Source grant, or saved successful status is authority.
+(defn pair [id prepared]
+ (assert (= :elaborated (:status prepared)) (pr-str prepared))
+ {:id id :object (get-in prepared [:elaboration :object])
+  :checking (formal/check-elaboration (get-in prepared [:elaboration :object]))})
+(def examples
+ [(pair "colliding-role" (compiler/with-fresh-names
+          #(producer/prepare-function "(fn [a] (let [local 10] (erlang/+ a local)))" [["local_3" t/Int]])))
+  (pair "conditional-failing-int" (producer/prepare "(if (quot x y) (+ x 1) 2)" {"x" t/Int "y" t/Int}))
+  (pair "eager-default" (producer/prepare "(get {\"n\" x} \"n\" (quot x 0))" {"x" t/Int}))
+  (pair "repeated-updates" (producer/prepare "(assoc {\"n\" x} \"n\" 1 \"n\" 2)" {"x" t/Int}))])
+(def context
+ (formal/selected-source-context
+  {:sources [{:namespace 'formal.elaboration.archive :revision 'current :file "pair.bl"
+              :source "(ns formal.elaboration.archive) (def base 10) (defn helper [x] (erlang/+ x base)) (defn answer [a] (helper a))"}]
+   :entry ['formal.elaboration.archive 'current] :target 'answer :parameters [["local_3" t/Int]]}))
+(def rows (conj examples (pair "selected-helper-and-initializer" (:prepared (selected/prepare context)))))
+(assert (every? #(= :checked (get-in % [:checking :status])) rows))
+
+;; Reuse the ACTUAL pre-repair compiler ANF and erroneous Core, not a synthetic
+;; recreation of its fresh names. This exact old pair is independently refused.
+(def historical-root (Path/expand "research/formal-logic/evidence/hygiene/baseline"))
+(def old-bytes (File/read! (Path/join historical-root "probe.etf")))
+(def old-pin (interop/json-> (File/read! (Path/join historical-root "probe-pin.json"))))
+(assert (<= (erlang/byte_size old-bytes) 2097152))
+(assert (= (get old-pin "bytes") (erlang/byte_size old-bytes)))
+(assert (= (get old-pin "sha256") (artifact/digest old-bytes)))
+(def decoded (erlang/binary_to_term old-bytes (list :used)))
+(assert (= (erlang/byte_size old-bytes) (elem decoded 1)))
+(def historical (elem decoded 0))
+(def historical-function (:function historical))
+;; The archive retains the old producer's actual :prepared/:anf tree.
+(def historical-anf (get-in historical-function [:prepared :anf]))
+(def historical-core (get-in historical-function [:contract :body]))
+(assert historical-anf "historical ANF must be present in the original probe")
+(def old-object (validation/function-claim historical-anf historical-core [[(:semantic-role historical-function) t/Int]] :declared))
+(def old-check (validation/check old-object))
+(assert (= :rejected (:status old-check)) (pr-str old-check))
+(def data {:schema :enchant.formal.elaboration-examples-v1
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :rows rows :historical {:source-commit (:source-commit historical) :object old-object :checking old-check}
+           :selected-context context :identity-profile identity/profile :compiler-proof-authority false})
+(identity/bytes data)
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! output)
+(def bytes (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "elaboration.etf") bytes)
+(File/write! (Path/join output "elaboration-pin.json") (interop/->json
+ {:schema :enchant.formal.elaboration-archive-v1 :bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}))
+(File/write! (Path/join output "elaboration.json") (interop/->json
+ {:schema (:schema data) :source-commit (:source-commit data)
+  :rows (mapv #(select-keys % [:id :checking]) rows)
+  :historical {:source-commit (get-in data [:historical :source-commit]) :checking old-check}
+  :source-to-anf :not-established :selected-specialization :not-established :compiler-proof-authority false}))
+(println {:pairs (count rows) :historical-pair (:status old-check) :compiler-proof-authority false})

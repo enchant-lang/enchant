@@ -1,0 +1,84 @@
+(ns formal.elaboration-recheck
+ (:require [formal.api :as formal] [formal.elaborate :as producer] [formal.core :as core]
+           [formal.backend :as backend] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [compiler :as compiler] [interop]))
+
+;; Decode only this bounded, exactly hash-pinned project-owned ETF archive.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)) "Pass a trusted archive directory after --")
+(def directory (Path/expand (first args)))
+(def file (Path/join directory "elaboration.etf"))
+(assert (<= (:size (File/stat! file)) 8388608))
+(def bytes (File/read! file))
+(def pin (interop/json-> (File/read! (Path/join directory "elaboration-pin.json"))))
+(assert (= "enchant.formal.elaboration-archive-v1" (get pin "schema")))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (erlang/byte_size bytes) (elem decoded 1)))
+(def data (elem decoded 0))
+(assert (= :enchant.formal.elaboration-examples-v1 (:schema data)))
+(defn mfa [function]
+ (let [info (erlang/fun_info function)] (tuple (Keyword/get info :module) (Keyword/get info :name) (Keyword/get info :arity))))
+(def core-module (elem (mfa core/canonicalize) 0))
+(def evaluator-patterns
+ (mapv (fn [row] {:id "core-evaluator" :pattern (tuple core-module (elem row 0) (elem row 1))})
+  (filter #(String/contains? (str (elem % 0)) "evaluate") (erlang/apply core-module :module_info (list :functions)))))
+(assert (seq evaluator-patterns) "Find the actual Core evaluator entry points")
+(def patterns
+ (into [{:id "compiler" :pattern (mfa compiler/compile)}
+        {:id "elaborator" :pattern (mfa producer/from-anf)}
+        {:id "canonicalizer" :pattern (mfa core/canonicalize)}
+        {:id "native-session" :pattern (mfa backend/with-session)}] evaluator-patterns))
+(def by-pattern (into {} (map (fn [row] [(:pattern row) (:id row)]) patterns)))
+(def empty-counts (into {} (map (fn [row] [(:id row) 0]) patterns)))
+(defn barrier []
+ (let [reference (erlang/trace_delivered :all)]
+  (receive [:trace_delivered :all seen] :when (= seen reference) :ok (after 5000 (throw :trace-deadline)))))
+(defn recheck []
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       tracer (spawn (fn [] (loop [counts empty-counts]
+         (receive
+          [:trace _ :call [module function arguments]]
+           (let [id (get by-pattern (tuple module function (count arguments)))]
+            (recur (if id (update counts id inc) counts)))
+          [:reset seen] :when (= seen ticket)
+           (do (erlang/send parent [:calibration ticket counts]) (recur empty-counts))
+          [:finish seen] :when (= seen ticket) (erlang/send parent [:finished ticket counts])
+          _ (recur counts)))))]
+  (try
+   (doseq [row patterns] (assert (pos? (erlang/trace_pattern (:pattern row) true (list :local)))))
+   (erlang/trace :all true (list :call :set_on_spawn (tuple :tracer tracer)))
+   ;; Positive calibration precedes the checking window and does not use any
+   ;; archived target. Every prohibited entry must actually be seen here.
+   (let [prepared (producer/prepare "(erlang/+ 1 2)" {})]
+    (assert (= :elaborated (:status prepared)))
+    (assert (= 3 (:value (core/evaluate (:core prepared) {} {})))))
+   (backend/with-session {:backend :z3} (fn [session] (assert (:hello session))))
+   (barrier) (erlang/send tracer [:reset ticket])
+   (let [calibration (receive [:calibration seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))
+         _ (assert (every? pos? (vals calibration)) (pr-str calibration))
+         results (mapv (fn [row]
+                         (let [answer (formal/check-elaboration (:object row))]
+                          (assert (= (:checking row) answer) (pr-str answer))
+                          {:id (:id row) :checking answer})) (:rows data))
+         old (formal/check-elaboration (get-in data [:historical :object]))]
+    (assert (= (get-in data [:historical :checking]) old))
+    (assert (= :rejected (:status old)))
+    (barrier) (erlang/send tracer [:finish ticket])
+    (let [counts (receive [:finished seen counts] :when (= seen ticket) counts (after 5000 (throw :trace-deadline)))]
+     (assert (= empty-counts counts) (pr-str counts))
+     {:rows results :historical old :calibration calibration :checking counts}))
+   (finally
+    (erlang/trace :all false (list :call :set_on_spawn))
+    (doseq [row patterns] (erlang/trace_pattern (:pattern row) false (list :local)))
+    (when (Process/alive? tracer) (erlang/exit tracer :kill))))))
+(def result (recheck))
+(def output (Path/join (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT") "elaboration-fresh.json"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output (interop/->json
+ (merge result {:schema :enchant.formal.elaboration-recheck-v1 :archive-directory directory
+                :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+                :identity-profile identity/profile :compiler-proof-authority false})))
+(println {:pairs (count (:rows result)) :historical (get-in result [:historical :status])
+          :calibration (:calibration result) :checking (:checking result) :compiler-proof-authority false})
