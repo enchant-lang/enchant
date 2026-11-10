@@ -2,7 +2,7 @@
  (:require [formal.loop-core :as lc] [formal.core-symbolic :as symbolic]
            [formal.term :as t] [formal.query :as q] [formal.proof :as proof]
            [formal.certificate :as certificate] [formal.logic :as logic]
-           [formal.identity :as identity] [formal.backend :as backend]))
+           [formal.identity :as identity] [formal.backend :as backend] [formal.connection :as connection]))
 
 (def ^:private fields
  #{:formal/loop :name :program :source :requires :invariant :rank :ensures
@@ -132,9 +132,13 @@
                    (add! (str path "/prefix-normal") ok (conj facts inv) {})
                    (visit (:body node) declarations env (conj facts ok) (str path "/body")))))]
     (visit (:body program) declarations env [] "body"))
+   (let [consistency (q/prove (t/bool false) {:assumptions [pre] :profile lc/profile :scope {:mode :exact}})]
    {:status :ready :definition (:identity definition) :obligations @obligations :inputs inputs :state state
     :typing typed :rank-dimension (count ranks)
-    :consistency (q/prove (t/bool false) {:assumptions [pre] :profile lc/profile :scope {:mode :exact}})} )
+    :model-interpretation (connection/reviewed {:kind :loop-controller :identity (:identity definition)}
+                           :loop-controller-to-ranking-and-result-obligations
+                           (into [["consistency" consistency]] (mapv (fn [row] [(str "obligation/" (:id row)) (:problem row)]) @obligations)))
+    :consistency consistency}))
   (catch error {:status :unsupported :reason (ex-message error)})))
 
 (defn- impossible [problem]
@@ -162,7 +166,7 @@
                             (if (= 1 (:rank-dimension prepared)) "BeamLispCore.integer_rank_wellFounded" "BeamLispCore.integer_pair_rank_wellFounded"))
                    :axioms (if (= :finite-control-v1 (:rule object)) [] ["propext" "Classical.choice" "Quot.sound"])
                    :bl-model-connection :reviewed-not-mechanically-proved}
-    :scope :conditional-normal-return-of-loop-model :compiler-proof-authority false})
+    :scope :conditional-normal-return-of-loop-model :model-interpretation (:model-interpretation prepared) :compiler-proof-authority false})
   (catch error {:status :rejected :reason (ex-message error)})))
 
 (defn verify
@@ -208,4 +212,4 @@
       :proof object :checking checked :obligations rows :backend native :inconsistency-proof inconsistent
       :assumption-consistency (cond inconsistent? :inconsistent-checked (= :sat (:verdict feasible)) :replayed-witness
                                     (= :unsat (:verdict feasible)) :backend-inconsistent :else :not-established)
-      :source-connection :reviewed-not-mechanically-proved :compiler-proof-authority false})))))
+      :source-connection :reviewed-not-mechanically-proved :model-interpretation (:model-interpretation prepared) :compiler-proof-authority false})))))

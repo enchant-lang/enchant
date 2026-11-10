@@ -1,0 +1,135 @@
+(ns formal.connection-test
+ (:require [formal.api :as formal] [formal.connection :as connection] [formal.identity :as identity]
+           [formal.core :as core] [formal.contract :as contracts] [formal.translation :as translations]
+           [formal.protocol :as protocols] [formal.source-protocol :as sources]
+           [formal.term :as t] [formal.query :as q]))
+
+(def authored
+ (formal/program-contract {:name "connection-authored" :parameters {} :core (core/literal 5)
+  :ensures (fn [in out] (t/eq out (t/int 5)))}))
+(def sourced
+ (formal/program-contract {:name "connection-sourced" :parameters {} :source "5"
+  :ensures (fn [in out] (t/eq out (t/int 5)))}))
+(def changed
+ (formal/translation {:name "connection-core-pair" :parameters {} :before (core/literal 5)
+                      :after (core/operation :add [(core/literal 2) (core/literal 3)])}))
+(def finite-loop
+ (formal/loop-contract {:name "connection-loop" :parameters {} :source "(loop [n 0] n)"
+  :ensures (fn [in state out] (t/eq out (t/int 0)))}))
+(def state-spec
+ {:name "connection-counter" :state {"n" t/Int}
+  :init (fn [state] (t/eq (get state "n") (t/int 0)))
+  :invariant (fn [state] (t/ge (get state "n") (t/int 0)))
+  :transitions [{:name "increment" :next (fn [state event] {"n" (t/add (get state "n") (t/int 1))})}]})
+(def state-model (formal/protocol state-spec))
+(def source-model
+ (formal/source-protocol
+  (assoc (dissoc state-spec :transitions) :name "connection-source-counter"
+   :handlers [{:name "increment" :source "(fn [s msg] (assoc s \"n\" (inc (get s \"n\"))))"}])))
+(def direct (q/prove (t/bool true) {:origin {:source "This is an annotation, not authenticated Source."}}))
+(def subjects [authored sourced changed finite-loop state-model source-model (formal/protocol-trace state-model 1)
+               (formal/protocol-trace source-model 1)])
+
+(deftest authored-core-is-not-reported-as-bl-source
+ (doseq [definition [authored changed]]
+  (let [answer (formal/check definition) description (formal/describe definition)
+        model (:model-interpretation answer)]
+   (is (= :checked (:status answer)))
+   (is (= :authored-core-no-source-claim (:source-connection answer)))
+   (is (= :authored-core-no-source-claim (:source-connection description)))
+   (is (= :authored-core-no-source-claim (get-in answer [:evidence :connection :source])))
+   (is (= :reviewed-not-mechanically-proved (:status model)))
+   (is (= :implementation-connection-not-proof (:purpose model)))
+   (is (= model (:model-interpretation description)))
+   (is (= model (get-in answer [:evidence :connection :model-interpretation])))
+   (is (= false (:compiler-proof-authority model)))
+   (is (identity/valid? model)))))
+
+(deftest actual-source-retains-its-separate-connection-and-gate
+ (let [answer (formal/check sourced)]
+  (is (= :reviewed-not-mechanically-proved (:source-connection answer)))
+  (is (= :checked (get-in answer [:elaboration :status])))
+  (is (= :typed-core (get-in answer [:model-interpretation :model :kind])))
+  (is (= :not-established-by-this-record (get-in answer [:model-interpretation :source-provenance])))
+  (is (= :not-established-by-this-record (get-in answer [:model-interpretation :runtime-conformance])))))
+
+(deftest every-model-kind-exposes-exact-labelled-interpretation-questions
+ (doseq [[subject expected] (map (fn [a b] [a b]) subjects
+       [:typed-core :typed-core :typed-core-pair :loop-controller :authored-state-model
+        :source-extracted-state-model :authored-bounded-state-model :source-extracted-bounded-state-model])]
+  (let [answer (formal/check subject) description (formal/describe subject) model (:model-interpretation answer)]
+   (is (= :checked (:status answer)) (pr-str answer))
+   (is (= expected (get-in model [:model :kind])))
+   (is (= connection/profile (:profile model)))
+   (is (= model (:model-interpretation description)))
+   (is (= :reviewed-not-mechanically-proved (:status model)))
+   (is (= 1 (:formal/model-connection model)))
+   (is (= (count (:questions model)) (count (set (map :label (:questions model))))))
+   (is (every? #(and (string? (:identity %)) (= 64 (erlang/byte_size (:identity %))) (map? (:scope %))) (:questions model)))
+   (is (identity/valid? model))
+   (is (= :checked (get-in answer [:evidence :certificate :status])))
+   (is (= false (get-in answer [:evidence :authority :compiler]))))))
+
+(deftest the-bound-question-is-the-prepared-property-not-another-successful-query
+ (let [prepared (contracts/prepare authored) model (:model-interpretation prepared)
+       false-property (formal/program-contract {:name "connection-authored-false" :parameters {} :core (core/literal 5)
+                         :ensures (fn [in out] (t/eq out (t/int 6)))})
+       changed-prepared (contracts/prepare false-property)]
+  (is (= (:core prepared) (get-in model [:model :identity])))
+  (is (= (identity/hash (:problem prepared)) (get-in model [:questions 0 :identity])))
+  (is (= (get-in prepared [:problem :scope]) (get-in model [:questions 0 :scope])))
+  (is (= (:core prepared) (:core changed-prepared)))
+  (is (not= (:identity model) (get-in changed-prepared [:model-interpretation :identity])))
+  (is (not= (get-in model [:questions 0 :identity]) (get-in changed-prepared [:model-interpretation :questions 0 :identity])))))
+
+(deftest source-handler-connections-include-the-reviewed-derived-state-link
+ (let [prepared (sources/prepare source-model) child (get-in prepared [:protocol-prepared :model-interpretation])
+       model (:model-interpretation prepared)]
+  (is (= (:identity child) (:via model)))
+  (is (= (:identity source-model) (get-in model [:model :identity])))
+  (is (= (get-in source-model [:protocol :identity]) (get-in model [:model :state-model])))
+  (is (= (mapv #(select-keys % [:name :core]) (:handlers prepared)) (get-in model [:model :handler-cores])))
+  (is (= (:questions child) (:questions model)))
+  (is (not= (:identity child) (:identity model)))))
+
+(deftest direct-terms-and-failed-preparation-do-not-invent-a-model-or-source-link
+ (let [answer (formal/check direct) description (formal/describe direct)]
+  (is (= :checked (:status answer)))
+  (is (= :not-applicable-direct-term-query (get-in answer [:evidence :connection :source])))
+  (is (= :not-applicable-direct-term-query (:source-connection description)))
+  (is (= {:status :not-applicable :reason :direct-term-question} (get-in answer [:evidence :connection :model-interpretation])))
+  (is (= (:model-interpretation description) (get-in answer [:evidence :connection :model-interpretation]))))
+ (let [answer (formal/check (assoc authored :problem direct))]
+  (is (= :unsupported (:status answer)))
+  (is (= :not-established (get-in answer [:evidence :connection :model-interpretation :status])))
+  (is (= :not-established (get-in answer [:evidence :certificate :status])))))
+
+(deftest a-reviewed-record-cannot-be-used-as-a-proof-or-formal-subject
+ (let [answer (formal/check changed) model (:model-interpretation answer) prepared (translations/prepare changed)]
+  (is (= :unsupported (:status (formal/check model)))))
+  (is (= :rejected (:status (formal/check-translation-proof changed model)))))
+  (is (= :rejected (:status (formal/check-certificate (:problem prepared) model)))))))
+
+(deftest native-engines-cannot-upgrade-model-interpretation-or-create-a-source-claim
+ (doseq [subject [authored sourced changed]]
+  (let [portable (formal/check subject)]
+   (doseq [engine [:z3 :oxiz]]
+    (let [answer (formal/check {:backend engine} subject)]
+     (is (= :checked (:status answer)))
+     (is (= (:model-interpretation portable) (:model-interpretation answer)))
+     (is (= (:source-connection portable) (:source-connection answer)))
+     (is (= :reviewed-not-mechanically-proved (get-in answer [:evidence :connection :model-interpretation :status])))
+     (is (= false (get-in answer [:evidence :authority :compiler]))))))))
+
+(deftest unknown-and-vacuous-proofs-keep-interpretation-and-entailment-distinct
+ (let [x (core/variable "x" t/Int)
+       unknown (formal/program-contract {:name "connection-unknown" :parameters {"x" t/Int} :core x
+                 :ensures (fn [in out] (t/gt out (t/int 0)))})
+       vacuous (formal/program-contract {:name "connection-vacuous" :parameters {} :core (core/literal 5)
+                 :requires (t/bool false) :ensures (t/bool false)})]
+  (doseq [[subject expected] [[unknown :unknown] [vacuous :vacuous]]]
+   (let [answer (formal/check subject)]
+    (is (= expected (:status answer)))
+    (is (= :authored-core-no-source-claim (:source-connection answer)))
+    (is (= :reviewed-not-mechanically-proved (get-in answer [:model-interpretation :status])))
+    (is (= false (get-in answer [:evidence :authority :compiler])))))))

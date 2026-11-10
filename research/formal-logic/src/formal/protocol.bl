@@ -1,7 +1,7 @@
 (ns formal.protocol
  (:require [formal.term :as t] [formal.value :as v] [formal.transition :as transition]
            [formal.identity :as identity] [formal.query :as q] [formal.proof :as proof] [formal.certificate :as certificate]
-           [formal.backend :as backend] [formal.logic :as logic] [formal.evaluate :as replay]))
+           [formal.backend :as backend] [formal.logic :as logic] [formal.evaluate :as replay] [formal.connection :as connection]))
 
 (def profile :bl/pure-state-int-bool-v1)
 (def rule :finite-trace-invariant-v1)
@@ -109,12 +109,17 @@
                         :origin {:protocol (:identity definition) :basis :reviewed-transition-model}})})
         rows (vec (cons (obligation [:initiation] (:base derived))
                     (mapv #(obligation [:preservation (:id %)] %) (:steps derived))))
-        initial (:assumptions (:base derived))]
-   {:status :ready :definition (:identity definition) :model model :obligations rows
-    :consistency (q/prove (t/bool false) {:assumptions initial :profile profile
+        initial (:assumptions (:base derived))
+        consistency (q/prove (t/bool false) {:assumptions initial :profile profile
                      :scope {:mode :exact :protocol (:identity definition) :procedure :initial-consistency}})
-    :initial (q/sat {:assumptions initial :observe state :profile profile
-                    :scope {:mode :exact :protocol (:identity definition) :procedure :initial-state}})
+        initial-question (q/sat {:assumptions initial :observe state :profile profile
+                    :scope {:mode :exact :protocol (:identity definition) :procedure :initial-state}})]
+   {:status :ready :definition (:identity definition) :model model :obligations rows
+    :consistency consistency :initial initial-question
+    :model-interpretation (connection/reviewed {:kind :authored-state-model :identity (:identity definition)}
+                           :state-model-to-induction-obligations
+                           (into [["consistency" consistency] ["initial-state" initial-question]]
+                             (mapv (fn [row] [(str "obligation/" (:id row)) (:problem row)]) rows)))
     :source-connection :authored-model-not-live-beam-actor})
   (catch error {:status :unsupported :reason (ex-message error)})))
 
@@ -142,7 +147,7 @@
            :failure-lemma "BeamLispCore.no_failed_attempt_on_reachable" :axioms []
            :bl-model-connection :reviewed-not-mechanically-proved}
     :scope :all-finite-prefixes-of-the-declared-state-model
-    :source-connection :authored-model-not-live-beam-actor :compiler-proof-authority false})
+    :source-connection :authored-model-not-live-beam-actor :model-interpretation (:model-interpretation prepared) :compiler-proof-authority false})
   (catch error {:status :rejected :reason (ex-message error)})))
 
 (defn initial-witness
@@ -201,4 +206,4 @@
                                     :else :not-established)
       :safety-status (if (= :checked status) :conditional-inductive-invariant :not-established)
       :liveness :not-established :handler-termination :term-model-only
-      :source-connection :authored-model-not-live-beam-actor :compiler-proof-authority false})))))
+      :source-connection :authored-model-not-live-beam-actor :model-interpretation (:model-interpretation prepared) :compiler-proof-authority false})))))
