@@ -1,0 +1,40 @@
+(ns formal.witness-check
+ (:require [formal.api :as formal] [formal.witness-examples :as examples]
+           [formal.logic :as logic] [formal.backend :as backend] [formal.identity :as identity]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+(def authored
+ (mapv (fn [row]
+         (let [made (formal/term-witness (:question row) (:bindings row))]
+          (assert (= :ready (:status made)) (pr-str made))
+          {:id (:id row) :question (:question row) :packet (:packet made) :discovery {:kind :explicit-bindings}})) examples/rows))
+(def native
+ (vec (mapcat (fn [engine]
+               (backend/with-session {:backend engine}
+                (fn [session]
+                 (mapv (fn [row]
+                         (let [answer (logic/solve-in session (:question row))
+                               made (formal/term-witness-from-result (:question row) answer)]
+                          (assert (= :ready (:status made)) (pr-str made))
+                          {:id (str "native-" (name engine) "-" (:id row)) :question (:question row)
+                           :packet (:packet made) :discovery (:discovery made)}))
+                       (filter #(contains? examples/native-ids (:id %)) examples/rows))))) [:z3 :oxiz])))
+(def rows (into authored native))
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! output)
+(doseq [row rows]
+ (assert (= :checked-data-connection (:status (formal/check-term-witness-data (:question row) (:packet row)))))
+ (File/write! (Path/join output (str (:id row) ".json")) (interop/->json (:packet row))))
+(def data {:schema :enchant.formal.typed-witness-examples-v1 :rows rows
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :identity-profile identity/profile :kernel-execution :not-run :compiler-proof-authority false})
+(identity/bytes data)
+(def wire (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "witnesses.etf") wire)
+(File/write! (Path/join output "archive-pin.json") (interop/->json {:bytes (erlang/byte_size wire) :sha256 (artifact/digest wire)}))
+(File/write! (Path/join output "summary.json") (interop/->json
+ {:schema (:schema data) :source-commit (:source-commit data)
+  :rows (mapv (fn [row] {:id (:id row) :packet (get-in row [:packet :identity]) :discovery (:discovery row)}) rows)
+  :kernel-execution :not-run :compiler-proof-authority false}))
+(println {:authored (count authored) :native (count native) :packets (count rows)
+          :kernel-execution :not-run :compiler-proof-authority false})
