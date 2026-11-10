@@ -1,0 +1,51 @@
+(ns formal.term-refutation-check
+ (:require [formal.api :as formal] [formal.term :as t] [formal.query :as q]
+           [formal.identity :as identity] [formal.runtime-artifact :as artifact] [interop]))
+
+(def archive "research/formal-logic/evidence/refutation-kernel/examples")
+(def bytes (File/read! (Path/join archive "refutation.etf")))
+(def pin (interop/json-> (File/read! (Path/join archive "refutation-pin.json"))))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def old (erlang/binary_to_term bytes))
+(assert (= :enchant.formal.normalized-refutation-examples-v1 (:schema old)))
+(def x (t/variable "terms.x" t/Int))
+(def p (t/variable "terms.p" t/Bool))
+(def extras
+ [["dead-division" (q/prove (t/implies (t/bool false) (t/eq (t/div x (t/int 0)) x)))]
+  ["dead-conjunction" (q/prove (t/not (t/all [(t/bool false) (t/eq (t/div x (t/int 0)) x)])))]
+  ["ground-after-cancellation" (q/prove (t/eq (t/div (t/sub (t/sub x x) (t/int 7)) (t/int -3)) (t/int 3)))]
+  ["comparison-choice" (q/prove (t/ge (t/ite (t/lt x (t/int 0)) (t/int 0) x) (t/int 0)))]
+  ["boolean-choice" (q/prove (t/eq (t/ite p (t/not p) p) (t/bool false)))]
+  ["selected-dead-arm" (q/prove (t/eq (t/ite (t/lt (t/int 7) (t/int 0)) (t/div x (t/int 0)) x) x))]])
+(def rows
+ (into (:rows old)
+  (mapv (fn [[id question]]
+          (let [made (formal/certify question)]
+           (assert (= :checked (:status made)) (pr-str made))
+           {:id id :question question :certificate (:certificate made)})) extras)))
+(def output (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! output)
+(def exported
+ (mapv (fn [row]
+         (let [ready (formal/term-refutation (:question row) (:certificate row)) packet (:packet ready)
+               checked (formal/check-term-refutation-data (:question row) (:certificate row) packet)]
+          (assert (= :ready (:status ready)) (pr-str ready))
+          (assert (= :checked-data-connection (:status checked)) (pr-str checked))
+          (when (:packet row) (assert (= (:packet row) (:normalized packet))))
+          (File/write! (Path/join output (str (:id row) ".json")) (interop/->json packet))
+          (assoc row :term-packet packet))) rows))
+(def data {:schema :enchant.formal.term-refutation-examples-v1 :rows exported
+           :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+           :identity-profile identity/profile :kernel-execution :not-run :compiler-proof-authority false})
+(identity/bytes data)
+(def wire (erlang/term_to_binary data (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "terms.etf") wire)
+(File/write! (Path/join output "terms-pin.json") (interop/->json {:bytes (erlang/byte_size wire) :sha256 (artifact/digest wire)}))
+(File/write! (Path/join output "summary.json") (interop/->json
+ {:schema (:schema data) :source-commit (:source-commit data)
+  :rows (mapv (fn [row] {:id (:id row) :packet (get-in row [:term-packet :identity])
+                       :normalized (get-in row [:term-packet :normalized :identity])}) exported)
+  :kernel-execution :not-run :compiler-proof-authority false}))
+(println {:exported (count exported) :old-normalized-packets-unchanged (count (:rows old))
+          :kernel-execution :not-run :compiler-proof-authority false})
