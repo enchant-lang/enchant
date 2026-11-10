@@ -247,7 +247,7 @@ theorem runLoop_equation (body : State → LoopStep State Result)
       | .again next => runLoop body wf next := by
   unfold runLoop
   rw [WellFounded.fix_eq]
-  split <;> rfl
+  cases hbody : body state <;> rfl
 
 theorem runLoop_postcondition (body : State → LoopStep State Result)
     (wf : WellFounded (fun next current => body current = .again next))
