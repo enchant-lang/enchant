@@ -35,6 +35,7 @@ try{
   await navigate('/#s-the-big-idea');
   check(size.name+': comparison reference role grants no authority',await evaluate("document.body.innerText.includes('Z3 is now called the reference engine')&&document.body.innerText.includes('That role gives it no compiler authority')"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Let the optimizer propose'))?.scrollIntoView({block:'start'})");
+  check(size.name+': chapter heading stays below navigation',await evaluate(`[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Let the optimizer propose')).getBoundingClientRect().top>=${size.mobile?100:40}`));
   await shot(size.name+'-checked-changes');
   await navigate('/#s-a-path-we-can-actually-build');
   await click('#milestones-formal-delivery [data-milestone-to="M3"]');
