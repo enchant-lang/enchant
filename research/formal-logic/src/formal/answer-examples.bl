@@ -1,0 +1,62 @@
+(ns formal.answer-examples
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
+           [formal.evaluate :as replay] [formal.identity :as identity] [oracle]))
+
+(def unavailable {:backend :oxiz :worker "/unavailable/formal-worker"})
+(def p (t/variable "guide.answer.p" t/Bool))
+(def x (t/variable "guide.answer.x" t/Int))
+(defn- handled [question response]
+ (oracle/with-query-handler
+  (fn [whole _execute] (oracle/query-answer whole response))
+  (fn [] (logic/run unavailable question))))
+
+(defn summary []
+ (let [contradiction (q/sat {:id :guide/typed-contradiction
+                            :assumptions [(t/all [p]) (t/not (t/any [p]))]})
+       invalid (handled contradiction {:solver-status :sat :assignments {"guide.answer.p" 1}})
+       observation (q/sat {:id :guide/derive-observation :assumptions [(t/eq x (t/int 7))]
+                            :observe {"next" (t/add x (t/int 1))}})
+       displayed (handled observation {:solver-status :sat :assignments {"guide.answer.x" 7}
+                                       :witness {"next" 999}})
+       wrong-phase (handled (q/prove (t/bool false)) {:phase :frontend :solver-status :unsat})]
+  {:ill-sorted-contradiction (:verdict invalid) :typed-bindings (get-in invalid [:validation :bindings :status])
+   :reported-next (get-in displayed [:reported-witness "next"]) :derived-next (get-in displayed [:witness "next"])
+   :observation-source (get-in displayed [:witness-provenance "next" :terms 0 :source])
+   :wrong-phase (:verdict wrong-phase) :execution :handled-in-beam-lisp :compiler-proof-authority false}))
+
+(defn equality-cases []
+ (let [fp (t/fp-sort 8 24) a (t/literal fp 2143289344) b (t/literal fp 2143289345)
+       sequence-a (t/app :seq-unit (t/seq-sort fp) [a] nil)
+       sequence-b (t/app :seq-unit (t/seq-sort fp) [b] nil)
+       array-a (t/app :array-const (t/array-sort t/Bool fp) [a] nil)
+       array-b (t/app :array-const (t/array-sort t/Bool fp) [b] nil)
+       stored (t/store (t/app :array-const (t/array-sort fp t/Int) [(t/int 0)] nil) a (t/int 9))]
+  (mapv (fn [[id claim]]
+          {:id id :claim claim :question (q/prove claim {:id id :vacuity :allow
+                     :profile :smt/floating-point-identity-v1
+                     :scope {:mode :exact :domain :smt-floating-point :source :direct-terms}})})
+        [["sequence-nan-equality" (t/eq sequence-a sequence-b)]
+         ["array-nan-default" (t/eq array-a array-b)]
+         ["array-nan-key" (t/eq (t/select stored b) (t/int 9))]])))
+
+(defn equality-results []
+ (mapv (fn [{:keys [id claim question]}]
+         {:id id :question (identity/hash question) :independent-value (replay/value claim {})
+          :z3 (select-keys (logic/run {:backend :z3} question) [:verdict :solver-status :certificate :identity :phase])
+          :oxiz (select-keys (logic/run {:backend :oxiz} question) [:verdict :solver-status :certificate :identity :phase])})
+       (equality-cases)))
+
+(defn context-results []
+ (mapv (fn [engine]
+         (logic/with-session {:backend engine}
+          (fn [session]
+           (let [question (q/prove (t/bool false) {:id :guide/context-poison :vacuity :allow})
+                 original (logic/solve-in session question)
+                 poisoned (oracle/with-query-handler
+                           (fn [whole execute]
+                            (logic/load! session [(q/assertion "poison" (t/bool false))])
+                            (oracle/query-answer whole (execute)))
+                           (fn [] (logic/solve-in session question)))]
+            {:backend engine :original-verdict (:verdict original)
+             :changed-context (select-keys poisoned [:verdict :solver-status :phase :error])
+             :compiler-proof-authority false})))) [:z3 :oxiz]))
