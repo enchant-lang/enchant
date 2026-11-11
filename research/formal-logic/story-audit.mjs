@@ -283,11 +283,14 @@ try{
     await evaluate("document.querySelector('[data-graph=\"formal-sdk-interface\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
     await shot(size.name+'-sdk-interface-panel');
   }
+  await navigate('/#s-the-model-running');
+  await wait("document.querySelector('#cell-story-sdk-interface').getClientRects().length>0");
+  check(size.name+': SDK example is visible in its executable section',await evaluate("document.querySelector('#cell-story-sdk-interface').getClientRects().length>0"));
   const sdkInterface=await evaluate("document.querySelector('#cell-story-sdk-interface')?.innerText||''");
   check(size.name+': SDK cell checks portable model and both native engines',sdkInterface.includes(':sdk-entry-point :system/preserves?')&&sdkInterface.includes(':portable-model :checked')&&sdkInterface.includes(':native-verdicts [:proved :proved]'));
   check(size.name+': SDK table sees the same question without opening a native worker',sdkInterface.includes(':same-question true')&&sdkInterface.includes(':table-answer :unknown')&&sdkInterface.includes(':handler-native-worker :not-opened'));
   check(size.name+': SDK handler keeps scope certificate and authority explicit',sdkInterface.includes(':handler-scope :calling-process')&&sdkInterface.includes(':handler-certificate :not-checked')&&sdkInterface.includes(':compiler-proof-authority false'));
-  await evaluate("document.querySelector('#cell-story-sdk-interface').scrollIntoView({block:'center'})");
+  await evaluate("document.querySelector('#cell-story-sdk-interface .result').scrollIntoView({block:'center'})");
   await shot(size.name+'-sdk-interface-data');
   if(size.name==='desktop'){
     await navigate('/#ask-through-the-language-library');
