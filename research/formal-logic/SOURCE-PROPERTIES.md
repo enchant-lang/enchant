@@ -42,9 +42,11 @@ foreign calls and unresolved globals are refused.
 `veritas/GenTerms` gives generators a term-valued `gen-term` method alongside
 sampling and enumeration. Bounded integers, Booleans and homogeneous finite
 sets of integers, Booleans or strings have reviewed domains. An empty finite set
-is a false domain. Real generators require a runtime float model; string length,
-collection abstractions, and enum generators require their own source adapters.
-Their legacy SMT encodings grant no meaning to this source interface.
+is a false domain. The [composed Veritas models](VERITAS-TERMS.md) add enums,
+positional products, explicit collection-length abstractions and text prefixes.
+Concrete replay checks those models' runtime domains and output profiles.
+Element reasoning, runtime floats and grapheme bounds retain their own limits.
+Legacy SMT encodings grant no meaning to this source interface.
 
 The SDK's `formal.source` uses resolved compiler ANF and the exact reviewed
 intrinsic catalogue. It preserves integer truthiness, nil, lazy branches,
