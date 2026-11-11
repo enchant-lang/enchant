@@ -1,0 +1,186 @@
+(ns formal.temporal
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.logic :as logic] [formal.identity :as identity]))
+
+(def profile :bl/half-open-integer-time-v1)
+(def limits {:events 256 :orderings 2048})
+(def relations
+ [:precedes :meets :overlaps :starts :during :finishes :equals
+  :preceded-by :met-by :overlapped-by :started-by :contains :finished-by])
+(def ^:private span-domain {:kind :temporal-span :profile profile :coordinates :integer})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.temporal: " message) {:kind :temporal-input}))))
+(defn- integer [value]
+ (let [value (if (int? value) (v/lift (t/int value)) (v/lift value))]
+  (require! (= t/Int (t/sort-of (v/term value))) "integer endpoint required")
+  value))
+
+(defn endpoint-range
+ "An integer endpoint with an inclusive input range. An empty range has no
+  admitted assignment; it is not evidence of a possible dating."
+ [name lower upper]
+ (require! (and (int? lower) (int? upper)) "integer endpoint range required")
+ (let [term (t/variable name t/Int)]
+  (v/make term {:constraints [(t/ge term (t/int lower)) (t/le term (t/int upper))]
+                :domain {:kind :scalar :profile profile}
+                :scope {:mode :exact :coordinates :integer}})))
+
+(defn span
+ "A half-open integer span [from,to). Zero width is empty. The model admits
+  ordered endpoints; reversed endpoints make the model domain infeasible."
+ [from to]
+ (let [from (integer from) to (integer to) context (v/context [from to])]
+  (v/make {:from (v/term from) :to (v/term to)}
+   (assoc context :within (t/all [(:within context) (t/le (v/term from) (v/term to))])
+                  :domain span-domain))))
+(defn- as-span [value]
+ (if (v/value? value)
+  (do
+   (require! (= span-domain (:domain value)) "a temporal span value is required")
+   (let [payload (:value value)]
+    (require! (and (map? payload) (= #{:from :to} (set (keys payload)))) "span endpoint fields required")
+    (require! (every? #(and (t/term? %) (= t/Int (t/sort-of %))) (vals payload))
+              "span payloads must contain integer terms")
+    ;; Reassert the semantic domain even for a reconstructed public value.
+    (v/make payload (assoc (v/context [value]) :domain span-domain
+                     :within (t/all [(v/within value) (t/le (:from payload) (:to payload))])))))
+  (do (require! (map? value) "a span or a map with from/to endpoints is required")
+      (span (:from value) (:to value)))))
+(defn duration [value]
+ (let [value (as-span value) endpoints (:value value)]
+  (v/scalar (t/sub (:to endpoints) (:from endpoints)) [value]
+            {:domain {:kind :scalar :profile profile}})))
+(defn shift [value offset]
+ (let [value (as-span value) offset (integer offset) endpoints (:value value)
+       add (fn [endpoint] (v/scalar (t/add endpoint (v/term offset)) [value offset]
+                                    {:domain {:kind :scalar :profile profile}}))]
+  (span (add (:from endpoints)) (add (:to endpoints)))))
+
+(defn intersects
+ "A semantic Boolean for positive-width intersection. Empty spans and touching
+  endpoints do not intersect. Operand domains and constraints travel with it."
+ [left right]
+ (let [left (as-span left) right (as-span right)
+       a (:value left) b (:value right)]
+  (v/scalar
+   (t/all [(t/lt (:from a) (:to a)) (t/lt (:from b) (:to b))
+           (t/lt (:from a) (:to b)) (t/lt (:from b) (:to a))])
+   [left right] {:domain {:kind :scalar :profile profile}})))
+
+(defn covers
+ "Set inclusion for admitted half-open spans. Every span covers an empty span."
+ [left right]
+ (let [left (as-span left) right (as-span right) a (:value left) b (:value right)]
+  (v/scalar (t/any [(t/eq (:from b) (:to b))
+                    (t/all [(t/le (:from a) (:from b)) (t/le (:to b) (:to a))])])
+            [left right] {:domain {:kind :scalar :profile profile}})))
+(defn same-points
+ "Set equality, including empty spans at different coordinates. Ordinary
+  formal.value/equal compares the endpoint data of these span values."
+ [left right]
+ (let [left (as-span left) right (as-span right) a (:value left) b (:value right)]
+  (v/scalar (t/any [(t/all [(t/eq (:from a) (:to a)) (t/eq (:from b) (:to b))])
+                    (t/all [(t/eq (:from a) (:from b)) (t/eq (:to a) (:to b))])])
+            [left right] {:domain {:kind :scalar :profile profile}})))
+
+(defn allen
+ "One of Allen's thirteen relations, as a semantic Boolean. Its model domain
+  requires positive-width operands. Use intersects when empty spans matter."
+ [relation left right]
+ (require! (some #{relation} relations) "unknown Allen relation")
+ (let [left (as-span left) right (as-span right)
+       a (:value left) b (:value right)
+       a0 (:from a) a1 (:to a) b0 (:from b) b1 (:to b)
+       terms {:precedes (t/lt a1 b0) :preceded-by (t/lt b1 a0)
+              :meets (t/eq a1 b0) :met-by (t/eq b1 a0)
+              :overlaps (t/all [(t/lt a0 b0) (t/lt b0 a1) (t/lt a1 b1)])
+              :overlapped-by (t/all [(t/lt b0 a0) (t/lt a0 b1) (t/lt b1 a1)])
+              :starts (t/all [(t/eq a0 b0) (t/lt a1 b1)])
+              :started-by (t/all [(t/eq a0 b0) (t/lt b1 a1)])
+              :during (t/all [(t/lt b0 a0) (t/lt a1 b1)])
+              :contains (t/all [(t/lt a0 b0) (t/lt b1 a1)])
+              :finishes (t/all [(t/lt b0 a0) (t/eq a1 b1)])
+              :finished-by (t/all [(t/lt a0 b0) (t/eq a1 b1)])
+              :equals (t/all [(t/eq a0 b0) (t/eq a1 b1)])}
+       context (v/context [left right])]
+  (v/make (get terms relation)
+   (assoc context :within (t/all [(:within context) (t/lt a0 a1) (t/lt b0 b1)])
+                  :domain {:kind :scalar :profile profile}))))
+
+(defn overlap-questions
+ "The same admitted context, asked for an intersection and its complement.
+  Both complete SAT questions are inspectable and backend independent."
+ [left right]
+ (let [left (as-span left) right (as-span right)
+       intersection (v/term (intersects left right))
+       options {:inputs [left right] :profile profile
+                :observe {"left" left "right" right}}]
+  {:intersection (q/sat (assoc options :id :temporal/intersection
+                         :assumptions [(q/assertion "temporal/intersection" intersection)]))
+   :separation (q/sat (assoc options :id :temporal/separation
+                       :assumptions [(q/assertion "temporal/separation" (t/not intersection))]))}))
+(defn- options! [options]
+ (require! (map? options) "backend options map required; a legacy port is not a selector")
+ options)
+(defn- overlap-verdict [intersection separation]
+ (let [a (:verdict intersection) b (:verdict separation)]
+  (cond
+   (and (= a :sat) (= b :unsat)) :certain
+   (and (= a :unsat) (= b :sat)) :impossible
+   (and (= a :sat) (= b :sat)) :possible
+   (and (= a :unsat) (= b :unsat)) :infeasible
+   (some #{:error :invalid-model} [a b]) :error
+   (some #{:unsupported} [a b]) :unsupported
+   (some #{:candidate} [a b]) :candidate
+   :else :unknown)))
+(defn overlap-result
+ "Check both temporal possibilities in one logical/native session. A SAT side
+  must replay before it establishes a possibility; native UNSAT is unchecked."
+ [options left right]
+ (options! options)
+ (let [questions (overlap-questions left right)]
+  (logic/with-session options
+   (fn [session]
+    (let [intersection (logic/solve-in session (:intersection questions))
+          separation (logic/solve-in session (:separation questions))]
+     {:formal/temporal-result 1 :kind :overlap :profile profile
+      :verdict (overlap-verdict intersection separation)
+      :questions questions :answers {:intersection intersection :separation separation}
+      :trusted false :compiler-proof-authority false
+      :certificate {:status :not-checked :kind :temporal-answer-set}})))))
+
+(defn chronology-question
+ "Exact strict-before constraints over inclusive integer start ranges. Keys
+  retain their complete portable identity, including keyword namespaces."
+ [bounds orderings]
+ (require! (and (map? bounds) (vector? orderings)) "bounds map and ordering vector required")
+ (require! (and (<= (count bounds) (:events limits)) (<= (count orderings) (:orderings limits)))
+           "chronology input capacity")
+ (let [keys (vec (sort-by identity/bytes (keys bounds)))
+       variables (into {} (mapv (fn [key] [key (t/variable (str "temporal/event/" (identity/hash key)) t/Int)]) keys))]
+  (require! (= (count variables) (count (distinct (vals variables)))) "event identity collision")
+  (doseq [key keys]
+   (let [range (get bounds key)]
+    (require! (and (vector? range) (= 2 (count range)) (every? int? range)) "inclusive integer range required")))
+  (doseq [edge orderings]
+   (require! (and (vector? edge) (= 2 (count edge)) (every? #(contains? bounds %) edge))
+             "each ordering must reference two declared event keys"))
+  (let [ranges (mapcat (fn [i]
+                 (let [key (nth keys i) variable (get variables key) range (get bounds key)]
+                  [(q/assertion (str "event/" i "/lower") (t/ge variable (t/int (first range)))
+                                {:event key :bound :lower})
+                   (q/assertion (str "event/" i "/upper") (t/le variable (t/int (second range)))
+                                {:event key :bound :upper})])) (range (count keys)))
+        edges (mapv (fn [i]
+                (let [[before after] (nth orderings i)]
+                 (q/assertion (str "ordering/" i) (t/lt (get variables before) (get variables after))
+                              {:before before :after after}))) (range (count orderings)))]
+   (q/sat {:id :temporal/chronology :profile profile :assumptions (vec (concat ranges edges))
+           :observe variables :origin {:consumer :temporal-chronology}
+           :scope {:mode :exact :coordinates :integer :ranges :inclusive :ordering :strict-before
+                   :event-keys keys}}))))
+(defn consistency-result [options bounds orderings]
+ (options! options)
+ (let [answer (logic/run options (chronology-question bounds orderings))]
+  (assoc answer :consistent (case (:verdict answer) :sat true :unsat false nil)
+                :schedule (when (= :sat (:verdict answer)) (:witness answer)))))

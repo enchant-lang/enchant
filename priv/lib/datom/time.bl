@@ -27,7 +27,7 @@
 ; parameters. If this file were long, the design would be wrong.
 
 (ns datom.time
-  (:require [datom.db] [datom.index] [minikanren] [z3] [oracle] [smt :as smtlib]))
+  (:require [datom.db] [datom.index] [minikanren] [formal.temporal :as temporal]))
 
 (defn as-of
   "The database as it was at transaction `t`.
@@ -386,9 +386,12 @@
        rel))
 
 (defn allen
-  "The single Allen relation between intervals `a` and `b`."
+  "The single Allen relation between positive-width intervals a and b.
+   Raises for empty operands; use overlaps? for intersection with empty spans."
   [a b]
   (let [a0 (:from a) a1 (:to a) b0 (:from b) b1 (:to b)]
+    (when-not (and (< a0 a1) (< b0 b1))
+      (throw (ex-info "Allen relations require positive-width intervals" {:kind :allen-domain})))
     (cond
       (and (= a0 b0) (= a1 b1)) :equals
       (= a0 b0) (if (< a1 b1) :starts :started-by)
@@ -401,15 +404,12 @@
       (and (< a0 b0) (< b1 a1)) :contains
       :else (inverse (allen b a)))))
 
-(def ^:private OVERLAPPING-FAMILY
-  #{:overlaps :overlapped-by :starts :started-by :during :contains
-    :finishes :finished-by :equals})
-
 (defn overlaps?
-  "Whether a and b share any positive-width instant (Allen's overlapping
-   family). Adjacent intervals that merely touch (:meets) do NOT overlap."
+  "Whether a and b share positive width. Empty spans and adjacent intervals
+   that merely touch do not overlap."
   [a b]
-  (core/contains? OVERLAPPING-FAMILY (allen a b)))
+  (and (< (:from a) (:to a)) (< (:from b) (:to b))
+       (< (:from a) (:to b)) (< (:from b) (:to a))))
 
 (defn meets?
   "Whether a ends exactly where b begins (no gap, no overlap)."
@@ -422,16 +422,17 @@
   (= :precedes (allen a b)))
 
 (defn contains?
-  "Whether a fully covers b (b starts at or after a, ends at or before)."
+  "Whether a covers every point of b. Every interval covers an empty span."
   [a b]
-  (and (<= (:from a) (:from b)) (>= (:to a) (:to b))))
+  (or (= (:from b) (:to b))
+      (and (<= (:from a) (:from b)) (>= (:to a) (:to b)))))
 
 (defn subset? "Whether a falls entirely within b." [a b] (contains? b a))
 
 (defn disjoint?
-  "Whether a and b share no instant (they precede or meet, either way)."
+  "Whether a and b share no positive width, including an empty operand."
   [a b]
-  (or (<= (:to a) (:from b)) (<= (:to b) (:from a))))
+  (not (overlaps? a b)))
 
 (defn before?
   "Whether a lies entirely at or before b's start — a total-ish order on
@@ -468,28 +469,33 @@
 (defn union
   "The union of a and b as a SINGLE interval when they overlap or meet
    (adjacency concatenates: [a,b) ++ [b,c) == [a,c)), else nil — a
-   disjoint union is two spans, which the query layer represents."
+   disjoint union is two spans, which the query layer represents. An empty
+   operand contributes no points and returns the other operand."
   [a b]
-  (if (or (overlaps? a b) (meets? a b) (meets? b a))
+  (cond
+   (= (:from a) (:to a)) b
+   (= (:from b) (:to b)) a
+   (or (overlaps? a b) (meets? a b) (meets? b a))
     (->Interval (min (:from a) (:from b)) (max (:to a) (:to b))
                 (if (finer? (:resolution a) (:resolution b))
                   (:resolution a) (:resolution b))
                 (:calendar a))
-    nil))
+   :else nil))
 
 (defn subtract
   "a minus b: the parts of a that b does not cover, as a vector of 0, 1
    or 2 intervals. The difference operator behind free-busy — the
-   value-in-hand sibling of the store's not-join."
+   value-in-hand sibling of the store's not-join. An empty a returns []."
   [a b]
-  (let [i (intersect a b)]
+  (if (= (:from a) (:to a)) []
+   (let [i (intersect a b)]
     (if (nil? i)
       [a]
       (let [left  (when (< (:from a) (:from i))
                     (->Interval (:from a) (:from i) (:resolution a) (:calendar a)))
             right (when (< (:to i) (:to a))
                     (->Interval (:to i) (:to a) (:resolution a) (:calendar a)))]
-        (filterv some? [left right])))))
+        (filterv some? [left right]))))))
 
 ;; ═══════════════════════════════════════════════════════════════════
 ;; THE SET — many intervals, coalesced (an IntervalSet)
@@ -802,65 +808,39 @@
   [iv]
   (count (expand iv)))
 
-;; ── z3-backed overlap verdict ───────────────────────────────────
-;;
-;; "Do a and b overlap?" over uncertain spans has THREE honest answers.
-;; We ask z3 twice, encoding the intervals as integer bounds:
-;;   overlap possible?   sat of (a0 < b1 ∧ b0 < a1)
-;;   overlap forced?     unsat of its negation
-;; certain = forced; impossible = not-possible; possible = the rest.
+ ;; ── portable temporal questions ────────────────────────────────────
 
-(defn- overlap-smt
-  "The interval bounds as FORM commands: four Int consts pinned to a/b's
-   endpoints. The z3 wire is rendered once, at the port edge."
-  [a b]
-  [(smtlib/declare-const 'a0 'Int) (smtlib/declare-const 'a1 'Int)
-   (smtlib/declare-const 'b0 'Int) (smtlib/declare-const 'b1 'Int)
-   (smtlib/assert `(= a0 ~(:from a))) (smtlib/assert `(= a1 ~(:to a)))
-   (smtlib/assert `(= b0 ~(:from b))) (smtlib/assert `(= b1 ~(:to b)))])
+(defn overlap-questions
+  "The complete term questions for intersection and separation. Accepts crisp
+   intervals or formal.temporal spans with symbolic integer endpoints."
+  [a b] (temporal/overlap-questions a b))
+
+(defn overlap-result
+  "Check both temporal possibilities. Options select :z3 or :oxiz; the result
+   retains both questions, answers, witnesses and unchecked certificate status."
+  [options a b] (temporal/overlap-result options a b))
 
 (defn overlap-verdict
-  "The three-valued overlap verdict for two intervals, proven by z3:
-   :certain | :possible | :impossible. `port` is an open z3 process.
+  "Certain, possible or impossible when both questions decide. Infeasible
+   domains, unknown/candidate answers, unsupported theories and errors retain
+   separate verdicts. Use overlap-result for the full evidence."
+  [options a b] (:verdict (overlap-result options a b)))
 
-   Crisp intervals collapse to :certain / :impossible (a boolean is the
-   degenerate case); a genuine smear — modelled by widening one bound to
-   a variable — is where :possible appears. Here the demo passes crisp
-   bounds, so this proves the certain/impossible poles; the smeared case
-   widens a0/a1 to a range in the SMT, the next build in §4."
-  [port a b]
-  (let [decls (overlap-smt a b)
-        overlaps (smtlib/assert '(and (< a0 b1) (< b0 a1)))
-        possible (oracle/refuted? (oracle/ask (oracle/obligation :overlap-verdict (conj decls overlaps))))
-        disjoint (smtlib/assert '(or (>= a0 b1) (>= b0 a1)))
-        can-miss (oracle/refuted? (oracle/ask (oracle/obligation :overlap-verdict (conj decls disjoint))))]
-    (cond (and possible (not can-miss)) :certain
-          (and (not possible) can-miss) :impossible
-          :else :possible)))
+(defn chronology-question
+  "A portable strict-before question over inclusive integer start ranges."
+  [bounds orderings] (temporal/chronology-question bounds orderings))
 
-;; ═══════════════════════════════════════════════════════════════════
-;; CHRONOLOG — a chronology is a db; its questions are engines you have
-;;
-;; Partially-known intervals with ordering constraints. "tighten" is a
-;; bound propagation; "consistent?" is a z3 check. See §7. These are the
-;; value-level primitives; the datom-fixpoint and provenance spellings
-;; are the next builds named in the doc.
-;; ═══════════════════════════════════════════════════════════════════
+(defn consistency-result
+  "Check a chronology. :consistent is true or false for decisive answers and
+   nil otherwise. A replayed SAT answer includes a schedule keyed by the
+   original event identities."
+  [options bounds orderings] (temporal/consistency-result options bounds orderings))
 
 (defn consistent?
-  "Whether a set of ordering constraints over intervals is satisfiable,
-   proven by z3. `constraints` is a vector of [before-key after-key]
-   pairs over `bounds`, a map of key -> [lo hi] permitted start range.
-   Returns true | {:consistent false}."
-  [port bounds constraints]
-  (let [decls (vec (mapcat (fn [k]
-                             (let [v (symbol (name k))]
-                               [(smtlib/declare-const v 'Int)
-                                (smtlib/assert `(>= ~v ~(first (get bounds k))))
-                                (smtlib/assert `(<= ~v ~(second (get bounds k))))]))
-                           (keys bounds)))
-        ords (map (fn [c] (smtlib/assert `(< ~(symbol (name (first c)))
-                                             ~(symbol (name (second c))))))
-                  constraints)]
-    (if (oracle/refuted? (oracle/ask (oracle/obligation :consistent? (concat decls ords)))) true {:consistent false})))
-
+  "A strict Boolean predicate for chronology consistency. Raises on an
+   unresolved answer; use consistency-result to inspect that answer as data."
+  [options bounds orderings]
+  (let [answer (consistency-result options bounds orderings) result (:consistent answer)]
+    (if (or (= true result) (= false result)) result
+      (throw (ex-info "Temporal consistency is unresolved"
+                      {:kind :temporal-inconclusive :answer answer})))))

@@ -1,0 +1,173 @@
+(ns system.formal-temporal-test
+ (:require [formal.temporal :as temporal] [formal.term :as t] [formal.value :as v]
+           [formal.query :as q] [formal.logic :as logic] [formal.evaluate :as replay]
+           [formal.identity :as identity] [formal.check :as check] [datom.time :as time] [oracle]))
+
+(defn concrete [value] (replay/value (v/term value) {}))
+(defn interval [from to] {:from from :to to :resolution :second :calendar :gregorian})
+(def unavailable {:backend :oxiz :worker "/unavailable/temporal-worker"})
+(def start (temporal/endpoint-range "temporal.test.start" 0 4))
+(def uncertain (temporal/span start (t/add (v/term start) (t/int 1))))
+(def fixed (temporal/span 2 3))
+
+(deftest empty-spans-and-set-equality-have-an-explicit-domain
+ (let [empty-a (temporal/span 0 0) empty-b (temporal/span 10 10)]
+  (is (= true (concrete (temporal/same-points empty-a empty-b))))
+  (is (= false (concrete (v/equal empty-a empty-b))))
+  (is (= true (concrete (temporal/covers (temporal/span 2 3) empty-a))))
+  (is (= false (concrete (temporal/intersects empty-a (temporal/span -1 1)))))
+  (is (= false (replay/value (v/within (temporal/allen :equals empty-a empty-b)) {}))))
+ (is (thrown? (time/allen (interval 1 1) (interval 0 2))))
+ (is (= (interval 0 2) (time/union (interval 1 1) (interval 0 2))))
+ (is (= (interval 0 2) (time/union (interval 0 2) (interval 10 10))))
+ (is (= [] (time/subtract (interval 1 1) (interval 0 2))))
+ (is (= true (time/contains? (interval 2 3) (interval 10 10)))))
+
+(deftest a-finite-grid-agrees-with-independent-point-sets
+ (let [spans (vec (for [a (range -2 3) b (range a 3)] (interval a b)))]
+  (doseq [a spans b spans]
+   (let [ap (set (range (:from a) (:to a))) bp (set (range (:from b) (:to b)))
+         common (boolean (some #(contains? bp %) ap))
+         covers (every? #(contains? ap %) bp)]
+    (is (= common (time/overlaps? a b)))
+    (is (= (not common) (time/disjoint? a b)))
+    (is (= covers (time/contains? a b)))
+    (is (= common (concrete (temporal/intersects a b))))
+    (is (= covers (concrete (temporal/covers a b))))
+    (is (= (= ap bp) (concrete (temporal/same-points a b))))
+    (when (and (< (:from a) (:to a)) (< (:from b) (:to b)))
+     (let [holds (filter #(concrete (temporal/allen % a b)) temporal/relations)]
+      (is (= [(time/allen a b)] (vec holds)))))))))
+
+(deftest symbolic-domains-survive-duration-shift-and-question-construction
+ (let [moved (temporal/shift uncertain (t/variable "temporal.offset" t/Int))
+       questions (temporal/overlap-questions uncertain fixed)]
+  (is (= temporal/profile (:profile (:intersection questions))))
+  (doseq [[_ question] questions]
+   (is (= question (q/validate! question)))
+   (is (= :sat (:mode question)))
+   (is (not (contains? question :text)))
+   (is (erlang/is_binary (identity/bytes question))))
+  (is (= 1 (replay/value (v/term (temporal/duration moved))
+                        {"temporal.test.start" 3 "temporal.offset" -100})))
+  (is (= false (replay/value (v/within moved)
+                            {"temporal.test.start" 5 "temporal.offset" 0})))
+  (is (= ["temporal.offset" "temporal.test.start"]
+         (sort (map :data (t/variables (v/terms moved))))))))
+
+(deftest scalar-sorts-and-span-shapes-are-checked-before-solving
+ (doseq [f [#(temporal/span 0.0 1) #(temporal/span (t/bool true) 1)
+             #(temporal/endpoint-range "bad.range" 0.0 1)
+             #(temporal/allen :unknown-relation fixed fixed)
+             #(temporal/intersects {:from 0} fixed)
+             #(temporal/intersects (assoc fixed :value {:from (t/int 0) :to (t/int 1) :hidden (t/int 9)}) fixed)
+             #(temporal/intersects (assoc fixed :within (t/int 1)) fixed)]]
+  (is (thrown? (f)))))
+
+(def allen-examples
+ [[:precedes [0 1] [2 3]] [:meets [0 1] [1 2]] [:overlaps [0 2] [1 3]]
+  [:starts [0 1] [0 2]] [:during [1 2] [0 3]] [:finishes [1 3] [0 3]]
+  [:equals [0 2] [0 2]] [:preceded-by [2 3] [0 1]] [:met-by [1 2] [0 1]]
+  [:overlapped-by [1 3] [0 2]] [:started-by [0 2] [0 1]]
+  [:contains [0 3] [1 2]] [:finished-by [0 3] [1 3]]])
+
+(deftest all-thirteen-relations-use-the-same-portable-native-interface
+ (doseq [engine [:z3 :oxiz]]
+  (logic/with-session {:backend engine}
+   (fn [session]
+    (doseq [[relation [a0 a1] [b0 b1]] allen-examples]
+     (let [answer (logic/solve-in session
+                   (q/prove (temporal/allen relation (temporal/span a0 a1) (temporal/span b0 b1))))]
+      (is (= :proved (:verdict answer)) (pr-str [engine relation answer]))
+      (is (= :not-checked (get-in answer [:certificate :status])))))))))
+
+(deftest both-native-possibilities-have-replayed-concrete-datings
+ (doseq [engine [:z3 :oxiz]]
+  (let [answer (time/overlap-result {:backend engine} uncertain fixed)
+        yes (get-in answer [:answers :intersection]) no (get-in answer [:answers :separation])
+        a (get-in yes [:witness "left" :value]) b (get-in yes [:witness "right" :value])
+        separated-a (get-in no [:witness "left" :value]) separated-b (get-in no [:witness "right" :value])]
+   (is (= :possible (:verdict answer)) (pr-str [engine answer]))
+   (is (= :valid (get-in yes [:validation :status])))
+   (is (= :valid (get-in no [:validation :status])))
+   (is (time/overlaps? a b))
+   (is (time/disjoint? separated-a separated-b))
+   (is (= false (:compiler-proof-authority answer)))
+   (is (= :not-checked (get-in answer [:certificate :status]))))
+  (doseq [[a b expected] [[(temporal/span 0 2) (temporal/span 1 3) :certain]
+                           [(temporal/span 0 1) (temporal/span 1 2) :impossible]
+                           [(temporal/span 1 1) (temporal/span 0 2) :impossible]
+                           [(temporal/span 2 1) (temporal/span 0 2) :infeasible]
+                           [(temporal/span (temporal/endpoint-range "empty.range" 2 1) 3)
+                            (temporal/span 0 4) :infeasible]]]
+   (is (= expected (time/overlap-verdict {:backend engine} a b))))))
+
+(deftest temporal-questions-are-handled-as-complete-terms-without-native-artifacts
+ (let [seen (atom [])
+       answer (oracle/with-query-handler
+                (fn [question _execute]
+                 (swap! seen conj question)
+                 (oracle/query-answer question
+                  {:solver-status :sat
+                   :assignments {"temporal.test.start" (if (= :temporal/intersection (:id question)) 2 0)}}))
+                (fn [] (time/overlap-result unavailable uncertain fixed)))]
+  (is (= :possible (:verdict answer)))
+  (is (= 2 (count @seen)))
+  (is (= (set (vals (time/overlap-questions uncertain fixed))) (set @seen)))
+  (is (every? #(= :valid (get-in % [:validation :status])) (vals (:answers answer)))))
+ (doseq [[status expected] [[:unknown :unknown] [:unsupported :unsupported] [:sat :candidate]]]
+  (is (= expected (:verdict (oracle/with-query-handler
+                             (fn [question _] (oracle/query-answer question {:solver-status status}))
+                             (fn [] (time/overlap-result unavailable uncertain fixed)))))))
+ (let [answer (oracle/with-query-handler
+                (fn [question _] (oracle/query-answer question {:solver-status :sat :assignments {"temporal.test.start" 0}}))
+                (fn [] (time/overlap-result unavailable uncertain fixed)))]
+  (is (= :error (:verdict answer)))
+  (is (= :invalid-model (get-in answer [:answers :intersection :verdict])))))
+
+(deftest chronology-preserves-complete-event-identities-and-rejects-undeclared-edges
+ (let [bounds {:left/event [0 0] :right/event [1 1] 'left/event [2 2]}
+       edges [[:left/event :right/event] [:right/event 'left/event]]
+       question (time/chronology-question bounds edges)]
+  (is (= 3 (count (t/variables (q/roots question)))))
+  (is (= (identity/bytes question)
+         (identity/bytes (time/chronology-question (into {} (reverse (vec bounds))) edges))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (time/consistency-result {:backend engine} bounds edges)]
+    (is (= true (:consistent answer)) (pr-str answer))
+    (is (= bounds (into {} (mapv (fn [[key value]] [key [value value]]) (:schedule answer)))))
+    (is (= :valid (get-in answer [:validation :status]))))
+   (is (= false (time/consistent? {:backend engine} {:a [0 2] :b [0 2]} [[:a :b] [:b :a]])))
+   (is (= true (time/consistent? {:backend engine} {} [])))
+   (is (= false (time/consistent? {:backend engine} {:a [2 1]} [])))))
+ (doseq [f [#(time/chronology-question {:a [0 1]} [[:a :missing]])
+             #(time/chronology-question {:a [0 1]} [[:a]])
+             #(time/chronology-question {:a [0.0 1]} [])
+             #(time/chronology-question {:a [0 1 2]} [])
+             #(time/chronology-question (into {} (mapv (fn [i] [i [0 1]]) (range 257))) [])
+             #(time/chronology-question {:a [0 1]} (vec (repeat 2049 [:a :a])))
+             #(time/chronology-question {(fn [] nil) [0 1]} [])]]
+  (is (thrown? (f)))))
+
+(deftest an-unresolved-chronology-remains-data-and-the-predicate-refuses-it
+ (oracle/with-query-handler
+  (fn [question _] (oracle/query-answer question {:solver-status :unknown :why {:kind :incomplete}}))
+  (fn []
+   (let [answer (time/consistency-result unavailable {:a [0 3]} [])]
+    (is (= :unknown (:verdict answer)))
+    (is (nil? (:consistent answer)))
+    (is (nil? (:schedule answer))))
+   (is (thrown-with-msg? "unresolved" (time/consistent? unavailable {:a [0 3]} []))))))
+
+(deftest portable-certificates-can-check-unbounded-integer-span-laws
+ (let [a (temporal/span (t/variable "laws.a0" t/Int) (t/variable "laws.a1" t/Int))
+       b (temporal/span (t/variable "laws.b0" t/Int) (t/variable "laws.b1" t/Int))
+       delta (t/variable "laws.delta" t/Int)
+       laws [(v/equal (temporal/intersects a b) (temporal/intersects b a))
+             (v/equal (temporal/duration a) (temporal/duration (temporal/shift a delta)))
+             (temporal/same-points (temporal/span (t/variable "laws.x" t/Int) (t/variable "laws.x" t/Int))
+                                   (temporal/span (t/variable "laws.y" t/Int) (t/variable "laws.y" t/Int)))]]
+  (doseq [law laws]
+   (let [answer (check/query (q/prove law {:profile temporal/profile}))]
+    (is (= :checked (:status answer)) (pr-str answer))
+    (is (= :checked (get-in answer [:evidence :certificate :status])))))))
