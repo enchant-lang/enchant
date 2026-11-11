@@ -391,7 +391,7 @@ try{
  check('Six changed Core outcome packets were rejected',coreRejected.length===6&&coreRejected.every(row=>row.status==='not-accepted-by-Lean'));
  check('Trusted Core term archive stays unavailable to the browser',(await fetch(base+'/evidence/core-terms/examples/core-terms.etf')).status===404);
  check('Compiled Core term model stays unavailable to the browser',(await fetch(base+'/evidence/core-terms/CoreTerms.olean')).status===404);
- for(const path of ['/CORE-CONTRACTS.md','/src/formal/core-contracts.bl','/metatheory/CoreContract.lean','/evidence/core-contracts/execution/unused-slots/CoreContractCheck.lean','/evidence/core-contracts/execution/accepted.json','/evidence/core-contracts/execution/rejected.json','/evidence/core-contracts/qualification.json']){
+ for(const path of ['/CORE-CONTRACTS.md','/src/formal/core-contracts.bl','/metatheory/CoreContract.lean','/evidence/core-contracts/execution/unused-slots/CoreContractCheck.lean','/evidence/core-contracts/execution/accepted.json','/evidence/core-contracts/execution/rejected.json','/evidence/core-contracts/fresh/core-contracts-fresh.json','/evidence/core-contracts/qualification.json']){
   const response=await fetch(base+path),body=await response.text();
   check('Declared Core contract evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
  }
@@ -399,6 +399,8 @@ try{
  check('Eight composed Core contract proofs and six admission proofs',contracts.length===8&&contracts.filter(row=>row.axioms.originalCoreHasAdmittedOutcome).length===6&&contracts.every(row=>row.axioms.originalCoreSatisfiesContract&&row.compiler_proof_authority===false));
  check('The vacuous example has no admission proof',contracts.some(row=>row.id==='vacuous'&&row.admission==='witness-not-provided'&&!row.axioms.originalCoreHasAdmittedOutcome));
  check('The quotient example records its standard axiom policy',contracts.some(row=>row.id==='allowed-division'&&row.axiom_policy==='lean-standard'&&row.axioms.originalCoreSatisfiesContract.includes('Classical.choice')));
+ const freshContracts=await fetch(base+'/evidence/core-contracts/fresh/core-contracts-fresh.json').then(response=>response.json());
+ check('The transferred named-error contract rechecks with zero proof search or native sessions',freshContracts.rows.some(row=>row.id==='named-errors'&&row.status==='checked-data-connection')&&Object.values(freshContracts['checking-window']).every(count=>count===0));
  check('Trusted Core contract archive stays unavailable to the browser',(await fetch(base+'/evidence/core-contracts/examples/core-contracts.etf')).status===404);
  check('Compiled Core contract proof stays unavailable to the browser',(await fetch(base+'/evidence/core-contracts/execution/unused-slots/CoreContractCheck.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){

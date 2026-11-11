@@ -20,8 +20,7 @@ def read(path):
 def commits_match(pin):
     for name, digest in pin['sha256'].items():
         path = P / name
-        commit = pin['recheck_commit'] if name == 'core-contracts-recheck.bl' else pin['code_commit']
-        committed = subprocess.check_output(['git', 'show', commit + ':' + path.relative_to(R).as_posix()], cwd=R)
+        committed = subprocess.check_output(['git', 'show', pin['code_commit'] + ':' + path.relative_to(R).as_posix()], cwd=R)
         require(sha(path) == digest and path.read_bytes() == committed, 'qualified source snapshot: ' + name)
 
 
