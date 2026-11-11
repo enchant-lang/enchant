@@ -32,6 +32,9 @@ require(counts.keys() == {'formal.' + name + '-test' for name in expected}
 for log, tests in [('lean-checks.txt', 4), ('prior-actor-checks.txt', 3)]:
     transcript = (E / log).read_text()
     require(f'Ran {tests} tests' in transcript and '\nOK\n' in transcript, 'successful Lean suites: ' + log)
+cli = read(E / 'cli-check.json')
+require(cli['status'] == 'checked-recorded-core-trace' and cli['recorded_safety'] == 'safe'
+        and cli['checked_prefixes'] == 5 and cli['all_traces_safety_packet'] is not None, 'documented CLI entry point')
 
 index = read(E / 'examples/summary.json')
 archive = E / 'examples/core-observations.etf'
