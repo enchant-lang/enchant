@@ -58,3 +58,7 @@ not a general compiler-preservation theorem.
 
 Legacy SMT helpers remain for the separate mock/fault consumers. Their
 migration and richer source summaries remain active work.
+
+On the exact shared Unicode-prefix law, Z3 reports UNSAT and OxiZ 0.3.4
+returns unknown. Constructing a native string term and deciding its query are
+different capabilities; the native answer keeps that distinction.
