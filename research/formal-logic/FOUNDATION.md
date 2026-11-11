@@ -305,6 +305,14 @@ itself mechanically verified and does not certify all SMT theories.
   by zero. The named-data codec, compiler lowering and BEAM behavior retain
   their own trust boundaries. [Core translation proofs](TRANSLATION.md)
 
+- Checked ranked loops connect the exact finite initializer and controller to
+  an unbounded mathematical evaluator. The term theorem establishes
+  initialization, normal steps, preservation of the invariant, nonnegative
+  decreasing ranks and the exit postcondition. The applied proof exhibits a
+  finite trace and the result for every admitted input to the contained model.
+  The exported proof retains the original control and named predicates.
+  [Core loop proofs](LOOPS.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

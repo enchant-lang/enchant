@@ -1,7 +1,7 @@
 #+title: Beam Lisp, with reasons you can inspect
 #+subtitle: One language for programs, contracts and the evidence behind them.
 #+kicker: ENCHANT · FORMAL LOGIC LAB
-#+status: Autonomous implementation on main · checked contracts and translation proofs on exact Core outcomes · Source, compiler and wider model connections remain active
+#+status: Autonomous implementation on main · checked contracts, translations and ranked loops on exact Core outcomes · Source, compiler and wider model connections remain active
 #+design: forest
 #+TODO: TODO NEXT DOING WAIT REVIEW | DONE DROP
 
@@ -1062,6 +1062,49 @@ The [[#cell-story-core-translation-composition][executable example]] runs both t
 
 Read [[file:TRANSLATION.md][the translation interface and runner]], [[file:src/formal/core-translations.bl][the BL export]], [[file:metatheory/CoreTranslation.lean][the checked proof rules]], [[file:evidence/core-translations/execution/optimizer-preserves-failure/CoreTranslationCheck.lean][the applied rewrite theorem]], [[file:evidence/core-translations/execution/accepted.json][the accepted proof audits]], [[file:evidence/core-translations/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-translations/fresh/core-translations-fresh.json][the fresh reconstruction]], and [[file:evidence/core-translations/qualification.json][the qualification]].
 
+** Prove that the loop reaches its exit
+A countdown starts with two values. The counter starts at the input, and the accumulator starts at zero. Each recurrence reduces the counter and increases the accumulator. The invariant keeps the counter nonnegative and their sum equal to the input. When the loop exits, the accumulator is the answer.
+
+Lean now applies that argument to the exact finite initializer and controller. A finite return trace exists for every admitted input, and the result meets the postcondition at its exit state. The theorem uses no fixed iteration bound.
+
+#+begin_rosetta
+What the checker needs | What it proves about this loop
+Initialization | The actual initial values satisfy the invariant.
+A recurrence | All arguments return normally, and the next state is assigned simultaneously. The invariant holds again and the rank decreases.
+An exit | The actual returned value satisfies the postcondition for that exit state.
+Two ranks | The outer rank can decrease while the inner rank resets upward.
+#+end_rosetta
+
+#+begin_code_graph :id formal-core-loop-composition :title "Follow the proof from initialization to exit" :start init
+node init | code | Evaluate the actual initializer | observed
+summary The packet retains the original loop control. The independent checker reconstructs the finite initializer and controller and checks their symbolic outcomes.
+source research/formal-logic/src/formal/core-loops.bl | Whole-controller term question | Uses the original precondition, invariant, rank and postcondition.
+node step | code | Apply the exact recurrence arguments | observed
+summary The controller yields a tagged exit or recurrence. Lean checks that substitution into the invariant and rank uses the actual next values.
+field State update | Each recurrence argument reads the same current state. State slots are updated together.
+source research/formal-logic/metatheory/CoreLoop.lean | State substitution and exact composition | The term entailment is matched to the original initializer and step.
+node rank | code | Run on states satisfying the invariant | observed
+summary The evaluator only follows recurrence edges whose next state satisfies the invariant. The checked decrease gives a well-founded order for these edges.
+source research/formal-logic/metatheory/LoopTotal.lean | Unbounded ranked evaluator and return traces | A trace witnesses successful steps and a normal exit.
+node exit | code | Prove the exit postcondition | observed
+summary The countdown theorem covers every nonnegative input. It establishes an exit state and a returned value meeting the original postcondition.
+field Scope | The theorem covers the contained Core control. Source extraction and BEAM preservation remain open.
+source research/formal-logic/evidence/core-loops/execution/countdown/CoreLoopCheck.lean | The applied countdown theorem | Uses the exact initializer, controller, and typed question.
+node changed | code | Refuse an altered rank or postcondition | observed
+summary The composed proof fails when either of those predicates is changed and the original entailment is supplied again.
+source research/formal-logic/evidence/core-loops/execution/rejected.json | Rejected substitutions | Both Core proofs and the original term proof still check.
+edge init -> step | start in the invariant
+edge step -> rank | check a strictly decreasing edge
+edge rank -> exit | establish a finite return trace
+edge exit -> changed | test the exact proof connection
+#+end_code_graph
+
+The [[#cell-story-core-loop-composition][executable example]] counts down from four. The applied proof covers all admitted inputs. Other examples include a two-rank reset, Boolean state, a simultaneous swap, and a failing expression excluded by the invariant. The reports record the standard Lean axioms used by the integer ranking proof.
+
+The whole-controller proof can refuse a question containing undefined arithmetic in an unreachable return value. The separate path checker can still prove that the branch is unreachable.
+
+Read [[file:LOOPS.md][the ranked loop interface]], [[file:src/formal/core-loops.bl][the exact term export]], [[file:metatheory/CoreLoop.lean][the checked term connection]], [[file:metatheory/LoopTotal.lean][the evaluator and finite return proof]], [[file:evidence/core-loops/execution/countdown/CoreLoopCheck.lean][the applied countdown theorem]], [[file:evidence/core-loops/execution/accepted.json][the accepted proofs and axiom audits]], [[file:evidence/core-loops/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-loops/fresh/core-loops-fresh.json][the fresh reconstruction]], and [[file:evidence/core-loops/qualification.json][the qualification]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1492,7 +1535,8 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.collections :as c] [formal.value :as v] [bl.json :as json]
            [formal.api :as formal] [formal.core :as core] [formal.identity :as data-identity]
            [formal.core-symbolic :as core-symbolic] [formal.elaborate :as elaborate] [compiler :as compiler] [system.ir :as ir]
-           [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]))
+           [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]
+           [formal.loop-core :as loop-core]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2210,6 +2254,19 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-core-translation-composition
 : {:kernel-execution :not-run, :data-connection :checked-data-connection, :returned-values [0 0], :raised-errors [:phase/left :phase/left]}
 
+
+
+#+begin_src beam-lisp :id story-core-loop-composition
+(def ranked-question (formal/core-loop-question countdown-contract))
+(def ranked-certificate (:certificate (formal/certify (:problem ranked-question))))
+(def ranked-export (formal/core-loop-data countdown-contract ranked-certificate))
+(def ranked-check (formal/check-core-loop-data countdown-contract ranked-certificate (:packet ranked-export)))
+(def ranked-sample (loop-core/evaluate (:program countdown-contract) {"n" 4}))
+(assert (= :checked-data-connection (:status ranked-check)))
+(assert (= 4 (:value ranked-sample) (:iterations ranked-sample)))
+{:sample-input 4 :sample-result (:value ranked-sample) :sample-backedges (:iterations ranked-sample)
+ :data-connection (:status ranked-check) :kernel-execution (:kernel-execution ranked-check)}
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity

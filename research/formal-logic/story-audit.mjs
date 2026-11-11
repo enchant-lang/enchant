@@ -213,6 +213,21 @@ try{
   check(size.name+': executable rewrite shows both values and both error names',rewrite.includes(':returned-values [0 0]')&&rewrite.includes(':raised-errors [:phase/left :phase/left]')&&rewrite.includes(':data-connection :checked-data-connection')&&rewrite.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-translation-composition').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-translation-data');
+  await navigate('/#prove-that-the-loop-reaches-its-exit');
+  check(size.name+': ranked loop chapter describes a finite trace with no fixed bound',await evaluate("document.body.innerText.includes('A finite return trace exists for every admitted input')&&document.body.innerText.includes('The theorem uses no fixed iteration bound')"));
+  await click('[data-graph="formal-core-loop-composition"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="step"]');
+  check(size.name+': loop proof panel explains the exact recurrence values',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-core-loop-composition\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('substitution into the invariant and rank uses the actual next values')&&text.includes('State slots are updated together')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Prove that the loop reaches its exit')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-core-loop');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-core-loop-composition\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-core-loop-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const ranked=await evaluate("document.querySelector('#cell-story-core-loop-composition')?.innerText||''");
+  check(size.name+': executable countdown displays four actual backedges and a replayed packet',ranked.includes(':sample-input 4')&&ranked.includes(':sample-result 4')&&ranked.includes(':sample-backedges 4')&&ranked.includes(':data-connection :checked-data-connection')&&ranked.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-core-loop-composition').scrollIntoView({block:'center'})");
+  await shot(size.name+'-core-loop-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -431,6 +446,18 @@ try{
  check('All original translations reconnect after transfer',freshTranslations.rows.length===9&&freshTranslations.rows.every(row=>row.status==='checked-data-connection'&&row['changed-precondition']==='rejected'));
  check('Trusted Core translation archive stays unavailable to the browser',(await fetch(base+'/evidence/core-translations/examples/core-translations.etf')).status===404);
  check('Compiled Core translation proof stays unavailable to the browser',(await fetch(base+'/evidence/core-translations/execution/optimizer-preserves-failure/CoreTranslationCheck.olean')).status===404);
+ for(const path of ['/LOOPS.md','/src/formal/core-loops.bl','/metatheory/CoreLoop.lean','/metatheory/LoopTotal.lean','/evidence/core-loops/execution/countdown/CoreLoopCheck.lean','/evidence/core-loops/execution/accepted.json','/evidence/core-loops/execution/rejected.json','/evidence/core-loops/fresh/core-loops-fresh.json','/evidence/core-loops/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared Core loop evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const loops=await fetch(base+'/evidence/core-loops/execution/accepted.json').then(response=>response.json());
+ check('Seven exact loop return theorems have no iteration bound',loops.length===7&&loops.every(row=>row.iteration_bound===null&&row.axioms.originalCoreLoopReturns.includes('Classical.choice')&&Object.keys(row.imported_olean_sha256).length===3&&row.compiler_proof_authority===false));
+ const changedLoops=await fetch(base+'/evidence/core-loops/execution/rejected.json').then(response=>response.json());
+ check('A changed rank and postcondition fail the exact loop question check',changedLoops.length===2&&changedLoops.every(row=>row.status==='not-accepted-by-Lean'));
+ const freshLoops=await fetch(base+'/evidence/core-loops/fresh/core-loops-fresh.json').then(response=>response.json());
+ check('All original loops reconnect after transfer',freshLoops.rows.length===7&&freshLoops.rows.every(row=>row.status==='checked-data-connection'&&row['changed-precondition']==='rejected'));
+ check('Trusted Core loop archive stays unavailable to the browser',(await fetch(base+'/evidence/core-loops/examples/core-loops.etf')).status===404);
+ check('Compiled Core loop proof stays unavailable to the browser',(await fetch(base+'/evidence/core-loops/execution/countdown/CoreLoopCheck.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));

@@ -53,6 +53,55 @@ that its assumptions are inconsistent, even when its unused result is outside
 the arithmetic fragment. Input inconsistency is reported separately as vacuity.
 An author `^{:decreasing ...}` assertion is never a substitute for these checks.
 
+## Prove normal return of the exact Core controller
+
+`formal/core-loop-question` builds one portable term question from the same
+loop contract. It describes the exact finite initializer and one execution of
+the body. The question checks successful initialization and establishment of the
+invariant. On a state satisfying the precondition and invariant, it checks that
+the controller returns normally, both ranks are nonnegative, a recurrence
+preserves admission and decreases the rank, and an exit meets the postcondition.
+
+```clojure
+(def question (:problem (formal/core-loop-question count-up)))
+(def certificate (:certificate (formal/certify question)))
+(def exported (formal/core-loop-data count-up certificate))
+(formal/check-core-loop-data count-up certificate (:packet exported))
+```
+
+The packet contains the original closed loop control, the exact finite Core
+programs and the original predicates. The external checker reconstructs the
+initializer and controller from the contained control. It checks both finite
+Core outcome theorems and the complete term entailment in Lean. It then checks
+that the question matches those programs and predicates after slot alignment.
+The Lean substitution theorem connects the symbolic next-state terms to the
+values returned by the Core controller. The result slot refers to the actual
+return value in the exit state's postcondition.
+
+The final theorem exhibits a successful initialization, a finite sequence of
+controller steps, and a normal return satisfying the postcondition at the
+exit state, for every admitted input. The proof uses well-founded recursion on
+states satisfying the invariant and has no fixed iteration bound. A rank with
+one component is padded with zero in the second position. Finite control with
+zero ranks uses a pair of zeros. The applied reports record the standard Lean
+axiom policy, including the dependency on `Classical.choice` in the integer
+ranking proof.
+
+Export the packet as JSON with `interop/->json` and use the pinned checker.
+
+```sh
+research/formal-logic/check-core-loop \
+  research/formal-logic/evidence/core-loops/examples/countdown.json \
+  --output /tmp/enchant-core-loop
+```
+
+The whole-controller question uses the current partial Int/Bool proof
+fragment. For example, a division by zero in an unreachable return payload can
+exceed that fragment. The separate path checker can establish that branch's
+unreachability. The exact whole-controller runner also accepts a qualified case
+where the unreachable division is evaluated in a strict prefix and its value
+is discarded.
+
 ## What a failed argument means
 
 `obligation-refuted` identifies a countermodel to a proposed invariant, rank or
@@ -70,10 +119,9 @@ verification does not silently wrap the source program with runtime admission.
 
 ## Remaining trust
 
-The checked mathematical ranking rule does not prove that the BL ANF reader,
-control extraction, integer term interpretation, obligation generator or
-reference executor implements that rule correctly. Their composition remains
-reviewed implementation backed by focused checks. Compiler/runtime admission is
-disabled. In the first profile, nested loops, general recursive functions, other
-value domains and effectful bodies are explicitly outside the recognized source
-fragment; they require further interfaces and evidence.
+The composed proof covers the contained Core control, its typed model and the
+exact question. The named-data codec and the connection from Source and compiler
+ANF to that control remain reviewed. The BL reference executor and BEAM
+preservation still need their own correspondence evidence. Nested loops,
+general recursion, further value domains and effectful bodies require
+additional semantics and proof rules.
