@@ -1,0 +1,34 @@
+(ns formal.packaged-worker-check
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
+           [formal.backend :as backend] [bl.json :as json]))
+
+;; Only ordinary SDK namespaces are required. Run this file from an unrelated
+;; cwd, with both research artifact environment variables absent.
+(def x (t/variable "packaged.x" t/Int))
+(def instance (q/sat {:id :packaged/seven :assumptions [(t/eq x (t/int 7))] :observe {"x" x}}))
+(def increment (q/prove (t/gt (t/add x (t/int 1)) x) {:id :packaged/increment}))
+
+(defn inspect [engine]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (let [sat (logic/solve-in session instance) proof (logic/solve-in session increment)
+         artifacts (get-in session [:identity :artifacts])]
+    (assert (= :sat (:verdict sat)))
+    (assert (= :valid (get-in sat [:validation :status])))
+    (assert (= 7 (get-in sat [:witness "x"])))
+    (assert (= :proved (:verdict proof)))
+    (assert (= :not-checked (get-in proof [:certificate :status])))
+    (assert (= :sdk (get-in artifacts [:worker :origin])))
+    {:backend engine :native (get-in (backend/hello session) [:backend])
+     :artifacts artifacts :satisfiable (:verdict sat) :x (get-in sat [:witness "x"])
+     :replay (get-in sat [:validation :status]) :increment (:verdict proof)
+     :certificate (get-in proof [:certificate :status]) :compiler-proof-authority false}))))
+
+(let [report {:schema "enchant.formal.packaged-worker-examples.v1"
+              :rows (mapv inspect [:z3 :oxiz]) :cwd (File/cwd!)
+              :question-identities [(q/cache-key instance {} {} :model-and-core)
+                                    (q/cache-key increment {} {} :model-and-core)]
+              :research-import-path false :compiler-proof-authority false}
+      encoded (json/encode report {:pretty 2}) output (first (BeamLisp/argv))]
+ (when output (File/write! output encoded))
+ (println encoded))
