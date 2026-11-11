@@ -1,7 +1,10 @@
 (ns veritas.term-queries-test
  (:require [veritas :as v] [veritas.property :as p] [formal.query :as q]
            [formal.source :as source] [formal.term :as t] [formal.value :as value]
-           [formal.evaluate :as evaluate] [oracle]))
+           [formal.evaluate :as evaluate] [oracle] [compiler :as compiler]))
+
+(defmacro coverage-body-bomb []
+ (throw (ex-info "coverage body macro must not expand" {:case :coverage/body-expansion})))
 
 (defn brief [r] (pr-str (select-keys r [:modality :reason :why :runtime-replay :answer])))
 (deftest native-claims-and-runtime-witnesses-have-distinct-modalities
@@ -158,4 +161,15 @@
    (is (= :right/open (:witness (nth answers 2))))
    (is (not (Process/alive? (get-in @escaped [:session :pid]))))
    (is (= :error (:modality (v/for-all @escaped "n" (v/int-of 0 1) true)))))))
+
+(deftest coverage-removes-the-body-before-macro-expansion
+ (let [body "(fn [x] (veritas.term-queries-test/coverage-body-bomb))"
+       rejected (try (compiler/compile (first (BeamLisp.Reader/read_string body)) (compiler/new-env "formal.source.intrinsics")) false
+                     (catch error (= :coverage/body-expansion (:case (ex-data error)))))
+       src "(defn f [x] (veritas.term-queries-test/coverage-body-bomb))"]
+  (is rejected "positive control: the actual compiler expands this macro")
+  (doseq [backend [:z3 :oxiz]]
+   (let [r (v/covers {:backend backend} src (v/int-of 0 10))]
+    (is (= :solver-claim (:modality r)) (brief r))
+    (is (= :not-compiled (get-in r [:source-connection :bodies])))))))
 (run-tests)
