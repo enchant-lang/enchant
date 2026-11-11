@@ -1,17 +1,17 @@
 ; test/bl/veritas/ledger_test.bl — a verdict is a fact that outlives the session.
 
 (ns veritas.ledger-test
-  (:require [veritas :as v] [veritas.model :as vm] [veritas.ledger :as vl] [datom] [z3]))
+  (:require [veritas :as v] [veritas.model :as vm] [veritas.ledger :as vl] [datom]))
 
-(def port (z3/open))
+(def options {:backend :z3})
 
 (defn- tmp [] (str "/tmp/bl-ledger-" (erlang/unique_integer (to-list [:positive])) ".fjall"))
 
 (deftest three-modalities-recorded-reopened-reported
   (let [path (tmp)
         l (vl/open path)
-        proven (v/for-all port "n" (v/int-of 0 100) '(>= n 0))
-        refuted (v/for-all port "n" (v/int-of 0 100000000) '(not (includes? (str n) "77")) {:seed 5})
+        proven (v/for-all options "n" (v/int-of 0 100) '(>= n 0))
+        refuted (v/for-all options "n" (v/int-of 0 100000000) '(not (includes? (str n) "77")) {:seed 5})
         witnessed (vm/check (vm/model "q" {:state 0 :init (fn [] (atom 0))
                                            :commands {:tick {:next (fn [s _] (+ s 1))
                                                              :run (fn [sys _] (swap! sys inc))}}
@@ -25,17 +25,63 @@
           vs (vl/all l2)
           md (vl/report l2)]
       (is (= 3 (count vs)))
-      (is (= #{:proven :refuted :witnessed} (into #{} (map :verdict/modality vs))))
+      (is (= #{:solver-claim :refuted :witnessed} (into #{} (map :verdict/modality vs))))
       ;; refuted comes first, with its witness and replay line
       (is (< (index-of md "## Refuted") (index-of md "## Witnessed")))
-      (is (< (index-of md "## Witnessed") (index-of md "## Proven")))
+      (is (< (index-of md "## Witnessed") (index-of md "## Solver claims")))
       (is (includes? md "replay: bl run replay.bl"))
       (is (includes? md "seed 5"))
       (is (includes? md "witness: "))
       (is (= 1 (count (vl/about l2 "demo/tick"))))
+      (let [row (first (filter #(= :solver-claim (:verdict/modality %)) vs))]
+       (is (= (:question proven) (:verdict/question row)))
+       (is (= (:question-identity proven) (:verdict/question-id row)))
+       (is (= (:answer proven) (get-in row [:verdict/evidence :answer])))
+       (is (= :recorded (:verdict/assurance row)))
+       (is (= false (:verdict/compiler-authority row))))
       (datom/close! l2))
     (File/rm_rf! path)))
 
+
+(deftest nil-and-false-witnesses-retain-presence-and-never-gain-authority
+ (let [path (tmp) l (vl/open path)]
+  (try
+   (doseq [[claim witness] [["false witness" false] ["nil witness" nil]]]
+    (vl/record! l {:modality :witnessed :engine :enumerate :witness witness :compiler-proof-authority true}
+                  {:claim claim :about ["test/witness"]}))
+   (vl/record! l {:modality :solver-claim :engine :terms} {:claim "unchecked native claim"})
+   (vl/record! l {:modality :future-kind :engine :sample} {:claim "new modality"})
+   (datom/close! l)
+   (let [reopened (vl/open path)]
+    (try
+     (let [rows (vl/all reopened) by-claim (into {} (map (fn [row] [(:verdict/claim row) row]) rows))
+           text (vl/report reopened)]
+      (is (= false (get-in by-claim ["false witness" :verdict/witness])))
+      (is (= nil (get-in by-claim ["nil witness" :verdict/witness])))
+      (is (= true (get-in by-claim ["nil witness" :verdict/witness-present])))
+      (is (= false (get-in by-claim ["unchecked native claim" :verdict/witness-present])))
+      (is (every? #(= :recorded (:verdict/assurance %)) rows))
+      (is (every? #(= false (:verdict/compiler-authority %)) rows))
+      (is (includes? text "witness: nil"))
+      (is (includes? text "witness: false"))
+      (is (includes? text "certificate unchecked"))
+      (is (includes? text "new modality")))
+     (is (= #{false nil} (set (map :verdict/witness (vl/about reopened "test/witness")))))
+     (finally (datom/close! reopened))))
+   (finally (datom/close! l) (File/rm_rf! path)))))
+
 (deftest an-empty-ledger-reports-nothing
   (let [l (vl/open nil)]
-    (is (= "" (vl/report l)))))
+    (try (is (= "" (vl/report l))) (finally (datom/close! l)))))
+
+(deftest question-identities-are-checked-and-record-identities-are-distinct
+ (let [l (vl/open nil)
+       result (v/for-all {:backend :z3 :engine :terms} "n" (v/int-of 0 1) '(>= n 0))]
+  (try
+   (let [ids (mapv (fn [_] (vl/record! l result {:claim "same caller claim"})) (range 20))]
+    (is (= 20 (count (set ids))))
+    (is (= 20 (count (vl/all l)))))
+   (is (try (vl/record! l (assoc result :question-identity "wrong") {:claim "mismatched"}) false (catch _ true)))
+   (is (try (vl/record! l (dissoc result :question) {:claim "missing question"}) false (catch _ true)))
+   (is (= 20 (count (vl/all l))))
+   (finally (datom/close! l)))))

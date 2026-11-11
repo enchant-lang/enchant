@@ -1,26 +1,10 @@
-; veritas/ledger.bl — a verdict is a FACT: what was claimed, how it was
-; checked, what it found, and how to see it again.
-;
-; ── Why ─────────────────────────────────────────────────────────────────────
-;
-; A verdict held in a variable dies with the session that computed it. The one
-; who writes most of the code (an agent) loses context between turns, so a
-; check it cannot find later is a check it will either repeat or — worse —
-; remember wrongly. The ledger makes "what have I verified, and how strongly?"
-; a query, and generates the report from it, so a summary can never claim more
-; than a recorded verdict supports.
-;
-; ── What is here, and what is not yet ───────────────────────────────────────
-;
-; Here: the verdict schema, `record!`, reading back, and `report` (markdown,
-; grouped by modality, with the seed and the replay hint). Not yet: STALENESS
-; (a verdict whose code changed). That needs a content hash per definition in
-; the codebase graph (`priv/std/codebase.bl` has none today); the `:about` refs
-; are recorded now so staleness can be computed over existing verdicts later.
-; See docs/veritas-for-agents.md §2 and PLAN-151 V4.
+; A durable record of caller verdicts, complete questions and their evidence.
+; Recording checks question identity, not mathematical validity. Reports retain
+; unknown modalities and explicit witness presence; no row gains proof or
+; compiler authority merely by being stored.
 
 (ns veritas.ledger
-  (:require [datom] [datom.store-fjall]))
+  (:require [datom] [datom.store-fjall] [formal.identity :as identity] [formal.query :as query]))
 
 (def schema
   [{:db/ident :verdict/id       :db/valueType :db.type/string :db/unique :db.unique/identity}
@@ -31,6 +15,13 @@
    {:db/ident :verdict/seed     :db/valueType :db.type/long}
    {:db/ident :verdict/tried    :db/valueType :db.type/long}
    {:db/ident :verdict/witness  :db/valueType :db.type/term}
+   {:db/ident :verdict/witness-present :db/valueType :db.type/boolean}
+   {:db/ident :verdict/witness-value :db/valueType :db.type/term}
+   {:db/ident :verdict/question-id :db/valueType :db.type/string}
+   {:db/ident :verdict/question :db/valueType :db.type/term}
+   {:db/ident :verdict/evidence :db/valueType :db.type/term}
+   {:db/ident :verdict/assurance :db/valueType :db.type/keyword}
+   {:db/ident :verdict/compiler-authority :db/valueType :db.type/boolean}
    {:db/ident :verdict/replay   :db/valueType :db.type/string}
    {:db/ident :verdict/about    :db/valueType :db.type/string :db/cardinality :db.cardinality/many :db/index true}
    {:db/ident :verdict/by       :db/valueType :db.type/string}
@@ -44,25 +35,36 @@
     (datom/connect schema)
     (datom/connect-with (datom.store-fjall/open path) schema)))
 
-(defn- vid [claim at]
-  (str "vd-" at "-" (erlang/phash2 claim 1000000)))
+(defn- vid []
+ (str "vd-" (Base/encode16 (crypto/strong_rand_bytes 16) (list (tuple :case :lower)))))
 
 (defn record!
-  "Record verdict `v` (any veritas verdict map) under `meta`
+  "Record a caller verdict without granting proof authority, under `meta`
    {:claim str (required) :about [str …] :by str :replay str}. The shrunk
    witness is kept when present (it is the one worth replaying). → the id."
   [ledger v meta]
-  (let [at (erlang/system_time :millisecond)
-        id (vid (:claim meta) at)
-        w (if (contains? v :shrunk) (:shrunk v) (:witness v))]
+  (when-not (and (keyword? (:modality v)) (string? (:claim meta)))
+   (throw (ex-info "A ledger record needs an explicit modality and claim" {})))
+  (let [at (erlang/system_time :millisecond) id (vid)
+        present (or (contains? v :shrunk) (contains? v :witness))
+        w (if (contains? v :shrunk) (:shrunk v) (:witness v))
+        question (:question v)
+        qid (when question (identity/hash (query/validate! question)))
+        _ (when (and (:question-identity v) (not= qid (:question-identity v)))
+            (throw (ex-info "Ledger question identity does not match the recorded question" {})))
+        evidence (select-keys v [:modality :engine :complete :none :answer :source-connection :runtime-replay :compiler-proof-authority])]
     (datom/transact! ledger
       [(cond-> {:db/id -1 :verdict/id id :verdict/claim (:claim meta)
-                :verdict/modality (:modality v) :verdict/at at}
+                 :verdict/modality (:modality v) :verdict/at at
+                :verdict/witness-present present :verdict/assurance :recorded
+                :verdict/compiler-authority false :verdict/evidence evidence}
          (:engine v) (assoc :verdict/engine (:engine v))
          (:why v) (assoc :verdict/why (:why v))
          (int? (:seed v)) (assoc :verdict/seed (:seed v))
          (int? (:tried v)) (assoc :verdict/tried (:tried v))
+         present (assoc :verdict/witness-value [w])
          (some? w) (assoc :verdict/witness w)
+         qid (assoc :verdict/question-id qid :verdict/question question)
          (:replay meta) (assoc :verdict/replay (:replay meta))
          (:by meta) (assoc :verdict/by (:by meta)))])
     ;; many-valued refs go in as list-form adds: a map-form SET value is
@@ -76,7 +78,12 @@
 (def ^:private PULL
   [:verdict/id :verdict/claim :verdict/modality :verdict/engine :verdict/why
    :verdict/seed :verdict/tried :verdict/witness :verdict/replay :verdict/about
-   :verdict/by :verdict/at])
+   :verdict/by :verdict/at :verdict/witness-present :verdict/witness-value
+   :verdict/question-id :verdict/question :verdict/evidence :verdict/assurance :verdict/compiler-authority])
+
+(defn- normalize-row [row]
+ (if (= true (:verdict/witness-present row))
+  (assoc row :verdict/witness (first (:verdict/witness-value row))) row))
 
 (defn all
   "Every verdict, newest first; `since` (epoch ms) narrows."
@@ -86,41 +93,48 @@
          es (into [] (datom/q '[:find ?e ?at :in $ ?since
                                 :where [?e :verdict/at ?at] [(>= ?at ?since)]]
                               d since))]
-     (mapv (fn [[e _]] (datom/pull d PULL e))
+     (mapv (fn [[e _]]
+             (normalize-row (datom/pull d PULL e)))
            (reverse (sort-by second es))))))
 
 (defn about
   "Every verdict resting on `thing` (a string naming code: \"ns/fn\")."
   [ledger thing]
   (let [d (datom/db ledger)]
-    (mapv (fn [[e]] (datom/pull d PULL e))
+    (mapv (fn [[e]] (normalize-row (datom/pull d PULL e)))
           (into [] (datom/q '[:find ?e :in $ ?t :where [?e :verdict/about ?t]] d thing)))))
 
 (def ^:private SECTIONS
-  [[:refuted "Refuted"] [:unknown "Unknown"] [:witnessed "Witnessed (sampled — not a proof)"]
-   [:proven "Proven"]])
+ [[:error "Execution or interface errors"] [:refuted "Refuted"] [:candidate "Unconfirmed candidates"]
+  [:unknown "Unknown"] [:unsupported "Unsupported"] [:vacuous "Vacuous"]
+  [:witnessed "Witnessed (inspect engine and completeness)"] [:exhausted "Exhausted finite domains"]
+  [:solver-claim "Solver claims (certificate unchecked)"]
+  [:checked "Recorded checked labels (inspect evidence)"] [:proven "Legacy proven labels (not independently checked here)"]])
 
 (defn- line [v]
   (str "- " (:verdict/claim v)
        " — " (name (or (:verdict/engine v) :unknown))
        (if (some? (:verdict/tried v)) (str ", " (:verdict/tried v) " tried") "")
        (if (some? (:verdict/seed v)) (str ", seed " (:verdict/seed v)) "")
-       (if (and (= :refuted (:verdict/modality v)) (some? (:verdict/witness v)))
+       (if (or (= true (:verdict/witness-present v)) (and (nil? (:verdict/witness-present v)) (some? (:verdict/witness v))))
          (str "\n  witness: " (pr-str (:verdict/witness v))) "")
        (if (some? (:verdict/replay v)) (str "\n  replay: " (:verdict/replay v)) "")
+       (if (:verdict/question-id v) (str "\n  question: " (:verdict/question-id v)) "")
        "  [" (:verdict/id v) "]"))
 
 (defn report
-  "Markdown: refuted first (what is broken), then unknown, witnessed, proven —
-   each line with its engine, effort, seed, witness and replay. Only recorded
-   verdicts appear, so the report cannot claim what was not checked."
+  "Report every recorded modality with engine, effort, seed and witness.
+   Native claims and legacy proof labels remain explicitly unchecked."
   ([ledger] (report ledger 0))
   ([ledger since]
    (let [vs (all ledger since)
-         by (group-by :verdict/modality vs)]
+         by (group-by :verdict/modality vs)
+         known (set (map first SECTIONS))
+         sections (concat SECTIONS (map (fn [k] [k (str "Other recorded modality: " (pr-str k))])
+                                        (sort-by pr-str (remove #(contains? known %) (keys by)))))]
      (join "\n"
        (mapcat (fn [[k title]]
                  (let [xs (get by k)]
                    (if (empty? xs) []
                      (concat [(str "## " title " (" (count xs) ")")] (map line xs) [""]))))
-               SECTIONS)))))
+               sections)))))

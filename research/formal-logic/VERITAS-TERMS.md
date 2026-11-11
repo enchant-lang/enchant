@@ -59,6 +59,12 @@ not a general compiler-preservation theorem.
 Legacy SMT helpers remain for the separate mock/fault consumers. Their
 migration and richer source summaries remain active work.
 
+`veritas.ledger/record!` retains the complete typed question, checked question
+identity, caller evidence and an explicit witness-presence bit. False and nil
+witnesses survive durable storage. Every stored row has `:recorded` assurance
+and no compiler authority; recording a `:checked` or legacy `:proven` label
+does not verify it. Reports keep unfamiliar future modalities visible.
+
 On the exact shared Unicode-prefix law, Z3 reports UNSAT and OxiZ 0.3.4
 returns unknown. Constructing a native string term and deciding its query are
 different capabilities; the native answer keeps that distinction.

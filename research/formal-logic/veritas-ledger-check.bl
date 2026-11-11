@@ -1,0 +1,33 @@
+(ns formal.veritas-ledger-check
+ (:require [veritas :as v] [veritas.ledger :as ledger] [formal.identity :as identity]
+           [datom] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def mode (first args))
+(def path (second args))
+(def output (nth args 2))
+(assert (and (string? path) (string? output)))
+(def store (ledger/open path))
+(try
+ (case mode
+  "write"
+   (let [claim (v/for-all {:backend :z3 :engine :terms} "n" (v/int-of 0 100000) '(>= n 0))]
+    (assert (= :solver-claim (:modality claim)))
+    (ledger/record! store claim {:claim "native law"})
+    (doseq [w [false nil]]
+     (ledger/record! store {:modality :witnessed :engine :enumerate :witness w} {:claim (pr-str w)})))
+  "read"
+   (let [rows (ledger/all store) by-claim (into {} (map (fn [r] [(:verdict/claim r) r]) rows))
+         law (get by-claim "native law") nil-row (get by-claim "nil") false-row (get by-claim "false")]
+    (assert (= 3 (count rows)))
+    (assert (= (:verdict/question-id law) (identity/hash (:verdict/question law))))
+    (assert (= :not-checked (get-in law [:verdict/evidence :answer :certificate :status])))
+    (assert (= true (:verdict/witness-present nil-row)))
+    (assert (= nil (:verdict/witness nil-row)))
+    (assert (= false (:verdict/witness false-row)))
+    (assert (every? #(= :recorded (:verdict/assurance %)) rows))
+    (assert (every? #(= false (:verdict/compiler-authority %)) rows)))
+  (throw (ex-info "Expected write or read" {})))
+ (File/write! output (json/encode {:schema "enchant.formal.veritas-ledger.v1" :mode mode
+                                 :rows (count (ledger/all store)) :process (System/pid)
+                                 :compiler-proof-authority false} {:pretty 2}))
+ (finally (datom/close! store)))
