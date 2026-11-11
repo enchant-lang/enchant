@@ -126,7 +126,33 @@ for row in packets['rows']:
     require(packet['identity'] == row['packet'] == proof['packet'] and proof['status'] == 'checked-term-entailment',
             'actual original-term law proof: ' + row['id'])
     require(not proof['compiler_proof_authority'], 'no compiler authority')
-for name in ('TEMPORAL.md', 'temporal-check.bl', 'temporal-laws-export.bl', 'qualify-temporal.py'):
+    target = E / 'law-execution' / row['id']
+    require(sha(target / 'Check.lean') == proof['proof_source_sha256']
+            and sha(target / 'Check.olean') == proof['proof_olean_sha256'], 'retained actual proof bytes')
+    require(proof['axioms']['originalQuestionEntails'] == ['propext', 'Quot.sound']
+            and 'sorryAx' not in (target / 'lean.txt').read_text(), 'checked choice-free theorem dependencies')
+prior_proofs = read(E / 'prior-term-proofs/accepted.json')
+prior_rejected = read(E / 'prior-term-proofs/rejected.json')
+require(len(prior_proofs) == 17 and len(prior_rejected) == 5
+        and 'Ran 4 tests' in (E / 'prior-term-proof-checks.txt').read_text()
+        and '\nOK\n' in (E / 'prior-term-proof-checks.txt').read_text(), 'real original proof and adversarial regression')
+for row in prior_proofs:
+    target = E / 'prior-term-proofs' / row['id']
+    require(row['status'] == 'checked-term-entailment' and sha(target / 'Check.lean') == row['proof_source_sha256']
+            and sha(target / 'Check.olean') == row['proof_olean_sha256'], 'retained prior checked proof')
+for row in prior_rejected:
+    target = E / 'prior-term-proofs/rejected' / row['id']
+    require(row['status'] == 'rejected-by-lean' and not (target / 'Check.olean').exists()
+            and (target / 'lean.txt').is_file(), 'changed original cannot retain compiled success')
+require(not read(E / 'law-lean-1-note.json')['lean_accepted']
+        and not (E / 'law-execution-initial/intersection-symmetry/Check.olean').exists(), 'initial proof search safely refused')
+models = [read(P / 'metatheory' / name) for name in ('terms-pin.json', 'refutation-pin.json')]
+for model in models:
+    require(all(sha(P / model[k]['path']) == model[k]['sha256'] for k in ('source', 'compiled')), 'unchanged pinned model/kernel')
+tool = read(P / 'metatheory/tool-pin.json')
+require(sha(Path(tool['path']) / 'bin/lean') == tool['binary_sha256'], 'actual pinned Lean executable')
+for name in ('TEMPORAL.md', 'temporal-check.bl', 'temporal-laws-export.bl', 'temporal-laws-check.py',
+             'term_refutation.py', 'term_refutation_test.py', 'refutation_kernel.py', 'qualify-temporal.py'):
     qualified[str((P / name).relative_to(R))] = sha(P / name)
 report = {'schema': 'enchant.formal.temporal-qualification.v1', 'checkpoint': 34, 'sdk_pin': pin,
     'source': {'code_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip(), 'sha256': qualified},
@@ -134,7 +160,8 @@ report = {'schema': 'enchant.formal.temporal-qualification.v1', 'checkpoint': 34
     'checks': {'focused': focused, 'focused_invocations': 2, 'regression': regression, 'total_assertions': 9459, 'failed': 0},
     'retained_initial_test_failure': {'passed': 1594, 'failed': 1, 'correction': corrected},
     'baseline': baseline, 'unchanged_paired_questions': total, 'temporal_examples': example,
-    'original_term_laws': packets['rows'],
+    'original_term_laws': packets['rows'], 'lean_regression': {'accepted': 17, 'rejected': 5, 'tests': 4},
+    'model_pins': models, 'lean_tool': tool,
     'scope': ['semantic integer spans and thirteen Allen relation constructors', 'two complete overlap SAT questions',
               'replayed intersecting/separated assignments', 'strict chronology with full event identities',
               'SDK and selected Source consumers', 'three exact original-term law theorems'],
