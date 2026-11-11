@@ -1,0 +1,25 @@
+(ns system.mcp-stdio-utf8-test
+ (:require [mcp.server :as server] [mcp.transport-stdio :as stdio]))
+
+(deftest stdio-retains-utf8-request-identities-and-json-bytes-under-either-device-default
+ (BeamLisp/with_cwd (System/tmp_dir!)
+  (fn []
+   (doseq [encoding [:latin1 :unicode]]
+    (let [request {"jsonrpc" "2.0" "id" "طلب—é" "method" "unknown/🙂"}
+          opened (StringIO/open (str (bl.json/encode request) "\n"))
+          device (elem opened 1)
+          original (erlang/group_leader)
+          srv (server/start)]
+     (try
+      (is (= :ok (io/setopts device (list (tuple :encoding encoding)))))
+      (erlang/group_leader device (erlang/self))
+      (is (= :done (stdio/run srv)))
+      (let [output (elem (StringIO/contents device) 1)
+            response (bl.json/decode (String/trim output))]
+       (is (String/ends_with? output "\n"))
+       (is (= (get request "id") (get response "id")))
+       (is (= -32601 (get-in response ["error" "code"]))))
+      (finally
+       (erlang/group_leader original (erlang/self))
+       (server/stop srv)
+       (StringIO/close device))))))))
