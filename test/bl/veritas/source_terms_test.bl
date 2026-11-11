@@ -1,7 +1,7 @@
 (ns veritas.source-terms-test
  (:require [veritas.property :as p] [veritas :as v] [formal.source :as source]
            [formal.term :as t] [formal.value :as value] [formal.query :as q]
-           [formal.evaluate :as evaluate] [oracle]))
+           [formal.evaluate :as evaluate] [oracle] [core]))
 
 (def floor '(defn floor [c] (if (< c 0) 0 c)))
 (def options-without-worker {:worker "/unavailable/formal-worker"})
@@ -114,4 +114,28 @@
   (is (= :unsupported (:status (p/prepare s true g))) s))
  (is (= :unsupported (:status (p/prepare '(defn ident [n] n) 1 (v/int-of 0 10)))))
  (is (= :translated (:status (p/prepare '(defn constant [] 1) '(= result 1) (v/tuple-of))))))
+
+(deftest integer-operations-keep-beam-signs-and-zero-divisor-definedness
+ (let [x (t/variable "x" t/Int) y (t/variable "y" t/Int)]
+  (doseq [[function-source runtime] [["(fn [x y] (quot x y))" core/quot]
+                                    ["(fn [x y] (rem x y))" erlang/rem]
+                                    ["(fn [x y] (mod x y))" core/mod]]]
+   (let [p (source/prepare-function function-source [x y]) output (:value p)]
+    (is (= :translated (:status p)) (pr-str p))
+    (doseq [a (range -4 5) b (range -3 4)]
+     (let [assignment {"x" a "y" b} defined (evaluate/value (value/defined output) assignment)]
+      (is (= (not= 0 b) defined))
+      (when (not= 0 b)
+       (is (= (runtime a b) (evaluate/value (value/term output) assignment))))))))))
+
+(deftest nil-and-zero-keep-language-truthiness-in-source-replay
+ (doseq [engine [:z3 :oxiz]]
+  (let [empty (p/prove {:backend engine} '(defn nothing [n] nil) '(not (not result)) (v/one-of 0))
+        zero (p/prove {:backend engine} '(defn zero-truth [n] (if n 7 8)) '(= result 7) (v/one-of 0))
+        constant (p/prove {:backend engine} '(defn constant [] 1) '(= result 2) (v/tuple-of))]
+   (is (= :refuted (:modality empty)) (pr-str empty))
+   (is (= nil (:result empty)))
+   (is (= :solver-claim (:modality zero)) (pr-str zero))
+   (is (= :refuted (:modality constant)) (pr-str constant))
+   (is (= [] (:witness constant))))))
 (run-tests)
