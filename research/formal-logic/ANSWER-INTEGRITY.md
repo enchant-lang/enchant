@@ -2,7 +2,9 @@
 
 The first behavioral baseline passed 13 assertions and failed 27. The repaired
 immutable SDK passes 134 answer checks and the preceding 86 public SDK checks.
-The wider regression and dossier qualification are in progress.
+The wider regression passed 7,086 assertions across twenty-two files, with all
+187 preceding native questions and verdicts unchanged. Dossier qualification
+is in progress.
 
 ## Architectural pieces
 
@@ -61,6 +63,10 @@ where its checked input implied 8. Both engines correctly solved a native
 context after a handler added a false assumption, while the reply still named
 the original question. The new fallback guard refuses that context change.
 The original logs are retained under `evidence/answer-integrity`.
+
+The context guard covers the tracked API state. Raw native transport operations
+and manual mutation of session bookkeeping remain lower-level escape hatches.
+Authoritative native-owner context accounting is further hardening work.
 
 ## Review process semantics separately
 

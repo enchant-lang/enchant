@@ -20,8 +20,13 @@ now live under `priv/lib/formal`; research imports use the pinned SDK, while
 qualification passed 86 focused SDK assertions and 2,549 regression assertions.
 Source extraction, remaining legacy consumers, process-wide effect semantics
 and native worker packaging remain active work.
-[ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) specifies the next answer,
-observation and context-custody qualification slice.
+[ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
+boundary: exact question binding, checked model sorts, reconstructed handler
+observations, phase rules and tracked context guards. Its immutable SDK passes
+220 focused assertions and 7,086 regression assertions; all preceding 187 native
+questions retain their identities and verdicts. Three additional ground cases
+exercise floating-point equality through sequences and arrays. Authoritative
+native-owner context accounting and automatic handler inheritance remain ahead.
 
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,

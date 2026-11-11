@@ -99,9 +99,8 @@ oracle still have further migration work.
 
 The handler scope currently belongs to the calling process. Ordinary `spawn`
 conveys the language environment, but does not yet convey this oracle handler.
-The derived search procedures that directly open a native transport context
-also need migration to the common logical context. These are explicit next
-steps; the focused SDK tests do not establish their handler behavior.
+The derived search procedures now use the common logical context. Automatic
+process inheritance remains a separate runtime design and qualification task.
 
 Exact artifacts, source hashes and retained failed-run evidence are in
 `evidence/sdk-interface/qualification.json`.
@@ -112,3 +111,21 @@ tests loaded the equal source bytes, while static declaration checking refused
 the conflicting provider identity. Those aliases were removed from the import
 root. The `sdk-src` link is for authored source browsing, outside import search.
 The immutable SDK and its declaration checks remain unchanged.
+
+## Checked answer data
+
+`formal.answer/bind` and `check` give complete typed replies a pure boundary.
+The current SDK adds 134 focused answer assertions; the preceding 86 public
+SDK assertions still pass. The wider twenty-two-file regression passed 7,086
+assertions. `ANSWER-INTEGRITY.md` records the contract and semantic choices.
+
+Concrete assignment encodings are checked against their sorts. Handler
+observations are reconstructed from those assignments. An exact reply from an
+owned native fallback retains its native-only observations and provenance; a
+modified reply is replayed, with the supplied display retained separately.
+Phase/status combinations must answer the requested question.
+
+Derived procedures now use the common logical session before opening a native
+worker. A changed tracked context refuses a saved fallback. Raw native
+transport and mutable session bookkeeping retain their lower-level scope.
+The recorded probes qualify ordinary API behavior, not a security capability.

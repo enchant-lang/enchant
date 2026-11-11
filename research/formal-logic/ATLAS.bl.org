@@ -1273,6 +1273,70 @@ The focused SDK file passed 86 assertions without a research import path. A sepa
 
 The [[#cell-story-sdk-interface][executable example]] calls the SDK consumer, compares both engines and handles a question with deliberately unavailable native paths. Read [[file:SDK-INTERFACE.md][the interface guide]], [[file:sdk-src/system/formal.bl][the SDK consumer]], [[file:sdk-src/oracle.bl][the oracle boundary]], [[file:sdk-src/formal/query.bl][the question schema]], [[file:sdk-src/formal/logic.bl][the logical session]], [[file:evidence/sdk-interface/focused-checks.txt][the focused SDK checks]] and [[file:evidence/sdk-interface/qualification.json][the qualification receipt]].
 
+** An answer has to fit its question
+A solver response is useful only when its values and its meaning fit the question. Beam Lisp now checks that boundary in the SDK, above both engines.
+
+The review found a concrete mistake: giving the number =1= to a Boolean variable could make the old replay accept a contradiction. Bool values now have to be =true= or =false=. The same rule extends to integer, rational, floating-point, enum, sequence and array models.
+
+#+begin_rosetta
+What arrived | What BL checks | What the caller sees
+A Boolean variable assigned 1 | The binding has the wrong sort. | The proposed model is invalid.
+A display saying 999 when the input is 7 | Replay computes the requested expression x + 1. | The standard observation is 8; the supplied display is retained separately.
+SAT for only the assumptions | The proof goal still needs an answer. | The phase mismatch is refused.
+An assumption loaded during delegation | The saved question context has changed. | The fallback refuses to answer under the changed context.
+An unchanged native reply | Oracle matches it with its actual owned fallback result. | Native-only observations keep their provenance.
+#+end_rosetta
+
+#+begin_code_graph :id formal-answer-integrity :title "Keep the question, values and execution together" :start question
+node question | code | Bind the whole question | observed
+summary Reply binding preserves the exact formal-data identity of the question. Integer and float metadata, list and vector shapes, and floating bit patterns stay distinct.
+source research/formal-logic/sdk-src/formal/answer.bl | Pure answer boundary | The reply cannot replace its question with a similar-looking value.
+node bindings | code | Check the values' sorts | observed
+summary A Boolean binding contains true or false. Concrete values for the other supported sorts have checked encodings. Missing values remain unavailable.
+source research/formal-logic/sdk-src/formal/evaluate.bl | Typed independent replay | Malformed bindings cannot become a satisfying assignment through BL truthiness.
+node observations | code | Rebuild what you display | observed
+summary An ordinary handler's observations come from its assignments and the requested descriptors. Its supplied display is kept as reported data.
+source research/formal-logic/src/formal/answer-examples.bl | Executable examples | Seven plus one displays eight even if the handler supplied 999.
+node phase | code | Ask which question was answered | observed
+summary Consistent assumptions and a proved goal are different facts. The phase and status must describe the complete requested question.
+source research/formal-logic/sdk-src/formal/answer.bl | Phase and status rules | A frontend UNSAT claim cannot become an entailment.
+node context | code | Keep delegation in its context | observed
+summary Loading or resetting the tracked session changes its assumptions or generation. The owned fallback checks its original context before executing.
+field Scope | Session maps are cooperative API handles. Raw native transport and manual bookkeeping mutation retain their lower-level escape-hatch scope.
+source research/formal-logic/sdk-src/formal/logic.bl | Context snapshot guard | Both native backends refuse the recorded context substitution.
+node native | code | Preserve an exact native reply | observed
+summary Oracle records its actual fallback result. Exact delegation retains native-only observations; a modified reply is independently reconstructed.
+field Proof status | Native and handler answers keep unchecked certificate status. Compiler proof authority stays disabled.
+source research/formal-logic/sdk-src/oracle.bl | Effect-owned execution record | Execution provenance is kept separate from proof checking.
+edge question -> bindings | validate the proposed assignment
+edge bindings -> observations | derive the requested values
+edge question -> phase | check the response's meaning
+edge question -> context | bind the tracked assumptions
+edge context -> native | delegate the original question
+edge native -> observations | retain matching provenance
+#+end_code_graph
+
+** Equality follows the value's sort
+Two floating-point bit patterns can represent the same NaN value in the SMT model. That equality must keep working inside a sequence, as an array's default value and when the value becomes an array key. The independent replay now follows those rules recursively.
+
+#+begin_rosetta
+The distinction | The meaning
+Formal data identity | The written representations retain different data identities.
+SMT floating-point identity | Each format has one logical NaN value, so the two representations name the same array key.
+IEEE comparison | fp.eq has its own comparison rule, including false when a NaN is involved.
+Backend availability | Z3 answers all three new ground questions. OxiZ answers the two array questions and reports the sequence question unsupported.
+#+end_rosetta
+
+These are direct SMT-model questions. A program that needs to preserve a NaN payload can use an explicit bit-vector representation. The [[#cell-story-nested-equality][executable comparison]] keeps both native verdicts visible.
+
+The new SDK file passed 134 assertions, and the preceding 86 SDK assertions still pass. The broader run passed 7,086 assertions across twenty-two files. All 187 previous native questions retain their identities and verdicts.
+
+#+begin_note :title "A stronger interface, with its evidence basis intact"
+Typed replay, native execution and certificate checking remain separate reasons to trust an answer. This slice fixes concrete interface failures and checks the recorded cases. General implementation soundness, compiler preservation and automatic handler inheritance across processes remain work ahead.
+#+end_note
+
+Try [[#cell-story-answer-integrity][the handled-answer example]] and [[#cell-story-answer-context][the tracked-context example]]. Read [[file:ANSWER-INTEGRITY.md][the interface and semantic choices]], [[file:sdk-src/formal/answer.bl][the answer boundary]], [[file:sdk-src/formal/evaluate.bl][typed replay]], [[file:src/formal/answer-examples.bl][the executable examples]], [[file:answers-check.bl][the example recorder]], [[file:evidence/answer-integrity/examples.json][the retained examples]], [[file:evidence/answer-integrity/baseline-checks.txt][the original failing baseline]], [[file:evidence/answer-integrity/focused-checks.txt][the 220 SDK checks]], [[file:evidence/answer-integrity/regression-checks.txt][the wider regression]] and [[file:evidence/answer-integrity/qualification.json][the qualification receipt]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1707,7 +1771,8 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.loop-core :as loop-core] [formal.core-actor-examples :as actors]
            [formal.core-observation-examples :as observed-actors]
            [formal.core-counterexample-examples :as native-traces]
-           [system.core :as system] [system.formal :as system-formal] [oracle]))
+           [system.core :as system] [system.formal :as system-formal] [oracle]
+           [formal.answer-examples :as answer-examples]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2523,6 +2588,42 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-sdk-interface
 : {:compiler-proof-authority false, :sdk-entry-point :system/preserves?, :portable-model :checked, :native-verdicts [:proved :proved], :same-question true, :table-answer :unknown, :handler-native-worker :not-opened, :handler-scope :calling-process, :handler-certificate :not-checked}
 
+
+
+#+begin_src beam-lisp :id story-answer-integrity
+(def handled-answer-summary (answer-examples/summary))
+(assert (= :invalid-model (:ill-sorted-contradiction handled-answer-summary)))
+(assert (= 8 (:derived-next handled-answer-summary)))
+(assert (= :error (:wrong-phase handled-answer-summary)))
+(into-sorted-map handled-answer-summary)
+#+end_src
+
+
+#+begin_src beam-lisp :id story-answer-context
+(def tracked-contexts (answer-examples/context-results))
+(assert (every? #(= :refuted (:original-verdict %)) tracked-contexts))
+(assert (every? #(= :error (get-in % [:changed-context :verdict])) tracked-contexts))
+(into-sorted-map
+ {:engines (mapv :backend tracked-contexts)
+  :original-verdicts (mapv :original-verdict tracked-contexts)
+  :after-context-change (mapv #(get-in % [:changed-context :verdict]) tracked-contexts)
+  :fallback-statuses (mapv #(get-in % [:changed-context :solver-status]) tracked-contexts)
+  :compiler-proof-authority false})
+#+end_src
+
+
+#+begin_src beam-lisp :id story-nested-equality
+(def nested-equality-results (answer-examples/equality-results))
+(assert (every? :independent-value nested-equality-results))
+(assert (= [:proved :proved :proved] (mapv #(get-in % [:z3 :verdict]) nested-equality-results)))
+(assert (= [:unsupported :proved :proved] (mapv #(get-in % [:oxiz :verdict]) nested-equality-results)))
+(into-sorted-map
+ {:cases (mapv :id nested-equality-results)
+  :independent-values (mapv :independent-value nested-equality-results)
+  :z3 (mapv #(get-in % [:z3 :verdict]) nested-equality-results)
+  :oxiz (mapv #(get-in % [:oxiz :verdict]) nested-equality-results)
+  :native-certificate :not-checked :compiler-proof-authority false})
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity

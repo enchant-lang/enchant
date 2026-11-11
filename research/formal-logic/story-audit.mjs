@@ -299,6 +299,39 @@ try{
     await shot(size.name+'-sdk-interface-night');
     await click('#theme');
   }
+  await navigate('/#an-answer-has-to-fit-its-question');
+  check(size.name+': answer chapter explains typed bindings and reconstruction',await evaluate("document.body.innerText.includes('accept a contradiction')&&document.body.innerText.includes('standard observation is 8')"));
+  await click('[data-graph="formal-answer-integrity"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="bindings"]');
+  check(size.name+': typed binding panel refuses language truthiness',await evaluate("document.querySelector('[data-graph=\"formal-answer-integrity\"] .sg-stage>[data-view]:not([hidden])').innerText.includes('Malformed bindings cannot become a satisfying assignment through BL truthiness')"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('An answer has to fit its question')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-answer-integrity');
+  await click('[data-graph="formal-answer-integrity"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="context"]');
+  check(size.name+': context panel exposes tracked state and raw transport boundary',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-answer-integrity\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('cooperative API handles')&&t.includes('Raw native transport')})()"));
+  await evaluate("document.querySelector('[data-graph=\"formal-answer-integrity\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+  await shot(size.name+'-answer-context-panel');
+  await click('[data-graph="formal-answer-integrity"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="native"]');
+  check(size.name+': native reply panel keeps execution and proof separate',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-answer-integrity\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('actual fallback result')&&t.includes('unchecked certificate status')&&t.includes('Compiler proof authority stays disabled')})()"));
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-answer-integrity\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-answer-integrity-night');
+    await click('#theme');
+  }
+  await navigate('/#equality-follows-the-values-sort');
+  check(size.name+': equality chapter distinguishes formal data SMT identity and IEEE comparison',await evaluate("document.body.innerText.includes('one logical NaN value')&&document.body.innerText.includes('fp.eq has its own comparison rule')&&document.body.innerText.includes('reports the sequence question unsupported')"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes(\"Equality follows the value's sort\")).scrollIntoView({block:'start'})");
+  await shot(size.name+'-nested-equality');
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-answer-integrity','story-answer-context','story-nested-equality']){
+    await wait(`document.querySelector('#cell-${id}').getClientRects().length>0`);
+    check(size.name+': visible executable result '+id,await evaluate(`document.querySelector('#cell-${id} .result').getClientRects().length>0`));
+    const text=await evaluate(`document.querySelector('#cell-${id} .result').innerText`);
+    if(id==='story-answer-integrity')check(size.name+': handled answer cell checks sorts observations and phases',text.includes(':ill-sorted-contradiction :invalid-model')&&text.includes(':derived-next 8')&&text.includes(':reported-next 999')&&text.includes(':wrong-phase :error')&&text.includes(':observation-source :independent-replay')&&text.includes(':compiler-proof-authority false'));
+    if(id==='story-answer-context')check(size.name+': both engines refuse changed tracked context',text.includes(':engines [:z3 :oxiz]')&&text.includes(':original-verdicts [:refuted :refuted]')&&text.includes(':after-context-change [:error :error]')&&text.includes(':fallback-statuses [:not-run :not-run]'));
+    if(id==='story-nested-equality')check(size.name+': equality cell keeps exact native availability and unchecked certificate',text.includes(':independent-values [true true true]')&&text.includes(':z3 [:proved :proved :proved]')&&text.includes(':oxiz [:unsupported :proved :proved]')&&text.includes(':native-certificate :not-checked')&&text.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -566,6 +599,13 @@ try{
  const sdkQualification=await fetch(base+'/evidence/sdk-interface/qualification.json').then(response=>response.json());
  check('SDK qualification retains exact artifact public checks and theory coverage',sdkQualification.checkpoint===28&&sdkQualification.checks.focused_assertions===86&&sdkQualification.paired_questions===187&&sdkQualification.compiler_proof_authority===false);
  check('SDK qualification retains first failure and current process scope',sdkQualification.candidate_1.assertions_failed===8&&sdkQualification.scope.includes('complete typed query effect in the calling process')&&sdkQualification.remaining.includes('automatic oracle handler inheritance across processes'));
+ for(const path of ['/ANSWER-INTEGRITY.md','/sdk-src/formal/answer.bl','/sdk-src/formal/evaluate.bl','/src/formal/answer-examples.bl','/answers-check.bl','/evidence/answer-integrity/examples.json','/evidence/answer-integrity/baseline-checks.txt','/evidence/answer-integrity/focused-checks.txt','/evidence/answer-integrity/regression-checks.txt','/evidence/answer-integrity/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared answer source or evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const answers=await fetch(base+'/evidence/answer-integrity/qualification.json').then(response=>response.json());
+ check('Typed answer qualification retains baseline exact SDK and passing regressions',answers.checkpoint===29&&answers.baseline.checks.failed===27&&answers.checks.focused_assertions===220&&answers.checks.regression_assertions===7086&&answers.unchanged_paired_questions===187&&answers.compiler_proof_authority===false);
+ check('Ground equality availability remains explicit',JSON.stringify(answers.additional_native_verdicts)===JSON.stringify({z3:['proved','proved','proved'],oxiz:['unsupported','proved','proved']}));
  const counterexamples=await fetch(base+'/evidence/core-counterexamples/execution/accepted.json').then(response=>response.json());
  check('Both engines have twelve composed original query and unsafe trace proofs',counterexamples.length===12&&counterexamples.every(row=>row.status==='checked-original-query-and-unsafe-core-run'&&row.checked_prefixes===row.events+1&&row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns']&&!row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns'].includes('Classical.choice')));
  check('Extra opaque observations retain explicit completion',counterexamples.some(row=>row.discovery.engine==='oxiz'&&row.extra_observation_bindings>0&&row.completion_origins['explicit-replay-completion']>0));

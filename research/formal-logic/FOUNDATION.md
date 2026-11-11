@@ -345,9 +345,20 @@ itself mechanically verified and does not certify all SMT theories.
   sixteen-file regression passed 2,549 assertions and retained all 187 native
   verdicts. Static document checking exposed research aliases shadowing SDK
   provider identity, so those aliases were removed from import search.
-  Process inheritance, replay sort checks, handler observation reconstruction,
-  derived search/session migration and remaining production consumers are
+  Automatic process inheritance and remaining production consumers remain
   explicit next work. [SDK interface](SDK-INTERFACE.md)
+
+- Typed answers now bind the complete question using canonical data identity.
+  The SDK checks concrete assignment sorts, reconstructs handler observations,
+  rejects invalid phase/status combinations and preserves native observations
+  only for the effect-owned fallback reply. Derived procedures use logical
+  sessions before opening workers. Tracked context mutation refuses delegation;
+  authoritative native-owner accounting beyond cooperative session bookkeeping
+  remains ahead. The new file passes 134 assertions, the preceding public SDK
+  file passes 86 and twenty-two regression files pass 7,086. All 187 preceding
+  paired questions retain their identities and verdicts. Recursive FP equality
+  has three additional ground comparisons. Compiler authority stays disabled.
+  [Answer integrity](ANSWER-INTEGRITY.md)
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
