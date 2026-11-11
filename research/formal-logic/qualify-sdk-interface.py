@@ -65,6 +65,10 @@ require('36 cells, 35 cell errors' in (E / 'dossier-cells-1.txt').read_text()
         (E / 'dossier-cells-failed.bl.org').read_text(), 'retain the namespace shadow diagnosis')
 for canonical in (R / 'priv/lib/formal').glob('*.bl'):
     require(not (P / 'src/formal' / canonical.name).exists(), 'no SDK namespace alias in research import search')
+cache_checks = (E / 'dossier-cache-checks.txt').read_text()
+require('formal.review-cache-test  31 passed' in cache_checks
+        and '1 file(s) passed, 0 failed, 0 incoherent' in cache_checks,
+        'bounded view cache role, revision, failure and concurrency checks')
 matrices = {}
 for name in ('advanced', 'features', 'native'):
     current = read(E / 'regression' / (name + '.json'))
@@ -85,7 +89,8 @@ worker = R / 'research/oxiz-prototype/worker/target/release/formal-worker'
 library = sdk / 'image/priv/z3/bin/libz3.so'
 qualified = [R / name for name in matched['sha256']] + [P / name for name in
     ('SDK-INTERFACE.md', 'INTEGRATION.md', 'src/formal/api.bl', 'src/formal/contract.bl',
-     'src/formal/loop.bl', 'src/formal/translation.bl', 'src/formal/review-host.bl', 'qualify-sdk-interface.py')]
+     'src/formal/loop.bl', 'src/formal/translation.bl', 'src/formal/review-host.bl',
+     'src/formal/review-cache.bl', 'test/review_cache_test.bl', 'review', 'qualify-sdk-interface.py')]
 qualified += [R / 'test/bl/system/formal_oracle_test.bl']
 report = {
     'schema': 'enchant.formal.sdk-interface-qualification.v1', 'checkpoint': 28,
@@ -95,7 +100,7 @@ report = {
     'worker_sha256': sha(worker), 'z3_library_sha256': sha(library),
     'checks': {'focused_assertions': 86, 'regression_files': counts,
                'regression_assertions': sum(counts.values()), 'source_routing_files': routing_counts,
-               'source_routing_assertions': sum(routing_counts.values()), 'dossier_cells': 36, 'failed': 0},
+               'source_routing_assertions': sum(routing_counts.values()), 'dossier_cells': 36, 'view_cache_assertions': 31, 'failed': 0},
     'source_alias_migration': 'removed research symlinks from import search; sdk-src remains a declared browsing root',
     'matrices': matrices, 'paired_questions': 187,
     'static_document_initial_issue': 'research source symlinks shadowed packaged SDK declaration identity; aliases removed',
