@@ -90,18 +90,6 @@ BL_BOOTSTRAP_INSTALL=1 scripts/regenerate-seed
 ./bin/bl --cold seed --check
 ```
 
-Use a qualified immutable SDK as the recovery substrate when the checkout's
-build image is stale:
-
-```sh
-BL_REGEN_SDK=/nix/store/EXISTING-beam-lisp-sdk-selection \
-  BL_BOOTSTRAP_INSTALL=1 scripts/regenerate-seed
-```
-
-This selects its matching Elixir platform and dependencies in a bare VM.
-Regeneration writes the current target tree's floor. It uses the substrate
-directly, without acquiring the SDK launcher's application custody.
-
 The regenerator uses a bare, capped VM because an application VM already holds
 SDK custody. If the current image cannot load changed compiler sources, use a
 coherent older source image through `BL_REGEN_ROOT`. The regeneration workflow

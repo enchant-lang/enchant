@@ -6,8 +6,6 @@
 #   BL_REGEN_FROM_SCRATCH=1 ...   recompile every host (to CHECK a floor)
 #   BL_REGEN_ROOT=/other/tree scripts/regenerate-seed   run THIS tree's image,
 #       regenerate the floor for the other tree (recovery: see the doc)
-#   BL_REGEN_SDK=/nix/store/...-beam-lisp-sdk-selection ...
-#       use that coherent SDK substrate in a bare recovery VM
 #
 # WHY A BARE VM. `bl run scripts/regenerate-seed.bl` can never work: the launcher
 # takes an SDK/application lease before the script runs, and regeneration needs
@@ -27,49 +25,18 @@ if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
 fi
 mkdir -p "$OUT"
 
+EBIN=${BEAM_LISP_EBIN:-$ROOT/build}
+[ -d "$EBIN" ] || { echo "regenerate-seed: no build image at $EBIN; run ./bin/bl once first" >&2; exit 66; }
+IMAGE=$ROOT/.bl/lib/beam_lisp-0.1.0
+[ -e "$IMAGE/ebin" ] || { echo "regenerate-seed: no image links under $IMAGE; run ./bin/bl once first" >&2; exit 66; }
+
+# Library code path, computed exactly as bin/bl computes it.
 PA=""
-RECOVERY_ROOT=$ROOT
-if [ -n "${BL_REGEN_SDK:-}" ]; then
-  RECOVERY_SDK=$(readlink -f "$BL_REGEN_SDK")
-  PLATFORM=$(python3 - "$RECOVERY_SDK" <<'PY'
-import json, pathlib, re, sys
-p = pathlib.Path(sys.argv[1])
-assert re.fullmatch(r'/nix/store/[0-9a-z]{32}-[^/]+', str(p)), 'immutable SDK required'
-m = json.loads((p / 'artifact.json').read_text())
-assert (m['version'], m['kind']) == (1, 'sdk'), 'SDK descriptor required'
-platform = pathlib.Path(m['platform'])
-assert re.fullmatch(r'/nix/store/[0-9a-z]{32}-[^/]+', str(platform)), 'immutable platform required'
-assert (platform / 'bin/elixir').is_file() and (p / 'image/ebin/Elixir.BeamLisp.Env.beam').is_file()
-print(platform)
-PY
-  )
-  export PATH="$PLATFORM/bin:$PATH"
-  export BL_ARTIFACT_PLATFORM="$PLATFORM/artifact-platform"
-  BL_PREPARED_NATIVES=$(readlink -f "$PLATFORM/native-products")
-  export BL_PREPARED_NATIVES
-  export BL_BIN="$PLATFORM/bin/drop-launcher"
-  # Use the substrate directly. The public SDK launcher takes custody, which
-  # would make this fresh recovery VM ineligible to replace its compiler hosts.
-  unset BL_SDK_PRODUCT BL_PREPARATION_COORDINATOR
-  RECOVERY_ROOT=$RECOVERY_SDK/image
-  IMAGE=$RECOVERY_SDK/lib/beam_lisp-0.1.0
-  for d in "$RECOVERY_SDK"/lib/*/ebin; do
-    # The platform owns the actual Elixir CLI; an ebin-only portable copy must
-    # not shadow its matching scripts and running installation.
-    case "$d" in */elixir-*/ebin) continue ;; esac
-    [ -d "$d" ] && PA="$PA -pa $d"
-  done
-else
-  EBIN=${BEAM_LISP_EBIN:-$ROOT/build}
-  [ -d "$EBIN" ] || { echo "regenerate-seed: no build image at $EBIN; select BL_REGEN_SDK" >&2; exit 66; }
-  IMAGE=$ROOT/.bl/lib/beam_lisp-0.1.0
-  CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/beam_lisp/ebin
-  TAG=$(elixir -e 'IO.write("erts#{:erlang.system_info(:version)}-elixir#{System.version()}")')
-  for d in "$ROOT"/.bl/lib/*/ebin "$ROOT"/deps/*/ebin "$CACHE"/*-"$TAG"/ebin; do
-    [ -d "$d" ] && PA="$PA -pa $d"
-  done
-fi
-[ -e "$IMAGE/ebin" ] || { echo "regenerate-seed: no recovery image under $IMAGE" >&2; exit 66; }
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/beam_lisp/ebin
+TAG=$(elixir -e 'IO.write("erts#{:erlang.system_info(:version)}-elixir#{System.version()}")')
+for d in "$ROOT"/.bl/lib/*/ebin "$ROOT"/deps/*/ebin "$CACHE"/*-"$TAG"/ebin; do
+  [ -d "$d" ] && PA="$PA -pa $d"
+done
 PA="$PA -pa $IMAGE/ebin"
 
 N=$(nproc 2>/dev/null || echo 4)
@@ -88,8 +55,7 @@ EOF
 
 # The user service manager may not inherit setup-beam/asdf/Nix toolchains.
 # Preserve the caller's executable search path for both Elixir and its erl child.
-set -- env PATH="$PATH" BL_ROOT="$RECOVERY_ROOT" BL_REGEN_TARGET="$TARGET" BL_BOOTSTRAP_OUTPUT="$OUT" BL_DAEMON=off \
-  BL_ARTIFACT_PLATFORM="${BL_ARTIFACT_PLATFORM:-}" BL_PREPARED_NATIVES="${BL_PREPARED_NATIVES:-}" BL_BIN="${BL_BIN:-}" \
+set -- env PATH="$PATH" BL_ROOT="$ROOT" BL_REGEN_TARGET="$TARGET" BL_BOOTSTRAP_OUTPUT="$OUT" BL_DAEMON=off \
   BL_BOOTSTRAP_INSTALL="${BL_BOOTSTRAP_INSTALL:-}" BL_REGEN_FROM_SCRATCH="${BL_REGEN_FROM_SCRATCH:-}" \
   ELIXIR_ERL_OPTIONS="$ERL_OPTS" \
   elixir $PA "$DRIVER"
@@ -97,5 +63,5 @@ if command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >
   set -- systemd-run --user --collect --wait --pipe --quiet --working-directory="$ROOT" \
     --property=MemoryMax="${BL_REGEN_MEMORY_MAX:-8G}" --property=MemorySwapMax=1G "$@"
 fi
-echo "regenerate-seed: image $RECOVERY_ROOT, floor for $TARGET -> $OUT (${N} schedulers)" >&2
+echo "regenerate-seed: image $ROOT, floor for $TARGET -> $OUT (${N} schedulers)" >&2
 "$@"
