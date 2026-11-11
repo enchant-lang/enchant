@@ -117,6 +117,8 @@ for row in rows:
             and row['consistent'] and row['certificate'] == 'not-checked'
             and row['artifacts']['worker']['origin'] == 'sdk', 'actual default native temporal examples')
 require(len(example['laws']) == 3 and all(row['certificate'] == 'checked' for row in example['laws']), 'three portable law certificates')
+for name in ('uncertain', 'chronology'):
+    require(read(E / ('demo-' + name + '-result.json'))['exit_code'] == 0, 'actual public demo: ' + name)
 packets = read(E / 'law-packets.json')
 require(len(packets['rows']) == 3 and all(row['data-connection'] == 'checked-data-connection' for row in packets['rows']),
         'three original-term connections')

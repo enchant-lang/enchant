@@ -102,3 +102,29 @@ removed. Callers that need unresolved outcomes as data use `consistency-result`.
 The API checks satisfiability of the declared order. It does not compute a
 tightest-bound fixpoint, enumerate every schedule or authenticate the database
 history from which a caller extracted its bounds and edges.
+
+## Qualification
+
+The immutable SDK passes 2,373 focused assertions across 14 files and 7,086
+formal regression assertions across 22 files. The focused coverage uses the
+initial 13 passing files and a targeted rerun of the corrected temporal test;
+the first test-assumption failure is retained. All 187 preceding paired native
+questions keep their exact identities and solver/verdict statuses. An SDK-only
+program runs from an unrelated working directory, and a selected Source
+function calls both temporal backends.
+
+Three law certificates pass the portable checker and the pinned Lean
+original-term checker: intersection symmetry, preservation of duration under a
+shift, and set equality of empty spans at different coordinates. These are
+unbounded integer statements about their exact generated typed terms. Their
+Lean dependencies are `propext` and `Quot.sound`; compiler proof authority
+remains false. Connecting the temporal constructors and concrete BL operations
+to those term statements remains reviewed implementation reasoning.
+
+The first external symmetry check refused an incomplete connection proof. The
+untrusted proof writer now simplifies Boolean connective permutations before
+arithmetic closure. The original statements, normalized certificates, model
+and acceptance gates are unchanged. Its regression accepts 17 original-term
+proofs and rejects five altered originals across four tests. The initial
+refusal, actual commands and exact sources are retained under
+`evidence/temporal`; `qualification.json` binds the complete checkpoint.

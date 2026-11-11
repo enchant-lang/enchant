@@ -49,6 +49,13 @@ Its native-process and fault-peer evidence remains separate from genuine
 busy-solver cancellation and future pool admission. The selected SDK passes
 686 focused assertions and 7,086 formal assertions; all 187 paired question
 identities and native verdicts remain unchanged.
+[Temporal values and consumers](TEMPORAL.md) now expose symbolic integer spans,
+all thirteen Allen relations and complete overlap/chronology questions in the
+SDK. Both native engines replay concrete datings; three generated unbounded
+term laws have checked portable certificates and original-term Lean proofs.
+The temporal SDK passes 2,373 focused and 7,086 formal assertions. The reviewed
+semantics distinguish empty spans, endpoint equality, infeasible inputs and
+solver uncertainty. Full runtime correspondence remains ahead.
 
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,

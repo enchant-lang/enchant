@@ -30,6 +30,16 @@ focused assertions (183 in the new native lifetime file) and 7,086 regression
 assertions; all 187 paired question identities and native statuses remain
 unchanged. This qualification is separate from the packaged-worker checkpoint.
 
+[Temporal consumers](TEMPORAL.md) now construct portable integer questions.
+`formal.temporal` supplies semantic spans, endpoint ranges, shifts, duration,
+set predicates and thirteen Allen relations. `datom.time` asks both complete
+overlap possibilities and strict chronology questions through the common
+oracle method. Its strict `consistent?` predicate returns a Boolean when
+decided and raises on an unresolved answer; `consistency-result` retains that
+answer as data. The selected temporal SDK passes 2,373 focused assertions and
+7,086 formal assertions. Three exact generated term laws also pass the pinned
+original-term Lean checker. Constructor/runtime correspondence remains reviewed.
+
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,
 the remaining verifier consumers and the default pool still have migration
@@ -62,7 +72,7 @@ or test listed below has been rerun through the new interface.
 | Same file: `sufficient?`, `fireable?`, `guard-implies?`, `repair-transition`, `joint-fireable?`, `guard-implies-multi?`, `guards-overlap?` | SAT and UNSAT answers have different intended polarities | Replace each with `q/sat` or `q/prove` deliberately. `:sat` is a feasible witness, not automatically a refutation; `:unsat` is not universally a failed program |
 | `priv/lib/veritas.bl`: `try-symbolic`; `veritas/property.bl`: `prove` | Translated forms feed oracle; SAT models are converted to test inputs | Request descriptor observations, retain independent validation, and emit an executable counterexample only when decoding and replay cover the question's domain |
 | `priv/lib/veritas/mock.bl`: `synth`, `synth-invalid`, `synth-boundary`, `check`; `veritas/fault.bl`: `isolate` | Raw scalar model maps drive synthesis/mock data and fault explanations | Use `q/sat` with explicit domains/partiality, projection enumeration or finite optimization. Preserve absent/nil/default and representation limits instead of manufacturing a value from missing model fields |
-| `priv/lib/datom/time.bl`: `overlap-verdict`, `consistent?` | Oracle satisfiability decides overlap/missing intersections and temporal constraints | Build exact integer/order questions with `q/sat`; propagate unknown/unsupported rather than converting them to consistency or disjointness |
+| `priv/lib/datom/time.bl`: `overlap-questions`, `overlap-result`, `chronology-question`, `consistency-result`, strict predicates | Migrated to `formal.temporal` and complete `q/sat` questions, with replayed witnesses and preserved unresolved outcomes | Qualify additional calendar/recurrence interpretations and formal constructor/runtime correspondence; retain the declared integer model and input capacities |
 | `priv/lib/system/linear.bl`: `size-lemma`; `priv/std/reload/migrate.bl`: `verify-migration`/`z3/prove-equiv` call | Arithmetic obligations and raisedness/value equivalence use the legacy ABI | Construct `q/prove` or `q/equivalent`; include effects, definedness and resource assumptions in the descriptor and identity |
 | `priv/lib/z3.bl`: `check`, `check-model`, `prove-equiv`, `command`, `push`, `pop`, `check-here`, `check-assuming`, `check-core` | Script compatibility API, sometimes raw strings and low-level conversation effects | Keep this as an explicitly legacy escape hatch during transition. New common consumers receive queries, not arbitrary backend commands |
 | `priv/std/z3pool.bl` and `priv/host/z3_port.bl` | Lease registry, borrower custody, process lifetime, text framing and hard deadline | Preserve custody/backpressure/deadlines while replacing only the native transport implementation. The new owner is per session; a bounded reusable worker pool has not been implemented |
