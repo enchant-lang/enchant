@@ -288,6 +288,15 @@ itself mechanically verified and does not certify all SMT theories.
   35 files and matched all 187 earlier native verdicts. `CORE.md` describes
   the packet, checker and scope.
 
+- Checked Core contracts apply the original term entailment to the actual
+  outcome of a contained Core tree. Lean checks equality of the full
+  question after aligning the two input layouts. Eight composed theorems
+  cover scalar and record programs, return policies and named failures.
+  Six also prove existence of an admitted input. Fresh VM replay exposed
+  a dependency on set iteration order when a policy allowed multiple errors.
+  The canonical order now preserves the exact question across transfer.
+  [Core contract composition](CORE-CONTRACTS.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical
