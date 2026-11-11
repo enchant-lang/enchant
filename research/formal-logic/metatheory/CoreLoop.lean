@@ -71,12 +71,12 @@ theorem Layout.plug_reads (slots : Layout τ) (payload : Payload τ) (value : Va
     cases payload with
     | integer term =>
       refine ⟨fun n => ?_, matchInputs.2⟩
-      by_cases same : n = slot <;> simp [Layout.plug, Layout.put, same, matchInputs.1, Payload.eval] at known ⊢
+      by_cases same : n = slot <;> simp [Layout.plug, Layout.put, same, matchInputs.1, Payload.eval] at known ⊢ <;> assumption
   | bool slot =>
     cases payload with
     | boolean term =>
       refine ⟨matchInputs.1, fun n => ?_⟩
-      by_cases same : n = slot <;> simp [Layout.plug, Layout.put, same, matchInputs.2, Payload.eval] at known ⊢
+      by_cases same : n = slot <;> simp [Layout.plug, Layout.put, same, matchInputs.2, Payload.eval] at known ⊢ <;> assumption
   | unit => cases payload; exact matchInputs
   | pair left right leftIH rightIH =>
     cases payload with
@@ -84,7 +84,7 @@ theorem Layout.plug_reads (slots : Layout τ) (payload : Payload τ) (value : Va
       cases ha : a.eval current.ints current.bools <;> cases hb : b.eval current.ints current.bools <;>
         simp [Payload.eval, ha, hb] at known
       subst value
-      exact rightIH _ _ _ (leftIH _ _ _ matchInputs ha) hb
+      exact rightIH _ _ _ _ (leftIH _ _ _ _ matchInputs ha) hb
 
 theorem put_eval (slots : Layout τ) (payload : Payload τ) (value : Value τ) (input : Inputs)
     (known : payload.eval input.ints input.bools = some value) (term : Term sort) :
@@ -100,7 +100,10 @@ def all : List (Term .boolean) → Term .boolean
 private theorem and_true_iff (a b : Option Bool) :
     pAnd a b = some true ↔ a = some true ∧ b = some true := by
   cases a with
-  | none => cases b <;> simp [pAnd]
+  | none =>
+    cases b with
+    | none => rfl
+    | some flag => cases flag <;> decide
   | some flag => cases flag <;> simp
 
 theorem all_true_iff (terms : List (Term .boolean)) (input : Inputs) :
@@ -151,7 +154,7 @@ private theorem packed_values (data : StepTerms state result) (input : Inputs) (
     cases b : data.value.eval input.ints input.bools <;>
     cases c : data.next.eval input.ints input.bools <;> simp [StepTerms.pack, Payload.eval, a, b, c] at h
   subst value
-  exact ⟨a, b, c⟩
+  exact ⟨rfl, rfl, rfl⟩
 
 def Policy.good (p : Policy state result) (input : Inputs) : Prop :=
   p.pre.eval input.ints input.bools = some true ∧ p.inv.eval input.ints input.bools = some true
@@ -209,11 +212,11 @@ private theorem domain_values (p : Policy state result) (input : Inputs)
       p.secondRank.eval input.ints input.bools = some (p.rank input).2 ∧
       0 ≤ (p.rank input).1 ∧ 0 ≤ (p.rank input).2 := by
   have checks := (all_true_iff _ input).mp h
-  have hx := checks (.le (.int 0) p.firstRank) (by simp [Policy.domain])
-  have hy := checks (.le (.int 0) p.secondRank) (by simp [Policy.domain])
+  have hx := checks (.le (.int 0) p.firstRank) (by simp)
+  have hy := checks (.le (.int 0) p.secondRank) (by simp)
   cases x : p.firstRank.eval input.ints input.bools <;>
     cases y : p.secondRank.eval input.ints input.bools <;> simp [Term.eval.eq_11, Term.eval.eq_1, x, y] at hx hy
-  exact ⟨rfl, rfl, hx, hy⟩
+  simp [Policy.rank, x, y, hx, hy]
 
 private theorem checked_decrease (p : Policy state result) (r : Replacement) (current next : Inputs)
     (matching : reads r current next)
@@ -240,9 +243,108 @@ private theorem checked_terms (p : Policy state result) (initialOK : Term .boole
     · subst t; exact pre)
   simpa [Policy.question, both, Term.eval.eq_2, Term.eval.eq_16] using claim
 
+theorem checked_initial (p : Policy state result) (initializer : Expr context state)
+    (env : Inputs → Env context) (initialOK stepOK : Term .boolean) (start : Payload state)
+    (step : StepTerms state result) (error : Term .integer) (code : String → Int)
+    (checked : (p.question initialOK start stepOK step).entails) (input : Inputs)
+    (agreement : agrees (eval initializer (env input)) (initialOK.eval input.ints input.bools)
+      (start.eval input.ints input.bools) (error.eval input.ints input.bools) code)
+    (admitted : p.pre.eval input.ints input.bools = some true) :
+    ∃ next, initial initializer env p.stateSlots input = .ok next ∧ p.good next := by
+  have checks := checked_terms p initialOK start stepOK step checked input admitted
+  have ok := checks initialOK (by simp [Policy.checks])
+  cases evaluated : eval initializer (env input) with
+  | raised reason =>
+    rw [evaluated] at agreement
+    have failed := ((agrees_raised _ _ _ _ _).mp agreement).1
+    rw [failed] at ok
+    contradiction
+  | returned value =>
+    rw [evaluated] at agreement
+    have known := ((agrees_returned _ _ _ _ _).mp agreement).2.1
+    let r := p.stateSlots.plug start Replacement.identity
+    have pre := checks (replace r p.pre) (by simp [r, Policy.checks])
+    have inv := checks (replace r p.inv) (by simp [r, Policy.checks])
+    exact ⟨p.stateSlots.put value input, by simp [initial, evaluated],
+      (put_eval _ _ _ input known p.pre).symm ▸ pre,
+      (put_eval _ _ _ input known p.inv).symm ▸ inv⟩
+
+theorem checked_step (p : Policy state result) (controller : Expr context (StepSort state result))
+    (env : Inputs → Env context) (initialOK stepOK : Term .boolean) (start : Payload state)
+    (step : StepTerms state result) (error : Term .integer) (code : String → Int)
+    (checked : (p.question initialOK start stepOK step).entails) (input : Inputs)
+    (agreement : agrees (eval controller (env input)) (stepOK.eval input.ints input.bools)
+      (step.pack.eval input.ints input.bools) (error.eval input.ints input.bools) code)
+    (admitted : p.good input) :
+    (0 ≤ (p.rank input).1 ∧ 0 ≤ (p.rank input).2) ∧
+    admissibleStep (control controller env p.stateSlots) p.good p.rank p.resultHolds input := by
+  have checks := checked_terms p initialOK start stepOK step checked input admitted.1
+  have onInvariant := checks (.implies p.inv (all (p.stepChecks stepOK step))) (by simp [Policy.checks])
+  have obligations := (all_true_iff _ input).mp (apply_implication onInvariant admitted.2)
+  have ok := obligations stepOK (by simp [Policy.stepChecks])
+  have nonnegative := obligations p.domain (by simp [Policy.stepChecks])
+  refine ⟨(domain_values p input nonnegative).2.2, ?_⟩
+  cases evaluated : eval controller (env input) with
+  | raised reason =>
+    rw [evaluated] at agreement
+    have failed := ((agrees_raised _ _ _ _ _).mp agreement).1
+    rw [failed] at ok
+    contradiction
+  | returned packed =>
+    rw [evaluated] at agreement
+    have known := ((agrees_returned _ _ _ _ _).mp agreement).2.1
+    obtain ⟨flag, value, stateValue⟩ := packed_values step input packed known
+    cases branch : packed.1
+    · let r := p.resultSlot.plug step.value Replacement.identity
+      have exit := obligations (.implies (.not step.again) (replace r p.post)) (by simp [r, Policy.stepChecks])
+      have notAgain : (Term.not step.again).eval input.ints input.bools = some true := by
+        simp [Term.eval.eq_15, flag, branch]
+      have post := apply_implication exit notAgain
+      have actual := (put_eval _ _ _ input value p.post).symm ▸ post
+      simpa only [admissibleStep, control, evaluated, branch, Bool.false_eq_true, ↓reduceIte, Policy.resultHolds] using actual
+    · let r := p.stateSlots.plug step.next Replacement.identity
+      let next := p.stateSlots.put packed.2.2.1 input
+      let checks := [replace r p.pre, replace r p.inv, replace r p.domain, p.decrease r]
+      have edge := obligations (.implies step.again (all checks)) (by simp [r, checks, Policy.stepChecks])
+      have again : step.again.eval input.ints input.bools = some true := by rw [flag, branch]
+      have nextChecks := (all_true_iff checks input).mp (apply_implication edge again)
+      have matching : reads r input next :=
+        p.stateSlots.plug_reads step.next packed.2.2.1 input input _ ⟨fun _ => rfl, fun _ => rfl⟩ stateValue
+      have pre := nextChecks (replace r p.pre) (by simp [checks])
+      have inv := nextChecks (replace r p.inv) (by simp [checks])
+      have domain := nextChecks (replace r p.domain) (by simp [checks])
+      rw [replacement_eval _ _ _ matching] at pre inv domain
+      have dec := checked_decrease p r input next matching nonnegative domain
+        (nextChecks (p.decrease r) (by simp [checks]))
+      simpa only [admissibleStep, control, evaluated, branch, ↓reduceIte] using
+        (show p.good next ∧ decreases (p.rank next) (p.rank input) from ⟨⟨pre, inv⟩, dec⟩)
+
+theorem composed_loop (p : Policy state result)
+    (initializer : Expr context state) (controller : Expr context (StepSort state result))
+    (env : Inputs → Env context) (initialOK stepOK : Term .boolean) (start : Payload state)
+    (step : StepTerms state result) (initialError stepError : Term .integer) (initialCode stepCode : String → Int)
+    (initAgreement : ∀ input, agrees (eval initializer (env input)) (initialOK.eval input.ints input.bools)
+      (start.eval input.ints input.bools) (initialError.eval input.ints input.bools) initialCode)
+    (stepAgreement : ∀ input, agrees (eval controller (env input)) (stepOK.eval input.ints input.bools)
+      (step.pack.eval input.ints input.bools) (stepError.eval input.ints input.bools) stepCode)
+    (checked : (p.question initialOK start stepOK step).entails) :
+    ∀ input, p.pre.eval input.ints input.bools = some true →
+      ∃ first last result,
+        initial initializer env p.stateSlots input = .ok first ∧
+        Returns (control controller env p.stateSlots) first last result ∧ p.good last ∧ p.resultHolds last result := by
+  intro input admitted
+  obtain ⟨first, initialized, good⟩ := checked_initial p initializer env initialOK stepOK start step initialError
+    initialCode checked input (initAgreement input) admitted
+  have steps := fun input good => checked_step p controller env initialOK stepOK start step stepError
+    stepCode checked input (stepAgreement input) good
+  obtain ⟨last, result, path, exitGood, post⟩ := terminates (control controller env p.stateSlots)
+    p.good p.rank p.resultHolds (fun s h => (steps s h).2) (fun s h => (steps s h).1) first good
+  exact ⟨first, last, result, initialized, path, exitGood, post⟩
+
 #print axioms replacement_eval
 #print axioms Layout.plug_reads
 #print axioms put_eval
-#print axioms domain_values
-#print axioms checked_decrease
+#print axioms checked_initial
+#print axioms checked_step
+#print axioms composed_loop
 end CoreLoop
