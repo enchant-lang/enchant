@@ -313,6 +313,13 @@ itself mechanically verified and does not certify all SMT theories.
   The exported proof retains the original control and named predicates.
   [Core loop proofs](LOOPS.md)
 
+- Checked source-handler traces connect the exact Core handlers to safety
+  at every finite admitted prefix. The initiation proof establishes the
+  invariant. A per-handler proof checks normal return and preservation on
+  the actual returned state, under the original message assumptions. The
+  complete family and assumption ledger are retained in the proof packet.
+  [Core handler trace proofs](RECORD-HANDLERS.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

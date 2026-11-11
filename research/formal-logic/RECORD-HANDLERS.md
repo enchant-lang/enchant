@@ -135,15 +135,60 @@ core and compare its returned state or exact named failure with the term model.
 An induction countermodel is still `:obligation-refuted`; it need not be reachable
 from the stated initial state.
 
+## Check every admitted trace of the exact Core handlers
+
+`formal/core-actor-questions` returns an initiation question and one question
+for each original source handler. The initiation proof establishes the
+invariant from the initial predicate. A handler proof starts with the current
+invariant and the original message assumptions. It proves normal return and
+the invariant on the state returned by the exact Core handler.
+
+```clojure
+(def plan (formal/core-actor-questions definition))
+(def certificates
+ (into {} (map (fn [row] [(:id row) (:certificate (formal/certify (:problem row)))])
+               (:rows plan))))
+(def exported (formal/core-actor-data definition certificates))
+(formal/check-core-actor-data definition certificates (:packet exported))
+```
+
+The packet names the entire ordered handler family. It retains their Core
+trees, actual symbolic outcomes, admission predicates and checked term
+evidence. Fresh Beam Lisp preparation checks coverage against the original
+source subject. Export the packet with `interop/->json` and check it with the
+pinned Lean runner.
+
+```sh
+research/formal-logic/check-core-actor \
+  research/formal-logic/evidence/core-actors/examples/bank.json \
+  --output /tmp/enchant-core-actor
+```
+
+The runner independently decodes each premise. It compiles them together in
+namespaces within one Lean module so internal equation lemmas can be shared.
+The final proof checks that each term question matches the exact handler,
+state layout and admission predicate. It uses the returned state fields
+when applying the invariant and checks that the invariant reads only state
+slots.
+
+The composed theorem covers every finite admitted event sequence, including
+stutters, starting at any state satisfying the initial predicate. It proves
+that the invariant holds at each prefix and that no handler raises on such a
+trace. The trace semantics records a raised name and retains the old state
+on a failing attempt, with only stuttering available afterwards. A message
+outside its declared assumptions is outside the trace's admission relation.
+The proof is conditional on the initial predicate. The existing initial-state
+witness interface checks its feasibility separately.
+
 ## What the connection still needs
 
 `Core.lean` adds Unit and finite products to the typed mathematical evaluator.
 Twelve additional laws cover recursive value equality, ordered construction,
 hidden-field failures, eager defaults and updates preserving failures/other
-fields. Structural recursion still checks the evaluator's termination. The
-named-field layout and construction-order translation to those products is not
-proved. Neither is correspondence with BL's core interpreter, symbolic lowerer,
-ANF extraction, certificate checker or runtime.
+fields. Structural recursion checks the evaluator's termination. The
+composed trace theorem checks the contained Core trees and their exact
+symbolic outcomes. The named-data codecs, ANF extraction and Beam Lisp
+runtime correspondence retain their separate trust boundaries.
 
 This handler path executes no live actor. Mailbox order, selective receive,
 sending, crashes, persistence, scheduling, fairness and progress remain outside

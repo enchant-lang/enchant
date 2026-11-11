@@ -1,7 +1,7 @@
 #+title: Beam Lisp, with reasons you can inspect
 #+subtitle: One language for programs, contracts and the evidence behind them.
 #+kicker: ENCHANT · FORMAL LOGIC LAB
-#+status: Autonomous implementation on main · checked contracts, translations and ranked loops on exact Core outcomes · Source, compiler and wider model connections remain active
+#+status: Autonomous implementation on main · checked contracts, translations, ranked loops and handler traces · Source, compiler and wider model connections remain active
 #+design: forest
 #+TODO: TODO NEXT DOING WAIT REVIEW | DONE DROP
 
@@ -1105,6 +1105,50 @@ The whole-controller proof can refuse a question containing undefined arithmetic
 
 Read [[file:LOOPS.md][the ranked loop interface]], [[file:src/formal/core-loops.bl][the exact term export]], [[file:metatheory/CoreLoop.lean][the checked term connection]], [[file:metatheory/LoopTotal.lean][the evaluator and finite return proof]], [[file:evidence/core-loops/execution/countdown/CoreLoopCheck.lean][the applied countdown theorem]], [[file:evidence/core-loops/execution/accepted.json][the accepted proofs and axiom audits]], [[file:evidence/core-loops/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-loops/fresh/core-loops-fresh.json][the fresh reconstruction]], and [[file:evidence/core-loops/qualification.json][the qualification]].
 
+** Keep the actor invariant across every admitted event
+A bank starts with a zero balance. A deposit or withdrawal must keep the balance nonnegative and equal to credits minus debits. The handler for an oversized withdrawal returns the old state. A negative amount falls outside the declared message assumptions.
+
+Lean checks what each exact Core handler does on every admitted message. It then proves that the invariant holds at every finite trace prefix. The proof includes idle events and uses no fixed trace length.
+
+#+begin_rosetta
+An event in the model | What the trace records
+A deposit of ten | The handler returns a new state with ten more in both balance and credits.
+A withdrawal beyond the balance | The handler returns the old state. The invariant still holds.
+A message outside its assumptions | Admission excludes that event from the modeled trace.
+A handler raises | The state stays unchanged and the trace records the named failure. Only idle events can follow it.
+#+end_rosetta
+
+#+begin_code_graph :id formal-core-actor-composition :title "Follow the proof across the whole handler family" :start initial
+node initial | code | Start in the invariant | observed
+summary The exact initiation question applies the original initial predicate and state invariant. The theorem starts with any admitted initial state.
+source research/formal-logic/src/formal/core-actors.bl | Initiation and handler term export | The packet binds the complete ordered handler family.
+node admission | code | Keep each message rule attached | observed
+summary Each handler's question retains the original admission predicate. The handler's typed state slots are shared, and its message slots are local to that handler.
+source research/formal-logic/evidence/core-actors/execution/bank/CoreActorCheck.lean | Applied bank trace theorem | Checks the exact initiation and every handler question.
+node outcome | code | Check the state the handler returns | observed
+summary Lean applies the invariant to the actual returned fields. It also checks that the invariant reads only state slots.
+field Core program | Each handler proof uses the checked outcome of the exact Core program the trace executes.
+source research/formal-logic/evidence/core-actors/execution/bank/premises/ActorPremises.lean | Freshly compiled premise proofs | The complete family is checked together with separate namespaces.
+node trace | code | Carry safety through every event | observed
+summary Induction covers every finite admitted trace. Every prefix keeps the invariant and remains free of handler failure.
+source research/formal-logic/metatheory/ActorTrace.lean | Trace, failure and safety rules | A failed attempt retains the exact named error, and only stuttering follows it.
+node changed | code | Refuse widened admission | observed
+summary A widened message predicate or changed invariant makes the final exact-question check fail, even when the original premises still check.
+source research/formal-logic/evidence/core-actors/execution/rejected.json | Rejected proof substitutions | The original proof belongs to its original conditions.
+edge initial -> admission | use the current invariant
+edge admission -> outcome | check the exact handler attempt
+edge outcome -> trace | carry the result to the next event
+edge trace -> changed | test the full statement
+#+end_code_graph
+
+#+begin_note :title "Where the trace lives"
+The proof evaluates the contained Core handlers and uses the declared event relation. Source extraction and correspondence with a live BEAM actor remain open. The initial predicate can be checked separately for feasibility.
+#+end_note
+
+The [[#cell-story-core-actor-composition][executable bank example]] deposits ten, withdraws three, then leaves the balance at seven after an oversized withdrawal and a stutter.
+
+Read [[file:RECORD-HANDLERS.md][the source handler interface]], [[file:src/formal/core-actors.bl][the exact question and packet builder]], [[file:metatheory/ActorTrace.lean][the checked trace rules]], [[file:evidence/core-actors/execution/bank/CoreActorCheck.lean][the applied bank theorem]], [[file:evidence/core-actors/execution/bank/premises/ActorPremises.lean][its premise proofs]], [[file:evidence/core-actors/execution/accepted.json][the results and axiom audits]], [[file:evidence/core-actors/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-actors/fresh/core-actors-fresh.json][the fresh reconstruction]], and [[file:evidence/core-actors/qualification.json][the qualification]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1536,7 +1580,7 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.api :as formal] [formal.core :as core] [formal.identity :as data-identity]
            [formal.core-symbolic :as core-symbolic] [formal.elaborate :as elaborate] [compiler :as compiler] [system.ir :as ir]
            [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]
-           [formal.loop-core :as loop-core]))
+           [formal.loop-core :as loop-core] [formal.core-actor-examples :as actors]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2270,6 +2314,21 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-core-loop-composition
 : {:kernel-execution :not-run, :data-connection :checked-data-connection, :sample-input 4, :sample-result 4, :sample-backedges 4}
 
+
+
+#+begin_src beam-lisp :id story-core-actor-composition
+(def bank-actor (actors/bank))
+(def bank-certificates (actors/certificates bank-actor))
+(def bank-packet (:packet (formal/core-actor-data bank-actor bank-certificates)))
+(def bank-proof-check (formal/check-core-actor-data bank-actor bank-certificates bank-packet))
+(def bank-trace (formal/replay-source-protocol-trace bank-actor actors/bank-initial actors/bank-events))
+(assert (= :checked-data-connection (:status bank-proof-check)))
+(assert (= :holds (:safety bank-trace)))
+(assert (= 7 (get-in bank-trace [:state "balance"])))
+{:sample-balance (get-in bank-trace [:state "balance"]) :sample-safety (:safety bank-trace)
+ :handler-count (count (:handlers bank-packet)) :events (:events bank-trace)
+ :data-connection (:status bank-proof-check) :kernel-execution (:kernel-execution bank-proof-check)}
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity
