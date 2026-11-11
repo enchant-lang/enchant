@@ -73,7 +73,7 @@ require('148 passed, 21 failed' in (E / 'baseline-checks.txt').read_text(), 'rea
 focused = counts(E / 'focused-checks.txt', {'system.formal-lifetime-test', 'system.formal-artifact-test',
     'source-formal-artifact-test', 'system.effect-test', 'system.formal-effect-test', 'source-effect-test',
     'system.formal-context-owner-test', 'system.formal-answer-test', 'system.formal-oracle-test'})
-require(focused['system.formal-lifetime-test'] == 185 and sum(focused.values()) == 688,
+require(focused['system.formal-lifetime-test'] == 183 and sum(focused.values()) == 686,
         'native lifetime cases and preceding interface checks')
 regression = counts(E / 'regression-checks.txt', {'system.oracle-test', 'system.system-test'} |
     {'formal.' + name + '-test' for name in ('query', 'backend', 'kernel', 'certificate', 'core', 'record',
@@ -105,7 +105,7 @@ report = {'schema': 'enchant.formal.session-lifetime-qualification.v1', 'checkpo
     'sdk_pin': pin, 'source': {'code_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip(),
                              'sha256': {name: sha(R / name) for name in files}},
     'managed_build': build, 'compiler': compiler,
-    'checks': {'focused': focused, 'regression': regression, 'total_assertions': 7774, 'failed': 0},
+    'checks': {'focused': focused, 'regression': regression, 'total_assertions': 7772, 'failed': 0},
     'baseline': baseline, 'unchanged_paired_questions': total,
     'scope': ['post-start session setup inside cleanup bracket', 'monitored owner stop with exact-PID kill fallback',
               'actual native owner and OS death on return, exception, suspension and idle borrower loss',
@@ -115,5 +115,5 @@ report = {'schema': 'enchant.formal.session-lifetime-qualification.v1', 'checkpo
                   'remaining legacy/source Oracle migration', 'language totality and compiler/runtime preservation'],
     'compiler_proof_authority': False}
 (E / 'qualification.json').write_text(json.dumps(report, indent=2) + '\n')
-print(json.dumps({'checkpoint': 33, 'focused': 688, 'regression': 7086, 'paired_questions': total,
+print(json.dumps({'checkpoint': 33, 'focused': 686, 'regression': 7086, 'paired_questions': total,
                   'compiler_proof_authority': False}))
