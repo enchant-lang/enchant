@@ -480,9 +480,14 @@ both state-model and handler-core replay. Its focused run passed 762 assertions
 and the separate mathematical model now checks 46 theorems, including explicit
 handler simulation premises. `BOUNDED-TRACES.md` records the connection.
 
-The design below led to those implementations. Next define explicit live actor
-observations and refinement. Neither source
-extraction nor a finite trace establishes mailbox, scheduling or progress laws.
+The owned sequential adapter now records actual executions under an immutable
+SDK. A complete conforming receipt can be connected to a Lean trace witness
+for every recorded prefix of the exact Core handlers. The optional link to
+the all-traces theorem applies that theorem at those same prefixes. A
+conforming receipt can also establish a concrete unsafe prefix. See
+`RUNTIME-OBSERVATIONS.md` for the two checker interfaces and custody boundary.
+Universal implementation refinement, mailbox, scheduling and progress laws
+remain open.
 
 Prioritize an actual source-backed handler path after the bounded witness
 connection. A handler should consume declared state/message records and return

@@ -158,3 +158,52 @@ Implementation: `src/formal/runtime-{artifact,outcome,actor,protocol}.bl`.
 Focused checks: `test/runtime_protocol_test.bl`. Executable examples:
 `runtime-check.bl`; fresh-VM record validation: `runtime-recheck.bl`. Qualification
 and raw observations live in `evidence/actor-runtime/`.
+
+## Check the recorded prefixes in Lean
+
+The finite bridge has two checks. Run the first against the original source
+protocol and the complete receipt.
+
+```beam-lisp
+(def recorded (formal/observe-protocol-trace definition initial events))
+(def receipt (:receipt recorded))
+(def packet (:packet (formal/core-actor-observation-data definition receipt)))
+(formal/check-core-actor-observation-data definition receipt packet)
+```
+
+The export requires `:conforming`. BL reconstructs the source model and
+recompiles the recorded manifests into bytes during validation. This path
+does not load a handler or send messages to an actor. The sealed packet
+carries the exact Core model, receipt and artifact identities, and every
+recorded state, message and projected outcome. Record fields are ordered
+name/value pairs with their scalar kinds fixed by the Core declarations.
+
+Write the packet as JSON using `interop/->json` for the second check.
+
+```sh
+research/formal-logic/check-core-observation run.json --output check/
+research/formal-logic/check-core-observation run.json --safety actor-proof.json --output linked/
+```
+
+The independent bridge decodes the exact programs, admission predicates and
+observed values into typed Lean declarations. Lean checks initiation, each
+recorded step and a trace proof for every prefix. A step checks admission
+and the exact handler outcome. Lean also checks that the handler's typed
+environment reads the actual recorded message record. A raise preserves the prior state and records
+`:zero-divisor` under the current projection. Idle frames preserve the whole
+configuration, including that failure. The independent checker can establish
+an unsafe prefix even when the final state satisfies the invariant.
+
+`--safety` accepts an exact `formal/core-actor-data` packet for the same model.
+It checks the universal proof afresh, then applies it to every recorded prefix.
+The result includes the imported proof's identity and the axiom audit for
+each application. The standalone path needs no proof search or solver.
+
+The finite receipt cap still applies. The Core theorem proves a claim about
+the projected values. Fresh BL reconstruction binds those values to the
+original receipt. An observer who can supply a receipt is still trusted to
+report the run faithfully. This bridge has no cryptographic execution
+attestation and establishes no universal BEAM refinement.
+
+The seven real receipts, exact Lean proofs, fresh reconstruction and rejected
+substitutions are indexed by `evidence/core-observations/qualification.json`.

@@ -1,7 +1,7 @@
 #+title: Beam Lisp, with reasons you can inspect
 #+subtitle: One language for programs, contracts and the evidence behind them.
 #+kicker: ENCHANT · FORMAL LOGIC LAB
-#+status: Autonomous implementation on main · checked contracts, translations, ranked loops and handler traces · Source, compiler and wider model connections remain active
+#+status: Autonomous implementation on main · checked contracts, translations, ranked loops and recorded actor traces · compiler and wider runtime connections remain active
 #+design: forest
 #+TODO: TODO NEXT DOING WAIT REVIEW | DONE DROP
 
@@ -1149,6 +1149,44 @@ The [[#cell-story-core-actor-composition][executable bank example]] deposits ten
 
 Read [[file:RECORD-HANDLERS.md][the source handler interface]], [[file:src/formal/core-actors.bl][the exact question and packet builder]], [[file:metatheory/ActorTrace.lean][the checked trace rules]], [[file:evidence/core-actors/execution/bank/CoreActorCheck.lean][the applied bank theorem]], [[file:evidence/core-actors/execution/bank/premises/ActorPremises.lean][its premise proofs]], [[file:evidence/core-actors/execution/accepted.json][the results and axiom audits]], [[file:evidence/core-actors/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-actors/fresh/core-actors-fresh.json][the fresh reconstruction]], and [[file:evidence/core-actors/qualification.json][the qualification]].
 
+** Follow one recorded actor run into Core
+The bank example also runs in an owned BEAM actor. It records the starting balance, the messages actually delivered and the state each handler returns. The independent checker takes that recording and proves that each prefix is a trace of the exact Core handlers. The bank's all-traces theorem then applies to each of those prefixes.
+
+#+begin_rosetta
+What happened in the run | What the independent checker can establish
+The bank reaches a balance of seven | The starting state and all four events agree with the exact Core trace, including the idle event.
+The divisor is zero | The named failure retains the previous state. An idle event can follow it and keeps that failure recorded.
+A handler writes a negative value and later restores it | The first bad prefix violates the invariant. The later repair leaves that earlier violation in the trace.
+#+end_rosetta
+
+#+begin_code_graph :id formal-recorded-core-trace :title "Follow the evidence from the actor to the theorem" :start receipt
+node receipt | code | Keep the original recording | observed
+summary The owned adapter records the returned states, named failure evidence and exact emitted BEAM artifacts.
+source research/formal-logic/RUNTIME-OBSERVATIONS.md | Adapter and receipt | The adapter covers one owned sequential run.
+node bind | code | Reconnect it to the source | observed
+summary Beam Lisp reconstructs the model and artifact manifests from the source and checks the exact receipt projection.
+source research/formal-logic/src/formal/core-observations.bl | Term-native observation packet | The recorded values stay ordinary Beam Lisp data.
+node prefix | code | Check each observed prefix | observed
+summary Lean checks the initial state, admission, each actual return or named raise, and the recorded state after every event.
+source research/formal-logic/evidence/core-observations/execution/bank/CoreObservedTrace.lean | Concrete bank trace proofs | Every prefix has its own checked trace theorem.
+node apply | code | Apply the bank's general proof | observed
+summary The checker freshly imports the all-traces proof for the same exact bank model and applies it to every recorded prefix.
+source research/formal-logic/evidence/core-observations/execution/bank-linked/CoreObservedTrace.lean | Linked bank proof | Each application records its axiom dependencies.
+node bad | code | Keep a bad prefix visible | observed
+summary The unsafe return and the named division failure both have valid traces and a checked unsafe prefix.
+source research/formal-logic/evidence/core-observations/execution/accepted.json | Accepted traces and safety results | A trace can be faithful and unsafe.
+edge receipt -> bind | check the recording against its subject
+edge bind -> prefix | prove the concrete steps
+edge prefix -> apply | use the universal theorem
+edge prefix -> bad | locate the violated promise
+#+end_code_graph
+
+#+begin_note :title "What the recording can tell us"
+The proof is about the recorded values in the exact Core model. Beam Lisp checks their connection to the supplied receipt, and the observer is trusted to report the execution faithfully. Proving that the compiler and scheduler always produce these traces is a separate obligation.
+#+end_note
+
+The [[#cell-story-core-observation][executable example]] observes the bank, checks its receipt against the source model and reads the projected balances. The [[file:evidence/core-observations/execution/accepted.json][independent results]] include seven recorded runs and the bank's linked proof. See [[file:evidence/core-observations/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-observations/fresh/core-observations-fresh.json][the fresh reconstruction]] and [[file:evidence/core-observations/qualification.json][the qualification]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1580,7 +1618,8 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.api :as formal] [formal.core :as core] [formal.identity :as data-identity]
            [formal.core-symbolic :as core-symbolic] [formal.elaborate :as elaborate] [compiler :as compiler] [system.ir :as ir]
            [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]
-           [formal.loop-core :as loop-core] [formal.core-actor-examples :as actors]))
+           [formal.loop-core :as loop-core] [formal.core-actor-examples :as actors]
+           [formal.core-observation-examples :as observed-actors]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2331,6 +2370,22 @@ These cells execute the actual shared interface. Their stored results are writte
 #+end_src
 #+RESULTS: story-core-actor-composition
 : {:events 4, :kernel-execution :not-run, :data-connection :checked-data-connection, :sample-balance 7, :sample-safety :holds, :handler-count 2}
+
+
+
+#+begin_src beam-lisp :id story-core-observation
+(def recorded-bank (observed-actors/bank))
+(def bank-receipt (:receipt recorded-bank))
+(def bank-observation (:packet (formal/core-actor-observation-data bank-actor bank-receipt)))
+(def bank-observation-check (formal/check-core-actor-observation-data bank-actor bank-receipt bank-observation))
+(def observed-balances (mapv #(get (into {} (:state %)) "balance") (:frames bank-observation)))
+(assert (= :observed (:status recorded-bank)))
+(assert (= :checked-data-connection (:status bank-observation-check)))
+(assert (= [0 10 7 7 7] observed-balances))
+{:balances observed-balances :recorded-prefixes (count observed-balances)
+ :adapter-conformance (get-in recorded-bank [:checking :status])
+ :data-connection (:status bank-observation-check) :kernel-execution (:kernel-execution bank-observation-check)}
+#+end_src
 
 
 

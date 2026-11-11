@@ -243,6 +243,21 @@ try{
   check(size.name+': bank cell replays four events and checks both handler packets',bank.includes(':sample-balance 7')&&bank.includes(':sample-safety :holds')&&bank.includes(':handler-count 2')&&bank.includes(':events 4')&&bank.includes(':data-connection :checked-data-connection')&&bank.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-actor-composition').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-actor-data');
+  await navigate('/#follow-one-recorded-actor-run-into-core');
+  check(size.name+': recorded trace explains both the repaired state and the observer boundary',await evaluate("document.body.innerText.includes('The first bad prefix violates the invariant')&&document.body.innerText.includes('the observer is trusted to report the execution faithfully')"));
+  await click('[data-graph="formal-recorded-core-trace"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="apply"]');
+  check(size.name+': recorded trace panel applies the exact matching theorem to every prefix',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-recorded-core-trace\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('same exact bank model')&&text.includes('applies it to every recorded prefix')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Follow one recorded actor run into Core')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-core-observation');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-recorded-core-trace\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-core-observation-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const recording=await evaluate("document.querySelector('#cell-story-core-observation')?.innerText||''");
+  check(size.name+': bank observation cell checks the five recorded states',recording.includes(':balances [0 10 7 7 7]')&&recording.includes(':recorded-prefixes 5')&&recording.includes(':adapter-conformance :conforming')&&recording.includes(':data-connection :checked-data-connection')&&recording.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-core-observation').scrollIntoView({block:'center'})");
+  await shot(size.name+'-core-observation-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -485,6 +500,20 @@ try{
  check('Every original actor subject reconnects after transfer',freshActors.rows.length===6&&freshActors.rows.every(row=>row.status==='checked-data-connection'&&row['changed-initial']==='rejected'));
  check('Trusted Core actor archive stays unavailable to the browser',(await fetch(base+'/evidence/core-actors/examples/core-actors.etf')).status===404);
  check('Compiled Core actor proof stays unavailable to the browser',(await fetch(base+'/evidence/core-actors/execution/bank/CoreActorCheck.olean')).status===404);
+ for(const path of ['/RUNTIME-OBSERVATIONS.md','/src/formal/core-observations.bl','/evidence/core-observations/execution/bank/CoreObservedTrace.lean','/evidence/core-observations/execution/bank-linked/CoreObservedTrace.lean','/evidence/core-observations/execution/accepted.json','/evidence/core-observations/execution/rejected.json','/evidence/core-observations/fresh/core-observations-fresh.json','/evidence/core-observations/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared recorded Core trace evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const observed=await fetch(base+'/evidence/core-observations/execution/accepted.json').then(response=>response.json());
+ const byId=Object.fromEntries(observed.map(row=>[row.id,row]));
+ check('Seven recorded runs and the linked bank theorem have exact Core witnesses',observed.length===8&&observed.every(row=>row.status==='checked-recorded-core-trace'&&row.checked_prefixes===row.events+1&&row.execution_authenticity==='observer-trusted')&&byId['full-idle'].checked_prefixes===65&&byId['bank-linked'].all_traces_safety_packet&&byId['bank-linked'].axioms['CoreObservedTrace.recordedSafe4']);
+ check('Faithful traces retain two different forms of unsafe prefix',byId.failure.recorded_safety==='unsafe'&&byId.failure.first_failure_at===2&&byId['unsafe-return'].first_invariant_violation_at===1);
+ const rejectedObservations=await fetch(base+'/evidence/core-observations/execution/rejected.json').then(response=>response.json());
+ check('Seven resealed false step and invariant claims fail in Lean',rejectedObservations.length===7&&rejectedObservations.every(row=>row.status==='not-accepted-by-Lean'));
+ const freshObservations=await fetch(base+'/evidence/core-observations/fresh/core-observations-fresh.json').then(response=>response.json());
+ check('All receipts reconnect after transfer and reject a changed receipt identity',freshObservations.rows.length===7&&freshObservations.rows.every(row=>row.status==='checked-data-connection'&&row['changed-receipt']==='rejected'));
+ check('Trusted observation archive stays unavailable to the browser',(await fetch(base+'/evidence/core-observations/examples/core-observations.etf')).status===404);
+ check('Compiled observation proof stays unavailable to the browser',(await fetch(base+'/evidence/core-observations/execution/bank/CoreObservedTrace.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
