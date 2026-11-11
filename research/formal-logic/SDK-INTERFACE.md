@@ -4,7 +4,8 @@ The public SDK interface passed 86 focused assertions and a 16-file regression
 with 2,549 assertions in this checkout. The 187 paired theory questions retain
 their preceding canonical identities and native verdicts. The portable
 term, question, proof and state-model implementations now live under
-`priv/lib/formal`. Research import paths point to those canonical sources.
+`priv/lib/formal`. Research imports resolve these namespaces from the selected SDK. Readable source
+links live outside the research import root, under `sdk-src`.
 The native worker remains an explicitly configured artifact.
 
 ## Ask through a standard consumer
@@ -104,3 +105,10 @@ steps; the focused SDK tests do not establish their handler behavior.
 
 Exact artifacts, source hashes and retained failed-run evidence are in
 `evidence/sdk-interface/qualification.json`.
+
+The first document-cell qualification exposed a source-selection conflict:
+research symlinks inside the import root shadowed SDK namespaces. Ordinary
+tests loaded the equal source bytes, while static declaration checking refused
+the conflicting provider identity. Those aliases were removed from the import
+root. The `sdk-src` link is for authored source browsing, outside import search.
+The immutable SDK and its declaration checks remain unchanged.
