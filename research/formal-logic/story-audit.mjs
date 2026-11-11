@@ -486,6 +486,31 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#a-function-can-explain-its-failing-example');
+  check(size.name+': source property chapter explains exact ANF replay',await evaluate("document.body.innerText.includes('runs that exact representation')&&document.body.innerText.includes('an unused output cannot hide a crash')"));
+  await evaluate("document.querySelector('#a-function-can-explain-its-failing-example').scrollIntoView({block:'start'})");
+  await shot(size.name+'-source-properties');
+  await click('[data-graph="formal-source-properties"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="replay"]');
+  check(size.name+': source panel distinguishes execution agreement and a candidate',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-source-properties\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('same compiler ANF')&&t.includes('remain a candidate')})()"));
+  await evaluate("document.querySelector('[data-graph=\"formal-source-properties\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+  await shot(size.name+'-source-replay-panel');
+  if(size.name==='desktop'){
+    await click('#theme');
+    await click('[data-graph="formal-source-properties"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="proof"]');
+    await evaluate("document.querySelector('[data-graph=\"formal-source-properties\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-source-proof-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-source-properties','story-source-property-outcomes','story-source-property-proof']){
+    const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+    check(size.name+': visible executed source result '+id,t.length>100);
+    if(id==='story-source-properties')check(size.name+': paired claims retain unchecked certificates and both replays',t.includes(':law [:solver-claim :solver-claim]')&&t.includes(':native-certificate [:not-checked :not-checked]')&&t.includes(':failing-inputs [-2 -2]')&&t.includes(':actual-results [0 0]')&&t.includes(':runtime-replay [:reproduced :reproduced]')&&t.includes(':term-replay [:valid :valid]')&&t.includes(':same-complete-question true'));
+    if(id==='story-source-property-outcomes')check(size.name+': source failures and inconclusive answers have distinct meanings',t.includes(':target-crash [:raised :raised]')&&t.includes(':empty-domain [:vacuous :vacuous]')&&t.includes(':unsupported :unsupported')&&t.includes(':explicit-sample :witnessed')&&t.includes(':unknown :unknown')&&t.includes(':unknown-engine :terms'));
+    if(id==='story-source-property-proof')check(size.name+': checked term proof retains reviewed runtime correspondence',t.includes(':term-certificate :checked')&&t.includes(':term-claim :entails')&&t.includes(':source-connection :reviewed')&&t.includes(':runtime-correspondence :reviewed-implementation')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -601,7 +626,7 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared actual-runtime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
- for(const path of ['/INTRINSICS.md','/src/formal/intrinsics.bl','/src/formal/elaborate.bl','/test/intrinsics_test.bl','/evidence/intrinsics/intrinsics-probe.json','/evidence/intrinsics/checks.txt','/evidence/intrinsics/fresh-replay.json','/evidence/intrinsics/qualification.json']){
+ for(const path of ['/INTRINSICS.md','/sdk-src/formal/intrinsics.bl','/src/formal/elaborate.bl','/test/intrinsics_test.bl','/evidence/intrinsics/intrinsics-probe.json','/evidence/intrinsics/checks.txt','/evidence/intrinsics/fresh-replay.json','/evidence/intrinsics/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared callee-identity evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
@@ -609,7 +634,7 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared binding/identity evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
- for(const path of ['/SELECTED-SOURCE.md','/src/formal/selected.bl','/src/formal/source.bl','/test/selected_test.bl','/test/source_test.bl','/evidence/source-selection/checks.txt','/evidence/source-selection/selected-third-check.txt','/evidence/source-selection/examples/selected-examples.json','/evidence/source-selection/fresh/selected-fresh-replay.json','/evidence/source-selection/qualification.json']){
+ for(const path of ['/SELECTED-SOURCE.md','/src/formal/selected.bl','/sdk-src/formal/source.bl','/test/selected_test.bl','/test/source_test.bl','/evidence/source-selection/checks.txt','/evidence/source-selection/selected-third-check.txt','/evidence/source-selection/examples/selected-examples.json','/evidence/source-selection/fresh/selected-fresh-replay.json','/evidence/source-selection/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared selected Source evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
@@ -785,7 +810,7 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared elaboration evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
- for(const path of ['/HYGIENE.md','/src/formal/anf-inputs.bl','/test/hygiene_test.bl','/hygiene-check.bl','/evidence/hygiene/baseline/probe.json','/evidence/hygiene/repaired/hygiene.json','/evidence/hygiene/checks.txt','/evidence/hygiene/qualification.json']){
+ for(const path of ['/HYGIENE.md','/sdk-src/formal/anf-inputs.bl','/test/hygiene_test.bl','/hygiene-check.bl','/evidence/hygiene/baseline/probe.json','/evidence/hygiene/repaired/hygiene.json','/evidence/hygiene/checks.txt','/evidence/hygiene/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared hygiene evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
@@ -804,6 +829,10 @@ try{
  for(const path of ['/TEMPORAL.md','/sdk-src/formal/temporal.bl','/temporal-check.bl','/temporal-laws-export.bl','/sdk-examples/datom/time/07-uncertain.bl','/sdk-examples/datom/time/08-chronolog.bl','/evidence/temporal/examples.json','/evidence/temporal/focused-temporal-checks.txt','/evidence/temporal/law-execution/intersection-symmetry/Check.lean','/evidence/temporal/law-execution/shift-preserves-duration/Check.lean','/evidence/temporal/law-execution/empty-spans-same-points/Check.lean','/evidence/temporal/law-execution/accepted.json','/evidence/temporal/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared temporal source or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared source-property interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  check('Trusted temporal law archive stays unavailable to the browser',(await fetch(base+'/evidence/temporal/laws.etf')).status===404);
  check('Compiled temporal theorem stays unavailable to the browser',(await fetch(base+'/evidence/temporal/law-execution/intersection-symmetry/Check.olean')).status===404);
