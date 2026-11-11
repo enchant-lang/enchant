@@ -126,8 +126,9 @@ for name, packaging in [('examples.json', 'nix'), ('portable-examples.json', 'po
         require(row['artifacts']['worker']['origin'] == 'sdk'
                 and row['artifacts']['packaged']['packaging'] == packaging, 'actual selected package kind')
         if packaging == 'portable-shell-v1':
-            require(row['artifacts']['worker']['sha256'] == relocated['worker']['sha256']
-                    and row['artifacts']['library']['sha256'] == relocated['z3']['sha256'], 'runtime reports relocated bytes')
+            require(row['artifacts']['worker']['sha256'] == relocated['worker']['sha256'], 'runtime reports relocated worker')
+            require(row['artifacts']['library']['sha256'] == relocated['z3']['sha256'] if row['backend'] == 'z3'
+                    else row['artifacts']['library'] is None, 'only Z3 selects the relocated library')
 qualified = [R / name for name in candidate['source_sha256']]
 qualified += [R / name for name in ('test/bl/system/formal_artifact_test.bl', 'test/bl/source_formal_artifact_test.bl')]
 qualified += [P / name for name in ('PACKAGED-WORKER.md', 'packaged-worker-check.bl', 'run', 'review', 'qualify-packaged-worker.py')]
