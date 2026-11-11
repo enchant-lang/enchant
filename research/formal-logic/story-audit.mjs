@@ -366,6 +366,37 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#keep-the-handler-with-the-work');
+  await wait("document.querySelector('#keep-the-handler-with-the-work').getClientRects().length>0");
+  check(size.name+': handler chapter binds submission snapshots to actual code custody',await evaluate("document.body.innerText.includes('keep that snapshot after the caller leaves its scope')&&document.body.innerText.includes(\"retains the handler's executable code\")"));
+  await evaluate("document.querySelector('#keep-the-handler-with-the-work').scrollIntoView({block:'start'})");
+  await shot(size.name+'-effect-scopes');
+  await click('[data-graph="formal-effect-scopes"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="retain"]');
+  check(size.name+': handler retention keeps outside dependencies and Source authority distinct',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-effect-scopes\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('before publishing managed work')&&t.includes('explicit outside-dependency contract')&&t.includes('grants no Source execution authority')})()"));
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-effect-scopes\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-effect-custody-panel');
+  }
+  await click('[data-graph="formal-effect-scopes"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="world"]');
+  check(size.name+': explicit world entry has a declared handler boundary',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-effect-scopes\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes(\"clears the builder's callable tables\")&&t.includes(\"uses that world's context\")&&t.includes('Ordinary calls preserve the active dynamic table')})()"));
+  await click('[data-graph="formal-effect-scopes"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="limits"]');
+  check(size.name+': scoped handler support keeps continuation and proof limits explicit',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-effect-scopes\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('synchronous scoped function calls')&&t.includes('Continuation capture')&&t.includes('Compiler proof authority stays disabled')})()"));
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-effect-scopes\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-effect-scopes-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-managed-effects','story-named-effects']){
+    await wait(`document.querySelector('#cell-${id} .result').getClientRects().length>0`);
+    check(size.name+': visible executable result '+id,await evaluate(`document.querySelector('#cell-${id} .result').getClientRects().length>0`));
+    const t=await evaluate(`document.querySelector('#cell-${id} .result').innerText`);
+    if(id==='story-managed-effects')check(size.name+': each backend choice handles four managed boundaries with native paths unavailable',t.includes(':backend-choices [:z3 :oxiz]')&&t.includes(':managed-boundaries [:child :future :registration :actor]')&&t.includes(':observed-x [[7 7 7 7] [7 7 7 7]]')&&t.includes(':native-paths [:unavailable :unavailable]')&&t.includes(':typed-replay :valid')&&t.includes(':caller-restored true')&&t.includes(':certificate :not-checked')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-named-effects')check(size.name+': named effect registration keeps forty-two while caller restores its default',t.includes(':submitted-work 42')&&t.includes(':caller-default 40')&&t.includes(':caller-restored true')&&t.includes(':continuation-capture false')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
