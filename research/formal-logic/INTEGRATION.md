@@ -11,8 +11,10 @@ arities for preservation, establishment, fireability and model induction.
 The subsequent [typed-answer boundary](ANSWER-INTEGRITY.md) adds exact question
 binding, concrete sort checks, reconstructed handler observations and phase
 rules. It passes 220 focused assertions and 7,086 regression assertions. Tracked
-context changes refuse delegation; authoritative native-owner accounting and
-automatic handler inheritance remain integration work.
+context changes refuse delegation. The subsequent [native-owner
+interface](NATIVE-CONTEXTS.md) makes the registry, assumptions and revision
+authoritative in the port-owning process and passes 356 focused SDK assertions.
+Automatic handler inheritance remains integration work.
 
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,

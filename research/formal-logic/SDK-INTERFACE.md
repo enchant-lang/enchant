@@ -126,6 +126,9 @@ modified reply is replayed, with the supplied display retained separately.
 Phase/status combinations must answer the requested question.
 
 Derived procedures now use the common logical session before opening a native
-worker. A changed tracked context refuses a saved fallback. Raw native
-transport and mutable session bookkeeping retain their lower-level scope.
-The recorded probes qualify ordinary API behavior, not a security capability.
+worker. The subsequent native-context boundary uses owner-held assumptions,
+registry, generation and revision. A changed owner context refuses a saved
+fallback, and raw transport requires a managed reset before portable reuse.
+Client bookkeeping is diagnostic. The added 136 owner assertions bring the
+focused SDK run to 356. See `NATIVE-CONTEXTS.md`; these are API consistency
+checks, not security capabilities against arbitrary Erlang introspection.

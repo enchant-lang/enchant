@@ -64,9 +64,12 @@ context after a handler added a false assumption, while the reply still named
 the original question. The new fallback guard refuses that context change.
 The original logs are retained under `evidence/answer-integrity`.
 
-The context guard covers the tracked API state. Raw native transport operations
-and manual mutation of session bookkeeping remain lower-level escape hatches.
-Authoritative native-owner context accounting is further hardening work.
+This checkpoint first guarded tracked API state. The subsequent
+[native-context interface](NATIVE-CONTEXTS.md) extends that boundary: the owner
+holds the registry, assumptions and revision; client bookkeeping is diagnostic.
+Raw transport makes portable accounting unavailable until a managed reset.
+Arbitrary Erlang introspection and runtime replacement remain outside this
+API consistency boundary.
 
 ## Review process semantics separately
 
