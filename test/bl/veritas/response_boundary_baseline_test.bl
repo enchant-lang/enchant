@@ -1,0 +1,47 @@
+(ns veritas.response-boundary-baseline-test
+ (:require [veritas.mock :as mock] [veritas.fault :as fault] [oracle] [datom]))
+
+(deftest an-untranslated-law-never-weakens-the-contract
+ (is (try (mock/contract-from [["x" "Int"]] ['(unreviewed-contract-helper x)]) false (catch _ true))))
+
+(deftest an-impossible-request-never-becomes-a-successful-answer
+ (let [contract (mock/contract-from [["code" "Int"]] ['(and (>= code 200) (< code 300))])
+       server (mock/make-mock {} contract "code") answer (mock/answer server 500)]
+  (is (= false (:ok? answer)))
+  (is (= :solver-claim (:modality answer)))
+  (is (= true (:none answer)))))
+
+(deftest violating-every-law-is-different-from-violating-the-contract
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0) '(<= x 1)])
+       result (fault/total-error {} contract)]
+  (is (= true (:none result)))
+  (is (= :solver-claim (:modality result)))))
+
+(deftest contradictory-other-laws-are-an-explicit-vacuous-case
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0) '(< x 0) true])
+       result (fault/isolate {} contract 2)]
+  (is (= :vacuous (:modality result)))
+  (is (not (= true (:implied result))))))
+
+(deftest unresolved-native-checks-do-not-invent-violation-edges
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0)])
+       world (oracle/with-oracle
+               {:script (fn [_ _] {:status :unknown})
+                :query (fn [question _] (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown}))}
+               #(fault/build-db {} contract [{:value {:x 0} :fault/id 0 :kind :observed}]))]
+  (try (is (= [] (fault/covered-clauses (:db world)))) (finally (datom/close! (:conn world))))))
+
+(deftest a-typed-handler-sees-the-complete-response-question
+ (let [seen (atom nil) contract (mock/contract-from [["x" "Int"]] ['(>= x 0)])
+       result (try
+                (oracle/with-query-handler
+                 (fn [question _] (reset! seen question)
+                  (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown}))
+                 #(mock/synth {} contract nil))
+                (catch error {:unexpected-error (ex-message error)}))]
+  (is (= 1 (:formal/query @seen)))
+  (is (= :unknown (:modality result)))))
+
+(deftest concrete-checks-require-the-declared-response-shape
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0)])]
+  (is (not (mock/check {} contract {:x 0 :unmentioned true}))))))
