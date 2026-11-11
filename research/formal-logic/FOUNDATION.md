@@ -320,6 +320,15 @@ itself mechanically verified and does not certify all SMT theories.
   complete family and assumption ledger are retained in the proof packet.
   [Core handler trace proofs](RECORD-HANDLERS.md)
 
+- Recorded actor observations now connect complete owned-adapter receipts
+  to checked traces of those exact Core handlers. Seven recorded runs have
+  86 checked prefixes, including a named failure, a temporary invariant
+  violation, initial-only execution and the full idle-event cap. The bank's
+  general safety proof applies to its five recorded prefixes. Typed message
+  reads are checked alongside admission and each concrete outcome. Fresh BL
+  reconstruction supplies receipt custody, with execution authenticity
+  carried as an observer assumption. [Recorded Core traces](RUNTIME-OBSERVATIONS.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical
