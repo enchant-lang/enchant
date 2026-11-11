@@ -26,8 +26,14 @@ checks = (E / 'checks.txt').read_text()
 counts = {name: int(count) for name, count in re.findall(r'✓\s+(formal\.[\w-]+)\s+(\d+) passed', checks)}
 expected = {'core-counterexamples', 'core-observations', 'witness', 'protocol-trace', 'source-trace', 'api',
             'advanced', 'features', 'native'}
-require(counts.keys() == {'formal.' + name + '-test' for name in expected}
-        and '9 file(s) passed, 0 failed, 0 incoherent' in checks, 'qualified BL coverage')
+require(counts.keys() == {'formal.' + name + '-test' for name in expected - {'core-counterexamples'}}
+        and '8 file(s) passed, 1 failed, 0 incoherent' in checks
+        and 'undefined var: formal.core-counterexamples-test/vector' in checks, 'original regression run and fixture diagnosis')
+repaired = (E / 'focused-checks.txt').read_text()
+focused = {name: int(count) for name, count in re.findall(r'✓\s+(formal\.[\w-]+)\s+(\d+) passed', repaired)}
+require(focused.keys() == {'formal.core-counterexamples-test'}
+        and '1 file(s) passed, 0 failed, 0 incoherent' in repaired, 'focused qualification after repairing the test fixture')
+counts.update(focused)
 for filename, tests in [('lean-checks.txt', 3), ('prior-observation-checks.txt', 4)]:
     transcript = (E / filename).read_text()
     require(f'Ran {tests} tests' in transcript and '\nOK\n' in transcript, 'successful proof regressions: ' + filename)
@@ -144,7 +150,10 @@ artifacts = {path.relative_to(P).as_posix(): sha(path) for path in sorted(E.rglo
              and path.name != 'qualification.json'}
 report = {'schema': 'enchant.formal.core-counterexample-qualification.v1', 'checkpoint': 27, 'source': source,
           'sdk_pin': sdk, 'worker_sha256': worker, 'z3_library_sha256': z3_library,
-          'checks': {'files': counts, 'assertions': sum(counts.values()), 'failed': 0},
+          'checks': {'files': counts, 'assertions': sum(counts.values()), 'failed': 0,
+                     'qualification': 'eight-regression-files-and-focused-test-fixture-repair',
+                     'initial_issue': 'test used an unavailable vector constructor',
+                     'focused_repair_log': 'evidence/core-counterexamples/focused-checks.txt'},
           'counterexamples': {'original_queries': len(cases), 'engines': ['z3', 'oxiz'], 'composed_runs': len(results),
                               'checked_prefixes': 26, 'choice_free': len(results), 'rejected_pairings': len(rejected)},
           'fresh_reconstruction': fresh, 'native_corpus_unchanged': native, 'artifacts': artifacts,
