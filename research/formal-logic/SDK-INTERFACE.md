@@ -1,6 +1,6 @@
 # Typed questions at the SDK oracle boundary
 
-The SDK migration is undergoing qualification in this checkout. The portable
+The public SDK interface has passed its focused qualification in this checkout. The portable
 term, question, proof and state-model implementations now live under
 `priv/lib/formal`. Research import paths point to those canonical sources.
 The native worker remains an explicitly configured artifact.
@@ -93,3 +93,9 @@ The migration includes the normal question paths for contracts, loops,
 translations and protocol induction. Direct `formal.backend` operations remain
 the explicit native transport layer. Source consumers and the default legacy
 oracle still have further migration work.
+
+The handler scope currently belongs to the calling process. Ordinary `spawn`
+conveys the language environment, but does not yet convey this oracle handler.
+The derived search procedures that directly open a native transport context
+also need migration to the common logical context. These are explicit next
+steps; the focused SDK tests do not establish their handler behavior.

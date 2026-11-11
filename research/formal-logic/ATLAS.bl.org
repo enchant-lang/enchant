@@ -1227,6 +1227,50 @@ The result establishes one original query counterexample and its recorded Core e
 
 The [[#cell-story-core-counterexample][executable example]] uses both engines and checks that they answered the same original question. Read [[file:RUNTIME-OBSERVATIONS.md][the interface]], [[file:src/formal/core-counterexamples.bl][the bundle builder]], [[file:src/formal/core-counterexample-examples.bl][the paired examples]], [[file:evidence/core-counterexamples/execution/overdraft-oxiz/CoreCounterexampleCheck.lean][the composed theorem]], [[file:evidence/core-counterexamples/execution/overdraft-oxiz/trace/CoreObservedTrace.lean][the recorded trace proof]], [[file:evidence/core-counterexamples/execution/accepted.json][the results and axiom audits]], [[file:evidence/core-counterexamples/execution/rejected.json][the rejected pairings]], [[file:evidence/core-counterexamples/fresh/core-counterexamples-fresh.json][the fresh reconstruction]] and [[file:evidence/core-counterexamples/qualification.json][the qualification]].
 
+** Ask through the language library
+The formal interface now reaches the SDK. A program can ask =system/preserves?= about a declared state model, select Z3 or OxiZ, and inspect the same portable question before either engine runs. Portable certificate checking is available through the same entry point.
+
+This makes the experiment easier to use in an ordinary Beam Lisp program. The term, question, proof and state-model modules have one canonical implementation in the SDK. The research paths point to those sources.
+
+#+begin_rosetta
+What you want to do | The language interface | What travels with it
+Inspect the promise | system.formal/preservation-question | The exact claim, assumptions, observations and semantic profile.
+Check a model | system/prove-box | Initial-state evidence and complete establishment and preservation obligations.
+Compare engines | system/preserves? with a backend option | The same question, each native verdict and its evidence basis.
+Handle solver access | oracle/with-query-handler | The complete question and a scoped native fallback.
+Read a counterexample | The common evidence envelope | Values replayed against the original assumptions and goal.
+#+end_rosetta
+
+#+begin_code_graph :id formal-sdk-interface :title "An ordinary library call, with the meaning intact" :start public
+node public | code | Ask through system.core | observed
+summary Typed arities accept a declared state model and return the common formal evidence envelope.
+source research/formal-logic/sdk-src/system/formal.bl | SDK consumer | The public consumer builds questions from the shared state-model semantics.
+node question | code | Inspect the question as data | observed
+summary Claim, assumptions, observations, profile and scope stay in one value. The solver option selects execution without changing that value.
+source research/formal-logic/src/formal/query.bl | Portable question schema | Validation keeps the full mathematical question together.
+node effect | code | Handle the complete effect | observed
+summary A query handler sees the complete question. It can answer from a table, deny access, or invoke an owned fallback for that same question.
+field Scope today | The installed handler belongs to the calling process. Automatic process inheritance is further work.
+source research/formal-logic/sdk-src/oracle.bl | Oracle boundary | Handler replies are bound to the exact question and SAT assignments are replayed.
+node engines | code | Choose native execution | observed
+summary Z3 and OxiZ use the same typed terms. The worker remains an explicitly configured artifact, with the existing owner and deadlines.
+source research/formal-logic/src/formal/logic.bl | Logical sessions | Retained assumptions and their generation remain visible to handlers.
+node evidence | code | Read the reason and its limits | observed
+summary Portable certificates, native solver answers and handler claims retain their distinct evidence status. None grants compiler proof authority.
+source research/formal-logic/SDK-INTERFACE.md | SDK interface guide | Public examples and the remaining migration boundary.
+edge public -> question | build once
+edge question -> effect | carry the whole question
+edge effect -> engines | delegate within the owned context
+edge engines -> evidence | retain the result basis
+edge effect -> evidence | check the handler reply
+#+end_code_graph
+
+#+begin_note :title "The migration boundary"
+The typed state-model entry points and their ordinary query path are implemented. The existing source extractors, remaining legacy consumers and default text oracle still need migration. Native worker packaging, reusable worker pooling and language-wide totality remain open work.
+#+end_note
+
+The [[#cell-story-sdk-interface][executable example]] calls the SDK consumer, compares both engines and handles a question with deliberately unavailable native paths. Read [[file:SDK-INTERFACE.md][the interface guide]], [[file:sdk-src/system/formal.bl][the SDK consumer]], [[file:sdk-src/oracle.bl][the oracle boundary]], [[file:src/formal/query.bl][the question schema]], [[file:src/formal/logic.bl][the logical session]], [[file:evidence/sdk-interface/focused-checks.txt][the focused SDK checks]] and [[file:evidence/sdk-interface/qualification.json][the qualification receipt]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1660,7 +1704,8 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]
            [formal.loop-core :as loop-core] [formal.core-actor-examples :as actors]
            [formal.core-observation-examples :as observed-actors]
-           [formal.core-counterexample-examples :as native-traces]))
+           [formal.core-counterexample-examples :as native-traces]
+           [system.core :as system] [system.formal :as system-formal] [oracle]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2449,6 +2494,30 @@ These cells execute the actual shared interface. Their stored results are writte
 : {:kernel-execution :not-run, :engines [:z3 :oxiz], :same-query true, :unsafe-recordings 2, :data-connections [:checked-data-connection :checked-data-connection]}
 
 
+
+
+#+begin_src beam-lisp :id story-sdk-interface
+(def sdk-portable (system/prove-box {:initial-state {"count" 0}} counter-protocol))
+(def sdk-native (mapv #(system/preserves? {:backend %} counter-protocol "add") [:z3 :oxiz]))
+(def sdk-question (system-formal/preservation-question counter-protocol "add"))
+(def sdk-seen (atom []))
+(def sdk-handled
+ (oracle/with-query-handler
+  (fn [question execute]
+   (swap! sdk-seen conj question)
+   ((oracle/query-table {}) question execute))
+  (fn [] (system/preserves? {:backend :oxiz :worker "/unavailable/formal-worker"}
+                            counter-protocol "add"))))
+(assert (= :checked (:status sdk-portable)))
+(assert (every? #(= :proved (:verdict %)) sdk-native))
+(assert (= [sdk-question] @sdk-seen))
+(assert (= :unknown (:verdict sdk-handled)))
+{:sdk-entry-point :system/preserves? :portable-model (:status sdk-portable)
+ :native-verdicts (mapv :verdict sdk-native) :same-question (= [sdk-question] @sdk-seen)
+ :table-answer (:verdict sdk-handled) :handler-native-worker :not-opened
+ :handler-scope :calling-process :handler-certificate (get-in sdk-handled [:certificate :status])
+ :compiler-proof-authority (get-in sdk-handled [:evidence :authority :compiler])}
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity
