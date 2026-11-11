@@ -1,24 +1,34 @@
 (ns system.mcp-stdio-utf8-test
  (:require [mcp.server :as server] [mcp.transport-stdio :as stdio]))
 
-(deftest stdio-retains-utf8-request-identities-and-json-bytes-under-either-device-default
+(deftest stdio-retains-utf8-request-values-and-source-owned-replies-under-either-device-default
  (BeamLisp/with_cwd (System/tmp_dir!)
   (fn []
    (doseq [encoding [:latin1 :unicode]]
-    (let [request {"jsonrpc" "2.0" "id" "طلب—é" "method" "unknown/🙂"}
-          opened (StringIO/open (str (bl.json/encode request) "\n"))
-          device (elem opened 1)
+    (let [request {"jsonrpc" "2.0" "id" "طلب—é" "method" "tools/call"
+                   "params" {"name" "encoding/echo" "arguments" {"text" "طلب—é🙂"}}}
+          observed (atom nil)
+          ;; A source-owned reply and the server's decoded input expose
+          ;; inverse transcoding that could cancel out in an opaque ID echo.
+          registry (server/registry-state
+                     {:tools [["encoding/echo" "Retain the decoded request value"
+                               {"type" "object" "properties" {"text" {"type" "string"}}}
+                               (fn [args]
+                                (reset! observed (get args "text"))
+                                {"text" "réponse · ثابت🙂"})]]})
+          device (elem (StringIO/open (str (bl.json/encode request) "\n")) 1)
           original (erlang/group_leader)
-          srv (server/start)]
+          srv (start-link server/mcp-server registry)]
      (try
       (is (= :ok (io/setopts device (list (tuple :encoding encoding)))))
       (erlang/group_leader device (erlang/self))
       (is (= :done (stdio/run srv)))
+      (is (= "طلب—é🙂" @observed))
       (let [output (elem (StringIO/contents device) 1)
             response (bl.json/decode (String/trim output))]
        (is (String/ends_with? output "\n"))
        (is (= (get request "id") (get response "id")))
-       (is (= -32601 (get-in response ["error" "code"]))))
+       (is (= "réponse · ثابت🙂" (get-in response ["result" "text"]))))
       (finally
        (erlang/group_leader original (erlang/self))
        (server/stop srv)
