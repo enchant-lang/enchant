@@ -184,7 +184,7 @@ try{
   await evaluate("document.querySelector('#cell-story-core-term-agreement').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-term-data');
   await navigate('/#prove-the-promise-on-the-core-program');
-  check(size.name+': contract chapter explains the return promise and one admitted input',await evaluate("document.body.innerText.includes('The checked policy rules out a raised outcome')&&document.body.innerText.includes('x = 4')"));
+  check(size.name+': contract chapter explains the return promise and one admitted input',await evaluate("document.body.innerText.includes('The checked policy rules out a raised outcome')&&document.body.innerText.includes('x set to 4')"));
   await click('[data-graph="formal-core-contract-composition"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="layout"]');
   check(size.name+': contract proof panel shows exact name and sort transport',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-core-contract-composition\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('Both proof slots move from index zero to index one')&&text.includes('match the exact assumptions and the whole outcome policy')})()"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Prove the promise on the Core program')).scrollIntoView({block:'start'})");
