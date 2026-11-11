@@ -1,0 +1,70 @@
+(ns formal.core-actor-examples
+ (:require [formal.api :as formal] [formal.term :as t]))
+
+(def zero (t/int 0))
+(def one (t/int 1))
+(def bank-initial {"balance" 0 "credits" 0 "debits" 0})
+(def bank-spec
+ {:name "trace-core-bank" :state {"balance" t/Int "credits" t/Int "debits" t/Int}
+  :init (fn [s] (t/all (mapv #(t/eq (get s %) zero) ["balance" "credits" "debits"])))
+  :invariants {"nonnegative" (fn [s] (t/ge (get s "balance") zero))
+               "conserved" (fn [s] (t/eq (get s "balance") (t/sub (get s "credits") (get s "debits"))))}
+  :handlers [{:name "deposit" :inputs {"amount" t/Int}
+              :assumptions (fn [_ in] [(t/ge (get in "amount") zero)])
+              :source "(fn [s msg] (assoc s \"balance\" (+ (get s \"balance\") (get msg \"amount\")) \"credits\" (+ (get s \"credits\") (get msg \"amount\"))))"}
+             {:name "withdraw" :inputs {"amount" t/Int}
+              :assumptions (fn [_ in] [(t/ge (get in "amount") zero)])
+              :source "(fn [s msg] (if (<= (get msg \"amount\") (get s \"balance\")) (assoc s \"balance\" (- (get s \"balance\") (get msg \"amount\")) \"debits\" (+ (get s \"debits\") (get msg \"amount\"))) s))"}]})
+(defn bank [] (formal/source-protocol bank-spec))
+(def bank-events [{:transition "deposit" :inputs {"amount" 10}}
+                  {:transition "withdraw" :inputs {"amount" 3}}
+                  {:transition "withdraw" :inputs {"amount" 100}}
+                  {:stutter true}])
+
+(defn- example [id specification]
+ {:id id :definition (formal/source-protocol (assoc specification :name id))})
+
+(defn examples []
+ [{:id "bank" :definition (bank)}
+  (example "context-counter"
+   {:bindings :closed-records :state {"n" t/Int}
+    :init (fn [s] (t/eq (get s "n") zero))
+    :invariant (fn [s] (t/ge (get s "n") zero))
+    :handlers [{:name "increment" :source "(fn [s msg] (assoc s \"n\" (inc (get s \"n\"))))"}]})
+  (example "overlapping-message-names"
+   {:state {"done" t/Bool "n" t/Int}
+    :init (fn [s] (t/all [(t/not (get s "done")) (t/eq (get s "n") zero)]))
+    :invariant (fn [s] (t/all [(t/ge (get s "n") zero) (t/implies (get s "done") (t/ge (get s "n") one))]))
+    :handlers [{:name "advance" :inputs {"value" t/Bool}
+                :source "(fn [s m] (if (get m \"value\") (assoc s \"done\" true \"n\" (+ (get s \"n\") 1)) s))"}
+               {:name "set-count" :inputs {"value" t/Int}
+                :assumptions (fn [_ in] [(t/ge (get in "value") one)])
+                :source "(fn [s m] (assoc s \"n\" (get m \"value\")))"}]})
+  (example "empty-state"
+   {:state {} :handlers [{:name "ping" :inputs {"flag" t/Bool} :source "(fn [s m] (if (get m \"flag\") {} s))"}]})
+  (example "stutter-only"
+   {:state {"n" t/Int}
+    :init (fn [s] (t/eq (get s "n") zero))
+    :invariant (fn [s] (t/ge (get s "n") zero)) :handlers []})
+  (example "admission-protects-division"
+   {:state {"n" t/Int}
+    :init (fn [s] (t/eq (get s "n") zero))
+    :invariant (fn [s] (t/ge (get s "n") zero))
+    :handlers [{:name "compute" :inputs {"divisor" t/Int}
+                :assumptions (fn [_ in] [(t/not (t/eq (get in "divisor") zero))])
+                :source "(fn [s m] (do (quot 1 (get m \"divisor\")) (assoc s \"n\" (inc (get s \"n\")))))"}]})])
+
+(defn failing []
+ (:definition (example "empty-failure"
+  {:state {} :handlers [{:name "attempt" :source "(fn [s m] (do (quot 1 0) {}))"}]})))
+
+(defn certificates [definition]
+ (let [questions (formal/core-actor-questions definition)]
+  (assert (= :ready (:status questions)) (pr-str questions))
+  (into {} (map (fn [row]
+                  (let [made (formal/certify (:problem row))]
+                   (when-not (= :checked (:status made))
+                    (println {:label (:id row) :status (:status made) :reason (:reason made)})
+                    (throw (ex-info "Core actor question has no checked certificate" {:label (:id row)})))
+                   [(:id row) (:certificate made)]))
+               (:rows questions)))))
