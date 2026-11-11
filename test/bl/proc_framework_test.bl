@@ -3,7 +3,7 @@
            [proc.inventory :as inventory] [proc.owner-registry :as owners]
            [proc.instance :as instance] [proc.attempt :as attempt] [proc.super :as super]
            [proc.table :as table] [reload.generation :as generation]
-           [reload.state :as state]))
+           [reload.state :as state] [effect]))
 
 (defn- await [pred]
  (loop [left 1000]
@@ -65,7 +65,14 @@
        initializer (start-initializer! old) primary (atom nil) secondary (atom nil)
        result (atom nil) birth (atom nil)]
   (try
-   (reset! primary (start-dispatch! old :framework.test/table-a))
+   (reset! primary
+    (generation/with! old
+     #(effect/with-handler :framework.test/caller (fn [_ _] :application-handler)
+        (fn [] (start dispatch/dispatcher
+                 {:limit 1 :table-key :framework.test/table-a :owner-key :framework.test/owner})))))
+   ;; Fixed SDK adoption replaces application graph custody with class custody.
+   ;; Its continuing process must not retain the submitting application's table.
+   (is (nil? (Keyword/get (elem (erlang/process_info @primary :dictionary) 1) :bl_callable_scopes)))
    (let [native (framework/owner-evidence @primary) sdk (runtime-lease)
          native-row (BeamLisp.Env/framework_owner_evidence @primary)
          class-lease (:lease native-row)]
