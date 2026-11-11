@@ -273,6 +273,29 @@ try{
   check(size.name+': paired counterexample cell records the same original query and checked data',counterexample.includes(':engines [:z3 :oxiz]')&&counterexample.includes(':same-query true')&&counterexample.includes(':unsafe-recordings 2')&&counterexample.includes(':data-connections [:checked-data-connection :checked-data-connection]')&&counterexample.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-counterexample').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-counterexample-data');
+  await navigate('/#ask-through-the-language-library');
+  check(size.name+': SDK chapter exposes public consumers and remaining migration',await evaluate("document.body.innerText.includes('The formal interface now reaches the SDK')&&document.body.innerText.includes('remaining legacy consumers and default text oracle still need migration')"));
+  await click('[data-graph="formal-sdk-interface"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="effect"]');
+  check(size.name+': SDK effect panel keeps complete questions and process scope visible',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-sdk-interface\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('complete question')&&text.includes('calling process')&&text.includes('Automatic process inheritance is further work')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Ask through the language library')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-sdk-interface');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-sdk-interface\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-sdk-interface-panel');
+  }
+  const sdkInterface=await evaluate("document.querySelector('#cell-story-sdk-interface')?.innerText||''");
+  check(size.name+': SDK cell checks portable model and both native engines',sdkInterface.includes(':sdk-entry-point :system/preserves?')&&sdkInterface.includes(':portable-model :checked')&&sdkInterface.includes(':native-verdicts [:proved :proved]'));
+  check(size.name+': SDK table sees the same question without opening a native worker',sdkInterface.includes(':same-question true')&&sdkInterface.includes(':table-answer :unknown')&&sdkInterface.includes(':handler-native-worker :not-opened'));
+  check(size.name+': SDK handler keeps scope certificate and authority explicit',sdkInterface.includes(':handler-scope :calling-process')&&sdkInterface.includes(':handler-certificate :not-checked')&&sdkInterface.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-sdk-interface').scrollIntoView({block:'center'})");
+  await shot(size.name+'-sdk-interface-data');
+  if(size.name==='desktop'){
+    await navigate('/#ask-through-the-language-library');
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-sdk-interface\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-sdk-interface-night');
+    await click('#theme');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -533,6 +556,13 @@ try{
   const response=await fetch(base+path),body=await response.text();
   check('Declared native Core counterexample evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
  }
+ for(const path of ['/SDK-INTERFACE.md','/sdk-src/system/formal.bl','/sdk-src/oracle.bl','/src/formal/query.bl','/src/formal/logic.bl','/evidence/sdk-interface/focused-checks.txt','/evidence/sdk-interface/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared SDK interface source or evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const sdkQualification=await fetch(base+'/evidence/sdk-interface/qualification.json').then(response=>response.json());
+ check('SDK qualification retains exact artifact public checks and theory coverage',sdkQualification.checkpoint===28&&sdkQualification.checks.focused_assertions===86&&sdkQualification.paired_questions===187&&sdkQualification.compiler_proof_authority===false);
+ check('SDK qualification retains first failure and current process scope',sdkQualification.candidate_1.assertions_failed===8&&sdkQualification.scope.includes('complete typed query effect in the calling process')&&sdkQualification.remaining.includes('automatic oracle handler inheritance across processes'));
  const counterexamples=await fetch(base+'/evidence/core-counterexamples/execution/accepted.json').then(response=>response.json());
  check('Both engines have twelve composed original query and unsafe trace proofs',counterexamples.length===12&&counterexamples.every(row=>row.status==='checked-original-query-and-unsafe-core-run'&&row.checked_prefixes===row.events+1&&row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns']&&!row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns'].includes('Classical.choice')));
  check('Extra opaque observations retain explicit completion',counterexamples.some(row=>row.discovery.engine==='oxiz'&&row.extra_observation_bindings>0&&row.completion_origins['explicit-replay-completion']>0));
