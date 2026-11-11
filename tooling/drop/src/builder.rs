@@ -255,7 +255,7 @@ fn seed_assets(from: &Path, tree: &Path, log: &Path, custody: &BuildLock) -> Res
     if from == tree {
         return Ok(());
     }
-    for rel in ["priv/z3", "priv/embed"] {
+    for rel in ["priv/z3", "priv/embed", "priv/formal"] {
         let (src, dst) = (from.join(rel), tree.join(rel));
         let empty = std::fs::read_dir(&dst).map(|mut d| d.next().is_none()).unwrap_or(true);
         if src.is_dir() && empty {

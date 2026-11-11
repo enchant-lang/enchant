@@ -84,6 +84,7 @@ let
     sha256 = "7288c49a5bd6dbafd7b0b0d1f65956b91672da24b08f09242919af159be3418e";
   };
   z3Runtime = import ./z3-runtime.nix { inherit pkgs; archive = z3; };
+  formalWorker = import ./formal-worker.nix { inherit pkgs; };
   # explorer's polars NIF (rustler_precompiled), the non-legacy-CPU build; its
   # sha256 is the one explorer's own checksum file pins. glibc floor 2.35.
   explorerNif = pkgs.fetchurl {
@@ -108,7 +109,7 @@ let
     root = ../.;
     fileset = lib.fileset.unions [
       ../bin
-      (cleanDirectory ../priv [ "native" "z3" ".bl" "codegen.sources" "precompiled.term" "sdk-code.term" ])
+      (cleanDirectory ../priv [ "native" "z3" "formal" ".bl" "codegen.sources" "precompiled.term" "sdk-code.term" ])
       ../env.bl ../bl.lock
       ../scripts/prepare-release.bl
       ../scripts/produce-sdk.bl
@@ -122,6 +123,7 @@ let
       ../test/scripts/artifact-generation.bl
       (lib.fileset.unions (map (crate:
         cleanDirectory (../native + "/${crate}") [ "target" ".git" ".bl" ]) nativeCrates))
+      (cleanDirectory ../native/ports/formal_worker [ "target" ".git" ".bl" ])
       ../tooling/drop/src ../tooling/drop/Cargo.toml ../tooling/drop/Cargo.lock
     ];
   };
@@ -249,6 +251,19 @@ let
       cp ${z3Runtime}/bin/z3 ${z3Runtime}/bin/libz3.so priv/z3/bin/
       cp ${z3Runtime}/LICENSE.txt priv/z3/
       echo 7288c49a5bd6dbafd7b0b0d1f65956b91672da24b08f09242919af159be3418e > priv/z3/.fetched
+      cp -a --no-preserve=ownership ${formalWorker} priv/formal
+      chmod -R u+w priv/formal
+      ${pkgs.python3}/bin/python3 - <<'FORMAL'
+      import hashlib, json
+      from pathlib import Path
+      path = Path('priv/formal/artifact.json')
+      original = path.read_bytes()
+      metadata = json.loads(original)
+      metadata.update(packaging='nix', producer_descriptor_sha256=hashlib.sha256(original).hexdigest(),
+          z3=dict(path='../z3/bin/libz3.so', version='4.16.0',
+                  sha256=hashlib.sha256(Path('priv/z3/bin/libz3.so').read_bytes()).hexdigest()))
+      path.write_text(json.dumps(metadata, sort_keys=True) + '\n')
+      FORMAL
 
       # The native SDK keeps its Nix-linked launcher.
       cp ${drop-tools}/bin/drop $TMPDIR/drop
@@ -328,6 +343,7 @@ let
         dependencies = toString dependencies;
         platform = toString buildCheckout;
         coordinator = toString coordinator;
+        formalWorker = toString formalWorker;
         target = "x86_64-linux";
       }}' > "$sdk/artifact.json"
       ${pkgs.jq}/bin/jq --arg source "$src" \
@@ -350,6 +366,7 @@ let
     erlang = toString erlang;
     elixir = toString elixir;
     z3 = toString z3Runtime;
+    formalWorker = toString formalWorker;
     explorer = toString explorerNif;
     terminal = toString ratatuiNif;
     toolchain = toString pkgs.path;

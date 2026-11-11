@@ -37,10 +37,19 @@ worker (pkgs.runCommand "beam-lisp-portable-release" {
   done
   ${pkgs.python3}/bin/python3 - <<'PORTABLE'
   import json, os
+  import hashlib
   from pathlib import Path
   import subprocess
   patcher = '${pkgs.patchelf}/bin/patchelf'
   counts = dict(files=0, elf=0, interpreters=0)
+  for manifest in (Path(os.environ['TMPDIR']) / 'payload/lib').glob('beam_lisp-*/priv/formal/artifact.json'):
+      metadata = json.loads(manifest.read_text())
+      if metadata.get('packaging') != 'nix' or metadata['worker']['path'] != 'bin/formal-worker' or metadata['z3']['path'] != '../z3/bin/libz3.so':
+          raise SystemExit('unexpected native formal worker paths')
+      for field in ('worker', 'z3'):
+          row = metadata[field]
+          if hashlib.sha256((manifest.parent / row['path']).read_bytes()).hexdigest() != row['sha256']:
+              raise SystemExit('formal worker producer bytes differ before relocation')
   for path in (Path(os.environ['TMPDIR']) / 'payload').rglob('*'):
       if path.is_symlink() or not path.is_file():
           continue
@@ -65,6 +74,20 @@ worker (pkgs.runCommand "beam-lisp-portable-release" {
           replacement = b'#!/bin/bash\n' if interpreter == b'bash' else b'#!/bin/sh\n'
           path.write_bytes(replacement + path.read_bytes()[len(first):])
           counts['interpreters'] += 1
+  # ELF relocation changes file identity. Preserve the producer's hashes and
+  # bind the installed descriptor to the actual portable payload bytes.
+  for manifest in (Path(os.environ['TMPDIR']) / 'payload/lib').glob('beam_lisp-*/priv/formal/artifact.json'):
+      metadata = json.loads(manifest.read_text())
+      if (metadata.get('version'), metadata.get('kind'), metadata.get('protocol'), metadata.get('packaging')) != (1, 'formal-worker', 1, 'nix'):
+          raise SystemExit('unexpected formal worker descriptor before relocation')
+      if metadata['worker']['path'] != 'bin/formal-worker' or metadata['z3']['path'] != '../z3/bin/libz3.so':
+          raise SystemExit('unexpected formal worker payload paths')
+      for field in ('worker', 'z3'):
+          row = metadata[field]
+          row['producer_sha256'] = row['sha256']
+          row['sha256'] = hashlib.sha256((manifest.parent / row['path']).read_bytes()).hexdigest()
+      metadata['packaging'] = 'portable-shell-v1'
+      manifest.write_text(json.dumps(metadata, sort_keys=True) + '\n')
   print('PORTABLE-PAYLOAD ' + json.dumps(counts), flush=True)
   PORTABLE
   sdk_phase_end

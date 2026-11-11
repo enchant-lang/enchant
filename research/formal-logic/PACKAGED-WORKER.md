@@ -1,7 +1,7 @@
 # A solver worker in the SDK
 
 The term interface needs a native worker without a research checkout. The
-packaging slice moves the canonical term worker into `native/formal_worker`,
+packaging slice moves the canonical term worker into `native/ports/formal_worker`,
 builds it as its own pinned executable artifact and carries it in the SDK's
 `priv/formal` directory. It remains a port worker, separate from NIF libraries.
 The original text-worker experiment retains an explicit compatibility entry.

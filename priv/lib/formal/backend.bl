@@ -1,4 +1,4 @@
-(ns formal.backend (:require [formal.term :as t] [formal.evaluate :as ev]))
+(ns formal.backend (:require [formal.term :as t] [formal.evaluate :as ev] [bl.json :as json]))
 
 (def ^:private wire-atoms
  #{:ok :protocol :generation :backend :name :version :capabilities :operations :sorts :limits :pid
@@ -176,17 +176,70 @@
  (terminate [_ state] (close! (:port state))))
 
 (defn- checksum [path] (Base/encode16 (crypto/hash :sha256 (File/read! path)) (list (tuple :case :lower))))
-(defn with-session [opts f]
+(defn- image-priv []
+ (let [directory (code/priv_dir :beam_lisp)]
+  (when-not (and (erlang/is_list directory) (File/dir? (erlang/list_to_binary directory)))
+   (throw (ex-info "formal backend: a filesystem language image is required for packaged artifacts" {})))
+  (erlang/list_to_binary directory)))
+(defn- artifact-choice [opts key environment default-path]
+ (cond (some? (get opts key)) {:path (get opts key) :origin :option}
+       (some? (System/get_env environment)) {:path (System/get_env environment) :origin :environment}
+       :else {:path default-path :origin :sdk}))
+(defn- artifact-file! [artifact]
+ (let [path (:path artifact)]
+  (when-not (and (string? path) (File/regular? path))
+   (throw (ex-info "formal backend configuration refused" {:artifact artifact})))
+  (assoc artifact :path (Path/expand path) :sha256 (checksum path))))
+(defn artifacts
+ "Resolve and hash the actual runtime files without starting a solver. Options
+  override environment pins; otherwise use this language image's packaged
+  worker and Z3 library. This runtime descriptor is not a portable question."
+ [opts]
  (let [backend (get opts :backend :z3)
-       worker (or (:worker opts) (System/get_env "ENCHANT_FORMAL_WORKER"))
-       library (or (:library opts) (System/get_env "ENCHANT_Z3_LIBRARY"))
+       _ (when-not (contains? #{:z3 :oxiz} backend)
+           (throw (ex-info "formal backend configuration refused" {:backend backend})))
+       ;; Explicit artifact pins also work outside a packaged filesystem image.
+       need-worker (and (nil? (:worker opts)) (nil? (System/get_env "ENCHANT_FORMAL_WORKER")))
+       need-library (and (= :z3 backend) (nil? (:library opts)) (nil? (System/get_env "ENCHANT_Z3_LIBRARY")))
+       priv (when (or need-worker need-library) (image-priv))
+       worker (artifact-file! (artifact-choice opts :worker "ENCHANT_FORMAL_WORKER"
+                                (when priv (Path/join priv "formal/bin/formal-worker"))))
+       library (when (= :z3 backend)
+                 (artifact-file! (artifact-choice opts :library "ENCHANT_Z3_LIBRARY"
+                                  (when priv (Path/join priv "z3/bin/libz3.so")))))
+       manifest-path (when priv (Path/join priv "formal/artifact.json"))
+       manifest (when manifest-path
+                  (when-not (and (File/regular? manifest-path) (<= (:size (File/stat! manifest-path)) 65536))
+                   (throw (ex-info "formal packaged artifact descriptor unavailable" {})))
+                  (json/decode (File/read! manifest-path)))]
+  (when manifest
+   (when-not (and (= 1 (get manifest "version")) (= "formal-worker" (get manifest "kind"))
+                  (= 1 (get manifest "protocol")) (= "x86_64-linux" (get manifest "target"))
+                  (contains? #{"nix" "portable-shell-v1"} (get manifest "packaging"))
+                  (= "bin/formal-worker" (get-in manifest ["worker" "path"]))
+                  (= "../z3/bin/libz3.so" (get-in manifest ["z3" "path"]))
+                  (or (not= :sdk (:origin worker)) (= (:sha256 worker) (get-in manifest ["worker" "sha256"])))
+                  (or (not= :sdk (:origin library)) (= (:sha256 library) (get-in manifest ["z3" "sha256"]))))
+    (throw (ex-info "formal packaged artifact identity mismatch" {}))))
+  {:backend backend :worker worker :library library :sdk (System/get_env "BL_SDK_PRODUCT")
+   :packaged (when manifest
+               {:applies-to (vec (concat (when (= :sdk (:origin worker)) [:worker])
+                                         (when (= :sdk (:origin library)) [:library])))
+                :descriptor-sha256 (checksum manifest-path) :packaging (get manifest "packaging")
+                :producer-descriptor-sha256 (get manifest "producer_descriptor_sha256")
+                :cargo-lock-sha256 (get manifest "cargo_lock_sha256") :source (get manifest "source")
+                :features (get manifest "features") :oxiz-version (get manifest "oxiz_version")})}))
+
+(defn with-session [opts f]
+ (let [assets (artifacts opts) backend (:backend assets)
+       worker (get-in assets [:worker :path]) library (get-in assets [:library :path])
        solver-ms (get opts :solver-ms 500) hard-ms (get opts :hard-ms 2000)]
   (when-not (and (contains? #{:z3 :oxiz} backend) (string? worker) (File/exists? worker)
                 (or (= backend :oxiz) (and (string? library) (File/exists? library)))
                 (int? solver-ms) (int? hard-ms) (< 0 solver-ms hard-ms) (<= hard-ms 15000) (<= solver-ms 10000))
    (throw (ex-info "formal backend configuration refused" {:backend backend :worker worker :library library})))
-  (let [identity {:backend backend :worker-sha256 (checksum worker)
-                  :library-sha256 (when (= backend :z3) (checksum library))
+  (let [identity {:backend backend :worker-sha256 (get-in assets [:worker :sha256])
+                  :library-sha256 (get-in assets [:library :sha256]) :artifacts assets
                   :model-completion (if (= backend :z3) :concrete-extension :backend-native)
                   :sdk (System/get_env "BL_SDK_PRODUCT")}
         pid (start native-owner {:backend backend :worker (Path/expand worker) :library library

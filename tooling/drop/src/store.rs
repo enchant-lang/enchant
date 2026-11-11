@@ -45,7 +45,7 @@ pub const BUILD_INPUTS: &[&str] = &[
 /// Build OUTPUTS that live under an input root (all gitignored). Skipping them
 /// keeps a build's own products from changing the stamp of the tree it built.
 const STAMP_SKIP_DIRS: &[&str] = &["target", ".spell", ".cargo"];
-const STAMP_SKIP_PATHS: &[&str] = &["priv/native", "priv/embed", "priv/z3", "priv/codegen.sources"];
+const STAMP_SKIP_PATHS: &[&str] = &["priv/native", "priv/embed", "priv/z3", "priv/formal", "priv/codegen.sources"];
 
 // ── store layout names ──────────────────────────────────────────────────────
 // One spelling each: the golden strings the on-disk store is built from.

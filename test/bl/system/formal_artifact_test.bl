@@ -1,5 +1,5 @@
 (ns system.formal-artifact-test
- (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]))
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic] [formal.backend :as backend]))
 
 (def x (t/variable "sdk.artifact.x" t/Int))
 (def problem (q/sat {:id :sdk/packaged-worker
@@ -12,3 +12,60 @@
    (is (= :sat (:verdict answer)) (pr-str answer))
    (is (= :valid (get-in answer [:validation :status])))
    (is (= 7 (get-in answer [:witness "x"]))))))
+
+(defn- sha [path]
+ (Base/encode16 (crypto/hash :sha256 (File/read! path)) (list (tuple :case :lower))))
+
+(deftest runtime-artifact-inspection-binds-the-files-actually-selected
+ (doseq [engine [:z3 :oxiz]]
+  (let [assets (backend/artifacts {:backend engine}) worker (:worker assets)]
+   (is (= :sdk (:origin worker)))
+   (is (String/ends_with? (:path worker) "/priv/formal/bin/formal-worker"))
+   (is (= (:sha256 worker) (sha (:path worker))))
+   (is (= "nix" (get-in assets [:packaged :packaging])))
+   (is (= "0.3.4" (get-in assets [:packaged :oxiz-version])))
+   (is (= ["oxiz-core/std" "oxiz-solver/std"] (get-in assets [:packaged :features])))
+   (is (= (if (= engine :z3) [:worker :library] [:worker]) (get-in assets [:packaged :applies-to])))
+   (if (= engine :z3)
+    (do
+     (is (= :sdk (get-in assets [:library :origin])))
+     (is (= (get-in assets [:library :sha256]) (sha (get-in assets [:library :path])))))
+    (is (nil? (:library assets))))
+   (backend/with-session {:backend engine}
+    (fn [session]
+     (is (= assets (get-in session [:identity :artifacts])))
+     (is (= (:sha256 worker) (get-in session [:identity :worker-sha256]))))))))
+
+(deftest explicit-artifact-options-win-over-environment-pins-with-separate-provenance
+ (let [assets (backend/artifacts {:backend :z3})
+       worker (get-in assets [:worker :path]) library (get-in assets [:library :path])
+       prior-worker (System/get_env "ENCHANT_FORMAL_WORKER") prior-library (System/get_env "ENCHANT_Z3_LIBRARY")]
+  (try
+   (System/put_env "ENCHANT_FORMAL_WORKER" "/unavailable/environment-worker")
+   (System/put_env "ENCHANT_Z3_LIBRARY" "/unavailable/environment-library")
+   (is (thrown? (backend/artifacts {:backend :z3})))
+   (let [explicit (backend/artifacts {:backend :z3 :worker worker :library library})]
+    (is (= :option (get-in explicit [:worker :origin])))
+    (is (= :option (get-in explicit [:library :origin])))
+    (is (nil? (:packaged explicit)))
+    (is (= (get-in assets [:worker :sha256]) (get-in explicit [:worker :sha256])))
+    (is (= (get-in assets [:library :sha256]) (get-in explicit [:library :sha256]))))
+   (System/put_env "ENCHANT_FORMAL_WORKER" worker)
+   (System/put_env "ENCHANT_Z3_LIBRARY" library)
+   (let [environment (backend/artifacts {:backend :z3})]
+    (is (= :environment (get-in environment [:worker :origin])))
+    (is (= :environment (get-in environment [:library :origin])))
+    (is (nil? (:packaged environment))))
+   (finally
+    (if prior-worker (System/put_env "ENCHANT_FORMAL_WORKER" prior-worker) (System/delete_env "ENCHANT_FORMAL_WORKER"))
+    (if prior-library (System/put_env "ENCHANT_Z3_LIBRARY" prior-library) (System/delete_env "ENCHANT_Z3_LIBRARY")))))))
+
+(deftest mixed-selection-names-only-the-packaged-component-it-actually-uses
+ (let [packaged (backend/artifacts {:backend :z3})
+       mixed (backend/artifacts {:backend :z3 :worker (get-in packaged [:worker :path])})]
+  (is (= :option (get-in mixed [:worker :origin])))
+  (is (= :sdk (get-in mixed [:library :origin])))
+  (is (= [:library] (get-in mixed [:packaged :applies-to]))))
+ (doseq [options [{:backend :not-a-backend} {:backend :oxiz :worker false}
+                  {:backend :oxiz :worker "/unavailable/formal-worker"}]]
+  (is (thrown? (backend/artifacts options)))))
