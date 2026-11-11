@@ -13,6 +13,11 @@ The [temporal interface](TEMPORAL.md) adds semantic integer spans and complete
 overlap/chronology questions. `datom.time` consumes these questions through the
 same oracle method; symbolic endpoint constraints travel with the values.
 
+The [source-property interface](SOURCE-PROPERTIES.md) turns compiler ANF and
+generator domains into the same portable questions. Source counterexamples
+require term replay and execution of that exact ANF. The scalar source, numeric
+and data adapters also live in the SDK.
+
 ## Ask through a standard consumer
 
 ```beam-lisp

@@ -1357,6 +1357,48 @@ The selected SDK passes 686 focused assertions and 7,086 formal regression asser
 
 The [[#cell-story-session-lifetime][running example]] checks ordinary callback failure on both engines. The [[file:evidence/session-lifetime/baseline-checks.txt][previous SDK's failing checks]] retain the two behavioral mistakes and the coarser diagnostics. Read [[file:SESSION-LIFETIME.md][the lifetime interface]], [[file:evidence/session-lifetime/focused-checks.txt][the native and interface checks]], [[file:evidence/session-lifetime/regression-checks.txt][the formal regression]] and [[file:evidence/session-lifetime/qualification.json][the exact qualification]]. The repository check is =test/bl/system/formal_lifetime_test.bl=.
 
+** A function can explain its failing example
+Write a small function, state a promise about its output, and ask either engine about the same inputs. The function's compiler representation becomes typed terms. If an engine finds a failing input, Beam Lisp runs that exact representation and checks that the failure really happens.
+
+This connects formal questions to a familiar programming task: /show me where this function breaks its promise/. Arguments, returned values and crashes travel as data. Return types are inferred, and an unused output cannot hide a crash.
+
+#+begin_rosetta :title "What a source-property answer means"
+Native UNSAT | solver-claim | The engine reports no counterexample. Its certificate is still unchecked.
+A failing input reproduces | refuted | Both the term model and execution of the translated ANF agree on the failure.
+The input model is empty | vacuous | There are no admitted inputs on which to check the promise.
+The source has no reviewed translation | unsupported | Sampling runs only when explicitly requested.
+A portable certificate checks | checked term claim | The mathematical question has checked evidence. Its connection to compilation and runtime remains reviewed.
+#+end_rosetta
+
+#+begin_code_graph :id formal-source-properties :title "Follow a promise from source to a real failure" :start source
+node source | code | Compile the function once | implemented
+summary A plain defn with distinct parameters becomes an anonymous function. The real compiler resolves its ANF, and a reviewed adapter gives the selected intrinsics their language meaning.
+source research/formal-logic/sdk-src/formal/source.bl | Canonical SDK source adapter | Integer signs, nil, truthiness, lazy branches and raisedness stay explicit.
+node inputs | code | Keep the input domain as values | implemented
+summary GenTerms adds a typed domain to generators. Bounded integers, Booleans and finite scalar sets become constraints carried by the input values. Tuple coordinates preserve argument order.
+field Deliberate limits | Real generators need a runtime float profile. Collection and string length abstractions need their own source adapters.
+source research/formal-logic/SOURCE-PROPERTIES.md | Source property interface | Generator and function arity must agree exactly. The output name result is reserved.
+node question | code | Give both engines the whole question | observed
+summary prepare returns an ordinary formal.query. Changing the backend keeps the canonical question identity. Normal target return and a true, normally returning property form one claim.
+field Evidence | Native UNSAT is a solver-claim. Empty inputs are vacuous. Unknown stays unresolved.
+source research/formal-logic/evidence/source-properties/examples.json | Actual SDK-only examples | Both native answers retain their complete question and replay status.
+node replay | code | Run the exact translated ANF | observed
+summary A refutation requires independent term replay and concrete execution of the same compiler ANF. Arguments are actual values; returned values and raisedness must match the prediction.
+field Disagreement | Missing inputs or a mismatch remain a candidate. The underlying native answer stays available.
+source research/formal-logic/sdk-src/veritas/property.bl | Source consumer and runtime replay | A target crash and a property crash have separate records.
+node proof | code | Check the mathematical promise separately | observed
+summary The prepared question can carry a portable certificate checked by formal.check. This establishes the term claim under its explicit conditions.
+field Source boundary | ANF-to-term translation and compiler/runtime correspondence remain reviewed implementations. Ambient rebinding requires an explicit source context. Compiler proof authority is false.
+source research/formal-logic/sdk-src/formal/check.bl | Independent term evidence | A checked term claim and a checked compiler are distinct milestones.
+edge source -> inputs | binds arguments positionally
+edge inputs -> question | carries every domain constraint
+edge question -> replay | validates a proposed counterexample
+edge question -> proof | can request checked term evidence
+edge replay -> proof | keeps the source connection visible
+#+end_code_graph
+
+The [[#cell-story-source-properties][running source example]] compares both engines. Another cell separates [[#cell-story-source-property-outcomes][crashes, empty inputs and explicit sampling]]. A third checks [[#cell-story-source-property-proof][the derived mathematical question]]. Read [[file:SOURCE-PROPERTIES.md][the interface and semantic choices]], [[file:source-properties-check.bl][the SDK-only program]], [[file:evidence/source-properties/focused-checks.txt][the focused checks]] and [[file:evidence/source-properties/qualification.json][the exact qualification]].
+
 ** Time becomes a value you can reason about
 An appointment lasts one tick and starts somewhere between zero and four. Does it intersect the window from two to three? Beam Lisp can now express the uncertain appointment as an ordinary value: shift a one-tick span by an endpoint with an input range.
 
@@ -2004,6 +2046,7 @@ These cells execute the actual shared interface. Their stored results are writte
 (ns formal.dossier-story
  (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic] [formal.backend :as backend]
            [formal.collections :as c] [formal.value :as v] [bl.json :as json]
+           [veritas.property :as property] [veritas :as veritas] [formal.check :as checked-query]
            [formal.temporal :as temporal] [datom.time :as time] [formal.certificate :as certificate]
            [formal.api :as formal] [formal.core :as core] [formal.identity :as data-identity]
            [formal.core-symbolic :as core-symbolic] [formal.elaborate :as elaborate] [compiler :as compiler] [system.ir :as ir]
@@ -3018,6 +3061,58 @@ These cells execute the actual shared interface. Their stored results are writte
 : {:backends [:z3 :oxiz], :busy-solver-cancellation :not-qualified, :callback-errors [:preserved :preserved], :compiler-proof-authority false, :owner-alive [false false], :retired [true true], :worker-alive [false false]}
 
 
+
+#+begin_src beam-lisp :id story-source-properties
+(def source-floor '(defn floor [c] (if (< c 0) 0 c)))
+(def source-dom (veritas/one-of -2))
+(def source-laws (mapv #(property/prove {:backend %} source-floor '(>= result 0) source-dom) [:z3 :oxiz]))
+(def source-failures (mapv #(property/prove {:backend %} source-floor '(> result 0) source-dom) [:z3 :oxiz]))
+(assert (every? #(= :solver-claim (:modality %)) source-laws))
+(assert (every? #(= :refuted (:modality %)) source-failures))
+(assert (apply = (map :question-identity source-laws)))
+(assert (apply = (map :question-identity source-failures)))
+(into-sorted-map
+ {:backends [:z3 :oxiz] :law (mapv :modality source-laws)
+  :native-certificate (mapv #(get-in % [:answer :certificate :status]) source-laws)
+  :same-complete-question true :failing-inputs (mapv :witness source-failures)
+  :actual-results (mapv :result source-failures)
+  :term-replay (mapv #(get-in % [:answer :validation :status]) source-failures)
+  :runtime-replay (mapv #(get-in % [:runtime-replay :status]) source-failures)
+  :source-connection :reviewed :compiler-proof-authority false})
+#+end_src
+
+#+begin_src beam-lisp :id story-source-property-outcomes
+(def source-crashes
+ (mapv #(property/prove {:backend %} '(defn boom [n] (quot n 0)) true (veritas/one-of 7)) [:z3 :oxiz]))
+(def source-empty
+ (mapv #(property/prove {:backend %} '(defn ident [n] n) false (veritas/one-of)) [:z3 :oxiz]))
+(def source-refusal (property/prove {} '(defn ident [n] n) '(int? result) source-dom))
+(def source-sampled (property/prove {:fallback :sample} '(defn ident [n] n) '(int? result) source-dom))
+(def source-unknown
+ (oracle/with-query-handler
+  (fn [question _] (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown}))
+  #(property/prove {:worker "/unavailable/formal-worker" :fallback :sample} source-floor '(>= result 0) source-dom)))
+(assert (every? #(= :refuted (:modality %)) source-crashes))
+(into-sorted-map
+ {:target-crash (mapv #(get-in % [:runtime-replay :target :status]) source-crashes)
+  :crash-replay (mapv #(get-in % [:runtime-replay :status]) source-crashes)
+  :empty-domain (mapv :modality source-empty) :unsupported (:modality source-refusal)
+  :explicit-sample (:modality source-sampled) :sample-engine (:engine source-sampled)
+  :unknown (:modality source-unknown) :unknown-engine (:engine source-unknown)
+  :compiler-proof-authority false})
+#+end_src
+
+#+begin_src beam-lisp :id story-source-property-proof
+(def source-proof-prepared
+ (property/prepare '(defn step [n] (+ n 1)) '(> result n) (veritas/int-of 0 1000000)))
+(def source-proof-answer (checked-query/query (:problem source-proof-prepared)))
+(assert (= :checked (:status source-proof-answer)))
+(into-sorted-map
+ {:term-certificate (:status source-proof-answer)
+  :term-claim (get-in source-proof-answer [:evidence :claim :verdict])
+  :source-connection (get-in source-proof-prepared [:source-connection :status])
+  :runtime-correspondence :reviewed-implementation :compiler-proof-authority false})
+#+end_src
 
 #+begin_src beam-lisp :id story-temporal-values
 (def appointment (temporal/shift (temporal/span 0 1) (temporal/endpoint-range "appointment.start" 0 4)))
