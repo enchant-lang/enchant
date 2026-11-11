@@ -1,14 +1,21 @@
 # Moving Enchant's formal consumers to portable terms
 
-This is a source audit and a concrete cutover design. The implementation under
-`research/formal-logic/src/formal/` is experimental. Loading it does **not**
-migrate the default compiler oracle, its pool, existing verifier consumers, or
-their caches. The current default remains `oracle/pool-handler` →
-`z3pool/check`, with SMT-LIB text at that boundary. The explicit historical
+The first SDK migration is undergoing qualification. Canonical portable term,
+question, certificate and state-model sources live under `priv/lib/formal`.
+The research import paths point to those sources. `system.core` has typed
+arities for preservation, establishment, fireability and model induction.
+`oracle/ask-query` passes complete questions through an explicit handler method.
+[SDK consumer interface](SDK-INTERFACE.md)
+
+The script arities continue through `oracle/pool-handler` →
+`z3pool/check`, with SMT-LIB text at that boundary. Process extraction,
+the remaining verifier consumers and the default pool still have migration
+work. The explicit historical
 `oxiz.oracle/with-oracle` bridge still reads text and re-emits model text; it is
 compatibility evidence, not the new term path.
 
-The new path is `formal.query` → `formal.logic` → owned `formal.backend` →
+The typed SDK path is `system.core` → `formal.query` → `formal.logic` →
+`oracle/ask-query` → owned `formal.backend` →
 typed DAG → native Z3 C API or OxiZ `Context`. Both adapters construct native
 terms without an SMT-LIB script parser/printer fallback. Portable BL terms
 contain no native pointer. ETF and native AST construction still cost time:
@@ -24,10 +31,10 @@ or test listed below has been rerun through the new interface.
 
 | Consumer | Current seam | Concrete term cutover |
 | --- | --- | --- |
-| `priv/lib/oracle.bl`: `obligation`, `ask`, `session`, `scoped`, `here-verdict` | Obligations eagerly render scripts; handlers accept `[text model?]`; verdicts parse model/core text | Accept a `formal/query` value as the effect payload. Keep one explicit handler receiving a complete question and returning structured evidence. `formal.backend/with-session` owns native state; `formal.logic/solve-in` interprets proof polarity and replay |
+| `priv/lib/oracle.bl`: `obligation`, `ask`, `session`, `scoped`, `here-verdict` | Script obligations render eagerly. The added `ask-query` method receives a complete typed question and an owned fallback | Qualify the method boundary, exact reply binding, SAT replay, custom handler scopes and ledger. Move each remaining consumer to the query method |
 | `priv/lib/system/smt.bl`: `translate-node`, `of-node`, `of-source`, length/variant/inlining siblings | Resolved compiler ANF becomes untyped SMT forms, with `:untranslatable` | Retain compiler ANF and source-clause resolution. Replace the output algebra with checked `formal.term`/`formal.value` constructors. Preserve unsupported results, origins, partiality and semantic profiles |
 | Same file: `datatype-decl`, `variants-map`, `defn->define-fun` | Native datatype and helper definitions become SMT declaration forms | Nullary enums have native term routes. Payload sums currently need explicit `formal.data` encodings. Nonrecursive helper bodies become checked summaries/substitution with hygienic binders, rather than a printed `define-fun` |
-| `priv/lib/system/core.bl`: `preserves?`, `establishes?`, `prove-box`, `preserves-joint?`, `establishment-verdict`, `step-obligation` | Prelude declares state/primed values and `Inv`; scoped named assertions express a counterexample | Build state terms once. Use `q/prove` for preservation/establishment and `q/sat` for feasibility, with named assumptions and observations. Preserve the distinction between initial feasibility and establishment |
+| `priv/lib/system/core.bl`: `preserves?`, `establishes?`, `prove-box`, `preserves-joint?`, `establishment-verdict`, `step-obligation` | Typed arities use the closed `formal.protocol` model. The source and script arities retain their prelude and primed values | Qualify the typed entry points, then connect source extraction to the same questions. Preserve initial feasibility, establishment and complete step coverage |
 | Same file: `k-induction-check`, `verify-process`, `discover-invariant`, `verify-capacity`, `synthesize-capacity`, `verify-content` | Repeated oracle sessions over generated declarations, copied names, length abstractions and quantified content laws | Use portable state vectors and checked substitution. Feed explicit procedure questions to `formal.transition` or `formal.logic`; record induction depth, abstraction and capacity scope on every result |
 | Same file: `sufficient?`, `fireable?`, `guard-implies?`, `repair-transition`, `joint-fireable?`, `guard-implies-multi?`, `guards-overlap?` | SAT and UNSAT answers have different intended polarities | Replace each with `q/sat` or `q/prove` deliberately. `:sat` is a feasible witness, not automatically a refutation; `:unsat` is not universally a failed program |
 | `priv/lib/veritas.bl`: `try-symbolic`; `veritas/property.bl`: `prove` | Translated forms feed oracle; SAT models are converted to test inputs | Request descriptor observations, retain independent validation, and emit an executable counterexample only when decoding and replay cover the question's domain |
@@ -315,10 +322,9 @@ enable a term-native BL formal interface or make an unwired trait trustworthy.
 1. Finish custody/typed-boundary/persistent-context qualification above, while
    retaining the exact SDK and native artifact receipts. Separate native
    construction capabilities from successfully qualified theory queries.
-2. Move the scalar Int/Bool preservation/establishment and feasibility
-   obligations in `system.core` to the exact `formal.query` shape shown above,
-   behind an explicit experimental handler. Retain legacy default behavior.
-   Compare decisive statuses, checked witnesses, vacuity and costs per question.
+2. Qualify the scalar Int/Bool typed arities in `system.core`, then connect
+   the source-derived obligations to the same `formal.query` shape. Compare
+   decisive statuses, checked witnesses, vacuity and costs per question.
 3. Extend `formal.source` with the existing ANF helper-summary and clause
    selection logic; qualify it against current and proposed semantic canaries.
    Preserve Euclidean versus truncating division, grapheme/codepoint/byte

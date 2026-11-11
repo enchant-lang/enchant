@@ -79,9 +79,10 @@ table and deny scopes effective over previously asked questions too.
 
 `formal.logic/with-session` supplies the common question context. An installed
 handler uses a logical context with BL assumptions, and the default path uses
-one native owner. `load!`, `reset!` and `solve-in` keep the assumptions and
-generation explicit in every scoped question. Questions after reset use the
-new context. A closed or foreign context refuses execution.
+one native owner. `load!` normalizes retained assumptions, and `solve-in`
+includes their generation and digest in each scoped question. `reset!`
+advances the context and removes those assumptions. A closed or foreign
+context refuses execution.
 
 Delegating from a handler opens an owned native context for that fallback and
 closes it afterward. A retained fallback also checks its original context's
