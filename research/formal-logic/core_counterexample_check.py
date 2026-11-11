@@ -142,7 +142,7 @@ def validate(packet):
             record(handler['core']['inputs'][0][1], entry[1])
     require(set(witness_variables) <= seen, 'original query variables belong to the bounded trace layout')
     bindings = packet['bindings']
-    require(type(bindings) is list and len(bindings) <= 4096, 'completed binding capacity')
+    require(type(bindings) is list and len(bindings) == len(variables), 'complete bounded binding vector')
     names, bound = [], {}
     for row in bindings:
         require(type(row) is list and len(row) == 5, 'completed binding fields')
