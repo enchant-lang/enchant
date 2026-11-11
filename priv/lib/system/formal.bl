@@ -1,0 +1,47 @@
+(ns system.formal
+ (:require [formal.protocol :as protocol] [formal.query :as q] [formal.term :as t]
+           [formal.value :as v] [formal.check :as check] [formal.result :as result]))
+
+(defn- ready [definition]
+ (let [prepared (protocol/prepare definition)]
+  (when-not (= :ready (:status prepared))
+   (throw (ex-info (str "system.formal: " (:reason prepared)) {})))
+  prepared))
+
+(defn- obligation [definition id]
+ (let [prepared (ready definition)
+       row (first (filter #(= id (:id %)) (:obligations prepared)))]
+  (when-not row (throw (ex-info "system.formal: transition is absent from the exact model" {:id id})))
+  (:problem row)))
+
+(defn establishment-question [definition] (obligation definition [:initiation]))
+(defn preservation-question [definition transition]
+ (obligation definition [:preservation transition]))
+
+(defn fireability-question
+ "A normal true guard admits the attempt. The question leaves the update's
+  outcome visible to preservation checking."
+ [definition transition]
+ (let [prepared (ready definition)
+       model (:model prepared)
+       row (first (filter #(= transition (:name %)) (:transitions model)))
+       _ (when-not row (throw (ex-info "system.formal: unknown transition" {:transition transition})))
+       preservation (preservation-question definition transition)
+       guard (:guard row)
+       ;; The preservation context also covers a guard that raises. This
+       ;; additional predicate selects a normal enabled guard for fireability.
+       enabled (t/all [(v/defined guard) (v/term guard)])]
+  (q/sat {:id [:fireability transition] :profile (:profile preservation)
+          :assumptions (conj (:assertions preservation) (q/assertion "guard-enabled" enabled))
+          :observe (:observe preservation) :relation :normally-enabled-transition
+          :scope (assoc (:scope preservation) :procedure :transition-fireability)
+          :origin {:protocol (:identity definition) :transition transition}})))
+
+(defn preserves [options definition transition]
+ (check/query options (preservation-question definition transition)))
+(defn establishes [options definition]
+ (check/query options (establishment-question definition)))
+(defn fireable [options definition transition]
+ (check/query options (fireability-question definition transition)))
+(defn prove-box [options definition]
+ (result/attach definition (protocol/verify options definition) (if (:backend options) :native :portable)))

@@ -22,6 +22,9 @@
             [z3pool]
             [system.decide :as decide]
             [system.ledger :as ledger]
+            [formal.query :as query]
+            [formal.term :as term]
+            [formal.evaluate :as replay]
             [typed]))
 
 ;; ── L2: the verdict record ────────────────────────────────────────────────
@@ -271,16 +274,21 @@
   (z3pool/check text model?))
 
 (defn with-oracle
-  "Run `f` with every `ask` answered by `handler` — (fn [script-text model?] raw)."
+  "Handle oracle effects during f. A function handles [script-text model?].
+   A method map supplies :script [text model?] and/or :query [question execute]."
   [handler f]
+  (when-not (or (fn? handler)
+                (and (map? handler) (seq handler) (every? #{:script :query} (keys handler))
+                     (every? fn? (vals handler))))
+    (throw (ex-info "oracle: a handler function or method map is required" {})))
   (let [prev (erlang/get handler-key)]
     (erlang/put handler-key handler)
     (try (f) (finally (if (= :undefined prev) (erlang/erase handler-key) (erlang/put handler-key prev))))))
 
 (defn deny
   "A handler that refuses: the sandbox's oracle."
-  [_text _model?]
-  (throw (ex-info "oracle: denied in this context" {})))
+  ([_query] (throw (ex-info "oracle: denied in this context" {})))
+  ([_text _model?] (throw (ex-info "oracle: denied in this context" {}))))
 
 (defn table
   "A handler that answers from {script-text → status-string}; unlisted → unknown."
@@ -288,15 +296,98 @@
   (fn [text _model?] {:status (get answers text "unknown") :model nil :core nil}))
 
 ;; `erlang/get` answers :undefined for an unset key — not nil — so `or` is wrong here.
-(defn- handler [] (let [h (erlang/get handler-key)] (if (or (nil? h) (= :undefined h)) pool-handler h)))
+(defn- installed-handler []
+  (let [h (erlang/get handler-key)] (when-not (or (nil? h) (= :undefined h)) h)))
+
+(defn- handler []
+  (let [h (installed-handler)]
+    (cond (nil? h) pool-handler
+          (fn? h) h
+          (:script h) (:script h)
+          :else (throw (ex-info "oracle: installed handler has no script method" {})))))
 
 (defn- custom-handler?
   "True when someone is HANDLING the oracle — the session path must route through
    the handler too, or `with-oracle` would be a lie for the engine (measured: a
    table handler intercepted `ask` and the engine's sessions went to z3 anyway)."
   []
-  (let [h (erlang/get handler-key)]
-    (not (or (nil? h) (= :undefined h)))))
+  (some? (installed-handler)))
+
+(defn query-intercepted? [] (custom-handler?))
+
+(defn with-query-handler
+  "Handle complete typed queries during f. Script questions require a :script
+   method supplied explicitly through with-oracle."
+  [handler f] (with-oracle {:query handler} f))
+
+(defn query-answer
+  "Bind a handler response to the complete question it answers. Handler claims
+   carry an unchecked certificate and explicit effect provenance."
+  [question response]
+  (merge response (select-keys question [:id :mode :profile :profiles :scope :context])
+    {:formal/query-reply 1 :question question :trusted false
+     :certificate {:status :not-checked :kind :effect-handler-answer}
+     :compiler-proof-authority false}))
+
+(defn query-table
+  "Handle typed queries by exact question value. An unlisted question is unknown."
+  [answers]
+  (fn [question _execute]
+    (query-answer question
+      (get answers question {:solver-status :unknown :verdict :unknown :phase :query
+                             :validation {:status :not-applicable}}))))
+
+(defn- query-fragment [question]
+  (if (every? (fn [node]
+                (and (contains? #{term/Int term/Bool} (:sort node))
+                     (contains? #{:var :int :bool :add :sub :neg :eq :lt :le :gt :ge
+                                  :and :or :not :implies :xor :ite} (:op node))))
+              (term/walk (query/roots question)))
+    :arith :general))
+
+(defn- checked-query-answer [question answer]
+  (when-not (and (map? answer) (= 1 (:formal/query-reply answer)) (= question (:question answer))
+                 (= (select-keys question [:id :mode :profile :profiles :scope :context])
+                    (select-keys answer [:id :mode :profile :profiles :scope :context]))
+                 (contains? #{:sat :unsat :unknown :unsupported :error :not-run} (:solver-status answer))
+                 (contains? #{:query :assumption-consistency :frontend} (:phase answer))
+                 (contains? #{:proved :refuted :sat :unsat :unknown :unsupported :error :candidate :vacuous :invalid-model}
+                            (:verdict answer)))
+    (throw (ex-info "oracle: handler response differs from its complete typed question" {})))
+  (let [answer (query-answer question answer)]
+    (if (= :sat (:solver-status answer))
+      (let [context (vec (concat (:assertions question)
+                          (when (and (= :query (:phase answer)) (:counterexample question))
+                            [(:counterexample question)])))
+            validation (replay/validate context (get answer :assignments {}))
+            verdict (cond (= :invalid (:status validation)) :invalid-model
+                          (not= :valid (:status validation)) :candidate
+                          (= :assumption-consistency (:phase answer)) :sat
+                          (= :prove (:mode question)) :refuted :else :sat)]
+        (assoc answer :validation validation :verdict verdict))
+      (assoc answer :verdict
+        (cond (= :unsat (:solver-status answer))
+               (if (= :assumption-consistency (:phase answer)) :vacuous
+                 (if (= :prove (:mode question)) :proved :unsat))
+              (= :not-run (:solver-status answer)) :error
+              :else (:solver-status answer))))))
+
+(defn ask-query
+  "Route a complete typed question through the installed oracle effect.
+   execute supplies the owned native path when the effect is unhandled."
+  [question execute]
+  (query/validate! question)
+  (let [h (installed-handler) started (erlang/monotonic_time :microsecond)
+        answer (if h
+                 (if-let [method (when (map? h) (:query h))]
+                   (checked-query-answer question (method question execute))
+                   (throw (ex-info "oracle: installed handler has no typed query method" {})))
+                 (execute))
+        elapsed (- (erlang/monotonic_time :microsecond) started)
+        fragment (query-fragment question)]
+    (ledger/record fragment :oracle (name (:solver-status answer)) elapsed (:why answer))
+    (assoc answer :oracle-effect {:kind (if h :handler :native)
+                                  :fragment fragment :us elapsed})))
 
 (defn- prelude-text [] (let [p (erlang/get session-prelude-key)] (if (= :undefined p) "" (or p ""))))
 
@@ -309,7 +400,8 @@
   ([obl model?]
    (let [text (:text obl)
          k (:key obl)
-         hit (if (memo-on?) (ets/lookup (memo!) k) (to-list []))]
+         memo? (and (memo-on?) (not (custom-handler?)))
+         hit (if memo? (ets/lookup (memo!) k) (to-list []))]
      (if (and (seq hit) (not model?))
        (let [v (erlang/element 2 (first hit))]
          (ledger/record (:frag obl) :memo (name (:status v)) 0 (:why v))
@@ -323,7 +415,7 @@
          ;; `(memo!)`, not the bare name: the insert is what must create the table
          ;; when a memo-OFF lookup skipped that step above (it did not, and the
          ;; insert raised ArgumentError — measured).
-         (when (or (proven? v) (refuted? v)) (ets/insert (memo!) (->tuple k v)))
+         (when (and memo? (or (proven? v) (refuted? v))) (ets/insert (memo!) (->tuple k v)))
          v)))))
 
 ;; ── L4: a conversation by default ────────────────────────────────────────
@@ -374,6 +466,8 @@
    caller owns the conversation's scope (`session`/`scoped` bracket, this reads).
    Options: `:core?` (the unsat core, for named assertions), `:model?`."
   ([opts]
+   (when (custom-handler?)
+     (throw (ex-info "oracle: current native conversations require the default handler" {})))
    (let [t0 (now-us)
          raw (z3pool/check-here (to-list (get opts :assume (to-list [])))
                                 (get opts :core? false)

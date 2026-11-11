@@ -17,7 +17,8 @@
 
 (ns system.core
   (:require [z3] [oracle] [system.footprint :as fp] [typed] [minikanren :as mk] [system.gfp :as gfp]
-            [system.model :as model] [system.smt :as smt] [smt :as smtlib] [errors] [z3pool]))
+            [system.model :as model] [system.smt :as smt] [smt :as smtlib] [errors] [z3pool]
+            [system.formal :as formal]))
 
 ; ── script building: ONE lane — forms, with the reader at the edge ─────────
 ;
@@ -93,23 +94,29 @@
 
 (defn preserves?
   "Does the transition preserve Inv? Assert Inv(s) ∧ guard ∧ s2=next ∧ ¬Inv(s2);
-   unsat ⟹ preserved. Returns {:preserved bool :model countermodel-or-nil}."
-  [port inv svar decls guard next]
+   unsat ⟹ preserved. The three-argument term form takes options, a closed
+   formal protocol and a transition name, and returns common formal evidence."
+  ([options definition transition] (formal/preserves options definition transition))
+  ([port inv svar decls guard next]
   (let [cmds (concat (preserves-prelude inv svar decls)
                      (:cmds (preserves-obligation inv svar guard next)))
         r (oracle/ask (oracle/obligation :preserves? cmds) true)]
-    {:preserved (oracle/proven? r) :model (:raw-model r)}))
+    {:preserved (oracle/proven? r) :model (:raw-model r)})))
 
 (defn establishes?
-  "Does the initial state expression establish Inv?"
-  [port inv decls init]
+  "Check initial establishment. The term form takes options and a closed
+   formal protocol, and returns common formal evidence."
+  ([options definition] (formal/establishes options definition))
+  ([port inv decls init]
   (let [r (oracle/ask (oracle/obligation :establishes? (concat (as-cmds decls) [(neg-asserted (inv init))])) true)]
-    {:established (oracle/proven? r) :model (:raw-model r)}))
+    {:established (oracle/proven? r) :model (:raw-model r)})))
 
 (defn prove-box
   "□Inv iff init establishes AND every transition preserves. `transitions` is
-   [{:label :guard :next} …]. Returns {:holds :init :steps :failures}."
-  [port inv svar decls init transitions]
+   [{:label :guard :next} …]. The term form accepts options and a closed
+   formal protocol, returning its checked induction and common evidence."
+  ([options definition] (formal/prove-box options definition))
+  ([port inv svar decls init transitions]
   (let [init-r (establishes? port inv decls init)
         ; ONE session for the box: the declarations and Inv(s) are shared, each
         ; transition is a push/assert/check/pop over them. Measured on the
@@ -137,7 +144,7 @@
         undecided (map :label (filter :undecided step-rs))]
     {:holds (and (:established init-r) (empty? failures) (empty? undecided))
      :init init-r :steps step-rs :failures failures
-     :undecided (into [] undecided)}))
+     :undecided (into [] undecided)})))
 
 ; ════════════════════════════════════════════════════════════════════════
 ; AUTO-STRENGTHENING — abduce a missing precondition (P16d)
@@ -194,11 +201,13 @@
 (defn fireable?
   "Is `cand` satisfiable with Inv and the guard? (rejects contradictory
    candidates that 'close' the triple by forbidding the transition). NB: no
-   inline (check-sat) — z3/check appends it; a second one desyncs the reader."
-  [port inv svar decls guard cand]
+   inline (check-sat) — z3/check appends it; a second one desyncs the reader.
+   The term form takes options, a closed protocol and a transition name."
+  ([options definition transition] (formal/fireable options definition transition))
+  ([port inv svar decls guard cand]
   (oracle/refuted? (oracle/ask (oracle/obligation :fireable? (concat (as-cmds decls)
              [(asserted (inv svar)) (asserted cand)]
-             (if guard [(asserted guard)] []))))))
+             (if guard [(asserted guard)] [])))))))
 
 (defn abduce
   "Sufficient + fireable candidates over `domain`, shortest first (a shorter

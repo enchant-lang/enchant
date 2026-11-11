@@ -1,0 +1,224 @@
+(ns formal.certificate (:require [formal.term :as t] [formal.identity :as identity] [formal.query :as q]))
+
+;; This is the checking boundary. No native solver, independent model evaluator,
+;; compiler traversal or search implementation is called from this namespace.
+(def legacy-rules :bl/boolean-linear-integer-v1)
+(def choice-rules :bl/boolean-piecewise-linear-integer-v2)
+(def rules :bl/piecewise-ground-integer-v3)
+(def supported-rules #{legacy-rules choice-rules rules})
+(def limits {:terms 1024 :atoms 32 :nodes 8192 :depth 64 :weight-bits 4096})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.certificate: " message) {}))))
+(defn- digest [data]
+ (identity/hash [:formal/certificate data]))
+(defn- gcd [a b] (loop [a (abs a) b (abs b)] (if (= b 0) a (recur b (erlang/rem a b)))))
+(defn- floor-div [a b]
+ (let [q (erlang/div a b)] (if (< (erlang/rem a b) 0) (dec q) q)))
+(defn- coefficients [a b scale]
+ (into {} (remove (fn [[_ n]] (= n 0))
+  (reduce (fn [out [x n]] (update out x (fn [old] (+ (or old 0) (* scale n))))) a b))))
+(defn- affine-add [a b scale]
+ {:coeff (coefficients (:coeff a) (:coeff b) scale)
+  :constant (+ (:constant a) (* scale (:constant b)))})
+(defn- affine-scale [a n]
+ {:coeff (coefficients {} (:coeff a) n) :constant (* n (:constant a))})
+(defn- affine [term ground?]
+ (require! (= t/Int (:sort term)) "linear expressions must have Int sort")
+ (let [op (:op term) args (:args term)]
+  (case op
+   :int {:coeff {} :constant (:data term)}
+   :var {:coeff {(:data term) 1} :constant 0}
+   :add (affine-add (affine (first args) ground?) (affine (second args) ground?) 1)
+   :sub (affine-add (affine (first args) ground?) (affine (second args) ground?) -1)
+   :neg (affine-scale (affine (first args) ground?) -1)
+   :mul (let [a (affine (first args) ground?) b (affine (second args) ground?)]
+         (cond (empty? (:coeff a)) (affine-scale b (:constant a))
+               (empty? (:coeff b)) (affine-scale a (:constant b))
+               :else (throw (ex-info "formal.certificate: nonlinear multiplication" {}))))
+   (if (and ground? (contains? #{:div :mod} op))
+    (let [a (affine (first args) ground?) b (affine (second args) ground?)
+          _ (require! (and (empty? (:coeff a)) (empty? (:coeff b)) (not= 0 (:constant b)))
+                      "only ground nonzero Euclidean division is checked")
+          x (:constant a) y (:constant b) q (erlang/div x y) r (erlang/rem x y)
+          quotient (if (< r 0) (if (> y 0) (dec q) (inc q)) q)]
+     {:coeff {} :constant (if (= :div op) quotient (- x (* y quotient)))})
+    (throw (ex-info "formal.certificate: operation outside the linear Int fragment" {:operation op}))))))
+(defn- tighten [row]
+ (let [g (reduce (fn [g [_ n]] (gcd g n)) 0 (:coeff row))]
+  (if (<= g 1) row
+   {:coeff (into {} (map (fn [[x n]] [x (erlang/div n g)]) (:coeff row)))
+    :bound (floor-div (:bound row) g)})))
+(defn- relation [a b strict? ground?]
+ (let [difference (affine-add (affine a ground?) (affine b ground?) -1)]
+  (tighten {:coeff (:coeff difference) :bound (- (if strict? -1 0) (:constant difference))})))
+
+(defn- integer-choice [term]
+ (when (= t/Int (:sort term))
+  (if (= :ite (:op term)) term
+   (when (contains? #{:add :sub :mul :neg :div :mod} (:op term))
+    (first (keep integer-choice (:args term)))))))
+(defn- replace-choice [term choice replacement]
+ (cond (= term choice) replacement (empty? (:args term)) term
+       :else (t/app (:op term) (:sort term) (mapv #(replace-choice % choice replacement) (:args term)) (:data term))))
+(defn- fold-form [formula]
+ (let [kind (first formula) body (second formula)]
+  (cond
+   (= :not kind) (let [a (fold-form body)] (if (= :const (first a)) [:const (not (second a))] [:not a]))
+   (contains? #{:and :or} kind)
+    (let [parts (mapv fold-form body) decisive (= :or kind)]
+     (if (some #(= [:const decisive] %) parts) [:const decisive]
+      (let [remaining (vec (remove #(= :const (first %)) parts))]
+       (case (count remaining) 0 [:const (not decisive)] 1 (first remaining) [kind remaining]))))
+   :else formula)))
+
+(defn prepare
+ "Reconstruct the exact conditional entailment and its atom vocabulary.
+  Inputs are portable data; assertions and the claim are validated afresh."
+ ([problem] (prepare problem rules))
+ ([problem rule-system]
+ (q/validate! problem)
+ (require! (contains? supported-rules rule-system) "unknown certificate rule system")
+ (require! (and (= 1 (:formal/query problem)) (= :prove (:mode problem))) "a proof query is required")
+ (let [assertions (:assertions problem) claim (:claim problem)
+       _ (require! (vector? assertions) "assertions must be a vector")
+       _ (doseq [a assertions]
+           (require! (and (map? a) (string? (:label a)) (= t/Bool (t/sort-of (:term a)))) "invalid assertion"))
+       _ (require! (= t/Bool (t/sort-of claim)) "the claim must be Boolean")
+       roots (conj (mapv :term assertions) (t/not claim))
+       _ (require! (<= (count (t/walk roots)) (:terms limits)) "term capacity exceeded")
+       _ (t/validate! roots)
+       atoms (atom []) ids (atom {}) visits (atom 0) modern? (= rules rule-system)
+       register (fn [atom]
+                  (if (contains? @ids atom) [:atom (get @ids atom)]
+                   (let [id (count @atoms)]
+                    (require! (< id (:atoms limits)) "atom capacity exceeded")
+                    (swap! ids assoc atom id) (swap! atoms conj atom) [:atom id])))
+       linear (fn [row]
+                (if (empty? (:coeff row)) [:const (<= 0 (:bound row))]
+                 (register (assoc row :kind :linear))))]
+  (letfn [(negate [form]
+           (if (and modern? (= :const (first form))) [:const (not (second form))] [:not form]))
+          (junction [kind terms]
+           (if-not modern? [kind (mapv boolean terms)]
+            (loop [remaining terms forms []]
+             (if (empty? remaining)
+              (case (count forms) 0 [:const (= :and kind)] 1 (first forms) [kind forms])
+              (let [form (boolean (first remaining)) constant? (= :const (first form))]
+               (if (and constant? (= (= :or kind) (second form))) form
+                (recur (rest remaining) (if constant? forms (conj forms form)))))))))
+          (ordered [a b strict?]
+           (if-let [choice (when (not= legacy-rules rule-system) (or (integer-choice a) (integer-choice b)))]
+            (let [[condition yes no] (:args choice)
+                  branch (fn [value] (ordered (replace-choice a choice value) (replace-choice b choice value) strict?))]
+             (if (= :bool (:op condition)) (branch (if (:data condition) yes no))
+              (let [c (boolean condition)]
+               (if (and modern? (= :const (first c))) (branch (if (second c) yes no))
+                [:or [[:and [c (branch yes)]] [:and [[:not c] (branch no)]]]]))))
+            (linear (relation a b strict? modern?))))
+          (boolean [term]
+           (require! (<= (swap! visits inc) 4096) "normalization capacity exceeded")
+           (require! (= t/Bool (:sort term)) "expected Boolean term")
+           (let [op (:op term) args (:args term) a (first args) b (second args)
+                 formula (case op
+             :bool [:const (:data term)]
+             :var (register {:kind :boolean :name (:data term)})
+             :not (negate (boolean a))
+             :and (junction :and args)
+             :or (junction :or args)
+             :implies (let [a (boolean a)]
+                        (if (and modern? (= :const (first a)))
+                         (if (second a) (boolean b) [:const true])
+                         [:or [[:not a] (boolean b)]]))
+             :xor (let [a (boolean a) b (boolean b)]
+                   [:or [[:and [a [:not b]]] [:and [[:not a] b]]]])
+             :ite (if (and (not= legacy-rules rule-system) (= :bool (:op a)))
+                    (boolean (if (:data a) b (nth args 2)))
+                    (let [c (boolean a)]
+                     (if (and modern? (= :const (first c)))
+                      (boolean (if (second c) b (nth args 2)))
+                      (let [yes (boolean b) no (boolean (nth args 2))]
+                       [:or [[:and [c yes]] [:and [[:not c] no]]]]))))
+             :eq (cond
+                   (= t/Int (:sort a)) [:and [(ordered a b false) (ordered b a false)]]
+                   (= t/Bool (:sort a)) (let [a (boolean a) b (boolean b)]
+                    [:or [[:and [a b]] [:and [[:not a] [:not b]]]]])
+                   :else (throw (ex-info "formal.certificate: equality sort outside the proof fragment" {})))
+             :le (ordered a b false)
+             :lt (ordered a b true)
+             :ge (ordered b a false)
+             :gt (ordered b a true)
+             (throw (ex-info "formal.certificate: Boolean operation outside the proof fragment" {:operation op})))]
+            (if modern? (fold-form formula) formula)))]
+   (let [formulas (mapv boolean roots)
+         statement {:mode :prove :identity-profile identity/profile :claim claim
+                    :assertions (mapv (fn [a] (select-keys a [:label :term])) assertions)
+                    :profile (:profile problem) :profiles (:profiles problem)
+                    :scope (:scope problem) :relation (:relation problem)}]
+    {:rules rule-system :statement (digest statement) :subject statement
+     :atoms @atoms :formulas formulas
+     :assumptions (mapv (fn [i] {:index i :label (:label (nth assertions i))
+                               :term (:term (nth assertions i)) :origin (:origin (nth assertions i))})
+                       (range (count assertions)))})))))
+
+(defn truth
+ "Three-valued evaluation of only the normalized Boolean skeleton."
+ [formula assignment]
+ (case (first formula)
+  :const (second formula)
+  :atom (get assignment (second formula))
+  :not (let [a (truth (second formula) assignment)] (when (some? a) (not a)))
+  :and (let [values (mapv #(truth % assignment) (second formula))]
+         (cond (some #(= false %) values) false (every? #(= true %) values) true :else nil))
+  :or (let [values (mapv #(truth % assignment) (second formula))]
+        (cond (some #(= true %) values) true (every? #(= false %) values) false :else nil))))
+
+(defn inequality
+ "The exact integer inequality of an assigned atom; no proof-supplied rows."
+ [prepared assignment id]
+ (require! (and (int? id) (<= 0 id) (< id (count (:atoms prepared)))
+                (contains? assignment id)) "arithmetic premise is not assigned")
+ (let [row (nth (:atoms prepared) id)]
+  (require! (= :linear (:kind row)) "arithmetic premise is not linear")
+  (if (get assignment id) (select-keys row [:coeff :bound])
+   (tighten {:coeff (coefficients {} (:coeff row) -1) :bound (- -1 (:bound row))}))))
+
+(defn check
+ "Check a finite refutation independently of its producer and both solvers.
+  :checked establishes conditional entailment, not assumption feasibility,
+  source correctness, compiler correctness or a verified implementation."
+ [problem certificate]
+ (try
+  (let [rule-system (:rules certificate) prepared (prepare problem rule-system) count-nodes (atom 0)]
+   (require! (and (= 1 (:formal/certificate certificate))
+                  (= (:statement prepared) (:statement certificate))) "certificate belongs to a different statement or rule system")
+   (letfn [(visit [proof assignment depth]
+            (require! (and (map? proof) (<= depth (:depth limits))
+                           (<= (swap! count-nodes inc) (:nodes limits))) "proof capacity or shape")
+            (case (:rule proof)
+             :boolean (require! (some #(= false (truth % assignment)) (:formulas prepared)) "no Boolean assertion is false")
+             :split (let [id (:atom proof)]
+                     (require! (and (int? id) (<= 0 id) (< id (count (:atoms prepared)))
+                                    (not (contains? assignment id))) "invalid or repeated split atom")
+                     (visit (:yes proof) (assoc assignment id true) (inc depth))
+                     (visit (:no proof) (assoc assignment id false) (inc depth)))
+             :linear (let [weights (:weights proof)
+                           _ (require! (and (vector? weights) (pos? (count weights))
+                                            (<= (count weights) (:atoms limits))) "invalid arithmetic weights")
+                           total (reduce
+                            (fn [sum entry]
+                             (let [[id weight] entry]
+                              (require! (and (vector? entry) (= 2 (count entry)) (int? weight)
+                                             (pos? weight) (< weight (erlang/bsl 1 (:weight-bits limits)))) "weights must be positive bounded integers")
+                              (let [row (inequality prepared assignment id)]
+                               {:coeff (coefficients (:coeff sum) (:coeff row) weight)
+                                :bound (+ (:bound sum) (* weight (:bound row)))})))
+                            {:coeff {} :bound 0} weights)]
+                       (require! (and (empty? (:coeff total)) (< (:bound total) 0)) "arithmetic combination is not a contradiction"))
+             (throw (ex-info "formal.certificate: unknown proof rule" {}))))]
+    (visit (:proof certificate) {} 0)
+    {:status :checked :verdict :entails :rules rule-system :statement (:statement prepared)
+     :profile (:profile problem) :scope (:scope problem) :nodes @count-nodes
+     :assumptions (:assumptions prepared) :feasibility :not-established
+     :trust [:certificate-checker :term-validation :exact-integer-arithmetic :bl-compiler :beam-runtime]
+     :source-connection :not-established :implementation-verification :not-established}))
+  (catch error {:status :rejected :verdict :not-established :reason (ex-message error)})))

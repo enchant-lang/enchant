@@ -1,0 +1,176 @@
+(ns system.formal-oracle-test
+ (:require [system.core :as system] [system.formal :as system-formal] [system.ledger :as ledger]
+           [oracle] [formal.term :as t] [formal.query :as q] [formal.protocol :as protocol]
+           [formal.logic :as logic] [formal.check :as check] [formal.certificate :as certificate]))
+
+(def zero (t/int 0))
+(def bank
+ (protocol/define
+  {:name "sdk-formal-bank" :state {"balance" t/Int "open" t/Bool}
+   :init (fn [s] (t/all [(t/eq (get s "balance") zero) (get s "open")]))
+   :invariant (fn [s] (t/ge (get s "balance") zero))
+   :transitions [{:name "deposit" :inputs {"amount" t/Int}
+                  :guard (fn [_ in] (t/ge (get in "amount") zero))
+                  :next (fn [s in] {"balance" (t/add (get s "balance") (get in "amount"))})}
+                 {:name "withdraw" :inputs {"amount" t/Int}
+                  :guard (fn [s in] (t/all [(t/ge (get in "amount") zero)
+                                            (t/le (get in "amount") (get s "balance"))]))
+                  :next (fn [s in] {"balance" (t/sub (get s "balance") (get in "amount"))})}]}))
+(def initial {"balance" 0 "open" true})
+(def unavailable {:backend :z3 :worker "/unavailable/formal-worker" :library "/unavailable/libz3.so"})
+(def x (t/variable "sdk.effect.x" t/Int))
+(def ordinary (q/prove (t/ge x zero) {:id "effect/question" :assumptions [(t/ge x zero)]}))
+
+(deftest standard-system-entry-points-build-portable-term-questions
+ (let [preservation (system/preserves? {} bank "withdraw")
+       establishment (system/establishes? {} bank)
+       box (system/prove-box {:initial-state initial} bank)]
+  (is (= :checked (:status preservation)) (pr-str preservation))
+  (is (= :checked (:status establishment)))
+  (is (= :checked (:status box)))
+  (is (= :entails (get-in preservation [:evidence :claim :verdict])))
+  (is (= :checked (get-in preservation [:evidence :certificate :status])))
+  (is (= :checked (get-in box [:evidence :certificate :status])))
+  (is (= :valid (get-in box [:initial-witness :status])))
+  (is (= :all-finite-prefixes-of-the-declared-state-model (:scope box)))
+  (is (= false (get-in box [:evidence :authority :compiler])))
+  (is (= 3 (count (:obligations box))))
+  (is (thrown? (system-formal/preservation-question bank "missing")))))
+
+(deftest either-native-backend-receives-the-exact-same-system-question
+ (doseq [engine [:z3 :oxiz]]
+  (let [options {:backend engine}
+        step (system/preserves? options bank "withdraw")
+        start (system/establishes? options bank)
+        enabled (system/fireable? options bank "withdraw")
+        box (system/prove-box (assoc options :initial-state initial) bank)]
+   (is (= :proved (:verdict step)) (pr-str step))
+   (is (= :proved (:verdict start)))
+   (is (= :sat (:verdict enabled)) (pr-str enabled))
+   (is (= :valid (get-in enabled [:validation :status])))
+   (is (= :checked (:status box)) (pr-str box))
+   (is (= :not-checked (get-in step [:evidence :certificate :status])))
+   (is (= :normal-step-and-state-invariant (get-in step [:evidence :claim :relation])))
+   (is (= :normally-enabled-transition (get-in enabled [:evidence :claim :relation])))
+   (is (= false (get-in box [:evidence :authority :compiler])))
+   (is (= :native (get-in step [:oracle-effect :kind]))))))
+
+(deftest query-handlers-intercept-system-sessions-before-opening-a-worker
+ (let [seen (atom [])
+       state (get-in (protocol/prepare bank) [:model :state])
+       assignment (into {} (map (fn [[field variable]] [(:data variable) (get initial field)]) state))
+       handler (fn [question _execute]
+                 (swap! seen conj question)
+                 (oracle/query-answer question
+                  {:phase :query :solver-status (if (= :sat (:mode question)) :sat :unsat)
+                   :verdict (if (= :sat (:mode question)) :sat :proved) :assignments assignment}))
+       answer (oracle/with-query-handler handler
+                (fn [] (system/prove-box (assoc unavailable :initial-state initial) bank)))]
+  (is (= :checked (:status answer)) (pr-str answer))
+  (is (= 4 (count @seen)))
+  (is (every? #(= 1 (:formal/query %)) @seen))
+  (is (= [:sat :prove :prove :prove] (mapv :mode @seen)))
+  (is (= 1 (count (set (map #(get-in % [:scope :protocol]) @seen)))))
+  (is (= :handler (get-in answer [:backend :feasibility :oracle-effect :kind])))
+  (is (= :effect-handler-answer (get-in answer [:backend :feasibility :certificate :kind])))))
+
+(deftest typed-handlers-are-bound-to-the-whole-question-and-replay-sat-values
+ (let [changed (q/prove (t/lt x zero) {:id (:id ordinary) :assumptions [(t/ge x zero)]})
+       wrong (oracle/with-query-handler
+               (fn [_ _execute] (oracle/query-answer changed {:phase :query :solver-status :unsat :verdict :proved}))
+               (fn [] (logic/run unavailable ordinary)))]
+  (is (= :error (:verdict wrong)))
+  (is (String/contains? (:error wrong) "complete typed question")))
+ (let [question (q/sat {:id "effect/positive" :assumptions [(t/ge x zero)]})]
+  (doseq [[value expected] [[-1 :invalid-model] [1 :sat]]]
+   (let [answer (oracle/with-query-handler
+                 (fn [question _execute]
+                   (oracle/query-answer question
+                    {:phase :query :solver-status :sat :verdict :sat :assignments {"sdk.effect.x" value}
+                     :trusted true :certificate {:status :checked}}))
+                 (fn [] (check/query unavailable question)))]
+    (is (= expected (:verdict answer)))
+    (is (= false (:trusted answer)))
+    (is (= false (get-in answer [:evidence :authority :compiler])))
+    (is (= :not-checked (get-in answer [:evidence :certificate :status])))))))
+
+(deftest logical-session-assumptions-generations-and-owner-lifetimes-are-visible
+ (let [seen (atom []) escaped (atom nil)
+       handler (fn [question _execute]
+                 (swap! seen conj question)
+                 (oracle/query-answer question {:phase :query :solver-status :unsat :verdict :proved}))]
+  (oracle/with-query-handler handler
+   (fn []
+    (logic/with-session unavailable
+     (fn [session]
+      (reset! escaped session)
+      (is (= 1 (:formal/logical-session session)))
+      (is (= true (:ok (logic/load! session [(q/assertion "positive" (t/gt x zero))]))))
+      (is (= :proved (:verdict (logic/solve-in session ordinary))))
+      (is (= 2 (count (:assertions (last @seen))))))
+      (is (= ["context/0/positive"] (get-in (last @seen) [:context :assertions])))
+      (is (= 0 (get-in (last @seen) [:context :generation])))
+      (let [parent (erlang/self)]
+       (erlang/spawn (fn [] (erlang/send parent [:foreign-answer (logic/solve-in session ordinary)])))
+       (let [foreign (receive [:foreign-answer answer] answer (after 5000 {:timeout true}))]
+        (is (= :error (:verdict foreign)))
+        (is (not (:timeout foreign)))))
+      (is (= 1 (count @seen)))
+      (is (= true (:ok (logic/reset! session))))
+      (is (= :proved (:verdict (logic/solve-in session ordinary))))
+      (is (= 1 (count (:assertions (last @seen))))))
+      (is (= nil (:context (last @seen))))))))
+  (is (= true (:retired @(:state @escaped))))
+  (is (= :error (:verdict (logic/solve-in @escaped ordinary))))
+  (is (= 2 (count @seen)))))
+
+(deftest instrumentation-can-delegate-through-an-owned-fallback
+ (doseq [engine [:z3 :oxiz]]
+  (let [counted (atom 0) fallback (atom nil)
+        answer (oracle/with-query-handler
+                 (fn [question execute]
+                   (swap! counted inc)
+                   (reset! fallback execute)
+                   (oracle/query-answer question (execute)))
+                 (fn [] (system/preserves? {:backend engine} bank "deposit")))]
+   (is (= :proved (:verdict answer)) (pr-str answer))
+   (is (= 1 @counted))
+   (is (= :handler (get-in answer [:oracle-effect :kind])))
+   (is (thrown? (@fallback))))))
+
+(deftest script-and-query-handlers-refuse-unhandled-methods-and-restore-the-scope
+ (let [answer (oracle/with-query-handler oracle/deny (fn [] (logic/run unavailable ordinary)))]
+  (is (= :error (:verdict answer)))
+  (is (String/contains? (:error answer) "denied")))
+ (let [answer (oracle/with-oracle oracle/deny (fn [] (logic/run unavailable ordinary)))]
+  (is (= :error (:verdict answer)))
+  (is (String/contains? (:error answer) "typed query method")))
+ (is (thrown? (oracle/with-query-handler (oracle/query-table {})
+                (fn [] (oracle/ask (oracle/obligation :script ['(assert true)]))))))
+ (let [answer (oracle/with-query-handler (oracle/query-table {})
+                (fn [] (logic/run unavailable ordinary)))]
+  (is (= :unknown (:verdict answer))))
+ (is (= false (oracle/query-intercepted?))))
+
+(deftest custom-script-handlers-see-questions-that-were-previously-memoized
+ (let [obligation (oracle/obligation :memo-boundary ['(declare-const sdk_memo Int) '(assert (= sdk_memo 1))])
+       seen (atom 0)]
+  (oracle/memo-clear!)
+  (oracle/ask obligation)
+  (is (= 1 (oracle/memo-size)))
+  (is (thrown? (oracle/with-oracle oracle/deny (fn [] (oracle/ask obligation)))))
+  (let [answer (oracle/with-oracle
+                 (fn [_text _model?] (swap! seen inc) {:status "unknown" :model nil :core nil})
+                 (fn [] (oracle/ask obligation)))]
+   (is (= :unknown (:status answer)))
+   (is (= 1 @seen)))
+  (oracle/memo-clear!)))
+
+(deftest legacy-system-arities-retain-their-result-shape
+ (let [seen (atom 0)
+       answer (oracle/with-oracle
+                (fn [_text _model?] (swap! seen inc) {:status "unsat" :model nil :core nil})
+                (fn [] (system/preserves? nil (fn [state] (list '>= state 0)) 'n
+                          ['(declare-const n Int)] '(>= n 0) '(+ n 1))))]
+  (is (= {:preserved true :model nil} answer))
+  (is (= 1 @seen))))

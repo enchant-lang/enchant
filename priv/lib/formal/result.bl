@@ -1,0 +1,134 @@
+(ns formal.result (:require [formal.identity :as identity] [formal.connection :as connection]))
+
+;; An evidence projection, not a new checker. Raw results remain available and
+;; no projection can grant compiler authority or complete missing evidence.
+(def tags {:formal/query :query :formal/contract :contract :formal/loop :loop :formal/translation :translation
+           :formal/protocol :protocol :formal/source-protocol :source-protocol :formal/protocol-trace :protocol-trace})
+(defn kind [subject]
+ (let [present (if (map? subject) (vec (filter #(contains? subject %) (keys tags))) [])]
+  (if (and (= 1 (count present)) (= 1 (get subject (first present))))
+   (get tags (first present)) :unsupported)))
+(defn subject-id [subject]
+ (if-not (map? subject) nil
+  (if (= :query (kind subject))
+  (identity/hash [:formal/query-identity subject])
+  (:identity subject))))
+(defn- portable [produced checking object]
+ {:kind :portable-term :status (if checking (:status checking) :not-established)
+  :production-status (:status produced) :rules (:rules checking)
+  :object object :checking checking})
+(defn- certificate [subject raw execution]
+ (case (kind subject)
+  :query (if (= :native execution) (get raw :certificate {:status :not-checked :kind :solver-answer})
+           (portable raw (:checking raw) (:certificate raw)))
+  :contract (portable (:proof raw) (get-in raw [:proof :checking]) (get-in raw [:proof :certificate]))
+  :translation (portable (get-in raw [:proof :production]) (get-in raw [:proof :checking]) (get-in raw [:proof :object]))
+  :protocol-trace (portable (get-in raw [:proof :production]) (get-in raw [:proof :checking]) (get-in raw [:proof :object]))
+  :loop {:kind :portable-loop-obligations
+         :status (if (= :checked-obligations (get-in raw [:checking :status])) :checked :not-established)
+         :object (:proof raw) :checking (:checking raw)}
+  :protocol {:kind :portable-protocol-obligations
+             :status (if (= :checked-obligations (get-in raw [:checking :status])) :checked :not-established)
+             :object (:proof raw) :checking (:checking raw)}
+  :source-protocol {:kind :portable-source-protocol-obligations
+                    :status (if (= :checked-obligations (get-in raw [:checking :status])) :checked :not-established)
+                    :object (:proof raw) :checking (:checking raw)}
+  {:kind :none :status :not-established}))
+(defn- native-rows [subject raw execution]
+ (case (kind subject)
+  :query (if (= :native execution) [{:id (:id raw) :result raw}] [])
+  :loop (vec (concat (when-let [feasible (get-in raw [:backend :feasibility])]
+                      [{:id :feasibility :result feasible}]) (get-in raw [:backend :obligations])))
+  :protocol (vec (concat (when-let [feasible (get-in raw [:backend :feasibility])]
+                          [{:id :feasibility :result feasible}]) (get-in raw [:backend :obligations])))
+  :source-protocol (vec (concat (when-let [feasible (get-in raw [:backend :feasibility])]
+                                 [{:id :feasibility :result feasible}]) (get-in raw [:backend :obligations])))
+  (vec (keep (fn [key] (when-let [result (get-in raw [:backend key])] {:id key :result result}))
+             [:feasibility :property]))))
+(defn attach
+ "Add the common evidence envelope while retaining every original result field.
+  Logical answer, certificate, feasibility, connection and authority stay separate."
+ [subject raw execution]
+ (let [type (kind subject) cert (certificate subject raw execution)
+       status (or (:verdict raw) (:status raw))
+       verdict (get {:checked :entails :proved :entails :uncertified :entails} status status)
+       ledger (if (contains? #{:loop :protocol :source-protocol} type)
+                {:kind :per-obligation :input-precondition (get subject :requires (get subject :init (get-in subject [:protocol :init])))
+                 :rows (mapv (fn [row] {:id (:id row) :kind (:kind row)
+                                        :assumptions (get-in row [:proof :checking :assumptions])}) (:obligations raw))}
+                {:kind :single-statement :assertions
+                 (if (= :query type) (:assertions subject)
+                  (or (get-in raw [:proof :checking :assumptions])
+                      (:assumptions raw)
+                      (when (and (map? subject) (contains? subject :requires)) [{:label "requires" :term (:requires subject)}])))})
+       feasibility (if (= :query type)
+                     (cond (= :vacuous status) :backend-inconsistent
+                           (= :sat status) :replayed-witness
+                           (= :sat (get-in raw [:preflight :status])) :backend-sat
+                           :else :not-established)
+                     (get raw :assumption-consistency :not-established))]
+  (assoc raw :subject-kind type
+   :evidence {:formal/evidence 1 :subject {:kind type :identity (subject-id subject)}
+              :claim {:verdict verdict :reported-status status :scope (get raw :scope (:scope subject))
+                      :relation (get subject :relation (get {:contract :return-value-and-declared-errors
+                                                            :loop :normal-return-and-postcondition
+                                                            :protocol :normal-step-and-state-invariant
+                                                            :source-protocol :normal-step-and-state-invariant
+                                                            :protocol-trace :finite-prefix-state-and-normal-step-safety} type))
+                      :profile (:profile subject)
+                      :basis (cond (= :checked (:status cert)) :checked-certificate
+                                   (contains? #{:proved :uncertified} status) :solver-verdict
+                                   (and (contains? #{:contract :translation} type) (= :refuted status)) :term-and-core-replay
+                                   (and (= :protocol-trace type) (= :refuted status)
+                                        (= :valid (get-in raw [:counterexample :source-replay :status]))) :term-state-and-handler-core-replay
+                                   (and (= :protocol-trace type) (= :refuted status)) :term-and-state-trace-replay
+                                   (contains? #{:sat :refuted :obligation-refuted} status) :independent-term-replay
+                                   :else :reported-evidence)
+                      :conditional (not= :sat (:mode subject))}
+              :certificate cert :assumptions ledger :feasibility {:status feasibility}
+              :connection {:source (if (= :query type) :not-applicable-direct-term-query (get raw :source-connection :not-established))
+                           :model-interpretation (get raw :model-interpretation
+                                                  (if (= :query type) (connection/direct-terms) (connection/unavailable)))
+                           :identity-profile identity/profile
+                           :binding-context (:binding-context raw)
+                           :elaboration (:elaboration raw)
+                           :specialization (:specialization raw)
+                           :implementation-soundness :not-mechanically-proved}
+              :native (mapv (fn [{:keys [id result]}]
+                              {:id id :solver-status (:solver-status result) :verdict (:verdict result)
+                               :phase (:phase result) :preflight-status (get-in result [:preflight :status])
+                               :identity (:identity result) :certificate (:certificate result)
+                               :validation (:validation result) :model-status (:model-status result)
+                               :witness-provenance (:witness-provenance result)}) (native-rows subject raw execution))
+              :authority {:compiler false :promotion :disabled}})))
+
+(defn- native-feasibility [row]
+ (or (:preflight-status row) (when (= :assumption-consistency (:phase row)) (:solver-status row))
+     (when (= :sat (:solver-status row)) :sat)))
+(defn- native-signature [row]
+ [(:id row) (:phase row) (:solver-status row) (native-feasibility row)])
+(defn comparison [subject reference candidate]
+ (let [a (get-in reference [:evidence :claim :verdict]) b (get-in candidate [:evidence :claim :verdict])
+       decisive? #(contains? #{:entails :refuted :obligation-refuted :sat :unsat :vacuous} %)
+       native-a (get-in reference [:evidence :native]) native-b (get-in candidate [:evidence :native])
+       native-decisive? #(contains? #{:sat :unsat} %)
+       covered? (and (seq native-a) (= (mapv :id native-a) (mapv :id native-b)))
+       logical-agreement (and (decisive? a) (decisive? b) (= a b))
+       logical-disagreement (and (decisive? a) (decisive? b) (not= a b))
+       native-agreement (boolean (and covered? (every? #(native-decisive? (:solver-status %)) (concat native-a native-b))
+                                      (= (mapv native-signature native-a) (mapv native-signature native-b))))
+       native-disagreement (boolean (and covered? (some true?
+        (map (fn [x y]
+               (or (and (= (:phase x) (:phase y)) (native-decisive? (:solver-status x)) (native-decisive? (:solver-status y))
+                         (not= (:solver-status x) (:solver-status y)))
+                   (and (native-decisive? (native-feasibility x)) (native-decisive? (native-feasibility y))
+                         (not= (native-feasibility x) (native-feasibility y))))) native-a native-b))))]
+  {:formal/comparison 1 :subject-kind (kind subject) :definition (subject-id subject)
+   :reference-engine :z3 :authority :none :compiler-proof-authority false
+   :decision reference :candidate candidate :results {:z3 reference :oxiz candidate}
+   :status-agreement native-agreement :backend-status-agreement native-agreement
+   :logical-agreement logical-agreement :logical-disagreement logical-disagreement
+   :backend-disagreement native-disagreement :disagreement (or logical-disagreement native-disagreement)
+   :certificate-statuses {:z3 (get-in reference [:evidence :certificate :status])
+                          :oxiz (get-in candidate [:evidence :certificate :status])}
+   :promotion :disabled}))

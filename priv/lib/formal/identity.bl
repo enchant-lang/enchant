@@ -1,0 +1,54 @@
+(ns formal.identity)
+
+;; Identity is over public data contents, never a VM's map iteration order,
+;; persistent-vector storage shape or live resource address. The normalized
+;; tree contains only tagged native tuples/lists, binaries and numeric data.
+(def profile :bl/canonical-formal-data-v1)
+(def limits {:nodes 100000 :depth 192 :bytes 8388608})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.identity: " message) {:kind :identity-data :profile profile}))))
+(defn- encoded [value] (erlang/term_to_binary value (list :deterministic (tuple :minor_version 2))))
+(defn bytes [value]
+ (let [nodes (atom 0) scalar-bytes (atom 0)]
+  (letfn [(walk [value depth]
+            (swap! nodes inc)
+            (require! (and (<= @nodes (:nodes limits)) (<= depth (:depth limits))) "data walk capacity")
+            (require! (not (fn? value)) "functions are not portable formal data")
+            (require! (or (nil? (meta value)) (= {} (meta value))) "metadata must be an explicit data field")
+            (require! (not (or (sorted-map? value) (sorted-set? value))) "ordered runtime collections require an explicit data model")
+            (when (or (string? value) (int? value) (float? value))
+             (swap! scalar-bytes + (erlang/external_size value))
+             (require! (<= @scalar-bytes (:bytes limits)) "scalar byte capacity"))
+            (cond
+             (nil? value) (tuple "nil")
+             (= true value) (tuple "bool" 1)
+             (= false value) (tuple "bool" 0)
+             (int? value) (tuple "int" value)
+             (float? value) (tuple "float64" (encoded value))
+             (string? value) (tuple "binary" value)
+             (keyword? value) (tuple "keyword" (erlang/atom_to_binary value))
+             (symbol? value) (tuple "symbol" (str value))
+             (vector? value) (tuple "vector" (to-list (map #(walk % (inc depth)) value)))
+             (list? value) (tuple "list" (to-list (map #(walk % (inc depth)) value)))
+             (set? value)
+              (let [items (sort-by first (mapv (fn [item] (let [n (walk item (inc depth))] [(encoded n) n])) value))]
+               (require! (= (count items) (count (distinct (map first items)))) "ambiguous canonical set elements")
+               (tuple "set" (to-list (map second items))))
+             (map? value)
+              (let [entries (sort-by first
+                              (mapv (fn [[key item]]
+                                      (let [k (walk key (inc depth)) v (walk item (inc depth))]
+                                       [(encoded k) (tuple k v)])) value))]
+               (require! (= (count entries) (count (distinct (map first entries)))) "ambiguous canonical map keys")
+               (tuple "map" (to-list (map second entries))))
+             (erlang/is_tuple value) (tuple "tuple" (to-list (map #(walk % (inc depth)) (erlang/tuple_to_list value))))
+             :else (throw (ex-info "formal.identity: value is not portable formal data" {:kind :identity-data :profile profile}))))]
+   (let [result (encoded (tuple "bl/canonical-formal-data-v1" (walk value 0)))]
+    (require! (<= (erlang/byte_size result) (:bytes limits)) "encoded byte capacity") result))))
+(defn hash [value]
+ (Base/encode16 (crypto/hash :sha256 (bytes value)) (list (tuple :case :lower))))
+(defn of [data] (hash (dissoc data :identity)))
+(defn seal [data]
+ (let [marked (assoc data :identity-profile profile)] (assoc marked :identity (of marked))))
+(defn valid? [data]
+ (and (map? data) (= profile (:identity-profile data)) (= (:identity data) (of data))))

@@ -1,0 +1,105 @@
+(ns formal.refutation
+ (:require [formal.certificate :as certificate] [formal.identity :as identity] [formal.term :as t] [formal.term-model :as model]))
+
+;; Export exact normalized data for the separate executable Lean kernel. This
+;; does not prove the BL term normalizer sound and does not invoke external code.
+(def profile :bl/normalized-refutation-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.refutation: " reason) {}))))
+(defn- gcd [a b]
+ (loop [a (abs a) b (abs b)] (if (= b 0) a (recur b (erlang/rem a b)))))
+(declare binary-form)
+(defn- joined [tag identity forms]
+ (let [forms (vec forms) n (count forms)]
+  (case n
+   0 [:constant identity]
+   1 (binary-form (first forms))
+   (let [middle (erlang/div n 2)]
+    [tag (joined tag identity (take middle forms)) (joined tag identity (drop middle forms))]))))
+(defn- binary-form [form]
+ (case (first form)
+  :const [:constant (second form)]
+  :atom [:atom (second form)]
+  :not [:neg (binary-form (second form))]
+  :and (joined :both true (second form))
+  :or (joined :either false (second form))
+  (throw (ex-info "formal.refutation: unknown normalized Boolean constructor" {}))))
+(defn- proof-data [proof]
+ (case (:rule proof)
+  :boolean [:boolean]
+  :linear [:linear (:weights proof)]
+  :split [:split (:atom proof) (proof-data (:yes proof)) (proof-data (:no proof))]
+  (throw (ex-info "formal.refutation: unknown proof constructor" {}))))
+(defn prepare
+ "Bind a real question/certificate to the exact normalized data consumed by
+  the executable Lean refutation kernel. Both data and remaining bridges are
+  explicit. This export runs no compiler, native solver or Lean process."
+ [question object]
+ (try
+  (let [checked (certificate/check question object)]
+   (require! (= :checked (:status checked)) (str "BL certificate rejected: " (:reason checked)))
+   (let [prepared (certificate/prepare question (:rules object))
+         variables (vec (sort (set (mapcat #(keys (:coeff %)) (filter #(= :linear (:kind %)) (:atoms prepared))))))
+         _ (require! (every? string? variables) "integer variable identities must be strings")
+         atoms (mapv (fn [atom]
+                       (case (:kind atom)
+                        :boolean [:boolean]
+                        :linear
+                         (do
+                          ;; BL prepare has already tightened these coefficients.
+                          ;; A false atom's exact integer complement therefore
+                          ;; needs no additional gcd division in the Lean kernel.
+                          (require! (= 1 (reduce gcd 0 (vals (:coeff atom)))) "primitive normalized coefficients required")
+                          [:linear (mapv #(get (:coeff atom) % 0) variables) (:bound atom)])
+                        (throw (ex-info "formal.refutation: unknown normalized atom" {})))) (:atoms prepared))
+         booleans (vec (keep (fn [[index atom]] (when (= :boolean (:kind atom)) [index (:name atom)]))
+                         (map-indexed (fn [index atom] [index atom]) (:atoms prepared))))
+         kernel {:atoms atoms :formulas (mapv binary-form (:formulas prepared)) :proof (proof-data (:proof object))}
+         packet (identity/seal
+                  {:formal/normalized-refutation 1 :profile profile :rules (:rules prepared)
+                   :statement (:statement prepared) :question (identity/hash question)
+                   :variables variables :booleans booleans :kernel kernel})]
+    {:status :ready :packet packet :bl-check checked
+     :normalization :reviewed-not-mechanically-proved :encoding :reviewed-data-bridge
+     :kernel-execution :not-run :compiler-proof-authority false}))
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
+
+(defn check-data
+ "Reconstruct the export from the exact original question/certificate. A
+  rehashed packet is not accepted in place of that reconstruction. No external
+  process is invoked and no Lean execution receipt is authenticated here."
+ [question object packet]
+ (let [prepared (prepare question object)]
+  (cond
+   (not= :ready (:status prepared)) prepared
+   (not= packet (:packet prepared)) {:status :rejected :reason :normalized-data-does-not-match-subject :compiler-proof-authority false}
+   :else {:status :checked-data-connection :profile profile :packet (:identity packet)
+          :statement (:statement packet) :normalization :reviewed-not-mechanically-proved
+          :kernel-execution :not-run :compiler-proof-authority false})))
+
+(def term-profile :bl/typed-term-refutation-v1)
+(def term-semantics model/semantics)
+(defn prepare-terms
+ "Retain original typed Int/Bool assertion and claim trees alongside their
+  normalized refutation. Export is pure data, not a normalization proof."
+ [question object]
+ (let [normalized (prepare question object)]
+  (if (not= :ready (:status normalized)) normalized
+   (try
+    (let [assertions (mapv :term (:assertions question)) claim (:claim question)
+          supported? (model/supported? (conj assertions claim))]
+     (if-not supported?
+      {:status :unsupported :reason :original-term-outside-partial-int-bool-model :compiler-proof-authority false}
+      {:status :ready
+       :packet (identity/seal {:formal/term-refutation 1 :profile term-profile :semantics term-semantics
+                              :assertions assertions :claim claim :normalized (:packet normalized)})
+       :term-connection :not-run :kernel-execution :not-run :compiler-proof-authority false}))
+    (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))))
+(defn check-term-data [question object packet]
+ (let [prepared (prepare-terms question object)]
+  (cond
+   (not= :ready (:status prepared)) prepared
+   (not= packet (:packet prepared)) {:status :rejected :reason :original-term-data-does-not-match-subject :compiler-proof-authority false}
+   :else {:status :checked-data-connection :profile term-profile :packet (:identity packet)
+          :question (get-in packet [:normalized :question]) :semantics term-semantics
+          :term-connection :not-run :kernel-execution :not-run :compiler-proof-authority false})))

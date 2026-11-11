@@ -1,0 +1,81 @@
+(ns formal.witness
+ (:require [formal.term :as t] [formal.query :as q] [formal.identity :as identity]
+           [formal.evaluate :as replay] [formal.term-model :as model]))
+
+(def profile :bl/typed-term-witness-v1)
+(defn- require! [ok reason] (when-not ok (throw (ex-info (str "formal.witness: " reason) {}))))
+(defn- assignment [variables supplied]
+ (let [by-name (into {} (map (fn [variable] [(:data variable) variable]) variables))
+       pairs (cond (map? supplied) (vec supplied)
+                   (vector? supplied)
+                    (mapv (fn [row]
+                            (require! (and (vector? row) (= 2 (count row))) "term binding must be [variable value]")
+                            (let [[variable value] row]
+                             (t/validate! [variable])
+                             (require! (and (= :var (:op variable)) (= variable (get by-name (:data variable))))
+                                       "binding key must be an original assertion variable")
+                             [(:data variable) value])) supplied)
+                   :else (throw (ex-info "formal.witness: explicit name map or term-binding vector required" {})))
+       names (mapv first pairs)]
+  (require! (and (every? string? names) (= (count names) (count (set names)))) "unique string input names required")
+  (require! (= (set names) (set (keys by-name))) "exactly one value for every assertion input required")
+  (doseq [[name value] pairs]
+   (require! (if (= t/Int (t/sort-of (get by-name name))) (int? value) (boolean? value)) "concrete value must match its input sort"))
+  (into {} pairs)))
+
+(defn prepare
+ "Constructive SAT evidence from explicit bindings, without search or native
+  handles. All assertion variables are required; watchers add no constraints."
+ [question supplied]
+ (try
+  (q/validate! question)
+  (require! (= :sat (:mode question)) "SAT question required")
+  (let [assertions (mapv :term (:assertions question))]
+   (if-not (model/supported? assertions)
+    {:status :unsupported :reason :original-term-outside-partial-int-bool-model :compiler-proof-authority false}
+    (let [variables (t/variables assertions) values (assignment variables supplied)
+          checked (replay/validate (:assertions question) values)]
+     (require! (= :valid (:status checked)) "every original assertion must evaluate to true; false and unavailable are rejected")
+     {:status :ready
+      :packet (identity/seal
+               {:formal/term-witness 1 :profile profile :semantics model/semantics
+                :question (identity/hash question) :mode :sat :assertions assertions
+                :bindings (mapv (fn [variable] [(:data variable) (t/sort-of variable) (get values (:data variable))])
+                                (sort-by :data variables))
+                :completion :zero-false-outside-bindings})
+      :validation checked :existence :checked-by-bl-replay :kernel-execution :not-run
+      :term-data-model-correspondence :reviewed-data-semantics-bridge :compiler-proof-authority false})))
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
+
+(defn check-data
+ "Reconstruct the exact SAT packet against its original portable question.
+  This checks data and replays assertions; it authenticates no Lean receipt."
+ [question packet]
+ (try
+  (require! (and (map? packet) (vector? (:bindings packet))) "witness bindings required")
+  (require! (identity/valid? packet) "closed canonical witness identity required")
+  (let [bindings (mapv (fn [row]
+                        (require! (and (vector? row) (= 3 (count row))) "witness binding row required")
+                        [(t/variable (nth row 0) (nth row 1)) (nth row 2)]) (:bindings packet))
+        ready (prepare question bindings)]
+   (require! (= :ready (:status ready)) (:reason ready))
+   (require! (= packet (:packet ready)) "packet does not match the complete original SAT question and bindings")
+   {:status :checked-data-connection :profile profile :packet (:identity packet) :question (:question packet)
+    :semantics model/semantics :existence :checked-by-bl-replay :kernel-execution :not-run
+    :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
+
+(defn from-result
+ "Adapt a native SAT model into ordinary evidence. Assertion assignments are
+  replayed afresh; displayed observations and backend verdicts prove nothing."
+ [question result]
+ (try
+  (q/validate! question)
+  (require! (and (= :sat (:mode result)) (= :query (:phase result)) (= :sat (:solver-status result))
+                 (contains? #{"z3" "oxiz"} (get-in result [:backend :name])) (map? (:assignments result))) "native SAT model assignments required")
+  (let [names (mapv :data (t/variables (mapv :term (:assertions question))))
+        made (prepare question (select-keys (:assignments result) names))]
+   (assoc made :discovery {:kind :native-model :backend (case (get-in result [:backend :name]) "z3" :z3 "oxiz" :oxiz)
+                          :description (:backend result) :identity (:identity result)
+                          :origin :claimed-not-cryptographically-attested :truth :independent-original-assertion-check}))
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
