@@ -17,7 +17,8 @@
                                       (get values (str "watch/" i) (replay/unavailable :missing-observation))])
                               (range (count (:watched rows)))))
        resolved (into {} (map (fn [[term native]]
-                    (let [derived (when (replay/unavailable? native)
+                    (let [native (replay/checked-value (t/sort-of term) native)
+                          derived (when (replay/unavailable? native)
                                     (if (contains? #{:bool :int :real :string :bv :enum} (first (t/sort-of term)))
                                      (replay/value term assignments) (replay/unavailable :observation-replay-sort)))
                           replayed? (and (replay/unavailable? native) (not (replay/unavailable? derived)))]
@@ -35,6 +36,7 @@
   ;; Display fallback never participates in the assertion-validation decision.
   ;; Native model status remains in base-result; every replayed field is labelled.
   {:assignments assignments :witness witness :witness-provenance provenance
+   :observation-basis :native-model-and-independent-replay
    :validation (replay/validate assertions assignments)}))
 
 (defn- base-result [problem reply]
@@ -116,8 +118,10 @@
   (backend/reset! session)))
 
 (defn- query-error [problem error]
- {:id (:id problem) :mode (:mode problem) :profile (:profile problem) :scope (:scope problem) :trusted false
-  :verdict :error :phase :frontend :solver-status :not-run :error (ex-message error)})
+ (merge (if (map? problem) (select-keys problem [:id :mode :profile :profiles :scope :context]) {})
+  {:question problem :trusted false :compiler-proof-authority false
+   :certificate {:status :not-checked :kind :frontend-error} :validation {:status :not-applicable}
+   :verdict :error :phase :frontend :solver-status :not-run :error (ex-message error)}))
 
 (defn solve-in
  "Check a complete portable question through the oracle effect. Retained
@@ -126,7 +130,8 @@
  (try
   (live! session)
   (let [problem (q/validate! problem)
-        persistent (:assertions @(:state session))
+        snapshot (select-keys @(:state session) [:generation :assertions])
+        persistent (:assertions snapshot)
         retained (mapv (fn [i]
                     (let [a (nth persistent i)]
                      (assoc a :label (str "context/" i "/" (:label a))))) (range (count persistent)))
@@ -134,15 +139,23 @@
                     (-> problem
                         (update :assertions #(vec (concat retained %)))
                         (update :assumptions #(vec (concat (map (fn [a] (select-keys a [:label :origin])) retained) %)))
-                        (assoc :context {:generation (:generation @(:state session))
+                        (assoc :context {:generation (:generation snapshot)
                                          :assertions (mapv :label retained)
                                          :digest (t/digest (mapv :term retained))})))]
-   (oracle/ask-query effective
-    (fn []
-     (live! session)
-     (if (= 1 (:formal/logical-session session))
-      (backend/with-session (:options session) (fn [native] (solve-native-in native effective)))
-      (solve-native-in session effective)))))
+   (try
+    (oracle/ask-query effective
+     (fn []
+      (live! session)
+      (when-not (= snapshot (select-keys @(:state session) [:generation :assertions]))
+       (throw (ex-info "formal.logic: question context changed before fallback execution" {})))
+      (let [result (if (= 1 (:formal/logical-session session))
+                     (backend/with-session (:options session) (fn [native] (solve-native-in native effective)))
+                     (solve-native-in session effective))]
+       (live! session)
+       (when-not (= snapshot (select-keys @(:state session) [:generation :assertions]))
+        (throw (ex-info "formal.logic: question context changed during fallback execution" {})))
+       result)))
+    (catch error (query-error effective error))))
   (catch error (query-error problem error))))
 
 (defn run [opts problem]
@@ -174,7 +187,7 @@
                 (every? (fn [[_ term]] (and (t/term? term)
                        (contains? #{:bool :int :real :string :bv :enum} (first (t/sort-of term))))) projection))
   (throw (ex-info "Enumeration needs supported scalar terms and limit 1..256" {})))
- (backend/with-session opts
+ (with-session opts
   (fn [session]
    (loop [blocks [] answers []]
     (if (>= (count answers) limit)
@@ -184,6 +197,9 @@
       (cond
        (= :unsat (:verdict result)) {:status :complete :answers answers :complete true}
        (not= :sat (:verdict result)) {:status :partial :answers answers :complete false :last result}
+       (not (every? (fn [[name term]]
+                      (= :valid (:status (replay/check-value (t/sort-of term) (get (:witness result) name))))) projection))
+        {:status :partial :answers answers :complete false :reason :projection-unavailable :last result}
        :else
         (let [witness (:witness result)
               equalities (mapv (fn [[name term]]
@@ -202,7 +218,7 @@
  (when-not (and (= t/Int (t/sort-of objective)) (int? lower) (int? upper) (<= lower upper)
                 (<= (- upper lower) 256) (contains? #{:min :max} direction))
   (throw (ex-info "Finite optimization needs explicit integer bounds <=256" {})))
- (backend/with-session opts
+ (with-session opts
   (fn [session]
    (let [candidates (if (= direction :min) (range lower (inc upper)) (reverse (range lower (inc upper))))]
     (loop [remaining candidates tested 0]
@@ -223,7 +239,7 @@
  [opts candidates options]
  (when-not (and (vector? candidates) (<= (count candidates) 256))
   (throw (ex-info "Synthesis needs an explicit finite grammar of at most 256 candidates" {})))
- (backend/with-session opts
+ (with-session opts
   (fn [session]
    (loop [remaining (seq candidates) rejected []]
     (if (empty? remaining) {:status :grammar-exhausted :rejected rejected :grammar-size (count candidates)}
@@ -239,7 +255,7 @@
  [opts assertions]
  (when-not (and (vector? assertions) (<= (count assertions) 256))
   (throw (ex-info "Deletion explanation needs at most 256 explicit assertions" {})))
- (backend/with-session opts
+ (with-session opts
   (fn [session]
    (let [initial (solve-in session (q/sat {:assumptions assertions}))]
     (if (not= :unsat (:verdict initial)) {:status :not-unsat :evidence initial}

@@ -1,6 +1,7 @@
 (ns system.formal-answer-test
  (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
-           [formal.evaluate :as replay] [oracle]))
+           [formal.evaluate :as replay] [formal.value :as v] [formal.backend :as backend]
+           [formal.answer :as answer] [formal.check :as check] [oracle]))
 
 (def unavailable {:backend :z3 :worker "/unavailable/formal-worker" :library "/unavailable/libz3.so"})
 (def p (t/variable "answer.p" t/Bool))
@@ -92,3 +93,133 @@
   (is (= :partial (:status answer)) (pr-str answer))
   (is (= false (:complete answer)))
   (is (= 1 @seen))))
+
+(deftest concrete-model-encodings-match-their-declared-sorts
+ (let [color (t/enum-sort "AnswerColor" ["red" "blue"])
+       pairs [[t/Bool true 1] [t/Int 1 1.0]
+              [t/Real (replay/real 1 2) {:formal/real [2 4]}]
+              [(t/bv-sort 8) (replay/bv 8 255) {:formal/bv [8 256]}]
+              [(t/fp-sort 8 24) {:formal/fp [8 24 0]} {:formal/fp [11 53 0]}]
+              [color {:formal/enum ["AnswerColor" "red"]} {:formal/enum ["Other" "red"]}]
+              [t/Rounding "RNE" "other"]
+              [t/String "snowman ☃" (erlang/list_to_binary (list 255))]
+              [(t/seq-sort t/Int) [1 2] [1 false]]
+              [(t/array-sort t/Bool t/Int)
+               {:formal/array {:default 0 :updates [[true 1]]}}
+               {:formal/array {:default 0 :updates [[1 1]]}}]]]
+  (doseq [[sort valid invalid] pairs]
+   (is (= :valid (:status (replay/check-value sort valid))))
+   (is (= :invalid (:status (replay/check-value sort invalid))))
+   (is (replay/unavailable? (replay/value (t/variable "typed.input" sort) {"typed.input" invalid})))))
+ (is (= :incomplete (:status (replay/check-value (t/uninterpreted-sort "Opaque") "model-local-name"))))
+ (is (= :invalid (:status (replay/check-value (t/bv-sort 8) (backend/decode-native ["bv" 8 256])))))
+ (is (= :valid (:status (replay/check-value t/String (unicode/characters_to_binary (list 196607))))))
+ (is (= :invalid (:status (replay/check-value t/String (unicode/characters_to_binary (list 196608)))))))
+
+(deftest unavailable-bindings-remain-compatible-with-known-boolean-dominance
+ (let [statement (q/assertion "dominant" (t/any [(t/bool true) p]))]
+  (is (= :valid (:status (replay/validate [statement] {}))))
+  (is (= :incomplete (get-in (replay/validate [statement] {}) [:bindings :status])))
+  (is (= :invalid (:status (replay/validate [statement] {"answer.p" 1}))))
+  (is (= :invalid (:status (replay/validate [statement] [])))))
+ (let [question (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"next" (v/lift (t/add x (t/int 1)))}})
+       result (handled question {:phase :query :solver-status :sat :assignments {"answer.x" 7}})]
+  (is (= 8 (get-in result [:witness "next" :value])))
+  (is (= true (get-in result [:witness "next" :defined])))))
+
+(deftest nested-equality-and-array-keys-use-the-smt-floating-point-identity
+ (let [fp (t/fp-sort 8 24) a (t/literal fp 2143289344) b (t/literal fp 2143289345)
+       seq-sort (t/seq-sort fp)
+       sequence-a (t/app :seq-unit seq-sort [a] nil)
+       sequence-b (t/app :seq-unit seq-sort [b] nil)
+       array-a (t/app :array-const (t/array-sort t/Bool fp) [a] nil)
+       array-b (t/app :array-const (t/array-sort t/Bool fp) [b] nil)
+       store (t/store (t/app :array-const (t/array-sort fp t/Int) [(t/int 0)] nil) a (t/int 9))
+       claims [(t/eq sequence-a sequence-b) (t/eq array-a array-b) (t/eq (t/select store b) (t/int 9))]]
+  (doseq [claim claims]
+   (is (= true (replay/value claim {})))
+   (is (= :proved (:verdict (logic/run {:backend :z3} (q/prove claim {:vacuity :allow})))))
+   (let [candidate (logic/run {:backend :oxiz} (q/prove claim {:vacuity :allow}))]
+    (is (contains? #{:proved :unknown :unsupported} (:verdict candidate)) (pr-str candidate))))))
+
+(deftest exact-delegation-retains-native-observations-and-mutated-displays-are-rebuilt
+ (doseq [engine [:z3 :oxiz]]
+  (let [question (q/sat {:assumptions [(t/eq x (t/int 7))]
+                         :observe {"next" (t/add x (t/int 1))
+                                   "native-only" (t/uf "answer.fn" [t/Int] t/Int [x])}})
+        observed (atom nil)
+        result (oracle/with-query-handler
+                (fn [whole execute]
+                 (let [native (execute)] (reset! observed native) (oracle/query-answer whole native)))
+                (fn [] (logic/run {:backend engine} question)))]
+   (is (= :sat (:verdict result)))
+   (is (= (:witness @observed) (:witness result)))
+   (is (= :owned-native-fallback (:observation-basis result)))
+   (is (= :matched (get-in result [:oracle-effect :delegation])))
+   (is (= :not-checked (get-in result [:certificate :status])))
+   (let [changed (oracle/with-query-handler
+                  (fn [whole execute]
+                   (oracle/query-answer whole (assoc-in (execute) [:witness "next"] 999)))
+                  (fn [] (logic/run {:backend engine} question)))]
+    (is (= :sat (:verdict changed)))
+    (is (= 8 (get-in changed [:witness "next"])))
+    (is (= 999 (get-in changed [:reported-witness "next"])))
+    (is (= :independent-replay (:observation-basis changed)))
+    (is (= :not-matched (get-in changed [:oracle-effect :delegation])))))))
+
+(defn finite-handler [rows]
+ (fn [question _execute]
+  (let [assertions (vec (concat (:assertions question) (when (:counterexample question) [(:counterexample question)])))
+        found (first (filter #(= :valid (:status (replay/validate assertions %))) rows))]
+   (oracle/query-answer question {:phase :query :solver-status (if found :sat :unsat)
+                                  :assignments (or found {})}))))
+
+(deftest finite-language-procedures-can-run-against-whole-term-questions-without-a-worker
+ (oracle/with-query-handler (finite-handler [{"answer.p" false} {"answer.p" true}])
+  (fn []
+   (let [enumerated (logic/enumerate-projection unavailable [] {"p" p} 3)
+         synthesized (logic/synthesize unavailable [["p" p] ["always" (t/bool true)]] {})
+         explanation (logic/explain-unsat unavailable [(q/assertion "p" p) (q/assertion "not-p" (t/not p))])]
+    (is (= :complete (:status enumerated)))
+    (is (= #{{"p" false} {"p" true}} (set (:answers enumerated))))
+    (is (= true (:complete enumerated)))
+    (is (= :candidate-proved (:status synthesized)))
+    (is (= "always" (:candidate synthesized)))
+    (is (= :subset-minimal (:status explanation)))
+    (is (= 2 (count (:assertions explanation)))))))
+ (oracle/with-query-handler (finite-handler (mapv (fn [value] {"answer.x" value}) (range 4)))
+  (fn []
+   (let [optimum (logic/optimize-finite unavailable [(t/ge x (t/int 2)) (t/le x (t/int 3))] x 0 3 :min)]
+    (is (= :optimal-in-bounds (:status optimum)))
+    (is (= 2 (:value optimum)))
+    (is (= 2 (get-in optimum [:witness "objective"]))))))
+ (let [question (q/prove (t/bool true))
+       result (oracle/with-query-handler (finite-handler [{}]) (fn [] (check/query unavailable question)))]
+  (is (= :effect-handler-claim (get-in result [:evidence :claim :basis])))
+  (is (= :handler (get-in result [:evidence :native 0 :oracle-effect :kind])))))
+
+(deftest a-reply-tag-and-metadata-cannot-replace-the-complete-question
+ (let [question (q/sat {:assumptions [p]})
+       bound (answer/bind question {:phase :query :solver-status :sat :assignments {"answer.p" true}
+                                    :trusted true :certificate {:status :checked}
+                                    :model-interpretation {:status :invented} :evidence {:authority true}})]
+  (is (= :sat (:verdict (answer/check question bound))))
+  (is (= false (:trusted bound)))
+  (is (= :not-checked (get-in bound [:certificate :status])))
+  (is (not (contains? bound :evidence)))
+  (is (not (contains? bound :model-interpretation)))
+  (is (thrown? (answer/check question (assoc bound :formal/query-reply 1.0))))
+  (is (thrown? (answer/check question (assoc bound :question (q/sat {:assumptions [(t/not p)]})))))))
+
+(deftest reply-binding-preserves-canonical-data-kinds-and-floating-bit-patterns
+ (doseq [[original changed] [[1 1.0] [[1] (list 1)] [0.0 -0.0]]]
+  (let [question (q/sat {:id original :assumptions [p]})
+        bound (answer/bind question {:phase :query :solver-status :sat :assignments {"answer.p" true}})
+        forged (assoc bound :id changed :question (assoc question :id changed))]
+   (is (thrown? (answer/check question forged)))))
+ (let [question (q/sat {:assumptions [p]})
+       bound (answer/bind question {:phase :query :solver-status :sat :assignments {"answer.p" true}})
+       transferred (erlang/binary_to_term (erlang/term_to_binary bound) (list :safe))]
+  (is (= :sat (:verdict (answer/check question transferred)))))
+ (is (= false (t/term? (assoc p :formal/term 1.0))))
+ (is (= false (v/value? (assoc (v/lift p) :formal/value 1.0)))))

@@ -8,6 +8,67 @@
 (defn real [n d] {:formal/real (t/rational n d)})
 (defn bv [width value]
  {:formal/bv [width (erlang/band value (dec (erlang/bsl 1 width)))]})
+(defn- wrapped? [key n data]
+ (and (map? data) (= #{key} (set (keys data))) (vector? (get data key)) (= n (count (get data key)))))
+(defn- checks [items]
+ (or (first (filter #(= :invalid (:status %)) items))
+     (first (filter #(= :incomplete (:status %)) items)) {:status :valid}))
+(defn check-value
+ "Check the concrete BL encoding of a value against its mathematical sort.
+  Unavailable values and uninterpreted representatives stay incomplete."
+ [sort data]
+ (let [kind (first sort)
+       scalar (fn [ok] (if ok {:status :valid} {:status :invalid :reason :value-sort-mismatch}))]
+  (cond
+   (unavailable? data) {:status :incomplete :reason (:formal/unavailable data)}
+   (= kind :bool) (scalar (boolean? data))
+   (= kind :int) (scalar (int? data))
+   (= kind :string) (scalar (and (string? data) (String/valid? data)
+                                 (every? #(<= % 196607) (unicode/characters_to_list data))))
+   (= kind :real)
+    (scalar (and (wrapped? :formal/real 2 data)
+                  (let [[n d] (:formal/real data)]
+                   (and (int? n) (int? d) (> d 0) (= [n d] (t/rational n d))))))
+   (= kind :bv)
+    (scalar (and (wrapped? :formal/bv 2 data)
+                  (let [[width bits] (:formal/bv data)]
+                   (and (int? width) (= width (second sort)) (int? bits)
+                        (<= 0 bits) (< bits (erlang/bsl 1 width))))))
+   (= kind :fp)
+    (scalar (and (wrapped? :formal/fp 3 data)
+                  (let [[e s bits] (:formal/fp data)]
+                   (and (int? e) (int? s) (= [e s] [(second sort) (nth sort 2)])
+                        (int? bits) (<= 0 bits) (< bits (erlang/bsl 1 (+ e s)))))))
+   (= kind :enum)
+    (scalar (and (wrapped? :formal/enum 2 data)
+                  (= (second sort) (first (:formal/enum data)))
+                  (contains? (set (nth sort 2)) (second (:formal/enum data)))))
+   (= kind :rounding) (scalar (contains? #{"RNE" "RNA" "RTP" "RTN" "RTZ"} data))
+   (= kind :seq) (if (vector? data) (checks (mapv #(check-value (second sort) %) data))
+                  (scalar false))
+   (= kind :array)
+    (if (and (map? data) (= #{:formal/array} (set (keys data)))
+             (map? (:formal/array data)) (= #{:default :updates} (set (keys (:formal/array data))))
+             (vector? (get-in data [:formal/array :updates]))
+             (every? #(and (vector? %) (= 2 (count %))) (get-in data [:formal/array :updates])))
+     (checks (vec (concat [(check-value (nth sort 2) (get-in data [:formal/array :default]))]
+                   (mapcat (fn [[key item]] [(check-value (second sort) key) (check-value (nth sort 2) item)])
+                           (get-in data [:formal/array :updates])))))
+     (scalar false))
+   :else {:status :incomplete :reason :sort-not-materialized})))
+(defn checked-value [sort data]
+ (let [checking (check-value sort data)]
+  (cond (= :valid (:status checking)) data
+        (unavailable? data) data
+        :else (unavailable {:kind (if (= :invalid (:status checking)) :ill-sorted-value :incomplete-value)
+                           :sort sort :reason (:reason checking)}))))
+(defn check-bindings [roots assignments]
+ (if-not (map? assignments) {:status :invalid :rows [] :reason :assignment-map-required}
+  (let [rows (mapv (fn [variable]
+                    (assoc (check-value (t/sort-of variable)
+                             (get assignments (:data variable) (unavailable :unassigned)))
+                           :name (:data variable) :sort (t/sort-of variable))) (t/variables roots))]
+   {:status (:status (checks rows)) :rows rows})))
 (defn- rational? [value] (and (map? value) (contains? value :formal/real)))
 (defn- pair [value] (if (rational? value) (:formal/real value) [value 1]))
 (defn- radd [a b]
@@ -54,28 +115,38 @@
                   :else (< (:bits a) (:bits b)))]
   (and (not (:nan a)) (not (:nan b))
        (case op :fp-eq equal :fp-lt less :fp-le (or equal less)))))
-(defn- array-read [array key]
+(defn- array-read [sort array key]
  (if (and (map? array) (contains? array :formal/array))
-  (let [model (:formal/array array) matches (filter (fn [[k _]] (= k key)) (:updates model))]
-   (if (seq matches) (second (last matches)) (:default model)))
+  (loop [updates (reverse (:updates (:formal/array array)))]
+   (if (empty? updates) (:default (:formal/array array))
+    (let [[stored item] (first updates) matches (equal (second sort) stored key)]
+     (cond (= true matches) item (= false matches) (recur (rest updates))
+           :else (unavailable :nonconcrete-array-key-equality)))))
   (unavailable :nonconcrete-array)))
 (defn- array-store [array key item]
  (if (and (map? array) (contains? array :formal/array))
   (update-in array [:formal/array :updates] conj [key item])
   (unavailable :nonconcrete-array)))
-(defn- equal [a b]
+(defn- equal [sort a b]
  (cond
+  (or (unavailable? a) (unavailable? b)) (unavailable :nonconcrete-equality)
   (and (map? a) (:formal/fp a) (map? b) (:formal/fp b))
    (let [aa (fp-parts a) bb (fp-parts b)]
     (and (= [(:e aa) (:s aa)] [(:e bb) (:s bb)])
          (or (and (:nan aa) (:nan bb)) (= (:bits aa) (:bits bb)))))
-  (and (map? a) (contains? a :formal/array) (map? b) (contains? b :formal/array))
+  (= :seq (first sort))
+   (if (not= (count a) (count b)) false
+    (let [results (mapv #(equal (second sort) (nth a %) (nth b %)) (range (count a)))]
+     (cond (some false? results) false (some unavailable? results) (unavailable :nonconcrete-sequence-equality) :else true)))
+  (= :array (first sort))
    (let [ad (:default (:formal/array a)) bd (:default (:formal/array b))
+         defaults (equal (nth sort 2) ad bd)
          keys (set (concat (map first (:updates (:formal/array a))) (map first (:updates (:formal/array b)))))]
     ;; Different defaults can still describe equal arrays over a finite index
     ;; sort if their updates cover it; do not guess that case.
-    (if (not= ad bd) (unavailable :array-default-domain-needed)
-     (every? (fn [k] (= (array-read a k) (array-read b k))) keys)))
+    (if (not= true defaults) (unavailable :array-default-domain-needed)
+     (let [results (mapv (fn [k] (equal (nth sort 2) (array-read sort a k) (array-read sort b k))) keys)]
+      (cond (some false? results) false (some unavailable? results) (unavailable :nonconcrete-array-equality) :else true))))
   :else (= a b)))
 
 (defn- signed [width bits]
@@ -103,9 +174,9 @@
 (defn value [term assignments]
  (let [op (:op term) sort (:sort term) data (:data term) children (:args term)]
   (cond
-   (= op :var) (get assignments data (unavailable {:unassigned data}))
+   (= op :var) (checked-value sort (get assignments data (unavailable {:unassigned data})))
    (= op :bound) (unavailable {:free-binder data})
-   (contains? #{:bool :int :text :rounding} op) data
+   (contains? #{:bool :int :text :rounding} op) (checked-value sort data)
    (= op :real) (real (first data) (second data))
    (= op :bv) (bv (second sort) data)
    (= op :fp-bits) {:formal/fp [(second sort) (nth sort 2) data]}
@@ -139,9 +210,10 @@
        (= op :not) (= false a)
        (= op :implies) (or (= false a) (= true b))
        (= op :xor) (not= a b)
-       (= op :eq) (equal a b)
+       (= op :eq) (equal (t/sort-of (first children)) a b)
        (= op :distinct)
-        (let [pairs (for [i (range (count args)) j (range i)] (equal (nth args i) (nth args j)))]
+        (let [pairs (for [i (range (count args)) j (range i)]
+                      (equal (t/sort-of (first children)) (nth args i) (nth args j)))]
          (cond (some true? pairs) false (some unavailable? pairs) (unavailable :incomplete-distinct) :else true))
        (contains? #{:add :sub :mul :neg :div :mod} op)
         (if (= sort t/Real)
@@ -156,7 +228,7 @@
        (= op :to-int) (let [[n d] (pair a)] (ediv n d))
        (= op :is-int) (= 1 (second (pair a)))
        (= op :array-const) {:formal/array {:default a :updates []}}
-       (= op :select) (array-read a b)
+       (= op :select) (array-read (t/sort-of (first children)) a b)
        (= op :store) (array-store a b (nth args 2))
        (= op :str-concat) (str a b)
        (= op :str-len) (count (codepoints a))
@@ -185,12 +257,14 @@
        :else (unavailable {:unsupported-operation op})))))))
 
 (defn validate [assertions assignments]
- (let [results (mapv (fn [assertion]
+ (let [bindings (check-bindings (mapv :term assertions) assignments)
+       assignments (if (map? assignments) assignments {})
+       results (mapv (fn [assertion]
                   (let [actual (value (:term assertion) assignments)]
                    {:label (:label assertion) :value actual
                     :status (cond (= actual true) :valid (= actual false) :invalid :else :incomplete)})) assertions)
        invalid (vec (filter (fn [r] (= :invalid (:status r))) results))
        missing (vec (filter (fn [r] (= :incomplete (:status r))) results))]
-  {:status (cond (seq invalid) :invalid (seq missing) :incomplete :else :valid)
+  {:status (cond (= :invalid (:status bindings)) :invalid (seq invalid) :invalid (seq missing) :incomplete :else :valid)
    :kind :independent-replay :checked (- (count results) (count missing))
-   :invalid invalid :incomplete missing :results results}))
+   :bindings bindings :invalid invalid :incomplete missing :results results}))

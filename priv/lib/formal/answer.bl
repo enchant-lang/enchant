@@ -1,0 +1,96 @@
+(ns formal.answer
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q] [formal.identity :as identity]
+           [formal.evaluate :as replay]))
+
+;; A pure boundary. Execution custody belongs to logic/oracle; this layer
+;; checks data and never grants proof authority to an engine or handler.
+(def ^:private question-fields [:id :mode :profile :profiles :scope :context])
+(def ^:private payload-fields
+ [:phase :solver-status :why :error :identity :backend :stats :wall-us :model-status
+  :core :assignments :witness :witness-provenance :preflight :nodes-imported :cache-key])
+(defn- same-data? [left right]
+ ;; Formal data identity preserves numeric/data kinds and float bit patterns.
+ ;; The existing canonical data-format capacity applies to reply binding.
+ (= (identity/bytes left) (identity/bytes right)))
+
+(defn- phase! [question response]
+ (let [status (:solver-status response) phase (get response :phase :query)]
+  (when-not
+   (and (contains? #{:sat :unsat :unknown :unsupported :error :not-run} status)
+        (case phase
+         :query (not= :not-run status)
+         :frontend (contains? #{:not-run :error :unsupported} status)
+         :assumption-consistency (and (= :prove (:mode question)) (not= :allow (:vacuity question))
+                                      (contains? #{:unsat :unknown :unsupported :error} status))
+         false))
+   (throw (ex-info "formal.answer: phase/status does not answer the complete question" {})))
+  phase))
+
+(defn- nonmodel-verdict [question phase status]
+ (cond (= :unsat status) (if (= :assumption-consistency phase) :vacuous
+                           (if (= :prove (:mode question)) :proved :unsat))
+       (= :sat status) :candidate
+       (= :not-run status) :error :else status))
+
+(defn bind
+ "Construct a complete-question-bound, unchecked handler reply. Semantic
+  verdict and model evidence are reconstructed by check."
+ [question response]
+ (q/validate! question)
+ (when-not (map? response) (throw (ex-info "formal.answer: a response map is required" {})))
+ (let [phase (phase! question response)]
+  (merge (select-keys response payload-fields) (select-keys question question-fields)
+   {:formal/query-reply 1 :question question :phase phase :trusted false
+    :assumptions (:assumptions question) :origin (:origin question)
+    :verdict (nonmodel-verdict question phase (:solver-status response))
+    :certificate {:status :not-checked :kind :effect-handler-answer}
+    :compiler-proof-authority false})))
+
+(defn- decoded [question assignments]
+ (let [watched (vec (distinct (mapcat (fn [[_ descriptor]] (v/terms descriptor)) (:observe question))))
+       values (into {} (mapv (fn [term] [term (replay/value term assignments)]) watched))
+       resolve (fn [term] (if (contains? values term) (get values term) (replay/value term assignments)))]
+  {:witness (into {} (mapv (fn [[name descriptor]]
+                         [name (if (v/value? descriptor) (v/decode descriptor resolve) (resolve descriptor))])
+                           (:observe question)))
+   :witness-provenance
+    (into {} (mapv (fn [[name descriptor]]
+                    [name {:terms (mapv (fn [term]
+                                 (let [value (get values term)]
+                                  {:term (t/digest [term])
+                                   :source (if (replay/unavailable? value) :unavailable :independent-replay)
+                                   :reason (when (replay/unavailable? value) (:formal/unavailable value))}))
+                               (v/terms descriptor))}]) (:observe question)))}))
+
+(defn check
+ "Check a full reply, replay assignments and reconstruct observations. The
+  optional execution record is supplied by the effect owner from its actual
+  fallback. Only an exactly matching response retains that execution's native
+  observation provenance; all answers remain unchecked claims."
+ ([question response] (check question response nil))
+ ([question response executed]
+  (q/validate! question)
+  (when-not (and (map? response) (int? (:formal/query-reply response)) (= 1 (:formal/query-reply response))
+                 (same-data? question (:question response))
+                 (same-data? (select-keys question question-fields) (select-keys response question-fields)))
+   (throw (ex-info "formal.answer: handler response differs from its complete typed question" {})))
+  (let [answer (bind question response)
+        matched? (boolean (and executed
+                     (same-data? (select-keys answer payload-fields)
+                                 (select-keys (bind question executed) payload-fields))))]
+   (if (= :sat (:solver-status answer))
+    (let [assignments (get answer :assignments {})
+          context (vec (concat (:assertions question) (when (:counterexample question) [(:counterexample question)])))
+          validation (replay/validate context assignments)
+          assignments (if (map? assignments) assignments {})
+          observations (if matched? (select-keys executed [:witness :witness-provenance]) (decoded question assignments))
+          verdict (cond (= :invalid (:status validation)) :invalid-model
+                        (not= :valid (:status validation)) :candidate
+                        (= :prove (:mode question)) :refuted :else :sat)]
+     (merge answer observations
+      {:assignments assignments :validation validation :verdict verdict
+       :observation-basis (if matched? :owned-native-fallback :independent-replay)
+       :reported-witness (when (contains? response :witness) (:witness response))
+       :delegation (if matched? :matched :not-matched)}))
+    (assoc (dissoc answer :assignments :witness :witness-provenance)
+      :validation {:status :not-applicable} :delegation (if matched? :matched :not-matched))))))

@@ -24,7 +24,7 @@
             [system.ledger :as ledger]
             [formal.query :as query]
             [formal.term :as term]
-            [formal.evaluate :as replay]
+            [formal.answer :as answer]
             [typed]))
 
 ;; ── L2: the verdict record ────────────────────────────────────────────────
@@ -321,19 +321,8 @@
   [handler f] (with-oracle {:query handler} f))
 
 (defn query-answer
-  "Bind a handler response to the complete question it answers. Handler claims
-   carry an unchecked certificate and explicit effect provenance."
-  [question response]
-  (let [phase (get response :phase :query) status (:solver-status response)]
-   (merge (dissoc response :id :mode :profile :profiles :scope :context)
-    (select-keys question [:id :mode :profile :profiles :scope :context])
-    {:formal/query-reply 1 :question question :phase phase :trusted false
-     :verdict (cond (= :unsat status) (if (= :assumption-consistency phase) :vacuous
-                                        (if (= :prove (:mode question)) :proved :unsat))
-                    (= :sat status) :candidate
-                    (= :not-run status) :error :else status)
-     :certificate {:status :not-checked :kind :effect-handler-answer}
-     :compiler-proof-authority false})))
+ "Bind an unchecked handler response to its complete portable question."
+ [question response] (answer/bind question response))
 
 (defn query-table
   "Handle typed queries by exact question value. An unlisted question is unknown."
@@ -351,31 +340,6 @@
               (term/walk (query/roots question)))
     :arith :general))
 
-(defn- checked-query-answer [question answer]
-  (when-not (and (map? answer) (= 1 (:formal/query-reply answer)) (= question (:question answer))
-                 (= (select-keys question [:id :mode :profile :profiles :scope :context])
-                    (select-keys answer [:id :mode :profile :profiles :scope :context]))
-                 (contains? #{:sat :unsat :unknown :unsupported :error :not-run} (:solver-status answer))
-                 (contains? #{:query :assumption-consistency :frontend} (:phase answer)))
-    (throw (ex-info "oracle: handler response differs from its complete typed question" {})))
-  (let [answer (query-answer question answer)]
-    (if (= :sat (:solver-status answer))
-      (let [context (vec (concat (:assertions question)
-                          (when (and (= :query (:phase answer)) (:counterexample question))
-                            [(:counterexample question)])))
-            validation (replay/validate context (get answer :assignments {}))
-            verdict (cond (= :invalid (:status validation)) :invalid-model
-                          (not= :valid (:status validation)) :candidate
-                          (= :assumption-consistency (:phase answer)) :sat
-                          (= :prove (:mode question)) :refuted :else :sat)]
-        (assoc answer :validation validation :verdict verdict))
-      (assoc answer :verdict
-        (cond (= :unsat (:solver-status answer))
-               (if (= :assumption-consistency (:phase answer)) :vacuous
-                 (if (= :prove (:mode question)) :proved :unsat))
-              (= :not-run (:solver-status answer)) :error
-              :else (:solver-status answer))))))
-
 (defn ask-query
   "Route a complete typed question through the installed oracle effect.
    execute supplies the owned native path when the effect is unhandled."
@@ -384,14 +348,18 @@
   (let [h (installed-handler) started (erlang/monotonic_time :microsecond)
         answer (if h
                  (if-let [method (when (map? h) (:query h))]
-                   (checked-query-answer question (method question execute))
+                   (let [executed (atom nil)
+                         fallback (fn [] (let [result (execute)] (reset! executed result) result))
+                         response (method question fallback)]
+                    (answer/check question response @executed))
                    (throw (ex-info "oracle: installed handler has no typed query method" {})))
                  (execute))
         elapsed (- (erlang/monotonic_time :microsecond) started)
         fragment (query-fragment question)]
     (ledger/record fragment :oracle (name (:solver-status answer)) elapsed (:why answer))
-    (assoc answer :oracle-effect {:kind (if h :handler :native)
-                                  :fragment fragment :us elapsed})))
+    (assoc answer :oracle-effect
+      (if h {:kind :handler :fragment fragment :us elapsed :delegation (:delegation answer)}
+            {:kind :native :fragment fragment :us elapsed})))))
 
 (defn- prelude-text [] (let [p (erlang/get session-prelude-key)] (if (= :undefined p) "" (or p ""))))
 
