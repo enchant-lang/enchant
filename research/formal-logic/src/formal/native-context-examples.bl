@@ -1,0 +1,79 @@
+(ns formal.native-context-examples
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
+           [formal.backend :as backend] [formal.identity :as identity] [oracle]))
+
+(def false-goal (q/prove (t/bool false) {:id :guide/owned-context :vacuity :allow}))
+(defn- raw-substitution [engine]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (let [term (t/bool false) exported (t/export (t/registry) [term])
+         id (get-in exported [:registry :ids term])
+         raw (backend/invoke session
+               (tuple :load 0 (backend/native-data (:nodes exported))
+                             (backend/native-data [["raw-false" id]])))
+         refused (logic/solve-in session false-goal)
+         reset (backend/reset! session)
+         recovered (logic/solve-in session false-goal)]
+    (assert (:ok raw))
+    (assert (= :not-run (:solver-status refused)))
+    (assert (:ok reset))
+    (assert (= :refuted (:verdict recovered)))
+    {:native-load :accepted :portable-query (select-keys refused [:verdict :phase :solver-status])
+     :managed-reset :accepted :after-reset (:verdict recovered)
+     :identity (:identity session)}))))
+
+(defn- forgotten-mirror [engine]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (let [x (t/variable "guide.owned.x" t/Int) retained (t/eq x (t/int 7)) seen (atom nil)]
+    (assert (:ok (logic/load! session [(q/assertion "known-x" retained)])))
+    (swap! (:state session) assoc :assertions [] :generation 999 :registry nil)
+    (let [handled (oracle/with-query-handler
+                   (fn [whole _execute]
+                    (reset! seen whole)
+                    (oracle/query-answer whole {:solver-status :unknown}))
+                   (fn [] (logic/solve-in session (q/prove retained))))
+          actual (logic/solve-in session (q/prove retained))]
+     (assert (= [retained] (mapv :term (:assertions @seen))))
+     (assert (= :proved (:verdict actual)))
+     {:handler-verdict (:verdict handled) :question-assumptions (count (:assertions @seen))
+      :retained-labels (get-in @seen [:context :assertions]) :after-mirror-change (:verdict actual)
+      :question-is-portable (erlang/is_binary (identity/bytes @seen))})))))
+
+(defn- restored-mirror [engine]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (let [before @(:state session)
+         answer (oracle/with-query-handler
+                 (fn [whole execute]
+                  (logic/load! session [(q/assertion "changed" (t/bool false))])
+                  (reset! (:state session) before)
+                  (oracle/query-answer whole (execute)))
+                 (fn [] (logic/solve-in session false-goal)))]
+    (assert (= :not-run (:solver-status answer)))
+    {:fallback (:solver-status answer) :verdict (:verdict answer)
+     :mirror-revision (:revision @(:state session))
+     :owner-revision (:revision (backend/context session))}))))
+
+(defn- revision-guard [engine]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (let [before (backend/context session) first (backend/scope! session [] [] [] before)
+         loaded (logic/load! session [(q/assertion "retained" (t/bool true))])
+         current (backend/context session) stale (backend/scope! session [] [] [] before)
+         next (backend/scope! session [] [] [] current)]
+    (assert (:ok loaded))
+    (assert (= :context-changed (get-in stale [:why :kind])))
+    (assert (= (inc (get-in first [:stats :checks])) (get-in next [:stats :checks])))
+    {:before (:revision before) :after (:revision current)
+     :stale-scope (get-in stale [:why :kind])
+     :native-checks-before (get-in first [:stats :checks])
+     :native-checks-after (get-in next [:stats :checks]) :rejected-exchange-native-checks 0}))))
+
+(defn results []
+ (let [rows (mapv (fn [engine]
+                   {:backend engine :raw (raw-substitution engine) :forgotten (forgotten-mirror engine)
+                    :restored (restored-mirror engine) :revision (revision-guard engine)
+                    :compiler-proof-authority false}) [:z3 :oxiz])]
+  (identity/bytes rows)
+  rows))
