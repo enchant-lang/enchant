@@ -20,6 +20,8 @@ now live under `priv/lib/formal`; research imports use the pinned SDK, while
 qualification passed 86 focused SDK assertions and 2,549 regression assertions.
 Source extraction, remaining legacy consumers, process-wide effect semantics
 and native worker packaging remain active work.
+[ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) specifies the next answer,
+observation and context-custody qualification slice.
 
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,
