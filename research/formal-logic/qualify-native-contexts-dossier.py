@@ -51,7 +51,13 @@ manual = ['phone-native-context-owner.png', 'phone-native-context-owner-panel.pn
           'desktop-story-native-context-revision-data.png']
 require(all(name in images for name in manual), 'actual frames retained')
 visual = read(E / 'browser-audit/visual-review.json')
-require(visual['inspected'] == manual and visual['passed'], 'manual visual inspection record')
+require(visual['inspected'] == manual and visual['status'] == 'reviewed-with-capture-limitation',
+        'manual visual inspection retains the unresolved capture discrepancy')
+diagnosis = read(E / 'browser-owner-diagnosis/owner-nav.json')
+require(all(row['opacity'] == '1' and row['visibility'] == 'visible'
+            and row['text'] in row['hit'] for row in diagnosis['links'][:2]), 'actual visible topic hit targets')
+require(sha(E / 'browser-owner-diagnosis/phone-native-context-owner-panel.png')
+        == visual['capture_limitation']['readable_followup_frame_sha256'], 'manually inspected follow-up frame')
 for size in ('phone', 'desktop'):
     for cell in ('story-native-contexts', 'story-native-context-revision'):
         require(any(row['name'] == size + ': visible executable result ' + cell and row['passed']
