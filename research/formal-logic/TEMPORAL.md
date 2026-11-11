@@ -48,6 +48,9 @@ Coordinates are unbounded mathematical integers. `span` admits `from <= to`;
 or an unsuccessful/outside-domain operand leave no admitted assignment.
 Endpoint ranges use inclusive limits. Their constraints survive `shift`,
 `duration`, relation construction and observation decoding.
+The value protocol retains input constraints separately from model admission
+(`within`). The complete query asserts both; inspecting `within` alone does
+not test whether an assignment satisfies every input range.
 
 `intersects` tests positive-width intersection. Touching intervals and empty
 spans do not intersect. `covers` tests inclusion of points, so every span covers
