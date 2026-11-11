@@ -44,9 +44,12 @@ The original baseline passed 12 assertions and failed 20. The first immutable
 candidate passed 346 assertions and failed three: two fixture expectations
 omitted an existing domain assertion; one native `unsupported` answer was
 incorrectly replaced by a retirement error. The corrected candidate separates
-post-execution identity matching from liveness. Qualification is in progress.
+post-execution identity matching from liveness. Its selected immutable SDK
+passes 356 focused assertions and 7,086 assertions across twenty-two regression
+files. All 187 preceding paired questions retain their exact identities and
+native verdicts. Managed build stdout is truncated; successful build status
+and exact artifact/source identities are retained independently.
 
- Keep the selected immutable SDK
-until its replacement passes focused qualification, then reuse that exact
-artifact for regression and recorded dossier examples. Compiler authority
-remains disabled.
+Recorded examples and qualification receipts live under `evidence/native-contexts`.
+These checks do not mechanically prove the implementation or compiler.
+Compiler authority remains disabled.

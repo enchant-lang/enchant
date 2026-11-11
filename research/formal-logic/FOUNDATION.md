@@ -353,12 +353,24 @@ itself mechanically verified and does not certify all SMT theories.
   rejects invalid phase/status combinations and preserves native observations
   only for the effect-owned fallback reply. Derived procedures use logical
   sessions before opening workers. Tracked context mutation refuses delegation;
-  authoritative native-owner accounting beyond cooperative session bookkeeping
-  remains ahead. The new file passes 134 assertions, the preceding public SDK
+  the subsequent native-owner checkpoint replaces that cooperative session
+  bookkeeping as the authority for execution. The new file passes 134 assertions, the preceding public SDK
   file passes 86 and twenty-two regression files pass 7,086. All 187 preceding
   paired questions retain their identities and verdicts. Recursive FP equality
   has three additional ground comparisons. Compiler authority stays disabled.
   [Answer integrity](ANSWER-INTEGRITY.md)
+
+- Native port owners now also hold the portable registry, assumptions,
+  generation and revision. Questions read those assumptions from the owner;
+  client atoms are diagnostic mirrors. The owner checks a captured execution
+  token in the same turn as a scope exchange. Raw transport invalidates
+  portable accounting until managed reset. Post-execution identity matching
+  preserves a native refusal after retirement without authorizing another
+  exchange. The immutable SDK passes 356 focused assertions and 7,086
+  assertions across twenty-two regression files; all 187 previous paired
+  questions and verdicts remain unchanged. Arbitrary Erlang introspection and
+  universal implementation soundness remain outside this API consistency
+  boundary. [Native context ownership](NATIVE-CONTEXTS.md)
 
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
