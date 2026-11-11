@@ -1,0 +1,39 @@
+(ns formal.core-translations-test
+ (:require [formal.api :as formal] [formal.core :as core] [formal.identity :as identity]
+           [formal.term :as t] [formal.core-translation-examples :as examples]))
+
+(deftest package-both-original-core-models-and-their-question
+ (doseq [row (examples/examples)]
+  (let [definition (:definition row) object (examples/proof-object row)
+        made (formal/core-translation-data definition object) packet (:packet made)]
+   (is (= :ready (:status made)) (pr-str [(:id row) (:reason made)]))
+   (is (identity/valid? packet))
+   (is (= (:identity definition) (get-in packet [:subject :identity])))
+   (is (= (get-in packet [:subject :question]) (get-in packet [:entailment :normalized :question])))
+   (is (= (get-in packet [:before :inputs]) (get-in packet [:after :inputs])))
+   (is (= (get-in packet [:before :errors]) (get-in packet [:after :errors])))
+   (is (= :not-run (:kernel-execution made)))
+   (is (= false (:compiler-proof-authority made)))
+   (is (= :checked-data-connection (:status (formal/check-core-translation-data definition object packet)))))))
+
+(deftest replay-refuses-resealed-changes-and-borrowed-proofs
+ (let [rows (examples/examples) row (first rows) definition (:definition row) object (examples/proof-object row)
+       packet (:packet (formal/core-translation-data definition object))]
+  (doseq [changed [(assoc packet :pre (t/bool false))
+                   (assoc packet :after (:before packet))
+                   (assoc packet :before (:after packet))
+                   (update packet :after #(identity/seal (assoc-in % [:outcome :error] (t/int 999))))
+                   (update packet :entailment #(identity/seal (update % :assertions conj (t/bool false))))]]
+   (is (= :rejected (:status (formal/check-core-translation-data definition object (identity/seal changed))))))
+  (is (not= :ready (:status (formal/core-translation-data definition (examples/proof-object (second rows))))))
+  (is (not= :ready (:status (formal/core-translation-data definition (assoc object :certificate {})))))))
+
+(deftest both-backends-find-the-error-a-value-only-rewrite-drops
+ (let [unsafe (formal/translation {:name "translation-drops-operand" :parameters {"p" t/Bool "x" t/Int}
+               :before examples/multiply :after (core/literal 0)})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/verify-translation {:backend engine} unsafe)]
+    (is (= :refuted (:status answer)) (pr-str [engine (:status answer)]))
+    (is (= :phase/left (get-in answer [:counterexample :before :error])))
+    (is (= :returned (get-in answer [:counterexample :after :status])))
+    (is (not= :ready (:status (formal/core-translation-data unsafe (get-in answer [:proof :object])))))))))
