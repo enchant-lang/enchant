@@ -103,6 +103,8 @@ require(read(E / 'notices-check.json')['registry_packages'] == 104
         and read(E / 'notices-check.json')['all_locked_registry_packages_covered'], 'registry notice metadata')
 require(read(E / 'compatibility-result.json') == {'exit_code': 0, 'private_target_removed': True}
         and not (R / '.bl/qualify/packaged-worker-compat-check').exists(), 'compatibility compiles and private target retired')
+require(sha(R / 'research/oxiz-prototype/worker/target/release/formal-worker')
+        == read(P / 'evidence/effects/qualification.json')['worker_sha256'], 'preceding qualified research worker retained')
 portable = read(E / 'portable-artifact.json')
 require(portable['image'] == metadata['image'] and portable['sha256'] == sha(Path(portable['product']) / 'bl.drop'),
         'portable product packages this exact image')
