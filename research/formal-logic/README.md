@@ -18,8 +18,13 @@ complete-query oracle handler. Canonical term, proof and state-model sources
 now live under `priv/lib/formal`; research imports use the pinned SDK, while
 `sdk-src` supplies readable source links outside import search. The initial
 qualification passed 86 focused SDK assertions and 2,549 regression assertions.
-Source extraction, remaining legacy consumers, formal effect semantics
-and native pooling remain active work.
+The [source-property interface](SOURCE-PROPERTIES.md) connects reviewed compiler
+ANF to the same questions. Both engines receive identical typed domains and
+claims. Source failures require model replay and concrete invocation of that
+ANF, with exact code custody and retirement. Checked term certificates retain
+the reviewed source/compiler connection as a separate fact. Broader source
+extraction, remaining legacy consumers, formal effect semantics and native
+pooling remain active work.
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes

@@ -364,7 +364,11 @@ enable a term-native BL formal interface or make an unwired trait trustworthy.
    selection logic; qualify it against current and proposed semantic canaries.
    Preserve Euclidean versus truncating division, grapheme/codepoint/byte
    operations, nil/default/presence and FP/Real distinctions in profiles.
-4. Port `veritas` model consumers to descriptor observations and independent
+4. `veritas.property` uses typed generator domains, complete questions and
+   actual ANF replay; see [SOURCE-PROPERTIES.md](SOURCE-PROPERTIES.md). Its
+   native UNSAT status is a solver claim; unsupported source samples only by
+   explicit request. Port the remaining `veritas` quantifier, coverage and mock
+   model consumers to descriptor observations and independent
    replay. A model that cannot construct a valid runtime test remains a
    candidate. Native ADT/recursive definitions, regex, arbitrary sequences,
    recursive summaries and proof certificates need explicit capability work;
