@@ -193,7 +193,7 @@ def trace_boundary(packet, safety):
         if claim != 'incomplete':
             name = f'recordedInvariant{n}'
             polarity = '¬ ' if claim == 'violated' else ''
-            proof = 'by\n  unfold StatePolicy.invariant holds\n  decide' if polarity else 'rfl'
+            proof = 'by\n  unfold StatePolicy.invariant ActorTrace.holds\n  decide' if polarity else 'rfl'
             text.append(f'theorem {name} : {polarity}policy.invariant {at}.1 := {proof}')
             audits.add(name)
             if polarity and violation_at is None:
@@ -218,7 +218,8 @@ def trace_boundary(packet, safety):
 
 def sections(packet, layouts, safety):
     model = packet['model']
-    header = ('import CoreActorCheck\n' if safety else 'import ActorTrace\n') + actor.HEADER + f'\nnamespace {MODULE}\n'
+    header = (('import CoreActorCheck\n' if safety else 'import ActorTrace\n') + actor.HEADER
+              + 'set_option linter.unusedVariables false\n' + f'\nnamespace {MODULE}\n')
     groups = [] if safety else model_sections(model, layouts)
     definitions = [] if safety else model_declarations(model, layouts)
     model_tail, model_audits = ('', set()) if safety else model_boundary(packet)
