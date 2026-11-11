@@ -166,9 +166,22 @@
           (assoc base :kind :prose-code)))
 
       (starts-with? lt "#+begin_")
-      (let [lang (first (split (subs lt 8) " "))]
-        (assoc (closed r (find-row lines (inc r) (fn [x] (= (lc-trim x) (str "#+end_" lang)))) n)
-               :kind :block :lang lang))
+      (let [lang (first (tokens (subs lt 8)))
+            end (find-row lines (inc r) (fn [x] (= (lc-trim x) (str "#+end_" lang))))
+            base (assoc (closed r end n) :kind :block :lang lang)
+            ;; Greater Org blocks contain elements. Literal blocks never do:
+            ;; a begin_src inside a comment/example is data, never a cell.
+            limit (if (nil? end) n end)
+            children (if (contains? #{"comment" "example" "export" "verse"} lang) []
+                       (loop [row (inc r) out []]
+                         (if (>= row limit) out
+                           (let [child (org-span-at (subvec lines 0 limit) row (assoc opts :headings? false))]
+                             (if child
+                               (recur (:to child) (conj out child))
+                               (recur (inc row) out))))))]
+        ;; The top-level partition remains total and disjoint. Nested spans
+        ;; use absolute coordinates and do not become executable top-level cells.
+        (if (seq children) (assoc base :children children) base))
 
       (some? (results-id l))
       (let [stop (find-row lines (inc r) results-stop?)]
