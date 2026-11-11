@@ -13,7 +13,7 @@ const navigate=path=>call({op:'navigate',url:base+path});
 const click=selector=>call({op:'click',selector});
 const check=(name,ok,detail={})=>{report.checks.push({name,passed:Boolean(ok),...detail});if(!ok)console.log('FAILED '+name);};
 const wait=expression=>call({op:'wait',expression});
-const report={schema:'enchant.formal.guided-review-audit.v1',base,started:new Date().toISOString(),checks:[],screenshots:[],scope:'Live presentation, recorded data, source-backed views and kit interactions. No production semantic change.'};
+const report={schema:'enchant.formal.guided-review-audit.v1',base,started:new Date().toISOString(),checks:[],screenshots:[],scope:'Live presentation, recorded data, source-backed views and kit interactions. Presentation checks do not establish source/compiler preservation.'};
 async function shot(name){await call({op:'screenshot',path:join(output,name+'.png')});report.screenshots.push(name+'.png');}
 try{
  await call({op:'open',width:1440,height:1000,mobile:false});
