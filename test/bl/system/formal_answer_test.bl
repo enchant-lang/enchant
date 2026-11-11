@@ -1,0 +1,94 @@
+(ns system.formal-answer-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
+           [formal.evaluate :as replay] [oracle]))
+
+(def unavailable {:backend :z3 :worker "/unavailable/formal-worker" :library "/unavailable/libz3.so"})
+(def p (t/variable "answer.p" t/Bool))
+(def x (t/variable "answer.x" t/Int))
+(defn handled [question response]
+ (oracle/with-query-handler
+  (fn [whole _execute] (oracle/query-answer whole response))
+  (fn [] (logic/run unavailable question))))
+
+(deftest replay-rejects-ill-sorted-bindings-before-accepting-assertions
+ (let [contradiction (q/sat {:assumptions [(t/all [p]) (t/not (t/any [p]))]})
+       answer (handled contradiction {:phase :query :solver-status :sat :assignments {"answer.p" 1}})]
+  (is (= :invalid-model (:verdict answer)) (pr-str answer))
+  (is (= :invalid (get-in answer [:validation :status]))))
+ (let [question (q/sat {:assumptions [(t/eq x x)]})
+       answer (handled question {:phase :query :solver-status :sat :assignments {"answer.x" 1.5}})]
+  (is (= :invalid-model (:verdict answer)) (pr-str answer))
+  (is (= :invalid (get-in answer [:validation :status]))))
+ (let [question (q/sat {:assumptions [(t/all [p]) (t/not (t/any [p]))]})]
+  (doseq [value [true false]]
+   (is (= :invalid-model (:verdict (handled question {:phase :query :solver-status :sat
+                                                     :assignments {"answer.p" value}})))))))
+
+(deftest displayed-observations-are-derived-from-checked-assignments
+ (let [question (q/sat {:assumptions [(t/eq x (t/int 7))]
+                        :observe {"next" (t/add x (t/int 1))}})
+       answer (handled question {:phase :query :solver-status :sat :assignments {"answer.x" 7}
+                                 :witness {"next" 999}
+                                 :witness-provenance {"next" {:terms [{:source :backend}]}}})]
+  (is (= :sat (:verdict answer)))
+  (is (= 8 (get-in answer [:witness "next"])))
+  (is (= :independent-replay (get-in answer [:witness-provenance "next" :terms 0 :source])))
+  (is (= :valid (get-in answer [:validation :status])))))
+
+(deftest a-phase-report-cannot-answer-a-different-question
+ (let [proof (q/prove (t/bool false)) sat (q/sat {:assumptions [(t/bool true)]})]
+  (doseq [[question response] [[proof {:phase :assumption-consistency :solver-status :sat :assignments {}}]
+                               [proof {:phase :frontend :solver-status :unsat}]
+                               [sat {:phase :assumption-consistency :solver-status :unsat}]
+                               [proof {:phase :query :solver-status :not-run}]]]
+   (let [answer (handled question response)]
+    (is (= :error (:verdict answer)) (pr-str answer))))
+  (is (= :unknown (:verdict (handled proof {:phase :assumption-consistency :solver-status :unknown}))))
+  (is (= :vacuous (:verdict (handled proof {:phase :assumption-consistency :solver-status :unsat}))))
+  (is (= :error (:verdict (handled proof {:phase :frontend :solver-status :not-run}))))))
+
+(deftest a-live-fallback-refuses-a-changed-native-question-context
+ (doseq [engine [:z3 :oxiz] mutation [:load :reset]]
+  (logic/with-session {:backend engine}
+   (fn [session]
+    (let [question (q/prove (t/bool false) {:vacuity :allow})]
+     (is (= :refuted (:verdict (logic/solve-in session question))))
+     (let [answer
+            (oracle/with-query-handler
+             (fn [whole execute]
+              (if (= :load mutation)
+               (logic/load! session [(q/assertion "poison" (t/bool false))])
+               (logic/reset! session))
+              (oracle/query-answer whole (execute)))
+             (fn [] (logic/solve-in session question)))]
+      (is (= :error (:verdict answer)) (pr-str [engine mutation answer]))
+      (is (String/contains? (get answer :error "") "context changed"))))))))
+
+(deftest derived-procedures-use-the-logical-effect-before-native-startup
+ (doseq [[expected procedure]
+          [[:partial (fn [] (logic/enumerate-projection unavailable [] {"x" x} 2))]
+           [:undecided (fn [] (logic/optimize-finite unavailable [] x 0 1 :min))]
+           [:undecided (fn [] (logic/synthesize unavailable [["true" (t/bool true)]] {}))]
+           [:not-unsat (fn [] (logic/explain-unsat unavailable [(q/assertion "false" (t/bool false))]))]]
+  (let [seen (atom 0)
+        answer (try
+                (oracle/with-query-handler
+                 (fn [question _execute]
+                  (swap! seen inc)
+                  (oracle/query-answer question {:phase :query :solver-status :unknown})) procedure)
+                (catch error {:status :error :error (ex-message error)}))]
+   (is (= expected (:status answer)) (pr-str answer))
+   (is (= 1 @seen)))))
+
+(deftest an-unavailable-projection-stops-enumeration-without-a-completeness-claim
+ (let [seen (atom 0)
+       answer (try
+               (oracle/with-query-handler
+                (fn [question _execute]
+                 (swap! seen inc)
+                 (oracle/query-answer question {:phase :query :solver-status :sat :assignments {}}))
+                (fn [] (logic/enumerate-projection {:backend :z3} [] {"x" x} 2)))
+               (catch error {:status :error :error (ex-message error)}))]
+  (is (= :partial (:status answer)) (pr-str answer))
+  (is (= false (:complete answer)))
+  (is (= 1 @seen))))
