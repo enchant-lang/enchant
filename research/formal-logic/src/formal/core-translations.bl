@@ -1,0 +1,42 @@
+(ns formal.core-translations
+ (:require [formal.translation :as translation] [formal.core-terms :as terms]
+           [formal.core :as core] [formal.identity :as identity] [formal.refutation :as refutation]))
+
+(def profile :bl/core-translation-data-v1)
+(defn- rejected [reason]
+ {:status :rejected :reason reason :kernel-execution :not-run :compiler-proof-authority false})
+
+(defn prepare [definition object]
+ (try
+  (let [prepared (translation/prepare definition)]
+   (cond
+    (not= :ready (:status prepared)) prepared
+    (not (translation/proof-for? prepared object)) (rejected :translation-proof-subject-mismatch)
+    :else
+    (let [entailment (refutation/prepare-terms (:problem prepared) (:certificate object))]
+     (if (not= :ready (:status entailment)) entailment
+      (let [options {:prefix (:prefix definition)
+                     :input-encoding (if (= core/record-profile (:profile definition)) :record-paths-v2 :legacy)}
+            export (fn [side]
+                     (terms/lowered-packet (get definition side) (:parameters definition) options
+                      (get-in prepared [:lowerings side]) {:kind :core :identity (get prepared side) :question nil}))]
+       {:status :ready :kernel-execution :not-run :compiler-proof-authority false
+        :packet (identity/seal
+         {:formal/core-translation-data 1 :profile profile
+          :subject {:kind :translation :identity (:identity definition)
+                    :before (:before prepared) :after (:after prepared)
+                    :question (identity/hash (:problem prepared)) :relation translation/relation}
+          :pre (:requires definition) :before (export :before) :after (export :after)
+          :entailment (:packet entailment)})})))))
+  (catch error (rejected (ex-message error)))))
+
+(defn check-data [definition object packet]
+ (try
+  (let [fresh (prepare definition object)]
+   (cond
+    (not= :ready (:status fresh)) (rejected (:reason fresh))
+    (not (and (identity/valid? packet) (= packet (:packet fresh))))
+    (rejected :packet-differs-from-fresh-translation-and-proof)
+    :else {:status :checked-data-connection :packet (:identity packet) :subject (:subject packet)
+           :kernel-execution :not-run :compiler-proof-authority false}))
+  (catch error (rejected (ex-message error)))))

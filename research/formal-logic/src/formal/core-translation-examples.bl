@@ -1,0 +1,47 @@
+(ns formal.core-translation-examples
+ (:require [formal.api :as formal] [formal.core :as c] [formal.term :as t]
+           [formal.core-term-examples :as core]))
+
+(defn- example [id specification]
+ {:id id :definition (formal/translation (assoc specification :name id))})
+
+(def x core/x)
+(def p core/p)
+(def one (c/literal 1))
+(def zero (c/literal 0))
+(def increment (core/binary :add x one))
+(def fail-left (core/fail :phase/left t/Int))
+(def fail-right (core/fail :phase/right t/Int))
+(def signed (core/binary :quot (c/literal -7) (c/literal 3)))
+(def multiply (core/binary :mul zero (c/choose p x fail-left)))
+
+(defn examples []
+ (let [optimized (formal/optimize-core multiply {"p" t/Bool "x" t/Int} {:name "optimizer-preserves-failure"})
+       r (c/record [["flag" p] ["inner" (c/record [["balance" x]])]])
+       updated (c/record-assoc r [["inner" (c/record [["balance" increment]])] ["inner" (c/record [["balance" x]])]])
+       eager (c/field (c/record [["balance" x]]) "balance" fail-left)]
+  (assert (= :optimized (:status optimized)))
+  [{:id "optimizer-preserves-failure" :definition (:translation optimized)
+    :object (get-in optimized [:validation :proof :object])}
+   (example "guarded-slots"
+    {:parameters {"a-unused" t/Int "b-unused" t/Bool "p" t/Bool "x" t/Int}
+     :before (c/choose p increment fail-left) :after increment
+     :requires (fn [in] (t/all [(get in "p") (t/ge (get in "x") (t/int 0))]))})
+   (example "signed-quotient"
+    {:parameters {} :before signed :after (c/literal -2)})
+   (example "both-named-errors"
+    {:parameters {"p" t/Bool} :before (c/choose p fail-left fail-right)
+     :after (c/choose (c/operation :not [p]) fail-right fail-left)})
+   (example "nested-record-update"
+    {:parameters {"p" t/Bool "x" t/Int} :before updated :after r})
+   (example "eager-record-default"
+    {:parameters {"x" t/Int} :before eager :after fail-left})
+   (example "mixed-record-profile"
+    {:parameters {"x" t/Int} :before (c/field (c/record [["balance" x]]) "balance") :after x})
+   (example "empty-record"
+    {:parameters {} :before (c/block [one (c/record [])]) :after (c/record [])})
+   (example "vacuous-precondition"
+    {:parameters {} :before one :after zero :requires (t/bool false)})]))
+
+(defn proof-object [row]
+ (or (:object row) (get-in (formal/verify-translation (:definition row)) [:proof :object])))

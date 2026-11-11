@@ -1,0 +1,27 @@
+(ns formal.core-translations-check
+ (:require [formal.api :as formal] [formal.core-translation-examples :as examples]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+(def out (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! out)
+(def rows
+ (mapv (fn [row]
+         (let [definition (:definition row) proof (examples/proof-object row)
+               made (formal/core-translation-data definition proof) packet (:packet made)]
+          (when-not (= :ready (:status made))
+           (println {:id (:id row) :status (:status made) :reason (:reason made)})
+           (throw (ex-info "Core translation export refused" {:id (:id row)})))
+          (assert (= :checked-data-connection (:status (formal/check-core-translation-data definition proof packet))))
+          (File/write! (Path/join out (str (:id row) ".json")) (interop/->json packet))
+          (assoc row :object proof :packet packet))) (examples/examples)))
+(def snapshot {:schema :enchant.formal.core-translation-examples-v1 :rows rows
+               :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))})
+(def bytes (erlang/term_to_binary snapshot (list :deterministic (tuple :minor_version 2))))
+(assert (<= (erlang/byte_size bytes) 8388608))
+(File/write! (Path/join out "core-translations.etf") bytes)
+(File/write! (Path/join out "summary.json") (interop/->json
+ {:schema (:schema snapshot) :source-commit (:source-commit snapshot)
+  :archive {:bytes (erlang/byte_size bytes) :sha256 (artifact/digest bytes)}
+  :rows (mapv (fn [row] {:id (:id row) :packet (get-in row [:packet :identity])
+                        :subject (get-in row [:packet :subject])}) rows)}))
+(println {:examples (count rows) :kernel-execution :not-run})

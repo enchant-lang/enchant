@@ -406,18 +406,28 @@ def sections(packet, integers, booleans):
             ('symbolicError : Term FormalTerms.Ty.integer', None)]
 
 
-def source(packet, integers, booleans):
+def source(packet, integers, booleans, *, namespace=None):
     out = packet['outcome']
     values = [terms.emit_term(out['ok'], integers, booleans), emit_payload(packet['body']['sort'], out['value'], integers, booleans),
               terms.emit_term(out['error'], integers, booleans)]
     values = iter(values)
-    return HEADER + ''.join('\n\ndef ' + name + ' :=\n' + (render(data) if data is not None else next(values))
-                            for name, data in sections(packet, integers, booleans)) + TAIL
+    opening, closing = proof_scope(namespace)
+    return HEADER + opening + ''.join('\n\ndef ' + name + ' :=\n' + (render(data) if data is not None else next(values))
+                                      for name, data in sections(packet, integers, booleans)) + TAIL + closing
 
 
-def verify_source(text, packet, integers, booleans):
-    require(text.startswith(HEADER) and text.endswith(TAIL), 'fixed Core theorem template')
-    definitions = text[len(HEADER):-len(TAIL)].split('\n\ndef ')
+def proof_scope(namespace):
+    require(namespace in {None, 'BeforeCore', 'AfterCore'}, 'supported Core proof scope')
+    if namespace is None:
+        return '', ''
+    return f'\nnamespace {namespace}\n', f'\nend {namespace}\n'
+
+
+def verify_source(text, packet, integers, booleans, *, namespace=None):
+    opening, closing = proof_scope(namespace)
+    header, tail = HEADER + opening, TAIL + closing
+    require(text.startswith(header) and text.endswith(tail), 'fixed Core theorem template')
+    definitions = text[len(header):-len(tail)].split('\n\ndef ')
     require(definitions.pop(0) == '', 'Core definitions start')
     layout = sections(packet, integers, booleans)
     require(len(definitions) == len(layout), 'exact Core declarations')
@@ -461,15 +471,16 @@ def copy_library(library, libraries):
 
 def run(path, output, axiom_policy='lean-standard', *, module='Check'):
     require(axiom_policy in terms.AXIOM_POLICIES, 'supported Core term axiom policy')
-    require(module in {'Check', 'CoreCheck'}, 'Core term check module')
+    require(module in {'Check', 'CoreCheck', 'BeforeCore', 'AfterCore'}, 'Core term check module')
+    namespace = module if module in {'BeforeCore', 'AfterCore'} else None
     output.mkdir(parents=True, exist_ok=True)
     (output / 'Check.olean').unlink(missing_ok=True)
     (output / 'result.json').unlink(missing_ok=True)
     require(path.stat().st_size <= k.MAX_BYTES, 'Core term packet byte capacity')
     packet = k.load_packet(path)
     integers, booleans = validate(packet)
-    text = source(packet, integers, booleans)
-    verify_source(text, packet, integers, booleans)
+    text = source(packet, integers, booleans, namespace=namespace)
+    verify_source(text, packet, integers, booleans, namespace=namespace)
     lean, libraries = checked_kernel()
     (output / 'Check.lean').write_text(text)
     with tempfile.TemporaryDirectory(prefix='enchant-core-terms-') as temporary:
@@ -484,7 +495,8 @@ def run(path, output, axiom_policy='lean-standard', *, module='Check'):
                                        stderr=subprocess.STDOUT, timeout=120)
         transcript = (output / 'lean.txt').read_text()
         require(completed.returncode == 0 and 'sorryAx' not in transcript and 'warning:' not in transcript, 'Lean did not accept Core term correspondence')
-        audits = proof_tools.theorem_audits(transcript, {'coreTermCorrespondence', 'errorCatalogueRoundTrip'})
+        prefix = namespace + '.' if namespace else ''
+        audits = proof_tools.theorem_audits(transcript, {prefix + 'coreTermCorrespondence', prefix + 'errorCatalogueRoundTrip'})
         require(all(set(deps) <= terms.AXIOM_POLICIES[axiom_policy] for deps in audits.values()), 'Core term axioms exceed policy')
         shutil.copyfile(work / 'Check.olean', output / 'Check.olean')
     result = {'schema': 'enchant.formal.core-term-execution.v1', 'status': 'checked-core-term-correspondence',
