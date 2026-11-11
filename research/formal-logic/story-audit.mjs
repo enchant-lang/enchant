@@ -512,6 +512,30 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#generators-can-speak-the-same-logic');
+  check(size.name+': generator chapter distinguishes encodings and runtime units',await evaluate("document.body.innerText.includes('Finite tags encode the alternatives')&&document.body.innerText.includes('BL count uses graphemes')&&document.body.innerText.includes('Bodies are removed before compilation')"));
+  await evaluate("document.querySelector('#generators-can-speak-the-same-logic').scrollIntoView({block:'start'})");
+  await shot(size.name+'-generator-terms');
+  await click('[data-graph="formal-veritas-terms"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="ledger"]');
+  check(size.name+': ledger panel records evidence without proof promotion',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-veritas-terms\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('False and nil survive durable storage')&&t.includes('recorded assurance')&&t.includes('does not check a proof')})()"));
+  await evaluate("document.querySelector('[data-graph=\"formal-veritas-terms\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+  await shot(size.name+'-recorded-evidence-panel');
+  if(size.name==='desktop'){
+    await click('#theme');
+    await shot(size.name+'-recorded-evidence-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-generator-terms','story-clause-coverage','story-runtime-units','story-recorded-verdicts']){
+    const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+    check(size.name+': visible executed generator result '+id,t.length>100);
+    if(id==='story-generator-terms')check(size.name+': composed domains retain abstract scope and false payload replay',t.includes(':composed-claims [:solver-claim :solver-claim]')&&t.includes(':same-complete-question true')&&t.includes(':scope :abstract')&&t.includes(':left/open false')&&t.includes(':runtime-replay [:reproduced :reproduced]')&&t.includes(':enum-model :finite-tag-encoding'));
+    if(id==='story-clause-coverage')check(size.name+': coverage retains local names and reproduces zero gap',t.includes(':coverage [:solver-claim :solver-claim]')&&t.includes(':gap [:refuted :refuted]')&&t.includes(':uncovered-inputs [0 0]')&&t.includes(':original-bodies :removed-before-compilation'));
+    if(id==='story-runtime-units')check(size.name+': exact shared Unicode law keeps different native verdicts',t.includes(':unicode-prefix [:solver-claim :unknown]')&&t.includes(':same-complete-question true')&&t.includes(':graphemes 1')&&t.includes(':codepoints 2')&&t.includes(':runtime-floats :separate-profile-required'));
+    if(id==='story-recorded-verdicts')check(size.name+': search and ledger preserve presence without authority',t.includes(':nil-present true')&&t.includes(':false-witness false')&&t.includes(':sampled-absence :unknown')&&t.includes(':assurance :recorded')&&t.includes(':question-retained true')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -830,6 +854,10 @@ try{
  for(const path of ['/TEMPORAL.md','/sdk-src/formal/temporal.bl','/temporal-check.bl','/temporal-laws-export.bl','/sdk-examples/datom/time/07-uncertain.bl','/sdk-examples/datom/time/08-chronolog.bl','/evidence/temporal/examples.json','/evidence/temporal/focused-temporal-checks.txt','/evidence/temporal/law-execution/intersection-symmetry/Check.lean','/evidence/temporal/law-execution/shift-preserves-duration/Check.lean','/evidence/temporal/law-execution/empty-spans-same-points/Check.lean','/evidence/temporal/law-execution/accepted.json','/evidence/temporal/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared temporal source or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/VERITAS-TERMS.md','/CALLABLE-CUSTODY.md','/sdk-src/formal/runtime-values.bl','/sdk-src/formal/coverage.bl','/sdk-src/veritas/ledger.bl','/veritas-terms-check.bl','/veritas-ledger-check.bl','/evidence/veritas-terms/examples.json','/evidence/veritas-terms/focused-current-checks.txt','/evidence/veritas-terms/qualification.json']){
+  const r=await fetch(base+path);const body=await r.text();
+  check('Declared Veritas interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/formal/source-runtime.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
