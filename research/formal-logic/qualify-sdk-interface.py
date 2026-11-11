@@ -55,6 +55,16 @@ expected = {'system.oracle-test', 'system.system-test'} | {'formal.' + name + '-
      'translation', 'api', 'advanced', 'features', 'native', 'core-counterexamples')}
 require(counts.keys() == expected and '16 file(s) passed, 0 failed, 0 incoherent' in checks,
         'complete selected regression run')
+routing = (E / 'source-routing-checks.txt').read_text()
+routing_counts = {name: int(count) for name, count in re.findall(r'✓\s+([\w.-]+)\s+(\d+) passed', routing)}
+require(routing_counts.keys() == {'formal.context-test', 'formal.selected-test', 'formal.selected-runtime-test'}
+        and '3 file(s) passed, 0 failed, 0 incoherent' in routing, 'SDK-only namespace routing regressions')
+require('36 cells, 0 cell errors' in (E / 'dossier-cells.txt').read_text(), 'all 36 executable dossier cells')
+require('36 cells, 35 cell errors' in (E / 'dossier-cells-1.txt').read_text()
+        and 'SDK declaration metadata is unavailable for formal.term/Int' in
+        (E / 'dossier-cells-failed.bl.org').read_text(), 'retain the namespace shadow diagnosis')
+for canonical in (R / 'priv/lib/formal').glob('*.bl'):
+    require(not (P / 'src/formal' / canonical.name).exists(), 'no SDK namespace alias in research import search')
 matrices = {}
 for name in ('advanced', 'features', 'native'):
     current = read(E / 'regression' / (name + '.json'))
@@ -84,9 +94,11 @@ report = {
                'sha256': {str(path.relative_to(R)): sha(path) for path in qualified}},
     'worker_sha256': sha(worker), 'z3_library_sha256': sha(library),
     'checks': {'focused_assertions': 86, 'regression_files': counts,
-               'regression_assertions': sum(counts.values()), 'failed': 0},
+               'regression_assertions': sum(counts.values()), 'source_routing_files': routing_counts,
+               'source_routing_assertions': sum(routing_counts.values()), 'dossier_cells': 36, 'failed': 0},
     'source_alias_migration': 'removed research symlinks from import search; sdk-src remains a declared browsing root',
     'matrices': matrices, 'paired_questions': 187,
+    'static_document_initial_issue': 'research source symlinks shadowed packaged SDK declaration identity; aliases removed',
     'comparison_baseline': 'evidence/core-counterexamples/corpora (checkpoint 27, canonical term identities)',
     'candidate_1': {'build': 'succeeded', 'assertions_passed': 77, 'assertions_failed': 8,
                     'cause': 'optional context reply normalization and test fixture assumptions'},
