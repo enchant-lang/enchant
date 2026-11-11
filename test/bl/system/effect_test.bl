@@ -52,6 +52,26 @@
  (is (thrown? (effect/call :example :perform (list) (fn [] :default))))
  (is (thrown? (effect/call :example :perform [] 42))))
 
+(defn- nested-tables [remaining body]
+ (if (zero? remaining) (body)
+  (effect/with-handler (keyword (str "effect-capacity-" remaining)) (answer remaining)
+   (fn [] (nested-tables (dec remaining) body)))))
+
+(deftest table-count-method-count-and-snapshot-size-have-real-entry-bounds
+ (let [entered (atom 0) body (fn [] (swap! entered inc))
+       methods (into {} (map (fn [i] [(keyword (str "method-" i)) (fn [] i)]) (range 64)))]
+  (effect/with-methods :capacity methods
+   (fn [] (is (= 63 (effect/call :capacity :method-63 [] (fn [] :default))))))
+  (is (thrown? (effect/with-methods :capacity (assoc methods :overflow (fn [] nil)) body)))
+  (nested-tables 32 (fn [] (is (= true (effect/handled? :effect-capacity-1)))))
+  (is (= false (effect/handled? :effect-capacity-1)))
+  (is (thrown? (nested-tables 33 body)))
+  (let [large (String/duplicate "x" 8388608)
+        handler (fn [_request _default] (count large))]
+   (is (thrown? (effect/with-handler :capacity handler body))))
+  (is (= 0 @entered))
+  (is (= false (effect/handled? :capacity)))))
+
 (deftest registrations-snapshot-unhandled-and-handled-contexts-and-restore-the-worker
  (let [read (fn [] (effect/perform :example nil (fn [] :default)))
        absent (BeamLisp.Execution/register! read)
