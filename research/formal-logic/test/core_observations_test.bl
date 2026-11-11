@@ -1,0 +1,53 @@
+(ns formal.core-observations-test
+ (:require [formal.api :as formal] [formal.core-observation-examples :as examples]
+           [formal.core-actor-examples :as actors] [formal.identity :as identity]))
+
+(deftest exact-receipt-projection-uses-recorded-values-and-ordered-artifacts
+ (let [definition (actors/bank) observed (examples/bank) receipt (:receipt observed)
+       made (formal/core-actor-observation-data definition receipt)
+       packet (:packet made) frames (:frames packet)]
+  (is (= :observed (:status observed)) (pr-str observed))
+  (is (= :ready (:status made)) (pr-str made))
+  (is (= :not-run (:kernel-execution made)))
+  (is (= false (:compiler-proof-authority made)))
+  (is (= (:identity receipt) (get-in packet [:observation :receipt])))
+  (is (= (mapv (juxt :name :core :module :beam-sha256) (:artifacts receipt)) (get-in packet [:observation :artifacts])))
+  (is (= [:initial :returned :returned :returned :idle] (mapv :kind frames)))
+  (is (= [0 10 7 7 7] (mapv #(get (into {} (:state %)) "balance") frames)))
+  (is (= [["amount" 100]] (get-in frames [3 :message])))
+  (is (every? #(= :holds (:invariant %)) frames))
+  (is (= :checked-data-connection (:status (formal/check-core-actor-observation-data definition receipt packet))))
+  (let [other (:receipt (examples/bank))]
+   (is (not= (:identity receipt) (:identity other)))
+   (is (= :rejected (:status (formal/check-core-actor-observation-data definition other packet)))))
+  (doseq [changed [(assoc-in packet [:observation :receipt] (identity/hash "other"))
+                   (update-in packet [:observation :artifacts] #(vec (reverse %)))
+                   (assoc-in packet [:frames 1 :state 0 1] 11)
+                   (assoc-in packet [:frames 4 :invariant] :violated)]]
+   (is (= :rejected (:status (formal/check-core-actor-observation-data definition receipt (identity/seal changed))))))
+  (doseq [changed [(assoc receipt :termination :timeout)
+                   (assoc-in receipt [:monitor :forced] true)
+                   (assoc-in receipt [:artifacts 0 :beam-sha256] (identity/hash "other"))
+                   (assoc-in receipt [:frames 3 :state] {"balance" 8 "credits" 10 "debits" 3})
+                   (-> receipt
+                       (assoc-in [:frames 3 :state] {"balance" 8 "credits" 10 "debits" 3})
+                       (assoc-in [:frames 3 :outcome :value] {"balance" 8 "credits" 10 "debits" 3})
+                       (assoc-in [:frames 4 :state] {"balance" 8 "credits" 10 "debits" 3}))]]
+   (is (= :rejected (:status (formal/core-actor-observation-data definition (identity/seal changed))))))))
+
+(deftest actual-failure-can-conform-and-retain-a-state
+ (let [definition (examples/failure)
+       events [{:transition "compute" :inputs {"divisor" 0}} {:stutter true}]
+       observed (formal/observe-protocol-trace definition {"n" 7} events)
+       receipt (:receipt observed)
+       exported (formal/core-actor-observation-data definition receipt)
+       frames (get-in exported [:packet :frames])]
+  (is (= :observed (:status observed)) (pr-str observed))
+  (is (= :violated (get-in observed [:checking :runtime-safety])))
+  (is (= :ready (:status exported)) (pr-str exported))
+  (is (= [:initial :raised :idle] (mapv :kind frames)))
+  (is (= :zero-divisor (get-in frames [1 :error])))
+  (is (= [[["n" 7]] [["n" 7]] [["n" 7]]] (mapv :state frames)))
+  (is (= [:holds :holds :holds] (mapv :invariant frames)))
+  (is (= :rejected (:status (formal/core-actor-observation-data definition
+                             (identity/seal (assoc-in receipt [:frames 1 :outcome :frames] []))))))))

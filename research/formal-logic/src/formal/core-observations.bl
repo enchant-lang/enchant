@@ -1,0 +1,56 @@
+(ns formal.core-observations
+ (:require [formal.core-actors :as actors] [formal.runtime-protocol :as runtime]
+           [formal.runtime-outcome :as outcome] [formal.identity :as identity]))
+
+(def profile :bl/core-actor-observation-data-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.core-observations: " reason) {}))))
+(defn- record-data [value] (mapv (fn [field] [field (get value field)]) (sort (keys value))))
+
+(defn- frames [receipt reference]
+ (loop [remaining (:frames receipt) expected (:frames reference) invariant nil result []]
+  (if (empty? remaining) result
+   (let [frame (first remaining)
+         checked (first expected)
+         invariant (case (:kind frame)
+                     :initial (:invariant checked)
+                     :stutter invariant
+                     :handler (get checked :invariant-after invariant))
+         fields {:state (record-data (:state frame)) :invariant invariant}
+         row (case (:kind frame)
+               :initial (assoc fields :kind :initial)
+               :stutter (assoc fields :kind :idle)
+               :handler
+                (let [raw (:outcome frame)
+                      base (assoc fields :kind (:status raw) :handler (:transition frame)
+                             :message (record-data (:inputs frame)))]
+                 (if (= :raised (:status raw)) (assoc base :error (outcome/error-name raw)) base)))]
+    (recur (rest remaining) (rest expected) invariant (conj result row))))))
+
+(defn prepare
+ "Project a complete conforming owned observation onto exact typed Core data.
+  This checks the original receipt and recompiles manifests without running an actor."
+ [definition receipt]
+ (try
+  (let [checked (runtime/check definition receipt)
+        _ (require! (= :conforming (:status checked)) (str "complete conforming observation required (" (:status checked) ")"))
+        model (actors/trace-model definition)
+        artifacts (mapv (fn [row] [(:name row) (:core row) (:module row) (:beam-sha256 row)]) (:artifacts receipt))
+        _ (require! (= (mapv #(subvec % 0 2) artifacts) (get-in model [:subject :handlers])) "observed handler manifest differs")
+        packet (identity/seal
+                 {:formal/core-actor-observation-data 1 :profile profile :model model
+                  :observation {:receipt (:identity receipt) :profile (:profile receipt) :adapter (:adapter receipt)
+                                :projection (:projection receipt) :sdk-descriptor (get-in receipt [:sdk :descriptor-sha256])
+                                :artifacts artifacts}
+                  :frames (frames receipt (get checked :source-model-execution))})]
+   {:status :ready :packet packet :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
+
+(defn check-data [definition receipt packet]
+ (try
+  (let [fresh (prepare definition receipt)]
+   (require! (= :ready (:status fresh)) (:reason fresh))
+   (require! (and (identity/valid? packet) (= packet (:packet fresh))) "packet differs from exact model and observation projection")
+   {:status :checked-data-connection :packet (:identity packet) :receipt (:identity receipt)
+    :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))

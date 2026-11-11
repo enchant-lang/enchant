@@ -37,14 +37,15 @@ theorem initialStatesAreSafe : ∀ value, policy.initial value → policy.invari
   checked_init policy (exactInitialQuestion ▸ rename_entails ActorInitTerms.originalQuestion _ _
     ActorInitTerms.originalQuestionEntails)
 """
-HANDLER = """
+CORE_HANDLER = """
 
 def handlerEnv{n} (input : Inputs) := ActorHandlerCore{n}.originalInputs input.ints input.bools
 def handler{n} := coreHandler policy ActorHandlerCore{n}.originalProgram handlerEnv{n} admission{n}
 
 theorem handler{n}ReadsState (value : Value {state}) (message : Inputs) :
     (handlerEnv{n} (stateSlots.put value message)).lookup (Var.succ Var.zero) = value := rfl
-
+"""
+HANDLER = CORE_HANDLER + """
 theorem exactHandler{n}Question :
     renameQuestion ActorHandlerTerms{n}.originalQuestion (fun i => handler{n}IntSlots[i]?.getD 0)
       (fun i => handler{n}BoolSlots[i]?.getD 0) =
@@ -60,15 +61,29 @@ theorem handler{n}Safe : Safe handler{n} policy.invariant :=
 """
 
 
+MODEL_FIELDS = {'subject', 'state-sort', 'initial', 'invariant', 'handlers'}
+HANDLER_FIELDS = {'name', 'core', 'admission'}
+
+
+def model_data(packet):
+    return {**{key: packet[key] for key in MODEL_FIELDS - {'handlers'}},
+            'handlers': [{key: row[key] for key in HANDLER_FIELDS} for row in packet['handlers']]}
+
+
+def typed_model(model):
+    subject = model['subject']
+    return {**model, 'subject': {**subject, 'kind': k.Keyword(subject['kind']), 'source-profile': k.Keyword(subject['source-profile'])},
+            'state-sort': core.typed_sort(model['state-sort']),
+            'initial': terms.typed_term(model['initial']), 'invariant': terms.typed_term(model['invariant']),
+            'handlers': [{**row, 'core': core.typed_packet(row['core']), 'admission': terms.typed_term(row['admission'])}
+                         for row in model['handlers']]}
+
+
 def canonical_identity(packet):
-    subject = packet['subject']
-    data = {**packet, 'profile': k.Keyword(packet['profile']), 'identity-profile': k.Keyword(packet['identity-profile']),
-            'subject': {**subject, 'kind': k.Keyword(subject['kind']), 'source-profile': k.Keyword(subject['source-profile'])},
-            'state-sort': core.typed_sort(packet['state-sort']),
-            'initial': terms.typed_term(packet['initial']), 'invariant': terms.typed_term(packet['invariant']),
-            'initial-proof': typed_term_packet(packet['initial-proof']),
-            'handlers': [{**row, 'core': core.typed_packet(row['core']), 'admission': terms.typed_term(row['admission']),
-                          'entailment': typed_term_packet(row['entailment'])} for row in packet['handlers']]}
+    data = {**typed_model(packet), 'profile': k.Keyword(packet['profile']), 'identity-profile': k.Keyword(packet['identity-profile']),
+            'initial-proof': typed_term_packet(packet['initial-proof'])}
+    data['handlers'] = [{**typed, 'entailment': typed_term_packet(original['entailment'])}
+                        for typed, original in zip(data['handlers'], packet['handlers'])]
     del data['identity']
     return data_digest(data)
 
@@ -93,14 +108,8 @@ def slot_maps(proof, question, layout):
     return [[full.index(name) for name in subset] for subset, full in zip(used, layout)]
 
 
-def validate(packet):
-    require(type(packet) is dict and set(packet) == {'formal/core-actor-data', 'profile', 'identity-profile', 'identity',
-            'subject', 'state-sort', 'initial', 'invariant', 'initial-question', 'initial-proof', 'handlers'},
-            'Core actor packet fields')
-    require(type(packet['formal/core-actor-data']) is int and packet['formal/core-actor-data'] == 1
-            and packet['profile'] == 'bl/core-actor-trace-data-v1'
-            and packet['identity-profile'] == 'bl/canonical-formal-data-v1', 'Core actor packet profile')
-    digest(packet['identity'], 'Core actor packet')
+def validate_model(packet):
+    require(type(packet) is dict and set(packet) == MODEL_FIELDS, 'exact Core actor model fields')
     subject = packet['subject']
     require(type(subject) is dict and set(subject) == {'kind', 'identity', 'model', 'source-profile', 'handlers'}
             and subject['kind'] == 'source-protocol'
@@ -108,20 +117,17 @@ def validate(packet):
             'exact source protocol subject')
     for field in ('identity', 'model'):
         digest(subject[field], field)
-    digest(packet['initial-question'], 'initiation question')
     symbols = state_symbols(packet['state-sort'])
     state_names = {name: sort for sort, name in symbols.values()}
     state_layout = tuple(sorted(name for name, sort in state_names.items() if sort == kind) for kind in ('int', 'bool'))
     typed_roots([packet['initial'], packet['invariant']], state_names, 'state predicates')
-    initial_maps = slot_maps(packet['initial-proof'], packet['initial-question'], state_layout)
     handlers = packet['handlers']
     require(type(handlers) is list and len(handlers) <= 16, 'source handler capacity')
-    mappings, manifest, labels = [], [], set()
+    layouts, manifest, labels = [], [], set()
     for row in handlers:
-        require(type(row) is dict and set(row) == {'name', 'admission', 'core', 'question', 'entailment'}
+        require(type(row) is dict and set(row) == HANDLER_FIELDS
                 and core.name_ok(row['name']) and row['name'] not in labels, 'unique exact handler row')
         labels.add(row['name'])
-        digest(row['question'], 'handler question')
         model = row['core']
         layout = core.validate(model)
         require(model['subject']['kind'] == 'core' and model['prefix'] == 'core' and model['input-encoding'] == 'record-paths-v2'
@@ -134,24 +140,48 @@ def validate(packet):
         require(all(all_names[:len(state)] == state for all_names, state in zip(layout, state_layout)),
                 'the state slots must be shared before the message slots')
         typed_roots([row['admission']], {name: kind for names, kind in zip(layout, ('int', 'bool')) for name in names}, 'message admission')
-        mappings.append((layout, slot_maps(row['entailment'], row['question'], layout)))
+        layouts.append(layout)
         manifest.append([row['name'], model['core']])
     require(subject['handlers'] == manifest, 'complete ordered handler manifest')
+    return symbols, state_layout, layouts
+
+
+def validate(packet):
+    require(type(packet) is dict and set(packet) == MODEL_FIELDS | {'formal/core-actor-data', 'profile', 'identity-profile', 'identity',
+            'initial-question', 'initial-proof'}, 'Core actor packet fields')
+    require(type(packet['formal/core-actor-data']) is int and packet['formal/core-actor-data'] == 1
+            and packet['profile'] == 'bl/core-actor-trace-data-v1'
+            and packet['identity-profile'] == 'bl/canonical-formal-data-v1', 'Core actor packet profile')
+    digest(packet['identity'], 'Core actor packet')
+    digest(packet['initial-question'], 'initiation question')
+    rows = packet['handlers']
+    require(type(rows) is list and len(rows) <= 16 and all(type(row) is dict and
+            set(row) == HANDLER_FIELDS | {'question', 'entailment'} for row in rows), 'exact handler proof rows')
+    symbols, state_layout, layouts = validate_model(model_data(packet))
+    initial_maps = slot_maps(packet['initial-proof'], packet['initial-question'], state_layout)
+    mappings = []
+    for row, layout in zip(rows, layouts):
+        digest(row['question'], 'handler question')
+        mappings.append((layout, slot_maps(row['entailment'], row['question'], layout)))
     require(canonical_identity(packet) == packet['identity'], 'canonical Core actor packet identity mismatch')
     return symbols, state_layout, initial_maps, mappings
 
 
-def definitions(packet, layouts):
-    symbols, state_layout, initial_maps, mappings = layouts
+def state_definitions(packet, symbols, state_layout):
     slots = 'Layout.unit'
     for _, (sort, name) in reversed(list(symbols.items())):
         slot = state_layout[0 if sort == 'int' else 1].index(name)
         slots = ('Layout.pair', ('Layout.' + sort, slot), slots)
-    rows = [('stateSlots', slots, None), ('stateIntCount : Nat', len(state_layout[0]), None),
+    return [('stateSlots', slots, None), ('stateIntCount : Nat', len(state_layout[0]), None),
             ('stateBoolCount : Nat', len(state_layout[1]), None),
             ('initialPredicate : Term FormalTerms.Ty.boolean', packet['initial'], state_layout),
-            ('invariantPredicate : Term FormalTerms.Ty.boolean', packet['invariant'], state_layout),
-            ('initialIntSlots : List Nat', initial_maps[0], None), ('initialBoolSlots : List Nat', initial_maps[1], None)]
+            ('invariantPredicate : Term FormalTerms.Ty.boolean', packet['invariant'], state_layout)]
+
+
+def definitions(packet, layouts):
+    symbols, state_layout, initial_maps, mappings = layouts
+    rows = state_definitions(packet, symbols, state_layout)
+    rows.extend([('initialIntSlots : List Nat', initial_maps[0], None), ('initialBoolSlots : List Nat', initial_maps[1], None)])
     for index, (handler, (layout, maps)) in enumerate(zip(packet['handlers'], mappings)):
         rows.extend([(f'admission{index} : Term FormalTerms.Ty.boolean', handler['admission'], layout),
                      (f'handler{index}IntSlots : List Nat', maps[0], None),
@@ -204,29 +234,36 @@ theorem failureRetainsState {{before : Value {state}}} {{reason : String}} {{eve
     return header, tail + ''.join(f'#print axioms {name}\n' for name in audits), set(audits)
 
 
-def source(packet, layouts):
-    header, tail, _ = boundaries(packet, layouts)
-    return header + ''.join('\n\ndef ' + name + ' :=\n' +
+def emit_definitions(rows):
+    return ''.join('\n\ndef ' + name + ' :=\n' +
                             (terms.emit_term(data, *layout) if layout is not None else core.render(data))
-                            for name, data, layout in definitions(packet, layouts)) + tail
+                            for name, data, layout in rows)
 
 
-def verify_source(text, packet, layouts):
-    header, tail, audits = boundaries(packet, layouts)
-    require(text.startswith(header) and text.endswith(tail), 'fixed Core actor theorem template')
-    rows = text[len(header):-len(tail)].split('\n\ndef ')
+def verify_definitions(text, expected, *, decoder_class=core.Decoder):
+    rows = text.split('\n\ndef ')
     require(rows.pop(0) == '', 'Core actor declarations start')
-    expected = definitions(packet, layouts)
     require(len(rows) == len(expected), 'exact Core actor declarations')
     for row, (name, data, layout) in zip(rows, expected):
         prefix = name + ' :=\n'
         require(row.startswith(prefix), 'Core actor declaration type')
-        decoder = core.Decoder(row[len(prefix):])
+        decoder = decoder_class(row[len(prefix):])
         if layout is not None:
             require(terms.faithful(data, decoder.term(), *layout), 'generated actor predicate differs')
         else:
             require(decoder.data() == data, 'generated actor state or proof slots differ')
         require(decoder.at == len(decoder.tokens), 'trailing Core actor declaration data')
+
+
+def source(packet, layouts):
+    header, tail, _ = boundaries(packet, layouts)
+    return header + emit_definitions(definitions(packet, layouts)) + tail
+
+
+def verify_source(text, packet, layouts):
+    header, tail, audits = boundaries(packet, layouts)
+    require(text.startswith(header) and text.endswith(tail), 'fixed Core actor theorem template')
+    verify_definitions(text[len(header):-len(tail)], definitions(packet, layouts))
     return audits
 
 

@@ -1,0 +1,35 @@
+(ns formal.core-observation-examples
+ (:require [formal.api :as formal] [formal.core-actor-examples :as actors] [formal.term :as t]))
+
+(defn bank [] (formal/observe-protocol-trace (actors/bank) actors/bank-initial actors/bank-events))
+
+(defn failure []
+ (formal/source-protocol
+  {:name "recorded-division-failure" :state {"n" t/Int}
+   :handlers [{:name "compute" :inputs {"divisor" t/Int}
+               :source "(fn [s m] (assoc s \"n\" (quot (get s \"n\") (get m \"divisor\"))))"}]}))
+
+(defn- unsafe-return []
+ (formal/source-protocol
+  {:name "recorded-negative-state" :state {"n" t/Int}
+   :init (fn [s] (t/eq (get s "n") (t/int 0)))
+   :invariant (fn [s] (t/ge (get s "n") (t/int 0)))
+   :handlers [{:name "set" :inputs {"n" t/Int} :source "(fn [s m] m)"}]}))
+
+(defn- message [handler input] {:transition handler :inputs input})
+
+(defn examples []
+ (let [protocols (into {} (map (juxt :id :definition) (actors/examples)))]
+  [{:id "bank" :definition (get protocols "bank") :initial actors/bank-initial :events actors/bank-events}
+   {:id "context-counter" :definition (get protocols "context-counter") :initial {"n" 0}
+    :events [(message "increment" {}) (message "increment" {})]}
+   {:id "overlapping-message-names" :definition (get protocols "overlapping-message-names") :initial {"done" false "n" 0}
+    :events [(message "advance" {"value" false}) (message "advance" {"value" true})
+             (message "set-count" {"value" 40}) (message "advance" {"value" true})]}
+   {:id "full-idle" :definition (get protocols "stutter-only") :initial {"n" 0}
+    :events (vec (repeat 64 {:stutter true}))}
+   {:id "initial-only" :definition (get protocols "stutter-only") :initial {"n" 0} :events []}
+   {:id "failure" :definition (failure) :initial {"n" 7}
+    :events [(message "compute" {"divisor" -3}) (message "compute" {"divisor" 0}) {:stutter true}]}
+   {:id "unsafe-return" :definition (unsafe-return) :initial {"n" 0}
+    :events [(message "set" {"n" -5}) (message "set" {"n" 0})]}]))
