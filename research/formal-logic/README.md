@@ -57,6 +57,13 @@ existence theorem. The composed proof checks the full question after aligning
 input slots by name and sort. Its report records the two premise proofs and
 the axioms used by the final theorem.
 
+[RECORD-HANDLERS.md](RECORD-HANDLERS.md) connects the exact Core handler family
+to invariant preservation at every finite admitted trace prefix.
+[RUNTIME-OBSERVATIONS.md](RUNTIME-OBSERVATIONS.md) adds owned BEAM receipts
+and a term-native export for independently checking each recorded Core prefix.
+The bank example applies its general safety theorem to the same recorded run.
+Execution authenticity remains an explicit observer assumption.
+
 [WITNESSES.md](WITNESSES.md) adds positive SAT evidence with term-native
 bindings. Authored assignments and models from either backend are independently
 replayed against the original assertions and checked by a constructive Lean
