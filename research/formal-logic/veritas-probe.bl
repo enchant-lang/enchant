@@ -1,0 +1,19 @@
+(ns formal.veritas-probe (:require [compiler :as compiler] [system.ir :as ir] [bl.json :as json] [veritas :as v]))
+(def expressions ["(count x)" "(nth x 1)" "(nth x 1 7)" "(get x :on)" "(:on x)" "(some? x)" "(nil? x)" "(int? x)" "(keyword? x)" "(string? x)" "(boolean? x)" "(vector? x)" "(empty? x)" "(rest x)" "(pop x)" "(conj x 1)" "(str-prefix? \"e\" x)"])
+(defn inspect [expression]
+ (let [anf (compiler/compile (first (BeamLisp.Reader/read_string (str "(fn [x] " expression ")")))
+                            (compiler/new-env "formal.source.intrinsics"))
+       calls (atom [])]
+  (letfn [(walk [node]
+            (when-let [call (ir/call-site node)] (swap! calls conj (select-keys call [:mode :mod :fun :arity :callee :rest])))
+            (doseq [child (ir/child-nodes node)] (walk child)))]
+   (walk anf))
+  {:expression expression :calls @calls :anf anf}))
+(def result {:expressions (mapv inspect expressions)
+ :guards (mapv inspect ["(if (pos? x) 1 0)"])
+ :coverage-anf (compiler/compile (first (BeamLisp.Reader/read_string "(fn ([x] :when (pos? x) :p) ([renamed] :when (neg? renamed) :n) ([0] :z))")) (compiler/new-env "formal.source.intrinsics"))
+ :unicode [{:text "é" :bl-count (count "é") :codepoints (length (String/codepoints "é"))}
+           {:text "🇲🇦" :bl-count (count "🇲🇦") :codepoints (length (String/codepoints "🇲🇦"))}]
+ :string-samples (v/gen-sample (v/string-of "usr_" 8 12) 0 5)})
+(File/write! (first (BeamLisp/argv)) (json/encode result {:pretty 2}))
+(println :recorded)
