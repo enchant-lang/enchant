@@ -56,3 +56,42 @@
    (is (thrown? (cache/get-or-build! store version role variant build))))
   (is (= 0 @builds))
   (is (= nil @(:state store)))))
+
+(deftest parsed-content-is-bounded-to-one-exact-document
+ (let [store (cache/create) builds (atom 0)
+       ask (fn [text] (cache/get-parsed! store text #(do (swap! builds inc) {:nodes [text]})))]
+  (is (= {:nodes ["first"]} (ask "first")))
+  (is (= {:nodes ["first"]} (ask "first")))
+  (is (= 1 @builds))
+  (is (= {:nodes ["first "]} (ask "first ")))
+  (is (= 2 @builds))
+  (is (= #{:digest :document} (set (keys @(:state store)))))
+  (is (= {:nodes ["first"]} (ask "first")))
+  (is (= 3 @builds))))
+
+(deftest failed-and-malformed-parses-do-not-poison-the-cache
+ (let [store (cache/create)]
+  (is (thrown? (cache/get-parsed! store "a" #(throw (ex-info "parse failed" {})))))
+  (is (thrown? (cache/get-parsed! store "a" #(identity {:nodes nil}))))
+  (is (= nil @(:state store)))
+  (is (= {:nodes []} (cache/get-parsed! store "a" #(identity {:nodes []}))))
+  (is (thrown? (cache/get-parsed! store "b" #(throw (ex-info "next parse failed" {})))))
+  (is (= {:nodes []} (cache/get-parsed! store "a" #(throw (ex-info "must reuse" {})))))
+  (is (thrown? (cache/get-parsed! store nil #(identity {:nodes []}))))))
+
+(deftest simultaneous-readers-share-one-pure-parse
+ (let [store (cache/create) parent (erlang/self) builds (atom 0)]
+  (doseq [_ (range 3)]
+   (spawn (fn []
+    (erlang/send parent [:parse-entered])
+    (let [doc (cache/get-parsed! store "shared"
+                (fn []
+                 (swap! builds inc) (erlang/send parent [:parse-building (erlang/self)])
+                 (receive [:finish-parse] {:nodes []} (after 5000 (throw (ex-info "release missing" {}))))))]
+     (erlang/send parent [:parse-answer doc])))))
+  (dotimes [_ 3] (is (= :entered (receive [:parse-entered] :entered (after 5000 :timeout)))))
+  (let [builder (receive [:parse-building pid] pid (after 5000 nil))]
+   (is (some? builder)) (when builder (erlang/send builder [:finish-parse])))
+  (is (= [{:nodes []} {:nodes []} {:nodes []}]
+         (mapv (fn [_] (receive [:parse-answer doc] doc (after 5000 :timeout))) (range 3))))
+  (is (= 1 @builds))))

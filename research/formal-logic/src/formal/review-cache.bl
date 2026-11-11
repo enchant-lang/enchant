@@ -4,6 +4,22 @@
 ;; Values contain serialized strings; no request or executable is retained.
 (defn create [] {:lock (erlang/make_ref) :state (atom nil)})
 
+(defn get-parsed!
+ "Retain one pure document parse by exact text contents. Use a separate cache
+  instance from the HTML cache. Enriched evidence and reader roles stay outside."
+ [cache text build]
+ (when-not (and (string? text) (<= (erlang/byte_size text) 8388608) (fn? build))
+  (throw (ex-info "Invalid parsed document cache request" {})))
+ (let [digest (crypto/hash :sha256 text)]
+  (global/trans (tuple (:lock cache) (erlang/self))
+   (fn []
+    (if (= digest (:digest @(:state cache))) (:document @(:state cache))
+     (let [doc (build)]
+      (when-not (and (map? doc) (vector? (:nodes doc)))
+       (throw (ex-info "Document cache requires parsed nodes" {})))
+      (reset! (:state cache) {:digest digest :document doc})
+      doc))))))
+
 (defn get-or-build! [cache revision writable? variant build]
  (when-not (and (string? revision) (<= (count revision) 1024)
                 (contains? #{true false} writable?)
