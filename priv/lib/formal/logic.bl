@@ -102,10 +102,11 @@
  "Retain named assumptions in a context. Intercepted contexts retain BL data."
  [session assertions]
  (live! session)
- (q/validate! (q/sat {:assumptions assertions}))
- (if (= 1 (:formal/logical-session session))
-  (do (swap! (:state session) update :assertions #(vec (concat % assertions))) {:ok true})
-  (backend/load! session assertions)))
+ (let [question (q/validate! (q/sat {:assumptions assertions}))
+       normalized (:assertions question)]
+  (if (= 1 (:formal/logical-session session))
+   (do (swap! (:state session) update :assertions #(vec (concat % normalized))) {:ok true})
+   (backend/load! session normalized))))
 
 (defn reset! [session]
  (live! session)
@@ -113,6 +114,10 @@
   (do (swap! (:state session) (fn [state] {:generation (inc (:generation state)) :assertions [] :retired false}))
       {:ok true :generation (:generation @(:state session))})
   (backend/reset! session)))
+
+(defn- query-error [problem error]
+ {:id (:id problem) :mode (:mode problem) :profile (:profile problem) :scope (:scope problem) :trusted false
+  :verdict :error :phase :frontend :solver-status :not-run :error (ex-message error)})
 
 (defn solve-in
  "Check a complete portable question through the oracle effect. Retained
@@ -138,13 +143,11 @@
      (if (= 1 (:formal/logical-session session))
       (backend/with-session (:options session) (fn [native] (solve-native-in native effective)))
       (solve-native-in session effective)))))
-  (catch error
-   {:id (:id problem) :mode (:mode problem) :profile (:profile problem) :scope (:scope problem) :trusted false
-    :verdict :error :phase :frontend :solver-status :not-run :error (ex-message error)})))
+  (catch error (query-error problem error))))
 
 (defn run [opts problem]
- (q/validate! problem)
- (with-session opts (fn [session] (solve-in session problem))))
+ (let [failure (try (q/validate! problem) nil (catch error (query-error problem error)))]
+  (if failure failure (with-session opts (fn [session] (solve-in session problem))))))
 (defn prove [opts claim options] (run opts (q/prove claim options)))
 (defn equivalent [opts left right options] (run opts (q/equivalent left right options)))
 
