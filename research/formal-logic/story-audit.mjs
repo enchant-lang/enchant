@@ -454,6 +454,38 @@ try{
   check(size.name+': execution cell keeps hard-search and proof authority boundaries',ended.includes(':busy-solver-cancellation :not-qualified')&&ended.includes(':compiler-proof-authority false'));
   await evaluate("document.querySelector('#cell-story-session-lifetime .result').scrollIntoView({block:'center'})");
   await shot(size.name+'-story-session-lifetime-data');
+  await navigate('/#time-becomes-a-value-you-can-reason-about');
+  await wait("document.querySelector('#time-becomes-a-value-you-can-reason-about').getClientRects().length>0");
+  check(size.name+': temporal chapter distinguishes mixed datings from solver uncertainty',await evaluate("document.body.innerText.includes('starts somewhere between zero and four')&&document.body.innerText.includes('An engine that cannot decide has a different answer')"));
+  await evaluate("document.querySelector('#time-becomes-a-value-you-can-reason-about').scrollIntoView({block:'start'})");
+  await shot(size.name+'-temporal-values');
+  await click('[data-graph="formal-temporal-values"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="meaning"]');
+  check(size.name+': temporal panel separates endpoint data, empty point sets and positive-width Allen relations',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-temporal-values\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('different endpoint data')&&t.includes('positive-width premise')&&t.includes('Input range constraints and model admission remain separate')})()"));
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-temporal-values\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-temporal-meaning-panel');
+  }
+  await click('[data-graph="formal-temporal-values"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="chronology"]');
+  check(size.name+': chronology panel preserves event identities and a strict predicate',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-temporal-values\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Namespaced keywords and symbols')&&t.includes('raises with the complete answer when unresolved')})()"));
+  await click('[data-graph="formal-temporal-values"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="laws"]');
+  check(size.name+': temporal law panel keeps exact term theorems separate from runtime correspondence',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-temporal-values\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Three portable certificates')&&t.includes('exact generated integer-term statements')&&t.includes('runtime remains reviewed')})()"));
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-temporal-values\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-temporal-values-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-temporal-values','story-temporal-chronology','story-temporal-laws']){
+    await wait(`document.querySelector('#cell-${id} .result').getClientRects().length>0`);
+    check(size.name+': visible executable result '+id,await evaluate(`document.querySelector('#cell-${id} .result').getClientRects().length>0`));
+    const t=await evaluate(`document.querySelector('#cell-${id} .result').innerText`);
+    if(id==='story-temporal-values')check(size.name+': both native possibilities retain valid replay and identical complete questions',t.includes(':overlap [:possible :possible]')&&t.includes(':intersecting-starts [2 2]')&&t.includes(':intersecting-replay [:valid :valid]')&&t.includes(':separated-replay [:valid :valid]')&&t.includes(':same-complete-questions true')&&t.includes(':native-certificate :not-checked')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-temporal-chronology')check(size.name+': full event identities and an unresolved strict predicate remain visible',t.includes(':native-consistency [true true]')&&t.includes(':left/event')&&t.includes(':right/event')&&t.includes(':starts [2 2]')&&t.includes(':predicate-refused true')&&t.includes(':verdict :unknown')&&t.includes(':consistent nil')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-temporal-laws')check(size.name+': three original term laws reconnect to recorded external proofs',t.includes(':certificates [:checked :checked :checked]')&&t.includes('intersection-symmetry')&&t.includes('shift-preserves-duration')&&t.includes('empty-spans-same-points')&&t.includes(':external-proof :recorded-Lean-results')&&t.includes(':model-runtime-connection :reviewed-implementation')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -769,6 +801,12 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared session lifetime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
+ for(const path of ['/TEMPORAL.md','/sdk-src/formal/temporal.bl','/temporal-check.bl','/temporal-laws-export.bl','/sdk-examples/datom/time/07-uncertain.bl','/sdk-examples/datom/time/08-chronolog.bl','/evidence/temporal/examples.json','/evidence/temporal/focused-temporal-checks.txt','/evidence/temporal/law-execution/intersection-symmetry/Check.lean','/evidence/temporal/law-execution/shift-preserves-duration/Check.lean','/evidence/temporal/law-execution/empty-spans-same-points/Check.lean','/evidence/temporal/law-execution/accepted.json','/evidence/temporal/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared temporal source or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ check('Trusted temporal law archive stays unavailable to the browser',(await fetch(base+'/evidence/temporal/laws.etf')).status===404);
+ check('Compiled temporal theorem stays unavailable to the browser',(await fetch(base+'/evidence/temporal/law-execution/intersection-symmetry/Check.olean')).status===404);
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
