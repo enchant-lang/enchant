@@ -26,13 +26,27 @@ The question layer obtains retained assumptions from an owner snapshot and
 binds execution to that snapshot. Mutating a client mirror cannot erase an
 assumption or restore an old owner revision. A managed reset can recover a
 healthy context after a raw exchange; a failed native exchange still retires
-the worker.
+the worker. The owner can still match the captured question after a completed
+refusal retired it. Identity matching does not authorize another exchange, and
+the original `unsupported` result must survive that retirement.
+
+`backend/context` returns an ephemeral owner PID with its revision. This is an
+execution token, not durable query or certificate data. The portable question
+retains named assumptions, their digest and generation; it contains neither
+the owner PID nor native node IDs. Recorded examples encode their questions
+with the canonical data codec.
 
 Intercepted logical sessions remain caller-owned BL data. Their fallback opens
 a fresh native context for the complete captured question. Process handler
 inheritance and executable code custody are a separate language/runtime slice.
 
-Implementation and qualification are pending. Keep the selected immutable SDK
+The original baseline passed 12 assertions and failed 20. The first immutable
+candidate passed 346 assertions and failed three: two fixture expectations
+omitted an existing domain assertion; one native `unsupported` answer was
+incorrectly replaced by a retirement error. The corrected candidate separates
+post-execution identity matching from liveness. Qualification is in progress.
+
+ Keep the selected immutable SDK
 until its replacement passes focused qualification, then reuse that exact
 artifact for regression and recorded dossier examples. Compiler authority
 remains disabled.
