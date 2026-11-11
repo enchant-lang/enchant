@@ -36,6 +36,9 @@ sdk, source = Path(pin['sdk']), Path(pin['source'])
 meta = read(sdk / 'artifact.json')
 require(pin == snapshot['sdk_pin'], 'same implementation SDK')
 require(sha(sdk / 'artifact.json') == pin['descriptor_sha256'] and meta['source'] == str(source), 'descriptor and source')
+production = read(E / 'preparation-result.json')
+require(production['ok'] is True and production['value']['kind'] == 'preparation-result'
+        and production['value']['output'] == pin['sdk'] and production['value']['operation'] == 'sdk', 'managed SDK production receipt')
 for name, digest in snapshot['source_sha256'].items():
     require(sha(R / name) == digest, 'unchanged implementation: ' + name)
     require(hashlib.sha256(subprocess.check_output(['git', 'show', snapshot['code_commit'] + ':' + name], cwd=R)).hexdigest() == digest,
