@@ -13,6 +13,7 @@ from obligation_proof import data_digest, digest
 
 P, k, require = terms.P, terms.k, terms.require
 SCALARS = (['int'], ['bool'])
+SCOPED_MODULES = {'BeforeCore', 'AfterCore', 'InitializerCore', 'ControllerCore'}
 INTEGER_OPS = {'add', 'sub', 'mul', 'quot', 'rem', 'mod'}
 COMPARISONS = {'lt', 'le', 'gt', 'ge'}
 
@@ -417,7 +418,7 @@ def source(packet, integers, booleans, *, namespace=None):
 
 
 def proof_scope(namespace):
-    require(namespace in {None, 'BeforeCore', 'AfterCore'}, 'supported Core proof scope')
+    require(namespace in {None} | SCOPED_MODULES, 'supported Core proof scope')
     if namespace is None:
         return '', ''
     return f'\nnamespace {namespace}\n', f'\nend {namespace}\n'
@@ -471,8 +472,8 @@ def copy_library(library, libraries):
 
 def run(path, output, axiom_policy='lean-standard', *, module='Check'):
     require(axiom_policy in terms.AXIOM_POLICIES, 'supported Core term axiom policy')
-    require(module in {'Check', 'CoreCheck', 'BeforeCore', 'AfterCore'}, 'Core term check module')
-    namespace = module if module in {'BeforeCore', 'AfterCore'} else None
+    require(module in {'Check', 'CoreCheck'} | SCOPED_MODULES, 'Core term check module')
+    namespace = module if module in SCOPED_MODULES else None
     output.mkdir(parents=True, exist_ok=True)
     (output / 'Check.olean').unlink(missing_ok=True)
     (output / 'result.json').unlink(missing_ok=True)

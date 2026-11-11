@@ -1,16 +1,13 @@
 """Check equality of two exact Core outcomes under a portable precondition."""
 import argparse
 import json
-import os
 from pathlib import Path
-import shutil
 import subprocess
-import tempfile
 
 import core_term_check as core
 from obligation_proof import data_digest, digest, typed_term_packet
 import term_refutation as terms
-from witness_kernel import theorem_audits
+from core_composition import check_linked, theorem_audits
 
 P, k, require = terms.P, terms.k, terms.require
 HEADER = """import BeforeCore
@@ -163,42 +160,15 @@ def run(path, output, axiom_policy='lean-standard'):
     text = source(packet, *layouts)
     verify_source(text, packet, *layouts)
     lean, libraries = checked_kernel()
-    (output / (module + '.lean')).write_text(text)
-    with tempfile.TemporaryDirectory(prefix='enchant-core-translation-') as temporary:
-        work = Path(temporary)
-        library = work / 'library'
-        core.copy_library(library, libraries)
-        imported = {}
-        for side, premise_module, check_premise, object_hash in [
-                ('before', 'BeforeCore', core.run, 'olean_sha256'),
-                ('after', 'AfterCore', core.run, 'olean_sha256'),
-                ('entailment', 'EntailmentCheck', terms.run, 'proof_olean_sha256')]:
-            input_path = work / (side + '.json')
-            input_path.write_text(json.dumps(packet[side]))
-            premise_output = output / side
-            result = check_premise(input_path, premise_output, axiom_policy, module=premise_module)
-            target = library / (premise_module + '.olean')
-            shutil.copyfile(premise_output / 'Check.olean', target)
-            require(k.sha(target) == result[object_hash], 'fresh translation premise object identity')
-            imported[side] = result[object_hash]
-        check = work / (module + '.lean')
-        check.write_text(text)
-        compiled = check.with_suffix('.olean')
-        with (output / 'lean.txt').open('w') as log:
-            completed = subprocess.run([str(lean), '--root=' + str(work), '-o', str(compiled), str(check)],
-                                       cwd=work, env=dict(os.environ, LEAN_PATH=str(library)), stdout=log,
-                                       stderr=subprocess.STDOUT, timeout=120)
-        transcript = (output / 'lean.txt').read_text()
-        require(completed.returncode == 0 and 'sorryAx' not in transcript and 'warning:' not in transcript,
-                'Lean did not accept the exact Core translation composition')
-        audits = theorem_audits(transcript, AUDITS)
-        require(all(set(deps) <= terms.AXIOM_POLICIES[axiom_policy] for deps in audits.values()), 'Core translation axioms exceed policy')
-        shutil.copyfile(compiled, output / compiled.name)
+    imported, audits = check_linked(packet, text, output, module=module,
+        premises=[('before', 'BeforeCore'), ('after', 'AfterCore'), ('entailment', 'EntailmentCheck')],
+        lean=lean, libraries=libraries, axiom_policy=axiom_policy, expected_audits=AUDITS,
+        failure='Lean did not accept the exact Core translation composition')
     result = {'schema': 'enchant.formal.core-translation-execution.v1', 'status': 'checked-core-translation',
               'packet': packet['identity'], 'subject': packet['subject'],
               'scope': 'conditional-equality-of-the-two-contained-core-outcomes',
               'imported_olean_sha256': imported, 'axioms': audits, 'axiom_policy': axiom_policy,
-              'source_sha256': k.sha(output / check.name), 'olean_sha256': k.sha(output / compiled.name),
+              'source_sha256': k.sha(output / (module + '.lean')), 'olean_sha256': k.sha(output / (module + '.olean')),
               'source_data': 'independently-decoded-and-compared', 'subject_connection': 'requires-fresh-BL-reconstruction',
               'source_compiler_preservation': 'not-established', 'compiler_proof_authority': False}
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')

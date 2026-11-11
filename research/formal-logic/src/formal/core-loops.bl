@@ -1,0 +1,102 @@
+(ns formal.core-loops
+ (:require [formal.loop :as loops] [formal.loop-core :as lc] [formal.core :as core]
+           [formal.core-symbolic :as symbolic] [formal.core-terms :as core-terms]
+           [formal.term :as t] [formal.term-model :as model] [formal.query :as q]
+           [formal.identity :as identity] [formal.refutation :as refutation]))
+
+(def profile :bl/core-loop-data-v1)
+(defn- require! [condition reason]
+ (when-not condition (throw (ex-info (str "formal.core-loops: " reason) {}))))
+(defn- default-value [sort] (core/literal (if (= t/Bool sort) false 0)))
+(defn- state-record [slots values] (core/record (mapv (fn [slot value] [(:id slot) value]) slots values)))
+(defn- step-program [program]
+ (let [slots (:state program) placeholder (state-record slots (mapv #(default-value (:sort %)) slots))
+       pack (fn [again value state] (core/record [["again" (core/literal again)] ["result" value] ["state" state]]))]
+  (letfn [(visit [node]
+            (case (:control node)
+             :return (pack false (:value node) placeholder)
+             :recur (pack true (default-value (:sort program)) (state-record slots (:values node)))
+             :if (core/choose (:test node) (visit (:then node)) (visit (:else node)))
+             :let (core/let-in (:name node) (:initial node) (visit (:body node)))
+             :do (core/block (conj (:prefix node) (visit (:body node))))))]
+   (visit (:body program)))))
+
+(defn- prepared [definition]
+ (let [legacy (loops/prepare definition)
+       _ (require! (= :ready (:status legacy)) (:reason legacy))
+       program (:program definition) slots (:state program)
+       declarations (assoc (merge (lc/input-declarations (:parameters program)) (lc/state-declarations slots))
+                           "result" (:sort program))
+       options {:prefix (:prefix definition) :input-encoding :record-paths-v2}
+       initial-body (state-record slots (:initial program))
+       controller-body (step-program program)
+       start (symbolic/lower initial-body declarations options)
+       step (symbolic/lower controller-body declarations options)
+       _ (require! (and (= :translated (:status start)) (= :translated (:status step))
+                        (= (:inputs start) (:inputs step))) "exact finite loop outcomes required")
+       inputs (:inputs start)
+       state-terms (mapv #(get inputs (:id %)) slots)
+       rename (merge (into {} (map (fn [[name term]] [term (get inputs (str "input/" name))]) (:inputs legacy)))
+                     (into {} (map (fn [slot] [(get (:state legacy) (:name slot)) (get inputs (:id slot))]) slots))
+                     {(:result definition) (get inputs "result")})
+       pre (t/substitute (:requires definition) rename)
+       inv (t/substitute (:invariant definition) rename)
+       post (t/substitute (:ensures definition) rename)
+       ranks (mapv #(t/substitute % rename) (take 2 (concat (:rank definition) [(t/int 0) (t/int 0)])))
+       _ (require! (model/supported? (into [pre inv post] ranks)) "partial Int/Bool loop policy required")
+       so (:outcome start) co (:outcome step) action (:value co)
+       update-state (fn [payload] (zipmap state-terms (mapv #(get payload (:id %)) slots)))
+       on-start (update-state (:value so))
+       on-next (update-state (get action "state"))
+       on-exit {(get inputs "result") (get action "result")}
+       [first-rank second-rank] ranks
+       first-next (t/substitute first-rank on-next)
+       second-next (t/substitute second-rank on-next)
+       domain (t/all (mapv #(t/ge % (t/int 0)) ranks))
+       decrease (t/any [(t/all [(t/lt first-next first-rank)])
+                        (t/all [(t/eq first-next first-rank) (t/lt second-next second-rank)])])
+       again (get action "again")
+       step-checks (t/all [(:ok co) domain
+                          (t/implies again (t/all [(t/substitute pre on-next) (t/substitute inv on-next)
+                                                   (t/substitute domain on-next) decrease]))
+                          (t/implies (t/not again) (t/substitute post on-exit))])
+       claim (t/all [(:ok so) (t/substitute pre on-start) (t/substitute inv on-start)
+                     (t/implies inv step-checks)])
+       problem (q/prove claim {:id (str (:name definition) "/composed-loop")
+                       :profile lc/profile :assumptions [(q/assertion "requires" pre)]
+                       :scope {:mode :exact :loop (:identity definition) :initializer (:core start) :controller (:core step)}
+                       :relation :ranked-loop-normal-return
+                       :observe inputs})
+       packet (fn [body lowered]
+                (core-terms/lowered-packet body declarations options lowered
+                 {:kind :core :identity (:core lowered) :question nil}))]
+  {:problem problem
+   :program (update program :parameters #(mapv vec (sort-by first %)))
+   :policy (select-keys definition [:requires :invariant :rank :ensures])
+   :initializer (packet initial-body start) :controller (packet controller-body step)}))
+
+(defn question [definition]
+ (try
+  {:status :ready :problem (:problem (prepared definition))}
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn prepare [definition certificate]
+ (try
+  (let [{:keys [problem program policy initializer controller]} (prepared definition)
+        refutation (refutation/prepare-terms problem certificate)]
+   (if (not= :ready (:status refutation)) refutation
+    {:status :ready :kernel-execution :not-run :compiler-proof-authority false
+     :packet (identity/seal {:formal/core-loop-data 1 :profile profile
+                             :subject {:kind :loop :identity (:identity definition) :question (identity/hash problem)}
+                             :program program :policy policy :initializer initializer :controller controller
+                             :entailment (:packet refutation)})}))
+  (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))
+
+(defn check-data [definition certificate packet]
+ (try
+  (let [ready (prepare definition certificate)]
+   (require! (= :ready (:status ready)) (:reason ready))
+   (require! (and (identity/valid? packet) (= packet (:packet ready))) "packet differs from the original loop and question")
+   {:status :checked-data-connection :packet (:identity packet) :subject (:subject packet)
+    :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
