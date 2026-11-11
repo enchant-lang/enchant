@@ -79,6 +79,9 @@ async function dispatch(message) {
  case 'screenshot':{
   const file=resolve(message.path);const root=resolve(process.argv[2]);
   if(!file.startsWith(root+sep))throw Error('Frame path outside owned output');
+  // Navigation can expose a pane before Chromium has painted its topic row.
+  // Capture the actual settled frame, including locally loaded font glyphs.
+  await evaluate('document.fonts.ready.then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))');
   await mkdir(root,{recursive:true});const shot=await rpc('Page.captureScreenshot',{format:'png',captureBeyondViewport:false,fromSurface:true});
   await writeFile(file,Buffer.from(shot.data,'base64'));return {path:file,recordedAt:Date.now()};
  }

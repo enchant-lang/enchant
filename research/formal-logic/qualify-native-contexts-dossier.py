@@ -73,7 +73,7 @@ report = {
                  'cell_results_commit': snapshot['code_commit'], 'document_unchanged_since_cell_check': True,
                  'cell_run_log_sha256': sha(E / 'dossier-cells.txt'), 'cell_check_log_sha256': sha(E / 'dossier-check.txt'),
                  'block_kinds': dict(blocks), 'semantic_block_kinds': len(set(blocks) - {'src'})},
-    'browser': {'audit_script_sha256': sha(P / 'story-audit.mjs'),
+    'browser': {'audit_script_sha256': sha(P / 'story-audit.mjs'), 'browser_driver_sha256': sha(P / 'browser-driver.mjs'),
                 'audit_report_sha256': sha(E / 'browser-audit/audit.json'), 'checks': len(audit['checks']),
                 'screenshots': len(images), 'passed': True, 'connected_review_graphs': len(graphs),
                 'review_graph_ids': graphs, 'visible_owner_cells': True,

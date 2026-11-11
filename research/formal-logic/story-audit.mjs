@@ -343,6 +343,7 @@ try{
   check(size.name+': raw transport panel keeps reset policy and introspection scope explicit',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('refuses further managed solving until a reset')&&t.includes('Arbitrary Erlang introspection')})()"));
   await evaluate("document.querySelector('#the-process-keeps-the-real-context').scrollIntoView({block:'start'})");
   await shot(size.name+'-native-context-owner');
+  check(size.name+': owner topic navigation remains visible',await evaluate("(()=>{const n=document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden]) .review-index'),r=n.getBoundingClientRect();return [...n.querySelectorAll('button')].some(b=>{const q=b.getBoundingClientRect();return b.innerText.trim()&&q.width>0&&q.height>0&&q.right>r.left&&q.left<r.right&&q.bottom>r.top&&q.top<r.bottom})})()"));
   if(size.name==='phone'){
     await evaluate("document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
     await shot(size.name+'-native-context-owner-panel');
