@@ -700,6 +700,10 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared hygiene evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
+ for(const path of ['/EFFECTS.md','/sdk-src/effect.bl','/src/formal/effect-examples.bl','/evidence/effects/examples.json','/evidence/effects/focused-checks.txt','/evidence/effects/runtime-checks.txt','/evidence/effects/capacity-checks.txt','/evidence/effects/regression-checks.txt','/evidence/effects/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared handler evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
  await call({op:'stop'}).catch(()=>{});helper.stdin.end();
