@@ -1,0 +1,48 @@
+(ns formal.veritas-terms-check
+ (:require [veritas :as v] [veritas.property :as p] [bl.json :as json]))
+(def output (first (BeamLisp/argv)))
+(assert (string? output))
+(File/mkdir_p! output)
+(defn summary [id result]
+ {:id id :modality (:modality result) :engine (:engine result) :witness (:witness result)
+  :none (:none result) :complete (:complete result) :question (:question-identity result)
+  :scope (get-in result [:question :scope]) :term-replay (get-in result [:answer :validation :status])
+  :runtime-replay (get-in result [:runtime-replay :status]) :certificate (get-in result [:answer :certificate :status])
+  :source-connection (:source-connection result) :artifacts (get-in result [:answer :identity :artifacts])
+  :compiler-proof-authority false})
+(defn inspect [backend]
+ (let [options {:backend backend :engine :terms}
+       product (v/for-all options "p" (v/tuple-of (v/coll-of 0 3) (v/enum-of :left/open :right/open)) '(and (<= (count p_0) 3) (keyword? p_1)))
+       payload (v/exists options "mode" (v/enum-of [:left/open :bool] :right/open) '(and (some? (:left/open mode)) (= (:left/open mode) false)))
+       empty (v/for-all options "c" (v/coll-of 0 3) '(>= (count (pop c)) 0))
+       rest (v/exists options "c" (v/coll-of 0 3) '(vector? (rest c)))
+       prefix (v/for-all options "s" (v/text-of "é") '(String/starts_with? s "é"))
+       covered (v/covers options "(defn sign ([x] :when (>= x 0) (unavailable-body)) ([renamed] :when (< renamed 0) (another-unavailable-body)))" (v/int-of -1000000 1000000))
+       gap (v/covers options "(defn sign ([x] :when (> x 0) :p) ([renamed] :when (< renamed 0) :n))" (v/int-of -100 100))
+       large (v/exists options "c" (v/coll-of 5000 5000) true)]
+  (assert (= :solver-claim (:modality product)))
+  (assert (= :witnessed (:modality payload))) (assert (= {:left/open false} (:witness payload)))
+  (assert (= :refuted (:modality empty))) (assert (= [] (:witness empty)))
+  (assert (= :solver-claim (:modality rest))) (assert (= true (:none rest)))
+  (assert (= (if (= backend :z3) :solver-claim :unknown) (:modality prefix)))
+  (assert (= :solver-claim (:modality covered)))
+  (assert (= :refuted (:modality gap))) (assert (= 0 (:witness gap)))
+  (assert (= :candidate (:modality large)))
+  {:backend backend :rows (mapv (fn [[id r]] (summary id r))
+                          [["mixed-product" product] ["false-enum-payload" payload] ["empty-pop" empty] ["rest-kind" rest]
+                           ["unicode-prefix" prefix] ["clause-coverage" covered] ["coverage-gap" gap] ["large-candidate" large]])}))
+(def engines (mapv inspect [:z3 :oxiz]))
+(assert (= (mapv :question (:rows (first engines))) (mapv :question (:rows (second engines)))))
+(def false-found (v/exists {:engine :enumerate} "x" (v/one-of false nil) '(= x false)))
+(def nil-found (v/exists {:engine :enumerate} "x" (v/one-of nil false) '(nil? x)))
+(def absent (v/exists {:engine :sample} "x" (v/any-of) false))
+(assert (= false (:witness false-found))) (assert (= nil (:witness nil-found)))
+(assert (= :witnessed (:modality nil-found))) (assert (= :unknown (:modality absent))) (assert (not (:none absent)))
+(def report {:schema "enchant.formal.veritas-terms.v1" :native engines
+             :runtime-search {:false-witness (:witness false-found) :nil-present (contains? nil-found :witness)
+                              :nil-witness (:witness nil-found) :sample-absence (:modality absent) :sample-none (:none absent)}
+             :units {:graphemes (count "é") :codepoints (count (String/codepoints "é"))}
+             :cwd (File/cwd!) :research-import-path false :compiler-proof-authority false})
+(def encoded (json/encode report {:pretty 2}))
+(File/write! (Path/join output "examples.json") encoded)
+(println encoded)
