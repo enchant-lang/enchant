@@ -70,6 +70,11 @@ structure StatePolicy (state : BeamLispCore.Ty) where
 
 def zeroInputs : Inputs := ⟨fun _ => 0, fun _ => false⟩
 
+theorem inputs_ext (left right : Inputs) (ints : ∀ n, left.ints n = right.ints n)
+    (bools : ∀ n, left.bools n = right.bools n) : left = right := by
+  cases left; cases right
+  exact Inputs.mk.injEq .. |>.mpr ⟨funext ints, funext bools⟩
+
 def holds (term : Term .boolean) (input : Inputs) : Prop :=
   term.eval input.ints input.bools = some true
 

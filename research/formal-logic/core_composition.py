@@ -22,9 +22,11 @@ def check_linked(packet, text, output, *, module, premises, lean, libraries, axi
         core.copy_library(library, libraries)
         imported = {}
         for side, premise_module in premises:
-            check_premise, object_hash = (terms.run, 'proof_olean_sha256') if side == 'entailment' else (core.run, 'olean_sha256')
+            leaf = packet[side]
+            check_premise, object_hash = ((terms.run, 'proof_olean_sha256') if 'formal/term-refutation' in leaf
+                                          else (core.run, 'olean_sha256'))
             input_path = work / (side + '.json')
-            input_path.write_text(json.dumps(packet[side]))
+            input_path.write_text(json.dumps(leaf))
             premise_output = output / side
             result = check_premise(input_path, premise_output, axiom_policy, module=premise_module)
             target = library / (premise_module + '.olean')

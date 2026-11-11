@@ -245,19 +245,31 @@ def mappings(packet, integers, booleans):
     return i, b
 
 
-def source(packet, integers, booleans):
+SCOPED_MODULES = {"ActorInitTerms", *(f"ActorHandlerTerms{i}" for i in range(16))}
+
+
+def proof_scope(namespace):
+    require(namespace in {None} | SCOPED_MODULES, "supported term proof scope")
+    if namespace is None:
+        return HEADER, ""
+    return HEADER.replace("\ndef originalQuestion", f"\nnamespace {namespace}\n\ndef originalQuestion"), f"\nend {namespace}\n"
+
+
+def source(packet, integers, booleans, *, namespace=None):
     terms = lambda node: emit_term(node, integers, booleans)
     question = "(Question.mk " + k.emit_list([terms(t) for t in packet["assertions"]]) + " " + terms(packet["claim"]) + ")"
     kernel = packet["normalized"]["kernel"]
     problem = "(Problem.mk " + k.emit_list([k.emit_atom(a) for a in kernel["atoms"]]) + " " + k.emit_list([k.emit_formula(f) for f in kernel["formulas"]]) + ")"
     i, b = mappings(packet, integers, booleans)
-    return HEADER + question + PROBLEM + problem + PROOF + k.emit_proof(kernel["proof"]) + MAP_I + k.emit_list(list(map(str, i))) + MAP_END + MAP_B + k.emit_list(list(map(str, b))) + MAP_END + tail(packet, integers, booleans)
+    header, closing = proof_scope(namespace)
+    return header + question + PROBLEM + problem + PROOF + k.emit_proof(kernel["proof"]) + MAP_I + k.emit_list(list(map(str, i))) + MAP_END + MAP_B + k.emit_list(list(map(str, b))) + MAP_END + tail(packet, integers, booleans) + closing
 
 
-def verify_source(text, packet, integers, booleans):
-    ending = tail(packet, integers, booleans)
-    require(text.startswith(HEADER) and text.endswith(ending), "original proof source template")
-    question, rest = text[len(HEADER):-len(ending)].split(PROBLEM)
+def verify_source(text, packet, integers, booleans, *, namespace=None):
+    header, closing = proof_scope(namespace)
+    ending = tail(packet, integers, booleans) + closing
+    require(text.startswith(header) and text.endswith(ending), "original proof source template")
+    question, rest = text[len(header):-len(ending)].split(PROBLEM)
     problem, rest = rest.split(PROOF)
     proof, rest = rest.split(MAP_I)
     i, b = rest.split(MAP_B)
@@ -285,12 +297,13 @@ AXIOM_POLICIES = {"choice-free": {"propext", "Quot.sound"},
 
 def run(path, output, axiom_policy="choice-free", *, module="Check"):
     require(axiom_policy in AXIOM_POLICIES, "unknown axiom policy")
-    require(module in {"Check", "EntailmentCheck"}, "term refutation check module")
+    require(module in {"Check", "EntailmentCheck"} | SCOPED_MODULES, "term refutation check module")
+    namespace = module if module in SCOPED_MODULES else None
     require(path.stat().st_size <= k.MAX_BYTES, "term packet byte capacity")
     packet = k.load_packet(path)
     integers, booleans = validate(packet)
-    text = source(packet, integers, booleans)
-    verify_source(text, packet, integers, booleans)
+    text = source(packet, integers, booleans, namespace=namespace)
+    verify_source(text, packet, integers, booleans, namespace=namespace)
     tool = json.loads((P / "metatheory/tool-pin.json").read_text())
     lean = Path(tool["path"]) / "bin/lean"
     require(k.sha(lean) == tool["binary_sha256"], "Lean executable pin")
@@ -318,7 +331,12 @@ def run(path, output, axiom_policy="choice-free", *, module="Check"):
         for line in transcript.splitlines():
             match = re.fullmatch(r"'([^']+)' (?:does not depend on any axioms|depends on axioms: \[(.*)\])", line)
             require(match is not None, "unexpected term theorem audit")
-            audits[match[1]] = match[2].split(", ") if match[2] else []
+            name = match[1]
+            if namespace is not None:
+                require(name.startswith(namespace + "."), "term theorem audit scope")
+                name = name[len(namespace) + 1:]
+            require(name not in audits, "duplicate term theorem audit")
+            audits[name] = match[2].split(", ") if match[2] else []
         require(set(audits) == {"packetAccepted", "normalizationConnected", "originalQuestionEntails"}, "term theorem audit names")
         connection_axioms = set(audits["normalizationConnected"])
         final_axioms = set(audits["originalQuestionEntails"])

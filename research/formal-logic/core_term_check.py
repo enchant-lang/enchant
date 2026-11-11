@@ -14,6 +14,7 @@ from obligation_proof import data_digest, digest
 P, k, require = terms.P, terms.k, terms.require
 SCALARS = (['int'], ['bool'])
 SCOPED_MODULES = {'BeforeCore', 'AfterCore', 'InitializerCore', 'ControllerCore'}
+SCOPED_MODULES.update(f'ActorHandlerCore{i}' for i in range(16))
 INTEGER_OPS = {'add', 'sub', 'mul', 'quot', 'rem', 'mod'}
 COMPARISONS = {'lt', 'le', 'gt', 'ge'}
 

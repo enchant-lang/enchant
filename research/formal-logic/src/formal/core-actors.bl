@@ -1,0 +1,87 @@
+(ns formal.core-actors
+ (:require [formal.source-protocol :as source] [formal.core :as core]
+           [formal.core-symbolic :as symbolic] [formal.core-terms :as core-terms]
+           [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.identity :as identity] [formal.refutation :as refutation]))
+
+(def profile :bl/core-actor-trace-data-v1)
+(defn- require! [condition reason]
+ (when-not condition (throw (ex-info (str "formal.core-actors: " reason) {}))))
+(defn- predicate [value] (t/all [(v/defined value) (v/term value)]))
+(defn- rename-fields [before after]
+ (into {} (map (fn [[field term]] [term (get after field)]) before)))
+(defn- prepared [definition]
+ (let [prepared (source/prepare definition)
+       _ (require! (= :ready (:status prepared)) (:reason prepared))
+       protocol (:protocol prepared)
+       model (get-in prepared [:protocol-prepared :model])
+       state-sort (core/record-sort (:schema protocol))
+       declarations {"state" state-sort}
+       state-layout (symbolic/lower (core/variable "state" state-sort) declarations)
+       _ (require! (= :translated (:status state-layout)) (:reason state-layout))
+       state (get-in state-layout [:inputs "state"])
+       rename-state (rename-fields (:state model) state)
+       initial (t/substitute (predicate (:init model)) rename-state)
+       invariant (t/substitute (t/all (mapv (comp predicate second) (sort-by first (:invariants model)))) rename-state)
+       scope {:mode :exact :source-protocol (:identity definition) :model (:identity protocol)}
+       base (q/prove invariant {:id "initial" :profile profile :scope scope :relation :source-handler-trace-safety
+                                 :assumptions [(q/assertion "initial" initial)] :observe state})
+       handlers
+        (mapv (fn [handler transition]
+                (let [name (:name handler) lowered (:lowered handler) outcome (:outcome lowered)
+                      inputs (:inputs lowered)
+                      _ (require! (= state (get inputs "state")) "handler state input layout mismatch")
+                      rename-message (rename-fields (:inputs transition) (get inputs "message"))
+                      admission (t/substitute (t/all (:assumptions transition)) (merge rename-state rename-message))
+                      successor (rename-fields state (:value outcome))
+                      claim (t/all [(:ok outcome) (t/substitute invariant successor)])
+                      problem (q/prove claim {:id (str "handler/" name) :profile profile
+                                               :scope (assoc scope :handler name :core (:core handler))
+                                               :relation :source-handler-trace-safety
+                                               :assumptions [(q/assertion "invariant" invariant)
+                                                             (q/assertion "message" admission)]
+                                               :observe (merge state
+                                                         (into {} (map (fn [[field term]] [(str "message/" field) term])
+                                                                       (get inputs "message"))))})
+                      packet (core-terms/lowered-packet (:body handler) (:parameters handler) {} lowered
+                               {:kind :core :identity (:core handler) :question nil})]
+                 {:name name :admission admission :problem problem :core packet}))
+              (:handlers prepared) (:transitions model))]
+  {:subject {:kind :source-protocol :identity (:identity definition) :model (:identity protocol)
+             :source-profile (:profile definition)
+             :handlers (mapv (fn [row] [(:name row) (get-in row [:core :core])]) handlers)}
+   :state-sort state-sort :initial initial :invariant invariant :base base :handlers handlers}))
+
+(defn questions [definition]
+ (try
+  (let [{:keys [base handlers]} (prepared definition)]
+   {:status :ready :rows (into [{:id "initial" :problem base}]
+                        (map (fn [row] {:id (get-in row [:problem :id]) :problem (:problem row)}) handlers))})
+  (catch error {:status :unsupported :reason (ex-message error)})))
+
+(defn prepare [definition certificates]
+ (try
+  (let [{:keys [subject state-sort initial invariant base handlers]} (prepared definition)
+        labels (into #{"initial"} (map #(get-in % [:problem :id]) handlers))
+        _ (require! (and (map? certificates) (= labels (set (keys certificates)))) "one certificate for every original question required")
+        export (fn [problem]
+                 (let [made (refutation/prepare-terms problem (get certificates (:id problem)))]
+                  (require! (= :ready (:status made)) (:reason made))
+                  (:packet made)))]
+   {:status :ready :kernel-execution :not-run :compiler-proof-authority false
+    :packet (identity/seal
+      {:formal/core-actor-data 1 :profile profile :subject subject :state-sort state-sort
+       :initial initial :invariant invariant :initial-question (identity/hash base) :initial-proof (export base)
+       :handlers (mapv (fn [{:keys [name admission core problem]}]
+                         {:name name :admission admission :core core :question (identity/hash problem) :entailment (export problem)})
+                        handlers)})})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
+
+(defn check-data [definition certificates packet]
+ (try
+  (let [fresh (prepare definition certificates)]
+   (require! (= :ready (:status fresh)) (:reason fresh))
+   (require! (and (identity/valid? packet) (= packet (:packet fresh))) "packet differs from the original protocol and handler coverage")
+   {:status :checked-data-connection :packet (:identity packet) :subject (:subject packet)
+    :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
