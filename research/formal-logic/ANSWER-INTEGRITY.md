@@ -3,8 +3,8 @@
 The first behavioral baseline passed 13 assertions and failed 27. The repaired
 immutable SDK passes 134 answer checks and the preceding 86 public SDK checks.
 The wider regression passed 7,086 assertions across twenty-two files, with all
-187 preceding native questions and verdicts unchanged. Dossier qualification
-is in progress.
+187 preceding native questions and verdicts unchanged. Executable dossier and
+browser qualification are recorded separately under `evidence/answer-integrity`.
 
 ## Architectural pieces
 
