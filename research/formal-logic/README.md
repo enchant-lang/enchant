@@ -43,6 +43,10 @@ Its 503 focused assertions include ordinary and selected Source callers;
 7,086 formal assertions and the preceding 187 paired questions still pass.
 The portable product has observed host execution with separately recorded
 producer and relocated hashes. Clean-host activation remains a separate gate.
+[Session lifetime](SESSION-LIFETIME.md) tightens cleanup around setup and user
+callbacks, kills stalled owners by exact PID, and refuses trailing ETF bytes.
+Its native-process and fault-peer evidence remains separate from genuine
+busy-solver cancellation and future pool admission.
 
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,

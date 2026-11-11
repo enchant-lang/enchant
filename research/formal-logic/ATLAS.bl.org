@@ -1313,9 +1313,47 @@ edge portable -> limits | report the actual runtime bytes
 
 The [[#cell-story-packaged-worker][SDK cell]] inspects default selection and asks both engines. The [[#cell-story-portable-provenance][portable evidence cell]] checks the recorded producer/runtime distinction. Read [[file:PACKAGED-WORKER.md][the interface]], [[file:packaged-worker-check.bl][the standalone program]], [[file:evidence/packaged-worker/examples.json][the native run]], [[file:evidence/packaged-worker/portable-examples.json][the portable run]], [[file:evidence/packaged-worker/native-artifact.json][native artifact metadata]], [[file:evidence/packaged-worker/portable-runtime-artifact.json][relocated metadata]], [[file:evidence/packaged-worker/portable-observation-note.json][the observation scope and corrected cache lookup]], [[file:evidence/packaged-worker/focused-checks.txt][focused SDK checks]], [[file:evidence/packaged-worker/regression-checks.txt][the formal regression]] and [[file:evidence/packaged-worker/qualification.json][the exact qualification]].
 
-The focused SDK file passed 86 assertions without a research import path. A separate sixteen-file regression passed 2,549 assertions; the original 187 paired questions retain their prior canonical identities and verdicts.
+The earlier SDK consumer checkpoint passed 86 focused assertions without a research import path. Its separate sixteen-file regression passed 2,549 assertions; the original 187 paired questions retained their prior canonical identities and verdicts.
 
 The [[#cell-story-sdk-interface][executable example]] calls the SDK consumer, compares both engines and handles a question with deliberately unavailable native paths. Read [[file:SDK-INTERFACE.md][the interface guide]], [[file:sdk-src/system/formal.bl][the SDK consumer]], [[file:sdk-src/oracle.bl][the oracle boundary]], [[file:sdk-src/formal/query.bl][the question schema]], [[file:sdk-src/formal/logic.bl][the logical session]], [[file:evidence/sdk-interface/focused-checks.txt][the focused SDK checks]] and [[file:evidence/sdk-interface/qualification.json][the qualification receipt]].
+
+** A question can end cleanly
+Asking a formal question starts real processes. Leaving that question must close them, even when the program raises an error or the solver stops replying. The session now owns startup, its callback and cleanup as one bracket.
+
+The new checks found two mistakes in the previous SDK. A stalled owner could survive cleanup and hide the program's original error. A reply could also contain a valid term followed by ignored bytes. Both behaviors have concrete regression checks. Cleanup now stops a stalled owner, and decoding requires exactly one complete term.
+
+#+begin_code_graph :id formal-session-lifetime :title "The question owns its worker until it ends" :start bracket
+node bracket | code | Own the whole session | implemented
+summary The cleanup bracket begins immediately after startup returns. Fetching the greeting, constructing the session and running the callback all belong to it.
+source research/formal-logic/sdk-src/formal/backend.bl | Session boundary | Failed initialization also closes its port and removes its borrower monitor.
+node callback | code | Keep the program's original error | implemented
+summary Leaving the callback retires the session and stops its owner. A deliberately suspended owner gets a one-second graceful-stop deadline, then that exact PID is killed and observed ending.
+field OS lifetime | BEAM closes the owner's ports. The native worker's EOF watchdog can exit independently of its solving thread.
+source test/bl/system/formal_lifetime_test.bl | Actual native owner and OS PIDs | Both real engines are checked on return, callback error, stalled owner and idle borrower death.
+node wire | code | Consume the whole reply | implemented
+summary Empty, oversized, compressed, malformed and trailing reply bytes are refused before the reply's identity and typed values are considered.
+field Diagnostics | A bad frame, a worker exit and a hard deadline keep different failure kinds. None becomes an UNSAT answer.
+source research/formal-logic/SESSION-LIFETIME.md | Framing and error interface | An incomplete packet followed by exit is reported as worker exit, matching the actual transport observation.
+node fixture | code | Stop a peer that never replies | observed
+summary A deliberately faulty ETF peer records complete packets and EOF. It checks handshake failure, exchange failure, request capacity and borrower death during a pending exchange.
+field Scope | This peer is not a solver. Pending-peer cancellation does not qualify cancellation during a genuine hard solver search.
+source test/fixtures/formal_transport_worker.py | Fault injection peer | The test uses bounded waits and removes only its own workers.
+node example | code | Leave a native question with an error | observed
+summary The running cell raises a callback error on each backend, checks that the original error survives, and observes both owner and OS worker ending.
+source research/formal-logic/ATLAS.bl.org | Executable session-lifetime cell | The displayed statuses are produced by the actual running examples.
+node boundary | constraint | Build admission before sharing workers | partial
+summary The interface still owns one worker per session. A reusable pool needs bounded admission, backpressure and a reset that removes every borrower's state.
+field Formal scope | These are lifetime checks. They add no termination theorem, proof certificate, global resource bound or compiler proof authority.
+source research/formal-logic/INTEGRATION.md | Remaining native integration | Real busy-solver cancellation and broader transport placement remain explicit work.
+edge bracket -> callback | preserves the callback's outcome
+edge callback -> wire | keeps protocol failures separate
+edge wire -> fixture | exercises refusal and cancellation
+edge callback -> example | observes actual process retirement
+edge fixture -> boundary | retains the qualification scope
+edge example -> boundary | supplies execution evidence
+#+end_code_graph
+
+The [[#cell-story-session-lifetime][running example]] checks ordinary callback failure on both engines. The [[file:evidence/session-lifetime/baseline-checks.txt][previous SDK's failing checks]] retain the two behavioral mistakes and the coarser diagnostics. Read [[file:SESSION-LIFETIME.md][the lifetime interface]], [[file:evidence/session-lifetime/focused-checks.txt][the native and interface checks]], [[file:evidence/session-lifetime/regression-checks.txt][the formal regression]] and [[file:evidence/session-lifetime/qualification.json][the exact qualification]]. The repository check is =test/bl/system/formal_lifetime_test.bl=.
 
 ** An answer has to fit its question
 A solver response is useful only when its values and its meaning fit the question. Beam Lisp now checks that boundary in the SDK, above both engines.
@@ -2890,6 +2928,35 @@ These cells execute the actual shared interface. Their stored results are writte
 #+end_src
 #+RESULTS: story-portable-provenance
 : {:clean-host-activation :not-qualified, :compiler-proof-authority false, :evidence :recorded-host-execution, :observed-x [7 7], :packaging "portable-shell-v1", :producer-and-runtime-hashes :distinct, :producer-hashes :retained}
+
+
+#+begin_src beam-lisp :id story-session-lifetime
+(def ended-native-sessions
+ (mapv (fn [engine]
+        (let [escaped (atom nil)
+              original-error (try
+                              (backend/with-session {:backend engine}
+                               (fn [session]
+                                (reset! escaped session)
+                                (throw (ex-info "the program's own error" {:case :dossier-callback}))))
+                              (catch error (= {:case :dossier-callback} (ex-data error))))
+              worker-path (str "/proc/" (:pid (:hello @escaped)))
+              deadline (+ (erlang/monotonic_time :millisecond) 3000)]
+         (loop []
+          (when (and (File/exists? worker-path) (< (erlang/monotonic_time :millisecond) deadline))
+           (Process/sleep 10) (recur)))
+         (assert original-error)
+         (assert (not (Process/alive? (:pid @escaped))))
+         (assert (not (File/exists? worker-path)))
+         {:callback-error (if original-error :preserved :lost)
+          :owner-alive (Process/alive? (:pid @escaped)) :worker-alive (File/exists? worker-path)
+          :retired (:retired @(:state @escaped))})) [:z3 :oxiz]))
+(into-sorted-map
+ {:backends [:z3 :oxiz] :callback-errors (mapv :callback-error ended-native-sessions)
+  :owner-alive (mapv :owner-alive ended-native-sessions) :worker-alive (mapv :worker-alive ended-native-sessions)
+  :retired (mapv :retired ended-native-sessions) :busy-solver-cancellation :not-qualified
+  :compiler-proof-authority false})
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity

@@ -22,6 +22,12 @@ actual-file provenance. Its 503 focused assertions include selected Source
 calls; the 7,086-assertion regression and 187 paired native verdicts remain
 unchanged. Native pooling and remaining legacy/source consumers remain work.
 
+The next [session-lifetime slice](SESSION-LIFETIME.md) puts post-start setup
+inside the callback's cleanup bracket and adds a monitored kill fallback for
+stalled owners. Replies must consume exactly one complete ETF term; transport
+failures retain their kind, phase and operation. Its qualification is recorded
+separately from the packaged-worker checkpoint above.
+
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,
 the remaining verifier consumers and the default pool still have migration
@@ -197,9 +203,10 @@ Further boundary checks needed before replacing `z3pool`:
 3. Check zero/oversized/truncated packets, trailing ETF, native crash, stale
    generation and altered ID import. A reply that exceeds capacity currently
    ends the worker; it cannot authorize a proof or a missing-value default.
-4. Make owner startup and all post-start setup one cleanup bracket; observe
-   cleanup on callback exceptions and setup/handshake failure as well as the
-   ordinary finalizer. Add bounded backpressure before any shared-worker pool.
+4. Qualify the session-lifetime cleanup bracket against callback exceptions,
+   handshake failure and stalled owners. Keep genuine busy-solver cancellation
+   separate from pending fault-peer checks. Add bounded backpressure before any
+   shared-worker pool.
 5. Retain declared source identities consistently across sorts. UF signatures
    and bound sorts are checked natively; same-spelled free variables of
    different sorts must not collapse in the BL name-keyed assignment map.

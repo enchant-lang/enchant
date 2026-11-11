@@ -428,6 +428,32 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#a-question-can-end-cleanly');
+  await wait("document.querySelector('#a-question-can-end-cleanly').getClientRects().length>0");
+  check(size.name+': lifetime chapter explains the two concrete old behaviors',await evaluate("document.body.innerText.includes('stalled owner could survive cleanup')&&document.body.innerText.includes('valid term followed by ignored bytes')"));
+  await evaluate("document.querySelector('#a-question-can-end-cleanly').scrollIntoView({block:'start'})");
+  await shot(size.name+'-session-lifetime');
+  await click('[data-graph="formal-session-lifetime"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="callback"]');
+  check(size.name+': cleanup panel names its bounded stop and exact PID',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-session-lifetime\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('one-second graceful-stop deadline')&&t.includes('exact PID')&&t.includes('independently of its solving thread')})()"));
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-session-lifetime\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-session-lifetime-panel');
+  }
+  await click('[data-graph="formal-session-lifetime"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="fixture"]');
+  check(size.name+': cancellation panel keeps the faulty peer separate from a real solver search',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-session-lifetime\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('not a solver')&&t.includes('does not qualify cancellation during a genuine hard solver search')})()"));
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-session-lifetime\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-session-lifetime-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  const ended=await evaluate("document.querySelector('#cell-story-session-lifetime .result').innerText");
+  check(size.name+': visible executable result story-session-lifetime',await evaluate("document.querySelector('#cell-story-session-lifetime .result').getClientRects().length>0"));
+  check(size.name+': both real native callback errors survive with owner and worker gone',ended.includes(':backends [:z3 :oxiz]')&&ended.includes(':callback-errors [:preserved :preserved]')&&ended.includes(':owner-alive [false false]')&&ended.includes(':worker-alive [false false]')&&ended.includes(':retired [true true]'));
+  check(size.name+': execution cell keeps hard-search and proof authority boundaries',ended.includes(':busy-solver-cancellation :not-qualified')&&ended.includes(':compiler-proof-authority false'));
+  await evaluate("document.querySelector('#cell-story-session-lifetime .result').scrollIntoView({block:'center'})");
+  await shot(size.name+'-story-session-lifetime-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -738,6 +764,10 @@ try{
  for(const path of ['/PACKAGED-WORKER.md','/packaged-worker-check.bl','/evidence/packaged-worker/examples.json','/evidence/packaged-worker/portable-examples.json','/evidence/packaged-worker/native-artifact.json','/evidence/packaged-worker/portable-runtime-artifact.json','/evidence/packaged-worker/portable-observation-note.json','/evidence/packaged-worker/focused-checks.txt','/evidence/packaged-worker/regression-checks.txt','/evidence/packaged-worker/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared packaged worker evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/SESSION-LIFETIME.md','/evidence/session-lifetime/baseline-checks.txt','/evidence/session-lifetime/focused-checks.txt','/evidence/session-lifetime/regression-checks.txt','/evidence/session-lifetime/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared session lifetime evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
