@@ -276,7 +276,7 @@ try{
   await navigate('/#ask-through-the-language-library');
   check(size.name+': SDK chapter exposes public consumers and remaining migration',await evaluate("document.body.innerText.includes('The formal interface now reaches the SDK')&&document.body.innerText.includes('remaining legacy consumers and default text oracle still need migration')"));
   await click('[data-graph="formal-sdk-interface"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="effect"]');
-  check(size.name+': SDK effect panel keeps complete questions and process scope visible',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-sdk-interface\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('complete question')&&text.includes('calling process')&&text.includes('Automatic process inheritance is further work')})()"));
+  check(size.name+': SDK effect panel keeps complete questions snapshots and native borrowing visible',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-sdk-interface\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('complete question')&&text.includes(\"calling process's handler snapshot\")&&text.includes('callback custody')&&text.includes('native solver session remains borrower-owned')})()"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Ask through the language library')).scrollIntoView({block:'start'})");
   await shot(size.name+'-sdk-interface');
   if(size.name==='phone'){
@@ -663,7 +663,7 @@ try{
  }
  const sdkQualification=await fetch(base+'/evidence/sdk-interface/qualification.json').then(response=>response.json());
  check('SDK qualification retains exact artifact public checks and theory coverage',sdkQualification.checkpoint===28&&sdkQualification.checks.focused_assertions===86&&sdkQualification.paired_questions===187&&sdkQualification.compiler_proof_authority===false);
- check('SDK qualification retains first failure and current process scope',sdkQualification.candidate_1.assertions_failed===8&&sdkQualification.scope.includes('complete typed query effect in the calling process')&&sdkQualification.remaining.includes('automatic oracle handler inheritance across processes'));
+ check('Original SDK qualification retains first failure and historical process scope',sdkQualification.candidate_1.assertions_failed===8&&sdkQualification.scope.includes('complete typed query effect in the calling process')&&sdkQualification.remaining.includes('automatic oracle handler inheritance across processes'));
  for(const path of ['/ANSWER-INTEGRITY.md','/sdk-src/formal/answer.bl','/sdk-src/formal/evaluate.bl','/src/formal/answer-examples.bl','/answers-check.bl','/evidence/answer-integrity/examples.json','/evidence/answer-integrity/baseline-checks.txt','/evidence/answer-integrity/focused-checks.txt','/evidence/answer-integrity/regression-checks.txt','/evidence/answer-integrity/qualification.json']){
   const response=await fetch(base+path),body=await response.text();
   check('Declared answer source or evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
