@@ -1,0 +1,49 @@
+(ns formal.core-actors-test
+ (:require [formal.api :as formal] [formal.identity :as identity] [formal.logic :as logic]
+           [formal.term :as t] [formal.core-actor-examples :as examples]))
+
+(deftest exact-source-coverage-survives-reconstruction
+ (doseq [row (examples/examples)]
+  (let [definition (:definition row) certificates (examples/certificates definition)
+        made (formal/core-actor-data definition certificates) packet (:packet made)]
+   (is (= :ready (:status made)) (pr-str [(:id row) (:reason made)]))
+   (is (identity/valid? packet))
+   (is (= (:identity definition) (get-in packet [:subject :identity])))
+   (is (= (mapv :name (:handlers definition)) (mapv :name (:handlers packet))))
+   (is (= (inc (count (:handlers definition))) (count certificates)))
+   (is (= :not-run (:kernel-execution made)))
+   (is (= false (:compiler-proof-authority made)))
+   (is (= :checked-data-connection (:status (formal/check-core-actor-data definition certificates packet)))))))
+
+(deftest no-missing-handler-or-substituted-admission
+ (let [definition (examples/bank) certificates (examples/certificates definition)
+       packet (:packet (formal/core-actor-data definition certificates))]
+  (is (= :rejected (:status (formal/core-actor-data definition (dissoc certificates "handler/withdraw")))))
+  (is (= :rejected (:status (formal/core-actor-data definition (assoc certificates "invented" {})))))
+  (doseq [changed [(update packet :handlers pop)
+                   (update packet :handlers #(vec (reverse %)))
+                   (assoc-in packet [:handlers 0 :admission] (t/bool true))
+                   (assoc packet :invariant (t/bool false))]]
+   (is (= :rejected (:status (formal/check-core-actor-data definition certificates (identity/seal changed))))))
+  (let [trace (formal/replay-source-protocol-trace definition examples/bank-initial examples/bank-events)]
+   (is (= :replayed (:status trace)))
+   (is (= :holds (:safety trace)))
+   (is (= 7 (get-in trace [:state "balance"])))
+   (is (= 3 (get-in trace [:source-replay :handlers]))))))
+
+(deftest empty-state-failure-still-refutes-handler-safety-on-both-engines
+ (let [definition (examples/failing)
+       questions (formal/core-actor-questions definition) step (:problem (second (:rows questions)))
+       attempt {:transition "attempt" :inputs {}}
+       halted (formal/replay-source-protocol-trace definition {} [attempt {:stutter true}])]
+  (is (= :ready (:status questions)))
+  (is (not= :checked (:status (formal/certify step))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (logic/run {:backend engine} step)]
+    (is (= :refuted (:verdict answer)) (pr-str [engine (:verdict answer)]))
+    (is (= :valid (get-in answer [:validation :status])))))
+  (is (= :replayed (:status halted)))
+  (is (= true (:failed halted)))
+  (is (= {} (:state halted)))
+  (is (= :zero-divisor (get-in halted [:frames 1 :core-execution :error])))
+  (is (= :transition-after-failure (:reason (formal/replay-source-protocol-trace definition {} [attempt attempt]))))))
