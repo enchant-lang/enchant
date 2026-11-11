@@ -1,0 +1,35 @@
+(ns formal.core-counterexamples-test
+ (:require [formal.api :as formal] [formal.core-counterexample-examples :as examples]
+           [formal.protocol-trace :as bounded] [formal.identity :as identity] [formal.term :as t]))
+
+(deftest either-engine-uses-the-same-original-query-and-typed-execution-connection
+ (let [samples (mapv examples/sample [:z3 :oxiz])]
+  (is (= 1 (count (set (map #(get-in % [:packet :subject :query]) samples)))))
+  (doseq [[engine {:keys [subject native receipt packet]}] (map vector [:z3 :oxiz] samples)]
+   (is (= engine (get-in packet [:discovery :engine])))
+   (is (= (:identity subject) (get-in packet [:subject :identity])))
+   (is (= (:identity receipt) (get-in packet [:execution :observation :receipt])))
+   (is (= (identity/hash (:problem (bounded/prepare subject))) (get-in packet [:subject :query])))
+   (is (= :ready (:status (formal/core-protocol-counterexample-data subject native receipt))))
+   (is (= :checked-data-connection (:status (formal/check-core-protocol-counterexample-data subject native receipt packet))))
+   (is (= :not-run (:kernel-execution (formal/check-core-protocol-counterexample-data subject native receipt packet))))
+   (is (= 2 (count (get-in packet [:layout :states]))))
+   (is (= 1 (count (get-in packet [:layout :choices]))))
+   (is (= :not (get-in packet [:witness :assertions (dec (count (get-in packet [:witness :assertions]))) :op])))
+   (is (= (:claim packet) (first (:args (last (get-in packet [:witness :assertions]))))))
+   (is (> (count (:bindings packet)) (count (get-in packet [:witness :bindings]))))
+   (when (= engine :oxiz)
+    (is (some #(contains? #{:explicit-replay-completion :model-execution-completion} (nth % 3)) (:bindings packet)))))
+  (let [{:keys [subject native receipt packet]} (first samples)]
+   (doseq [changed [(assoc-in packet [:subject :depth] 2)
+                    (assoc-in packet [:subject :query] (identity/hash "other"))
+                    (assoc packet :claim (t/bool true))
+                    (assoc-in packet [:discovery :engine] :oxiz)
+                    (assoc-in packet [:execution :frames 1 :state 0 1] -999)]]
+    (is (= :rejected (:status (formal/check-core-protocol-counterexample-data subject native receipt (identity/seal changed))))))
+   (is (= :rejected (:status (formal/core-protocol-counterexample-data
+                              (formal/protocol-trace (:protocol subject) 2) native receipt))))
+   (is (= :rejected (:status (formal/core-protocol-counterexample-data subject (assoc native :phase :assumption-consistency) receipt))))
+   (is (= :rejected (:status (formal/core-protocol-counterexample-data subject (assoc native :solver-status :unknown) receipt))))
+   (let [altered (identity/seal (assoc receipt :events [{:stutter true}]))]
+    (is (= :rejected (:status (formal/core-protocol-counterexample-data subject native altered))))))))

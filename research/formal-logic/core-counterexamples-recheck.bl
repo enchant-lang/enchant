@@ -1,0 +1,35 @@
+(ns formal.core-counterexamples-recheck
+ (:require [formal.api :as formal] [formal.identity :as identity] [formal.runtime-artifact :as artifact] [interop]))
+
+;; Bounded archive produced by this repository's export script.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)))
+(def directory (Path/expand (first args)))
+(def index (interop/json-> (File/read! (Path/join directory "summary.json"))))
+(assert (= "enchant.formal.core-counterexample-examples-v1" (get index "schema")))
+(def path (Path/join directory "core-counterexamples.etf"))
+(assert (<= (:size (File/stat! path)) 8388608))
+(def bytes (File/read! path))
+(assert (= (get-in index ["archive" "bytes"]) (erlang/byte_size bytes)))
+(assert (= (get-in index ["archive" "sha256"]) (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (elem decoded 1) (erlang/byte_size bytes)))
+(def archive (elem decoded 0))
+(assert (= :enchant.formal.core-counterexample-examples-v1 (:schema archive)))
+(def results
+ (mapv (fn [{:keys [id subject native receipt packet]}]
+         (let [checked (formal/check-core-protocol-counterexample-data subject native receipt packet)
+               changed (identity/seal (assoc-in packet [:subject :query] (identity/hash "other query")))
+               rejected (formal/check-core-protocol-counterexample-data subject native receipt changed)]
+          (assert (= :checked-data-connection (:status checked)) (pr-str checked))
+          (assert (= :rejected (:status rejected)) (pr-str rejected))
+          (assoc checked :id id :changed-query (:status rejected))))
+       (:rows archive)))
+(def out (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! out)
+(File/write! (Path/join out "core-counterexamples-fresh.json") (interop/->json
+ {:schema :enchant.formal.core-counterexample-recheck-v1 :rows results
+  :archive-sha256 (artifact/digest bytes)
+  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+  :kernel-execution :not-run :compiler-proof-authority false}))
+(println {:counterexamples (count results) :kernel-execution :not-run})
