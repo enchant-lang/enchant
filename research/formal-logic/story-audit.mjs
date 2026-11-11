@@ -397,6 +397,37 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#the-sdk-brings-its-own-worker');
+  await wait("document.querySelector('#the-sdk-brings-its-own-worker').getClientRects().length>0");
+  check(size.name+': packaged worker chapter makes ordinary calls independent of research setup',await evaluate("document.body.innerText.includes('no research import path or manual worker build')&&document.body.innerText.includes('does not change the question or hide a theory gap')"));
+  await evaluate("document.querySelector('#the-sdk-brings-its-own-worker').scrollIntoView({block:'start'})");
+  await shot(size.name+'-packaged-worker');
+  await click('[data-graph="formal-packaged-worker"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="image"]');
+  check(size.name+': artifact panel keeps actual selection and mixed provenance visible',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-packaged-worker\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('Options override environment pins')&&t.includes('mixed selection')&&t.includes('do not grant compiler proof authority')})()"));
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-packaged-worker\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-packaged-artifacts-panel');
+  }
+  await click('[data-graph="formal-packaged-worker"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="build"]');
+  check(size.name+': build panel distinguishes construction resources from runtime budgets',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-packaged-worker\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('104 registry pins')&&t.includes('Real KVM access')&&t.includes('construction guest')&&t.includes('caller resource limits')})()"));
+  await click('[data-graph="formal-packaged-worker"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="portable"]');
+  check(size.name+': portable panel keeps changed hashes and activation scope separate',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-packaged-worker\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('producer hashes')&&t.includes('changed runtime hashes')&&t.includes('observed host execution')&&t.includes('Clean-host activation')})()"));
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-packaged-worker\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-packaged-worker-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-packaged-worker','story-portable-provenance']){
+    await wait(`document.querySelector('#cell-${id} .result').getClientRects().length>0`);
+    check(size.name+': visible executable result '+id,await evaluate(`document.querySelector('#cell-${id} .result').getClientRects().length>0`));
+    const t=await evaluate(`document.querySelector('#cell-${id} .result').innerText`);
+    if(id==='story-packaged-worker')check(size.name+': SDK cell selects packaged files and validates both ordinary queries',t.includes(':backend-choices [:z3 :oxiz]')&&t.includes(':worker-origins [:sdk :sdk]')&&t.includes(':library-origins [:sdk nil]')&&t.includes(':packaged-components [[:worker :library] [:worker]]')&&t.includes(':observed-x [7 7]')&&t.includes(':typed-replay [:valid :valid]')&&t.includes(':certificate [:not-checked :not-checked]')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-portable-provenance')check(size.name+': portable cell labels recorded host evidence and distinct runtime hashes',t.includes(':evidence :recorded-host-execution')&&t.includes(':packaging "portable-shell-v1"')&&t.includes(':producer-and-runtime-hashes :distinct')&&t.includes(':producer-hashes :retained')&&t.includes(':observed-x [7 7]')&&t.includes(':clean-host-activation :not-qualified')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -703,6 +734,10 @@ try{
  for(const path of ['/EFFECTS.md','/sdk-src/effect.bl','/src/formal/effect-examples.bl','/evidence/effects/examples.json','/evidence/effects/focused-checks.txt','/evidence/effects/runtime-checks.txt','/evidence/effects/capacity-checks.txt','/evidence/effects/regression-checks.txt','/evidence/effects/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared handler evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/PACKAGED-WORKER.md','/packaged-worker-check.bl','/evidence/packaged-worker/examples.json','/evidence/packaged-worker/portable-examples.json','/evidence/packaged-worker/native-artifact.json','/evidence/packaged-worker/portable-runtime-artifact.json','/evidence/packaged-worker/portable-observation-note.json','/evidence/packaged-worker/focused-checks.txt','/evidence/packaged-worker/regression-checks.txt','/evidence/packaged-worker/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared packaged worker evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
 }catch(error){report.fatal={message:error.message,stack:error.stack};check('Audit completed',false,{error:error.message});}
 finally{
