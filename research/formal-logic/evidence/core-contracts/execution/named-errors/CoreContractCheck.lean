@@ -18,7 +18,7 @@ def mustReturn : Bool :=
 false
 
 def declaredAllowed : List Nat :=
-[3, 2]
+[2, 3]
 
 def integerSlots : List Nat :=
 []
