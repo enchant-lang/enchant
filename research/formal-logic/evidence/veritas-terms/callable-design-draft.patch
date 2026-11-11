@@ -1,0 +1,176 @@
+diff --git a/priv/lib/formal/source-runtime.bl b/priv/lib/formal/source-runtime.bl
+index e041766cf..6868efa2b 100644
+--- a/priv/lib/formal/source-runtime.bl
++++ b/priv/lib/formal/source-runtime.bl
+@@ -1,18 +1,17 @@
+ (ns formal.source-runtime (:require [anf :as anf] [lower :as lower]))
+ 
+-(defn run
+- "Execute supplied compiler function ANF with actual scalar arguments.
+-  Preparation/publication errors are distinct from a target raise. The exact
+-  emitted binary is leased for invocation and retired before returning."
+- [function arguments]
+- (let [phase (atom :admission)]
++(defn with-function
++ "Compile supplied function ANF once and lend an owner-bound invocation method
++  to a callback. Arguments pass as actual BEAM terms. The method expires before
++  its exact binary lease is released; no native function escapes through it."
++ [function callback]
++ (let [phase (atom :admission) state (atom {:retired true}) borrower (erlang/self)]
+   (try
+    (BeamLisp.Env/assert_native_framework_execution!)
+    (reset! phase :compile)
+    (let [module (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" (System/unique_integer (list :positive))))
+-         call {:op :apply :fn function :args (mapv anf/lit arguments) :ann {}}
+          descriptor (anf/module module
+-                     (list {:op :defn-clause :fname :run :params (list) :guard nil :body call :ann {}})
++                     (list {:op :defn-clause :fname :run :params (list) :guard nil :body function :ann {}})
+                      (list [:run 0]) (list))
+          pair (lower/descriptor->beam descriptor)
+          _ (when-not (= module (elem pair 0)) (throw (ex-info "Source replay compiled a different module" {})))
+@@ -22,12 +21,32 @@
+           (try
+            (BeamLisp.Env/with_code_lease (list module)
+             (fn []
+-             (reset! phase :invocation)
+-             (try {:status :returned :value (erlang/apply module :run (list)) :phase :invocation}
+-                  (catch error {:status :raised :reason (ex-message error) :phase :invocation}))))
++             (let [callable (erlang/apply module :run (list))]
++              (when-not (erlang/is_function callable) (throw (ex-info "Compiled source is not a function" {})))
++              (reset! state {:retired false :callable callable}))
++             (reset! phase :callback)
++             (callback
++              (fn [arguments]
++               (cond
++                (not= borrower (erlang/self)) {:status :error :phase :ownership :reason "Source callable belongs to another process"}
++                (:retired @state) {:status :error :phase :retired :reason "Source callable has expired"}
++                :else
++                 (try {:status :returned :phase :invocation :value (erlang/apply (:callable @state) (apply list arguments))}
++                      (catch error {:status :raised :phase :invocation :reason (ex-message error)})))))))
+            (finally
++            ;; Clearing the cell also removes the native fun from escaped
++            ;; invocation closures before the code publication is retired.
++            (reset! state {:retired true})
+             (reset! phase :cleanup)
+             (BeamLisp.Env/release_code! lease)
+             (BeamLisp.Env/retire_module! module)))]
+-    (assoc outcome :module module :module-loaded (erlang/module_loaded module)))
++    {:status :completed :value outcome :module module :module-loaded (erlang/module_loaded module)})
+    (catch error {:status :error :phase @phase :reason (ex-message error)}))))
++
++(defn run
++ "Execute supplied function ANF with actual arguments. Preparation errors are
++  distinct from invocation raises; code retirement remains visible."
++ [function arguments]
++ (let [result (with-function function (fn [invoke] (invoke arguments)))]
++  (if (= :completed (:status result))
++   (assoc (:value result) :module (:module result) :module-loaded (:module-loaded result)) result)))
+diff --git a/priv/lib/veritas.bl b/priv/lib/veritas.bl
+index d3caf1626..9b759b5b5 100644
+--- a/priv/lib/veritas.bl
++++ b/priv/lib/veritas.bl
+@@ -334,16 +334,27 @@
+       (core/map-indexed (fn [i x] (str var "_" i " " (lit x))) v))
+     ""))
+ 
++(defn- predicate-source [var pred arity]
++ ;; The reader validates the identifier separately; generated aliases bind
++ ;; through lexical ANF and never masquerade as solver variable names.
++ (formal-inputs/prepare "formal.source.intrinsics" {var (term/int 0)})
++ (str "(fn [" var "] "
++      (if arity
++       (str "(let [" (core/join " " (map (fn [i] (str var "_" i " (nth " var " " i ")")) (range arity))) "] " (pr-str (pred-form pred)) ")")
++       (pr-str (pred-form pred))) ")"))
++
++(defn- compile-predicate [var pred arity]
++ (compiler/compile (first (BeamLisp.Reader/read_string (predicate-source var pred arity)))
++                   (compiler/new-env "formal.source.intrinsics")))
+ (defn holds?
+-  "Does spec `pred` (a quoted bl form over the one variable `var`) hold for `v`?
+-   Evaluated as (let [var v  var_0 v0 …] pred) — self-contained, no scope leak.
+-   For a vector `v` the coordinates also bind as <var>_i so a positional
+-   predicate (p_0, p_1) evaluates on the fallback exactly as it does in z3. A
+-   predicate that RAISES counts as NOT holding (a property that errors failed)."
+-  [var pred v]
+-  (try
+-    (= true (env/eval (str "(let [" var " " (lit v) " " (positional-lets var v) "] " (pr-str (pred-form pred)) ")")))
+-    (catch _ false)))
++ "Run a quoted predicate on an actual value, with positional aliases for a
++  vector. Its arguments are never printed or embedded as compiler literals."
++ [var pred candidate]
++ (try
++  (let [anf (compile-predicate var pred (when (vector? candidate) (count candidate)))
++        actual (source-runtime/run anf [candidate])]
++   (and (= :returned (:status actual)) (= false (:module-loaded actual)) (= true (:value actual))))
++  (catch _ false)))
+ 
+ ; ── z3 model parsing: a SAT model IS the value (was mock/parse-model) ────────
+ ;
+@@ -696,15 +707,6 @@
+ ; QUOTED bl form over var (blueprint.constraint's rule: no strings-as-constraints).
+ ; check runs the strongest engine the (gen, pred) pair supports.
+ 
+-(defn- predicate-source [var pred arity]
+- ;; The reader validates the identifier separately; generated aliases bind
+- ;; through lexical ANF and never masquerade as solver variable names.
+- (formal-inputs/prepare "formal.source.intrinsics" {var (term/int 0)})
+- (str "(fn [" var "] "
+-      (if arity
+-       (str "(let [" (core/join " " (map (fn [i] (str var "_" i " (nth " var " " i ")")) (range arity))) "] " (pr-str (pred-form pred)) ")")
+-       (pr-str (pred-form pred))) ")"))
+-
+ (defn prepare
+  "Prepare one complete quantifier question without running its predicate.
+   Runtime domains, source translation and backend support are separate facts."
+@@ -763,24 +765,37 @@
+ 
+ (defn- run-sample [request seed n enumerate?]
+  (let [g (:gen request) var (:var request) pred (pred-form (:pred request))
+-       ;; Validate even an empty domain, before evaluating source.
+-       _ (formal-inputs/prepare "formal.source.intrinsics" {var (term/int 0)})
+        enumeration (when enumerate? (gen-enumerate g))
+        finite? (and enumerate? (not= enumeration :infinite))
+        _ (when (and enumerate? (not finite?)) (throw (ex-info "Generator cannot be exhaustively enumerated within its limit" {})))
+        values (if finite? enumeration (gen-sample g seed n))
+-       forall? (= :for-all (:q request))
+-       found (core/some (fn [x] (when (= forall? (not (holds? var pred x))) [x])) values)
+-       engine (if finite? :enumerate :sample)
+-       base {:engine engine :seed seed :tried (count values) :complete finite? :compiler-proof-authority false}]
+-  (cond
+-   found (let [witness (first found)]
+-          (merge base {:modality (if forall? :refuted :witnessed) :witness witness}
+-           (when forall? {:shrunk (shrink-in-domain g #(not (holds? var pred %)) witness)})))
+-   (and finite? forall? (empty? values)) (assoc base :modality :vacuous)
+-   finite? (merge base {:modality :exhausted} (when-not forall? {:none true}))
+-   forall? (assoc base :modality :witnessed)
+-   :else (assoc base :modality :unknown :search-exhausted false))))
++       forall? (= :for-all (:q request)) engine (if finite? :enumerate :sample)
++       ;; Tuple aliases are fixed by the generator. Any/open collection values
++       ;; do not invent aliases that depend on the current sample's length.
++       anf (compile-predicate var pred (when (= :tuple (gen-tag g)) (count (:gens g))))
++       execution
++        (source-runtime/with-function anf
++         (fn [invoke]
++          (let [test (fn [x] (invoke [x]))
++                fails? (fn [x] (let [actual (test x)]
++                                  (and (not= :error (:status actual)) (not= true (:value actual)))))]
++           (loop [remaining (seq values) tried 0]
++            (if-not remaining
++             (cond
++              (and finite? forall? (= 0 tried)) {:modality :vacuous :tried tried}
++              finite? (merge {:modality :exhausted :tried tried} (when-not forall? {:none true}))
++              forall? {:modality :witnessed :tried tried}
++              :else {:modality :unknown :search-exhausted false :tried tried})
++             (let [x (first remaining) actual (test x) holds (= true (:value actual))]
++              (cond
++               (= :error (:status actual)) {:modality :error :runtime actual :tried tried}
++               (= forall? (not holds))
++                (merge {:modality (if forall? :refuted :witnessed) :witness x :runtime actual :tried (inc tried)}
++                       (when forall? {:shrunk (shrink-in-domain g fails? x)}))
++               :else (recur (next remaining) (inc tried)))))))))]
++  (if (and (= :completed (:status execution)) (= false (:module-loaded execution)))
++   (merge (:value execution) {:engine engine :seed seed :n n :complete finite? :code-retired true :compiler-proof-authority false})
++   {:modality :error :engine engine :execution execution :compiler-proof-authority false})))
+ 
+ (defn check
+  "Check {:q :exists|:for-all :var name :gen generator :pred quoted-form}.
