@@ -490,6 +490,7 @@ try{
   check(size.name+': source property chapter explains exact ANF replay',await evaluate("document.body.innerText.includes('runs that exact representation')&&document.body.innerText.includes('an unused output cannot hide a crash')"));
   await evaluate("document.querySelector('#a-function-can-explain-its-failing-example').scrollIntoView({block:'start'})");
   await shot(size.name+'-source-properties');
+  check(size.name+': source answer table labels UNSAT with its own conclusion',await evaluate("(()=>{const r=[...document.querySelectorAll('.rosetta .r-row:not(.r-head)')].find(r=>r.children[0]?.textContent.trim()==='Native UNSAT');return !!r&&r.children[1].textContent.trim()==='solver-claim'&&r.children[1].dataset.h==='Answer'&&r.children[2].textContent.includes('certificate is still unchecked')})()"));
   await click('[data-graph="formal-source-properties"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="replay"]');
   check(size.name+': source panel distinguishes execution agreement and a candidate',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-source-properties\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('same compiler ANF')&&t.includes('remain a candidate')})()"));
   await evaluate("document.querySelector('[data-graph=\"formal-source-properties\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
@@ -830,7 +831,7 @@ try{
   const r=await fetch(base+path),body=await r.text();
   check('Declared temporal source or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
- for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
+ for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/formal/source-runtime.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared source-property interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
