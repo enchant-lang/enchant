@@ -66,3 +66,16 @@
   (oracle/with-query-handler handle
    (fn [] (erlang/spawn (fn [] (erlang/send parent [:raw tag (oracle/query-intercepted?)])))))
   (is (= false (receive [:raw seen value] :when (= seen tag) value (after 5000 :timeout))))))
+
+(deftest legacy-fanout-keeps-handler-snapshots-duplicate-labels-and-unrelated-messages
+ (let [a (oracle/obligation :same ["(assert true)"])
+       b (oracle/obligation :same ["(assert false)"])
+       marker (erlang/make_ref)
+       handler (fn [text _model?]
+                 {:status (if (String/contains? text "false") "unsat" "sat") :model nil :core nil})]
+  (erlang/send (erlang/self) [:verdict marker :unrelated])
+  (is (= [:sat :unsat] (mapv :status (oracle/with-oracle handler (fn [] (oracle/ask-all [a b]))))))
+  (is (= :unrelated (receive [:verdict seen value] :when (= seen marker) value (after 1000 :missing))))
+  (let [result (oracle/with-oracle oracle/deny (fn [] (oracle/ask-all [a])))]
+   (is (= :error (:status (first result))))
+   (is (String/contains? (:why (first result)) "denied")))))

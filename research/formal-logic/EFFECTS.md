@@ -23,6 +23,24 @@ starts must retain these callbacks before publishing work. Raw Erlang spawning
 continues with its explicit native context. Logical query data can cross that
 boundary, while a native session remains borrower-owned.
 
-The starting cases are in `test/bl/system/formal_effect_test.bl`. Implementation
-and qualification are pending. Automatic handler inheritance remains separate
-from any claim of a verified runtime or compiler.
+Preparing a Source world starts a distinct framework context. It does not bake
+the builder's handler into a compiled world. An explicit world entry selects
+that world's context; a Source entry can install its own handlers and spawn
+managed work with that snapshot. Fixed SDK framework adoption also clears
+application handler tables when it replaces application lifetime with class
+custody. Ordinary function calls preserve the active dynamic table.
+
+`effect/with-handler`, `with-methods`, `perform` and `call` are the public
+language interface. The optional dependency vector names native modules for
+captured callbacks outside a managed graph, following the existing execution
+registration contract. Declaring a module for retention grants no Source
+execution authority. `Env/convey` transports context; a delayed native callback
+still needs actual registration/custody for all its executable dependencies.
+
+The runtime admits at most 32 effect tables, 64 methods per table and 4,096
+explicit outside modules per table. The table snapshot has an 8 MiB ceiling;
+the existing pooled execution-context limits also apply.
+
+The starting cases in `test/bl/system/formal_effect_test.bl` passed six
+assertions and failed fourteen. Qualification is pending. Automatic handler
+inheritance remains separate from a verified runtime or compiler.

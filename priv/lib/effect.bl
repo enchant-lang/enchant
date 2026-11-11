@@ -1,0 +1,53 @@
+(ns effect)
+
+(defn- identity! [identity]
+ (when-not (keyword? identity)
+  (throw (ex-info "effect: a keyword identity is required" {:identity identity})))
+ identity)
+
+(defn handlers
+ "The active method table for an effect, or nil. This runtime context is not
+  portable proof data; managed submissions retain its executable snapshot."
+ [identity] (BeamLisp.Env/callable_scope (identity! identity)))
+
+(defn with-methods
+ "Replace one effect's method table during action. Nested scopes restore the
+  previous table. Captured callbacks outside a managed graph keep the runtime's
+  explicit dependency contract; arbitrary captured data is not scanned."
+ ([identity methods action] (with-methods identity methods [] action))
+ ([identity methods dependencies action]
+ (identity! identity)
+ (when-not (and (map? methods) (seq methods) (every? keyword? (keys methods))
+                (every? fn? (vals methods)) (fn? action) (BeamLisp.Ns.Rt/invocable? action 0))
+  (throw (ex-info "effect: named callable methods and an action are required" {})))
+ (when-not (and (or (vector? dependencies) (list? dependencies)) (<= (count dependencies) 4096)
+                (every? erlang/is_atom dependencies))
+  (throw (ex-info "effect: eager native module dependencies required" {})))
+ (BeamLisp.Env/with_callable_scope identity methods (to-list dependencies) action)))
+
+(defn with-handler
+ "Handle perform during action with [request default-operation]."
+ ([identity handler action] (with-methods identity {:perform handler} action))
+ ([identity handler dependencies action] (with-methods identity {:perform handler} dependencies action)))
+
+(defn handled?
+ ([identity] (some? (handlers identity)))
+ ([identity method] (contains? (or (handlers identity) {}) method)))
+
+(defn call
+ "Invoke an installed method with eager arguments, or default-operation when
+  the entire effect is unhandled. A present table missing this method refuses."
+ [identity method arguments default-operation]
+ (identity! method)
+ (when-not (and (vector? arguments) (fn? default-operation) (BeamLisp.Ns.Rt/invocable? default-operation 0))
+  (throw (ex-info "effect: eager argument vector and default operation required" {})))
+ (if-let [methods (handlers identity)]
+  (if-let [handler (get methods method)] (apply handler arguments)
+   (throw (ex-info "effect: installed table has no requested method" {:effect identity :method method})))
+  (default-operation)))
+
+(defn perform
+ "Perform a synchronous named effect. A handler may call the supplied default
+  operation as an ordinary function; this does not capture a continuation."
+ [identity request default-operation]
+ (call identity :perform [request default-operation] default-operation))

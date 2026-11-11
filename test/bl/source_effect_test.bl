@@ -1,0 +1,39 @@
+(ns source-effect-test (:require [effect] [reload.generation :as generation]))
+
+(defn graph []
+ (generation/prepare!
+  {:application-id "source-effect-scopes" :stable-namespaces #{"effect"}
+   :sources {"effects.application"
+    (str "(ns effects.application (:require [effect])) "
+         "(defn read [] (effect/perform :example nil (fn [] :default))) "
+         "(defn future-answer [] "
+         " (effect/with-handler :example (fn [_ _] :future) (fn [] (future (read))))) "
+         "(defserver actor (init [_] (ok nil)) "
+         " (handle-call :read [_ state] (reply (read) state))) "
+         "(defn start-actor [] "
+         " (effect/with-handler :example (fn [_ _] :actor) (fn [] (start actor nil))))")}}))
+
+(deftest source-managed-futures-and-actors-retain-their-effect-context
+ (let [g (graph) actor (atom nil)]
+  (try
+   (is (= :future (deref (generation/invoke! g "effects.application/future-answer" []))))
+   (reset! actor (generation/invoke! g "effects.application/start-actor" []))
+   (is (= :actor (call @actor :read)))
+   (is (= false (effect/handled? :example)))
+   (is (= :waiting (:status (generation/retire! g))))
+   (is (= :actor (call @actor :read)))
+   (finally
+    (when (and @actor (Process/alive? @actor)) (GenServer/stop @actor))
+    (generation/retire! g)))))
+
+(deftest preparing-a-source-world-does-not-bake-a-builders-handler-into-its-context
+ (let [g (effect/with-handler :example (fn [_ _] :builder) (fn [] (graph)))]
+  (try
+   (is (nil? (get-in g [:context :callable-scopes])))
+   (is (= :default (generation/invoke! g "effects.application/read" [])))
+   (effect/with-handler :example (fn [_ _] :caller)
+    (fn []
+     ;; An explicit framework world entry selects that world's context.
+     (is (= :default (generation/invoke! g "effects.application/read" [])))
+     (is (= :caller (effect/perform :example nil (fn [] :default))))))
+   (finally (generation/retire! g)))))

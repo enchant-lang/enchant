@@ -25,6 +25,7 @@
             [formal.query :as query]
             [formal.term :as term]
             [formal.answer :as answer]
+            [effect]
             [typed]))
 
 ;; ── L2: the verdict record ────────────────────────────────────────────────
@@ -263,7 +264,6 @@
 ;; handler is the pool. A test hands in a table; a sandbox hands in `deny`. The
 ;; engine (core.bl) calls `ask` and never knows which.
 
-(def ^:private handler-key :oracle-handler)
 (def ^:private session-prelude-key :oracle-session-prelude)
 
 (defn pool-handler
@@ -276,14 +276,13 @@
 (defn with-oracle
   "Handle oracle effects during f. A function handles [script-text model?].
    A method map supplies :script [text model?] and/or :query [question execute]."
-  [handler f]
+  ([handler f] (with-oracle handler [] f))
+  ([handler dependencies f]
   (when-not (or (fn? handler)
                 (and (map? handler) (seq handler) (every? #{:script :query} (keys handler))
                      (every? fn? (vals handler))))
     (throw (ex-info "oracle: a handler function or method map is required" {})))
-  (let [prev (erlang/get handler-key)]
-    (erlang/put handler-key handler)
-    (try (f) (finally (if (= :undefined prev) (erlang/erase handler-key) (erlang/put handler-key prev))))))
+  (effect/with-methods :oracle (if (fn? handler) {:script handler} handler) dependencies f)))
 
 (defn deny
   "A handler that refuses: the sandbox's oracle."
@@ -296,8 +295,7 @@
   (fn [text _model?] {:status (get answers text "unknown") :model nil :core nil}))
 
 ;; `erlang/get` answers :undefined for an unset key — not nil — so `or` is wrong here.
-(defn- installed-handler []
-  (let [h (erlang/get handler-key)] (when-not (or (nil? h) (= :undefined h)) h)))
+(defn- installed-handler [] (effect/handlers :oracle))
 
 (defn- handler []
   (let [h (installed-handler)]
@@ -318,7 +316,8 @@
 (defn with-query-handler
   "Handle complete typed queries during f. Script questions require a :script
    method supplied explicitly through with-oracle."
-  [handler f] (with-oracle {:query handler} f))
+  ([handler f] (with-oracle {:query handler} f))
+  ([handler dependencies f] (with-oracle {:query handler} dependencies f)))
 
 (defn query-answer
  "Bind an unchecked handler response to its complete portable question."
@@ -457,15 +456,21 @@
 ;; every consumer asks serially, so the pool's high-water mark is 1.
 
 (defn ask-all
-  "obligations → verdicts, in order, one BEAM process per question; the lease
-   registry is the backpressure."
+  "Legacy obligations to verdicts in input order. Managed children inherit the
+   handler table; correlation is per submission, independently of labels."
   [obls]
-  (let [parent (erlang/self)
+  (let [obls (vec obls) tag (erlang/make_ref) parent (erlang/self)
         n (count obls)]
-    (vec (map (fn [o] (erlang/spawn (fn [] (erlang/send parent [:verdict (:label o) (ask o)]))))
-              obls))
+    (doseq [i (range n)]
+     (let [o (nth obls i)]
+      (spawn (fn []
+               (let [result (try (ask o)
+                              (catch error {:status :error :model {} :core [] :tier :oracle :us 0
+                                            :why (ex-message error)}))]
+                (erlang/send parent [:oracle-verdict tag i result]))))))
     (let [got (reduce (fn [acc _]
-                        (let [m (receive [:verdict l v] [l v] (after 60000 :timeout))]
+                        (let [m (receive [:oracle-verdict seen i v] :when (= seen tag) [i v]
+                                  (after 60000 :timeout))]
                           (if (= m :timeout) acc (assoc acc (first m) (second m)))))
                       {} (range n))]
-      (vec (map (fn [o] (get got (:label o))) obls)))))
+      (mapv (fn [i] (get got i)) (range n)))))

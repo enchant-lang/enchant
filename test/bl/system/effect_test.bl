@@ -1,0 +1,136 @@
+(ns system.effect-test (:require [effect]))
+
+(defn answer [value] (fn [_request _default] value))
+
+(deftest synchronous-effects-have-an-explicit-default-and-a-handler-table
+ (is (= :default (effect/perform :example nil (fn [] :default))))
+ (is (= false (effect/handled? :example)))
+ (is (= :handled (effect/with-handler :example (answer :handled)
+                  (fn [] (effect/perform :example {:term :data} (fn [] :default))))))
+ (is (= 42 (effect/with-handler :example (fn [request default] (+ request (default)))
+             (fn [] (effect/perform :example 2 (fn [] 40))))))
+ (is (= false (effect/handled? :example))))
+
+(deftest selected-effect-tables-replace-and-nested-extents-restore
+ (is (= [:outer :inner :outer]
+         (effect/with-handler :example (answer :outer)
+          (fn [] [(effect/perform :example nil (fn [] :default))
+                  (effect/with-handler :example (answer :inner)
+                   (fn [] (effect/perform :example nil (fn [] :default))))
+                  (effect/perform :example nil (fn [] :default))]))))
+ (is (= [:a :b]
+         (effect/with-handler :a/same-name (answer :a)
+          (fn [] (effect/with-handler :b/same-name (answer :b)
+                   (fn [] [(effect/perform :a/same-name nil (fn [] :default))
+                           (effect/perform :b/same-name nil (fn [] :default))]))))))
+ (is (thrown? (effect/with-handler :example (answer :temporary) (fn [] (throw (ex-info "body failed" {}))))))
+ (is (= false (effect/handled? :example))))
+
+(deftest a-present-table-refuses-a-missing-method-instead-of-using-a-default
+ (let [defaults (atom 0)]
+  (effect/with-methods :example {:sum (fn [a b] (+ a b))}
+   (fn []
+    (is (= true (effect/handled? :example)))
+    (is (= true (effect/handled? :example :sum)))
+    (is (= false (effect/handled? :example :perform)))
+    (is (= 42 (effect/call :example :sum [40 2] (fn [] :default))))
+    (is (thrown? (effect/perform :example nil (fn [] (swap! defaults inc)))))))
+  (is (= 0 @defaults))))
+
+(deftest malformed-tables-and-dependencies-refuse-before-entering-the-body
+ (let [entered (atom 0) body (fn [] (swap! entered inc))]
+  (doseq [action [(fn [] (effect/with-methods "not-a-keyword" {:perform (answer 1)} body))
+                  (fn [] (effect/with-methods :example {} body))
+                  (fn [] (effect/with-methods :example {"not-a-keyword" (answer 1)} body))
+                  (fn [] (effect/with-methods :example {:perform 42} body))
+                  (fn [] (effect/with-methods :example {:perform (answer 1)} ["not-a-module"] body))
+                  (fn [] (effect/with-methods :example {:perform (answer 1)} [(tuple :not :a-module)] body))]]
+   (is (thrown? (action))))
+  (is (= 0 @entered))
+  (is (= false (effect/handled? :example))))
+ (is (thrown? (effect/call :example :perform (list) (fn [] :default))))
+ (is (thrown? (effect/call :example :perform [] 42))))
+
+(deftest registrations-snapshot-unhandled-and-handled-contexts-and-restore-the-worker
+ (let [read (fn [] (effect/perform :example nil (fn [] :default)))
+       absent (BeamLisp.Execution/register! read)
+       left (effect/with-handler :example (answer :left) (fn [] (BeamLisp.Execution/register! read)))
+       right (effect/with-handler :example (answer :right) (fn [] (BeamLisp.Execution/register! read)))]
+  (try
+   (is (= [:left :right :left]
+          (mapv #(get-in (BeamLisp.Execution/invoke! % []) [:value]) [left right left])))
+   (is (= false (effect/handled? :example)))
+   (effect/with-handler :example (answer :caller)
+    (fn []
+     (is (= :default (:value (BeamLisp.Execution/invoke! absent []))))
+     (is (= :caller (read)))))
+   (is (= false (effect/handled? :example)))
+   (finally (doseq [registration [absent left right]] (BeamLisp.Execution/close! registration))))))
+
+(deftest explicit-environment-conveyance-restores-a-reused-worker-table
+ (let [callback (fn [] (effect/perform :example nil (fn [] :default)))
+       wrapped (effect/with-handler :example (answer :captured)
+                 (fn [] (BeamLisp.Env/convey callback)))]
+  (is (erlang/is_function wrapped 0))
+  (effect/with-handler :example (answer :worker)
+   (fn []
+    (is (= :captured (wrapped)))
+    (is (= :worker (callback)))))
+  (is (= false (effect/handled? :example)))))
+
+(defserver EffectActor
+ (init [_] (ok nil))
+ (handle-call :ask [_from state]
+  (reply (effect/perform :example nil (fn [] :default)) state)))
+
+(deftest generated-native-actors-keep-their-submission-table-after-the-parent-extent
+ (let [actor (effect/with-handler :example (answer :actor)
+               (fn [] (start EffectActor nil)))]
+  (try
+   (is (= false (effect/handled? :example)))
+   (is (= :actor (call actor :ask)))
+   (finally (GenServer/stop actor)))))
+
+(deftest managed-spawn-conveys-registered-effects-and-no-arbitrary-dictionary-keys
+ (let [parent (erlang/self) tag (erlang/make_ref) key (tuple :not-conveyed tag)]
+  (erlang/put key :private)
+  (try
+   (effect/with-handler :example (answer :child)
+    (fn [] (spawn (fn [] (erlang/send parent [:registered tag
+                                (effect/perform :example nil (fn [] :default)) (erlang/get key)])))))
+   (let [result (receive [:registered seen value unrelated] :when (= seen tag) [value unrelated]
+                  (after 5000 :timeout))]
+    (is (= [:child :undefined] result)))
+   (finally (erlang/erase key)))))
+
+(defn wait-until [predicate]
+ (loop [left 1000]
+  (cond (predicate) true (zero? left) false
+   :else (do (Process/sleep 5) (recur (dec left))))))
+
+(deftest a-child-retains-a-declared-handler-from-another-physical-module
+ (let [handler (BeamLisp/eval "(fn [_request _default] :held)")
+       modules (BeamLisp.Env/callback_modules handler)
+       parent (erlang/self) tag (erlang/make_ref)
+       child (effect/with-handler :example handler
+              (fn [] (spawn (fn []
+                             (receive [:run seen] :when (= seen tag)
+                              (erlang/send parent [:held tag (effect/perform :example nil (fn [] :default))]))))))]
+  (try
+   (doseq [module modules] (is (= true (BeamLisp.Env/live_code_leases? module))))
+   (erlang/send child [:run tag])
+   (is (= :held (receive [:held seen value] :when (= seen tag) value (after 5000 :timeout))))
+   (is (wait-until #(not (Process/alive? child))))
+   (finally (when (Process/alive? child) (Process/exit child :kill))))))
+
+(deftest explicit-outside-callback-dependencies-follow-the-handler-snapshot
+ (let [outside (BeamLisp/eval "(fn [] 42)")
+       factory (BeamLisp/eval "(fn [outside] (fn [_request _default] (outside)))")
+       handler (factory outside) dependencies (vec (BeamLisp.Env/callback_modules outside))
+       registration (effect/with-handler :example handler dependencies
+                      (fn [] (BeamLisp.Execution/register! #(effect/perform :example nil (fn [] :default)))))]
+  (try
+   (let [lease (:lease (BeamLisp.Env/execution_registration_state registration))]
+    (doseq [module dependencies] (is (some #(= module %) (elem lease 0)))))
+   (is (= 42 (:value (BeamLisp.Execution/invoke! registration []))))
+   (finally (BeamLisp.Execution/close! registration)))))
