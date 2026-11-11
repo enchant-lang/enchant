@@ -102,7 +102,7 @@ private theorem and_true_iff (a b : Option Bool) :
   cases a with
   | none =>
     cases b with
-    | none => rfl
+    | none => decide
     | some flag => cases flag <;> decide
   | some flag => cases flag <;> simp
 
