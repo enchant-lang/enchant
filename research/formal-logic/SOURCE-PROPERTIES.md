@@ -27,7 +27,9 @@ A source refutation requires two observations: independent term-model replay,
 and execution of the exact compiler ANF used for translation. Runtime arguments
 travel as actual values into ANF literals. The replay checks the target's
 returned value or raisedness, then the property's returned value or raisedness.
-A disagreement or unavailable input yields `:candidate` with the underlying
+Compilation or publication failures are execution errors, distinct from a
+target raise. The exact emitted module is leased through invocation and retired
+before replay completes. A disagreement or unavailable input yields `:candidate` with the underlying
 answer retained. A reproduced failure yields `:refuted`, `:witness`, `:result`,
 `:crash` and a detailed `:runtime-replay` record.
 
@@ -58,3 +60,8 @@ Unsupported source returns `:unsupported` without running the target.
 case. A successful sample yields `:witnessed`. An unknown solver answer never
 falls through to sampling. `hypothesis` remains the direct sampling interface;
 its printed data literals preserve quoting and escaping.
+
+The qualified guarded-division example `(if (= n 0) 0 (quot 1 n))` at input zero
+has a true, normally returning term interpretation. Z3 settles its property;
+OxiZ 0.3.4 returns unknown on that exact question. Backend decision strength is
+reported separately from the shared source meaning.

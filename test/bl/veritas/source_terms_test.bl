@@ -1,5 +1,5 @@
 (ns veritas.source-terms-test
- (:require [veritas.property :as p] [veritas :as v] [formal.source :as source]
+ (:require [veritas.property :as p] [veritas :as v] [formal.source :as source] [formal.source-runtime :as source-runtime]
            [formal.term :as t] [formal.value :as value] [formal.query :as q] [formal.check :as check]
            [formal.evaluate :as evaluate] [oracle] [core]))
 
@@ -64,10 +64,16 @@
    (is (= :raised (get-in r [:runtime-replay :predicate :status]))))))
 
 (deftest unselected-branches-do-not-raise
- (doseq [engine [:z3 :oxiz]]
-  (let [r (p/prove {:backend engine} '(defn safe [n] (if (= n 0) 0 (quot 1 n)))
-                   '(= result 0) (v/one-of 0))]
-   (is (= :solver-claim (:modality r)) (pr-str r)))))
+ (let [prepared (p/prepare '(defn safe [n] (if (= n 0) 0 (quot 1 n))) '(= result 0) (v/one-of 0))
+       claim (get-in prepared [:problem :claim])]
+  (is (= true (evaluate/value claim {"property/input/0" 0}))))
+ (let [r (p/prove {:backend :z3} '(defn safe [n] (if (= n 0) 0 (quot 1 n))) '(= result 0) (v/one-of 0))]
+  (is (= :solver-claim (:modality r)) (pr-str r)))
+ ;; OxiZ 0.3.4 cannot settle this exact guarded division question. This is a
+ ;; recorded capability difference, separate from the language's lazy meaning.
+ (let [r (p/prove {:backend :oxiz} '(defn safe [n] (if (= n 0) 0 (quot 1 n))) '(= result 0) (v/one-of 0))]
+  (is (= :unknown (:modality r)) (pr-str r))
+  (is (= :unknown (get-in r [:answer :solver-status])))))
 
 (deftest printed-data-and-symbolic-replay-preserve-strings
  (let [text "quote: \" slash: \\ newline:\nλ"]
@@ -147,4 +153,17 @@
   (is (= :entails (get-in answer [:evidence :claim :verdict])))
   (is (= :reviewed (get-in prepared [:source-connection :status])))
   (is (= false (:compiler-proof-authority prepared)))))
+
+(deftest replay-preparation-errors-are-never-target-crashes
+ (let [bad (source-runtime/run {:op :not-an-operation :ann {}} [])
+       prepared (source/prepare-function "(fn [x] (quot x 0))" [(t/int 7)])
+       raised (source-runtime/run (:anf prepared) [7])
+       good (source-runtime/run (:anf (source/prepare-function "(fn [x] (+ x 1))" [(t/int 7)])) [7])]
+  (is (= :error (:status bad))) (is (= :compile (:phase bad)))
+  (is (= :raised (:status raised)) (pr-str raised))
+  (is (= :invocation (:phase raised)))
+  (is (= false (:module-loaded raised)))
+  (is (= :returned (:status good)) (pr-str good))
+  (is (= 8 (:value good)))
+  (is (= false (:module-loaded good)))))
 (run-tests)

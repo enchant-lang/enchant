@@ -20,7 +20,7 @@
 
 (ns veritas.property
  (:require [veritas :as v] [typed] [env] [core] [compiler :as compiler] [reader-node :as rn]
-           [lower :as lower] [formal.source :as source] [formal.term :as t]
+           [formal.source-runtime :as source-runtime] [formal.source :as source] [formal.term :as t]
            [formal.value :as value] [formal.query :as q] [formal.logic :as logic]
            [formal.identity :as identity]))
 
@@ -203,15 +203,6 @@
     :compiler-proof-authority false})
   (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
 
-(defn- execute [anf arguments]
- ;; Run the very ANF translated to terms. No source interpolation, second
- ;; name resolution, global defn publication or serialization of arguments.
- (try
-  {:status :returned :value
-   (lower/eval-anf (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" (System/unique_integer (list :positive))))
-    {:op :apply :fn anf :args (mapv (fn [x] {:op :lit :val x}) arguments) :ann {}})}
-  (catch error {:status :raised :reason (ex-message error)})))
-
 (defn- runtime-replay [prepared answer]
  (let [n (count (:params prepared)) observations (:witness answer)
        fields (mapv #(get observations (str "input/" %)) (range n))
@@ -222,11 +213,14 @@
        in-domain? (and concrete? (v/gen-domain? (:generator prepared) witness))]
   (if-not in-domain?
    {:status :unavailable :reason :input-observations-or-domain}
-   (let [actual (execute (get-in prepared [:function :anf]) args)
+   (let [actual (source-runtime/run (get-in prepared [:function :anf]) args)
          check (when (= :returned (:status actual))
-                 (execute (get-in prepared [:predicate :anf]) (conj args (:value actual))))
+                 (source-runtime/run (get-in prepared [:predicate :anf]) (conj args (:value actual))))
          predicted-result (get observations "result") predicted-property (get observations "predicate")
          matches? (and
+           (contains? #{:returned :raised} (:status actual))
+           (= false (:module-loaded actual))
+           (or (= :raised (:status actual)) (and (contains? #{:returned :raised} (:status check)) (= false (:module-loaded check))))
            (= (= :returned (:status actual)) (:defined predicted-result))
            (or (= :raised (:status actual))
                (and (= (:value actual) (:value predicted-result))

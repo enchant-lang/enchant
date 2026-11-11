@@ -1,0 +1,33 @@
+(ns formal.source-runtime (:require [anf :as anf] [lower :as lower]))
+
+(defn run
+ "Execute supplied compiler function ANF with actual scalar arguments.
+  Preparation/publication errors are distinct from a target raise. The exact
+  emitted binary is leased for invocation and retired before returning."
+ [function arguments]
+ (let [phase (atom :admission)]
+  (try
+   (BeamLisp.Env/assert_native_framework_execution!)
+   (reset! phase :compile)
+   (let [module (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" (System/unique_integer (list :positive))))
+         call {:op :apply :fn function :args (mapv anf/lit arguments) :ann {}}
+         descriptor (anf/module module
+                     (list {:op :defn-clause :fname :run :params (list) :guard nil :body call :ann {}})
+                     (list [:run 0]) (list))
+         pair (lower/descriptor->beam descriptor)
+         _ (when-not (= module (elem pair 0)) (throw (ex-info "Source replay compiled a different module" {})))
+         _ (reset! phase :publication)
+         lease (BeamLisp.Env/retain_exact_binary! pair (str module ".beam"))
+         outcome
+          (try
+           (BeamLisp.Env/with_code_lease (list module)
+            (fn []
+             (reset! phase :invocation)
+             (try {:status :returned :value (erlang/apply module :run (list)) :phase :invocation}
+                  (catch error {:status :raised :reason (ex-message error) :phase :invocation}))))
+           (finally
+            (reset! phase :cleanup)
+            (BeamLisp.Env/release_code! lease)
+            (BeamLisp.Env/retire_module! module)))]
+    (assoc outcome :module module :module-loaded (erlang/module_loaded module)))
+   (catch error {:status :error :phase @phase :reason (ex-message error)}))))
