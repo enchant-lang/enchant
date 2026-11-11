@@ -46,7 +46,14 @@ for name, digest in snapshot['source_sha256'].items():
     if name.startswith('priv/'):
         require(sha(source / name) == digest, 'actual immutable SDK source: ' + name)
 for name, digest in read(E / 'check-source-pin.json')['source_sha256'].items():
-    require(sha(R / name) == digest, 'checked program: ' + name)
+    if name == 'test/bl/doc_nested_spans_test.bl':
+        committed = subprocess.check_output(['git', 'show', snapshot['code_commit'] + ':' + name], cwd=R)
+        require(hashlib.sha256(committed).hexdigest() == digest and sha(E / 'checked-doc-nested-spans-test.bl') == digest,
+                'actual SDK-era Org regression program; later independent parser changes are outside this qualification')
+    else:
+        require(sha(R / name) == digest, 'checked program: ' + name)
+for name, digest in snapshot.get('incidental_sdk_source_sha256', {}).items():
+    require(sha(source / name) == digest, 'incidental SDK source: ' + name)
 prior = read(E / 'baseline-sdk-pin.json')
 previous = read(Path(prior['sdk']) / 'artifact.json')
 require(meta['formalWorker'] == previous['formalWorker'], 'unchanged native worker')
