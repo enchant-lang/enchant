@@ -258,6 +258,21 @@ try{
   check(size.name+': bank observation cell checks the five recorded states',recording.includes(':balances [0 10 7 7 7]')&&recording.includes(':recorded-prefixes 5')&&recording.includes(':adapter-conformance :conforming')&&recording.includes(':data-connection :checked-data-connection')&&recording.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-observation').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-observation-data');
+  await navigate('/#follow-a-counterexample-from-either-solver');
+  check(size.name+': native counterexample chapter keeps the original claim and completion origin',await evaluate("document.body.innerText.includes('those values make the original claim false')&&document.body.innerText.includes('retains its origin')"));
+  await click('[data-graph="formal-core-counterexample"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="values"]');
+  check(size.name+': counterexample panel ties states choices and messages to query bindings',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-core-counterexample\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('State fields, selected choices and messages')&&text.includes('query bindings to the recorded Core trace')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Follow a counterexample from either solver')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-core-counterexample');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-core-counterexample\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-core-counterexample-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const counterexample=await evaluate("document.querySelector('#cell-story-core-counterexample')?.innerText||''");
+  check(size.name+': paired counterexample cell records the same original query and checked data',counterexample.includes(':engines [:z3 :oxiz]')&&counterexample.includes(':same-query true')&&counterexample.includes(':unsafe-recordings 2')&&counterexample.includes(':data-connections [:checked-data-connection :checked-data-connection]')&&counterexample.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-core-counterexample').scrollIntoView({block:'center'})");
+  await shot(size.name+'-core-counterexample-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -514,6 +529,19 @@ try{
  check('All receipts reconnect after transfer and reject a changed receipt identity',freshObservations.rows.length===7&&freshObservations.rows.every(row=>row.status==='checked-data-connection'&&row['changed-receipt']==='rejected'));
  check('Trusted observation archive stays unavailable to the browser',(await fetch(base+'/evidence/core-observations/examples/core-observations.etf')).status===404);
  check('Compiled observation proof stays unavailable to the browser',(await fetch(base+'/evidence/core-observations/execution/bank/CoreObservedTrace.olean')).status===404);
+ for(const path of ['/src/formal/core-counterexamples.bl','/src/formal/core-counterexample-examples.bl','/evidence/core-counterexamples/execution/overdraft-oxiz/CoreCounterexampleCheck.lean','/evidence/core-counterexamples/execution/overdraft-oxiz/trace/CoreObservedTrace.lean','/evidence/core-counterexamples/execution/accepted.json','/evidence/core-counterexamples/execution/rejected.json','/evidence/core-counterexamples/fresh/core-counterexamples-fresh.json','/evidence/core-counterexamples/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared native Core counterexample evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const counterexamples=await fetch(base+'/evidence/core-counterexamples/execution/accepted.json').then(response=>response.json());
+ check('Both engines have twelve composed original query and unsafe trace proofs',counterexamples.length===12&&counterexamples.every(row=>row.status==='checked-original-query-and-unsafe-core-run'&&row.checked_prefixes===row.events+1&&row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns']&&!row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns'].includes('Classical.choice')));
+ check('Extra opaque observations retain explicit completion',counterexamples.some(row=>row.discovery.engine==='oxiz'&&row.extra_observation_bindings>0&&row.completion_origins['explicit-replay-completion']>0));
+ const changedCounterexamples=await fetch(base+'/evidence/core-counterexamples/execution/rejected.json').then(response=>response.json());
+ check('Individually valid mismatched query and trace proofs fail final composition',changedCounterexamples.length===3&&changedCounterexamples.every(row=>row.status==='not-accepted-by-Lean'&&row.query_witness==='checked'&&row.unsafe_trace==='checked'));
+ const freshCounterexamples=await fetch(base+'/evidence/core-counterexamples/fresh/core-counterexamples-fresh.json').then(response=>response.json());
+ check('All twelve original native discoveries reconnect after transfer',freshCounterexamples.rows.length===12&&freshCounterexamples.rows.every(row=>row.status==='checked-data-connection'&&row['changed-query']==='rejected'));
+ check('Trusted native counterexample archive stays unavailable to the browser',(await fetch(base+'/evidence/core-counterexamples/examples/core-counterexamples.etf')).status===404);
+ check('Compiled native counterexample proof stays unavailable to the browser',(await fetch(base+'/evidence/core-counterexamples/execution/overdraft-oxiz/CoreCounterexampleCheck.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
