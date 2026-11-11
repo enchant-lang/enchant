@@ -81,19 +81,16 @@ theorem eval_covered (names : List String) (expression : Expr Γ τ) :
 
 theorem decode_covered (codes : List Nat) (reason : String) (member : reason ∈ codes.map errorName) :
     errorName (errorCode codes reason).toNat = reason := by
-  induction codes with
-  | nil => cases member
-  | cons code rest induction =>
-    change reason ∈ errorName code :: rest.map errorName at member
-    cases found : (errorName code == reason)
-    · have different : reason ≠ errorName code := by
-        intro equal
-        subst reason
-        simp at found
-      have tail := induction ((List.mem_cons.mp member).resolve_left different)
-      simpa only [errorCode, List.find?_cons, found, Bool.false_eq_true, ↓reduceIte] using tail
-    · have equal : errorName code = reason := beq_iff_eq.mp found
-      simpa only [errorCode, List.find?_cons, found, ↓reduceIte, Option.getD_some, Int.toNat_ofNat] using equal
+  unfold errorCode
+  cases found : codes.find? (fun n => errorName n == reason) with
+  | none =>
+    obtain ⟨code, inCodes, rfl⟩ := List.mem_map.mp member
+    have absent := (List.find?_eq_none (p := fun n => errorName n == errorName code)).mp found code inCodes
+    exact (absent (beq_iff_eq.mpr rfl)).elim
+  | some code =>
+    have accepted : (errorName code == reason) = true :=
+      List.find?_some (p := fun n => errorName n == reason) (a := code) found
+    exact beq_iff_eq.mp accepted
 
 /- A record is a right-associated product with unit at the end. Its
    conjunction follows that layout, including each nested record field. -/
