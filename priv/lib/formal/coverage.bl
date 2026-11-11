@@ -1,0 +1,79 @@
+(ns formal.coverage
+ (:require [reader-node :as rn] [typed] [compiler :as compiler] [system.ir :as ir]
+           [formal.source :as source] [formal.runtime-values :as rv] [formal.term :as t]
+           [formal.value :as v] [formal.query :as q] [formal.identity :as identity]))
+
+(defn- guarded? [clause]
+ (let [items (rn/node-items (:node clause)) marker (rn/node-form (second items))]
+  (and (= :keyword (rn/node-tag marker)) (= "when" (rn/node-name marker)))))
+(defn- require! [ok reason] (when-not ok (throw (ex-info (str "Coverage: " reason) {}))))
+(defn- replace-inner [scaffold inner]
+ (let [init (:init scaffold) clause (first (:clauses init))]
+  (assoc scaffold :init (assoc init :clauses [(assoc clause :body inner)]))))
+(defn prepare
+ "Compile plain parameter clauses into a selection predicate, with bodies
+  replaced by true and a final false clause. Source function bodies never run.
+  Guards are modeled from their actual resolved ANF and keep clause-local names."
+ ([src input] (prepare src input true))
+ ([src input model?]
+ (try
+  (let [source-text (if (string? src) src (pr-str src)) forms (BeamLisp.Reader/read_string source-text)
+        _ (require! (= 1 (count forms)) "one source function required")
+        node (rn/node-form (first forms))
+        _ (require! (= :list (rn/node-tag node)) "a defn form required")
+        items (rn/node-items node)
+        _ (require! (= "defn" (rn/node-name (rn/node-form (first items)))) "a plain defn form required")
+        parsed (vec (nth (typed/defn-clauses items) 2)) arity (count (:params (first parsed)))
+        _ (require! (and (seq parsed) (<= arity 16)
+                         (every? (fn [clause]
+                                   (and (= arity (count (:params clause)))
+                                        (every? #(= :symbol (rn/node-tag (rn/node-form %))) (:params clause))
+                                        (= arity (count (set (map #(rn/node-name (rn/node-form %)) (:params clause)))))
+                                        (every? #(not= "&" (rn/node-name (rn/node-form %))) (:params clause)))) parsed))
+                    "one fixed arity and distinct variable parameters per clause required")
+        args (if (= 1 arity) [input]
+               (do (require! (and (= :bl/product (rv/kind input)) (= arity (count (:value input)))) "product domain must match function arity")
+                   (:value input)))
+        ;; Rebuild clauses before compilation: original bodies and their macros
+        ;; are not even compiled. Compiler binding and guard rules stay in charge.
+        clauses (mapv (fn [clause]
+                       (rn/list-node (concat (list (tuple :vector (:params clause)))
+                          (when (guarded? clause) (list (tuple :keyword "when") (:guard clause))) (list true)))) parsed)
+        fn-node (rn/list-node (cons (rn/sym-node "fn") clauses))
+        anf (compiler/compile fn-node (compiler/new-env "formal.source.intrinsics"))
+        _ (require! (ir/self-scaffold? anf) "compiler function scaffold required")
+        inner (ir/scaffold-inner anf) compiled (:clauses inner)
+        _ (require! (every? #(and (= arity (count (:pats %))) (every? (fn [p] (= :pvar (:pop p))) (:pats %))) compiled) "resolved variable patterns required")
+        default {:pats (mapv (fn [i] {:pop :pvar :name (str "formal/coverage/default/" i)}) (range arity))
+                 :guard nil :body {:op :lit :val false :ann {}}}
+        selected (replace-inner anf (assoc inner :clauses (conj (vec compiled) default)))
+        wrapper (compiler/compile (first (BeamLisp.Reader/read_string "(fn [input] true)")) (compiler/new-env "formal.source.intrinsics"))
+        wrapper-inner (ir/scaffold-inner wrapper) wrapper-clause (first (:clauses wrapper-inner))
+        wrapper-name (:name (first (:pats wrapper-clause)))
+        reference {:op :var :name wrapper-name :ann {}}
+        actual-args (if (= 1 arity) [reference]
+                     (mapv (fn [i] {:op :remote :mod :Elixir.BeamLisp.Ns.Rt :fun :nth
+                                     :args [reference {:op :lit :val i :ann {}}] :ann {}}) (range arity)))
+        predicate (replace-inner wrapper (assoc wrapper-inner :clauses
+                      [(assoc wrapper-clause :body {:op :apply :fn selected :args actual-args :ann {}})]))
+        base {:input input :predicate {:anf predicate} :source source-text :arity arity :clauses (count compiled)
+              :source-connection {:status :reviewed :basis :compiler-clause-selection :bodies :not-compiled}
+              :compiler-proof-authority false}
+        translation
+         (if-not model? {:status :runtime-only :reason "No reviewed generator model selected"}
+          (try
+          (let [accepted (mapv (fn [clause]
+                           (if-let [guard (:guard clause)]
+                            (let [bindings (into {} (map-indexed (fn [i pattern] [(:name pattern) (nth args i)]) (:pats clause)))
+                                  lowered (source/lower guard bindings {})]
+                             ;; BEAM guards accept only true and decline on raise.
+                             (if (and (t/term? (:value lowered)) (= t/Bool (t/sort-of (v/term lowered))))
+                              (t/all [(v/defined lowered) (v/term lowered)]) (t/bool false)))
+                            (t/bool true))) compiled)
+                claim (v/scalar (t/any accepted) [input] {})
+                problem (q/prove claim {:id :veritas/coverage :inputs [input] :observe {"input" input "predicate" claim}
+                          :profile :bl/compiler-clause-coverage-v1 :origin {:source source-text :arity arity :bodies :not-compiled}})]
+           {:status :translated :problem problem :question-identity (identity/hash problem)})
+          (catch error {:status :runtime-only :reason (ex-message error)})))]
+   (merge base translation))
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false}))))

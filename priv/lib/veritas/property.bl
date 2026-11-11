@@ -22,7 +22,7 @@
  (:require [veritas :as v] [typed] [env] [core] [compiler :as compiler] [reader-node :as rn]
            [formal.source-runtime :as source-runtime] [formal.source :as source] [formal.term :as t]
            [formal.value :as value] [formal.query :as q] [formal.logic :as logic]
-           [formal.identity :as identity]))
+           [formal.identity :as identity] [formal.runtime-values :as rv]))
 
 ; ── read a function's shape as data ─────────────────────────────────────────
 
@@ -50,7 +50,9 @@
            (throw (ex-info "A plain defn form is required" {})))
        parsed (nth (typed/defn-clauses items) 2) clause (first parsed)
        params (:params clause)
-       _ (when-not (and (= 1 (count parsed)) (nil? (:guard clause)) (seq (:body clause))
+       marker (rn/node-form (second (rn/node-items (:node clause))))
+       guarded? (and (= :keyword (rn/node-tag marker)) (= "when" (rn/node-name marker)))
+       _ (when-not (and (= 1 (count parsed)) (not guarded?) (seq (:body clause))
                         (<= (count params) 16) (every? #(= :symbol (rn/node-tag (rn/node-form %))) params))
            (throw (ex-info "One unguarded clause with up to 16 variable parameters required" {})))
        names (mapv #(rn/node-name (rn/node-form %)) params)
@@ -67,19 +69,8 @@
  ;; Reader/printed data handles quotes, backslashes, symbols and containers.
  (str "(quote " (core/pr-str value) ")"))
 
-(defn- tuple-of
-  "A candidate as an arg TUPLE, given `arity`. A vector candidate is the arg LIST
-   only when arity>1 ([6 0] → two args); for a single-arg function a vector is ONE
-   value. A bare value is always [value]. Resolves the one-vector-arg vs many-args
-   ambiguity a vector candidate would otherwise carry."
-  [arity cand]
-  (cond
-    (= 0 arity) []
-    (and (vector? cand) (> arity 1)) cand
-    (vector? cand) [cand]
-    :else [cand]))
-
-(defn- args-src [arity cand] (core/join " " (map lit (tuple-of arity cand))))
+(defn- args-src [gen candidate]
+ (core/join " " (map lit (if (= :tuple (v/gen-tag gen)) candidate [candidate]))))
 (defn- params-src [params] (core/join " " params))
 
 ; ── call the function on a candidate ────────────────────────────────────────
@@ -87,11 +78,11 @@
 (defn- call
   "Call function `src` on candidate `cand`. {:ok v} on a normal return, {:raised
    true} on any raise (a crash is a first-class property outcome)."
-  [src params cand]
+  [src params gen cand]
   (let [s (ensure-src src)
         node (first (BeamLisp.Reader/read_string s))]
     (try
-      {:ok (env/eval (str s "\n(" (:name (shape-of s)) " " (args-src (count params) cand) ")"))}
+      {:ok (env/eval (str s "\n(" (:name (shape-of s)) " " (args-src gen cand) ")"))}
       (catch _ {:raised true}))))
 
 ; ── does the hypothesis hold at a candidate? ────────────────────────────────
@@ -103,14 +94,14 @@
 ; from the caller's scope leaks in.
 
 (defn- holds-at?
-  [src params pred cand]
-  (let [r (call src params cand)]
+  [src params pred gen cand]
+  (let [r (call src params gen cand)]
     (if (:raised r)
       {:holds false :crash true :input cand}
       (let [ok (try
                  (= true (env/eval
                            (str "((fn [" (params-src params) " result] " (pr-str (v/pred-form pred)) ") "
-                                (args-src (count params) cand) " " (lit (:ok r)) ")")))
+                                (args-src gen cand) " " (lit (:ok r)) ")")))
                  (catch _ false))]
         {:holds ok :crash false :input cand :result (:ok r)}))))
 
@@ -132,7 +123,7 @@
   (if (and (> (count params) 1) (not= :tuple (v/gen-tag gen)))
     cand
     (v/shrink-in-domain gen
-                        (fn [c] (not (:holds (holds-at? src params pred c))))
+                        (fn [c] (not (:holds (holds-at? src params pred gen c))))
                         cand)))
 
 ; ── the public verb ─────────────────────────────────────────────────────────
@@ -150,15 +141,17 @@
   (let [src (ensure-src src0)
         sh (shape-of src)
         params (:params sh)
+        _ (when-not (= (count params) (if (= :tuple (v/gen-tag gen)) (count (:gens gen)) 1))
+            (throw (ex-info "Generator coordinates must match function arity before sampling" {})))
         domain (v/samples gen n)
         failing (core/some (fn [c]
-                             (let [h (holds-at? src params pred c)]
+                             (let [h (holds-at? src params pred gen c)]
                                (if (:holds h) nil h)))
                            domain)]
     (if (nil? failing)
       {:holds true :tried (count domain)}
       (let [minimal (shrink gen src params pred (:input failing))
-            mres (holds-at? src params pred minimal)]
+            mres (holds-at? src params pred gen minimal)]
         {:holds false
          :witness (:input failing)
          :shrunk minimal
@@ -206,9 +199,12 @@
 (defn- runtime-replay [prepared answer]
  (let [n (count (:params prepared)) observations (:witness answer)
        fields (mapv #(get observations (str "input/" %)) (range n))
-       concrete? (every? #(and (= true (:defined %)) (= true (:within %))
-                              (not (map? (:value %)))) fields)
-       args (mapv :value fields)
+       projected (mapv (fn [i]
+                         (let [field (nth fields i)]
+                          (when (and (= true (:defined field)) (= true (:within field)))
+                           (rv/concrete (nth (get-in prepared [:function :inputs]) i) (:value field))))) (range n))
+       concrete? (every? some? projected)
+       args (mapv :value projected)
        witness (if (:tuple prepared) args (first args))
        in-domain? (and concrete? (v/gen-domain? (:generator prepared) witness))]
   (if-not in-domain?
@@ -223,7 +219,7 @@
            (or (= :raised (:status actual)) (and (contains? #{:returned :raised} (:status check)) (= false (:module-loaded check))))
            (= (= :returned (:status actual)) (:defined predicted-result))
            (or (= :raised (:status actual))
-               (and (= (:value actual) (:value predicted-result))
+               (and (rv/matches? (get-in prepared [:function :value]) (:value actual) (:value predicted-result))
                     (= (= :returned (:status check)) (:defined predicted-property))
                     (or (= :raised (:status check)) (= (:value check) (:value predicted-property))))))
          fails? (or (= :raised (:status actual)) (= :raised (:status check)) (not= true (:value check)))]

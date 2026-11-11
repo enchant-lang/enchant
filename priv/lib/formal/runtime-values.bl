@@ -1,0 +1,169 @@
+(ns formal.runtime-values
+ (:require [formal.term :as t] [formal.value :as v] [formal.data :as d]))
+
+(defn kind [x] (get-in (v/lift x) [:domain :kind]))
+(defn product [items]
+ (v/make (mapv v/lift items) (merge (v/context items)
+  {:domain {:kind :bl/product :runtime-kind :vector :profile :bl/positional-product-v1}})))
+(defn keyword-value [label]
+ (when-not (keyword? label) (throw (ex-info "A keyword value requires a keyword" {})))
+ (v/make label {:domain {:kind :bl/keyword :profile :bl/keyword-literal-v1}}))
+(defn length-value [length runtime-kind operands]
+ (v/make {:length length} (merge (v/context operands)
+  {:scope {:mode :abstract :model :collection-length :erases :elements}
+   :domain {:kind :bl/length :runtime-kind runtime-kind :profile :bl/collection-length-v1}})))
+(defn length-domain [name lo hi]
+ (let [n (t/variable name t/Int)]
+  (assoc (length-value n :vector []) :constraints [(t/ge n (t/int lo)) (t/le n (t/int hi))])))
+(defn enum-value [name tags shapes]
+ (let [tag (t/variable (str name "/tag") t/Int)
+       arms (into {} (map-indexed (fn [i label]
+                     [label (when-let [sort (get shapes label)] (v/lift (t/variable (str name "/arm/" i) sort)))]) tags))]
+  (v/make {:tag tag :arms arms}
+   {:constraints [(t/ge tag (t/int 0)) (t/lt tag (t/int (count tags)))]
+    :domain {:kind :bl/enum :tags tags :shapes shapes :profile :bl/keyword-or-payload-enum-v1}})))
+(defn admissible? [x]
+ (let [x (v/lift x) k (kind x)]
+  (case k
+   :scalar (contains? #{t/Int t/Bool t/String} (t/sort-of (v/term x)))
+   :nullable (contains? #{t/Int t/Bool t/String} (get-in x [:domain :item-sort]))
+   :bl/keyword true
+   :bl/product (every? admissible? (:value x))
+   :bl/length true
+   :bl/enum true
+   false)))
+(defn nil-value? [x]
+ (let [x (v/lift x)]
+  (if (= :nullable (kind x)) (get-in x [:value :nil?]) (t/bool false))))
+(defn- scalar-result [term args] (v/scalar term args {}))
+(defn type-test [expected x]
+ (let [x (v/lift x) k (kind x) domain (:domain x)
+       sort (case k :scalar (t/sort-of (v/term x)) :nullable (:item-sort domain) nil)
+       matches
+        (case expected
+         :nil (nil-value? x)
+         :keyword (case k :bl/keyword (t/bool true)
+                    :bl/enum (t/any (keep-indexed (fn [i label]
+                                  (when (nil? (get (:shapes domain) label)) (t/eq (get-in x [:value :tag]) (t/int i)))) (:tags domain)))
+                    (t/bool false))
+         :map (if (= :bl/enum k)
+                (t/any (keep-indexed (fn [i label]
+                          (when (get (:shapes domain) label) (t/eq (get-in x [:value :tag]) (t/int i)))) (:tags domain))) (t/bool false))
+         :vector (t/bool (and (contains? #{:bl/product :bl/length} k) (= :vector (:runtime-kind domain))))
+         :bool (t/all [(t/not (nil-value? x)) (t/bool (= t/Bool sort))])
+         :int (t/all [(t/not (nil-value? x)) (t/bool (= t/Int sort))])
+         :string (t/all [(t/not (nil-value? x)) (t/bool (= t/String sort))])
+         (throw (ex-info "Unreviewed runtime type predicate" {:type expected})))]
+  (scalar-result matches [x])))
+
+(declare equal)
+(defn- enum-equal [a b]
+ (let [da (:domain a) db (:domain b) ta (get-in a [:value :tag]) tb (get-in b [:value :tag])]
+  (t/any (keep-indexed
+   (fn [i label]
+    (when (contains? (:shapes db) label)
+     (let [j (first (keep-indexed (fn [j x] (when (= x label) j)) (:tags db)))
+           sa (get (:shapes da) label) sb (get (:shapes db) label)]
+      (when (= sa sb)
+       (t/all [(t/eq ta (t/int i)) (t/eq tb (t/int j))
+               (if sa (v/term (equal (get-in a [:value :arms label]) (get-in b [:value :arms label]))) (t/bool true))])))) (:tags da)))))
+(defn equal [left right]
+ (let [a (v/lift left) b (v/lift right) ka (kind a) kb (kind b)
+       result
+        (cond
+         (or (= :bl/length ka) (= :bl/length kb))
+          (throw (ex-info "Collection equality needs elements; length equality is a different claim" {}))
+         (and (= :bl/keyword ka) (= :bl/keyword kb)) (t/bool (= (:value a) (:value b)))
+         (and (= :bl/enum ka) (= :bl/keyword kb))
+          (t/any (keep-indexed (fn [i label]
+                   (when (and (= label (:value b)) (nil? (get-in a [:domain :shapes label])))
+                    (t/eq (get-in a [:value :tag]) (t/int i)))) (get-in a [:domain :tags])))
+         (and (= :bl/keyword ka) (= :bl/enum kb)) (v/term (equal b a))
+         (and (= :bl/enum ka) (= :bl/enum kb)) (enum-equal a b)
+         (and (= :bl/product ka) (= :bl/product kb))
+          (if (and (= (get-in a [:domain :runtime-kind]) (get-in b [:domain :runtime-kind])) (= (count (:value a)) (count (:value b))))
+           (t/all (mapv #(v/term (equal (nth (:value a) %) (nth (:value b) %))) (range (count (:value a))))) (t/bool false))
+         (and (= :scalar ka) (= :scalar kb))
+          (if (= (t/sort-of (v/term a)) (t/sort-of (v/term b))) (v/term (v/equal a b)) (t/bool false))
+         (= ka kb) (v/term (v/equal a b))
+         (and (= :nullable ka) (= :scalar kb))
+          (if (= (get-in a [:domain :item-sort]) (t/sort-of (v/term b))) (v/term (v/equal a (d/non-nil b))) (t/bool false))
+         (and (= :scalar ka) (= :nullable kb)) (v/term (equal b a))
+         :else (t/bool false))]
+  (v/scalar result [a b] {:domain {:kind :scalar :profile :formal/equality-v1}}))))
+(defn count-value [x]
+ (let [x (v/lift x)]
+  (case (kind x)
+   :bl/product (scalar-result (t/int (count (:value x))) [x])
+   :bl/length (scalar-result (get-in x [:value :length]) [x])
+   (throw (ex-info "count needs a reviewed collection; BL graphemes are not SMT code points" {})))))
+(defn nth-value [x index default]
+ (let [x (v/lift x) index (v/lift index) i (v/term index)
+       _ (when-not (and (= :bl/product (kind x)) (= :int (:op i)))
+           (throw (ex-info "Product nth requires a literal integer index; length models have no elements" {})))
+       n (:data i) items (:value x) args (concat [x index] (when default [default]))]
+  (if (and (<= 0 n) (< n (count items)))
+   (let [chosen (nth items n)] (v/make (:value chosen) (merge (v/context (conj (vec args) chosen)) {:domain (:domain chosen)})))
+   (if default (v/make (:value default) (merge (v/context args) {:domain (:domain default)}))
+    (v/undefined (v/scalar (t/int 0) [x index] {}) :index-out-of-range)))))
+(defn lookup-value [x key default]
+ (let [x (v/lift x)]
+  (when-not (and (= :bl/enum (kind x)) (= :bl/keyword (kind key)))
+   (throw (ex-info "Lookup requires a reviewed enum and literal keyword" {})))
+  (let [label (:value key) payload (get-in x [:value :arms label]) tags (get-in x [:domain :tags])
+        i (first (keep-indexed (fn [i t] (when (= t label) i)) tags))]
+   (if (nil? payload)
+    (let [chosen (or default (d/nil-of t/Int))]
+     (v/make (:value chosen) (merge (v/context [x key chosen]) {:domain (:domain chosen)})))
+    (let [sort (t/sort-of (v/term payload))
+          fallback (or default (d/nil-of sort))
+          fallback (if (and (= :nullable (kind fallback)) (= :bool (:op (nil-value? fallback))) (= true (:data (nil-value? fallback))))
+                     (d/nil-of sort) fallback)
+          yes (if (= :nullable (kind fallback)) (d/non-nil payload) payload)
+          chosen (v/choose (scalar-result (t/eq (get-in x [:value :tag]) (t/int i)) [x]) yes fallback)]
+     (v/make (:value chosen) (merge (v/context [x key fallback chosen]) {:domain (:domain chosen)}))))))
+(defn rest-value [x]
+ (let [x (v/lift x) n (v/term (count-value x))]
+  (length-value (t/ite (t/gt n (t/int 0)) (t/sub n (t/int 1)) (t/int 0)) :list [x])))
+(defn pop-value [x]
+ (let [x (v/lift x) n (v/term (count-value x))]
+  (assoc (length-value (t/sub n (t/int 1)) (get-in x [:domain :runtime-kind]) [x])
+   :defined (t/all [(v/defined x) (t/gt n (t/int 0))]))))
+(defn conj-value [x item]
+ (let [x (v/lift x)]
+  (when-not (contains? #{:bl/product :bl/length} (kind x)) (throw (ex-info "conj requires a reviewed collection" {})))
+  (length-value (t/add (v/term (count-value x)) (t/int 1)) (get-in x [:domain :runtime-kind]) [x item])))
+
+(defn concrete
+ "Turn a decoded observation into a candidate runtime value. Length models
+  choose range elements explicitly and cap materialization; execution must
+  validate the candidate before a source witness is established."
+ [descriptor raw]
+ (let [k (kind descriptor) domain (:domain descriptor)]
+  (case k
+   :bl/enum
+    (let [i (:tag raw) tags (:tags domain)]
+     (if (and (int? i) (<= 0 i) (< i (count tags)))
+      (let [tag (nth tags i) child (get-in descriptor [:value :arms tag])
+            decoded (when child (concrete child (get-in raw [:arms tag])))]
+       (if child (when decoded {:value {tag (:value decoded)}}) {:value tag})) nil))
+   :bl/product
+    (when (and (vector? raw) (= (count raw) (count (:value descriptor))))
+     (let [xs (mapv (fn [i] (concrete (nth (:value descriptor) i) (nth raw i))) (range (count raw)))]
+      (when (every? some? xs) {:value (mapv :value xs)})))
+   :bl/length
+    (when (and (int? (:length raw)) (<= 0 (:length raw) 4096))
+     {:value (if (= :vector (:runtime-kind domain)) (vec (range (:length raw))) (apply list (range (:length raw))))
+      :projection :length-concretization})
+   (when-not (and (map? raw) (or (:unavailable raw) (:formal/unavailable raw))) {:value raw})))))
+
+(defn matches?
+ "Match a concrete result against exactly the observations retained by its
+  model. A length projection checks length and collection kind, not elements."
+ [descriptor actual raw]
+ (case (kind descriptor)
+  :bl/length (and (if (= :vector (get-in descriptor [:domain :runtime-kind])) (vector? actual) (list? actual))
+                 (= (count actual) (:length raw)))
+  :bl/product (and (vector? actual) (vector? raw) (= (count actual) (count raw) (count (:value descriptor)))
+                    (every? true? (mapv #(matches? (nth (:value descriptor) %) (nth actual %) (nth raw %)) (range (count actual)))))
+  (let [projected (concrete descriptor raw)] (and projected (= actual (:value projected))))))

@@ -20,42 +20,42 @@
 (ns veritas.theories-test
   (:require [veritas :as v] [z3] [core]))
 
-(def port (z3/open))
+(def options {})
 
 ; ── enums: nullary arms — a finite datatype, exhaustively provable ──────────
 
 (deftest enum-for-all-is-z3-proven
-  (let [r (v/for-all port "phase" (v/enum-of :pending :running :done)
+  (let [r (v/for-all options "phase" (v/enum-of :pending :running :done)
                      '(or (= phase :pending) (= phase :running) (= phase :done)))]
-    (is (= :proven (:modality r)) "an exhaustive disjunction over the whole sort")
-    (is (= :oracle (:engine r)) "the variants map reached the translator — symbolic rung")))
+    (is (= :solver-claim (:modality r)) "an exhaustive disjunction over the whole sort")
+    (is (= :terms (:engine r)) "the variants map reached the translator — symbolic rung")))
 
 (deftest enum-for-all-refutes-with-projected-witness
-  (let [r (v/for-all port "phase" (v/enum-of :pending :running :done)
+  (let [r (v/for-all options "phase" (v/enum-of :pending :running :done)
                      '(not (= phase :running)))]
     (is (= :refuted (:modality r)) "a law the sort's own members break")
     (is (= :running (:witness r)) "the z3 ctor symbol projects back to the bl keyword")))
 
 (deftest enum-enumerates-finitely-when-pred-leaves-fragment
-  (let [r (v/for-all port "phase" (v/enum-of :a :b) '(keyword? phase))]
-    (is (= :proven (:modality r)) "keyword? is outside the fragment — exhaustion proves")
+  (let [r (v/for-all options "phase" (v/enum-of :a :b) '(keyword? phase))]
+    (is (= :exhausted (:modality r)) "complete runtime enumeration is explicit")
     (is (= :enumerate (:engine r)))
     (is (= 2 (:tried r)) "the datatype IS the domain: two constructors, two checks")))
 
 ; ── enums: a payload arm — an open domain, z3 decides, witnesses project ────
 
 (deftest enum-payload-exists-projects-payload-witness
-  (let [r (v/exists port "mode" (v/enum-of [:on :int] :off)
+  (let [r (v/exists options "mode" (v/enum-of [:on :int] :off)
                     '(some? (:on mode)))]
-    (is (= :proven (:modality r)) "z3 synthesizes the :on arm")
+    (is (= :witnessed (:modality r)) "native candidate is replayed in BL")
     (is (map? (:witness r)) "the payload ctor projects to a bl map, not an SMT term")
     (is (core/int? (:on (:witness r))) "the projected payload is the bound integer")))
 
 (deftest enum-payload-law-holds-symbolically
-  (let [r (v/for-all port "mode" (v/enum-of [:on :int] :off)
+  (let [r (v/for-all options "mode" (v/enum-of [:on :int] :off)
                      '(or (some? (:on mode)) (= mode :off)))]
-    (is (= :proven (:modality r)) "every ctor satisfies the arm law — discriminant + equality")
-    (is (= :oracle (:engine r)))))
+    (is (= :solver-claim (:modality r)) "every ctor satisfies the arm law — discriminant + equality")
+    (is (= :terms (:engine r)))))
 
 (deftest enum-preds-eval-on-both-rungs
   (is (v/holds? "mode" '(some? (:on mode)) {:on 3})
@@ -64,49 +64,49 @@
 ; ── collections: the length abstraction — proven over an unbounded domain ───
 
 (deftest coll-length-law-is-z3-proven
-  (let [r (v/for-all port "c" (v/coll-of 0 5) '(<= (count c) 5))]
-    (is (= :proven (:modality r)) "the length abstraction reached z3")
-    (is (= :oracle (:engine r)) "count over the var became c_len arithmetic")))
+  (let [r (v/for-all options "c" (v/coll-of 0 5) '(<= (count c) 5))]
+    (is (= :solver-claim (:modality r)) "the length abstraction reached z3")
+    (is (= :terms (:engine r)) "count over the var became c_len arithmetic")))
 
 (deftest coll-length-law-refutes-with-vector-witness
-  (let [r (v/for-all port "c" (v/coll-of 0 9) '(<= (count c) 5))]
+  (let [r (v/for-all options "c" (v/coll-of 0 9) '(<= (count c) 5))]
     (is (= :refuted (:modality r)))
     (is (vector? (:witness r)) "the c_len model value projects to a real vector")
     (is (and (>= (count (:witness r)) 6) (<= (count (:witness r)) 9))
         "the witness length violates the law; z3 picks the model, not a minimum")))
 
 (deftest coll-exists-none-over-the-bounded-length
-  (let [r (v/exists port "c" (v/coll-of 0 3) '(> (count c) 3))]
-    (is (= :proven (:modality r)))
+  (let [r (v/exists options "c" (v/coll-of 0 3) '(> (count c) 3))]
+    (is (= :solver-claim (:modality r)))
     (is (core/some? (:none r)) "no vector of length ≤3 has more than 3 elements")))
 
 (deftest coll-content-pred-falls-to-sample
-  (let [r (v/for-all port "c" (v/coll-of 0 9)
+  (let [r (v/for-all options "c" (v/coll-of 0 9)
                      '(not (some (fn [x] (= x 7)) c)))]
     (is (= :refuted (:modality r)) "the sampled full-range vector contains 7")
-    (is (not= :oracle (:engine r)) "content is outside the length fragment — honest fall")
+    (is (not= :terms (:engine r)) "content is outside the length fragment — honest fall")
     (is (core/some? (core/some (fn [x] (core/= x 7)) (:witness r)))
         "the witness is a real failing vector — its bl evaluation is what failed")))
 
 ; ── OneOf: strings are decidable — the disjunction translates ───────────────
 
 (deftest one-of-strings-constrains
-  (let [r (v/exists port "s" (v/one-of "alpha" "beta") '(= s "beta"))]
-    (is (= :proven (:modality r)))
-    (is (= :oracle (:engine r)) "strings are decidable — the disjunction translates")
+  (let [r (v/exists options "s" (v/one-of "alpha" "beta") '(= s "beta"))]
+    (is (= :witnessed (:modality r)))
+    (is (= :terms (:engine r)) "strings are decidable — the disjunction translates")
     (is (= "beta" (:witness r)))))
 
 ; ── tuples: opts merge across children; mixing modes falls honestly ─────────
 
 (deftest tuple-int-plus-enum-is-jointly-symbolic
-  (let [r (v/for-all port "p" (v/tuple-of (v/int-of 0 3) (v/enum-of :a :b))
+  (let [r (v/for-all options "p" (v/tuple-of (v/int-of 0 3) (v/enum-of :a :b))
                      '(not (= (nth p 1) :a)))]
     (is (= :refuted (:modality r)))
-    (is (= :oracle (:engine r)) "one query, two sorts — the variants map merged across children")))
+    (is (= :terms (:engine r)) "one query, two sorts — the variants map merged across children")))
 
 (deftest tuple-coll-plus-enum-falls-to-sample
-  (let [r (v/for-all port "p" (v/tuple-of (v/coll-of 0 3) (v/enum-of :a :b))
+  (let [r (v/for-all options "p" (v/tuple-of (v/coll-of 0 3) (v/enum-of :a :b))
                      '(>= (count (nth p 0)) 0))]
-    (is (= :witnessed (:modality r)))
-    (is (= :sample (:engine r))
-        "no single translator pass speaks variants + lengths — the honest fall")))
+    (is (= :solver-claim (:modality r)))
+    (is (= :terms (:engine r))
+        "typed products compose the enum and length models")))

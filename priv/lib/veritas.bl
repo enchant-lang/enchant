@@ -1,43 +1,14 @@
-; veritas.bl — one verb over generators: exists / for-all, with a modal verdict
-; that never confuses a sample for a proof.
-;
-; ── The unification ─────────────────────────────────────────────────────────
-;
-; mock (∃ value satisfying a spec), fuzz (∀ input, a property holds), and
-; coverage (which inputs fall through the guards) were three tools. They are ONE
-; operation: (quantifier [var generator] predicate) → verdict. The only things
-; that differed were the generator (ad-hoc ranges), the predicate (stringly),
-; and the verdict (which hid its own confidence). Unify those and there is one
-; verb.
-;
-; ── The three nouns ─────────────────────────────────────────────────────────
-;
-;   GEN   a typed generator (a defrecord, so its TYPE tag dispatches a protocol
-;         GLOBALLY across require boundaries — multimethods are namespace-local
-;         and would not dispatch from a requiring module). One generator feeds
-;         all three engines:
-;           gen-sample    → witnesses         → the FUZZ engine
-;           gen-enumerate → finite set|:inf   → the exhaustive engine
-;           gen-constrain → z3 decls+asserts  → the SYMBOLIC engine
-;           gen-tag       → the type it spans  → coverage completeness
-;
-;   SPEC  a predicate over the bound value as bl SOURCE, evaluated as a
-;         self-contained lambda so it composes and cannot leak the caller's scope.
-;
-;   CHECK one verb whose verdict carries its own MODALITY, so honesty is
-;         structural, not a footnote:
-;           :proven     symbolically (z3) or exhaustively (finite) discharged — a real proof
-;           :witnessed  sampled; no counterexample found — NOT a proof
-;           :refuted    a definite counterexample (+ :witness, +:shrunk)
-;           :unknown    undecidable / timed out — the honest nothing
-;
-; CHECK runs an ENGINE ESCALATOR: the strongest modality the (gen, pred) pair
-; supports. constrain-able ∧ z3-decidable → symbolic; else finite → exhaustive;
-; else → sample+shrink.
+; Quantifier tests and structural coverage share typed generator domains,
+; complete formal.query values and actual BL witness replay. Native UNSAT
+; remains a solver claim. Finite runtime search is exhausted; sampling alone
+; establishes neither universal validity nor absence of an existential witness.
+; Legacy SMT helpers remain solely for the separate mock/fault consumers.
 
 (ns veritas
   (:require [z3] [oracle] [core] [env] [smt :as smtlib] [system.smt :as smt] [reader-node :as rn]
-            [system.model :as model] [typed] [formal.term :as term] [formal.value :as value]))
+            [system.model :as model] [typed] [formal.term :as term] [formal.value :as value] [formal.runtime-values :as rv] [formal.anf-inputs :as formal-inputs]
+            [formal.source :as source] [formal.source-runtime :as source-runtime] [formal.query :as query]
+            [formal.coverage :as coverage] [formal.logic :as logic] [formal.identity :as identity] [compiler :as compiler]))
 
 ; ═════════════════════════════════════════════════════════════════════════
 ; GEN — typed generators as records; the Gen protocol dispatches on their type
@@ -60,7 +31,7 @@
     (let [lo (:lo g) hi (:hi g)
           span (+ 1 (- hi lo))
           edges (filter (fn [v] (and (>= v lo) (<= v hi))) (list lo hi 0 1 -1))
-          interior (map (fn [i] (+ lo (core/mod (* (+ i seed 1) 2654435761) span))) (range 0 n))]
+          interior (if (<= span 0) [] (map (fn [i] (+ lo (core/mod (* (+ i seed 1) 2654435761) span))) (range 0 n)))]
       (into [] (distinct (concat edges interior)))))
   (gen-enumerate [g]
     (let [span (+ 1 (- (:hi g) (:lo g)))]
@@ -140,11 +111,10 @@
 
 (extend-type StringGen Gen
   (gen-sample [g seed n]
-    (let [p (:prefix g)
-          pad (fn [k] (core/join "" (map (fn [_] "x") (range 0 k))))]
-      (into [] (distinct (list (str p (pad (:minlen g)))
-                               (str p (pad (core/mod (+ seed 3) (+ 1 (:maxlen g)))))
-                               (str p "ABCDEF"))))))
+    (let [p (:prefix g) base (count p) lo (max 0 (- (:minlen g) base)) hi (- (:maxlen g) base)
+          pad (fn [k] (core/join "" (repeat k "x")))
+          lengths (distinct [lo hi (+ lo (core/mod (+ seed 3) (inc (- hi lo))))])]
+     (mapv #(str p (pad %)) lengths)))
   (gen-enumerate [g] :infinite)
   (gen-constrain [g var]
     (let [x (symbol var)]
@@ -175,17 +145,20 @@
 
 (extend-type EnumGen Gen
   (gen-sample [g seed n]
-    (into [] (map (fn [t] (enum-value t (get (:arms g) (name t)))) (:tags g))))
+    (into [] (map (fn [t] (enum-value t (get (:arms g) t))) (:tags g))))
   (gen-enumerate [g]
-    (if (core/some? (core/some (fn [t] (if (core/some? (get (:arms g) (name t))) true nil)) (:tags g)))
+    (if (core/some? (core/some (fn [t] (if (core/some? (get (:arms g) t)) true nil)) (:tags g)))
       :infinite
       (into [] (:tags g))))
   (gen-constrain [g var]
-    (let [sort (str "E_" var)]
-      {:decls (vec (concat [(smt/datatype-decl sort (:arms g))]
+    (let [sort (str "E_" var)
+          _ (when (some #(String/contains? (str %) "/") (:tags g))
+              (throw (ex-info "Legacy enum encoding cannot represent namespaced labels; use typed questions" {})))
+          arms (into {} (map (fn [[tag shape]] [(name tag) shape]) (:arms g)))]
+      {:decls (vec (concat [(smt/datatype-decl sort arms)]
                            [(smtlib/declare-const (symbol var) (symbol sort))]))
        :assert []
-       :smt {:variants (smt/variants-map sort (:arms g))}}))
+       :smt {:variants (smt/variants-map sort arms)}}))
   (gen-tag [g] :kw))
 
 ; ── CollGen : a length-bounded collection — the LENGTH ABSTRACTION theory ──
@@ -223,19 +196,20 @@
 
 (defrecord TupleGen [gens])
 
-(defn- cartesian [colls]
-  (reduce (fn [acc c] (into [] (mapcat (fn [row] (map (fn [x] (conj row x)) c)) acc)))
+(defn- cartesian [colls limit]
+  (reduce (fn [acc c] (into [] (take limit (mapcat (fn [row] (map (fn [x] (conj row x)) c)) acc))))
           [[]] colls))
 
 (extend-type TupleGen Gen
   (gen-sample [g seed n]
-    (let [per (map (fn [gg] (gen-sample gg seed n)) (:gens g))]
-      (into [] (take 64 (cartesian per)))))
+    (let [per (map (fn [gg] (gen-sample gg seed (min 64 n))) (:gens g))]
+      (cartesian per 64)))
   (gen-enumerate [g]
     (let [es (map (fn [gg] (gen-enumerate gg)) (:gens g))]
-      (if (core/some? (core/some (fn [e] (if (= e :infinite) true nil)) es))
+      (if (or (some #(= % :infinite) es)
+              (> (reduce (fn [n xs] (if (> n 10000) n (* n (count xs)))) 1 es) 10000))
         :infinite
-        (into [] (cartesian es)))))
+        (cartesian es 10000))))
   (gen-constrain [g var]
     (let [cons (map-indexed (fn [i gg] (gen-constrain gg (str var "_" i))) (:gens g))]
       (if (core/some? (core/some (fn [c] (if (nil? c) true nil)) cons))
@@ -278,9 +252,15 @@
 (extend-type AnyGen GenTerms (gen-term [g name] nil))
 (extend-type RealGen GenTerms (gen-term [g name] nil))
 (extend-type StringGen GenTerms (gen-term [g name] nil))
-(extend-type EnumGen GenTerms (gen-term [g name] nil))
-(extend-type CollGen GenTerms (gen-term [g name] nil))
-(extend-type TupleGen GenTerms (gen-term [g name] nil))
+(extend-type EnumGen GenTerms
+ (gen-term [g name]
+  (when-not (some #(= "Real" %) (vals (:arms g)))
+   (rv/enum-value name (:tags g) (into {} (map (fn [[tag sort]] [tag (get {"Int" term/Int "Bool" term/Bool "String" term/String} sort)]) (:arms g)))))))
+(extend-type CollGen GenTerms (gen-term [g name] (rv/length-domain name (:minlen g) (:maxlen g))))
+(extend-type TupleGen GenTerms
+ (gen-term [g name]
+  (let [items (mapv (fn [i] (gen-term (nth (:gens g) i) (str name "/" i))) (range (count (:gens g))))]
+   (when (every? some? items) (rv/product items)))))
 
 ; ── the public gen constructors ─────────────────────────────────────────────
 
@@ -288,20 +268,32 @@
 (defn real-of   [lo hi] (->RealGen lo hi))
 (defn bool-of   [] (->BoolGen))
 (defn one-of    [& values] (->OneOf (into [] values)))
-(defn string-of [prefix minlen maxlen] (->StringGen prefix minlen maxlen))
-(defn enum-of
-  "An enum over `specs`: a bare keyword is a nullary arm (:paused); a
-   [tag sort] vector a payload arm ([:on :int]) — sort ∈ :int :float :bool
-   :string. The spec IS the datatype: z3's domain is exactly these
-   constructors, no junk. All-nullary enums enumerate finitely (exhaustion
-   proves); a payload arm opens the domain (z3 constrains, bl samples)."
-  [& specs]
-  (let [tag (fn [s] (if (vector? s) (keyword (core/first s)) s))
-        sort-of (fn [s] (if (vector? s)
-                          (get {:int "Int" :float "Real" :bool "Bool" :string "String"} (core/second s))
-                          nil))]
-    (->EnumGen (into [] (map tag specs))
-               (into {} (map (fn [s] [(name (tag s)) (sort-of s)]) specs)))))
+(defn string-of [prefix minlen maxlen]
+ (when-not (and (string? prefix) (String/valid? prefix) (int? minlen) (int? maxlen)
+                (<= 0 minlen maxlen) (<= (count prefix) maxlen))
+  (throw (ex-info "String domains require valid text and possible total grapheme bounds" {})))
+ (->StringGen prefix minlen maxlen))
+(defrecord TextGen [prefix])
+(extend-type TextGen Gen
+ (gen-sample [g seed n] [(:prefix g) (str (:prefix g) "x") (str (:prefix g) "é")])
+ (gen-enumerate [g] :infinite)
+ (gen-constrain [g name] nil)
+ (gen-tag [g] :string))
+(extend-type TextGen GenTerms
+ (gen-term [g name]
+  (let [x (term/variable name term/String)]
+   (value/make x {:constraints [(term/app :str-prefix term/Bool [(term/text (:prefix g)) x] nil)]
+                  :scope {:mode :abstract :model :solver-text :runtime-domain :valid-utf8-prefix}
+                  :domain {:kind :scalar :profile :bl/valid-utf8-prefix-v1}}))))
+(defn text-of [prefix]
+ (when-not (and (string? prefix) (String/valid? prefix)) (throw (ex-info "Text prefix must be valid UTF-8" {})))
+ (->TextGen prefix))
+(defn enum-of [& specs]
+ (let [tag (fn [s] (if (vector? s) (first s) s)) tags (mapv tag specs)]
+  (when-not (and (<= (count tags) 256) (every? keyword? tags) (= (count tags) (count (set tags)))
+                 (every? (fn [s] (or (keyword? s) (and (vector? s) (= 2 (count s)) (contains? #{:int :float :bool :string} (second s))))) specs))
+   (throw (ex-info "Enum constructors require distinct complete keyword identities and reviewed payload sorts" {})))
+  (->EnumGen tags (into {} (map (fn [s] [(tag s) (when (vector? s) (get {:int "Int" :float "Real" :bool "Bool" :string "String"} (second s)))]) specs)))))
 
 (defn coll-of
   "A length-bounded collection (a bl vector): the length abstraction's gen.
@@ -309,7 +301,9 @@
    var translate. bl rung: real vectors, elements (range 0 len), lengths drawn
    deterministically from the bounds. Elements are open ⇒ never finite; a
    content predicate falls to sampling."
-  [minlen maxlen] (->CollGen minlen maxlen))
+  [minlen maxlen]
+ (when-not (and (int? minlen) (int? maxlen) (<= 0 minlen maxlen)) (throw (ex-info "Collection lengths require an ordered nonnegative integer range" {})))
+ (->CollGen minlen maxlen))
 
 (defn tuple-of  [& gens] (->TupleGen (into [] gens)))
 (defn any-of    [] (->AnyGen))
@@ -327,17 +321,7 @@
 ; SPEC — a predicate over the bound value, as a self-contained lambda
 ; ═════════════════════════════════════════════════════════════════════════
 
-(defn- lit
-  "A value as bl source that re-reads to itself: negatives parenthesised,
-   strings quoted, keywords colon-preserved (str drops the colon), collections
-   quoted so they read as data rather than being evaluated as calls."
-  [v]
-  (cond (and (core/int? v) (< v 0)) (str "(- " (- 0 v) ")")
-        (string? v) (str "\"" v "\"")
-        (nil? v) "nil"
-        (keyword? v) (core/pr-str v)
-        (or (vector? v) (map? v) (set? v) (list? v)) (str "(quote " (core/pr-str v) ")")
-        :else (str v)))
+(defn- lit [x] (str "(quote " (core/pr-str x) ")"))
 
 (defn- positional-lets
   "When `v` is a vector, `let` bindings that name each coordinate <var>_i — the
@@ -658,16 +642,20 @@
                           (<= (count v) (:maxlen g))))
   (gen-shrink [g v] (into [] (distinct (domain-filter g v)))))
 
+(extend-type TextGen GenShrink
+ (gen-domain? [g x] (and (string? x) (String/valid? x) (String/starts_with? x (:prefix g))))
+ (gen-shrink [g x] (into [] (filter #(in-domain? g %) (shrink-candidates x)))))
 (extend-type EnumGen GenShrink
-  (gen-domain? [g v]
-    (let [tags (core/set (:tags g))]
-      (cond
-        (keyword? v) (contains? tags v)
-        (map? v)     (and (= 1 (count v)) (contains? tags (core/first (keys v))))
-        :else        false)))
-  (gen-shrink [g v]
-    (into [] (distinct (filter (fn [c] (and (in-domain? g c) (sized-smaller? c v)))
-                               (shrink-candidates v))))))
+ (gen-domain? [g x]
+  (cond
+   (keyword? x) (and (contains? (:arms g) x) (nil? (get (:arms g) x)))
+   (and (map? x) (= 1 (count x)))
+    (let [tag (first (keys x)) shape (get (:arms g) tag) payload (get x tag)]
+     (and (contains? (:arms g) tag)
+          (case shape "Int" (int? payload) "Real" (float? payload) "Bool" (or (= true payload) (= false payload))
+                      "String" (and (string? payload) (String/valid? payload)) false)))
+   :else false))
+ (gen-shrink [g x] (into [] (filter #(and (in-domain? g %) (sized-smaller? % x)) (shrink-candidates x)))))
 
 (extend-type CollGen GenShrink
   (gen-domain? [g v] (and (vector? v) (>= (count v) (:minlen g)) (<= (count v) (:maxlen g))))
@@ -708,116 +696,122 @@
 ; QUOTED bl form over var (blueprint.constraint's rule: no strings-as-constraints).
 ; check runs the strongest engine the (gen, pred) pair supports.
 
-(defn- try-symbolic
-  "The z3 rung. A verdict map, or nil when this query is not symbolically
-   decidable (gen does not constrain, or pred is outside the SMT fragment)."
-  [port q]
-  (let [g (:gen q) var (:var q) pred (:pred q)
-        con (gen-constrain g var)
-        smt-pred (if (nil? con) nil (smt-of-opts (list var) pred (:smt con)))
-        ; a z3 model value → a real bl value of the gen's domain (a tag, a
-        ; payload map, a vector of the modelled length)
-        wit (fn [r] (project-witness g var
-                            (get (parse-model (:raw-model r)) (witness-key g var))))]
-    (if (or (nil? con) (nil? smt-pred))
-      nil
-      (let [decls (:decls con) bounds (:assert con)
-            ; smt-pred: a FORM (the translator's output) or legacy TEXT, READ
-            ; once here (as-term) — every path past this line is form-only
-            smt-term (as-term smt-pred)
-            pred-cmd (smtlib/assert smt-term)
-            base (concat [(smtlib/raw "(set-option :timeout 3000)")] decls bounds)]
-        (if (= (:q q) :exists)
-          (let [r (oracle/ask (oracle/obligation :try-symbolic (concat base [pred-cmd])) true)]
-            (cond
-              (oracle/refuted? r)
-                {:modality :proven :engine :oracle :witness (wit r)}
-              (oracle/proven? r)
-                {:modality :proven :engine :oracle :witness nil :none true}
-              :else {:modality :unknown :engine :oracle}))
-          (let [r (oracle/ask (oracle/obligation :try-symbolic (concat base [(smtlib/assert `(not ~smt-term))])) true)]
-            (cond
-              (oracle/proven? r) {:modality :proven :engine :oracle}
-              (oracle/refuted? r)
-                {:modality :refuted :engine :oracle :witness (wit r)}
-              :else {:modality :unknown :engine :oracle})))))))
+(defn- predicate-source [var pred arity]
+ ;; The reader validates the identifier separately; generated aliases bind
+ ;; through lexical ANF and never masquerade as solver variable names.
+ (formal-inputs/prepare "formal.source.intrinsics" {var (term/int 0)})
+ (str "(fn [" var "] "
+      (if arity
+       (str "(let [" (core/join " " (map (fn [i] (str var "_" i " (nth " var " " i ")")) (range arity))) "] " (pr-str (pred-form pred)) ")")
+       (pr-str (pred-form pred))) ")"))
 
-(defn- run-sample
-  "The fuzz/exhaustive rung. Enumerate finitely ⟹ exhaustion is a PROOF; else
-   sample. For ∀, a counterexample is shrunk; for ∃, find one witness."
-  [q seed n]
-  (let [g (:gen q) var (:var q) pred (:pred q)
-        enum (gen-enumerate g)
-        exhaustive (not (= enum :infinite))
-        values (if exhaustive enum (gen-sample g seed n))
-        fails? (fn [v] (not (holds? var pred v)))
-        proof-mod (if exhaustive :proven :witnessed)
-        eng (if exhaustive :enumerate :sample)]
-    (if (= (:q q) :for-all)
-      (let [cex (core/some (fn [v] (if (fails? v) v nil)) values)]
-        (if (nil? cex)
-          {:modality proof-mod :engine eng :tried (count values)}
-          {:modality :refuted :engine eng :witness cex :shrunk (shrink-in-domain g fails? cex)}))
-      (let [wit (core/some (fn [v] (if (holds? var pred v) v nil)) values)]
-        (if (core/some? wit)
-          {:modality proof-mod :engine eng :witness wit}
-          {:modality proof-mod :engine eng :witness nil :none true})))))
+(defn prepare
+ "Prepare one complete quantifier question without running its predicate.
+  Runtime domains, source translation and backend support are separate facts."
+ [request]
+ (try
+  (when-not (contains? #{:exists :for-all} (:q request)) (throw (ex-info "Expected exists or for-all" {})))
+  (let [g (:gen request) var (:var request)
+        input (or (gen-term g "veritas/input") (throw (ex-info "Generator has no reviewed term domain" {})))
+        compiled (source/prepare-function (predicate-source var (:pred request) (when (= :tuple (gen-tag g)) (count (:gens g)))) [input])
+        _ (when-not (= :translated (:status compiled)) (throw (ex-info (:reason compiled) {})))
+        property (:value compiled)
+        _ (when-not (= term/Bool (term/sort-of (value/term property))) (throw (ex-info "A property must return Bool" {})))
+        options {:id :veritas/quantifier :inputs [input] :observe {"input" input "predicate" property}
+                 :profile :bl/veritas-quantifier-v1 :origin {:variable var :predicate (pr-str (pred-form (:pred request))) :basis :compiler-anf}}
+        problem (if (= :for-all (:q request)) (query/prove property options)
+                  (query/sat (assoc options :inputs [input property] :assumptions [(value/term property)])))]
+   {:status :translated :problem problem :question-identity (identity/hash problem) :input input
+    :predicate compiled :request request :source-connection {:status :reviewed :basis :compiler-anf :metatheory :not-mechanized}
+    :compiler-proof-authority false})
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
 
-(defn- why-not-symbolic
-  "Why the z3 rung declined `q`, as a sentence — nil when it did not decline.
-   The escalator already knows this; a verdict that drops it leaves a reader to
-   guess whether a :witnessed was the best possible answer or a missed proof."
-  [q]
-  (let [con (gen-constrain (:gen q) (:var q))]
-    (cond
-      (nil? con) (str "generator " (gen-tag (:gen q)) " does not constrain in z3")
-      (nil? (smt-of-opts (list (:var q)) (:pred q) (:smt con)))
-        "predicate is outside the SMT fragment system.smt translates"
-      :else nil)))
+(defn- replay-witness [prepared answer]
+ (let [observed (get-in answer [:witness "input"])
+       candidate (when (and (= true (:defined observed)) (= true (:within observed)))
+                  (rv/concrete (:input prepared) (:value observed)))
+       g (get-in prepared [:request :gen]) witness (:value candidate)]
+  (if-not (and candidate (satisfies? GenShrink g) (gen-domain? g witness))
+   {:status :unavailable :reason :input-observation-or-domain}
+   (let [actual (source-runtime/run (get-in prepared [:predicate :anf]) [witness])
+         predicted (get-in answer [:witness "predicate"])
+         matched (and (= false (:module-loaded actual))
+                      (or (and (= :raised (:status actual)) (= false (:defined predicted)))
+                          (and (= :returned (:status actual)) (= true (:defined predicted)) (= (:value actual) (:value predicted)))))
+         holds (= true (:value actual))
+         expected (if (= :exists (get-in prepared [:request :q])) holds (not holds))]
+    {:status (if (and matched expected) :reproduced :mismatch) :witness witness :predicate actual
+     :projection (:projection candidate) :matches-term-model matched :holds holds}))))
 
-(defn- with-why
-  "Attach :seed and :why to a sampling-rung verdict."
-  [v q seed]
-  (let [decline (why-not-symbolic q)
-        rung (if (= :enumerate (:engine v))
-               "exhausted a finite domain"
-               (str "sampled (domain infinite, seed " seed ")"))]
-    (assoc v :seed seed
-             :why (if (nil? decline) rung (str rung "; symbolic declined: " decline)))))
+(defn- solve-prepared [options prepared]
+ (let [answer (if (:session options) (logic/solve-in (:session options) (:problem prepared)) (logic/run options (:problem prepared)))
+       exists? (= :exists (get-in prepared [:request :q]))
+       replay (when (contains? #{:sat :refuted} (:verdict answer)) (replay-witness prepared answer))
+       modality (case (:verdict answer)
+                  :proved :solver-claim :unsat :solver-claim
+                  :sat (if (= :reproduced (:status replay)) :witnessed :candidate)
+                  :refuted (if (= :reproduced (:status replay)) :refuted :candidate)
+                  :vacuous :vacuous :unsupported :unsupported :error :error :candidate :candidate :unknown)
+       base {:modality modality :engine :terms :question (:problem prepared) :answer answer
+             :question-identity (:question-identity prepared) :runtime-replay replay
+             :source-connection (:source-connection prepared) :compiler-proof-authority false
+             :why (str "typed question answered " (name (:verdict answer)))}]
+  (cond
+   (= :reproduced (:status replay)) (assoc base :witness (:witness replay))
+   (and exists? (= :unsat (:verdict answer))) (assoc base :none true :complete true)
+   :else base)))
+
+(defn- run-sample [request seed n enumerate?]
+ (let [g (:gen request) var (:var request) pred (pred-form (:pred request))
+       ;; Validate even an empty domain, before evaluating source.
+       _ (formal-inputs/prepare "formal.source.intrinsics" {var (term/int 0)})
+       enumeration (when enumerate? (gen-enumerate g))
+       finite? (and enumerate? (not= enumeration :infinite))
+       _ (when (and enumerate? (not finite?)) (throw (ex-info "Generator cannot be exhaustively enumerated within its limit" {})))
+       values (if finite? enumeration (gen-sample g seed n))
+       forall? (= :for-all (:q request))
+       found (core/some (fn [x] (when (= forall? (not (holds? var pred x))) [x])) values)
+       engine (if finite? :enumerate :sample)
+       base {:engine engine :seed seed :tried (count values) :complete finite? :compiler-proof-authority false}]
+  (cond
+   found (let [witness (first found)]
+          (merge base {:modality (if forall? :refuted :witnessed) :witness witness}
+           (when forall? {:shrunk (shrink-in-domain g #(not (holds? var pred %)) witness)})))
+   (and finite? forall? (empty? values)) (assoc base :modality :vacuous)
+   finite? (merge base {:modality :exhausted} (when-not forall? {:none true}))
+   forall? (assoc base :modality :witnessed)
+   :else (assoc base :modality :unknown :search-exhausted false))))
 
 (defn check
-  "Run a query with the strongest engine it supports. `q` is
-   {:q :exists|:for-all :var str :gen g :pred form} — the pred a QUOTED bl form
-   over var. `opts` {:seed :n} fixes the sample (default seed 0, n 32): the same
-   seed samples the same values on every machine, so a :witnessed or :refuted
-   verdict is reproducible from the verdict alone.
-   Returns a modal verdict carrying :why — which rung answered, and why any
-   stronger rung declined — and :seed when a sampling rung answered.
-   Escalator: symbolic (z3) if the gen constrains and the pred is SMT; else
-   exhaustive if the gen enumerates finitely; else sample+shrink."
-  ([port q] (check port q {}))
-  ([port q opts]
-   (let [seed (get opts :seed 0) n (get opts :n 32)
-         sym (try-symbolic port q)]
-     (if (some? sym)
-       (assoc sym :why (if (= :unknown (:modality sym))
-                         "z3 answered unknown (timeout or undecidable theory)"
-                         "z3 decided the query"))
-       (with-why (run-sample q seed n) q seed)))))
-
-; ── sugar: the two quantifiers ──────────────────────────────────────────────
-
+ "Check {:q :exists|:for-all :var name :gen generator :pred quoted-form}.
+  Options select :backend and :engine (:auto, :terms, :enumerate, :sample).
+  Auto tries reviewed terms, then actual finite enumeration or sampling.
+  Native UNSAT is a solver claim. Only replayed runtime values are witnesses.
+  A sample that finds nothing establishes no absence."
+ ([options request] (check options request {}))
+ ([options request settings]
+  (when-not (and (map? options) (map? settings)) (throw (ex-info "Veritas needs an options map, not a legacy solver handle" {})))
+  (let [options (merge options settings) engine (get options :engine :auto)
+        _ (when-not (contains? #{:auto :terms :enumerate :sample} engine) (throw (ex-info "Unknown Veritas engine" {})))
+        _ (when-not (contains? #{:exists :for-all} (:q request)) (throw (ex-info "Unknown quantifier" {})))
+        _ (pred-form (:pred request))
+        seed (get options :seed 0) n (get options :n 32)
+        _ (when-not (and (int? seed) (int? n) (<= 0 n 4096)) (throw (ex-info "Sample count must be in 0..4096 and seed an integer" {})))
+        prepared (when (contains? #{:auto :terms} engine) (prepare request))]
+   (if (= :translated (:status prepared)) (solve-prepared options prepared)
+    (if (= :terms engine) {:modality :unsupported :engine :terms :reason (:reason prepared) :compiler-proof-authority false}
+     (let [finite? (not= :infinite (gen-enumerate (:gen request)))
+           enumerate? (or (= :enumerate engine) (and (= :auto engine) finite?))
+           result (run-sample request seed n enumerate?)]
+      (assoc result :symbolic prepared
+       :why (str (if enumerate? "exhausted a finite domain" (str "sampled with seed " seed))
+              (when prepared (str "; symbolic declined: " (:reason prepared)))))))))))
 (defn exists
-  "∃ v ∈ gen. pred(v).  pred is a quoted bl form over `var`. Modal verdict.
-   `opts` as `check` ({:seed :n})."
-  ([port var gen pred] (exists port var gen pred {}))
-  ([port var gen pred opts] (check port {:q :exists :var var :gen gen :pred pred} opts)))
-
+ ([options var gen pred] (exists options var gen pred {}))
+ ([options var gen pred settings] (check options {:q :exists :var var :gen gen :pred pred} settings)))
 (defn for-all
-  "∀ v ∈ gen. pred(v).  Refutes + shrinks; :proven when symbolic or finite.
-   `opts` as `check` ({:seed :n})."
-  ([port var gen pred] (for-all port var gen pred {}))
-  ([port var gen pred opts] (check port {:q :for-all :var var :gen gen :pred pred} opts)))
+ ([options var gen pred] (for-all options var gen pred {}))
+ ([options var gen pred settings] (check options {:q :for-all :var var :gen gen :pred pred} settings)))
 
 ; ═════════════════════════════════════════════════════════════════════════
 ; COVERS — the third quantifier: does every input land in a clause?
@@ -829,61 +823,38 @@
 ; written. Modality follows the generator: :proven when it enumerates finitely,
 ; :witnessed when sampled. A gap is a :refuted with the uncovered witness.
 
-(defn- guards-of
-  "The guard FORMS of a defn `fn-src`, in clause order (a clause with no
-   :when yields `true`), plus the first parameter name. Taken from the clause's
-   guard NODE — the parsed form, not a re-printed string."
-  [fn-src]
-  (let [node (first (BeamLisp.Reader/read_string fn-src))
-        clauses (model/transitions node)
-        its (typed/node-items (typed/node-form node))
-        parsed (nth (typed/defn-clauses its) 2)
-        params (:params (core/first parsed))
-        arg (if (and (seq params) (= :symbol (typed/node-tag (typed/node-form (core/first params)))))
-              (typed/node-name (typed/node-form (core/first params))) "n")]
-    {:guards (into [] (map (fn [c] (if (nil? (:guard-node c))
-                                   true
-                                   (rn/form (:guard-node c))))
-                         clauses)) :arg arg}))
-
-(defn- any-guard-covers?
-  "Does SOME guard of `gd` accept value `v`? A guard is evaluated as a lambda
-   application (holds?), so a raising guard declines — exactly as BEAM dispatch."
-  [gd v]
-  (core/some? (core/some (fn [g] (if (holds? (:arg gd) g v) true nil)) (:guards gd))))
-
 (defn covers
-  "The coverage property over a function `fn-src` and a generator `gen`: does
-   EVERY value the generator yields land in some clause? Returns a modal verdict:
-     :proven    every value covered AND the gen enumerates finitely (exhaustive)
-     :witnessed every SAMPLED value covered — not a proof
-     :refuted   a value fell through every clause (the gap), with :witness
-   The property is the function's own guard heads — nothing is written."
-  [port fn-src gen]
-  (let [gd (guards-of fn-src)
-        enum (gen-enumerate gen)
-        exhaustive (not (= enum :infinite))]
-    (if exhaustive
-      ; FINITE domain: exhaustion IS a proof — enumerate every value.
-      (let [values enum
-            gap (core/some (fn [v] (if (any-guard-covers? gd v) nil v)) values)]
-        (if (core/some? gap)
-          {:modality :refuted :engine :enumerate :witness gap :guards (:guards gd)}
-          {:modality :proven :engine :enumerate :guards (:guards gd) :tried (count values)}))
-      ; INFINITE domain: coverage ≡ ∀ v. (or guard₁ … guardₙ). When the guards
-      ; translate and the gen constrains, that is a z3 query — a real :proven
-      ; over an unbounded domain (enumerate could only :witness). z3's SAT model
-      ; for the negation IS the uncovered witness. Untranslatable ⇒ sample.
-      (let [; guards are forms — compose the disjunction as data, never as strings
-            or-pred (cons 'or (:guards gd))
-            sym (try-symbolic port {:q :for-all :var (:arg gd) :gen gen :pred or-pred})]
-        (if (core/some? sym)
-          (merge sym {:guards (:guards gd)})
-          (let [values (gen-sample gen 0 32)
-                gap (core/some (fn [v] (if (any-guard-covers? gd v) nil v)) values)]
-            (if (core/some? gap)
-              {:modality :refuted :engine :sample :witness gap :guards (:guards gd)}
-              {:modality :witnessed :engine :sample :guards (:guards gd) :tried (count values)})))))))
+ "Check compiler clause selection. Bodies are not compiled or executed.
+  Auto uses reviewed guard terms, then actual selection on finite or sampled
+  values. Runtime compilation errors never count as uncovered inputs."
+ [options fn-src gen]
+ (when-not (map? options) (throw (ex-info "Coverage requires an options map" {})))
+ (let [engine (get options :engine :auto)
+       _ (when-not (contains? #{:auto :terms :enumerate :sample} engine) (throw (ex-info "Unknown coverage engine" {})))
+       input (try (gen-term gen "veritas/input") (catch _ nil))
+       placeholder (if (= :tuple (gen-tag gen)) (rv/product (mapv (fn [i] (term/variable (str "coverage/unmodeled/" i) term/Int)) (range (count (:gens gen)))))
+                     (value/lift (term/variable "coverage/unmodeled" term/Int)))
+       prepared (coverage/prepare fn-src (or input placeholder) (and input (contains? #{:auto :terms} engine)))]
+  (cond
+   (= :translated (:status prepared)) (solve-prepared options (assoc prepared :request {:q :for-all :gen gen}))
+   (or (= :unsupported (:status prepared)) (= :terms engine))
+    {:modality :unsupported :engine :terms :reason (:reason prepared) :preparation prepared :compiler-proof-authority false}
+   :else
+    (let [enum (gen-enumerate gen) finite? (and (not= :sample engine) (not= :infinite enum))
+          _ (when (and (= :enumerate engine) (not finite?)) (throw (ex-info "Coverage domain cannot be enumerated within its limit" {})))
+          seed (get options :seed 0) n (get options :n 32)
+          _ (when-not (and (int? seed) (int? n) (<= 0 n 4096)) (throw (ex-info "Invalid coverage sampling settings" {})))
+          values (if finite? enum (gen-sample gen seed n))
+          base {:engine (if finite? :enumerate :sample) :complete finite? :seed seed :source-connection (:source-connection prepared)
+                :arity (:arity prepared) :symbolic (select-keys prepared [:status :reason]) :compiler-proof-authority false}]
+     (loop [remaining (seq values) tried 0]
+      (if-not remaining
+       (assoc base :modality (cond (and finite? (= 0 tried)) :vacuous finite? :exhausted :else :witnessed) :tried tried)
+       (let [witness (first remaining) actual (source-runtime/run (get-in prepared [:predicate :anf]) [witness])]
+        (cond
+         (or (not= :returned (:status actual)) (:module-loaded actual)) (assoc base :modality :error :runtime actual :tried tried)
+         (not= true (:value actual)) (assoc base :modality :refuted :witness witness :runtime actual :tried (inc tried))
+         :else (recur (next remaining) (inc tried))))))))))
 
 ; ═════════════════════════════════════════════════════════════════════════
 ; FAULTS — the fault space as exists-not queries, with a MODALITY
@@ -919,7 +890,8 @@
           (let [r (isolate-fault port gen laws i)]
             {:law i :modality (:modality r)
              :isolated-fault (if (:none r) nil (:witness r))
-             :implied (core/some? (:none r))}))
+             :implied (if (:none r) true (when (contains? r :witness) false))
+             :basis (:modality r) :answer (:answer r)}))
         laws))))
 
 ; ═════════════════════════════════════════════════════════════════════════
@@ -931,7 +903,6 @@
 ; the common case where a caller runs several checks together.
 
 (defn with-solver
-  "Open a z3 port, pass it to `f`, return f's result. The port lives for the
-   duration of `f` — batch your checks inside one with-solver."
-  [f]
-  (f (z3/open)))
+ "Share one owned typed context across a callback; its options expire on return."
+ ([f] (with-solver {} f))
+ ([options f] (logic/with-session options (fn [session] (f (assoc options :session session))))))

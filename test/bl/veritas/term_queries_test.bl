@@ -1,0 +1,146 @@
+(ns veritas.term-queries-test
+ (:require [veritas :as v] [veritas.property :as p] [formal.query :as q]
+           [formal.source :as source] [formal.term :as t] [formal.value :as value]
+           [formal.evaluate :as evaluate] [oracle]))
+
+(defn brief [r] (pr-str (select-keys r [:modality :reason :why :runtime-replay :answer])))
+(deftest native-claims-and-runtime-witnesses-have-distinct-modalities
+ (doseq [engine [:z3 :oxiz]]
+  (let [opts {:backend engine :engine :terms}
+        law (v/for-all opts "n" (v/int-of 0 100000) '(>= n 0))
+        witness (v/exists opts "b" (v/bool-of) '(= b false))
+        failure (v/for-all opts "b" (v/bool-of) 'b)]
+   (is (= :solver-claim (:modality law)) (brief law))
+   (is (= :not-checked (get-in law [:answer :certificate :status])))
+   (is (= :witnessed (:modality witness)) (brief witness))
+   (is (= false (:witness witness)))
+   (is (= :refuted (:modality failure)) (brief failure))
+   (is (= false (:witness failure)))
+   (doseq [r [law witness failure]]
+    (is (= (:question r) (q/validate! (:question r))))
+    (is (= false (:compiler-proof-authority r)))))))
+
+(deftest enum-fields-retain-namespaces-false-and-constructor-shapes
+ (let [g (v/enum-of [:left/open :bool] :right/open)]
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (v/exists {:backend engine :engine :terms} "mode" g
+                     '(and (some? (:left/open mode)) (= (:left/open mode) false)))]
+    (is (= :witnessed (:modality r)) (brief r))
+    (is (= {:left/open false} (:witness r)))
+    (is (= :reproduced (get-in r [:runtime-replay :status])))))
+  (is (v/gen-domain? g {:left/open false}))
+  (is (v/gen-domain? g :right/open))
+  (is (not (v/gen-domain? g :left/open)))
+  (is (not (v/gen-domain? g {:right/open false})))
+  (is (not (v/gen-domain? g {:left/open 1}))))
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (v/for-all {:backend engine} "phase" (v/enum-of :left/open :right/open)
+                     '(or (= phase :left/open) (= phase :right/open)))]
+   (is (= :solver-claim (:modality r)) (brief r)))))
+
+(deftest products-compose-enums-and-length-models
+ (let [g (v/tuple-of (v/coll-of 0 3) (v/enum-of :left/open :right/open))
+       answers (mapv #(v/for-all {:backend % :engine :terms} "p" g
+                         '(and (<= (count (nth p 0)) 3) (keyword? p_1))) [:z3 :oxiz])]
+  (is (apply = (map :question-identity answers)))
+  (doseq [r answers]
+   (is (= :solver-claim (:modality r)) (brief r))
+   (is (= :abstract (get-in r [:question :scope :mode])))))
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (v/exists {:backend engine :engine :terms} "p"
+                   (v/tuple-of (v/int-of 7 7) (v/enum-of :a :b))
+                   '(and (= p_0 7) (= (nth p 1) :b)))]
+   (is (= :witnessed (:modality r)) (brief r))
+   (is (= [7 :b] (:witness r))))))
+
+(deftest collection-operations-keep-partiality-and-runtime-kind
+ (doseq [engine [:z3 :oxiz]]
+  (let [opts {:backend engine :engine :terms}
+        length-law (v/for-all opts "c" (v/coll-of 0 3) '(= (count (conj c 9)) (+ (count c) 1)))
+        gap (v/for-all opts "c" (v/coll-of 0 3) '(>= (count (pop c)) 0))
+        list-result (v/exists opts "c" (v/coll-of 0 3) '(vector? (rest c)))
+        large (v/exists opts "c" (v/coll-of 5000 5000) true)]
+   (is (= :solver-claim (:modality length-law)) (brief length-law))
+   (is (= :refuted (:modality gap)) (brief gap))
+   (is (= [] (:witness gap)))
+   (is (= :raised (get-in gap [:runtime-replay :predicate :status])))
+   (is (= :solver-claim (:modality list-result)) (brief list-result))
+   (is (= true (:none list-result)))
+   (is (= :candidate (:modality large)) (brief large))
+   (is (not (contains? large :witness)))))
+ (let [g (v/coll-of 0 3)]
+  (is (= :unsupported (:status (v/prepare {:q :for-all :var "c" :gen g :pred '(= c c)}))))
+  (is (= :unsupported (:status (v/prepare {:q :for-all :var "c" :gen g :pred '(= (nth c 0) 1)}))))))
+
+(deftest unicode-graphemes-and-native-codepoints-stay-separate
+ (doseq [prefix ["" "usr_" "é" "🇲🇦"] seed (range 10)]
+  (let [g (v/string-of prefix (count prefix) (+ (count prefix) 4))]
+   (is (every? #(v/gen-domain? g %) (v/gen-sample g seed 5)))))
+ (is (= 1 (count "é")))
+ (is (= 2 (count (String/codepoints "é"))))
+ (is (= :unsupported (:status (v/prepare {:q :for-all :var "s" :gen (v/string-of "" 1 2) :pred '(>= (count s) 0)}))))
+ (is (= :unsupported (:status (v/prepare {:q :for-all :var "x" :gen (v/real-of 0.0 1.0) :pred '(>= x 0)}))))
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (v/for-all {:backend engine :engine :terms} "s" (v/text-of "é") '(String/starts_with? s "é"))]
+   (is (= :solver-claim (:modality r)) (brief r)))))
+
+(deftest finite-search-preserves-false-nil-and-completeness
+ (doseq [witness [false nil]]
+  (let [r (v/exists {:engine :enumerate} "x" (v/one-of witness) true)
+        bad (v/for-all {:engine :enumerate} "x" (v/one-of witness) false)]
+   (is (= :witnessed (:modality r))) (is (= witness (:witness r)))
+   (is (= :refuted (:modality bad))) (is (= witness (:witness bad)))))
+ (let [absent (v/exists {:engine :sample} "x" (v/any-of) false)
+       finite (v/exists {:engine :enumerate} "x" (v/one-of false nil) false)
+       empty (v/for-all {:engine :enumerate} "x" (v/one-of) false)]
+  (is (= :unknown (:modality absent))) (is (not (:none absent)))
+  (is (= :exhausted (:modality finite))) (is (= true (:none finite)))
+  (is (= :vacuous (:modality empty)))))
+
+(deftest coverage-uses-local-parameters-and-never-compiles-the-body
+ (let [src "(defn sign ([a] :when (>= a 0) (unavailable-body)) ([renamed] :when (< renamed 0) (another-unavailable-body)))"
+       answers (mapv #(v/covers {:backend %} src (v/int-of -1000000 1000000)) [:z3 :oxiz])]
+  (is (apply = (map :question-identity answers)))
+  (doseq [r answers]
+   (is (= :solver-claim (:modality r)) (brief r))
+   (is (= :not-compiled (get-in r [:source-connection :bodies])))))
+ (doseq [engine [:z3 :oxiz]]
+  (let [gap (v/covers {:backend engine} "(defn sign ([x] :when (> x 0) :p) ([y] :when (< y 0) :n))" (v/int-of -100 100))
+        strict (v/covers {:backend engine} "(defn choose [x] :when x (not-compiled))" (v/one-of 0))]
+   (is (= :refuted (:modality gap)) (brief gap)) (is (= 0 (:witness gap)))
+   (is (= :refuted (:modality strict)) (brief strict)) (is (= 0 (:witness strict)))))
+ (let [r (v/covers {:engine :enumerate} "(defn bool [x] :when (int? x) (not-compiled))" (v/one-of false nil))]
+  (is (= :refuted (:modality r)) (brief r)) (is (= false (:witness r))))
+ (is (= :unsupported (:modality (v/covers {} "(defn f [[x]] x)" (v/coll-of 0 2))))))
+
+(deftest literal-nil-and-false-guards-remain-present
+ (doseq [guard ["nil" "false"] engine [:z3 :oxiz]]
+  (let [src (str "(defn f [x] :when " guard " (unavailable-body))")
+        r (v/covers {:backend engine} src (v/one-of 0))]
+   (is (= :refuted (:modality r)) (brief r))
+   (is (= 0 (:witness r)))
+   (is (= :unsupported (:status (p/prepare src true (v/one-of 0))))))))
+
+(deftest source-properties-can-replay-enum-and-length-values
+ (doseq [engine [:z3 :oxiz]]
+  (let [enum (p/prove {:backend engine} '(defn ident [x] x) '(not (= result :off)) (v/enum-of :on :off))
+        length (p/prove {:backend engine} '(defn grow [xs] (conj xs 99)) '(< (count result) 1) (v/coll-of 0 2))]
+   (is (= :refuted (:modality enum)) (brief enum)) (is (= :off (:result enum)))
+   (is (= :refuted (:modality length)) (brief length))
+   (is (= :reproduced (get-in length [:runtime-replay :status]))))))
+
+(deftest contexts-and-unknown-answers-stay-in-the-complete-query-interface
+ (let [seen (atom []) options {:worker "/unavailable/formal-worker"}
+       r (oracle/with-query-handler
+          (fn [question _] (swap! seen conj question)
+            (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown}))
+          #(v/for-all options "n" (v/int-of 0 100) '(>= n 0)))]
+  (is (= 1 (count @seen))) (is (= :unknown (:modality r))) (is (= :terms (:engine r))))
+ (is (try (v/for-all :z3-leases "n" (v/int-of 0 1) true) false (catch _ true))))
+
+(deftest sampled-properties-use-the-same-argument-geometry-as-terms
+ (let [r (p/hypothesis '(defn ident [n] n) '(string? (str result)) (v/tuple-of (v/int-of 0 2)) 3)]
+  (is (= true (:holds r))))
+ (is (try (p/hypothesis '(defn add [a b] (+ a b)) true (v/int-of 0 2) 3) false (catch _ true)))
+ (is (try (p/prove {:fallback :sample} '(defn add [a b] (+ a b)) true (v/int-of 0 2)) false (catch _ true))))
+(run-tests)

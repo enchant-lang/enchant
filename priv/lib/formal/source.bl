@@ -1,7 +1,7 @@
 (ns formal.source
  (:require [compiler :as compiler] [system.ir :as ir]
            [formal.term :as t] [formal.value :as v] [formal.data :as d]
-           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs] [formal.anf-function :as anf-function]))
+           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs] [formal.anf-function :as anf-function] [formal.runtime-values :as runtime-values]))
 
 ;; Consume the compiler's resolved ANF, never a second surface-language walker.
 ;; This initial source environment allows the declared variables and a reviewed
@@ -36,7 +36,7 @@
     (if (= size 2)
      (integer-binary (get {"+" t/add "-" t/sub "*" t/mul "<" t/lt "<=" t/le "=<" t/le ">" t/gt ">=" t/ge} name) a b node)
      (if (and (= name "-") (= size 1)) (integer-binary t/sub (t/int 0) a node) (refuse "arithmetic arity" node)))
-   (and (contains? #{"=" "eqv" "==" "=:="} name) (= size 2)) (v/equal a b)
+   (and (contains? #{"=" "eqv" "==" "=:="} name) (= size 2)) (runtime-values/equal a b)
    (and (= name "not") (= size 1)) (result (t/not (v/term (truthy a))) [a])
    (and (= name "strict-not") (= size 1))
     (do (when-not (and (= :scalar (get-in (v/lift a) [:domain :kind])) (= t/Bool (t/sort-of (v/term a))))
@@ -49,6 +49,23 @@
     (result ((get {"pos?" t/gt "neg?" t/lt "zero?" t/eq} name) (v/term a) (t/int 0)) [a])
    (and (contains? #{"inc" "dec"} name) (= size 1))
     (result ((if (= name "inc") t/add t/sub) (v/term a) (t/int 1)) [a])
+   (and (contains? #{"nil?" "some?" "int?" "keyword?" "string?" "boolean?" "vector?" "map?"} name) (= size 1))
+    (let [value (runtime-values/type-test (get {"nil?" :nil "some?" :nil "int?" :int "keyword?" :keyword
+                                              "string?" :string "boolean?" :bool "vector?" :vector "map?" :map} name) a)]
+     (if (= "some?" name) (result (t/not (v/term value)) [value]) value))
+   (and (= "count" name) (= size 1)) (runtime-values/count-value a)
+   (and (= "empty?" name) (= size 1)) (result (t/eq (v/term (runtime-values/count-value a)) (t/int 0)) [a])
+   (and (= "nth" name) (= size 2)) (runtime-values/nth-value a b nil)
+   (and (= "nth-default" name) (= size 3)) (runtime-values/nth-value a b (nth args 2))
+   (and (= "get" name) (= size 2)) (runtime-values/lookup-value a b nil)
+   (and (= "get-default" name) (= size 3)) (runtime-values/lookup-value a b (nth args 2))
+   (and (= "rest" name) (= size 1)) (runtime-values/rest-value a)
+   (and (= "pop" name) (= size 1)) (runtime-values/pop-value a)
+   (and (= "conj" name) (= size 2)) (runtime-values/conj-value a b)
+   (and (= "text-starts-with" name) (= size 2))
+    (result (t/app :str-prefix t/Bool [(v/term b) (v/term a)] nil) [a b])
+   (and (= "text-codepoints" name) (= size 1))
+    (runtime-values/length-value (t/app :str-len t/Int [(v/term a)] nil) :list [a])
    :else (refuse (str "intrinsic " name " is outside this source profile") node))))
 
 (declare lower)
@@ -68,6 +85,7 @@
            (int? value) (v/lift (t/int value))
            (string? value) (v/lift (t/text value))
            (and (keyword? value) (:keyword-universe opts)) (d/key-literal (:keyword-universe opts) value)
+           (keyword? value) (runtime-values/keyword-value value)
            :else (refuse "literal needs a declared semantic domain" node)))
    (= :var op)
     (or (get bindings (:name node)) (refuse "unbound lexical input identity" node))
@@ -95,6 +113,8 @@
      (when (or (nil? call) (:rest call)) (refuse "unresolved/computed call" node))
      (let [args (mapv #(lower % bindings opts) (:args call))]
       (cond
+       (and (= :invoke (:mode call)) (= :lit (:op (:callee call))) (keyword? (:val (:callee call))) (contains? #{1 2} (:arity call)))
+        (runtime-values/lookup-value (first args) (runtime-values/keyword-value (:val (:callee call))) (second args))
        (= :remote (:mode call))
         (let [meaning (intrinsics/remote-meaning (:mod call) (:fun call) (:arity call))]
          (when-not meaning (refuse "unreviewed module/function/arity identity" node))
@@ -116,12 +136,8 @@
          _ (when-not (= (count named) (count (set (map first named))))
              (refuse "multiple binding keys normalize to the same source name" {}))
          bindings (into {} named)
-         _ (doseq [[_ value] bindings]
-             (let [domain (:domain value) kind (:kind domain)
-                   sort (if (= :nullable kind) (:item-sort domain)
-                         (when (= :scalar kind) (t/sort-of (v/term value))))]
-              (when-not (contains? #{[:int] [:bool] [:string]} sort)
-               (refuse "binding requires a reviewed runtime scalar profile" {}))))
+         _ (when-not (every? runtime-values/admissible? (vals bindings))
+             (refuse "binding requires a reviewed runtime value profile" {}))
          inputs (anf-inputs/prepare "formal.source.intrinsics" bindings)
          anf (compiler/compile form (:environment inputs))
          value (lower anf (:bindings inputs) opts)]
@@ -149,12 +165,8 @@
          _ (when-not (and (= 1 (count forms)) (vector? inputs) (<= (count inputs) 32))
              (refuse "one function and at most 32 ordered semantic inputs required" {}))
          inputs (mapv v/lift inputs)
-         _ (doseq [value inputs]
-             (let [kind (get-in value [:domain :kind])
-                   sort (if (= :nullable kind) (get-in value [:domain :item-sort])
-                          (when (= :scalar kind) (t/sort-of (v/term value))))]
-              (when-not (contains? #{[:int] [:bool] [:string]} sort)
-               (refuse "function inputs require a reviewed runtime scalar profile" {}))))
+         _ (when-not (every? runtime-values/admissible? inputs)
+             (refuse "function inputs require a reviewed runtime value profile" {}))
          anf (compiler/compile (first forms) (compiler/new-env "formal.source.intrinsics"))
          clause (anf-function/clause! anf (count inputs))
          bindings (into {} (map-indexed (fn [i pattern] [(:name pattern) (nth inputs i)]) (:pats clause)))
