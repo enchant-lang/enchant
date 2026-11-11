@@ -1,6 +1,8 @@
 # Typed questions at the SDK oracle boundary
 
-The public SDK interface has passed its focused qualification in this checkout. The portable
+The public SDK interface passed 86 focused assertions and a 16-file regression
+with 2,549 assertions in this checkout. The 187 paired theory questions retain
+their preceding canonical identities and native verdicts. The portable
 term, question, proof and state-model implementations now live under
 `priv/lib/formal`. Research import paths point to those canonical sources.
 The native worker remains an explicitly configured artifact.
@@ -99,3 +101,6 @@ conveys the language environment, but does not yet convey this oracle handler.
 The derived search procedures that directly open a native transport context
 also need migration to the common logical context. These are explicit next
 steps; the focused SDK tests do not establish their handler behavior.
+
+Exact artifacts, source hashes and retained failed-run evidence are in
+`evidence/sdk-interface/qualification.json`.

@@ -58,7 +58,7 @@ require(counts.keys() == expected and '16 file(s) passed, 0 failed, 0 incoherent
 matrices = {}
 for name in ('advanced', 'features', 'native'):
     current = read(E / 'regression' / (name + '.json'))
-    before = read(P / 'evidence' / (name + '.json'))
+    before = read(P / 'evidence/core-counterexamples/corpora' / (name + '.json'))
     require(not current['disagreements'] and not current['invalid-models'], 'no decisive disagreement or invalid model')
     old = {row['id']: row for row in before['cases']}
     require(old.keys() == {row['id'] for row in current['cases']}, 'same theory cases')
@@ -86,6 +86,7 @@ report = {
     'checks': {'focused_assertions': 86, 'regression_files': counts,
                'regression_assertions': sum(counts.values()), 'failed': 0},
     'matrices': matrices, 'paired_questions': 187,
+    'comparison_baseline': 'evidence/core-counterexamples/corpora (checkpoint 27, canonical term identities)',
     'candidate_1': {'build': 'succeeded', 'assertions_passed': 77, 'assertions_failed': 8,
                     'cause': 'optional context reply normalization and test fixture assumptions'},
     'build_stdout': 'both managed builds succeeded; their stdout ledgers are truncated',
