@@ -73,6 +73,11 @@ class CoreCounterexampleChecks(unittest.TestCase):
         # Swapping two distinct Boolean slots preserves both original leaf proofs.
         state_flag = swapped_messages['layout']['states'][0][1]
         ignored = swapped_messages['layout']['inputs'][0][0][1][1]
+        ignored_name = ignored[1]['data']
+        flag_value = frames[0]['state'][1][1]
+        next(row for row in swapped_messages['bindings'] if row[0] == ignored_name)[2] = not flag_value
+        swapped_messages['execution']['frames'][1]['message'][1][1] = not flag_value
+        swapped_messages['execution']['identity'] = check.observed.canonical_identity(swapped_messages['execution'])
         state_flag[1], ignored[1] = ignored[1], state_flag[1]
         rows = []
         for name, packet, theorem in [('different-valid-unsafe-run', wrong_run, 'projectedState1Matches'),
