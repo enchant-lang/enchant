@@ -1,0 +1,20 @@
+(ns formal.response-frontend-probe
+ (:require [formal.source :as source] [formal.runtime-values :as runtime] [formal.term :as t]
+           [formal.value :as value] [compiler :as compiler] [system.ir :as ir] [bl.json :as json]))
+(def arguments [(runtime/product [(t/variable "probe/x" t/Int) (t/variable "probe/y" t/Int)])])
+(def source-cases
+ (mapv (fn [[id text]]
+         (let [prepared (source/prepare-function text arguments)]
+          {:id id :status (:status prepared) :reason (:reason prepared)}))
+       [["unqualified" "(fn [input] (let [x (nth input 0) y (nth input 1)] (= (+ x y) 15)))"]
+        ["qualified" "(fn [input] (let [nth (core/nth input 0) formal_response_input (core/nth input 1)] (= (+ nth formal_response_input) 15)))"]]))
+(def literal (str "quoted\" slash\\ newline\n" (erlang/list_to_binary (list 0))))
+(def anf (compiler/compile (compiler/datum-macro-result (list 'fn ['x] (list '= 'x literal)))
+                          (compiler/new-env "formal.source.intrinsics")))
+(def clause (first (:clauses (ir/scaffold-inner anf))))
+(def lowered (source/lower (:body clause) {(:name (first (:pats clause))) (value/lift (t/variable "probe/text" t/String))} {}))
+(assert (some #(and (= :text (:op %)) (= literal (:data %))) (t/walk (value/terms lowered))))
+(def report {:schema "enchant.formal.response-frontend-probe.v1" :source-cases source-cases
+             :data-form-literal-preserved true :compiler-proof-authority false})
+(File/write! (first (BeamLisp/argv)) (json/encode report {:pretty 2}))
+(println (json/encode report {:pretty 2}))
