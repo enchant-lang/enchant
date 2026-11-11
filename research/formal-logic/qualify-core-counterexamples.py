@@ -70,6 +70,9 @@ for name, row in results.items():
             'freshly checked imported premise objects')
     witness_layout = bridge.witnesses.validate(packet['witness'])
     bridge.witnesses.verify_source((folder / 'witness/Check.lean').read_text(), packet['witness'], *witness_layout)
+    require(theorem_audits((folder / 'witness/lean.txt').read_text(),
+                          {'packetAccepted', 'originalContextHolds', 'originalContextSatisfiable'}) == query['axioms']
+            and all(set(deps) <= allowed for deps in query['axioms'].values()), 'fresh witness theorem audit')
     trace_layout = bridge.observed.validate(packet['execution'])
     trace_audits, verdict, failed, violated = bridge.observed.verify_source((folder / 'trace/CoreObservedTrace.lean').read_text(),
                                                                         packet['execution'], trace_layout, False)
@@ -80,7 +83,8 @@ for name, row in results.items():
         require(f'CoreCounterexampleCheck.projectedState{prefix}Matches' in row['axioms'], 'every recorded state is connected')
     require(row['completed_bindings'] == len(packet['bindings'])
             and row['extra_observation_bindings'] == len(packet['bindings']) - len(packet['witness']['bindings'])
-            and row['completion_origins'] == original['completion'], 'all completion origins survive export')
+            and {key: count for key, count in row['completion_origins'].items() if count} == original['completion'],
+            'all completion origins survive export')
     require(row['query_and_receipt_connection'] == 'requires-fresh-BL-reconstruction'
             and row['backend_provenance'] == 'claimed-engine-response' and row['execution_authenticity'] == 'observer-trusted'
             and row['general_unrolling_correspondence'] == row['universal_runtime_refinement'] == 'not-established'
