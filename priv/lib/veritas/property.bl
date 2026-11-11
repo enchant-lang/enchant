@@ -19,8 +19,10 @@
 ; the property tester and the core alike — not a second, parallel domain notion.
 
 (ns veritas.property
-  (:require [smt :as smtlib]  [veritas :as v] [system.model :as model] [system.smt :as smt]
-            [typed] [env] [core] [z3] [oracle]))
+ (:require [veritas :as v] [typed] [env] [core] [compiler :as compiler] [reader-node :as rn]
+           [lower :as lower] [formal.source :as source] [formal.term :as t]
+           [formal.value :as value] [formal.query :as q] [formal.logic :as logic]
+           [formal.identity :as identity]))
 
 ; ── read a function's shape as data ─────────────────────────────────────────
 
@@ -33,45 +35,37 @@
   [src]
   (if (string? src) src (core/pr-str src)))
 
-(defn- params-of
-  "The parameter NAME vector of a defn's first clause (all args, in order).
-   Multi-arg aware; defaults to [\"n\"] when the shape is opaque."
-  [node]
-  (let [its (typed/node-items (typed/node-form node))
-        parsed (nth (typed/defn-clauses its) 2)
-        params (:params (first parsed))
-        names (into [] (keep (fn [p]
-                               (if (= :symbol (typed/node-tag (typed/node-form p)))
-                                 (typed/node-name (typed/node-form p)) nil))
-                             params))]
-    (if (empty? names) ["n"] names)))
-
-(defn- fn-name-of
-  "The defn's own name, for building a call to it."
-  [node]
-  (let [its (typed/node-items (typed/node-form node))]
-    (typed/node-name (typed/node-form (second its)))))
-
 (defn shape-of
-  "The data shape of a defn source: its name and parameter names. Accepts a
-   source string or a quoted bl form (see ensure-src)."
-  [src]
-  (let [node (first (BeamLisp.Reader/read_string (ensure-src src)))]
-    {:name (fn-name-of node) :params (params-of node)}))
+ "Read one plain defn with one unguarded clause and distinct parameters.
+  Destructuring, attributes, guards and multiple clauses require a richer
+  source contract. The output binder `result` is reserved."
+ [src]
+ (let [forms (BeamLisp.Reader/read_string (ensure-src src))
+       _ (when-not (= 1 (count forms)) (throw (ex-info "One source function required" {})))
+       node (rn/node-form (first forms))
+       _ (when-not (= :list (rn/node-tag node)) (throw (ex-info "A defn form is required" {})))
+       items (rn/node-items node)
+       _ (when-not (and (>= (count items) 4) (= "defn" (rn/node-name (rn/node-form (first items))))
+                        (= :symbol (rn/node-tag (rn/node-form (second items)))))
+           (throw (ex-info "A plain defn form is required" {})))
+       parsed (nth (typed/defn-clauses items) 2) clause (first parsed)
+       params (:params clause)
+       _ (when-not (and (= 1 (count parsed)) (nil? (:guard clause)) (seq (:body clause))
+                        (<= (count params) 16) (every? #(= :symbol (rn/node-tag (rn/node-form %))) params))
+           (throw (ex-info "One unguarded clause with up to 16 variable parameters required" {})))
+       names (mapv #(rn/node-name (rn/node-form %)) params)
+       _ (when-not (and (= (count names) (count (set names)))
+                        (every? #(and (not= "result" %) (not= "&" %) (not (String/contains? % "/"))) names))
+           (throw (ex-info "Distinct unqualified parameters required; result is reserved" {})))
+       fn-node (rn/list-node (concat (list (rn/sym-node "fn") (tuple :vector params)) (:body clause)))]
+  {:name (rn/node-name (rn/node-form (second items))) :params names
+   :fn-source (core/pr-str (compiler/datum fn-node))}))
 
 ; ── render an INPUT (a tuple of args) as bl source ──────────────────────────
 
-(defn- lit
-  "One value as bl SOURCE that re-reads to itself. Negatives parenthesised, strings
-   quoted, keywords colon-preserved (str drops it), collections quoted so they read
-   as data literals rather than being evaluated as calls."
-  [val]
-  (cond (and (core/int? val) (< val 0)) (str "(- " (- 0 val) ")")
-        (string? val) (str "\"" val "\"")
-        (nil? val) "nil"
-        (keyword? val) (core/pr-str val)
-        (or (vector? val) (map? val) (set? val) (list? val)) (str "(quote " (core/pr-str val) ")")
-        :else (str val)))
+(defn- lit [value]
+ ;; Reader/printed data handles quotes, backslashes, symbols and containers.
+ (str "(quote " (core/pr-str value) ")"))
 
 (defn- tuple-of
   "A candidate as an arg TUPLE, given `arity`. A vector candidate is the arg LIST
@@ -80,6 +74,7 @@
    ambiguity a vector candidate would otherwise carry."
   [arity cand]
   (cond
+    (= 0 arity) []
     (and (vector? cand) (> arity 1)) cand
     (vector? cand) [cand]
     :else [cand]))
@@ -96,7 +91,7 @@
   (let [s (ensure-src src)
         node (first (BeamLisp.Reader/read_string s))]
     (try
-      {:ok (env/eval (str s "\n(" (fn-name-of node) " " (args-src (count params) cand) ")"))}
+      {:ok (env/eval (str s "\n(" (:name (shape-of s)) " " (args-src (count params) cand) ")"))}
       (catch _ {:raised true}))))
 
 ; ── does the hypothesis hold at a candidate? ────────────────────────────────
@@ -149,8 +144,8 @@
      {:holds true}                                     — no counterexample found
      {:holds false :witness cand :shrunk cand          — refuted, minimal case
       :result v :crash bool}                            — whether it was a crash
-   The property applies to every input by construction; the witness is the simplest
-   input the code fails on. `n` is the sample size for an infinite generator."
+   A successful sample is not a proof. Shrinking seeks a local minimum in the
+   generator domain. `n` controls sampling."
   [src0 pred gen n]
   (let [src (ensure-src src0)
         sh (shape-of src)
@@ -170,74 +165,103 @@
          :result (:result mres)
          :crash (:crash mres)}))))
 
-; ═══════════════════════════════════════════════════════════════════════════
-; PROVE — the behavioural hypothesis, SYMBOLICALLY
-; ═══════════════════════════════════════════════════════════════════════════
-;
-; hypothesis SAMPLES a function's output; prove DISCHARGES the same law with z3.
-; The function lowers to a define-fun (system.smt/defn->define-fun), `result` in
-; the predicate is bound to the call (fname params…), and ∀ inputs. pred becomes
-; one z3 query. A TRUE law over an infinite domain is now :proven (not merely
-; :witnessed); a violation is z3's counterexample. Untranslatable body or
-; predicate ⇒ fall back to the sampled `hypothesis` (honest, never a false z3).
+; A source law means: the target returns, the predicate returns, and its
+; result is exactly true. Crashes remain counterexamples even when `result`
+; is unused. The question contains no textual SMT or invented return sort.
+(defn prepare
+ "Prepare a complete backend-independent source property without executing it."
+ [src0 pred gen]
+ (try
+  (let [src (ensure-src src0) shape (shape-of src) params (:params shape)
+        tuple? (= :tuple (v/gen-tag gen))
+        generators (if tuple? (:gens gen) [gen])
+        _ (when-not (= (count params) (count generators))
+            (throw (ex-info "Generator coordinates must match function arity exactly" {})))
+        inputs (mapv (fn [i]
+                   (or (v/gen-term (nth generators i) (str "property/input/" i))
+                       (throw (ex-info "Generator has no reviewed term-based runtime domain" {:index i}))))
+                 (range (count params)))
+        function (source/prepare-function (:fn-source shape) inputs)
+        _ (when-not (= :translated (:status function)) (throw (ex-info (:reason function) {})))
+        output (:value function)
+        predicate-source (str "(fn [" (params-src params) " result] " (pr-str (v/pred-form pred)) ")")
+        predicate (source/prepare-function predicate-source (conj inputs output))
+        _ (when-not (= :translated (:status predicate)) (throw (ex-info (:reason predicate) {})))
+        property (:value predicate)
+        _ (when-not (= t/Bool (t/sort-of (value/term property)))
+            (throw (ex-info "A source property must return Bool, rather than a truthy value" {})))
+        claim (value/scalar (value/term property) [output property] {})
+        observe (merge (into {} (map-indexed (fn [i x] [(str "input/" i) x]) inputs))
+                        {"result" output "predicate" property})
+        problem (q/prove claim {:id :veritas/source-property :inputs inputs :observe observe
+                 :profile :bl/source-property-v1
+                 :origin {:source src :predicate (pr-str (v/pred-form pred)) :basis :compiler-anf}})]
+   {:status :translated :problem problem :question-identity (identity/hash problem)
+    :function function :predicate predicate :params params :tuple tuple? :generator gen
+    :source-connection {:status :reviewed :basis :compiler-anf
+                        :relation :returns-and-boolean-property :metatheory :not-mechanized}
+    :compiler-proof-authority false})
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false})))
 
-(defn- param-decls
-  "z3 const declarations for `params` under `gen`. A TupleGen zips its children to
-   the params positionally; a scalar gen constrains the single param. Returns
-   {:decls str :assert str} or nil when the gen does not constrain (⇒ sample)."
-  [params gen]
-  (if (= :tuple (v/gen-tag gen))
-    (let [child-cons (core/map-indexed
-                       (fn [i p] (v/gen-constrain (core/nth (:gens gen) i) p)) params)]
-      (if (core/some? (core/some (fn [c] (if (core/nil? c) true nil)) child-cons))
-        nil
-        ; form-command vectors: concatenate, never join
-        {:decls (vec (core/mapcat :decls child-cons))
-         :assert (vec (core/mapcat :assert child-cons))}))
-    (v/gen-constrain gen (core/first params))))
+(defn- execute [anf arguments]
+ ;; Run the very ANF translated to terms. No source interpolation, second
+ ;; name resolution, global defn publication or serialization of arguments.
+ (try
+  {:status :returned :value
+   (lower/eval-anf (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" (System/unique_integer (list :positive))))
+    {:op :apply :fn anf :args (mapv (fn [x] {:op :lit :val x}) arguments) :ann {}})}
+  (catch error {:status :raised :reason (ex-message error)})))
+
+(defn- runtime-replay [prepared answer]
+ (let [n (count (:params prepared)) observations (:witness answer)
+       fields (mapv #(get observations (str "input/" %)) (range n))
+       concrete? (every? #(and (= true (:defined %)) (= true (:within %))
+                              (not (map? (:value %)))) fields)
+       args (mapv :value fields)
+       witness (if (:tuple prepared) args (first args))
+       in-domain? (and concrete? (v/gen-domain? (:generator prepared) witness))]
+  (if-not in-domain?
+   {:status :unavailable :reason :input-observations-or-domain}
+   (let [actual (execute (get-in prepared [:function :anf]) args)
+         check (when (= :returned (:status actual))
+                 (execute (get-in prepared [:predicate :anf]) (conj args (:value actual))))
+         predicted-result (get observations "result") predicted-property (get observations "predicate")
+         matches? (and
+           (= (= :returned (:status actual)) (:defined predicted-result))
+           (or (= :raised (:status actual))
+               (and (= (:value actual) (:value predicted-result))
+                    (= (= :returned (:status check)) (:defined predicted-property))
+                    (or (= :raised (:status check)) (= (:value check) (:value predicted-property)))))
+         fails? (or (= :raised (:status actual)) (= :raised (:status check)) (not= true (:value check)))]
+    {:status (if (and matches? fails?) :reproduced :mismatch)
+     :witness witness :arguments args :target actual :predicate check
+     :holds (not fails?) :crash (= :raised (:status actual)) :matches-term-model matches?}))))
 
 (defn prove
-  "Prove a behavioural law `pred` (a QUOTED bl form over the input params and `result`) about a
-   function `src` symbolically. `gen` is the input domain (a scalar gen for a
-   1-arg fn, a tuple-of for multi-arg). `ret-sort` (default \"Int\") is the
-   function's return sort — use \"Bool\" for a predicate-returning fn. Returns a
-   modal verdict:
-     :proven :oracle     — ∀ inputs the law holds (z3 unsat on its negation)
-     :refuted :oracle    — a counterexample input (+ :witness)
-     falls back to (hypothesis …) sampled verdict when not translatable."
-  ([port src pred gen] (prove port src pred gen "Int"))
-  ([port src0 pred gen ret-sort]
-   (let [src (ensure-src src0)
-         sh (shape-of src)
-         params (:params sh)
-         fname (:name sh)
-         def-fn (smt/defn->define-fun src ret-sort)
-         con (param-decls params gen)
-         params-list (map symbol params)
-         ; the predicate over params + result; result := the function call.
-         pred-smt (let [r (smt/of-source (core/set (core/conj params "result")) (pr-str (v/pred-form pred)))]
-                    (if (or (core/nil? r) (= r :untranslatable)) nil r))]
-     (if (or (= def-fn :untranslatable) (core/nil? con) (core/nil? pred-smt))
-       ; not fully symbolic → the sampled hypothesis (honest fallback)
-       (let [h (hypothesis src pred gen 64)]
-         (if (:holds h)
-           {:modality :witnessed :engine :sample :tried (:tried h)}
-           {:modality :refuted :engine :sample :witness (:shrunk h) :crash (:crash h)}))
-       ; fully symbolic: define f, bind result=call, prove ∀ inputs. pred
-       (let [call (apply list (symbol fname) params-list)
-             cmds (concat [(smtlib/raw "(set-option :timeout 3000)")]
-                          [def-fn]
-                          (:decls con) (:assert con)
-                          [(smtlib/declare-const 'result (symbol ret-sort))]
-                          [(smtlib/assert `(= result ~call))]
-                          [(smtlib/assert `(not ~pred-smt))])
-             r (oracle/ask (oracle/obligation :prove cmds) true)]
-         (core/cond
-           (oracle/proven? r) {:modality :proven :engine :oracle}
-           (oracle/refuted? r)
-             (let [m (v/parse-model (:raw-model r))
-                   wit (if (= :tuple (v/gen-tag gen))
-                         (into [] (core/map (fn [p] (core/get m p)) params))
-                         (core/get m (core/first params)))]
-               {:modality :refuted :engine :oracle :witness wit})
-           :else {:modality :unknown :engine :oracle}))))))
+ "Check a source law using {:backend :z3|:oxiz}, returning its full term
+  question and answer. Native UNSAT is :solver-claim, never a checked source
+  proof. A refutation requires term replay and execution of the translated
+  compiler ANF. Unsupported source returns :unsupported; :fallback :sample
+  explicitly requests execution and sampling instead."
+ [opts src pred gen]
+ (when-not (map? opts) (throw (ex-info "Property checking requires an options map, not a legacy solver port" {})))
+ (when-not (contains? #{nil :sample} (:fallback opts)) (throw (ex-info "Unknown source-property fallback" {})))
+ (let [prepared (prepare src pred gen)]
+  (if-not (= :translated (:status prepared))
+   (if (= :sample (:fallback opts))
+    (let [h (hypothesis src pred gen (get opts :sample-n 64))]
+     (merge {:modality (if (:holds h) :witnessed :refuted) :engine :sample
+             :symbolic prepared :compiler-proof-authority false}
+            (if (:holds h) (select-keys h [:tried]) {:witness (:shrunk h) :crash (:crash h) :result (:result h)})))
+    {:modality :unsupported :engine :terms :reason (:reason prepared) :preparation prepared :compiler-proof-authority false})
+   (let [answer (logic/run opts (:problem prepared))
+         replay (when (= :refuted (:verdict answer)) (runtime-replay prepared answer))
+         modality (case (:verdict answer)
+                    :proved :solver-claim
+                    :refuted (if (= :reproduced (:status replay)) :refuted :candidate)
+                    :candidate :candidate :vacuous :vacuous :unsupported :unsupported :error :error :unknown)
+         base {:modality modality :engine :terms :question (:problem prepared)
+               :question-identity (:question-identity prepared) :answer answer
+               :source-connection (:source-connection prepared) :runtime-replay replay :compiler-proof-authority false}]
+    (if (= :reproduced (:status replay))
+     (merge base {:witness (:witness replay) :result (get-in replay [:target :value]) :crash (:crash replay)}) base)))))

@@ -1,7 +1,7 @@
 (ns formal.source
  (:require [compiler :as compiler] [system.ir :as ir]
            [formal.term :as t] [formal.value :as v] [formal.data :as d]
-           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs]))
+           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs] [formal.anf-function :as anf-function]))
 
 ;; Consume the compiler's resolved ANF, never a second surface-language walker.
 ;; This initial source environment allows the declared variables and a reviewed
@@ -137,3 +137,30 @@
        (merge opts {:profile :bl/int-bool-intrinsics-v1
                     :origin {:left left :right right :basis :compiler-anf}}))}
    {:status :unsupported :left a :right b})))
+
+(defn prepare-function
+ "Translate one anonymous BL function through real compiler ANF. Ordered
+  semantic inputs bind its compiler parameters positionally. Execution is
+  separate; this reviewed translation grants no compiler proof authority."
+ ([source inputs] (prepare-function source inputs {}))
+ ([source inputs opts]
+  (try
+   (let [forms (BeamLisp.Reader/read_string source)
+         _ (when-not (and (= 1 (count forms)) (vector? inputs) (<= (count inputs) 16))
+             (refuse "one function and at most 16 ordered semantic inputs required" {}))
+         inputs (mapv v/lift inputs)
+         _ (doseq [value inputs]
+             (let [kind (get-in value [:domain :kind])
+                   sort (if (= :nullable kind) (get-in value [:domain :item-sort])
+                          (when (= :scalar kind) (t/sort-of (v/term value))))]
+              (when-not (contains? #{[:int] [:bool] [:string]} sort)
+               (refuse "function inputs require a reviewed runtime scalar profile" {}))))
+         anf (compiler/compile (first forms) (compiler/new-env "formal.source.intrinsics"))
+         clause (anf-function/clause! anf (count inputs))
+         bindings (into {} (map-indexed (fn [i pattern] [(:name pattern) (nth inputs i)]) (:pats clause)))
+         value (lower (:body clause) bindings opts)]
+    {:status :translated :value value :inputs inputs :source source :anf anf
+     :basis :compiler-anf :profile :bl/int-bool-intrinsics-v1 :intrinsic-profile intrinsics/profile
+     :scope (v/scope value) :assurance :reviewed-anf-to-terms :compiler-proof-authority false})
+   (catch error {:status :unsupported :source source :reason (ex-message error)
+                 :basis :compiler-anf :profile :bl/int-bool-intrinsics-v1}))))

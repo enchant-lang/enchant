@@ -1,0 +1,117 @@
+(ns veritas.source-terms-test
+ (:require [veritas.property :as p] [veritas :as v] [formal.source :as source]
+           [formal.term :as t] [formal.value :as value] [formal.query :as q]
+           [formal.evaluate :as evaluate] [oracle]))
+
+(def floor '(defn floor [c] (if (< c 0) 0 c)))
+(def options-without-worker {:worker "/unavailable/formal-worker"})
+
+(deftest one-source-question-is-independent-of-the-backend
+ (let [answers (mapv #(p/prove {:backend %} floor '(>= result 0) (v/int-of -1000000 1000000)) [:z3 :oxiz])]
+  (is (apply = (map :question-identity answers)))
+  (is (apply = (map :question answers)))
+  (doseq [r answers]
+   (is (= :solver-claim (:modality r)) (pr-str r))
+   (is (= :proved (get-in r [:answer :verdict])))
+   (is (= :not-checked (get-in r [:answer :certificate :status])))
+   (is (= :reviewed (get-in r [:source-connection :status])))
+   (is (= false (:compiler-proof-authority r)))
+   (is (= (:question r) (q/validate! (:question r)))))))
+
+(deftest a-source-counterexample-must-reproduce-in-beam
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (p/prove {:backend engine} floor '(> result 0) (v/int-of -1000000 1000000))]
+   (is (= :refuted (:modality r)) (pr-str r))
+   (is (<= (:witness r) 0))
+   (is (= 0 (:result r)))
+   (is (= false (:crash r)))
+   (is (= :valid (get-in r [:answer :validation :status])))
+   (is (= :reproduced (get-in r [:runtime-replay :status])))
+   (is (= true (get-in r [:runtime-replay :matches-term-model]))))))
+
+(deftest return-sorts-are-inferred-and-false-is-a-real-value
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (p/prove {:backend engine} '(defn negate [b] (not b)) '(= result b) (v/one-of false))]
+   (is (= :refuted (:modality r)) (pr-str r))
+   (is (= false (:witness r)))
+   (is (= true (:result r)))
+   (is (= :reproduced (get-in r [:runtime-replay :status]))))))
+
+(deftest tuples-preserve-source-argument-order-and-domain
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (p/prove {:backend engine} '(defn sub [first second] (- first second)) '(>= result 0)
+                   (v/tuple-of (v/int-of 40 41) (v/int-of 50 51)))
+        [a b] (:witness r)]
+   (is (= :refuted (:modality r)) (pr-str r))
+   (is (<= 40 a 41)) (is (<= 50 b 51))
+   (is (= (- a b) (:result r)))
+   (is (= [a b] (get-in r [:runtime-replay :arguments]))))))
+
+(deftest an-unused-result-cannot-hide-a-target-crash
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (p/prove {:backend engine} '(defn boom [n] (quot n 0)) true (v/int-of 1 100))]
+   (is (= :refuted (:modality r)) (pr-str r))
+   (is (= true (:crash r)))
+   (is (= :raised (get-in r [:runtime-replay :target :status])))
+   (is (= :reproduced (get-in r [:runtime-replay :status]))))))
+
+(deftest predicate-crashes-are-distinct-from-target-crashes
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (p/prove {:backend engine} '(defn ident [n] n) '(= (quot result 0) 0) (v/int-of 1 10))]
+   (is (= :refuted (:modality r)) (pr-str r))
+   (is (= false (:crash r)))
+   (is (= :returned (get-in r [:runtime-replay :target :status])))
+   (is (= :raised (get-in r [:runtime-replay :predicate :status]))))))
+
+(deftest unselected-branches-do-not-raise
+ (doseq [engine [:z3 :oxiz]]
+  (let [r (p/prove {:backend engine} '(defn safe [n] (if (= n 0) 0 (quot 1 n)))
+                   '(= result 0) (v/one-of 0))]
+   (is (= :solver-claim (:modality r)) (pr-str r)))))
+
+(deftest printed-data-and-symbolic-replay-preserve-strings
+ (let [text "quote: \" slash: \\ newline:\nλ"]
+  (is (:holds (p/hypothesis '(defn ident [s] s) '(= result s) (v/one-of text) 1)))
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (p/prove {:backend engine} '(defn ident [s] s) '(not (= result s)) (v/one-of text))]
+    (is (= :refuted (:modality r)) (pr-str r))
+    (is (= text (:witness r))) (is (= text (:result r)))))))
+
+(deftest empty-domains-are-vacuous-and-unknown-stays-unknown
+ (doseq [engine [:z3 :oxiz]]
+  (is (= :vacuous (:modality (p/prove {:backend engine} '(defn ident [n] n) false (v/one-of))))))
+ (let [r (oracle/with-query-handler
+          (fn [question _] (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown}))
+          #(p/prove (assoc options-without-worker :fallback :sample) floor '(>= result 0) (v/int-of 0 10)))]
+  (is (= :unknown (:modality r)))
+  (is (= :terms (:engine r)))
+  (is (= nil (:runtime-replay r)))))
+
+(deftest symbolic-refusal-never-silently-starts-sampling
+ (let [r (p/prove {} '(defn ident [n] n) '(int? result) (v/int-of 0 10))
+       sampled (p/prove {:fallback :sample :sample-n 5} '(defn ident [n] n) '(int? result) (v/int-of 0 10))]
+  (is (= :unsupported (:modality r)))
+  (is (= :witnessed (:modality sampled)))
+  (is (= :sample (:engine sampled)))
+  (is (= :unsupported (get-in sampled [:symbolic :status])))))
+
+(deftest reviewed-function-inputs-are-positional-and-hygienic
+ (let [x (t/variable "role" t/Int)
+       r (source/prepare-function "(fn [renamed] (let [role 10] (+ renamed role)))" [x])]
+  (is (= :translated (:status r)) (pr-str r))
+  (is (= 17 (evaluate/value (value/term (:value r)) {"role" 7}))))
+ (doseq [s ["(fn [x] (foreign/+ x 1))" "(fn [x] (println x))" "(fn [[x]] x)"
+            "(fn ([x] x) ([x y] y))" "(fn [x] (recur x))" "(fn [x] (/ x 2))"]]
+  (is (= :unsupported (:status (source/prepare-function s [(t/int 7)]))) s)))
+
+(deftest misleading-or-ambiguous-shapes-are-refused
+ (doseq [[s g] [["(defn ident [n] n) (println 1)" (v/int-of 0 10)]
+                 ["(defn sub [a b] (- a b))" (v/int-of 0 10)]
+                 ["(defn ident [a] a)" (v/tuple-of (v/int-of 0 10) (v/int-of 0 10))]
+                 ["(defn ident [result] result)" (v/int-of 0 10)]
+                 ["(defn ident [[n]] n)" (v/int-of 0 10)]
+                 ["(defn ident [a] a)" (v/real-of 0.0 1.0)]]]
+  (is (= :unsupported (:status (p/prepare s true g))) s))
+ (is (= :unsupported (:status (p/prepare '(defn ident [n] n) 1 (v/int-of 0 10)))))
+ (is (= :translated (:status (p/prepare '(defn constant [] 1) '(= result 1) (v/tuple-of)))))))
+(run-tests)

@@ -37,7 +37,7 @@
 
 (ns veritas
   (:require [z3] [oracle] [core] [env] [smt :as smtlib] [system.smt :as smt] [reader-node :as rn]
-            [system.model :as model] [typed]))
+            [system.model :as model] [typed] [formal.term :as term] [formal.value :as value]))
 
 ; ═════════════════════════════════════════════════════════════════════════
 ; GEN — typed generators as records; the Gen protocol dispatches on their type
@@ -252,6 +252,35 @@
                 (into {} (concat (if (empty? vs) [] [[:variants vs]])
                                  (if (empty? cs) [] [[:colls cs]]))))})))
   (gen-tag [g] :tuple))
+
+; Typed domains are independent of gen-constrain's legacy SMT commands.
+; A backend receives these exact values through formal.query. Returning nil
+; declines a runtime profile; it never substitutes an unrelated solver sort.
+(defprotocol GenTerms (gen-term [g name]))
+(extend-type IntGen GenTerms
+ (gen-term [g name]
+  (when (and (int? (:lo g)) (int? (:hi g)))
+   (let [x (term/variable name term/Int)]
+    (value/make x {:constraints [(term/ge x (term/int (:lo g))) (term/le x (term/int (:hi g)))]
+                   :domain {:kind :scalar :profile :bl/bounded-integer-generator-v1}})))))
+(extend-type BoolGen GenTerms
+ (gen-term [g name] (value/lift (term/variable name term/Bool))))
+(extend-type OneOf GenTerms
+ (gen-term [g name]
+  (let [xs (:values g)
+        sort (cond (every? int? xs) term/Int
+                   (every? #(or (= true %) (= false %)) xs) term/Bool
+                   (every? string? xs) term/String :else nil)]
+   (when sort
+    (let [x (term/variable name sort)]
+     (value/make x {:constraints [(term/any (mapv #(term/eq x (term/literal sort %)) xs))]
+                    :domain {:kind :scalar :profile :bl/finite-scalar-generator-v1}}))))))
+(extend-type AnyGen GenTerms (gen-term [g name] nil))
+(extend-type RealGen GenTerms (gen-term [g name] nil))
+(extend-type StringGen GenTerms (gen-term [g name] nil))
+(extend-type EnumGen GenTerms (gen-term [g name] nil))
+(extend-type CollGen GenTerms (gen-term [g name] nil))
+(extend-type TupleGen GenTerms (gen-term [g name] nil))
 
 ; ── the public gen constructors ─────────────────────────────────────────────
 
