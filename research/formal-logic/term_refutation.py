@@ -200,7 +200,12 @@ PROOF = "\n\ndef packetProof : Proof :=\n"
 MAP_I = "\n\ndef integerMap (integers : Nat → Int) (index : Nat) : Int := integers (("
 MAP_B = "\n\ndef booleanMap (booleans : Nat → Bool) (index : Nat) : Bool := booleans (("
 MAP_END = " : List Nat)[index]?.getD 0)"
-SIMPS = "Term.eval, strict₂, partial₂, divide, modulus"
+# Canonicalize Boolean connective permutations before arithmetic closure.
+# This is untrusted proof search: original data decoding, Lean checking and
+# theorem dependency gates still determine acceptance.
+SIMPS = ("Term.eval, strict₂, partial₂, divide, modulus, "
+         "Bool.and_assoc, Bool.and_comm, Bool.and_left_comm, "
+         "Bool.or_assoc, Bool.or_comm, Bool.or_left_comm")
 
 
 def tail(packet, integers, booleans):
