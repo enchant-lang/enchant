@@ -1,0 +1,40 @@
+(ns formal.core-loops-recheck
+ (:require [formal.api :as formal] [formal.identity :as identity] [formal.term :as t]
+           [formal.runtime-artifact :as artifact] [interop]))
+
+;; Read a bounded, trusted repository archive produced by the export script.
+(def args (vec *command-line-args*))
+(assert (= 1 (count args)))
+(def directory (Path/expand (first args)))
+(def index (interop/json-> (File/read! (Path/join directory "summary.json"))))
+(assert (= "enchant.formal.core-loop-examples-v1" (get index "schema")))
+(def path (Path/join directory "core-loops.etf"))
+(assert (<= (:size (File/stat! path)) 8388608))
+(def bytes (File/read! path))
+(assert (= (get-in index ["archive" "bytes"]) (erlang/byte_size bytes)))
+(assert (= (get-in index ["archive" "sha256"]) (artifact/digest bytes)))
+(def decoded (erlang/binary_to_term bytes (list :used)))
+(assert (= (elem decoded 1) (erlang/byte_size bytes)))
+(def archive (elem decoded 0))
+(assert (= :enchant.formal.core-loop-examples-v1 (:schema archive)))
+
+(def results
+ (mapv (fn [row]
+         (let [packet (:packet row) definition (:definition row) proof (:certificate row)
+               check (formal/check-core-loop-data definition proof packet)
+               changed (identity/seal (update-in packet [:policy :requires] t/not))
+               rejected (formal/check-core-loop-data definition proof changed)]
+          (when-not (and (= :checked-data-connection (:status check)) (= :rejected (:status rejected)))
+           (println {:id (:id row) :original check :changed rejected})
+           (throw (ex-info "Fresh loop replay did not match the expected statuses" {:id (:id row)})))
+          {:id (:id row) :packet (:packet check) :subject (:subject check) :status (:status check)
+           :changed-precondition (:status rejected) :kernel-execution (:kernel-execution check)}))
+       (:rows archive)))
+(def out (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(File/mkdir_p! out)
+(File/write! (Path/join out "core-loops-fresh.json") (interop/->json
+ {:schema :enchant.formal.core-loop-recheck-v1 :rows results
+  :archive-sha256 (get-in index ["archive" "sha256"])
+  :source-commit (trim (elem (System/cmd "git" (list "rev-parse" "HEAD")) 0))
+  :kernel-execution :not-run :compiler-proof-authority false}))
+(println {:subjects (count results) :kernel-execution :not-run})

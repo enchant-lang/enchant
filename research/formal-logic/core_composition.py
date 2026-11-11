@@ -1,6 +1,7 @@
 """Compile fresh Core/term premises and link a checked composition theorem."""
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import tempfile

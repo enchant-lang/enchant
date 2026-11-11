@@ -1,0 +1,46 @@
+(ns formal.core-loops-test
+ (:require [formal.api :as formal] [formal.identity :as identity] [formal.logic :as logic]
+           [formal.term :as t] [formal.core-loop-examples :as examples]))
+
+(defn prove [definition]
+ (let [question (formal/core-loop-question definition)]
+  (when (= :ready (:status question)) (formal/certify (:problem question)))))
+
+(deftest exact-loop-question-binds-both-programs-and-its-policy
+ (doseq [row (examples/examples)]
+  (let [definition (:definition row) certificate (:certificate (prove definition))
+        exported (formal/core-loop-data definition certificate) packet (:packet exported)]
+   (is (= :ready (:status exported)) (pr-str [(:id row) (:reason exported)]))
+   (is (identity/valid? packet))
+   (is (= (:identity definition) (get-in packet [:subject :identity])))
+   (is (= (get-in packet [:subject :question]) (get-in packet [:entailment :normalized :question])))
+   (is (= (get-in packet [:initializer :inputs]) (get-in packet [:controller :inputs])))
+   (is (= :not-run (:kernel-execution exported)))
+   (is (= false (:compiler-proof-authority exported)))
+   (is (= :checked-data-connection (:status (formal/check-core-loop-data definition certificate packet)))))))
+
+(deftest exact-subject-check-refuses-resealed-policy-and-control-changes
+ (let [definition (:definition (first (examples/examples))) certificate (:certificate (prove definition))
+       packet (:packet (formal/core-loop-data definition certificate))]
+  (doseq [changed [(assoc-in packet [:policy :rank] [(t/int 0)])
+                   (assoc-in packet [:policy :invariant] (t/bool true))
+                   (assoc-in packet [:policy :ensures] (t/bool false))
+                   (update-in packet [:program :state] #(vec (reverse %)))
+                   (assoc packet :controller (:initializer packet))]]
+   (is (= :rejected (:status (formal/check-core-loop-data definition certificate (identity/seal changed))))))
+  (is (not= :ready (:status (formal/core-loop-data (examples/growing) certificate))))))
+
+(deftest both-native-backends-refute-the-whole-controller-growth-claim
+ (let [definition (examples/growing) question (formal/core-loop-question definition)]
+  (is (= :ready (:status question)))
+  (is (not= :checked (:status (prove definition))))
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (logic/run {:backend engine} (:problem question))]
+    (is (= :refuted (:verdict answer)) (pr-str [engine (:verdict answer)]))
+    (is (= :valid (get-in answer [:validation :status])))))))
+
+(deftest partial-payloads-can-exceed-the-whole-controller-proof-fragment
+ (let [definition (examples/unreachable-partial-payload)
+       path-proof (formal/verify-loop definition) whole-proof (prove definition)]
+  (is (= :checked (:status path-proof)))
+  (is (contains? #{:unsupported :checked} (:status whole-proof)))))
