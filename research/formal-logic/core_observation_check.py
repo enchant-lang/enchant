@@ -35,13 +35,18 @@ class ObservationDecoder(core.Decoder):
         self.at = 0
 
 
-def canonical_identity(packet):
+def typed_packet(packet):
     observation = packet['observation']
     data = {**packet, 'profile': k.Keyword(packet['profile']), 'identity-profile': k.Keyword(packet['identity-profile']),
             'model': actor.typed_model(packet['model']),
             'observation': {**observation, **{field: k.Keyword(observation[field]) for field in ('profile', 'adapter', 'projection')}},
             'frames': [{**frame, 'kind': k.Keyword(frame['kind']), 'invariant': k.Keyword(frame['invariant']),
                         **({'error': k.Keyword(frame['error'])} if 'error' in frame else {})} for frame in packet['frames']]}
+    return data
+
+
+def canonical_identity(packet):
+    data = typed_packet(packet)
     del data['identity']
     return data_digest(data)
 

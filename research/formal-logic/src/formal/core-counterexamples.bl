@@ -1,0 +1,67 @@
+(ns formal.core-counterexamples
+ (:require [formal.protocol-trace :as bounded] [formal.core-observations :as observations]
+           [formal.witness :as witness] [formal.query :as q] [formal.term :as t]
+           [formal.identity :as identity]))
+
+(def profile :bl/core-protocol-counterexample-data-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.core-counterexamples: " reason) {}))))
+(defn- fields [record] (mapv (fn [name] [name (get record name)]) (sort (keys record))))
+
+(defn- witness-question [subject problem]
+ (q/sat {:id (:identity subject) :profile profile :scope (:scope problem)
+         :relation :original-bounded-query-counterexample
+         :origin {:subject (:identity subject) :query (identity/hash problem)}
+         :assumptions (conj (:assertions problem) (:counterexample problem))}))
+
+(defn prepare
+ "Bind an original source trace question, completed native witness and a
+  complete owned observation as portable data for an independent check."
+ [subject native receipt]
+ (try
+  (require! (bounded/source-profile? (:profile subject)) "source protocol trace required")
+  (require! (and (= :sat (:solver-status native)) (= :prove (:mode native)) (= :query (:phase native))
+                 (contains? #{"z3" "oxiz"} (get-in native [:backend :name]))) "native proof-query counterexample required")
+  (let [prepared (bounded/prepare subject)
+        _ (require! (= :ready (:status prepared)) (:reason prepared))
+        replayed (bounded/replay-counterexample subject native)
+        _ (require! (= :valid (:status replayed)) (str "original counterexample replay failed (" (:status replayed) ")"))
+        _ (require! (and (= (:initial replayed) (:initial receipt)) (= (:events replayed) (:events receipt)))
+                    "receipt initial state and events differ from the query witness")
+        recorded (observations/prepare (:protocol subject) receipt)
+        _ (require! (= :ready (:status recorded)) (:reason recorded))
+        problem (:problem prepared) trace (:trace prepared)
+        question (witness-question subject problem)
+        variables (t/variables (q/roots problem))
+        values (:assignments replayed)
+        needed (mapv :data (t/variables (mapv :term (:assertions question))))
+        made (witness/prepare question (select-keys values needed))
+        _ (require! (= :ready (:status made)) (:reason made))
+        handlers (get-in recorded [:packet :model :handlers])
+        layout {:states (mapv fields (:states trace)) :choices (:choices trace)
+                :inputs (mapv (fn [at]
+                                (mapv (fn [index] [(:name (nth handlers index)) (fields (nth at index))])
+                                      (range (count handlers)))) (:inputs trace))}
+        bindings (mapv (fn [variable]
+                         (let [name (:data variable) provenance (get-in replayed [:variable-provenance name])]
+                          [name (:sort variable) (get values name) (:source provenance) (:native-availability provenance)]))
+                       (sort-by :data variables))
+        packet (identity/seal
+                {:formal/core-counterexample-data 1 :profile profile
+                 :subject {:kind :protocol-trace :identity (:identity subject) :profile (:profile subject)
+                           :protocol (get-in subject [:protocol :identity]) :depth (:depth subject) :query (identity/hash problem)}
+                 :discovery {:engine (case (get-in native [:backend :name]) "z3" :z3 "oxiz" :oxiz)
+                             :result (identity/hash native) :backend (identity/hash (:identity native))}
+                 :claim (:claim problem) :witness (:packet made) :bindings bindings :layout layout
+                 :execution (:packet recorded)})]
+   {:status :ready :packet packet :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))
+
+(defn check-data [subject native receipt packet]
+ (try
+  (let [fresh (prepare subject native receipt)]
+   (require! (= :ready (:status fresh)) (:reason fresh))
+   (require! (and (identity/valid? packet) (= packet (:packet fresh))) "packet differs from original query, witness and receipt")
+   {:status :checked-data-connection :packet (:identity packet) :subject (:identity subject)
+    :receipt (:identity receipt) :kernel-execution :not-run :compiler-proof-authority false})
+  (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run :compiler-proof-authority false})))

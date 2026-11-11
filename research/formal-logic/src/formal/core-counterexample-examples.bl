@@ -1,0 +1,51 @@
+(ns formal.core-counterexample-examples (:require [formal.api :as formal] [formal.term :as t]))
+
+(defn specifications []
+ [{:id "overdraft" :depth 1
+   :spec {:state {"balance" t/Int "flag" t/Bool}
+          :init (fn [s] (t/all [(t/eq (get s "balance") (t/int 0)) (get s "flag")]))
+          :invariant (fn [s] (t/ge (get s "balance") (t/int 0)))
+          :handlers [{:name "withdraw" :inputs {"amount" t/Int "ignored" t/Bool}
+                      :assumptions (fn [_ in] [(t/ge (get in "amount") (t/int 1))])
+                      :source "(fn [s m] (assoc s \"balance\" (- (get s \"balance\") (get m \"amount\"))))"}]}}
+  {:id "later-prefix" :depth 2
+   :spec {:state {"n" t/Int} :init (fn [s] (t/eq (get s "n") (t/int 0)))
+          :invariant (fn [s] (t/lt (get s "n") (t/int 2)))
+          :handlers [{:name "tick" :source "(fn [s m] (assoc s \"n\" (inc (get s \"n\"))))"}]}}
+  {:id "empty-failure" :depth 2
+   :spec {:state {} :handlers [{:name "attempt" :source "(fn [s m] (do (quot 1 0) {}))"}]}}
+  {:id "initial-violation" :depth 0
+   :spec {:state {"n" t/Int} :init (fn [s] (t/eq (get s "n") (t/int 0)))
+          :invariant (fn [s] (t/gt (get s "n") (t/int 0))) :handlers []}}
+  {:id "mixed-message-types" :depth 1
+   :spec {:state {"done" t/Bool "n" t/Int}
+          :init (fn [s] (t/all [(t/not (get s "done")) (t/eq (get s "n") (t/int 0))]))
+          :invariant (fn [s] (t/ge (get s "n") (t/int 0)))
+          :handlers [{:name "choose" :inputs {"value" t/Bool "unused" t/Int}
+                      :source "(fn [s m] (if (get m \"value\") (assoc s \"done\" true \"n\" -1) s))"}
+                     {:name "set" :inputs {"value" t/Int}
+                      :source "(fn [s m] (assoc s \"n\" (get m \"value\")))"}]}}
+  {:id "context-overdraft" :depth 1
+   :spec {:bindings :closed-records :state {"n" t/Int}
+          :init (fn [s] (t/eq (get s "n") (t/int 0)))
+          :invariant (fn [s] (t/ge (get s "n") (t/int 0)))
+          :handlers [{:name "subtract" :inputs {"amount" t/Int}
+                      :assumptions (fn [_ in] [(t/gt (get in "amount") (t/int 0))])
+                      :source "(fn [s m] (assoc s \"n\" (- (get s \"n\") (get m \"amount\"))))"}]}}])
+
+(defn subject [row]
+ (formal/protocol-trace (formal/source-protocol (assoc (:spec row) :name (:id row))) (:depth row)))
+
+(defn discover [engine subject]
+ (let [answer (formal/check {:backend engine :search {:nodes 128 :rows 128}} subject)]
+  (assert (= :refuted (:status answer)) (pr-str answer))
+  (get-in answer [:backend :property])))
+
+(defn sample [engine]
+ (let [subject (subject (first (specifications))) native (discover engine subject)
+       observed (formal/observe-protocol-counterexample subject native)
+       receipt (:receipt observed)
+       made (formal/core-protocol-counterexample-data subject native receipt)]
+  (assert (= :observed (:status observed)) (pr-str observed))
+  (assert (= :ready (:status made)) (pr-str made))
+  {:subject subject :native native :receipt receipt :packet (:packet made)}))
