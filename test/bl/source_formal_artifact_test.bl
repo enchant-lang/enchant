@@ -1,0 +1,24 @@
+(ns source-formal-artifact-test (:require [reload.generation :as generation]))
+
+(defn graph []
+ (generation/prepare!
+  {:application-id "packaged-formal-source"
+   :stable-namespaces #{"formal.logic" "formal.query" "formal.term"}
+   :sources {"packaged.source"
+    (str "(ns packaged.source (:require [formal.logic :as logic] [formal.query :as q] [formal.term :as t])) "
+         "(defn answer [engine] "
+         " (let [x (t/variable \"source.packaged.x\" t/Int)] "
+         "  (logic/run {:backend engine} (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {\"x\" x}}))))")}}))
+
+(deftest selected-source-calls-use-the-packaged-worker-and-retire-their-native-owners
+ (let [g (graph)]
+  (try
+   (doseq [engine [:z3 :oxiz]]
+    (let [answer (generation/invoke! g "packaged.source/answer" [engine])]
+     (is (= :sat (:verdict answer)) (pr-str answer))
+     (is (= :valid (get-in answer [:validation :status])))
+     (is (= 7 (get-in answer [:witness "x"])))
+     (is (= :sdk (get-in answer [:identity :artifacts :worker :origin])))
+     (is (= :not-checked (get-in answer [:certificate :status])))))
+   (is (= :retired (:status (generation/retire! g))))
+   (finally (generation/retire! g)))))
