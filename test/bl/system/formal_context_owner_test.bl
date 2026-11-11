@@ -1,0 +1,64 @@
+(ns system.formal-context-owner-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
+           [formal.backend :as backend] [oracle]))
+
+(def false-goal (q/prove (t/bool false) {:vacuity :allow}))
+(defn raw-load-false [session]
+ (let [term (t/bool false) exported (t/export (t/registry) [term])
+       id (get-in exported [:registry :ids term])]
+  (backend/invoke session
+   (tuple :load 0 (backend/native-data (:nodes exported))
+          (backend/native-data [["raw-false" id]])))))
+
+(deftest raw-native-assumptions-cannot-silently-become-a-portable-question
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (is (:ok (raw-load-false session)))
+    (let [answer (logic/solve-in session false-goal)]
+     (is (= :error (:verdict answer)) (pr-str [engine answer]))
+     (is (= :frontend (:phase answer)))
+     (is (= :not-run (:solver-status answer))))
+    (is (:ok (backend/reset! session)))
+    (is (= :refuted (:verdict (logic/solve-in session false-goal))))))))
+
+(deftest portable-question-context-comes-from-the-owner-not-a-client-atom
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (let [x (t/variable "owned.x" t/Int) retained (t/eq x (t/int 7)) seen (atom nil)]
+     (is (:ok (logic/load! session [(q/assertion "known-x" retained)])))
+     (swap! (:state session) assoc :assertions [])
+     (let [answer (oracle/with-query-handler
+                   (fn [whole _execute]
+                    (reset! seen whole)
+                    (oracle/query-answer whole {:phase :query :solver-status :unknown}))
+                   (fn [] (logic/solve-in session (q/prove retained))))]
+      (is (= :unknown (:verdict answer)))
+      (is (= [retained] (mapv :term (:assertions @seen))))
+      (is (= ["context/0/known-x"] (get-in @seen [:context :assertions])))))))))
+
+(deftest native-registry-and-generation-are-owned-even-if-a-client-mirror-is-corrupted
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (is (= :refuted (:verdict (logic/solve-in session false-goal))))
+    (swap! (:state session) assoc :generation 999 :registry nil)
+    (let [answer (logic/solve-in session false-goal)]
+     (is (= :refuted (:verdict answer)) (pr-str [engine answer])))))))
+
+(deftest restoring-a-client-mirror-cannot-restore-the-native-context-of-a-fallback
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (is (= :refuted (:verdict (logic/solve-in session false-goal))))
+    (let [before @(:state session)
+          answer (oracle/with-query-handler
+                  (fn [whole execute]
+                   (logic/load! session [(q/assertion "changed" (t/bool false))])
+                   (reset! (:state session) before)
+                   (oracle/query-answer whole (execute)))
+                  (fn [] (logic/solve-in session false-goal)))]
+     (is (= :error (:verdict answer)) (pr-str [engine answer]))
+     (is (= :not-run (:solver-status answer)))
+     (is (String/contains? (or (:error answer) "") "context changed")))))))
