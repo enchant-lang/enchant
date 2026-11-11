@@ -86,6 +86,9 @@ report = {
                 'viewports': [{'width': 390, 'height': 844, 'mobile': True},
                               {'width': 1440, 'height': 1000, 'mobile': False}]},
     'visual_review': visual, 'image_sha256': images, 'host': host,
+    'capture_evidence_sha256': {name: sha(E / name) for name in
+                               ('CAPTURE-NOTE.md', 'browser-owner-diagnosis/probe.mjs',
+                                'browser-owner-diagnosis/owner-nav.json')},
     'persistent_owner': {'deliverable': 'live formal-logic dossier', 'unit': 'work-enchant-formal-review.service',
                          'retirement': 'research/formal-logic/review stop when the user retires this review'},
     'scope': 'Presentation, executed recorded examples, declared source/evidence access and live review. '
@@ -95,4 +98,4 @@ report = {
 }
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps({'cells': 41, 'checks': len(audit['checks']), 'screenshots': len(images),
-                  'graphs': len(graphs), 'passed': True}))
+                  'graphs': len(graphs), 'automated_checks_passed': True, 'visual_status': visual['status']}))
