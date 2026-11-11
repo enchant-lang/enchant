@@ -94,12 +94,25 @@
                            (scaffold-clauses var-scaffold))]
         (concat fixed var-clauses))))
 
+(defn- source-environment
+  "Honor a source's explicit JavaScript grant without evaluating its ns form."
+  [forms]
+  (let [declaration (first (filter #(= "ns" (headname %)) forms))
+        items (when declaration (typed/node-items (typed/node-form declaration)))
+        metadata (when items (typed/node-pos (second items)))
+        js? (or (= true (:js metadata))
+                (= :javascript (:interop metadata))
+                (= "javascript" (when (= :keyword (typed/node-tag (:interop metadata)))
+                                  (typed/node-name (:interop metadata)))))
+        environment (c/new-env "system.analyze.program")]
+    (if js? (assoc environment :target :js :js-interop true) environment)))
+
 (defn- top-level-body
   "{:params [] :body anf} for the file's top-level NON-declaration forms,
    compiled as one synthetic 0-arity fn, or nil when there are none (or they
    do not compile — a declaration-only file, or a mid-edit form the compiler
    rejects, must not blind the defns that DO compile)."
-  [forms]
+  [forms environment]
   (let [code (filter (fn [form] (not (contains? top-skip-heads (or (headname form) ""))))
                      forms)]
     (when (seq code)
@@ -111,7 +124,7 @@
                                  (concat (list (typed/sym-node "fn")
                                                (typed/->tuple [:vector '()]))
                                          code))])
-              compiled (c/compile fn-form (c/new-env "system.analyze.program"))
+              compiled (c/compile fn-form environment)
               clause (first (peeled-clauses compiled))]
           {:params [] :body (:body clause)})
         (catch _e nil)))))
@@ -137,6 +150,7 @@
    for consumers that read a single body (system.incr, system.linear)."
   [src]
   (let [forms (if (string? src) (BeamLisp.Reader/read_string src) src)
+        environment (source-environment forms)
         defns (reduce
     (fn [m form]
       (if (contains? #{"defn" "defn-"} (headname form))
@@ -150,7 +164,7 @@
                         [:list (apply list
                           (concat (list (typed/sym-node "fn"))
                                   (map :node parsed)))])
-              compiled (c/compile fn-form (c/new-env "system.analyze.program"))
+              compiled (c/compile fn-form environment)
               clauses (peeled-clauses compiled)]
           ;; A peel miss used to store {:params nil :body nil} and say nothing:
           ;; every analysis over that fn then agreed with every other, and a
@@ -167,17 +181,18 @@
                            :clauses cs})))
         m))
     {} forms)
-        top (top-level-body forms)]
+        top (top-level-body forms environment)]
     (if (nil? top) defns (assoc defns top-name top))))
 
-(declare bound-top-names)
+(declare bound-top-names ordinary-top-names)
 
 (defn fn-bodies
   "Compile every program body in one isolated definition environment. All
    top-level bindings shadow ambient core links before any body is compiled."
   [src]
   (let [forms (if (string? src) (BeamLisp.Reader/read_string src) src)
-        environment (BeamLisp.Env/fork)]
+        environment (BeamLisp.Env/fork)
+        ordinary (ordinary-top-names forms)]
     (try
       (BeamLisp.Env/with_env environment
         (fn []
@@ -189,6 +204,8 @@
                     pair (:aliases header)]
               (BeamLisp.Env/add_alias "system.analyze.program" (elem pair 0) (elem pair 1))))
           (doseq [name (bound-top-names forms)]
+            (when (contains? ordinary name)
+              (BeamLisp.Env/intern "system.analyze.program" name nil))
             (BeamLisp.Env/put_link "system.analyze.program" name
                                  (tuple :analysis-program {} nil)))
           (program-bodies forms)))
@@ -295,30 +312,37 @@
   (merge-summaries (map (fn [cl] (summary/summarize known fp-resolve (:body cl)))
                         (clauses-of d))))
 
-(defn- bound-top-names
+(defn- binding-names
   "Every name ANY top-level form of `src` binds with a def-like head — `defn`,
    `defn-`, `def`, `defmacro`, `defonce`, `declare`… — i.e. every head starting
    with `def` or `declare`, plus every name a `declare` lists. A core value
    name in this set is shadowed by the program, so its purity is NOT the
    core table's to claim."
-  [src]
+  [src ordinary-only?]
   (reduce
     (fn [acc form]
       (let [f (typed/node-form form)
             its (if (= :list (typed/node-tag f)) (typed/node-items f) nil)
             head (headname form)]
-        (if (and (some? head) (or (String/starts_with? head "def") (= head "declare")))
+        (if (and (some? head) (or (String/starts_with? head "def") (= head "declare"))
+                 (or (not ordinary-only?) (not= head "defmacro")))
           (into acc (keep (fn [n] (let [nf (typed/node-form n)]
                                     (when (= :symbol (typed/node-tag nf)) (typed/node-name nf))))
                           (if (= head "declare") (rest its) (take 1 (rest its)))))
           acc)))
     #{} (if (string? src) (BeamLisp.Reader/read_string src) src)))
 
+(defn- bound-top-names [src] (binding-names src false))
+(defn- ordinary-top-names [src]
+  (typed/ordinary-bound-names (if (string? src) (BeamLisp.Reader/read_string src) src)))
+
 (defn- core-pure-resolver
   "The program-aware half of the core purity table: a first-order core value
    name the program never binds resolves to `{}`; anything else is `:unknown`."
   [shadowed]
   (fn [name]
+    ;; A literal initializer does not make a global immutable: templates,
+    ;; macros and runtime rebinding can replace it with an effectful value.
     (if (and (contains? fp/pure-value-globals name) (not (contains? shadowed name)))
       {}
       :unknown)))

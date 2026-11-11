@@ -134,12 +134,16 @@
 ; means any, which means silent. Elixir-module seeds key on the exact
 ; "Module/fn" string the reader produces for interop heads.
 
+(def collection-callback-tags
+  "The runtime's callable data values, as well as ordinary functions."
+  #{:fn :kw :map :vec :set})
+
 (def core-seeds-v2
-  {"map"      {:args [#{:fn :kw} any] :ret #{:seq}}
-   "filter"   {:args [#{:fn :kw} any] :ret #{:seq}}
-   "remove"   {:args [#{:fn :kw} any] :ret #{:seq}}
-   "keep"     {:args [#{:fn :kw} any] :ret #{:seq}}
-   "mapcat"   {:args [#{:fn :kw} any] :ret #{:seq}}
+  {"map"      {:args [collection-callback-tags any] :ret #{:seq}}
+   "filter"   {:args [collection-callback-tags any] :ret #{:seq}}
+   "remove"   {:args [collection-callback-tags any] :ret #{:seq}}
+   "keep"     {:args [collection-callback-tags any] :ret #{:seq}}
+   "mapcat"   {:args [collection-callback-tags any] :ret #{:seq}}
    "concat"   {:args [any] :ret #{:seq}}
    "take"     {:args [#{:int} any] :ret #{:seq}}
    "drop"     {:args [#{:int} any] :ret #{:seq}}
@@ -148,12 +152,12 @@
    "reverse"  {:args [any] :ret #{:seq}}
    "range"    {:args [] :ret #{:seq}}
    "repeat"   {:args [any] :ret #{:seq}}
-   "iterate"  {:args [#{:fn :kw} any] :ret #{:seq}}
+   "iterate"  {:args [collection-callback-tags any] :ret #{:seq}}
    "keys"     {:args [#{:map}] :ret #{:seq}}
    "vals"     {:args [#{:map}] :ret #{:seq}}
    "sort"     {:args [any] :ret #{:list}}
-   "mapv"     {:args [#{:fn :kw} any] :ret #{:vec}}
-   "filterv"  {:args [#{:fn :kw} any] :ret #{:vec}}
+   "mapv"     {:args [collection-callback-tags any] :ret #{:vec}}
+   "filterv"  {:args [collection-callback-tags any] :ret #{:vec}}
    "vec"      {:args [any] :ret #{:vec}}
    "vector"   {:args [] :ret #{:vec}}
    "name"     {:args [any] :ret #{:string}}
@@ -163,7 +167,7 @@
    "not"      {:args [any] :ret #{:bool}}
    "contains?" {:args [any any] :ret #{:bool}}
    "empty?"   {:args [any] :ret #{:bool}}
-   "every?"   {:args [#{:fn :kw} any] :ret #{:bool}}
+   "every?"   {:args [collection-callback-tags any] :ret #{:bool}}
    "inc"      {:args [#{:int :float}] :ret #{:int :float}}
    "dec"      {:args [#{:int :float}] :ret #{:int :float}}
    "abs"      {:args [#{:int :float}] :ret #{:int :float}}
@@ -221,6 +225,22 @@
 (defn sym-node [s] (rn/sym-node s))
 (defn list-node [items] (rn/list-node items))
 (defn meta-node [n pos] (rn/meta-node n pos))
+
+(defn ordinary-bound-names
+  "Ordinary top-level bindings shadow ambient macros and core signatures."
+  [forms]
+  (reduce (fn [out node]
+            (let [form (node-form node)]
+              (if (= :list (node-tag form))
+                (let [items (node-items form) head (node-form (first items))
+                      name (when (= :symbol (node-tag head)) (node-name head))]
+                  (if (and name (not= name "defmacro")
+                           (or (String/starts_with? name "def") (= name "declare")))
+                    (reduce (fn [acc n]
+                              (let [n (node-form n)]
+                                (if (= :symbol (node-tag n)) (conj acc (node-name n)) acc)))
+                            out (if (= name "declare") (rest items) (take 1 (rest items)))) out)) out)))
+          #{} forms))
 
 ; --- state --------------------------------------------------------------------
 
@@ -301,6 +321,29 @@
 ; --- the walker -----------------------------------------------------------------
 
 (declare walk)
+
+(defn- shadowed-call? [env name]
+  (or (contains? env name) (contains? (:shadowed (state)) name)))
+
+(defn- walk-template
+  "Template constructors are data; only unquoted expressions execute. Mirrors synq."
+  [sigs env node]
+  (let [form (node-form node) tag (node-tag form)]
+    (cond
+      (= tag :meta) (walk-template sigs env form)
+      (= tag :list)
+        (let [items (node-items form) head (node-form (first items))
+              name (when (= :symbol (node-tag head)) (node-name head))]
+          (if (contains? #{"unquote" "unquote-splicing"} name)
+            (walk sigs env (second items))
+            (reduce (fn [_ n] (walk-template sigs env n)) nil items)))
+      (contains? #{:vector :set} tag)
+        (reduce (fn [_ n] (walk-template sigs env n)) nil (node-items form))
+      (= tag :map)
+        (reduce (fn [_ pair]
+                  (walk-template sigs env (elem pair 0))
+                  (walk-template sigs env (elem pair 1))) nil (node-items form))
+      :else nil)))
 
 (defn eff-pos
   "Position for warnings: the node's own, else the enclosing meta
@@ -428,7 +471,7 @@
               (map-indexed
                 (fn [i declared]
                   (let [actual (get arg-types i nil)]
-                    (if (and (some? actual)
+                    (if (and (some? actual) (not (empty? actual))
                              (empty? (t-meet actual declared)))
                       (warn! :type-mismatch
                              (str (node-name head) ": argument " (+ i 1) " is "
@@ -458,7 +501,9 @@
                 [env env]
                 (let [cur (get env x any)
                       in  (t-meet cur tags)
-                      out (t-diff cur tags)]
+                      ;; A nonzero number is still numeric. Only a full type
+                      ;; predicate licenses removing the whole type on false.
+                      out (if (contains? #{"zero?" "pos?" "neg?"} pred) cur (t-diff cur tags))]
                   (if (empty? in)
                     (warn! :unreachable-branch
                            (str "branch unreachable: " x " is provably not "
@@ -561,6 +606,10 @@
             (= hname "let")  (walk-let sigs env (second items) (rest (rest items)))
             (= hname "do")   (reduce (fn [_ b] (walk sigs env b)) never (rest items))
             (= hname "quote") #{:sym}
+            (= hname "syntax-quote")
+              (do (walk-template sigs env (second items)) any)
+
+            (shadowed-call? env hname) (walk-call sigs env items pos node)
 
             ; whitelisted macros — walked structurally, NEVER expanded
             (= hname "when")
@@ -573,7 +622,7 @@
                        pos node)
             (= hname "when-not")
               (walk-if sigs env
-                       (list head (second items)
+                       (list head (second items) nil
                              (list-node
                                (apply list
                                       (concat [(sym-node "do")]
@@ -821,7 +870,8 @@
       (let [forms (if (string? src) (BeamLisp.Reader/read_string src) src)
             seeded (merge core-sigs seeds)
             names (concat (keys seeded) (map node-name (keys guard-tags)))
-            shadowed (into (source-definitions forms) (filter #(BeamLisp.Env/local_var? ns %) names))
+            shadowed (into (into (source-definitions forms) (ordinary-bound-names forms))
+                            (filter #(BeamLisp.Env/local_var? ns %) names))
             sigs (merge (reduce dissoc seeded shadowed) (sigs-from-env ns))]
     (erlang/put state-key (assoc st :shadowed shadowed))
     (doall
