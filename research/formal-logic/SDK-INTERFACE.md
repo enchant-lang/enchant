@@ -6,7 +6,12 @@ their preceding canonical identities and native verdicts. The portable
 term, question, proof and state-model implementations now live under
 `priv/lib/formal`. Research imports resolve these namespaces from the selected SDK. Readable source
 links live outside the research import root, under `sdk-src`.
-The native worker remains an explicitly configured artifact.
+The SDK image supplies its default native worker and Z3 library. Explicit
+option/environment pins retain their separate provenance.
+
+The [temporal interface](TEMPORAL.md) adds semantic integer spans and complete
+overlap/chronology questions. `datom.time` consumes these questions through the
+same oracle method; symbolic endpoint constraints travel with the values.
 
 ## Ask through a standard consumer
 

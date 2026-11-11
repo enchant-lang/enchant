@@ -182,7 +182,7 @@ Verified by reading `priv/lib/datom/time.bl`:
 | `intersect`, `union`, `subtract` — **returning one interval (or two)** | ✅ (too narrow) |
 | `expand` — a coarse/masked interval → its members; `count-set` | ✅ |
 | EDTF masks via `read-iso8601` (`156X` → a decade) | ✅ |
-| z3: `overlap-verdict` (three-valued, proven) and `consistent?` (ordering constraints satisfiable) | ✅ |
+| Term-native Z3/OxiZ: `overlap-result`, `overlap-verdict`, `consistency-result` and strict Boolean `consistent?` | ✅ |
 | a **set** type (an `IntervalSet`, sweep-line, coalesced) | ❌ |
 | a rule → occurrences generator, and RRULE parse/emit | ❌ (being built: `datom.recur`) |
 | time zones / DST | ❌ (`sched`: "Time zones are not implemented yet") |
@@ -270,10 +270,11 @@ Tempo's `Network` solves partially-known *data* (when did this stratum end?);
 OR-Tools solves *resource* scheduling with an optimiser. Nothing in the field
 answers "can these two recurrence rules ever land on the same minute" — and that
 is precisely the question this repo is already equipped to answer, because
-`datom.time/consistent?` and `overlap-verdict` **already encode intervals as
-integers for z3**. The DSL is the thing that makes the encoding *reachable*: a
-rule becomes a finite set of integer bounds over a window, and the question
-becomes `(check (and …))`.
+`datom.time/chronology-question` and `overlap-questions` construct **portable
+integer term questions for Z3 or OxiZ**. A rule becomes a finite set of integer
+bounds over a window. Its complete question carries those bounds, its semantic
+profile and requested observations. `:possible` overlap requires replayed
+assignments on both sides; solver `:unknown` remains a separate outcome.
 
 The honest limit belongs in the docstring, not in the marketing: z3 answers over
 a **bounded window** (`(collides? a b {:within (interval :year 2026)})`). An

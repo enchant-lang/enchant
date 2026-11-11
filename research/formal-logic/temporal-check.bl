@@ -1,0 +1,64 @@
+(ns formal.temporal-check
+ (:require [formal.temporal :as temporal] [formal.term :as t] [formal.value :as v]
+           [formal.query :as q] [formal.check :as check] [formal.identity :as identity]
+           [datom.time :as time] [bl.json :as json]))
+
+;; This program needs only the selected SDK. Its caller supplies an output
+;; directory and can run it from an unrelated cwd without research imports.
+(def output (first (BeamLisp/argv)))
+(assert (string? output))
+(File/mkdir_p! output)
+(def uncertain
+ (temporal/shift (temporal/span 0 1) (temporal/endpoint-range "appointment.start" 0 4)))
+(def fixed (temporal/span 2 3))
+(def bounds {:history/war [0 0] :history/treaty [1 1]})
+(def edges [[:history/war :history/treaty]])
+(defn inspect [engine]
+ (let [overlap (time/overlap-result {:backend engine} uncertain fixed)
+       yes (get-in overlap [:answers :intersection]) no (get-in overlap [:answers :separation])
+       chronology (time/consistency-result {:backend engine} bounds edges)]
+  (assert (= :possible (:verdict overlap)))
+  (assert (every? #(= :valid (get-in % [:validation :status])) [yes no chronology]))
+  (assert (= {:history/war 0 :history/treaty 1} (:schedule chronology)))
+  {:backend engine :overlap (:verdict overlap)
+   :intersecting (get-in yes [:witness "left" :value])
+   :separated (get-in no [:witness "left" :value])
+   :replay [(get-in yes [:validation :status]) (get-in no [:validation :status])]
+   :question-identities (mapv #(identity/hash (get-in overlap [:questions %])) [:intersection :separation])
+   :chronology-question (identity/hash (time/chronology-question bounds edges))
+   :consistent (:consistent chronology)
+   :schedule (mapv (fn [[key value]] {:event (pr-str key) :start value})
+                   (sort-by (comp identity/bytes first) (:schedule chronology)))
+   :artifacts (get-in yes [:identity :artifacts])
+   :certificate (get-in overlap [:certificate :status]) :compiler-proof-authority false}))
+(def native (mapv inspect [:z3 :oxiz]))
+(assert (apply = (map :question-identities native)))
+(assert (apply = (map :chronology-question native)))
+
+(def a (temporal/span (t/variable "time.a0" t/Int) (t/variable "time.a1" t/Int)))
+(def b (temporal/span (t/variable "time.b0" t/Int) (t/variable "time.b1" t/Int)))
+(def delta (t/variable "time.delta" t/Int))
+(def x (t/variable "time.x" t/Int))
+(def y (t/variable "time.y" t/Int))
+(def laws
+ [{:id "intersection-symmetry" :claim (v/equal (temporal/intersects a b) (temporal/intersects b a))}
+  {:id "shift-preserves-duration" :claim (v/equal (temporal/duration a) (temporal/duration (temporal/shift a delta)))}
+  {:id "empty-spans-same-points" :claim (temporal/same-points (temporal/span x x) (temporal/span y y))}])
+(def checked-laws
+ (mapv (fn [{:keys [id claim]}]
+         (let [question (q/prove claim {:id id :profile temporal/profile})
+               checked (check/query question)]
+          (assert (= :checked (:status checked)) (pr-str checked))
+          {:id id :question question :certificate (:certificate checked)})) laws))
+(def archive (erlang/term_to_binary {:schema :temporal/laws-v1 :rows checked-laws}
+                                   (list :deterministic (tuple :minor_version 2))))
+(File/write! (Path/join output "laws.etf") archive)
+(File/write! (Path/join output "laws-pin.json")
+ (json/encode {:bytes (erlang/byte_size archive)
+               :sha256 (Base/encode16 (crypto/hash :sha256 archive) (list (tuple :case :lower)))}))
+(let [report {:schema "enchant.formal.temporal-examples.v1" :native native
+              :laws (mapv #(hash-map :id (:id %) :question (identity/hash (:question %)) :certificate :checked) checked-laws)
+              :cwd (File/cwd!) :research-import-path false :compiler-proof-authority false}
+      encoded (json/encode report {:pretty 2})]
+ (File/write! (Path/join output "examples.json") encoded)
+ (println encoded))

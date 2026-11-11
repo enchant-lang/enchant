@@ -420,9 +420,15 @@ structure — because with one repr there was never anything to separate.
 
 ```clojure
 (datom.time/tighten     db :reign/aethelred)  ; datom fixpoint → [from,to)
-(datom.time/consistent? db)                    ; z3 → true | {:clash [...]}
+(datom.time/consistent? {:backend :oxiz} bounds before-edges) ; true | false; raises if unresolved
 (datom.time/why         db :reign/aethelred)  ; provenance → the trace
 ```
+
+`chronology-question` constructs the complete term question from inclusive
+integer start ranges and strict-before edges. `consistency-result` retains the
+solver verdict, replayed schedule and certificate status as data. Select Z3 or
+OxiZ through the same options map. Event keys keep their full identities,
+including keyword namespaces.
 
 ---
 

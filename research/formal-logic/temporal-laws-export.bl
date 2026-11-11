@@ -1,0 +1,23 @@
+(ns formal.temporal-laws-export
+ (:require [formal.api :as formal] [formal.runtime-artifact :as artifact]
+           [formal.identity :as identity] [interop]))
+
+(def root (System/get_env "ENCHANT_FORMAL_EVIDENCE_ROOT"))
+(def bytes (File/read! (Path/join root "laws.etf")))
+(def pin (interop/json-> (File/read! (Path/join root "laws-pin.json"))))
+(assert (= (get pin "bytes") (erlang/byte_size bytes)))
+(assert (= (get pin "sha256") (artifact/digest bytes)))
+(def data (erlang/binary_to_term bytes))
+(assert (= :temporal/laws-v1 (:schema data)))
+(def packets
+ (mapv (fn [row]
+         (let [ready (formal/term-refutation (:question row) (:certificate row))
+               packet (:packet ready)
+               connected (formal/check-term-refutation-data (:question row) (:certificate row) packet)]
+          (assert (= :ready (:status ready)) (pr-str ready))
+          (assert (= :checked-data-connection (:status connected)))
+          (File/write! (Path/join root (str (:id row) ".json")) (interop/->json packet))
+          {:id (:id row) :packet (:identity packet) :data-connection (:status connected)})) (:rows data)))
+(File/write! (Path/join root "law-packets.json")
+ (interop/->json {:rows packets :kernel-execution :not-run :compiler-proof-authority false}))
+(println {:exported (count packets) :kernel-execution :not-run :compiler-proof-authority false})
