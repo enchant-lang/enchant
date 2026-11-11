@@ -1,6 +1,6 @@
 (ns system.formal-context-owner-test
  (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic]
-           [formal.backend :as backend] [oracle]))
+           [formal.backend :as backend] [formal.identity :as identity] [oracle]))
 
 (def false-goal (q/prove (t/bool false) {:vacuity :allow}))
 (defn raw-load-false [session]
@@ -62,3 +62,110 @@
      (is (= :error (:verdict answer)) (pr-str [engine answer]))
      (is (= :not-run (:solver-status answer)))
      (is (String/contains? (or (:error answer) "") "context changed")))))))
+
+(deftest scopes-check-owner-generation-and-revision-before-touching-the-worker
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (let [before (backend/context session)
+          first (backend/scope! session [] [] [] before)]
+     (is (= (:pid session) (:owner before)))
+     (is (= 0 (:generation before)))
+     (is (= 0 (:revision before)))
+     (is (= true (:portable before)))
+     (is (not (contains? before :port)))
+     (is (not (contains? before :registry)))
+     (is (= :sat (:status first)))
+     (is (= before (backend/context session)))
+     (is (:ok (logic/load! session [(q/assertion "kept" (t/bool true))])))
+     (let [current (backend/context session)
+           stale (backend/scope! session [] [] [] before)]
+      (is (= 1 (:revision current)))
+      (is (= false (:ok stale)))
+      (is (= :context-changed (get-in stale [:why :kind])))
+      (doseq [forged [(assoc current :owner (erlang/self))
+                     (assoc current :generation 0.0) (assoc current :revision 1.0)]]
+       (is (= :context-changed (get-in (backend/scope! session [] [] [] forged) [:why :kind]))))
+      (let [next (backend/scope! session [] [] [] current)]
+       (is (= :sat (:status next)))
+       (is (= (inc (get-in first [:stats :checks])) (get-in next [:stats :checks]))))))))))
+
+(deftest managed-reset-recovers-the-actual-generation-after-a-raw-reset
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (is (:ok (backend/invoke session (tuple :hello))))
+    (is (= 0 (:revision (backend/context session))))
+    (is (:ok (backend/invoke session (tuple :reset 0))))
+    (is (= :not-run (:solver-status (logic/solve-in session false-goal))))
+    (is (thrown? (backend/context session)))
+    (is (= false (:ok (backend/load! session [(q/assertion "opaque" (t/bool true))]))))
+    (swap! (:state session) assoc :generation -17 :assertions [])
+    (let [reset (backend/reset! session) current (backend/context session)]
+     (is (:ok reset))
+     (is (= 2 (:generation reset)))
+     (is (= 2 (:generation current)))
+     (is (= 2 (:revision current)))
+     (is (= [] (:assertions current)))
+     (is (= :refuted (:verdict (logic/solve-in session false-goal)))))))))
+
+(deftest even-a-raw-scoped-import-leaves-the-managed-registry-unavailable
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (let [exported (t/export (t/registry) [(t/bool false)])
+          reply (backend/invoke session (tuple :scope 0 (backend/native-data (:nodes exported))
+                                               (list) (list) (list) 100))]
+     (is (:ok reply))
+     (is (= :sat (:status reply)))
+     (is (= :not-run (:solver-status (logic/solve-in session false-goal))))
+     (is (:ok (backend/reset! session)))
+     (is (= :refuted (:verdict (logic/solve-in session false-goal)))))))))
+
+(deftest context-tokens-cannot-be-used-with-a-different-live-owner
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [left]
+    (backend/with-session {:backend engine}
+     (fn [right]
+      (let [reply (backend/scope! right [] [] [] (backend/context left))]
+       (is (= false (:ok reply)))
+       (is (= :context-changed (get-in reply [:why :kind])))
+       (is (= :refuted (:verdict (logic/solve-in right false-goal)))))))))))
+
+(deftest foreign-borrowers-cannot-read-or-mutate-owner-context-state
+ (backend/with-session {:backend :z3}
+  (fn [session]
+   (let [before (backend/context session) parent (erlang/self)]
+    (doseq [request [:context [:managed :reset {}]
+                      [:managed :load {:assertions [(q/assertion "foreign" (t/bool false))]}]]]
+     (erlang/spawn (fn [] (erlang/send parent [:foreign (GenServer/call (:pid session) request 1000)])))
+     (receive
+      [:foreign reply] (is (= false (:ok reply)))
+      (after 3000 (is false "foreign owner request did not reply"))))
+    (is (= before (backend/context session)))
+    (is (= :refuted (:verdict (logic/solve-in session false-goal))))))))
+
+(deftest the-owner-mirror-is-diagnostic-and-queries-stay-portable
+ (doseq [engine [:z3 :oxiz]]
+  (let [escaped (atom nil)]
+   (backend/with-session {:backend engine}
+    (fn [session]
+     (reset! escaped session)
+     (reset! (:state session) 42)
+     (let [answer (logic/solve-in session false-goal)]
+      (is (= :refuted (:verdict answer)))
+      (is (erlang/is_binary (identity/bytes (:question answer)))))
+     (reset! (:state session) nil)))
+   (is (= true (:retired @(:state @escaped))))
+   (is (= false (Process/alive? (:pid @escaped))))
+   (is (= :error (:verdict (logic/solve-in @escaped false-goal)))))))
+
+(deftest a-native-error-retires-the-context-instead-of-allowing-managed-reset
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (is (= false (:ok (backend/invoke session (tuple :check 999 (list) (list) 100)))))
+    (is (thrown? (backend/context session)))
+    (is (= false (:ok (backend/reset! session))))
+    (is (= :not-run (:solver-status (logic/solve-in session false-goal))))))))

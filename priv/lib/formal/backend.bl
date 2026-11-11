@@ -69,6 +69,85 @@
    (catch error (close! port) (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__))
    (finally (Process/demonitor monitor (list :flush))))))
 
+(defn- owner-context [state]
+ {:owner (erlang/self) :generation (:generation state) :revision (:revision state)
+  :assertions (:assertions state) :portable (:portable state) :retired (:retired state)})
+(defn- refuse [state kind message]
+ {:state state :result {:ok false :status :error :error message
+                        :why {:kind kind :message message}}})
+(defn- exchange-owned [state request]
+ (let [result (try
+                (let [reply (exchange! (:port state) (:monitor state) request (:hard-ms state))
+                      op (elem request 0)
+                      generation (if (and (:ok reply) (= op :reset)) (inc (:generation state)) (:generation state))]
+                 (validate-reply reply (:backend state) generation op))
+               (catch e {:ok false :status :error :error (ex-message e)
+                         :why {:kind (get (ex-data e) :kind :invalid) :message (ex-message e)}}))]
+  (when-not (:ok result) (close! (:port state)))
+  {:result result :state (if (:ok result) (assoc state :generation (:generation result))
+                                              (assoc state :retired true))}))
+(defn- prepare-owned [state assertions assumptions observations]
+ (let [roots (vec (concat (map :term assertions) assumptions (map second observations)))
+       exported (t/export (:registry state) roots) ids (:ids (:registry exported))]
+  {:registry (:registry exported) :nodes (:nodes exported)
+   :assertions (mapv (fn [a] [(str (:label a)) (get ids (:term a))]) assertions)
+   :assumptions (mapv (fn [term] (get ids term)) assumptions)
+   :observations (mapv (fn [[name term]] [(str name) (get ids term)]) observations)}))
+(defn- same-context? [state expected]
+ (and (map? expected) (= (erlang/self) (:owner expected))
+      (int? (:generation expected)) (= (:generation state) (:generation expected))
+      (int? (:revision expected)) (= (:revision state) (:revision expected))))
+(defn- managed-exchange [state operation payload]
+ (cond
+  (and (not= operation :reset) (not (:portable state)))
+   (refuse state :context-unavailable "formal native context is not portable after raw transport; reset required")
+  (and (= operation :scope) (not (same-context? state (:context payload))))
+   (refuse state :context-changed "formal native question context changed before exchange")
+  (not (contains? #{:load :scope :reset} operation))
+   (refuse state :invalid "unknown formal managed operation")
+  :else
+   (try
+    (let [assertions (vec (:assertions payload))
+          prepared (when-not (= operation :reset)
+                     (prepare-owned state assertions (:assumptions payload) (:observations payload)))
+          request (cond
+                    (= operation :reset) (tuple :reset (:generation state))
+                    (= operation :load) (tuple :load (:generation state)
+                                         (native-data (:nodes prepared)) (native-data (:assertions prepared)))
+                    :else (tuple :scope (:generation state) (native-data (:nodes prepared))
+                                 (native-data (:assertions prepared)) (native-data (:assumptions prepared))
+                                 (native-data (:observations prepared)) (:solver-ms state)))
+          exchanged (exchange-owned state request) result (:result exchanged) after (:state exchanged)
+          committed (if-not (:ok result) after
+                      (cond
+                       (= operation :reset)
+                        (assoc after :registry (t/registry) :assertions [] :portable true :revision (inc (:revision state)))
+                       (= operation :load)
+                        (assoc after :registry (:registry prepared)
+                                     :assertions (vec (concat (:assertions state) assertions)) :revision (inc (:revision state)))
+                       :else (assoc after :registry (:registry prepared))))]
+     {:state committed :result (if (:ok result) (assoc result :owned-context (owner-context committed)) result)})
+    (catch e
+     (close! (:port state))
+     (refuse (assoc state :retired true) :invalid (ex-message e))))))
+(defn- handle-owned [state request]
+ (cond
+  (= request :hello) {:state state :result (:hello state)}
+  (:retired state) (refuse state :retired "formal context retired")
+  (= request :context)
+   (if (:portable state) {:state state :result {:ok true :context (owner-context state)}}
+     (refuse state :context-unavailable "formal native context is not portable after raw transport; reset required"))
+  (and (vector? request) (= :managed (first request)) (= 3 (count request)))
+   (managed-exchange state (second request) (nth request 2))
+  (and (vector? request) (= :invoke (first request)) (= 2 (count request)))
+   (let [exchanged (exchange-owned state (second request))]
+    ;; Raw ETF cannot attest the original portable assumptions or node registry.
+    ;; Even a successful scoped import is outside managed registry accounting.
+    (if (and (get-in exchanged [:result :ok]) (not= :hello (elem (second request) 0)))
+     (update exchanged :state #(assoc % :portable false :revision (inc (:revision state))))
+     exchanged))
+  :else (refuse state :invalid "unknown formal owner request")))
+
 (defserver native-owner
  (init [config]
   (let [monitor (Process/monitor (:borrower config))
@@ -81,27 +160,12 @@
    (when-not (and (:ok hello) (= 1 (:protocol hello)))
     (close! port) (throw (ex-info "formal protocol handshake refused" {:reply hello})))
    (ok {:port port :borrower (:borrower config) :monitor monitor :hello hello
-        :backend (:backend config) :generation 0
-        :hard-ms (:hard-ms config) :retired false})))
- (handle-call [:invoke request] [from state]
-  (cond
-   (not= (:borrower state) (elem from 0))
-    (reply {:ok false :status :error :error "formal borrower required"} state)
-   (:retired state) (reply {:ok false :status :error :error "formal context retired"} state)
-   :else
-    (let [result (try
-                   (let [reply (exchange! (:port state) (:monitor state) request (:hard-ms state))
-                         op (elem request 0)
-                         generation (if (and (:ok reply) (= op :reset)) (inc (:generation state)) (:generation state))]
-                    (validate-reply reply (:backend state) generation op))
-                  (catch e {:ok false :status :error :error (ex-message e)
-                            :why {:kind (get (ex-data e) :kind :invalid) :message (ex-message e)}}))]
-     (when-not (:ok result) (close! (:port state)))
-     (reply result (cond-> (assoc state :retired (not (:ok result)))
-                         (:ok result) (assoc :generation (:generation result)))))))
- (handle-call :hello [from state]
-  (reply (if (= (:borrower state) (elem from 0)) (:hello state)
-           {:ok false :status :error :error "formal borrower required"}) state))
+        :backend (:backend config) :generation 0 :revision 0 :registry (t/registry) :assertions [] :portable true
+        :solver-ms (:solver-ms config) :hard-ms (:hard-ms config) :retired false})))
+ (handle-call request [from state]
+  (if (not= (:borrower state) (elem from 0))
+   (reply {:ok false :status :error :error "formal borrower required"} state)
+   (let [handled (handle-owned state request)] (reply (:result handled) (:state handled)))))
  (handle-info [:DOWN ref :process _ _] [state]
   (if (= ref (:monitor state)) (stop :normal state) (noreply state)))
  (handle-info _ [state] (noreply state))
@@ -122,40 +186,38 @@
                   :model-completion (if (= backend :z3) :concrete-extension :backend-native)
                   :sdk (System/get_env "BL_SDK_PRODUCT")}
         pid (start native-owner {:backend backend :worker (Path/expand worker) :library library
-                                 :borrower (erlang/self) :hard-ms hard-ms})
+                                 :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms})
         hello (call pid :hello (+ 1000 hard-ms))
         session {:pid pid :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms :identity identity :hello hello
-                 :state (atom {:generation (:generation hello) :registry (t/registry) :assertions []})}]
+                 :state (atom {:generation (:generation hello) :revision 0 :assertions [] :portable true :retired false})}]
    (try (f session)
     (finally
-     (swap! (:state session) assoc :retired true)
-     (when (Process/alive? pid) (GenServer/stop pid :normal 1000)))))))
+     (try (swap! (:state session) #(assoc (if (map? %) % {}) :retired true))
+      (finally (when (Process/alive? pid) (GenServer/stop pid :normal 1000)))))))))
 
-(defn invoke [session request]
- (call (:pid session) [:invoke request] (+ 1000 (:hard-ms session))))
+(defn- owner-call [session request]
+ (call (:pid session) request (+ 1000 (:hard-ms session))))
+(defn invoke
+ "Raw native compatibility transport. Successful exchanges other than hello
+  invalidate portable context accounting until a managed reset."
+ [session request] (owner-call session [:invoke request]))
 (defn hello [session] (:hello session))
-(defn reset! [session]
- (let [result (invoke session (tuple :reset (:generation @(:state session))))]
-  (when (:ok result)
-   (swap! (:state session) (fn [_] {:generation (:generation result) :registry (t/registry) :assertions []}))) result))
-
-(defn- label [x] (if (keyword? x) (str x) (str x)))
-(defn- prepare [session assertions assumptions observations]
- (let [before @(:state session)
-       roots (vec (concat (map :term assertions) assumptions (map second observations)))
-       exported (t/export (:registry before) roots) ids (:ids (:registry exported))]
-  {:state before :registry (:registry exported) :nodes (:nodes exported)
-   :assertions (mapv (fn [a] [(label (:label a)) (get ids (:term a))]) assertions)
-   :assumptions (mapv (fn [term] (get ids term)) assumptions)
-   :observations (mapv (fn [[name term]] [(str name) (get ids term)]) observations)}))
-
-(defn load! [session assertions]
- (let [prepared (prepare session assertions [] [])
-       result (invoke session (tuple :load (:generation (:state prepared))
-                      (native-data (:nodes prepared)) (native-data (:assertions prepared))))]
-  (when (:ok result)
-   (swap! (:state session) (fn [state] (-> state (assoc :registry (:registry prepared))
-                                         (update :assertions #(vec (concat % assertions))))))) result))
+(defn context
+ "Read the authoritative live portable context from its borrower-owned process.
+  The owner PID is an execution token, not portable query data or a certificate."
+ [session]
+ (when-not (and (= (:borrower session) (erlang/self)) (Process/alive? (:pid session)))
+  (throw (ex-info "formal backend: a live owned question context is required" {})))
+ (let [reply (owner-call session :context)]
+  (if (:ok reply) (:context reply) (throw (ex-info (:error reply) (:why reply))))))
+(defn- managed-call [session operation payload]
+ (let [reply (owner-call session [:managed operation payload])]
+  (when (:ok reply)
+   ;; A diagnostic mirror only. No native operation reads this atom.
+   (swap! (:state session) (fn [_] (dissoc (:owned-context reply) :owner))))
+  (dissoc reply :owned-context)))
+(defn reset! [session] (managed-call session :reset {}))
+(defn load! [session assertions] (managed-call session :load {:assertions (vec assertions)}))
 
 (defn decode-native [wire]
  (if-not (and (vector? wire) (seq wire)) (ev/unavailable :malformed-observation)
@@ -172,15 +234,14 @@
     :else (ev/unavailable {:kind kind :reason (second wire)})))))
 
 (defn scope!
- "One generation-checked native exchange. Portable terms persist; scoped
-  assertions do not. Witness availability is independent of solver status."
- [session assertions assumptions observations]
- (let [started (erlang/monotonic_time :microsecond)
-       prepared (prepare session assertions assumptions observations)
-       reply (invoke session (tuple :scope (:generation (:state prepared))
-               (native-data (:nodes prepared)) (native-data (:assertions prepared))
-               (native-data (:assumptions prepared)) (native-data (:observations prepared)) (:solver-ms session)))]
-  (when (:ok reply) (swap! (:state session) assoc :registry (:registry prepared)))
-  (assoc reply :identity (:identity session) :trusted false
-               :values (into {} (map (fn [[name v]] [name (decode-native v)]) (:observations reply)))
-               :wall-us (- (erlang/monotonic_time :microsecond) started))))
+ "An owner-checked native scope. The optional captured context is checked in
+  the same owner turn as the exchange. Portable node IDs remain owner-local."
+ ([session assertions assumptions observations]
+  (scope! session assertions assumptions observations (context session)))
+ ([session assertions assumptions observations expected]
+  (let [started (erlang/monotonic_time :microsecond)
+        reply (managed-call session :scope {:context expected :assertions (vec assertions)
+                                            :assumptions (vec assumptions) :observations (vec observations)})]
+   (assoc reply :identity (:identity session) :trusted false
+                :values (into {} (map (fn [[name v]] [name (decode-native v)]) (:observations reply)))
+                :wall-us (- (erlang/monotonic_time :microsecond) started)))))

@@ -53,11 +53,11 @@
 
 (defn- solve-native-in
  "Execute a complete question in its native context."
- [session problem]
+ [session problem context]
   (let [rows (observations problem)
         background (:assertions problem)
         preflight (when (and (= :prove (:mode problem)) (not= :allow (:vacuity problem)))
-                    (backend/scope! session background [] []))]
+                    (backend/scope! session background [] [] context))]
    (if (and preflight (or (not (:ok preflight)) (not= :sat (:status preflight))))
     (assoc (base-result problem preflight)
       :verdict (cond (= :unsat (:status preflight)) :vacuous
@@ -65,7 +65,7 @@
                      (= :unknown (:status preflight)) :unknown :else :error)
       :phase :assumption-consistency :validation {:status :not-applicable})
     (let [assertions (vec (concat background (when (:counterexample problem) [(:counterexample problem)])))
-          reply (backend/scope! session assertions [] (:rows rows))
+          reply (backend/scope! session assertions [] (:rows rows) context)
           decoded (when (= :sat (:status reply)) (replay-and-decode problem rows reply assertions))
           validation (get decoded :validation {:status :not-applicable})
           verdict (cond
@@ -96,9 +96,16 @@
   (backend/with-session opts f)))
 
 (defn- live! [session]
- (when (or (and (:borrower session) (not= (:borrower session) (erlang/self)))
-           (:retired @(:state session)))
+ (when (or (not= (:borrower session) (erlang/self))
+           (if (= 1 (:formal/logical-session session))
+            (:retired @(:state session)) (not (Process/alive? (:pid session)))))
   (throw (ex-info "formal.logic: a live owned question context is required" {}))))
+
+(defn- snapshot! [session]
+ (live! session)
+ (if (= 1 (:formal/logical-session session))
+  (select-keys @(:state session) [:generation :assertions])
+  (backend/context session)))
 
 (defn load!
  "Retain named assumptions in a context. Intercepted contexts retain BL data."
@@ -130,7 +137,7 @@
  (try
   (live! session)
   (let [problem (q/validate! problem)
-        snapshot (select-keys @(:state session) [:generation :assertions])
+        snapshot (snapshot! session)
         persistent (:assertions snapshot)
         retained (mapv (fn [i]
                     (let [a (nth persistent i)]
@@ -146,13 +153,13 @@
     (oracle/ask-query effective
      (fn []
       (live! session)
-      (when-not (= snapshot (select-keys @(:state session) [:generation :assertions]))
+      (when-not (= snapshot (snapshot! session))
        (throw (ex-info "formal.logic: question context changed before fallback execution" {})))
       (let [result (if (= 1 (:formal/logical-session session))
-                     (backend/with-session (:options session) (fn [native] (solve-native-in native effective)))
-                     (solve-native-in session effective))]
+                     (backend/with-session (:options session) (fn [native] (solve-native-in native effective (backend/context native))))
+                     (solve-native-in session effective snapshot))]
        (live! session)
-       (when-not (= snapshot (select-keys @(:state session) [:generation :assertions]))
+       (when-not (= snapshot (snapshot! session))
         (throw (ex-info "formal.logic: question context changed during fallback execution" {})))
        result)))
     (catch error (query-error effective error))))
