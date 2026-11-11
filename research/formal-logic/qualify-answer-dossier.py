@@ -58,7 +58,8 @@ for size in ('phone', 'desktop'):
                     for row in audit['checks']), 'visible executable result: ' + size + '/' + cell)
 host = read(E / 'dossier-host.json')
 require(host['state']['ActiveState'] == 'active' and host['state']['SubState'] == 'running'
-        and host['state']['MemoryMax'] == '2147483648' and pin['sdk'] + '/bin/bl' in host['launcher'],
+        and host['state']['MemoryMax'] == '2147483648' and host['launcher'] == pin['sdk'] + '/bin/bl'
+        and host['live_process_sdk_boot'] == pin['sdk'] + '/boot.exs',
         'live intended host uses this exact SDK and resource cap')
 require(host['http']['status'] == 200 and host['http']['bytes'] > 1000000, 'actual dossier served')
 blocks = Counter(re.findall(r'^#\+begin_([\w-]+)', text, re.M | re.I))
