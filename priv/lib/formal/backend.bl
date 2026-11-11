@@ -22,8 +22,15 @@
 (defn decode-frame [bytes]
  (when-not (and (erlang/is_binary bytes) (<= 2 (erlang/byte_size bytes) 1048576)
                 (= 131 (binary/at bytes 0)) (not= 80 (binary/at bytes 1)))
-  (throw (ex-info "formal reply must be bounded, uncompressed ETF" {:kind :invalid})))
- (read-data (erlang/binary_to_term bytes (list :safe))))
+  (throw (ex-info "formal reply must be bounded, uncompressed ETF" {:kind :invalid-frame :phase :reply})))
+ (try
+  (let [decoded (erlang/binary_to_term bytes (list :safe :used))]
+   (when-not (= (erlang/byte_size bytes) (elem decoded 1))
+    (throw (ex-info "formal reply has trailing bytes" {})))
+   (read-data (elem decoded 0)))
+  (catch error
+   (throw (ex-info "formal reply must contain exactly one valid ETF term"
+                   {:kind :invalid-frame :phase :reply :detail (ex-message error)})))))
 (defn validate-reply [reply backend generation operation]
  (let [ok (:ok reply) status (:status reply)
        check? (contains? #{:check :scope} operation)]
@@ -45,27 +52,34 @@
                               (map? (:stats reply)))
                   :else (contains? #{:load :reset} operation))
                  (and (contains? #{:error :unsupported} status) (string? (:error reply)))))
-   (throw (ex-info "formal native reply schema or identity mismatch" {:kind :invalid})))
+   (throw (ex-info "formal native reply schema or identity mismatch" {:kind :invalid :phase :reply})))
   reply))
 (defn- close! [port]
- (when (and (erlang/is_port port) (some? (Port/info port))) (Port/close port)) :ok)
+ ;; OS exit can race the info/close pair, including while handling another
+ ;; exception. Closing an already departed worker must not replace that error.
+ (try (when (and (erlang/is_port port) (some? (Port/info port))) (Port/close port))
+  (catch _ :ok)) :ok)
 (defn- exchange! [port borrower-monitor payload timeout]
  (when-not (= (tuple :connected (erlang/self)) (erlang/port_info port :connected))
   (throw (ex-info "formal backend port custody required" {})))
  (let [deadline (+ (erlang/monotonic_time :millisecond) timeout)
        bytes (erlang/term_to_binary payload) monitor (erlang/monitor :port port)]
   (try
-   (when (> (erlang/byte_size bytes) 1048576) (throw (ex-info "formal request exceeds packet capacity" {})))
-   (when-not (Port/command port bytes (list :nosuspend)) (throw (ex-info "formal backend port busy" {})))
+   (when (> (erlang/byte_size bytes) 1048576)
+    (throw (ex-info "formal request exceeds packet capacity" {:kind :packet-capacity :phase :request})))
+   (when-not (Port/command port bytes (list :nosuspend))
+    (throw (ex-info "formal backend port busy" {:kind :port-busy :phase :transport})))
    (receive
     [seen [:data bytes]] :when (= seen port)
      (decode-frame bytes)
     [:DOWN seen :process _ _] :when (= seen borrower-monitor)
      (do (close! port) (erlang/exit (erlang/self) :kill))
-    [:DOWN seen :port _ _] :when (= seen monitor) (throw (ex-info "formal native worker exited" {}))
-    [seen [:exit_status status]] :when (= seen port) (throw (ex-info "formal native worker exited" {:status status}))
+    [:DOWN seen :port _ reason] :when (= seen monitor)
+     (throw (ex-info "formal native worker exited" {:kind :worker-exit :phase :transport :reason reason}))
+    [seen [:exit_status status]] :when (= seen port)
+     (throw (ex-info "formal native worker exited" {:kind :worker-exit :phase :transport :status status}))
     (after (max 0 (- deadline (erlang/monotonic_time :millisecond)))
-     (throw (ex-info "formal backend hard deadline exceeded" {:kind :timeout}))))
+     (throw (ex-info "formal backend hard deadline exceeded" {:kind :timeout :phase :transport}))))
    (catch error (close! port) (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__))
    (finally (Process/demonitor monitor (list :flush))))))
 
@@ -82,7 +96,9 @@
                       generation (if (and (:ok reply) (= op :reset)) (inc (:generation state)) (:generation state))]
                  (validate-reply reply (:backend state) generation op))
                (catch e {:ok false :status :error :error (ex-message e)
-                         :why {:kind (get (ex-data e) :kind :invalid) :message (ex-message e)}}))]
+                         :why (merge (ex-data e)
+                                {:kind (get (ex-data e) :kind :invalid) :message (ex-message e)
+                                 :operation (elem request 0)})}))]
   (when-not (:ok result) (close! (:port state)))
   {:result result :state (if (:ok result) (assoc state :generation (:generation result))
                                               (assoc state :retired true))}))
@@ -154,18 +170,23 @@
 
 (defserver native-owner
  (init [config]
-  (let [monitor (Process/monitor (:borrower config))
-        port (erlang/open_port (tuple :spawn_executable (:worker config))
+  (let [monitor (Process/monitor (:borrower config))]
+   (try
+    (let [port (erlang/open_port (tuple :spawn_executable (:worker config))
               (list :binary :use_stdio :exit_status (tuple :packet 4)
                (tuple :args (to-list (concat ["--backend" (name (:backend config))]
-                    (if (= :z3 (:backend config)) ["--z3-library" (:library config)] []))))))
-        hello (validate-reply (exchange! port monitor (tuple :hello) (:hard-ms config))
-                              (:backend config) 0 :hello)]
-   (when-not (and (:ok hello) (= 1 (:protocol hello)))
-    (close! port) (throw (ex-info "formal protocol handshake refused" {:reply hello})))
-   (ok {:port port :borrower (:borrower config) :monitor monitor :hello hello
-        :backend (:backend config) :generation 0 :revision 0 :registry (t/registry) :assertions [] :portable true
-        :solver-ms (:solver-ms config) :hard-ms (:hard-ms config) :retired false})))
+                    (if (= :z3 (:backend config)) ["--z3-library" (:library config)] []))))))]
+     (try
+      (let [hello (validate-reply (exchange! port monitor (tuple :hello) (:hard-ms config))
+                                  (:backend config) 0 :hello)]
+       (when-not (:ok hello)
+        (throw (ex-info "formal protocol handshake refused" {:reply hello})))
+       (ok {:port port :borrower (:borrower config) :monitor monitor :hello hello
+            :backend (:backend config) :generation 0 :revision 0 :registry (t/registry) :assertions [] :portable true
+            :solver-ms (:solver-ms config) :hard-ms (:hard-ms config) :retired false}))
+      (catch error (close! port) (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__))))
+    (catch error (Process/demonitor monitor (list :flush))
+      (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__)))))
  (handle-call request [from state]
   (if (not= (:borrower state) (elem from 0))
    (reply {:ok false :status :error :error "formal borrower required"} state)
@@ -230,6 +251,24 @@
                 :cargo-lock-sha256 (get manifest "cargo_lock_sha256") :source (get manifest "source")
                 :features (get manifest "features") :oxiz-version (get manifest "oxiz_version")})}))
 
+(defn- stop-owner! [pid]
+ ;; An unresponsive actor must not outlive its bracket. Graceful stop normally
+ ;; closes the port in terminate; kill also closes every port owned by the PID.
+ ;; Monitor before stopping so both paths wait for the actual owner's death.
+ (let [monitor (Process/monitor pid)]
+  (try
+   (when (Process/alive? pid)
+    (try (GenServer/stop pid :normal 1000)
+     (catch _ (Process/exit pid :kill))))
+   (receive
+    [:DOWN seen :process _ _] :when (= seen monitor) :ok
+    (after 1000
+     (do (Process/exit pid :kill)
+      (receive
+       [:DOWN seen :process _ _] :when (= seen monitor) :ok
+       (after 1000 (throw (ex-info "formal owner did not retire" {:kind :cleanup-timeout})))))))
+   (finally (Process/demonitor monitor (list :flush))))))
+
 (defn with-session [opts f]
  (let [assets (artifacts opts) backend (:backend assets)
        worker (get-in assets [:worker :path]) library (get-in assets [:library :path])
@@ -242,15 +281,19 @@
                   :library-sha256 (get-in assets [:library :sha256]) :artifacts assets
                   :model-completion (if (= backend :z3) :concrete-extension :backend-native)
                   :sdk (System/get_env "BL_SDK_PRODUCT")}
+        state (atom {:generation 0 :revision 0 :assertions [] :portable true :retired false})
         pid (start native-owner {:backend backend :worker (Path/expand worker) :library library
-                                 :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms})
-        hello (call pid :hello (+ 1000 hard-ms))
-        session {:pid pid :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms :identity identity :hello hello
-                 :state (atom {:generation (:generation hello) :revision 0 :assertions [] :portable true :retired false})}]
-   (try (f session)
+                                 :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms})]
+   ;; Everything after a successful start, including session setup, is owned
+   ;; by the same cleanup bracket as the user callback.
+   (try
+    (let [hello (call pid :hello (+ 1000 hard-ms))
+          session {:pid pid :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms :identity identity
+                   :hello hello :state state}]
+     (f session))
     (finally
-     (try (swap! (:state session) #(assoc (if (map? %) % {}) :retired true))
-      (finally (when (Process/alive? pid) (GenServer/stop pid :normal 1000)))))))))
+     (try (swap! state #(assoc (if (map? %) % {}) :retired true))
+      (finally (stop-owner! pid))))))))
 
 (defn- owner-call [session request]
  (call (:pid session) request (+ 1000 (:hard-ms session))))

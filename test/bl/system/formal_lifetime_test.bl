@@ -63,7 +63,7 @@
                           (fn [session]
                            (reset! escaped session)
                            (erlang/suspend_process (:pid session))
-                           (throw (ex-info "callback sentinel" {:case :callback}))))) ]
+                           (throw (ex-info "callback sentinel" {:case :callback})))))]
    (try
     (is (= {:case :callback} (:data result)) (pr-str result))
     (is (not (Process/alive? (:pid @escaped))))
@@ -106,6 +106,37 @@
       (is (not (Process/alive? (:pid @escaped))))
       (is (until #(not (os-alive? (get (recorded) "pid")))))
       (finally (force-stop @escaped))))))))
+
+(deftest an-oversized-request-retires-the-context-without-touching-the-worker
+ (with-fixture "query-hang"
+  (fn [opts recorded]
+   (backend/with-session opts
+    (fn [session]
+     (let [reply (backend/invoke session (tuple :hello (String/duplicate "x" 1048577)))]
+      (is (= false (:ok reply)))
+      (is (= :packet-capacity (get-in reply [:why :kind])))
+      (is (= :request (get-in reply [:why :phase])))
+      (is (= :hello (get-in reply [:why :operation])))
+      (is (= false (:ok (backend/reset! session)))))))
+   (is (= 1 (get (recorded) "packets")))
+   (is (until #(not (os-alive? (get (recorded) "pid")))))
+   (is (= true (get (recorded) "eof"))))))
+
+(deftest borrower-death-while-idle-retires-either-real-native-worker
+ (doseq [engine [:z3 :oxiz]]
+  (let [parent (erlang/self)
+        borrower (erlang/spawn
+                   (fn [] (backend/with-session {:backend engine}
+                     (fn [session]
+                      (erlang/send parent [:idle session])
+                      (receive :finish :ok (after 5000 :abandoned))))))
+        session (receive [:idle value] value (after 3000 nil))]
+   (try
+    (is (some? session))
+    (Process/exit borrower :kill)
+    (is (until #(not (Process/alive? (:pid session)))))
+    (is (until #(not (os-alive? (:pid (:hello session))))))
+    (finally (Process/exit borrower :kill) (force-stop session))))))
 
 (deftest borrower-death-during-a-pending-exchange-closes-the-port
  (with-fixture "query-hang"
