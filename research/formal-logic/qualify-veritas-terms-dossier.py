@@ -54,6 +54,18 @@ for size in ('phone', 'desktop'):
     for cell in ('story-generator-terms', 'story-clause-coverage', 'story-runtime-units', 'story-recorded-verdicts'):
         require(any(row['name'] == size + ': visible executed generator result ' + cell and row['passed']
                     for row in audit['checks']), 'visible result: ' + size + '/' + cell)
+host_sources = read(E / 'host-source-pin.json')
+for name, digest in host_sources['source_sha256'].items():
+    require(sha(R / name) == digest, 'qualified host source: ' + name)
+    committed = subprocess.check_output(['git', 'show', host_sources['code_commit'] + ':' + name], cwd=R)
+    require(hashlib.sha256(committed).hexdigest() == digest, 'committed host source: ' + name)
+require('formal.review-cache-test  52 passed' in (E / 'host-cache-checks.txt').read_text()
+        and pin['sdk'] + '/bin/bl' in read(E / 'host-cache-command.json'), 'bounded parsing and separate HTML-role cache checks')
+profile = (E / 'host-profile-2-checks.txt').read_text()
+cold = int(re.search(r':cold-elapsed-ms (\d+)', profile)[1])
+warm = int(re.search(r':warm-elapsed-ms (\d+)', profile)[1])
+require(':same-data-revision true' in profile and warm < cold, 'actual warm preparation with unchanged evidence projection')
+require('Endpoint did not become ready' in (E / 'dossier-serve-1.txt').read_text(), 'retained initial readiness failure')
 host = read(E / 'dossier-host.json')
 require(host['state']['ActiveState'] == 'active' and host['state']['SubState'] == 'running'
         and host['state']['MemoryMax'] == '2147483648' and host['launcher'] == pin['sdk'] + '/bin/bl'
@@ -71,7 +83,10 @@ report = {'schema': 'enchant.formal.veritas-terms-dossier-qualification.v1', 'ch
     'browser': {'audit_script_sha256': sha(P / 'story-audit.mjs'), 'browser_driver_sha256': sha(P / 'browser-driver.mjs'),
                 'automated_checks': len(audit['checks']), 'screenshots': images, 'review_graphs': graphs,
                 'visual_review': visual, 'audit_sha256': sha(E / 'browser-audit/audit.json')},
-    'host': host, 'scope': 'Executable examples and live presentation; runtime tests are implementation checks, not a preservation theorem.',
+    'host': host, 'host_sources': host_sources,
+    'host_cache': {'assertions': 52, 'cold_preparation_ms': cold, 'warm_preparation_ms': warm,
+                   'same_data_revision': True, 'scope': 'One bounded pure parse; evidence and roster enrichment remain live. These are preparation observations, not deployment benchmarks.'},
+    'scope': 'Executable examples and live presentation; runtime tests are implementation checks, not a preservation theorem.',
     'compiler_proof_authority': False}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps({'cells': 56, 'checks': len(audit['checks']), 'screenshots': len(images),
