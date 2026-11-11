@@ -37,6 +37,10 @@ with tempfile.TemporaryDirectory(prefix='sdk-preflight-control-') as temporary:
                            '--root', candidate, '--out', report_path], timeout=340)
     assert done.returncode == 1, done.returncode
     report = json.loads(report_path.read_text())
+    assert report['beam-selection']['modality'] == 'exhausted', report['beam-selection']
+    assert report['beam-selection']['complete'] is True
+    assert report['declaration-cases']['modality'] == 'exhausted', report['declaration-cases']
+    assert report['declaration-cases']['complete'] is True
     assert len(report['source-errors']) == 1, report['source-errors']
     assert report['source-errors'][0]['file'] == 'std/preflight-invalid.bl'
     assert report['target-dependency-errors'] == [{

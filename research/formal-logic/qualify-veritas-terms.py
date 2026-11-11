@@ -63,11 +63,14 @@ for path in (R / 'priv/lib/formal').glob('*.bl'):
         require(sha(path) == sha(old), 'unchanged preceding formal module: ' + path.name)
 floor, preflight = (read(E / n) for n in ('produced-compiler.json', 'source-preflight.json'))
 require(floor['status'] == 'passed' and floor['sdk'] == pin['sdk'] and floor['files'] == 141, 'complete produced compiler floor')
-require(preflight['beam-selection']['modality'] == 'proven' and not any(preflight[k] for k in
+require(preflight['beam-selection']['modality'] == 'exhausted' and preflight['beam-selection']['complete'] is True
+        and preflight['declaration-cases']['modality'] == 'exhausted' and not any(preflight[k] for k in
         ('source-errors', 'target-dependency-errors', 'require-cycles', 'sources_changed_during_analysis')), 'source preflight')
 require('0 passed, 6 failed, 1 errored' in (E / 'baseline-checks.txt').read_text(), 'retained previous-SDK failures')
 require('not green' in (E / 'focused-1-checks.txt').read_text() and 'not green' in (E / 'regression-checks.txt').read_text(),
         'retained initial test and downstream failures')
+require('veritas.model-serve-test  56 passed' in (E / 'http-baseline-checks.txt').read_text()
+        and 'veritas.model-serve-test  56 passed' in (E / 'http-isolated-checks.txt').read_text(), 'retained isolated HTTP comparisons')
 focused, regression = counts('focused-current-checks.txt', 15), counts('regression-current-checks.txt', 31)
 require(focused['veritas.term-queries-test'] == 181 and regression['veritas.ledger-test'] >= 28, 'new meaningful interface and ledger checks')
 paired = 0
@@ -118,6 +121,9 @@ report = {'schema': 'enchant.formal.veritas-terms-qualification.v1', 'checkpoint
           'paired_questions': paired, 'sdk_only': True, 'durable_ledger_fresh_process': True,
           'unicode_prefix': {'z3': 'solver-claim', 'oxiz': 'unknown'}, 'compiler_proof_authority': False,
           'compiler_changed_since_previous': meta['compiler'] != previous['compiler'],
+          'http_admission_history': {'initial_batch': 'one unexpected log entry; cause unresolved',
+              'previous_sdk_isolated': '56 assertions passed', 'candidate_2_isolated': '56 assertions passed',
+              'current_full_batch': '57 assertions passed with admission diagnostics'},
           'evidence_sha256': {n: sha(E / n) for n in ('focused-current-checks.txt', 'regression-current-checks.txt',
               'examples.json', 'ledger-write.json', 'ledger-read.json', 'produced-compiler.json', 'source-preflight.json')}}
 (E / 'qualification.json').write_text(json.dumps(report, indent=2) + '\n')
