@@ -19,8 +19,17 @@ The previous SDK failed 21 assertions in the new initial 169-assertion check.
 Two failures concerned actual behavior: a suspended owner survived its bracket
 and hid the callback error, and the decoder accepted trailing bytes after a
 valid ETF term. Other failures demanded more precise transport diagnostics.
-The retained baseline is in `evidence/session-lifetime/baseline-checks.txt`;
+The initial baseline contains six tests. The expanded eight-test file passes 183
+assertions, including oversized requests and idle native borrower death. The
+retained baseline is in `evidence/session-lifetime/baseline-checks.txt`;
 the first reader-error attempt is retained separately.
+
+The selected immutable SDK passes 686 focused assertions across nine files and
+7,086 formal regression assertions across 22 files. All 187 paired native
+questions retain their exact identities and solver/verdict statuses. The full
+compiler-floor check passes for the same 141 files as the previous SDK. The
+exact pin, commands and source hashes are retained in
+`evidence/session-lifetime/qualification.json`.
 
 Every reply must now contain exactly one bounded, uncompressed, safe ETF term.
 The decoder requests the number of consumed bytes and refuses any remainder.

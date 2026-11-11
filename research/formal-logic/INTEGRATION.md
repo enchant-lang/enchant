@@ -25,8 +25,10 @@ unchanged. Native pooling and remaining legacy/source consumers remain work.
 The next [session-lifetime slice](SESSION-LIFETIME.md) puts post-start setup
 inside the callback's cleanup bracket and adds a monitored kill fallback for
 stalled owners. Replies must consume exactly one complete ETF term; transport
-failures retain their kind, phase and operation. Its qualification is recorded
-separately from the packaged-worker checkpoint above.
+failures retain their kind, phase and operation. The selected SDK passes 686
+focused assertions (183 in the new native lifetime file) and 7,086 regression
+assertions; all 187 paired question identities and native statuses remain
+unchanged. This qualification is separate from the packaged-worker checkpoint.
 
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,
@@ -170,13 +172,13 @@ The new owner's source preserves the important structure:
 
 | Legacy assertion group | New equivalent/invariant | Source-audit status / qualification still needed |
 | --- | --- | --- |
-| Structured models, closing lease stops OS process | Observation tags and `with-session` finalizer; SAT separate from availability | Implemented; recheck normal exit and exceptions for both native backends |
+| Structured models, closing lease stops OS process | Observation tags and `with-session` finalizer; SAT separate from availability | Actual owner and OS death observed on return, callback error and suspended owner for both native backends in the 183-assertion lifetime file |
 | One context, scoped declaration rollback | One native process; import before push; only scoped assertions roll back | Intentional semantic change: immutable DAG nodes/declarations persist after scope. Reset advances generation; source terms can be reimported |
 | Assumptions do not persist | Z3 native check-assumptions; OxiZ temporary push/assert/check/pop | Implemented; add consecutive checks on one session for both paths |
 | Named core values | Z3 private fresh tracking literals → binary labels | Implemented. OxiZ typed native core getter is unavailable, so core-kind is unsupported; do not preserve the old test's native-core expectation by parsing text |
 | Unsupported/ill-sorted scripts retire context | Typed frontend/native validation; any partially applied fault retires | Arrays are now a real native capability, not intrinsically invalid. Test malformed node/sort/arity, changed IDs, unknown operations and UF signature redeclarations instead |
 | Foreign borrower refusal | PID check at owner call and port custody check | Implemented; session maps contain mutable host bookkeeping and are not a transferable security capability |
-| Borrower killed while idle | Monitor → stop → terminate → close | Implemented by inspection; observe actual OS death for each backend |
+| Borrower killed while idle | Monitor → stop → terminate → close | Actual owner and OS death observed for both native backends in the lifetime file |
 | Deadline while real solver busy | Independent hard deadline → close → EOF watchdog | Same design; repeat the real busy-solver cancellation probe, not only an immediate UNSAT/timeout |
 | Borrower killed while solver busy | Borrower DOWN is handled inside the blocking exchange | Implemented by inspection; repeat OS-process disappearance and no late response |
 | Existing verifier bridge, memo bypass | Historical bridge remains text-based | Do not substitute its passing result for term-only `system.core` cutover evidence |
@@ -197,16 +199,16 @@ Further boundary checks needed before replacing `z3pool`:
    result shape and compressed-reply refusal are implemented and tested.
    `binary_to_term(..., [:safe])` prevents new atoms; it does not establish
    model semantics or validate every observation's sort.
-2. Preserve transport error kind and phase through every failure. The owner
-   retains structured exception kinds (including hard timeout); native exit
-   and framing cases need finer classification and additional checks.
-3. Check zero/oversized/truncated packets, trailing ETF, native crash, stale
-   generation and altered ID import. A reply that exceeds capacity currently
-   ends the worker; it cannot authorize a proof or a missing-value default.
-4. Qualify the session-lifetime cleanup bracket against callback exceptions,
-   handshake failure and stalled owners. Keep genuine busy-solver cancellation
-   separate from pending fault-peer checks. Add bounded backpressure before any
-   shared-worker pool.
+2. Preserve the implemented transport kind/phase/operation diagnostics when
+   adding pool admission and new transports. Fault peers now cover native-exit
+   and bad-frame observations separately from hard timeout.
+3. Retain the checked zero/oversized/truncated/trailing/compressed frame cases
+   and stale-generation/altered-ID refusal. A reply that exceeds capacity ends
+   the worker; it cannot authorize a proof or a missing-value default.
+4. Retain the qualified cleanup bracket for callback exceptions, handshake
+   failure and stalled owners. Genuine busy-solver cancellation still needs
+   qualification beyond the pending fault-peer checks. Add bounded backpressure
+   before any shared-worker pool.
 5. Retain declared source identities consistently across sorts. UF signatures
    and bound sorts are checked natively; same-spelled free variables of
    different sorts must not collapse in the BL name-keyed assignment map.
