@@ -372,6 +372,16 @@ itself mechanically verified and does not certify all SMT theories.
   universal implementation soundness remain outside this API consistency
   boundary. [Native context ownership](NATIVE-CONTEXTS.md)
 
+- Registered callable scopes now retain synchronous named handlers across
+  managed submissions, including actor starts. Oracle uses this same method
+  table boundary. Nested extents and reused workers restore their preceding
+  table; explicit Source world entry and fixed SDK framework adoption have
+  separate context boundaries. Six focused files pass 450 assertions, native
+  lifetime/capacity checks pass 284 and twenty-two formal files pass 7,086.
+  All 187 preceding paired questions retain their identities and verdicts.
+  Runtime preservation, effect typing and totality remain separate obligations.
+  [Managed handlers](EFFECTS.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

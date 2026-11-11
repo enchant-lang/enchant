@@ -18,7 +18,7 @@ complete-query oracle handler. Canonical term, proof and state-model sources
 now live under `priv/lib/formal`; research imports use the pinned SDK, while
 `sdk-src` supplies readable source links outside import search. The initial
 qualification passed 86 focused SDK assertions and 2,549 regression assertions.
-Source extraction, remaining legacy consumers, process-wide effect semantics
+Source extraction, remaining legacy consumers, formal effect semantics
 and native worker packaging remain active work.
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
@@ -29,8 +29,14 @@ exercise floating-point equality through sequences and arrays.
 The subsequent [native-context interface](NATIVE-CONTEXTS.md) moves the registry,
 assumptions and revision into the port-owning process. Its selected SDK passes
 356 focused assertions and 7,086 regression assertions. A client atom is now diagnostic; raw transport requires
-a managed reset before portable reuse. Automatic handler inheritance remains
-ahead.
+a managed reset before portable reuse.
+[Managed handler scopes](EFFECTS.md) now carry synchronous named method tables
+through managed spawning, futures, registered callbacks and generated actors,
+with actual callback custody. Explicit Source world entry and fixed SDK
+framework adoption have declared context boundaries. The selected SDK passes
+450 focused assertions, 284 native lifetime/capacity assertions and 7,086 formal
+regression assertions; all 187 preceding native questions retain their identities
+and verdicts. Effect typing and formal runtime preservation remain ahead.
 
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,

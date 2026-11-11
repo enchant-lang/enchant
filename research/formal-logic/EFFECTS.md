@@ -1,12 +1,12 @@
 # Handlers across managed work
 
-The next slice makes a handler table part of the language's explicit callable
+The handler table is part of the language's explicit callable
 context. A managed submission captures the active table. Accepted work retains
 the table's executable modules independently of the parent scope. Nested
 tables replace the selected effect's methods and restore their predecessor in
 `finally`. Reused workers restore their own prior context after invocation.
 
-The public language interface will provide named synchronous effects and
+The public language interface provides named synchronous effects and
 method tables. Oracle uses one table with `:script` and `:query` methods, so an
 installed table missing the requested method refuses that method. A completely
 unhandled effect may use its supplied default operation. These are scoped
@@ -65,6 +65,26 @@ The runtime admits at most 32 effect tables, 64 methods per table and 4,096
 explicit outside modules per table. The table snapshot has an 8 MiB ceiling;
 the existing pooled execution-context limits also apply.
 
-The starting cases in `test/bl/system/formal_effect_test.bl` passed six
-assertions and failed fourteen. Qualification is pending. Automatic handler
-inheritance remains separate from a verified runtime or compiler.
+The starting twenty assertions in `test/bl/system/formal_effect_test.bl`
+passed six and failed fourteen on the preceding SDK. The selected SDK passes
+450 assertions across six focused files, including 94 handler and Source cases;
+284 native lifetime/capacity assertions; and 7,086 formal regression assertions.
+All 187 preceding paired native questions retain their identities and verdicts.
+The compiler's P/B/C production and complete installed floor are checked;
+B and C inventories agree byte for byte.
+
+The [executable examples](src/formal/effect-examples.bl) run four managed
+boundaries for each backend choice with deliberately unavailable native paths.
+Every handled answer has a replayed value of seven and a valid typed model.
+Its certificate remains unchecked. The generic named effect returns forty-two
+in submitted work and restores the caller's default of forty.
+The [qualification receipt](evidence/effects/qualification.json) binds the code,
+SDK and retained checks. These are scoped implementation checks, separate from
+runtime preservation or compiler soundness proofs.
+
+Further formalization needs a model of effect requests, handler selection,
+submission, completion and cancellation, with explicit outcome contracts for
+each handler. Source extraction must preserve that relation rather than replace
+an effectful call with a convenient constant. Effect typing, continuation
+capture, fairness and totality require their own rules and evidence. Remaining
+legacy Oracle migration and native worker packaging are also active work.
