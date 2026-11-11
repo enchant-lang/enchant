@@ -1,0 +1,128 @@
+; One VM exercises real native processes and faulty ETF peers, with bounded
+; waits and cleanup of every process created here. Linux /proc is intentional:
+; the packaged worker currently targets x86_64-linux.
+(ns system.formal-lifetime-test
+ (:require [formal.backend :as backend] [formal.term :as t]
+           [formal.query :as q] [formal.logic :as logic] [bl.json :as json]))
+
+(defn- until [pred]
+ (let [deadline (+ (erlang/monotonic_time :millisecond) 3000)]
+  (loop []
+   (if (pred) true
+    (if (>= (erlang/monotonic_time :millisecond) deadline) false
+     (do (Process/sleep 10) (recur)))))))
+(defn- os-alive? [pid] (File/exists? (str "/proc/" pid)))
+(defn- force-stop [session]
+ (when (and session (Process/alive? (:pid session))) (Process/exit (:pid session) :kill)))
+(defn- outcome [f]
+ (try {:value (f)} (catch error {:exception-kind __EXCEPTION_KIND__ :error error :data (ex-data error)})))
+(defn- with-fixture [mode f]
+ (let [dir (Path/join (System/tmp_dir!) (str "bl-formal-lifetime-" (erlang/unique_integer (list :positive))))
+       worker (Path/join dir mode)
+       python (System/find_executable "python3")]
+  (when-not python (throw (ex-info "formal lifetime fixture requires Python 3" {})))
+  (File/mkdir_p! dir)
+  (try
+   (File/write! worker
+    (String/replace (File/read! (Path/join (BeamLisp/cwd) "test/fixtures/formal_transport_worker.py"))
+                    "#!/usr/bin/env python3" (str "#!" python)))
+   (File/chmod! worker 493)
+   (f {:worker worker :backend :oxiz :solver-ms 50 :hard-ms 300}
+      (fn [] (json/decode (File/read! (str worker ".json")))))
+   (finally (File/rm_rf! dir)))))
+
+(deftest exactly-one-complete-uncompressed-etf-term-is-required
+ (let [valid (erlang/term_to_binary (tuple :hello))
+       trailing (erlang/iolist_to_binary (list valid "unconsumed"))]
+  (is (= (tuple :hello) (backend/decode-frame valid)))
+  (doseq [bytes ["" "x" (erlang/list_to_binary (list 131 255)) trailing
+                 (erlang/term_to_binary (String/duplicate "x" 4000) (list :compressed))
+                 (String/duplicate "x" 1048577)]]
+   (let [result (outcome #(backend/decode-frame bytes))]
+    (is (= :invalid-frame (get-in result [:data :kind])) (pr-str result))))))
+
+(deftest normal-and-exceptional-callbacks-retire-the-owner-and-os-worker
+ (doseq [engine [:z3 :oxiz] failure [false true]]
+  (let [escaped (atom nil)
+        result (outcome #(backend/with-session {:backend engine}
+                          (fn [session]
+                           (reset! escaped session)
+                           (if failure (throw (ex-info "callback sentinel" {:case :callback})) :returned))))]
+   (try
+    (is (= (if failure {:case :callback} nil) (:data result)))
+    (is (= (if failure nil :returned) (:value result)))
+    (is (not (Process/alive? (:pid @escaped))))
+    (is (:retired @(:state @escaped)))
+    (is (until #(not (os-alive? (:pid (:hello @escaped))))))
+    (finally (force-stop @escaped))))))
+
+(deftest a-stalled-owner-cannot-hide-the-callback-error-or-escape-cleanup
+ (doseq [engine [:z3 :oxiz]]
+  (let [escaped (atom nil)
+        result (outcome #(backend/with-session {:backend engine}
+                          (fn [session]
+                           (reset! escaped session)
+                           (erlang/suspend_process (:pid session))
+                           (throw (ex-info "callback sentinel" {:case :callback}))))) ]
+   (try
+    (is (= {:case :callback} (:data result)) (pr-str result))
+    (is (not (Process/alive? (:pid @escaped))))
+    (is (:retired @(:state @escaped)))
+    (is (until #(not (os-alive? (:pid (:hello @escaped))))))
+    (finally (force-stop @escaped))))))
+
+(deftest handshake-failures-never-enter-the-callback-and-release-the-os-worker
+ (doseq [fault ["refuse" "identity" "zero" "oversized" "bad-etf" "trailing" "compressed" "truncated" "exit" "hang"]]
+  (with-fixture (str "init-" fault)
+   (fn [opts recorded]
+    (let [entered (atom false) result (outcome #(backend/with-session opts (fn [_] (reset! entered true))))]
+     (is (contains? result :error) (pr-str [fault result]))
+     (is (not @entered))
+     (is (= 1 (get (recorded) "packets")))
+     (is (until #(not (os-alive? (get (recorded) "pid")))))
+     (when (contains? #{"refuse" "identity" "zero" "oversized" "bad-etf" "trailing" "compressed" "hang"} fault)
+      (is (= true (get (recorded) "eof")))))))))
+
+(deftest transport-failures-retain-their-kind-and-retire-the-context
+ (doseq [[fault kind] [["zero" :invalid-frame] ["oversized" :invalid-frame]
+                       ["bad-etf" :invalid-frame] ["trailing" :invalid-frame]
+                       ["compressed" :invalid-frame] ["identity" :invalid]
+                       ["truncated" :worker-exit] ["exit" :worker-exit] ["hang" :timeout]]]
+  (with-fixture (str "query-" fault)
+   (fn [opts recorded]
+    (let [escaped (atom nil)]
+     (try
+      (backend/with-session opts
+       (fn [session]
+        (reset! escaped session)
+        (let [answer (logic/solve-in session (q/sat {}))]
+         (is (= :error (:verdict answer)) (pr-str [fault answer]))
+         (is (= :query (:phase answer)))
+         (is (= kind (get-in answer [:why :kind])) (pr-str [fault answer]))
+         (is (= false (:trusted answer)))
+         (is (= :not-checked (get-in answer [:certificate :status]))))
+        (is (= false (:ok (backend/reset! session))))))
+      (is (= 2 (get (recorded) "packets")))
+      (is (not (Process/alive? (:pid @escaped))))
+      (is (until #(not (os-alive? (get (recorded) "pid")))))
+      (finally (force-stop @escaped))))))))
+
+(deftest borrower-death-during-a-pending-exchange-closes-the-port
+ (with-fixture "query-hang"
+  (fn [opts recorded]
+   (let [parent (erlang/self)
+         borrower (erlang/spawn
+                    (fn [] (backend/with-session opts
+                      (fn [session]
+                       (erlang/send parent [:started session])
+                       (receive :go (backend/scope! session [] [] []) (after 3000 :abandoned)))))))
+         session (receive [:started value] value (after 3000 nil))]
+    (try
+     (is (some? session))
+     (erlang/send borrower :go)
+     (is (until #(= 2 (get (recorded) "packets"))))
+     (Process/exit borrower :kill)
+     (is (until #(not (Process/alive? (:pid session)))))
+     (is (until #(not (os-alive? (get (recorded) "pid")))))
+     (is (= true (get (recorded) "eof")))
+     (finally (Process/exit borrower :kill) (force-stop session))))))
