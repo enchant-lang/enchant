@@ -337,6 +337,18 @@ itself mechanically verified and does not certify all SMT theories.
   the two premises. Completion provenance stays explicit.
   [Native counterexample composition](RUNTIME-OBSERVATIONS.md)
 
+- SDK formal consumers now use the canonical `priv/lib/formal` modules. Typed
+  `system.core` arities share portable questions, certificate checking and
+  backend selection. The oracle can handle a complete question, keep logical
+  assumptions visible and delegate through an owned fallback. The initial
+  public SDK file passed 86 assertions without research imports; a separate
+  sixteen-file regression passed 2,549 assertions and retained all 187 native
+  verdicts. Static document checking exposed research aliases shadowing SDK
+  provider identity, so those aliases were removed from import search.
+  Process inheritance, replay sort checks, handler observation reconstruction,
+  derived search/session migration and remaining production consumers are
+  explicit next work. [SDK interface](SDK-INTERFACE.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

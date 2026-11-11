@@ -98,6 +98,6 @@ not an unqualified cross-version encoding theorem. The encoder, crypto/runtime
 and checker remain reviewed code. Canonical identity is neither execution
 attestation nor compiler proof authority.
 
-Implementation: `src/formal/identity.bl`. Independent fixtures:
+Implementation: `sdk-src/formal/identity.bl`. Independent fixtures:
 `canonical_identity_fixtures.py` and `evidence/contexts/canonical-fixtures.json`.
 Checks: `test/identity_test.bl` and `evidence/contexts/qualification.json`.

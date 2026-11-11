@@ -12,6 +12,15 @@ implemented fragments and deferred work distinguished per family. It does not
 claim 46 complete solver theories. [CONTRACT.md](CONTRACT.md) defines the shared
 data contract; [INTEGRATION.md](INTEGRATION.md) describes the production cutover.
 
+[SDK-INTERFACE.md](SDK-INTERFACE.md) connects the experiment to ordinary SDK
+programs: typed `system.core` entry points, portable question inspection and a
+complete-query oracle handler. Canonical term, proof and state-model sources
+now live under `priv/lib/formal`; research imports use the pinned SDK, while
+`sdk-src` supplies readable source links outside import search. The initial
+qualification passed 86 focused SDK assertions and 2,549 regression assertions.
+Source extraction, remaining legacy consumers, process-wide effect semantics
+and native worker packaging remain active work.
+
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,
 connected theory cards and recorded browser evidence. Its
