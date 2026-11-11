@@ -16,9 +16,19 @@
  (let [owner (System/get_env "DOSSIER_OWNER")]
   (and request (not (blank? owner)) (= owner (web/req-header request "tailscale-user-login")))))
 (defn roster-options [request] {:root root :can-write? (boolean (owner? request))})
+(defn- phase [label action]
+ (if-not (= "1" (System/get_env "FORMAL_REVIEW_PROFILE")) (action)
+  (let [started (erlang/monotonic_time :millisecond)]
+   (println (str "formal-review begin " label))
+   (let [result (action)]
+    (println (str "formal-review end " label " " (- (erlang/monotonic_time :millisecond) started) "ms"))
+    result))))
 (defn document [text request]
- (roster/enrich (witness/enrich (review/enrich (film/enrich (org/read-doc text) directory)) directory)
-                directory (roster-options request)))
+ (let [parsed (phase "parse" (fn [] (org/read-doc text)))
+       filmed (phase "film" (fn [] (film/enrich parsed directory)))
+       reviewed (phase "review" (fn [] (review/enrich filmed)))
+       witnessed (phase "witness" (fn [] (witness/enrich reviewed directory)))]
+  (phase "roster" (fn [] (roster/enrich witnessed directory (roster-options request))))))
 (defn revision [doc]
  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary
    [(File/read! path) (mapv :data (:nodes doc))])) (list (tuple :case :lower))))
@@ -106,7 +116,7 @@
        text (File/read! path)
        frame (Regex/run (Regex/compile! "^/witness-media/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)
        roster-frame (Regex/run (Regex/compile! "^/roster-media/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)
-       linked (when (= method "get") (linked-file text route))]
+       linked (when (= method "get") (phase "linked-file" (fn [] (linked-file text route))))]
   (cond
    (and (= method "post") (contains? #{"/answer" "/roster-note"} route))
     (if-not (owner? request) (web/json request 403 {:error "Only the configured dossier owner can save a review."})
@@ -135,9 +145,10 @@
    (= route "/doc") (let [doc (document text request)]
       (web/json request {:rev (revision doc) :html (join "" (map h/hiccup->html (page/doc-h doc)))}))
    linked (web/bytes request (:mime linked) (File/read! (:file linked)))
-   (= route "/") (let [doc (document text request)]
-     (web/html request (str "<!doctype html>" (h/hiccup->html (page/page-h doc (css)
-                          (str (scripts) (when-not (owner? request) (readonly-script))))))))
+   (= route "/") (let [doc (document text request)
+                         tree (phase "page" (fn [] (page/page-h doc (css)
+                               (str (scripts) (when-not (owner? request) (readonly-script))))))]
+     (web/html request (str "<!doctype html>" (phase "html" (fn [] (h/hiccup->html tree))))))
    :else (web/text request 404 "Not found"))))
 (defn start []
  (let [port (erlang/binary_to_integer (or (System/get_env "PORT") "4093"))]
