@@ -36,42 +36,64 @@ private theorem covered_bind {names : List String} {result : Outcome α} {next :
 
 private theorem covered_intOp (names : List String) (op : IntOp) (x y : Int)
     (zero : "zero-divisor" ∈ names) : covered names (op.apply x y) := by
-  cases op <;> simp [IntOp.apply, covered]
-  all_goals split <;> simp [covered, zero]
+  cases op <;> simp only [IntOp.apply]
+  all_goals first
+    | exact True.intro
+    | (split
+       · exact zero
+       · exact True.intro)
 
 theorem eval_covered (names : List String) (expression : Expr Γ τ) :
     ∀ env, covers names expression = true → covered names (eval expression env) := by
   induction expression <;> intro env check <;>
     simp only [covers, Bool.and_eq_true, List.contains_iff_mem] at check <;>
     simp only [eval]
+  case bind initial body initialIH bodyIH =>
+    exact covered_bind (initialIH env check.1) (fun v => bodyIH (.cons v env) check.2)
+  case cond condition yes no conditionIH yesIH noIH =>
+    apply covered_bind (conditionIH env check.1)
+    intro flag
+    cases flag
+    · exact noIH env check.2.2
+    · exact yesIH env check.2.1
+  case seq initial body initialIH bodyIH =>
+    exact covered_bind (initialIH env check.1) (fun _ => bodyIH env check.2)
+  case intOp op left right leftIH rightIH =>
+    exact covered_bind (leftIH env check.2.1)
+      (fun x => covered_bind (rightIH env check.2.2) (fun y => covered_intOp names op x y check.1))
   all_goals first
     | exact True.intro
     | exact check
-    | (apply covered_bind <;> first
-        | (solve | exact (by assumption : _ ) | apply_assumption <;> first | assumption | exact check.1 | exact check.2.1)
-        | (intro v
-           first
-           | exact True.intro
-           | (cases v <;> simp only [Bool.false_eq_true, ↓reduceIte] <;>
-              apply_assumption <;> first | exact check.2.1 | exact check.2.2)
-           | (apply covered_bind
-              · apply_assumption <;> first | exact check.2 | exact check.2.2
-              · intro w
-                first | exact True.intro | exact covered_intOp _ _ _ _ check.1)
-           | (apply_assumption <;> exact check.2)))
+    | (apply covered_bind
+       · apply_assumption
+         exact check
+       · intro _
+         exact True.intro)
+    | (apply covered_bind
+       · apply_assumption
+         exact check.1
+       · intro _
+         apply covered_bind
+         · apply_assumption
+           exact check.2
+         · intro _
+           exact True.intro)
 
 theorem decode_covered (codes : List Nat) (reason : String) (member : reason ∈ codes.map errorName) :
     errorName (errorCode codes reason).toNat = reason := by
-  unfold errorCode
-  cases found : codes.find? (fun n => errorName n == reason) with
-  | none =>
-    obtain ⟨code, inCodes, rfl⟩ := List.mem_map.mp member
-    have absent := (List.find?_eq_none (p := fun n => errorName n == errorName code)).mp found code inCodes
-    exact (absent (by simp)).elim
-  | some code =>
-    have accepted : (errorName code == reason) = true :=
-      List.find?_some (p := fun n => errorName n == reason) (a := code) found
-    simpa using beq_iff_eq.mp accepted
+  induction codes with
+  | nil => cases member
+  | cons code rest induction =>
+    change reason ∈ errorName code :: rest.map errorName at member
+    cases found : (errorName code == reason)
+    · have different : reason ≠ errorName code := by
+        intro equal
+        subst reason
+        simp at found
+      have tail := induction ((List.mem_cons.mp member).resolve_left different)
+      simpa only [errorCode, List.find?_cons, found, Bool.false_eq_true, ↓reduceIte] using tail
+    · have equal : errorName code = reason := beq_iff_eq.mp found
+      simpa only [errorCode, List.find?_cons, found, ↓reduceIte, Option.getD_some, Int.toNat_ofNat] using equal
 
 /- A record is a right-associated product with unit at the end. Its
    conjunction follows that layout, including each nested record field. -/
