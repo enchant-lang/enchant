@@ -137,7 +137,10 @@ def concrete_declarations(packet, layouts):
             event = 'none'
             if tag != 'idle':
                 index = by_name[frame['handler']]
+                message_sort = model['handlers'][index]['core']['inputs'][0][1]
+                message_value = core.render(core.core_sort(message_sort))
                 rows.extend([(f'recordedHandler{n} : Fin handlers.length', ('Fin.mk', index, ('by', 'decide')), None),
+                             (f'recordedMessageValue{n} : Value {message_value}', concrete_state(message_sort, frame['message']), None),
                              (f'recordedMessage{n} : Inputs', concrete_message(layouts[2][index], frame), None)])
                 event = ('some', ('Prod.mk', f'recordedHandler{n}', f'recordedMessage{n}'))
             rows.append((f'recordedEvent{n} : Event handlers', event, None))
@@ -171,6 +174,7 @@ def model_boundary(packet):
 def trace_boundary(packet, safety):
     audits = set()
     text = []
+    by_name = {row['name']: index for index, row in enumerate(packet['model']['handlers'])}
     failure_at, violation_at = None, None
     for n, frame in enumerate(packet['frames']):
         kind = frame['kind']
@@ -178,6 +182,12 @@ def trace_boundary(packet, safety):
             if kind == 'idle':
                 step = f'Step.idle recordedConfig{n-1}'
             else:
+                index = by_name[frame['handler']]
+                name = f'recordedMessage{n}Read'
+                text.append(f'''theorem {name} :
+    (handlerEnv{index} (policy.slots.put recordedConfig{n-1}.1 recordedMessage{n})).lookup Var.zero =
+      recordedMessageValue{n} := rfl''')
+                audits.add(name)
                 step = f'Step.{kind} recordedHandler{n} recordedMessage{n} (by rfl) (by rfl)'
             name = f'recordedStep{n}'
             text.append(f'theorem {name} : Step handlers recordedConfig{n-1} recordedEvent{n} recordedConfig{n} :=\n  {step}')

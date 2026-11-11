@@ -52,8 +52,10 @@ class CoreObservationChecks(unittest.TestCase):
                 self.assertFalse(result['compiler_proof_authority'])
                 self.assertEqual(result['execution_authenticity'], 'observer-trusted')
                 self.assertIsNone(result['all_traces_safety_packet'])
-                for index in range(len(packet['frames'])):
+                for index, frame in enumerate(packet['frames']):
                     self.assertIn(f'CoreObservedTrace.recordedPrefix{index}', result['axioms'])
+                    if frame['kind'] in ('returned', 'raised'):
+                        self.assertIn(f'CoreObservedTrace.recordedMessage{index}Read', result['axioms'])
                 if safety == 'safe':
                     self.assertIn(f"CoreObservedTrace.recordedSafe{len(packet['frames']) - 1}", result['axioms'])
                 else:
