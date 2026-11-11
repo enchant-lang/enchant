@@ -39,9 +39,21 @@
        reviewed (phase "review" (fn [] (review/enrich filmed)))
        witnessed (phase "witness" (fn [] (witness/enrich reviewed directory)))]
   (phase "roster" (fn [] (roster/enrich witnessed directory (roster-options request))))))
-(defn revision [doc]
+(defn revision [text doc]
  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary
-   [(File/read! path) (mapv :data (:nodes doc))])) (list (tuple :case :lower))))
+   [text (mapv :data (:nodes doc))])) (list (tuple :case :lower))))
+(def ^:private html-cache (atom nil))
+(def ^:private html-lock (erlang/make_ref))
+(defn- cached-html [text doc writable? kind build]
+ (let [key (revision text doc)]
+  (global/trans (tuple html-lock (erlang/self))
+   (fn []
+    (when-not (= key (:revision @html-cache))
+     (reset! html-cache {:revision key :roles {}}))
+    (if-let [found (get-in @html-cache [:roles writable? kind])] found
+     (let [value (phase (str "serialize-" (name kind)) build)]
+      (swap! html-cache assoc-in [:roles writable? kind] value)
+      value))))))
 (defn css [] (str (asset "style.css") (File/read! (str review-kit "/review.css"))
                   (asset "roster.css") (File/read! (str root "/dossier-local.css"))))
 (defn scripts [] (str (asset "live.js") (asset "roster.js")))
@@ -151,14 +163,19 @@
     (web/bytes request "application/json" (File/read! (str root route)))
    (= route "/src") (web/text request text)
    (= route "/answers") (web/json request (vec (page/feedback-items (document text request))))
-   (= route "/rev") (web/json request {:rev (revision (document text request))})
+   (= route "/rev") (web/json request {:rev (revision text (document text request))})
    (= route "/doc") (let [doc (document text request)]
-      (web/json request {:rev (revision doc) :html (join "" (mapv render-html (page/doc-h doc)))}))
+      (web/json request {:rev (revision text doc)
+                         :html (cached-html text doc (boolean (owner? request)) :fragment
+                                 (fn [] (join "" (mapv render-html (page/doc-h doc)))))}))
    linked (web/bytes request (:mime linked) (File/read! (:file linked)))
-   (= route "/") (let [doc (document text request)
-                         tree (phase "page" (fn [] (page/page-h doc (css)
-                               (str (scripts) (when-not (owner? request) (readonly-script))))))]
-     (web/html request (str "<!doctype html>" (phase "html" (fn [] (render-html tree))))))
+   (= route "/") (let [doc (document text request) writable? (boolean (owner? request))]
+     (web/html request
+      (cached-html text doc writable? :page
+       (fn []
+        (let [tree (phase "page" (fn [] (page/page-h doc (css)
+                    (str (scripts) (when-not writable? (readonly-script))))))]
+         (str "<!doctype html>" (phase "html" (fn [] (render-html tree)))))))))
    :else (web/text request 404 "Not found"))))
 (defn start []
  (let [port (erlang/binary_to_integer (or (System/get_env "PORT") "4093"))]
