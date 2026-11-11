@@ -329,6 +329,14 @@ itself mechanically verified and does not certify all SMT theories.
   reconstruction supplies receipt custody, with execution authenticity
   carried as an observer assumption. [Recorded Core traces](RUNTIME-OBSERVATIONS.md)
 
+- Native counterexample bundles retain the original bounded query, positive
+  witness, complete trace layout and a matching owned-adapter receipt. A
+  composed Lean theorem checks that the original assumptions hold, the
+  claim is false and the same recorded Core trace has an unsafe prefix.
+  Equality proofs bind state fields, choices and typed messages across
+  the two premises. Completion provenance stays explicit.
+  [Native counterexample composition](RUNTIME-OBSERVATIONS.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

@@ -207,3 +207,46 @@ the observer. Universal BEAM refinement remains open.
 
 The seven real receipts, exact Lean proofs, fresh reconstruction and rejected
 substitutions are indexed by `evidence/core-observations/qualification.json`.
+
+## Carry a native counterexample through the recorded run
+
+A source `protocol-trace` can now carry the original bounded question and
+the observed Core trace in one closed bundle. Both backends use the same
+entry points.
+
+```beam-lisp
+(def answer (formal/check {:backend :oxiz} subject))
+(def native (get-in answer [:backend :property]))
+(def recorded (formal/observe-protocol-counterexample subject native))
+(def receipt (:receipt recorded))
+(def packet (:packet (formal/core-protocol-counterexample-data subject native receipt)))
+(formal/check-core-protocol-counterexample-data subject native receipt packet)
+```
+
+Export reconstructs the original question and replays the native observation,
+including its explicit scalar completions. The receipt must have the same
+initial state and event plan. The positive term witness contains every original
+assumption and the exact negated claim. The bundle also retains the complete
+state, choice and per-handler message layout with each completed binding's
+origin. Watch-only inputs keep their values as supplemental observation data.
+
+```sh
+research/formal-logic/check-core-counterexample packet.json --output checked/
+```
+
+The capped runner freshly checks the SAT witness and every recorded Core
+prefix. Its final Lean theorem checks that the original claim evaluates to
+false, the assumptions hold and the trace contains an unsafe prefix. Equality
+proofs connect every state, selected choice and message to the query bindings.
+A valid SAT witness paired with a different valid unsafe Core execution fails
+those equalities. The final success artifact is removed before checking, so a
+failed composition retires its prior success.
+
+The query and receipt identities reconnect through fresh BL reconstruction.
+Native discovery remains claimed engine provenance, and recorded execution
+retains the observer assumption. A general proof that the unroller represents
+every admitted trace remains open. These results establish particular original
+query counterexamples and their recorded Core executions.
+
+The paired examples and proof custody are in
+`evidence/core-counterexamples/qualification.json`.

@@ -63,6 +63,9 @@ to invariant preservation at every finite admitted trace prefix.
 and a term-native export for independently checking each recorded Core prefix.
 The bank example applies its general safety theorem to the same recorded run.
 Execution authenticity remains an explicit observer assumption.
+The native counterexample bundle also connects the original bounded question
+and its witness to the recorded run. Its independent check rejects mismatched
+query and trace values even when both premise proofs succeed.
 
 [WITNESSES.md](WITNESSES.md) adds positive SAT evidence with term-native
 bindings. Authored assignments and models from either backend are independently

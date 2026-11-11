@@ -1187,6 +1187,46 @@ The proof is about the recorded values in the exact Core model. Beam Lisp checks
 
 The [[#cell-story-core-observation][executable example]] observes the bank, checks its receipt against the source model and reads the projected balances. The [[file:evidence/core-observations/execution/accepted.json][independent results]] include seven recorded runs and the bank's linked proof. See [[file:src/formal/core-observations.bl][the packet builder]], [[file:evidence/core-observations/execution/bank/CoreObservedTrace.lean][the concrete bank proof]], [[file:evidence/core-observations/execution/bank-linked/CoreObservedTrace.lean][the linked bank proof]], [[file:evidence/core-observations/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-observations/fresh/core-observations-fresh.json][the fresh reconstruction]] and [[file:evidence/core-observations/qualification.json][the qualification]].
 
+** Follow a counterexample from either solver
+A solver finds a withdrawal that sends the balance below zero. Beam Lisp can now keep the original question, the solver's values and the recorded handler run together as ordinary language data. The independent checker proves that those values make the original claim false and that the same values appear in an unsafe Core trace.
+
+#+begin_rosetta
+The connection | What gets checked
+The original question | Every assumption holds and the exact original claim evaluates to false.
+The values passed to the handler | The selected handler, its typed message and every state agree with the query's bindings.
+A value the engine leaves opaque | Replay supplies an explicit completion and retains its origin. The concrete value still goes through the checks.
+A different unsafe run | Both premise proofs can succeed. The final equality check refuses a run with different values.
+#+end_rosetta
+
+#+begin_code_graph :id formal-core-counterexample :title "Carry the same counterexample through each check" :start discover
+node discover | code | Find values with either engine | observed
+summary Z3 and OxiZ receive the same bounded source question. The bundle records which engine supplied the response.
+source research/formal-logic/src/formal/core-counterexample-examples.bl | Paired native examples | Both engines find counterexamples for six source protocols.
+node query | code | Check the original claim | observed
+summary The positive witness keeps every original assumption and the exact negated goal. Lean checks the values and proves the original claim false.
+source research/formal-logic/evidence/core-counterexamples/execution/overdraft-oxiz/CoreCounterexampleCheck.lean | Composed overdraft theorem | The theorem retains the original question and its witness.
+node values | code | Follow the values by name and type | observed
+summary State fields, selected choices and messages have equality proofs connecting the query bindings to the recorded Core trace.
+field Opaque inputs | Supplemental values retain their backend or replay completion origin.
+source research/formal-logic/src/formal/core-counterexamples.bl | Closed evidence bundle | The complete original layout travels with the packet.
+node run | code | Check the recorded execution | observed
+summary Lean checks every recorded prefix against the exact Core handlers and identifies an unsafe prefix in the same trace.
+source research/formal-logic/evidence/core-counterexamples/execution/overdraft-oxiz/trace/CoreObservedTrace.lean | Exact recorded Core run | The original query and recorded execution share their values.
+node mismatch | code | Refuse a different valid run | observed
+summary The SAT witness and the unsafe trace can both check while their values differ. The final composed proof rejects that substitution.
+source research/formal-logic/evidence/core-counterexamples/execution/rejected.json | Rejected evidence pairings | Two valid premises still need a checked connection.
+edge discover -> query | keep the original question
+edge query -> values | carry the checked bindings
+edge values -> run | connect each recorded input and state
+edge run -> mismatch | test the value connection
+#+end_code_graph
+
+#+begin_note :title "How far this argument reaches"
+The result establishes one original query counterexample and its recorded Core execution. Native discovery is recorded as claimed engine provenance, and execution reporting retains the observer assumption. The general correspondence between the unroller and every admitted trace remains open.
+#+end_note
+
+The [[#cell-story-core-counterexample][executable example]] uses both engines and checks that they answered the same original question. Read [[file:RUNTIME-OBSERVATIONS.md][the interface]], [[file:src/formal/core-counterexamples.bl][the bundle builder]], [[file:src/formal/core-counterexample-examples.bl][the paired examples]], [[file:evidence/core-counterexamples/execution/overdraft-oxiz/CoreCounterexampleCheck.lean][the composed theorem]], [[file:evidence/core-counterexamples/execution/overdraft-oxiz/trace/CoreObservedTrace.lean][the recorded trace proof]], [[file:evidence/core-counterexamples/execution/accepted.json][the results and axiom audits]], [[file:evidence/core-counterexamples/execution/rejected.json][the rejected pairings]], [[file:evidence/core-counterexamples/fresh/core-counterexamples-fresh.json][the fresh reconstruction]] and [[file:evidence/core-counterexamples/qualification.json][the qualification]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1619,7 +1659,8 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.core-symbolic :as core-symbolic] [formal.elaborate :as elaborate] [compiler :as compiler] [system.ir :as ir]
            [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]
            [formal.loop-core :as loop-core] [formal.core-actor-examples :as actors]
-           [formal.core-observation-examples :as observed-actors]))
+           [formal.core-observation-examples :as observed-actors]
+           [formal.core-counterexample-examples :as native-traces]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2389,6 +2430,21 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-core-observation
 : {:kernel-execution :not-run, :data-connection :checked-data-connection, :balances [0 10 7 7 7], :recorded-prefixes 5, :adapter-conformance :conforming}
 
+
+
+
+#+begin_src beam-lisp :id story-core-counterexample
+(def native-recordings (mapv native-traces/sample [:z3 :oxiz]))
+(def native-checks (mapv (fn [{:keys [subject native receipt packet]}]
+                          (formal/check-core-protocol-counterexample-data subject native receipt packet)) native-recordings))
+(def native-query-ids (mapv #(get-in % [:packet :subject :query]) native-recordings))
+(assert (apply = native-query-ids))
+(assert (every? #(= :checked-data-connection (:status %)) native-checks))
+(assert (every? #(< (get-in % [:receipt :frames 1 :state "balance"]) 0) native-recordings))
+{:engines (mapv #(get-in % [:packet :discovery :engine]) native-recordings)
+ :same-query (apply = native-query-ids) :unsafe-recordings (count native-recordings)
+ :data-connections (mapv :status native-checks) :kernel-execution :not-run}
+#+end_src
 
 
 
