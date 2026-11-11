@@ -1,0 +1,71 @@
+(ns formal.effect-examples
+ (:require [effect] [oracle] [formal.term :as t] [formal.query :as q]
+           [formal.logic :as logic] [formal.identity :as identity]))
+
+(def x (t/variable "guide.effect.x" t/Int))
+(def question (q/sat {:id :guide/effect-snapshot
+                     :assumptions [(t/eq x (t/int 7))] :observe {"x" x}}))
+(defn- handle [whole _execute]
+ (oracle/query-answer whole {:solver-status :sat :assignments {"guide.effect.x" 7}}))
+(defn- ask [engine]
+ (logic/run {:backend engine :worker "/unavailable/formal-worker"
+             :z3-library "/unavailable/libz3.so"} question))
+(defn- summary [answer]
+ {:verdict (:verdict answer) :x (get-in answer [:witness "x"])
+  :validation (get-in answer [:validation :status])
+  :certificate (get-in answer [:certificate :status])})
+
+(defserver Reader
+ (init [engine] (ok engine))
+ (handle-call :ask [_from engine] (reply (ask engine) engine)))
+
+(defn managed-work
+ "A handled term question survives its submitting scope. Both backend choices
+  have deliberately unavailable native paths; the handler supplies a model."
+ [engine]
+ (let [parent (erlang/self) ticket (erlang/make_ref)
+       work (oracle/with-query-handler handle
+             (fn []
+              {:child (spawn (fn []
+                               (receive [:go seen] :when (= seen ticket)
+                                (erlang/send parent [:answer ticket (ask engine)]))))
+               :future (future (ask engine))
+               :registration (BeamLisp.Execution/register! (fn [] (ask engine)))
+               :actor (start Reader engine)}))]
+  (try
+   (assert (not (oracle/query-intercepted?)))
+   (erlang/send (:child work) [:go ticket])
+   (let [child (receive [:answer seen answer] :when (= seen ticket) answer
+                (after 10000 (throw (ex-info "effect example child timed out" {}))))
+         answers {:child (summary child) :future (summary (deref (:future work)))
+                  :registration (summary (:value (BeamLisp.Execution/invoke! (:registration work) [])))
+                  :actor (summary (call (:actor work) :ask))}]
+    (doseq [[_ result] answers]
+     (assert (= :sat (:verdict result))) (assert (= 7 (:x result)))
+     (assert (= :valid (:validation result))))
+    (identity/bytes question)
+    {:backend-choice engine :native-paths :unavailable :answers answers
+     :caller-handler-restored (not (oracle/query-intercepted?))
+     :portable-question true :compiler-proof-authority false})
+   (finally
+    (BeamLisp.Execution/close! (:registration work))
+    (when (Process/alive? (:actor work)) (GenServer/stop (:actor work)))
+    (when (Process/alive? (:child work)) (Process/exit (:child work) :kill))))))
+
+(defn named-effect
+ "The same runtime boundary works for an ordinary named synchronous effect."
+ []
+ (let [registration
+       (effect/with-handler :guide/read (fn [request default] (+ request (default)))
+        (fn [] (BeamLisp.Execution/register!
+                #(effect/perform :guide/read 2 (fn [] 40)))))]
+  (try
+   (let [handled (:value (BeamLisp.Execution/invoke! registration []))
+         default (effect/perform :guide/read 2 (fn [] 40))]
+    (assert (= 42 handled)) (assert (= 40 default))
+    {:submitted-work handled :caller-default default :caller-restored (not (effect/handled? :guide/read))})
+   (finally (BeamLisp.Execution/close! registration)))))
+
+(defn results []
+ {:managed (mapv managed-work [:z3 :oxiz]) :named (named-effect)
+  :continuation-capture false :compiler-proof-authority false})
