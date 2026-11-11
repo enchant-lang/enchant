@@ -24,6 +24,8 @@ The `ensures` builder runs at preparation time on symbolic inputs and payload. I
 
 An omitted witness leaves a conditional theorem. A false precondition can admit no input and still have a conditional proof. The checker reports admission separately.
 
+Preparation orders permitted error codes numerically, so rebuilding a contract from a saved definition preserves the exact question. An earlier certificate whose question used a different set iteration order needs to be regenerated for the canonical question.
+
 ## Independent check
 
 Export the packet as JSON with `interop/->json`. Run the capped checker with the pinned Lean model.

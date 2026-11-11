@@ -30,7 +30,7 @@ commits_match(source)
 checks = (E / 'checks.txt').read_text()
 counts = {name: int(count) for name, count in re.findall(r'✓\s+(formal\.[\w-]+)\s+(\d+) passed', checks)}
 require(len(counts) == 36 and '36 file(s) passed, 0 failed, 0 incoherent' in checks
-        and counts['formal.core-contracts-test'] == 93, 'complete BL integration suite')
+        and counts['formal.core-contracts-test'] == 96, 'complete BL integration suite')
 for name, tests in [('lean-checks.txt', 3), ('prior-core-checks.txt', 5)]:
     log = (E / name).read_text()
     require(f'Ran {tests} tests' in log and '\nOK\n' in log, name + ' passed')

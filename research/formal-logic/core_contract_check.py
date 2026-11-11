@@ -92,8 +92,8 @@ def validate(packet):
     allowed = policy['allowed-codes']
     require(type(allowed) is list and len(allowed) <= len(packet['core']['errors'])
             and all(type(code) is int and code > 0 for code in allowed), 'positive allowed Core error codes')
-    require(len(set(allowed)) == len(allowed) and set(allowed) <= {code for _, code in packet['core']['errors']},
-            'unique allowed codes drawn from the Core catalogue')
+    require(allowed == sorted(set(allowed)) and set(allowed) <= {code for _, code in packet['core']['errors']},
+            'ordered unique allowed codes drawn from the Core catalogue')
     names = terms.validate_roots([policy['pre'], policy['post']], ['bool', 'bool'])
     require(all(name in core_layout[sort == 'bool'] for name, sort in names.items()),
             'contract policy names and sorts belong to the Core input layout')
