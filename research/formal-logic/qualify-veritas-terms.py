@@ -112,6 +112,8 @@ require(write['mode'] == 'write' and reread['mode'] == 'read' and write['rows'] 
         and write['process'] != reread['process'], 'fresh-process durable question and nil/false roundtrip')
 report = {'schema': 'enchant.formal.veritas-terms-qualification.v1', 'checkpoint': 36, 'sdk_pin': pin,
           'source': {'code_commit': snapshot['code_commit'], 'sha256': snapshot['source_sha256']},
+          'incidental_sdk_source': snapshot.get('incidental_sdk_source_sha256', {}),
+          'incidental_scope': snapshot.get('incidental_scope'),
           'focused': focused, 'regression': regression, 'bl_assertions': sum(focused.values()) + sum(regression.values()),
           'paired_questions': paired, 'sdk_only': True, 'durable_ledger_fresh_process': True,
           'unicode_prefix': {'z3': 'solver-claim', 'oxiz': 'unknown'}, 'compiler_proof_authority': False,
