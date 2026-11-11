@@ -45,13 +45,16 @@ for name, digest in snapshot['source_sha256'].items():
             'committed implementation: ' + name)
     if name.startswith('priv/'):
         require(sha(source / name) == digest, 'actual immutable SDK source: ' + name)
-for name, digest in read(E / 'check-source-pin.json')['source_sha256'].items():
+checked = read(E / 'check-source-pin.json')
+for name, digest in checked['source_sha256'].items():
     if name == 'test/bl/doc_nested_spans_test.bl':
         committed = subprocess.check_output(['git', 'show', snapshot['code_commit'] + ':' + name], cwd=R)
         require(hashlib.sha256(committed).hexdigest() == digest and sha(E / 'checked-doc-nested-spans-test.bl') == digest,
                 'actual SDK-era Org regression program; later independent parser changes are outside this qualification')
     else:
         require(sha(R / name) == digest, 'checked program: ' + name)
+        committed = subprocess.check_output(['git', 'show', checked['code_commit'] + ':' + name], cwd=R)
+        require(hashlib.sha256(committed).hexdigest() == digest, 'committed check program: ' + name)
 for name, digest in snapshot.get('incidental_sdk_source_sha256', {}).items():
     require(sha(source / name) == digest, 'incidental SDK source: ' + name)
 prior = read(E / 'baseline-sdk-pin.json')
@@ -66,6 +69,10 @@ require(floor['status'] == 'passed' and floor['sdk'] == pin['sdk'] and floor['fi
 require(preflight['beam-selection']['modality'] == 'exhausted' and preflight['beam-selection']['complete'] is True
         and preflight['declaration-cases']['modality'] == 'exhausted' and not any(preflight[k] for k in
         ('source-errors', 'target-dependency-errors', 'require-cycles', 'sources_changed_during_analysis')), 'source preflight')
+require(preflight['root'] == str(source) and preflight['runtime'] == str(sdk)
+        and preflight['selector_sha256'] == sha(source / 'priv/build/sdk-source-selection.bl')
+        and preflight['driver_sha256'] == sha(R / 'scripts/sdk-preflight.bl'), 'actual preflight source and reader')
+require('SDK-PREFLIGHT-CONTROL passed: parse, target edge and cycle refusals' in (E / 'preflight-controls-checks.txt').read_text(), 'preflight refusal controls')
 require('0 passed, 6 failed, 1 errored' in (E / 'baseline-checks.txt').read_text(), 'retained previous-SDK failures')
 require('not green' in (E / 'focused-1-checks.txt').read_text() and 'not green' in (E / 'regression-checks.txt').read_text(),
         'retained initial test and downstream failures')
