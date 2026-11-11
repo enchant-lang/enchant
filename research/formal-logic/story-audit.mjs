@@ -198,6 +198,21 @@ try{
   check(size.name+': contract cell records its input and exact policy replay',composed.includes(':admitted-x 4')&&composed.includes(':core-value 5')&&composed.includes(':declared-inputs 4')&&composed.includes(':witness-inputs 2')&&composed.includes(':must-return true')&&composed.includes(':changed-policy :rejected')&&composed.includes(':kernel-execution :not-run'));
   await evaluate("document.querySelector('#cell-story-core-contract-composition').scrollIntoView({block:'center'})");
   await shot(size.name+'-core-contract-data');
+  await navigate('/#prove-that-a-rewrite-preserves-the-outcome');
+  check(size.name+': rewrite chapter explains both observed outcomes and its precondition',await evaluate("document.body.innerText.includes('when a flag is true and raises a named error otherwise')&&document.body.innerText.includes(\"whenever the rewrite's precondition holds\")"));
+  await click('[data-graph="formal-core-translation-composition"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="premises"]');
+  check(size.name+': rewrite proof panel describes the exact question and all three imports',await evaluate("(()=>{const text=document.querySelector('[data-graph=\"formal-core-translation-composition\"] .sg-stage>[data-view]:not([hidden])').innerText;return text.includes('imports all three freshly compiled proofs')&&text.includes('after aligning typed input slots')})()"));
+  await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes('Prove that a rewrite preserves the outcome')).scrollIntoView({block:'start'})");
+  await shot(size.name+'-core-translation');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-core-translation-composition\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-core-translation-panel');
+  }
+  await navigate('/#s-the-model-running');
+  const rewrite=await evaluate("document.querySelector('#cell-story-core-translation-composition')?.innerText||''");
+  check(size.name+': executable rewrite shows both values and both error names',rewrite.includes(':returned-values [0 0]')&&rewrite.includes(':raised-errors [:phase/left :phase/left]')&&rewrite.includes(':data-connection :checked-data-connection')&&rewrite.includes(':kernel-execution :not-run'));
+  await evaluate("document.querySelector('#cell-story-core-translation-composition').scrollIntoView({block:'center'})");
+  await shot(size.name+'-core-translation-data');
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -403,6 +418,19 @@ try{
  check('The transferred named-error contract rechecks with zero proof search or native sessions',freshContracts.rows.some(row=>row.id==='named-errors'&&row.status==='checked-data-connection')&&Object.values(freshContracts['checking-window']).every(count=>count===0));
  check('Trusted Core contract archive stays unavailable to the browser',(await fetch(base+'/evidence/core-contracts/examples/core-contracts.etf')).status===404);
  check('Compiled Core contract proof stays unavailable to the browser',(await fetch(base+'/evidence/core-contracts/execution/unused-slots/CoreContractCheck.olean')).status===404);
+ for(const path of ['/TRANSLATION.md','/src/formal/core-translations.bl','/metatheory/CoreTranslation.lean','/evidence/core-translations/execution/optimizer-preserves-failure/CoreTranslationCheck.lean','/evidence/core-translations/execution/accepted.json','/evidence/core-translations/execution/rejected.json','/evidence/core-translations/fresh/core-translations-fresh.json','/evidence/core-translations/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared Core translation evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const translations=await fetch(base+'/evidence/core-translations/execution/accepted.json').then(response=>response.json());
+ check('Nine exact Core translations check both error catalogues and both outcomes',translations.length===9&&translations.every(row=>row.axioms.beforeErrorsCovered&&row.axioms.afterErrorsCovered&&row.axioms.originalCoreOutcomesEqual&&Object.keys(row.imported_olean_sha256).length===3&&row.compiler_proof_authority===false));
+ check('Signed quotient uses the explicitly recorded standard axiom policy',translations.some(row=>row.id==='signed-quotient'&&row.axioms.originalCoreOutcomesEqual.includes('Classical.choice'))&&translations.filter(row=>row.axiom_policy==='choice-free').length===8);
+ const changedTranslations=await fetch(base+'/evidence/core-translations/execution/rejected.json').then(response=>response.json());
+ check('A changed precondition and a different checked after tree fail composition',changedTranslations.length===2&&changedTranslations.every(row=>row.status==='not-accepted-by-Lean'));
+ const freshTranslations=await fetch(base+'/evidence/core-translations/fresh/core-translations-fresh.json').then(response=>response.json());
+ check('All original translations reconnect after transfer',freshTranslations.rows.length===9&&freshTranslations.rows.every(row=>row.status==='checked-data-connection'&&row['changed-precondition']==='rejected'));
+ check('Trusted Core translation archive stays unavailable to the browser',(await fetch(base+'/evidence/core-translations/examples/core-translations.etf')).status===404);
+ check('Compiled Core translation proof stays unavailable to the browser',(await fetch(base+'/evidence/core-translations/execution/optimizer-preserves-failure/CoreTranslationCheck.olean')).status===404);
  for(const path of ['/SPECIALIZATION.md','/src/formal/specialization.bl','/test/specialization_test.bl','/specialization-check.bl','/specialization-recheck.bl','/evidence/specialization/examples/specialization.json','/evidence/specialization/fresh/specialization-fresh.json','/evidence/specialization/checks.txt','/evidence/specialization/qualification.json','/evidence/specialization/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared specialization evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));

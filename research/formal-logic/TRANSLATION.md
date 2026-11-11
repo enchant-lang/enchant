@@ -15,10 +15,10 @@ happens to lower to an identical arithmetic claim needs its own evidence.
 This compares two Core data programs and therefore reports
 `:source-connection :authored-core-no-source-claim`. A separate
 `:model-interpretation` record identifies both Core programs and the exact
-prepared equivalence question. The interpretation remains reviewed,
-unmechanized implementation code even when the resulting term certificate is
-checked. An earlier Source extraction, a later compiler lowering and actual
-runtime preservation each need their own connection. [CONNECTIONS.md](CONNECTIONS.md)
+prepared equivalence question. The portable certificate checks the term
+entailment. The Core translation runner described below checks its application
+to both Core outcomes. An earlier Source extraction, a later compiler lowering
+and actual runtime preservation each need their own connection. [CONNECTIONS.md](CONNECTIONS.md)
 defines the common assurance fields.
 
 ```clojure
@@ -76,6 +76,40 @@ The result carries its explicit precondition. A caller may use a conditional
 rewrite only where that precondition is established. The current built-in
 rewrites need no extra assumptions; a supplied false precondition yields a
 vacuous comparison and cannot admit them.
+
+## Check the theorem on both Core programs
+
+`formal/core-translation-data` accepts the original translation definition and
+the proof object returned by `verify-translation`. An optimizer result carries
+the same definition under `:translation` and object under
+`[:validation :proof :object]`. The export retains both original trees and
+their actual lowered terms, the precondition and the complete typed question.
+`formal/check-core-translation-data` reconstructs that packet from the
+definition and object in a fresh BL process.
+
+Export the packet as JSON with `interop/->json`. Check it with the pinned Lean
+runner.
+
+```sh
+research/formal-logic/check-core-translation \
+  research/formal-logic/evidence/core-translations/examples/optimizer-preserves-failure.json \
+  --output /tmp/enchant-core-translation --axiom-policy choice-free
+```
+
+The runner compiles a fresh correspondence theorem for each Core program and
+checks the original term entailment. The final module imports those three
+objects. Lean checks that both programs share an input environment and error
+catalogue, that every possible raised name is represented, and that the
+remapped question exactly expresses the claimed outcome comparison. The
+result is equality of the two Core outcomes for every typed input where the
+precondition evaluates to true. Equal returned records have equal fields,
+including nested fields. Equal raised outcomes carry the same error name.
+
+A conditional theorem can cover an empty input domain. The existing optimizer
+uses the feasibility result to refuse a vacuous rewrite. The model proof
+covers the two contained finite Core trees, with the named-data codecs and
+the original BL subject connection checked separately. Compiler preservation
+remains open. [Execution results](evidence/core-translations/execution/accepted.json)
 
 ## Versioned checking rules
 

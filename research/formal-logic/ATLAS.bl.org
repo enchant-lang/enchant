@@ -1,7 +1,7 @@
 #+title: Beam Lisp, with reasons you can inspect
 #+subtitle: One language for programs, contracts and the evidence behind them.
 #+kicker: ENCHANT · FORMAL LOGIC LAB
-#+status: Autonomous implementation on main · checked contracts on exact Core outcomes · Source, compiler and wider model connections remain active
+#+status: Autonomous implementation on main · checked contracts and translation proofs on exact Core outcomes · Source, compiler and wider model connections remain active
 #+design: forest
 #+TODO: TODO NEXT DOING WAIT REVIEW | DONE DROP
 
@@ -1021,6 +1021,47 @@ The [[#cell-story-core-contract-composition][executable example]] shows which in
 
 Read [[file:CORE-CONTRACTS.md][the term-based contract interface]], [[file:src/formal/core-contracts.bl][the BL packet builder]], [[file:metatheory/CoreContract.lean][the checked composition rule]], [[file:evidence/core-contracts/execution/unused-slots/CoreContractCheck.lean][the applied theorem]], [[file:evidence/core-contracts/execution/accepted.json][the results and axiom audits]], [[file:evidence/core-contracts/execution/rejected.json][the five rejected substitutions]], [[file:evidence/core-contracts/fresh/core-contracts-fresh.json][the fresh-VM replay]], and [[file:evidence/core-contracts/qualification.json][the implementation qualification]].
 
+** Prove that a rewrite preserves the outcome
+The optimizer turns multiplication by zero into a short sequence. It evaluates the other operand first, then returns zero. In this example the operand returns an integer when a flag is true and raises a named error otherwise. The two versions must agree on both inputs.
+
+Lean checks the original tree, the rewritten tree and the original term question. It proves that the two trees give the same outcome whenever the rewrite's precondition holds. The inputs line up by name and type even when the proof only needs some of them.
+
+#+begin_rosetta
+Try it with | What both Core programs do
+Flag true and input 7 | Return zero.
+Flag false and input 7 | Raise the named error =:phase/left=.
+A nested record result | Return equal values in every field, including nested fields.
+An impossible precondition | The conditional theorem holds vacuously. The optimizer refuses this false-precondition example.
+#+end_rosetta
+
+#+begin_code_graph :id formal-core-translation-composition :title "Follow the proof for a rewrite" :start pair
+node pair | code | Keep both exact Core programs | implemented
+summary The export retains the optimizer's original program and actual candidate, their symbolic outcomes, and the exact translation proof.
+source research/formal-logic/src/formal/core-translations.bl | Translation packet builder | Fresh BL reconstruction connects the packet to its original definition.
+node premises | code | Check each program and the whole comparison | observed
+summary The runner checks both Core outcome correspondences and the original term entailment. The final module imports all three freshly compiled proofs.
+field Exact question | Lean compares the complete precondition and comparison with the checked question after aligning typed input slots.
+source research/formal-logic/evidence/core-translations/execution/optimizer-preserves-failure/CoreTranslationCheck.lean | The optimizer example's composed theorem | Its conclusion compares the evaluations of the two original Core expressions.
+node errors | code | Match the actual error names | observed
+summary Lean proves that every error either tree can raise belongs to the shared catalogue. Equal numeric codes can then establish the same raised name.
+source research/formal-logic/metatheory/CoreTranslation.lean | Error coverage and equality proof | A missing code could otherwise hide the difference between two errors.
+node scope | code | Keep the precondition attached | observed
+summary The theorem proves equality of outcomes for every admitted input to these two trees. A false precondition produces a conditional theorem with an empty domain.
+field Scope | The theorem covers finite Core evaluation. The named-data codec is reviewed, and compiler and BEAM preservation remain open.
+source research/formal-logic/evidence/core-translations/execution/accepted.json | Original translations and axiom audits | The reports identify the before, after and entailment proof objects.
+node changed | code | Refuse a different rewrite | observed
+summary Both Core correspondences and the term proof can check while the final comparison fails. Lean rejects a changed precondition and a different checked after program paired with the old question.
+source research/formal-logic/evidence/core-translations/execution/rejected.json | Rejected substitutions | The original premises still check in both cases.
+edge pair -> premises | prove what both trees evaluate
+edge premises -> errors | connect the two named error outcomes
+edge premises -> scope | apply the checked question under its precondition
+edge scope -> changed | test that the exact question is required
+#+end_code_graph
+
+The [[#cell-story-core-translation-composition][executable example]] runs both trees on a returning input and a failing one. Nine translations passed. They include a signed quotient, nested and empty records, an eager default and a guarded rewrite whose proof omits unused inputs. The signed quotient records a dependence on =Classical.choice=. The other eight passed the choice-free policy.
+
+Read [[file:TRANSLATION.md][the translation interface and runner]], [[file:src/formal/core-translations.bl][the BL export]], [[file:metatheory/CoreTranslation.lean][the checked proof rules]], [[file:evidence/core-translations/execution/optimizer-preserves-failure/CoreTranslationCheck.lean][the applied rewrite theorem]], [[file:evidence/core-translations/execution/accepted.json][the accepted proof audits]], [[file:evidence/core-translations/execution/rejected.json][the rejected substitutions]], [[file:evidence/core-translations/fresh/core-translations-fresh.json][the fresh reconstruction]], and [[file:evidence/core-translations/qualification.json][the qualification]].
+
 ** The same value, after it moves
 A saved execution record should keep its identity in another VM. The first context archive did not: its definition and profile were intact, but the receipt hash changed after transfer. The implementation had mistaken default ETF bytes for a canonical data encoding.
 
@@ -1451,7 +1492,7 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.collections :as c] [formal.value :as v] [bl.json :as json]
            [formal.api :as formal] [formal.core :as core] [formal.identity :as data-identity]
            [formal.core-symbolic :as core-symbolic] [formal.elaborate :as elaborate] [compiler :as compiler] [system.ir :as ir]
-           [formal.core-contract-examples :as composed]))
+           [formal.core-contract-examples :as composed] [formal.core-translation-examples :as rewrites]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2148,6 +2189,24 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-core-contract-composition
 : {:must-return true, :kernel-execution :not-run, :data-connection :checked-data-connection, :admitted-x 4, :admitted-flag true, :core-value 5, :declared-inputs 4, :witness-inputs 2, :changed-policy :rejected}
 
+
+
+#+begin_src beam-lisp :id story-core-translation-composition
+(def rewrite (first (rewrites/examples)))
+(def rewrite-definition (:definition rewrite))
+(def rewrite-proof (:object rewrite))
+(def rewrite-packet (:packet (formal/core-translation-data rewrite-definition rewrite-proof)))
+(def rewrite-check (formal/check-core-translation-data rewrite-definition rewrite-proof rewrite-packet))
+(defn evaluate-rewrite [side flag]
+ (core/evaluate (get rewrite-definition side) (:parameters rewrite-definition) {"p" flag "x" 7}))
+(def rewrite-returns (mapv #(:value (evaluate-rewrite % true)) [:before :after]))
+(def rewrite-errors (mapv #(:error (evaluate-rewrite % false)) [:before :after]))
+(assert (= [0 0] rewrite-returns))
+(assert (= [:phase/left :phase/left] rewrite-errors))
+(assert (= :checked-data-connection (:status rewrite-check)))
+{:returned-values rewrite-returns :raised-errors rewrite-errors
+ :data-connection (:status rewrite-check) :kernel-execution (:kernel-execution rewrite-check)}
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity

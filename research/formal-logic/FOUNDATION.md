@@ -297,6 +297,14 @@ itself mechanically verified and does not certify all SMT theories.
   The canonical order now preserves the exact question across transfer.
   [Core contract composition](CORE-CONTRACTS.md)
 
+- Checked Core translations prove equality of the outcomes of two exact
+  trees on admitted inputs. The proof aligns their environments and checks
+  that their shared catalogue represents every reachable raised name. It
+  then applies the exact term comparison to both Core correspondences.
+  The optimizer example preserves a raised operand under multiplication
+  by zero. The named-data codec, compiler lowering and BEAM behavior retain
+  their own trust boundaries. [Core translation proofs](TRANSLATION.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical
