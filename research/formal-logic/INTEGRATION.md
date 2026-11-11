@@ -40,6 +40,14 @@ answer as data. The selected temporal SDK passes 2,373 focused assertions and
 7,086 formal assertions. Three exact generated term laws also pass the pinned
 original-term Lean checker. Constructor/runtime correspondence remains reviewed.
 
+[Veritas quantifiers and coverage](VERITAS-TERMS.md) now use complete term
+questions through options-map entry points. Their source and generator profiles
+are canonical SDK modules. Native unknown never becomes a sampling result;
+runtime-only fallback happens only after preparation declines. The ledger keeps
+questions, evidence and explicit witness presence as caller records. Generic
+callable/Source ownership remains open; the [custody note](CALLABLE-CUSTODY.md)
+records why retiring arbitrary generated code needs a stronger lifetime model.
+
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,
 the remaining verifier consumers and the default pool still have migration

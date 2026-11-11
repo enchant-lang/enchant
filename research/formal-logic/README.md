@@ -25,6 +25,13 @@ ANF, with exact code custody and retirement. Checked term certificates retain
 the reviewed source/compiler connection as a separate fact. Broader source
 extraction, remaining legacy consumers, formal effect semantics and native
 pooling remain active work.
+
+The [Veritas term interface](VERITAS-TERMS.md) now covers quantifiers and
+compiler-backed clause selection. Typed generator models compose enums,
+products, vector lengths and text prefixes without hiding their abstraction
+boundaries. Concrete replay, exhaustive search and sampling retain distinct
+result meanings; nil and false remain valid witnesses. The ledger stores the
+whole question and caller evidence without promoting their authority.
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes

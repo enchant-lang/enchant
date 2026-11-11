@@ -18,6 +18,14 @@ generator domains into the same portable questions. Source counterexamples
 require term replay and execution of that exact ANF. The scalar source, numeric
 and data adapters also live in the SDK.
 
+The [Veritas term interface](VERITAS-TERMS.md) extends this path to quantifiers
+and compiler-backed clause coverage. Options maps choose the backend and the
+terms/enumeration/sampling engine separately. Enum payloads, positional products,
+collection-length abstractions and text prefixes compose as typed inputs.
+`veritas/prepare` exposes the complete question before solving; the ledger can
+retain it with its identity, caller evidence and explicit witness presence.
+Native claims, runtime replay and recorded evidence keep separate authority.
+
 ## Ask through a standard consumer
 
 ```beam-lisp
