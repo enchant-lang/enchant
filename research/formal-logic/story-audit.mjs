@@ -334,6 +334,37 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#the-process-keeps-the-real-context');
+  await wait("document.querySelector('#the-process-keeps-the-real-context').getClientRects().length>0");
+  check(size.name+': native owner chapter explains authoritative state and restored mirrors',await evaluate("document.body.innerText.includes('diagnostic mirror')&&document.body.innerText.includes('owner now sees a different revision')"));
+  await click('[data-graph="formal-native-context-owner"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="question"]');
+  check(size.name+': owner question panel separates durable terms and execution token',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('no owner PID, port or native node IDs')&&t.includes('outside the durable question')})()"));
+  await click('[data-graph="formal-native-context-owner"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="raw"]');
+  check(size.name+': raw transport panel keeps reset policy and introspection scope explicit',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('refuses further managed solving until a reset')&&t.includes('Arbitrary Erlang introspection')})()"));
+  await evaluate("document.querySelector('#the-process-keeps-the-real-context').scrollIntoView({block:'start'})");
+  await shot(size.name+'-native-context-owner');
+  if(size.name==='phone'){
+    await evaluate("document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-native-context-owner-panel');
+  }
+  await click('[data-graph="formal-native-context-owner"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="retirement"]');
+  check(size.name+': retirement panel keeps completed native refusal distinct from future execution',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-native-context-owner\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('without changing the question it answered')&&t.includes('does not authorize another exchange')&&t.includes('Compiler proof authority stays disabled')})()"));
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-native-context-owner\"]').scrollIntoView({block:'center'})");
+    await shot(size.name+'-native-context-owner-night');
+    await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-native-contexts','story-native-context-revision']){
+    await wait(`document.querySelector('#cell-${id} .result').getClientRects().length>0`);
+    check(size.name+': visible executable result '+id,await evaluate(`document.querySelector('#cell-${id} .result').getClientRects().length>0`));
+    const t=await evaluate(`document.querySelector('#cell-${id} .result').innerText`);
+    if(id==='story-native-contexts')check(size.name+': owner cell retains assumptions refuses raw reuse and catches a restored mirror',t.includes(':engines [:z3 :oxiz]')&&t.includes(':after-raw-load [:not-run :not-run]')&&t.includes(':after-managed-reset [:refuted :refuted]')&&t.includes(':retained-assumptions [1 1]')&&t.includes(':restored-mirror-revisions [0 0]')&&t.includes(':actual-owner-revisions [1 1]')&&t.includes(':questions-portable true')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-native-context-revision')check(size.name+': owner revision cell shows no native checks for refused scopes',t.includes(':before-revisions [0 0]')&&t.includes(':after-revisions [1 1]')&&t.includes(':stale-scopes [:context-changed :context-changed]')&&t.includes(':refused-native-checks [0 0]')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -608,6 +639,14 @@ try{
  const answers=await fetch(base+'/evidence/answer-integrity/qualification.json').then(response=>response.json());
  check('Typed answer qualification retains baseline exact SDK and passing regressions',answers.checkpoint===29&&answers.baseline.checks.failed===27&&answers.checks.focused_assertions===220&&answers.checks.regression_assertions===7086&&answers.unchanged_paired_questions===187&&answers.compiler_proof_authority===false);
  check('Ground equality availability remains explicit',JSON.stringify(answers.additional_native_verdicts)===JSON.stringify({z3:['proved','proved','proved'],oxiz:['unsupported','proved','proved']}));
+ for(const path of ['/NATIVE-CONTEXTS.md','/sdk-src/formal/backend.bl','/src/formal/native-context-examples.bl','/native-contexts-check.bl','/evidence/native-contexts/examples.json','/evidence/native-contexts/baseline-checks.txt','/evidence/native-contexts/candidate-1-focused-checks.txt','/evidence/native-contexts/focused-checks.txt','/evidence/native-contexts/regression-checks.txt','/evidence/native-contexts/qualification.json']){
+  const response=await fetch(base+path),body=await response.text();
+  check('Declared native context source or evidence is readable: '+path,response.status===200&&body.length>50&&(/text\/plain|application\/json/).test(response.headers.get('content-type')));
+ }
+ const ownerQualification=await fetch(base+'/evidence/native-contexts/qualification.json').then(response=>response.json());
+ check('Native context qualification retains baseline candidate issue and passing exact SDK checks',ownerQualification.checkpoint===30&&ownerQualification.baseline.checks.failed===20&&ownerQualification.candidate_1.assertions_failed===3&&ownerQualification.checks.focused_assertions===356&&ownerQualification.checks.regression_assertions===7086&&ownerQualification.unchanged_paired_questions===187&&ownerQualification.compiler_proof_authority===false);
+ const ownerExamples=await fetch(base+'/evidence/native-contexts/examples.json').then(response=>response.json());
+ check('Both native examples retain truthful questions portable data and exact execution revisions',ownerExamples.rows.length===2&&ownerExamples.rows.every(row=>row.raw['portable-query']['solver-status']==='not-run'&&row.raw['after-reset']==='refuted'&&row.forgotten['question-is-portable']&&row.forgotten['retained-assumptions']===1&&row.restored['mirror-revision']===0&&row.restored['owner-revision']===1&&row.revision['rejected-exchange-native-checks']===0));
  const counterexamples=await fetch(base+'/evidence/core-counterexamples/execution/accepted.json').then(response=>response.json());
  check('Both engines have twelve composed original query and unsafe trace proofs',counterexamples.length===12&&counterexamples.every(row=>row.status==='checked-original-query-and-unsafe-core-run'&&row.checked_prefixes===row.events+1&&row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns']&&!row.axioms['CoreCounterexampleCheck.originalCounterexampleRuns'].includes('Classical.choice')));
  check('Extra opaque observations retain explicit completion',counterexamples.some(row=>row.discovery.engine==='oxiz'&&row.extra_observation_bindings>0&&row.completion_origins['explicit-replay-completion']>0));
