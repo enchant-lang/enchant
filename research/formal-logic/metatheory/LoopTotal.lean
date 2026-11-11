@@ -72,7 +72,7 @@ theorem run_restricted (step : State → Except String (LoopStep State Result))
       cases action with
       | finished value =>
         have chosen : restrictedStep step good rank post safe state = .finished (state.val, value) := by
-          simp [restrictedStep, actual]
+          unfold restrictedStep; split <;> simp_all
         rw [chosen]
         exact ⟨.exit actual, state.property, by simpa only [admissibleStep, actual] using safe state.val state.property⟩
       | again next =>
@@ -80,7 +80,7 @@ theorem run_restricted (step : State → Except String (LoopStep State Result))
           simpa only [admissibleStep, actual] using safe state.val state.property).1
         let successor : Subtype good := ⟨next, nextGood⟩
         have chosen : restrictedStep step good rank post safe state = .again successor := by
-          simp [restrictedStep, actual, successor]
+          unfold restrictedStep; split <;> simp_all [successor]
         rw [chosen]
         obtain ⟨path, exitGood, exitPost⟩ := ih successor chosen
         exact ⟨.recur actual path, exitGood, exitPost⟩
