@@ -1,0 +1,58 @@
+(ns formal.review-cache-test (:require [formal.review-cache :as cache]))
+
+(deftest a-revision-keeps-reader-roles-and-response-variants-separate
+ (let [store (cache/create) builds (atom 0)
+       ask (fn [version role variant content]
+             (cache/get-or-build! store version role variant
+               (fn [] (swap! builds inc) content)))]
+  (is (= "reader" (ask "one" false :page "reader")))
+  (is (= "reader" (ask "one" false :page "must-not-rebuild")))
+  (is (= 1 @builds))
+  (is (= "owner" (ask "one" true :page "owner")))
+  (is (= "fragment" (ask "one" false :fragment "fragment")))
+  (is (= "owner-fragment" (ask "one" true :fragment "owner-fragment")))
+  (is (= 4 @builds))
+  (is (= "updated" (ask "two" false :page "updated")))
+  (is (= {false {:page "updated"}} (:roles @(:state store))))
+  (is (= "updated-owner" (ask "two" true :page "updated-owner")))
+  (is (= 6 @builds))))
+
+(deftest failures-release-the-lock-and-never-cache-an-error
+ (let [store (cache/create) builds (atom 0)]
+  (is (thrown? (cache/get-or-build! store "one" false :page
+                 (fn [] (throw (ex-info "failed projection" {}))))))
+  (is (thrown? (cache/get-or-build! store "one" false :page (fn [] nil))))
+  (is (= {} (:roles @(:state store))))
+  (is (= "recovered" (cache/get-or-build! store "one" false :page
+                        (fn [] (swap! builds inc) "recovered"))))
+  (is (= "recovered" (cache/get-or-build! store "one" false :page (fn [] "wrong"))))
+  (is (= 1 @builds))))
+
+(deftest simultaneous-readers-share-one-build
+ (let [store (cache/create) parent (erlang/self) builds (atom 0)]
+  (doseq [_ (range 6)]
+   (spawn
+    (fn []
+     (erlang/send parent [:cache-entered])
+     (let [answer (try
+                   (cache/get-or-build! store "shared" false :page
+                    (fn []
+                     (swap! builds inc)
+                     (erlang/send parent [:cache-building (erlang/self)])
+                     (receive [:finish-cache] "shared" (after 5000 (throw (ex-info "release missing" {}))))))
+                   (catch error {:error (ex-message error)}))]
+      (erlang/send parent [:cache-answer answer])))))
+  (dotimes [_ 6] (is (= :entered (receive [:cache-entered] :entered (after 5000 :timeout)))))
+  (let [builder (receive [:cache-building pid] pid (after 5000 nil))]
+   (is (some? builder))
+   (when builder (erlang/send builder [:finish-cache])))
+  (let [answers (mapv (fn [_] (receive [:cache-answer answer] answer (after 5000 :timeout))) (range 6))]
+   (is (= ["shared" "shared" "shared" "shared" "shared" "shared"] answers)))
+  (is (= 1 @builds))))
+
+(deftest malformed-cache-requests-cannot-add-variants
+ (let [store (cache/create) builds (atom 0) build (fn [] (swap! builds inc) "html")]
+  (doseq [[version role variant] [[nil false :page] ["one" nil :page] ["one" false :other]]]
+   (is (thrown? (cache/get-or-build! store version role variant build))))
+  (is (= 0 @builds))
+  (is (= nil @(:state store)))))

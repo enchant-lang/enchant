@@ -3,7 +3,8 @@
            [dossier.org :as org] [dossier.page :as page] [dossier.design :as design]
            [dossier.answer :as answer] [dossier.feedback :as feedback]
            [dossier.film :as film] [dossier.witness :as witness] [dossier.roster :as roster]
-           [codebase-review.blocks :as review] [formal.presentation :as presentation]))
+           [codebase-review.blocks :as review] [formal.presentation :as presentation]
+           [formal.review-cache :as view-cache]))
 
 (def root (Path/expand "research/formal-logic"))
 (def source-root (Path/expand "../.." root))
@@ -42,18 +43,10 @@
 (defn revision [text doc]
  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary
    [text (mapv :data (:nodes doc))])) (list (tuple :case :lower))))
-(def ^:private html-cache (atom nil))
-(def ^:private html-lock (erlang/make_ref))
+(def ^:private html-cache (view-cache/create))
 (defn- cached-html [text doc writable? kind build]
- (let [key (revision text doc)]
-  (global/trans (tuple html-lock (erlang/self))
-   (fn []
-    (when-not (= key (:revision @html-cache))
-     (reset! html-cache {:revision key :roles {}}))
-    (if-let [found (get-in @html-cache [:roles writable? kind])] found
-     (let [value (phase (str "serialize-" (name kind)) build)]
-      (swap! html-cache assoc-in [:roles writable? kind] value)
-      value))))))
+ (view-cache/get-or-build! html-cache (revision text doc) writable? kind
+   (fn [] (phase (str "serialize-" (name kind)) build))))
 (defn css [] (str (asset "style.css") (File/read! (str review-kit "/review.css"))
                   (asset "roster.css") (File/read! (str root "/dossier-local.css"))))
 (defn scripts [] (str (asset "live.js") (asset "roster.js")))

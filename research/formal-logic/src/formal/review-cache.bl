@@ -1,0 +1,20 @@
+(ns formal.review-cache)
+
+;; One local document revision, two reader roles and two HTML variants.
+;; Values contain serialized strings; no request or executable is retained.
+(defn create [] {:lock (erlang/make_ref) :state (atom nil)})
+
+(defn get-or-build! [cache revision writable? variant build]
+ (when-not (and (string? revision) (<= (count revision) 1024)
+                (contains? #{true false} writable?)
+                (contains? #{:page :fragment} variant) (fn? build))
+  (throw (ex-info "Invalid document cache request" {})))
+ (global/trans (tuple (:lock cache) (erlang/self))
+  (fn []
+   (when-not (= revision (:revision @(:state cache)))
+    (reset! (:state cache) {:revision revision :roles {}}))
+   (if-let [found (get-in @(:state cache) [:roles writable? variant])] found
+    (let [value (build)]
+     (when-not (string? value) (throw (ex-info "Document cache requires serialized HTML" {})))
+     (swap! (:state cache) assoc-in [:roles writable? variant] value)
+     value)))))
