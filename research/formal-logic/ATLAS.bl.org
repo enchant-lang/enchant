@@ -1301,8 +1301,8 @@ node phase | code | Ask which question was answered | observed
 summary Consistent assumptions and a proved goal are different facts. The phase and status must describe the complete requested question.
 source research/formal-logic/sdk-src/formal/answer.bl | Phase and status rules | A frontend UNSAT claim cannot become an entailment.
 node context | code | Keep delegation in its context | observed
-summary Loading or resetting the tracked session changes its assumptions or generation. The owned fallback checks its original context before executing.
-field Scope | Session maps are cooperative API handles. Raw native transport and manual bookkeeping mutation retain their lower-level escape-hatch scope.
+summary Loading or resetting the native context advances its owner-held state. The owned fallback checks its original context before executing.
+field Scope | Session maps are cooperative API handles. Raw native transport invalidates portable context accounting. Client bookkeeping is diagnostic; arbitrary Erlang introspection remains outside this boundary.
 source research/formal-logic/sdk-src/formal/logic.bl | Context snapshot guard | Both native backends refuse the recorded context substitution.
 node native | code | Preserve an exact native reply | observed
 summary Oracle records its actual fallback result. Exact delegation retains native-only observations; a modified reply is independently reconstructed.
@@ -1315,6 +1315,58 @@ edge question -> context | bind the tracked assumptions
 edge context -> native | delegate the original question
 edge native -> observations | retain matching provenance
 #+end_code_graph
+
+** The process keeps the real context
+The process that owns the native port now also keeps the term registry and the assumptions actually loaded into it. The caller's atom is a diagnostic mirror. Erasing an entry there cannot erase an assumption from the question.
+
+There is a second reason to keep a revision. A handler could load a new assumption and restore the old mirror before delegating. The old guard saw the same atom and continued. The owner now sees a different revision and refuses that execution.
+
+#+begin_rosetta
+What changes | What the owner does | What BL can report
+The client forgets x = 7 | The owner retains the loaded assumption. | The complete question still names x = 7.
+A handler restores the old client atom | The owner's revision has advanced. | The fallback stops before solving.
+A raw native load adds false | Portable accounting becomes unavailable. | A typed question reports not-run until a managed reset.
+A healthy raw context is reset | The owner uses its actual generation and starts a fresh registry. | Portable terms can be used again.
+An unsupported exchange retires a worker | The completed result keeps its meaning; new execution is refused. | Unsupported stays unsupported.
+#+end_rosetta
+
+#+begin_code_graph :id formal-native-context-owner :title "One owner for the port and its meaning" :start journal
+node journal | code | Keep the native journal | observed
+summary The owner holds the portable term registry, retained assumptions, generation and a monotone context revision. It sends native IDs built from its own registry.
+source research/formal-logic/sdk-src/formal/backend.bl | Managed owner state | The client mirror cannot replace the native registry or generation.
+node question | code | Name the loaded assumptions | observed
+summary The question layer reads the owner's snapshot. It adds the retained assumptions to the complete portable question, with their labels and digest.
+field Portable data | The query carries no owner PID, port or native node IDs. The leased execution token stays outside the durable question.
+source research/formal-logic/sdk-src/formal/logic.bl | Complete question construction | The handler still sees an assumption forgotten by the client.
+node exchange | code | Check the revision before sending | observed
+summary The owner checks the expected owner, generation and revision in the same actor turn as the native exchange. A stale token produces no native solver check.
+source research/formal-logic/src/formal/native-context-examples.bl | Native counter examples | A refused scope leaves the native check counter unchanged.
+node mirror | code | Treat the atom as a mirror | observed
+summary A caller can erase the local assumptions or restore an old snapshot. The owner retains its actual assumptions and revision.
+source research/formal-logic/src/formal/native-context-examples.bl | Forgotten and restored mirrors | Both backends retain the question's context.
+node raw | code | Mark raw accounting unavailable | observed
+summary A raw operation other than hello cannot attest the original portable terms. The owner refuses further managed solving until a reset.
+field Scope | This is API consistency. Arbitrary Erlang introspection and replacement of trusted runtime code are outside the boundary.
+source research/formal-logic/sdk-src/formal/backend.bl | Raw compatibility transport | Native commands cannot silently alter a portable question.
+node reset | code | Recover a healthy raw context | observed
+summary A managed reset uses the owner's actual native generation. It clears assumptions and native IDs, restores portable accounting and advances the revision.
+source research/formal-logic/sdk-src/formal/backend.bl | Managed reset | A failed native exchange still retires the worker and requires a new session.
+node retirement | code | Preserve a completed refusal | observed
+summary A native unsupported result can retire a worker without changing the question it answered. Post-execution identity matching keeps that result; it does not authorize another exchange.
+field Proof status | Owner checks and replay remain implementation checks. Compiler proof authority stays disabled.
+source research/formal-logic/sdk-src/formal/backend.bl | Identity and liveness | The first candidate exposed this distinction in the existing OxiZ sequence example.
+edge journal -> question | retain the actual assumptions
+edge question -> exchange | bind execution to its owner snapshot
+edge mirror -> journal | read authoritative state
+edge raw -> reset | reset before portable reuse
+edge reset -> journal | start a fresh registry
+edge exchange -> retirement | keep the completed result
+edge raw -> exchange | refuse unknown portable accounting
+#+end_code_graph
+
+The focused SDK run passed 356 assertions: 136 owner checks and the preceding 220 typed-interface checks. The first candidate exposed one retirement projection bug and two fixture expectations; its failing record is retained.
+
+Try [[#cell-story-native-contexts][the owner examples]] and [[#cell-story-native-context-revision][the native counter check]]. Read [[file:NATIVE-CONTEXTS.md][the context interface]], [[file:sdk-src/formal/backend.bl][the native owner]], [[file:src/formal/native-context-examples.bl][the examples]], [[file:native-contexts-check.bl][the recorder]], [[file:evidence/native-contexts/examples.json][both backends' recorded results]], [[file:evidence/native-contexts/baseline-checks.txt][the original failures]], [[file:evidence/native-contexts/candidate-1-focused-checks.txt][the first SDK qualification]], [[file:evidence/native-contexts/focused-checks.txt][the passing SDK checks]], [[file:evidence/native-contexts/regression-checks.txt][the regression]] and [[file:evidence/native-contexts/qualification.json][the qualification receipt]].
 
 ** Equality follows the value's sort
 Two floating-point bit patterns can represent the same NaN value in the SMT model. That equality must keep working inside a sequence, as an array's default value and when the value becomes an array key. The independent replay now follows those rules recursively.
@@ -1772,7 +1824,8 @@ These cells execute the actual shared interface. Their stored results are writte
            [formal.core-observation-examples :as observed-actors]
            [formal.core-counterexample-examples :as native-traces]
            [system.core :as system] [system.formal :as system-formal] [oracle]
-           [formal.answer-examples :as answer-examples]))
+           [formal.answer-examples :as answer-examples]
+           [formal.native-context-examples :as owner-examples]))
 (def x (t/variable "dossier.x" t/Int))
 (def question (q/prove (t/gt (t/add x (t/int 1)) x)
                {:id :dossier/increment :profile :math/unbounded-int-v1}))
@@ -2633,6 +2686,37 @@ These cells execute the actual shared interface. Their stored results are writte
 #+RESULTS: story-nested-equality
 : {:cases ["sequence-nan-equality" "array-nan-default" "array-nan-key"], :compiler-proof-authority false, :independent-values [true true true], :native-certificate :not-checked, :oxiz [:unsupported :proved :proved], :z3 [:proved :proved :proved]}
 
+
+
+#+begin_src beam-lisp :id story-native-contexts
+(def owner-results (owner-examples/results))
+(assert (every? #(= :not-run (get-in % [:raw :portable-query :solver-status])) owner-results))
+(assert (every? #(= :refuted (get-in % [:raw :after-reset])) owner-results))
+(assert (every? #(= 1 (get-in % [:forgotten :retained-assumptions])) owner-results))
+(assert (every? #(get-in % [:forgotten :question-is-portable]) owner-results))
+(into-sorted-map
+ {:engines (mapv :backend owner-results)
+  :after-raw-load (mapv #(get-in % [:raw :portable-query :solver-status]) owner-results)
+  :after-managed-reset (mapv #(get-in % [:raw :after-reset]) owner-results)
+  :retained-assumptions (mapv #(get-in % [:forgotten :retained-assumptions]) owner-results)
+  :restored-mirror-revisions (mapv #(get-in % [:restored :mirror-revision]) owner-results)
+  :actual-owner-revisions (mapv #(get-in % [:restored :owner-revision]) owner-results)
+  :restored-fallback (mapv #(get-in % [:restored :fallback]) owner-results)
+  :questions-portable true :compiler-proof-authority false})
+#+end_src
+
+
+#+begin_src beam-lisp :id story-native-context-revision
+(assert (every? #(= :context-changed (get-in % [:revision :stale-scope])) owner-results))
+(assert (every? #(= 0 (get-in % [:revision :rejected-exchange-native-checks])) owner-results))
+(into-sorted-map
+ {:engines (mapv :backend owner-results)
+  :before-revisions (mapv #(get-in % [:revision :before]) owner-results)
+  :after-revisions (mapv #(get-in % [:revision :after]) owner-results)
+  :stale-scopes (mapv #(get-in % [:revision :stale-scope]) owner-results)
+  :refused-native-checks (mapv #(get-in % [:revision :rejected-exchange-native-checks]) owner-results)
+  :compiler-proof-authority false})
+#+end_src
 
 
 #+begin_src beam-lisp :id story-canonical-identity
