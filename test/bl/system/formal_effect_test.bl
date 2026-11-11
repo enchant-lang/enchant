@@ -1,0 +1,68 @@
+(ns system.formal-effect-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic] [oracle]))
+
+(def unavailable {:backend :oxiz :worker "/unavailable/formal-worker"})
+(def x (t/variable "effect.x" t/Int))
+(def problem (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"x" x}}))
+(defn handle [whole _execute]
+ (oracle/query-answer whole {:solver-status :sat :assignments {"effect.x" 7}}))
+(defn ask []
+ (try (logic/run unavailable problem) (catch error {:verdict :error :error (ex-message error)})))
+(defn child-answer [start]
+ (let [parent (erlang/self) tag (erlang/make_ref)]
+  (start (fn [] (erlang/send parent [:effect-answer tag (ask)])))
+  (receive [:effect-answer seen answer] :when (= seen tag) answer
+   (after 5000 {:verdict :timeout}))))
+
+(deftest complete-query-handlers-follow-managed-spawn-variants
+ (doseq [start [(fn [action] (spawn action)) (fn [action] (spawn-link action))
+               (fn [action] (let [[_pid ref] (spawn-monitor action)] (Process/demonitor ref (list :flush))))]]
+  (let [answer (oracle/with-query-handler handle (fn [] (child-answer start)))]
+   (is (= :sat (:verdict answer)) (pr-str answer))
+   (is (= 7 (get-in answer [:witness "x"])))
+   (is (= :valid (get-in answer [:validation :status]))))))
+
+(deftest complete-query-handlers-follow-a-future
+ (let [answer (oracle/with-query-handler handle (fn [] (deref (future (ask)))))]
+  (is (= :sat (:verdict answer)) (pr-str answer))
+  (is (= :valid (get-in answer [:validation :status])))))
+
+(deftest a-submitted-child-keeps-its-snapshot-after-the-parent-scope-ends
+ (let [parent (erlang/self) tag (erlang/make_ref)
+       pid (oracle/with-query-handler handle
+             (fn [] (spawn (fn []
+                            (receive [:run seen] :when (= seen tag)
+                              (erlang/send parent [:snapshot tag (ask)]))))))]
+  (try
+   (is (= false (oracle/query-intercepted?)))
+   (erlang/send pid [:run tag])
+   (let [answer (receive [:snapshot seen answer] :when (= seen tag) answer
+                 (after 5000 {:verdict :timeout}))]
+    (is (= :sat (:verdict answer)) (pr-str answer)))
+   (finally (when (Process/alive? pid) (Process/exit pid :kill))))))
+
+(deftest nested-handler-tables-are-snapshots-and-restore-the-outer-table
+ (let [unknown (fn [whole _execute] (oracle/query-answer whole {:solver-status :unknown}))
+       answers (oracle/with-query-handler handle
+                 (fn [] [(child-answer (fn [f] (spawn f)))
+                         (oracle/with-query-handler unknown (fn [] (child-answer (fn [f] (spawn f)))))
+                         (child-answer (fn [f] (spawn f)))]))]
+  (is (= [:sat :unknown :sat] (mapv :verdict answers)))
+  (is (= false (oracle/query-intercepted?)))))
+
+(deftest a-native-registration-captures-the-handler-and-restores-the-invoking-worker
+ (let [registration (oracle/with-query-handler handle
+                      (fn [] (BeamLisp.Execution/register! (fn [] (ask)))))]
+  (try
+   (is (= false (oracle/query-intercepted?)))
+   (let [answer (BeamLisp.Execution/invoke! registration [])]
+    (is (= :completed (:status answer)))
+    (is (= :sat (get-in answer [:value :verdict])) (pr-str answer)))
+   (is (= false (oracle/query-intercepted?)))
+   (finally (BeamLisp.Execution/close! registration)))))
+
+(deftest raw-erlang-spawn-keeps-its-explicit-nonconveying-boundary
+ (let [parent (erlang/self) tag (erlang/make_ref)]
+  (oracle/with-query-handler handle
+   (fn [] (erlang/spawn (fn [] (erlang/send parent [:raw tag (oracle/query-intercepted?)])))))
+  (is (= false (receive [:raw seen value] :when (= seen tag) value (after 5000 :timeout))))))
