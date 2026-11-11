@@ -126,6 +126,7 @@ def reconstructed_program(program, errors_init, errors_step):
         state[slot['id']] = slot['sort']
     require(type(program['initial']) is list and len(program['initial']) == len(state), 'loop initializer arity')
     visits = 0
+    backedges = 0
     result = program['sort']
 
     def expression(expr, scope, errors, expected=None):
@@ -143,7 +144,7 @@ def reconstructed_program(program, errors_init, errors_step):
         return record(['again', 'result', 'state'], [literal(['bool'], again), value, next_state])
 
     def visit(control, scope, depth=0):
-        nonlocal visits
+        nonlocal visits, backedges
         visits += 1
         require(visits <= 256 and depth <= 64 and type(control) is dict, 'closed loop control capacity')
         op = control.get('control')
@@ -153,6 +154,7 @@ def reconstructed_program(program, errors_init, errors_step):
         if op == 'return':
             return packed(False, expression(control['value'], scope, errors_step, result), empty)
         if op == 'recur':
+            backedges += 1
             return packed(True, default(result), ordered_state(control['values'], scope, errors_step))
         if op == 'if':
             test = expression(control['test'], scope, errors_step, ['bool'])
@@ -171,7 +173,8 @@ def reconstructed_program(program, errors_init, errors_step):
         return node('do', body['sort'], [*values, body])
 
     initial = ordered_state(program['initial'], inputs, errors_init)
-    return inputs, state, initial, visit(program['body'], {**inputs, **state})
+    controller = visit(program['body'], {**inputs, **state})
+    return inputs, state, initial, controller, backedges
 
 
 def validate(packet):
@@ -193,7 +196,8 @@ def validate(packet):
             == 'record-paths-v2' and all(item['subject']['kind'] == 'core' for item in (initializer, controller)),
             'exact shared loop Core layout')
     program = packet['program']
-    inputs, state, expected_init, expected_step = reconstructed_program(program, dict(initializer['errors']), dict(controller['errors']))
+    inputs, state, expected_init, expected_step, backedges = reconstructed_program(
+        program, dict(initializer['errors']), dict(controller['errors']))
     require(initializer['body'] == expected_init and controller['body'] == expected_step,
             'finite Core programs differ from the contained loop control')
     require({name: sort for name, sort, _ in initializer['inputs']} == {**inputs, **state, 'result': program['sort']},
@@ -204,7 +208,8 @@ def validate(packet):
     original = tuple([to_original[name] for name in slots] for slots in layout)
     policy = packet['policy']
     require(type(policy) is dict and set(policy) == {'requires', 'invariant', 'ensures', 'rank'}
-            and type(policy['rank']) is list and len(policy['rank']) <= 2, 'closed ranking policy')
+            and type(policy['rank']) is list and int(backedges > 0) <= len(policy['rank']) <= 2,
+            'one or two integer ranks required on recursive loops')
     original_sorts = {prefix + '.' + name: sort[0] for name, sort in {**inputs, **state, 'result': program['sort']}.items()}
     for roots, sorts, allowed in [
             ([policy['requires']], ['bool'], inputs),
