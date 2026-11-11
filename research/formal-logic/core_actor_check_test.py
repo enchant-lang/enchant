@@ -31,7 +31,7 @@ class CoreActorChecks(unittest.TestCase):
                 self.assertEqual(result['subject'], row['subject'])
                 self.assertIsNone(result['trace_bound'])
                 self.assertFalse(result['compiler_proof_authority'])
-                self.assertEqual(len(result['imported_olean_sha256']), 1 + 2 * result['handler_count'])
+                self.assertEqual(len(result['premise_packets']), 1 + 2 * result['handler_count'])
                 self.assertIn('originalHandlerTracesSafe', result['axioms'])
                 results.append({'id': name, **result})
         self.assertEqual(len(results), 6)
@@ -61,7 +61,7 @@ class CoreActorChecks(unittest.TestCase):
                 self.assertFalse((output / 'CoreActorCheck.olean').exists())
                 self.assertFalse((output / 'result.json').exists())
                 self.assertIn(theorem, (output / 'lean.txt').read_text())
-                self.assertEqual(len(list(output.glob('*/Check.olean'))), 5)
+                self.assertTrue((output / 'premises/ActorPremises.olean').exists())
                 rejected.append({'id': name, 'packet': packet['identity'], 'status': 'not-accepted-by-Lean'})
         (OUTPUT / 'rejected.json').write_text(json.dumps(rejected, indent=2) + '\n')
 

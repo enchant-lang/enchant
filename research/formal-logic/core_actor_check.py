@@ -2,11 +2,13 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 
 import core_loop_check as loops
 import core_term_check as core
-from core_composition import check_linked
+from core_composition import compile_module
 from obligation_proof import data_digest, digest, typed_term_packet
 import term_refutation as terms
 
@@ -169,10 +171,7 @@ def coverage_cases(count):
 
 def boundaries(packet, layouts):
     n = len(packet['handlers'])
-    modules = ['ActorTrace', 'ActorInitTerms']
-    for i in range(n):
-        modules.extend([f'ActorHandlerCore{i}', f'ActorHandlerTerms{i}'])
-    header = ''.join('import ' + module + '\n' for module in modules) + HEADER
+    header = 'import ActorTrace\nimport ActorPremises\n' + HEADER
     state = core.render(core.core_sort(packet['state-sort']))
     tail = POLICY + ''.join(coverage_cases(len(names)) for names in layouts[1]) + INIT
     tail += ''.join(HANDLER.format(n=i, state=state) for i in range(n))
@@ -241,29 +240,61 @@ def checked_kernel():
     return lean, libraries
 
 
+def premises_source(packet):
+    leaves = [('ActorInitTerms', terms, packet['initial-proof'])]
+    for i, row in enumerate(packet['handlers']):
+        leaves.extend([(f'ActorHandlerCore{i}', core, row['core']), (f'ActorHandlerTerms{i}', terms, row['entailment'])])
+    chunks = ['import CoreTerms\n']
+    expected = set()
+    for namespace, checker, leaf in leaves:
+        names = checker.validate(leaf)
+        generated = checker.source(leaf, *names, namespace=namespace)
+        checker.verify_source(generated, leaf, *names, namespace=namespace)
+        first, body = generated.split('\n', 1)
+        require(first == ('import Terms' if checker is terms else 'import CoreTerms'), 'closed premise imports')
+        chunks.append(body)
+        audits = (('packetAccepted', 'normalizationConnected', 'originalQuestionEntails') if checker is terms
+                  else ('coreTermCorrespondence', 'errorCatalogueRoundTrip'))
+        expected.update(f'{namespace}.{name}' for name in audits)
+    # Lean can generate the same private equation splitter in separate modules.
+    # Compile the already decoded namespaces together in one Lean environment.
+    return '\n\n'.join(chunks), expected, {namespace: leaf['identity'] for namespace, _, leaf in leaves}
+
+
 def run(path, output, axiom_policy='lean-standard'):
     require(axiom_policy in terms.AXIOM_POLICIES, 'supported Core actor axiom policy')
     output.mkdir(parents=True, exist_ok=True)
     module = 'CoreActorCheck'
     for name in (module + '.olean', 'result.json', 'lean.txt'):
         (output / name).unlink(missing_ok=True)
+    premise_output = output / 'premises'
+    (premise_output / 'ActorPremises.olean').unlink(missing_ok=True)
     require(path.stat().st_size <= k.MAX_BYTES, 'Core actor packet byte capacity')
     packet = k.load_packet(path)
     layouts = validate(packet)
     text = source(packet, layouts)
     audits = verify_source(text, packet, layouts)
     lean, libraries = checked_kernel()
-    leaves = {'initial-proof': packet['initial-proof']}
-    premises = [('initial-proof', 'ActorInitTerms')]
-    for i, row in enumerate(packet['handlers']):
-        leaves.update({f'handler-{i}-core': row['core'], f'handler-{i}-entailment': row['entailment']})
-        premises.extend([(f'handler-{i}-core', f'ActorHandlerCore{i}'), (f'handler-{i}-entailment', f'ActorHandlerTerms{i}')])
-    imported, axioms = check_linked(leaves, text, output, module=module, premises=premises, lean=lean, libraries=libraries,
-        axiom_policy=axiom_policy, expected_audits=audits, failure='Lean did not accept the exact Core actor trace composition')
+    premise_text, premise_audits, leaves = premises_source(packet)
+    (output / (module + '.lean')).write_text(text)
+    with tempfile.TemporaryDirectory(prefix='enchant-actor-composition-') as temporary:
+        work = Path(temporary)
+        library = work / 'library'
+        core.copy_library(library, libraries)
+        checked = compile_module(work, library, premise_output, module='ActorPremises', text=premise_text, lean=lean,
+            axiom_policy=axiom_policy, expected_audits=premise_audits, failure='Lean did not accept the exact Core actor premises')
+        compiled = premise_output / 'ActorPremises.olean'
+        target = library / compiled.name
+        imported = k.sha(compiled)
+        shutil.copyfile(compiled, target)
+        require(k.sha(target) == imported, 'fresh actor premise object identity')
+        axioms = compile_module(work, library, output, module=module, text=text, lean=lean, axiom_policy=axiom_policy,
+            expected_audits=audits, failure='Lean did not accept the exact Core actor trace composition')
     result = {'schema': 'enchant.formal.core-actor-trace-execution.v1', 'status': 'checked-core-actor-trace-safety',
               'packet': packet['identity'], 'subject': packet['subject'], 'handler_count': len(packet['handlers']),
               'scope': 'all-finite-admitted-traces-of-the-contained-core-handlers', 'trace_bound': None,
-              'imported_olean_sha256': imported, 'axioms': axioms, 'axiom_policy': axiom_policy,
+              'imported_olean_sha256': imported, 'premise_source_sha256': k.sha(premise_output / 'ActorPremises.lean'),
+              'premise_packets': leaves, 'premise_axioms': checked, 'axioms': axioms, 'axiom_policy': axiom_policy,
               'source_sha256': k.sha(output / (module + '.lean')), 'olean_sha256': k.sha(output / (module + '.olean')),
               'subject_connection': 'requires-fresh-BL-reconstruction', 'initial_feasibility': 'not-checked',
               'live_actor_preservation': 'not-established', 'compiler_proof_authority': False}
