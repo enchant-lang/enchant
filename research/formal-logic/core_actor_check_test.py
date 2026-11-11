@@ -24,7 +24,7 @@ class CoreActorChecks(unittest.TestCase):
         for row in ROWS:
             name = row['id']
             with self.subTest(case=name):
-                policy = 'lean-standard' if name == 'admission-protects-division' else 'choice-free'
+                policy = 'lean-standard' if name in {'bank', 'admission-protects-division'} else 'choice-free'
                 result = bridge.run(E / 'examples' / f'{name}.json', OUTPUT / name, policy)
                 self.assertEqual(result['status'], 'checked-core-actor-trace-safety')
                 self.assertEqual(result['packet'], row['packet'])

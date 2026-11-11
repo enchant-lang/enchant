@@ -228,7 +228,14 @@ theorem normalizationConnected : ∀ integers booleans,
   all_goals try dsimp only [Problem.values]
   all_goals simp only [List.getElem?_cons_zero, List.getElem?_cons_succ, List.getElem?_nil]
   all_goals simp [Row.holds, dot, integerMap, booleanMap]
-""" + cases + f"  all_goals simp_all [{SIMPS}]\n  all_goals try dsimp (config := {{ instances := true }}) only [Ty.Value] at *\n  all_goals omega\n" + """
+""" + cases + f"""  all_goals first
+    | (simp_all [{SIMPS}]
+       all_goals try dsimp (config := {{ instances := true }}) only [Ty.Value] at *
+       all_goals omega)
+    | (simp [{SIMPS}] at *
+       all_goals try dsimp (config := {{ instances := true }}) only [Ty.Value] at *
+       all_goals omega)
+""" + """
 theorem originalQuestionEntails : originalQuestion.entails :=
   connected_refutation_entails originalQuestion packetProblem packetProof integerMap booleanMap normalizationConnected packetAccepted
 #print axioms packetAccepted
