@@ -110,7 +110,8 @@ research symlinks inside the import root shadowed SDK namespaces. Ordinary
 tests loaded the equal source bytes, while static declaration checking refused
 the conflicting provider identity. Those aliases were removed from the import
 root. The `sdk-src` link is for authored source browsing, outside import search.
-The immutable SDK and its declaration checks remain unchanged.
+Removing those aliases required no change to the qualified SDK or its
+declaration checks.
 
 ## Checked answer data
 

@@ -25,9 +25,10 @@ boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes
 220 focused assertions and 7,086 regression assertions; all preceding 187 native
 questions retain their identities and verdicts. Three additional ground cases
-exercise floating-point equality through sequences and arrays. The subsequent [native-context interface](NATIVE-CONTEXTS.md) moves the registry,
+exercise floating-point equality through sequences and arrays.
+The subsequent [native-context interface](NATIVE-CONTEXTS.md) moves the registry,
 assumptions and revision into the port-owning process. Its selected SDK passes
-356 focused assertions. A client atom is now diagnostic; raw transport requires
+356 focused assertions and 7,086 regression assertions. A client atom is now diagnostic; raw transport requires
 a managed reset before portable reuse. Automatic handler inheritance remains
 ahead.
 
