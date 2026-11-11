@@ -226,10 +226,11 @@ The remaining obligations apply to every consumer:
   populated by this experiment. The legacy `oracle/obligation` uses
   `phash2(text)` and its memo is not backend/profile/artifact scoped. Bypass it
   during comparison; do not repurpose it as the new proof cache.
-* Hash the actual immutable native artifacts used. The prototype hashes
-  worker/library files before launch; deployment should select immutable
-  packaged artifacts and retain the qualified SDK selection, dependency
-  features and source receipt. A version string alone is insufficient.
+* The SDK selects its packaged worker and library by default. Runtime evidence
+  hashes the actual selected files and records option/environment/image
+  provenance. Portable relocation retains the producer hashes separately.
+  Keep the qualified SDK selection, dependency features and source receipt;
+  a version string alone is insufficient.
 * `:proved`, raw UNSAT, checked SAT witness, incomplete candidate, unavailable
   observation and certificate verification are separate facts. New results
   have `:trusted false` and unchecked certificates. `formal.logic/compare`

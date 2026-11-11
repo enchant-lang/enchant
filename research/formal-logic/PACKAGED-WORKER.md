@@ -51,8 +51,8 @@ by that application. This is host execution evidence, not a clean-host
 activation rehearsal, release publication or rolling-release qualification.
 
 The canonical source preserves all 104 registry dependency pins and explicit
-OxiZ std features. The legacy experiment's two binary targets still compile
-against its delegated canonical library; that check uses and removes a private
+OxiZ std features. The legacy experiment's two binary targets pass Cargo's
+locked offline check against the delegated canonical library; it uses a private
 target directory. Its preceding qualified release binaries stay untouched.
 Build memory values in the native descriptor describe the artifact-construction
 guest. Runtime requests retain the existing owner, deadline and caller resource
