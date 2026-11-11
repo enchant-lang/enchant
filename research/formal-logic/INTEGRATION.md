@@ -1,11 +1,18 @@
 # Moving Enchant's formal consumers to portable terms
 
-The first SDK migration is undergoing qualification. Canonical portable term,
-question, certificate and state-model sources live under `priv/lib/formal`.
-The research import paths point to those sources. `system.core` has typed
+The first SDK migration is qualified. Canonical portable term, question,
+certificate and state-model sources live under `priv/lib/formal`. Research
+programs import those modules from the pinned SDK; `sdk-src` is a browsing-only
+source root. `system.core` has typed
 arities for preservation, establishment, fireability and model induction.
 `oracle/ask-query` passes complete questions through an explicit handler method.
 [SDK consumer interface](SDK-INTERFACE.md)
+
+The subsequent [typed-answer boundary](ANSWER-INTEGRITY.md) adds exact question
+binding, concrete sort checks, reconstructed handler observations and phase
+rules. It passes 220 focused assertions and 7,086 regression assertions. Tracked
+context changes refuse delegation; authoritative native-owner accounting and
+automatic handler inheritance remain integration work.
 
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,

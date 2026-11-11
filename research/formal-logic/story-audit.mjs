@@ -300,6 +300,7 @@ try{
     await click('#theme');
   }
   await navigate('/#an-answer-has-to-fit-its-question');
+  await wait("document.querySelector('#an-answer-has-to-fit-its-question').getClientRects().length>0");
   check(size.name+': answer chapter explains typed bindings and reconstruction',await evaluate("document.body.innerText.includes('accept a contradiction')&&document.body.innerText.includes('standard observation is 8')"));
   await click('[data-graph="formal-answer-integrity"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="bindings"]');
   check(size.name+': typed binding panel refuses language truthiness',await evaluate("document.querySelector('[data-graph=\"formal-answer-integrity\"] .sg-stage>[data-view]:not([hidden])').innerText.includes('Malformed bindings cannot become a satisfying assignment through BL truthiness')"));
@@ -317,7 +318,8 @@ try{
     await shot(size.name+'-answer-integrity-night');
     await click('#theme');
   }
-  await navigate('/#equality-follows-the-values-sort');
+  await navigate('/#equality-follows-the-value-s-sort');
+  await wait("document.querySelector('#equality-follows-the-value-s-sort').getClientRects().length>0");
   check(size.name+': equality chapter distinguishes formal data SMT identity and IEEE comparison',await evaluate("document.body.innerText.includes('one logical NaN value')&&document.body.innerText.includes('fp.eq has its own comparison rule')&&document.body.innerText.includes('reports the sequence question unsupported')"));
   await evaluate("[...document.querySelectorAll('h2,h3')].find(e=>e.innerText.includes(\"Equality follows the value's sort\")).scrollIntoView({block:'start'})");
   await shot(size.name+'-nested-equality');
