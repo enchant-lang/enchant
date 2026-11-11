@@ -31,6 +31,7 @@ inductive Trace (handlers : List (Handler state)) (initial : Value state → Pro
       Trace handlers initial (events ++ [event]) after
 
 theorem after_failure (handlers : List (Handler state))
+    {before : Value state} {reason : String} {event : Event handlers} {after : Configuration state}
     (transition : Step handlers (before, some reason) event after) :
     event = none ∧ after = (before, some reason) := by
   cases transition
@@ -43,17 +44,18 @@ def Safe (handler : Handler state) (invariant : Value state → Prop) : Prop :=
 theorem trace_safe (handlers : List (Handler state)) (initial invariant : Value state → Prop)
     (starts : ∀ state, initial state → invariant state)
     (safe : ∀ handler ∈ handlers, Safe handler invariant)
+    {events : List (Event handlers)} {outcome : Configuration state}
     (trace : Trace handlers initial events outcome) : invariant outcome.1 ∧ outcome.2 = none := by
   induction trace with
   | start h => exact ⟨starts _ h, rfl⟩
-  | append prefix transition previous =>
+  | append earlier transition previous =>
     cases transition with
     | idle _ => exact previous
     | returned index message admitted returned =>
       have member := List.getElem_mem (l := handlers) index.isLt
       obtain ⟨next, observed, holds⟩ := safe _ member _ _ previous.1 admitted
       have same := Outcome.returned.inj (returned.symm.trans observed)
-      exact ⟨same ▸ holds, rfl⟩
+      exact ⟨same.symm ▸ holds, rfl⟩
     | raised index message admitted raised =>
       have member := List.getElem_mem (l := handlers) index.isLt
       obtain ⟨next, observed, _⟩ := safe _ member _ _ previous.1 admitted
