@@ -19,7 +19,7 @@ now live under `priv/lib/formal`; research imports use the pinned SDK, while
 `sdk-src` supplies readable source links outside import search. The initial
 qualification passed 86 focused SDK assertions and 2,549 regression assertions.
 Source extraction, remaining legacy consumers, formal effect semantics
-and native worker packaging remain active work.
+and native pooling remain active work.
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes
@@ -37,6 +37,12 @@ framework adoption have declared context boundaries. The selected SDK passes
 450 focused assertions, 284 native lifetime/capacity assertions and 7,086 formal
 regression assertions; all 187 preceding native questions retain their identities
 and verdicts. Effect typing and formal runtime preservation remain ahead.
+[Packaged worker discovery](PACKAGED-WORKER.md) supplies both native adapters
+from the SDK image without research paths or worker environment variables.
+Its 503 focused assertions include ordinary and selected Source callers;
+7,086 formal assertions and the preceding 187 paired questions still pass.
+The portable product has observed host execution with separately recorded
+producer and relocated hashes. Clean-host activation remains a separate gate.
 
 The [live guided dossier](https://work.tailcb5318.ts.net:18100/) presents the
 experiment through approachable examples, source-discovered BL components,

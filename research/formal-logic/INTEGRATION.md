@@ -14,7 +14,13 @@ rules. It passes 220 focused assertions and 7,086 regression assertions. Tracked
 context changes refuse delegation. The subsequent [native-owner
 interface](NATIVE-CONTEXTS.md) makes the registry, assumptions and revision
 authoritative in the port-owning process and passes 356 focused SDK assertions.
-Automatic handler inheritance remains integration work.
+[Managed handler scopes](EFFECTS.md) now retain handlers and callback code across
+managed work, with explicit Source world and SDK framework boundaries.
+[Packaged worker discovery](PACKAGED-WORKER.md) supplies the SDK's default
+native executable and library, preserving explicit option/environment pins and
+actual-file provenance. Its 503 focused assertions include selected Source
+calls; the 7,086-assertion regression and 187 paired native verdicts remain
+unchanged. Native pooling and remaining legacy/source consumers remain work.
 
 The script arities continue through `oracle/pool-handler` →
 `z3pool/check`, with SMT-LIB text at that boundary. Process extraction,
