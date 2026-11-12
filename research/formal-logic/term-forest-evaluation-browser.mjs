@@ -29,7 +29,10 @@ try{
   check(size.name+': illustrative counts stay separate from actual execution',await evaluate("document.body.innerText.includes('This calculator counts syntax')&&document.body.innerText.includes('not additional executions of the evaluator')"));
   check(size.name+': default calculator matches checked fixture',await evaluate(`${number('sharing_terms_16')}===131071&&${number('sharing_nodes')}===17`));
   await center('.nb-measure-row');await shot(size.name+'-sharing-default');
+  await center('.nb-controls>summary');
   await click('.nb-controls>summary');
+  await center('.nb-controls [data-nb-input="sharing_layers"]');
+  await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
   await click('.nb-controls [data-nb-input="sharing_layers"]');
   const selectedLayers=Number(await evaluate("document.querySelector('.nb-controls [data-nb-input]').value"));
   (report.pointerSelections??=[]).push({viewport:size.name,layers:selectedLayers});
