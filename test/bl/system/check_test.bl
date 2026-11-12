@@ -8,7 +8,9 @@
 ;
 ; Run: bl test test/bl/system/check_test.bl
 (ns system.check-test
-  (:require [bl.check :as check] [bl.util :as u] [lsp]))
+  (:require [bl.check :as check] [bl.util :as u] [bl.json :as json] [lsp]))
+
+(def report-state (atom 0))
 
 (defn- capture
   "Run `f` with this process's group leader on a StringIO, so a command's output
@@ -72,6 +74,29 @@
     (is (some #(= "=-0→zero?*" (:name %)) (:smell-info a)))))
 
 ; ── the baseline on disk ──────────────────────────────────────────────
+
+(deftest json-report-preserves-qualified-footprint-identities
+ (let [dir (tmp-dir)
+       source "(ns check.report-fixture) (defn reading [] @system.check-test/report-state)"]
+  (try
+   (let [path (str dir "/report.bl")
+         native (check/analyze-source path source)
+         footprint (get-in native [:fn-info 0 :footprint])]
+    (is (contains? footprint [:qualified-global "system.check-test" "report-state"]))
+    (File/write! path source)
+    (BeamLisp/with_cwd dir
+     (fn []
+      (let [captured (capture (fn [] (check/run [path] {:json true})))
+            report (json/decode (second captured))
+            entries (get-in report ["files" 0 "fn-info" 0 "footprint"])
+            restored (into {} (map (fn [entry]
+                                    [(first (BeamLisp.Compiler/read_all_data (get entry "resource-source")))
+                                     (keyword (get entry "mode"))]) entries))]
+       (is (= 0 (first captured)))
+       (is (= footprint restored) "every resource identity and mode survives the JSON boundary")
+       (is (= (:pure (first (:fn-info native))) (get-in report ["files" 0 "fn-info" 0 "pure"])))
+       (is (= 0 @report-state) "reporting never executes the inspected global read")))))
+   (finally (File/rm_rf! dir)))))
 
 (deftest an-unreadable-file-is-a-metric-not-a-crash
   (let [dir (tmp-dir)]

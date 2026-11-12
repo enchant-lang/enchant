@@ -379,6 +379,26 @@ the baseline; with no baseline the run is a measurement; otherwise the exit
 code carries the verdict.
 
 ```beam-lisp
+(defn- json-report
+  "Footprint identities can be structured globals or phase bindings. Keep
+   their readable source and mode as entries, so JSON never flattens names or
+   treats a compound identity as an object key. Native analysis stays intact."
+  [report]
+  (update report :files
+    (fn [files]
+      (mapv (fn [file]
+              (update file :fn-info
+                (fn [facts]
+                  (mapv (fn [fact]
+                          (update fact :footprint
+                            (fn [footprint]
+                              (mapv (fn [[resource mode]]
+                                      {:resource-source (pr-str resource) :mode mode})
+                                    (sort-by (fn [[resource _]] (pr-str resource)) footprint))))) facts)))) files))))
+
+(defn- emit-report [st report human]
+  (u/emit st (if (:json st) (json-report report) report) human))
+
 (defn run
   "`bl check [PATH…] [--changed] [--update] [--fix] [--json] [--install-hook]`.
    Exit 0 when nothing regressed, 1 when something did, 2 on a usage error."
@@ -413,13 +433,13 @@ code carries the verdict.
             (cond
               (:update st)
               (do (write-baseline! baseline-path report)
-                  (u/emit st (assoc report :updated true :ok true :regressions [])
+                  (emit-report st (assoc report :updated true :ok true :regressions [])
                           (fn [r] (str "wrote " (u/rel-path baseline-path)
                                        " (" (count (:files r)) " files)")))
                   0)
 
               (nil? base)
-              (do (u/emit st (assoc report :ok true :regressions []
+              (do (emit-report st (assoc report :ok true :regressions []
                                     :note "no baseline: run bl check --update to create .bl-check.edn")
                           render)
                   0)
@@ -427,5 +447,5 @@ code carries the verdict.
               :else
               (let [regs (regressions base report)
                     ok (empty? regs)]
-                (u/emit st (assoc report :ok ok :regressions regs) render)
+                (emit-report st (assoc report :ok ok :regressions regs) render)
                 (if ok 0 1)))))))))
