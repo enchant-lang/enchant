@@ -1,0 +1,81 @@
+(ns formal.integer-preflight-test
+ (:require [formal.integer-preflight :as policy] [formal.term :as t]
+           [formal.evaluate :as sdk] [formal.data-graph :as graph] [oracle]))
+
+(def generous {:integer-bits 100000 :intermediate-bits 200000 :work-units 100000000000})
+(defn sdk-value [op operands]
+ (let [arguments (mapv t/int operands)
+       sort (if (contains? #{:eq :lt :le :gt :ge} op) t/Bool t/Int)]
+  (sdk/value (t/app op sort arguments nil) {})))
+
+(deftest plans-bind-exact-request-data-and-normalize-limits
+ (let [p (policy/plan :add [7 1] {})]
+  (is (= :ready (:status p)))
+  (is (= [3 1] (:argument-bits p)))
+  (is (= {:result-bits 4 :intermediate-bits 4 :work-units 4} (:forecast p)))
+  (is (= :not-run (:primitive-execution p)))
+  (is (= false (:compiler-proof-authority p)))
+  (is (= (:request-reference p) (:request-reference (policy/plan :add [7 1] policy/defaults))))
+  (is (not= (:request-reference p) (:request-reference (policy/plan :add [1 7] {}))))
+  (is (not= (:request-reference p) (:request-reference (policy/plan :add [7 1] {:integer-bits 63}))))
+  (is (= policy/defaults (policy/limits {})))))
+
+(deftest magnitude-length-does-not-confuse-zero-or-sign
+ (is (= [0 1 1 2 2 8 8 9 9]
+        (mapv policy/bits [0 1 -1 2 -2 255 -255 256 -256]))))
+
+(deftest each-limit-has-an-explicit-incomplete-reason
+ (doseq [[overrides metric] [[{:integer-bits 3} :integer-bits]
+                              [{:intermediate-bits 3} :intermediate-bits]
+                              [{:work-units 3} :work-units]]]
+  (let [p (policy/plan :add [7 1] overrides)]
+   (is (= :incomplete (:status p)))
+   (is (= {:kind :resource-limit :metric metric :required 4 :limit 3} (:reason p)))
+   (is (= :not-run (:primitive-execution p)))))
+ (is (= :ready (:status (policy/plan :add [7 1] {:integer-bits 4 :intermediate-bits 4 :work-units 4}))))
+ ;; Input values are bounded too, even when multiplication would return zero.
+ (is (= :incomplete (:status (policy/plan :mul [256 0] {:integer-bits 8}))))
+ (is (= :ready (:status (policy/plan :mul [0 0] {:integer-bits 0 :intermediate-bits 0 :work-units 1}))))))
+
+(deftest forecasts-cover-small-exact-results-and-sdk-mod-intermediates
+ (doseq [op [:add :sub :mul :div :mod :eq :lt :le :gt :ge] a (range -12 13) b (range -12 13)]
+  (let [p (policy/plan op [a b] generous) result (sdk-value op [a b])]
+   (is (= :ready (:status p)))
+   (when (int? result) (is (<= (policy/bits result) (get-in p [:forecast :result-bits]))))
+   (when (and (= :mod op) (not= b 0))
+    (let [quotient (sdk-value :div [a b]) product (* b quotient)]
+     (is (<= (max (policy/bits quotient) (policy/bits product) (policy/bits (- a product)))
+             (get-in p [:forecast :intermediate-bits])))))))
+ (doseq [a (range -100 101)]
+  (let [p (policy/plan :neg [a] generous)]
+   (is (<= (policy/bits (- a)) (get-in p [:forecast :result-bits]))))))
+
+(deftest sparse-large-operands-and-growth-are-forecast-without-constructing-the-result
+ (let [a (erlang/bsl 1 65536) p (policy/plan :mul [a a] {})]
+  (is (= [65537 65537] (:argument-bits p)))
+  (is (= 131074 (get-in p [:forecast :result-bits])))
+  (is (= :incomplete (:status p)))
+  (is (= :not-run (:primitive-execution p))))
+ (doseq [a [(- (erlang/bsl 1 127)) (dec (erlang/bsl 1 256))]
+         b [-17 -1 1 29] op [:add :sub :mul :div :mod]]
+  (let [p (policy/plan op [a b] generous) value (sdk-value op [a b])]
+   (is (= :ready (:status p)))
+   (is (<= (policy/bits value) (get-in p [:forecast :result-bits]))))))
+
+(deftest unsupported-policies-are-not-permission-to-run
+ (let [p (policy/plan :exponent [2 1000000] {})]
+  (is (= :incomplete (:status p)))
+  (is (= {:kind :resource-policy-unsupported} (:reason p)))
+  (is (= :not-run (:primitive-execution p)))))
+
+(deftest malformed-requests-stay-admission-errors
+ (doseq [bad [nil [] {:integer-bits -1} {:integer-bits 1.0} {:integer-bits true} {:integer-bit 2}]]
+  (is (thrown? (policy/limits bad))))
+ (doseq [[op operands] [["add" [1 2]] [:add (list 1 2)] [:add [1 2.0]] [:add [1]] [:neg [1 2]]]]
+  (is (thrown? (policy/plan op operands {})))))
+
+(deftest forecasting-never-asks-a-backend
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :forecast-must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn [] (is (= :ready (:status (policy/plan :add [1 2] {}))))))
+  (is (= 0 @calls))))

@@ -1,0 +1,64 @@
+(ns formal.integer-preflight (:require [formal.data-graph :as graph]))
+
+(def profile :bl/integer-preflight-preview-v1)
+(def defaults {:integer-bits 65536 :intermediate-bits 131072 :work-units 1048576})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.integer-preflight: " message) {:profile profile}))))
+(defn limits
+ "Normalize explicit integer-primitive limits. Work units are a conservative
+  bit-size charging convention, not a theorem about BEAM time or allocations."
+ [overrides]
+ (require! (map? overrides) "limit overrides must be a map")
+ (require! (every? #(contains? defaults %) (keys overrides)) "unknown limit key")
+ (let [result (merge defaults overrides)]
+  (require! (every? #(and (int? %) (>= % 0)) (vals result)) "limits must be nonnegative integers")
+  (graph/encode result)
+  result))
+(defn bits
+ "Magnitude bit length; zero has zero bits. This reads an existing integer,
+  allocating only its binary digit representation, never an arithmetic result."
+ [value]
+ (require! (int? value) "integer operand required")
+ (if (zero? value) 0 (erlang/byte_size (erlang/integer_to_binary (if (< value 0) (- value) value) 2))))
+
+(defn plan
+ "Forecast one admitted integer primitive as portable data. No arithmetic
+  primitive, solver or user callback is executed. The request reference binds
+  the exact operands and normalized limits. A ready plan is a resource-policy
+  decision, not a checked value, proof, cost theorem or owner capability.
+  Unknown operations stay incomplete; ill-formed requests are refused."
+ [op operands overrides]
+ (require! (and (keyword? op) (vector? operands) (every? int? operands)) "keyword operation and integer operand vector required")
+ (let [policy (limits overrides)
+       reference (graph/of {:profile profile :operation op :operands operands :limits policy})
+       widths (mapv bits operands)
+       arity (if (= :neg op) 1 (when (contains? #{:add :sub :mul :div :mod :eq :lt :le :gt :ge} op) 2))
+       base {:profile profile :request-reference reference :operation op :argument-bits widths :limits policy
+             :primitive-execution :not-run :compiler-proof-authority false}]
+  (if (nil? arity) (assoc base :status :incomplete :reason {:kind :resource-policy-unsupported})
+   (do
+    (require! (= arity (count operands)) "wrong primitive arity")
+    (let [a (first operands) b (second operands) aw (first widths) bw (or (second widths) 0)
+          largest (max aw bw)
+          ;; Euclidean div can adjust a negative truncating quotient by one.
+          ;; mod's SDK implementation additionally forms b*q then a-b*q.
+          forecast
+          (cond
+           (contains? #{:add :sub} op) {:result-bits (inc largest) :intermediate-bits (inc largest) :work-units (inc largest)}
+           (= :neg op) {:result-bits aw :intermediate-bits aw :work-units (max 1 aw)}
+           (= :mul op) (if (or (zero? a) (zero? b))
+                       {:result-bits 0 :intermediate-bits 0 :work-units 1}
+                       {:result-bits (+ aw bw) :intermediate-bits (+ aw bw) :work-units (* (max 1 aw) (max 1 bw))})
+           (contains? #{:div :mod} op)
+            (if (zero? b) {:result-bits 0 :intermediate-bits 0 :work-units 1}
+             {:result-bits (if (= :div op) (inc aw) bw)
+              :intermediate-bits (+ aw bw 2)
+              :work-units (* 4 (inc largest) (inc largest))})
+           (= :eq op) {:result-bits 0 :intermediate-bits largest :work-units (max 1 largest)}
+           :else {:result-bits 0 :intermediate-bits (inc largest) :work-units (* 2 (inc largest))})
+          checks [[:integer-bits (max largest (:result-bits forecast))]
+                  [:intermediate-bits (:intermediate-bits forecast)] [:work-units (:work-units forecast)]]
+          refused (first (filter (fn [[metric amount]] (> amount (get policy metric))) checks))]
+     (assoc base :forecast forecast :status (if refused :incomplete :ready)
+                 :reason (when refused {:kind :resource-limit :metric (first refused)
+                                       :required (second refused) :limit (get policy (first refused))})))))))
