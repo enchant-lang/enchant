@@ -14,6 +14,12 @@ cases pay more admission overhead; managed question/reply integration remains
 next. The live dossier includes the actual evaluation and an adjustable,
 source-backed structural counting notebook.
 
+[Question inventory preparation](QUESTION-FOREST.md) now also preserves exact
+definitions, root order, labels and observation term leaves on all 187 questions,
+with 68 focused assertions. It checks normalized counterexample syntax without
+expanding term arguments. Structured observation reconstruction, complete
+managed owner admission and derived-value resource budgets remain next.
+
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
 [SEMANTICS.md](SEMANTICS.md). The catalogue has 46 interface families, with

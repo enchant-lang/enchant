@@ -1,9 +1,10 @@
 # Prepare the question, not just its formulas
 
-The project module and focused/corpus recipes now exist. Its 68 focused
-assertions pass; whole-corpus qualification is pending. They prepare a term
-inventory. Structured observation reconstruction and managed owner admission
-remain separate work.
+The project module now passes 68 focused assertions and all 187 preceding
+questions with exact term and observation inventories. The
+[qualification](evidence/question-forest/qualification.json) retains its actual
+sources, SDK and resource caps. Structured observation reconstruction and
+managed owner admission remain separate work.
 
 The next project boundary should accept the original closed question-graph
 wrapper and derive a fresh term inventory without expanding argument trees.
