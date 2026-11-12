@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -16,7 +17,19 @@ def sha(path):
 pin = read(P / 'sdk-pin.json')
 assert pin == read(E / 'qualification.json')['sdk_pin'] and read(E / 'qualification.json')['status'] == 'passed'
 assert read(E / 'dossier-check-exit.json')['exit_code'] == 0
-assert read(E / 'dossier-check-exit.json')['document_sha256'] == sha(P / 'ATLAS.bl.org')
+checked = read(E / 'dossier-check-source-pin.json')
+assert checked['sdk_pin'] == pin
+for name, digest in checked['source_sha256'].items():
+    if name == 'research/formal-logic/ATLAS.bl.org':
+        body = subprocess.check_output(['git', 'show', checked['code_commit'] + ':' + name], cwd=R).decode()
+        assert hashlib.sha256(body.encode()).hexdigest() == digest == read(E / 'dossier-check-exit.json')['document_sha256']
+        current = (R / name).read_text()
+        for pattern in (r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
+                        r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*',
+                        r'^#\+name:[^\n]*\n(?:\|[^\n]*(?:\n|$))*'):
+            assert re.findall(pattern, body, re.M | re.S) == re.findall(pattern, current, re.M | re.S)
+    else:
+        assert sha(R / name) == digest
 kit = read(E / 'kit-state.json')
 for name, digest in kit['rendering_source_sha256'].items():
     assert sha(Path(kit['root']) / name) == digest

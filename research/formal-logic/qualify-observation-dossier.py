@@ -45,6 +45,9 @@ for stage in ('inputs', 'cells', 'check'):
             for pattern in (r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
                             r'^#\+name:[^\n]*\n(?:\|[^\n]*(?:\n|$))*'):
                 assert re.findall(pattern, body.decode(), re.M | re.S) == re.findall(pattern, text, re.M | re.S)
+            if stage == 'check':
+                pattern = r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*'
+                assert re.findall(pattern, body.decode(), re.M | re.S) == re.findall(pattern, text, re.M | re.S)
         else:
             assert sha(R / name) == digest
     result = read(E / (prefix + '-exit.json'))
