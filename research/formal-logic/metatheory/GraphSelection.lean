@@ -17,10 +17,13 @@ def sequenceFin : {n : Nat} → (Fin n → Option α) → Option (Fin n → α)
 
 theorem sequenceFin_some {n : Nat} (values : Fin n → α) :
     sequenceFin (fun i => some (values i)) = some values := by
-  induction n with
-  | zero => rfl
+  induction n generalizing values with
+  | zero =>
+    congr 1
+    funext index
+    exact Fin.elim0 index
   | succ n ih =>
-    simp only [sequenceFin, ih]
+    simp only [sequenceFin, ih, Option.bind_some]
     congr 1
     funext index
     by_cases earlier : index.val < n
@@ -99,7 +102,7 @@ theorem selective_fold_agrees (leaf : Scalar → Option α) (fullLeaf : Scalar �
     (ready : table.Ready leaf fullLeaf wanted) :
     ∀ index, wanted index = true →
       table.partialFold leaf node wanted index = some (table.fold fullLeaf node index) := by
-  induction table with
+  induction table generalizing wanted with
   | empty => intro index; exact Fin.elim0 index
   | @push n previous row ih =>
     intro index needed
@@ -110,17 +113,17 @@ theorem selective_fold_agrees (leaf : Scalar → Option α) (fullLeaf : Scalar �
         ih (fun i => wanted i.castSucc) ready.1 ⟨index.val, earlier⟩ prefixNeeded
     · have last : index = Fin.last n := by apply Fin.ext; simp [Fin.last]; omega
       subst index
-      simp only [Table.partialFold, Table.fold, extend_last, needed, Bool.true_eq, if_true]
-      exact partial_apply_agrees leaf fullLeaf node (fun i => wanted i.castSucc)
-        _ _ row (ready.2 needed) (ih _ ready.1)
+      simpa [Table.partialFold, Table.fold, needed] using
+        partial_apply_agrees leaf fullLeaf node (fun i => wanted i.castSucc)
+          _ _ row (ready.2 needed) (ih _ ready.1)
 
 theorem unselected_is_none (leaf : Scalar → Option α) (node : Algebra α)
-    (table : Table size) (wanted : Fin size → Bool) (index : Fin size)
-    (unneeded : wanted index = false) :
-    table.partialFold leaf node wanted index = none := by
-  induction table with
-  | empty => exact Fin.elim0 index
+    (table : Table size) (wanted : Fin size → Bool) :
+    ∀ index, wanted index = false → table.partialFold leaf node wanted index = none := by
+  induction table generalizing wanted with
+  | empty => intro index; exact Fin.elim0 index
   | @push n previous row ih =>
+    intro index unneeded
     by_cases earlier : index.val < n
     · have prefixUnneeded : wanted (⟨index.val, earlier⟩ : Fin n).castSucc = false := by
         simpa using unneeded
