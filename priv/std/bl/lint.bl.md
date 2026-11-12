@@ -195,12 +195,10 @@ sweep; a linter reports what it can read and keeps going.
                       ((:text rule) src)))
                text-rules))))))
 
-(defn lint-source
-  "Convert each top-level reader tree once, then walk its data and positions
-   together. Matching a child never reconverts its entire subtree."
-  [rules path src]
-  (let [forms (BeamLisp.Reader/read_string src)
-        prepared (deodorant/prepare-rules rules)
+(defn lint-forms
+  "Lint the parsed forms shared by a diagnostics request, retaining positions."
+  [rules path src forms]
+  (let [prepared (deodorant/prepare-rules rules)
         roots (mapv (fn [n] [n (node->data n) nil]) forms)
         found (loop [pending (vec (reverse roots)) found []]
                 (if (empty? pending) found
@@ -214,6 +212,11 @@ sweep; a linter reports what it can read and keeps going.
                                 (catch _ []))]
                     (recur (into (pop pending) (reverse kids)) (into found at)))))]
     {:path path :smells (vec (sort-by :line (concat found (text-smell-entries rules src))))}))
+
+(defn lint-source
+  "Convert each reader tree once and retain source positions."
+  [rules path src]
+  (lint-forms rules path src (BeamLisp.Reader/read_string src)))
 
 (defn smell-count-forms
   "Smell count sharing a diagnostic request's parsed reader forms."

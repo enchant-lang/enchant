@@ -55,6 +55,24 @@ async function boot(page, opts) {
 const pingsOf = (page) =>
   page.evaluate(() => window.__sockets.map((s) => s.sent.filter((d) => d === '["ping"]').length));
 
+test("mount restores SSR text boundaries before ordinary patch frames", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, "fixture.json"), "utf8")).fragments;
+  await boot(page, { heartbeatMs: 0, reconnect: false });
+  await page.waitForFunction(() => window.__sockets[0].readyState === 1);
+  await page.evaluate(f => {
+    const socket = window.__sockets[0];
+    socket.onmessage({ data: JSON.stringify(["mount", f.mount,
+      { "input-ack": true, "text-layout": f["text-layout"] }]) });
+    f.patches.forEach(patch => socket.onmessage({ data: JSON.stringify(["patch", patch.ops]) }));
+  }, fixture);
+  await expect(page.locator("label span")).toHaveText("couvertures");
+  await expect(page.locator("p")).toHaveText("🙂 مرحبا après");
+  expect(await page.evaluate(() => Live.root.__liveInputAck)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 // ── the heartbeat ─────────────────────────────────────────────────────
 
 test("heartbeat: a ['ping'] frame per heartbeatMs, and no stray traffic", async ({ page }) => {
@@ -258,4 +276,51 @@ test("patch: one op that throws does not sink the rest; the client asks to remou
   expect(out.errors).toEqual([1, 1, 1]);
   expect(out.asked1).toBe(1);
   expect(out.asked2).toBe(2);
+});
+
+
+test("fragment setting links use native navigation and land on the exact field", async ({ page }) => {
+  await page.route("http://live.test/**", route => route.fulfill({
+    contentType: "text/html",
+    body: "<div style='height:1600px'></div><input id='machine-setting-clamp' value='16'><div style='height:500px'></div>"
+  }));
+  await page.goto("http://live.test/start");
+  await boot(page, { heartbeatMs: 0, reconnect: false });
+  await page.waitForFunction(() => window.__sockets[0].readyState === 1);
+  await page.evaluate(() => {
+    document.getElementById("live-root").innerHTML =
+      '<a id="plain" href="/resource/other?tab=settings">Settings</a>' +
+      '<a id="source" href="/resource/cutter?tab=settings#machine-setting-clamp">16 mm source</a>';
+  });
+  await page.click("#plain");
+  expect(await page.evaluate(() => window.__sockets[0].sent)).toEqual([
+    '["event",["navigate","/resource/other?tab=settings"],{}]'
+  ]);
+  await page.click("#source");
+  await expect(page).toHaveURL("http://live.test/resource/cutter?tab=settings#machine-setting-clamp");
+  await expect(page.locator("#machine-setting-clamp")).toHaveValue("16");
+  expect(await page.locator("#machine-setting-clamp").evaluate(e => {
+    const r=e.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight;
+  })).toBe(true);
+});
+
+test("session: reconnect distinguishes an undelivered first mount from a hydrated DOM", async ({ page }) => {
+  await boot(page, { heartbeatMs: 0 });
+  await page.waitForFunction(() => window.__sockets[0].readyState === 1);
+  const first = await page.evaluate(() => window.__sockets[0].url);
+  expect(new URL(first).searchParams.get('live-mounted')).toBe('0');
+  await page.evaluate(() => window.__sockets[0].close());
+  await page.waitForFunction(() => window.__sockets.length === 2 && window.__sockets[1].readyState === 1);
+  const lostMount = await page.evaluate(() => window.__sockets[1].url);
+  expect(new URL(lostMount).searchParams.get('live-sid')).toBe(new URL(first).searchParams.get('live-sid'));
+  expect(new URL(lostMount).searchParams.get('live-mounted')).toBe('0');
+  await page.evaluate(() => {
+    window.__sockets[1].onmessage({ data: JSON.stringify(['mount', '<input value="retained">', { 'input-ack': true, 'text-layout': [] }]) });
+    window.__sockets[1].close();
+  });
+  await page.waitForFunction(() => window.__sockets.length === 3 && window.__sockets[2].readyState === 1);
+  const mounted = await page.evaluate(() => window.__sockets[2].url);
+  expect(new URL(mounted).searchParams.get('live-sid')).toBe(new URL(first).searchParams.get('live-sid'));
+  expect(new URL(mounted).searchParams.get('live-mounted')).toBe('1');
+  expect(await page.locator('input').inputValue()).toBe('retained');
 });

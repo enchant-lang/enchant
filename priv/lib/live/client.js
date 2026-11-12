@@ -6,7 +6,8 @@
 // and keyed, this is ~120 lines with no virtual DOM and no heuristics.
 //
 // Wire protocol (JSON over a WebSocket):
-//   server → client:  ["mount", html]            first paint (full HTML)
+//   server → client:  ["mount", html, features]  first paint (full HTML)
+//                     features["text-layout"] restores parsed text boundaries
 //                     ["style", css]              rules for classes the next
 //                                                 mount/patch introduces
 //                     ["patch", ops]              a list of patch ops
@@ -116,8 +117,8 @@
     let el = rootEl(container);
     // Walk ALL child nodes (text + element), NOT element-only: the server
     // differ (diff.bl `children-of`) indexes a node's children as the flat
-    // text+element list, and `hiccup->html` joins siblings with "" so the
-    // rendered DOM's childNodes mirror that list exactly. Walking
+    // text+element list. Mount hydration restores adjacent/empty text nodes
+    // that HTML parsing otherwise merges or drops. Walking
     // elementChildren here skips text siblings, so a path segment under a node
     // that interleaves text and elements (e.g. `[:button (icon) "Label"]`)
     // resolves to the WRONG node — or past the end — and the op is silently
@@ -136,6 +137,52 @@
     return Array.prototype.filter.call(el.childNodes, function (n) {
       return n.nodeType === 1 || n.nodeType === 3;
     });
+  }
+
+  function hydrateText(root, layouts) {
+    const next = function (node) {
+      for (let n = node.nextSibling; n; n = n.nextSibling) {
+        if (n.nodeType === 1 || n.nodeType === 3) return n;
+      }
+      return null;
+    };
+    // Parents precede descendants: splitting a parent's text first restores
+    // the child indices by which its descendants are subsequently addressed.
+    for (const [path, fragments] of layouts || []) {
+      const parent = at(root, path);
+      let cursor = domChildren(parent)[0] || null;
+      let leading = /^(PRE|TEXTAREA|LISTING)$/.test(parent.tagName);
+      let previousCR = false;
+      for (let fragment of fragments) {
+        if (fragment === null) {
+          leading = false;
+          previousCR = false;
+          if (!cursor || cursor.nodeType !== 1) throw Error("Live text hydration: missing element at " + path);
+          cursor = next(cursor);
+        } else {
+          // The HTML parser normalizes CR/CRLF and strips one initial LF in
+          // preformatted/RCDATA containers. Split the parsed text, preserving
+          // its visible content, elements, input state and event listeners.
+          const original = fragment;
+          if (previousCR && fragment[0] === "\n") fragment = fragment.slice(1);
+          if (original.length) previousCR = original.endsWith("\r");
+          fragment = fragment.replace(/\r\n?/g, "\n");
+          if (leading && fragment.length) {
+            leading = false;
+            if (fragment[0] === "\n") fragment = fragment.slice(1);
+          }
+          if (!fragment.length) {
+            parent.insertBefore(document.createTextNode(""), cursor);
+          } else {
+            if (!cursor || cursor.nodeType !== 3 || cursor.data.length < fragment.length)
+              throw Error("Live text hydration: missing text at " + path);
+            if (cursor.data.length > fragment.length) cursor.splitText(fragment.length);
+            cursor = next(cursor);
+          }
+        }
+      }
+      if (cursor) throw Error("Live text hydration: surplus children at " + path);
+    }
   }
 
   // element children only (skip text nodes) — used for the #live-root → view
@@ -353,7 +400,7 @@
       // data, so a text change beside sibling elements does not clobber them.
       const parent = at(root, path.slice(0, -1));
       const slot = path[path.length - 1];
-      const node = parent.childNodes[slot];
+      const node = domChildren(parent)[slot];
       if (node && node.nodeType === 3) {
         node.data = String(op[2]);
       } else if (node) {
@@ -427,6 +474,9 @@
     // last saw — instead of mounting a fresh one. In memory only, on purpose:
     // a reload is a new page load and wants a fresh session, so there is
     // nothing to persist, expire or clear.
+    // A reconnect before initial delivery cannot resume from SSR as though
+    // it were hydrated. Only a successfully applied mount changes this receipt.
+    var mounted = false;
     var sid = (function () {
       var a = new Uint8Array(16), i, s = "";
       if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(a);
@@ -435,7 +485,7 @@
       return s;
     })();
     function sessionUrl(url) {
-      return url + (url.indexOf("?") === -1 ? "?" : "&") + "live-sid=" + sid;
+      return url + (url.indexOf("?") === -1 ? "?" : "&") + "live-sid=" + sid + "&live-mounted=" + (mounted ? "1" : "0");
     }
 
     // `ws` is now MUTABLE — a reconnect swaps in a fresh socket while the event
@@ -595,10 +645,12 @@
           discardInputs();
           root.__liveInputAck = !!(b && b["input-ack"]);
           root.innerHTML = a;
+          hydrateText(root, b && b["text-layout"]);
           syncInputs(root);
           restoreFields(root, kept);
           // a waitable mark (an event can fire before a test starts waiting)
           try { document.documentElement.setAttribute("data-mounted", "1"); } catch (_e) {}
+          mounted = true;
           announce("live:mount", { root: root });
         } else if (kind === "style") {
           // the head sheet holds what the warm reached; a socket that renders
@@ -684,7 +736,7 @@
           !e.shiftKey && !e.altKey && (a.getAttribute("target") || "") === "") {
         var href = a.getAttribute("href") || "";
         if (href.indexOf("/") === 0 && href.indexOf("//") !== 0 &&
-            href.indexOf("#") !== 0 && ws && ws.__navigate) {
+            href.indexOf("#") < 0 && ws && ws.__navigate) {
           e.preventDefault();
           ws.__navigate(href);
           return;
@@ -1024,7 +1076,7 @@
     }
   }
 
-  window.Live = { copy: copy, connect: connect, applyOp: applyOp, render: render,
+  window.Live = { copy: copy, connect: connect, applyOp: applyOp, render: render, hydrateText: hydrateText,
                   at: at, pathOf: pathOf, ws: null, root: null };
   var Live = window.Live;
 })();
