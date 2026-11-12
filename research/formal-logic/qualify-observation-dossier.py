@@ -32,7 +32,7 @@ assert len(re.findall(r'^#\+begin_src beam-lisp\b', text, re.M)) == 84
 identities = re.findall(r'^#\+begin_src beam-lisp\b[^\n]*:id ([^\s]+)', text, re.M)
 assert len(identities) == len(set(identities))
 checks = {}
-for stage in ('cells', 'check'):
+for stage in ('inputs', 'cells', 'check'):
     prefix = 'dossier-' + stage
     snapshot = read(E / (prefix + '-source-pin.json'))
     assert snapshot['sdk_pin'] == pin and snapshot['kit_state_sha256'] == sha(E / 'kit-state.json')
@@ -50,12 +50,19 @@ for stage in ('cells', 'check'):
     result = read(E / (prefix + '-exit.json'))
     assert result['exit_code'] == 0 and result['runtime_retired']
     command = read(E / (prefix + '-command.json'))
+    imports = [str(P / 'src'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
+               str(Path(kit['root']) / 'codebase-review/kit')]
+    assert snapshot['project_import_paths'] == imports
+    assert 'BEAM_LISP_PATH=' + ':'.join(imports) in command
     assert str(Path(pin['sdk']) / 'bin/bl') in command and '--cold' in command
     assert all(item in command for item in ('--property=MemoryMax=4G', '--property=MemorySwapMax=0',
                                             '--property=RuntimeMaxSec=1200', '--property=KillMode=control-group'))
     log = (E / (prefix + '-checks.txt')).read_text()
-    expected = '84 cells, 0 cell errors' + (' (checked, unchanged)' if stage == 'check' else '')
-    assert expected in log
+    if stage == 'inputs':
+        assert ':notebook :valid' in log and ':project-imports :loaded' in log and ':native-query-calls 0' in log
+    else:
+        expected = '84 cells, 0 cell errors' + (' (checked, unchanged)' if stage == 'check' else '')
+        assert expected in log
     if stage == 'check':
         assert result['document_sha256'] == snapshot['source_sha256']['research/formal-logic/ATLAS.bl.org']
     checks[stage] = {'source_pin': snapshot, 'exit': result, 'log_sha256': sha(E / (prefix + '-checks.txt'))}
