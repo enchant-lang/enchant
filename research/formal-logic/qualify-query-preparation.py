@@ -99,6 +99,15 @@ require(example['research-import-path'] is False and not Path(example['cwd']).is
         and '-p' not in read(E / 'examples-command.json'), 'SDK-only unrelated-directory consumer')
 cases = example['cases']
 require([(x['backend'], x['placement']) for x in cases] == [('z3', 1), ('z3', 2), ('oxiz', 1), ('oxiz', 2)], 'paired declared size cases')
+families = example['size-families']
+require(families['checked']['status'] == 'checked' and families['checked']['holds'] is True,
+        'positive family has checked evidence')
+require(families['unknown']['status'] == 'unknown' and families['unknown']['holds'] is None
+        and families['unknown']['arities'][0]['linear']['native']['result']['verdict'] == 'proved',
+        'theorem budget abstains despite a separate unchecked native positive label')
+require(families['refuted']['status'] == 'refuted' and families['refuted']['holds'] is False
+        and families['refuted']['arities'][0]['linear']['counterexample']['checking']['status'] == 'checked-data-connection',
+        'false needs a checked single-placement counterexample')
 for row in cases:
     plan, original, result = row['plan'], row['original-answer'], row['prepared-answer']
     require(plan['formal/preparation'] == 1 and plan['status'] == 'ready'
