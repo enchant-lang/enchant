@@ -595,10 +595,14 @@ try{
   await evaluate("document.querySelector('#what-a-size-result-actually-means').scrollIntoView({block:'start'})");
   await shot(size.name+'-size-evidence');
   await navigate('/#a-large-question-should-still-travel-as-language-data');
-  check(size.name+': graph chapter preserves the whole question and initial conversion cost',await evaluate("document.body.innerText.includes('Saving only a formula digest loses part of the question')&&document.body.innerText.includes('Initial conversion still visits the supplied tree')"));
+  check(size.name+': graph chapter preserves the whole question',await evaluate("document.body.innerText.includes('Saving only a formula digest loses part of the question')&&document.body.innerText.includes('Repeated pieces are stored once')"));
   await evaluate("document.querySelector('#a-large-question-should-still-travel-as-language-data').scrollIntoView({block:'start'})");
   await shot(size.name+'-question-graph');
   const graphPanel='[data-graph="formal-question-graphs"] .sg-stage>[data-view]:not([hidden])';
+  await click(graphPanel+' .review-index [data-sg-to="sharing"]');
+  check(size.name+': opened sharing panel states initial tree cost and canonical ordering',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(graphPanel)}).innerText;return t.includes('Initial conversion still visits the supplied tree')&&t.includes('Children precede parents')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(graphPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-graph-sharing-panel');
   await click(graphPanel+' .review-index [data-sg-to="runtime"]');
   check(size.name+': graph materialization panel keeps unfamiliar atoms and equality refusal visible',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(graphPanel)}).innerText;return t.includes('existing keywords only')&&t.includes('Runtime machinery is refused')&&t.includes('collapse distinct entries')})()`));
   await evaluate(`document.querySelector(${JSON.stringify(graphPanel)}).scrollIntoView({block:'center'})`);

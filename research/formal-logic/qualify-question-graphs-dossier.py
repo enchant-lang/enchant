@@ -43,7 +43,7 @@ graphs = sorted({row['name'].split('/')[1].split(':')[0] for row in audit['check
                  if row['name'].endswith(': connected topic opens')})
 require(len(graphs) == 48 and 'formal-question-graphs' in graphs, 'all 48 connected review graphs')
 images = {name: sha(E / 'browser-audit' / name) for name in audit['screenshots']}
-frames = ('question-graph', 'graph-runtime-panel', 'story-question-graph-data', 'story-graph-point-data', 'story-graph-budget-data')
+frames = ('question-graph', 'graph-sharing-panel', 'graph-runtime-panel', 'story-question-graph-data', 'story-graph-point-data', 'story-graph-budget-data')
 manual = [size + '-' + frame + '.png' for size in ('phone', 'desktop') for frame in frames]
 manual.append('desktop-graph-night.png')
 manual.append('phone-graph-runtime-details.png')
