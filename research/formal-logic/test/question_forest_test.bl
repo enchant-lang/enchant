@@ -1,0 +1,96 @@
+(ns formal.question-forest-test
+ (:require [formal.question-forest :as prepared] [formal.question-graph :as qg]
+           [formal.term :as t] [formal.query :as q] [formal.value :as v]
+           [formal.data-graph :as graph] [oracle]))
+
+(defn- original [problem]
+ {:formal/question-graph 1 :profile qg/profile :graph (graph/encode problem)})
+(defn- agree [problem]
+ (q/validate! problem)
+ (let [context (original problem) actual (prepared/prepare context)
+       roots (vec (concat (q/roots problem) (when (:counterexample problem) [(get-in problem [:counterexample :term])])))
+       old (t/export (t/registry) roots)]
+  (is (erlang/=:= (:nodes old) (get-in actual [:forest :nodes])))
+  (is (= (:ids old) (get-in actual [:forest :roots])))
+  (is (= (graph/reference (:graph context)) (:reference actual)))
+  (is (= (:mode problem) (:mode actual)))
+  (is (= (mapv :label (:assertions problem)) (mapv :label (:assertions actual))))
+  (is (= false (:compiler-proof-authority actual)))
+  actual))
+
+(deftest proof-sat-and-empty-inventories-match-existing-export
+ (let [x (t/variable "question.forest.x" t/Int)]
+  (agree (q/prove (t/gt (t/add x (t/int 1)) x) {:observe {"x" x}}))
+  (agree (q/sat {:assumptions [(t/bool true)] :vacuity :allow}))
+  (is (= [] (get-in (agree (q/sat {})) [:forest :nodes])))))
+
+(deftest nested-observation-inventories-keep-legacy-container-order
+ (let [x (t/variable "question.forest.x" t/Int)
+       y (t/variable "question.forest.y" t/Bool)
+       item (v/make {:b [y x] :a (list x y)} {})
+       result (agree (q/sat {:observe {:second item "first" x :third {:z y :a [x y x]}}}))]
+  (is (= 3 (count (:observations result))))
+  (is (> (get-in result [:checking :observation-descriptors]) 3))))
+
+(deftest counterexample-agreement-compares-syntax-not-only-node-ids
+ (let [claim (t/eq (t/variable "question.forest.alias" t/Int) (t/int 7))
+       alias (assoc claim :args (to-list (:args claim)))
+       problem (assoc-in (q/prove claim) [:counterexample :term] (t/not alias))
+       result (agree problem)]
+  (is (> (get-in result [:checking :syntax-comparisons]) 0))))
+
+(deftest malformed-question-meaning-and-caller-caches-are-refused
+ (let [base (q/prove (t/bool true)) context (original base) checked (prepared/prepare context)]
+  (doseq [problem [(assoc base :claim nil) (assoc base :claim (t/int 1))
+                   (assoc-in base [:counterexample :term] (t/bool true))
+                   (assoc-in base [:counterexample :term] (assoc (t/not (:claim base)) :data 0))
+                   (assoc base :assertions [{:label 1 :term (t/bool true)}])
+                   (assoc base :observe []) (assoc base :mode :unexpected)
+                   (assoc (q/sat {}) :claim (t/bool true))
+                   (assoc (q/sat {}) :counterexample (:counterexample base))
+                   (assoc base :observe {"bad-success" {:formal/value 1 :value (t/int 1)}})]]
+   (is (thrown? (prepared/prepare (original problem)))))
+  (is (thrown? (prepared/prepare checked)))
+  (is (thrown? (prepared/prepare (assoc context :reference (:reference checked)))))))
+
+(deftest unread-observation-leaves-stay-data-without-becoming-a-witness
+ (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" "question.forest.preview.unadmitted.observation"]]}
+       base (:graph (original (q/sat {})))
+       data (graph/patch-map base [[(graph/encode :observe)
+                                    (graph/assemble "map" [[(graph/encode "raw") unknown]])]])
+       context {:formal/question-graph 1 :profile qg/profile :graph data}
+       result (prepared/prepare context)]
+  (is (= [] (get-in result [:forest :nodes])))
+  (is (= [] (:terms (first (:observations result)))))
+  (is (= (graph/reference data) (:reference result)))
+  (is (= :original-graph-data-and-sdk-term-inventory (:observation-policy result)))
+  (is (thrown? (qg/open! context)))
+  (is (not (contains? result :view)))))
+
+(deftest preparation-does-not-request-an-oracle-answer
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :question-preparation-must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   #(agree (q/prove (t/bool true))))
+  (is (= 0 @calls))))
+
+(deftest repeated-observation-containers-do-not-expand-the-term-inventory
+ (let [payload (reduce (fn [data _] (graph/assemble "vector" [data data]))
+                        (graph/encode (t/bool true)) (range 16))
+       data (graph/patch-map (:graph (original (q/sat {})))
+              [[(graph/encode :observe) (graph/assemble "map" [[(graph/encode "shared") payload]])]])
+       result (prepared/prepare {:formal/question-graph 1 :profile qg/profile :graph data})]
+  (is (= 17 (get-in result [:checking :observation-descriptors])))
+  (is (= 1 (count (get-in result [:forest :nodes]))))
+  (is (= [1] (:terms (first (:observations result)))))))
+
+(deftest unread-provenance-remains-bound-to-the-original-graph
+ (let [base (original (q/prove (t/bool true)))
+       history (fn [name] {:formal/data-graph 1 :profile graph/profile :root 0 :nodes [["keyword" name]]})
+       derive (fn [name] (assoc base :graph (graph/patch-map (:graph base)
+                                      [[(graph/encode :origin) (history name)]])))
+       a (prepared/prepare (derive "question.forest.unadmitted.history.a"))
+       b (prepared/prepare (derive "question.forest.unadmitted.history.b"))]
+  (is (= (get-in a [:forest :nodes]) (get-in b [:forest :nodes])))
+  (is (= (:assertions a) (:assertions b)))
+  (is (not= (:reference a) (:reference b)))))

@@ -1,0 +1,138 @@
+(ns formal.question-forest
+ (:require [formal.data-graph :as graph] [formal.question-graph :as question]
+           [formal.term-forest :as forest] [formal.term :as t] [formal.identity :as identity]))
+
+;; Project preparation only. This result is not an accepted cached question,
+;; an operational observer template, a managed execution or proof authority.
+(def profile :bl/question-term-inventory-preview-v1)
+(def limits {:syntax-pairs 131072})
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.question-forest: " reason) {:profile profile}))))
+(defn- fields [rows id]
+ (let [[kind pairs] (nth rows id)]
+  (require! (= "map" kind) "question or assertion map required")
+  (into {} (keep (fn [[key value]]
+                   (let [[tag name] (nth rows key)] (when (= "keyword" tag) [name value]))) pairs))))
+(defn- nil-node? [rows id] (or (nil? id) (= ["nil" nil] (nth rows id))))
+(defn- assertion [rows id]
+ (let [f (fields rows id)]
+  (require! (and (contains? f "label") (contains? f "term")) "assertion label and term required")
+  {:label-source (get f "label") :term-source (get f "term")}))
+(defn- original-data! [context]
+ (require! (and (= :map (rt/kind-kind context)) (= 3 (erlang/map_size context))
+                (erlang/is_map_key :formal/question-graph context)
+                (erlang/is_map_key :profile context) (erlang/is_map_key :graph context)
+                (or (nil? (meta context)) (= {} (meta context)))
+                (int? (:formal/question-graph context)) (= 1 (:formal/question-graph context))
+                (= question/profile (:profile context))) "original closed question graph required")
+ (:graph context))
+
+(defn prepare
+ "Revalidate original question data, collect the existing observation term
+  inventory, and prepare its ordered forest without expanding term arguments.
+  Uninterpreted observation leaves remain original graph data. No observation
+  reconstruction, managed owner admission or caller-supplied checked view."
+ [context]
+ (let [data (original-data! context) checked (graph/check! data) rows (:nodes data)
+       f (fields rows (:root data)) tag (get f "formal/query") mode-id (get f "mode")
+       _ (require! (and (some? tag) (= ["int" 1] (nth rows tag))) "version-1 question required")
+       mode-row (when (some? mode-id) (nth rows mode-id))
+       mode (cond (= ["keyword" "sat"] mode-row) :sat
+                  (= ["keyword" "prove"] mode-row) :prove
+                  :else (throw (ex-info "formal.question-forest: proof or SAT mode required" {})))
+       assertions-id (get f "assertions")
+       _ (require! (and (some? assertions-id) (= "vector" (first (nth rows assertions-id)))) "assertion vector required")
+       specs (mapv #(assertion rows %) (second (nth rows assertions-id)))
+       claim-id (get f "claim") counter-id (get f "counterexample") observe-id (get f "observe")
+       counter (when-not (nil-node? rows counter-id) (assertion rows counter-id))
+       _ (if (= :prove mode)
+           (require! (and (not (nil-node? rows claim-id)) (some? counter)) "proof claim and counterexample required")
+           (require! (and (nil-node? rows claim-id) (nil? counter)) "SAT has neither claim nor counterexample"))
+       _ (require! (or (nil-node? rows observe-id) (= "map" (first (nth rows observe-id)))) "observation map required")
+       observation-pairs (if (nil-node? rows observe-id) [] (second (nth rows observe-id)))
+       descriptions (atom {}) selected-keys (atom (set (concat (map :label-source specs)
+                                                        (when counter [(:label-source counter)])
+                                                        (map first observation-pairs))))]
+  ;; Discover only observable payload structure. A term stops traversal before
+  ;; its argument edges; ignored value metadata remains in the original graph.
+  (letfn [(discover [id]
+           (when (and (some? id) (not (contains? @descriptions id)))
+            (let [[kind body] (nth rows id)
+                  f (when (= "map" kind) (fields rows id))
+                  marked? (fn [name] (when-let [tag (get f name)] (= ["int" 1] (nth rows tag))))
+                  descriptor
+                  (cond
+                   (marked? "formal/term") {:kind :term}
+                   (marked? "formal/value")
+                    {:kind :value :payload (get f "value")
+                     :predicates [(get f "defined") (get f "within")]}
+                   (= "map" kind) {:kind :map :pairs body}
+                   (contains? #{"vector" "list"} kind) {:kind :sequence :children body}
+                   :else {:kind :leaf})]
+             (case (:kind descriptor)
+              :value (discover (:payload descriptor))
+              :map (doseq [[key child] body] (swap! selected-keys conj key) (discover child))
+              :sequence (doseq [child body] (discover child))
+              nil)
+             (swap! descriptions assoc id descriptor))))]
+   (doseq [[_ id] observation-pairs] (discover id)))
+  (let [key-ids (vec @selected-keys) decoded (graph/decode-nodes! data key-ids)
+        keys (zipmap key-ids decoded) collected (atom {})]
+   (letfn [(collect [id]
+            (if (nil? id) []
+             (if (contains? @collected id) (get @collected id)
+              (let [descriptor (get @descriptions id)
+                    result
+                    (vec (distinct
+                      (case (:kind descriptor)
+                       :term [id]
+                       :value (concat (collect (:payload descriptor)) (:predicates descriptor))
+                       :map (mapcat collect (vals (into {} (map (fn [[key child]] [(get keys key) child]) (:pairs descriptor)))))
+                       :sequence (mapcat collect (:children descriptor))
+                       [])))]
+               (require! (<= (count result) (:roots forest/limits)) "observation term inventory capacity")
+               (swap! collected assoc id result) result))))]
+    (let [observations (into {} (map (fn [[key descriptor]] [(get keys key) descriptor]) observation-pairs))
+          ordered-observations (sort-by (fn [[label _]] (identity/bytes label)) observations)
+          roots (vec (concat (map :term-source specs) (when (= :prove mode) [claim-id])
+                       (mapcat (fn [[_ id]] (collect id)) ordered-observations)
+                       (when counter [(:term-source counter)])))
+          prepared (forest/prepare data roots) translated (zipmap roots (:roots prepared))
+          nodes (into {} (map (fn [[id op sort children datum]]
+                               [id {:op op :sort sort :children children :data datum}]) (:nodes prepared)))
+          comparisons (atom {})
+          _ (doseq [id (concat (map :term-source specs) (when (= :prove mode) [claim-id])
+                               (when counter [(:term-source counter)]))]
+              (require! (= t/Bool (:sort (get nodes (get translated id)))) "Boolean assertion or claim required"))
+          named (fn [spec]
+                  (let [label (get keys (:label-source spec))]
+                   (require! (string? label) "assertion label string required")
+                   {:label label :term (get translated (:term-source spec))}))]
+     (letfn [(same-syntax? [left right]
+              (if (= left right) true
+               (let [pair [left right]]
+                (if (contains? @comparisons pair) (get @comparisons pair)
+                 (let [a (get nodes left) b (get nodes right)]
+                  (require! (< (count @comparisons) (:syntax-pairs limits)) "term syntax comparison capacity")
+                  ;; Reserve capacity before recursively checking dependencies.
+                  (swap! comparisons assoc pair false)
+                  (let [same (and (= (select-keys a [:op :sort :data]) (select-keys b [:op :sort :data]))
+                                  (= (count (:children a)) (count (:children b)))
+                                  (every? true? (map same-syntax? (:children a) (:children b))))]
+                   (swap! comparisons assoc pair same) same))))))]
+      (when counter
+       (let [node (get nodes (get translated (:term-source counter)))]
+        (require! (and (= "not" (:op node)) (nil? (:data node)) (= 1 (count (:children node)))
+                       (same-syntax? (first (:children node)) (get translated claim-id)))
+                  "counterexample must be exactly the negated claim")))
+      {:formal/question-forest 1 :profile profile :reference (:reference checked)
+       :mode mode :vacuity (if (= ["keyword" "allow"] (when-let [id (get f "vacuity")] (nth rows id))) :allow :report)
+       :assertions (mapv named specs) :claim (when (= :prove mode) (get translated claim-id))
+       :counterexample (when counter (named counter))
+       :observations (mapv (fn [[label id]] {:label label :descriptor-source id
+                                             :terms (mapv #(get translated %) (collect id))}) ordered-observations)
+       :forest prepared :checking {:observation-descriptors (count @descriptions)
+                                   :materialized-labels-and-keys (count key-ids)
+                                   :syntax-comparisons (count @comparisons)}
+       :observation-policy :original-graph-data-and-sdk-term-inventory
+       :compiler-proof-authority false}))))))

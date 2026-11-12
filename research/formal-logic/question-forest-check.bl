@@ -1,0 +1,49 @@
+(ns formal.question-forest-check
+ (:require [formal.question-forest :as prepared] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.query :as q] [formal.term :as t]
+           [formal.value :as v] [formal.identity :as identity] [formal.advanced-cases :as advanced]
+           [formal.feature-cases :as features] [formal.native-cases :as native]
+           [oracle] [bl.json :as json]))
+
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :question-inventory-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  #(vec (mapcat
+    (fn [[family cases]]
+     (mapv (fn [item]
+             (println (str "question forest " (:id item)))
+             (let [problem (q/validate! (q/from-case item))
+                   data (graph/encode problem)
+                   context {:formal/question-graph 1 :profile qg/profile :graph data}
+                   actual (prepared/prepare context)
+                   roots (vec (concat (q/roots problem) [(get-in problem [:counterexample :term])]))
+                   old (t/export (t/registry) roots) ids (get-in old [:registry :ids])
+                   assertions (mapv (fn [a] {:label (:label a) :term (get ids (:term a))}) (:assertions problem))
+                   counter {:label (get-in problem [:counterexample :label])
+                            :term (get ids (get-in problem [:counterexample :term]))}
+                   observers (mapv (fn [[label value]] {:label label :terms (mapv #(get ids %) (v/terms value))})
+                               (sort-by (fn [[label _]] (identity/bytes label)) (:observe problem)))]
+              (assert (erlang/=:= (:nodes old) (get-in actual [:forest :nodes])))
+              (assert (= (:ids old) (get-in actual [:forest :roots])))
+              (assert (= assertions (:assertions actual)))
+              (assert (= (get ids (:claim problem)) (:claim actual)))
+              (assert (= counter (:counterexample actual)))
+              (assert (= observers (mapv #(select-keys % [:label :terms]) (:observations actual))))
+              (assert (= (graph/reference data) (:reference actual)))
+              (assert (= (:mode problem) (:mode actual)))
+              (assert (= (if (= :allow (:vacuity problem)) :allow :report) (:vacuity actual)))
+              (assert (= false (:compiler-proof-authority actual)))
+              {:id (:id item) :family family :reference (:reference actual)
+               :exact-definitions true :ordered-roots true :assertions true :claim-and-counterexample true
+               :observation-inventory true :mode-and-vacuity true
+               :native-definitions (count (get-in actual [:forest :nodes]))
+               :checking (:checking actual) :compiler-proof-authority false})) cases))
+    [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
+(assert (= 187 (count rows)))
+(assert (= 0 @calls))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.question-forest-corpus.v1" :rows rows :managed-query-calls @calls
+               :native-execution :not-invoked :compiler-proof-authority false
+               :scope "Project question term-inventory preparation, compared to the selected SDK exporter and observation term collector. Not structured observation reconstruction, managed owner admission or a complete question-interpretation theorem."} {:pretty 2}))
+(println {:questions (count rows) :status :exact-question-inventory-agreement :managed-query-calls @calls})
