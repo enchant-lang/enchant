@@ -387,3 +387,25 @@ enable a term-native BL formal interface or make an unwired trait trustworthy.
    legacy script API explicit for existing callers until their migrations are
    complete. This document does not perform or authorize automatic promotion
    of OxiZ into the compiler's proof authority.
+
+## Binary64 Source and the legacy Real boundary — checkpoint 41
+
+[The Float interface](FLOAT-SOURCE.md) promotes `formal.floating` and the
+independent `formal.ieee-arithmetic` evaluator into the SDK. `formal.beam-float`
+and the reviewed Source profile use finite binary64 bits, RNE operations and
+explicit failure outcomes. Float `one-of` inputs preserve both signed zeros;
+returned-value observations preserve type/bits separately from numeric equality.
+Known Float/declared Real legacy process verification, repair and discovery
+refuse Source claims. Explicit `:semantics :ideal-real-model` keeps the old
+mathematical result nested without top-level Source proof authority.
+
+The exact SDK passes 19,415 assertion executions, compiler/source gates,
+SDK-only paired examples and eight fresh-process record checks. All 187 prior
+native verdicts/statuses remain unchanged. A separate full-public-data audit
+finds identical complete questions; one exceeds the unchanged standard identity
+walk budget. This is a comparison-only hash, not a new proof packet format.
+
+This guard does not complete legacy Source typing or eliminate implicit Int
+fallbacks elsewhere. [Explicit points and runtime observation](NEXT-POINTS.md)
+are the next interface design; native models, independent data evidence and
+actual Source calls must retain separate provenance.

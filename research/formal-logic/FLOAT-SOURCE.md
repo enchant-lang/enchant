@@ -1,4 +1,4 @@
-# Binary64 Source integration — checkpoint 41 candidate
+# Binary64 Source integration — checkpoint 41
 
 The SDK40 baseline in `evidence/float-source/baseline.json` records an actual
 compiled counterexample at `1.0` to cancellation by `0.1`, while the legacy
@@ -47,7 +47,38 @@ unsupported before native import, preserving the owner's registry, assertions,
 generation and revision so subsequent supported queries can still run. No
 OxiZ capability is inferred from that Z3 restriction.
 
-Qualification is pending for this runtime batch. The earlier arithmetic
-prototype's 8,191 passing assertions are historical evidence, not a qualification
-of this new SDK. Original source bytes, tests and failed native width-two
-comparison remain in Git and `evidence/float-source`.
+Checkpoint 41 qualifies one immutable SDK with 19,415 assertion executions:
+1,310 focused, 8,191 arithmetic, 167 migration, 299 preparation, 1,307 preceding
+focused and 8,141 regression assertions. The 141-file compiler artifact floor,
+frozen-source preflight and negative controls pass. Four Source subjects run
+on both engines from an unrelated directory without research imports; a fresh
+process reopens eight complete records, reconstructs their questions and
+observes the original functions with zero managed query calls in the named
+record-rechecking window. Recompiling Source may execute phase code.
+
+The 26 selected binary64 patterns are checked against actual BL arithmetic.
+A separate FP(2,2) finite grid covers all pairs for add/sub/mul and all pairs
+with a nonzero divisor for division, across five rounding modes. Another 160
+pinned Z3 FP(2,3) reference questions and separate special-value checks cover
+rounding and nonfinite results. This is not exhaustive binary64 testing.
+
+All 187 preceding native statuses/verdicts remain unchanged. A separately
+profiled bounded Merkle audit compares every public field of their complete
+questions on SDK40 and SDK41. One closure question exceeds the unchanged
+standard identity walk budget (110,551 versus 100,000); no runtime budget was
+relaxed and this comparison hash grants no packet/proof identity.
+
+Z3 reproduces the cancellation, negative-zero identity and zero-division
+counterexamples in actual Source; the rounded-sum positive answer remains an
+unchecked solver claim. OxiZ returns unknown for cancellation and the positive
+sum, and candidate for the other two, with original replay incomplete.
+
+Observation replay keeps semantic NaN classification/equality available
+without manufacturing IEEE payloads. The policy is shared by native fallback,
+handler reconstruction, fresh answer checking, and nested FP sequences/arrays.
+Internal mathematical evaluation still retains a semantic NaN representative.
+
+Original bytes, rejected candidates and complete receipts remain in
+`evidence/float-source`. The code qualification is `qualification.json`; the
+full-content audit is `complete-question-identity-qualification.json`.
+`NEXT-POINTS.md` records the next interface design and remaining Source cutover.

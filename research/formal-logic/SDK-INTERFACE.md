@@ -39,6 +39,14 @@ access retain different records. [The size consumer](COMPILER-LINEARITY.md)
 uses the same interface alongside fresh positive certificates and constructed
 counterexamples; its unknown result has no false truth projection.
 
+The [binary64 interface](FLOAT-SOURCE.md) adds `formal.beam-float`, promoted
+`formal.floating`, independent IEEE arithmetic replay and a versioned scalar
+Float Source profile. Homogeneous Float `veritas/one-of` domains preserve
+runtime kind and zero bits. Known Float legacy process checks require the new
+typed path or an explicit ideal-model request; ideal-model verdicts are not
+Source proofs. Native FP(e,2) requests are refused safely by pinned Z3 before
+import, while the portable theory and independent evaluator retain that format.
+
 ## Ask through a standard consumer
 
 ```beam-lisp

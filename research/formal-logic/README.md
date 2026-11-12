@@ -67,6 +67,16 @@ compiler/source gates. All 187 preceding paired questions remain unchanged;
 three new migration subjects use the same questions on both backends. This
 grants no mailbox delivery or compiler authority.
 
+[Binary64 Source](FLOAT-SOURCE.md) now preserves finite runtime Float bits,
+RNE arithmetic, numeric/strict zero equality and nonfinite-result failure in
+typed terms. Checkpoint 41 passes 19,415 assertion executions and the compiler
+and source gates. Four paired Source subjects and eight reopened records keep
+backend answers, independent replay and actual calls separate. Known Float
+legacy checks refuse the former exact-Real shortcut. The full public contents
+of all 187 preceding questions match across SDKs; a standard identity capacity
+refusal remains explicitly recorded. [Next point interfaces](NEXT-POINTS.md)
+remain design work.
+
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes
@@ -396,7 +406,7 @@ receipt; the atlas carries the detailed contracts and open questions.
 | Division profiles | Partial toward-zero quot/rem, divisor-sign BL mod, separate Euclidean remainder |
 | Exact rational / Real | Native rational terms; algebraic model values remain opaque |
 | Decimal and quantization | Fixed-scale exact coefficients; numeric versus representation equality; contexts/rounding remain |
-| Finite floats / IEEE | Native FP constructors; finite-result outcome profile; full BEAM arithmetic lowering remains |
+| Finite floats / IEEE | Reviewed finite binary64 scalar ANF arithmetic, bit-preserving observations and independent IEEE replay; broader casts, functions and preservation proofs remain |
 | Fixed-width BV | Native wrapping arithmetic, comparisons, shifts, extract/concat/extend |
 | Bytes / bitstrings | Bounded byte vectors; explicit BV layouts, codecs and overflow profiles |
 | Codepoint text / regex | Native codepoint strings; regex constructor vocabulary remains |
