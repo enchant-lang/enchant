@@ -2,8 +2,11 @@
 
 The first foundation is now qualified in [GRAPH-TABLE-MODEL.md](GRAPH-TABLE-MODEL.md):
 a total prefix-table model, fold/quantity laws, certified local counters and
-three exact owned-wire node/depth instances. This document retains the broader
-plan. Selective interpretation, pruning, canonical encoding/hash theorems,
+three exact owned-wire node/depth instances. The separate
+[selection model](GRAPH-SELECTION-MODEL.md) adds seven general lemmas, five
+fixture theorems and four refusal controls: a closed, correctly admitted
+selection agrees with the original value. This document retains the broader
+plan. The actual dependency-selection algorithm, pruning, canonical encoding/hash theorems,
 scalar byte-cost instantiation, typed binders and a universal implementation
 connection remain open; the completed results do not imply those connections.
 
