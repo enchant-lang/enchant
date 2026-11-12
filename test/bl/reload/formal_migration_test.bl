@@ -1,0 +1,191 @@
+(ns reload.formal-migration-test
+ (:require [formal.migration :as migration] [formal.term :as t] [formal.value :as v]
+           [formal.identity :as identity] [formal.query :as q] [formal.answer :as answer]
+           [formal.numeric :as numeric] [formal.evaluate :as replay] [reload.migrate :as reload]
+           [oracle]))
+
+(defn input [environment] (get environment "message"))
+(defn positive [environment] (t/ge (input environment) (t/int 0)))
+(defn admitted [_ output] (t/ge (v/term output) (t/int 0)))
+(defn spec [name delta]
+ {:name name :parameters [["message" t/Int]] :message "message"
+  :transform (fn [environment] (t/add (input environment) (t/int delta)))
+  :admit-before positive :admit-after admitted})
+(def good (migration/define (spec "good" 10)))
+(def bad (migration/define (spec "bad" -1000)))
+
+(deftest closed-definitions-rebuild-complete-questions
+ (let [prepared (migration/prepare good) question (:problem prepared)]
+  (is (= :ready (:status prepared)))
+  (is (= :preserves-admission (:relation question)))
+  (is (= :declared-message-relation (get-in question [:scope :claim-scope])))
+  (is (= (t/not (:claim question)) (get-in question [:counterexample :term])))
+  (is (= :sat (get-in prepared [:admission :mode])))
+  (is (= :sat (get-in prepared [:counterexample :mode])))
+  (is (= (conj (:assertions question) (:counterexample question)) (get-in prepared [:counterexample :assertions])))
+  (is (= :authored-terms-no-runtime-function-claim (:source-connection prepared)))
+  (is (identity/valid? good))
+  (is (not (some fn? (vals good))))))
+
+(deftest checked-condition-and-admitted-input-are-separate-evidence
+ (let [conditional (migration/verify good)
+       result (migration/verify {:admission {"message" 0}} good)
+       wrong (migration/verify {:admission {"message" -1}} good)]
+  (is (= :checked (:status conditional)))
+  (is (nil? (:verified conditional)))
+  (is (= :not-established (:assumption-consistency conditional)))
+  (is (= :checked (:status result)))
+  (is (= true (:verified result)))
+  (is (= :checked-data-connection (:assumption-consistency result)))
+  (is (= :checked (get-in result [:proof :checking :status])))
+  (is (= :checked (get-in result [:evidence :certificate :status])))
+  (is (= :migration (:subject-kind result)))
+  (is (= false (:delivery-authority result)))
+  (is (= false (:compiler-proof-authority result)))
+  (is (= false (get-in result [:evidence :authority :compiler])))
+  (is (nil? (:verified wrong)))
+  (is (= :rejected (get-in wrong [:requested-points :admission :status])))))
+
+(deftest explicit-counterexamples-are-independent-portable-evidence
+ (let [result (migration/verify {:counterexample {"message" 1}} bad)
+       point (:counterexample result) object (:object point)]
+  (is (= :refuted (:status result)))
+  (is (= false (:verified result)))
+  (is (= :checked-data-connection (get-in point [:checking :status])))
+  (is (= :checked-data-connection (:status (migration/check-counterexample bad object))))
+  (is (= :rejected (:status (migration/check-counterexample good object))))
+  (is (= :rejected (:status (migration/check-admission bad object))))
+  (is (= :rejected (:status (migration/check-counterexample bad (assoc object :kind :admission)))))))
+
+(deftest stale-foreign-extra-and-resealed-model-changes-do-not-reuse-proofs
+ (let [result (migration/verify {:admission {"message" 2}} good) object (get-in result [:proof :object])]
+  (is (= :checked (:status (migration/check-proof good object))))
+  (is (= :rejected (:status (migration/check-proof bad object))))
+  (is (= :rejected (:status (migration/check-proof good (assoc object :definition "foreign")))))
+  (is (= :rejected (:status (migration/check-proof good (assoc object :extra true)))))
+  (doseq [changed [(assoc good :name "foreign") (assoc good :transform (v/lift (t/int -1)))
+                   (assoc good :cached-question (q/prove (t/bool true)))]]
+   (is (= :unsupported (:status (migration/prepare changed)))))
+  (let [changed (identity/seal (assoc good :transform (v/lift (t/int -1))))]
+   (is (= :ready (:status (migration/prepare changed))))
+   (is (= :rejected (:status (migration/check-proof changed object)))))
+  (is (= :rejected (:status (migration/check-proof good (assoc object :certificate nil)))))))
+
+(deftest partial-output-and-partial-new-admission-are-claims
+ (let [partial (migration/define (assoc (spec "partial" 0) :transform
+                                  (fn [environment] (v/undefined (input environment) :test))))
+       partial-admission (migration/define (assoc (spec "partial-law" 0) :admit-after
+                                            (fn [_ _] (v/undefined (t/bool true) :test))))]
+  (doseq [definition [partial partial-admission]]
+   (let [prepared (migration/prepare definition)
+         point (migration/point definition :counterexample {"message" 0})
+         result (migration/verify {:counterexample {"message" 0}} definition)]
+    (is (= :ready (:status point)))
+    (is (= :refuted (:status result)))
+    (is (= false (:verified result)))
+    (is (= :ready (:status (migration/point definition :admission {"message" 0}))))
+    (is (= false (replay/value (:claim (:problem prepared)) (:assignments point))))))))
+
+(deftest vacuity-and-insufficient-search-never-become-verified-or-refuted
+ (let [vacuous (migration/define (assoc (spec "vacuous" 0) :requires (t/bool false)))
+       result (migration/verify vacuous)
+       unknown (migration/verify {:search {:nodes 1} :admission {"message" 1}} good)]
+  (is (= :vacuous (:status result)))
+  (is (nil? (:verified result)))
+  (is (= :inconsistent-checked (:assumption-consistency result)))
+  (is (= :unknown (:status unknown)))
+  (is (nil? (:verified unknown)))
+  (is (= :checked-data-connection (:assumption-consistency unknown)))))
+
+(deftest quoted-source-is-reconstructed-and-executed-on-concrete-inputs
+ (let [definition (migration/define (-> (spec "source" 1) (dissoc :transform)
+                                    (assoc :source-function '(fn [x] (+ x 1)))))
+       ready (migration/prepare definition)
+       run (migration/replay-source definition {"message" 4})
+       forged (identity/seal (assoc definition :transform (v/lift (t/int -10))))]
+  (is (= :ready (:status ready)))
+  (is (= :reviewed-compiler-anf-to-terms (:source-connection ready)))
+  (is (= :valid (:status run)))
+  (is (= 5 (get-in run [:actual :value])))
+  (is (= false (get-in run [:actual :module-loaded])))
+  (is (= false (:delivery-authority run)))
+  (is (= :unsupported (:status (migration/prepare forged))))
+  (is (= :unsupported (:status (migration/replay-source good {"message" 1})))))))
+
+(deftest actual-source-division-raises-at-zero-without-hiding-the-input
+ (let [definition (migration/define (-> (spec "division" 0) (dissoc :transform)
+                                    (assoc :source-function '(fn [x] (quot 10 x)))))
+       point (migration/point definition :counterexample {"message" 0})
+       run (migration/replay-source definition {"message" 0})]
+  (is (= :ready (:status point)))
+  (is (= :valid (:status run)))
+  (is (= :raised (get-in run [:actual :status])))
+  (is (= false (get-in run [:expected :defined])))
+  (is (= false (get-in run [:actual :module-loaded])))))
+
+(deftest equivalence-requires-normal-output-and-preserves-bool-false
+ (let [identity (migration/define {:name "bool" :parameters [["message" t/Bool]] :message "message"
+                                  :relation :equivalent :transform input})
+       result (migration/verify {:admission {"message" false}} identity)
+       changed (migration/define {:name "bool-changed" :parameters [["message" t/Bool]] :message "message"
+                                  :relation :equivalent :transform (fn [env] (t/not (input env)))})]
+  (is (= true (:verified result)))
+  (is (= false (get-in result [:admission :values "message"])))
+  (is (= :refuted (:status (migration/verify {:counterexample {"message" false}} changed)))))
+  (is (thrown? (migration/define (assoc (spec "no-drop" 1) :relation :equivalent))))))
+
+(deftest malformed-and-undeclared-models-are-refused
+ (doseq [invalid [(dissoc (spec "missing" 0) :admit-after)
+                  (assoc (spec "wrong-sort" 0) :admit-after (fn [_ _] (t/int 2)))
+                  (assoc (spec "foreign" 0) :transform (t/variable "undeclared" t/Int))
+                  (assoc (spec "mixed" 0) :source-function '(fn [x] x))
+                  (assoc (spec "float" 0) :parameters [["message" t/Real]])
+                  (assoc (spec "duplicate" 0) :parameters [["message" t/Int] ["message" t/Int]])
+                  (assoc (spec "bounded" 0) :transform (v/make (t/int 1) {:within (t/bool false)}))]]
+  (is (thrown? (migration/define invalid))))
+ (doseq [values [{"message" false} {} {"message" 1 "extra" 2}]]
+  (is (= :rejected (:status (migration/point good :admission values)))))
+ (is (= :rejected (:status (migration/point good :unknown {"message" 1})))))
+
+(deftest native-only-claims-remain-uncertified-and-handlers-see-complete-questions
+ (let [seen (atom [])
+       result (oracle/with-oracle {:query (fn [question _]
+                   (swap! seen conj question)
+                   (answer/bind question {:phase :query :solver-status (if (= :sat (:mode question)) :unknown :unsat)}))}
+                #(migration/verify {:backend :oxiz :search {:nodes 1}} good))
+       ready (migration/prepare good)]
+  (is (= [(:admission ready) (:problem ready)] @seen))
+  (is (= :uncertified (:status result)))
+  (is (nil? (:verified result)))
+  (is (not= :checked (get-in result [:evidence :certificate :status])))
+  (is (= [:handler :handler] (mapv #(get-in % [:oracle-effect :kind]) (vals (:backend result)))))))
+
+(deftest both-native-backends-answer-the-same-model-and-replay-bad-migrations
+ (doseq [backend [:z3 :oxiz]]
+  (let [positive (migration/verify {:backend backend :admission {"message" 0}} good)
+        negative (migration/verify {:backend backend} bad)
+        limited (migration/verify {:backend backend :search {:nodes 1} :admission {"message" 0}} good)
+        question (:problem (migration/prepare good))]
+   (is (= :checked (:status positive)))
+   (is (= true (:verified positive)))
+   (is (= :proved (get-in positive [:backend :property :verdict])))
+   (is (= question (get-in positive [:backend :property :question])))
+   (is (= :refuted (:status negative)))
+   (is (= false (:verified negative)))
+   (is (= :checked-data-connection (get-in negative [:counterexample :checking :status])))
+   (is (= :uncertified (:status limited)))
+   (is (nil? (:verified limited)))
+   (is (= false (:compiler-proof-authority limited))))))
+
+(deftest reload-preview-uses-the-closed-model-and-never-binds-a-supplied-fn
+ (let [called (atom 0) spec (reload/migration {:strategy :reroute :formal-model good
+                       :fn (fn [_] (swap! called inc) -1000)})
+       result (reload/verify-migration {:admission {"message" 1}} spec)
+       direct (reload/verify-migration {:admission {"message" 1}} good)
+       missing (reload/verify-migration {} (dissoc spec :formal-model))]
+  (is (= true (:verified result)))
+  (is (= (:evidence result) (:evidence direct)))
+  (is (= 0 @called))
+  (is (= :unsupported (:status missing)))
+  (is (nil? (:verified missing)))
+  (is (= false (:delivery-authority result)))))

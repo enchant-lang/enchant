@@ -1,0 +1,233 @@
+(ns formal.migration
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.identity :as identity] [formal.source :as source]
+           [formal.source-runtime :as runtime] [formal.evaluate :as replay]
+           [formal.proof :as proof] [formal.certificate :as certificate]
+           [formal.witness :as witness] [formal.logic :as logic]
+           [formal.connection :as connection] [formal.result :as result]))
+
+(def profile :bl/message-migration-v1)
+(def ^:private fields
+ #{:formal/migration :name :parameters :message :transform :requires
+   :admit-before :admit-after :source :relation :profile :identity-profile :identity})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.migration: " why) {}))))
+(defn- inputs [name parameters]
+ (require! (and (string? name) (not (blank? name)) (vector? parameters)
+                (<= 1 (count parameters) 8)
+                (every? #(and (vector? %) (= 2 (count %)) (string? (first %))
+                             (not (blank? (first %))) (contains? #{[:int] [:bool]} (second %))) parameters)
+                (= (count parameters) (count (set (map first parameters))))) "ordered distinct Bool/Int parameters required")
+ (into {} (mapv (fn [[role sort]] [role (t/variable (str "migration." name "." role) sort)]) parameters)))
+(defn- value! [value allowed boolean?]
+ (let [value (v/lift value) roots (vec (concat (v/terms value) (v/constraints value)))]
+  (require! (and (= :scalar (get-in value [:domain :kind]))
+                 (contains? #{[:int] [:bool]} (t/sort-of (v/term value)))
+                 (or (not boolean?) (= t/Bool (t/sort-of (v/term value))))
+                 (= {:mode :exact} (v/scope value)) (= (t/bool true) (v/within value)))
+            "initial migration values require exact scalar Bool/Int domains")
+  (t/validate! roots)
+  (require! (every? #(contains? #{[:int] [:bool]} (:sort %)) (t/walk roots)) "only Bool/Int term sorts are supported")
+  (require! (every? #(contains? (set (vals allowed)) %) (t/variables roots)) "undeclared migration input identity")
+  value))
+(defn- holds [value] (t/all [(v/defined value) (v/term value)]))
+(defn- build [builder args] (if (fn? builder) (apply builder args) builder))
+
+(defn define
+ "Build a closed migration model. :transform or :source-function supplies the
+  message computation. :admit-before receives inputs; :admit-after receives
+  inputs and the result. Builders run once and are absent from the definition.
+  This checks a declared relation, never an arbitrary runtime :fn or delivery."
+ [spec]
+ (let [name (:name spec) parameters (:parameters spec) environment (inputs name parameters)
+       message (:message spec) relation (get spec :relation :preserves-admission)
+       _ (require! (contains? environment message) "message must name one declared parameter")
+       _ (require! (contains? #{:preserves-admission :equivalent} relation) "unknown migration relation")
+       _ (require! (= 1 (count (filter #(contains? spec %) [:transform :source-function]))) "one transform or source function required")
+       selected (:source-function spec)
+       translated (when (contains? spec :source-function)
+                    (source/prepare-function selected (mapv #(get environment (first %)) parameters)))
+       _ (when translated (require! (= :translated (:status translated)) (:reason translated)))
+       transform (value! (if translated (:value translated) (build (:transform spec) [environment])) environment false)
+       requires (value! (build (get spec :requires (t/bool true)) [environment]) environment true)
+       _ (when (= :preserves-admission relation)
+           (require! (and (contains? spec :admit-before) (contains? spec :admit-after)) "both admission predicates required"))
+       _ (when (= :equivalent relation)
+           (require! (and (not (contains? spec :admit-before)) (not (contains? spec :admit-after)))
+                     "equivalence does not silently accept admission predicates"))
+       before (value! (build (get spec :admit-before (t/bool true)) [environment]) environment true)
+       after (value! (build (get spec :admit-after (t/bool true)) [environment transform]) environment true)
+       _ (when (= :equivalent relation) (v/equivalent (get environment message) transform))]
+  (identity/seal
+   {:formal/migration 1 :name name :parameters parameters :message message
+    :transform transform :requires requires :admit-before before :admit-after after
+    :source (when translated {:function selected}) :relation relation :profile profile})))
+
+(defn prepare
+ "Reconstruct every question from the closed definition. Output raisedness is
+  a claim, never an input-success premise. Source functions are lowered afresh."
+ [definition]
+ (try
+  (require! (and (map? definition) (= fields (set (keys definition)))
+                 (= 1 (:formal/migration definition)) (= profile (:profile definition))
+                 (identity/valid? definition)) "changed or noncanonical migration identity")
+  (let [environment (inputs (:name definition) (:parameters definition))
+        message (get environment (:message definition)) relation (:relation definition)
+        _ (require! (and message (contains? #{:preserves-admission :equivalent} relation)) "message or relation mismatch")
+        transform (value! (:transform definition) environment false)
+        requires (value! (:requires definition) environment true)
+        before (value! (:admit-before definition) environment true)
+        after (value! (:admit-after definition) environment true)
+        stored (:source definition)
+        _ (when stored
+            (require! (and (map? stored) (= #{:function} (set (keys stored)))) "source descriptor shape")
+            (let [fresh (source/prepare-function (:function stored) (mapv #(get environment (first %)) (:parameters definition)))]
+             (require! (and (= :translated (:status fresh)) (= transform (:value fresh))) "transform differs from freshly lowered Source")))
+        _ (when (= :equivalent relation)
+            (require! (= [(v/lift (t/bool true)) (v/lift (t/bool true))] [before after]) "equivalence has no admission predicates"))
+        ;; Retain declared constraints and bounds without assuming output success.
+        context (v/scalar (t/bool true) [transform requires before after] {:defined (t/bool true)})
+        common {:id (:name definition) :inputs (conj (vec (vals environment)) context)
+                :assumptions (cond-> [(q/assertion "requires" (holds requires))]
+                               (= :preserves-admission relation) (conj (q/assertion "old-message-admitted" (holds before))))
+                :observe (merge (into {} (map (fn [[role term]] [(str "input/" role) term]) environment))
+                           {"transformed" transform "new-message-admitted" after})
+                :profile profile :relation relation :vacuity :report
+                :scope {:mode :exact :migration (:identity definition) :claim-scope :declared-message-relation}
+                :origin {:migration (:identity definition) :source stored :basis :reviewed-model-to-terms}}
+        claim (if (= :equivalent relation) (v/equivalent message transform)
+                (t/all [(v/defined transform) (holds after)]))
+        problem (q/validate! (q/prove claim common))
+        admission (q/validate! (q/sat (assoc common :id [(:name definition) :admission])))
+        counterexample (q/constrain (assoc admission :id [(:name definition) :counterexample])
+                         "goal/counterexample" (get-in problem [:counterexample :term]) (:origin problem))
+        inconsistency (q/prove (t/bool false) {:assumptions (:assertions problem) :profile profile :scope (:scope problem)})]
+   {:status :ready :definition (:identity definition) :inputs environment :problem problem
+    :admission admission :counterexample counterexample :inconsistency inconsistency
+    :source-connection (if stored :reviewed-compiler-anf-to-terms :authored-terms-no-runtime-function-claim)
+    :model-interpretation (connection/reviewed {:kind :closed-message-migration :identity (:identity definition)}
+                           relation [["property" problem] ["admission" admission] ["counterexample" counterexample]])})
+  (catch error {:status :unsupported :reason (ex-message error) :compiler-proof-authority false :delivery-authority false})))
+
+(defn check-proof
+ "Fresh certificate checking against a reconstructed migration. Neither proof
+  search nor native execution participates. Admission is a separate fact."
+ [definition object]
+ (let [prepared (prepare definition)]
+  (if-not (= :ready (:status prepared)) (assoc prepared :status :rejected)
+   (if-not (and (map? object) (= #{:formal/migration-proof :definition :certificate} (set (keys object)))
+                 (= 1 (:formal/migration-proof object)) (= (:identity definition) (:definition object)))
+    {:status :rejected :reason :migration-proof-subject-mismatch}
+    (assoc (certificate/check (:problem prepared) (:certificate object))
+      :definition (:identity definition) :scope :conditional-declared-message-relation
+      :compiler-proof-authority false :delivery-authority false)))))
+
+(defn- packet-for [question assignments]
+ (let [names (mapv :data (t/variables (mapv :term (:assertions question))))]
+  (witness/prepare question (select-keys assignments names))))
+(defn- check-point [definition object kind]
+ (let [prepared (prepare definition)]
+  (if-not (= :ready (:status prepared)) (assoc prepared :status :rejected)
+   (if-not (and (map? object) (= #{:formal/migration-point :definition :kind :packet} (set (keys object)))
+                 (= 1 (:formal/migration-point object)) (= kind (:kind object))
+                 (= (:identity definition) (:definition object)))
+    {:status :rejected :reason :migration-point-subject-mismatch}
+    (assoc (witness/check-data (get prepared kind) (:packet object)) :definition (:identity definition)
+      :scope (if (= :admission kind) :admitted-model-input :declared-relation-counterexample)
+      :compiler-proof-authority false :delivery-authority false)))))
+(defn check-admission [definition object] (check-point definition object :admission))
+(defn check-counterexample [definition object] (check-point definition object :counterexample))
+(defn point
+ "Construct admission or refutation evidence from an explicit role/value map.
+  Every declared input is supplied; no missing native coordinate is invented."
+ [definition kind values]
+ (let [prepared (prepare definition)]
+  (if-not (= :ready (:status prepared)) prepared
+   (try
+    (require! (contains? #{:admission :counterexample} kind) "unknown point kind")
+    (require! (and (map? values) (= (set (keys values)) (set (keys (:inputs prepared))))) "exact input role map required")
+    (let [assignments (into {} (map (fn [[role term]]
+                                     (let [value (get values role)]
+                                      (require! (if (= t/Int (t/sort-of term)) (int? value) (boolean? value)) "input sort mismatch")
+                                      [(:data term) value])) (:inputs prepared)))
+          made (packet-for (get prepared kind) assignments)]
+     (require! (= :ready (:status made)) (:reason made))
+     (let [object {:formal/migration-point 1 :definition (:identity definition) :kind kind :packet (:packet made)}]
+      {:status :ready :object object :checking (check-point definition object kind) :values values :assignments assignments}))
+    (catch error {:status :rejected :reason (ex-message error)})))))
+
+(defn replay-source
+ "Execute the stored Source function on explicitly supplied concrete inputs.
+  Compare its outcome with term evaluation. This is one observed input, not a
+  universal compiler or delivery proof. Publication errors remain errors."
+ [definition values]
+ (let [prepared (prepare definition)]
+  (if-not (= :ready (:status prepared)) prepared
+   (if-not (:source definition) {:status :unsupported :reason :authored-transform-has-no-source-function}
+    (let [bound (point definition :admission values)]
+     (if-not (= :ready (:status bound)) bound
+      (let [fresh (source/prepare-function (get-in definition [:source :function])
+                    (mapv #(get (:inputs prepared) (first %)) (:parameters definition)))
+            actual (runtime/run (:anf fresh) (mapv #(get values (first %)) (:parameters definition)))
+            defined (replay/value (v/defined (:transform definition)) (:assignments bound))
+            expected (when (= true defined) (replay/value (v/term (:transform definition)) (:assignments bound)))
+            status (cond (= :error (:status actual)) :error
+                         (or (replay/unavailable? defined) (replay/unavailable? expected)) :incomplete
+                         (= false defined) (if (= :raised (:status actual)) :valid :invalid)
+                         (= :returned (:status actual)) (if (= expected (:value actual)) :valid :invalid)
+                         :else :invalid)]
+       {:status status :actual actual :expected {:defined defined :value expected}
+        :admission (:checking bound) :scope :one-concrete-source-invocation
+        :compiler-proof-authority false :delivery-authority false})))))))
+
+(defn- native-point [definition prepared kind native]
+ (when (and (map? (:assignments native)) (= :sat (:solver-status native)))
+  (let [made (packet-for (get prepared kind) (:assignments native))]
+   (when (= :ready (:status made))
+    (let [object {:formal/migration-point 1 :definition (:identity definition) :kind kind :packet (:packet made)}]
+     {:object object :checking (check-point definition object kind)})))))
+
+(defn verify
+ "A fresh portable certificate plus admitted-input evidence permits verified
+  true. A checked counterexample gives false. Unknown, vacuous and native-only
+  claims leave it nil. No result authorizes mailbox delivery."
+ ([definition] (verify {} definition))
+ ([options definition]
+  (let [prepared (prepare definition)]
+   (if-not (= :ready (:status prepared)) prepared
+    (let [search (get options :search {}) produced (proof/produce (:problem prepared) search)
+          object (when (= :checked (:status produced))
+                   {:formal/migration-proof 1 :definition (:identity definition) :certificate (:certificate produced)})
+          checking (when object (check-proof definition object))
+          inconsistent (proof/produce (:inconsistency prepared) search)
+          inconsistency (when (= :checked (:status inconsistent))
+                          (certificate/check (:inconsistency prepared) (:certificate inconsistent)))
+          explicit (when (contains? options :admission) (point definition :admission (:admission options)))
+          counter (when (contains? options :counterexample) (point definition :counterexample (:counterexample options)))
+          native (when (:backend options)
+                   (logic/with-session options (fn [session]
+                    {:feasibility (logic/solve-in session (:admission prepared))
+                     :property (logic/solve-in session (:problem prepared))})))
+          admitted (or (when (= :checked-data-connection (get-in explicit [:checking :status])) explicit)
+                       (native-point definition prepared :admission (:feasibility native)))
+          refuted (or (when (= :checked-data-connection (get-in counter [:checking :status])) counter)
+                      (native-point definition prepared :counterexample (:property native)))
+          checked? (= :checked (:status checking)) impossible? (= :checked (:status inconsistency))
+          status (cond (or (and checked? refuted) (and impossible? admitted)) :disagreement
+                       impossible? :vacuous
+                       refuted :refuted
+                       checked? :checked
+                       (or (= :vacuous (get-in native [:property :verdict]))
+                           (= :unsat (get-in native [:feasibility :verdict]))) :vacuous
+                       (= :proved (get-in native [:property :verdict])) :uncertified
+                       :else :unknown)
+          raw {:status status :verified (cond (and (= :checked status) admitted) true (= :refuted status) false :else nil)
+               :definition (:identity definition) :profile profile :relation (:relation definition)
+               :scope :conditional-declared-message-relation :proof {:production produced :object object :checking checking}
+               :inconsistency-proof {:production inconsistent :checking inconsistency}
+               :admission admitted :counterexample refuted :requested-points {:admission explicit :counterexample counter}
+               :assumptions (:assertions (:problem prepared)) :backend native
+               :assumption-consistency (cond admitted :checked-data-connection impossible? :inconsistent-checked :else :not-established)
+               :source-connection (:source-connection prepared) :model-interpretation (:model-interpretation prepared)
+               :compiler-proof-authority false :delivery-authority false}]
+     (result/attach definition raw (if (:backend options) :native :portable)))))))
