@@ -1,7 +1,7 @@
 (ns formal.source
  (:require [compiler :as compiler] [system.ir :as ir]
            [formal.term :as t] [formal.value :as v] [formal.data :as d]
-           [formal.numeric :as n] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs] [formal.anf-function :as anf-function] [formal.runtime-values :as runtime-values]))
+           [formal.numeric :as n] [formal.beam-float :as float] [formal.query :as q] [formal.intrinsics :as intrinsics] [formal.anf-inputs :as anf-inputs] [formal.anf-function :as anf-function] [formal.runtime-values :as runtime-values]))
 
 ;; Consume the compiler's resolved ANF, never a second surface-language walker.
 ;; This initial source environment allows the declared variables and a reviewed
@@ -28,15 +28,36 @@
   (refuse "initial runtime arithmetic profile requires Int operands" node))
  (result (operator (v/term a) (v/term b)) [a b]))
 
+(defn- numeric-binary [name a b node]
+ (if (or (float/model? a) (float/model? b))
+  (case name
+   "+" (float/add a b) "-" (float/subtract a b) "*" (float/multiply a b)
+   "<" (float/compare :lt a b) "<=" (float/compare :le a b) "=<" (float/compare :le a b)
+   ">" (float/compare :gt a b) ">=" (float/compare :ge a b))
+  (integer-binary (get {"+" t/add "-" t/sub "*" t/mul "<" t/lt "<=" t/le "=<" t/le ">" t/gt ">=" t/ge} name) a b node)))
+(defn- negate [a node]
+ (if (float/model? a) (float/negate a) (integer-binary t/sub (t/int 0) a node)))
+(defn- float-terms? [term]
+ (or (= float/Sort (t/sort-of term)) (some float-terms? (:args term))))
+(defn- source-profile [values]
+ (if (some float-terms? (mapcat #(concat (v/terms %) (v/constraints %)) values))
+  :bl/scalar-float64-intrinsics-v2 :bl/int-bool-intrinsics-v1))
+
 (defn- intrinsic [name args node]
  (let [a (first args) b (second args) size (count args)]
   (cond
-   (and (= name "neg") (= size 1)) (integer-binary t/sub (t/int 0) a node)
+   (and (= name "neg") (= size 1)) (negate a node)
    (contains? #{"+" "-" "*" "<" "<=" "=<" ">" ">="} name)
     (if (= size 2)
-     (integer-binary (get {"+" t/add "-" t/sub "*" t/mul "<" t/lt "<=" t/le "=<" t/le ">" t/gt ">=" t/ge} name) a b node)
-     (if (and (= name "-") (= size 1)) (integer-binary t/sub (t/int 0) a node) (refuse "arithmetic arity" node)))
-   (and (contains? #{"=" "eqv" "==" "=:="} name) (= size 2)) (runtime-values/equal a b)
+     (numeric-binary name a b node)
+     (if (and (= name "-") (= size 1)) (negate a node) (refuse "arithmetic arity" node)))
+   (and (= name "float-divide") (= size 2)) (float/divide a b)
+   (and (contains? #{"=" "eqv" "==" "=:="} name) (= size 2))
+    (if (or (float/model? a) (float/model? b))
+     (float/equal (if (= name "=:=") :identity :numeric) a b)
+     (do (when (and (= name "=:=") (= :bl/scalar-float64-intrinsics-v2 (source-profile [a b])))
+           (refuse "strict equality of Float-containing composites needs a reviewed representation relation" node))
+         (runtime-values/equal a b)))
    (and (= name "not") (= size 1)) (result (t/not (v/term (truthy a))) [a])
    (and (= name "strict-not") (= size 1))
     (do (when-not (and (= :scalar (get-in (v/lift a) [:domain :kind])) (= t/Bool (t/sort-of (v/term a))))
@@ -46,11 +67,15 @@
    (and (= name "rem") (= size 2)) (n/remainder a b)
    (and (= name "mod") (= size 2)) (n/modulus a b)
    (and (contains? #{"pos?" "neg?" "zero?"} name) (= size 1))
-    (result ((get {"pos?" t/gt "neg?" t/lt "zero?" t/eq} name) (v/term a) (t/int 0)) [a])
+    (if (float/model? a)
+     (if (= name "zero?") (float/equal :numeric a (float/literal 0.0))
+      (float/compare (if (= name "pos?") :gt :lt) a (float/literal 0.0)))
+     (result ((get {"pos?" t/gt "neg?" t/lt "zero?" t/eq} name) (v/term a) (t/int 0)) [a]))
    (and (contains? #{"inc" "dec"} name) (= size 1))
-    (result ((if (= name "inc") t/add t/sub) (v/term a) (t/int 1)) [a])
-   (and (contains? #{"nil?" "some?" "int?" "keyword?" "string?" "boolean?" "vector?" "map?"} name) (= size 1))
-    (let [value (runtime-values/type-test (get {"nil?" :nil "some?" :nil "int?" :int "keyword?" :keyword
+    (if (float/model? a) (numeric-binary (if (= name "inc") "+" "-") a (v/lift (t/int 1)) node)
+     (result ((if (= name "inc") t/add t/sub) (v/term a) (t/int 1)) [a]))
+   (and (contains? #{"nil?" "some?" "int?" "float?" "keyword?" "string?" "boolean?" "vector?" "map?"} name) (= size 1))
+    (let [value (runtime-values/type-test (get {"nil?" :nil "some?" :nil "int?" :int "float?" :float "keyword?" :keyword
                                               "string?" :string "boolean?" :bool "vector?" :vector "map?" :map} name) a)]
      (if (= "some?" name) (result (t/not (v/term value)) [value]) value))
    (and (= "count" name) (= size 1)) (runtime-values/count-value a)
@@ -83,6 +108,7 @@
      (cond (nil? value) (d/nil-of (get opts :nil-sort t/Int))
            (or (= true value) (= false value)) (v/lift (t/bool value))
            (int? value) (v/lift (t/int value))
+           (float? value) (float/literal value)
            (string? value) (v/lift (t/text value))
            (and (keyword? value) (:keyword-universe opts)) (d/key-literal (:keyword-universe opts) value)
            (keyword? value) (runtime-values/keyword-value value)
@@ -142,7 +168,7 @@
          inputs (anf-inputs/prepare "formal.source.intrinsics" bindings)
          anf (compiler/compile form (:environment inputs))
          value (lower anf (:bindings inputs) opts)]
-    {:status :translated :value value :profile :bl/int-bool-intrinsics-v1
+    {:status :translated :value value :profile (source-profile (conj (vec (vals bindings)) value))
      :basis :compiler-anf :intrinsic-profile intrinsics/profile :source source :anf anf :scope (v/scope value)})
    (catch error {:status :unsupported :reason (ex-message error) :source source
                  :basis :compiler-anf :profile :bl/int-bool-intrinsics-v1}))))
@@ -151,7 +177,7 @@
  (let [a (prepare left bindings opts) b (prepare right bindings opts)]
   (if (and (= :translated (:status a)) (= :translated (:status b)))
    {:status :translated :problem (q/equivalent (:value a) (:value b)
-       (merge opts {:profile :bl/int-bool-intrinsics-v1
+       (merge opts {:profile (source-profile (concat (vals bindings) [(:value a) (:value b)]))
                     :origin {:left left :right right :basis :compiler-anf}}))}
    {:status :unsupported :left a :right b})))
 
@@ -174,7 +200,7 @@
          bindings (into {} (map-indexed (fn [i pattern] [(:name pattern) (nth inputs i)]) (:pats clause)))
          value (lower (:body clause) bindings opts)]
     {:status :translated :value value :inputs inputs :source source :anf anf
-     :basis :compiler-anf :profile :bl/int-bool-intrinsics-v1 :intrinsic-profile intrinsics/profile
+     :basis :compiler-anf :profile (source-profile (conj inputs value)) :intrinsic-profile intrinsics/profile
      :scope (v/scope value) :assurance :reviewed-anf-to-terms :compiler-proof-authority false})
    (catch error {:status :unsupported :source source :reason (ex-message error)
                  :basis :compiler-anf :profile :bl/int-bool-intrinsics-v1}))))

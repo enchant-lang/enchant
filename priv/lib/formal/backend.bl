@@ -113,6 +113,14 @@
  (and (map? expected) (= (erlang/self) (:owner expected))
       (int? (:generation expected)) (= (:generation state) (:generation expected))
       (int? (:revision expected)) (= (:revision state) (:revision expected))))
+(defn- z3-small-significand? [data]
+ ;; The portable theory allows s=2. The pinned Z3 native API requires s>=3.
+ ;; Inspect nested sorts and signature/binder data, including unused binders.
+ (cond
+  (and (vector? data) (= 3 (count data)) (= :fp (first data)) (= 2 (nth data 2))) true
+  (map? data) (some z3-small-significand? (vals data))
+  (or (vector? data) (list? data)) (some z3-small-significand? data)
+  :else false))
 (defn- managed-exchange [state operation payload]
  (cond
   (and (not= operation :reset) (not (:portable state)))
@@ -133,7 +141,13 @@
                     :else (tuple :scope (:generation state) (native-data (:nodes prepared))
                                  (native-data (:assertions prepared)) (native-data (:assumptions prepared))
                                  (native-data (:observations prepared)) (:solver-ms state)))
-          exchanged (exchange-owned state request) result (:result exchanged) after (:state exchanged)
+          exchanged (if (and (= :z3 (:backend state)) (z3-small-significand? (:nodes prepared)))
+                      {:state state :result {:ok false :status :unsupported
+                        :protocol 1 :generation (:generation state) :backend (:backend (:hello state))
+                        :error "Pinned Z3 native API requires FP significand width at least 3; portable s=2 terms remain valid"
+                        :why {:kind :backend-format :phase :preflight :significand-minimum 3}}}
+                      (exchange-owned state request))
+          result (:result exchanged) after (:state exchanged)
           committed (if-not (:ok result) after
                       (cond
                        (= operation :reset)

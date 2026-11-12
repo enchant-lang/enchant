@@ -1,0 +1,94 @@
+(ns formal.beam-float
+ (:require [formal.term :as t] [formal.value :as v] [formal.floating :as fp]
+           [formal.ieee-arithmetic :as ieee] [formal.ground :as ground]))
+
+(def profile :bl/finite-binary64-rne-outcomes-v1)
+(def Sort (t/fp-sort 11 53))
+(def scope {:mode :finite-universe :format Sort :rounding "RNE"
+            :input-admission :finite :runtime-domain :beam-float64
+            :implementation-correspondence :reviewed-with-concrete-checks})
+(def domain {:kind :scalar :format Sort :rounding "RNE" :runtime-kind :float :profile profile})
+(defn model? [value]
+ (and (v/value? value) (= domain (:domain value)) (= Sort (t/sort-of (v/term value)))))
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.beam-float: " why) {}))))
+(defn- adopt [value] (assoc value :domain domain :scope scope))
+(defn- finite-data! [data]
+ (let [parts (ieee/parts data)]
+  (require! (and (= 11 (:e parts)) (= 53 (:s parts)) (not (:nan parts)) (not (:infinite parts)))
+            "a finite binary64 runtime value is required") data))
+(defn runtime-data
+ "Preserve a finite runtime Float's exact IEEE bits, including signed zero."
+ [actual]
+ (require! (float? actual) "runtime Float required; Int is a different input type")
+ (let [envelope (erlang/term_to_binary actual)]
+  (finite-data! (ieee/data 11 53 (binary/decode_unsigned (erlang/binary_part envelope 2 8))))))
+(defn to-runtime
+ "Decode a concrete finite binary64 observation. Opaque and nonfinite values
+  are refused; no missing native coordinate is completed."
+ [data]
+ (finite-data! data)
+ (let [bits (nth (:formal/fp data) 2)
+       bytes (mapv #(erlang/band 255 (erlang/bsr bits (* 8 (- 7 %)))) (range 8))]
+  (BeamLisp.Env/decode_data_term! (erlang/list_to_binary (to-list (concat [131 70] bytes))))))
+(defn bits [pattern]
+ (finite-data! (ieee/data 11 53 pattern))
+ (adopt (fp/bits 11 53 pattern)))
+(defn literal [actual] (bits (nth (:formal/fp (runtime-data actual)) 2)))
+(defn variable [name] (adopt (fp/variable name 11 53)))
+(defn exact-integer-literal
+ "An arithmetic conversion is admitted only for an exactly representable Int
+  literal. Symbolic Int/Float conversion needs its own reviewed operation."
+ [value]
+ (let [value (v/lift value) term (v/term value)]
+  (require! (and (= t/Int (t/sort-of term)) (= :int (:op term))) "exact Int literal required for mixed arithmetic")
+  (let [data (ieee/from-integer 11 53 "RNE" (:data term))
+        _ (finite-data! data) [n d] (ieee/rational data)]
+   (require! (= n (* (:data term) d)) "inexact Int/Float conversion is outside this Source profile")
+   (v/scalar (t/literal Sort (nth (:formal/fp data) 2)) [value] {:scope scope :domain domain}))))
+(defn- operands [a b]
+ (let [a (v/lift a) b (v/lift b)]
+  (require! (or (model? a) (model? b)) "at least one reviewed binary64 operand required")
+  [(if (model? a) a (exact-integer-literal a))
+   (if (model? b) b (exact-integer-literal b))]))
+(defn add [a b] (let [[a b] (operands a b)] (adopt (fp/add a b))))
+(defn subtract [a b] (let [[a b] (operands a b)] (adopt (fp/subtract a b))))
+(defn multiply [a b] (let [[a b] (operands a b)] (adopt (fp/multiply a b))))
+(defn divide [a b] (let [[a b] (operands a b)] (adopt (fp/divide a b))))
+(defn negate [a]
+ (require! (model? a) "reviewed binary64 operand required") (adopt (fp/negate a)))
+(defn compare
+ "Numeric ordering of reviewed finite operands. Successful results exclude
+  NaNs; strict term equality is a different operation."
+ [operation a b]
+ (let [[a b] (operands a b)
+       term (case operation
+              :lt (t/app :fp-lt t/Bool [(v/term a) (v/term b)] nil)
+              :le (t/app :fp-le t/Bool [(v/term a) (v/term b)] nil)
+              :gt (t/app :fp-lt t/Bool [(v/term b) (v/term a)] nil)
+              :ge (t/app :fp-le t/Bool [(v/term b) (v/term a)] nil)
+              (throw (ex-info "formal.beam-float: unknown numeric comparison" {})))]
+  (v/scalar term [a b] {})))
+(defn equal
+ "BL/BEAM numeric equality agrees on signed zeros; strict Erlang term equality
+  distinguishes them and distinguishes Float from Int. Nonliteral mixed
+  numeric comparison is refused, rather than converted through a Real."
+ [mode left right]
+ (require! (contains? #{:numeric :identity} mode) "unknown equality mode")
+ (let [a (v/lift left) b (v/lift right) fa (model? a) fb (model? b)
+       int-a (and (= :scalar (get-in a [:domain :kind])) (= t/Int (t/sort-of (v/term a))))
+       int-b (and (= :scalar (get-in b [:domain :kind])) (= t/Int (t/sort-of (v/term b))))]
+  (cond
+   (and fa fb) (v/scalar (if (= mode :identity) (t/eq (v/term a) (v/term b))
+                           (t/app :fp-eq t/Bool [(v/term a) (v/term b)] nil)) [a b] {})
+   (and (= mode :numeric) (or (and fa int-b) (and fb int-a)))
+    (let [[a b] (operands a b)] (equal mode a b))
+   (or fa fb) (v/scalar (t/bool false) [a b] {})
+   :else (throw (ex-info "formal.beam-float: Float equality requires a reviewed Float operand" {})))))
+(defn bind [model actual]
+ (try
+  (require! (model? model) "reviewed binary64 model required")
+  (ground/bind (v/term model) (runtime-data actual))
+  (catch error {:status :invalid :reason (ex-message error) :pins [] :assignments {} :sorts {}})))
+(defn same-runtime-value? [actual data]
+ (try (= (runtime-data actual) (finite-data! data)) (catch _ false)))

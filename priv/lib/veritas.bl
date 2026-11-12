@@ -6,7 +6,7 @@
 
 (ns veritas
   (:require [z3] [oracle] [core] [env] [smt :as smtlib] [system.smt :as smt] [reader-node :as rn]
-            [system.model :as model] [typed] [formal.term :as term] [formal.value :as value] [formal.runtime-values :as rv] [formal.anf-inputs :as formal-inputs]
+            [system.model :as model] [typed] [formal.beam-float :as float] [formal.term :as term] [formal.value :as value] [formal.runtime-values :as rv] [formal.anf-inputs :as formal-inputs]
             [formal.source :as source] [formal.source-runtime :as source-runtime] [formal.query :as query]
             [formal.coverage :as coverage] [formal.logic :as logic] [formal.identity :as identity]
             [formal.response :as response] [formal.response-runtime :as response-runtime] [compiler :as compiler]))
@@ -246,10 +246,13 @@
         sort (cond (every? int? xs) term/Int
                    (every? #(or (= true %) (= false %)) xs) term/Bool
                    (every? string? xs) term/String :else nil)]
-   (when sort
-    (let [x (term/variable name sort)]
-     (value/make x {:constraints [(term/any (mapv #(term/eq x (term/literal sort %)) xs))]
-                    :domain {:kind :scalar :profile :bl/finite-scalar-generator-v1}}))))))
+   (if (and (seq xs) (every? float? xs))
+    (let [model (float/variable name) x (value/term model)]
+     (assoc model :constraints [(term/any (mapv #(term/eq x (value/term (float/literal %))) xs))]))
+    (when sort
+     (let [x (term/variable name sort)]
+      (value/make x {:constraints [(term/any (mapv #(term/eq x (term/literal sort %)) xs))]
+                     :domain {:kind :scalar :profile :bl/finite-scalar-generator-v1}})))))))
 (extend-type AnyGen GenTerms (gen-term [g name] nil))
 (extend-type RealGen GenTerms (gen-term [g name] nil))
 (extend-type StringGen GenTerms (gen-term [g name] nil))
@@ -631,7 +634,12 @@
   (gen-shrink [g v] (shrink-candidates v)))
 
 (extend-type OneOf GenShrink
-  (gen-domain? [g v] (not (nil? (core/some (fn [x] (if (= x v) true nil)) (:values g)))))
+  (gen-domain? [g v]
+    (boolean (core/some (fn [x]
+      (cond
+       (float? x) (and (float? v) (= (float/runtime-data x) (float/runtime-data v)))
+       (core/int? x) (and (core/int? v) (= x v))
+       :else (= x v))) (:values g))))
   (gen-shrink [g v]
     (into [] (distinct (filter (fn [c] (and (in-domain? g c) (sized-smaller? c v)))
                                (:values g))))))

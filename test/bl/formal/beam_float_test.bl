@@ -1,0 +1,145 @@
+(ns formal.beam-float-test
+ (:require [formal.beam-float :as float] [formal.ieee-arithmetic :as ieee]
+           [formal.term :as t] [formal.value :as v] [formal.evaluate :as ev]
+           [formal.source :as source] [formal.source-runtime :as runtime]
+           [formal.runtime-values :as rv] [formal.query :as q] [formal.logic :as logic]
+           [formal.backend :as backend] [veritas :as gen] [veritas.property :as property]
+           [system.core :as system]))
+
+(defn observe [value assignments]
+ (v/decode value #(ev/value % assignments)))
+(defn finite-host [pattern] (float/to-runtime (ieee/data 11 53 pattern)))
+
+(deftest bit-preserving-inputs-and-finite-observations
+ (doseq [pattern [0 9223372036854775808 1 9223372036854775809 4503599627370496
+                 4607182418800017408 9218868437227405311 18442240474082181119]]
+  (let [actual (finite-host pattern) data (ieee/data 11 53 pattern) model (float/variable "x")
+        binding (rv/bind model actual)]
+   (is (= data (float/runtime-data actual)))
+   (is (= :valid (:status binding)))
+   (is (= data (get (:assignments binding) "x")))
+   (is (rv/matches? model actual data))
+   (is (= data (float/runtime-data (:value (rv/concrete model data)))))))
+ (is (not (rv/matches? (float/variable "x") 0.0 (ieee/data 11 53 9223372036854775808))))
+ (is (= :invalid (:status (rv/bind (float/variable "x") 1))))
+ (is (nil? (rv/concrete (float/variable "x") (ieee/infinity 11 53 false))))
+ (is (nil? (rv/concrete (float/variable "x") (ev/unavailable :missing))))
+ (is (thrown? (float/literal 1)))
+ (is (thrown? (float/bits 9218868437227405312))))
+
+(def unary-sources
+ ['(fn [x] (+ x 0.1)) '(fn [x] (- x 0.1)) '(fn [x] (* x 0.1))
+  '(fn [x] (/ x 0.1)) '(fn [x] (- x)) '(fn [x] (inc x)) '(fn [x] (dec x))
+  '(fn [x] (< x 0.0)) '(fn [x] (<= x 0.0)) '(fn [x] (> x 0.0)) '(fn [x] (>= x 0.0))
+  '(fn [x] (pos? x)) '(fn [x] (neg? x)) '(fn [x] (zero? x))
+  '(fn [x] (= x 0.0)) '(fn [x] (erlang/=:= x 0.0)) '(fn [x] (== x 0))
+  '(fn [x] (float? x)) '(fn [x] (int? x)) '(fn [x] (not x))
+  '(fn [x] (if (neg? x) (- x) x)) '(fn [x] (= (- (+ x 0.1) x) 0.1))])
+(deftest actual-source-execution-and-independent-terms-agree-on-outcomes
+ (doseq [form unary-sources]
+  (let [input (float/variable "x") prepared (source/prepare-function form [input])]
+   (is (= :translated (:status prepared)) (pr-str [form prepared]))
+   (is (= :bl/scalar-float64-intrinsics-v2 (:profile prepared)))
+   (when (= :translated (:status prepared))
+    (doseq [pattern [0 9223372036854775808 1 9223372036854775809 4591870180066957722
+                    4607182418800017408 13830554455654793216 9218868437227405311]]
+     (let [actual (runtime/run (:anf prepared) [(finite-host pattern)])
+           projected (observe (:value prepared) {"x" (ieee/data 11 53 pattern)})]
+      (is (= false (:module-loaded actual)))
+      (is (= true (:within projected)))
+      (is (= (= :returned (:status actual)) (:defined projected)) (pr-str [form pattern actual projected]))
+      (when (= :returned (:status actual))
+       (is (rv/matches? (:value prepared) (:value actual) (:value projected)) (pr-str [form pattern actual projected])))))))))
+
+(deftest exact-conversions-signed-zero-and-unreviewed-unions
+ (let [input (float/variable "x") bits {"x" (float/runtime-data -0.0)}]
+  (doseq [[text expected] [["(= x 0.0)" true] ["(== x 0)" true]
+                          ["(erlang/=:= x 0.0)" false] ["(erlang/=:= x 0)" false]]]
+   (let [prepared (source/prepare text {"x" input})]
+    (is (= :translated (:status prepared)))
+    (is (= expected (:value (observe (:value prepared) bits))))))
+  (doseq [text ["(+ x 9007199254740993)" "(+ x n)" "(if true x 0)" "(/ n 2)"]]
+   (is (= :unsupported (:status (source/prepare text {"x" input "n" (v/lift (t/variable "n" t/Int))}))) text))
+  (is (= :translated (:status (source/prepare "(+ x 9007199254740992)" {"x" input}))))
+  (let [a (source/prepare "(- x)" {"x" input}) b (source/prepare "(- 0.0 x)" {"x" input})]
+   (is (not= (:value (observe (:value a) {"x" (float/runtime-data 0.0)}))
+             (:value (observe (:value b) {"x" (float/runtime-data 0.0)}))))))
+ (is (= :bl/int-bool-intrinsics-v1 (:profile (source/prepare "(+ n 1)" {"n" (t/variable "n" t/Int)})))))
+
+(deftest finite-result-failure-is-a-claim-not-an-admission-premise
+ (doseq [form ['(fn [x] (/ x 0.0)) '(fn [x] (* x 1.7976931348623157e308))]]
+  (let [prepared (source/prepare-function form [(float/variable "x")])
+        projected (observe (:value prepared) {"x" (float/runtime-data 2.0)})
+        actual (runtime/run (:anf prepared) [2.0])]
+   (is (= :translated (:status prepared)))
+   (is (= true (:within projected)))
+   (is (= false (:defined projected)))
+   (is (= :raised (:status actual))))))
+
+(deftest finite-generator-membership-preserves-runtime-type-and-zero-bits
+ (let [positive (gen/one-of 0.0) negative (gen/one-of -0.0) whole (gen/one-of 1.0)]
+  (is (gen/gen-domain? positive 0.0))
+  (is (not (gen/gen-domain? positive -0.0)))
+  (is (gen/gen-domain? negative -0.0))
+  (is (not (gen/gen-domain? whole 1)))
+  (is (not (gen/gen-domain? (gen/one-of 1) 1.0)))
+  (let [model (gen/gen-term (gen/one-of 0.0 -0.0) "x")]
+   (is (float/model? model))
+   (doseq [actual [0.0 -0.0]]
+    (is (every? true? (map #(ev/value % {"x" (float/runtime-data actual)}) (:constraints model))))))))
+
+(def misleading
+ "(defserver ^{:invariant (= (- (+ x 0.1) x) 0.1)} rounded
+    (init [] (ok 1.0)) (handle-call [:noop] [_ x] (reply :ok x)))")
+(defn read-one [text] (first (BeamLisp.Reader/read_string text)))
+(deftest default-legacy-source-checker-cannot-prove-the-confirmed-float-counterexample
+ (let [node (read-one misleading) result (system/verify-process nil node {:emit true})
+       prepared (source/prepare-function '(fn [x] (= (- (+ x 0.1) x) 0.1)) [(float/literal 1.0)])]
+  (is (= :unsupported (:status result)))
+  (is (nil? (:holds result)))
+  (is (= false (:checked result)))
+  (is (= false (:complete result)))
+  (is (= :runtime-float-needs-binary64 (:reason result)))
+  (is (nil? (:emitted result)))
+  (is (= false (:value (observe (:value prepared) {}))))
+  (is (= false (:value (runtime/run (:anf prepared) [1.0]))))
+  (is (= :unsupported (:status (system/repair-process nil node))))
+  (is (= :unsupported (:status (system/discover-invariant nil node))))
+  (is (seq (system/verify-file nil "float.bl" misleading)))
+  (is (seq (system/verify-file nil "float.bl" (str misleading "\n(defn plain [] 1)")))))
+ (doseq [text ["(defserver ^{:invariant (>= x 0) :sorts {:x Real}} rate (init [] (ok 1)) (handle-call [:n] [_ x] (reply :ok x)))"
+               "(defserver ^{:invariant (>= x 0.0)} rate (init [] (ok x)) (handle-call [:n] [_ x] (reply :ok x)))"]]
+  (is (= :unsupported (:status (system/verify-process nil (read-one text))))))
+ (is (= :unsupported (:status (system/verify-process nil
+     (read-one "(defserver ^{:invariant (ok? x)} rate (init [] (ok 1)) (handle-call [:n] [_ x] (reply :ok x)))")
+     {:defs ["(defn ok? [x] (= (+ x 0.1) x))"]}))))
+ (is (= false (:checked (system/verify-process nil (read-one "(defn plain [] 0.5)"))))))
+
+(deftest z3-format-refusal-leaves-the-owned-context-usable-and-unchanged
+ (backend/with-session {:backend :z3}
+  (fn [session]
+   (let [p (t/variable "kept" t/Bool)
+         _ (is (:ok (backend/load! session [{:label "retained" :term p}])))
+         before (backend/context session) small (t/fp-sort 2 2)
+         sorts [small (t/array-sort t/Int small) (t/seq-sort small)]
+         questions (concat
+          (map (fn [sort] (t/eq (t/variable "unsupported" sort) (t/variable "unsupported" sort))) sorts)
+          [(t/forall [(t/bound "unused" small)] (t/bool true))
+           (t/eq (t/uf "f" [small] t/Int [(t/literal small 0)]) (t/int 0))])]
+    (doseq [question questions]
+     (let [reply (backend/scope! session [{:label "small" :term question}] [] [] before)]
+      (is (= :unsupported (:status reply)))
+      (is (= :backend-format (get-in reply [:why :kind])))
+      (is (= before (backend/context session)))))
+    (is (= :unsupported (:status (backend/load! session [{:label "small" :term (t/eq (t/literal small 0) (t/literal small 0))}]))))
+    (is (= before (backend/context session)))
+    (is (= :proved (:verdict (logic/solve-in session (q/prove p)))))
+    (is (= before (backend/context session)))))))
+
+(deftest native-counterexample-is-replayed-in-terms-and-in-actual-source
+ (let [result (property/prove {:backend :z3}
+               '(defn cancellation [x] (- (+ x 0.1) x)) '(= result 0.1) (gen/one-of 1.0))]
+  (is (= :terms (:engine result)))
+  (is (= :refuted (:modality result)) (pr-str result))
+  (is (= false (:compiler-proof-authority result)))
+  (is (= :reproduced (get-in result [:runtime-replay :status])))))

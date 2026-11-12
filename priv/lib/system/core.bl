@@ -1363,7 +1363,7 @@
 
 
 
-(defn verify-process
+(defn- verify-process-model
   "Verify a process SOURCE FORM end to end. Returns:
      {:name :holds :k :warnings [{:msg :line :col}] :checked bool}
    :checked=false when there is no ^{:invariant} or it is untranslatable (the
@@ -1387,7 +1387,7 @@
      :emit  when true the result also carries :emitted — the declarations and the
             invariant define-fun the verdict is a statement ABOUT. A verdict is
             only as meaningful as the sorts it was decided over."
-  ([port node] (verify-process port node {}))
+  ([port node] (verify-process-model port node {}))
   ([port node opts]
    (let [sm (model/system-model node)
         clauses (:transitions sm)
@@ -1608,7 +1608,50 @@
                     :warnings (box-warnings {:failures all-failures} pos)}
                     (if (some? emitted) {:emitted emitted} {})))))))))))
 
-(defn repair-process
+;; The legacy SMT printer describes exact mathematical Reals. It must never
+;; certify rounded Source Float execution. The explicitly requested model lane
+;; retains its result under :model-result and grants no Source proof authority.
+(defn- contains-runtime-float? [x]
+ (cond
+  (float? x) true
+  (erlang/is_tuple x) (some contains-runtime-float? (erlang/tuple_to_list x))
+  (map? x) (some contains-runtime-float? (vals x))
+  (erlang/is_map x) (some #(contains-runtime-float? (elem % 1)) (maps/to_list x))
+  (or (list? x) (vector? x) (erlang/is_list x)) (some contains-runtime-float? x)
+  :else false))
+(defn- real-source-model? [node opts]
+ (or (contains-runtime-float? node)
+     (some #(= "Real" %) (vals (declared-sorts node)))
+     (some (fn [text] (some contains-runtime-float? (BeamLisp.Reader/read_string text))) (:defs opts))))
+(defn- float-source-refusal [node]
+ (let [pos (typed/node-pos node)
+       message "Float Source verification requires binary64 terms; exact Real arithmetic is not runtime Float arithmetic. Use formal.source with formal.beam-float inputs."]
+  {:name (:name (model/system-model node)) :status :unsupported :holds nil :checked false :complete false
+   :reason :runtime-float-needs-binary64 :profile :bl/legacy-source-float-refusal-v1
+   :source-correspondence :not-established :compiler-proof-authority false
+   :warnings [{:msg message :line (get pos :line 0) :col (get pos :col 0)}]}))
+(defn verify-process
+ "Legacy process model entry. Known Float/Real Source is refused by default.
+  :semantics :ideal-real-model requests a mathematical model result only;
+  its :holds never becomes a Source proof. Typed binary64 Source is available
+  through formal.source. Other legacy models retain their declared scope."
+ ([port node] (verify-process port node {}))
+ ([port node opts]
+  (let [semantics (:semantics opts)
+        _ (when-not (contains? #{nil :ideal-real-model} semantics)
+            (throw (ex-info "Unknown process verification semantics" {:semantics semantics})))
+        request? (or (invariant-node node) (invariant-clause node))]
+   (cond
+    (= semantics :ideal-real-model)
+     {:name (:name (model/system-model node)) :status :model-only :holds nil :checked false :complete false
+      :profile :bl/ideal-real-source-model-v1 :source-correspondence :not-established
+      :compiler-proof-authority false :warnings [] :model-result (verify-process-model port node opts)}
+    (and request? (real-source-model? node opts)) (float-source-refusal node)
+    :else (assoc (verify-process-model port node opts)
+           :profile :bl/legacy-mathematical-process-model-v1 :source-correspondence :not-established
+           :compiler-proof-authority false :native-proof-certificate-checked false)))))
+
+(defn- repair-process-model
   "For each transition that BREAKS the invariant, synthesize the weakest extra
    guard that repairs it — the checker run backwards over the whole process.
    Returns {:name :repairs [{:label :guard} …] :holds bool}. :holds true ⇒
@@ -1856,7 +1899,7 @@
                  prime-eqs
                  [(neg-asserted cprimed)]))))
 
-(defn discover-invariant
+(defn- discover-invariant-model
   "Discover an inductive invariant for a process form with NO annotation (or to
    corroborate one). Returns {:name :discovered form|nil :conjuncts […]
    :checked bool}. Sound: every returned conjunct is proven established at init
@@ -1967,6 +2010,14 @@
                     (reduce (fn [a c] (walk c a)) acc (typed/node-items f))))
                 acc)))]
     (walk inv-node #{})))
+
+(defn repair-process [port node]
+ (if (real-source-model? node {})
+  (assoc (float-source-refusal node) :repairs []) (repair-process-model port node)))
+
+(defn discover-invariant [port node]
+ (if (real-source-model? node {})
+  (assoc (float-source-refusal node) :discovered nil :conjuncts []) (discover-invariant-model port node)))
 
 (defn verify-capacity
   "Verify a capacity/size invariant over a collection-valued process (P18 Rung
@@ -2322,6 +2373,7 @@
                              "nor violated: " (join ", " (map (fn [l] (str l)) (:undecided r)))))
                   (list))]
     {:name (:name r)
+     :status (:status r) :reason (:reason r) :profile (:profile r)
      :holds (:holds r)
      :checked (:checked r)
      :complete (:complete r)
@@ -2337,7 +2389,7 @@
     (if (< (count forms) 2)
       (mapcat (fn [node]
                 (let [r (verify-process-report port file src node)]
-                  (if (:checked r) (:rendered r) [])))
+                  (:rendered r)))
               forms)
       ; FAN-OUT: one process per form. Every form's obligations go through
       ; `oracle/session`, which LEASES a solver, so N forms are served by the
@@ -2355,7 +2407,7 @@
                           {} idxs)]
           (vec (mapcat (fn [i]
                          (let [r (get got i)]
-                           (if (and r (:checked r)) (:rendered r) (to-list []))))
+                           (if r (:rendered r) (to-list []))))
                        idxs)))))))
 
 (defn- head-is?

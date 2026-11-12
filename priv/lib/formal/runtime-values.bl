@@ -1,5 +1,6 @@
 (ns formal.runtime-values
- (:require [formal.term :as t] [formal.value :as v] [formal.data :as d] [formal.ground :as ground]))
+ (:require [formal.term :as t] [formal.value :as v] [formal.data :as d] [formal.ground :as ground]
+           [formal.beam-float :as float]))
 
 (defn kind [x] (get-in (v/lift x) [:domain :kind]))
 (defn product [items]
@@ -25,7 +26,7 @@
 (defn admissible? [x]
  (let [x (v/lift x) k (kind x)]
   (case k
-   :scalar (contains? #{t/Int t/Bool t/String} (t/sort-of (v/term x)))
+   :scalar (or (contains? #{t/Int t/Bool t/String} (t/sort-of (v/term x))) (float/model? x))
    :nullable (contains? #{t/Int t/Bool t/String} (get-in x [:domain :item-sort]))
    :bl/keyword true
    :bl/product (every? admissible? (:value x))
@@ -52,6 +53,7 @@
          :vector (t/bool (and (contains? #{:bl/product :bl/length} k) (= :vector (:runtime-kind domain))))
          :bool (t/all [(t/not (nil-value? x)) (t/bool (= t/Bool sort))])
          :int (t/all [(t/not (nil-value? x)) (t/bool (= t/Int sort))])
+         :float (t/bool (float/model? x))
          :string (t/all [(t/not (nil-value? x)) (t/bool (= t/String sort))])
          (throw (ex-info "Unreviewed runtime type predicate" {:type expected})))]
   (scalar-result matches [x])))
@@ -84,7 +86,8 @@
           (if (and (= (get-in a [:domain :runtime-kind]) (get-in b [:domain :runtime-kind])) (= (count (:value a)) (count (:value b))))
            (t/all (mapv #(v/term (equal (nth (:value a) %) (nth (:value b) %))) (range (count (:value a))))) (t/bool false))
          (and (= :scalar ka) (= :scalar kb))
-          (if (= (t/sort-of (v/term a)) (t/sort-of (v/term b))) (v/term (v/equal a b)) (t/bool false))
+          (if (or (float/model? a) (float/model? b)) (v/term (float/equal :numeric a b))
+           (if (= (t/sort-of (v/term a)) (t/sort-of (v/term b))) (v/term (v/equal a b)) (t/bool false)))
          (= ka kb) (v/term (v/equal a b))
          (and (= :nullable ka) (= :scalar kb))
           (if (= (get-in a [:domain :item-sort]) (t/sort-of (v/term b))) (v/term (v/equal a (d/non-nil b))) (t/bool false))
@@ -155,18 +158,21 @@
     (when (and (int? (:length raw)) (<= 0 (:length raw) 4096))
      {:value (if (= :vector (:runtime-kind domain)) (vec (range (:length raw))) (apply list (range (:length raw))))
       :projection :length-concretization})
-   (when-not (and (map? raw) (or (:unavailable raw) (:formal/unavailable raw))) {:value raw}))))
+   (if (float/model? descriptor)
+    (try {:value (float/to-runtime raw)} (catch _ nil))
+    (when-not (and (map? raw) (or (:unavailable raw) (:formal/unavailable raw))) {:value raw})))))
 
 (defn matches?
  "Match a concrete result against exactly the observations retained by its
   model. A length projection checks length and collection kind, not elements."
  [descriptor actual raw]
+ (if (float/model? descriptor) (float/same-runtime-value? actual raw)
  (case (kind descriptor)
   :bl/length (and (if (= :vector (get-in descriptor [:domain :runtime-kind])) (vector? actual) (list? actual))
                  (= (count actual) (:length raw)))
   :bl/product (and (vector? actual) (vector? raw) (= (count actual) (count raw) (count (:value descriptor)))
                     (every? true? (mapv #(matches? (nth (:value descriptor) %) (nth actual %) (nth raw %)) (range (count actual)))))
-  (let [projected (concrete descriptor raw)] (and projected (= actual (:value projected))))))
+  (let [projected (concrete descriptor raw)] (and projected (= actual (:value projected)))))))
 
 (defn bind
  "Represent a concrete runtime input in its declared model. Erased elements
@@ -176,7 +182,7 @@
        invalid {:status :invalid :reason :runtime-value-shape :pins [] :assignments {} :sorts {}}]
   (case (kind descriptor)
    :scalar
-    (let [bound (ground/bind (v/term descriptor) actual)]
+    (let [bound (if (float/model? descriptor) (float/bind descriptor actual) (ground/bind (v/term descriptor) actual))]
      (if (and (= :invalid (:status bound)) (= t/String (t/sort-of (v/term descriptor)))
               (= :abstract (get-in descriptor [:scope :mode])) (string? actual) (String/valid? actual))
       (assoc bound :status :incomplete :reason :runtime-text-outside-solver-alphabet) bound))
