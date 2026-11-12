@@ -1,0 +1,40 @@
+(ns formal.graph-table-export
+ (:require [formal.data-graph :as graph] [formal.point] [formal.question-graph]
+           [oracle] [bl.json :as json]))
+
+;; Owned qualification transport only. Graph keyword names below stay bytes;
+;; reading the preceding owned fixture does not admit arbitrary atom names.
+(def owned-vocabulary
+ [:original :subject :point :bindings :bl/independent-original-point-v2
+  :bl/mathematical-data-replay-v1 :evaluator :formal/point :original-satisfiability
+  :role :identity-profile :bl/canonical-formal-data-v1 :sha256])
+(defn hex [bytes] (Base/encode16 bytes (list (tuple :case :lower))))
+(defn packet [id data]
+ (let [checked (graph/check! data)]
+  {:id id :root (:root data) :data-profile graph/profile :checking checked
+   :rows (mapv (fn [[kind payload]]
+                [kind (if (contains? #{"float64" "binary" "keyword" "symbol"} kind) (hex payload) payload)]) (:nodes data))
+   :wire-hex (hex (graph/bytes data))}))
+(def argv (BeamLisp/argv))
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :graph-model-export-must-not-query))
+(def packets
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  #(let [scalars (graph/encode
+                  [nil true false -3 0 1 1.0 0.0 -0.0 (Base/decode16! "00FF80") :ready 'model/name
+                   (list 1 nil) #{:yes :no} (tuple :ok 1)
+                   (into {} [[1 :integer] [1.0 :floating] [0.0 :positive-zero] [-0.0 :negative-zero]])])
+         unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                  :nodes [["keyword" "graph.model.unfamiliar.45"]]}
+         shared (reduce (fn [data _] (graph/assemble "vector" [data data])) unknown (range 16))
+         cases [(packet :scalar-and-container-kinds scalars) (packet :shared-unknown-keyword shared)]
+         cases (if (> (count argv) 1)
+                 (let [owned (BeamLisp.Env/decode_data_term! (File/read! (second argv)) (list :safe))]
+                  (conj cases (packet :saved-original-closure (:original owned)))) cases)]
+     (assert (= 0 @calls)) cases)))
+(File/write! (first argv)
+ (json/encode {:schema "enchant.formal.graph-table-instances.v1" :binary-fields :hex
+               :packets packets :managed-query-calls @calls :compiler-proof-authority false
+               :scope "Owned SDK exports for an independent structural-table model; no implementation soundness theorem."}
+  {:pretty 2}))
+(println {:graph-model-packets (count packets) :queries @calls :authority false})
