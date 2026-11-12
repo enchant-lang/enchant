@@ -327,7 +327,7 @@ test("session: reconnect distinguishes an undelivered first mount from a hydrate
 
 // Page lifecycle is separate from transient connection loss. A frozen page
 // cannot drain patches, and a restored page still holds its original DOM.
-test('pagehide closes without retry; pageshow resumes its hydrated session once', async ({ page }) => {
+test('pagehide closes without retry; pageshow resynchronizes the same session once', async ({ page }) => {
   await boot(page, { heartbeatMs: 30 });
   await page.waitForFunction(() => __sockets[0].readyState === WebSocket.OPEN);
   const original = await page.evaluate(() => {
@@ -348,12 +348,14 @@ test('pagehide closes without retry; pageshow resumes its hydrated session once'
     dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
   });
   await page.waitForFunction(() => __sockets.length === 2 && __sockets[1].readyState === 1);
+  await page.evaluate(() => __sockets[1].onmessage({
+    data: JSON.stringify(['mount', '<input id="draft">', { 'input-ack': true }]),
+  }));
   const resumed = await page.evaluate(() => ({
-    url: Live.ws.url, sameInput: originalInput === document.getElementById('draft'), value: originalInput.value,
+    url: Live.ws.url, value: document.getElementById('draft').value,
   }));
   expect(new URL(resumed.url).searchParams.get('live-sid')).toBe(new URL(original).searchParams.get('live-sid'));
-  expect(new URL(resumed.url).searchParams.get('live-mounted')).toBe('1');
-  expect(resumed.sameInput).toBe(true);
+  expect(new URL(resumed.url).searchParams.get('live-mounted')).toBe('0');
   expect(resumed.value).toBe('Private words · كلمات');
 });
 

@@ -713,10 +713,13 @@
     }
     // Cached pages keep their DOM and JavaScript heap, but cannot consume
     // patches while frozen. Release the transport so its server session
-    // detaches and stops projecting; retain sid, mounted and the outbox for
-    // a real return. Tab visibility alone does not suspend a live viewer.
+    // detaches and stops projecting. A patch may already be in flight when
+    // the page freezes, so a return requests a fresh mount of the SAME
+    // session; keepFields preserves its private inputs and focus. Retain sid
+    // and the outbox. Tab visibility alone does not suspend a live viewer.
     window.addEventListener("pagehide", function () {
       suspended = true;
+      mounted = false;
       if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (beat) { clearInterval(beat); beat = null; }
       discardInputs();
