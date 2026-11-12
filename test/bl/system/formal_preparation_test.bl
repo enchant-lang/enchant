@@ -1,0 +1,129 @@
+(ns system.formal-preparation-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.affine :as affine]
+           [formal.preparation :as preparation] [formal.answer :as answer]
+           [formal.logic :as logic] [formal.evaluate :as replay] [oracle]))
+
+(def x (t/variable "preparation/x" t/Int))
+(def y (t/variable "preparation/y" t/Int))
+(defn sample []
+ (q/sat {:id :prepare/point :profile :bl/preparation-test-v1
+         :scope {:mode :bounded :declared [1 20]} :origin {:source "retained"}
+         :assumptions [{:label "positive" :origin {:line 7} :term (t/gt (t/add x (t/int 0)) (t/int 0))}]
+         :observe {"x" (t/add (t/int 0) x) "scaled" (t/mul (t/int 12) (t/add (t/int 1) x))}}))
+(defn claimed [question assignments]
+ (answer/bind question {:phase :query :solver-status :sat :assignments assignments
+                        :witness {"x" -999 "scaled" -999}}))
+
+(deftest a-plan-keeps-both-complete-questions-and-fresh-equality-objects
+ (let [question (sample) plan (affine/prepare question) checked (preparation/check plan)]
+  (is (= :ready (:status plan)))
+  (is (= question (:original plan)))
+  (is (not= question (:execution plan)))
+  (is (= :checked (:status checked)))
+  (is (= 4 (count (:sites plan))))
+  (is (some #(= :certificate (:kind %)) (:sites plan)))
+  (is (= (:scope question) (get-in plan [:execution :scope])))
+  (is (= (:origin question) (get-in plan [:execution :origin])))
+  (is (= (:assumptions question) (get-in plan [:execution :assumptions])))
+  (is (= false (:compiler-proof-authority checked)))))
+
+(deftest changed-metadata-cannot-borrow-valid-component-certificates
+ (let [plan (affine/prepare (sample))]
+  (doseq [path [[:id] [:profile] [:profiles] [:scope] [:origin] [:relation] [:vacuity] [:context]
+                [:assertions 0 :label] [:assertions 0 :origin] [:assumptions]]]
+   (is (= :rejected (:status (preparation/check (assoc-in plan (into [:execution] path) :changed))))))
+  (is (= :rejected (:status (preparation/check (update-in plan [:execution :assertions] #(vec (rest %)))))))
+  (is (= :rejected (:status (preparation/check (update-in plan [:execution :observe] dissoc "scaled")))))
+  (is (= :rejected (:status (preparation/check (assoc-in plan [:execution :observe "extra"] x)))))))
+
+(deftest missing-foreign-extra-and-forged-proof-sites-are-refused
+ (let [plan (affine/prepare (sample))]
+  (is (= :rejected (:status (preparation/check (update plan :sites #(vec (rest %)))))))
+  (is (= :rejected (:status (preparation/check (update plan :sites conj (first (:sites plan)))))))
+  (is (= :rejected (:status (preparation/check (update plan :sites #(vec (reverse %)))))))
+  (is (= :rejected (:status (preparation/check (assoc-in plan [:sites 0 :kind] :identical)))))
+  (is (= :rejected (:status (preparation/check (assoc-in plan [:sites 0 :object] nil)))))
+  (is (= :rejected (:status (preparation/check (assoc-in plan [:sites 0 :object :statement] "foreign")))))
+  (is (= :checked (:status (preparation/check (assoc plan :status :forged :checking {:status :rejected})))))))
+
+(deftest source-observations-are-reconstructed-and-assignments-replayed
+ (let [question (sample) plan (affine/prepare question) executed (claimed (:execution plan) {"preparation/x" 7})
+       good (preparation/accept plan executed)
+       bad (preparation/accept plan (assoc executed :assignments {"preparation/x" -1} :validation {:status :valid}))
+       incomplete (preparation/accept plan (assoc executed :assignments {}))]
+  (is (= :sat (:verdict good)))
+  (is (= :valid (get-in good [:validation :status])))
+  (is (= {"x" 7 "scaled" 96} (:witness good)))
+  (is (= question (:question good)))
+  (is (= executed (get-in good [:execution :answer])))
+  (is (= :not-checked (get-in good [:certificate :status])))
+  (is (= :invalid-model (:verdict bad)))
+  (is (= :invalid (get-in bad [:validation :status])))
+  (is (= :candidate (:verdict incomplete)))
+  (is (replay/unavailable? (get-in incomplete [:witness "x"])))
+  (is (= false (:compiler-proof-authority good)))))
+
+(deftest native-absence-and-foreign-questions-never-gain-proof-authority
+ (let [plan (affine/prepare (sample))
+       absent (answer/bind (:execution plan) {:phase :query :solver-status :unsat})
+       kept (preparation/accept plan absent)
+       foreign (assoc absent :question (q/sat {:assumptions [(t/bool false)]}))]
+  (is (= :unsat (:verdict kept)))
+  (is (= :not-checked (get-in kept [:certificate :status])))
+  (is (not (contains? kept :witness)))
+  (is (= :error (:verdict (preparation/accept plan foreign))))
+  (is (= :error (:verdict (preparation/accept plan (dissoc absent :question))))))))
+
+(deftest preparation-is-visible-to-the-ordinary-query-effect
+ (let [seen (atom []) question (sample) plan (affine/prepare question)
+       result (oracle/with-oracle
+                {:query (fn [execution _]
+                          (swap! seen conj execution)
+                          (claimed execution {"preparation/x" 3}))}
+                #(preparation/execute {:backend :oxiz} plan))]
+  (is (= [(:execution plan)] @seen))
+  (is (= question (:question result)))
+  (is (= {"x" 3 "scaled" 48} (:witness result)))
+  (is (= :handler (get-in result [:oracle-effect :kind])))
+  (is (= :not-checked (get-in result [:certificate :status])))))
+
+(deftest insufficient-search-and-unsupported-theories-do-not-execute
+ (let [question (q/sat {:assumptions [(t/lt (t/add x (t/int 0)) (t/int 5))]})
+       short (affine/prepare question {:search {:nodes 1}}) calls (atom 0)
+       result (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :must-not-execute))}
+                #(preparation/execute {:backend :z3} short))]
+  (is (= :unknown (:status short)))
+  (is (= :rejected (:status (preparation/check short))))
+  (is (= :error (:verdict result)))
+  (is (= 0 @calls))
+  (is (= :unsupported (:status (affine/prepare (q/prove (t/ge (t/mul x y) (t/int 0)))))))
+  (is (= :unsupported (:status (affine/prepare (q/sat {:observe {"real" (t/real 1 3)}}))))))))
+
+(deftest canonical-integer-sums-are-idempotent-and-preserve-signs
+ (let [expression (t/sub (t/mul (t/int -3) (t/add x (t/int -2))) (t/neg y))
+       normalized (affine/normalize expression)]
+  (is (= normalized (affine/normalize normalized)))
+  (doseq [a [-5 0 8] b [-9 0 11]]
+   (is (= (replay/value expression {"preparation/x" a "preparation/y" b})
+          (replay/value normalized {"preparation/x" a "preparation/y" b}))))))
+
+(deftest nil-and-absent-observation-fields-retain-their-exact-presence
+ (doseq [question [(assoc (q/sat {}) :observe nil) (dissoc (q/sat {}) :observe)]]
+  (let [plan (affine/prepare question)]
+   (is (= :ready (:status plan)))
+   (is (= question (:execution plan)))
+   (is (= :checked (:status (preparation/check plan)))))))
+
+(deftest both-native-engines-answer-the-same-prepared-point
+ (let [question (q/sat {:assumptions [(t/eq (t/add x (t/int 0)) (t/int 7))]
+                        :observe {"x" (t/add x (t/int 0))}})
+       plan (affine/prepare question)]
+  (doseq [backend [:z3 :oxiz]]
+   (let [result (preparation/execute {:backend backend} plan)]
+    (is (= :sat (:verdict result)))
+    (is (= question (:question result)))
+    (is (= (:execution plan) (get-in result [:execution :answer :question])))
+    (is (= {"x" 7} (:witness result)))
+    (is (= :valid (get-in result [:validation :status])))
+    (is (= :checked (get-in result [:preparation :status])))
+    (is (= false (:compiler-proof-authority result)))))))

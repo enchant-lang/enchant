@@ -1,0 +1,83 @@
+(ns system.linear-terms-test
+ (:require [system.linear :as linear] [formal.query :as q] [formal.term :as t]
+           [formal.proof :as proof] [formal.certificate :as certificate]
+           [formal.affine :as affine] [formal.preparation :as preparation] [oracle]))
+
+(deftest zero-arity-has-no-child-to-duplicate
+ (let [one (linear/size-lemma 12 0 8) two (linear/size-lemma 12 0 8 2)]
+  (is (= one (q/validate! one)))
+  (is (= (:claim one) (:claim two)))
+  (is (= ["linearity/overhead"] (mapv :data (t/variables (q/roots one)))))
+  (is (= :checked (:status (proof/produce one))))
+  (is (= :checked (:status (proof/produce two))))))
+
+(deftest every-supported-arity-has-a-freshly-checked-positive-object
+ (doseq [n (range 9)]
+  (let [question (linear/size-lemma 12 n 8) produced (proof/produce question)
+        checked (certificate/check question (:certificate produced))]
+   (is (= :checked (:status produced)))
+   (is (= :checked (:status checked)))
+   (is (= n (get-in question [:scope :arity])))
+   (is (= :unbounded (get-in question [:scope :mode])))
+   (is (= :conditional-not-mechanized (get-in question [:origin :compiler-connection]))))))
+
+(deftest premise-feasibility-and-constructed-counterexamples-are-separate-data
+ (let [result (linear/prove-bound 12 8 3)]
+  (is (= true (:holds result)))
+  (is (= :declared-size-recurrence (:claim-scope result)))
+  (is (= false (:native-requested result)))
+  (is (= false (:compiler-proof-authority result)))
+  (doseq [row (:arities result)]
+   (is (= :checked (get-in row [:linear :certificate :status])))
+   (is (= :checked-data-connection (get-in row [:linear :feasibility :checking :status])))
+   (is (= :checked-data-connection (get-in row [:duplicated :counterexample :checking :status])))
+   (is (= :sat (get-in row [:duplicated :counterexample :question :mode])))
+   (is (= :ready (get-in row [:duplicated :counterexample :production :status])))
+   (is (nil? (get-in row [:linear :native]))))))
+
+(deftest native-unknown-keeps-its-own-meaning-without-invalidating-a-checked-object
+ (let [seen (atom [])
+       result (oracle/with-oracle
+                {:query (fn [question _]
+                          (swap! seen conj question)
+                          (oracle/query-answer question {:phase :query :solver-status :unknown}))}
+                #(linear/prove-bound {:backend :oxiz} 12 8 2))]
+  (is (= true (:holds result)))
+  (is (= 4 (count @seen)))
+  (doseq [row (:arities result) kind [:linear :duplicated]]
+   (is (= :unknown (get-in row [kind :native :result :verdict])))
+   (is (= :checked (get-in row [kind :native :result :preparation :status])))
+   (is (= (get-in row [kind :question]) (get-in row [kind :native :result :question])))
+   (is (= :not-checked (get-in row [kind :native :result :certificate :status]))))))
+
+(deftest an-unchecked-native-claim-cannot-establish-an-invalid-size-bound
+ (let [result (oracle/with-oracle
+                {:query (fn [question _]
+                          (oracle/query-answer question {:phase :query :solver-status :unsat}))}
+                #(linear/prove-bound {:backend :z3} 12 13 1))]
+  (is (= false (:holds result)))
+  (is (not= :checked (get-in result [:arities 0 :linear :certificate :status])))
+  (is (= :proved (get-in result [:arities 0 :linear :native :result :verdict])))
+  (is (= :not-checked (get-in result [:arities 0 :linear :native :result :certificate :status])))
+  (is (= false (:compiler-proof-authority result)))))
+
+(deftest the-controlled-affine-form-helps-both-engines-without-replacing-the-original
+ (doseq [placement [1 2]]
+  (let [question (linear/size-lemma 12 2 8 placement) plan (affine/prepare question)]
+   (is (= :ready (:status plan)))
+   (is (= question (:original plan)))
+   (is (= :checked (:status (preparation/check plan))))
+   (doseq [backend [:z3 :oxiz]]
+    (let [result (preparation/execute {:backend backend} plan)]
+     (is (= (if (= placement 1) :proved :refuted) (:verdict result)))
+     (is (= question (:question result)))
+     (is (= (:execution plan) (get-in result [:execution :answer :question])))
+     (is (= :not-checked (get-in result [:certificate :status])))
+     (when (= placement 2)
+      (is (= :valid (get-in result [:validation :status])))))))))
+
+(deftest malformed-or-empty-size-families-are-refused-explicitly
+ (doseq [args [[0 2 8] [12 -1 8] [12 9 8] [12 2 -1] [12 2 8 -1]]]
+  (is (thrown? (apply linear/size-lemma args))))
+ (is (thrown? (linear/prove-bound 12 8 0)))
+ (is (thrown? (linear/prove-bound :old-ignored-port 12 8 2))))

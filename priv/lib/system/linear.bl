@@ -13,10 +13,10 @@
 ;
 ; ── The property ─────────────────────────────────────────────────────────
 ;
-; LINEARITY: |emit(form)| ≤ k · |form|. It holds iff no compiler constructor
-; places the SAME compiled child node in two positions of the tree it builds.
-; A duplicated child is the ONLY way output can outgrow input super-linearly,
-; because every compile-* function is structurally recursive on the source.
+; A declared size recurrence can establish |emit(form)| ≤ k · |form| when
+; child placement is affine, local overhead is bounded and recursive calls
+; decrease the stated source measure. Structural recursion alone does not
+; establish those premises. Macro expansion can also change the input measure.
 ;
 ; Three tiers, each a different formal engine, each checked by a suite:
 ;
@@ -28,10 +28,10 @@
 ;      run as a query over facts, so a future `(a/lett self outer inner)`
 ;      with `inner` twice is a failing fact, not a surprise.
 ;
-;   2. SEMANTIC (z3 via system.smt). The size lemma: given affine use, the
-;      per-constructor size recurrence is affine — `size(out) ≤ c + Σ size(in)`
-;      — so by induction on the source `|emit| ≤ k·|src|`. z3 discharges the
-;      arithmetic for every constructor arity the compiler uses.
+;   2. DECLARED ARITHMETIC (portable typed questions). A positive bound has
+;      a freshly checked certificate. Double placement has a constructed,
+;      replayed counterexample. Optional native comparisons use the same
+;      checked preparation plan on Z3 or OxiZ; their labels stay unchecked.
 ;
 ;   3. DYNAMIC (system.incr hashes, run on the emitted IR). The sentinel: a
 ;      post-compile pass hashes every subtree (alpha-normalized, :ann-free)
@@ -42,18 +42,18 @@
 ;      surfaces and what the boot build asserts over the whole toolchain.
 ;
 ; Tier 1 checks a recognized subset of compiler Source (coverage limits below);
-; it is not an unconditional proof of the complete compiler. Tier 2 proves the
-; property implies the bound; tier 3 measures the artefact. A regression in
+; it is not an unconditional proof of the complete compiler. Tier 2 checks the
+; declared recurrence under its premises; tier 3 measures the artefact. A regression in
 ; any of the three fails a test with the offending function named.
 
 (ns system.linear
-  (:require [oracle]
+  (:require [formal.term :as term] [formal.query :as query] [formal.proof :as proof]
+            [formal.witness :as witness] [formal.affine :as affine] [formal.preparation :as preparation]
             [system.ir :as ir]
             [system.emission :as emission]
             [system.incr :as incr]
             [system.analyze :as analyze]
             [compiler :as c]
-            [z3]
             [typed]))
 
 ; ════════════════════════════════════════════════════════════════════════
@@ -451,54 +451,90 @@
             (refuse-vacuity! (analyze/fn-bodies compiler-src)))))
 
 ; ════════════════════════════════════════════════════════════════════════
-; TIER 2 — the size lemma, discharged by z3
+; TIER 2 — the declared constructor-size recurrence
 ; ════════════════════════════════════════════════════════════════════════
 ;
-; With affine use, a constructor of arity n produces 1 + Σ|child_i| nodes.
-; Induction on the source: if each child satisfies |emit(c)| ≤ k·|c| and
-; the constructor adds a constant overhead ≤ h (the scaffold: self-apply
-; adds 4 nodes, a let adds 1), then |emit(f)| ≤ k·|f| for k ≥ h+1. The
-; lemma z3 proves, ∀ sizes ≥ 0, arity ≤ 8, overhead ≤ 8: with k = 12,
-;   (c1 ≤ k·s1) ∧ … ∧ (cn ≤ k·sn) ∧ (out = h + c1 + … + cn) ∧ (h ≤ 8)
-;   ⟹ out ≤ k·(1 + s1 + … + sn).
-; The negation is unsat. If a constructor ever placed a child TWICE
-; (out = h + 2·c1 + …), the same query is sat — the counter-model is the
-; blowup. So this is also the arithmetic reason tier 1's condition is the
-; right one.
+; This is arithmetic about declared child sizes and bounded local overhead.
+; The compiler's recursive structure, macro expansion measure and complete
+; producer/constructor coverage are separate premises. A refuted duplicated
+; recurrence does not itself prove actual compiler blowup or exponential time.
+
+(defn- size-parameters! [k n h placement]
+ (when-not (and (int? k) (> k 0) (int? n) (<= 0 n 8) (int? h) (<= 0 h)
+                (int? placement) (<= 0 placement))
+  (throw (ex-info "system.linear: positive integer coefficient, arity 0..8, nonnegative integer overhead and placement required" {}))))
+(defn- sum-terms [xs] (reduce term/add (term/int 0) xs))
 
 (defn size-lemma
-  "The SMT-LIB commands (as forms) whose `check-sat` must be unsat for the
-   linearity bound with constant `k`, constructor arity `n`, scaffold
-   overhead ≤ `h`. `dup` (default 1) is how many times child 1 is placed —
-   pass 2 to watch the bound fail as it did before the fix."
-  ([k n h] (size-lemma k n h 1))
-  ([k n h dup]
-   (let [ss (map (fn [i] (symbol (str "s" i))) (range n))
-         cs (map (fn [i] (symbol (str "c" i))) (range n))
-         decl (fn [v] (list 'declare-const v 'Int))
-         nonneg (fn [v] (list 'assert (list '>= v 0)))
-         bounded (map (fn [s c] (list 'assert (list '<= c (list '* k s)))) ss cs)
-         out (apply list '+ 'h (cons (list '* dup (first cs)) (rest cs)))
-         src (apply list '+ 1 ss)]
-     (concat (map decl ss) (map decl cs) [(decl 'h)]
-             (map nonneg ss) (map nonneg cs)
-             [(list 'assert (list '>= 'h 0)) (list 'assert (list '<= 'h h))]
-             bounded
-             ; negate the conclusion (z3/check appends the check-sat)
-             [(list 'assert (list 'not (list '<= out (list '* k src))))]))))
+ "A complete portable question about a DECLARED constructor recurrence.
+  Nonnegative child sizes obey emitted_i <= k * source_i; local overhead is
+  between zero and h. Placement multiplies only the first child, when present.
+  The question preserves the original factored bound and has no compiler authority."
+ ([k n h] (size-lemma k n h 1))
+ ([k n h placement]
+  (size-parameters! k n h placement)
+  (let [sources (mapv #(term/variable (str "linearity/size/" %) term/Int) (range n))
+        emitted (mapv #(term/variable (str "linearity/emitted/" %) term/Int) (range n))
+        overhead (term/variable "linearity/overhead" term/Int)
+        assumptions (vec (concat (mapv #(term/ge % (term/int 0)) sources)
+                           (mapv #(term/ge % (term/int 0)) emitted)
+                           (mapv (fn [source child] (term/le child (term/mul (term/int k) source))) sources emitted)
+                           [(term/ge overhead (term/int 0)) (term/le overhead (term/int h))]))
+        output (term/add overhead (sum-terms (mapv (fn [i child]
+                                                     (term/mul (term/int (if (= i 0) placement 1)) child))
+                                                   (range n) emitted)))
+        bound (term/mul (term/int k) (term/add (term/int 1) (sum-terms sources)))]
+   (query/prove (term/le output bound)
+    {:id :compiler/constructor-size :profile :bl/declared-constructor-size-v1
+     :assumptions assumptions :observe {"output" output "bound" bound}
+     :scope {:mode :unbounded :model :declared-size-recurrence :arity n :coefficient k
+             :overhead-bound h :first-child-placement placement}
+     :origin {:compiler-connection :conditional-not-mechanized
+              :premises [:bounded-local-overhead :declared-recursion-measure :declared-child-placement]}}))))
+
+(defn- sat-question [question counterexample?]
+ (let [assertions (cond-> (:assertions question) counterexample? (conj (:counterexample question)))]
+  (query/validate!
+   (assoc question :mode :sat :claim nil :counterexample nil :assertions assertions
+     :assumptions (mapv #(select-keys % [:label :origin]) assertions)))))
+(defn- constructed [question bindings]
+ (let [made (witness/prepare question bindings)]
+  {:question question :production made
+   :checking (if (= :ready (:status made)) (witness/check-data question (:packet made))
+               {:status :rejected :reason :witness-construction-refused})}))
+(defn- zeros [question]
+ (into {} (mapv (fn [variable] [(:data variable) 0]) (term/variables (query/roots question)))))
+(defn- native-comparison [options question]
+ (when (:backend options)
+  (let [plan (affine/prepare question (select-keys options [:search]))]
+   {:plan plan :result (preparation/execute options plan)})))
 
 (defn prove-bound
-  "Tier 2: for every arity 1..max-arity, z3 shows the bound holds (unsat)
-   with a single placement and FAILS (sat) with a double placement. Returns
-   {:holds bool :arities [{:n :linear :duplicated}]}."
-  [port k h max-arity]
-  (let [rows (into []
-               (map (fn [n]
-                      ; z3/check resets the solver per query — two queries on one
-                      ; port must not see each other's assertions
+ "Check arities 1..max-arity with portable positive certificates, feasible
+  premises and constructed double-placement counterexamples. Optional :backend
+  comparisons never decide :holds. This is not a compiler preservation theorem."
+ ([k h max-arity] (prove-bound {} k h max-arity))
+ ([options k h max-arity]
+  (when-not (and (map? options) (int? max-arity) (<= 1 max-arity 8))
+   (throw (ex-info "system.linear: an options map and nonempty arity range 1..8 required" {})))
+  (size-parameters! k max-arity h 1)
+  (let [rows (mapv (fn [n]
+                     (let [single (size-lemma k n h) doubled (size-lemma k n h 2)
+                           feasible-question (sat-question single false)
+                           counterexample-question (sat-question doubled true)
+                           feasible (constructed feasible-question (zeros feasible-question))
+                           counterexample (constructed counterexample-question
+                                            (assoc (zeros counterexample-question)
+                                              "linearity/size/0" 2 "linearity/emitted/0" (* 2 k)))]
                       {:n n
-                       :linear (oracle/ask (oracle/obligation :size-lemma (size-lemma k n h 1)))
-                       :duplicated (oracle/ask (oracle/obligation :size-lemma (size-lemma k n h 2)))})
-                    (range 1 (inc max-arity))))]
-    {:holds (every? (fn [r] (and (oracle/proven? (:linear r)) (oracle/refuted? (:duplicated r)))) rows)
-     :arities rows}))
+                       :linear {:question single :certificate (proof/produce single (get options :search {}))
+                                :feasibility feasible :native (native-comparison options single)}
+                       :duplicated {:question doubled :counterexample counterexample
+                                    :native (native-comparison options doubled)}})) (range 1 (inc max-arity)))
+        holds (every? (fn [row]
+                         (and (= :checked (get-in row [:linear :certificate :status]))
+                              (= :checked-data-connection (get-in row [:linear :feasibility :checking :status]))
+                              (= :checked-data-connection (get-in row [:duplicated :counterexample :checking :status])))) rows)]
+   {:holds holds :arities rows :claim-scope :declared-size-recurrence
+    :basis :portable-certificate-and-constructed-counterexample :native-requested (boolean (:backend options))
+    :compiler-connection :conditional-not-mechanized :compiler-proof-authority false})))

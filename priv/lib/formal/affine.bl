@@ -1,0 +1,71 @@
+(ns formal.affine
+ (:require [formal.term :as t] [formal.query :as q] [formal.preparation :as preparation]))
+
+;; An untrusted proposal producer. The independent equality checker, rather
+;; than this collector, establishes each accepted question connection.
+(defn- coefficients [a b factor]
+ (into {} (remove (fn [[_ n]] (= n 0))
+   (reduce (fn [out [name n]] (update out name (fn [old] (+ (or old 0) (* factor n))))) a b))))
+(defn- add [a b factor]
+ {:constant (+ (:constant a) (* factor (:constant b)))
+  :coefficients (coefficients (:coefficients a) (:coefficients b) factor)})
+(defn- scale [a factor]
+ {:constant (* factor (:constant a)) :coefficients (coefficients {} (:coefficients a) factor)})
+(defn- collect [term]
+ (when-not (= t/Int (t/sort-of term)) (throw (ex-info "formal.affine: an Int expression is required" {})))
+ (let [[a b] (:args term)]
+  (case (:op term)
+   :int {:constant (:data term) :coefficients {}}
+   :var {:constant 0 :coefficients {(:data term) 1}}
+   :add (add (collect a) (collect b) 1)
+   :sub (add (collect a) (collect b) -1)
+   :neg (scale (collect a) -1)
+   :mul (let [left (collect a) right (collect b)]
+          (cond (empty? (:coefficients left)) (scale right (:constant left))
+                (empty? (:coefficients right)) (scale left (:constant right))
+                :else (throw (ex-info "formal.affine: nonlinear multiplication" {}))))
+   (throw (ex-info "formal.affine: operation outside the affine Int fragment" {:operation (:op term)})))))
+
+(defn- emitted [form]
+ (let [terms (mapv (fn [[name coefficient]]
+                     (let [x (t/variable name t/Int)]
+                      (if (= coefficient 1) x (t/mul (t/int coefficient) x))))
+                   (sort-by first (:coefficients form)))
+       terms (if (or (not= 0 (:constant form)) (empty? terms)) (into [(t/int (:constant form))] terms) terms)]
+  (reduce t/add (first terms) (rest terms))))
+
+(declare normalize)
+(defn normalize
+ "Propose a canonical sparse Int sum while preserving Boolean structure.
+  Unsupported operations refuse this first fragment; use prepare for evidence."
+ [term]
+ (case (t/sort-of term)
+  [:int] (emitted (collect term))
+  [:bool]
+   (cond
+    (contains? #{:bool :var} (:op term)) term
+    (contains? #{:not :and :or :implies :xor :ite :eq :le :lt :ge :gt} (:op term))
+     (t/app (:op term) t/Bool (mapv normalize (:args term)) (:data term))
+    :else (throw (ex-info "formal.affine: operation outside the Boolean affine fragment" {:operation (:op term)})))
+  (throw (ex-info "formal.affine: sort outside the Boolean affine fragment" {:sort (t/sort-of term)}))))
+
+(defn prepare
+ "Propose and freshly check an explicit affine execution question. The original
+  question, all metadata and every component proof object remain ordinary data."
+ ([question] (prepare question {}))
+ ([question options]
+  (try
+   (q/validate! question)
+   (when-not (every? (fn [[_ term]] (t/term? term)) (:observe question))
+    (throw (ex-info "formal.affine: plain term observations required" {})))
+   ;; Bound traversal before recursively collecting expressions.
+   (when (> (count (t/walk (q/roots question))) (:terms preparation/limits))
+    (throw (ex-info "formal.affine: term capacity exceeded" {})))
+   (let [execution (update question :assertions (fn [rows] (mapv #(update % :term normalize) rows)))
+         execution (if (contains? question :observe)
+                     (update execution :observe (fn [observations] (when observations (into {} (mapv (fn [[label term]] [label (normalize term)]) observations))))) execution)
+         execution (if (= :prove (:mode question))
+                     (let [claim (normalize (:claim question))]
+                      (-> execution (assoc :claim claim) (assoc-in [:counterexample :term] (t/not claim)))) execution)]
+    (assoc (preparation/propose question (q/validate! execution) options) :producer :bl/affine-int-v1))
+   (catch error {:status :unsupported :original question :reason (ex-message error) :compiler-proof-authority false}))))

@@ -1,0 +1,117 @@
+(ns formal.preparation
+ (:require [formal.term :as t] [formal.query :as q] [formal.identity :as identity]
+           [formal.certificate :as certificate] [formal.proof :as proof]
+           [formal.answer :as answer] [formal.logic :as logic]))
+
+;; Preparation has its own data boundary. Search and execution never establish
+;; equivalence: check reconstructs each equality from the actual two questions.
+(def limits {:sites 128 :terms 512})
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.preparation: " message) {}))))
+(defn- same? [a b] (= (identity/bytes a) (identity/bytes b)))
+
+(defn- sites [question]
+ (q/validate! question)
+ (require! (<= (count (t/walk (q/roots question))) (:terms limits)) "term capacity exceeded")
+ (require! (every? (fn [[_ term]] (t/term? term)) (:observe question))
+           "first preparation profile requires plain term observations")
+ (let [rows (vec (concat
+                   (mapv (fn [i] {:path [:assertions i :term] :term (get-in question [:assertions i :term])})
+                         (range (count (:assertions question))))
+                   (when (= :prove (:mode question)) [{:path [:claim] :term (:claim question)}])
+                   (mapv (fn [[label term]] {:path [:observe label] :term term})
+                         (sort-by (fn [[label _]] (identity/bytes label)) (:observe question)))))]
+  (require! (<= (count rows) (:sites limits)) "site capacity exceeded")
+  (require! (every? #(contains? #{t/Bool t/Int} (t/sort-of (:term %))) rows)
+            "first preparation profile requires Bool or Int roots")
+  rows))
+
+(defn- masked [question rows]
+ ;; Replace precisely the semantic sites, preserving field presence, all other
+ ;; metadata, assertion order/labels/origins and observation keys. A validated
+ ;; counterexample is exactly the negation of its claim, so it is derived.
+ (reduce (fn [out path] (assoc-in out path [:formal/preparation-slot])) question
+   (concat (map :path rows) (when (:counterexample question) [[:counterexample :term]]))))
+
+(defn- pairs [original execution]
+ (let [before (sites original) after (sites execution)]
+  (require! (same? (mapv :path before) (mapv :path after)) "question sites differ")
+  (require! (same? (masked original before) (masked execution after)) "question metadata differs")
+  (mapv (fn [a b]
+           (require! (= (t/sort-of (:term a)) (t/sort-of (:term b))) "site sorts differ")
+           {:path (:path a) :before (:term a) :after (:term b)}) before after)))
+
+(defn- equality-question [a b]
+ (q/prove (t/eq a b) {:id :formal.preparation/equality :profile :bl/query-preparation-equality-v1
+                       :scope {:mode :unbounded}}))
+
+(defn check
+ "Pure fresh checking of a complete question connection. Stored statuses and
+  producer metadata have no authority. This function invokes no search or engine."
+ [plan]
+ (try
+  (require! (and (map? plan) (int? (:formal/preparation plan)) (= 1 (:formal/preparation plan)))
+            "versioned preparation data required")
+  (let [rows (pairs (:original plan) (:execution plan)) proposed (:sites plan)]
+   (require! (and (vector? proposed) (= (count rows) (count proposed))) "one evidence row per actual site required")
+   (let [checked
+          (mapv (fn [row evidence]
+                  (require! (same? (:path row) (:path evidence)) "evidence path differs from actual site")
+                  (case (:kind evidence)
+                   :identical (do (require! (same? (:before row) (:after row)) "identity evidence changes a term")
+                                  {:path (:path row) :status :checked :kind :identical})
+                   :certificate
+                    (let [problem (equality-question (:before row) (:after row))
+                          result (certificate/check problem (:object evidence))]
+                     (require! (= :checked (:status result)) "component equality certificate rejected")
+                     {:path (:path row) :status :checked :kind :certificate :question problem :checking result})
+                   (throw (ex-info "formal.preparation: unknown evidence kind" {})))) rows proposed)]
+    {:status :checked :original (identity/hash (:original plan)) :execution (identity/hash (:execution plan))
+     :rows checked :scope :these-complete-question-forms :compiler-proof-authority false}))
+  (catch error {:status :rejected :reason (ex-message error) :compiler-proof-authority false})))
+
+(defn propose
+ "Untrusted bounded production of component equality objects. A failed search
+  remains visible in the proposal and cannot pass fresh check."
+ ([original execution] (propose original execution {}))
+ ([original execution options]
+  (let [rows (pairs original execution)
+        evidence (mapv (fn [row]
+                         (if (same? (:before row) (:after row)) {:path (:path row) :kind :identical}
+                          (let [produced (proof/produce (equality-question (:before row) (:after row)) (get options :search {}))]
+                           {:path (:path row) :kind :certificate :object (:certificate produced)
+                            :production (select-keys produced [:status :reason :search])}))) rows)
+        plan {:formal/preparation 1 :status :proposed :original original :execution execution :sites evidence}
+        checking (check plan)]
+   (assoc plan :status (if (= :checked (:status checking)) :ready :unknown) :checking checking))))
+
+(defn accept
+ "Pure transport across a freshly checked connection. Bind the actual executed
+  answer first, then independently replay assignments and decode the ORIGINAL
+  observations. A native absence label remains unchecked."
+ [plan executed]
+ (try
+  (let [connection (check plan)]
+   (require! (= :checked (:status connection)) "preparation connection rejected")
+   (require! (and (map? executed) (same? (:execution plan) (:question executed))) "answer belongs to another execution question")
+   (let [transported (answer/check (:original plan) (answer/bind (:original plan) executed))]
+    (cond-> (assoc transported
+      :preparation connection :execution {:question (:execution plan) :answer executed}
+      :certificate {:status :not-checked :kind :prepared-execution-claim}
+      :transport {:kind :checked-question-equivalence :observations :independent-original-replay}
+      :compiler-proof-authority false)
+      (:oracle-effect executed) (assoc :oracle-effect (:oracle-effect executed)))))
+  (catch error {:verdict :error :phase :frontend :solver-status :not-run :error (ex-message error)
+                :question (:original plan) :certificate {:status :not-checked :kind :preparation-refusal}
+                :compiler-proof-authority false})))
+
+(defn execute
+ "Own a fresh session for the execution question. This API does not rewrite or
+  borrow an existing native context; the ordinary query effect stays visible."
+ [options plan]
+ (let [connection (check plan)]
+  (if (= :checked (:status connection))
+   (accept plan (logic/run options (:execution plan)))
+   {:verdict :error :phase :frontend :solver-status :not-run :question (:original plan)
+    :error "formal.preparation: preparation connection rejected" :preparation connection
+    :certificate {:status :not-checked :kind :preparation-refusal} :compiler-proof-authority false})))
