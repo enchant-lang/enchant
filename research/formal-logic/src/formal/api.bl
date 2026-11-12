@@ -6,7 +6,7 @@
            [formal.proof :as proof] [formal.certificate :as certificate] [formal.check :as check]
            [formal.contract :as contracts] [formal.loop :as loops]
            [formal.translation :as translations] [formal.optimize :as optimizer]
-           [formal.result :as result] [formal.protocol :as protocols]
+           [formal.result :as result] [formal.protocol :as protocols] [formal.migration :as migrations]
            [formal.protocol-run :as protocol-run] [formal.protocol-trace :as protocol-traces]
            [formal.elaborate :as elaborate] [formal.core :as core]
            [formal.source-protocol :as source-protocols] [formal.runtime-protocol :as runtime-protocols]
@@ -74,6 +74,7 @@
         execution (if (:backend options) :native :portable)
         raw (case type
               :query (check/raw-query options subject)
+              :migration (migrations/verify options subject)
               :contract (contracts/verify options subject)
               :loop (loops/verify options subject)
               :translation (translations/verify options subject)
@@ -119,6 +120,11 @@
  ([subject options] (obligations/produce subject options)))
 (defn check-obligation-proof-data [subject bundle] (obligations/check-data subject bundle))
 (defn program-contract [specification] (contracts/define specification))
+(defn message-migration [specification] (migrations/define specification))
+(defn check-migration-proof [definition object] (migrations/check-proof definition object))
+(defn check-migration-admission [definition object] (migrations/check-admission definition object))
+(defn check-migration-counterexample [definition object] (migrations/check-counterexample definition object))
+(defn replay-migration-source [definition values] (migrations/replay-source definition values))
 (defn source-function [source parameters] (elaborate/prepare-function source parameters))
 (defn check-elaboration [object] (elaboration/check object))
 (defn check-specialization [object] (specialization/check object))
@@ -231,7 +237,8 @@
    :variables (mapv (fn [term] {:name (:data term) :sort (:sort term)}) (t/variables roots))}))
 (defn describe [subject]
  (let [type (result/kind subject)
-       prepared (when (contains? obligations/model-kinds type) (obligations/prepare-subject subject))]
+       prepared (if (= :migration type) (migrations/prepare subject)
+                  (when (contains? obligations/model-kinds type) (obligations/prepare-subject subject)))]
   (cond
    (= :query type) (assoc (describe-question subject) :subject-kind type :identity (result/subject-id subject)
                    :source-connection :not-applicable-direct-term-query :model-interpretation (connection/direct-terms))
@@ -257,7 +264,11 @@
  ([] (construction-capabilities {}))
  ([options]
   (let [base {:qualification :requires-retained-per-fragment-evidence
-              :subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace]
+              :subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace :migration]
+              :message-migration {:profile migrations/profile :parameters :exact-bool-int
+                                  :relations [:preserves-admission :equivalent]
+                                  :verified :checked-certificate-and-admitted-input
+                                  :delivery-authority false :runtime-function-correspondence :requires-stored-source}
               :identity-profile identity/profile
               :core-profiles [core/profile core/record-profile]
               :trace-profiles [protocol-traces/profile protocol-traces/source-profile protocol-traces/context-profile]
