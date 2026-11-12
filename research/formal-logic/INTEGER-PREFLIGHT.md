@@ -46,6 +46,12 @@ limit. It must not become false, UNSAT, a program exception, or an original
 counterexample. Assertion replay and display reconstruction need distinct
 completion statuses so a partially reconstructed display cannot certify a point.
 
+Keep these execution settings separate from the proposition's semantics. An
+integer bit budget does not turn mathematical Int into bounded arithmetic, and
+a solver deadline is not an assumption of the theorem. The native answer may
+still report SAT while an independently limited replay stays incomplete. Record
+both facts rather than converting one phase's limit into another phase's verdict.
+
 Demand is part of this integration. An untaken branch remains syntactically
 admitted but spends no concrete evaluation budget. Merely forecasting both
 branches eagerly would lose the current language behavior. Unknown operations
