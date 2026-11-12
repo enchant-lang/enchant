@@ -1,0 +1,114 @@
+(ns formal.observation-test
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.question-graph :as qg] [formal.evaluate :as ev] [formal.point :as point]
+           [formal.data-graph :as graph] [oracle]))
+
+(defn- decode [descriptor assignments]
+ (v/decode descriptor (fn [term] (ev/value term assignments))))
+
+(deftest list-observations-resolve-leaves-and-retain-container-kinds
+ (let [x (t/variable "observation.x" t/Int) flag (t/variable "observation.flag" t/Bool)
+       descriptor (v/make {:list (list x nil false (v/make (list flag x) {}))
+                            :vector [(list x) x]}
+                         {:domain {:kind :product :profile :observation/list-product-v1}})
+       actual (decode descriptor {"observation.x" 7 "observation.flag" false})
+       data (:value actual)]
+  (is (= {:list (list 7 nil false (list false 7)) :vector [(list 7) 7]} data))
+  (is (list? (:list data)))
+  (is (list? (nth (:list data) 3)))
+  (is (vector? (:vector data)))
+  (is (list? (first (:vector data))))
+  (is (= true (:defined actual)))
+  (is (= true (:within actual)))
+  (is (= (:domain descriptor) (:domain actual)))
+  (is (= (:scope descriptor) (:scope actual)))
+  (is (= #{{:op :var :name "observation.x"} {:op :var :name "observation.flag"}}
+         (set (map (fn [term] {:op (:op term) :name (:data term)})
+                    (filter (fn [term] (= :var (:op term))) (v/terms descriptor))))))))
+
+(deftest unavailable-values-inside-lists-stay-explicit
+ (let [x (t/variable "observation.missing" t/Int)
+       result (:value (decode (v/make (list x nil false) {}) {}))]
+  (is (list? result))
+  (is (= (ev/unavailable {:unassigned "observation.missing"}) (first result)))
+  (is (nil? (second result)))
+  (is (= false (nth result 2)))))
+
+(deftest unsuccessful-and-outside-domain-values-do-not-demand-list-payloads
+ (let [x (t/variable "observation.unused" t/Int)
+       cases [[{:defined (t/bool false)} :undefined-result]
+              [{:within (t/bool false)} :outside-model]]]
+  (doseq [[opts reason] cases]
+   (let [calls (atom [])
+         result (v/decode (v/make (list x) opts)
+                  (fn [term]
+                   (swap! calls conj (:op term))
+                   (when (= :var (:op term)) (throw :inactive-payload-was-demanded))
+                   (ev/value term {})))]
+    (is (= {:unavailable reason} (:value result)))
+    (is (= [:bool :bool] @calls))))))
+
+(deftest symbolic-list-equality-follows-ordered-sequence-value-equality
+ (let [x (t/variable "observation.equal.x" t/Int) y (t/variable "observation.equal.y" t/Int)
+       a (v/make (list x false nil) {})
+       shapes [(v/make (list y false nil) {}) (v/make [y false nil] {})]]
+  (is (= (list 3 false nil) [3 false nil]))
+  (doseq [b shapes]
+   (let [expression (v/term (v/equal a b)) reverse (v/term (v/equal b a))]
+    (is (= true (ev/value expression {"observation.equal.x" 3 "observation.equal.y" 3})))
+    (is (= false (ev/value expression {"observation.equal.x" 3 "observation.equal.y" 4})))
+    (is (= true (ev/value reverse {"observation.equal.x" 3 "observation.equal.y" 3})))))
+  (is (= false (ev/value (v/term (v/equal a (v/make (list x) {}))) {"observation.equal.x" 3})))))
+
+(deftest list-branches-choose-symbolically-without-changing-the-result-kind
+ (let [condition (t/variable "observation.branch" t/Bool) x (t/variable "observation.item" t/Int)
+       selected (v/choose condition (v/make (list x (t/bool false)) {})
+                                     (v/make (list (t/int 9) (t/bool true)) {}))]
+  (doseq [[branch expected] [[true (list 7 false)] [false (list 9 true)]]]
+   (let [result (:value (decode selected {"observation.branch" branch "observation.item" 7}))]
+    (is (list? result))
+    (is (= expected result))))
+  (is (thrown? (v/choose condition (v/make (list x) {}) (v/make (list x x) {}))))))
+
+(deftest query-admission-types-the-counterexample-before-any-export
+ (let [base (q/prove (t/eq (t/int 1) (t/int 1)))
+       counter (get-in base [:counterexample :term])
+       forged (assoc-in counter [:args 0 :args 1 :args 0 :data] 1.0)
+       problem (assoc-in base [:counterexample :term] forged)]
+  (is (thrown? (q/validate! problem)))
+  (is (thrown? (qg/prepare problem)))
+  (is (thrown? (qg/from-graph (graph/encode problem))))
+  (is (= :rejected (:status (point/prepare problem {}))))))
+
+(deftest accepted-sequence-aliases-remain-valid-after-complete-root-typing
+ (let [base (q/prove (t/eq (t/variable "observation.alias" t/Int) (t/int 7)))
+       alias (assoc (:claim base) :args (to-list (:args (:claim base))))
+       problem (assoc-in base [:counterexample :term] (t/not alias))]
+  (is (= problem (q/validate! problem)))
+  (is (= :prove (get-in (qg/open! (qg/prepare problem)) [:view :mode])))))
+
+(deftest ordinary-and-graph-points-reconstruct-list-witnesses-without-a-query
+ (let [x (t/variable "observation.point" t/Int)
+       question (q/sat {:observe {"list" (v/make (list x nil false) {})}})
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn []
+    (let [raw (point/prepare question {"observation.point" 7})
+          context (qg/prepare question) shared (point/prepare-context context {"observation.point" 7})
+          a (point/check question (:packet raw)) b (point/check-context context (:packet shared))]
+     (is (= :ready (:status raw)))
+     (is (= :ready (:status shared)))
+     (is (= :checked-data-connection (:status a)))
+     (is (= :checked-data-connection (:status b)))
+     (is (= (list 7 nil false) (get-in a [:observations "list" :value])))
+     (is (= (list 7 nil false) (get-in b [:observations "list" :value])))
+     (is (list? (get-in b [:observations "list" :value]))))))
+  (is (= 0 @calls))))
+
+(deftest ambiguous-bare-observations-are-refused-while-explicit-data-stays-available
+ (is (= :sat (:mode (q/validate! (assoc (q/sat {}) :observe nil)))))
+ (doseq [item [nil false 7 {"x" (t/int 1)} [(t/int 1)] (list (t/int 1))]]
+  (is (thrown? (q/validate! (q/sat {:observe {"ambiguous" item}})))))
+ (doseq [item [nil false 7 {"x" (t/int 1)} [(t/int 1)] (list (t/int 1))]]
+  (let [descriptor (v/make item {}) question (q/sat {:observe {"explicit" descriptor}})]
+   (is (= question (q/validate! question))))))
