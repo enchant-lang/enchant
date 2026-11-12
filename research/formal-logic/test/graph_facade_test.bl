@@ -1,0 +1,31 @@
+(ns formal.graph-facade-test
+ (:require [formal.api :as formal] [formal.query :as q] [formal.term :as t]
+           [formal.data-graph :as graph] [formal.question-graph :as qg] [formal.result :as result]))
+
+(deftest graph-subjects-share-check-compare-description-with-explicit-metadata
+ (let [x (t/variable "facade.graph.x" t/Int)
+       original (q/prove (t/ge x (t/int 0)) {:assumptions [(t/eq x (t/int 7))] :scope {:mode :exact}})
+       subject (formal/graph-question original)
+       saved (formal/saved-graph-question (:graph subject))
+       description (formal/describe saved)
+       pair (formal/compare saved)]
+  (is (= :query-graph (:subject-kind description)))
+  (is (= (qg/reference saved) (:identity description)))
+  (is (= :graph-data (:metadata-availability description)))
+  (is (= (:scope original) (graph/decode! (:scope-graph description))))
+  (is (= (:scope original) (graph/decode! (formal/question-field-graph saved :scope))))
+  (is (not (contains? description :profile)))
+  (is (= :unsupported (:status (formal/check saved))))
+  (is (= :graph-proof-search-not-admitted (:reason (formal/check saved))))
+  (is (= true (:status-agreement pair)))
+  (is (= false (:disagreement pair)))
+  (doseq [engine [:z3 :oxiz]]
+   (let [answer (formal/check {:backend engine} saved) compared (get-in pair [:results engine])]
+    (is (= :proved (:verdict answer)))
+    (is (= :query-graph (:subject-kind answer)))
+    (is (= :entails (get-in compared [:evidence :claim :verdict])))
+    (is (= :not-checked (get-in answer [:evidence :certificate :status])))
+    (is (= false (get-in answer [:evidence :authority :compiler])))
+    (is (= (result/subject-id saved) (get-in answer [:evidence :subject :identity])))))
+  (is (= :query-graph (result/kind saved)))
+  (is (= :unsupported (result/kind (assoc saved :formal/query 1))))))

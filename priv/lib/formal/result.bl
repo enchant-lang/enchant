@@ -1,8 +1,9 @@
-(ns formal.result (:require [formal.identity :as identity] [formal.connection :as connection]))
+(ns formal.result (:require [formal.identity :as identity] [formal.connection :as connection]
+           [formal.question-graph :as question-graph] [formal.data-graph :as graph] [formal.answer :as answer]))
 
 ;; An evidence projection, not a new checker. Raw results remain available and
 ;; no projection can grant compiler authority or complete missing evidence.
-(def tags {:formal/query :query :formal/migration :migration :formal/contract :contract :formal/loop :loop :formal/translation :translation
+(def tags {:formal/question-graph :query-graph :formal/query :query :formal/migration :migration :formal/contract :contract :formal/loop :loop :formal/translation :translation
            :formal/protocol :protocol :formal/source-protocol :source-protocol :formal/protocol-trace :protocol-trace})
 (defn kind [subject]
  (let [present (if (map? subject) (vec (filter #(contains? subject %) (keys tags))) [])]
@@ -10,9 +11,10 @@
    (get tags (first present)) :unsupported)))
 (defn subject-id [subject]
  (if-not (map? subject) nil
-  (if (= :query (kind subject))
-  (identity/hash [:formal/query-identity subject])
-  (:identity subject))))
+  (case (kind subject)
+   :query (identity/hash [:formal/query-identity subject])
+   :query-graph (question-graph/reference subject)
+   (:identity subject))))
 (defn- portable [produced checking object]
  {:kind :portable-term :status (if checking (:status checking) :not-established)
   :production-status (:status produced) :rules (:rules checking)
@@ -136,3 +138,36 @@
    :certificate-statuses {:z3 (get-in reference [:evidence :certificate :status])
                           :oxiz (get-in candidate [:evidence :certificate :status])}
    :promotion :disabled}))
+
+(defn attach-graph
+ "Project the common evidence envelope for a graph question. Metadata stays
+  explicit graph data; a format profile is never substituted for the original
+  statement profile. No portable proof migration is inferred."
+ [subject raw execution]
+ (let [opened (question-graph/open! subject)
+       _ (when (= 2 (:formal/query-reply raw)) (answer/assert-bound-graph! subject raw))
+       status (or (:verdict raw) (:status raw))
+       verdict (get {:checked :entails :proved :entails :uncertified :entails} status status)
+       cert (if (= :native execution) (get raw :certificate {:status :not-checked :kind :solver-answer})
+                {:kind :none :status :not-established})
+       feasibility (cond (= :vacuous status) :backend-inconsistent (= :sat status) :replayed-witness
+                         (= :sat (get-in raw [:preflight :status])) :backend-sat :else :not-established)
+       native (when (= :native execution)
+                [(assoc (select-keys raw [:solver-status :verdict :phase :identity :certificate :validation :model-status
+                                           :witness-provenance :observation-basis :oracle-effect])
+                   :id :query :preflight-status (get-in raw [:preflight :status]))])]
+  (assoc raw :subject-kind :query-graph
+   :evidence {:formal/evidence 1 :subject {:kind :query-graph :identity (:reference opened)}
+              :claim {:verdict verdict :reported-status status :metadata-availability :graph-data
+                      :scope-graph (question-graph/field-graph subject :scope)
+                      :profile-graph (question-graph/field-graph subject :profile)
+                      :relation-graph (question-graph/field-graph subject :relation)
+                      :basis (cond (contains? #{:proved :uncertified} status)
+                                    (if (= :handler (get-in raw [:oracle-effect :kind])) :effect-handler-claim :solver-verdict)
+                                   (contains? #{:sat :refuted} status) :independent-term-replay
+                                   :else :not-established)}
+              :certificate cert :assumptions {:kind :graph-statement :assertions-graph (question-graph/field-graph subject :assertions)}
+              :feasibility {:status feasibility}
+              :connection {:source :not-applicable-direct-term-query :model-interpretation (connection/direct-terms)
+                           :identity-profile graph/profile :implementation-soundness :not-mechanically-proved}
+              :native (vec native) :authority {:compiler false :promotion :disabled}})))

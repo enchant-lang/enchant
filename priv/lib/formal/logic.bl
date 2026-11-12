@@ -1,6 +1,8 @@
 (ns formal.logic
  (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
-           [formal.backend :as backend] [formal.evaluate :as replay] [oracle]))
+           [formal.backend :as backend] [formal.evaluate :as replay] [oracle]
+           [formal.question-graph :as question-graph] [formal.data-graph :as graph]
+           [formal.answer :as answer] [formal.identity :as identity]))
 
 (defn- observations [problem]
  (let [variables (t/variables (q/roots problem))
@@ -53,7 +55,8 @@
 
 (defn- solve-native-in
  "Execute a complete question in its native context."
- [session problem context]
+ ([session problem context] (solve-native-in session problem context nil))
+ ([session problem context graph-cache-key]
   (let [rows (observations problem)
         background (:assertions problem)
         preflight (when (and (= :prove (:mode problem)) (not= :allow (:vacuity problem)))
@@ -81,9 +84,9 @@
                     :else :error)]
      (merge (base-result problem reply) decoded
        {:verdict verdict :validation validation :phase :query
-        :cache-key (q/cache-key problem (:identity session) {:solver-ms (:solver-ms session)} :model-and-core)
+        :cache-key (or graph-cache-key (q/cache-key problem (:identity session) {:solver-ms (:solver-ms session)} :model-and-core))
         :nodes-imported (get-in reply [:stats :nodes])
-        :preflight (when preflight (select-keys preflight [:status :stats :wall-us]))})))))
+        :preflight (when preflight (select-keys preflight [:status :stats :wall-us]))}))))))
 
 (defn with-session
  "Run questions through one owned context. An installed oracle handler gets a
@@ -206,6 +209,90 @@
     :disagreement (and (decisive? z3) (decisive? oxiz) (not= (:solver-status z3) (:solver-status oxiz)))
     :candidate-replayed (= :valid (get-in oxiz [:validation :status]))
     :promotion :disabled})))
+
+(defn- graph-error
+ ([context error] (graph-error context error {:scope :provided-fallback :status :not-invoked}))
+ ([context error execution]
+  (let [invoked? (not= :not-invoked (:status execution))
+        raw {:trusted false :compiler-proof-authority false :verdict :error
+             :phase (if invoked? :query :frontend) :solver-status (if invoked? :error :not-run)
+             :error (ex-message error)}]
+   (try (assoc (answer/bind-graph context raw) :execution execution)
+        (catch _ (assoc raw :question-graph context :binding :not-established :execution execution))))))
+(defn- retained-graph [context snapshot]
+ (let [persistent (:assertions snapshot)]
+  (if (empty? persistent) context
+   (let [retained (mapv (fn [i] (let [a (nth persistent i)]
+                                  (assoc a :label (str "context/" i "/" (:label a))))) (range (count persistent)))
+         domains (vec (distinct (keep #(get-in % [:origin :formal/retained-domain]) retained)))
+         assertions (graph/concat-vectors [(graph/encode retained) (question-graph/field-graph context :assertions)])
+         old-data (question-graph/field-graph context :assumptions)
+         old-assumptions (if (or (nil? old-data) (= ["nil" nil] (nth (:nodes old-data) (:root old-data))))
+                           (graph/encode []) old-data)
+         assumptions (graph/concat-vectors
+                      [(graph/encode (mapv #(select-keys % [:label :origin]) retained)) old-assumptions])
+         patches {:assertions assertions :assumptions assumptions
+                  :context (graph/encode {:generation (:generation snapshot) :assertions (mapv :label retained)
+                                           :digest (t/digest (mapv :term retained))})}
+         patches (if (empty? domains) patches
+                  (assoc patches
+                   :scope (graph/encode
+                           (v/join-scope (mapv #(v/make (t/bool true) {:scope %})
+                                           (cons (question-graph/field-data! context :scope) (map :scope domains)))))
+                   :profiles (graph/encode (vec (distinct (concat (question-graph/field-data! context :profiles)
+                                                                  (mapcat :profiles domains)))))))]
+    (question-graph/patch context patches)))))
+(defn solve-graph-in
+ "Execute a graph-backed question in a live owned context. Retained data is
+  composed into the original graph; private native owner handles never enter it."
+ [session context]
+ (try
+  (live! session)
+  (question-graph/open! context)
+  (let [snapshot (snapshot! session) effective (retained-graph context snapshot)
+        opened (question-graph/open! effective) view (:view opened)
+        execution (atom {:scope :provided-fallback :status :not-invoked})]
+   (try
+    (oracle/ask-query-graph effective
+     (fn []
+      (live! session)
+      (when-not (= snapshot (snapshot! session))
+       (throw (ex-info "formal.logic: question context changed before fallback execution" {})))
+      (reset! execution {:scope :provided-fallback :status :attempted})
+      (let [solve (fn [native guard]
+                    (let [cache (identity/hash [:formal/graph-question-cache (:reference opened) (:identity native)
+                                                {:solver-ms (:solver-ms native)} :model-and-core])]
+                     (solve-native-in native view guard cache)))
+            result (if (= 1 (:formal/logical-session session))
+                     (backend/with-session (:options session) (fn [native] (solve native (backend/context native))))
+                     (solve session snapshot))]
+       (reset! execution {:scope :provided-fallback :status :returned :reported-answer result})
+       (live! session)
+       (when-not (if (= 1 (:formal/logical-session session))
+                   (= snapshot (snapshot! session)) (backend/context-matches? session snapshot))
+        (throw (ex-info "formal.logic: question context changed during fallback execution" {})))
+       result)))
+    (catch error (graph-error effective error @execution))))
+  (catch error (graph-error context error))))
+(defn run-graph
+ "Ask either backend the same portable graph question. This explicitly uses
+  reply version 2 and the :query-graph effect, preserving legacy query paths."
+ [opts context]
+ (try
+  (question-graph/open! context)
+  (with-session opts (fn [session] (solve-graph-in session context)))
+  (catch error (graph-error context error))))
+(defn compare-graph
+ ([context] (compare-graph context {}))
+ ([context opts]
+  (let [opened (question-graph/open! context) z3 (run-graph (assoc opts :backend :z3) context)
+        oxiz (run-graph (assoc opts :backend :oxiz) context)
+        decisive? (fn [r] (contains? #{:sat :unsat} (:solver-status r)))]
+   {:question-graph context :question-reference (:reference opened)
+    :reference-engine :z3 :authority :none :compiler-proof-authority false :decision z3 :candidate oxiz
+    :status-agreement (and (decisive? z3) (decisive? oxiz) (= (:solver-status z3) (:solver-status oxiz)))
+    :disagreement (and (decisive? z3) (decisive? oxiz) (not= (:solver-status z3) (:solver-status oxiz)))
+    :candidate-replayed (= :valid (get-in oxiz [:validation :status])) :promotion :disabled})))
 
 (defn enumerate-projection
  "Enumerate scalar observation tuples; completeness means UNSAT after all

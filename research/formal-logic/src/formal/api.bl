@@ -1,7 +1,7 @@
 (ns formal.api
  (:require [formal.term :as t] [formal.value :as v] [formal.data :as data]
            [formal.collections :as collections] [formal.numeric :as numeric]
-           [formal.relation :as relation] [formal.query :as query]
+           [formal.relation :as relation] [formal.query :as query] [formal.question-graph :as question-graph]
            [formal.logic :as logic] [formal.backend :as backend]
            [formal.proof :as proof] [formal.certificate :as certificate] [formal.check :as check]
            [formal.contract :as contracts] [formal.loop :as loops]
@@ -74,6 +74,7 @@
         execution (if (:backend options) :native :portable)
         raw (case type
               :query (check/raw-query options subject)
+              :query-graph (check/raw-query options subject)
               :migration (migrations/verify options subject)
               :contract (contracts/verify options subject)
               :loop (loops/verify options subject)
@@ -82,7 +83,10 @@
               :source-protocol (source-protocols/verify options subject)
               :protocol-trace (protocol-traces/verify options subject)
               {:status :unsupported :reason :one-supported-formal-subject-tag-required})]
-   (result/attach subject raw execution))))
+   (if (= :query-graph type) (result/attach-graph subject raw execution) (result/attach subject raw execution)))))
+(defn graph-question [question] (question-graph/prepare question))
+(defn saved-graph-question [data] (question-graph/from-graph data))
+(defn question-field-graph [context field] (question-graph/field-graph context field))
 (defn certify
  "Produce and independently check a certificate for the supported fragment.
   Unlike check, this path needs no native solver. Failure stays unknown or
@@ -221,13 +225,20 @@
 (defn compare
  ([subject] (compare subject {}))
  ([subject options]
-  (if (= :query (result/kind subject))
-   (let [pair (logic/compare subject options)
-         a (result/attach subject (:decision pair) :native)
-         b (result/attach subject (:candidate pair) :native)]
-    (merge pair (result/comparison subject a b)))
-   (result/comparison subject (check (assoc options :backend :z3) subject)
-                              (check (assoc options :backend :oxiz) subject)))))
+  (let [type (result/kind subject)]
+   (cond
+    (= :query type)
+     (let [pair (logic/compare subject options)
+           a (result/attach subject (:decision pair) :native)
+           b (result/attach subject (:candidate pair) :native)]
+      (merge pair (result/comparison subject a b)))
+    (= :query-graph type)
+     (let [pair (logic/compare-graph subject options)
+           a (result/attach-graph subject (:decision pair) :native)
+           b (result/attach-graph subject (:candidate pair) :native)]
+      (merge pair (result/comparison subject a b)))
+    :else (result/comparison subject (check (assoc options :backend :z3) subject)
+                                     (check (assoc options :backend :oxiz) subject))))))
 (defn- describe-question [question]
  (let [roots (query/roots question) nodes (t/walk roots)]
   {:id (:id question) :mode (:mode question) :scope (:scope question)
@@ -240,6 +251,12 @@
        prepared (if (= :migration type) (migrations/prepare subject)
                   (when (contains? obligations/model-kinds type) (obligations/prepare-subject subject)))]
   (cond
+   (= :query-graph type)
+    (let [opened (question-graph/open! subject)]
+     (merge (dissoc (describe-question (:view opened)) :id :scope :profile :profiles :assumptions)
+      {:subject-kind type :identity (:reference opened) :metadata-availability :graph-data
+       :scope-graph (question-graph/field-graph subject :scope) :profile-graph (question-graph/field-graph subject :profile)
+       :source-connection :not-applicable-direct-term-query :model-interpretation (connection/direct-terms)}))
    (= :query type) (assoc (describe-question subject) :subject-kind type :identity (result/subject-id subject)
                    :source-connection :not-applicable-direct-term-query :model-interpretation (connection/direct-terms))
    (= :ready (:status prepared))
@@ -264,12 +281,14 @@
  ([] (construction-capabilities {}))
  ([options]
   (let [base {:qualification :requires-retained-per-fragment-evidence
-              :subjects [:query :contract :loop :translation :protocol :source-protocol :protocol-trace :migration]
+              :subjects [:query :query-graph :contract :loop :translation :protocol :source-protocol :protocol-trace :migration]
               :message-migration {:profile migrations/profile :parameters :exact-bool-int
                                   :relations [:preserves-admission :equivalent]
                                   :verified :checked-certificate-and-admitted-input
                                   :delivery-authority false :runtime-function-correspondence :requires-stored-source}
               :identity-profile identity/profile
+              :graph-questions {:profile question-graph/profile :identity-profile :bl/public-data-graph-v1
+                                :effect :query-graph :native-reply-version 2 :portable-proof-migration :not-admitted}
               :core-profiles [core/profile core/record-profile]
               :trace-profiles [protocol-traces/profile protocol-traces/source-profile protocol-traces/context-profile]
               :selected-source-context {:profile selected/profile :closure :selected-source-and-lexical-callees

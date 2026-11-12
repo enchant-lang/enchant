@@ -1,6 +1,6 @@
 (ns formal.answer
  (:require [formal.term :as t] [formal.value :as v] [formal.query :as q] [formal.identity :as identity]
-           [formal.evaluate :as replay]))
+           [formal.evaluate :as replay] [formal.data-graph :as graph] [formal.question-graph :as question-graph]))
 
 ;; A pure boundary. Execution custody belongs to logic/oracle; this layer
 ;; checks data and never grants proof authority to an engine or handler.
@@ -94,3 +94,103 @@
        :delegation (if matched? :matched :not-matched)}))
     (assoc (dissoc answer :assignments :witness :witness-provenance)
       :validation {:status :not-applicable} :delegation (if matched? :matched :not-matched))))))
+
+;; Version 2 is opt-in. It carries the complete question graph exactly once;
+;; ordinary header metadata remains inside that graph, not in a lossy echo.
+(def graph-profile :bl/graph-query-reply-v1)
+(def ^:private graph-certificate {:status :not-checked :kind :graph-bound-answer})
+(def ^:private graph-fields
+ (set (concat payload-fields [:formal/query-reply :reply-profile :question-graph :question-reference :mode
+        :trusted :certificate :compiler-proof-authority :verdict :validation :delegation
+        :reported-witness :observation-basis :oracle-effect :execution :reported-execution :evidence :subject-kind])))
+(defn- graph-require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.answer: " why) {:kind :graph-query-reply}))))
+(defn- graph-same-data? [a b] (= (graph/bytes (graph/encode a)) (graph/bytes (graph/encode b))))
+(defn- graph-header! [opened response]
+ (graph-require! (and (= :map (rt/kind-kind response))
+                      (int? (:formal/query-reply response)) (= 2 (:formal/query-reply response))
+                      (= graph-profile (:reply-profile response))
+                      (every? #(contains? graph-fields %) (keys response))
+                      (= false (:trusted response)) (= false (:compiler-proof-authority response))
+                      (= (identity/bytes graph-certificate) (identity/bytes (:certificate response)))
+                      (= (:mode (:view opened)) (:mode response))
+                      (= (identity/bytes (:reference opened)) (identity/bytes (:question-reference response))))
+                 "closed graph-bound reply header required")
+ (phase! (:view opened) response)
+ response)
+(defn assert-bound-graph!
+ "Check declared graph format and exact complete-question binding only. This
+  does not validate a model, authenticate execution, or grant proof authority."
+ [context response]
+ (let [opened (question-graph/open! context)]
+  (graph-header! opened response)
+  (graph-require! (= (:canonical-bytes opened) (question-graph/bytes (:question-graph response)))
+                  "reply differs from its complete original graph question") response))
+(defn bind-graph
+ "Construct an unchecked version-2 reply bound to every original public field.
+  Payload data has its own graph capacities. Semantic results are reconstructed
+  by check-graph, not trusted from caller verdict or certificate labels."
+ [context response]
+ (graph-require! (map? response) "response map required")
+ (let [opened (question-graph/open! context) question (:view opened)
+       phase (phase! question response) payload (select-keys response payload-fields)
+       _ (graph/encode payload)]
+  (merge payload
+   {:formal/query-reply 2 :reply-profile graph-profile :question-graph context
+    :question-reference (:reference opened) :mode (:mode question) :phase phase
+    :trusted false :compiler-proof-authority false :certificate graph-certificate
+    :verdict (nonmodel-verdict question phase (:solver-status response))})))
+(defn check-graph
+ "Recheck an explicit graph reply against the complete original question.
+  Only an exactly matching privately supplied actual execution retains native
+  observation provenance. No graph or solver claim becomes a proof."
+ ([context response] (check-graph context response nil))
+ ([context response executed]
+  (assert-bound-graph! context response)
+  (let [question (:view (question-graph/open! context)) answer (cond-> (bind-graph context response)
+                 (contains? response :execution) (assoc :reported-execution (:execution response)))
+        matched? (boolean (and executed
+                      (graph-same-data? (select-keys answer payload-fields)
+                                        (select-keys (bind-graph context executed) payload-fields))))]
+   (if (= :sat (:solver-status answer))
+    (let [assignments (get answer :assignments {})
+          assertions (vec (concat (:assertions question) (when (:counterexample question) [(:counterexample question)])))
+          validation (replay/validate assertions assignments)
+          assignments (if (map? assignments) assignments {})
+          observations (if matched? (select-keys executed [:witness :witness-provenance]) (decoded question assignments))
+          verdict (cond (= :invalid (:status validation)) :invalid-model
+                        (not= :valid (:status validation)) :candidate
+                        (= :prove (:mode question)) :refuted :else :sat)]
+     (merge answer observations
+      {:assignments assignments :validation validation :verdict verdict
+       :observation-basis (if matched? :owned-native-fallback :independent-replay)
+       :reported-witness (when (contains? response :witness) (:witness response))
+       :delegation (if matched? :matched :not-matched)}))
+    (assoc (dissoc answer :assignments :witness :witness-provenance)
+     :validation {:status :not-applicable} :delegation (if matched? :matched :not-matched))))))
+(defn assert-graph-body!
+ "Validate a stored reply body before attaching its external question graph.
+  Only binding/status headers are decoded; unrelated reported data stays in
+  its canonical graph until explicitly materialized. No model is replayed."
+ [context body]
+ (graph/check! body)
+ (let [rows (:nodes body) [kind entries] (nth rows (:root body))
+       names (set (map #(erlang/atom_to_binary % :utf8) (disj graph-fields :question-graph)))
+       _ (graph-require! (and (= "map" kind)
+                         (every? (fn [[key _]] (let [[tag name] (nth rows key)]
+                                                (and (= "keyword" tag) (contains? names name)))) entries))
+                        "stored graph reply body fields required")
+       selected (graph/keyword-nodes body [:formal/query-reply :reply-profile :question-reference :mode
+                                           :trusted :certificate :compiler-proof-authority :phase :solver-status])
+       ids (vec (vals selected)) decoded (graph/decode-nodes! body ids)
+       by-id (into {} (mapv (fn [i] [(nth ids i) (nth decoded i)]) (range (count ids))))
+       headers (into {} (mapv (fn [[key id]] [key (get by-id id)]) selected))]
+  (graph-header! (question-graph/open! context) (assoc headers :question-graph context)) body))
+(defn restore-graph-body!
+ "Attach a separately stored authoritative question after exact reference
+  checks. Retained execution/proof labels remain recorded data; use check-graph
+  for independent model replay without trusting those labels."
+ [context body]
+ (assert-graph-body! context body)
+ (let [response (assoc (graph/decode! body) :question-graph context)]
+  (assert-bound-graph! context response)))

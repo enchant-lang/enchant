@@ -197,31 +197,177 @@
 (defn reference [graph] (:reference (check! graph)))
 (defn of [data] (reference (encode data)))
 (defn bytes [graph] (check! graph) (wire (:root graph) (:nodes graph)))
-(defn decode!
- "Decode an already bounded graph into data. Never creates atoms, loads modules
-  or invokes a value. Runtime equality must preserve map/set cardinality."
- [graph]
+(defn- reachable [rows roots]
+ (loop [pending (vec roots) reached #{}]
+  (if (empty? pending) reached
+   (let [id (peek pending) tail (pop pending)]
+    (if (contains? reached id) (recur tail reached)
+     (recur (into tail (children (nth rows id))) (conj reached id)))))))
+(defn decode-nodes!
+ "Validate the complete graph, then materialize only the requested nodes and
+  their dependencies. Unrelated keyword names remain bytes, never atoms."
+ [graph roots]
  (check! graph)
- (let [values (atom [])]
-  (doseq [[kind payload] (:nodes graph)]
-   (let [cs (when (contains? #{"vector" "list" "set" "tuple"} kind) (mapv #(nth @values %) payload))
-         x (cond
-            (= "nil" kind) nil
-            (= "bool" kind) payload
-            (= "int" kind) payload
-            (= "float64" kind) (BeamLisp.Env/decode_data_term! payload (list :safe))
-            (= "binary" kind) payload
-            (= "keyword" kind)
-             (let [a (erlang/binary_to_existing_atom payload :utf8)]
-              (require! (keyword? a) "keyword must remain a keyword, not nil or Boolean") a)
-            (= "symbol" kind) (symbol payload)
-            (= "vector" kind) cs
-            (= "list" kind) (to-list cs)
-            (= "tuple" kind) (erlang/list_to_tuple (to-list cs))
-            (= "set" kind) (let [s (set cs)] (require! (= (count s) (count cs)) "runtime set equality collapses graph elements") s)
-            (= "map" kind)
-             (let [m (into {} (mapv (fn [[k v]] [(nth @values k) (nth @values v)]) payload))]
-              (require! (= :map (rt/kind-kind m)) "runtime map must remain plain data")
-              (require! (= (count m) (count payload)) "runtime map equality collapses graph keys") m))]
-    (swap! values conj x)))
-  (nth @values (:root graph))))
+ (plain-vector! roots)
+ (require! (<= (count roots) (:nodes limits)) "materialization root capacity")
+ (let [rows (:nodes graph) n (count rows)]
+  (doseq [id roots]
+   (clean! id) (require! (and (int? id) (<= 0 id) (< id n)) "materialization root reference"))
+  (let [needed (reachable rows roots) values (atom [])]
+   (doseq [id (range n)]
+    (if-not (contains? needed id) (swap! values conj nil)
+     (let [[kind payload] (nth rows id)
+           cs (when (contains? #{"vector" "list" "set" "tuple"} kind) (mapv #(nth @values %) payload))
+           x (cond
+              (= "nil" kind) nil
+              (= "bool" kind) payload
+              (= "int" kind) payload
+              (= "float64" kind) (BeamLisp.Env/decode_data_term! payload (list :safe))
+              (= "binary" kind) payload
+              (= "keyword" kind)
+               (let [a (erlang/binary_to_existing_atom payload :utf8)]
+                (require! (keyword? a) "keyword must remain a keyword, not nil or Boolean") a)
+              (= "symbol" kind) (symbol payload)
+              (= "vector" kind) cs
+              (= "list" kind) (to-list cs)
+              (= "tuple" kind)
+               (let [t (erlang/list_to_tuple (to-list cs))]
+                (require! (= :tuple (rt/kind-kind t)) "tuple must remain plain runtime data") t)
+              (= "set" kind) (let [s (set cs)] (require! (= (count s) (count cs)) "runtime set equality collapses graph elements") s)
+              (= "map" kind)
+               (let [m (into {} (mapv (fn [[k v]] [(nth @values k) (nth @values v)]) payload))]
+                (require! (= :map (rt/kind-kind m)) "runtime map must remain plain data")
+                (require! (= (count m) (count payload)) "runtime map equality collapses graph keys") m))]
+      (swap! values conj x))))
+   (mapv #(nth @values %) roots))))
+(defn decode!
+ "Decode bounded data without creating atoms, loading modules or invoking a
+  described value. Runtime map/set cardinality must preserve exact keys."
+ [graph]
+ (first (decode-nodes! graph [(:root graph)])))
+
+;; Composition consumes checked node tables, never decoded source trees.
+;; Working storage obeys the same node/edge/scalar budgets as the final graph;
+;; input inspection also has an explicit cumulative node budget.
+(def composition-limits {:inputs 128 :inspected-nodes 4000000})
+(defn- builder [] {:rows (atom []) :infos (atom []) :interned (atom {}) :digests (atom {})
+                  :scalar (atom 0) :edges (atom 0) :inspected (atom 0) :inputs (atom 0)})
+(defn- intern-node! [state row]
+ (let [key (encoded (wire-row row))]
+  (if-let [id (get @(:interned state) key)] id
+   (let [id (count @(:rows state))]
+    (require! (< id (:nodes limits)) "composition working node capacity")
+    (row! row id @(:rows state) @(:infos state))
+    (when-not (contains? #{"map" "vector" "list" "set" "tuple"} (first row))
+     (require! (<= (+ @(:scalar state) (erlang/external_size (second row))) (:scalar-bytes limits))
+               "composition working scalar byte capacity"))
+    (let [info (node-info row @(:infos state))]
+     (swap! (:edges state) + (count (children row)))
+     (require! (<= @(:edges state) (:edges limits)) "composition working edge capacity")
+     (require! (not (contains? @(:digests state) (:hash info))) "composition digest collision")
+     (swap! (:scalar state) + (:scalar info))
+     (swap! (:digests state) assoc (:hash info) key)
+     (swap! (:interned state) assoc key id)
+     (swap! (:rows state) conj row) (swap! (:infos state) conj info) id)))))
+(defn- rewrite-row [[kind payload] resolve]
+ [kind (cond (= "map" kind) (mapv (fn [[k v]] [(resolve k) (resolve v)]) payload)
+             (contains? #{"vector" "list" "set" "tuple"} kind) (mapv resolve payload)
+             :else payload)])
+(defn- import-nodes! [state graph roots]
+ (swap! (:inputs state) inc)
+ (require! (<= @(:inputs state) (:inputs composition-limits)) "composition input capacity")
+ ;; Charge table size before validating its contents or following references.
+ (require! (map? graph) "composition graph required")
+ (let [rows (plain-vector! (:nodes graph))]
+  (swap! (:inspected state) + (count rows))
+  (require! (<= @(:inspected state) (:inspected-nodes composition-limits)) "composition inspection capacity")
+  (check! graph)
+  (plain-vector! roots)
+  (require! (<= (count roots) (:edges limits)) "composition root capacity")
+  (doseq [id roots]
+   (require! (and (int? id) (<= 0 id) (< id (count rows))) "composition root reference"))
+  (let [needed (reachable rows roots) ids (atom {})]
+   (doseq [id (range (count rows))]
+    (when (contains? needed id)
+     (let [row (rewrite-row (nth rows id) #(get @ids %))]
+      (swap! ids assoc id (intern-node! state row)))))
+   (mapv #(get @ids %) roots))))
+(defn- finish-builder [state root]
+ (let [rows @(:rows state) infos @(:infos state) needed (reachable rows [root])
+       order (vec (sort-by (fn [id] (let [i (nth infos id)] [(:height i) (:hash i)])) needed))
+       ids (into {} (map-indexed (fn [i old] [old i]) order))
+       result {:formal/data-graph 1 :profile profile :root (get ids root)
+               :nodes (mapv #(rewrite-row (nth rows %) (fn [id] (get ids id))) order)}]
+  (check! result) result))
+(defn subgraph
+ "Select one datum as its own canonical graph without materializing any value."
+ [graph id]
+ (let [state (builder) root (first (import-nodes! state graph [id]))]
+  (finish-builder state root)))
+(defn- sorted-map-row [state pairs]
+ ["map" (vec (sort-by (fn [[k _]] (:hash (nth @(:infos state) k))) pairs))])
+(defn assemble
+ "Build a vector/list/set/tuple from graph fragments, or a map from pairs of
+  key/value fragments. Exact canonical contents own sharing. No atom admission
+  or raw-tree conversion occurs; working and inspection capacities apply."
+ [kind fragments]
+ (require! (and (string? kind) (<= (erlang/byte_size kind) 7) (contains? #{"vector" "list" "set" "tuple" "map"} kind)) "composition container kind")
+ (plain-vector! fragments)
+ (require! (<= (* (if (= "map" kind) 2 1) (count fragments)) (:inputs composition-limits)) "composition input capacity")
+ (let [state (builder)
+       row (if (= "map" kind)
+             (sorted-map-row state
+              (mapv (fn [pair]
+                       (plain-vector! pair) (require! (= 2 (count pair)) "composition map pair")
+                       (mapv (fn [g] (first (import-nodes! state g [(:root g)]))) pair)) fragments))
+             (let [ids (mapv (fn [g] (first (import-nodes! state g [(:root g)]))) fragments)]
+              [kind (if (= "set" kind) (vec (sort-by #(:hash (nth @(:infos state) %)) ids)) ids)]))
+       root (intern-node! state row)]
+  (finish-builder state root)))
+(defn concat-vectors
+ "Concatenate shared vector data without decoding its elements."
+ [graphs]
+ (plain-vector! graphs)
+ (require! (<= (count graphs) (:inputs composition-limits)) "composition input capacity")
+ (let [state (builder)
+       ids (vec (mapcat
+             (fn [g]
+              (check! g)
+              (let [[kind items] (nth (:nodes g) (:root g))]
+               (require! (= "vector" kind) "vector graph required")
+               (import-nodes! state g items))) graphs))
+       root (intern-node! state ["vector" ids])]
+  (finish-builder state root)))
+(defn patch-map
+ "Replace/add exact map keys using graph fragments. Each entry is a pair of
+  key and value graphs. Duplicate patch keys are refused. Unchanged contents
+  retain sharing; final canonicalization prunes replaced unreachable data."
+ [graph patches]
+ (plain-vector! patches)
+ (require! (<= (inc (* 2 (count patches))) (:inputs composition-limits)) "composition input capacity")
+ (check! graph)
+ (let [[kind entries] (nth (:nodes graph) (:root graph))]
+  (require! (= "map" kind) "map graph required")
+  (let [state (builder) roots (vec (mapcat identity entries))
+        imported (import-nodes! state graph roots)
+        pairs (mapv (fn [i] [(nth imported (* 2 i)) (nth imported (inc (* 2 i)))]) (range (count entries)))
+        replacements (mapv (fn [pair]
+                              (plain-vector! pair) (require! (= 2 (count pair)) "composition map pair")
+                              (mapv (fn [g] (first (import-nodes! state g [(:root g)]))) pair)) patches)
+        _ (require! (= (count replacements) (count (distinct (map first replacements)))) "duplicate patch keys")
+        result (reduce (fn [m [k v]] (assoc m k v)) (into {} pairs) replacements)
+        root (intern-node! state (sorted-map-row state (vec result)))]
+   (finish-builder state root))))
+
+(defn keyword-nodes
+ "Find selected keyword-named fields in a checked map graph. Results are
+  portable node IDs in this graph, not decoded values or trusted cached views."
+ [data names]
+ (check! data) (plain-vector! names)
+ (require! (and (<= (count names) 128) (every? keyword? names)) "keyword field selector capacity")
+ (let [rows (:nodes data) [kind entries] (nth rows (:root data))
+       _ (require! (= "map" kind) "map graph required")
+       wanted (into {} (mapv (fn [name] [(erlang/atom_to_binary name :utf8) name]) names))]
+  (into {} (keep (fn [[key value]]
+                  (let [[tag name] (nth rows key)]
+                   (when (and (= "keyword" tag) (contains? wanted name)) [(get wanted name) value]))) entries))))

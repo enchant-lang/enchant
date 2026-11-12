@@ -25,6 +25,7 @@
             [formal.query :as query]
             [formal.term :as term]
             [formal.answer :as answer]
+            [formal.question-graph :as question-graph]
             [effect]
             [typed]))
 
@@ -275,11 +276,11 @@
 
 (defn with-oracle
   "Handle oracle effects during f. A function handles [script-text model?].
-   A method map supplies :script [text model?] and/or :query [question execute]."
+   A method map explicitly supplies :script, :query, and/or :query-graph."
   ([handler f] (with-oracle handler [] f))
   ([handler dependencies f]
   (when-not (or (fn? handler)
-                (and (map? handler) (seq handler) (every? #{:script :query} (keys handler))
+                (and (map? handler) (seq handler) (every? #{:script :query :query-graph} (keys handler))
                      (every? fn? (vals handler))))
     (throw (ex-info "oracle: a handler function or method map is required" {})))
   (effect/with-methods :oracle (if (fn? handler) {:script handler} handler) dependencies f)))
@@ -359,6 +360,33 @@
     (assoc answer :oracle-effect
       (if h {:kind :handler :fragment fragment :us elapsed :delegation (:delegation answer)}
             {:kind :native :fragment fragment :us elapsed}))))
+
+(defn with-query-graph-handler
+ "Handle explicit graph-backed questions. Ordinary :query and :script paths
+  require their own named methods; no format fallback is inferred."
+ ([handler f] (with-oracle {:query-graph handler} f))
+ ([handler dependencies f] (with-oracle {:query-graph handler} dependencies f)))
+(defn query-graph-answer [context response] (answer/bind-graph context response))
+(defn ask-query-graph
+ "Route a complete graph question through its named effect method. The owner
+  supplies the actual fallback; only a matching response retains its provenance."
+ [context execute]
+ (let [opened (question-graph/open! context) h (installed-handler)
+       started (erlang/monotonic_time :microsecond) executed (atom nil)
+       fallback (fn [] (let [result (execute)] (reset! executed result) (query-graph-answer context result)))
+       response (if h
+                  (if-let [method (when (map? h) (:query-graph h))]
+                    (method context fallback)
+                    (throw (ex-info "oracle: installed handler has no graph query method" {})))
+                  (fallback))
+       result (answer/check-graph context response @executed)
+       elapsed (- (erlang/monotonic_time :microsecond) started)
+       fragment (query-fragment (:view opened))]
+  (ledger/record fragment :oracle (name (:solver-status result)) elapsed (:why result))
+  (assoc result :execution {:scope :provided-fallback :status (if @executed :returned :not-invoked)}
+   :oracle-effect
+   (if h {:kind :handler :fragment fragment :us elapsed :delegation (:delegation result)}
+         {:kind :native :fragment fragment :us elapsed}))))
 
 (defn- prelude-text [] (let [p (erlang/get session-prelude-key)] (if (= :undefined p) "" (or p ""))))
 

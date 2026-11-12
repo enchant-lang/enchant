@@ -1,0 +1,127 @@
+(ns veritas.graph-ledger-test
+ (:require [veritas.ledger :as ledger] [formal.query :as q] [formal.term :as t]
+           [formal.question-graph :as qg] [formal.data-graph :as g] [formal.answer :as answer]
+           [formal.point :as point] [formal.identity :as identity] [datom] [datom.file :as file]
+           [datom.value-codec :as codec] [oracle]))
+(def x (t/variable "ledger.graph.x" t/Int))
+(def question (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"x" x}}))
+(def base (qg/prepare question))
+(defn context []
+ (let [name (str "ledger.graph.unknown." (System/unique_integer (list :positive)))
+       unknown {:formal/data-graph 1 :profile g/profile :root 0 :nodes [["keyword" name]]}]
+  (qg/patch base {:origin unknown})))
+(defn response [ctx]
+ (answer/check-graph ctx (answer/bind-graph ctx {:phase :query :solver-status :sat :assignments {"ledger.graph.x" 7}})))
+(defn refused? [f] (try (f) false (catch _ true)))
+(defn eid [connection id]
+ (first (first (datom/q '[:find ?e :in $ ?id :where [?e :verdict/id ?id]] (datom/db connection) id))))
+(defn raw-payload [connection id]
+ (let [e (eid connection id) descriptor (:verdict/payload (datom/pull (datom/db connection) [:verdict/payload] e))]
+  {:entity e :descriptor descriptor :data (codec/decode (datom/file-bytes (datom/db connection) descriptor))}))
+(defn replace-payload! [connection id transform]
+ (let [{:keys [entity descriptor data]} (raw-payload connection id)
+       bytes (codec/encode (transform data))
+       replacement (datom/put-file! connection bytes {:media-type (:media-type descriptor)})]
+  (datom/transact! connection [[:db/add entity :verdict/payload replacement]])))
+
+(deftest graph-records-keep-complete-questions-once-and-materialize-evidence-explicitly
+ (let [connection (ledger/open nil) ctx (context) r (response ctx)
+       p (:packet (point/prepare-context ctx {"ledger.graph.x" 7}))
+       id (ledger/record-graph! connection
+            {:question-graph ctx :question-reference (qg/reference ctx) :modality :checked-data-point :engine :terms
+             :answer r :witness false :evidence {:point p} :compiler-proof-authority true}
+            {:claim "graph record" :about ["graph/subject" "graph/subject"]})]
+  (try
+   (let [row (first (ledger/about connection "graph/subject"))
+         evidence (ledger/graph-evidence! row) saved-answer (:answer evidence)
+         payload (:data (raw-payload connection id))]
+    (is (= ledger/graph-format (:verdict/format row)))
+    (is (= :recorded (:verdict/assurance row)))
+    (is (= false (:verdict/compiler-authority row)))
+    (is (= (qg/reference ctx) (:verdict/question-reference row)))
+    (is (not (contains? row :verdict/question-id)))
+    (is (not (contains? row :verdict/question)))
+    (is (not (contains? row :verdict/evidence)))
+    (is (not (contains? row :verdict/witness)))
+    (is (= false (ledger/graph-witness! row)))
+    (is (= (g/bytes (:graph ctx)) (g/bytes (:graph (:verdict/question-graph row)))))
+    (is (= :sat (:verdict (answer/check-graph ctx saved-answer))))
+    (is (= :checked-data-connection (:status (point/check-context ctx (get-in evidence [:evidence :point])))))
+    (is (= true (:compiler-proof-authority evidence)))
+    (is (= 2 (:veritas/verdict-payload payload)))
+    (is (contains? payload :question-graph))
+    (is (not (contains? (g/keyword-nodes (:answer-body-graph payload) [:question-graph]) :question-graph)))
+    (is (refused? #(qg/materialize! (:verdict/question-graph row))))
+    (is (includes? (ledger/report connection) "graph question:"))
+    (is (= 1 (count (ledger/all connection))))
+   )
+   (finally (datom/close! connection))
+  )
+ ))
+
+(deftest old-inline-and-payload-records-coexist-with-graph-nil-and-false-witnesses
+ (let [path (str "/tmp/bl-graph-ledger-" (Base/encode16 (crypto/strong_rand_bytes 12)))
+       connection (ledger/open path) ctx (context)]
+  (try
+   (ledger/record! connection {:modality :witnessed :question question :witness nil} {:claim "legacy payload"})
+   (datom/transact! connection [{:db/id -1 :verdict/id "old-inline" :verdict/claim "old inline"
+                               :verdict/modality :witnessed :verdict/at 1 :verdict/assurance :recorded
+                               :verdict/compiler-authority false :verdict/question question
+                               :verdict/question-id (identity/hash question)}])
+   (doseq [[claim value] [["graph false" false] ["graph nil" nil]]]
+    (ledger/record-graph! connection {:modality :witnessed :question-graph ctx :witness value}
+                         {:claim claim :about ["graph/reopen"]}))
+   (datom/close! connection)
+   (let [opened (ledger/open path)]
+    (try
+     (let [rows (ledger/all opened) selected (ledger/about opened "graph/reopen")]
+      (is (= 4 (count rows)))
+      (is (= #{false nil} (set (map ledger/graph-witness! selected))))
+      (is (every? #(= true (:verdict/witness-present %)) selected))
+      (is (every? #(= :recorded (:verdict/assurance %)) rows))
+      (is (every? #(= false (:verdict/compiler-authority %)) rows))
+      (is (= 2 (count (filter #(nil? (:verdict/format %)) rows))))
+     )
+     (finally (datom/close! opened))
+    )
+   )
+   (finally (datom/close! connection) (File/rm_rf! path) (File/rm_rf! (str path ".blobs")))
+  )
+ ))
+
+(deftest corrupt-references-and-answer-bindings-refuse-even-after-rehashing-a-blob
+ (doseq [mutation [:question :answer :presence :format]]
+  (let [connection (ledger/open nil) ctx (context) other (qg/patch ctx {:profile (g/encode :other)})
+        id (ledger/record-graph! connection {:modality :solver-claim :question-graph ctx :answer (response ctx) :witness nil}
+                                 {:claim "tamper"})]
+   (try
+    (replace-payload! connection id
+     (fn [payload]
+      (case mutation
+       :question (assoc payload :question-graph other)
+       :answer (assoc payload :answer-body-graph
+                       (g/patch-map (:answer-body-graph payload)
+                        [[(g/encode :question-reference) (g/encode (qg/reference other))]]))
+       :presence (dissoc payload :witness-graph)
+       :format (assoc payload :profile :unknown-record-format))))
+    (is (refused? #(ledger/all connection)))
+    (finally (datom/close! connection))
+   )
+  )
+ ))
+
+(deftest invalid-graph-records-do-not-partially-write-an-indexed-row
+ (let [connection (ledger/open nil) ctx (context) v {:modality :unknown :question-graph ctx}]
+  (try
+   (doseq [[value metadata] [[v {:claim "bad about" :about [1]}]
+                            [v {:claim "bad by" :by false}]
+                            [(assoc v :question-reference {:profile g/profile :sha256 "wrong"}) {:claim "bad reference"}]
+                            [(assoc v :answer (response (qg/patch ctx {:origin (g/encode :different)}))) {:claim "bad answer"}]
+                            [(assoc v :question question) {:claim "mixed formats"}]]]
+    (is (refused? #(ledger/record-graph! connection value metadata)))
+   )
+   (is (= [] (ledger/all connection)))
+   (is (refused? #(ledger/record! connection v {:claim "wrong constructor"})))
+   (finally (datom/close! connection))
+  )
+ ))
