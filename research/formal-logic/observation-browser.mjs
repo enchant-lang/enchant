@@ -77,12 +77,17 @@ try{
   await center('#cell-story-graph-point-2');await shot(size.name+'-graph-point-cell');
   await call({op:'navigate',url:base+'/#let-observations-demand-only-what-they-display'});
   check(size.name+': observation chapter separates display, replay and resource policy',await evaluate("document.body.innerText.includes('1,176 exact observation matches')&&document.body.innerText.includes('assertion-replay :not-run')&&document.body.innerText.includes('preflight limits for derived values')"));
-  await center('#let-observations-demand-only-what-they-display');await shot(size.name+'-observation-chapter');
+  await evaluate("window.scrollBy({top:document.getElementById('let-observations-demand-only-what-they-display').getBoundingClientRect().top-92,behavior:'instant'})");await shot(size.name+'-observation-chapter');
   await call({op:'navigate',url:base+'/#use-the-saved-question-without-unpacking-its-history'});
   await click(panel+' .review-index [data-sg-to="observation"]');
   await evaluate(`document.querySelector(${JSON.stringify(panel)}).querySelector('.review-detail').scrollTo({top:0,behavior:'instant'})`);await center(panel);
   check(size.name+': observation branch keeps demand and managed integration visible',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(panel)}).innerText;return t.includes('inactive option payload can stay unread')&&t.includes('explicit refusal')&&t.includes('does not replay assertions')&&t.includes('managed-owner integration')})()`));
   await shot(size.name+'-graph-observation');
+  if(size.name==='phone'){
+   await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(panel)}).querySelector('.review-detail');d.scrollTo({top:d.scrollHeight,behavior:'instant'})})()`);
+   check('phone: observation relationships remain above the floating toolbar',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-graph-consumers"]'),r=document.querySelector(${JSON.stringify(panel)}).querySelector('.review-related').getBoundingClientRect();return r.bottom<=g.querySelector('.sg-toolbar').getBoundingClientRect().top})()`));
+   await shot('phone-graph-observation-details');
+  }
   if(size.name==='desktop'){await click('#theme');await center(panel);await shot('desktop-graph-observation-night');await click('#theme');}
   await call({op:'navigate',url:base+'/#s-the-model-running'});
   const observation=await evaluate("document.querySelector('#cell-story-graph-observations .result')?.innerText||''");
