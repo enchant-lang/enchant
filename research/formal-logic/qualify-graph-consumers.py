@@ -8,6 +8,10 @@ def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def require(ok,why):
     if not ok:raise AssertionError(why)
 pin=read(E/'sdk-candidate.json');sdk=Path(pin['sdk']);source=Path(pin['source']);meta=read(sdk/'artifact.json')
+recipe=read(E/'qualification-recipe-pin.json')
+for path,digest in recipe['source_sha256'].items():
+    require(sha(R/path)==digest,'qualification recipe bytes: '+path)
+    require(hashlib.sha256(subprocess.check_output(['git','show',recipe['code_commit']+':'+path],cwd=R)).hexdigest()==digest,'committed recipe: '+path)
 require(sha(sdk/'artifact.json')==pin['descriptor_sha256'] and meta['source']==str(source),'exact selected SDK')
 oldmeta=read(Path(read(prior/'sdk-candidate.json')['sdk'])/'artifact.json')
 require(meta['formalWorker']==oldmeta['formalWorker'],'unchanged formal worker')
@@ -31,6 +35,8 @@ for stage,files in [('focused',6),('facade',7),('regression',31),('compiler-macr
     rows={name:int(count) for name,count in re.findall(r'✓\s+([\w.-]+)\s+(\d+) passed',log)}
     require(len(rows)==files and f'{files} file(s) passed, 0 failed, 0 incoherent' in log,'complete tests: '+stage)
     runs[stage]=rows
+require(runs['focused']['formal.graph-context-test']>=149 and runs['focused']['veritas.graph-ledger-test']>=41,'graph context, scope and durable boundaries')
+require(runs['compiler-macro']['core.doseq-eager-test']>=25,'eager effects without memo admission')
 for stage in ['focused','facade','regression','compiler-macro','corpus','writer','consumer-one','consumer-two','compiler-floor','preflight','preflight-controls']:
     require(read(E/(stage+'-exit.json'))['exit_code']==0,'terminal result: '+stage)
     if stage in ['focused','facade','regression','compiler-macro','corpus','writer','consumer-one','consumer-two']:
