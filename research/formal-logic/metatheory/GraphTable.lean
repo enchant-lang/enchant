@@ -39,13 +39,14 @@ def Kind.slots : (kind : Kind) → List kind.Slot
 
 theorem slots_complete (kind : Kind) (slot : kind.Slot) : slot ∈ kind.slots := by
   cases kind with
-  | vector size => simp [Kind.slots]
-  | list size => simp [Kind.slots]
-  | set size => simp [Kind.slots]
-  | tuple size => simp [Kind.slots]
+  | vector size => exact List.mem_finRange slot
+  | list size => exact List.mem_finRange slot
+  | set size => exact List.mem_finRange slot
+  | tuple size => exact List.mem_finRange slot
   | map entries =>
     rcases slot with ⟨index, side⟩
-    cases side <;> simp [Kind.slots]
+    apply List.mem_flatMap.mpr
+    exact ⟨index, List.mem_finRange index, by cases side <;> simp⟩
 
 inductive Value where
   | scalar (value : Scalar)
@@ -53,8 +54,9 @@ inductive Value where
 
 abbrev Algebra (α : Type) := (kind : Kind) → (kind.Slot → α) → α
 
-def Value.fold {α : Type} (leaf : Scalar → α) (node : Algebra α) : Value → α :=
-  Value.rec (motive := fun _ => α) leaf (fun kind _ folded => node kind folded)
+def Value.fold {α : Type} (leaf : Scalar → α) (node : Algebra α) : Value → α
+  | .scalar value => leaf value
+  | .node kind children => node kind (fun slot => Value.fold leaf node (children slot))
 
 @[simp] theorem fold_scalar {α : Type} (leaf : Scalar → α) (node : Algebra α) (s : Scalar) :
     Value.fold leaf node (.scalar s) = leaf s := rfl
