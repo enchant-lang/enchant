@@ -111,16 +111,15 @@
   (is (= :rejected (:status (point/prepare-graph question {"x" 1}))))
   (is (= 0 @calls))))
 
-(deftest materialization-preserves-int-float-keys-and-refuses-signed-zero-collapse
- ;; BEAM hash collections distinguish Int from Float, but identify the zero
- ;; signs. The portable graph distinguishes both, so decoding must refuse the
- ;; latter instead of silently dropping an entry.
- (doseq [[kind values collapse?] [["set" [1 1.0] false] ["map" [1 1.0] false]
-                                 ["set" [0.0 negative-zero] true] ["map" [0.0 negative-zero] true]]]
+(deftest materialization-preserves-exact-keys-or-refuses-runtime-collapse
+ ;; Compare with the actual runtime's hash collections, rather than inferring
+ ;; key behavior from the language's numeric equality or another OTP version.
+ (doseq [kind ["set" "map"] values [[1 1.0] [0.0 negative-zero]]]
   (let [g (graph/encode values) root (:root g)
         payload (if (= "map" kind) [[0 0] [1 1]] [0 1])
-        shared (assoc-in g [:nodes root] [kind payload])]
+        shared (assoc-in g [:nodes root] [kind payload])
+        actual (if (= "map" kind) (into {} (mapv (fn [v] [v v]) values)) (set values))]
    (is (= :checked-data-graph (:status (graph/check! shared))))
-   (if collapse?
+   (if (< (count actual) 2)
     (is (refused? #(graph/decode! shared)))
-    (is (= 2 (count (graph/decode! shared))))))))
+    (is (= (graph/reference shared) (graph/of (graph/decode! shared))))))))

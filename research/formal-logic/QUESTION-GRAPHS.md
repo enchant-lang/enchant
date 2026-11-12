@@ -87,9 +87,9 @@ bytes. Function, resource, sorted collection, runtime struct and reserved
 tuple representations are outside this profile. Metadata belongs in an
 explicit field.
 
-BL map/set equality can be coarser than the graph's exact kind/bit identity.
-Materialization refuses a map or set if the runtime collapses distinct
-encoded entries. It does not silently convert two distinct formal data
+Runtime hash-key behavior must preserve the graph's exact kind/bit identity.
+Materialization checks cardinality and refuses a map or set if the runtime
+collapses distinct encoded entries. It does not silently convert two distinct formal data
 points into one. Checking canonical data alone is not a promise that every
 future keyword or mathematically distinct key set can be materialized by this
 runtime.
