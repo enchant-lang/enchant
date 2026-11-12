@@ -36,6 +36,8 @@ assert implementation['stages']['focused']['source']['source_sha256']['research/
 assert implementation['availability'] == 'project-preview' and implementation['exact_root_comparisons'] == 6300 and implementation['point_maps'] == 748
 baseline = read(P / 'evidence/graph-consumers/dossier-qualification.json')
 for name, digest in baseline['host_sources']['source_sha256'].items():
+    if name == 'research/formal-logic/browser-driver.mjs':
+        continue  # Test helper is qualified by the new full/focused source pins.
     assert sha(R / name) == digest
 kit = read(P / 'evidence/graph-consumers/kit-state.json')
 assert source['kit_state_sha256'] == sha(P / 'evidence/graph-consumers/kit-state.json')

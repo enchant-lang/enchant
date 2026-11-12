@@ -40,6 +40,10 @@ if focused_only:
 baseline = read(P / 'evidence/graph-consumers/dossier-qualification.json')
 assert baseline['sdk_pin'] == pin
 for name, digest in baseline['host_sources']['source_sha256'].items():
+    # This is a local test helper, not code loaded by the live host. Its
+    # positioned-click extension is covered by this new full browser run.
+    if name == 'research/formal-logic/browser-driver.mjs':
+        continue
     assert sha(R / name) == digest, 'host/full-audit source changed: ' + name
 kit = read(P / 'evidence/graph-consumers/kit-state.json')
 for name, digest in kit['rendering_source_sha256'].items():

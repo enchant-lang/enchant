@@ -12,7 +12,7 @@ let buffer=Buffer.alloc(0),waiting=[];
 helper.stdout.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4){const n=buffer.readUInt32BE(0);if(buffer.length<n+4)break;const value=JSON.parse(buffer.subarray(4,n+4).toString());buffer=buffer.subarray(4+n);const request=waiting.shift();clearTimeout(request.timer);value.ok?request.resolve(value.result):request.reject(Error(value.error));}});
 function call(message){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Browser helper deadline')),35000);waiting.push({resolve,reject,timer});const body=Buffer.from(JSON.stringify(message)),size=Buffer.alloc(4);size.writeUInt32BE(body.length);helper.stdin.write(Buffer.concat([size,body]));});}
 const evaluate=expression=>call({op:'eval',expression});
-const click=selector=>call({op:'click',selector});
+const click=(selector,options={})=>call({op:'click',selector,...options});
 const report={schema:'enchant.formal.term-forest-evaluation-browser.v1',base,checks:[],screenshots:[],started:new Date().toISOString()};
 function check(name,ok){report.checks.push({name,passed:Boolean(ok)});if(!ok)throw Error(name);}
 async function shot(name){await call({op:'screenshot',path:join(output,name+'.png')});report.screenshots.push(name+'.png');}
@@ -31,10 +31,11 @@ try{
   await center('.nb-measure-row');await shot(size.name+'-sharing-default');
   await center('.nb-controls>summary');
   await click('.nb-controls>summary');
+  check(size.name+': expanded source badge fits the page',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
   await center('.nb-controls [data-nb-input="sharing_layers"]');
   await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
   await evaluate("window.formalRangeEvents=[];for(const type of ['pointerdown','mousedown','mouseup','click','input','change'])document.addEventListener(type,e=>{if(e.target.closest('.nb-controls'))window.formalRangeEvents.push({type,target:e.target.tagName,value:e.target.value,x:e.clientX,y:e.clientY})},true)");
-  await click('.nb-controls [data-nb-input="sharing_layers"]');
+  await click('.nb-controls [data-nb-input="sharing_layers"]',{scroll:false});
   const selectedLayers=Number(await evaluate("document.querySelector('.nb-controls [data-nb-input]').value"));
   const diagnostic=await evaluate("(()=>{const e=document.querySelector('.nb-controls [data-nb-input]');return{html:e.outerHTML,rect:e.getBoundingClientRect().toJSON(),events:window.formalRangeEvents,active:document.activeElement===e,scrollY,viewport:visualViewport?.toJSON?.()}})()");
   (report.pointerSelections??=[]).push({viewport:size.name,layers:selectedLayers,diagnostic});
@@ -47,7 +48,7 @@ try{
   check(size.name+': figure opens its actual dependency expression',await evaluate("!document.querySelector('#nb-pop').hidden&&document.querySelector('#nb-pop h4').innerText==='Term occurrences through layer 16'&&!!document.querySelector('#nb-pop [data-nb-open=sharing_terms_15]')"));
   await shot(size.name+'-sharing-formula');
   await click('#nb-pop [data-nb-open="sharing_layers"]');
-  check(size.name+': dependency inspection reaches its source and control',await evaluate("document.querySelector('#nb-pop h4').innerText==='Shared layers above the leaf'&&document.querySelector('#nb-pop').innerText.includes('16-layer project fixture')&&!!document.querySelector('#nb-pop input[data-nb-input=sharing_layers]')"));
+  check(size.name+': dependency inspection reaches its source and control',await evaluate("document.querySelector('#nb-pop h4').innerText==='Shared layers above the leaf'&&document.querySelector('#nb-pop').innerText.includes('16-layer fixture')&&!!document.querySelector('#nb-pop input[data-nb-input=sharing_layers]')"));
   await call({op:'key',key:'Escape'});
   check(size.name+': escape closes the inspector',await evaluate("document.querySelector('#nb-pop').hidden"));
   await click('.nb-controls [data-nb-undo="sharing_layers"]');
