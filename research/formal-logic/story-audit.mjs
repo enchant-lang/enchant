@@ -598,6 +598,28 @@ try{
   check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
   await shot(size.name+'-model-replay');
+  await navigate('/#a-migration-needs-three-separate-answers');
+  check(size.name+': migration chapter separates admitted inputs, conditional truth and delivery',await evaluate("document.body.innerText.includes('9,891 assertion executions')&&document.body.innerText.includes('Neither failure becomes an assumption')&&document.body.innerText.includes('Re-elaboration may execute phase code')&&document.body.innerText.includes('Every result keeps compiler and delivery authority false')"));
+  await evaluate("document.querySelector('#a-migration-needs-three-separate-answers').scrollIntoView({block:'start'})");
+  await shot(size.name+'-message-migration');
+  const migrationPanel='[data-graph="formal-message-migration"] .sg-stage>[data-view]:not([hidden])';
+  await click(migrationPanel+' .review-index [data-sg-to="certificate"]');
+  check(size.name+': migration checking panel keeps certificate and admission independent',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(migrationPanel)}).innerText;return t.includes('Native proved cannot replace a missing certificate')&&t.includes('Verified true requires both checked facts')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(migrationPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-migration-certificate-panel');
+  if(size.name==='phone'){
+    await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(migrationPanel)}).querySelector('.review-detail');d.scrollTop=d.scrollHeight})()`);
+    check(size.name+': migration relationships remain readable above phone controls',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-message-migration"]'),d=document.querySelector(${JSON.stringify(migrationPanel)}).querySelector('.review-detail'),r=d.querySelector('.review-related').getBoundingClientRect(),b=d.getBoundingClientRect(),t=g.querySelector('.sg-toolbar').getBoundingClientRect();return r.top>=b.top&&r.bottom<=b.bottom&&r.bottom<=t.top})()`));
+    await shot(size.name+'-migration-details');
+  }
+  if(size.name==='desktop'){
+    await click('#theme');await evaluate(`document.querySelector(${JSON.stringify(migrationPanel)}).scrollIntoView({block:'center'})`);
+    await shot(size.name+'-migration-night');await click('#theme');
+  }
+  await click(migrationPanel+' .review-index [data-sg-to="source"]');
+  check(size.name+': Source observation panel retains one-invocation and function-correspondence limits',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(migrationPanel)}).innerText;return t.includes('not universal compiler preservation')&&t.includes('neither invoked nor certified')&&t.includes('compile or publication error remains an observer error')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(migrationPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-migration-source-panel');
   await navigate('/#s-the-model-running');
   for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger','story-answer-binding']){
     const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
@@ -612,12 +634,13 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
-  for(const id of ['story-query-preparation','story-size-evidence','story-original-replay']){
+  for(const id of ['story-query-preparation','story-size-evidence','story-original-replay','story-message-migration']){
     const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
-    check(size.name+': visible executed preparation result '+id,t.length>150);
+    check(size.name+(id==='story-message-migration'?': visible executed migration result ':': visible executed preparation result ')+id,t.length>150);
     if(id==='story-query-preparation')check(size.name+': same checked plan improves the OxiZ examples without native proof promotion',t.includes(':original [:proved :unknown]')&&t.includes(':prepared [:proved :proved]')&&t.includes(':doubled [:refuted :refuted]')&&t.includes(':connections [:checked :checked]')&&t.includes(':counterexample-replay [:valid :valid]')&&t.includes(':native-certificate :not-checked'));
     if(id==='story-size-evidence')check(size.name+': size results distinguish true false and unknown with independent checking',t.includes(':families [:checked :refuted :unknown]')&&t.includes(':holds [true false nil]')&&t.includes(':fresh-positive-objects [:checked :checked]')&&t.includes(':single-placement-counterexample :checked-data-connection')&&t.includes(':negative-controls :checked')&&t.includes(':limited-native-claim :proved')&&t.includes(':arity-zero-double-placement :checked')&&t.includes(':compiler-proof-authority false'));
     if(id==='story-original-replay')check(size.name+': executed constants do not invent original coordinates',t.includes(':satisfiability [:sat :sat]')&&t.includes(':execution-observations [0 0]')&&t.includes(':original-bindings [:incomplete :incomplete]')&&t.includes(':original-observations [:incomplete :incomplete]')&&t.includes(':original-values [:unavailable :unavailable]')&&t.includes(':invented-coordinates false'));
+    if(id==='story-message-migration')check(size.name+': migration results retain checked truth, Native-only nil and actual Source cleanup',t.includes(':positive [:checked :checked]')&&t.includes(':negative [:refuted :refuted]')&&t.includes(':verified-positive [true true]')&&t.includes(':verified-negative [false false]')&&t.includes(':verified-native-only [nil nil]')&&t.includes(':fresh-certificates [:checked :checked]')&&t.includes(':admission [:checked-data-connection :checked-data-connection]')&&t.includes(':source-replay :valid')&&t.includes(':actual-value 5')&&t.includes(':module-retired true')&&t.includes(':delivery-authority false'));
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
