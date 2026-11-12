@@ -598,6 +598,43 @@ try{
   check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
   await shot(size.name+'-model-replay');
+  await navigate('/#an-explicit-input-can-outlive-a-missing-solver-model');
+  check(size.name+': explicit point chapter separates backend answer, data and Source',await evaluate("document.body.innerText.includes('an explicit point is not a recovered native model')&&document.body.innerText.includes('Numeric equality can agree on Int and Float')"));
+  await evaluate("document.querySelector('#an-explicit-input-can-outlive-a-missing-solver-model').scrollIntoView({block:'start'})");
+  await shot(size.name+'-explicit-point');
+  const pointPanel='[data-graph="formal-explicit-points"] .sg-stage>[data-view]:not([hidden])';
+  await click(pointPanel+' .review-index [data-sg-to="check"]');
+  check(size.name+': pure point panel keeps Source and metatheory outside data checking',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(pointPanel)}).innerText;return t.includes('performs no Source compilation')&&t.includes('Lean receipts are not borrowed')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(pointPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-point-check-panel');
+  if(size.name==='phone'){
+    await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(pointPanel)}).querySelector('.review-detail');d.scrollTop=d.scrollHeight})()`);
+    check(size.name+': point relationships fit above phone controls',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-explicit-points"]'),d=document.querySelector(${JSON.stringify(pointPanel)}).querySelector('.review-detail'),r=d.querySelector('.review-related').getBoundingClientRect(),b=d.getBoundingClientRect(),t=g.querySelector('.sg-toolbar').getBoundingClientRect();return r.top>=b.top&&r.bottom<=b.bottom&&r.bottom<=t.top})()`));
+    await shot(size.name+'-point-check-details');
+  }
+  if(size.name==='desktop'){
+    await click('#theme');await evaluate(`document.querySelector(${JSON.stringify(pointPanel)}).scrollIntoView({block:'center'})`);
+    await shot(size.name+'-point-night');await click('#theme');
+  }
+  await click(pointPanel+' .review-index [data-sg-to="actual"]');
+  check(size.name+': point Source panel keeps runtime kinds and mismatch visible',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(pointPanel)}).innerText;return t.includes('runtime kinds differ')&&t.includes('mismatch remains disagreement')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(pointPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-point-source-panel');
+  await click(pointPanel+' .review-index [data-sg-to="domain"]');
+  check(size.name+': Float generator panel distinguishes finite cardinality and budgets',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(pointPanel)}).innerText;return t.includes('both signed zeros')&&t.includes('Enumeration budgets and finite cardinality')&&t.includes('Int endpoints')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(pointPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-point-domain-panel');
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-explicit-point','story-explicit-source','story-float-domain','story-runtime-kinds']){
+    const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+    check(size.name+': visible executed point result '+id,t.length>100);
+    if(id==='story-explicit-point')check(size.name+': exact rational point is data checked without borrowed kernel authority',t.includes(':original-point :checked-data-connection')&&t.includes(':formal/real [1 3]')&&t.includes(':kernel-execution :not-run')&&t.includes(':native-query-calls 0')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-explicit-source')check(size.name+': native unknown coexists with an explicitly reproduced Source counterexample',t.includes(':native-verdicts [:refuted :unknown]')&&t.includes(':same-complete-question true')&&t.includes(':explicit-point :checked-data-connection')&&t.includes(':source-observation :reproduced')&&t.includes(':explicit-verdict :refuted')&&t.includes(':verdict-basis :explicit-original-point')&&t.includes(':module-retired true'));
+    if(id==='story-float-domain')check(size.name+': Float enumeration keeps finite cardinality and both zeros',t.includes(':cardinality 2')&&t.includes('9223372036854775808')&&t.includes(':all-finite-patterns 18437736874454810624')&&t.includes(':all-domain-finite true')&&t.includes(':all-enumeration :over-budget')&&t.includes(':int-is-float-input false')&&t.includes(':legacy-real-admits-int true'));
+    if(id==='story-runtime-kinds')check(size.name+': numeric equality does not erase successful result kind',t.includes(':numeric-equality true')&&t.includes(':int-observation-accepts-float false')&&t.includes(':successful-values-equivalent false')&&t.includes(':both-raised-equivalent true')&&t.includes(':exception-categories :outside-profile'));
+    await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   await navigate('/#float-arithmetic-must-mean-the-same-thing-in-the-program-and-the-proof');
   check(size.name+': Float chapter explains the observed false Real proof',await evaluate("document.body.innerText.includes('the original compiled predicate made false')&&document.body.innerText.includes('Failure stays in the claim')"));
   await evaluate("document.querySelector('#float-arithmetic-must-mean-the-same-thing-in-the-program-and-the-proof').scrollIntoView({block:'start'})");
