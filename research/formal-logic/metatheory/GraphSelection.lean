@@ -1,7 +1,7 @@
 import GraphTable
 
 /- Selective interpretation over the previously qualified structural model.
-   This candidate is not yet qualified. It does not model BL atom admission,
+   Qualification is recorded separately. It does not model BL atom admission,
    container reconstruction, resource checks, canonical bytes or compiler code. -/
 namespace FormalGraphTable
 set_option autoImplicit false

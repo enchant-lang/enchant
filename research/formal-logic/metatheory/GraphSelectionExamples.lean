@@ -16,7 +16,10 @@ def selected : Fin 3 → Bool := fun index => index.val == 0
 def everything : Fin 3 → Bool := fun _ => true
 
 theorem selected_ready : table.Ready admit Value.scalar selected := by
-  simp [table, Table.Ready, Row.Ready, selected, admit, known, extend, Fin.last]
+  refine ⟨⟨⟨True.intro, ?_⟩, ?_⟩, ?_⟩
+  · intro _; rfl
+  · intro impossible; cases impossible
+  · intro impossible; cases impossible
 
 theorem selected_integer_preserved :
     table.partialFold admit Value.node selected ⟨0, by decide⟩ = some (.scalar (.integer 7)) := by
