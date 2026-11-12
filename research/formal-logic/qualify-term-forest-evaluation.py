@@ -55,7 +55,8 @@ for row in corpus['rows']:
         assert point['exact-values'] is True
         assert point['checking']['argument-traversal'] == 'graph-references'
         assert 0 <= point['checking']['evaluated-nodes'] <= point['checking']['typed-nodes']
-        assert len(point['value-reference']) == 64
+        assert point['value-reference']['profile'] == 'bl/public-data-graph-v1'
+        assert len(point['value-reference']['sha256']) == 64
         comparisons += point['roots']
         unavailable += point['unavailable']
         for key in timing:
