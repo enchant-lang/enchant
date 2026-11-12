@@ -72,6 +72,8 @@ require(host['state']['ActiveState'] == 'active' and host['state']['SubState'] =
         and host['state']['MemoryMax'] == '2147483648' and host['launcher'] == pin['sdk'] + '/bin/bl'
         and host['live_process_sdk_boot'] == pin['sdk'] + '/boot.exs', 'actual capped host on the selected SDK')
 require(host['http']['status'] == 200 and host['http']['bytes'] > 1000000, 'actual dossier response')
+require(host['document_sha256'] == sha(D) and host['http']['completed_interface_and_corpus_caption'],
+        'actual response warmed from the current corrected document')
 blocks = Counter(re.findall(r'^#\+begin_([\w-]+)', text, re.M | re.I))
 report = {'schema': 'enchant.formal.graph-consumers-dossier-qualification.v1', 'checkpoint': 44,
           'recorded_utc': datetime.now(timezone.utc).isoformat(),

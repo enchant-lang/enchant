@@ -22,13 +22,20 @@ assert boots==[pin['sdk']+'/boot.exs']
 assert state['ActiveState']=='active' and state['SubState']=='running' and state['MemoryMax']=='2147483648'
 launcher=Path('/home/othman/.local/state/workstation/enchant-formal-review/run.sh')
 script=launcher.read_bytes();assert (pin['sdk']+'/bin/bl').encode() in script
+document=P/'ATLAS.bl.org'
+document_sha256=hashlib.sha256(document.read_bytes()).hexdigest()
 with urllib.request.urlopen('http://127.0.0.1:24089/',timeout=60) as response:
     body=response.read();status=response.status
 assert status==200
+assert document_sha256==hashlib.sha256(document.read_bytes()).hexdigest()
+assert b'The common BL interface now carries' in body
+assert b'all 187 paired graph contexts retain their preceding results' in body
 report={'recorded_utc':datetime.now(timezone.utc).isoformat(),'state':state,
         'launcher':pin['sdk']+'/bin/bl','live_process_sdk_boot':boots[0],
         'launcher_script_sha256':hashlib.sha256(script).hexdigest(),
-        'http':{'status':status,'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest()},
+        'document_sha256':document_sha256,
+        'http':{'status':status,'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest(),
+                'completed_interface_and_corpus_caption':True},
         'review_url':'https://work.tailcb5318.ts.net:18100/','profile':int(profile)}
 (E/'dossier-host.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps({'pid':pid,'http':status,'bytes':len(body),'sdk':pin['sdk']}))
