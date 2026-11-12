@@ -49,9 +49,12 @@ try{
   await sharingFrame(size);await shot(size.name+'-sharing-adjusted');
   await click('.nb-measure-row [data-nb="sharing_terms_16"]');
   check(size.name+': figure opens its actual dependency expression',await evaluate("!document.querySelector('#nb-pop').hidden&&document.querySelector('#nb-pop h4').innerText==='Term occurrences through layer 16'&&!!document.querySelector('#nb-pop [data-nb-open=sharing_terms_15]')"));
+  check(size.name+': formula panel carries its illustrative phase',await evaluate("document.querySelector('#nb-pop .nb-phase')?.innerText==='Illustrative syntax count'"));
+  check(size.name+': formula panel stays inside the viewport',await evaluate("(()=>{const r=document.querySelector('#nb-pop').getBoundingClientRect();return r.left>=-2&&r.right<=innerWidth+2&&r.top>=-2&&r.bottom<=innerHeight+2})()"));
   await shot(size.name+'-sharing-formula');
   await click('#nb-pop [data-nb-open="sharing_layers"]');
   check(size.name+': dependency inspection reaches its source and control',await evaluate("document.querySelector('#nb-pop h4').innerText==='Shared layers above the leaf'&&document.querySelector('#nb-pop').innerText.includes('16-layer fixture')&&!!document.querySelector('#nb-pop input[data-nb-input=sharing_layers]')"));
+  check(size.name+': source chip opens the actual cited fixture',await evaluate("(()=>{const a=document.querySelector('#nb-pop a.nb-src');return a?.getAttribute('href')==='/evidence/term-forest-evaluation/sharing.json'&&a.target==='_blank'&&a.rel.includes('noopener')})()"));
   await call({op:'key',key:'Escape'});
   check(size.name+': escape closes the inspector',await evaluate("document.querySelector('#nb-pop').hidden"));
   await click('.nb-controls [data-nb-undo="sharing_layers"]');
@@ -86,7 +89,7 @@ try{
   check(size.name+': display example grants no assertion or compiler authority',observation.includes(':assertion-replay :not-run')&&observation.includes(':managed-query-calls 0')&&observation.includes(':compiler-proof-authority false'));
   await center('#cell-story-graph-observations');await shot(size.name+'-graph-observation-cell');
  }
- for(const path of ['TERM-FOREST-EVALUATION.md','src/formal/term-forest-evaluate.bl','evidence/term-forest-evaluation/qualification.json','GRAPH-OBSERVATIONS.md','src/formal/graph-observations.bl','src/formal/graph-reader.bl','src/formal/graph-observation-examples.bl','evidence/observation-semantics/qualification.json','INTEGER-PREFLIGHT.md']){
+ for(const path of ['TERM-FOREST-EVALUATION.md','src/formal/term-forest-evaluate.bl','evidence/term-forest-evaluation/qualification.json','GRAPH-OBSERVATIONS.md','src/formal/graph-observations.bl','src/formal/graph-reader.bl','src/formal/graph-observation-examples.bl','evidence/observation-semantics/qualification.json','INTEGER-PREFLIGHT.md','evidence/term-forest-evaluation/sharing.json']){
   const r=await fetch(base+'/'+path),body=Buffer.from(await r.arrayBuffer());
   check('Declared source bytes: '+path,r.status===200&&createHash('sha256').update(body).digest('hex')===createHash('sha256').update(await readFile(join(project,path))).digest('hex'));
  }
