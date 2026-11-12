@@ -42,6 +42,9 @@ assert source['kit_state_sha256'] == sha(P / 'evidence/graph-consumers/kit-state
 for name, digest in kit['rendering_source_sha256'].items():
     assert sha(Path(kit['root']) / name) == digest
 full = read(E / 'full-browser/audit.json')
+full_source = read(E / 'full-browser-source-pin.json')
+assert full_source['document_sha256'] == sha(P / 'ATLAS.bl.org')
+assert full_source['source_sha256']['research/formal-logic/story-audit.mjs'] == sha(P / 'story-audit.mjs')
 focused = read(E / 'focused-browser/audit.json')
 for audit in (full, focused):
     assert audit['passed'] and all(row['passed'] for row in audit['checks'])
@@ -63,6 +66,7 @@ report = {'schema': 'enchant.formal.term-forest-dossier-qualification.v1', 'stat
           'document': {'sha256': sha(P / 'ATLAS.bl.org'), 'cells': 81,
           'run_log_sha256': sha(E / 'dossier-cells-checks.txt'), 'unchanged_check_log_sha256': sha(E / 'dossier-checks.txt')},
           'browser': {'full_checks': len(full['checks']), 'focused_checks': len(focused['checks']),
+          'full_input_source_pin': full_source,
           'review_graphs': graphs, 'full_audit_sha256': sha(E / 'full-browser/audit.json'),
           'focused_audit_sha256': sha(E / 'focused-browser/audit.json'), 'visual_review': visual,
           'screenshots': {name: sha(E / 'focused-browser' / name) for name in manual}},

@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import urllib.request
 
 P = Path(__file__).resolve().parent
@@ -24,6 +25,18 @@ def write(path, value):
 
 
 pin = read(P / 'sdk-pin.json')
+focused_only = sys.argv[1:] == ['--focused-only']
+assert not sys.argv[1:] or focused_only
+if focused_only:
+    previous = read(E / 'full-browser-source-pin.json')
+    assert previous['document_sha256'] == sha(P / 'ATLAS.bl.org')
+    mutable = {'research/formal-logic/term-forest-browser.mjs',
+               'research/formal-logic/run-term-forest-browser.py',
+               'research/formal-logic/qualify-term-forest-dossier.py'}
+    for name, digest in previous['source_sha256'].items():
+        if name not in mutable:
+            assert sha(R / name) == digest, 'full-audit input changed: ' + name
+    assert read(E / 'full-browser-exit.json')['exit_code'] == 0
 baseline = read(P / 'evidence/graph-consumers/dossier-qualification.json')
 assert baseline['sdk_pin'] == pin
 for name, digest in baseline['host_sources']['source_sha256'].items():
@@ -44,6 +57,8 @@ for name in names:
 write(E / 'dossier-source-pin.json', {'code_commit': commit, 'source_sha256': sources,
                                     'document_sha256': sha(P / 'ATLAS.bl.org'), 'sdk_pin': pin,
                                     'kit_state_sha256': sha(P / 'evidence/graph-consumers/kit-state.json')})
+if not focused_only:
+    write(E / 'full-browser-source-pin.json', read(E / 'dossier-source-pin.json'))
 raw = subprocess.check_output(['systemctl', '--user', 'show', 'work-enchant-formal-review.service',
                                '--property=ActiveState,SubState,ExecMainPID,MemoryMax'], text=True)
 state = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
@@ -60,8 +75,10 @@ write(E / 'dossier-host.json', {'recorded_utc': datetime.now(timezone.utc).isofo
       'live_process_sdk_boot': boots[0], 'same_service_as_preceding_full_audit': True,
       'document_sha256': sha(P / 'ATLAS.bl.org'), 'http': {'status': status, 'bytes': len(body),
       'sha256': hashlib.sha256(body).hexdigest(), 'new_preview_present': True}})
-for stage, script, folder, ceiling in [('full', 'story-audit.mjs', 'full-browser', 900),
-                                      ('focused', 'term-forest-browser.mjs', 'focused-browser', 300)]:
+stages = [('focused', 'term-forest-browser.mjs', 'focused-browser', 300)]
+if not focused_only:
+    stages.insert(0, ('full', 'story-audit.mjs', 'full-browser', 900))
+for stage, script, folder, ceiling in stages:
     command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
                '--working-directory=' + str(R), '--property=MemoryMax=2G', '--property=MemorySwapMax=0',
                '--property=RuntimeMaxSec=' + str(ceiling), '--property=KillMode=control-group',

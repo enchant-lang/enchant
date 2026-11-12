@@ -38,7 +38,7 @@ try{
    check('phone: raw relationships fit above floating controls',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-graph-consumers"]'),r=document.querySelector(${JSON.stringify(panel)}).querySelector('.review-related').getBoundingClientRect();return r.bottom<=g.querySelector('.sg-toolbar').getBoundingClientRect().top})()`));
    await shot('phone-term-forest-raw-details');
   }else{
-   await click('#theme');await shot('desktop-term-forest-raw-night');await click('#theme');
+   await click('#theme');await evaluate(`document.querySelector(${JSON.stringify(panel)}).scrollIntoView({block:'center',behavior:'instant'})`);await shot('desktop-term-forest-raw-night');await click('#theme');
   }
   await call({op:'navigate',url:base+'/#s-the-model-running'});
   const text=await evaluate("document.querySelector('#cell-story-term-forest .result')?.innerText||''");
