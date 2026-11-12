@@ -1,0 +1,136 @@
+(ns formal.ieee-arithmetic)
+
+;; Exact integer/rational evaluation of binary IEEE add/sub/mul/div. This
+;; implementation never uses host floating arithmetic or a native solver.
+;; Its tested implementation correspondence is not a machine-checked theorem.
+(def profile :bl/exact-binary-ieee-arithmetic-v1)
+(def rounding-modes #{"RNE" "RNA" "RTP" "RTN" "RTZ"})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.ieee-arithmetic: " why) {}))))
+(defn- power [n] (erlang/bsl 1 n))
+(defn format! [e s]
+ (require! (and (int? e) (int? s) (<= 2 e 15) (<= 2 s 113)) "format exceeds exponent/significand capacity")
+ [e s])
+(defn data [e s bits]
+ (format! e s)
+ (require! (and (int? bits) (<= 0 bits) (< bits (power (+ e s)))) "IEEE bits outside format")
+ {:formal/fp [e s bits]})
+(defn parts [value]
+ (let [value (:formal/fp value)]
+  (require! (and (vector? value) (= 3 (count value))) "typed FP data required")
+  (let [[e s bits] value _ (data e s bits) f (dec s) bias (dec (power (dec e)))
+        fraction (erlang/band bits (dec (power f)))
+        exponent (erlang/band (erlang/bsr bits f) (dec (power e)))
+        special (= exponent (dec (power e)))]
+   {:e e :s s :bits bits :negative (not= 0 (erlang/band bits (power (dec (+ e s)))))
+    :nan (and special (not= 0 fraction)) :infinite (and special (= 0 fraction))
+    :zero (and (= exponent 0) (= fraction 0))
+    :significand (+ fraction (if (= exponent 0) 0 (power f)))
+    :exponent (- (if (= exponent 0) 1 exponent) bias f)})))
+(defn- signed [e s negative magnitude]
+ (data e s (+ (if negative (power (dec (+ e s))) 0) magnitude)))
+(defn zero [e s negative] (signed e s negative 0))
+(defn infinity [e s negative] (signed e s negative (erlang/bsl (dec (power e)) (dec s))))
+(defn nan [e s] (signed e s false (+ (erlang/bsl (dec (power e)) (dec s)) (power (- s 2)))))
+(defn- maximum [e s negative]
+ (signed e s negative (+ (erlang/bsl (- (power e) 2) (dec s)) (dec (power (dec s))))))
+(defn- bit-length [n]
+ (if (= n 0) 0
+  (let [bytes (binary/encode_unsigned n) size (erlang/byte_size bytes) head (binary/at bytes 0)]
+   (+ (* 8 (dec size)) (loop [head head n 0] (if (= head 0) n (recur (erlang/bsr head 1) (inc n))))))))
+(defn- log-ratio [n d]
+ (let [k (- (bit-length n) (bit-length d))
+       at-least (if (>= k 0) (>= n (erlang/bsl d k)) (>= (erlang/bsl n (- k)) d))]
+  (if at-least k (dec k))))
+(defn- increment? [rounding negative quotient remainder denominator]
+ (and (not= remainder 0)
+  (case rounding
+   "RNE" (or (> (* 2 remainder) denominator)
+             (and (= (* 2 remainder) denominator) (= 1 (erlang/band quotient 1))))
+   "RNA" (>= (* 2 remainder) denominator)
+   "RTP" (not negative)
+   "RTN" negative
+   "RTZ" false)))
+(defn- overflow [e s rounding negative]
+ (if (or (contains? #{"RNE" "RNA"} rounding)
+         (and (= "RTP" rounding) (not negative)) (and (= "RTN" rounding) negative))
+  (infinity e s negative) (maximum e s negative)))
+(defn round-ratio
+ "Round nonnegative n/d * 2^exponent in the requested binary format. The sign
+  of exact zero is explicit; exact arithmetic cancellation chooses it upstream."
+ [e s rounding negative n d exponent]
+ (format! e s)
+ (require! (and (contains? rounding-modes rounding) (boolean? negative)
+                (int? n) (<= 0 n) (int? d) (> d 0) (int? exponent)
+                (<= (abs exponent) 131072) (<= (bit-length n) 131072) (<= (bit-length d) 131072))
+           "rounding input or capacity")
+ (if (= n 0) (zero e s negative)
+  (let [f (dec s) bias (dec (power (dec e)))
+        highest (+ exponent (log-ratio n d))
+        quantum (max (- 1 bias f) (- highest f))
+        shift (- exponent quantum) numerator (erlang/bsl n (max 0 shift))
+        denominator (erlang/bsl d (max 0 (- shift)))
+        quotient (erlang/div numerator denominator) remainder (erlang/rem numerator denominator)
+        rounded (+ quotient (if (increment? rounding negative quotient remainder denominator) 1 0))
+        carry (>= rounded (power s))
+        significand (if carry (erlang/bsr rounded 1) rounded)
+        quantum (if carry (inc quantum) quantum)
+        unbiased (+ quantum f)]
+   (cond (> unbiased bias) (overflow e s rounding negative)
+         (< significand (power f)) (signed e s negative significand)
+         :else (signed e s negative (+ (erlang/bsl (+ unbiased bias) f) (- significand (power f))))))))
+(defn from-integer [e s rounding n]
+ (require! (int? n) "integer required")
+ (round-ratio e s rounding (< n 0) (abs n) 1 0))
+(defn rational
+ "Exact finite value as [signed numerator denominator]. Signed zero's sign is
+  not represented by this rational projection; retain its original bits."
+ [value]
+ (let [{:keys [significand exponent negative nan infinite]} (parts value)]
+  (require! (and (not nan) (not infinite)) "nonfinite has no rational projection")
+  (let [numerator (* (if negative -1 1) (erlang/bsl significand (max exponent 0)))
+        denominator (power (max 0 (- exponent)))
+        divisor (loop [a (abs numerator) b denominator]
+                  (if (= b 0) a (recur b (erlang/rem a b))))]
+   [(erlang/div numerator divisor) (erlang/div denominator divisor)])))
+(defn negate [value]
+ (let [{:keys [e s bits]} (parts value)] (data e s (erlang/bxor bits (power (dec (+ e s)))))))
+
+(defn- add-in [rounding a b]
+ (let [{:keys [e s]} a]
+  (cond (or (:nan a) (:nan b)) (nan e s)
+        (and (:infinite a) (:infinite b) (not= (:negative a) (:negative b))) (nan e s)
+        (:infinite a) (infinity e s (:negative a))
+        (:infinite b) (infinity e s (:negative b))
+        :else
+         (let [base (min (:exponent a) (:exponent b))
+               signed-value (fn [x] (* (if (:negative x) -1 1)
+                                      (erlang/bsl (:significand x) (- (:exponent x) base))))
+               sum (+ (signed-value a) (signed-value b))
+               negative (if (= sum 0)
+                          (if (and (:zero a) (:zero b) (= (:negative a) (:negative b))) (:negative a)
+                            (= "RTN" rounding)) (< sum 0))]
+          (round-ratio e s rounding negative (abs sum) 1 base)))))
+(defn operate
+ "IEEE operation on ordinary typed FP data. NaNs are one semantic value;
+  payload and signaling identity are not observed by these operations."
+ [operation rounding left right]
+ (let [a (parts left) b (parts right) e (:e a) s (:s a)
+       _ (require! (and (= [e s] [(:e b) (:s b)]) (contains? rounding-modes rounding)) "format or rounding mismatch")
+       negative (not= (:negative a) (:negative b))]
+  (case operation
+   :fp-add (add-in rounding a b)
+   :fp-sub (add-in rounding a (parts (negate right)))
+   :fp-mul
+    (cond (or (:nan a) (:nan b) (and (:zero a) (:infinite b)) (and (:infinite a) (:zero b))) (nan e s)
+          (or (:infinite a) (:infinite b)) (infinity e s negative)
+          :else (round-ratio e s rounding negative (* (:significand a) (:significand b)) 1
+                            (+ (:exponent a) (:exponent b))))
+   :fp-div
+    (cond (or (:nan a) (:nan b) (and (:zero a) (:zero b)) (and (:infinite a) (:infinite b))) (nan e s)
+          (:infinite a) (infinity e s negative)
+          (:infinite b) (zero e s negative)
+          (:zero b) (infinity e s negative)
+          :else (round-ratio e s rounding negative (:significand a) (:significand b)
+                            (- (:exponent a) (:exponent b))))
+   (throw (ex-info "formal.ieee-arithmetic: unsupported operation" {:operation operation})))))
