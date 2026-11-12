@@ -1,0 +1,112 @@
+(ns formal.data-graph-test
+ (:require [formal.data-graph :as graph] [formal.identity :as identity] [formal.point :as point]
+           [formal.term :as t] [formal.query :as q] [oracle]))
+(defn refused? [f] (try (f) false (catch _ true)))
+(defn packet [rows] {:formal/data-graph 1 :profile graph/profile :root (dec (count rows)) :nodes rows})
+(defn raw-float [bits]
+ (BeamLisp.Env/decode_data_term!
+  (erlang/list_to_binary (to-list (concat [131 70] (mapv #(erlang/band 255 (erlang/bsr bits (* 8 %))) (range 7 -1 -1)))))
+  (list :safe)))
+(defn exact? [a b] (= (identity/bytes a) (identity/bytes b)))
+(def negative-zero (raw-float 9223372036854775808))
+(def fixtures
+ [nil true false -348092349820349823409832498234 0 1 1.0 0.0 negative-zero "" "λ / bytes"
+  (erlang/list_to_binary (list 0 255)) :graph-test 'foo/bar [] (list) #{} {} (tuple)
+  [1 1.0 0.0 negative-zero nil true :graph-test 'foo/bar]
+  (list :graph-test [false nil]) (tuple 1 1.0 "x") #{:a :b :c} {:b [2 2] :a [1 1]}])
+(deftest every-public-kind-roundtrips-exactly-and-reencodes-canonically
+ (doseq [data fixtures]
+  (let [g (graph/encode data) checked (graph/check! g) decoded (graph/decode! g)]
+   (is (exact? data decoded))
+   (is (= :checked-data-graph (:status checked)))
+   (is (= (graph/bytes g) (graph/bytes (graph/encode decoded))))
+   (is (= (graph/of data) (:reference checked)))
+   (is (= false (:compiler-proof-authority checked))))))
+(deftest sharing-preserves-type-and-bit-distinctions
+ (let [leaf [1 1.0 0.0 negative-zero] data (vec (repeat 1000 leaf))
+       g (graph/encode data) stats (graph/check! g)]
+  (is (= 6 (:nodes stats)))
+  (is (= 5001 (:expanded-nodes stats)))
+  (is (= 1004 (:edges stats)))
+  (is (exact? data (graph/decode! g)))
+  (is (= 4 (count (set (map graph/of [1 1.0 0.0 negative-zero])))))))
+(deftest unordered-inputs-produce-stable-canonical-references
+ (let [pairs [[:x [1 2]] [:y (tuple false 3)] [:z #{:x :y}]]]
+  (doseq [rows [pairs (reverse pairs) (concat (drop 1 pairs) (take 1 pairs))]]
+   (is (= (graph/of (into {} pairs)) (graph/of (into {} rows)))))
+  (is (= (graph/of (set [:x :y :z])) (graph/of (set [:z :x :y]))))))
+(deftest malformed-or-noncanonical-graphs-are-refused-before-decoding
+ (let [g (graph/encode [1 2]) rows (:nodes g) root (:root g)]
+  (doseq [bad [(assoc g :extra nil) (assoc g :formal/data-graph 1.0) (assoc g :profile :other)
+              (assoc g :root 0) (assoc g :root (float root)) (assoc g :nodes (to-list rows))
+              (assoc-in g [:nodes root 1] [root]) (assoc-in g [:nodes root 1] [-1])
+              (assoc-in g [:nodes root 1] [999]) (assoc-in g [:nodes root 1] [0.0])
+              (packet [["int" 1.0]]) (packet [["bool" 0]]) (packet [["nil" false]])
+              (packet [["new-op" nil]]) (packet [["binary" :bytes]])
+              (packet [["keyword" "true"]]) (packet [["keyword" "nil"]])
+              (packet [["keyword" (erlang/list_to_binary (list 255))]])
+              (packet [["int" 0] ["int" 0] ["vector" [0 1]]])
+              (packet [["int" 0] ["int" 1]])
+              (packet [["int" 1] ["set" [0 0]]])
+              (packet [["int" 1] ["map" [[0 0] [0 0]]]])
+              (packet [["int" 1] ["map" [[0]]]])
+              (with-meta g {:hidden true})]]
+   (is (refused? #(graph/check! bad)) (pr-str bad)))
+  (let [swapped (assoc g :nodes [(nth rows 1) (nth rows 0) ["vector" [1 0]]])]
+   (is (refused? #(graph/check! swapped))))))
+(deftest runtime-machinery-and-implicit-metadata-are-outside-public-graphs
+ (doseq [x [(fn [] 1) (atom 0) (self) (erlang/make_ref) (with-meta [1] {:secret true})
+            (sorted-map :a 1) (sorted-set 1 2) (tuple :meta 1 {}) (tuple :"$remote" :x :y 0)
+            {:__struct__ :not-a-public-record}]]
+  (is (refused? #(graph/encode x))))
+ (doseq [head graph/reserved-tuple-heads]
+  (is (refused? #(graph/check! (packet [["keyword" head] ["tuple" [0]]])))))
+ (is (refused? #(graph/check! (packet [["keyword" "__struct__"] ["map" [[0 0]]]])))))
+(deftest decoder-never-interns-a-keyword-from-transport
+ (let [name (str "formal.graph.unknown." (System/unique_integer (list :positive)))
+       g (packet [["keyword" name]])]
+  (is (= :checked-data-graph (:status (graph/check! g))))
+  (is (refused? #(graph/decode! g)))
+  (let [before (erlang/system_info :atom_count)]
+   (doseq [i (range 40)] (is (refused? #(graph/decode! (packet [["keyword" (str name "." i)]])))))
+   (is (= before (erlang/system_info :atom_count))))))
+(deftest nonfinite-and-noncanonical-float-envelopes-are-refused
+ (doseq [p ["" (erlang/list_to_binary (list 131 97 0))
+            (erlang/list_to_binary (list 131 70 127 240 0 0 0 0 0 0))
+            (erlang/list_to_binary (list 131 70 127 248 0 0 0 0 0 0))]]
+  (is (refused? #(graph/check! (packet [["float64" p]]))))))
+(deftest expansion-and-structural-budgets-have-independent-boundaries
+ (let [rows (vec (concat [["binary" "x"]] (map (fn [i] ["vector" [i i]]) (range 20))))
+       good (packet rows) bomb (packet (conj rows ["vector" [20 20]]))]
+  (is (= 2097151 (:expanded-nodes (graph/check! good))))
+  (is (< (:bytes (graph/check! good)) 1024))
+  (is (refused? #(graph/check! bomb))))
+ (is (refused? #(graph/check! (packet (vec (repeat 32769 ["nil" nil]))))))
+ (let [deep (reduce (fn [x _] [x]) nil (range 192))]
+  (is (= 192 (:depth (graph/check! (graph/encode deep)))))
+  (is (refused? #(graph/encode [deep]))))
+ (is (refused? #(graph/check! (packet [["binary" (String/duplicate "x" 8388608)]])))))
+(deftest generated-nested-data-exercises-sharing-and-collection-kinds
+ (doseq [seed (range 40)]
+  (let [scalar (nth fixtures (rem seed 18))
+        xs [scalar [scalar scalar] (tuple :data seed scalar) (list scalar seed)]
+        data {:seed seed :items xs :again xs :names #{:a :b}}]
+   (is (exact? data (graph/decode! (graph/encode data)))))))
+(deftest point-version-two-is-explicit-and-keeps-version-one-checkable
+ (let [x (t/variable "x" t/Int) question (q/prove (t/gt x (t/int 0)))
+       old (point/prepare question {"x" 0}) ready (point/prepare-graph question {"x" 0})
+       packet (:packet ready) calls (atom 0)
+       checked (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :must-not-query))}
+                 #(point/check-graph question packet))]
+  (is (= :ready (:status ready)))
+  (is (= 2 (:formal/point packet)))
+  (is (= point/graph-profile (:profile packet)))
+  (is (= (graph/of question) (:question packet)))
+  (is (= :checked-data-connection (:status checked)))
+  (is (= :checked-data-connection (:status (point/check question (:packet old)))))
+  (is (= :rejected (:status (point/check question packet))))
+  (is (= :rejected (:status (point/check-graph question (:packet old)))))
+  (is (= :rejected (:status (point/check-graph (assoc question :profile :other) packet))))
+  (is (= :rejected (:status (point/check-graph question (identity/seal (assoc packet :question (identity/hash question)))))))
+  (is (= :rejected (:status (point/prepare-graph question {"x" 1}))))
+  (is (= 0 @calls))))

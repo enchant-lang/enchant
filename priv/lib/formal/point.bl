@@ -1,10 +1,11 @@
 (ns formal.point
  (:require [formal.term :as t] [formal.query :as q] [formal.value :as value]
-           [formal.evaluate :as evaluate] [formal.identity :as identity]))
+           [formal.evaluate :as evaluate] [formal.identity :as identity] [formal.data-graph :as graph]))
 
 ;; This is a data-evaluator profile. It neither extends the restricted
 ;; formal.witness Int/Bool metatheory nor borrows that model's Lean receipts.
 (def profile :bl/independent-original-point-v1)
+(def graph-profile :bl/independent-original-point-v2)
 (def evaluator :bl/mathematical-data-replay-v1)
 (defn- require! [ok why]
  (when-not ok (throw (ex-info (str "formal.point: " why) {}))))
@@ -34,12 +35,12 @@
                  [name (if (value/value? descriptor)
                          (value/decode descriptor #(evaluate/observation % values))
                          (evaluate/observation descriptor values))]) (:observe question))))
-(defn prepare
+(defn- prepare-with
  "Construct an original satisfiability point or counterexample from explicit
   typed data, without search, native queries, Source compilation or execution.
   Every original assertion must replay true; unknown mathematics is refused.
   Display observations add no constraints and may remain unavailable."
- [question supplied]
+ [version packet-profile question-reference question supplied]
  (try
   (q/validate! question)
   (let [{:keys [values variables]} (assignments question supplied)
@@ -52,8 +53,8 @@
     :else
      {:status :ready
       :packet (identity/seal
-               {:formal/point 1 :profile profile :evaluator evaluator
-                :question (identity/hash question) :mode (:mode question)
+               {:formal/point version :profile packet-profile :evaluator evaluator
+                :question (question-reference question) :mode (:mode question)
                 :role (if (= :prove (:mode question)) :original-counterexample :original-satisfiability)
                 :bindings (mapv (fn [v] [(:data v) (t/sort-of v) (get values (:data v))]) variables)})
       :validation checked :observations (observations question values)
@@ -61,25 +62,37 @@
       :kernel-execution :not-run :native-query-calls 0 :compiler-proof-authority false}))
   (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run
                 :native-query-calls 0 :compiler-proof-authority false})))
-(defn check
+(defn prepare [question supplied]
+ (prepare-with 1 profile identity/hash question supplied))
+(defn prepare-graph
+ "Opt in to a complete graph question reference. Packet seals retain the v1
+  small-data format; the v2 point explicitly changes its question reference."
+ [question supplied]
+ (prepare-with 2 graph-profile graph/of question supplied))
+(defn- check-with
  "Reconstruct a sealed point against the complete original question. Report
   data checking separately from compiler, runtime and metatheory authority."
- [question packet]
+ [version packet-profile prepare-point question packet]
  (try
-  (require! (and (map? packet) (= 1 (:formal/point packet))
-                 (= profile (:profile packet)) (= evaluator (:evaluator packet))
+  (require! (and (map? packet) (= version (:formal/point packet))
+                 (= packet-profile (:profile packet)) (= evaluator (:evaluator packet))
                  (vector? (:bindings packet)) (identity/valid? packet)) "closed original-point packet required")
   (let [bindings (mapv (fn [row]
                          (require! (and (vector? row) (= 3 (count row))) "typed binding row required")
                          [(t/variable (nth row 0) (nth row 1)) (nth row 2)]) (:bindings packet))
-        reconstructed (prepare question bindings)]
+        reconstructed (prepare-point question bindings)]
    (require! (= :ready (:status reconstructed)) "original point could not be reconstructed")
    (require! (= (identity/bytes packet) (identity/bytes (:packet reconstructed)))
              "point differs from its complete original question or typed bindings")
-   {:status :checked-data-connection :profile profile :evaluator evaluator
+   {:status :checked-data-connection :profile packet-profile :evaluator evaluator
     :question (:question packet) :packet (:identity packet) :role (:role packet)
     :validation (:validation reconstructed) :observations (:observations reconstructed)
     :assurance :independently-replayed-data :evaluator-soundness :reviewed-not-mechanically-proved
     :kernel-execution :not-run :native-query-calls 0 :compiler-proof-authority false})
   (catch error {:status :rejected :reason (ex-message error) :kernel-execution :not-run
                 :native-query-calls 0 :compiler-proof-authority false})))
+
+(defn check [question packet]
+ (check-with 1 profile prepare question packet))
+(defn check-graph [question packet]
+ (check-with 2 graph-profile prepare-graph question packet))
