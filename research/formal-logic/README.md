@@ -6,6 +6,14 @@ procedures and native theory access together. **The existing compiler/oracle
 defaults retain their trust policy.** `system.linear` is now a term-based compiler
 consumer with an explicitly declared arithmetic scope.
 
+The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
+argument references through independent BL evaluation. It matches 6,300 root
+values across 187 questions and four deterministic point maps each. The shared
+131,071-occurrence example evaluates 17 nodes without an engine call. Small
+cases pay more admission overhead; managed question/reply integration remains
+next. The live dossier includes the actual evaluation and an adjustable,
+source-backed structural counting notebook.
+
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
 [SEMANTICS.md](SEMANTICS.md). The catalogue has 46 interface families, with
