@@ -65,6 +65,13 @@
      {:file file :mime (if (= ".json" (Path/extname file)) "application/json" "text/plain")})))))
 (defn readonly-script []
  "document.querySelectorAll('form.fb').forEach(f=>{f.querySelectorAll('button,textarea,input,select').forEach(c=>c.disabled=true);const s=f.querySelector('.fb-state');if(s)s.textContent='Only the dossier owner can save a review.'});")
+(defn- page-html [text request]
+ (let [doc (document text request) writable? (boolean (owner? request))]
+  (cached-html text doc writable? :page
+   (fn []
+    (let [tree (phase "page" (fn [] (page/page-h doc (css)
+                (str (scripts) (when-not writable? (readonly-script))))))]
+     (str "<!doctype html>" (phase "html" (fn [] (render-html tree)))))))))
 (defn standalone [body extra-css extra-js]
  (str "<!doctype html><html data-design='forest'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
       "<title>Beam Lisp / logic lab</title><style>" (asset "style.css") (design/css)
@@ -163,15 +170,13 @@
                          :html (cached-html text doc (boolean (owner? request)) :fragment
                                  (fn [] (join "" (mapv render-html (page/doc-h doc)))))}))
    linked (web/bytes request (:mime linked) (File/read! (:file linked)))
-   (= route "/") (let [doc (document text request) writable? (boolean (owner? request))]
-     (web/html request
-      (cached-html text doc writable? :page
-       (fn []
-        (let [tree (phase "page" (fn [] (page/page-h doc (css)
-                    (str (scripts) (when-not writable? (readonly-script))))))]
-         (str "<!doctype html>" (phase "html" (fn [] (render-html tree)))))))))
+   (= route "/") (web/html request (page-html text request))
    :else (web/text request 404 "Not found"))))
 (defn start []
  (let [port (erlang/binary_to_integer (or (System/get_env "PORT") "4093"))]
+  ;; Complete one read-only render before readiness probes can overlap cold
+  ;; roster parsing. Owner roles and enriched evidence are still resolved per
+  ;; request; the existing HTML cache retains its exact revision/role keys.
+  (phase "warm-readonly-page" (fn [] (page-html (File/read! path) nil)))
   (web/serve {:port port :ip (tuple 127 0 0 1) :plug handler :log :off})
   (println (str "Formal BL review on http://127.0.0.1:" port "/ · " (count catalog) " discovered renderers"))))
