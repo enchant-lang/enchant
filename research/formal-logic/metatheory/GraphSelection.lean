@@ -10,21 +10,22 @@ variable {size : Nat} {α : Type}
 /-- Finite, constructive sequencing; a missing child refuses the container. -/
 def sequenceFin : {n : Nat} → (Fin n → Option α) → Option (Fin n → α)
   | 0, _ => some (fun index => Fin.elim0 index)
-  | n + 1, values => do
-    let previous ← sequenceFin (fun i => values i.castSucc)
-    let latest ← values (Fin.last n)
-    pure (extend previous latest)
+  | n + 1, values =>
+    match sequenceFin (fun i => values i.castSucc), values (Fin.last n) with
+    | some previous, some latest => some (extend previous latest)
+    | _, _ => none
 
 theorem sequenceFin_some {n : Nat} (values : Fin n → α) :
     sequenceFin (fun i => some (values i)) = some values := by
-  induction n generalizing values with
+  induction n with
   | zero =>
-    congr 1
+    change some (fun index : Fin 0 => Fin.elim0 index) = some values
+    apply congrArg some
     funext index
     exact Fin.elim0 index
   | succ n ih =>
-    simp only [sequenceFin, ih, Option.bind_some]
-    congr 1
+    simp only [sequenceFin, ih]
+    apply congrArg some
     funext index
     by_cases earlier : index.val < n
     · simp [extend, earlier]
@@ -35,12 +36,13 @@ theorem sequenceFin_some {n : Nat} (values : Fin n → α) :
 def Kind.sequence (kind : Kind) (values : kind.Slot → Option α) : Option (kind.Slot → α) :=
   match kind with
   | .vector _ | .list _ | .set _ | .tuple _ => sequenceFin values
-  | .map _ => do
-    let pairs ← sequenceFin (fun i => do
-      let key ← values (i, false)
-      let value ← values (i, true)
-      pure (key, value))
-    pure (fun slot => if slot.2 then (pairs slot.1).2 else (pairs slot.1).1)
+  | .map _ =>
+    match sequenceFin (fun i =>
+      match values (i, false), values (i, true) with
+      | some key, some value => some (key, value)
+      | _, _ => none) with
+    | some pairs => some (fun slot => if slot.2 then (pairs slot.1).2 else (pairs slot.1).1)
+    | none => none
 
 theorem sequence_some (kind : Kind) (values : kind.Slot → α) :
     kind.sequence (fun slot => some (values slot)) = some values := by
@@ -50,10 +52,12 @@ theorem sequence_some (kind : Kind) (values : kind.Slot → α) :
   | set n => exact sequenceFin_some values
   | tuple n => exact sequenceFin_some values
   | map n =>
-    simp only [Kind.sequence, Option.bind_some]
+    change (Fin n × Bool → α) at values
+    change (match sequenceFin (fun i : Fin n => some (values (i, false), values (i, true))) with
+      | some pairs => some (fun slot : Fin n × Bool => if slot.2 then (pairs slot.1).2 else (pairs slot.1).1)
+      | none => none) = some values
     rw [sequenceFin_some]
-    simp only [Option.bind_some]
-    congr 1
+    apply congrArg some
     funext slot
     rcases slot with ⟨index, side⟩
     cases side <;> rfl
@@ -102,7 +106,7 @@ theorem selective_fold_agrees (leaf : Scalar → Option α) (fullLeaf : Scalar �
     (ready : table.Ready leaf fullLeaf wanted) :
     ∀ index, wanted index = true →
       table.partialFold leaf node wanted index = some (table.fold fullLeaf node index) := by
-  induction table generalizing wanted with
+  induction table with
   | empty => intro index; exact Fin.elim0 index
   | @push n previous row ih =>
     intro index needed
@@ -120,7 +124,7 @@ theorem selective_fold_agrees (leaf : Scalar → Option α) (fullLeaf : Scalar �
 theorem unselected_is_none (leaf : Scalar → Option α) (node : Algebra α)
     (table : Table size) (wanted : Fin size → Bool) :
     ∀ index, wanted index = false → table.partialFold leaf node wanted index = none := by
-  induction table generalizing wanted with
+  induction table with
   | empty => intro index; exact Fin.elim0 index
   | @push n previous row ih =>
     intro index unneeded
