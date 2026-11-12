@@ -57,6 +57,7 @@ require(all(n in units for n in ('formal.preparation', 'formal.affine', 'formal.
 focused = counts('focused-checks.txt', 4)
 preceding = counts('preceding-focused-checks.txt', 26)
 regression = counts('regression-checks.txt', 31)
+require(regression['veritas.model-serve-test'] >= 59, 'owned admission control and rejected-body checks')
 require(focused['system.formal-preparation-test'] >= 109 and focused['system.linear-terms-test'] >= 126
         and focused['system.linear-term-baseline-test'] == 8 and focused['system.linear-test'] >= 36,
         'fresh connection, model boundary, constructive arithmetic and actual emission checks')
