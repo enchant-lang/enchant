@@ -53,7 +53,7 @@ assert operation['previous'] == read(E / 'baseline-sdk-pin.json')['sdk']
 stages = {}
 for stage in ('sdk-focused', 'graph-focused', 'native', 'observation-corpus', 'sdk-regression',
               'regression', 'paired-native-corpus', 'facade', 'live-regression',
-              'preflight', 'preflight-controls', 'writer', 'consumer-one', 'consumer-two'):
+              'preflight', 'preflight-controls', 'writer', 'consumer-one', 'consumer-two', 'example'):
     snapshot = read(E / (stage + '-source-pin.json'))
     assert snapshot['sdk_pin'] == pin
     committed(snapshot)
@@ -154,6 +154,12 @@ for row in corpus['rows']:
         observations += point['observations']
         roots += point['roots']
 assert (observations, roots) == (1176, 6300)
+example = read(E / 'example.json')
+assert example['managed-query-calls'] == 0 and example['compiler-proof-authority'] is False
+assert example['inactive']['question-reference'] == example['active']['question-reference'] == example['question-reference']
+assert example['inactive']['refused-observations'] == [] and example['active']['refused-observations'] == ['optional']
+assert example['inactive']['observations']['optional']['value'] == {'present': False}
+assert example['active']['observations']['optional']['reason'] == 'observation-materialization-refused'
 
 floor = read(OLD / 'produced-compiler.json')
 assert floor['status'] == 'passed' and floor['files'] == 141

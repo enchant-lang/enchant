@@ -1,0 +1,54 @@
+(ns formal.graph-observation-examples
+ (:require [formal.graph-observations :as observed] [formal.term :as t]
+           [formal.value :as v] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [oracle]))
+
+(defn run []
+ (let [x (t/variable "story.observation.x" t/Int)
+       present (t/variable "story.observation.present" t/Bool)
+       next (t/add x (t/int 1))
+       list-value (v/make (list next nil false) {})
+       unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" "story.observation.unadmitted.payload.50"]]}
+       payload (graph/patch-map (graph/encode {:present present :item nil})
+                 [[(graph/encode :item) unknown]])
+       option (graph/patch-map (graph/encode (v/make nil {:domain {:kind :option}}))
+                [[(graph/encode :value) payload]])
+       observers (graph/assemble "map" [[(graph/encode "list") (graph/encode list-value)]
+                                        [(graph/encode "same-next") (graph/encode next)]
+                                        [(graph/encode "optional") option]])
+       data (graph/patch-map (graph/encode (q/sat {})) [[(graph/encode :observe) observers]])
+       context {:formal/question-graph 1 :profile qg/profile :graph data}
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :observation-example-must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   #(let [inactive (observed/reconstruct context {"story.observation.x" 7 "story.observation.present" false})
+          active (observed/reconstruct context {"story.observation.x" 7 "story.observation.present" true})]
+     (doseq [result [inactive active]]
+      (assert (= (graph/reference data) (:question-reference result)))
+      (assert (list? (get-in result [:observations "list" :value])))
+      (assert (= (list 8 nil false) (get-in result [:observations "list" :value])))
+      (assert (= 8 (get-in result [:observations "same-next"])))
+      (assert (= :not-run (:assertion-replay result)))
+      (assert (= false (:compiler-proof-authority result))))
+     (assert (= {:present false} (get-in inactive [:observations "optional" :value])))
+     (assert (= [] (:refused-observations inactive)))
+     (assert (= ["optional"] (:refused-observations active)))
+     (assert (= :observation-materialization-refused (get-in active [:observations "optional" :reason])))
+     (assert (= 0 @calls))
+     {:schema "enchant.formal.graph-observation-example.v1"
+      :question-reference (graph/reference data) :inactive inactive :active active
+      :managed-query-calls @calls :native-execution :not-invoked :compiler-proof-authority false}))))
+
+(defn story []
+ (let [{:keys [inactive active] :as result} (run)]
+  (into-sorted-map
+   {:subject :graph-observation-reconstruction
+    :list-value (get-in inactive [:observations "list" :value]) :list-kind-preserved true
+    :same-next (get-in inactive [:observations "same-next"])
+    :inactive-option (get-in inactive [:observations "optional" :value])
+    :inactive-refusals (:refused-observations inactive)
+    :active-refusals (:refused-observations active)
+    :active-reason (get-in active [:observations "optional" :reason])
+    :same-original-question (= (:question-reference inactive) (:question-reference active))
+    :assertion-replay :not-run :managed-query-calls (:managed-query-calls result)
+    :compiler-proof-authority false})))
