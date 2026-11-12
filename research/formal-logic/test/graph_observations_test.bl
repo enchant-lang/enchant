@@ -1,0 +1,90 @@
+(ns formal.graph-observations-test
+ (:require [formal.graph-observations :as observed] [formal.term :as t]
+           [formal.value :as v] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.evaluate :as ev] [oracle]))
+
+(defn- context [items]
+ {:formal/question-graph 1 :profile qg/profile :graph (graph/encode (q/sat {:observe items}))})
+(defn- agrees [items assignments]
+ (let [ctx (context items) result (observed/reconstruct ctx assignments)
+       expected (into {} (map (fn [[label item]]
+                                [label (if (v/value? item) (v/decode item (fn [term] (ev/observation term assignments)))
+                                          (ev/observation item assignments))]) items))]
+  (is (erlang/=:= expected (:observations result)))
+  (is (= [] (:refused-observations result)))
+  (is (= (graph/reference (:graph ctx)) (:question-reference result)))
+  (is (= :not-run (:assertion-replay result)))
+  (is (= 0 (:native-query-calls result)))
+  (is (= false (:compiler-proof-authority result)))
+  result))
+
+(deftest graph-observations-preserve-list-vector-nil-and-false
+ (let [x (t/variable "graph.observation.x" t/Int)
+       descriptor (v/make {"list" (list x nil false) "vector" [x (v/make (list x) {})]} {})
+       result (agrees {"raw" x "composite" descriptor} {"graph.observation.x" 7})]
+  (is (list? (get-in result [:observations "composite" :value "list"])))
+  (is (vector? (get-in result [:observations "composite" :value "vector"])))
+  (is (= 2 (get-in result [:checking :evaluated-nodes])))))
+
+(deftest all-built-in-domain-decoders-use-the-original-template
+ (let [yes (t/bool true) no (t/bool false) item (t/int 7)
+       values [(v/make {:nil? no :item (list item nil)} {:domain {:kind :nullable}})
+               (v/make {:present yes :item [item false]} {:domain {:kind :option}})
+               (v/make {:tag (t/int 1) :arms {:a (list item) :b {:x item}}} {:domain {:kind :sum :tags [:a :b]}})
+               (v/make {:present [yes no] :items [(list item) item]} {:domain {:kind :finite-map :keys [:a :b]}})
+               (v/make {:length (t/int 1) :items [(list item) item]} {:domain {:kind :bounded-vector :capacity 2}})
+               (v/make {:members [no yes]} {:domain {:kind :finite-set :keys [:a :b]}})
+               (v/make {:counts [(t/int 0) (t/int 3)]} {:domain {:kind :finite-bag :keys [:a :b]}})
+               (v/make {:edges [[yes no] [no yes]]} {:domain {:kind :finite-relation :keys [:a :b]}})
+               (v/make (t/int 1) {:domain {:kind :finite-key :keys [:a :b]}})]]
+  (doseq [descriptor values] (agrees {"domain" descriptor} {}))))
+
+(deftest graph-observations-keep-incomplete-and-nan-results-explicit
+ (let [fp (t/fp-sort 5 11) nan (t/literal fp 32257) missing (t/variable "graph.observation.missing" t/Int)]
+  (agrees {"nan" nan "missing" missing "nested" (v/make (list nan missing) {})} {})))
+
+(defn- opaque-payload [defined]
+ (let [base (:graph (context {"value" (v/make nil {:defined (t/bool defined)})}))
+       fields (second (nth (:nodes base) (:root base)))
+       observe-id (second (first (filter (fn [[key _]] (= ["keyword" "observe"] (nth (:nodes base) key))) fields)))
+       descriptor-id (second (first (second (nth (:nodes base) observe-id))))
+       descriptor (graph/subgraph base descriptor-id)
+       unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" "graph.observation.preview.unadmitted.payload"]]}
+       replacement (graph/patch-map descriptor [[(graph/encode :value) unknown]])]
+  {:formal/question-graph 1 :profile qg/profile
+   :graph (graph/patch-map base [[(graph/encode :observe)
+                                 (graph/assemble "map" [[(graph/encode "value") replacement]])]])}))
+
+(deftest unused-opaque-payload-stays-unmaterialized-and-active-opaque-payload-stays-refused
+ (let [inactive (opaque-payload false) active (opaque-payload true)
+       a (observed/reconstruct inactive {}) b (observed/reconstruct active {})]
+  (is (= {:unavailable :undefined-result} (get-in a [:observations "value" :value])))
+  (is (= [] (:refused-observations a)))
+  (is (= ["value"] (:refused-observations b)))
+  (is (= 1 (get-in b [:observations "value" :formal/observation-refused])))
+  (is (= :observation-materialization-refused (get-in b [:observations "value" :reason])))
+  (is (= (graph/reference (:graph inactive)) (:question-reference a)))
+  (is (= (graph/reference (:graph active)) (:question-reference b)))
+  (is (thrown? (qg/open! inactive)))
+  (is (thrown? (graph/decode! (get-in b [:observations "value" :descriptor-graph]))))))
+
+(deftest reconstruction-shares-demand-across-observers-and-skips-inactive-items
+ (let [unused (t/variable "graph.observation.unused" t/Int) item (t/int 7)
+       opts (v/make {:present (t/bool false) :item unused} {:domain {:kind :option}})
+       result (agrees {"a" item "b" item "unused" opts} {})]
+  (is (= 3 (get-in result [:checking :evaluated-nodes])))
+  (is (= {:present false} (get-in result [:observations "unused" :value])))))
+
+(deftest caller-caches-and-forged-private-leaves-are-not-observer-authority
+ (let [ctx (context {"x" (t/int 7)})]
+  (is (thrown? (observed/reconstruct (assoc ctx :reference :claimed) {})))
+  (is (thrown? (observed/reconstruct ctx {"unused" (fn [] 7)})))
+  (is (thrown? (observed/reconstruct
+                (context {"forged" {:formal/term 1 :formal/graph-term-source 1 :sort t/Int}}) {})))))
+
+(deftest display-reconstruction-never-requests-an-oracle-verdict
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn [] (agrees {"x" (t/int 7)} {})))
+  (is (= 0 @calls))))

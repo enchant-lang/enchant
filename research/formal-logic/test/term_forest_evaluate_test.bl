@@ -90,3 +90,25 @@
   (oracle/with-oracle {:query deny :query-graph deny :script deny}
    #(agree [(t/add (t/int 4) (t/int 5))] {}))
   (is (= 0 @calls))))
+
+(deftest scoped-point-lookups-share-demand-and-refuse-unadmitted-roots
+ (let [x (t/variable "scoped.point" t/Int) expression (t/add x (t/int 1))
+       data (graph/encode [expression x]) ids (second (nth (:nodes data) (:root data)))
+       root (first ids) child (second ids) held (atom nil)]
+  (is (= :finished
+       (point/with-point data [root] {"scoped.point" 7}
+        (fn [operation]
+         (reset! held operation)
+         (is (= 0 (:evaluated-nodes ((:checking operation)))))
+         (is (= 8 ((:resolve operation) root)))
+         (is (= 3 (:evaluated-nodes ((:checking operation)))))
+         (is (= 8 ((:resolve operation) root)))
+         (is (= 3 (:evaluated-nodes ((:checking operation)))))
+         (is (thrown? ((:resolve operation) child)))
+         (is (thrown? ((:resolve operation) (erlang/float root))))
+         :finished))))
+  (is (thrown? ((:resolve @held) root)))
+  (is (thrown? ((:checking @held))))
+  (is (thrown? (point/with-point data [root] {"scoped.point" 7}
+                 (fn [operation] (reset! held operation) (throw :consumer-failure)))))
+  (is (thrown? ((:resolve @held) root)))))

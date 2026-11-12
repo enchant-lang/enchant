@@ -1,0 +1,157 @@
+(ns formal.graph-observations
+ (:require [formal.question-forest :as question] [formal.term-forest-evaluate :as point]
+           [formal.data-graph :as graph] [formal.term :as t] [formal.value :as v]
+           [formal.evaluate :as sdk]))
+
+(def profile :bl/graph-observation-preview-v1)
+(defn- require! [ok message]
+ (when-not ok (throw (ex-info (str "formal.graph-observations: " message)
+                            {:kind :observation-template-refused :profile profile}))))
+(defn- fields [rows id]
+ (let [[kind pairs] (nth rows id)]
+  (require! (= "map" kind) "map descriptor required")
+  (into {} (keep (fn [[key value]]
+                   (let [[tag name] (nth rows key)] (when (= "keyword" tag) [name value]))) pairs))))
+
+(defn reconstruct
+ "Reconstruct display observations from the original question graph and point
+  data. Argument trees stay references; demanded roots share one local evaluator.
+  Explicit domain/scope/key data uses existing-keyword materialization. Refused
+  fields retain their descriptor graph. No assertion replay or native query is
+  performed, and no checked witness, execution or compiler authority is granted."
+ [context assignments]
+ (let [prepared (question/prepare context) data (:graph context) rows (:nodes data)
+       forest (:forest prepared) translated (zipmap (:source-roots forest) (:roots forest))
+       sorts (into {} (map (fn [[id _ sort _ _]] [id sort]) (:nodes forest)))
+       token (erlang/make_ref) templates (atom {}) payloads (atom {}) displays (atom {})
+       components (atom #{}) decoded (atom {})]
+  (letfn [(materialize [ids]
+           (let [missing (vec (distinct (filter (fn [id] (not (contains? @decoded id))) ids)))]
+            (when (seq missing)
+             (try
+              (let [values (graph/decode-nodes! data missing)]
+               (doseq [i (range (count missing))]
+                (swap! decoded assoc (nth missing i) (nth values i))
+                (swap! components conj (nth missing i))))
+              (catch error
+               (throw (ex-info (str "formal.graph-observations: materialization refused: " (ex-message error))
+                               {:kind :observation-materialization-refused :profile profile}))))))
+           (mapv (fn [id] (get @decoded id)) ids))
+          (field! [f key]
+           (require! (contains? f key) (str "missing descriptor field " key)) (get f key))
+          (sequence! [id]
+           (let [[kind children] (nth rows id)]
+            (require! (contains? #{"vector" "list"} kind) "ordered payload sequence required") children))
+          (term [id expected]
+           (require! (contains? translated id) "a declared typed term leaf is required")
+           (let [sort (get sorts (get translated id))]
+            (when expected (require! (= expected sort) "observation predicate or index has the wrong sort"))
+            {:formal/term 1 :sort sort :formal/graph-term-source id :formal/graph-operation token}))
+          (deferred [id]
+           ;; This is a private SDK-decoder adapter. The operation token is not
+           ;; portable and can never occur in an admitted caller graph.
+           {:formal/term 1 :formal/graph-payload-source id :formal/graph-operation token})
+          (template [id]
+           (if (contains? @templates id) (get @templates id)
+            (let [f (fields rows id)
+                  _ (require! (= ["int" 1] (nth rows (field! f "formal/value"))) "explicit semantic value required")
+                  payload-id (field! f "value") domain-id (field! f "domain") scope-id (field! f "scope")
+                  [domain scope] (materialize [domain-id scope-id])
+                  _ (require! (and (map? domain) (map? scope)
+                                   (contains? #{:exact :bounded :finite-universe :abstract} (:mode scope)))
+                              "explicit domain and model scope required")
+                  kind (:kind domain) pf (when (contains? #{:nullable :option :sum :finite-map :bounded-vector
+                                                          :finite-set :finite-bag :finite-relation} kind)
+                                         (fields rows payload-id))
+                  source (fn [key] (field! pf key))
+                  terms (fn [key sort] (mapv (fn [child] (term child sort)) (sequence! (source key))))
+                  items (fn [key] (mapv deferred (sequence! (source key))))
+                  payload
+                  (case kind
+                   :nullable {:nil? (term (source "nil?") t/Bool) :item (deferred (source "item"))}
+                   :option {:present (term (source "present") t/Bool) :item (deferred (source "item"))}
+                   :sum
+                    (let [arms-id (source "arms") [tag entries] (nth rows arms-id)
+                          _ (require! (= "map" tag) "constructor arms must be a map")
+                          keys (materialize (mapv first entries))]
+                     {:tag (term (source "tag") t/Int)
+                      :arms (into {} (mapv (fn [i] [(nth keys i) (deferred (second (nth entries i)))])
+                                           (range (count entries))))})
+                   :finite-map {:present (terms "present" t/Bool) :items (items "items")}
+                   :bounded-vector {:length (term (source "length") t/Int) :items (items "items")}
+                   :finite-set {:members (terms "members" t/Bool)}
+                   :finite-bag {:counts (terms "counts" t/Int)}
+                   :finite-relation {:edges (mapv (fn [row] (mapv (fn [child] (term child t/Bool)) (sequence! row)))
+                                                   (sequence! (source "edges")))}
+                   :finite-key (term payload-id t/Int)
+                   (deferred payload-id))
+                  _ (case kind
+                      :sum (require! (and (or (vector? (:tags domain)) (list? (:tags domain)))
+                                          (= (set (:tags domain)) (set (keys (:arms payload))))) "constructor tags and arms must agree")
+                      :finite-map (require! (and (vector? (:keys domain))
+                                                 (= (count (:keys domain)) (count (:present payload)) (count (:items payload))))
+                                           "map keys, presence flags and items must agree")
+                      :bounded-vector (require! (and (int? (:capacity domain)) (<= 0 (:capacity domain))
+                                                     (= (:capacity domain) (count (:items payload)))) "vector capacity and items must agree")
+                      :finite-set (require! (and (vector? (:keys domain)) (= (count (:keys domain)) (count (:members payload)))) "set universe and members must agree")
+                      :finite-bag (require! (and (vector? (:keys domain)) (= (count (:keys domain)) (count (:counts payload)))) "bag universe and counts must agree")
+                      :finite-relation (require! (and (vector? (:keys domain)) (= (count (:keys domain)) (count (:edges payload)))
+                                                      (every? (fn [row] (= (count (:keys domain)) (count row))) (:edges payload))) "relation universe and matrix must agree")
+                      :finite-key (require! (vector? (:keys domain)) "finite key universe required")
+                      nil)
+                  value (v/make payload {:domain domain :scope scope
+                                        :defined (term (field! f "defined") t/Bool)
+                                        :within (term (field! f "within") t/Bool)})]
+             (swap! templates assoc id value) value)))]
+   (point/with-point data (:source-roots forest) assignments
+    (fn [operation]
+     (letfn [(display [id]
+              (if (contains? @displays id) (get @displays id)
+               (let [sort (get sorts (get translated id)) value ((:resolve operation) id)
+                     local (t/variable "graph.observation.private" sort)
+                     result (sdk/observation local {"graph.observation.private" value})]
+                (swap! displays assoc id result) result)))
+             (resolve [placeholder]
+              (require! (erlang/=:= token (:formal/graph-operation placeholder)) "foreign decoder placeholder refused")
+              (cond (contains? placeholder :formal/graph-term-source) (display (:formal/graph-term-source placeholder))
+                    (contains? placeholder :formal/graph-payload-source) (payload (:formal/graph-payload-source placeholder))
+                    :else (throw (ex-info "formal.graph-observations: unknown private placeholder" {}))))
+             (semantic [id] (v/decode (template id) resolve))
+             (payload [id]
+              (if (contains? @payloads id) (get @payloads id)
+               (let [[kind body] (nth rows id) f (when (= "map" kind) (fields rows id))
+                     marked? (fn [name] (when-let [ref (get f name)] (= ["int" 1] (nth rows ref))))
+                     result
+                     (cond
+                      (marked? "formal/term") (display id)
+                      (marked? "formal/value") (:value (semantic id))
+                      (= "map" kind)
+                       (let [keys (materialize (mapv first body))]
+                        (into {} (mapv (fn [i] [(nth keys i) (payload (second (nth body i)))])
+                                       (range (count body)))))
+                      (= "vector" kind) (mapv payload body)
+                      (= "list" kind) (to-list (map payload body))
+                      :else (first (materialize [id])))]
+                (swap! payloads assoc id result) result)))]
+      (let [refusals (atom [])
+            observations
+            (into {} (mapv
+             (fn [{:keys [label descriptor-source]}]
+              [label
+               (try
+                (let [f (fields rows descriptor-source)]
+                 (if-let [id (get f "formal/term")]
+                  (do (require! (= ["int" 1] (nth rows id)) "version-1 term required") (display descriptor-source))
+                  (semantic descriptor-source)))
+                (catch error
+                 (if (contains? #{:observation-materialization-refused :observation-template-refused} (:kind (ex-data error)))
+                  (do (swap! refusals conj label)
+                   {:formal/observation-refused 1 :reason (:kind (ex-data error)) :message (ex-message error)
+                    :descriptor-graph (graph/subgraph data descriptor-source)})
+                  (throw error))))]) (:observations prepared)))]
+       {:profile profile :question-reference (:reference prepared) :observations observations
+        :refused-observations @refusals :assertion-replay :not-run :native-query-calls 0
+        :checking (assoc ((:checking operation)) :decoded-components (count @components)
+                         :semantic-templates (count @templates) :payload-nodes (count @payloads)
+                         :display-roots (count @displays))
+        :semantics :selected-sdk-observation-rules :compiler-proof-authority false})))))))

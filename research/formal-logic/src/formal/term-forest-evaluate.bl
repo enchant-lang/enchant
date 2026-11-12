@@ -4,13 +4,13 @@
 
 (def profile :bl/graph-point-evaluation-preview-v1)
 
-(defn values
- "Evaluate requested graph terms under bounded portable point data. Revalidate
-  the original forest; retain argument references and per-operation memoization.
-  ITE/AND/OR keep the selected SDK's demand behavior. Other local primitive
-  semantics are delegated to that SDK using privately named child values.
-  No supplied prepared view, native result or checked-proof claim is accepted."
- [data roots assignments]
+(defn with-point
+ "Use one freshly admitted graph point while consuming demanded root values.
+  The callback receives source-root lookup and diagnostic snapshot functions;
+  both retire on return or failure. Only the original admitted roots can be
+  looked up. These functions are local implementation plumbing, not portable
+  query terms, accepted prepared views, native handles or proof authority."
+ [data roots assignments consume]
  (when-not (map? assignments)
   (throw (ex-info "formal.term-forest-evaluate: point assignments must be a map" {:profile profile})))
  ;; Refuse lazy/executable/nonportable model objects before primitive checking.
@@ -19,7 +19,7 @@
        nodes (into {} (map (fn [[id op sort children datum]]
                             [id {:op (erlang/binary_to_existing_atom op :utf8)
                                  :sort sort :children children :data datum}]) (:nodes prepared)))
-       memo (atom {})]
+       memo (atom {}) active (atom true) root-ids (zipmap roots (:roots prepared))]
   (letfn [(visit [id]
            (if (contains? @memo id) (get @memo id)
             (let [{:keys [op sort children data]} (get nodes id)
@@ -54,10 +54,31 @@
                      (sdk/value local bindings)))]
              (swap! memo assoc id result)
              result)))]
-   (let [result (mapv visit (:roots prepared))]
-    {:profile profile :data-reference (:data-reference prepared) :source-roots roots
-     :values result :checking {:typed-nodes (get-in prepared [:checking :typed-nodes])
-                              :evaluated-nodes (count @memo) :argument-traversal :graph-references}
+   (let [live! (fn [] (when-not @active (throw (ex-info "formal.term-forest-evaluate: point operation retired" {:profile profile}))))]
+    (try
+     (consume {:profile profile :data-reference (:data-reference prepared) :source-roots roots
+               :resolve (fn [id]
+                          (live!)
+                          (when-not (and (int? id) (contains? root-ids id))
+                           (throw (ex-info "formal.term-forest-evaluate: unadmitted source root" {:profile profile})))
+                          (visit (get root-ids id)))
+               :checking (fn [] (live!)
+                           {:typed-nodes (get-in prepared [:checking :typed-nodes])
+                            :evaluated-nodes (count @memo) :argument-traversal :graph-references})})
+     (finally (reset! active false) (reset! memo {})))))))
+
+(defn values
+ "Evaluate requested graph terms under bounded portable point data. Revalidate
+  the original forest; retain argument references and per-operation memoization.
+  ITE/AND/OR keep the selected SDK's demand behavior. Other local primitive
+  semantics are delegated to that SDK using privately named child values.
+  No supplied prepared view, native result or checked-proof claim is accepted."
+ [data roots assignments]
+ (with-point data roots assignments
+  (fn [point]
+   (let [result (mapv (:resolve point) roots)]
+    {:profile profile :data-reference (:data-reference point) :source-roots roots
+     :values result :checking ((:checking point))
      :semantics :selected-sdk-primitive-rules :compiler-proof-authority false}))))
 
 (defn value [data root assignments] (first (:values (values data [root] assignments))))
