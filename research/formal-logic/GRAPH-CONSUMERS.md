@@ -1,9 +1,11 @@
 # Graph-backed formal questions: checkpoint 44 candidate
 
-Implementation candidate; full qualification is pending the timed 187-question
-graph-context corpus. The 9,588 targeted assertion executions, two fresh readers,
-compiler floor and Source gates pass. Checkpoint 43 remains the selected qualified
-SDK and live dossier runtime until the complete new receipt is retained.
+Checkpoint 44 code qualification passes: 9,588 targeted assertion executions,
+all 187 graph-backed questions against preceding references/identities/native
+outcomes, two fresh readers, the compiler floor and Source gates. The selected
+immutable SDK is recorded in `sdk-pin.json`; exact results and limits are in
+`evidence/graph-consumers/qualification.json`. Dossier cells and browser review
+have their own receipt.
 
 `formal.question-graph/prepare` converts a complete typed question once.
 `from-graph` admits an already canonical graph. Its closed wrapper has exactly
