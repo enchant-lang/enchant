@@ -1,7 +1,11 @@
 # A mechanical model for shared public data
 
-Next foundation after graph-consumer qualification. This is a design, not a
-checked theorem or an implementation correspondence claim.
+The first foundation is now qualified in [GRAPH-TABLE-MODEL.md](GRAPH-TABLE-MODEL.md):
+a total prefix-table model, fold/quantity laws, certified local counters and
+three exact owned-wire node/depth instances. This document retains the broader
+plan. Selective interpretation, pruning, canonical encoding/hash theorems,
+scalar byte-cost instantiation, typed binders and a universal implementation
+connection remain open; the completed results do not imply those connections.
 
 The first model should establish the part that sharing makes subtle: a finite
 node table can describe a much larger value, and selecting an operational view

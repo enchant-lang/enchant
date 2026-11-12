@@ -1,7 +1,19 @@
-# Next: explicit graph references in typed answers and durable verdicts
+# Graph consumers: implemented baseline and next boundaries
 
-Design only. The checkpoint-43 graph and opt-in point interfaces do not yet
-migrate native answer binding, proof systems or the verdict ledger.
+The original checkpoint-43 design below is retained as the migration contract.
+Checkpoint 44 now qualifies closed graph contexts, selective graph composition,
+version-2 native replies, named graph effects, retained semantic scopes and
+versioned durable records. All 187 preceding questions retain their references,
+identities and native outcomes. See [GRAPH-CONSUMERS.md](GRAPH-CONSUMERS.md).
+
+The separate [structural graph model](GRAPH-TABLE-MODEL.md) now has checked fold
+and quantity laws plus exact owned-wire node/depth instances. It does not yet
+supply a typed graph-term interpreter, scalar byte-cost bridge, general selective
+projection/pruning theorem or universal connection to the BL implementation.
+Portable graph-proof migration and Source/compiler preservation remain open.
+
+The following requirements describe the preserved design; the delivered parts
+are listed above and their exact receipts remain authoritative.
 
 ## Preserve meanings before widening capacity
 
