@@ -42,9 +42,9 @@
 (defn record [connection kind backend]
  (let [definition (get definitions kind) prepared (migration/prepare definition)
        result (migration/verify {:backend backend :admission {"message" 0}} definition)
-       _ (assert (= (if (= kind :good) :checked :refuted) (:status result)))]
+       _ (assert (= (if (= kind :bad) :refuted :checked) (:status result)))]
   (ledger/record! connection
-   (cond-> {:modality (if (= kind :good) :checked-conditional-migration :witnessed)
+   (cond-> {:modality (if (= kind :bad) :witnessed :checked-conditional-migration)
             :engine backend :question (:problem prepared) :answer result
             :evidence {:kind kind :definition definition} :compiler-proof-authority false}
      (= kind :bad) (assoc :witness (get-in result [:counterexample :object])))
@@ -61,11 +61,11 @@
        _ (assert (= false (:verdict/compiler-authority row)))
        admission (migration/check-admission definition (get-in result [:admission :object]))
        _ (assert (= :checked-data-connection (:status admission)))
-       checked (if (= kind :good)
+       checked (if (not= kind :bad)
                  (migration/check-proof definition (get-in result [:proof :object]))
                  (migration/check-counterexample definition (get-in result [:counterexample :object])))
-       _ (assert (= (if (= kind :good) :checked :checked-data-connection) (:status checked)))
-       _ (assert (= (if (= kind :good) :proved :refuted) (:verdict rechecked)))
+       _ (assert (= (if (= kind :bad) :checked-data-connection :checked) (:status checked)))
+       _ (assert (= (if (= kind :bad) :refuted :proved) (:verdict rechecked)))
        _ (assert (= (= kind :bad) (:verdict/witness-present row)))]
   {:kind kind :engine (:verdict/engine row) :rechecked (:verdict rechecked)
    :definition (:identity definition) :question (identity/hash question)}))
@@ -74,11 +74,11 @@
  (let [connection (ledger/open (second argv))]
   (try
    (when (= mode "write")
-    (doseq [kind [:good :bad] backend [:z3 :oxiz]] (record connection kind backend)))
+    (doseq [kind [:good :bad :source] backend [:z3 :oxiz]] (record connection kind backend)))
    (let [calls (atom 0)
          rows (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :record-rechecking-must-not-query))}
                 #(mapv recheck (ledger/about connection "messages/declared-migration")))
-         _ (assert (= 4 (count rows)))
+         _ (assert (= 6 (count rows)))
          _ (assert (= 0 @calls))]
     {:schema "enchant.formal.migration-ledger.v1" :mode mode :process (System/pid)
      :rows rows :managed-query-calls @calls :managed-query-scope :record-rechecking

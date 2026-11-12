@@ -68,8 +68,10 @@ subjects and check saved objects without invoking their own native fallback or
 proof search. If a definition stores a Source function, reconstruction also
 re-elaborates it; that preparation may run phase code. These are not sandboxed,
 side-effect-free checkers for arbitrary Source macros. The retained ledger
-rechecking experiment uses authored term definitions and counts the managed
-query method only in its explicitly named checking window.
+rechecking experiment covers two authored term definitions and one stored
+intrinsic Source function on each backend. It counts the managed query method
+only in its explicitly named checking window; this is no guarantee about
+arbitrary Source macro effects.
 `point` constructs evidence from an explicit complete role/value map. It keeps
 Bool false and never invents a missing native coordinate. Witness packets prove
 existence in the declared term model; their data semantics bridge is reviewed,

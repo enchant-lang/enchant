@@ -104,7 +104,7 @@ for kind in ('good', 'bad', 'source'):
 run = example['source-replay']
 require(run['status'] == 'valid' and run['actual']['value'] == 5 and run['actual']['module-loaded'] is False, 'actual source invocation and retirement')
 a, b = read(E / 'ledger-write.json'), read(E / 'ledger-read.json')
-require(a['process'] != b['process'] and len(a['rows']) == len(b['rows']) == 4 and a['rows'] == b['rows'], 'durable fresh-process reconstruction')
+require(a['process'] != b['process'] and len(a['rows']) == len(b['rows']) == 6 and a['rows'] == b['rows'], 'durable fresh-process reconstruction')
 for report in (a, b):
     require(report['managed-query-calls'] == 0 and report['managed-query-scope'] == 'record-rechecking'
             and report['compiler-proof-authority'] is False and report['delivery-authority'] is False, 'pure record rechecking scope')
