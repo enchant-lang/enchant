@@ -176,9 +176,23 @@
 (defn equivalence-problem [left right bindings opts]
  (let [a (prepare left bindings opts) b (prepare right bindings opts)]
   (if (and (= :translated (:status a)) (= :translated (:status b)))
-   {:status :translated :problem (q/equivalent (:value a) (:value b)
-       (merge opts {:profile (source-profile (concat (vals bindings) [(:value a) (:value b)]))
-                    :origin {:left left :right right :basis :compiler-anf}}))}
+   (try
+    (let [x (:value a) y (:value b)
+          cross-kind? (and (= :scalar (get-in x [:domain :kind])) (= :scalar (get-in y [:domain :kind]))
+                            (not= (t/sort-of (v/term x)) (t/sort-of (v/term y))))
+          options (merge opts {:profile (source-profile (concat (vals bindings) [x y]))
+                               :origin {:left left :right right :basis :compiler-anf}})]
+     {:status :translated
+      :problem (if cross-kind?
+                 ;; Runtime kind is observable even when BL numeric = agrees.
+                 ;; Inactive payload kinds do not matter when both sides raise.
+                 (q/prove (v/make (t/all [(t/eq (v/defined x) (v/defined y)) (t/not (v/defined x))])
+                            {:within (t/all [(v/within x) (v/within y)])
+                             :constraints (vec (distinct (concat (v/constraints x) (v/constraints y))))
+                             :scope (v/join-scope [x y])})
+                          (assoc options :relation :raisedness-and-successful-value))
+                 (q/equivalent x y options))})
+    (catch error {:status :unsupported :reason (ex-message error) :left a :right b}))
    {:status :unsupported :left a :right b})))
 
 (defn prepare-function

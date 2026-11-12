@@ -1,0 +1,93 @@
+(ns formal.float-points-test
+ (:require [formal.beam-float :as float] [formal.runtime-values :as rv]
+           [formal.value :as value] [formal.term :as t] [formal.evaluate :as ev]
+           [formal.source :as source] [formal.point :as point] [formal.identity :as identity]
+           [veritas :as v] [veritas.property :as property] [oracle]))
+(defn data [actual] (float/runtime-data actual))
+(defn actual [bits] (float/to-runtime {:formal/fp [11 53 bits]}))
+(defn state [result] (:status result))
+
+(deftest scalar-result-observation-does-not-forget-runtime-kind
+ (is (= 1 1.0))
+ (is (not (rv/matches? (value/lift (t/int 1)) 1.0 1)))
+ (is (not (rv/matches? (value/lift (t/int 1)) 1 1.0)))
+ (is (rv/matches? (value/lift (t/int 1)) 1 1))
+ (is (not (rv/matches? (float/literal 1.0) 1 (data 1.0))))
+ (is (not (rv/matches? (float/literal 0.0) -0.0 (data 0.0))))
+ (is (not (rv/matches? (rv/product [(t/int 1)]) [1.0] [1]))))
+
+(deftest cross-kind-source-results-have-a-structured-strong-equivalence-question
+ (doseq [[left right] [["0" "0.0"] ["true" "0"] ["\"1\"" "1"]]]
+  (let [prepared (source/equivalence-problem left right {} {})]
+   (is (= :translated (state prepared)) (pr-str prepared))
+   (is (= false (ev/value (get-in prepared [:problem :claim]) {})))))
+ (let [prepared (source/equivalence-problem "(quot 1 0)" "(/ 1.0 0.0)" {} {})]
+  (is (= :translated (state prepared)))
+  (is (= true (ev/value (get-in prepared [:problem :claim]) {}))))
+ (is (= :unsupported (state (source/equivalence-problem ":keyword" "0" {} {})))))
+
+(deftest float-intervals-have-exact-finite-pattern-cardinalities
+ (let [zeros (v/float-of 0.0 0.0) tiny (v/float-of 0.0 (actual 1))
+       next (actual 4607182418800017409)]
+  (is (= 2 (v/float-cardinality zeros)))
+  (is (= [{:formal/fp [11 53 9223372036854775808]} {:formal/fp [11 53 0]}]
+         (mapv data (v/gen-enumerate zeros))))
+  (is (= 3 (v/float-cardinality tiny)))
+  (is (= 3 (count (v/gen-enumerate tiny))))
+  (is (= 2 (v/float-cardinality (v/float-of 1.0 next))))
+  (is (= 1 (v/float-cardinality (v/float-of 1.0 1.0))))
+  (is (v/gen-domain? zeros -0.0))
+  (is (v/gen-domain? zeros 0.0))
+  (is (not (v/gen-domain? zeros 0)))
+  (is (not (v/gen-domain? zeros (actual 1)))))
+ (let [full (v/float-of (actual 18442240474082181119) (actual 9218868437227405311))]
+  (is (= 18437736874454810624 (v/float-cardinality full)))
+  (is (= :infinite (v/gen-enumerate full)))
+  (is (= true (:finite (v/float-domain full))))
+  (is (= :over-budget (:enumeration (v/float-domain full)))))
+ (doseq [bounds [[0 1.0] [0.0 1] [2.0 1.0]]]
+  (is (thrown? (v/float-of (first bounds) (second bounds)))))
+ (is (v/gen-domain? (v/real-of 0.0 0.0) 0)))
+
+(deftest sampling-and-shrinking-use-exact-bit-keys-and-stay-in-domain
+ (doseq [generator [(v/float-of -100.0 100.0) (v/float-of 0.0 0.0)
+                    (v/float-of -10.0 -1.0) (v/float-of 1.0 10.0)]]
+  (let [samples (v/gen-sample generator 71 20)]
+   (is (= (mapv data samples) (mapv data (v/gen-sample generator 71 20))))
+   (is (= (count samples) (count (set (mapv data samples)))))
+   (is (every? #(v/gen-domain? generator %) samples))
+   (doseq [sample samples]
+    (let [shrunk (v/gen-shrink generator sample)]
+     (is (every? #(v/gen-domain? generator %) shrunk))
+     (is (not (some #(= (data sample) (data %)) shrunk)))))))
+ (is (= #{(data 0.0) (data -0.0)} (set (mapv data (v/gen-sample (v/float-of 0.0 0.0) 1 20))))))
+
+(deftest interval-term-domain-admits-both-zeros-and-bounds-are-not-outcomes
+ (let [generator (v/float-of -0.0 0.0) input (v/gen-term generator "x")]
+  (is (float/model? input))
+  (doseq [x [0.0 -0.0]]
+   (is (every? true? (map #(ev/value % {"x" (data x)}) (:constraints input)))))
+  (is (not (every? true? (map #(ev/value % {"x" (data 1.0)}) (:constraints input)))))
+  (is (nil? (v/gen-constrain generator "x")))))
+
+(deftest explicit-source-counterexamples-require-data-checking-and-actual-outcome-agreement
+ (let [calls (atom 0)
+       rows (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :must-not-use-native-query))}
+              #(mapv (fn [[src pred gen args]] (property/observe-point src pred gen args))
+                 [['(defn cancel [x] (- (+ x 0.1) x)) '(= result 0.1) (v/float-of 1.0 1.0) [1.0]]
+                  ['(defn negate [x] (- x)) '(erlang/=:= result 0.0) (v/float-of 0.0 0.0) [0.0]]
+                  ['(defn divide-zero [x] (/ x 0.0)) '(float? result) (v/float-of 1.0 1.0) [1.0]]]))]
+  (is (= 0 @calls))
+  (doseq [row rows]
+   (is (= :observed (state row)) (pr-str row))
+   (is (= :refuted (:modality row)))
+   (is (= :explicit-original-point (:basis row)))
+   (is (= :checked-data-connection (get-in row [:point-checking :status])))
+   (is (= :reproduced (get-in row [:runtime-replay :status])))
+   (is (= :checked-data-connection (state (point/check (:question row) (:point row)))))))
+ (let [outside (property/observe-point '(defn identity [x] x) '(= result 0.0) (v/float-of 0.0 0.0) [1.0])
+       holds (property/observe-point '(defn identity [x] x) '(= result x) (v/float-of 1.0 1.0) [1.0])]
+  (is (= :rejected (state outside)))
+  (is (= :rejected (state holds)))
+  (is (nil? (:runtime-replay outside)))
+  (is (nil? (:runtime-replay holds)))))

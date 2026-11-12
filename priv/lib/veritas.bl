@@ -71,6 +71,46 @@
        :assert [(smtlib/assert `(>= ~x ~(:lo g))) (smtlib/assert `(<= ~x ~(:hi g)))]}))
   (gen-tag [g] :float))
 
+; FloatGen is a finite binary64 interval. RealGen keeps its historical numeric
+; sampling domain; silently replacing it would drop integer endpoints.
+(defrecord FloatGen [lo hi lower-key upper-key])
+(def ^:private float-sign-key 9223372036854775808)
+(def ^:private float-max-bits 18446744073709551615)
+(defn- float-key [actual]
+ (let [bits (nth (:formal/fp (float/runtime-data actual)) 2)]
+  (if (>= bits float-sign-key) (- float-max-bits bits) (+ float-sign-key bits))))
+(defn- key-float [key]
+ (float/to-runtime {:formal/fp [11 53 (if (>= key float-sign-key) (- key float-sign-key) (- float-max-bits key))]}))
+(defn- float-key-in? [g key] (<= (:lower-key g) key (:upper-key g)))
+(defn float-cardinality
+ "The exact finite number of admitted binary64 patterns, counting both zeros.
+  This is independent of the legacy enumeration sentinel :infinite."
+ [g]
+ (when-not (and (float? (:lo g)) (float? (:hi g)) (<= (:lo g) (:hi g))
+                (int? (:lower-key g)) (int? (:upper-key g))
+                (= (:lower-key g) (if (= (:lo g) 0.0) (dec float-sign-key) (float-key (:lo g))))
+                (= (:upper-key g) (if (= (:hi g) 0.0) float-sign-key (float-key (:hi g)))))
+  (throw (ex-info "float-cardinality requires a reviewed Float interval generator" {})))
+ (inc (- (:upper-key g) (:lower-key g))))
+(defn float-domain [g]
+ (let [size (float-cardinality g)]
+  {:kind :float64-interval :finite true :cardinality size :enumeration (if (<= size 10000) :complete :over-budget)
+   :semantics :numeric-closed-bounds-with-both-signed-zeros :lower (:lo g) :upper (:hi g)}))
+(extend-type FloatGen Gen
+ (gen-sample [g seed n]
+  (let [span (float-cardinality g)
+        edges [(:lower-key g) (:upper-key g) (dec float-sign-key) float-sign-key
+               (float-key -1.0) (float-key 1.0)]
+        interior (mapv (fn [i] (+ (:lower-key g) (core/mod (* (+ i seed 1) 2654435761) span))) (range n))
+        keys (vec (distinct (filter #(float-key-in? g %) (concat edges interior))))]
+   (mapv key-float keys)))
+ (gen-enumerate [g]
+  ;; Historical protocol sentinel = not enumerated; the domain is still finite.
+  (if (> (float-cardinality g) 10000) :infinite
+   (mapv key-float (range (:lower-key g) (inc (:upper-key g))))))
+ (gen-constrain [g var] nil)
+ (gen-tag [g] :float))
+
 ; ── BoolGen : the two booleans (finite ⇒ exhaustive proofs) ─────────────────
 
 (defrecord BoolGen [])
@@ -253,6 +293,13 @@
      (let [x (term/variable name sort)]
       (value/make x {:constraints [(term/any (mapv #(term/eq x (term/literal sort %)) xs))]
                      :domain {:kind :scalar :profile :bl/finite-scalar-generator-v1}})))))))
+(extend-type FloatGen GenTerms
+ (gen-term [g name]
+  (let [model (float/variable name)
+        lower (float/compare :ge model (float/literal (:lo g)))
+        upper (float/compare :le model (float/literal (:hi g)))]
+   (assoc model :constraints [(value/term lower) (value/term upper)]
+                :scope (assoc (:scope model) :generator (float-domain g))))))
 (extend-type AnyGen GenTerms (gen-term [g name] nil))
 (extend-type RealGen GenTerms (gen-term [g name] nil))
 (extend-type StringGen GenTerms (gen-term [g name] nil))
@@ -270,6 +317,14 @@
 
 (defn int-of    [lo hi] (->IntGen lo hi))
 (defn real-of   [lo hi] (->RealGen lo hi))
+(defn float-of
+ "A finite binary64 numeric interval. Bounds must be runtime Floats; an
+  interval containing numeric zero admits both observable signed-zero values."
+ [lo hi]
+ (when-not (and (float? lo) (float? hi) (<= lo hi))
+  (throw (ex-info "float-of requires ordered finite runtime Float endpoints" {})))
+ (->FloatGen lo hi (if (= lo 0.0) (dec float-sign-key) (float-key lo))
+                  (if (= hi 0.0) float-sign-key (float-key hi))))
 (defn bool-of   [] (->BoolGen))
 (defn one-of    [& values] (->OneOf (into [] values)))
 (defn string-of [prefix minlen maxlen]
@@ -624,6 +679,20 @@
   (gen-shrink [g v]
     (into [] (distinct (filter (fn [c] (and (in-domain? g c) (sized-smaller? c v)))
                                (list 0.0 (:lo g) (/ v 2)))))))
+
+(extend-type FloatGen GenShrink
+ (gen-domain? [g actual] (and (float? actual) (float-key-in? g (float-key actual))))
+ (gen-shrink [g actual]
+  (if-not (gen-domain? g actual) []
+   (let [key (float-key actual)
+         target (cond (float-key-in? g float-sign-key) float-sign-key
+                      (< (:upper-key g) float-sign-key) (:upper-key g)
+                      :else (:lower-key g))
+         distance (abs (- key target))
+         candidates [target (+ target (erlang/div (- key target) 2))
+                     (+ key (if (< key target) 1 -1))]
+         keys (distinct (filter #(and (float-key-in? g %) (< (abs (- % target)) distance)) candidates))]
+    (mapv key-float keys)))))
 
 (extend-type BoolGen GenShrink
   (gen-domain? [g v] (or (= true v) (= false v)))

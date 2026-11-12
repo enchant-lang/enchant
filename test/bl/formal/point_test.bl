@@ -1,0 +1,65 @@
+(ns formal.point-test
+ (:require [formal.point :as point] [formal.term :as t] [formal.query :as q]
+           [formal.ground :as ground] [formal.identity :as identity] [formal.evaluate :as ev]
+           [formal.witness :as old-witness] [oracle]))
+
+(def fixtures
+ [[t/Bool false] [t/Int -7] [t/Real {:formal/real [1 3]}]
+  [t/String "point"] [t/Rounding "RNE"] [(t/bv-sort 8) {:formal/bv [8 255]}]
+  [(t/fp-sort 11 53) {:formal/fp [11 53 9223372036854775808]}]
+  [(t/enum-sort "PointChoice" ["a" "b"]) {:formal/enum ["PointChoice" "b"]}]
+  [(t/seq-sort t/Int) [1 2]]
+  [(t/array-sort t/Int t/Int) {:formal/array {:default 0 :updates [[1 2]]}}]])
+(deftest explicit-original-data-points-cover-replayable-mathematical-sorts
+ (doseq [[sort data] fixtures]
+  (let [x (t/variable "point/input" sort)
+        question (q/sat {:assumptions [(t/eq x (ground/literal sort data))] :observe {"input" x}})
+        ready (point/prepare question {"point/input" data})
+        checked (point/check question (:packet ready))]
+   (is (= :ready (:status ready)) (pr-str ready))
+   (is (= :checked-data-connection (:status checked)) (pr-str checked))
+   (is (= data (get-in checked [:observations "input"])))
+   (is (= :original-satisfiability (:role checked)))
+   (is (= :not-run (:kernel-execution checked)))
+   (is (= false (:compiler-proof-authority checked)))
+   (is (= :ready (:status (point/prepare question [[x data]])))))))
+
+(defn state [result] (:status result))
+(deftest original-counterexample-condition-cannot-be-omitted-or-replaced
+ (let [x (t/variable "x" t/Int) question (q/prove (t/gt x (t/int 0)))
+       ready (point/prepare question {"x" 0}) packet (:packet ready)]
+  (is (= :ready (state ready)))
+  (is (= :original-counterexample (:role (point/check question packet))))
+  (is (= :rejected (state (point/prepare question {"x" 1}))))
+  (is (= :rejected (state (point/check (assoc question :profile :another-meaning) packet))))
+  (is (= :rejected (state (point/check question (identity/seal (assoc packet :bindings [["x" t/Int 1]]))))))
+  (is (= :rejected (state (point/check question (identity/seal (assoc packet :role :original-satisfiability))))))
+  (is (= :rejected (state (point/check question (assoc packet :identity "forged")))))))
+
+(deftest missing-extra-duplicate-or-wrong-kind-coordinates-are-refused
+ (let [x (t/variable "x" t/Int) question (q/sat {:observe {"x" x}})]
+  (doseq [data [{} {"x" 1 "extra" 0} {"x" 1.0} {"x" false}]]
+   (is (= :rejected (state (point/prepare question data)))))
+  (is (= :rejected (state (point/prepare question [[x 1] [x 1]]))))
+  (is (= :rejected (state (point/prepare question [[(t/variable "different" t/Int) 1]]))))))
+
+(deftest unsupported-mathematics-stays-incomplete-without-a-native-query
+ (let [x (t/variable "x" t/Int) question (q/sat {:assumptions [(t/uf "unknown-law" [t/Int] t/Bool [x])]})
+       calls (atom 0)
+       ready (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :must-not-query))}
+               #(point/prepare question {"x" 1}))]
+  (is (= :unsupported (state ready)))
+  (is (= :original-replay-incomplete (:reason ready)))
+  (is (= 0 @calls))))
+
+(deftest mathematical-nan-is-not-a-runtime-payload-or-an-int-bool-metatheory
+ (let [sort (t/fp-sort 8 24) x (t/variable "x" sort) data {:formal/fp [8 24 2143289345]}
+       question (q/sat {:assumptions [(t/app :fp-is-nan t/Bool [x] nil)]
+                        :observe {"nan" x "nan?" (t/app :fp-is-nan t/Bool [x] nil)}})
+       ready (point/prepare question {"x" data}) checked (point/check question (:packet ready))]
+  (is (= :ready (state ready)))
+  (is (= true (get-in checked [:observations "nan?"])))
+  (is (ev/unavailable? (get-in checked [:observations "nan"])))
+  (is (= :unsupported (state (old-witness/prepare question {"x" data}))))
+  (is (= :not-run (:kernel-execution checked)))
+  (is (= :reviewed-not-mechanically-proved (:evaluator-soundness checked)))))

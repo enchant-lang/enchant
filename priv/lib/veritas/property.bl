@@ -22,7 +22,7 @@
  (:require [veritas :as v] [typed] [env] [core] [compiler :as compiler] [reader-node :as rn]
            [formal.source-runtime :as source-runtime] [formal.source :as source] [formal.term :as t]
            [formal.value :as value] [formal.query :as q] [formal.logic :as logic]
-           [formal.identity :as identity] [formal.runtime-values :as rv]))
+           [formal.identity :as identity] [formal.runtime-values :as rv] [formal.point :as point] [formal.ground :as ground]))
 
 ; ── read a function's shape as data ─────────────────────────────────────────
 
@@ -257,3 +257,38 @@
                :source-connection (:source-connection prepared) :runtime-replay replay :compiler-proof-authority false}]
     (if (= :reproduced (:status replay))
      (merge base {:witness (:witness replay) :result (get-in replay [:target :value]) :crash (:crash replay)}) base)))))
+
+(defn observe-point
+ "Check an explicitly supplied ordered runtime input vector, then observe
+  this Source function and predicate at that point. No native model is
+  inferred or completed. Mathematical point checking is separate from fresh
+  Source preparation and execution; preparation can execute phase code."
+ [src pred gen arguments]
+ (let [prepared (prepare src pred gen)]
+  (if-not (= :translated (:status prepared))
+   {:status :unsupported :modality :unsupported :preparation prepared :compiler-proof-authority false}
+   (try
+    (let [inputs (get-in prepared [:function :inputs])
+          _ (when-not (and (vector? arguments) (= (count inputs) (count arguments)))
+              (throw (ex-info "Explicit Source points require one ordered runtime value per parameter" {})))
+          witness (if (:tuple prepared) arguments (first arguments))
+          _ (when-not (and (satisfies? v/GenShrink gen) (v/gen-domain? gen witness))
+              (throw (ex-info "Explicit runtime point lies outside its declared generator domain" {})))
+          bound (ground/combine (mapv (fn [i] (rv/bind (nth inputs i) (nth arguments i))) (range (count inputs))))
+          _ (when-not (= :valid (:status bound))
+              (throw (ex-info "Explicit runtime point cannot bind every input in its reviewed model" {})))
+          ready (point/prepare (:problem prepared) (:assignments bound))]
+     (if-not (= :ready (:status ready))
+      {:status (:status ready) :modality :unknown :basis :explicit-original-point
+       :question (:problem prepared) :point ready :compiler-proof-authority false}
+      (let [checking (point/check (:problem prepared) (:packet ready))
+            _ (when-not (= :checked-data-connection (:status checking))
+                (throw (ex-info "Explicit point failed fresh mathematical checking" {})))
+            actual (runtime-replay prepared {:witness (:observations checking)})
+            reproduced? (= :reproduced (:status actual))]
+       {:status (if reproduced? :observed :disagreement) :modality (if reproduced? :refuted :disagreement)
+        :basis :explicit-original-point :question (:problem prepared) :question-identity (:question-identity prepared)
+        :point (:packet ready) :point-checking checking :runtime-replay actual
+        :source-connection (:source-connection prepared) :compiler-proof-authority false})))
+    (catch error {:status :rejected :modality :unknown :basis :explicit-original-point
+                  :reason (ex-message error) :compiler-proof-authority false})))))
