@@ -1,7 +1,8 @@
 (ns formal.response-runtime
  (:require [formal.response :as response] [formal.term :as t] [formal.value :as v]
            [formal.runtime-values :as runtime] [formal.source :as source] [formal.anf-inputs :as inputs]
-           [formal.source-runtime :as source-runtime] [formal.logic :as logic] [formal.identity :as identity]))
+           [formal.source-runtime :as source-runtime] [formal.logic :as logic] [formal.identity :as identity]
+           [formal.evaluate :as evaluate]))
 (defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.response-runtime: " message) {}))))
 
 (defn from-source
@@ -67,6 +68,11 @@
  "Validate a term model, domain membership and the requested law selection.
   Public for boundary search: feasibility and optimality keep separate evidence."
  [prepared answer]
+ (if-not (and (map? answer) (:question answer)
+              (= (identity/hash (:question prepared)) (identity/hash (:question answer))))
+  {:status :error :modality :error :reason :response-question-mismatch
+   :question (:question prepared) :question-identity (identity/hash (:question prepared))
+   :answer answer :compiler-proof-authority false}
  (let [contract (:contract prepared) model (:definition contract)
        mode (get-in prepared [:request :mode] :valid) clause (get-in prepared [:request :clause])
        sat? (contains? #{:sat :refuted} (:verdict answer))
@@ -84,8 +90,20 @@
                 (range (count (:fields model))) (:fields model)))
        data (when (and sat? (every? some? projected)) (into {} projected))
        measured (when data (check-result contract data))
+       bound (when data (response/bindings model data))
+       ;; Decoded fields can disagree with native variable assignments. Check
+       ;; the actual published response against every requested condition,
+       ;; including custom assumptions, pins and the counterexample goal.
+       projection (when data
+                    (if-not (= :valid (:status bound)) bound
+                     (evaluate/validate
+                      (vec (concat (:assertions (:question prepared))
+                                   (when-let [counter (:counterexample (:question prepared))] [counter])
+                                   (map-indexed (fn [i pin] {:label (str "response-point/" i) :term pin}) (:pins bound))))
+                      (merge (if (map? (:assignments answer)) (:assignments answer) {}) (:assignments bound)))))
        agreement
         (and (= :valid (get-in answer [:validation :status]))
+             (= :valid (:status projection))
              (contains? #{:valid :invalid} (:status measured))
              (every? true?
               (mapv (fn [i row]
@@ -103,6 +121,7 @@
                   :unsupported :unsupported :error :error :candidate :candidate :unknown)
        base {:status (:solver-status answer) :modality modality :engine :terms
              :question question :question-identity (identity/hash question) :answer answer
+             :projection-replay projection
              :runtime-replay (when sat? {:status (if agreement :reproduced :unavailable-or-mismatch) :measurement measured})
              :source-connection (:source-connection model) :compiler-proof-authority false}]
   (cond
@@ -110,10 +129,12 @@
    (contains? #{:unsat :proved} (:verdict answer)) (merge base {:none true :complete true}
                                                    (when (= :isolate mode) {:implied true :premise-feasibility :satisfiable-claim}))
    (= :vacuous (:verdict answer)) (assoc base :implied nil :premise-feasibility :infeasible-claim)
-   :else (cond-> base data (assoc :candidate-value data)))))
+   :else (cond-> base data (assoc :candidate-value data))))))
 
 (defn execute [options prepared]
  (when-not (map? options) (throw (ex-info "Response execution requires an options map" {})))
- (accept-answer prepared
-   (if (:session options) (logic/solve-in (:session options) (:question prepared))
-                         (logic/run options (:question prepared)))))
+ (let [answer (if (:session options) (logic/solve-in (:session options) (:question prepared))
+                                   (logic/run options (:question prepared)))]
+  ;; This owned execution may extend the request with its retained context.
+  ;; The public replay boundary itself requires an exact complete question.
+  (accept-answer (assoc prepared :question (or (:question answer) (:question prepared))) answer)))
