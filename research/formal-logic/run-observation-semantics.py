@@ -52,6 +52,15 @@ elif stage == 'observation-corpus':
               'research/formal-logic/src/formal/native-cases.bl',
               'research/formal-logic/graph-observations-check.bl']
     request = ['run', str(R / names[-1]), '--', str(E / 'observation-corpus.json')]
+elif stage == 'question-corpus':
+    project = True
+    names += ['research/formal-logic/src/formal/term-forest.bl',
+              'research/formal-logic/src/formal/question-forest.bl',
+              'research/formal-logic/src/formal/advanced-cases.bl',
+              'research/formal-logic/src/formal/feature-cases.bl',
+              'research/formal-logic/src/formal/native-cases.bl',
+              'research/formal-logic/question-forest-check.bl']
+    request = ['run', str(R / names[-1]), '--', str(E / 'question-corpus.json')]
 elif stage == 'paired-native-corpus':
     project = True
     names += ['research/formal-logic/graph-consumers-check.bl',
@@ -124,7 +133,7 @@ command += request
 (E / (stage + '-exit.json')).unlink(missing_ok=True)
 output_names = {'native': 'native.json', 'observation-corpus': 'observation-corpus.json',
                 'paired-native-corpus': 'paired-native-corpus.json', 'example': 'example.json',
-                'value-growth': 'value-growth.json'}
+                'value-growth': 'value-growth.json', 'question-corpus': 'question-corpus.json'}
 if stage in output_names:
     (E / output_names[stage]).unlink(missing_ok=True)
 (E / (stage + '-source-pin.json')).write_text(json.dumps({'code_commit': commit, 'source_sha256': sources, 'sdk_pin': pin}, indent=2) + '\n')

@@ -59,7 +59,7 @@ assert operation['previous'] == read(E / 'baseline-sdk-pin.json')['sdk']
 stages = {}
 for stage in ('sdk-focused', 'graph-focused', 'native', 'observation-corpus', 'sdk-regression',
               'regression', 'paired-native-corpus', 'facade', 'live-regression',
-              'preflight', 'preflight-controls', 'writer', 'consumer-one', 'consumer-two', 'example'):
+              'preflight', 'preflight-controls', 'writer', 'consumer-one', 'consumer-two', 'example', 'question-corpus'):
     snapshot = read(E / (stage + '-source-pin.json'))
     assert snapshot['sdk_pin'] == pin
     committed(snapshot)
@@ -160,6 +160,15 @@ for row in corpus['rows']:
         observations += point['observations']
         roots += point['roots']
 assert (observations, roots) == (1176, 6300)
+inventory = read(E / 'question-corpus.json')
+assert inventory['managed-query-calls'] == 0 and inventory['native-execution'] == 'not-invoked'
+assert inventory['compiler-proof-authority'] is False and len(inventory['rows']) == 187
+assert {r['id'] for r in inventory['rows']} == set(oldrows)
+for row in inventory['rows']:
+    assert row['reference'] == oldrows[row['id']]['graph']['reference']
+    assert all(row[field] is True for field in ('exact-definitions', 'ordered-roots', 'assertions',
+               'claim-and-counterexample', 'observation-inventory', 'mode-and-vacuity'))
+    assert row['compiler-proof-authority'] is False
 example = read(E / 'example.json')
 assert example['managed-query-calls'] == 0 and example['compiler-proof-authority'] is False
 assert example['inactive']['question-reference'] == example['active']['question-reference'] == example['question-reference']
