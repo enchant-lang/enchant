@@ -3,7 +3,7 @@
 `formal.integer-preflight/plan` is the first executable piece of the derived-value
 policy. It takes an operation keyword, a vector of existing integer operands,
 and limit overrides. It returns ordinary BL data; neither backend is involved.
-It is committed for focused qualification, not connected to the evaluator yet.
+Its focused qualification passes; it is not connected to the evaluator yet.
 
 ```clojure
 (integer-preflight/plan :mul [65536 65536]
@@ -65,11 +65,14 @@ text/sequence expansion, nested portable values, array updates, or floating-poin
 formats. Format limits must apply before expensive SDK sort/value admission as
 well as before arithmetic. Graph size alone does not cover those costs.
 
-The focused controls compare forecasts with independent SDK results over signed
-small operands and sparse large operands, including the actual Euclidean-mod
-intermediates. Separate small growth probes compute a 65,537-bit integer,
-65,536-byte text and 4,096-element sequence from shared input. These checks are
-queued; no qualification or mechanical cost-model correspondence is claimed yet.
+The [qualification](evidence/observation-semantics/integer-preflight-qualification.json)
+passes 10,248 focused assertions. The controls compare forecasts with independent
+SDK results over signed small operands and sparse large operands, including the
+actual Euclidean-mod intermediates. Separate small growth probes compute a
+65,537-bit integer and 65,536-byte text through 17 typed nodes each, and a
+4,096-element sequence through 14 typed nodes. Their input graphs are 1,343,
+1,383 and 1,224 bytes respectively. This is finite implementation evidence;
+mechanical cost-model correspondence remains open.
 
 Implementation: [planner](src/formal/integer-preflight.bl),
 [focused controls](test/integer_preflight_test.bl),

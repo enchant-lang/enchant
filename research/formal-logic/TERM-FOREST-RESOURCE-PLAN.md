@@ -32,8 +32,8 @@ refuse before expensive work. Do not advertise universal evaluator termination
 or cost bounds until the implementation and its cost model have their own
 correspondence argument.
 
-The first [integer primitive planner](INTEGER-PREFLIGHT.md) is now committed for
-focused qualification, alongside three capped concrete growth probes. It returns
+The first [integer primitive planner](INTEGER-PREFLIGHT.md) now passes 10,248
+focused assertions, alongside three capped concrete growth probes. It returns
 term-based forecasts without running the primitive. It is not integrated with
 the graph evaluator, and does not cover the whole gate. Cumulative accounting,
 other value families and a cost-model correspondence remain open.
