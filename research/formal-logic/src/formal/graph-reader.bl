@@ -1,0 +1,52 @@
+(ns formal.graph-reader (:require [formal.data-graph :as graph]))
+
+(def profile :bl/scoped-data-graph-reader-preview-v1)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.graph-reader: " why) {:profile profile}))))
+
+(defn with-data
+ "Admit the original immutable public graph once for a local consumer.
+  Selected dependencies fold into a private memo; scalar admission delegates
+  to the selected SDK on an exact singleton scalar graph. Container plainness
+  and runtime key/element collapse checks match that SDK. Reader functions
+  retire on return or failure. No supplied checked view or proof authority."
+ [data consume]
+ (let [checked (graph/check! data) rows (:nodes data) memo (atom {}) active (atom true)
+       requested (atom 0) attempts (atom 0)]
+  (letfn [(live! [] (require! @active "reader operation retired"))
+          (visit [id]
+           (if (contains? @memo id) (get @memo id)
+            (let [[kind body] (nth rows id)
+                  children (when (contains? #{"vector" "list" "tuple" "set"} kind) (mapv visit body))
+                  value
+                  (cond
+                   (= "vector" kind) children
+                   (= "list" kind) (to-list children)
+                   (= "tuple" kind)
+                    (let [value (erlang/list_to_tuple (to-list children))]
+                     (require! (= :tuple (rt/kind-kind value)) "tuple must remain plain runtime data") value)
+                   (= "set" kind)
+                    (let [value (set children)]
+                     (require! (= (count value) (count children)) "runtime set equality collapses graph elements") value)
+                   (= "map" kind)
+                    (let [value (into {} (mapv (fn [[key child]] [(visit key) (visit child)]) body))]
+                     (require! (= :map (rt/kind-kind value)) "map must remain plain runtime data")
+                     (require! (= (count value) (count body)) "runtime map equality collapses graph keys") value)
+                   :else
+                    (do (swap! attempts inc)
+                     (graph/decode! {:formal/data-graph 1 :profile graph/profile :root 0 :nodes [[kind body]]})))]
+             (swap! memo assoc id value) value)))]
+   (try
+    (consume {:profile profile :reference (:reference checked)
+              :read-nodes! (fn [roots]
+                             (live!)
+                             (require! (and (vector? roots) (or (nil? (meta roots)) (= {} (meta roots)))) "plain root vector required")
+                             (require! (<= (count roots) (:nodes graph/limits)) "root capacity")
+                             (doseq [id roots]
+                              (require! (and (int? id) (<= 0 id) (< id (count rows))) "root reference"))
+                             (swap! requested + (count roots))
+                             (mapv visit roots))
+              :checking (fn [] (live!)
+                          {:source-nodes (count rows) :decoded-nodes (count @memo)
+                           :requested-roots @requested :scalar-admission-attempts @attempts})})
+    (finally (reset! active false) (reset! memo {}))))))

@@ -28,7 +28,7 @@
  (let [x (t/variable "question.forest.x" t/Int)
        y (t/variable "question.forest.y" t/Bool)
        item (v/make {:b [y x] :a (list x y)} {})
-       result (agree (q/sat {:observe {:second item "first" x :third {:z y :a [x y x]}}}))]
+       result (agree (q/sat {:observe {:second item "first" x :third (v/make {:z y :a [x y x]} {})}}))]
   (is (= 3 (count (:observations result))))
   (is (> (get-in result [:checking :observation-descriptors]) 3))))
 
@@ -57,13 +57,14 @@
 (deftest unread-observation-leaves-stay-data-without-becoming-a-witness
  (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0
                 :nodes [["keyword" "question.forest.preview.unadmitted.observation"]]}
+       descriptor (graph/patch-map (graph/encode (v/make nil {})) [[(graph/encode :value) unknown]])
        base (:graph (original (q/sat {})))
        data (graph/patch-map base [[(graph/encode :observe)
-                                    (graph/assemble "map" [[(graph/encode "raw") unknown]])]])
+                                    (graph/assemble "map" [[(graph/encode "raw") descriptor]])]])
        context {:formal/question-graph 1 :profile qg/profile :graph data}
        result (prepared/prepare context)]
-  (is (= [] (get-in result [:forest :nodes])))
-  (is (= [] (:terms (first (:observations result)))))
+  (is (= ["bool"] (mapv second (get-in result [:forest :nodes]))))
+  (is (= [1] (:terms (first (:observations result)))))
   (is (= (graph/reference data) (:reference result)))
   (is (= :original-graph-data-and-sdk-term-inventory (:observation-policy result)))
   (is (thrown? (qg/open! context)))
@@ -78,10 +79,11 @@
 (deftest repeated-observation-containers-do-not-expand-the-term-inventory
  (let [payload (reduce (fn [data _] (graph/assemble "vector" [data data]))
                         (graph/encode (t/bool true)) (range 16))
+       descriptor (graph/patch-map (graph/encode (v/make nil {})) [[(graph/encode :value) payload]])
        data (graph/patch-map (:graph (original (q/sat {})))
-              [[(graph/encode :observe) (graph/assemble "map" [[(graph/encode "shared") payload]])]])
+              [[(graph/encode :observe) (graph/assemble "map" [[(graph/encode "shared") descriptor]])]])
        result (prepared/prepare {:formal/question-graph 1 :profile qg/profile :graph data})]
-  (is (= 17 (get-in result [:checking :observation-descriptors])))
+  (is (= 18 (get-in result [:checking :observation-descriptors])))
   (is (= 1 (count (get-in result [:forest :nodes]))))
   (is (= [1] (:terms (first (:observations result)))))))
 
@@ -99,10 +101,13 @@
 (deftest counterexamples-get-the-same-local-typing-as-the-claim
  (let [base (q/prove (t/eq (t/int 1) (t/int 1)))
        ;; Generic numeric equality can equate this forged datum with Int 1.
-       ;; The ordinary query validator omits the counterexample from its roots;
-       ;; the actual exporter and the new complete inventory both check it.
+       ;; The common validator and both preparation paths now check this root.
        forged (assoc-in (get-in base [:counterexample :term]) [:args 0 :args 1 :args 0 :data] 1.0)
        problem (assoc-in base [:counterexample :term] forged)]
-  (is (= :prove (:mode (q/validate! problem))))
+  (is (thrown? (q/validate! problem)))
   (is (thrown? (t/export (t/registry) [forged])))
   (is (thrown? (prepared/prepare (original problem))))))
+
+(deftest graph-inventory-uses-the-common-explicit-observation-boundary
+ (doseq [item [nil [(t/int 1)] {:x (t/int 1)}]]
+  (is (thrown? (prepared/prepare (original (q/sat {:observe {"bare" item}})))))))

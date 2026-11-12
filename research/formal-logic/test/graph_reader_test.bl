@@ -1,0 +1,41 @@
+(ns formal.graph-reader-test (:require [formal.graph-reader :as reader] [formal.data-graph :as graph]))
+
+(deftest selected-data-agrees-with-the-sdk-and-caches-false-nil-and-compounds
+ (let [data (graph/encode [nil false 1 1.0 -0.0 "λ" :known 'known
+                          (list 1 false) [1 nil] (tuple 1 false) #{1 1.0}
+                          {1 :integer 1.0 :float} {:nested [(list false nil)]}])
+       roots (vec (range (count (:nodes data)))) expected (graph/decode-nodes! data roots)]
+  (reader/with-data data
+   (fn [operation]
+    (is (erlang/=:= expected ((:read-nodes! operation) roots)))
+    (is (erlang/=:= expected ((:read-nodes! operation) roots)))
+    (is (= (count roots) (:decoded-nodes ((:checking operation)))))
+    (is (= (* 2 (count roots)) (:requested-roots ((:checking operation)))))
+    (is (= (graph/reference data) (:reference operation)))))))
+
+(deftest selected-value-can-stay-readable-beside-unadmitted-history
+ (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" "graph.reader.preview.unadmitted.history"]]}
+       data (graph/assemble "vector" [(graph/encode 7) unknown]) roots (second (nth (:nodes data) (:root data)))]
+  (reader/with-data data
+   (fn [operation]
+    (is (= [7] ((:read-nodes! operation) [(first roots)])))
+    (is (= 1 (:decoded-nodes ((:checking operation)))))
+    (is (thrown? ((:read-nodes! operation) [(second roots)])))
+    (is (= [7] ((:read-nodes! operation) [(first roots)])))
+    (is (= 1 (:decoded-nodes ((:checking operation)))))))
+  (is (thrown? (graph/decode! data)))))
+
+(deftest references-original-shape-and-reader-lifetime-are-checked
+ (let [data (graph/encode false) held (atom nil)]
+  (reader/with-data data
+   (fn [operation]
+    (reset! held operation)
+    (doseq [roots [[-1] [1] [0.0] (list 0)]]
+     (is (thrown? ((:read-nodes! operation) roots))))
+    (is (= [false false] ((:read-nodes! operation) [0 0])))))
+  (is (thrown? ((:read-nodes! @held) [0])))
+  (is (thrown? ((:checking @held))))
+  (is (thrown? (reader/with-data data (fn [operation] (reset! held operation) (throw :consumer-failure)))))
+  (is (thrown? ((:read-nodes! @held) [0])))
+  (is (thrown? (reader/with-data (assoc data :cached true) (fn [_] :must-not-run))))))
