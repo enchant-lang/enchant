@@ -1,0 +1,76 @@
+(ns formal.float-source-check
+ (:require [formal.beam-float :as float] [formal.source :as source] [formal.source-runtime :as runtime]
+           [formal.term :as t] [formal.value :as value] [formal.evaluate :as ev]
+           [formal.query :as q] [formal.logic :as logic] [formal.identity :as identity]
+           [formal.answer :as answer] [veritas :as v] [veritas.property :as property]
+           [veritas.ledger :as ledger] [oracle] [datom] [bl.json :as json]))
+
+(def subjects
+ [{:id :rounded-cancellation :source '(defn rounded [x] (- (+ x 0.1) x)) :predicate '(= result 0.1) :input 1.0}
+  {:id :negative-zero :source '(defn negative-zero [x] (- x)) :predicate '(erlang/=:= result 0.0) :input 0.0}
+  {:id :division-failure :source '(defn divide-zero [x] (/ x 0.0)) :predicate '(float? result) :input 1.0}
+  {:id :exact-rounding :source '(defn rounded-add [x] (+ x 0.1)) :predicate '(= result 0.30000000000000004) :input 0.2}])
+(def argv (BeamLisp/argv))
+(def mode (first argv))
+(assert (contains? #{"examples" "write" "read"} mode))
+(defn prepared [subject]
+ (let [p (property/prepare (:source subject) (:predicate subject) (v/one-of (:input subject)))]
+  (assert (= :translated (:status p))) p))
+(defn observe [subject p]
+ (let [actual (runtime/run (get-in p [:function :anf]) [(:input subject)])
+       predicted (value/decode (get-in p [:function :value])
+                   #(ev/value % {"property/input/0" (float/runtime-data (:input subject))}))]
+  (assert (= (= :returned (:status actual)) (:defined predicted)))
+  (assert (= false (:module-loaded actual)))
+  {:actual actual :term predicted :input-bits (float/runtime-data (:input subject))}))
+(defn result [subject engine]
+ (let [p (prepared subject)
+       r (property/prove {:backend engine} (:source subject) (:predicate subject) (v/one-of (:input subject)))]
+  (assert (= (:problem p) (:question r)))
+  (assert (= false (:compiler-proof-authority r)))
+  (assert (not (contains? #{:error :invalid-model :vacuous} (:modality r))))
+  {:id (:id subject) :backend engine :question (identity/hash (:problem p)) :result r
+   :observation (observe subject p)}))
+(defn examples []
+ (let [rows (vec (for [subject subjects engine [:z3 :oxiz]] (result subject engine)))]
+  (doseq [subject subjects]
+   (assert (= 1 (count (set (map :question (filter #(= (:id subject) (:id %)) rows)))))))
+  {:schema "enchant.formal.float-source-examples.v1" :cwd (File/cwd!) :research-import-path false
+   :cases rows :compiler-proof-authority false}))
+(defn record [connection subject engine]
+ (let [r (result subject engine) report (:result r)]
+  (ledger/record! connection
+   (cond-> {:modality (:modality report) :engine engine :question (:question report) :answer (:answer report)
+            :evidence {:subject subject :observation (:observation r)} :compiler-proof-authority false}
+     (= :refuted (:modality report)) (assoc :witness (float/runtime-data (:input subject))))
+   {:claim (str "float/" (:id subject) "/" engine) :about ["source/binary64"]})))
+(defn recheck [row]
+ (let [stored (:verdict/evidence row) subject (get-in stored [:evidence :subject]) p (prepared subject)
+       question (:problem p) native (:answer stored)
+       _ (assert (= (identity/bytes question) (identity/bytes (:question native))))
+       _ (assert (= question (:verdict/question row)))
+       checked (answer/check question (answer/bind question native))
+       _ (assert (= :recorded (:verdict/assurance row)))
+       _ (assert (= false (:verdict/compiler-authority row)))
+       _ (assert (= (:verdict native) (:verdict checked)))
+       actual (observe subject p)]
+  (assert (= (get-in stored [:evidence :observation :term]) (:term actual)))
+  {:id (:id subject) :backend (:verdict/engine row) :question (identity/hash question)
+   :verdict (:verdict checked) :input-bits (:input-bits actual)
+   :defined (get-in actual [:term :defined]) :actual-status (get-in actual [:actual :status])}))
+(defn recorded []
+ (let [connection (ledger/open (second argv))]
+  (try
+   (when (= mode "write") (doseq [subject subjects engine [:z3 :oxiz]] (record connection subject engine)))
+   (let [calls (atom 0)
+         rows (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :no-native-queries-during-record-rechecking))}
+                #(mapv recheck (ledger/about connection "source/binary64")))]
+    (assert (= 8 (count rows))) (assert (= 0 @calls))
+    {:schema "enchant.formal.float-source-ledger.v1" :mode mode :process (System/pid)
+     :rows rows :managed-query-calls @calls :managed-query-scope :record-rechecking
+     :actual-source-observations true :compiler-proof-authority false})
+   (finally (datom/close! connection)))))
+(def report (if (= mode "examples") (examples) (recorded)))
+(File/write! (nth argv (if (= mode "examples") 1 2)) (json/encode report {:pretty 2}))
+(println (json/encode {:mode mode :cases (count (:cases report)) :rows (count (:rows report))
+                      :managed-query-calls (:managed-query-calls report) :compiler-proof-authority false}))
