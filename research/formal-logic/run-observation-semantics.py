@@ -59,6 +59,9 @@ elif stage == 'sdk-regression':
               'test/bl/veritas/graph_ledger_test.bl', 'test/bl/formal/data_graph_test.bl',
               'test/bl/formal/point_test.bl', 'test/bl/formal/float_points_test.bl']
     request = ['test', *[str(R / name) for name in names[-6:]]]
+elif stage == 'live-regression':
+    names += ['priv/lib/live/app.bl', 'test/bl/live/app_test.bl']
+    request = ['test', str(R / names[-1])]
 elif stage == 'regression':
     project = True
     previous = json.loads((P / 'evidence/graph-consumers/regression-command.json').read_text())
