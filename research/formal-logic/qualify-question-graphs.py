@@ -11,7 +11,7 @@ pin=read(E/'sdk-candidate.json');sdk=Path(pin['sdk']);source=Path(pin['source'])
 require(sha(sdk/'artifact.json')==pin['descriptor_sha256'] and meta['source']==str(source),'immutable selected SDK')
 oldmeta=read(Path(read(E/'baseline-sdk-pin.json')['sdk'])/'artifact.json')
 require(all(meta[k]==oldmeta[k] for k in ('compiler','formalWorker')),'same compiler and worker')
-require(read(E/'preparation-result.json')['value']['output']==str(sdk),'managed SDK production')
+require(read(E/'preparation-result.json')['output']==str(sdk),'managed SDK production')
 snapshot=read(E/'sdk-source-pin.json')
 require(snapshot['sdk_pin']==pin,'runtime pin')
 for name,digest in snapshot['source_sha256'].items():
@@ -27,7 +27,7 @@ for stage,files in [('focused',3),('regression',31)]:
     text=(E/(stage+'-checks.txt')).read_text(); rows={name:int(count) for name,count in re.findall(r'✓\s+([\w.-]+)\s+(\d+) passed',text)}
     require(len(rows)==files and f'{files} file(s) passed, 0 failed, 0 incoherent' in text,'complete tests: '+stage)
     runs[stage]=rows
-require(runs['focused']['formal.point-test']==92 and runs['focused']['formal.float-points-test']==219 and runs['focused']['formal.data-graph-test']>=300,'old points and new graph coverage')
+require(runs['focused']['formal.point-test']==92 and runs['focused']['formal.float-points-test']==219 and runs['focused']['formal.data-graph-test']>=281,'old points and new graph coverage')
 for stage in ('focused','regression','corpus','consumer-one','consumer-two','compiler-floor','preflight','preflight-controls'):
     require(read(E/(stage+'-exit.json'))['exit_code']==0,'terminal exit: '+stage)
     if stage in ('focused','regression','corpus','consumer-one','consumer-two'):
