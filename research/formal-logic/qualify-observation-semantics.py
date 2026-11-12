@@ -68,6 +68,8 @@ for stage in ('sdk-focused', 'graph-focused', 'native', 'observation-corpus', 's
     command = read(E / (stage + '-command.json'))
     for item in ('--property=MemoryMax=4G', '--property=MemorySwapMax=0', '--property=KillMode=control-group'):
         assert item in command, (stage, item)
+    ceiling = 3600 if stage == 'paired-native-corpus' else (720 if stage == 'preflight-controls' else 900)
+    assert '--property=RuntimeMaxSec=' + str(ceiling) in command
     if stage not in ('preflight', 'preflight-controls'):
         assert str(sdk / 'bin/bl') in command and '--cold' in command
         for variable in ('ENCHANT_FORMAL_WORKER', 'ENCHANT_Z3_LIBRARY', 'BEAM_LISP_PATH'):
@@ -76,6 +78,8 @@ for stage in ('sdk-focused', 'graph-focused', 'native', 'observation-corpus', 's
     runtime = next(x.split('=', 2)[2] for x in command if x.startswith('--setenv=XDG_RUNTIME_DIR='))
     assert not Path(work).exists() and not Path(runtime).exists()
     assert not Path(work).is_relative_to(R)
+    if stage in ('sdk-focused', 'native', 'sdk-regression', 'facade', 'live-regression', 'writer', 'consumer-one', 'consumer-two'):
+        assert '-p' not in command, ('SDK-only stage', stage)
     stages[stage] = {'source': snapshot, 'exit': result,
                      'command_sha256': sha(E / (stage + '-command.json')),
                      'log_sha256': sha(E / (stage + '-checks.txt'))}
@@ -100,13 +104,14 @@ library_sha = '2c4c61e03b3fc1f5ccd0c388f5fcc89d00ccc058a2f9c2176b55a360ac606129'
 def identity(row, engine):
     assert row['sdk'] == str(sdk) and row['backend'] == engine and row['worker-sha256'] == worker_sha
     artifacts = row['artifacts']
-    assert artifacts['sdk'] == str(sdk) and artifacts['worker']['origin'] == 'sdk'
+    assert artifacts['sdk'] == str(sdk) and artifacts['backend'] == engine and artifacts['worker']['origin'] == 'sdk'
     assert artifacts['worker']['path'].startswith(meta['image'] + '/')
     assert artifacts['worker']['sha256'] == sha(Path(artifacts['worker']['path'])) == worker_sha
     assert artifacts['packaged']['oxiz-version'] == '0.3.4'
     assert artifacts['packaged']['features'] == ['oxiz-core/std', 'oxiz-solver/std']
     if engine == 'z3':
         assert row['library-sha256'] == artifacts['library']['sha256'] == library_sha
+        assert artifacts['library']['path'].startswith(meta['image'] + '/')
         assert artifacts['library']['origin'] == 'sdk' and sha(Path(artifacts['library']['path'])) == library_sha
     else:
         assert artifacts['library'] is None and row['library-sha256'] is None
