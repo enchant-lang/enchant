@@ -1,0 +1,28 @@
+(ns formal.float-source-baseline
+ (:require [system.core :as system] [system.smt :as smt] [z3] [smt :as text]
+           [compiler] [formal.source-runtime :as runtime] [bl.json :as json]))
+
+(def source
+ "(defserver ^{:invariant (= (- (+ x 0.1) x) 0.1)} rounded
+    (init [] (ok 1.0))
+    (handle-call [:noop] [_ x] (reply :ok x)))")
+(def predicate '(fn [x] (= (- (+ x 0.1) x) 0.1)))
+(def anf (compiler/compile (compiler/datum-macro-result predicate) (compiler/new-env "float-baseline")))
+(def actual (runtime/run anf [1.0]))
+(def port (z3/open))
+(def modeled (try (system/verify-process port (first (BeamLisp.Reader/read_string source)) {:emit true})
+                  (finally (z3/close port))))
+(defn bits [x]
+ (let [bytes (erlang/term_to_binary x)]
+  (erlang/decode_unsigned (erlang/binary_part bytes (- (erlang/byte_size bytes) 8) 8))))
+(def zero-tests
+ {:bl-equality (= 0.0 -0.0) :erlang-numeric (erlang/== 0.0 -0.0) :erlang-exact (erlang/=:= 0.0 -0.0)
+  :positive-bits (bits 0.0) :negative-bits (bits -0.0)})
+(def report {:schema "enchant.formal.float-source-baseline.v1" :source source :predicate predicate
+             :actual actual :modeled modeled :emitted (text/script (get-in modeled [:emitted :inv]))
+             :rounding {:sum (+ 0.1 0.2) :sum-equals-decimal (= (+ 0.1 0.2) 0.3)
+                        :large-addition-increases (> (+ 9007199254740992.0 1.0) 9007199254740992.0)}
+             :zero-tests zero-tests :compiler-proof-authority false})
+(File/write! (first (BeamLisp/argv)) (json/encode report {:pretty 2}))
+(println (json/encode {:actual (select-keys actual [:status :value :module-loaded])
+                      :modeled (select-keys modeled [:holds :checked :complete]) :zero-tests zero-tests} {:pretty 2}))
