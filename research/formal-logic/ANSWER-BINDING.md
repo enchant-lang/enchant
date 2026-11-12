@@ -26,6 +26,13 @@ The ledger retains it. An extremum record keeps it on the feasible-response
 side, alongside the SAT question; its final unchecked UNSAT question carries
 no witness or projection replay of that feasible point.
 
+Large records use the language's existing content-addressed file tier. Only
+small descriptors enter covering indexes; the complete question, evidence and
+witness retain the ordinary datom value codec outside those keys. Public ledger
+reads reconstruct the same values and continue reading older inline records.
+Missing or corrupt payloads are errors. Payloads have an explicit 16 MiB byte
+capacity; storing them still grants no mathematical or compiler authority.
+
 The preceding SDK passes one assertion and fails nine in the retained baseline.
 The candidate passes all twenty-five focused files, including all ten boundary
 assertions. Broader qualification remains in progress. None of these changes

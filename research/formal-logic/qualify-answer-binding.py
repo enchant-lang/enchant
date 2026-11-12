@@ -62,8 +62,10 @@ require(all(preflight[k]['modality'] == 'exhausted' and preflight[k]['complete']
         and not any(preflight[k] for k in ('source-errors', 'target-dependency-errors', 'require-cycles', 'sources_changed_during_analysis')), 'complete source preflight')
 require('SDK-PREFLIGHT-CONTROL passed: parse, target edge and cycle refusals' in (E / 'preflight-controls-checks.txt').read_text(), 'preflight refusal controls')
 require('1 passed, 9 failed' in (E / 'baseline-checks.txt').read_text(), 'retained preceding SDK boundary defects')
-focused, regression = counts('focused-checks.txt', 25), counts('regression-checks.txt', 31)
-require(focused['veritas.answer-binding-baseline-test'] == 10
+require('Keys can be up to 65535 bytes long' in (E / 'candidate-1/ledger-write-checks.txt').read_text(), 'retained durable index-key failure')
+focused, regression = counts('focused-checks.txt', 26), counts('regression-checks.txt', 31)
+require(focused['veritas.ledger-large-terms-test'] >= 21
+        and focused['veritas.answer-binding-baseline-test'] == 10
         and focused['veritas.ledger-test'] >= 42
         and focused['veritas.response-boundary-baseline-test'] == 12
         and focused['veritas.assumption-domain-baseline-test'] == 5
@@ -112,6 +114,7 @@ report = {'schema': 'enchant.formal.answer-binding-qualification.v1', 'checkpoin
           'sdk_only': True, 'durable_ledger_fresh_process': True,
           'native_reply_binding': 'complete effective question',
           'response_point_validation': 'all original assertions counterexample goal and concrete pins',
+          'durable_payload': 'content-addressed datom file using its existing value codec',
           'source_connection': 'reviewed-not-mechanized', 'compiler_proof_authority': False,
           'evidence_sha256': {n: sha(E / n) for n in ('focused-checks.txt', 'regression-checks.txt',
              'examples.json', 'ledger-write.json', 'ledger-read.json', 'produced-compiler.json', 'source-preflight.json')}}
