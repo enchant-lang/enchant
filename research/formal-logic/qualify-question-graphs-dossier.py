@@ -77,8 +77,8 @@ report = {'schema': 'enchant.formal.question-graph-dossier-qualification.v1', 'c
                       'automated_checks': len(audit['checks']), 'screenshots': images, 'review_graphs': graphs,
                       'visual_review': visual, 'audit_sha256': sha(E / 'browser-audit/audit.json')},
           'host': host, 'host_sources': host_sources,
-          'host_cache_scope': 'Unchanged host implementation; preceding cache qualification remains historical. Current host and presentation are exercised here on SDK 42.',
+          'host_cache_scope': 'Unchanged host implementation; preceding cache qualification remains historical. Current host and presentation are exercised here on SDK 43.',
           'scope': 'Executed examples, retained records and live presentation. These checks do not establish source/compiler preservation or whole-language totality.',
           'compiler_proof_authority': False}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
-print(json.dumps({'cells': 73, 'checks': len(audit['checks']), 'screenshots': len(images), 'graphs': len(graphs), 'visual_status': visual['status']}))
+print(json.dumps({'cells': 76, 'checks': len(audit['checks']), 'screenshots': len(images), 'graphs': len(graphs), 'visual_status': visual['status']}))
