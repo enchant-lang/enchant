@@ -22,7 +22,7 @@ def command_for(arguments, consumer=False):
         cleanup.append(cwd)
     return ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
             '--working-directory=' + cwd, '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
-            '--property=RuntimeMaxSec=900', '--property=KillMode=control-group',
+            '--property=RuntimeMaxSec=' + ('3600' if stage == 'corpus' else '900'), '--property=KillMode=control-group',
             '--setenv=XDG_RUNTIME_DIR=' + runtime,
             'env', '-u', 'ENCHANT_FORMAL_WORKER', '-u', 'ENCHANT_Z3_LIBRARY', '-u', 'BEAM_LISP_PATH',
             sdk + '/bin/bl', '--cold', *arguments]
