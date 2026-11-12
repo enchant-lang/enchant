@@ -170,3 +170,12 @@ with their three standard assumptions. The checkpoint is retained in
 machine, Source-specializer soundness or BL checker implementation theorem
 follows from these results. Their environment-agreement hypotheses require
 separate connection proofs for that implementation.
+
+
+[GraphTable.lean](GraphTable.lean) adds a separate finite-prefix structural model
+for shared public data. Fifteen general results and six original-value instances
+are qualified, with explicit axiom reports and rejection controls. The connection
+checks exact owned wire bytes and node/depth quantities; it does not prove the
+BL graph implementation, runtime admission or compiler sound. See
+[GRAPH-TABLE-MODEL.md](../GRAPH-TABLE-MODEL.md) and
+[graph-table-pin.json](graph-table-pin.json).
