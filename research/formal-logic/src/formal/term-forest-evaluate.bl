@@ -1,0 +1,63 @@
+(ns formal.term-forest-evaluate
+ (:require [formal.term-forest :as forest] [formal.term :as t]
+           [formal.data-graph :as graph] [formal.evaluate :as sdk]))
+
+(def profile :bl/graph-point-evaluation-preview-v1)
+
+(defn values
+ "Evaluate requested graph terms under bounded portable point data. Revalidate
+  the original forest; retain argument references and per-operation memoization.
+  ITE/AND/OR keep the selected SDK's demand behavior. Other local primitive
+  semantics are delegated to that SDK using privately named child values.
+  No supplied prepared view, native result or checked-proof claim is accepted."
+ [data roots assignments]
+ (when-not (map? assignments)
+  (throw (ex-info "formal.term-forest-evaluate: point assignments must be a map" {:profile profile})))
+ ;; Refuse lazy/executable/nonportable model objects before primitive checking.
+ (graph/encode assignments)
+ (let [prepared (forest/prepare data roots)
+       nodes (into {} (map (fn [[id op sort children datum]]
+                            [id {:op (erlang/binary_to_existing_atom op :utf8)
+                                 :sort sort :children children :data datum}]) (:nodes prepared)))
+       memo (atom {})]
+  (letfn [(visit [id]
+           (if (contains? @memo id) (get @memo id)
+            (let [{:keys [op sort children data]} (get nodes id)
+                  result
+                  (cond
+                   (= :ite op)
+                    (let [condition (visit (first children))]
+                     (cond (= true condition) (visit (second children))
+                           (= false condition) (visit (nth children 2))
+                           :else condition))
+                   (= :and op)
+                    (loop [pending children unknown nil]
+                     (if (empty? pending) (or unknown true)
+                      (let [value (visit (first pending))]
+                       (cond (= false value) false
+                             (sdk/unavailable? value) (recur (rest pending) value)
+                             :else (recur (rest pending) unknown)))))
+                   (= :or op)
+                    (loop [pending children unknown nil]
+                     (if (empty? pending) (or unknown false)
+                      (let [value (visit (first pending))]
+                       (cond (= true value) true
+                             (sdk/unavailable? value) (recur (rest pending) value)
+                             :else (recur (rest pending) unknown)))))
+                   :else
+                    (let [child-values (mapv visit children)
+                          names (mapv #(str "forest.private.child/" %) (range (count children)))
+                          arguments (mapv (fn [i] (t/variable (nth names i) (:sort (get nodes (nth children i)))))
+                                          (range (count children)))
+                          local {:formal/term 1 :op op :sort sort :args arguments :data data}
+                          bindings (if (= :var op) assignments (zipmap names child-values))]
+                     (sdk/value local bindings)))]
+             (swap! memo assoc id result)
+             result)))]
+   (let [result (mapv visit (:roots prepared))]
+    {:profile profile :data-reference (:data-reference prepared) :source-roots roots
+     :values result :checking {:typed-nodes (get-in prepared [:checking :typed-nodes])
+                              :evaluated-nodes (count @memo) :argument-traversal :graph-references}
+     :semantics :selected-sdk-primitive-rules :compiler-proof-authority false}))))
+
+(defn value [data root assignments] (first (:values (values data [root] assignments))))

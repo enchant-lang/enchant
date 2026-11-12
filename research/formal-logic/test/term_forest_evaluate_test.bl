@@ -1,0 +1,92 @@
+(ns formal.term-forest-evaluate-test
+ (:require [formal.term-forest-evaluate :as point] [formal.term-forest :as forest]
+           [formal.term :as t] [formal.evaluate :as sdk] [formal.data-graph :as graph]
+           [oracle]))
+
+(defn- evaluate [terms assignments]
+ (let [data (graph/encode (vec terms)) roots (second (nth (:nodes data) (:root data)))]
+  (point/values data roots assignments)))
+(defn- agree [terms assignments]
+ (let [actual (evaluate terms assignments) expected (mapv #(sdk/value % assignments) terms)]
+  (is (erlang/=:= expected (:values actual)))
+  (is (= false (:compiler-proof-authority actual)))
+  (is (= :graph-references (get-in actual [:checking :argument-traversal])))
+  actual))
+
+(deftest point-bindings-keep-false-missing-and-invalid-distinct
+ (let [x (t/variable "point.x" t/Bool)]
+  (doseq [bindings [{} {"point.x" false} {"point.x" true} {"point.x" nil}
+                   {"point.x" 0} {"point.x" (sdk/unavailable :explicit)}]]
+   (let [actual (agree [x x] bindings)]
+    (is (= 1 (get-in actual [:checking :evaluated-nodes])))))
+  (is (= [false false] (:values (evaluate [x x] {"point.x" false}))))))
+
+(deftest demand-rules-skip-unused-branches-but-still-admit-the-whole-forest
+ (let [x (t/variable "point.missing" t/Bool) yes (t/bool true) no (t/bool false)]
+  (doseq [[term visited] [[(t/ite yes no x) 3] [(t/ite no x yes) 3]
+                         [(t/ite x yes no) 2] [(t/all [no x]) 2]
+                         [(t/any [yes x]) 2] [(t/implies no x) 3]]]
+   (is (= visited (get-in (agree [term] {}) [:checking :evaluated-nodes]))))
+  ;; Demand is about evaluation, not permission to hide malformed code.
+  (is (thrown? (evaluate [(t/ite yes no (assoc x :extra :forged))] {})))))
+
+(deftest unknown-order-and-dominating-boolean-results-match-the-sdk
+ (let [a (t/variable "point.a" t/Bool) b (t/variable "point.b" t/Bool)
+       yes (t/bool true) no (t/bool false)]
+  (doseq [term [(t/all [a b]) (t/any [a b]) (t/all [a no b]) (t/any [a yes b])
+                (t/implies no a) (t/implies a yes) (t/implies a b)]]
+   (agree [term] {}))
+  (is (= [(sdk/unavailable {:unassigned "point.b"})]
+         (:values (evaluate [(t/all [a b])] {}))))))
+
+(deftest local-primitives-retain-concrete-and-incomplete-values
+ (let [bv (t/bv-sort 8) fp (t/fp-sort 5 11) enum (t/enum-sort "PointColor" ["red" "blue"])
+       array (t/store (t/const-array t/Int (t/real 1 2)) (t/int 3) (t/real 2 3))
+       seq (t/app :seq-unit (t/seq-sort t/Int) [(t/int 7)] nil)
+       binder (t/bound "point.bound" t/Int)
+       roots [(t/div (t/int -7) (t/int 3)) (t/mod (t/int -7) (t/int -3))
+              (t/div (t/int 1) (t/int 0)) (t/div (t/real 1 2) (t/real 0 1))
+              (t/select array (t/int 3)) (t/eq array array)
+              (t/app :bv-add bv [(t/literal bv 255) (t/literal bv 2)] nil)
+              (t/app :str-len t/Int [(t/text "aλ🦊")] nil)
+              (t/app :seq-nth t/Int [seq (t/int 0)] nil)
+              (t/app :seq-nth t/Int [seq (t/int 2)] nil)
+              (t/app :fp-is-nan t/Bool [(t/literal fp 32257)] nil)
+              (t/eq (t/literal enum "red") (t/literal enum "blue"))
+              (t/uf "point.unknown" [] t/Int [])
+              (t/forall [binder] (t/eq binder (t/int 0)))]]
+  (agree roots {})))
+
+(defn- doubled [data]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode :and)]
+   [(graph/encode :sort) (graph/encode t/Bool)]
+   [(graph/encode :args) (graph/assemble "vector" [data data])]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(deftest exponential-argument-sharing-is-evaluated-once-per-node
+ (let [data (reduce (fn [value _] (doubled value)) (graph/encode (t/bool true)) (range 16))
+       roots [(:root data) (:root data)] actual (point/values data roots {})]
+  (is (= [true true] (:values actual)))
+  (is (= 17 (get-in actual [:checking :typed-nodes])))
+  (is (= 17 (get-in actual [:checking :evaluated-nodes])))
+  (is (= (graph/reference data) (:data-reference actual)))
+  (is (= roots (:source-roots actual)))
+  (is (= true (point/value data (:root data) {})))))
+
+(deftest original-graph-and-portable-model-data-are-required
+ (let [data (graph/encode (t/bool true)) roots [(:root data)] prepared (forest/prepare data roots)
+       calls (atom 0) lazy (map (fn [x] (swap! calls inc) x) [1 2])]
+  (is (thrown? (point/values prepared roots {})))
+  (is (thrown? (point/values data roots nil)))
+  (is (thrown? (point/values data roots {"unused" lazy})))
+  (is (= 0 @calls))
+  (is (thrown? (point/values data roots {"unused" (fn [] true)})))
+  (is (thrown? (point/values data roots {"unused" (atom 1)})))
+  (is (= [] (:values (evaluate [] {}))))))
+
+(deftest evaluation-does-not-request-native-or-managed-query-evidence
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :point-must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   #(agree [(t/add (t/int 4) (t/int 5))] {}))
+  (is (= 0 @calls))))
