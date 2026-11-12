@@ -1673,7 +1673,7 @@ edge native -> evidence | retains backend diagnostics
 edge legacy -> evidence | keeps ideal-model claims visibly separate
 #+end_code_graph
 
-Try [[#cell-story-float-source][the runtime and term observation]] and [[#cell-story-float-backends][the paired Source question]]. Read [[file:FLOAT-SOURCE.md][the reviewed interface and limits]], [[file:sdk-src/formal/beam-float.bl][the SDK implementation]], [[file:sdk-src/formal/source.bl][the Source translator]], [[file:sdk-src/formal/backend.bl][owned native admission]], [[file:sdk-src/system/core.bl][the legacy guard]], [[file:sdk-src/formal/ieee-arithmetic.bl][the arithmetic evaluator]], [[file:evidence/float-source/baseline.json][the historical false proof]], [[file:evidence/float-source/examples.json][the paired answers]], [[file:evidence/float-source/ledger-read.json][fresh-process evidence]] and [[file:evidence/float-source/qualification.json][this checkpoint's qualification]], [[file:evidence/float-source/complete-question-identity-qualification.json][the full question comparison]] and [[file:NEXT-POINTS.md][the next interface design]].
+Try [[#cell-story-float-source][the runtime and term observation]] and [[#cell-story-float-backends][the paired Source question]]. Read [[file:FLOAT-SOURCE.md][the reviewed interface and limits]], [[file:sdk-src/formal/beam-float.bl][the SDK implementation]], [[file:sdk-src/formal/floating.bl][the declared IEEE model]], [[file:sdk-src/formal/source.bl][the Source translator]], [[file:sdk-src/formal/backend.bl][owned native admission]], [[file:sdk-src/system/core.bl][the legacy guard]], [[file:sdk-src/formal/ieee-arithmetic.bl][the arithmetic evaluator]], [[file:evidence/float-source/baseline.json][the historical false proof]], [[file:evidence/float-source/examples.json][the paired answers]], [[file:evidence/float-source/ledger-read.json][fresh-process evidence]], [[file:evidence/float-source/qualification.json][this checkpoint's qualification]], [[file:evidence/float-source/complete-question-identity-qualification.json][the full question comparison]] and [[file:NEXT-POINTS.md][the next interface design]].
 
 The arithmetic checks compare 26 selected binary64 input patterns, a separate tiny-format finite grid across five rounding modes, and 160 pinned Z3 reference questions. Tiny-format division uses nonzero divisors; separate special-value checks cover zero division and nonfinite results. This is selected binary64 testing, not exhaustive testing of all binary64 values.
 
@@ -2397,6 +2397,7 @@ These cells execute the actual shared interface. Their stored results are writte
 (ns formal.dossier-story
  (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic] [formal.backend :as backend]
            [formal.collections :as c] [formal.value :as v] [bl.json :as json]
+           [formal.beam-float :as beam-float] [formal.source :as term-source] [formal.source-runtime :as source-run]
            [veritas.property :as property] [veritas :as veritas] [veritas.ledger :as verdict-ledger] [veritas.mock :as response-mock] [veritas.fault :as response-fault] [datom] [formal.check :as checked-query]
            [formal.temporal :as temporal] [datom.time :as time] [formal.certificate :as certificate]
            [formal.affine :as affine] [formal.preparation :as preparation] [formal.evaluate :as term-replay] [system.linear :as linear]
@@ -3036,7 +3037,7 @@ These cells execute the actual shared interface. Their stored results are writte
  :kernel-execution (:kernel-execution positive-check) :compiler-proof-authority false}
 #+end_src
 #+RESULTS: story-positive-witness
-: {:evidence :positive-sat-witness, :compiler-proof-authority false, :kernel-execution :not-run, :semantics :bl/partial-mathematical-int-bool-v1, :existence :checked-by-bl-replay, :data-connection :checked-data-connection, :nonlinear-assignment [[6 7] :satisfies-product-42], :wrong-value :rejected, :watchers :no-added-assumptions}
+: {:evidence :positive-sat-witness, :compiler-proof-authority false, :semantics :bl/partial-mathematical-int-bool-v1, :kernel-execution :not-run, :existence :checked-by-bl-replay, :data-connection :checked-data-connection, :nonlinear-assignment [[6 7] :satisfies-product-42], :wrong-value :rejected, :watchers :no-added-assumptions}
 
 
 #+begin_src beam-lisp :id story-witnessed-obligations
@@ -3776,37 +3777,39 @@ These cells execute the actual shared interface. Their stored results are writte
 
 
 #+begin_src beam-lisp :id story-float-source
-(require '[formal.beam-float :as float] '[formal.source :as source]
-         '[formal.value :as value] '[formal.evaluate :as evaluate]
-         '[formal.source-runtime :as runtime] '[system.core :as system])
-(let [prepared (source/prepare-function '(fn [x] (= (- (+ x 0.1) x) 0.1)) [(float/literal 1.0)])
-      term (value/decode (:value prepared) #(evaluate/value % {}))
-      actual (runtime/run (:anf prepared) [1.0])
+(let [prepared (term-source/prepare-function '(fn [x] (= (- (+ x 0.1) x) 0.1)) [(beam-float/literal 1.0)])
+      term (v/decode (:value prepared) #(term-replay/value % {}))
+      actual (source-run/run (:anf prepared) [1.0])
       legacy (system/verify-process nil (first (BeamLisp.Reader/read_string
        "(defserver ^{:invariant (= (- (+ x 0.1) x) 0.1)} rounded (init [] (ok 1.0)) (handle-call [:noop] [_ x] (reply :ok x)))")))
-      numeric (float/equal :numeric (float/literal 0.0) (float/literal -0.0))
-      strict (float/equal :identity (float/literal 0.0) (float/literal -0.0))]
+      numeric (beam-float/equal :numeric (beam-float/literal 0.0) (beam-float/literal -0.0))
+      strict (beam-float/equal :identity (beam-float/literal 0.0) (beam-float/literal -0.0))]
  {:source-profile (:profile prepared) :term-value (:value term) :actual-value (:value actual)
   :module-retired (= false (:module-loaded actual))
   :legacy-source-status (:status legacy) :legacy-source-holds (:holds legacy)
-  :zeros-numerically-equal (evaluate/value (value/term numeric) {})
-  :zeros-strictly-identical (evaluate/value (value/term strict) {})
+  :zeros-numerically-equal (term-replay/value (v/term numeric) {})
+  :zeros-strictly-identical (term-replay/value (v/term strict) {})
   :implementation-correspondence :reviewed-with-concrete-checks :compiler-proof-authority false})
 #+end_src
+#+RESULTS: story-float-source
+: ;; error: undefined var: formal.dossier-story/require
+
 
 #+begin_src beam-lisp :id story-float-backends
-(require '[veritas :as v] '[veritas.property :as property] '[formal.identity :as identity])
 (let [answers (mapv (fn [engine]
               (property/prove {:backend engine} '(defn cancellation [x] (- (+ x 0.1) x))
-                '(= result 0.1) (v/one-of 1.0))) [:z3 :oxiz])]
+                '(= result 0.1) (veritas/one-of 1.0))) [:z3 :oxiz])]
  {:backends [:z3 :oxiz]
-  :same-complete-question (apply = (map #(identity/hash (:question %)) answers))
+  :same-complete-question (apply = (map #(data-identity/hash (:question %)) answers))
   :source-verdicts (mapv :modality answers)
   :native-statuses (mapv #(get-in % [:answer :solver-status]) answers)
   :independent-replay (mapv #(get-in % [:answer :validation :status]) answers)
   :actual-source (mapv #(get-in % [:runtime-replay :status]) answers)
   :native-proof-certificate :not-checked :compiler-proof-authority false})
 #+end_src
+#+RESULTS: story-float-backends
+: ;; error: undefined var: formal.dossier-story/require
+
 
 #+begin_src beam-lisp :id story-message-migration
 (def message-migration
