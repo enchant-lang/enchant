@@ -1,0 +1,91 @@
+(ns formal.migration-check
+ (:require [formal.migration :as migration] [formal.term :as t] [formal.value :as v]
+           [formal.identity :as identity] [formal.answer :as answer] [veritas.ledger :as ledger]
+           [oracle] [datom] [bl.json :as json]))
+
+(defn definition [name delta source?]
+ (migration/define
+  (merge {:name name :parameters [["message" t/Int]] :message "message"
+          :admit-before (fn [in] (t/ge (get in "message") (t/int 0)))
+          :admit-after (fn [_ out] (t/ge (v/term out) (t/int 0)))}
+    (if source? {:source-function (if (= delta 1) '(fn [x] (+ x 1)) '(fn [x] (- x 1000)))}
+      {:transform (fn [in] (t/add (get in "message") (t/int delta)))}))))
+(def definitions {:good (definition "retained-good" 1 false) :bad (definition "retained-bad" -1000 false)
+                  :source (definition "retained-source" 1 true)})
+(def argv (BeamLisp/argv))
+(def mode (first argv))
+(assert (contains? #{"examples" "write" "read"} mode))
+
+(defn example [kind backend]
+ (let [definition (get definitions kind) prepared (migration/prepare definition)
+       result (migration/verify {:backend backend :admission {"message" 0}} definition)
+       limited (when (= kind :good)
+                 (migration/verify {:backend backend :search {:nodes 1} :admission {"message" 0}} definition))
+       _ (assert (= (if (= kind :bad) :refuted :checked) (:status result)))
+       _ (assert (= (not= kind :bad) (:verified result)))
+       _ (assert (= (:problem prepared) (get-in result [:backend :property :question])))
+       _ (assert (= false (:delivery-authority result) (:compiler-proof-authority result)))
+       _ (when limited (assert (= :uncertified (:status limited))) (assert (nil? (:verified limited))))]
+  {:kind kind :backend backend :definition definition :question (identity/hash (:problem prepared))
+   :admission-question (identity/hash (:admission prepared)) :result result :limited limited}))
+
+(defn examples []
+ (let [rows (vec (for [kind [:good :bad :source] backend [:z3 :oxiz]] (example kind backend)))
+       run (migration/replay-source (:source definitions) {"message" 4})
+       _ (doseq [kind [:good :bad :source]]
+           (assert (apply = (map :question (filter #(= kind (:kind %)) rows)))))
+       _ (assert (= :valid (:status run)))
+       _ (assert (= 5 (get-in run [:actual :value])))]
+  {:schema "enchant.formal.migrations.v1" :cwd (File/cwd!) :research-import-path false
+   :cases rows :source-replay run :delivery-authority false :compiler-proof-authority false}))
+
+(defn record [connection kind backend]
+ (let [definition (get definitions kind) prepared (migration/prepare definition)
+       result (migration/verify {:backend backend :admission {"message" 0}} definition)
+       _ (assert (= (if (= kind :good) :checked :refuted) (:status result)))]
+  (ledger/record! connection
+   (cond-> {:modality (if (= kind :good) :checked-conditional-migration :witnessed)
+            :engine backend :question (:problem prepared) :answer result
+            :evidence {:kind kind :definition definition} :compiler-proof-authority false}
+     (= kind :bad) (assoc :witness (get-in result [:counterexample :object])))
+   {:claim (str "migration/" kind "/" backend) :about ["messages/declared-migration"]})))
+
+(defn recheck [row]
+ (let [stored (:verdict/evidence row) definition (get-in stored [:evidence :definition])
+       kind (get-in stored [:evidence :kind]) result (:answer stored)
+       prepared (migration/prepare definition) question (:problem prepared)
+       native (get-in result [:backend :property]) rechecked (answer/check question native)
+       _ (assert (= definition (get definitions kind)))
+       _ (assert (= question (:verdict/question row) (:question rechecked)))
+       _ (assert (= :recorded (:verdict/assurance row)))
+       _ (assert (= false (:verdict/compiler-authority row)))
+       admission (migration/check-admission definition (get-in result [:admission :object]))
+       _ (assert (= :checked-data-connection (:status admission)))
+       checked (if (= kind :good)
+                 (migration/check-proof definition (get-in result [:proof :object]))
+                 (migration/check-counterexample definition (get-in result [:counterexample :object])))
+       _ (assert (= (if (= kind :good) :checked :checked-data-connection) (:status checked)))
+       _ (assert (= (if (= kind :good) :proved :refuted) (:verdict rechecked)))
+       _ (assert (= (= kind :bad) (:verdict/witness-present row)))]
+  {:kind kind :engine (:verdict/engine row) :rechecked (:verdict rechecked)
+   :definition (:identity definition) :question (identity/hash question)}))
+
+(defn recorded []
+ (let [connection (ledger/open (second argv))]
+  (try
+   (when (= mode "write")
+    (doseq [kind [:good :bad] backend [:z3 :oxiz]] (record connection kind backend)))
+   (let [calls (atom 0)
+         rows (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :record-rechecking-must-not-query))}
+                #(mapv recheck (ledger/about connection "messages/declared-migration")))
+         _ (assert (= 4 (count rows)))
+         _ (assert (= 0 @calls))]
+    {:schema "enchant.formal.migration-ledger.v1" :mode mode :process (System/pid)
+     :rows rows :managed-query-calls @calls :managed-query-scope :record-rechecking
+     :delivery-authority false :compiler-proof-authority false})
+   (finally (datom/close! connection)))))
+
+(def report (if (= mode "examples") (examples) (recorded)))
+(File/write! (nth argv (if (= mode "examples") 1 2)) (json/encode report {:pretty 2}))
+(println (json/encode {:mode mode :cases (count (:cases report)) :rows (count (:rows report))
+                      :managed-query-calls (:managed-query-calls report) :compiler-proof-authority false}))
