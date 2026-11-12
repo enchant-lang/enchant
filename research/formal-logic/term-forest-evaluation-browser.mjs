@@ -63,10 +63,10 @@ try{
    await click('#theme');await center(panel);await shot('desktop-graph-point-night');await click('#theme');
   }
   await call({op:'navigate',url:base+'/#s-the-model-running'});
-  const text=await evaluate("document.querySelector('#cell-story-graph-point .result')?.innerText||''");
+  const text=await evaluate("document.querySelector('#cell-story-graph-point-2 .result')?.innerText||''");
   check(size.name+': actual graph evaluator result is visible',text.includes(':evaluated-nodes 17')&&text.includes(':typed-nodes 17')&&text.includes(':values [true true]')&&text.includes(':native-execution :not-invoked')&&text.includes(':managed-query-calls 0')&&text.includes(':compiler-proof-authority false'));
   check(size.name+': actual notebook cell checks every integer setting',await evaluate("document.querySelector('#cell-story-graph-sharing-notebook .result').innerText.includes(':settings-checked 17')"));
-  await center('#cell-story-graph-point');await shot(size.name+'-graph-point-cell');
+  await center('#cell-story-graph-point-2');await shot(size.name+'-graph-point-cell');
  }
  for(const path of ['TERM-FOREST-EVALUATION.md','src/formal/term-forest-evaluate.bl','evidence/term-forest-evaluation/qualification.json']){
   const r=await fetch(base+'/'+path),body=Buffer.from(await r.arrayBuffer());
