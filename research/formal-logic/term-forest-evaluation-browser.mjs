@@ -20,6 +20,9 @@ const panel='[data-graph="formal-graph-consumers"] .sg-stage>[data-view]:not([hi
 const calculator='try-changing-how-many-layers-share-their-children';
 const number=id=>`Number(document.querySelector('.nb-measure-row [data-nb="${id}"]').innerText.replace(/[^0-9]/g,''))`;
 const center=selector=>evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center',behavior:'instant'})`);
+const sharingFrame=size=>size.name==='phone'
+ ?evaluate(`window.scrollBy({top:document.getElementById('${calculator}').getBoundingClientRect().top-92,behavior:'instant'})`)
+ :center('.nb-measure-row');
 try{
  await call({op:'open',width:390,height:844,mobile:true});
  for(const size of [{name:'phone',width:390,height:844,mobile:true},{name:'desktop',width:1440,height:1000,mobile:false}]){
@@ -28,7 +31,7 @@ try{
   check(size.name+': no horizontal page overflow',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
   check(size.name+': illustrative counts stay separate from actual execution',await evaluate("document.body.innerText.includes('This calculator counts syntax')&&document.body.innerText.includes('not additional executions of the evaluator')"));
   check(size.name+': default calculator matches checked fixture',await evaluate(`${number('sharing_terms_16')}===131071&&${number('sharing_nodes')}===17`));
-  await center('.nb-measure-row');await shot(size.name+'-sharing-default');
+  await sharingFrame(size);await shot(size.name+'-sharing-default');
   await center('.nb-controls>summary');
   if(!await evaluate("document.querySelector('.nb-controls').open"))await click('.nb-controls>summary');
   check(size.name+': expanded source badge fits the page',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
@@ -43,7 +46,7 @@ try{
   check(size.name+': real pointer changes layers to a bounded intermediate value',Number.isInteger(selectedLayers)&&selectedLayers>0&&selectedLayers<16);
   check(size.name+': adjusted figures follow the real control',await evaluate(`${number('sharing_terms_16')}===${2**(selectedLayers+1)-1}&&${number('sharing_nodes')}===${selectedLayers+1}`));
   check(size.name+': all 17 browser counts match the cell formula',await evaluate("Array.from({length:17},(_,layers)=>{const v=window.dossierNotebook.calc('value',{sharing_layers:layers});return v.sharing_nodes===layers+1&&v.sharing_terms_16===2**(layers+1)-1}).every(Boolean)"));
-  await center('.nb-measure-row');await shot(size.name+'-sharing-adjusted');
+  await sharingFrame(size);await shot(size.name+'-sharing-adjusted');
   await click('.nb-measure-row [data-nb="sharing_terms_16"]');
   check(size.name+': figure opens its actual dependency expression',await evaluate("!document.querySelector('#nb-pop').hidden&&document.querySelector('#nb-pop h4').innerText==='Term occurrences through layer 16'&&!!document.querySelector('#nb-pop [data-nb-open=sharing_terms_15]')"));
   await shot(size.name+'-sharing-formula');
