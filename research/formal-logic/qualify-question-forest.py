@@ -38,7 +38,7 @@ for stage in ('focused', 'corpus'):
     stages[stage] = {'source': source, 'exit': result,
                      'command_sha256': sha(E / (stage + '-command.json')),
                      'log_sha256': sha(E / (stage + '-checks.txt'))}
-assert '65 passed' in (E / 'focused-checks.txt').read_text()
+assert '68 passed' in (E / 'focused-checks.txt').read_text()
 corpus = read(E / 'corpus.json')
 assert len(corpus['rows']) == 187
 assert corpus['managed-query-calls'] == 0 and corpus['native-execution'] == 'not-invoked'
@@ -50,7 +50,7 @@ for row in corpus['rows']:
         assert row[key] is True, (row['id'], key)
 report = {'schema': 'enchant.formal.question-forest-qualification.v1', 'status': 'passed',
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'availability': 'project-preview',
-          'sdk_pin': pin, 'stages': stages, 'focused_assertions': 65, 'questions': 187,
+          'sdk_pin': pin, 'stages': stages, 'focused_assertions': 68, 'questions': 187,
           'managed_query_calls': 0, 'native_execution': 'not-invoked',
           'implementation_sha256': sha(P / 'src/formal/question-forest.bl'),
           'corpus_sha256': sha(E / 'corpus.json'),
@@ -59,4 +59,4 @@ report = {'schema': 'enchant.formal.question-forest-qualification.v1', 'status':
           'scope': 'Project query preparation, not structured observation reconstruction, managed owner admission, native transport or a complete question-interpretation theorem. Existing list-observation and bare-container decoding distinctions remain explicitly under review.',
           'compiler_proof_authority': False}
 (E / 'qualification.json').write_text(json.dumps(report, indent=2) + '\n')
-print(json.dumps({'status': 'passed', 'focused': 65, 'questions': 187, 'managed_queries': 0}))
+print(json.dumps({'status': 'passed', 'focused': 68, 'questions': 187, 'managed_queries': 0}))
