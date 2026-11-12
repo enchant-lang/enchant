@@ -620,6 +620,10 @@ try{
   check(size.name+': Source observation panel retains one-invocation and function-correspondence limits',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(migrationPanel)}).innerText;return t.includes('not universal compiler preservation')&&t.includes('neither invoked nor certified')&&t.includes('compile or publication error remains an observer error')})()`));
   await evaluate(`document.querySelector(${JSON.stringify(migrationPanel)}).scrollIntoView({block:'center'})`);
   await shot(size.name+'-migration-source-panel');
+  if(size.name==='phone'){
+    await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(migrationPanel)}).querySelector('.review-detail');d.scrollTop=d.scrollHeight})()`);
+    await shot(size.name+'-migration-source-details');
+  }
   await navigate('/#s-the-model-running');
   for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger','story-answer-binding']){
     const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);

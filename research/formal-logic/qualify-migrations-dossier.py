@@ -47,6 +47,7 @@ frames = ('message-migration', 'migration-certificate-panel', 'migration-source-
 manual = [size + '-' + frame + '.png' for size in ('phone', 'desktop') for frame in frames]
 manual.append('desktop-migration-night.png')
 manual.append('phone-migration-details.png')
+manual.append('phone-migration-source-details.png')
 require(all(name in images for name in manual), 'retained actual response frames')
 visual = read(E / 'browser-audit/visual-review.json')
 require(visual['inspected'] == manual and visual['status'] in ('reviewed', 'reviewed-with-capture-limitation'), 'manual frame review')
