@@ -49,7 +49,9 @@ try{
   await sharingFrame(size);await shot(size.name+'-sharing-adjusted');
   await click('.nb-measure-row [data-nb="sharing_terms_16"]');
   check(size.name+': figure opens its actual dependency expression',await evaluate("!document.querySelector('#nb-pop').hidden&&document.querySelector('#nb-pop h4').innerText==='Term occurrences through layer 16'&&!!document.querySelector('#nb-pop [data-nb-open=sharing_terms_15]')"));
-  check(size.name+': formula panel carries its illustrative phase',await evaluate("document.querySelector('#nb-pop .nb-phase')?.innerText==='Illustrative syntax count'"));
+  const phaseBadge=await evaluate("(()=>{const e=document.querySelector('#nb-pop .nb-phase');return e?{text:e.textContent.trim(),renderedText:e.innerText,visible:e.getClientRects().length>0}:null})()");
+  (report.phaseBadges??=[]).push({viewport:size.name,...phaseBadge});
+  check(size.name+': formula panel carries its illustrative phase',phaseBadge?.text==='Illustrative syntax count'&&phaseBadge.visible);
   check(size.name+': formula panel stays inside the viewport',await evaluate("(()=>{const r=document.querySelector('#nb-pop').getBoundingClientRect();return r.left>=-2&&r.right<=innerWidth+2&&r.top>=-2&&r.bottom<=innerHeight+2})()"));
   await shot(size.name+'-sharing-formula');
   await click('#nb-pop [data-nb-open="sharing_layers"]');
