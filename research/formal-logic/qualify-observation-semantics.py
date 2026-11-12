@@ -27,6 +27,12 @@ def committed(snapshot, current=True):
             assert sha(R / name) == digest, ('current checked subject', name)
 
 pin = read(E / 'sdk-candidate.json')
+recipe_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
+recipe_names = ['qualify-observation-semantics.py', 'record-observation-build.py',
+                'archive-observation-ledger.py', 'run-observation-semantics.py', 'run-observation-admission.py']
+recipe = {'code_commit': recipe_commit,
+          'source_sha256': {str((P / name).relative_to(R)): sha(P / name) for name in recipe_names}}
+committed(recipe)
 sdk, source = Path(pin['sdk']), Path(pin['source'])
 meta = read(sdk / 'artifact.json')
 assert sha(sdk / 'artifact.json') == pin['descriptor_sha256']
@@ -195,6 +201,7 @@ assert not (E / 'durable-ledger').exists() and not (E / 'durable-ledger.blobs').
 
 report = {'schema': 'enchant.formal.observation-semantics-qualification.v1', 'status': 'passed',
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': pin, 'runs': runs,
+          'qualification_recipe': recipe,
           'assertion_executions': sum(sum(rows.values()) for rows in runs.values()), 'stages': stages,
           'observation_questions': 187, 'point_maps': 748, 'exact_observation_values': observations,
           'exact_root_values': roots, 'pure_observation_query_calls': 0, 'paired_native_result_records': 374,
