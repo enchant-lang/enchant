@@ -7,6 +7,7 @@ P = Path(__file__).resolve().parent
 R = P.parent.parent
 E = P / 'evidence/graph-consumers'
 subprocess.run(['python3', P / 'capture-graph-consumers-host.py'], cwd=R, check=True)
+subprocess.run(['python3', P / 'check-graph-consumers-media.py'], cwd=R, check=True)
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            '--working-directory=' + str(R), '--property=MemoryMax=2G',
            '--property=MemorySwapMax=0', '--property=RuntimeMaxSec=900',

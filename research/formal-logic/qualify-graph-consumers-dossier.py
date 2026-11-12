@@ -74,6 +74,10 @@ require(host['state']['ActiveState'] == 'active' and host['state']['SubState'] =
 require(host['http']['status'] == 200 and host['http']['bytes'] > 1000000, 'actual dossier response')
 require(host['document_sha256'] == sha(D) and host['http']['completed_interface_and_corpus_caption'],
         'actual response warmed from the current corrected document')
+media = read(E / 'media-checks.json')
+require(media['status'] == 'passed' and media['browser_wait_seconds'] == 6
+        and len(media['checks']) == 5 and all(row['seconds'] < 6 for row in media['checks'][:2]),
+        'two exact PNGs within existing browser wait and three undeclared-media refusals')
 blocks = Counter(re.findall(r'^#\+begin_([\w-]+)', text, re.M | re.I))
 report = {'schema': 'enchant.formal.graph-consumers-dossier-qualification.v1', 'checkpoint': 44,
           'recorded_utc': datetime.now(timezone.utc).isoformat(),
@@ -89,7 +93,8 @@ report = {'schema': 'enchant.formal.graph-consumers-dossier-qualification.v1', '
           'host': host, 'host_sources': host_sources,
           'host_warmup': warmup, 'host_warmup_log_sha256': sha(E / 'host-warmup-checks.txt'),
           'host_cache_checks': {'assertions': 52, 'log_sha256': sha(E / 'host-cache-checks.txt')},
-          'host_cache_scope': 'Existing revision/role/variant cache with a read-only page warmed before listener admission. Focused cache checks, actual cold startup and current presentation are exercised on SDK 44; preceding broader qualification remains historical.',
+          'media': media,
+          'host_cache_scope': 'Existing revision/role/variant cache with a read-only page warmed before listener admission. Media authorization reuses only the exact-text pure parse. Focused cache checks, exact media bytes/refusals, actual cold startup and current presentation are exercised on SDK 44; preceding broader qualification remains historical.',
           'scope': 'Executed examples, retained records and live presentation. These checks do not establish source/compiler preservation or whole-language totality.',
           'compiler_proof_authority': False}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
