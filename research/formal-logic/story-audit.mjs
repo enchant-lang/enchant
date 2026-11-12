@@ -598,6 +598,37 @@ try{
   check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
   await shot(size.name+'-model-replay');
+  await navigate('/#float-arithmetic-must-mean-the-same-thing-in-the-program-and-the-proof');
+  check(size.name+': Float chapter explains the observed false Real proof',await evaluate("document.body.innerText.includes('the original compiled predicate made false')&&document.body.innerText.includes('Failure stays in the claim')"));
+  await evaluate("document.querySelector('#float-arithmetic-must-mean-the-same-thing-in-the-program-and-the-proof').scrollIntoView({block:'start'})");
+  await shot(size.name+'-float-source');
+  const floatPanel='[data-graph="formal-float-source"] .sg-stage>[data-view]:not([hidden])';
+  await click(floatPanel+' .review-index [data-sg-to="replay"]');
+  check(size.name+': Float replay distinguishes implementation checks from preservation',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(floatPanel)}).innerText;return t.includes('integer and rational arithmetic')&&t.includes('not a machine-checked IEEE theorem')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(floatPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-float-replay-panel');
+  if(size.name==='phone'){
+    await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(floatPanel)}).querySelector('.review-detail');d.scrollTop=d.scrollHeight})()`);
+    check(size.name+': Float panel relationships remain above phone controls',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-float-source"]'),d=document.querySelector(${JSON.stringify(floatPanel)}).querySelector('.review-detail'),r=d.querySelector('.review-related').getBoundingClientRect(),b=d.getBoundingClientRect(),t=g.querySelector('.sg-toolbar').getBoundingClientRect();return r.top>=b.top&&r.bottom<=b.bottom&&r.bottom<=t.top})()`));
+    await shot(size.name+'-float-replay-details');
+  }
+  if(size.name==='desktop'){
+    await click('#theme');await evaluate(`document.querySelector(${JSON.stringify(floatPanel)}).scrollIntoView({block:'center'})`);
+    await shot(size.name+'-float-night');await click('#theme');
+  }
+  await click(floatPanel+' .review-index [data-sg-to="legacy"]');
+  check(size.name+': Float legacy panel grants no Source proof to ideal models',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(floatPanel)}).innerText;return t.includes('return unsupported by default')&&t.includes('grants no Source proof')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(floatPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-float-legacy-panel');
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-float-source','story-float-backends']){
+    const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+    check(size.name+': visible executed Float result '+id,t.length>100);
+    if(id==='story-float-source')check(size.name+': Float Source cell demonstrates the repaired mismatch and zero distinction',t.includes(':term-value false')&&t.includes(':actual-value false')&&t.includes(':legacy-source-status :unsupported')&&t.includes(':legacy-source-holds nil')&&t.includes(':zeros-numerically-equal true')&&t.includes(':zeros-strictly-identical false')&&t.includes(':module-retired true')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-float-backends')check(size.name+': Float backends receive identical questions without certificate authority',t.includes(':same-complete-question true')&&t.includes(':backends [:z3 :oxiz]')&&t.includes(':native-proof-certificate :not-checked')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   await navigate('/#a-migration-needs-three-separate-answers');
   check(size.name+': migration chapter separates admitted inputs, conditional truth and delivery',await evaluate("document.body.innerText.includes('9,891 assertion executions')&&document.body.innerText.includes('Neither failure becomes an assumption')&&document.body.innerText.includes('Re-elaboration may execute phase code')&&document.body.innerText.includes('Every result keeps compiler and delivery authority false')"));
   await evaluate("document.querySelector('#a-migration-needs-three-separate-answers').scrollIntoView({block:'start'})");
