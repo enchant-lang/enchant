@@ -73,7 +73,7 @@ async function dispatch(message) {
   throw Error('Timed out waiting for '+message.expression);
  case 'click':{
   const scroll=message.scroll!==false;
-  const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(message.selector)});if(!e)throw Error('Missing control');if(${scroll})e.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=e.getBoundingClientRect();const x=Math.max(1,Math.min(innerWidth-2,r.x+r.width/2)),y=Math.max(1,Math.min(innerHeight-2,r.y+r.height/2));const h=document.elementFromPoint(x,y);if(!h||!(e===h||e.contains(h)))throw Error('Obscured control');return{x,y}})()`);
+  const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(message.selector)});if(!e)throw Error('Missing control');if(${scroll})e.scrollIntoView({block:'center',inline:'nearest'});const r=e.getBoundingClientRect();const x=Math.max(1,Math.min(innerWidth-2,r.x+r.width/2)),y=Math.max(1,Math.min(innerHeight-2,r.y+r.height/2));const h=document.elementFromPoint(x,y);if(!h||!(e===h||e.contains(h)))throw Error('Obscured control');return{x,y}})()`);
   await rpc('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
   await rpc('Input.dispatchMouseEvent',{type:'mouseReleased',...point,button:'left',clickCount:1});await sleep(100);return true;
  }
