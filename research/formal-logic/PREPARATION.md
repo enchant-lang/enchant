@@ -1,7 +1,8 @@
 # A checked plan between a question and its execution
 
-Design for the next implementation checkpoint. The normalization probe is
-executable; the general plan interface described here is not implemented yet.
+Implementation for checkpoint 39 is on main and under SDK qualification.
+The selected SDK remains checkpoint 38. The retained normalization probe is
+already executable; the new general interface has not yet passed its checks.
 
 Beam Lisp should own the meaning of a formal question and make useful
 representations available to either engine. The observed compiler-size cases
@@ -14,7 +15,7 @@ complete execution question, and evidence connecting their actual term sites.
 Its identity covers all three. A normalizer proposes the execution question;
 an independent checker reconstructs the connection from those questions.
 
-The proposed API keeps these pieces separate:
+The API under qualification keeps these pieces separate:
 
 ```beam-lisp
 (def plan (affine/prepare original-question))
@@ -30,7 +31,7 @@ The proposed API keeps these pieces separate:
 initially receive the same execution question from the same plan. Backend
 settings, native provenance and any later alternative plan remain visible data.
 
-The first supported fragment should be explicit Bool and affine Int terms,
+The first normalization fragment is explicit Bool and affine Int terms,
 with plain typed observations. Each changed assertion, claim and observation
 needs an unconditional equality certificate. Assertion order, labels, origins,
 scope, profiles, context and arbitrary other question metadata stay identical.
@@ -45,7 +46,7 @@ foreign and extra sites, changed observation labels, modified metadata and a
 certificate for a merely similar term. Checked means equivalence under the
 existing certificate fragment and implementation trust boundary.
 
-Execution is a separate effect. Initially it should own a fresh session and
+Execution is a separate effect. The implementation owns a fresh session and
 send the execution question through the ordinary complete-query handler. It
 must verify the returned question before any transport. A borrowed live
 context is separate work: rewriting a query cannot silently rewrite assertions
@@ -70,7 +71,7 @@ native claims with unchecked absence certificates. An equivalence certificate
 does not become a proof of the theorem being queried. Unknown, unsupported,
 error, incomplete models and explicit budgets keep their distinct meanings.
 
-The first production consumer can be `system.linear`: a declared constructor
+The first production consumer under qualification is `system.linear`: a declared constructor
 size recurrence, a portable positive certificate, a replayed constructed
 double-placement counterexample, and optional paired native executions. Native
 uncertainty must not invalidate an independently checked arithmetic object, or

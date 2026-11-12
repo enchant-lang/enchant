@@ -1,10 +1,10 @@
 # A compiler check with its own arithmetic proof
 
-Implementation exploration started after checkpoint 37. `system.linear` has
-not yet been migrated. The retained arithmetic probes use the checkpoint 37
-SDK, regardless of later selected SDKs.
+The term migration is now on main and under checkpoint 39 SDK qualification.
+The selected SDK remains checkpoint 38. The retained arithmetic probes use
+the checkpoint 37 SDK, regardless of later selected SDKs.
 
-The retained baseline exposes the current boundary: `size-lemma` returns
+The retained baseline records the preceding boundary: `size-lemma` returns
 SMT command forms, the typed query handler sees no question, and `prove-bound`
 has no independently checked certificate or explicit model scope. The first
 baseline attempt had an extra closing delimiter; only the corrected run counts
@@ -24,6 +24,16 @@ Z3 reports the single-placement theorem and refutes double placement. OxiZ
 0.3.4 returns unknown for both exact questions under the SDK's default settings.
 This observation does not establish a general limitation of its integer theory.
 The complete native answers are retained in `evidence/compiler-linearity`.
+
+The new implementation replaces the ignored port argument with an options map.
+`(linear/prove-bound 12 8 6)` requests portable evidence; adding an initial
+`{:backend :z3}` or `{:backend :oxiz}` requests a separate native comparison.
+`:holds` depends on the positive portable certificates, constructed feasible
+premises and checked double-placement counterexamples. Native unknown or an
+unchecked positive label cannot decide it. The admitted family is explicitly
+nonempty, with maximum arity one through eight; `size-lemma` separately supports
+arity zero, where there is no child to duplicate. Runtime qualification is
+still pending, and compiler proof authority remains false.
 
 The next architectural split should be:
 
