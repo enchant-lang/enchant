@@ -66,6 +66,14 @@ decoded values or validation labels would bypass the transport check. If
 normalization removes a variable that the original replay still needs, missing
 assignments remain an incomplete model. No default coordinate is invented.
 
+The first candidate's lost-coordinate test exposed an important reporting
+distinction. Native `:model-status` describes access to the execution backend's
+model API; it is not original-coordinate completeness. The receiver now marks
+that basis explicitly and separately records `:original-replay`: assertion
+validation, typed binding availability and observation availability. This also
+keeps an unavailable original value distinct from a concrete constant observed
+after simplification. The correction is awaiting a new immutable SDK.
+
 UNSAT and vacuity may travel across a checked equivalence connection, but remain
 native claims with unchecked absence certificates. An equivalence certificate
 does not become a proof of the theorem being queried. Unknown, unsupported,

@@ -1,7 +1,7 @@
 (ns formal.preparation
  (:require [formal.term :as t] [formal.query :as q] [formal.identity :as identity]
            [formal.certificate :as certificate] [formal.proof :as proof]
-           [formal.answer :as answer] [formal.logic :as logic]))
+           [formal.answer :as answer] [formal.logic :as logic] [formal.evaluate :as replay]))
 
 ;; Preparation has its own data boundary. Search and execution never establish
 ;; equivalence: check reconstructs each equality from the actual two questions.
@@ -85,6 +85,22 @@
         checking (check plan)]
    (assoc plan :status (if (= :checked (:status checking)) :ready :unknown) :checking checking))))
 
+(defn- original-replay [question transported]
+ (if-not (= :sat (:solver-status transported)) {:status :not-applicable}
+  (let [bindings (replay/check-bindings (q/roots question) (:assignments transported))
+        rows (mapv (fn [[label term]]
+                      (assoc (replay/check-value (t/sort-of term)
+                                (get (:witness transported) label (replay/unavailable :missing-observation)))
+                        :label label :sort (t/sort-of term)))
+                    (sort-by (fn [[label _]] (identity/bytes label)) (:observe question)))
+        observation-status (cond (some #(= :invalid (:status %)) rows) :invalid
+                                 (some #(= :incomplete (:status %)) rows) :incomplete :else :valid)
+        statuses [(get-in transported [:validation :status]) (:status bindings) observation-status]]
+   {:status (cond (some #(= :invalid %) statuses) :invalid
+                  (some #(not= :valid %) statuses) :incomplete :else :valid)
+    :assertions (:validation transported) :bindings bindings
+    :observations {:status observation-status :rows rows}})))
+
 (defn accept
  "Pure transport across a freshly checked connection. Bind the actual executed
   answer first, then independently replay assignments and decode the ORIGINAL
@@ -97,6 +113,10 @@
    (let [transported (answer/check (:original plan) (answer/bind (:original plan) executed))]
     (cond-> (assoc transported
       :preparation connection :execution {:question (:execution plan) :answer executed}
+      ;; Native model-status reports access to the EXECUTED model API. It is
+      ;; not a completeness claim about the original inputs or observations.
+      :model-status-basis :executed-question
+      :original-replay (original-replay (:original plan) transported)
       :certificate {:status :not-checked :kind :prepared-execution-claim}
       :transport {:kind :checked-question-equivalence :observations :independent-original-replay}
       :compiler-proof-authority false)
