@@ -1,7 +1,7 @@
-# Explicit original points — checkpoint 42 candidate
+# Explicit original points — checkpoint 42
 
-This runtime batch is implemented as a prototype and **not yet qualified**.
-The selected SDK and live dossier remain checkpoint 41.
+Checkpoint 42 qualifies this runtime batch on one immutable SDK. Compiler and
+wider Source preservation remain outside its authority.
 
 `formal.point/prepare` takes a complete `formal.query` and explicit typed
 coordinates. It validates all original assertions and, for a proof question,
@@ -56,4 +56,19 @@ outcome relation still ignores exception categories when both sides raise.
 The confirmed SDK41 baseline and its exact pin are retained under
 `evidence/explicit-points`: Int observations accepted runtime `1.0`, cross-kind
 Source equivalence threw, and `real-of 0.0 0.0` admitted both Int and Float.
-Qualification and fresh-process evidence for this batch are pending.
+Qualification passes 19,726 assertion executions: 311 new point/domain tests,
+1,310 preceding Float-focused tests, 8,191 arithmetic reference assertions,
+167 migration, 299 preparation, 1,307 preceding consumer and 8,141 regression
+assertions. The 141-file compiler artifact floor, 581-namespace frozen-source
+preflight and negative controls pass. All 187 preceding native statuses and
+verdicts remain unchanged.
+
+An SDK-only consumer in an unrelated directory compares three Source
+counterpoints and one exact rational point on both engines. OxiZ returns
+unknown for the new Float interval questions; independently checked explicit
+points reproduce all three Source failures. Native answers remain unchanged.
+Eight saved records reopen in a fresh process. Pure rechecking performs zero
+managed query calls and no Source compilation; six fresh Source observations
+run afterward in a separate phase. Complete receipts are under
+`evidence/explicit-points`, including `qualification.json` and the native,
+point and Source evidence in `examples.json`.

@@ -77,6 +77,14 @@ of all 187 preceding questions match across SDKs; a standard identity capacity
 refusal remains explicitly recorded. [Next point interfaces](NEXT-POINTS.md)
 remain design work.
 
+[Explicit original points](EXPLICIT-POINTS.md) let BL check typed coordinates
+against a complete question even when a native answer is unknown. Point
+checking is a separate data-evaluator profile; fresh Source observation is a
+separate phase. `veritas/float-of` adds finite binary64 interval domains with
+exact pattern counts, while scalar observations preserve runtime kind.
+Checkpoint 42 passes 19,726 assertion executions, SDK-only paired examples,
+eight reopened points and six separately repeated Source observations.
+
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes

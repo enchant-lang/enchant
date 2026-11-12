@@ -47,6 +47,12 @@ typed path or an explicit ideal-model request; ideal-model verdicts are not
 Source proofs. Native FP(e,2) requests are refused safely by pinned Z3 before
 import, while the portable theory and independent evaluator retain that format.
 
+[Original points](EXPLICIT-POINTS.md) add backend-independent explicit data
+checking through `formal.point`. `veritas.property/observe-point` is a separate
+operation for an actual Source invocation. `float-of` keeps exact finite Float
+domains separate from historical `real-of`. This does not relax standard
+identity budgets or grant the point packet an Int/Bool metatheory receipt.
+
 ## Ask through a standard consumer
 
 ```beam-lisp

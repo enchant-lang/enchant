@@ -409,3 +409,23 @@ This guard does not complete legacy Source typing or eliminate implicit Int
 fallbacks elsewhere. [Explicit points and runtime observation](NEXT-POINTS.md)
 are the next interface design; native models, independent data evidence and
 actual Source calls must retain separate provenance.
+
+## Explicit original points — checkpoint 42
+
+[The original-point interface](EXPLICIT-POINTS.md) adds `formal.point/prepare`
+and `formal.point/check`. Both use typed coordinates and the complete original
+question, including its original counterexample condition. They do not borrow
+the Int/Bool `formal.witness` metatheory. The Source adapter
+`veritas.property/observe-point` checks a point before separately observing
+the declared function/predicate. Native unknown answers remain unchanged.
+
+`float-of`, exact finite pattern counts and ordered-key sampling/shrinking
+extend the generator domains. Scalar observations now distinguish Int from
+Float; successful cross-kind Source values differ under the strong result
+relation. Both raised outcomes still ignore exception categories.
+
+The selected SDK passes 19,726 assertion executions and compiler/source gates.
+Eight stored points reopen with zero managed query calls and no Source
+compilation during pure rechecking; six actual Source observations follow in
+another phase. General data-evaluator soundness and Source/compiler preservation
+remain reviewed boundaries, not new mechanically proved theorems.
