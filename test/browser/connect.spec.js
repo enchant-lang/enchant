@@ -324,3 +324,80 @@ test("session: reconnect distinguishes an undelivered first mount from a hydrate
   expect(new URL(mounted).searchParams.get('live-mounted')).toBe('1');
   expect(await page.locator('input').inputValue()).toBe('retained');
 });
+
+// Page lifecycle is separate from transient connection loss. A frozen page
+// cannot drain patches, and a restored page still holds its original DOM.
+test('pagehide closes without retry; pageshow resumes its hydrated session once', async ({ page }) => {
+  await boot(page, { heartbeatMs: 30 });
+  await page.waitForFunction(() => __sockets[0].readyState === WebSocket.OPEN);
+  const original = await page.evaluate(() => {
+    __sockets[0].onmessage({ data: JSON.stringify(['mount', '<input id="draft">', { 'input-ack': true }]) });
+    window.originalInput = document.getElementById('draft');
+    originalInput.value = 'Private words · كلمات';
+    const url = __sockets[0].url;
+    dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    return url;
+  });
+  expect(await page.evaluate(() => __sockets[0].readyState)).toBe(3);
+  const pings = await pingsOf(page);
+  await page.waitForTimeout(650);
+  expect(await page.evaluate(() => __sockets.length)).toBe(1);
+  expect(await pingsOf(page)).toEqual(pings);
+  await page.evaluate(() => {
+    dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+    dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  await page.waitForFunction(() => __sockets.length === 2 && __sockets[1].readyState === 1);
+  const resumed = await page.evaluate(() => ({
+    url: Live.ws.url, sameInput: originalInput === document.getElementById('draft'), value: originalInput.value,
+  }));
+  expect(new URL(resumed.url).searchParams.get('live-sid')).toBe(new URL(original).searchParams.get('live-sid'));
+  expect(new URL(resumed.url).searchParams.get('live-mounted')).toBe('1');
+  expect(resumed.sameInput).toBe(true);
+  expect(resumed.value).toBe('Private words · كلمات');
+});
+
+test('pagehide cancels a queued retry and late old callbacks cannot disturb its replacement', async ({ page }) => {
+  await boot(page, { heartbeatMs: 0 });
+  await page.waitForFunction(() => __sockets[0].readyState === 1);
+  await page.evaluate(() => {
+    __sockets[0].close();
+    dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+  });
+  await page.waitForTimeout(650);
+  expect(await page.evaluate(() => __sockets.length)).toBe(1);
+  await page.evaluate(() => dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  await page.waitForFunction(() => __sockets.length === 2 && __sockets[1].readyState === 1);
+  await page.evaluate(() => {
+    __sockets[0].onclose();
+    __sockets[0].onerror();
+    __sockets[0].onmessage({ data: JSON.stringify(['mount', 'late stale mount']) });
+  });
+  await page.waitForTimeout(650);
+  expect(await page.evaluate(() => __sockets.length)).toBe(2);
+  expect(await page.evaluate(() => Live.ws === __sockets[1] && Live.ws.readyState === 1)).toBe(true);
+  expect(await page.locator('#live-root').textContent()).not.toContain('late stale mount');
+});
+
+test('a cached page without initial delivery still requests an unmounted recovery', async ({ page }) => {
+  await boot(page, { heartbeatMs: 0 });
+  await page.waitForFunction(() => __sockets[0].readyState === 1);
+  await page.evaluate(() => {
+    dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  await page.waitForFunction(() => __sockets.length === 2 && __sockets[1].readyState === 1);
+  expect(await page.evaluate(() => new URL(Live.ws.url).searchParams.get('live-mounted'))).toBe('0');
+});
+
+test('reconnect opt-out also owns restoration after pagehide', async ({ page }) => {
+  await boot(page, { reconnect: false, heartbeatMs: 0 });
+  await page.waitForFunction(() => __sockets[0].readyState === 1);
+  await page.evaluate(() => {
+    dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+    dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  await page.waitForTimeout(650);
+  expect(await page.evaluate(() => __sockets.length)).toBe(1);
+  expect(await page.evaluate(() => Live.ws.readyState)).toBe(3);
+});
