@@ -299,3 +299,15 @@ names the *intent*, never the actor. A check-in cannot lie about who checked in.
 
 The frontend is a projection. The backend is a decision about what becomes
 true. The database is where they meet — and it remembers.
+
+A cached browser page suspends its Live transport on `pagehide`, cancels retry
+and heartbeat timers, and reconnects on `pageshow` when automatic reconnection
+is enabled. Hidden tabs remain live. Chromium 149 and later can cache pages
+with open WebSockets; without explicit suspension those frozen pages continue
+causing server projections. A return keeps the same session id and durable
+outbox but requests the existing fresh-mount recovery, because a patch may
+have been in flight when the page froze. Field restoration keeps private input
+and focus. Late callbacks from the old socket cannot mutate its replacement.
+The real-browser lifecycle regression enables bfcache explicitly, verifies
+that only one transport remains, and checks both newer shared display data
+and retained private words after Back navigation.

@@ -514,6 +514,9 @@
       inputFrames.clear();
     }
     var reconnectMs = 500;
+    var reconnectTimer = null;
+    var beat = null;
+    var suspended = false;
     // the latest route the page wants but has not yet put on the wire. A
     // navigation moves the URL bar SYNCHRONOUSLY (pushState) but the page only
     // changes when the server receives the navigate event and re-projects
@@ -578,6 +581,8 @@
 
     // open (or re-open) the socket and wire its handlers.
     function openSocket() {
+      if (suspended || (ws && (ws.readyState === WebSocket.OPEN ||
+                              ws.readyState === WebSocket.CONNECTING))) return;
       ws = new WebSocket(sessionUrl(opts.url));
       ws.__send = sendFrame;   // relay() and __navigate use this
       ws.__sendNav = sendNav;  // relay() uses this for a view-declared :navigate
@@ -595,11 +600,10 @@
         // frame that left the address bar ahead of a stale page.
         sendNav(path);
       };
-      var sock = ws;           // the heartbeat captures THIS socket — after a
-      var beat = null;         // reconnect swaps `ws`, the dead socket's timer
-                               // must die with it, never beat on the fresh one
+      var sock = ws;           // callbacks belong only to this transport
 
       ws.onopen = function () {
+        if (sock !== ws || suspended) return;
         reconnectMs = 500;                         // reset backoff
         // flush the route the page wants before anything else: a click or a
         // Back/Forward that happened while the socket was down left the URL bar
@@ -621,16 +625,21 @@
         setLive(true);
       };
       ws.onclose = function () {
+        if (sock !== ws) return;
         discardInputs();
         if (beat) { clearInterval(beat); beat = null; }
         setLive(false);
-        if (reconnect) {                           // auto-reconnect with backoff
-          setTimeout(openSocket, reconnectMs);
+        if (reconnect && !suspended && reconnectTimer === null) {
+          reconnectTimer = setTimeout(function () {
+            reconnectTimer = null;
+            openSocket();
+          }, reconnectMs);
           reconnectMs = Math.min(reconnectMs * 2, 10000);
         }
       };
-      ws.onerror = function () { setLive(false); };
+      ws.onerror = function () { if (sock === ws && !suspended) setLive(false); };
       ws.onmessage = function (msg) {
+        if (sock !== ws || suspended) return;
         const [kind, a, b] = JSON.parse(msg.data);
         if (kind === "mount") {
           // The mount REPLACES the server-rendered page. Whatever the reader
@@ -702,6 +711,28 @@
       };
       Live.ws = ws;
     }
+    // Cached pages keep their DOM and JavaScript heap, but cannot consume
+    // patches while frozen. Release the transport so its server session
+    // detaches and stops projecting. A patch may already be in flight when
+    // the page freezes, so a return requests a fresh mount of the SAME
+    // session; keepFields preserves its private inputs and focus. Retain sid
+    // and the outbox. Tab visibility alone does not suspend a live viewer.
+    window.addEventListener("pagehide", function () {
+      suspended = true;
+      mounted = false;
+      if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (beat) { clearInterval(beat); beat = null; }
+      discardInputs();
+      setLive(false);
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        ws.close(1000, "pagehide");
+      }
+    });
+    window.addEventListener("pageshow", function () {
+      if (!suspended) return;
+      suspended = false;
+      if (reconnect) openSocket();
+    });
     openSocket();
     Live.root = root;
 
