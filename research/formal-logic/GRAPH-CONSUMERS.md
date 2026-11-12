@@ -1,7 +1,9 @@
 # Graph-backed formal questions: checkpoint 44 candidate
 
-Implementation candidate; not yet qualified. Checkpoint 43 remains the selected
-qualified SDK and live dossier runtime until the new receipts are retained.
+Implementation candidate; full qualification is pending the timed 187-question
+graph-context corpus. The 9,588 targeted assertion executions, two fresh readers,
+compiler floor and Source gates pass. Checkpoint 43 remains the selected qualified
+SDK and live dossier runtime until the complete new receipt is retained.
 
 `formal.question-graph/prepare` converts a complete typed question once.
 `from-graph` admits an already canonical graph. Its closed wrapper has exactly
@@ -65,3 +67,9 @@ forged/rehashed bindings, old/new durable records, and fresh SDK-only readers.
 Compiler and Source gates remain separate. Graph mechanics, evaluator soundness,
 Source/compiler preservation, termination and actor liveness remain open proof
 obligations; serialization does not discharge them.
+
+The candidate SDK adopts main's existing eager `doseq` change in `priv/boot/core.bl`.
+Its compiler artifact differs from checkpoint 43; the exact 141-file P/B/C floor
+and 25 zero-memo-budget effect checks pass. The formal worker artifact is unchanged.
+The qualification records this transition explicitly rather than treating a new
+compiler as an unchanged artifact. No compiler soundness theorem is implied.
