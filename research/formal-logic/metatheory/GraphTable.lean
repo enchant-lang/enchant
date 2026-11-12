@@ -123,11 +123,11 @@ def Table.fold {α : Type} (leaf : Scalar → α) (node : Algebra α) :
 
 theorem fold_push_of_certified_prefix {α : Type} (leaf : Scalar → α) (node : Algebra α)
     (previous : Table size) (row : Row size) (values : Fin size → α) (latest : α)
-    (prefix : Table.fold leaf node previous = values)
+    (agreement : Table.fold leaf node previous = values)
     (step : Row.apply leaf node values row = latest) :
     Table.fold leaf node (.push previous row) = extend values latest := by
   simp only [Table.fold]
-  rw [prefix, step]
+  rw [agreement, step]
 
 def interpret (table : Table size) : Fin size → Value :=
   Table.fold Value.scalar Value.node table
