@@ -83,3 +83,10 @@ leaving a wholly unconstrained integer opaque. That answer remains a candidate;
 Z3 materializes a value for the same question. Explicit input pins and constrained
 domains can supply replayable responses on both. BL-side completion would need
 its own provenance and complete independent replay; it is not silently assumed.
+
+`formal.integer-optimize` owns integer extremum search. The existing research
+`formal.optimize` namespace continues to own proposed Core rewrites and their
+translation gates. The first wider regression caught their accidental namespace
+collision and the runtime refused the conflicting route; that failed attempt is
+retained. Incomplete equality between shared model coordinates also stays
+incomplete, instead of becoming an invented domain conflict.
