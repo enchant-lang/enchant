@@ -1,0 +1,47 @@
+(ns formal.query-preparation-check
+ (:require [system.linear :as linear] [formal.affine :as affine] [formal.preparation :as preparation]
+           [formal.proof :as proof] [formal.certificate :as certificate] [formal.logic :as logic]
+           [formal.identity :as identity] [bl.json :as json]))
+
+(def problems
+ (into {} (mapv (fn [placement]
+                  (let [question (linear/size-lemma 12 2 8 placement) plan (affine/prepare question)
+                        portable (when (= placement 1) (proof/produce question))]
+                   (assert (= :ready (:status plan)))
+                   (assert (= :checked (:status (preparation/check plan))))
+                   (when portable
+                    (assert (= :checked (:status (certificate/check question (:certificate portable))))))
+                   [placement {:question question :plan plan :portable-proof portable}])) [1 2])))
+(def rows
+ (vec (for [backend [:z3 :oxiz] placement [1 2]]
+        (let [{:keys [question plan portable-proof]} (get problems placement)
+              original (logic/run {:backend backend} question)
+              prepared (preparation/execute {:backend backend} plan)]
+         (assert (= question (:question original)))
+         (assert (= question (:question prepared)))
+         (assert (= (:execution plan) (get-in prepared [:execution :answer :question])))
+         (assert (= (if (= placement 1) :proved :refuted) (:verdict prepared)))
+         (assert (= :checked (get-in prepared [:preparation :status])))
+         (assert (= :not-checked (get-in prepared [:certificate :status])))
+         (assert (= false (:compiler-proof-authority prepared)))
+         (when (= placement 2)
+          (assert (= :valid (get-in prepared [:validation :status])))
+          (assert (= :valid (get-in prepared [:original-replay :status])))
+          (assert (> (get-in prepared [:witness "output"]) (get-in prepared [:witness "bound"]))))
+         {:backend backend :placement placement :question (identity/hash question)
+          :execution-question (identity/hash (:execution plan)) :plan plan
+          :original-answer original :prepared-answer prepared :portable-proof portable-proof}))))
+(doseq [placement [1 2]]
+ (let [same (filter #(= placement (:placement %)) rows)]
+  (assert (apply = (map :question same)))
+  (assert (apply = (map :execution-question same)))
+  (assert (apply = (map #(identity/hash (:plan %)) same)))))
+(def report {:schema "enchant.formal.query-preparation.v1" :cwd (File/cwd!) :research-import-path false
+             :cases rows :scope :declared-constructor-size-recurrence :compiler-proof-authority false})
+(File/write! (first (BeamLisp/argv)) (json/encode report {:pretty 2}))
+(println (json/encode {:cases (mapv (fn [row]
+                                    {:backend (:backend row) :placement (:placement row)
+                                     :original (get-in row [:original-answer :verdict])
+                                     :prepared (get-in row [:prepared-answer :verdict])
+                                     :original-replay (get-in row [:prepared-answer :original-replay :status])}) rows)
+                      :compiler-proof-authority false} {:pretty 2}))

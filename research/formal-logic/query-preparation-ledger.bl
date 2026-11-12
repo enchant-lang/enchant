@@ -1,0 +1,58 @@
+(ns formal.query-preparation-ledger
+ (:require [system.linear :as linear] [formal.affine :as affine] [formal.preparation :as preparation]
+           [formal.proof :as proof] [formal.certificate :as certificate] [formal.identity :as identity]
+           [veritas.ledger :as ledger] [datom] [oracle] [bl.json :as json]))
+
+(def argv (BeamLisp/argv))
+(def mode (first argv))
+(assert (contains? #{"write" "read"} mode))
+(def connection (ledger/open (second argv)))
+(try
+ (when (= mode "write")
+  (doseq [placement [1 2] backend [:z3 :oxiz]]
+   (let [question (linear/size-lemma 12 2 8 placement) plan (affine/prepare question)
+         result (preparation/execute {:backend backend} plan)
+         portable (when (= placement 1) (proof/produce question))]
+    (assert (= (if (= placement 1) :proved :refuted) (:verdict result)))
+    (ledger/record! connection
+     (cond-> {:modality (if (= placement 1) :solver-claim :witnessed) :engine backend
+              :question question :question-identity (identity/hash question) :answer result
+              :evidence {:plan plan :portable-proof portable} :compiler-proof-authority false}
+       (= placement 2) (assoc :witness (:witness result)))
+     {:claim (str "constructor size " backend "/" placement) :about ["compiler/declared-size-recurrence"]}))))
+ (let [calls (atom 0)
+       summary (oracle/with-oracle
+                 {:query (fn [_ _] (swap! calls inc) (throw :fresh-check-must-not-query))}
+                 (fn []
+                  (let [rows (ledger/about connection "compiler/declared-size-recurrence")]
+                   (assert (= 4 (count rows)))
+                   (doseq [row rows]
+                    (let [evidence (:verdict/evidence row) recorded (:answer evidence)
+                          plan (get-in evidence [:evidence :plan])
+                          placement (get-in row [:verdict/question :scope :first-child-placement])
+                          original (linear/size-lemma 12 2 8 placement)
+                          replayed (preparation/accept plan (get-in recorded [:execution :answer]))]
+                     (assert (= original (:original plan) (:verdict/question row) (:question replayed)))
+                     (assert (= :checked (:status (preparation/check plan))))
+                     (assert (= (if (= placement 1) :proved :refuted) (:verdict replayed)))
+                     (assert (= :recorded (:verdict/assurance row)))
+                     (assert (= false (:verdict/compiler-authority row)))
+                     (assert (= :not-checked (get-in replayed [:certificate :status])))
+                     (if (= placement 1)
+                      (do
+                       (assert (= false (:verdict/witness-present row)))
+                       (assert (= :checked (:status (certificate/check original
+                                                     (get-in evidence [:evidence :portable-proof :certificate]))))))
+                      (do
+                       (assert (= true (:verdict/witness-present row)))
+                       (assert (= :valid (get-in replayed [:original-replay :status])))
+                       (assert (= (:verdict/witness row) (:witness replayed)))))))
+                   {:rows (count rows) :claims (vec (sort (map :verdict/claim rows)))
+                    :fresh-connections :checked :original-replay :reproduced
+                    :compiler-proof-authority false})))]
+  (assert (= 0 @calls))
+  (let [report (assoc summary :schema "enchant.formal.query-preparation-ledger.v1"
+                              :mode mode :process (System/pid) :managed-query-calls @calls)]
+   (File/write! (nth argv 2) (json/encode report {:pretty 2}))
+   (println (json/encode report))))
+ (finally (datom/close! connection)))
