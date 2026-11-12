@@ -125,3 +125,10 @@ it sent literal Boolean nodes through the compound-operation constructor.
 The retained run records an incoherent migration test module and one errored
 conditional case. Literal leaves now retain their original validated nodes.
 Only the subsequently qualified SDK is eligible for selection.
+
+The first durable-reader attempt passed a raw native answer to the bound-handler
+reply checker and was refused. Inspection confirmed that the complete saved
+question matched. The reader now compares those exact canonical bytes first,
+then explicitly binds the raw answer before replay. The failure is retained
+under `ledger-before-binding`; it was a consumer error, not a backend failure.
+The rebound answer is a rechecked record, not a newly executed native result.

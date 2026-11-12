@@ -51,6 +51,7 @@ require(':closed-within true' in (E / 'candidate-1/domain-checks.txt').read_text
 require('0 passed, 1 errored' in (E / 'candidate-2/conditional-baseline-checks.txt').read_text(), 'retained conditional Source admission defect')
 require('unknown primitive operation' in (E / 'candidate-3/focused-checks.txt').read_text()
         and 'INCOHERENT' in (E / 'candidate-3/focused-checks.txt').read_text(), 'retained literal-constructor regression')
+require('handler response differs from its complete typed question' in (E / 'ledger-before-binding/ledger-write-checks.txt').read_text(), 'retained raw-native versus bound-reply reader error')
 focused = counts('focused', 4)
 prepared = counts('preparation-focused', 5)
 preceding = counts('preceding-focused', 26)

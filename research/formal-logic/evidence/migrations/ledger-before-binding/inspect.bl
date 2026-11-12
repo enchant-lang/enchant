@@ -1,0 +1,17 @@
+(ns migration-ledger-inspect
+ (:require [veritas.ledger :as ledger] [datom] [formal.migration :as migration] [formal.identity :as identity]))
+(def connection (ledger/open (first (BeamLisp/argv))))
+(try
+ (doseq [row (ledger/about connection "messages/declared-migration")]
+  (let [stored (:verdict/evidence row) definition (get-in stored [:evidence :definition])
+        prepared (migration/prepare definition) question (:problem prepared)
+        native (get-in stored [:answer :backend :property]) actual (:question native)
+        fields (set (concat (keys question) (keys actual)))
+        changed (filter (fn [key] (not= (identity/hash [(contains? question key) (get question key)])
+                                        (identity/hash [(contains? actual key) (get actual key)]))) fields)]
+   (println (pr-str {:claim (:verdict/claim row) :prepared (:status prepared) :reason (:reason prepared)
+                     :native-tag (:formal/query-reply native) :native-status (:solver-status native)
+                     :header (select-keys native [:id :mode :profile :profiles :scope :context])
+                     :expected-header (select-keys question [:id :mode :profile :profiles :scope :context])
+                     :changed (into {} (map (fn [key] [key {:expected (get question key) :actual (get actual key)}]) changed))}))))
+ (finally (datom/close! connection)))
