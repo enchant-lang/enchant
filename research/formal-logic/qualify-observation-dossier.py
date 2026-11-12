@@ -25,7 +25,7 @@ kit = read(E / 'kit-state.json')
 for name, digest in kit['rendering_source_sha256'].items():
     body = (Path(kit['root']) / name).read_bytes()
     assert hashlib.sha256(body).hexdigest() == digest
-    assert subprocess.check_output(['git', 'show', kit['commit'] + ':' + name], cwd=kit['root']) == body
+    assert subprocess.check_output(['git', 'show', kit['commit'] + ':' + name], cwd=kit.get('repository_root', kit['root'])) == body
 document = P / 'ATLAS.bl.org'
 text = document.read_text()
 assert len(re.findall(r'^#\+begin_src beam-lisp\b', text, re.M)) == 84
