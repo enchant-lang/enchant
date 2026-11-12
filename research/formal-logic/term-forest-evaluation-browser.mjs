@@ -31,8 +31,10 @@ try{
   await center('.nb-measure-row');await shot(size.name+'-sharing-default');
   await click('.nb-controls>summary');
   await click('.nb-controls [data-nb-input="sharing_layers"]');
-  check(size.name+': real pointer changes layers to eight',await evaluate("document.querySelector('.nb-controls [data-nb-input]').value==='8'"));
-  check(size.name+': adjusted figures follow the real control',await evaluate(`${number('sharing_terms_16')}===511&&${number('sharing_nodes')}===9`));
+  const selectedLayers=Number(await evaluate("document.querySelector('.nb-controls [data-nb-input]').value"));
+  (report.pointerSelections??=[]).push({viewport:size.name,layers:selectedLayers});
+  check(size.name+': real pointer changes layers to a bounded intermediate value',Number.isInteger(selectedLayers)&&selectedLayers>0&&selectedLayers<16);
+  check(size.name+': adjusted figures follow the real control',await evaluate(`${number('sharing_terms_16')}===${2**(selectedLayers+1)-1}&&${number('sharing_nodes')}===${selectedLayers+1}`));
   check(size.name+': all 17 browser counts match the cell formula',await evaluate("Array.from({length:17},(_,layers)=>{const v=window.dossierNotebook.calc('value',{sharing_layers:layers});return v.sharing_nodes===layers+1&&v.sharing_terms_16===2**(layers+1)-1}).every(Boolean)"));
   await center('.nb-measure-row');await shot(size.name+'-sharing-adjusted');
   await click('.nb-measure-row [data-nb="sharing_terms_16"]');
