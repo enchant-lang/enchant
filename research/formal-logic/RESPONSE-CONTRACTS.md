@@ -77,3 +77,9 @@ Runtime Unicode text outside the solver String alphabet remains a model limit,
 not an invented law violation. Native unsupported, unknown and incomplete model
 answers remain visible. No result here establishes checker soundness, source
 preservation, whole-language totality or compiler proof authority.
+
+The native model-completion boundary is observable: OxiZ can report SAT while
+leaving a wholly unconstrained integer opaque. That answer remains a candidate;
+Z3 materializes a value for the same question. Explicit input pins and constrained
+domains can supply replayable responses on both. BL-side completion would need
+its own provenance and complete independent replay; it is not silently assumed.
