@@ -14,6 +14,22 @@ complete execution question, and evidence connecting their actual term sites.
 Its identity covers all three. A normalizer proposes the execution question;
 an independent checker reconstructs the connection from those questions.
 
+The proposed API keeps these pieces separate:
+
+```beam-lisp
+(def plan (affine/prepare original-question))
+(preparation/check plan)
+(preparation/execute {:backend :z3} plan)
+(preparation/execute {:backend :oxiz} plan)
+;; A pure receiver checks an already returned execution answer:
+(preparation/accept plan execution-answer)
+```
+
+`prepare` is an untrusted producer. A plan's stored status is diagnostic;
+`check`, `execute` and `accept` reconstruct the connection afresh. Both engines
+initially receive the same execution question from the same plan. Backend
+settings, native provenance and any later alternative plan remain visible data.
+
 The first supported fragment should be explicit Bool and affine Int terms,
 with plain typed observations. Each changed assertion, claim and observation
 needs an unconditional equality certificate. Assertion order, labels, origins,
@@ -41,6 +57,13 @@ from those assignments, with unavailable coordinates kept unavailable. Retain
 the native answer, its execution question and replay, alongside this separate
 original-question replay. A decoded response still goes through the actual
 published-point boundary introduced in checkpoint 38.
+
+The public answer belongs to the original question. Its separate execution
+record retains the actual execution question and native answer. Reconstructing
+original observations can reuse the independent answer decoder; copying native
+decoded values or validation labels would bypass the transport check. If
+normalization removes a variable that the original replay still needs, missing
+assignments remain an incomplete model. No default coordinate is invented.
 
 UNSAT and vacuity may travel across a checked equivalence connection, but remain
 native claims with unchecked absence certificates. An equivalence certificate
