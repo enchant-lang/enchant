@@ -57,7 +57,7 @@ prepared = counts('preparation-focused', 5)
 preceding = counts('preceding-focused', 26)
 regression = counts('regression', 31)
 previous_facade = int(re.search(r'✓\s+formal.facade-test\s+(\d+) passed', (P / 'evidence/query-preparation/regression-checks.txt').read_text())[1])
-require(focused['reload.formal-migration-test'] >= 117 and focused['reload.migration-conditional-baseline-test'] == 4 and regression['formal.facade-test'] >= previous_facade + 12, 'migration semantics and common facade exercised')
+require(focused['reload.formal-migration-test'] >= 123 and focused['reload.migration-conditional-baseline-test'] == 4 and regression['formal.facade-test'] >= previous_facade + 12, 'migration semantics and common facade exercised')
 require(prepared['system.formal-preparation-test'] >= 109 and preceding['veritas.ledger-large-terms-test'] >= 21, 'prior binding and payload boundaries')
 for stage in ('focused', 'preparation-focused', 'preceding-focused', 'regression', 'examples', 'ledger-write', 'ledger-read'):
     command = read(E / (stage + '-command.json'))
