@@ -1,0 +1,40 @@
+(ns formal.value-growth-probe
+ (:require [formal.term :as t] [formal.data-graph :as graph]
+           [formal.term-forest-evaluate :as point] [oracle] [bl.json :as json]))
+
+;; Small, intentionally capped counterexamples to a graph-size-only cost policy.
+;; This measures the existing unmetered preview; it does not implement a budget.
+(defn doubled [op sort value]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)]
+   [(graph/encode :op) (graph/encode op)] [(graph/encode :sort) (graph/encode sort)]
+   [(graph/encode :args) (graph/assemble "vector" [value value])]
+   [(graph/encode :data) (graph/encode nil)]]))
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :growth-probe-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  #(mapv
+    (fn [[kind op sort initial layers expected measure]]
+     (let [data (reduce (fn [value _] (doubled op sort value)) (graph/encode initial) (range layers))
+           result (point/values data [(:root data)] {})
+           size (measure (first (:values result)))
+           checked (graph/check! data)]
+      (assert (= expected size))
+      (assert (= (+ (if (= kind :sequence) 2 1) layers) (get-in result [:checking :evaluated-nodes])))
+      {:kind kind :layers layers :typed-nodes (get-in result [:checking :typed-nodes])
+       :evaluated-nodes (get-in result [:checking :evaluated-nodes])
+       :graph-reference (graph/reference data) :data-graph checked
+       :canonical-graph-bytes (erlang/byte_size (graph/bytes data))
+       :derived-size size :unit (case kind :integer :integer-bits :text :utf8-bytes :sequence :elements)
+       :resource-preflight :not-implemented :compiler-proof-authority false}))
+    [[:integer :mul t/Int (t/int 2) 16 65537 #(erlang/byte_size (erlang/integer_to_binary % 2))]
+     [:text :str-concat t/String (t/text "a") 16 65536 erlang/byte_size]
+     [:sequence :seq-concat (t/seq-sort t/Int) (t/app :seq-unit (t/seq-sort t/Int) [(t/int 7)] nil)
+      12 4096 count]])))
+(assert (= 0 @calls))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.derived-value-growth-probe.v1" :rows rows
+               :managed-query-calls @calls :compiler-proof-authority false
+               :scope "Three bounded actual value computations, showing why graph-node bounds alone do not bound derived concrete values. No general cost theorem or resource preflight is implemented."} {:pretty 2}))
+(println (mapv #(select-keys % [:kind :typed-nodes :derived-size :unit]) rows))

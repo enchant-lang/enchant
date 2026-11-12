@@ -64,6 +64,12 @@ elif stage == 'example':
               'research/formal-logic/src/formal/graph-observation-examples.bl',
               'research/formal-logic/graph-observation-example.bl']
     request = ['run', str(R / names[-1]), '--', str(E / 'example.json')]
+elif stage == 'value-growth':
+    project = True
+    names += ['research/formal-logic/src/formal/term-forest.bl',
+              'research/formal-logic/src/formal/term-forest-evaluate.bl',
+              'research/formal-logic/value-growth-probe.bl']
+    request = ['run', str(R / names[-1]), '--', str(E / 'value-growth.json')]
 elif stage == 'sdk-regression':
     names += ['test/bl/formal/graph_ops_test.bl', 'test/bl/formal/graph_context_test.bl',
               'test/bl/veritas/graph_ledger_test.bl', 'test/bl/formal/data_graph_test.bl',
@@ -112,7 +118,8 @@ if project:
 command += request
 (E / (stage + '-exit.json')).unlink(missing_ok=True)
 output_names = {'native': 'native.json', 'observation-corpus': 'observation-corpus.json',
-                'paired-native-corpus': 'paired-native-corpus.json', 'example': 'example.json'}
+                'paired-native-corpus': 'paired-native-corpus.json', 'example': 'example.json',
+                'value-growth': 'value-growth.json'}
 if stage in output_names:
     (E / output_names[stage]).unlink(missing_ok=True)
 (E / (stage + '-source-pin.json')).write_text(json.dumps({'code_commit': commit, 'source_sha256': sources, 'sdk_pin': pin}, indent=2) + '\n')
