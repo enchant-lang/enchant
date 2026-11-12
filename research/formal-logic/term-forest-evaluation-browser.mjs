@@ -12,7 +12,7 @@ let buffer=Buffer.alloc(0),waiting=[];
 helper.stdout.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4){const n=buffer.readUInt32BE(0);if(buffer.length<n+4)break;const value=JSON.parse(buffer.subarray(4,n+4).toString());buffer=buffer.subarray(4+n);const request=waiting.shift();clearTimeout(request.timer);value.ok?request.resolve(value.result):request.reject(Error(value.error));}});
 function call(message){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Browser helper deadline')),35000);waiting.push({resolve,reject,timer});const body=Buffer.from(JSON.stringify(message)),size=Buffer.alloc(4);size.writeUInt32BE(body.length);helper.stdin.write(Buffer.concat([size,body]));});}
 const evaluate=expression=>call({op:'eval',expression});
-const click=(selector,options={})=>call({op:'click',selector,...options});
+const click=async(selector,options={})=>{try{return await call({op:'click',selector,...options});}catch(error){throw Error(selector+': '+error.message);}};
 const report={schema:'enchant.formal.term-forest-evaluation-browser.v1',base,checks:[],screenshots:[],started:new Date().toISOString()};
 function check(name,ok){report.checks.push({name,passed:Boolean(ok)});if(!ok)throw Error(name);}
 async function shot(name){await call({op:'screenshot',path:join(output,name+'.png')});report.screenshots.push(name+'.png');}
@@ -30,7 +30,7 @@ try{
   check(size.name+': default calculator matches checked fixture',await evaluate(`${number('sharing_terms_16')}===131071&&${number('sharing_nodes')}===17`));
   await center('.nb-measure-row');await shot(size.name+'-sharing-default');
   await center('.nb-controls>summary');
-  await click('.nb-controls>summary');
+  if(!await evaluate("document.querySelector('.nb-controls').open"))await click('.nb-controls>summary');
   check(size.name+': expanded source badge fits the page',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
   await center('.nb-controls [data-nb-input="sharing_layers"]');
   await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
