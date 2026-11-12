@@ -52,3 +52,31 @@ A universal connection needs a model of the relevant BL/BEAM operations or a
 verified translation for the implementation. The existing Int/Bool term and
 Core theorems cannot be borrowed to cover graph loops, arbitrary maps, effects
 or compiler behavior they do not model.
+
+## A graph-native typed term consumer
+
+The current context still rebuilds ordinary typed terms and runs the existing
+validator/evaluator. End-to-end corpus timings include that work and repeated
+public-boundary validation. They are not solver speed measurements.
+
+A next consumer should select a typed forest directly from checked public node
+IDs. Its meaning must stay tied to the complete original question, including
+vacuity, counterexample construction, observations and semantic domains. A
+portable node ID is not a native arena handle. Each native adapter translates
+that forest into the actual owner's arena, with its revision checks preserved.
+
+Validate binders under `(node ID, binder environment)`, rather than memoizing a
+bound expression by node ID alone. Prove the resulting interpreter agrees with
+the existing typed-term semantics before using it to replace a checked path.
+Finite operator tags can remain a closed vocabulary; user variable names,
+constructor names and inert keyword labels can stay bytes. A later label-aware
+value profile could reason about a finite keyword universe without interning
+its members, returning graph data until explicit materialization is requested.
+That would require its own declared value/observation interface and qualification.
+
+First remove redundant validation inside one public operation using private,
+locally derived views. Do not accept a caller's cached view as authority. A
+cross-call cache is a separate design: exact complete inputs, checker/profile
+identity, explicit capacities and cache-miss equivalence all need treatment.
+Optional memo admission must never determine whether validation or effects run;
+the eager-doseq compiler transition is a concrete reminder of that requirement.
