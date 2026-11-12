@@ -1,0 +1,33 @@
+(ns formal.graph-ledger-writer
+ (:require [formal.query :as q] [formal.term :as t] [formal.data-graph :as g]
+           [formal.question-graph :as qg] [formal.logic :as logic] [formal.point :as point]
+           [veritas.ledger :as ledger] [datom] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+(def x (t/variable "durable.graph.x" t/Int))
+(def original (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"next" (t/add x (t/int 1))}}))
+(def unknown {:formal/data-graph 1 :profile g/profile :root 0 :nodes [["keyword" "durable.graph.unfamiliar.provenance.44"]]})
+(def large (reduce (fn [value _] (g/assemble "vector" [value value])) unknown (range 16)))
+(def ctx (qg/patch (qg/prepare original) {:origin large}))
+(def p (point/prepare-context ctx {"durable.graph.x" 7}))
+(assert (= :ready (:status p)))
+(def connection (ledger/open (first argv)))
+(try
+ (ledger/record! connection {:modality :witnessed :question original :witness false} {:claim "legacy original"})
+ (let [answers (mapv
+                (fn [engine]
+                 (let [r (logic/run-graph {:backend engine} ctx)]
+                  (assert (= :sat (:verdict r)))
+                  (assert (= 8 (get-in r [:witness "next"])))
+                  (assert (= :returned (get-in r [:execution :status])))
+                  (ledger/record-graph! connection
+                   {:modality :solver-claim :engine engine :question-graph ctx :answer r :witness false
+                    :evidence {:point (:packet p)}}
+                   {:claim (str "durable graph " engine) :about ["graph/44"]})
+                  (select-keys r [:verdict :solver-status :identity :execution :question-reference]))) [:z3 :oxiz])]
+  (File/write! (second argv)
+   (json/encode {:schema "enchant.formal.graph-ledger-writer.v1" :process (System/pid) :cwd (File/cwd!)
+                 :sdk-only true :reference (qg/reference ctx) :graph (g/check! (:graph ctx))
+                 :point (:identity (:packet p)) :rows (count (ledger/all connection))
+                 :answers answers :compiler-proof-authority false} {:pretty 2})))
+ (finally (datom/close! connection)))
+(println {:writer :saved :sdk-only true :authority false})

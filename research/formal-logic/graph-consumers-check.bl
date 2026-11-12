@@ -1,0 +1,33 @@
+(ns formal.graph-consumers-check
+ (:require [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
+           [formal.native-cases :as native] [formal.query :as q] [formal.term :as t]
+           [formal.identity :as identity] [formal.data-graph :as graph] [formal.question-graph :as qg]
+           [formal.logic :as logic] [formal.answer :as answer] [oracle] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+(def rows
+ (vec (mapcat
+  (fn [[family cases]]
+   (mapv (fn [c]
+            (let [original (q/from-case c) ctx (qg/prepare original) opened (qg/open! ctx)
+                  materialized (qg/materialize! ctx) root-digest (t/digest (q/roots original))
+                  standard (try {:status :available :sha256 (identity/hash original)}
+                                (catch e {:status :unavailable :reason (ex-message e)}))
+                  a (logic/run-graph {:backend :z3} ctx) b (logic/run-graph {:backend :oxiz} ctx)]
+             (assert (= root-digest (t/digest (q/roots (:view opened)))))
+             (assert (= (graph/bytes (graph/encode original)) (graph/bytes (graph/encode materialized))))
+             (assert (= (qg/reference ctx) (:question-reference a) (:question-reference b)))
+             (doseq [r [a b]]
+              (assert (= 2 (:formal/query-reply r)))
+              (assert (= :returned (get-in r [:execution :status])))
+              (assert (= false (:trusted r)))
+              (assert (= false (:compiler-proof-authority r)))
+              (assert (= :not-checked (get-in r [:certificate :status])))
+              (answer/assert-bound-graph! ctx r))
+             {:id (:id c) :family family :roots root-digest :graph (:graph-checking opened)
+              :standard-identity standard
+              :z3 (select-keys a [:solver-status :verdict :phase :identity :validation :nodes-imported :observation-basis])
+              :oxiz (select-keys b [:solver-status :verdict :phase :identity :validation :nodes-imported :observation-basis])})) cases))
+  [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]])))
+(assert (= 187 (count rows)))
+(File/write! (first argv) (json/encode {:schema "enchant.formal.graph-consumers-corpus.v1" :rows rows :compiler-proof-authority false} {:pretty 2}))
+(println {:questions (count rows) :native-queries (* 2 (count rows)) :authority false})

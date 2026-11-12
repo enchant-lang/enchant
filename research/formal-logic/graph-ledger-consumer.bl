@@ -1,0 +1,38 @@
+(ns formal.graph-ledger-consumer
+ (:require [formal.data-graph :as g] [formal.question-graph :as qg] [formal.answer :as answer]
+           [formal.point :as point] [veritas.ledger :as ledger] [datom] [oracle] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :pure-graph-reader-must-not-query))
+(def connection (ledger/open (first argv)))
+(def report
+ (try
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   #(let [all (ledger/all connection) rows (ledger/about connection "graph/44")
+          checked (mapv
+                    (fn [row]
+                     (let [ctx (:verdict/question-graph row) e (ledger/graph-evidence! row)
+                           r (answer/check-graph ctx (:answer e))
+                           p (point/check-context ctx (get-in e [:evidence :point]))]
+                      (assert (= :recorded (:verdict/assurance row)))
+                      (assert (= false (:verdict/compiler-authority row)))
+                      (assert (= false (ledger/graph-witness! row)))
+                      (assert (not (contains? row :verdict/question)))
+                      (assert (not (contains? r :execution)))
+                      (assert (= :returned (get-in r [:reported-execution :status])))
+                      (assert (= :not-matched (:delegation r)))
+                      (assert (= :sat (:verdict r)))
+                      (assert (= 8 (get-in r [:witness "next"])))
+                      (assert (= :checked-data-connection (:status p)))
+                      (assert (= :not-run (:kernel-execution p)))
+                      {:engine (:verdict/engine row) :reference (qg/reference ctx)
+                       :graph (g/check! (:graph ctx)) :point (get-in e [:evidence :point :identity])
+                       :answer (select-keys r [:verdict :solver-status :delegation :observation-basis])
+                       :checking p :materialization (try (qg/materialize! ctx) :unexpected (catch _ :refused))})) rows)]
+     (assert (= 3 (count all))) (assert (= 2 (count rows))) (assert (= 0 @calls))
+     {:schema "enchant.formal.graph-ledger-consumer.v1" :process (System/pid) :cwd (File/cwd!)
+      :sdk-only true :research-import-path false :rows checked :managed-query-calls @calls
+      :source-compilation false :compiler-proof-authority false}))
+  (finally (datom/close! connection))))
+(File/write! (second argv) (json/encode report {:pretty 2}))
+(println {:reader :checked :queries @calls :sdk-only true :authority false})
