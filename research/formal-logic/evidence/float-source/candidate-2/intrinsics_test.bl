@@ -1,0 +1,76 @@
+(ns formal.intrinsics-test
+ (:require [formal.identity :as data-identity] [formal.elaborate :as elaborate] [formal.intrinsics :as intrinsics]
+           [formal.core :as core] [formal.term :as t] [formal.api :as formal]
+           [formal.source-protocol :as source]))
+
+(def declarations {"x" t/Int "y" t/Int})
+(def assignment {"x" 7 "y" 2})
+(defn prepared [expression] (elaborate/prepare expression declarations))
+
+(deftest source-calls-use-the-reviewed-exact-identity
+ (doseq [[expression expected]
+         [["(+ x y)" 9] ["(- x y)" 5] ["(* x y)" 14] ["(- x)" -7]
+          ["(< x y)" false] ["(<= x y)" false] ["(> x y)" true] ["(>= x y)" true]
+          ["(= x y)" false] ["(== x y)" false] ["(quot x y)" 3] ["(rem x y)" 1] ["(mod x y)" 1]
+          ["(inc x)" 8] ["(dec x)" 6] ["(not x)" false] ["(pos? x)" true] ["(neg? x)" false] ["(zero? x)" false]
+          ["(erlang/div x y)" 3] ["(erlang/rem x y)" 1] ["(erlang/- x)" -7]
+          ["(BeamLisp.Num/add x y)" 9] ["(BeamLisp.Num/sub x y)" 5] ["(BeamLisp.Num/mul x y)" 14]
+          ["(BeamLisp.Num/neg x)" -7] ["(BeamLisp.Num/lt x y)" false] ["(BeamLisp.Num/le x y)" false]
+          ["(BeamLisp.Num/gt x y)" true] ["(BeamLisp.Num/ge x y)" true] ["(BeamLisp.Num/num_eq x y)" false]
+          ["(BeamLisp.Num/pos? x)" true] ["(BeamLisp.Num/neg? x)" false] ["(BeamLisp.Num/zero? x)" false]]]
+  (let [p (prepared expression) result (core/evaluate (:core p) declarations assignment)]
+   (is (= :elaborated (:status p)) (pr-str p))
+   (is (= :returned (:status result)))
+   (is (= expected (:value result))))))
+
+(deftest familiar-names-do-not-borrow-a-different-modules-meaning
+ (doseq [expression
+         ["(BeamLisp.Num/div x y)" "(erlang/mod x y)" "(erlang/inc x)" "(erlang/eqv x y)"
+          "(erlang/not_ x)" "(BeamLisp.Ns.Core/div x y)" "(BeamLisp.Ns.Core/rem x y)"
+          "(BeamLisp.Ns.Rt/quot x y)" "(BeamLisp.Ns.Rt/mod x y)" "(BeamLisp.Num/quot x y)"
+          "(BeamLisp.Num/mod x y)" "(BeamLisp.Num/not_ x)" "(BeamLisp.Num/neg x y)"
+          "(erlang/div x)" "(erlang/rem x y 0)" "(inc x y)" "(quot x)"]]
+  (is (= :unsupported (:status (prepared expression))) expression))
+ ;; The host function's actual result is retained as a direct regression fact.
+ (is (= 3.5 (BeamLisp.Num/div 7 2)))
+ (is (= :unsupported (:status (prepared "(/ x y)")))))
+
+(deftest erlang-boolean-negation-is-not-bl-truthiness
+ (is (= :unsupported (:status (prepared "(erlang/not x)"))))
+ (doseq [value [true false]]
+  (let [p (elaborate/prepare "(erlang/not flag)" {"flag" t/Bool})
+        result (core/evaluate (:core p) {"flag" t/Bool} {"flag" value})]
+   (is (= :elaborated (:status p)))
+   (is (= (not value) (:value result))))))
+
+(deftest source-protocol-admission-refuses-the-actual-float-division-mismatch
+ (is (= :refused
+        (try
+         (formal/source-protocol
+          {:name "not-integer-division" :state {"n" t/Int}
+           :handlers [{:name "step" :source "(fn [s msg] (assoc s \"n\" (BeamLisp.Num/div (get s \"n\") 2)))"}]})
+         :admitted (catch _ :refused))))
+ (let [base (formal/source-protocol
+              {:name "historical-quotient-model" :state {"n" t/Int}
+               :handlers [{:name "step" :source "(fn [s msg] (assoc s \"n\" (erlang/div (get s \"n\") 2)))"}]})
+       historical (assoc-in base [:handlers 0 :source]
+                     "(fn [s msg] (assoc s \"n\" (BeamLisp.Num/div (get s \"n\") 2)))")
+       historical (assoc historical :identity
+                    (data-identity/of historical))]
+  ;; This old source/core pairing was admitted by the previous implementation.
+  ;; Fresh preparation refuses it before any old proof can be considered.
+  (is (= :unsupported (:status (source/prepare historical))))
+  (is (= :rejected (:status (formal/check-source-protocol-proof historical nil))))))
+
+(deftest inconsistent-canonical-arithmetic-and-unresolved-globals-are-refused
+ (doseq [node [{:op :arith :fun :add :bif :* :args [{:op :lit :val 2} {:op :lit :val 3}]}
+               {:op :arith :fun :div :bif :div :args [{:op :lit :val 7} {:op :lit :val 2}]}
+               {:op :invoke :callee {:op :global :ns "foreign" :name "inc"}
+                :arguments {:op :cons :head {:op :lit :val 1} :tail {:op :enil}}}
+               {:op :invoke :callee {:op :global :ns "foreign" :name "get"}
+                :arguments {:op :cons :head {:op :map :pairs []}
+                            :tail {:op :cons :head {:op :lit :val "x"}
+                                   :tail {:op :cons :head {:op :lit :val 1} :tail {:op :enil}}}}}]]
+  (is (= :refused (try (elaborate/from-anf node {}) :admitted (catch _ :refused)))))
+ (is (nil? (intrinsics/remote-meaning :Elixir.BeamLisp.Num :div 2)))
+ (is (nil? (intrinsics/remote-meaning :erlang :mod 2))))

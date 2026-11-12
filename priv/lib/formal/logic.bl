@@ -9,6 +9,16 @@
    :rows (vec (concat (mapv (fn [variable] [(str "var/" (:data variable)) variable]) variables)
                (mapv (fn [i] [(str "watch/" i) (nth watched i)]) (range (count watched)))))}))
 
+(defn- display-replay [term assignments]
+ (let [derived (replay/value term assignments)]
+  ;; The evaluator uses IEEE encodings to represent the single mathematical
+  ;; NaN value. A representative encoding is not an observable NaN payload.
+  ;; Keep a native payload refusal visible even when its NaN classification
+  ;; can be independently evaluated. Finite and infinite encodings are unique.
+  (if (and (= :fp (first (t/sort-of term))) (not (replay/unavailable? derived))
+           (= true (replay/value (t/app :fp-is-nan t/Bool [term] nil) assignments)))
+   (replay/unavailable :nan-has-no-observable-ieee-payload) derived)))
+
 (defn- replay-and-decode [problem rows reply assertions]
  (let [values (:values reply)
        assignments (into {} (map (fn [variable] [(:data variable) (get values (str "var/" (:data variable))
@@ -20,7 +30,7 @@
                     (let [native (replay/checked-value (t/sort-of term) native)
                           derived (when (replay/unavailable? native)
                                     (if (contains? #{:bool :int :real :string :bv :enum :fp} (first (t/sort-of term)))
-                                     (replay/value term assignments) (replay/unavailable :observation-replay-sort)))
+                                     (display-replay term assignments) (replay/unavailable :observation-replay-sort)))
                           replayed? (and (replay/unavailable? native) (not (replay/unavailable? derived)))]
                      [term {:value (if replayed? derived native)
                             :source (cond replayed? :independent-replay (replay/unavailable? native) :unavailable :else :backend)
