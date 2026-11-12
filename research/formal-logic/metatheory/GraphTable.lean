@@ -8,6 +8,8 @@ import Std
    is total by construction. Scalars retain tags and exact payloads; map slots
    are explicit ordered entry/key-or-value pairs, not a host map's equality. -/
 namespace FormalGraphTable
+set_option autoImplicit false
+variable {size before after : Nat}
 
 inductive Scalar where
   | nil
