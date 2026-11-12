@@ -33,9 +33,12 @@ try{
   await click('.nb-controls>summary');
   await center('.nb-controls [data-nb-input="sharing_layers"]');
   await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+  await evaluate("window.formalRangeEvents=[];for(const type of ['pointerdown','mousedown','mouseup','click','input','change'])document.addEventListener(type,e=>{if(e.target.closest('.nb-controls'))window.formalRangeEvents.push({type,target:e.target.tagName,value:e.target.value,x:e.clientX,y:e.clientY})},true)");
   await click('.nb-controls [data-nb-input="sharing_layers"]');
   const selectedLayers=Number(await evaluate("document.querySelector('.nb-controls [data-nb-input]').value"));
-  (report.pointerSelections??=[]).push({viewport:size.name,layers:selectedLayers});
+  const diagnostic=await evaluate("(()=>{const e=document.querySelector('.nb-controls [data-nb-input]');return{html:e.outerHTML,rect:e.getBoundingClientRect().toJSON(),events:window.formalRangeEvents,active:document.activeElement===e,scrollY,viewport:visualViewport?.toJSON?.()}})()");
+  (report.pointerSelections??=[]).push({viewport:size.name,layers:selectedLayers,diagnostic});
+  if(selectedLayers===16)await shot(size.name+'-pointer-diagnostic');
   check(size.name+': real pointer changes layers to a bounded intermediate value',Number.isInteger(selectedLayers)&&selectedLayers>0&&selectedLayers<16);
   check(size.name+': adjusted figures follow the real control',await evaluate(`${number('sharing_terms_16')}===${2**(selectedLayers+1)-1}&&${number('sharing_nodes')}===${selectedLayers+1}`));
   check(size.name+': all 17 browser counts match the cell formula',await evaluate("Array.from({length:17},(_,layers)=>{const v=window.dossierNotebook.calc('value',{sharing_layers:layers});return v.sharing_nodes===layers+1&&v.sharing_terms_16===2**(layers+1)-1}).every(Boolean)"));
