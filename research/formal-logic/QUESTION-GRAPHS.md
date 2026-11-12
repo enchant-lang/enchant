@@ -125,3 +125,23 @@ model, establish Source preservation or grant compiler authority.
 * Extend theory and Source interfaces on top of this shared data boundary;
   keep native availability, independent replay, Source observation and proof
   authority separate at each layer.
+
+## Qualification findings retained with the experiment
+
+The first graph candidate used a non-core Boolean binding; the corrected
+module uses the native Boolean predicate and gets a new SDK. Two early test
+fixtures also used an unsupported range arity and a rejected compiler-data
+struct literal. All failed runs are retained.
+
+The first full comparison run had correct content digests but sampled its
+scalar counter before the walk, because the effectful counter reads appeared
+inside a map literal. The corrected audit binds the completed walk result
+before constructing its report. This is a concrete preview semantic-review
+item: textual map-literal order must not be assumed by a formal model or by
+instrumentation without an explicit language rule and compiler connection.
+
+A fresh existing-only ETF reader also refused the owned packet envelope until
+its bounded keyword vocabulary was explicitly declared in the reader source.
+This is retained as a transport refusal, not worked around with unrestricted
+atom creation. The public graph checker can still inspect unknown keyword
+names as bytes without materializing them.
