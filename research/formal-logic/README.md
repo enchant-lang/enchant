@@ -37,9 +37,13 @@ SMT-script paths with portable relations, exact source replay and named pins.
 It distinguishes isolated faults, all-law faults, vacuity and global integer
 boundaries. A server retains its first complete answer per key; the ledger keeps
 feasible-response evidence separate from an unchecked optimality claim.
-Checkpoint 37 passes 9,376 assertion executions, an SDK-only consumer and a
-separate-process compound-ledger reopen on one immutable SDK. OxiZ's opaque
-unconstrained model coordinates remain candidates instead of invented values.
+[Complete reply binding](ANSWER-BINDING.md) attaches every native answer to its
+exact question and replays the actual published response against all conditions.
+The ledger retains complete large evidence in content-addressed payloads.
+Checkpoint 38 passes 9,411 assertion executions (1,307 focused and 8,104
+regression), an SDK-only consumer and a separate-process compound-ledger reopen
+on one immutable SDK. OxiZ's opaque unconstrained model coordinates remain
+candidates instead of invented values.
 
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler

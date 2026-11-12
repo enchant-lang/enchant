@@ -7,6 +7,11 @@ and native verdicts. SDK-only consumers and a separate-process compound ledger
 reopen passed. Exact artifacts and source hashes are in
 [evidence/response-contracts/qualification.json](evidence/response-contracts/qualification.json).
 
+[Checkpoint 38](ANSWER-BINDING.md) adds complete native reply binding and
+actual published-point replay, and moves large ledger evidence outside index
+keys without changing its public values. Its selected SDK passes 1,307 focused
+and 8,104 regression assertions; the earlier receipt above remains historical.
+
 A response contract contains named typed fields and every law. `formal.response`
 is the portable relation and question constructor. `formal.response-runtime`
 connects reviewed source ANF, concrete execution and native answers. Veritas mock

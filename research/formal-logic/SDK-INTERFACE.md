@@ -26,6 +26,11 @@ collection-length abstractions and text prefixes compose as typed inputs.
 retain it with its identity, caller evidence and explicit witness presence.
 Native claims, runtime replay and recorded evidence keep separate authority.
 
+[Complete reply binding](ANSWER-BINDING.md) also covers native answers. Every
+exported answer retains its exact effective question. Response consumers refuse
+foreign-question data and independently check the actual point being published;
+complete ledger evidence uses content-addressed payloads.
+
 ## Ask through a standard consumer
 
 ```beam-lisp

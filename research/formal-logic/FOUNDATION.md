@@ -382,6 +382,17 @@ itself mechanically verified and does not certify all SMT theories.
   Runtime preservation, effect typing and totality remain separate obligations.
   [Managed handlers](EFFECTS.md)
 
+- Complete native answers now retain their effective question, and response
+  consumers check both that binding and the actual published point against all
+  conditions. A retained baseline passes one assertion and fails nine on the
+  preceding SDK; all ten pass after the repair. Full evidence exposed the
+  durable store's 64 KiB index-key capacity. Complete payloads now use its
+  existing content-addressed file tier, with exact reconstruction, legacy rows,
+  integrity refusals and a 16 MiB payload capacity. The selected SDK passes
+  1,307 focused and 8,104 regression assertion executions; all 187 paired
+  questions retain their identities and verdicts. SDK-only and fresh-process
+  durable consumers pass. [Answer binding](ANSWER-BINDING.md)
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

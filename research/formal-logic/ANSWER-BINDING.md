@@ -1,7 +1,10 @@
 # Keep the answer attached to its question
 
-Checkpoint 38 implementation is under qualification. The selected dossier SDK
-remains checkpoint 37 until the new artifact passes its independent checks.
+Checkpoint 38 is qualified on the selected immutable SDK: 1,307 focused
+assertions across 26 files and 8,104 regression assertions across 31 files.
+All 187 preceding paired questions retain their identities and native verdicts.
+An SDK-only consumer and separate-process ledger reopen pass on that artifact.
+The exact receipt is [the qualification](evidence/answer-binding/qualification.json).
 
 Every exported `formal.logic` answer now contains the complete question it
 actually answered. Retained assumptions, scope, profiles and context generation
@@ -34,9 +37,12 @@ Missing or corrupt payloads are errors. Payloads have an explicit 16 MiB byte
 capacity; storing them still grants no mathematical or compiler authority.
 
 The preceding SDK passes one assertion and fails nine in the retained baseline.
-The candidate passes all twenty-five focused files, including all ten boundary
-assertions. Broader qualification remains in progress. None of these changes
-checks native absence certificates or establishes compiler preservation.
+The selected SDK passes all twenty-six focused files, including all ten boundary
+assertions and twenty-one large-payload, legacy-row and integrity assertions.
+The first candidate passed the response checks but failed durable storage at
+the index-key limit; that failure is retained. The replacement preserves the
+complete payload through durable reopen. None of these changes checks native
+absence certificates or establishes compiler preservation.
 
 This binding is also a prerequisite for checked query preparation. A future
 normalization plan must retain both the original and executed question, prove
