@@ -1,54 +1,5 @@
 (ns formal.term-forest-sharing
- (:require [formal.term-forest :as forest] [formal.term :as t] [formal.data-graph :as graph]
-           [formal.backend :as backend] [bl.json :as json] [oracle]))
-
-(defn doubled [data]
- (graph/assemble "map"
-  [[(graph/encode :formal/term) (graph/encode 1)]
-   [(graph/encode :op) (graph/encode :and)]
-   [(graph/encode :sort) (graph/encode t/Bool)]
-   [(graph/encode :args) (graph/assemble "vector" [data data])]
-   [(graph/encode :data) (graph/encode nil)]]))
-(def calls (atom 0))
-(defn deny [& _] (swap! calls inc) (throw :sharing-probe-must-not-use-managed-oracle))
-(def report
- (oracle/with-oracle {:query deny :query-graph deny :script deny}
-  #(let [data (reduce (fn [value _] (doubled value)) (graph/encode (t/bool true)) (range 16))
-         checked (graph/check! data) prepared (forest/prepare data [(:root data)])
-         counts (reduce (fn [out [id _ _ children _]]
-                          (assoc out id (inc (reduce + 0 (map (fn [child] (get out child)) children)))))
-                        {} (:nodes prepared))
-         root (first (:roots prepared))
-         results
-         (mapv (fn [engine]
-                 (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
-                  (fn [session]
-                   (let [before (backend/context session)
-                         request (tuple :scope (:generation before)
-                                  (backend/native-data (:nodes prepared))
-                                  (backend/native-data [["shared/true" root]]) (list)
-                                  (backend/native-data [["root" root]]) 500)
-                         reply (backend/invoke session request)
-                         value (backend/decode-native (second (first (:observations reply))))]
-                    (assert (= true (:ok reply))) (assert (= :sat (:status reply)))
-                    (assert (= true value))
-                    (assert (not (backend/context-matches? session before)))
-                    {:engine engine :identity (:identity session) :status (:status reply)
-                     :root value :model-status (:model-status reply) :stats (:stats reply)
-                     :native-packet-bytes (erlang/byte_size (erlang/term_to_binary request))
-                     :managed-context-invalidated true :transport :raw-compatibility
-                     :certificate :not-checked :compiler-proof-authority false})))) [:z3 :oxiz])]
-    (assert (= 17 (get-in prepared [:checking :typed-nodes])))
-    (assert (= 17 (get-in prepared [:checking :scope-states])))
-    (assert (= 131071 (get counts root)))
-    (assert (> (:expanded-nodes checked) 1000000))
-    (assert (= 0 @calls))
-    {:schema "enchant.formal.term-forest-sharing.v1" :data-reference (:data-reference prepared)
-     :data-graph checked :canonical-graph-bytes (erlang/byte_size (graph/bytes data))
-     :checking (:checking prepared) :native-definitions (:nodes prepared)
-     :expanded-term-occurrences (get counts root) :root-id root :results results
-     :raw-native-scopes 2 :managed-query-calls @calls
-     :scope "A graph-built Boolean sharing fixture, without reconstructing its term argument tree. Both actual raw native scopes return the observed true root. Structural counters are fixture checks, not universal BL/typed-forest/compiler preservation proofs."
-     :compiler-proof-authority false})))
+ (:require [formal.term-forest-examples :as examples] [bl.json :as json]))
+(def report (examples/run-sharing))
 (File/write! (first (BeamLisp/argv)) (json/encode report {:pretty 2}))
 (println (select-keys report [:checking :canonical-graph-bytes :expanded-term-occurrences :raw-native-scopes :managed-query-calls]))

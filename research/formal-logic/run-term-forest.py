@@ -27,7 +27,8 @@ else:
 runtime = Path(tempfile.mkdtemp(prefix='formal-term-forest-runtime-'))
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = [P / 'src/formal/term-forest.bl', P / 'test/term_forest_test.bl', P / 'term-forest-check.bl',
-           P / 'term-forest-native.bl', P / 'term-forest-sharing.bl', Path(__file__), P / 'sdk-pin.json']
+           P / 'term-forest-native.bl', P / 'term-forest-sharing.bl',
+           P / 'src/formal/term-forest-examples.bl', Path(__file__), P / 'sdk-pin.json']
 digests = {}
 for source in sources:
     name = str(source.relative_to(R))
