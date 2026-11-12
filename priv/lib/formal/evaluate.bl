@@ -264,14 +264,23 @@
        (= op :fp-is-inf) (:inf (fp-parts a))
        :else (unavailable {:unsupported-operation op})))))))
 
+(defn- observed-value [sort derived]
+ (cond
+  (unavailable? derived) derived
+  (= :fp (first sort)) (if (:nan (fp-parts derived)) (unavailable :nan-has-no-observable-ieee-payload) derived)
+  (= :seq (first sort)) (mapv #(observed-value (second sort) %) derived)
+  (= :array (first sort))
+   {:formal/array {:default (observed-value (nth sort 2) (get-in derived [:formal/array :default]))
+                   :updates (mapv (fn [[key item]] [(observed-value (second sort) key) (observed-value (nth sort 2) item)])
+                                  (get-in derived [:formal/array :updates]))}}
+  :else derived))
 (defn observation
- "Evaluate a display observation without inventing IEEE NaN payload bits.
-  Internal value evaluation retains a representative for the single semantic
-  NaN, so classifications and assertion equality can still be replayed."
+ "Evaluate a display observation without inventing IEEE NaN payload bits,
+  including FP elements/keys inside sequences and arrays. Internal value
+  evaluation retains representatives for semantic NaNs, so classification,
+  equality and original assertions can still be replayed."
  [term assignments]
- (let [derived (value term assignments)]
-  (if (and (= :fp (first (t/sort-of term))) (not (unavailable? derived)) (:nan (fp-parts derived)))
-   (unavailable :nan-has-no-observable-ieee-payload) derived)))
+ (observed-value (t/sort-of term) (value term assignments)))
 
 (defn validate [assertions assignments]
  (let [bindings (check-bindings (mapv :term assertions) assignments)
