@@ -42,13 +42,15 @@ for label,pin in pins.items():
 assert results['baseline']==results['current']
 assert len(results['current']['rows'])==187
 report={'schema':'enchant.formal.complete-question-identity-qualification.v1','status':'passed','checkpoint':41,
-        'sdk_pins':pins,'full_canonical_questions':187,'equal':True,
+        'sdk_pins':pins,'complete_public_data_questions':187,
+        'comparison_profile':results['current']['comparison-profile'],
+        'standard_identity_unavailable':[r['id'] for r in results['current']['rows'] if r['standard-identity']['status']=='unavailable'],'equal':True,
         'managed_query_calls':0,'managed_query_scope':'question-construction',
         'baseline_import':{'historical_commit':'093a4cfa9','old_path':'research/formal-logic/src/formal/floating.bl',
                            'production_path':'priv/lib/formal/floating.bl','sha256':hashlib.sha256(original).hexdigest(),
                            'identical_bytes':True,'temporary_import_retired':True},
         'source_commit':head,'program_sha256':hashlib.sha256(program.read_bytes()).hexdigest(),
-        'scope':'Complete canonical formal.query data, not only a root-term digest. No native solver executions in this comparison.',
+        'scope':'All public formal.query data compared through a separately profiled bounded Merkle encoding; standard identity capacity refusals remain explicit and unchanged. No native solver executions or runtime budget changes.',
         'compiler_proof_authority':False}
 (E/'complete-question-identity-qualification.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps({'status':'passed','complete_questions':187,'baseline_and_current_identical':True}))

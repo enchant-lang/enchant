@@ -2,19 +2,48 @@
  (:require [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
            [formal.native-cases :as native] [formal.query :as q] [formal.term :as t]
            [formal.identity :as identity] [oracle] [bl.json :as json]))
+(def comparison-profile :bl/full-public-data-merkle-comparison-v1)
+(defn complete-content
+ "Comparison-only full public data hashing. This does not relax the runtime
+  canonical identity budget or grant a packet/proof identity. Every container
+  and scalar kind is explicit; child hashes share repeated structure."
+ [data]
+ (let [walks (atom 0) scalar-bytes (atom 0)]
+  (letfn [(hash-node [node] (identity/hash [comparison-profile node]))
+          (walk [x depth]
+           (swap! walks inc)
+           (when (or (> @walks 4000000) (> depth 192)) (throw :comparison-walk-capacity))
+           (when (or (fn? x) (and (some? (meta x)) (not= {} (meta x))) (sorted-map? x) (sorted-set? x))
+            (throw :nonportable-comparison-data))
+           (cond
+            (map? x)
+             (hash-node [:map (vec (sort-by first (mapv (fn [[k item]] [(walk k (inc depth)) (walk item (inc depth))]) x)))])
+            (set? x) (hash-node [:set (vec (sort (mapv #(walk % (inc depth)) x)))])
+            (vector? x) (hash-node [:vector (mapv #(walk % (inc depth)) x)])
+            (list? x) (hash-node [:list (mapv #(walk % (inc depth)) x)])
+            (erlang/is_tuple x) (hash-node [:tuple (mapv #(walk % (inc depth)) (erlang/tuple_to_list x))])
+            :else
+             (let [bytes (identity/bytes x)]
+              (swap! scalar-bytes + (erlang/byte_size bytes))
+              (when (> @scalar-bytes 67108864) (throw :comparison-scalar-capacity))
+              (hash-node [:scalar bytes]))))]
+   (let [digest (walk data 0)]
+    {:sha256 digest :walks @walks :scalar-bytes @scalar-bytes}))))
 (def calls (atom 0))
 (def rows
  (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :construction-must-not-query))}
   #(vec (mapcat (fn [[family cases]]
          (mapv (fn [c]
                  (let [question (q/from-case c)]
-                  {:family family :id (:id c) :question (identity/hash question)
+                  {:family family :id (:id c) :content (complete-content question)
+                   :standard-identity (try {:status :available :sha256 (identity/hash question)}
+                                          (catch error {:status :unavailable :reason (ex-message error)}))
                    :roots (t/digest (q/roots question))})) cases))
        [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
 (assert (= 187 (count rows)))
 (assert (= 0 @calls))
 (File/write! (first (BeamLisp/argv))
- (json/encode {:schema "enchant.formal.complete-question-identities.v1" :rows rows
+ (json/encode {:schema "enchant.formal.complete-question-identities.v1" :rows rows :comparison-profile comparison-profile
                :managed-query-calls @calls :managed-query-scope :question-construction
                :compiler-proof-authority false} {:pretty 2}))
 (println {:complete-questions (count rows) :managed-query-calls @calls})
