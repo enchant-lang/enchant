@@ -43,7 +43,7 @@ graphs = sorted({row['name'].split('/')[1].split(':')[0] for row in audit['check
                  if row['name'].endswith(': connected topic opens')})
 require(len(graphs) == 43 and 'formal-response-contracts' in graphs, 'all 43 connected review graphs')
 images = {name: sha(E / 'browser-audit' / name) for name in audit['screenshots']}
-frames = ('response-contracts', 'answer-binding', 'answer-binding-panel', 'story-answer-binding-data')
+frames = ('response-contracts', 'answer-binding', 'answer-binding-panel', 'story-answer-binding-data', 'question-preparation')
 manual = [size + '-' + frame + '.png' for size in ('phone', 'desktop') for frame in frames]
 manual.append('desktop-answer-binding-night.png')
 require(all(name in images for name in manual), 'retained actual response frames')

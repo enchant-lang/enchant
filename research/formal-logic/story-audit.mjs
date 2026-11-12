@@ -560,6 +560,10 @@ try{
   check(size.name+': reply chapter distinguishes identity replay and durable payloads',await evaluate("document.body.innerText.includes('A decoded zero cannot borrow credibility')&&document.body.innerText.includes('explicit payload capacity is 16 MiB')&&document.body.innerText.includes('Missing or corrupt payloads raise an error')"));
   await evaluate("document.querySelector('#a-reply-belongs-to-one-exact-question').scrollIntoView({block:'start'})");
   await shot(size.name+'-answer-binding');
+  await navigate('/#a-better-question-shape-can-help-both-engines');
+  check(size.name+': preparation chapter retains observed representation gains and limited scope',await evaluate("document.body.innerText.includes('162 checked component certificates')&&document.body.innerText.includes('The production system.linear path has not been migrated yet.')&&document.body.innerText.includes('not evidence that every normalization is sound')"));
+  await evaluate("document.querySelector('#a-better-question-shape-can-help-both-engines').scrollIntoView({block:'start'})");
+  await shot(size.name+'-question-preparation');
   await navigate('/#s-the-model-running');
   for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger','story-answer-binding']){
     const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
@@ -904,6 +908,10 @@ try{
  for(const path of ['/ANSWER-BINDING.md','/answer-binding-check.bl','/sdk-src/formal/logic.bl','/sdk-src/veritas/ledger.bl','/evidence/answer-binding/baseline-checks.txt','/evidence/answer-binding/candidate-1/ledger-write-checks.txt','/evidence/answer-binding/examples.json','/evidence/answer-binding/ledger-read.json','/evidence/answer-binding/focused-checks.txt','/evidence/answer-binding/regression-checks.txt','/evidence/answer-binding/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared answer-binding interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/COMPILER-LINEARITY.md','/PREPARATION.md','/compiler-linearity-probe.bl','/compiler-linearity-normalization-probe.bl','/evidence/compiler-linearity/proof-probe.json','/evidence/compiler-linearity/normalization-probe.json','/evidence/compiler-linearity/baseline-checks.txt']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared preparation design or probe is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/formal/source-runtime.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
