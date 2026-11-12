@@ -44,9 +44,15 @@ theorem slots_complete (kind : Kind) (slot : kind.Slot) : slot ∈ kind.slots :=
   | set size => exact List.mem_finRange slot
   | tuple size => exact List.mem_finRange slot
   | map entries =>
-    rcases slot with ⟨index, side⟩
-    apply List.mem_flatMap.mpr
-    exact ⟨index, List.mem_finRange index, by cases side <;> simp⟩
+    have all_pairs : ∀ s : Fin entries × Bool,
+        s ∈ (List.finRange entries).flatMap (fun i => [(i, false), (i, true)]) := by
+      rintro ⟨index, side⟩
+      apply List.mem_flatMap.mpr
+      refine ⟨index, List.mem_finRange index, ?_⟩
+      cases side with
+      | false => exact List.Mem.head _
+      | true => exact List.Mem.tail _ (List.Mem.head _)
+    exact all_pairs slot
 
 inductive Value where
   | scalar (value : Scalar)
@@ -130,11 +136,11 @@ theorem table_fold_fusion {α : Type} (leaf : Scalar → α) (node : Algebra α)
   | @push size previous row ih =>
     intro index
     by_cases earlier : index.val < size
-    · simpa only [interpret, Table.fold, extend, dif_pos earlier] using ih ⟨index.val, earlier⟩
+    · simpa only [interpret, Table.fold, extend, dite_eq_left earlier] using ih ⟨index.val, earlier⟩
     · cases row with
       | scalar value => simp [interpret, Table.fold, extend, earlier, Row.apply]
       | node kind children =>
-        simp only [interpret, Table.fold, extend, dif_neg earlier, Row.apply, fold_node]
+        simp only [interpret, Table.fold, extend, dite_eq_right earlier, Row.apply, fold_node]
         apply congrArg (node kind)
         funext slot
         exact ih (children slot)
