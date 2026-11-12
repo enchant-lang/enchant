@@ -1,0 +1,34 @@
+(ns formal.response-contracts-ledger
+ (:require [veritas.mock :as mock] [veritas.ledger :as ledger] [datom]
+           [formal.identity :as identity] [formal.query :as query] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+(def mode (first argv))
+(def connection (ledger/open (second argv)))
+(try
+ (when (= mode "write")
+  (let [contract (mock/contract-from [[:x "Int"]] ['(>= x -41) '(<= x -3)])]
+   (doseq [backend [:z3 :oxiz]]
+    (let [answer (mock/synth-boundary {:backend backend} contract :x :min)]
+     (assert (= :solver-claim (:modality answer)))
+     (ledger/record! connection answer {:claim (str "global minimum " backend) :about ["response/x"]})))))
+ (let [rows (ledger/all connection)]
+  (assert (= 2 (count rows)))
+  (doseq [row rows]
+   (let [evidence (:verdict/evidence row) feasible (get-in evidence [:evidence :feasibility])
+         terminal (get-in evidence [:evidence :terminal])]
+    (assert (= :recorded (:verdict/assurance row)))
+    (assert (= false (:verdict/compiler-authority row)))
+    (assert (= false (:verdict/witness-present row)))
+    (assert (= :witnessed (:modality feasible)))
+    (assert (= {:x -41} (:value feasible)))
+    (assert (= :reproduced (get-in feasible [:runtime-replay :status])))
+    (assert (= :unsat (get-in terminal [:answer :verdict])))
+    (assert (= (:verdict/question-id row) (identity/hash (query/validate! (:verdict/question row)))))
+    (assert (= (:verdict/question row) (:question terminal)))
+    (assert (= (:question-identity feasible) (identity/hash (query/validate! (:question feasible)))))))
+  (let [report {:schema "enchant.formal.response-ledger.v1" :mode mode :process (System/get_pid)
+                :rows (count rows) :claims (vec (sort (map :verdict/claim rows)))
+                :compound-evidence-retained true :compiler-proof-authority false}]
+   (File/write! (nth argv 2) (json/encode report {:pretty 2}))
+   (println (json/encode report))))
+ (finally (datom/close! connection)))
