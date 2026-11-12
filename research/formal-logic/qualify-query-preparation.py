@@ -62,6 +62,13 @@ require(focused['system.formal-preparation-test'] >= 109 and focused['system.lin
         'fresh connection, model boundary, constructive arithmetic and actual emission checks')
 require('0 passed, 8 failed' in (P / 'evidence/compiler-linearity/baseline-checks.txt').read_text(), 'retained legacy interface baseline')
 require('95 passed, 4 failed' in (E / 'focused-1-checks.txt').read_text(), 'retained first candidate model-boundary review')
+http_failure = (E / 'regression-before-http-isolation/regression-checks.txt').read_text()
+require('refused request admission log' in http_failure and ':method :head' in http_failure,
+        'retained unrelated HTTP request in preceding admission assertion')
+isolation = read(E / 'regression-runtime.json')
+require(isolation['retired'] is True and not Path(isolation['path']).exists()
+        and '--setenv=XDG_RUNTIME_DIR=' + isolation['path'] in read(E / 'regression-command.json'),
+        'private test runtime retired after the complete run')
 require(preceding['veritas.answer-binding-baseline-test'] == 10
         and preceding['veritas.ledger-large-terms-test'] >= 21, 'preceding reply and durable payload boundaries')
 

@@ -91,13 +91,20 @@
       (finally ((:stop srv))))))
 
 (deftest bad-json-is-400-and-oversized-body-is-413
-  (let [srv (vm/serve api)]
+  (let [srv (vm/serve api)
+        path (str "/admission-" (Base/encode16 (crypto/strong_rand_bytes 12)))
+        owned-log (fn [] (filter #(= path (:path %)) ((:log srv))))]
     (try
-      (is (= 400 (:status (http srv :post "/servers" "{not json"))))
-      (is (= 0 (count ((:log srv)))) (str "invalid JSON admission log: " (pr-str ((:log srv)))))
-      (is (= 413 (:status (http srv :post "/servers" (apply str (repeat 1100000 "x"))))))
+      ;; A real accepted request proves the log filter sees this test's route.
+      ;; Local discovery can concurrently send HEAD / to ephemeral listeners;
+      ;; its independent request says nothing about these refused bodies.
+      (is (= 404 (:status (http srv :get path))))
+      (is (= 1 (count (owned-log))) "the accepted control is logged")
+      (is (= 400 (:status (http srv :post path "{not json"))))
+      (is (= 1 (count (owned-log))) (str "invalid JSON admission log: " (pr-str (owned-log))))
+      (is (= 413 (:status (http srv :post path (apply str (repeat 1100000 "x"))))))
       (is (= {} (:servers ((:state srv)))) "refused input never reaches the model")
-      (is (= 0 (count ((:log srv)))) (str "refused request admission log: " (pr-str ((:log srv)))))
+      (is (= 1 (count (owned-log))) (str "refused request admission log: " (pr-str (owned-log))))
       (finally ((:stop srv))))))
 
 (deftest inject-runs-a-non-http-command-and-respects-pre
