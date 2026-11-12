@@ -114,6 +114,12 @@ counterexample condition, and distinguish unavailable mathematics from a
 false assertion. A graph identity does not prove a claim, validate a solver
 model, establish Source preservation or grant compiler authority.
 
+The durable large-point example uses a separate satisfiability question with
+nine Boolean coordinates and the complete original transitivity question as
+explicit provenance. The point validates that SAT subject; it is not a
+counterexample to the transitivity proof question. The original proof question
+is separately round-tripped and compared in full.
+
 ## Next consumers and obligations
 
 * Carry explicit graph references through typed answer binding and the durable
