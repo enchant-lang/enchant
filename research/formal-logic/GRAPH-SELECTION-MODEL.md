@@ -51,3 +51,7 @@ Sources: [the general model](metatheory/GraphSelection.lean),
 [the fixture](metatheory/GraphSelectionExamples.lean),
 [the capped qualification recipe](run-graph-selection-model.py), and
 [the immutable model pin](metatheory/graph-selection-pin.json).
+
+The focused [dossier presentation receipt](evidence/graph-selection-model/dossier-qualification.json)
+records the current proof pane and unchanged executable cells separately from
+the mathematical qualification.
