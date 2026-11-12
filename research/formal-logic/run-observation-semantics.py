@@ -19,6 +19,11 @@ project = False
 if stage == 'sdk-focused':
     names += ['test/bl/formal/observation_test.bl']
     request = ['test', str(R / names[-1])]
+elif stage == 'integer-preflight':
+    project = True
+    names += ['research/formal-logic/src/formal/integer-preflight.bl',
+              'research/formal-logic/test/integer_preflight_test.bl']
+    request = ['test', str(R / names[-1])]
 elif stage == 'native':
     names += ['test/bl/formal/observation_native_test.bl']
     request = ['test', str(R / names[-1])]
