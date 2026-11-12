@@ -2,7 +2,7 @@
  (:require [formal.api :as formal] [formal.term :as t] [formal.value :as v]
            [formal.collections :as c] [formal.data :as d]
            [formal.query :as q] [formal.logic :as logic] [formal.backend :as backend]
-           [formal.source :as source]))
+           [formal.source :as source] [formal.answer :as answer] [formal.evaluate :as replay]))
 
 (deftest one-declaration-and-question-interface-for-language-values
  (let [inputs (formal/symbols "api.example"
@@ -40,6 +40,24 @@
          source (:source (first (get-in result [:witness-provenance "nan" :terms])))]
     (is (= :sat (:verdict result)))
     (is (contains? #{:backend :unavailable} source))))))
+
+(deftest handler-and-reopened-observations-keep-semantic-nan-without-payload
+ (let [sort (t/fp-sort 8 24) zero (t/literal sort 0)
+       nan (t/literal sort 2143289345)
+       computed (t/app :fp-div sort [(t/literal t/Rounding "RNE") zero zero] nil)]
+  (doseq [expression [nan computed]]
+   (let [question (q/sat {:observe {"nan" expression "nan?" (t/app :fp-is-nan t/Bool [expression] nil)}})
+         checked (answer/check question (answer/bind question {:solver-status :sat :assignments {}}))]
+    (is (= :sat (:verdict checked)))
+    (is (replay/unavailable? (get-in checked [:witness "nan"])))
+    (is (= true (get-in checked [:witness "nan?"])))
+    (is (= :unavailable (get-in checked [:witness-provenance "nan" :terms 0 :source])))
+    (is (= :independent-replay (get-in checked [:witness-provenance "nan?" :terms 0 :source])))))
+  (doseq [expression [(t/literal sort 1065353216) (t/literal sort 2139095040)]]
+   (let [question (q/sat {:observe {"value" expression}})
+         checked (answer/check question (answer/bind question {:solver-status :sat :assignments {}}))]
+    (is (= (replay/value expression {}) (get-in checked [:witness "value"])))
+    (is (= :independent-replay (get-in checked [:witness-provenance "value" :terms 0 :source])))))))
 
 (deftest persistent-context-is-visible-in-meaning-replay-and-cache
  (let [x (t/variable "context.x" t/Int) problem (q/prove (t/gt x (t/int 0)))
