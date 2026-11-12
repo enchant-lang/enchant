@@ -3,7 +3,8 @@
 This is the expanded OxiZ experiment: one typed, term-based BL interface with
 native Z3 and OxiZ backends. It prototypes language semantics, verification
 procedures and native theory access together. **The existing compiler/oracle
-defaults have not been migrated or given a new trust policy.**
+defaults retain their trust policy.** `system.linear` is now a term-based compiler
+consumer with an explicitly declared arithmetic scope.
 
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
@@ -40,10 +41,21 @@ feasible-response evidence separate from an unchecked optimality claim.
 [Complete reply binding](ANSWER-BINDING.md) attaches every native answer to its
 exact question and replays the actual published response against all conditions.
 The ledger retains complete large evidence in content-addressed payloads.
-Checkpoint 38 passes 9,411 assertion executions (1,307 focused and 8,104
+Checkpoint 38 passed 9,411 assertion executions (1,307 focused and 8,104
 regression), an SDK-only consumer and a separate-process compound-ledger reopen
 on one immutable SDK. OxiZ's opaque unconstrained model coordinates remain
 candidates instead of invented values.
+
+[Checked query preparation](PREPARATION.md) keeps an original question, its
+execution form and fresh equality objects. Both engines receive the same plan;
+models are replayed and observations reconstructed against the original.
+OxiZ settles the selected affine size questions that it leaves unknown in their
+factored form. [Declared size evidence](COMPILER-LINEARITY.md) also supplies
+portable positive certificates and constructive counterexamples, with true,
+false and unknown kept distinct. Checkpoint 39 passes 9,712 assertion
+executions (299 new focused, 1,307 preceding focused and
+8,106 regression), SDK-only consumption and a fresh-process
+four-record recheck. Whole-compiler preservation remains open.
 
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler

@@ -393,6 +393,19 @@ itself mechanically verified and does not certify all SMT theories.
   questions retain their identities and verdicts. SDK-only and fresh-process
   durable consumers pass. [Answer binding](ANSWER-BINDING.md)
 
+- Checked question preparation now preserves original/execution forms and all
+  nonterm metadata, verifies every actual changed site, and reconstructs original
+  observations. Native model API access has an explicit execution basis; original
+  bindings and observation availability are checked separately. `system.linear`
+  now constructs portable recurrence questions, freshly checks positive objects,
+  and checks constructive counterexamples. Checked/refuted/unknown outcomes and
+  theorem/preparation budgets remain separate. Five files pass 299 new
+  assertions; 26 preceding files pass 1,307 and 31 regression files pass
+  8,106. All 187 preceding paired identities/verdicts remain unchanged.
+  SDK-only paired execution and a separate-process four-record recheck pass.
+  Compiler and normalizer implementation soundness remain separate from these
+  per-object checks. [Preparation](PREPARATION.md), [size scope](COMPILER-LINEARITY.md).
+
 The selected unit's reduction now has an independent implementation gate, in
 addition to the final ANF/Core gate. Connect the named representation and both
 accepted rule relations to the typed model. Unit wellformedness, pure lexical

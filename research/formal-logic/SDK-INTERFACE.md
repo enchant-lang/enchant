@@ -31,6 +31,14 @@ exported answer retains its exact effective question. Response consumers refuse
 foreign-question data and independently check the actual point being published;
 complete ledger evidence uses content-addressed payloads.
 
+[Checked preparation](PREPARATION.md) introduces explicit original/execution
+questions with independently checked component equalities. `formal.affine`
+proposes a useful Bool/Int representation; `formal.preparation` checks, executes
+or purely accepts its returned answer. Original replay and native model API
+access retain different records. [The size consumer](COMPILER-LINEARITY.md)
+uses the same interface alongside fresh positive certificates and constructed
+counterexamples; its unknown result has no false truth projection.
+
 ## Ask through a standard consumer
 
 ```beam-lisp

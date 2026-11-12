@@ -1,8 +1,10 @@
 # A checked plan between a question and its execution
 
-Implementation for checkpoint 39 is on main and under SDK qualification.
-The selected SDK remains checkpoint 38. The retained normalization probe is
-already executable; the new general interface has not yet passed its checks.
+Checkpoint 39 is qualified on the selected immutable SDK: 299
+new focused assertions, 1,307 preceding focused assertions and
+8,106 regression assertions passed. All 187 preceding paired
+questions retain their identities and native verdicts. SDK-only use and a
+fresh-process ledger recheck passed. [Exact qualification](evidence/query-preparation/qualification.json).
 
 Beam Lisp should own the meaning of a formal question and make useful
 representations available to either engine. The observed compiler-size cases
@@ -15,9 +17,12 @@ complete execution question, and evidence connecting their actual term sites.
 Its identity covers all three. A normalizer proposes the execution question;
 an independent checker reconstructs the connection from those questions.
 
-The API under qualification keeps these pieces separate:
+The API keeps these pieces separate:
 
 ```beam-lisp
+(ns checked-size
+ (:require [formal.affine :as affine] [formal.preparation :as preparation] [system.linear :as linear]))
+(def original-question (linear/size-lemma 12 2 8))
 (def plan (affine/prepare original-question))
 (preparation/check plan)
 (preparation/execute {:backend :z3} plan)
@@ -72,16 +77,24 @@ model API; it is not original-coordinate completeness. The receiver now marks
 that basis explicitly and separately records `:original-replay`: assertion
 validation, typed binding availability and observation availability. This also
 keeps an unavailable original value distinct from a concrete constant observed
-after simplification. The correction is awaiting a new immutable SDK.
+after simplification. The selected SDK passes the corrected reporting checks.
 
 UNSAT and vacuity may travel across a checked equivalence connection, but remain
 native claims with unchecked absence certificates. An equivalence certificate
 does not become a proof of the theorem being queried. Unknown, unsupported,
 error, incomplete models and explicit budgets keep their distinct meanings.
 
-The first production consumer under qualification is `system.linear`: a declared constructor
+The first migrated compiler consumer is `system.linear`: a declared constructor
 size recurrence, a portable positive certificate, a replayed constructed
 double-placement counterexample, and optional paired native executions. Native
 uncertainty must not invalidate an independently checked arithmetic object, or
 grant compiler authority. Bounded overhead, recursive placement and the
 connection to actual compiler emission remain visible premises.
+
+
+`system.linear` also separates theorem search from preparation search. Its
+primary `:status` retains checked, refuted, unknown, unsupported and error.
+`:holds` is true after fresh positive checking, false after a checked original
+counterexample, and nil when truth was not established. Duplicated-child
+negative controls retain their own status. An unchecked native positive label
+cannot fill a missing portable certificate.
