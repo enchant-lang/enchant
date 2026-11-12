@@ -566,9 +566,35 @@ try{
   await evaluate("document.querySelector('#a-reply-belongs-to-one-exact-question').scrollIntoView({block:'start'})");
   await shot(size.name+'-answer-binding');
   await navigate('/#a-better-question-shape-can-help-both-engines');
-  check(size.name+': preparation chapter retains observed representation gains and limited scope',await evaluate("document.body.innerText.includes('162 checked component certificates')&&document.body.innerText.includes('The production system.linear path has not been migrated yet.')&&document.body.innerText.includes('not evidence that every normalization is sound')"));
+  check(size.name+': preparation chapter retains observed representation gains and limited scope',await evaluate("document.body.innerText.includes('162 checked component certificates')&&document.body.innerText.includes('299 new focused assertions')&&document.body.innerText.includes('8,106 regression assertions')&&document.body.innerText.includes('This does not prove a general normalizer correct')"));
   await evaluate("document.querySelector('#a-better-question-shape-can-help-both-engines').scrollIntoView({block:'start'})");
   await shot(size.name+'-question-preparation');
+  const preparationPanel='[data-graph="formal-query-preparation"] .sg-stage>[data-view]:not([hidden])';
+  await click(preparationPanel+' .review-index [data-sg-to="checking"]');
+  check(size.name+': preparation panel checks actual equality objects and metadata',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(preparationPanel)}).innerText;return t.includes('Check its object afresh')&&t.includes('preserve all metadata')&&t.includes('Missing, extra, foreign and stale proof sites')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(preparationPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-prepared-question-panel');
+  if(size.name==='phone'){
+    await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(preparationPanel)}).querySelector('.review-detail');d.scrollTop=d.scrollHeight})()`);
+    check(size.name+': preparation relationships remain readable after panel scroll',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-query-preparation"]'),d=document.querySelector(${JSON.stringify(preparationPanel)}).querySelector('.review-detail'),r=d.querySelector('.review-related').getBoundingClientRect(),b=d.getBoundingClientRect(),t=g.querySelector('.sg-toolbar').getBoundingClientRect();return r.top>=b.top&&r.bottom<=b.bottom&&r.bottom<=t.top})()`));
+    await shot(size.name+'-preparation-details');
+  }
+  if(size.name==='desktop'){
+    await click('#theme');await evaluate(`document.querySelector(${JSON.stringify(preparationPanel)}).scrollIntoView({block:'center'})`);
+    await shot(size.name+'-preparation-night');await click('#theme');
+  }
+  await click(preparationPanel+' .review-index [data-sg-to="replay"]');
+  check(size.name+': replay panel separates original values from native API access',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(preparationPanel)}).innerText;return t.includes('Native API access and original value availability')&&t.includes('no default native value is invented')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(preparationPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-original-replay-panel');
+  await navigate('/#what-a-size-result-actually-means');
+  check(size.name+': size chapter gives unknown its own truth result and budgets',await evaluate("document.body.innerText.includes('A tiny theorem-search budget leaves the answer unknown')&&document.body.innerText.includes('The theorem search and preparation search have independent budgets')&&document.body.innerText.includes('checked counterexample to the single-placement bound')"));
+  await evaluate("document.querySelector('#what-a-size-result-actually-means').scrollIntoView({block:'start'})");
+  await shot(size.name+'-size-evidence');
+  await navigate('/#model-access-and-recovered-values-are-different-facts');
+  check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
+  await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
+  await shot(size.name+'-model-replay');
   await navigate('/#s-the-model-running');
   for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger','story-answer-binding']){
     const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
@@ -580,6 +606,15 @@ try{
     if(id==='story-response-completion')check(size.name+': missing OxiZ coordinates remain candidates until concrete pins replay',t.includes(':unconstrained-models [:witnessed :candidate]')&&t.includes(':oxiz-model :partial')&&t.includes(':pinned-crashes [:raised :raised]')&&t.includes(':invented-native-values false'));
     if(id==='story-response-ledger')check(size.name+': compound ledger evidence grants no witness or proof to the absence claim',t.includes(':assurance :recorded')&&t.includes(':top-level-witness false')&&t.includes(':feasible-value {:x -41}')&&t.includes(':absence-claim :unsat')&&t.includes(':compiler-proof-authority false'));
     if(id==='story-answer-binding')check(size.name+': both engines reject foreign replies and conflicting decoded points',t.includes(':native-question-bound [true true]')&&t.includes(':published [:witnessed :witnessed]')&&t.includes(':response-replay [:valid :valid]')&&t.includes(':foreign-models [:error :error]')&&t.includes(':foreign-absence [:error :error]')&&t.includes(':decoded-mismatch [:candidate :candidate]')&&t.includes(':mismatch-replay [:invalid :invalid]')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
+  for(const id of ['story-query-preparation','story-size-evidence','story-original-replay']){
+    const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+    check(size.name+': visible executed preparation result '+id,t.length>150);
+    if(id==='story-query-preparation')check(size.name+': same checked plan improves the OxiZ examples without native proof promotion',t.includes(':original [:proved :unknown]')&&t.includes(':prepared [:proved :proved]')&&t.includes(':doubled [:refuted :refuted]')&&t.includes(':connections [:checked :checked]')&&t.includes(':counterexample-replay [:valid :valid]')&&t.includes(':native-certificate :not-checked'));
+    if(id==='story-size-evidence')check(size.name+': size results distinguish true false and unknown with independent checking',t.includes(':families [:checked :refuted :unknown]')&&t.includes(':holds [true false nil]')&&t.includes(':fresh-positive-objects [:checked :checked]')&&t.includes(':single-placement-counterexample :checked-data-connection')&&t.includes(':negative-controls :checked')&&t.includes(':limited-native-claim :proved')&&t.includes(':arity-zero-double-placement :checked')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-original-replay')check(size.name+': executed constants do not invent original coordinates',t.includes(':satisfiability [:sat :sat]')&&t.includes(':execution-observations [0 0]')&&t.includes(':original-bindings [:incomplete :incomplete]')&&t.includes(':original-observations [:incomplete :incomplete]')&&t.includes(':original-values [:unavailable :unavailable]')&&t.includes(':invented-coordinates false'));
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
@@ -917,6 +952,10 @@ try{
  for(const path of ['/COMPILER-LINEARITY.md','/PREPARATION.md','/compiler-linearity-probe.bl','/compiler-linearity-normalization-probe.bl','/evidence/compiler-linearity/proof-probe.json','/evidence/compiler-linearity/normalization-probe.json','/evidence/compiler-linearity/baseline-checks.txt']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared preparation design or probe is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/sdk-src/formal/affine.bl','/sdk-src/formal/preparation.bl','/sdk-src/formal/certificate.bl','/sdk-src/system/linear.bl','/query-preparation-check.bl','/query-preparation-ledger.bl','/evidence/query-preparation/examples.json','/evidence/query-preparation/ledger-read.json','/evidence/query-preparation/focused-checks.txt','/evidence/query-preparation/preceding-focused-checks.txt','/evidence/query-preparation/regression-checks.txt','/evidence/query-preparation/verdict-baseline-checks.txt','/evidence/query-preparation/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared query preparation source or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/formal/source-runtime.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
