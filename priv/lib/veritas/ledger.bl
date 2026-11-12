@@ -4,7 +4,8 @@
 ; compiler authority merely by being stored.
 
 (ns veritas.ledger
-  (:require [datom] [datom.store-fjall] [formal.identity :as identity] [formal.query :as query]))
+  (:require [datom] [datom.store-fjall] [datom.file :as file] [datom.value-codec :as codec]
+            [formal.identity :as identity] [formal.query :as query]))
 
 (def schema
   [{:db/ident :verdict/id       :db/valueType :db.type/string :db/unique :db.unique/identity}
@@ -20,6 +21,7 @@
    {:db/ident :verdict/question-id :db/valueType :db.type/string}
    {:db/ident :verdict/question :db/valueType :db.type/term}
    {:db/ident :verdict/evidence :db/valueType :db.type/term}
+   {:db/ident :verdict/payload :db/valueType :db.type/file}
    {:db/ident :verdict/assurance :db/valueType :db.type/keyword}
    {:db/ident :verdict/compiler-authority :db/valueType :db.type/boolean}
    {:db/ident :verdict/replay   :db/valueType :db.type/string}
@@ -38,6 +40,14 @@
 (defn- vid []
  (str "vd-" (Base/encode16 (crypto/strong_rand_bytes 16) (list (tuple :case :lower)))))
 
+(def ^:private payload-byte-limit (* 16 1024 1024))
+(def ^:private payload-media-type "application/vnd.beam-lisp.verdict-payload.v1")
+(defn- payload! [ledger payload]
+ (let [bytes (codec/encode payload)]
+  (when (> (erlang/byte_size bytes) payload-byte-limit)
+   (throw (ex-info "Ledger payload exceeds its explicit byte capacity" {})))
+  (datom/put-file! ledger bytes {:media-type payload-media-type})))
+
 (defn record!
   "Record a caller verdict without granting proof authority, under `meta`
    {:claim str (required) :about [str …] :by str :replay str}. The shrunk
@@ -53,19 +63,24 @@
         _ (when (and (:question-identity v) (not= qid (:question-identity v)))
             (throw (ex-info "Ledger question identity does not match the recorded question" {})))
         evidence (select-keys v [:modality :engine :complete :none :answer :source-connection :runtime-replay :projection-replay
-                                :claim-kind :evidence :feasibility :optimality :compiler-proof-authority])]
+                                :claim-kind :evidence :feasibility :optimality :compiler-proof-authority])
+        ;; Values occur in covering-index keys. Complete questions and evidence
+        ;; can exceed the store's 64 KiB key capacity, even for small contracts.
+        ;; Keep their exact value-codec bytes in the existing blob tier instead.
+        payload (payload! ledger
+                  (cond-> {:veritas/verdict-payload 1 :evidence evidence}
+                    qid (assoc :question question)
+                    present (assoc :witness [w])))]
     (datom/transact! ledger
       [(cond-> {:db/id -1 :verdict/id id :verdict/claim (:claim meta)
                  :verdict/modality (:modality v) :verdict/at at
                 :verdict/witness-present present :verdict/assurance :recorded
-                :verdict/compiler-authority false :verdict/evidence evidence}
+                :verdict/compiler-authority false :verdict/payload payload}
          (:engine v) (assoc :verdict/engine (:engine v))
          (:why v) (assoc :verdict/why (:why v))
          (int? (:seed v)) (assoc :verdict/seed (:seed v))
          (int? (:tried v)) (assoc :verdict/tried (:tried v))
-         present (assoc :verdict/witness-value [w])
-         (some? w) (assoc :verdict/witness w)
-         qid (assoc :verdict/question-id qid :verdict/question question)
+         qid (assoc :verdict/question-id qid)
          (:replay meta) (assoc :verdict/replay (:replay meta))
          (:by meta) (assoc :verdict/by (:by meta)))])
     ;; many-valued refs go in as list-form adds: a map-form SET value is
@@ -80,11 +95,31 @@
   [:verdict/id :verdict/claim :verdict/modality :verdict/engine :verdict/why
    :verdict/seed :verdict/tried :verdict/witness :verdict/replay :verdict/about
    :verdict/by :verdict/at :verdict/witness-present :verdict/witness-value
-   :verdict/question-id :verdict/question :verdict/evidence :verdict/assurance :verdict/compiler-authority])
+   :verdict/question-id :verdict/question :verdict/evidence :verdict/payload :verdict/assurance :verdict/compiler-authority])
 
-(defn- normalize-row [row]
- (if (= true (:verdict/witness-present row))
-  (assoc row :verdict/witness (first (:verdict/witness-value row))) row))
+(defn- normalize-row [db row]
+ (let [row (if-let [descriptor (:verdict/payload row)]
+             (do
+              (when-not (and (file/file? descriptor) (= payload-media-type (:media-type descriptor))
+                             (int? (:size descriptor)) (<= 1 (:size descriptor) payload-byte-limit))
+               (throw (ex-info "Ledger payload descriptor is invalid" {})))
+              (let [bytes (datom/file-bytes db descriptor)]
+               (when-not (and (erlang/is_binary bytes) (= (:size descriptor) (erlang/byte_size bytes))
+                              (= (:sha descriptor) (file/sha256 bytes)))
+                (throw (ex-info "Ledger payload is missing or corrupt" {})))
+               (let [payload (codec/decode bytes) question (:question payload)]
+                (when-not (and (map? payload) (= 1 (:veritas/verdict-payload payload)) (map? (:evidence payload))
+                               (= (boolean (:verdict/question-id row)) (contains? payload :question))
+                               (or (not (contains? payload :question)) (= (:verdict/question-id row) (identity/hash (query/validate! question))))
+                               (= (= true (:verdict/witness-present row)) (contains? payload :witness))
+                               (or (not (contains? payload :witness)) (and (vector? (:witness payload)) (= 1 (count (:witness payload))))))
+                 (throw (ex-info "Ledger payload does not match its indexed record" {})))
+                (cond-> (assoc (dissoc row :verdict/payload) :verdict/evidence (:evidence payload))
+                 question (assoc :verdict/question question)
+                 (contains? payload :witness) (assoc :verdict/witness-value (:witness payload)))))) row)]
+  ;; Existing inline records retain their public shape, including false/nil.
+  (if (= true (:verdict/witness-present row))
+   (assoc row :verdict/witness (first (:verdict/witness-value row))) row)))
 
 (defn all
   "Every verdict, newest first; `since` (epoch ms) narrows."
@@ -95,14 +130,14 @@
                                 :where [?e :verdict/at ?at] [(>= ?at ?since)]]
                               d since))]
      (mapv (fn [[e _]]
-             (normalize-row (datom/pull d PULL e)))
+             (normalize-row d (datom/pull d PULL e)))
            (reverse (sort-by second es))))))
 
 (defn about
   "Every verdict resting on `thing` (a string naming code: \"ns/fn\")."
   [ledger thing]
   (let [d (datom/db ledger)]
-    (mapv (fn [[e]] (normalize-row (datom/pull d PULL e)))
+    (mapv (fn [[e]] (normalize-row d (datom/pull d PULL e)))
           (into [] (datom/q '[:find ?e :in $ ?t :where [?e :verdict/about ?t]] d thing)))))
 
 (def ^:private SECTIONS

@@ -1,0 +1,69 @@
+(ns veritas.ledger-large-terms-test
+ (:require [veritas.ledger :as ledger] [formal.term :as t] [formal.query :as query] [formal.identity :as identity]
+           [datom] [datom.file :as file] [datom.db :as db] [datom.blob :as blob]))
+
+(defn temporary [] (str "/tmp/bl-ledger-large-" (Base/encode16 (crypto/strong_rand_bytes 12))))
+(defn large-result []
+ (let [text (String/duplicate "proof-data/" 10000)
+       question (query/sat {:observe {"large" (t/text text)}})]
+  {:modality :witnessed :engine :terms :witness text :question question :question-identity (identity/hash question)
+   :answer {:question question :retained text} :compiler-proof-authority true}))
+(defn entity [connection id]
+ (first (first (datom/q '[:find ?e :in $ ?id :where [?e :verdict/id ?id]] (datom/db connection) id))))
+
+(deftest complete-large-terms-use-the-blob-tier-and-reopen-without-truncation
+ (let [path (temporary) connection (ledger/open path) result (large-result)
+       id (ledger/record! connection result {:claim "large complete record" :about ["large/example"]})
+       raw (datom/pull (datom/db connection) [:verdict/payload :verdict/evidence :verdict/question :verdict/witness] (entity connection id))
+       descriptor (:verdict/payload raw)]
+  (try
+   (is (file/file? descriptor))
+   (is (> (:size descriptor) 65535))
+   (is (not (contains? descriptor :body)))
+   (is (nil? (:verdict/evidence raw)))
+   (is (nil? (:verdict/question raw)))
+   (is (nil? (:verdict/witness raw)))
+   (is (= (:witness result) (:verdict/witness (first (ledger/all connection)))))
+   (datom/close! connection)
+   (let [reopened (ledger/open path)]
+    (try
+     (let [row (first (ledger/about reopened "large/example"))]
+      (is (= (:question result) (:verdict/question row)))
+      (is (= (:question-identity result) (:verdict/question-id row)))
+      (is (= (:answer result) (get-in row [:verdict/evidence :answer])))
+      (is (= (:witness result) (:verdict/witness row)))
+      (is (= true (:verdict/witness-present row)))
+      (is (= :recorded (:verdict/assurance row)))
+      (is (= false (:verdict/compiler-authority row))))
+     (finally (datom/close! reopened))))
+   (finally (datom/close! connection) (File/rm_rf! path) (File/rm_rf! (str path ".blobs"))))))
+
+(deftest legacy-inline-records-keep-question-evidence-and-nil-presence
+ (let [connection (ledger/open nil) question (query/sat {})]
+  (try
+   (datom/transact! connection [{:db/id -1 :verdict/id "legacy" :verdict/claim "inline before payload storage"
+                               :verdict/modality :witnessed :verdict/at 1 :verdict/assurance :recorded
+                               :verdict/compiler-authority false :verdict/witness-present true :verdict/witness-value [nil]
+                               :verdict/question question :verdict/question-id (identity/hash question)
+                               :verdict/evidence {:legacy true}}])
+   (let [row (first (ledger/all connection))]
+    (is (= question (:verdict/question row)))
+    (is (= {:legacy true} (:verdict/evidence row)))
+    (is (= true (:verdict/witness-present row)))
+    (is (contains? row :verdict/witness))
+    (is (= nil (:verdict/witness row))))
+   (finally (datom/close! connection)))))
+
+(deftest missing-or-corrupt-payloads-are-errors-rather-than-empty-evidence
+ (let [connection (ledger/open nil) result (large-result)
+       id (ledger/record! connection result {:claim "payload integrity"})
+       descriptor (:verdict/payload (datom/pull (datom/db connection) [:verdict/payload] (entity connection id)))
+       store (db/blobs-of (datom/db connection))]
+  (try
+   (blob/-blob-delete store (:sha descriptor))
+   (is (thrown? (ledger/all connection)))
+   ;; A store may return bytes under the wrong content key. Check both the
+   ;; advertised size and digest before decoding any record.
+   (blob/-blob-put store (:sha descriptor) (String/duplicate "x" (:size descriptor)))
+   (is (thrown? (ledger/all connection)))
+   (finally (datom/close! connection)))))
