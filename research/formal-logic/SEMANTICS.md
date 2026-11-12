@@ -178,3 +178,10 @@ Neither relation should silently inherit the finite-number generic profile.
    independent witness validation; backend agreement alone is not validation.
 6. Report BEAM, JS, ordinary hash-key semantics, native backend support and
    finite/bounded scope independently. Unqualified gates remain visible.
+
+## Graph checkpoint follow-up
+
+[Equality and literal-order review](SEMANTIC-REVIEW-KEYS.md) records fresh pinned
+hash-key observations and a map-literal sequencing assumption found in the
+qualification's own instrumentation. It preserves the recommendations above;
+it does not relabel current behavior as the proposed numeric/key profile.

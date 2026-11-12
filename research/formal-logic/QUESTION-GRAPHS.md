@@ -1,6 +1,6 @@
 # Portable public-data graphs
 
-Checkpoint 43 candidate, pending exact SDK and presentation qualification.
+Checkpoint 43 implementation: 8,749 targeted assertion executions, 187 complete public-data round trips and two fresh SDK-only readers. Exact pins and scope are in `evidence/question-graphs/qualification.json`; presentation has a separate receipt.
 
 `formal.data-graph` adds an explicit `:bl/public-data-graph-v1` representation.
 It does not change `formal.identity` version 1. The immediate capacity target
@@ -151,3 +151,10 @@ its bounded keyword vocabulary was explicitly declared in the reader source.
 This is retained as a transport refusal, not worked around with unrestricted
 atom creation. The public graph checker can still inspect unknown keyword
 names as bytes without materializing them.
+
+The final candidate also applies a fixed native header shape check and a
+keyword byte prefix bound before UTF-8 validation. All 187 valid graph
+references/costs and the owned point fixture bytes match the preceding core
+candidate. Oversized names and headers have explicit negative controls. The
+raw metadata-header probe was already refused by the preceding candidate; it
+is retained as a compatibility check, not reported as a newly accepted attack.

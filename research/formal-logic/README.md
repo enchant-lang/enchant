@@ -85,6 +85,18 @@ exact pattern counts, while scalar observations preserve runtime kind.
 Checkpoint 42 passes 19,726 assertion executions, SDK-only paired examples,
 eight reopened points and six separately repeated Source observations.
 
+[Portable public-data graphs](QUESTION-GRAPHS.md) preserve the complete question,
+including profiles, observers and provenance, with explicitly versioned references.
+The closure question's 110,551 expanded nodes fit in 332 unique nodes and
+10,685 canonical bytes. Opt-in version-2 points use the new reference;
+version-1 identities and points remain checkable. Checkpoint 43 passes 8,749
+targeted assertions, 187 exact public-data round trips, unchanged native results
+on both engines, two fresh SDK-only readers and the compiler/source gates.
+The targeted run retains earlier arithmetic qualifications as historical evidence.
+[Answer and ledger migration](NEXT-GRAPH-CONSUMERS.md) and the
+[equality/literal-order review](SEMANTIC-REVIEW-KEYS.md) remain active. There is
+no public untrusted byte ingress, graph model theorem or compiler authority.
+
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes

@@ -1,6 +1,8 @@
 # Versioned portable question graphs — next design
 
-This is a design, not an implemented packet or proof identity. The unchanged
+This is the design record preceding checkpoint 43. The implemented profile and
+qualification are in [QUESTION-GRAPHS.md](QUESTION-GRAPHS.md). The design below
+does not itself authorize a packet or proof identity. The unchanged
 standard encoder refuses one complete three-key closure question among the
 187 preceding cases: its expanded public data walk needs 110,551 nodes, above
 the 100,000-node budget. Native DAG import still accepts that question.
