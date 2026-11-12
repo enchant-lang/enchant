@@ -30,6 +30,16 @@ assert len(re.findall(r'^#\+begin_src beam-lisp\b', text, re.M)) == 83
 assert '83 cells, 0 cell errors' in (E / 'dossier-cells-checks.txt').read_text()
 assert '83 cells, 0 cell errors (checked, unchanged)' in (E / 'dossier-checks.txt').read_text()
 assert read(E / 'dossier-check-exit.json')['exit_code'] == 0
+# The final edit adds a declared source link only. Retain the exact committed
+# checked state and compare every executable span/result rather than rerunning
+# all native examples for a presentation link. This is an after-check committed
+# source anchor, not a claim that a launch-time snapshot existed.
+checked_commit = '7bd5a85484ff264e68416f3ab71c1ff0bff18cef'
+checked_text = subprocess.check_output(['git', 'show', checked_commit + ':research/formal-logic/ATLAS.bl.org'], cwd=R).decode()
+patterns = [r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
+            r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*']
+for pattern in patterns:
+    assert re.findall(pattern, checked_text, re.M | re.S) == re.findall(pattern, text, re.M | re.S)
 implementation = read(E / 'qualification.json')
 assert implementation['status'] == 'passed' and implementation['sdk_pin'] == pin
 assert implementation['stages']['focused']['source']['source_sha256']['research/formal-logic/src/formal/term-forest-evaluate.bl'] == sha(P / 'src/formal/term-forest-evaluate.bl')
@@ -63,6 +73,9 @@ report = {'schema': 'enchant.formal.term-forest-evaluation-dossier-qualification
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': pin, 'source_pin': source,
           'implementation_qualification_sha256': sha(E / 'qualification.json'), 'host': host,
           'document': {'sha256': sha(P / 'ATLAS.bl.org'), 'cells': 83,
+          'cell_check_commit': checked_commit,
+          'cell_check_document_sha256': hashlib.sha256(checked_text.encode()).hexdigest(),
+          'cell_check_scope': 'All executable spans and stored results identical to the committed fresh 83-cell check. Final edit adds only a source link.',
           'run_log_sha256': sha(E / 'dossier-cells-checks.txt'), 'unchanged_check_log_sha256': sha(E / 'dossier-checks.txt')},
           'browser': {'full_checks': len(full['checks']), 'focused_checks': len(focused['checks']),
           'full_input_source_pin': full_source,
