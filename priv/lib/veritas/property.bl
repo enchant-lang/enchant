@@ -40,7 +40,7 @@
   Destructuring, attributes, guards and multiple clauses require a richer
   source contract. The output binder `result` is reserved."
  [src]
- (let [forms (BeamLisp.Reader/read_string (ensure-src src))
+ (let [forms (if (string? src) (BeamLisp.Reader/read_string src) (list (compiler/datum-macro-result src)))
        _ (when-not (= 1 (count forms)) (throw (ex-info "One source function required" {})))
        node (rn/node-form (first forms))
        _ (when-not (= :list (rn/node-tag node)) (throw (ex-info "A defn form is required" {})))
@@ -61,7 +61,7 @@
            (throw (ex-info "Distinct unqualified parameters required; result is reserved" {})))
        fn-node (rn/list-node (concat (list (rn/sym-node "fn") (tuple :vector params)) (:body clause)))]
   {:name (rn/node-name (rn/node-form (second items))) :params names
-   :fn-source (core/pr-str (compiler/datum fn-node))}))
+   :fn-form (compiler/datum fn-node) :fn-source (core/pr-str (compiler/datum fn-node))}))
 
 ; ── render an INPUT (a tuple of args) as bl source ──────────────────────────
 
@@ -165,7 +165,7 @@
  "Prepare a complete backend-independent source property without executing it."
  [src0 pred gen]
  (try
-  (let [src (ensure-src src0) shape (shape-of src) params (:params shape)
+  (let [src (ensure-src src0) shape (shape-of src0) params (:params shape)
         tuple? (= :tuple (v/gen-tag gen))
         generators (if tuple? (:gens gen) [gen])
         _ (when-not (= (count params) (count generators))
@@ -174,10 +174,10 @@
                    (or (v/gen-term (nth generators i) (str "property/input/" i))
                        (throw (ex-info "Generator has no reviewed term-based runtime domain" {:index i}))))
                  (range (count params)))
-        function (source/prepare-function (:fn-source shape) inputs)
+        function (source/prepare-function (:fn-form shape) inputs)
         _ (when-not (= :translated (:status function)) (throw (ex-info (:reason function) {})))
         output (:value function)
-        predicate-source (str "(fn [" (params-src params) " result] " (pr-str (v/pred-form pred)) ")")
+        predicate-source (list 'fn (conj (mapv symbol params) 'result) (v/pred-form pred))
         predicate (source/prepare-function predicate-source (conj inputs output))
         _ (when-not (= :translated (:status predicate)) (throw (ex-info (:reason predicate) {})))
         property (:value predicate)

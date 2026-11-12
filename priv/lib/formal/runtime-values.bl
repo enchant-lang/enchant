@@ -1,5 +1,5 @@
 (ns formal.runtime-values
- (:require [formal.term :as t] [formal.value :as v] [formal.data :as d]))
+ (:require [formal.term :as t] [formal.value :as v] [formal.data :as d] [formal.ground :as ground]))
 
 (defn kind [x] (get-in (v/lift x) [:domain :kind]))
 (defn product [items]
@@ -167,3 +167,35 @@
   :bl/product (and (vector? actual) (vector? raw) (= (count actual) (count raw) (count (:value descriptor)))
                     (every? true? (mapv #(matches? (nth (:value descriptor) %) (nth actual %) (nth raw %)) (range (count actual)))))
   (let [projected (concrete descriptor raw)] (and projected (= actual (:value projected))))))
+
+(defn bind
+ "Represent a concrete runtime input in its declared model. Erased elements
+  and inactive enum payloads are not fabricated or constrained."
+ [descriptor actual]
+ (let [descriptor (v/lift descriptor) domain (:domain descriptor)
+       invalid {:status :invalid :reason :runtime-value-shape :pins [] :assignments {} :sorts {}}]
+  (case (kind descriptor)
+   :scalar
+    (let [bound (ground/bind (v/term descriptor) actual)]
+     (if (and (= :invalid (:status bound)) (= t/String (t/sort-of (v/term descriptor)))
+              (= :abstract (get-in descriptor [:scope :mode])) (string? actual) (String/valid? actual))
+      (assoc bound :status :incomplete :reason :runtime-text-outside-solver-alphabet) bound))
+   :nullable
+    (ground/combine
+     (cond-> [(ground/bind (get-in descriptor [:value :nil?]) (nil? actual))]
+      (some? actual) (conj (ground/bind (get-in descriptor [:value :item]) actual))))
+   :bl/keyword (if (= actual (:value descriptor)) (ground/combine []) invalid)
+   :bl/product
+    (if (and (vector? actual) (= (count actual) (count (:value descriptor))))
+     (ground/combine (mapv #(bind (nth (:value descriptor) %) (nth actual %)) (range (count actual)))) invalid)
+   :bl/length
+    (if (if (= :vector (:runtime-kind domain)) (vector? actual) (list? actual))
+     (ground/bind (get-in descriptor [:value :length]) (count actual)) invalid)
+   :bl/enum
+    (let [tag (cond (keyword? actual) actual (and (map? actual) (= 1 (count actual))) (first (keys actual)))
+          at (first (keep-indexed (fn [i label] (when (= label tag) i)) (:tags domain)))
+          child (get-in descriptor [:value :arms tag])]
+     (if (and (some? at) (if child (map? actual) (keyword? actual)))
+      (ground/combine (cond-> [(ground/bind (get-in descriptor [:value :tag]) at)]
+                        child (conj (bind child (get actual tag))))) invalid))
+   {:status :incomplete :reason :runtime-model-encoding-unavailable :pins [] :assignments {} :sorts {}})))

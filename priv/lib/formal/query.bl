@@ -10,11 +10,16 @@
  (mapv (fn [i] (assertion (str prefix i) (nth terms i))) (range (count terms))))
 (defn- assumption [index item]
  (cond
-  (and (map? item) (contains? item :term)) (assertion (:label item) (:term item) (:origin item))
+  (and (map? item) (contains? item :term))
+   (let [value (:term item)]
+    (assertion (:label item) (if (v/value? value) (t/all [(v/defined value) (v/term value)]) value) (:origin item)))
   (v/value? item) (assertion (str "assume/" index) (t/all [(v/defined item) (v/term item)]))
   :else (assertion (str "assume/" index) item)))
 (defn- normalize-assumptions [items]
  (mapv (fn [i] (assumption i (nth items i))) (range (count items))))
+(defn- assumption-value [item]
+ (cond (v/value? item) item
+       (and (map? item) (v/value? (:term item))) (:term item)))
 
 (defn make
  "A portable question with explicit semantics, domain, source and requested
@@ -26,7 +31,7 @@
        _ (when (and (= :sat mode) (some? claim))
            (throw (ex-info "A SAT query uses assumptions; a claim would be silently discarded" {})))
        inputs (vec (get opts :inputs []))
-       context (vec (concat inputs (when claim [claim])))
+       context (vec (concat inputs (when claim [claim]) (keep assumption-value (get opts :assumptions []))))
        assumptions (normalize-assumptions (vec (get opts :assumptions [])))
        constraints (vec (distinct (mapcat v/constraints context)))
        bounds (vec (distinct (map v/within context)))
@@ -82,6 +87,20 @@
    (require! (and (nil? (:claim problem)) (nil? (:counterexample problem))) "SAT has neither claim nor counterexample"))
   (t/validate! (roots problem))
   problem))
+
+(defn constrain
+ "Derive a question by adding one named assumption. Preserve every original
+  claim, model condition, observation, semantic profile and source connection."
+ ([problem label expression] (constrain problem label expression nil))
+ ([problem label expression origin]
+  (validate! problem)
+  (when (or (not (string? label)) (blank? label)
+            (some #(= label (:label %)) (:assertions problem)))
+   (throw (ex-info "A derived query needs a distinct explicit assumption label" {})))
+  (let [extra (assertion label expression origin)]
+   (validate! (-> problem
+                (update :assertions conj extra)
+                (update :assumptions conj (select-keys extra [:label :origin])))))))
 (defn cache-key
  "A backend result cache cannot cross profiles, bounds, artifacts, settings or
   requested evidence. This key never grants trusted compiler authority."

@@ -1,0 +1,114 @@
+(ns veritas.response-server-test
+ (:require [veritas :as v] [veritas.mock :as mock] [veritas.fault :as fault]
+           [formal.term :as t] [formal.value :as value] [formal.logic :as logic]
+           [formal.identity :as identity] [oracle] [datom]))
+
+(defn changing-handler [calls contract]
+ (let [id (value/term (mock/field contract :id)) other (value/term (mock/field contract :other))]
+  (fn [question _]
+   (let [pin (first (filter (fn [row]
+                             (let [term (:term row)]
+                              (and (= :eq (:op term)) (= id (first (:args term)))))) (:assertions question)))
+         key (:data (second (:args (:term pin)))) ordinal (swap! calls inc)]
+    (oracle/query-answer question {:phase :query :solver-status :sat
+                                  :assignments {(:data id) key (:data other) ordinal}})))))
+
+(deftest a-server-retains-the-entire-response-not-just-its-seed-coordinate
+ (let [contract (mock/contract-from [["id" "Int"] ["other" "Int"]] ['(>= other 0)])
+       server (mock/make-mock {:worker "/unavailable/formal-worker" :capacity 2} contract :id)
+       calls (atom 0)]
+  (oracle/with-query-handler (changing-handler calls contract)
+   (fn []
+    (let [a (mock/answer server 7) again (mock/answer server 7) b (mock/answer server 8)
+          refused (mock/answer server 9) retained (mock/answer server 7)]
+     (is (= {:id 7 :other 1} (:value a)))
+     (is (= (:value a) (:value again)))
+     (is (= :retained-answer (:reuse again)))
+     (is (= {:id 8 :other 2} (:value b)))
+     (is (= :mock-capacity (:reason refused)))
+     (is (= false (:ok? refused)))
+     (is (= (:value a) (:value retained)))
+     (is (= 2 @calls)))))))
+
+(deftest simultaneous-requests-share-one-first-answer
+ (let [contract (mock/contract-from [["id" "Int"] ["other" "Int"]] ['(>= other 0)])
+       server (mock/make-mock {:worker "/unavailable/formal-worker"} contract :id)
+       calls (atom 0) parent (erlang/self)]
+  (oracle/with-query-handler (changing-handler calls contract)
+   (fn []
+    (doseq [_ (range 3)]
+     (spawn (fn [] (erlang/send parent [:mock-answer (mock/answer server 7)]))))
+    (let [answers (mapv (fn [_] (receive [:mock-answer result] result (after 10000 :timeout))) (range 3))]
+     (is (every? #(= true (:ok? %)) answers))
+     (is (= [{:id 7 :other 1} {:id 7 :other 1} {:id 7 :other 1}] (mapv :value answers)))
+     (is (= 1 @calls)))))))
+
+(deftest cached-answers-cannot-outlive-or-change-their-owned-question-context
+ (let [escaped (atom nil) contract (mock/contract-from [["x" "Int"]] ['(= x 7)])]
+  (v/with-solver {:backend :z3}
+   (fn [options]
+    (let [server (mock/make-mock options contract :x)]
+     (reset! escaped server)
+     (is (= true (:ok? (mock/answer server 7))))
+     (is (= :retained-answer (:reuse (mock/answer server 7))))
+     (logic/load! (:session options) [(t/bool false)])
+     (is (= :context-changed (:reason (mock/answer server 7))))
+     (let [unrealizable (mock/synth options contract)]
+      (is (= :solver-claim (:modality unrealizable)))
+      (is (= (:question-identity unrealizable) (identity/hash (:question unrealizable))))
+      (is (some #(starts-with? (:label %) "context/") (get-in unrealizable [:question :assertions])))))))
+  (is (= :context-expired (:reason (mock/answer @escaped 7))))))
+
+(deftest false-request-keys-and-unavailable-injections-keep-presence
+ (let [contract (mock/contract-from [["flag" "Bool"]] ['(= flag false)])
+       server (mock/make-mock {:backend :z3} contract :flag)
+       answer (mock/answer server false)]
+  (is (= true (:ok? answer)))
+  (is (= {:flag false} (:value answer)))
+  (is (= :retained-answer (:reuse (mock/answer server false)))))
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0) '(>= x -1)])
+       server (fault/make-server (mock/make-mock {:backend :z3} contract :x) {:bad 1})
+       result (fault/serve server :bad)]
+  (is (= false (:injected? result)))
+  (is (= false (:ok? result)))
+  (is (= :solver-claim (:modality result)))
+  (is (= true (:none result)))))
+
+(deftest complete-empty-signatures-are-visible-and-partial-signatures-are-not-redundancy
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0)])
+       world (fault/build-db {} contract [{:fault/id 2 :kind :observed :value {:x 0}}
+                                         {:fault/id 1 :kind :observed :value {:x 1}}])]
+  (try
+   (is (= [{:signature [] :faults [1 2] :measurement :complete}] (fault/redundant-mutants (:db world))))
+   (is (= [] (fault/covered-clauses (:db world))))
+   (finally (datom/close! (:conn world))))))
+
+(deftest retained-semantic-assumptions-keep-scope-profiles-and-the-executed-question
+ (doseq [backend [:z3 :oxiz]]
+  (let [contract (mock/contract-from [["x" "Int"]] [true])
+        x (value/term (mock/field contract :x))
+        premise (value/make (t/bool true) {:constraints [(t/ge x (t/int 5))]
+                                          :scope {:mode :bounded :domain [5 :unbounded]}
+                                          :domain {:kind :scalar :profile :test/retained-response-domain}})]
+   (v/with-solver {:backend backend}
+    (fn [options]
+     (logic/load! (:session options) [premise])
+     (let [result (mock/synth options contract)]
+      (is (= :witnessed (:modality result)))
+      (is (>= (get-in result [:value :x]) 5))
+      (is (= :bounded (get-in result [:question :scope :mode])))
+      (is (contains? (set (get-in result [:question :profiles])) :test/retained-response-domain))
+      (is (= (:question-identity result) (identity/hash (:question result))))))))))
+
+(deftest logical-field-identities-keep-independent-responses-separate
+ (let [a (mock/contract-from [["x" "Int"]] [true] {:namespace :response/a})
+       b (mock/contract-from [["x" "Int"]] ['(= x 0)] {:namespace :response/b})
+       other (mock/contract-from [["y" "Int"]] ['(= y 0)])]
+  (is (not= (value/term (mock/field a :x)) (value/term (mock/field b :x))))
+  (is (not= (value/term (mock/field a :x)) (value/term (mock/field other :y))))
+  (v/with-solver {:backend :z3}
+   (fn [options]
+    (logic/load! (:session options) [(t/ge (value/term (mock/field a :x)) (t/int 5))])
+    (let [result (mock/synth options b)]
+     (is (= :witnessed (:modality result)))
+     (is (= {:x 0} (:value result))))))))

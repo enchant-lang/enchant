@@ -1,0 +1,85 @@
+(ns formal.response
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.identity :as identity] [formal.runtime-values :as runtime]
+           [formal.ground :as ground] [formal.evaluate :as evaluate]))
+
+(defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.response: " message) {}))))
+(defn holds [law] (t/all [(v/defined law) (v/term law)]))
+(defn define
+ "An immutable response relation: named semantic inputs and every Boolean law.
+  Builders and generators are not part of this portable definition."
+ ([fields laws] (define fields laws {}))
+ ([fields laws options]
+  (require! (and (vector? fields) (vector? laws) (<= (count fields) 256)
+                (every? #(and (vector? %) (= 2 (count %)) (keyword? (first %))) fields)
+                (= (count fields) (count (set (map first fields))))) "distinct named response fields required")
+  (let [fields (mapv (fn [[key model]] [key (v/lift model)]) fields) laws (mapv v/lift laws)]
+   (require! (and (<= (count laws) 1024) (every? #(= t/Bool (t/sort-of (v/term %))) laws)) "every response law must be Boolean")
+   (let [definition {:formal/response 1 :fields fields :laws laws
+                     :profile (get options :profile :bl/response-relation-v1)
+                     :origin (:origin options) :source-connection (get options :source-connection {:status :authored-terms :source-claim false})}]
+    (let [declared (set (t/variables (vec (mapcat v/terms (map second fields)))))
+          roots (vec (mapcat #(concat (v/terms %) (v/constraints %)) (concat (map second fields) laws)))]
+     (t/validate! roots)
+     (require! (every? #(contains? declared %) (t/variables roots)) "laws and domains cannot introduce undeclared response variables"))
+    (identity/hash definition)
+    definition))))
+
+(defn field [definition key]
+ (let [found (first (filter #(= key (first %)) (:fields definition)))]
+  (require! found "unknown response field") (second found)))
+
+(defn question
+ "A complete valid, invalid, all-invalid or isolated-law question. Isolation
+  is a proof under the other laws, so infeasible premises remain vacuous."
+ ([definition] (question definition {}))
+ ([definition options]
+  (require! (= 1 (:formal/response definition)) "a typed response definition is required")
+  (require! (every? #(contains? #{:mode :clause :assumptions} %) (keys options)) "unknown response question option")
+  (let [mode (get options :mode :valid) laws (:laws definition) clause (:clause options)
+        _ (require! (contains? #{:valid :invalid :all-invalid :isolate} mode) "unknown response question mode")
+        _ (when (= mode :all-invalid) (require! (pos? (count laws)) "an all-law fault needs at least one law"))
+        _ (when (= :isolate mode) (require! (and (int? clause) (<= 0 clause) (< clause (count laws))) "law index outside the contract"))
+        accepted (mapv holds laws)
+        ;; Law partiality is the property, not a hidden input-success premise.
+        context (v/scalar (t/bool true) laws {:defined (t/bool true)})
+        observe (into {} (concat (map (fn [[key value]] [(str "field/" key) value]) (:fields definition))
+                                 (map-indexed (fn [i law] [(str "law/" i) law]) laws)))
+        assumptions (vec (get options :assumptions []))
+        common {:id :veritas/response :inputs (conj (mapv second (:fields definition)) context)
+                :observe observe :profile (:profile definition)
+                :origin {:definition (identity/hash definition) :mode mode :clause clause :connection (:source-connection definition)}}]
+   (q/validate!
+    (if (= mode :isolate)
+     (q/prove (nth laws clause) (assoc common :assumptions
+                                (into assumptions (keep-indexed (fn [i law] (when (not= i clause) law)) accepted))))
+     (q/sat (assoc common :assumptions
+              (conj assumptions (case mode :valid (t/all accepted) :invalid (t/not (t/all accepted))
+                                 :all-invalid (t/all (mapv t/not accepted)))))))))))
+
+(defn bindings [definition value]
+ (if-not (and (map? value) (= (set (keys value)) (set (map first (:fields definition)))))
+  {:status :invalid :reason :response-field-set :pins [] :assignments {} :sorts {}}
+  (ground/combine (mapv (fn [[key model]] (runtime/bind model (get value key))) (:fields definition)))))
+
+(defn domain-check [definition bound]
+ (if-not (= :valid (:status bound)) bound
+  (let [fields (mapv second (:fields definition)) context (concat fields (:laws definition))
+        terms (vec (concat (:pins bound) (mapcat v/constraints context) (mapv v/defined fields) (mapv v/within context)))]
+   (evaluate/validate (mapv (fn [i term] (q/assertion (str "response-domain/" i) term)) (range (count terms)) terms)
+                      (:assignments bound)))))
+
+(defn measure
+ "Independently evaluate a fully supplied mathematical response. Unknown
+  operations and model admission are separate from violated laws."
+ [definition value]
+ (let [bound (bindings definition value) admitted (domain-check definition bound)]
+  (if-not (= :valid (:status admitted)) {:status (if (= :invalid (:status admitted)) :invalid-domain :unknown) :domain admitted}
+   (let [rows (mapv (fn [i law]
+                     (let [result (evaluate/value (holds law) (:assignments bound))]
+                      {:clause i :holds result :status (cond (= true result) :holds (= false result) :violated :else :unknown)}))
+                    (range (count (:laws definition))) (:laws definition))]
+    {:status (cond (some #(= :unknown (:status %)) rows) :unknown
+                   (every? #(= :holds (:status %)) rows) :valid :else :invalid)
+     :laws rows :domain admitted :basis :independent-term-evaluation}))))
+

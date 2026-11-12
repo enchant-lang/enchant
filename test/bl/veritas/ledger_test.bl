@@ -1,7 +1,7 @@
 ; test/bl/veritas/ledger_test.bl — a verdict is a fact that outlives the session.
 
 (ns veritas.ledger-test
-  (:require [veritas :as v] [veritas.model :as vm] [veritas.ledger :as vl] [datom]))
+  (:require [veritas :as v] [veritas.model :as vm] [veritas.ledger :as vl] [veritas.mock :as mock] [datom]))
 
 (def options {:backend :z3})
 
@@ -84,4 +84,22 @@
    (is (try (vl/record! l (assoc result :question-identity "wrong") {:claim "mismatched"}) false (catch _ true)))
    (is (try (vl/record! l (dissoc result :question) {:claim "missing question"}) false (catch _ true)))
    (is (= 20 (count (vl/all l))))
+   (finally (datom/close! l)))))
+
+(deftest a-boundary-claim-retains-both-the-feasible-response-and-the-no-better-question
+ (let [l (vl/open nil) contract (mock/contract-from [["x" "Int"]] ['(= x 0)])
+       result (mock/synth-boundary {:backend :z3} contract :x :min)]
+  (try
+   (is (= :solver-claim (:modality result)))
+   (is (= :unsat (get-in result [:answer :verdict])))
+   (is (not (contains? result :witness)))
+   (vl/record! l result {:claim "zero is the minimum admitted response"})
+   (let [row (first (vl/all l)) evidence (get-in row [:verdict/evidence :evidence])]
+    (is (= :integer-extremum (:kind evidence)))
+    (is (= {:x 0} (get-in evidence [:feasibility :value])))
+    (is (= :sat (get-in evidence [:feasibility :answer :verdict])))
+    (is (= :unsat (get-in evidence [:terminal :answer :verdict])))
+    (is (= (:question result) (:verdict/question row)))
+    (is (= false (:verdict/witness-present row)))
+    (is (= :recorded (:verdict/assurance row))))
    (finally (datom/close! l)))))

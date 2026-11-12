@@ -1,67 +1,26 @@
-; test/bl/deps_test.bl — W7's server-side half: the CONTRACT, and the mock
-; derived from it.
-;
-; The client's job is to decide about a server it does not control, so the server
-; is written down first, as predicates. `veritas.mock` derives a mock from them,
-; and the client is driven through a TRANSPORT built on it — so client and server
-; answer to one predicate, which is what "interchangeable" means.
-;
-; ── The z3 guard, and why it is honest ─────────────────────────────────────
-;
-; Everything `veritas.mock` derives from a contract goes through the SMT port. In
-; THIS worktree that port answers nil (the z3 native side is a gitignored
-; dependency; `priv/z3` is symlinked in, and the shipped `test/bl/veritas/*.bl`
-; fail here for the same reason). So the contract-derived tests GUARD on it and
-; say so out loud, while the transport and client tests — which need no solver —
-; run either way. A test that silently skips is a lie; a test that fails for an
-; environment reason it cannot fix is noise.
-;
-; Run: bl test test/bl/deps_test.bl
-
-(ns test.deps
-  (:require [veritas.mock :as m] [z3]))
-
-(def port (z3/open))
-
+; Contract-derived package responses and the client transport use the selected SDK.
+(ns test.deps (:require [veritas.mock :as m]))
+(def options {:backend :z3})
 (def package-contract
-  (m/contract-from
-    [["versions" "Int"] ["retired" "Int"]]
-    ['(>= versions 1)
-     '(<= retired versions)]))
-
-(defn smt? []
-  (some? (m/satisfiable-status port package-contract)))
-
+ (m/contract-from [["versions" "Int"] ["retired" "Int"]] ['(>= versions 1) '(<= retired versions)]))
 (deftest the-contract-is-realizable
-  (if (smt?)
-    (is (= :sat (m/satisfiable-status port package-contract)))
-    (do (println "  (skipped: the SMT port answers nil in this worktree — see the header)")
-        (is true))))
-
+ (is (= :witnessed (:modality (m/synth options package-contract)))))
 (deftest a-contract-is-the-mock
-  (if (smt?)
-    (let [v (:value (m/synth port package-contract ""))]
-      (is (>= (:versions v) 1))
-      (is (<= (:retired v) (:versions v))))
-    (do (println "  (skipped: no SMT port)") (is true))))
-
-(deftest the-mock-is-deterministic
-  (if (smt?)
-    (let [srv (m/make-mock port package-contract "versions")]
-      (is (= (:value (m/answer srv 4)) (:value (m/answer srv 4))))
-      (is (not= (:value (m/answer srv 4)) (:value (m/answer srv 9)))))
-    (do (println "  (skipped: no SMT port)") (is true))))
-
-(deftest the-edges-come-from-the-optimizer
-  (if (smt?)
-    (is (= 1 (:versions (:value (m/synth-seeded port package-contract "versions" 1)))))
-    (do (println "  (skipped: no SMT port)") (is true))))
-
+ (let [result (m/synth options package-contract) value (:value result)]
+  (is (= :witnessed (:modality result)))
+  (is (>= (:versions value) 1)) (is (<= (:retired value) (:versions value)))))
+(deftest the-mock-retains-its-answer
+ (let [server (m/make-mock options package-contract "versions")]
+  (is (= (:value (m/answer server 4)) (:value (m/answer server 4))))
+  (is (not= (:value (m/answer server 4)) (:value (m/answer server 9))))))
+(deftest a-boundary-keeps-its-global-optimality-claim
+ (let [result (m/synth-boundary options package-contract "versions" :min)]
+  (is (= :solver-claim (:optimality result)))
+  (is (= 1 (get-in result [:value :versions])))))
 (deftest a-forbidden-response-is-outside-the-contract
-  (if (smt?)
-    (let [bad (:value (m/synth-invalid port package-contract))]
-      (is (not (m/check port package-contract bad))))
-    (do (println "  (skipped: no SMT port)") (is true))))
+ (let [result (m/synth-invalid options package-contract)]
+  (is (= :witnessed (:modality result)))
+  (is (not (m/check options package-contract (:value result))))))
 
 ; ── the client, over a transport that is a VALUE (no solver involved) ──────
 

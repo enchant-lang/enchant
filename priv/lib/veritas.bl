@@ -2,13 +2,14 @@
 ; complete formal.query values and actual BL witness replay. Native UNSAT
 ; remains a solver claim. Finite runtime search is exhausted; sampling alone
 ; establishes neither universal validity nor absence of an existential witness.
-; Legacy SMT helpers remain solely for the separate mock/fault consumers.
+; Deprecated SMT helper entry points remain separate from the typed consumers.
 
 (ns veritas
   (:require [z3] [oracle] [core] [env] [smt :as smtlib] [system.smt :as smt] [reader-node :as rn]
             [system.model :as model] [typed] [formal.term :as term] [formal.value :as value] [formal.runtime-values :as rv] [formal.anf-inputs :as formal-inputs]
             [formal.source :as source] [formal.source-runtime :as source-runtime] [formal.query :as query]
-            [formal.coverage :as coverage] [formal.logic :as logic] [formal.identity :as identity] [compiler :as compiler]))
+            [formal.coverage :as coverage] [formal.logic :as logic] [formal.identity :as identity]
+            [formal.response :as response] [formal.response-runtime :as response-runtime] [compiler :as compiler]))
 
 ; ═════════════════════════════════════════════════════════════════════════
 ; GEN — typed generators as records; the Gen protocol dispatches on their type
@@ -449,7 +450,7 @@
 (defn pred-form
   "The authoring contract, enforced: a predicate is a QUOTED bl form, never a
    source string (the blueprint.constraint rule). The form is walkable and
-   composable as data; pr-str is only the wire into system.smt. A string here
+   composable as data; Source compilation accepts the form as data; backend questions remain terms. A string here
    is a migration bug — throw, don't guess."
   [form]
   (if (string? form)
@@ -697,13 +698,14 @@
 ; check runs the strongest engine the (gen, pred) pair supports.
 
 (defn- predicate-source [var pred arity]
- ;; The reader validates the identifier separately; generated aliases bind
- ;; through lexical ANF and never masquerade as solver variable names.
+ ;; Validate the binder separately, then pass the code datum directly to the
+ ;; compiler. Runtime values and source literals never cross a printer/reader.
  (formal-inputs/prepare "formal.source.intrinsics" {var (term/int 0)})
- (str "(fn [" var "] "
-      (if arity
-       (str "(let [" (core/join " " (map (fn [i] (str var "_" i " (nth " var " " i ")")) (range arity))) "] " (pr-str (pred-form pred)) ")")
-       (pr-str (pred-form pred))) ")"))
+ (let [parameter (symbol var) body (pred-form pred)
+       body (if arity
+              (list 'let (vec (mapcat (fn [i] [(symbol (str var "_" i)) (list 'core/nth parameter i)]) (range arity))) body)
+              body)]
+  (list 'fn [parameter] body)))
 
 (defn prepare
  "Prepare one complete quantifier question without running its predicate.
@@ -820,8 +822,7 @@
 ; ∀ input ∈ gen, ∃ clause of `fn-src` whose guard accepts input. This is the
 ; COVERAGE property from priv/fuzz.bl, now a veritas query: the "spec" is read
 ; from the function's OWN guard clauses (system.model), so no property is
-; written. Modality follows the generator: :proven when it enumerates finitely,
-; :witnessed when sampled. A gap is a :refuted with the uncovered witness.
+; written. Finite execution is :exhausted; sampling is :witnessed. A gap is a :refuted with the uncovered witness.
 
 (defn covers
  "Check compiler clause selection. Bodies are not compiled or executed.
@@ -860,47 +861,61 @@
 ; FAULTS — the fault space as exists-not queries, with a MODALITY
 ; ═════════════════════════════════════════════════════════════════════════
 ;
-; For each law i of a contract {:gen :laws}, ask (∃ v. ¬law_i ∧ (rest laws)):
-;   :proven  witness   ⟹ an ISOLATED fault (wrong for exactly law i) — z3-built
-;   :proven  :none     ⟹ law i is IMPLIED by the others (redundant) — z3-PROVEN
-;   :witnessed         ⟹ sampled an isolated fault (no proof of isolation)
-;   :unknown           ⟹ undecidable
-; This recovers mock/fault.bl's independence analysis with a modality attached:
-; a redundant law is now z3-PROVEN redundant, not merely un-witnessed.
+; Fault isolation keeps a concrete violation separate from a native implication
+; claim and from infeasible other-law premises. No result gains proof authority.
 
 (defn isolate-fault
-  "The ∃-not query for law `i`: a value wrong for exactly law i. A modal verdict
-   — :proven witness (isolated fault), :proven :none (law i is implied/redundant),
-   :witnessed, or :unknown."
-  [port gen laws i]
-  (let [others (into [] (keep-indexed (fn [j l] (if (= j i) nil l)) laws))
-        ; laws are quoted forms — compose as data, never as strings
-        pred (cons 'and (cons (list 'not (nth laws i)) others))]
-    (exists port "v" gen pred)))
+ "Ask for a value failing one law while all other laws hold. Typed preparation
+  separates infeasible premises from implication; concrete faults replay every
+  law. Explicit runtime engines retain their finite/sampled scope."
+ [options gen laws i]
+ (when-not (and (map? options) (vector? laws) (int? i) (<= 0 i) (< i (count laws)))
+  (throw (ex-info "Fault queries require options, a law vector and an in-range index" {})))
+ (let [engine (get options :engine :auto)
+       _ (when-not (contains? #{:auto :terms :enumerate :sample} engine) (throw (ex-info "Unknown fault query engine" {})))
+       model (when (contains? #{:auto :terms} engine) (try (gen-term gen "veritas/input") (catch _ nil)))
+       predicates (mapv (fn [law]
+                          (let [form (pred-form law)]
+                           (if (= :tuple (gen-tag gen))
+                            (list 'let (vec (mapcat (fn [j] [(symbol (str "v_" j)) (list 'core/nth 'v j)]) (range (count (:gens gen))))) form)
+                            form))) laws)
+       prepared (when model
+                  (try {:contract (response-runtime/from-source [[:v model]] predicates)}
+                       (catch error {:reason (ex-message error)})))]
+  (if-let [contract (:contract prepared)]
+   (let [question (response/question (:definition contract) {:mode :isolate :clause i})
+         result (response-runtime/execute options {:contract contract :question question :request {:mode :isolate :clause i} :pins {}})]
+    (if (= :witnessed (:modality result))
+     (let [actual (get-in result [:value :v])]
+      (if (and (satisfies? GenShrink gen) (gen-domain? gen actual))
+       (assoc result :response-witness (:witness result) :witness actual :implied false)
+       (-> result (dissoc :value :witness) (assoc :modality :candidate :reason :runtime-generator-admission)))) result))
+   (if (= :terms engine)
+    {:modality :unsupported :engine :terms :reason (or (:reason prepared) "Generator has no reviewed term model") :compiler-proof-authority false}
+    (let [others (keep-indexed (fn [j law] (when (not= i j) law)) laws)
+          pred (cons 'and (cons (list 'not (nth laws i)) others))]
+     (assoc (exists options "v" gen pred) :premise-feasibility :not-separated :source-connection {:status :runtime-predicate-only}))))))
 
 (defn faults
-  "The fault space of a contract {:gen g :laws [quoted-form…]}: one isolate-fault
-   per law, tagged with the law it targets. :implied laws (proven :none) are
-   redundant — a finding about the SPEC, z3-proven."
-  [port contract]
-  (let [laws (:laws contract) gen (:gen contract)]
-    (into []
-      (map-indexed
-        (fn [i _]
-          (let [r (isolate-fault port gen laws i)]
-            {:law i :modality (:modality r)
-             :isolated-fault (if (:none r) nil (:witness r))
-             :implied (if (:none r) true (when (contains? r :witness) false))
-             :basis (:modality r) :answer (:answer r)}))
-        laws))))
+ "Every named fault result retains its complete question and evidence. Native
+  implication remains a solver claim; vacuous premises stay a separate case."
+ [options contract]
+ (let [laws (:laws contract) gen (:gen contract)]
+  (mapv (fn [i]
+          (let [result (isolate-fault options gen laws i)]
+           (assoc result :law i
+                         :witness-present (contains? result :witness)
+                         :isolated-fault (when (contains? result :witness) (:witness result))
+                         :implied (cond (= :vacuous (:modality result)) nil
+                                        (:none result) true
+                                        (contains? result :witness) false)
+                         :basis (:modality result)))) (range (count laws)))))
 
 ; ═════════════════════════════════════════════════════════════════════════
 ; ERGONOMICS — a managed solver, so the caller need not thread a z3 port
 ; ═════════════════════════════════════════════════════════════════════════
 ;
-; exists/for-all/covers take a port because z3 is a live process. `with-solver`
-; opens one, runs a thunk that receives it, and the thunk's queries share it —
-; the common case where a caller runs several checks together.
+; with-solver owns a typed context and passes expiring options to its callback.
 
 (defn with-solver
  "Share one owned typed context across a callback; its options expire on return."

@@ -1,0 +1,186 @@
+(ns veritas.response-terms-test
+ (:require [veritas :as v] [veritas.mock :as mock] [veritas.fault :as fault] [veritas.property :as property]
+           [formal.term :as t] [formal.value :as value] [formal.query :as query]
+           [formal.identity :as identity] [formal.evaluate :as evaluate] [formal.ground :as ground]
+           [formal.response :as response] [formal.logic :as logic] [oracle] [datom]))
+
+(defn brief [result] (pr-str (select-keys result [:modality :status :runtime-replay :answer :runtime-admission])))
+(defn unknown-answer [question _]
+ (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown}))
+
+(deftest ground-values-keep-their-mathematical-sort-and-representation
+ (let [enum (t/enum-sort "response.phase" ["left/open" "right/open"])
+       samples [[t/Int -9] [t/Bool false] [t/String "a\"b\\c"]
+                [t/Real {:formal/real [-1 3]}] [(t/bv-sort 8) {:formal/bv [8 255]}]
+                [(t/fp-sort 8 24) {:formal/fp [8 24 2147483648]}]
+                [t/Rounding "RTZ"] [enum {:formal/enum ["response.phase" "right/open"]}]
+                [(t/seq-sort t/Int) [7 -1 0]]
+                [(t/array-sort t/Bool t/Int) {:formal/array {:default 0 :updates [[false 7] [true -4]]}}]]]
+  (doseq [[sort actual] samples]
+   (let [term (ground/literal sort actual) replayed (evaluate/value term {})]
+    (is (= sort (t/sort-of term)))
+    (is (= true (evaluate/equal sort actual replayed)))))
+  (is (thrown? (ground/literal t/Real 0.5)))
+  (is (thrown? (ground/literal (t/bv-sort 8) 255)))))
+
+(deftest source-contracts-keep-every-law-and-infer-response-fields
+ (let [contract (mock/contract-from [[:temp (v/int-of -40 60)] [:code (v/int-of 200 299)]]
+                                   ['(<= temp 60) '(>= code 200)])
+       answers (mapv #(mock/synth {:backend %} contract) [:z3 :oxiz])]
+  (is (= 2 (mock/law-count contract)))
+  (is (apply = (map :question-identity answers)))
+  (doseq [answer answers]
+   (is (= :witnessed (:modality answer)) (brief answer))
+   (is (= :reproduced (get-in answer [:runtime-replay :status])))
+   (is (mock/check {} contract (:value answer)))
+   (is (= (:question answer) (query/validate! (:question answer))))
+   (is (= false (:compiler-proof-authority answer)))))
+ (is (thrown? (mock/contract-from [["x" "Int"]] ['(>= x 0) '(unknown-law x)])))
+ (is (thrown? (mock/contract-from [["x" "Real"]] ['(>= x 0)])))
+ (is (thrown? (mock/contract-from [["x" "Int"]] nil)))
+ (is (thrown? (mock/synth {} {:fields [["x" "Int"]] :ensures ["(>= x 0)"]}))))
+
+(deftest mathematical-contracts-have-no-implicit-runtime-source-claim
+ (let [contract (mock/contract [[:left/open t/Int] [:right/open t/Bool]]
+                  (fn [fields] [(t/ge (:left/open fields) (t/int 7)) (t/not (:right/open fields))]))]
+  (doseq [backend [:z3 :oxiz]]
+   (let [answer (mock/synth {:backend backend} contract)]
+    (is (= :witnessed (:modality answer)) (brief answer))
+    (is (= false (get-in answer [:value :right/open])))
+    (is (= :authored-terms (get-in answer [:source-connection :status])))
+    (is (= :independent-term-evaluation (get-in answer [:runtime-replay :measurement :basis])))
+    (is (mock/check {} contract (:value answer))))))
+ (let [contract (mock/contract [[:r t/Real] [:bits (t/bv-sort 8)]]
+                 (fn [f] [(t/eq (:r f) (t/real 1 3)) (t/eq (:bits f) (t/literal (t/bv-sort 8) 255))]))]
+  (doseq [backend [:z3 :oxiz]]
+   (let [answer (mock/synth {:backend backend} contract)]
+    (is (= :witnessed (:modality answer)) (brief answer))
+    (is (= {:formal/real [1 3]} (get-in answer [:value :r])))
+    (is (= {:formal/bv [8 255]} (get-in answer [:value :bits])))
+    (is (mock/check {} contract (:value answer)))))))
+
+(deftest generator-products-enums-and-lengths-remain-runtime-values
+ (let [contract (mock/contract-from [[:mode (v/enum-of [:left/open :bool] :right/open)]
+                                    [:payload (v/tuple-of (v/int-of 7 7) (v/coll-of 0 3))]]
+                 ['(and (some? (:left/open mode)) (= (:left/open mode) false))
+                  '(and (= (nth payload 0) 7) (= (count (nth payload 1)) 2))])]
+  (doseq [backend [:z3 :oxiz]]
+   (let [answer (mock/synth {:backend backend} contract)]
+    (is (= :witnessed (:modality answer)) (brief answer))
+    (is (= {:left/open false} (get-in answer [:value :mode])))
+    (is (= 7 (get-in answer [:value :payload 0])))
+    (is (= 2 (count (get-in answer [:value :payload 1]))))
+    (is (= :abstract (get-in answer [:question :scope :mode])))
+    (is (mock/check {} contract (:value answer)))))))
+
+(deftest literal-response-pins-do-not-become-source-code
+ (let [actual (str "quote\" slash\\ newline\n" (erlang/list_to_binary (list 0)))
+       contract (mock/contract-from [["text" "String"]] [(list '= 'text actual)])
+       answer (mock/synth {:backend :z3} contract {:pins {:text actual}})]
+  (is (= :witnessed (:modality answer)) (brief answer))
+  (is (= actual (get-in answer [:value :text])))
+  (is (mock/check {} contract {:text actual})))
+ (let [contract (mock/contract-from [["nth" "Int"] ["formal_response_input" "Int"]]
+                  ['(= nth 7) '(= formal_response_input 8)])
+       answer (mock/synth {:backend :z3} contract)]
+  (is (= :witnessed (:modality answer)) (brief answer))
+  (is (= {:nth 7 :formal_response_input 8} (:value answer)))))
+
+(deftest false-and-nil-retain-presence-and-the-response-shape-is-exact
+ (let [contract (mock/contract-from [["flag" "Bool"]] ['(= flag false)])]
+  (is (mock/check {} contract {:flag false}))
+  (is (not (mock/check {} contract {})))
+  (is (not (mock/check {} contract {:flag nil})))
+  (is (not (mock/check {} contract {:flag false :extra 9})))
+  (is (thrown? (mock/synth {} contract "(assert false)"))))
+ (doseq [backend [:z3 :oxiz]]
+  (let [result (first (v/faults {:backend backend :engine :terms} {:gen (v/bool-of) :laws ['v]}))]
+   (is (= :witnessed (:modality result)) (brief result))
+   (is (contains? result :witness))
+   (is (= false (:witness result)))
+   (is (= false (:isolated-fault result)))
+   (is (= (:question-identity result) (identity/hash (:question result)))))))
+
+(deftest crashes-are-law-violations-and-compiler-errors-are-not
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= (quot x 0) 0)])]
+  (doseq [backend [:z3 :oxiz]]
+   (let [valid (mock/synth {:backend backend} contract) invalid (mock/synth-invalid {:backend backend} contract)]
+    (is (= :solver-claim (:modality valid)))
+    (is (= true (:none valid)))
+    (is (= :witnessed (:modality invalid)) (brief invalid))
+    (is (= :raised (get-in invalid [:runtime-replay :measurement :laws 0 :runtime :status])))
+    (is (= false (get-in invalid [:runtime-replay :measurement :laws 0 :runtime :module-loaded]))))))
+ (let [good (mock/contract-from [["x" "Int"]] ['(>= x 0)])
+       different (mock/contract-from [["x" "Int"]] [false])
+       forged (assoc good :runtime-laws (:runtime-laws different))
+       result (mock/synth {:backend :z3} forged)]
+  (is (= :candidate (:modality result)))
+  (is (not (contains? result :value)))))
+
+(deftest isolated-faults-total-faults-and-vacuity-retain-different-questions
+ (doseq [backend [:z3 :oxiz]]
+  (let [options {:backend backend}
+        contract (mock/contract-from [["x" "Int"]] ['(>= x -40) '(<= x 60) '(>= x -50)])
+        rows (fault/isolate-all options contract) classes (fault/independent-laws rows)
+        impossible (mock/contract-from [["x" "Int"]] ['(>= x 0) '(< x 0) true])]
+   (is (= [:witnessed :witnessed :solver-claim] (mapv :modality rows)))
+   (is (= [0 1] (:independent classes))) (is (= [2] (:implied classes)))
+   (is (= :vacuous (:modality (fault/isolate options impossible 2))))
+   (is (= :not-checked (get-in (nth rows 2) [:answer :certificate :status])))
+   (is (every? #(= :prove (get-in % [:question :mode])) rows))))
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0) '(<= x 1)])]
+  (is (= :witnessed (:modality (mock/synth-invalid {:backend :z3} contract))))
+  (is (= :solver-claim (:modality (fault/total-error {:backend :z3} contract))))))
+
+(deftest native-unknown-and-mathematical-incompleteness-never-become-violation-edges
+ (let [contract (mock/contract [[:x t/Int]] (fn [f] [(t/eq (t/uf "response.f" [t/Int] t/Int [(:x f)]) (t/int 0))]))
+       world (fault/build-db {} contract [{:fault/id 0 :kind :observed :value {:x 0}}])]
+  (try
+   (is (= [] (fault/covered-clauses (:db world))))
+   (is (= false (:complete? world)))
+   (is (= :unknown (get-in world [:attempts 0 :measurement :status])))
+   (is (thrown? (mock/check {} contract {:x 0})))
+   (finally (datom/close! (:conn world)))))
+ (let [contract (mock/contract-from [["x" "Int"]] ['(>= x 0)])
+       result (oracle/with-query-handler unknown-answer #(mock/synth {:worker "/unavailable/formal-worker"} contract))]
+  (is (= :unknown (:modality result)))
+  (is (= 1 (get-in result [:question :formal/query])))
+  (is (not (contains? result :value)))))
+
+(deftest labelled-semantic-assumptions-carry-every-condition
+ (let [x (t/variable "response.assumption.x" t/Int)
+       premise (value/make (t/bool true) {:constraints [(t/ge x (t/int 5))]
+                                         :scope {:mode :bounded :domain [5 :unbounded]}})
+       question (query/prove (t/gt x (t/int 0))
+                  {:assumptions [{:label "admitted input" :term premise :origin {:source :test}}]})]
+  (is (= :bounded (get-in question [:scope :mode])))
+  (is (some #(= "admitted input" (:label %)) (:assertions question)))
+  (doseq [backend [:z3 :oxiz]]
+   (is (= :proved (:verdict (oracle/with-query-handler (fn [q execute] (oracle/query-answer q (execute)))
+                             #(logic/run {:backend backend} question))))))))
+
+(deftest quoted-predicates-targets-and-guards-preserve-native-literal-data
+ (let [actual (str "quote\" slash\\ newline\n" (erlang/list_to_binary (list 0)))
+       generator (v/one-of actual)
+       found (v/exists {:backend :z3 :engine :terms} "text" generator (list '= 'text actual))
+       failed (property/prove {:backend :z3} '(defn echo [text] text) (list 'not (list '= 'result actual)) generator)
+       clauses (list 'defn 'select (list ['text] :when (list '= 'text actual) true))
+       covered (v/covers {:backend :z3 :engine :terms} clauses generator)]
+  (is (= :witnessed (:modality found)) (brief found))
+  (is (= actual (:witness found)))
+  (is (= :refuted (:modality failed)) (brief failed))
+  (is (= actual (:result failed)))
+  (is (= :reproduced (get-in failed [:runtime-replay :status])))
+  (is (= :solver-claim (:modality covered)) (brief covered))))
+
+(deftest a-runtime-text-outside-the-solver-alphabet-is-not-a-law-violation
+ (let [actual (unicode/characters_to_binary (list 1048576))
+       contract (mock/contract-from [[:text (v/text-of "")]] ['(= text text)])
+       measured (mock/check-result {} contract {:text actual})
+       world (fault/build-db {} contract [{:fault/id 0 :kind :observed :value {:text actual}}])]
+  (try
+   (is (v/gen-domain? (v/text-of "") actual))
+   (is (= :unknown (:status measured)))
+   (is (= [] (fault/covered-clauses (:db world))))
+   (is (= false (:complete? world)))
+   (finally (datom/close! (:conn world))))))

@@ -1,0 +1,67 @@
+(ns veritas.response-optimize-test
+ (:require [veritas.mock :as mock] [formal.term :as t] [formal.value :as value]
+           [formal.query :as query] [formal.identity :as identity] [oracle]))
+(defn brief [r] (pr-str (select-keys r [:modality :feasibility :optimality :optimization :runtime-replay])))
+
+(deftest boundary-questions-are-global-and-work-above-the-finite-choice-limit
+ (doseq [backend [:z3 :oxiz] [lo hi] [[-41 -3] [-1000000 1000000]]]
+  (let [contract (mock/contract-from [["x" "Int"]] [(list '>= 'x lo) (list '<= 'x hi)])
+        answers (mapv #(mock/synth-boundary {:backend backend} contract :x %) [:min :max])]
+   (is (= [lo hi] (mapv #(get-in % [:value :x]) answers)))
+   (doseq [r answers]
+    (is (= :solver-claim (:optimality r)) (brief r))
+    (is (= :witnessed (:feasibility r)))
+    (is (= :not-checked (get-in r [:optimization :terminal :answer :certificate :status])))
+    (is (= :unsat (get-in r [:optimization :terminal :answer :verdict])))
+    (is (contains? #{:lt :gt} (get-in r [:optimization :terminal :question :assertions
+                                      (dec (count (get-in r [:optimization :terminal :question :assertions]))) :term :op])))
+    (is (mock/check {} contract (:value r)))))))
+
+(deftest a-budget-never-turns-an-unbounded-objective-into-an-optimum
+ (doseq [backend [:z3 :oxiz] direction [:min :max]]
+  (let [contract (mock/contract-from [["x" "Int"]] [true])
+        r (mock/synth-boundary {:backend backend} contract :x direction {:query-budget 4})]
+   (is (= :candidate (:modality r)) (brief r))
+   (is (= :not-established (:optimality r)))
+   (is (= :witnessed (:feasibility r)))
+   (is (= :query-budget (get-in r [:optimization :reason])))
+   (is (= 4 (get-in r [:optimization :queries])))
+   (is (mock/check {} contract (:value r))))))
+
+(deftest unresolved-final-improvement-keeps-a-feasible-candidate
+ (doseq [backend [:z3 :oxiz]]
+  (let [contract (mock/contract-from [["x" "Int"]] ['(= x 0)])
+        seen (atom [])
+        r (oracle/with-query-handler
+            (fn [question execute]
+             (swap! seen conj question)
+             (if (= true (get-in (last (:assertions question)) [:origin :strict]))
+              (oracle/query-answer question {:phase :query :solver-status :unknown :verdict :unknown})
+              (oracle/query-answer question (execute))))
+            #(mock/synth-boundary {:backend backend} contract :x :min))]
+   (is (= :candidate (:modality r)) (brief r))
+   (is (= :witnessed (:feasibility r)))
+   (is (= :not-established (:optimality r)))
+   (is (= {:x 0} (:value r)))
+   (is (= :unknown (get-in r [:optimization :terminal :answer :verdict])))
+   (is (every? #(= % (query/validate! %)) @seen))
+   (is (= 3 (count @seen))))))
+
+(deftest boundary-direction-sort-and-budget-errors-are-explicit
+ (let [integer (mock/contract-from [["x" "Int"]] [true])
+       real (mock/contract [[:x t/Real]] (fn [_] [(t/bool true)]))]
+  (is (thrown? (mock/synth-boundary {} integer :x :typo)))
+  (is (thrown? (mock/synth-boundary {} real :x :min)))
+  (is (thrown? (mock/synth-boundary {} integer :x :min {:query-budget 0})))
+  (is (thrown? (mock/synth-boundary {} integer :absent :min)))))
+
+(deftest derived-query-assumptions-preserve-the-original-claim-and-observations
+ (let [x (t/variable "response.derived.x" t/Int)
+       original (query/prove (t/ge x (t/int 0)) {:observe {"x" x} :profile :test/derived})
+       derived (query/constrain original "lower bound" (t/ge x (t/int 5)) {:source :test})]
+  (is (= (:claim original) (:claim derived)))
+  (is (= (:counterexample original) (:counterexample derived)))
+  (is (= (:observe original) (:observe derived)))
+  (is (= :test/derived (:profile derived)))
+  (is (not= (identity/hash original) (identity/hash derived)))
+  (is (thrown? (query/constrain derived "lower bound" (t/bool false))))))

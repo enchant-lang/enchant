@@ -1,0 +1,66 @@
+(ns formal.optimize
+ (:require [formal.term :as t] [formal.query :as q] [formal.logic :as logic] [formal.identity :as identity]))
+
+(defn- fresh-label [taken prefix]
+ (loop [label prefix] (if (contains? taken label) (recur (str label "/")) label)))
+
+(defn integer
+ "Search a global integer extremum with exponential bracketing and binary
+  refinement. No finite bound is added to the original domain. Only a final
+  strict-improvement UNSAT answer supports an unchecked optimality claim.
+  A query budget, unknown or unmaterialized model keeps the result incomplete."
+ ([options problem objective direction] (integer options problem objective direction {}))
+ ([options problem objective direction settings]
+  (q/validate! problem)
+  (when-not (and (map? options) (= :sat (:mode problem)) (= t/Int (t/sort-of objective))
+                (contains? #{:min :max} direction))
+   (throw (ex-info "Integer optimization requires a complete SAT question and min/max Int objective" {})))
+  (let [budget (get settings :query-budget 128)
+        _ (when-not (and (int? budget) (<= 1 budget 512)) (throw (ex-info "Optimization query budget must be in 1..512" {})))
+        watch (fresh-label (set (keys (:observe problem))) "formal.optimize/objective")
+        label (fresh-label (set (map :label (:assertions problem))) "formal.optimize/bound")
+        base (assoc problem :observe (assoc (:observe problem) watch objective))
+        bound-question (fn [threshold strict?]
+                         (q/constrain base label
+                          ((if (= :min direction) (if strict? t/lt t/le) (if strict? t/gt t/ge)) objective (t/int threshold))
+                          {:basis :integer-extremum :direction direction :strict strict?}))
+        perform
+        (fn [session]
+         (let [history (atom [])
+               ask (fn [question]
+                     (let [answer (logic/solve-in session question) actual (or (:question answer) question)]
+                      (swap! history conj {:question-identity (identity/hash actual)
+                                           :verdict (:verdict answer) :phase (:phase answer)})
+                      {:question actual :answer answer :value (get-in answer [:witness watch])}))
+               valid? (fn [row] (and (= :sat (get-in row [:answer :verdict])) (int? (:value row))
+                                     (= :valid (get-in row [:answer :validation :status]))))
+               finish (fn [status best more]
+                        (merge {:status status :direction direction :objective objective :scope (:scope base)
+                                :base-question base :feasible best :queries (count @history) :history @history
+                                :compiler-proof-authority false :certificate {:status :not-checked :kind :solver-answer}}
+                               more))
+               first-answer (ask base)]
+          (if-not (valid? first-answer)
+           (finish (if (= :unsat (get-in first-answer [:answer :verdict])) :infeasible-claim :unresolved)
+                   nil {:terminal first-answer})
+           (loop [best first-answer step 1 impossible nil]
+            (cond
+             (>= (count @history) budget) (finish :candidate best {:reason :query-budget :optimality :not-established})
+             (and (some? impossible) (= 1 (if (= :min direction) (- (:value best) impossible) (- impossible (:value best)))))
+              (let [terminal (ask (bound-question (:value best) true))]
+               (finish (if (= :unsat (get-in terminal [:answer :verdict])) :optimal-claim :candidate)
+                       best {:terminal terminal :optimality (if (= :unsat (get-in terminal [:answer :verdict])) :solver-claim :not-established)}))
+             :else
+              (let [threshold (if (nil? impossible)
+                                ((if (= :min direction) - +) (:value best) step)
+                                (erlang/div (+ (:value best) impossible) 2))
+                    ;; Toward-zero division must not repeat the feasible endpoint
+                    ;; of a negative interval. Use its adjacent interior point.
+                    threshold (if (= threshold (:value best))
+                                ((if (= :min direction) dec inc) threshold) threshold)
+                    row (ask (bound-question threshold false)) verdict (get-in row [:answer :verdict])]
+               (cond
+                (valid? row) (recur row (if (nil? impossible) (* step 2) step) impossible)
+                (= :unsat verdict) (recur best step threshold)
+                :else (finish :candidate best {:terminal row :reason :unresolved-bound :optimality :not-established}))))))))]
+   (if (:session options) (perform (:session options)) (logic/with-session options perform)))))

@@ -1,0 +1,47 @@
+(ns formal.ground (:require [formal.term :as t] [formal.evaluate :as evaluate]))
+
+(defn literal
+ "A typed mathematical BL value as a ground term, without a text boundary.
+  Real, BV, FP and enum encodings keep their explicit sort and representation."
+ [sort data]
+ (when-not (= :valid (:status (evaluate/check-value sort data)))
+  (throw (ex-info "Ground value does not inhabit its declared mathematical sort" {:sort sort})))
+ (case (first sort)
+  :real (t/literal sort (:formal/real data))
+  :bv (t/literal sort (second (:formal/bv data)))
+  :fp (t/literal sort (nth (:formal/fp data) 2))
+  :enum (t/literal sort (second (:formal/enum data)))
+  :seq (reduce (fn [out item]
+                 (t/app :seq-concat sort [out (t/app :seq-unit sort [(literal (second sort) item)] nil)] nil))
+               (t/app :seq-empty sort [] nil) data)
+  :array (reduce (fn [out [key item]] (t/store out (literal (second sort) key) (literal (nth sort 2) item)))
+                 (t/const-array (second sort) (literal (nth sort 2) (get-in data [:formal/array :default])))
+                 (get-in data [:formal/array :updates]))
+  (t/literal sort data)))
+
+(defn bind
+ "Pin one expression to typed data. A variable also supplies an independent
+  replay assignment. Pinning an expression does not invert that expression."
+ [expression data]
+ (let [checking (evaluate/check-value (t/sort-of expression) data)]
+  (if-not (= :valid (:status checking))
+   (assoc checking :pins [] :assignments {} :sorts {})
+   {:status :valid :pins [(t/eq expression (literal (t/sort-of expression) data))]
+    :assignments (if (= :var (:op expression)) {(:data expression) data} {})
+    :sorts (if (= :var (:op expression)) {(:data expression) (t/sort-of expression)} {})})))
+
+(defn combine [bindings]
+ (loop [remaining (seq bindings) result {:status :valid :pins [] :assignments {} :sorts {}}]
+  (if-not remaining result
+   (let [item (first remaining)
+         conflict (some (fn [[name data]]
+                          (and (contains? (:assignments result) name)
+                               (not= true (evaluate/equal (get (:sorts item) name)
+                                                (get (:assignments result) name) data)))) (:assignments item))]
+    (cond
+     (not= :valid (:status item)) item
+     conflict {:status :invalid :reason :conflicting-model-coordinates :pins [] :assignments {} :sorts {}}
+     :else (recur (next remaining)
+             {:status :valid :pins (into (:pins result) (:pins item))
+              :assignments (merge (:assignments result) (:assignments item))
+              :sorts (merge (:sorts result) (:sorts item))}))))))

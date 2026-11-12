@@ -1,0 +1,119 @@
+(ns formal.response-runtime
+ (:require [formal.response :as response] [formal.term :as t] [formal.value :as v]
+           [formal.runtime-values :as runtime] [formal.source :as source] [formal.anf-inputs :as inputs]
+           [formal.source-runtime :as source-runtime] [formal.logic :as logic] [formal.identity :as identity]))
+(defn- require! [ok message] (when-not ok (throw (ex-info (str "formal.response-runtime: " message) {}))))
+
+(defn from-source
+ "Translate every quoted law once through compiler ANF. Failure rejects the
+  whole contract. The runtime executes those exact functions for witnesses."
+ [fields predicates]
+ (require! (vector? predicates) "provide every source law in an explicit vector")
+ (let [names (mapv (comp str first) fields)
+       _ (inputs/prepare "formal.source.intrinsics" (into {} (mapv (fn [name] [name (t/int 0)]) names)))
+       input-name (symbol (loop [name "formal_response_input"] (if (contains? (set names) name) (recur (str name "_")) name)))
+       model (runtime/product (mapv second fields))
+       bindings (vec (mapcat (fn [i] [(symbol (nth names i)) (list 'core/nth input-name i)]) (range (count names))))
+       compiled (mapv (fn [i predicate]
+                        (require! (not (string? predicate)) "source laws are quoted forms, never strings")
+                        (let [form (list 'fn [input-name] (list 'let bindings predicate))
+                              result (source/prepare-function form [model])]
+                         (require! (= :translated (:status result)) (str "law " i " has no reviewed translation: " (:reason result)))
+                         (require! (= t/Bool (t/sort-of (v/term (:value result)))) (str "law " i " must return Bool"))
+                         result)) (range (count predicates)) predicates)
+       definition (response/define fields (mapv :value compiled)
+                    {:origin {:laws (mapv pr-str predicates)}
+                     :source-connection {:status :reviewed :basis :compiler-anf :metatheory :not-mechanized}})]
+  {:definition definition :runtime-laws compiled :runtime-kind :source}))
+
+(defn check-result
+ "Measure a supplied response independently. Runtime source laws execute their
+  exact translated ANF; mathematical laws use term evaluation. Interface or
+  model failures remain separate from actual law violations."
+ [contract data]
+ (let [model (:definition contract) bound (response/bindings model data)
+       domain (response/domain-check model bound)
+       base {:source-connection (:source-connection model) :compiler-proof-authority false}]
+  (cond
+   (not= :valid (:status domain)) (merge base {:status (if (= :invalid (:status domain)) :invalid-domain :unknown) :domain domain})
+   (= :terms (:runtime-kind contract)) (merge base (response/measure model data))
+   :else
+    (let [arguments (mapv #(get data (first %)) (:fields model))
+          rows (mapv (fn [i compiled]
+                        (let [actual (source-runtime/run (:anf compiled) [arguments])
+                              clean (= false (:module-loaded actual))
+                              returned (= :returned (:status actual))
+                              raised (and (= :raised (:status actual)) (= :invocation (:phase actual)))]
+                         {:clause i :runtime actual :holds (and returned (= true (:value actual)))
+                          :status (cond (not clean) :error
+                                        (and returned (boolean? (:value actual))) (if (= true (:value actual)) :holds :violated)
+                                        raised :violated :else :error)}))
+                      (range (count (:laws model))) (:runtime-laws contract))]
+     (merge base {:status (cond (some #(= :error (:status %)) rows) :error
+                               (every? #(= :holds (:status %)) rows) :valid :else :invalid)
+                  :laws rows :basis :same-anf-execution :domain domain})))))
+
+
+(defn- selection? [mode clause rows]
+ (let [accepted (mapv #(= :holds (:status %)) rows)]
+  (case mode
+   :valid (every? true? accepted)
+   :invalid (some false? accepted)
+   :all-invalid (every? false? accepted)
+   :isolate (and (= false (nth accepted clause)) (every? true? (keep-indexed #(when (not= %1 clause) %2) accepted)))
+   false)))
+
+(defn accept-answer
+ "Validate a term model, domain membership and the requested law selection.
+  Public for boundary search: feasibility and optimality keep separate evidence."
+ [prepared answer]
+ (let [contract (:contract prepared) model (:definition contract)
+       mode (get-in prepared [:request :mode] :valid) clause (get-in prepared [:request :clause])
+       sat? (contains? #{:sat :refuted} (:verdict answer))
+       projected
+        (when sat?
+         (mapv (fn [i row]
+                  (let [observed (get-in answer [:witness (str "field/" (first row))])
+                        raw (:value observed)
+                        projection (when (and (= true (:defined observed)) (= true (:within observed)))
+                                     (if (contains? (:pins prepared) (first row))
+                                       {:value (get (:pins prepared) (first row))}
+                                       (if (= :source (:runtime-kind contract))
+                                         (runtime/concrete (second row) raw) {:value raw})))]
+                   (when projection [(first row) (:value projection)])))
+                (range (count (:fields model))) (:fields model)))
+       data (when (and sat? (every? some? projected)) (into {} projected))
+       measured (when data (check-result contract data))
+       agreement
+        (and (= :valid (get-in answer [:validation :status]))
+             (contains? #{:valid :invalid} (:status measured))
+             (every? true?
+              (mapv (fn [i row]
+                      (let [expected (get-in answer [:witness (str "law/" i)]) actual (:runtime row)]
+                       (if (= :source (:runtime-kind contract))
+                         (or (and (= :returned (:status actual)) (= true (:defined expected)) (= (:value actual) (:value expected)))
+                             (and (= :raised (:status actual)) (= false (:defined expected))))
+                         (= (:holds row) (and (= true (:defined expected)) (= true (:value expected)))))))
+                    (range (count (:laws model))) (:laws measured)))
+             (selection? mode clause (:laws measured)))
+       question (or (:question answer) (:question prepared))
+       modality (case (:verdict answer)
+                  :unsat :solver-claim :proved :solver-claim :vacuous :vacuous
+                  :sat (if agreement :witnessed :candidate) :refuted (if agreement :witnessed :candidate)
+                  :unsupported :unsupported :error :error :candidate :candidate :unknown)
+       base {:status (:solver-status answer) :modality modality :engine :terms
+             :question question :question-identity (identity/hash question) :answer answer
+             :runtime-replay (when sat? {:status (if agreement :reproduced :unavailable-or-mismatch) :measurement measured})
+             :source-connection (:source-connection model) :compiler-proof-authority false}]
+  (cond
+   agreement (assoc base :value data :witness data)
+   (contains? #{:unsat :proved} (:verdict answer)) (merge base {:none true :complete true}
+                                                   (when (= :isolate mode) {:implied true :premise-feasibility :satisfiable-claim}))
+   (= :vacuous (:verdict answer)) (assoc base :implied nil :premise-feasibility :infeasible-claim)
+   :else (cond-> base data (assoc :candidate-value data)))))
+
+(defn execute [options prepared]
+ (when-not (map? options) (throw (ex-info "Response execution requires an options map" {})))
+ (accept-answer prepared
+   (if (:session options) (logic/solve-in (:session options) (:question prepared))
+                         (logic/run options (:question prepared)))))

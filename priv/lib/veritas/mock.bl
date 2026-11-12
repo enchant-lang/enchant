@@ -1,213 +1,183 @@
-; veritas/mock.bl — a contract, run backwards, IS a mock server.
-;
-; ── Where this sits ─────────────────────────────────────────────────────────
-;
-; veritas core answers a QUERY: (quantifier [var gen] pred) → modal verdict. That
-; is ∃/∀ over a typed generator. A mock needs something the core does not model:
-;   • a CONTRACT — a multi-field response shape {:fields :ensures}, not one var;
-;   • DETERMINISM — the same request key must always yield the same response, so a
-;     mock is a pure fn input→response (a server, not a fresh witness each call);
-;   • BOUNDARIES — the min/max valid response, which needs z3's OPTIMIZER, a path
-;     the core's sat/unsat escalator never takes.
-;
-; So this module keeps the contract shape and drives z3 directly for those three
-; things — but it REUSES the core's z3-model parser (veritas/parse-model), so the
-; "a SAT model IS the value" machinery is written once, in the core, not again
-; here. Everything the core already does (∃ a value, ∃ an invalid value) is left
-; to the core; this module adds only what the core cannot express.
-;
-; ── The one idea (unchanged from the original mock.bl) ──────────────────────
-;
-;   verify :  ∀ resp. ensures(resp)              → UNSAT ⟹ property holds
-;   mock   :  ∃ resp. ensures(resp) ∧ seed(resp) → SAT   ⟹ the model is the resp
-;
-; A mock is not written; it is DERIVED from the same contract the real impl is
-; checked against. Because the derivation is a pure fn of (contract, input), the
-; mock is a pure value — safe where the real impl's network egress is unspeakable.
-
 (ns veritas.mock
-  (:require [oracle] [z3] [veritas :as v] [system.smt :as smt] [smt :as smtlib] [core]))
+ (:require [veritas :as v] [formal.response :as response] [formal.term :as t] [formal.value :as value]
+           [formal.runtime-values :as runtime] [formal.ground :as ground]
+           [formal.response-runtime :as response-runtime] [formal.logic :as logic]
+           [formal.optimize :as optimize] [formal.identity :as identity]))
 
-(def TIMEOUT-MS 3000)
+(defn- require! [ok message] (when-not ok (throw (ex-info (str "veritas.mock: " message) {}))))
+(defn- field-key [key]
+ (require! (or (keyword? key) (string? key) (symbol? key)) "response fields need explicit names")
+ (let [key (if (keyword? key) key (keyword (str key)))]
+  (require! (not (blank? (str key))) "empty response field name") key))
+(defn- options! [options] (require! (map? options) "an options map is required, not a solver handle") options)
+(defn- native-sort [shape]
+ (if (string? shape) (get {"Int" t/Int "Bool" t/Bool "String" t/String "Real" t/Real "Rounding" t/Rounding} shape) shape))
+(defn- namespace-option [options]
+ (require! (and (map? options) (every? #(= :namespace %) (keys options))) "unknown contract definition option")
+ (let [scope (get options :namespace :veritas/response)]
+  (require! (or (keyword? scope) (string? scope)) "a logical namespace must be explicit data") scope))
+(defn- fields [declarations source? scope]
+ (require! (and (vector? declarations) (<= (count declarations) 256)
+                (every? #(and (vector? %) (= 2 (count %))) declarations)) "provide an ordered field vector")
+ (let [rows (mapv (fn [i [name shape]]
+                    (let [key (field-key name) sort (native-sort shape)
+                          role (str "veritas/response/" (identity/hash [scope key (if (t/sort? sort) sort :runtime-model)]))
+                          generator? (and source? (satisfies? v/GenTerms shape))
+                          model (cond
+                                  (t/sort? sort)
+                                   (value/lift (t/variable role sort))
+                                  generator?
+                                   (do (require! (satisfies? v/GenShrink shape) "a source generator needs runtime domain admission")
+                                       (or (v/gen-term shape role) (throw (ex-info "Generator has no reviewed term model" {:field key}))))
+                                  (and source? (or (value/value? shape) (t/term? shape))) (value/lift shape)
+                                  :else (throw (ex-info "Unknown response field domain" {:field key})))
+                          model (if (and source? (t/term? (:value model)) (= t/String (t/sort-of (:value model)))
+                                         (= :exact (get-in model [:scope :mode])))
+                                  (assoc model :scope {:mode :abstract :model :solver-text :runtime-domain :valid-utf8}
+                                               :domain {:kind :scalar :profile :bl/solver-text-v1}) model)]
+                     {:key key :model model :generator (when generator? shape)}))
+                  (range (count declarations)) declarations)]
+  (require! (= (count rows) (count (set (map :key rows)))) "field names must retain distinct complete identities")
+  rows))
 
-; ── contract → SMT ──────────────────────────────────────────────────────────
-;
-; A contract is {:fields [[name sort]…] :ensures [smt-string…]}. The AUTHORING
-; surface is quoted bl forms (contract-from); they lower through system.smt —
-; the SAME translator the verifier and the veritas core use, so a mock and its
-; checker can never disagree. The :ensures strings are the z3 WIRE, produced
-; once at the contract boundary and never hand-written.
-
-(defn contract-decls
-  "declare-const COMMANDS for the response fields — forms, rendered at the port
-   edge like every script. Public: veritas.fault reuses this so the contract→SMT
-   lowering lives in ONE place (this module owns contracts)."
-  [fields]
-  (vec (map (fn [f] (smtlib/declare-const (symbol (first f)) (symbol (second f)))) fields)))
-
-(defn- assert-all
-  "Assert every ensures clause — each a FORM (or legacy SMT text, READ once here)."
-  [ensures]
-  (vec (map (fn [e] (smtlib/assert (v/as-term e)))
-            ensures)))
-
-(defn- keywordize
-  "{name-string → v} → {name-keyword → v}, so a synthesized response reads like an
-   ordinary bl map ({:temp 16} not {\"temp\" 16})."
-  [m]
-  (into {} (map (fn [p] [(keyword (first p)) (second p)]) (into [] m))))
-
-(defn- model->value
-  "A z3 result → the response map (via the core's parser) or nil when not SAT."
-  [r]
-  ;; the verdict is the oracle's record: the status is a keyword and the model is
-  ;; ALREADY parsed into bl values, so the cast is the only step left here
-  (if (oracle/refuted? r) (keywordize (:model r)) nil))
-
-; ── synthesis modes ─────────────────────────────────────────────────────────
-;
-; Every mode returns {:status \"sat\"|\"unsat\"|\"unknown\" :value {field→v}|nil}.
-; A SAT carries the model as the value; unsat/unknown carry nil. Callers branch on
-; :status so \"unknown\" is never mistaken for a definite answer.
-
-(defn synth
-  "ONE valid response for `contract`, or nil. `extra` is extra SMT asserted on
-   top — a form command, a seq of them, or a legacy raw string — nil/empty for
-   the bare contract."
-  [port contract extra]
-  ; a command starts with a symbol head — that is what separates ONE command
-  ; from a seq of them (a seq's first element would be a command, also
-  ; symbol-headed, but its SECOND would not be its last… keep it simple: the
-  ; callers here pass one command, nil, a string, or a seq; sniff the head)
-  (let [extra-cmds (cond (nil? extra) []
-                         (string? extra) [(smtlib/raw extra)]
-                         (and (list? extra) (symbol? (first extra))) [extra]
-                         (vector? extra) (vec extra)
-                         (list? extra) (vec extra)
-                         :else [extra])
-        cmds (concat [(smtlib/set-option :timeout TIMEOUT-MS)]
-                     (contract-decls (:fields contract))
-                     (assert-all (:ensures contract))
-                     extra-cmds)
-        r (oracle/ask (oracle/obligation :synth cmds) true)]
-    {:status (:status r) :value (model->value r)}))
-
-(defn satisfiable?
-  "Is the contract realizable at all? true only on a definite SAT. A contradictory
-   spec (unsat) or an undecidable one (unknown) → false."
-  [port contract]
-  (oracle/refuted? (synth port contract nil)))
-
-(defn satisfiable-status
-  "The raw verdict: :sat | :unsat (contradictory spec) | :unknown | :error."
-  [port contract]
-  (:status (synth port contract nil)))
-
-(defn synth-invalid
-  "A response the contract FORBIDS: assert the NEGATION of the ensures. Every value
-   this returns is, by construction, a contract violation — an adversarial fault
-   the mock can inject while STILL being provably inside the sandbox."
-  [port contract]
-  (let [ens (:ensures contract)
-        neg-cmd (smtlib/assert
-                  `(not (and ~@(map (fn [e] (if (string? e) (symbol e) e)) ens))))
-        cmds (concat [(smtlib/set-option :timeout TIMEOUT-MS)]
-                     (contract-decls (:fields contract))
-                     [neg-cmd])
-        r (oracle/ask (oracle/obligation :synth-invalid cmds) true)]
-    {:status (:status r) :value (model->value r)}))
-
-; ── the mock SERVER: determinism the core cannot express ────────────────────
-;
-; synth-seeded pins an integer `field` to `seed` (a request key), so the SAME key
-; yields the SAME response. That is what turns a one-off witness into a mock
-; SERVER: a pure fn input→response, keyed by (hash input). The seed EQUATES the
-; field to the seed (a linear constraint), keeping the query fast and decidable.
-
-(defn synth-seeded
-  "A DETERMINISTIC response, pinned by `seed` (an integer) on integer `field`. Same
-   seed ⟹ same response. This is the mock server primitive."
-  [port contract field seed]
-  (synth port contract (smtlib/assert `(= ~(symbol field) ~seed))))
-
-(defrecord MockServer [port contract seed-field])
-
-(defn make-mock
-  "A mock server value: a pure fn from a request key to a deterministic valid
-   response. `seed-field` is the integer field pinned to the key."
-  [port contract seed-field]
-  (->MockServer port contract seed-field))
-
-(defn answer
-  "Serve request `key` from a mock `server`: a deterministic valid response
-   {:ok? true :value {…}}. The same key always yields the same value."
-  [server key]
-  {:ok? true
-   :value (:value (synth-seeded (:port server) (:contract server) (:seed-field server) key))})
-
-; ── boundaries: the OPTIMIZER path the core never takes ─────────────────────
-;
-; synth-boundary asks z3's optimizer for the smallest/largest valid response over
-; an integer `field`. These are the edge cases a hand-written mock always forgets,
-; generated for free — and they need (minimize)/(maximize), which the core's
-; sat/unsat check-model escalator has no way to request.
-
-(defn synth-boundary
-  "The EXTREME valid response: `dir` :min or :max over integer `field`. z3's
-   optimizer finds the smallest/largest response the contract still admits."
-  [port contract field dir]
-  (let [obj (if (= dir :min) 'minimize 'maximize)
-        cmds (concat [(smtlib/set-option :timeout TIMEOUT-MS)]
-                     (contract-decls (:fields contract))
-                     (assert-all (:ensures contract))
-                     [(list obj (symbol field))])
-        r (oracle/ask (oracle/obligation :synth-boundary cmds) true)]
-    {:status (:status r) :value (model->value r)}))
-
-; ── the forward round-trip: synthesize backward, VERIFY forward ─────────────
-;
-; A synthesized response is trusted only when it survives the forward check: pin
-; every field to its value and ask whether the ensures can be violated. unsat ⟹ it
-; holds. Only a definite unsat returns true, so an undecidable check is a safe
-; false.
-
-(defn- smt-literal
-  "A bl value as an SMT literal TERM (data): a negative number is `(- n)`,
-   a string is itself (emit quotes it), everything else passes through."
-  [val]
-  (cond
-    (and (core/int? val) (< val 0)) (list '- (- 0 val))
-    :else val))
-
-(defn check
-  "Does concrete `value` ({field→v}) satisfy `contract`? Pins every field and asks
-   whether the ensures can be violated; unsat ⟹ it holds."
-  [port contract value]
-  (let [pins (vec (map (fn [f]
-                         (let [nm (first f) val (get value (keyword nm))]
-                           (smtlib/assert `(= ~(symbol nm) ~(smt-literal val)))))
-                       (:fields contract)))
-        neg-cmd (smtlib/assert
-                  `(not (and ~@(map (fn [e] (if (string? e) (symbol e) e)) (:ensures contract)))))
-        cmds (concat [(smtlib/set-option :timeout TIMEOUT-MS)]
-                     (contract-decls (:fields contract))
-                     pins
-                     [neg-cmd])]
-    (oracle/proven? (oracle/ask (oracle/obligation :check cmds)))))
-
-; ── deriving a contract from QUOTED bl predicates ─────────────────────
+(defn contract
+ "Build a mathematical response relation from native sorts and a one-shot
+  builder over typed field terms. The builder itself is never stored."
+ ([declarations build-laws] (contract declarations build-laws {}))
+ ([declarations build-laws options]
+ (let [scope (namespace-option options) rows (fields declarations false scope)
+       terms (into {} (mapv (fn [row] [(:key row) (value/term (:model row))]) rows))
+       laws (if (fn? build-laws) (build-laws terms) build-laws)]
+  {:definition (response/define (mapv #(vector (:key %) (:model %)) rows) laws)
+   :fields rows :runtime-kind :terms :runtime-laws [] :namespace scope})))
 
 (defn contract-from
-  "Build a contract from `fields` ([[name sort]…]) and `preds` (QUOTED bl forms
-   over the field names — blueprint.constraint's rule: a predicate is a
-   walkable/composable form, never a source string). Each predicate is
-   translated through system.smt (the verifier's own translator); an
-   untranslatable predicate is dropped — the mock then satisfies a WEAKER
-   contract, never a wrong one."
-  [fields preds]
-  (let [vars (core/set (map first fields))
-        ens (keep (fn [p]
-                    (let [s (smt/of-source vars (pr-str (v/pred-form p)))]
-                      (if (or (nil? s) (= s :untranslatable)) nil s)))
-                  preds)]
-    {:fields fields :ensures (into [] ens)}))
+ "Compile every quoted law from actual BL source. Unsupported laws reject the
+  whole construction. Generator fields keep their runtime admission checks."
+ ([declarations predicates] (contract-from declarations predicates {}))
+ ([declarations predicates options]
+ (let [scope (namespace-option options) rows (fields declarations true scope)
+       built (response-runtime/from-source (mapv #(vector (:key %) (:model %)) rows) predicates)]
+  (assoc built :fields rows :namespace scope))))
+
+(defn definition [contract]
+ (let [result (:definition contract)]
+  (require! (= 1 (:formal/response result)) "a typed response contract is required; legacy SMT contracts are not accepted")
+  result))
+(defn field [contract name] (response/field (definition contract) (field-key name)))
+(defn law-count [contract] (count (:laws (definition contract))))
+
+(defn prepare
+ "Expose the complete question before execution. Extra constraints are typed
+  assumptions or named concrete pins; no solver text or commands are accepted."
+ ([contract] (prepare contract {}))
+ ([contract request]
+  (require! (and (map? request) (every? #(contains? #{:mode :clause :pins :assumptions} %) (keys request))) "unknown response request option")
+  (let [model (definition contract) pins (get request :pins {}) assumptions (get request :assumptions [])
+        _ (require! (and (map? pins) (vector? assumptions)) "pins are a map and assumptions an explicit vector")
+        pins (mapv (fn [[key data]] [(field-key key) data]) pins)
+        _ (require! (= (count pins) (count (set (map first pins)))) "duplicate normalized response pin")
+        bound (ground/combine (mapv (fn [[key data]] (runtime/bind (response/field model key) data)) pins))
+        _ (require! (= :valid (:status bound)) (str "a pin has no admitted concrete representation: " (pr-str (:reason bound))))
+        question (response/question model
+                   (merge (select-keys request [:mode :clause])
+                          {:assumptions (into assumptions (:pins bound))}))]
+   {:question question :question-identity (identity/hash question) :request request
+    :contract contract :pins (into {} pins)})))
+
+(defn- runtime-admission [contract data]
+ (when (map? data)
+  (try
+   (when-let [row (first (filter (fn [row] (and (:generator row) (not (v/gen-domain? (:generator row) (get data (:key row))))))
+                                (:fields contract)))]
+    {:status :invalid-domain :reason :generator-domain :field (:key row)})
+   (catch error {:status :error :reason (ex-message error)}))))
+(defn check-result
+ "Measure a response and retain generator-specific runtime admission."
+ [options contract data]
+ (options! options) (definition contract)
+ (let [failure (runtime-admission contract data)]
+  (if failure (assoc failure :compiler-proof-authority false)
+   (response-runtime/check-result contract data))))
+
+(defn check
+ "True only for an independently measured valid response. Unknown and execution
+  errors throw; they must never become false violation edges."
+ [options contract data]
+ (let [result (check-result options contract data)]
+  (case (:status result) :valid true :invalid false :invalid-domain false
+   (throw (ex-info "Concrete response checking is unresolved" {:result result})))))
+
+(defn accept-answer [prepared answer]
+ (let [result (response-runtime/accept-answer prepared answer)]
+  (if (= :witnessed (:modality result))
+   (if-let [failure (runtime-admission (:contract prepared) (:value result))]
+    (-> result (dissoc :value :witness) (assoc :modality :candidate :runtime-admission failure)) result) result)))
+(defn execute [options prepared]
+ (options! options)
+ (accept-answer prepared
+   (if (:session options) (logic/solve-in (:session options) (:question prepared))
+                         (logic/run options (:question prepared)))))
+(defn synth
+ ([options contract] (synth options contract nil))
+ ([options contract extra] (execute options (prepare contract (if (nil? extra) {} extra)))))
+(defn satisfiable-status
+ "Raw native status only. Use synth's modality to require a replayed value."
+ [options contract] (:status (synth options contract)))
+(defn satisfiable? [options contract]
+ (let [result (synth options contract)]
+  (case (:modality result) :witnessed true :solver-claim false
+   (throw (ex-info "Contract realizability is unresolved" {:result result})))))
+(defn synth-invalid [options contract] (synth options contract {:mode :invalid}))
+(defn synth-seeded [options contract name seed] (synth options contract {:pins {(field-key name) seed}}))
+
+(defn synth-boundary
+ "A global integer boundary search shared by both backends. A feasible response
+  is replayed separately from the final unchecked no-better-response claim."
+ ([options contract name direction] (synth-boundary options contract name direction {}))
+ ([options contract name direction settings]
+  (options! options)
+  (let [prepared (prepare contract) objective (value/term (field contract name))
+        searched (optimize/integer options (:question prepared) objective direction settings)
+        feasible (:feasible searched)
+        result (when feasible (accept-answer (assoc prepared :question (:question feasible)) (:answer feasible)))
+        feasibility (when result (select-keys result [:question :question-identity :answer :runtime-replay :source-connection :value :modality]))
+        evidence {:kind :integer-extremum :direction direction :objective objective
+                  :feasibility feasibility :search-status (:status searched) :terminal (:terminal searched)}]
+   (cond
+    (and (= :optimal-claim (:status searched)) (= :witnessed (:modality result)))
+     (let [terminal (:terminal searched)]
+      (assoc (dissoc result :witness :runtime-replay) :modality :solver-claim :claim-kind :integer-extremum
+                    :question (:question terminal) :question-identity (identity/hash (:question terminal)) :answer (:answer terminal)
+                    :feasibility :witnessed :optimality :solver-claim :optimization searched :evidence evidence))
+    result (assoc result :modality :candidate :claim-kind :integer-extremum :feasibility (:modality result)
+                         :optimality :not-established :optimization searched :evidence evidence)
+    :else (assoc (accept-answer prepared (get-in searched [:terminal :answer]))
+                 :claim-kind :integer-extremum :optimization searched :optimality :not-established :evidence evidence)))))
+
+(defrecord MockServer [options contract seed-field cache lock capacity context])
+(defn make-mock
+ "A server retains the first replayed answer for each exact request key.
+  Stability is per server instance, not a claim of canonical cross-backend
+  model choice. New keys are refused at capacity; old answers are never evicted."
+ [options contract seed-field]
+ (options! options) (definition contract) (field contract seed-field)
+ (let [capacity (get options :capacity 128)]
+  (require! (and (int? capacity) (<= 1 capacity 4096)) "mock capacity must be in 1..4096")
+  (->MockServer options contract (field-key seed-field) (atom {}) (erlang/make_ref) capacity
+                (when (:session options) (logic/context (:session options))))))
+(defn answer [server key]
+ (global/trans (tuple (:lock server) (erlang/self))
+  (fn []
+   (let [guard (when (:session (:options server))
+                (try (if (= (:context server) (logic/context (:session (:options server)))) :current :changed)
+                     (catch _ :expired)))]
+   (if (contains? #{:changed :expired} guard)
+    {:ok? false :modality :error :reason (if (= :changed guard) :context-changed :context-expired) :compiler-proof-authority false}
+   (if-let [cached (get @(:cache server) key)] (assoc cached :reuse :retained-answer)
+    (if (>= (count @(:cache server)) (:capacity server))
+     {:ok? false :modality :error :reason :mock-capacity :compiler-proof-authority false}
+     (let [result (synth-seeded (:options server) (:contract server) (:seed-field server) key)
+           result (assoc result :ok? (= :witnessed (:modality result)))]
+      (when (:ok? result) (swap! (:cache server) assoc key result))
+      result))))))))

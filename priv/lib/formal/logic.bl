@@ -107,12 +107,22 @@
   (select-keys @(:state session) [:generation :assertions])
   (backend/context session)))
 
+(defn context
+ "Read a live owned execution guard. Native guards include an owner PID and
+  must not be treated as portable mathematical data or proof authority."
+ [session] (snapshot! session))
+
 (defn load!
  "Retain named assumptions in a context. Intercepted contexts retain BL data."
  [session assertions]
  (live! session)
  (let [question (q/validate! (q/sat {:assumptions assertions}))
-       normalized (:assertions question)]
+       semantic? (some #(or (v/value? %) (and (map? %) (v/value? (:term %)))) assertions)
+       normalized (if semantic?
+                    (mapv (fn [assertion]
+                             (assoc assertion :origin {:source-origin (:origin assertion)
+                               :formal/retained-domain {:scope (:scope question) :profiles (:profiles question)}})) (:assertions question))
+                    (:assertions question))]
   (if (= 1 (:formal/logical-session session))
    (do (swap! (:state session) update :assertions #(vec (concat % normalized))) {:ok true})
    (backend/load! session normalized))))
@@ -142,15 +152,21 @@
         retained (mapv (fn [i]
                     (let [a (nth persistent i)]
                      (assoc a :label (str "context/" i "/" (:label a))))) (range (count persistent)))
+        domains (vec (distinct (keep #(get-in % [:origin :formal/retained-domain]) retained)))
         effective (if (empty? persistent) problem
                     (-> problem
                         (update :assertions #(vec (concat retained %)))
                         (update :assumptions #(vec (concat (map (fn [a] (select-keys a [:label :origin])) retained) %)))
                         (assoc :context {:generation (:generation snapshot)
                                          :assertions (mapv :label retained)
-                                         :digest (t/digest (mapv :term retained))})))]
+                                         :digest (t/digest (mapv :term retained))})))
+        effective (if (empty? domains) effective
+                    (assoc effective
+                      :scope (v/join-scope (mapv #(v/make (t/bool true) {:scope %})
+                                            (cons (:scope effective) (map :scope domains))))
+                      :profiles (vec (distinct (concat (:profiles effective) (mapcat :profiles domains))))))]
    (try
-    (oracle/ask-query effective
+    (let [result (oracle/ask-query effective
      (fn []
       (live! session)
       (when-not (= snapshot (snapshot! session))
@@ -162,7 +178,10 @@
        (when-not (if (= 1 (:formal/logical-session session))
                    (= snapshot (snapshot! session)) (backend/context-matches? session snapshot))
         (throw (ex-info "formal.logic: question context changed during fallback execution" {})))
-       result)))
+       result)))]
+     ;; With retained assumptions the caller's original question is not the
+     ;; complete one executed. Keep that effective question with the answer.
+     (if (seq persistent) (assoc result :question effective) result))
     (catch error (query-error effective error))))
   (catch error (query-error problem error))))
 
