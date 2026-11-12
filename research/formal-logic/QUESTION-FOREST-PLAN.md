@@ -1,8 +1,9 @@
 # Prepare the question, not just its formulas
 
-The project module and focused/corpus recipes now exist; qualification is
-pending. They prepare a term inventory. Structured observation reconstruction
-and managed owner admission remain separate work.
+The project module and focused/corpus recipes now exist. Its 68 focused
+assertions pass; whole-corpus qualification is pending. They prepare a term
+inventory. Structured observation reconstruction and managed owner admission
+remain separate work.
 
 The next project boundary should accept the original closed question-graph
 wrapper and derive a fresh term inventory without expanding argument trees.
@@ -44,6 +45,15 @@ explicit versioned observation profile before managed reply promotion.
 
 ## Review observations before producing answers
 
+The focused counterexample control confirms another admission distinction.
+`formal.query/validate!` compares the counterexample with the negated claim
+using generic equality, but omits the counterexample from its own typed-root
+walk. A forged Int datum `1.0` can therefore pass that comparison against
+Int `1`. The existing actual exporter refuses it when it checks the execution
+roots, and the new inventory checks it too. Central query admission should
+perform that same complete local typing before managed promotion. This is
+not evidence that the native exporter accepted an ill-typed query.
+
 The current SDK collects term leaves inside lists but `resolve-payload` only
 reconstructs maps/vectors. A list can therefore be admitted as an observation
 and then retain unresolved terms. A bare container can also contribute terms
@@ -74,3 +84,7 @@ question and rebuild observations from that original graph. Qualify effects,
 durable records and fresh-process readers on the exact new SDK. None of these
 compatibility checks supplies typed-forest soundness, evaluator equivalence or
 compiler preservation automatically.
+
+Include the [derived-value resource gate](TERM-FOREST-RESOURCE-PLAN.md): finite
+graph traversal does not bound the sizes of concrete arithmetic or container
+results. Keep this obligation separate from syntax sharing and solver limits.
