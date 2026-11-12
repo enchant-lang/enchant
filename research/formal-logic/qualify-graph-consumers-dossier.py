@@ -61,6 +61,10 @@ for name, digest in host_sources['source_sha256'].items():
     require(hashlib.sha256(committed).hexdigest() == digest, 'committed host source: ' + name)
 host = read(E / 'dossier-host.json')
 warmup = read(E / 'host-warmup-exit.json')
+cache_check = read(E / 'host-cache-exit.json')
+require(cache_check['exit_code'] == 0 and cache_check['runtime_retired']
+        and '52 passed' in (E / 'host-cache-checks.txt').read_text(),
+        '52 focused revision/role/cache concurrency checks on selected SDK')
 require(warmup['exit_code'] == 0 and warmup['ready_timeout_seconds'] == 120
         and warmup['memory_max'] == '2G' and warmup['profile'] == 0,
         'actual cold startup passes existing readiness and memory limits')
@@ -82,7 +86,8 @@ report = {'schema': 'enchant.formal.graph-consumers-dossier-qualification.v1', '
                       'visual_review': visual, 'audit_sha256': sha(E / 'browser-audit/audit.json')},
           'host': host, 'host_sources': host_sources,
           'host_warmup': warmup, 'host_warmup_log_sha256': sha(E / 'host-warmup-checks.txt'),
-          'host_cache_scope': 'Existing revision/role/variant cache with a read-only page warmed before listener admission. Actual cold startup and current presentation are exercised on SDK 44; preceding cache qualification remains historical.',
+          'host_cache_checks': {'assertions': 52, 'log_sha256': sha(E / 'host-cache-checks.txt')},
+          'host_cache_scope': 'Existing revision/role/variant cache with a read-only page warmed before listener admission. Focused cache checks, actual cold startup and current presentation are exercised on SDK 44; preceding broader qualification remains historical.',
           'scope': 'Executed examples, retained records and live presentation. These checks do not establish source/compiler preservation or whole-language totality.',
           'compiler_proof_authority': False}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
