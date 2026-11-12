@@ -69,5 +69,6 @@ finally:
         shutil.rmtree(path)
     (E / (stage + '-runtime.json')).write_text(json.dumps(
         {'paths': cleanup, 'retired': all(not Path(path).exists() for path in cleanup)}, indent=2) + '\n')
+(E / (stage + '-exit.json')).write_text(json.dumps({'stage': stage, 'exit_code': status}) + '\n')
 print(json.dumps({'stage': stage, 'exit_code': status}))
 raise SystemExit(status)
