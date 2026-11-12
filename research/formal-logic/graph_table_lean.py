@@ -42,6 +42,8 @@ def etf(value):
         return b'h'+bytes([len(value)])+b''.join(etf(x) for x in value)
     if type(value) is list:
         if not value:return b'j'
+        if len(value)<=65535 and all(integer(x) and 0<=x<=255 for x in value):
+            return b'k'+len(value).to_bytes(2,'big')+bytes(value)
         return b'l'+len(value).to_bytes(4,'big')+b''.join(etf(x) for x in value)+b'j'
     raise Refused('unsupported owned wire value')
 
@@ -53,6 +55,7 @@ def wire_row(row):
 
 def read_packet(packet):
     require(type(packet) is dict and set(packet)=={'id','root','data-profile','checking','rows','wire-hex'},'closed owned graph packet required')
+    require(type(packet['id']) is str and len(packet['id'].encode())<=256,'bounded instance label required')
     require(packet['data-profile']==PROFILE,'explicit data profile required')
     raw=packet['rows'];require(type(raw) is list and 1<=len(raw)<=LIMITS['nodes'],'model table capacity')
     require(integer(packet['root']) and packet['root']==len(raw)-1,'dense original root required')
@@ -106,6 +109,7 @@ def read_packet(packet):
     wire=encoded((PROFILE.encode(),packet['root'],[wire_row(row) for row in rows]))
     require(len(wire)<=LIMITS['wire'] and wire==hex_bytes(packet['wire-hex'],LIMITS['wire']),'exact original canonical wire required')
     checking=packet['checking'];require(type(checking) is dict,'SDK check report required')
+    require(all(integer(checking.get(k)) for k in ['nodes','edges','bytes','expanded-nodes','depth']),'integer count claims required')
     require(checking['status']=='checked-data-graph' and checking['profile']==PROFILE and checking['compiler-proof-authority'] is False,'explicit SDK report scope required')
     require(checking['reference']=={'profile':PROFILE,'sha256':digest(wire)},'original reference required')
     require(checking['nodes']==len(rows) and checking['edges']==edges and checking['bytes']==len(wire),'same physical structure as SDK report')
@@ -152,7 +156,7 @@ def read_export(path):
     value=json.loads(data)
     require(type(value) is dict and set(value)=={'schema','binary-fields','packets','managed-query-calls','compiler-proof-authority','scope'},'closed model export required')
     require(value['schema']=='enchant.formal.graph-table-instances.v1' and value['binary-fields']=='hex','explicit owned model export version')
-    require(value['managed-query-calls']==0 and value['compiler-proof-authority'] is False,'export scope required')
+    require(integer(value['managed-query-calls']) and value['managed-query-calls']==0 and value['compiler-proof-authority'] is False,'export scope required')
     require(type(value['packets']) is list and 1<=len(value['packets'])<=128,'packet capacity')
     return value
 
