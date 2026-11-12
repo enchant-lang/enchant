@@ -60,6 +60,10 @@ for name, digest in host_sources['source_sha256'].items():
     committed = subprocess.check_output(['git', 'show', host_sources['code_commit'] + ':' + name], cwd=R)
     require(hashlib.sha256(committed).hexdigest() == digest, 'committed host source: ' + name)
 host = read(E / 'dossier-host.json')
+warmup = read(E / 'host-warmup-exit.json')
+require(warmup['exit_code'] == 0 and warmup['ready_timeout_seconds'] == 120
+        and warmup['memory_max'] == '2G' and warmup['profile'] == 0,
+        'actual cold startup passes existing readiness and memory limits')
 require(host['state']['ActiveState'] == 'active' and host['state']['SubState'] == 'running'
         and host['state']['MemoryMax'] == '2147483648' and host['launcher'] == pin['sdk'] + '/bin/bl'
         and host['live_process_sdk_boot'] == pin['sdk'] + '/boot.exs', 'actual capped host on the selected SDK')
@@ -77,7 +81,8 @@ report = {'schema': 'enchant.formal.graph-consumers-dossier-qualification.v1', '
                       'automated_checks': len(audit['checks']), 'screenshots': images, 'review_graphs': graphs,
                       'visual_review': visual, 'audit_sha256': sha(E / 'browser-audit/audit.json')},
           'host': host, 'host_sources': host_sources,
-          'host_cache_scope': 'Unchanged host implementation; preceding cache qualification remains historical. Current host and presentation are exercised here on SDK 44.',
+          'host_warmup': warmup, 'host_warmup_log_sha256': sha(E / 'host-warmup-checks.txt'),
+          'host_cache_scope': 'Existing revision/role/variant cache with a read-only page warmed before listener admission. Actual cold startup and current presentation are exercised on SDK 44; preceding cache qualification remains historical.',
           'scope': 'Executed examples, retained records and live presentation. These checks do not establish source/compiler preservation or whole-language totality.',
           'compiler_proof_authority': False}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
