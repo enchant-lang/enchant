@@ -1,0 +1,38 @@
+(ns veritas.answer-binding-baseline-test
+ (:require [veritas.mock :as mock] [formal.term :as t] [formal.value :as value]
+           [formal.logic :as logic] [formal.query :as query]))
+
+(defn relation [] (mock/contract-from [[:x "Int"]] ['(>= x 0)]))
+
+(deftest a-native-result-retains-the-whole-question-it-answered
+ (let [contract (relation) prepared (mock/prepare contract {:pins {:x 7}})
+       answer (logic/run {:backend :z3} (:question prepared))]
+  (is (= (:question prepared) (:question answer)))
+  (is (= 1 (get-in answer [:question :formal/query])))
+  (is (= :witnessed (:modality (mock/accept-answer prepared answer))))))
+
+(deftest a-model-from-a-different-question-cannot-witness-the-request
+ (let [contract (relation) x (value/term (mock/field contract :x))
+       prepared (mock/prepare contract {:assumptions [(t/gt x (t/int 10))]})
+       other (mock/prepare contract {:pins {:x 0}})
+       answer (logic/run {:backend :z3} (:question other))
+       accepted (mock/accept-answer prepared answer)]
+  (is (= :error (:modality accepted)))
+  (is (not (contains? accepted :value)))
+  (is (not= :witnessed (:modality accepted)))))
+
+(deftest an-unsat-claim-from-a-different-question-cannot-hide-a-response
+ (let [contract (relation) prepared (mock/prepare contract {:pins {:x 7}})
+       answer (logic/run {:backend :z3} (query/sat {:assumptions [(t/bool false)]}))
+       accepted (mock/accept-answer prepared answer)]
+  (is (= :error (:modality accepted)))
+  (is (not= true (:none accepted)))))
+
+(deftest response-data-is-replayed-against-extra-conditions-not-just-the-laws
+ (let [contract (relation) x (value/term (mock/field contract :x))
+       prepared (mock/prepare contract {:assumptions [(t/gt x (t/int 10))]})
+       answer (logic/run {:backend :z3} (:question prepared))
+       misleading (assoc-in answer [:witness "field/x" :value] 0)
+       accepted (mock/accept-answer prepared misleading)]
+  (is (not= :witnessed (:modality accepted)))
+  (is (not (contains? accepted :value)))))
