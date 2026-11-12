@@ -78,7 +78,7 @@ for stage in ('sdk-focused', 'graph-focused', 'native', 'observation-corpus', 's
     runtime = next(x.split('=', 2)[2] for x in command if x.startswith('--setenv=XDG_RUNTIME_DIR='))
     assert not Path(work).exists() and not Path(runtime).exists()
     assert not Path(work).is_relative_to(R)
-    if stage in ('sdk-focused', 'native', 'sdk-regression', 'facade', 'live-regression', 'writer', 'consumer-one', 'consumer-two'):
+    if stage in ('sdk-focused', 'native', 'sdk-regression', 'live-regression', 'writer', 'consumer-one', 'consumer-two'):
         assert '-p' not in command, ('SDK-only stage', stage)
     stages[stage] = {'source': snapshot, 'exit': result,
                      'command_sha256': sha(E / (stage + '-command.json')),

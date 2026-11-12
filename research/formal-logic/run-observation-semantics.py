@@ -93,8 +93,9 @@ elif stage == 'live-regression':
     names += ['priv/lib/live/app.bl', 'test/bl/live/app_test.bl']
     request = ['test', str(R / names[-1])]
 elif stage == 'facade':
-    names += ['test/bl/formal/graph_facade_test.bl', 'test/bl/formal/facade_test.bl',
-              'test/bl/formal/api_test.bl', 'test/bl/system/formal_answer_test.bl',
+    project = True
+    names += ['research/formal-logic/test/graph_facade_test.bl', 'research/formal-logic/test/facade_test.bl',
+              'research/formal-logic/test/api_test.bl', 'test/bl/system/formal_answer_test.bl',
               'test/bl/system/formal_oracle_test.bl', 'test/bl/system/formal_effect_test.bl',
               'test/bl/veritas/ledger_test.bl']
     request = ['test', *[str(R / name) for name in names[-7:]]]
