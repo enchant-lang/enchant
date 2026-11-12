@@ -27,6 +27,7 @@ try{
   check(size.name+': no page overflow',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
   check(size.name+': selection model counts and actual selector boundary are readable',await evaluate(`(()=>{const t=document.body.innerText.replaceAll('’',"'");return t.includes('seven general lemmas, five fixture theorems and four rejection controls')&&t.includes("Prove BL's actual dependency selector builds that closed set.")})()`));
   await click(panel+' .review-index [data-sg-to="proof"]');
+  await evaluate(`document.querySelector(${JSON.stringify(panel)}).querySelector('.review-detail').scrollTo({top:0,behavior:'instant'})`);
   check(size.name+': checked proof panel states conditional value agreement',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(panel)}).innerText;return t.includes('seven selection lemmas')&&t.includes('five fixture theorems')&&t.includes('correct scalar admission')&&t.includes('actual BL dependency selector')&&t.includes('compiler correctness remain separate obligations')})()`));
   await evaluate(`document.querySelector(${JSON.stringify(panel)}).scrollIntoView({block:'center',behavior:'instant'})`);
   await shot(size.name+'-selection-proof');
@@ -42,7 +43,7 @@ try{
   await click('[data-graph="formal-graph-consumers"] [data-sg-mode]');
   await click('[data-graph="formal-graph-consumers"] .sg-overview .sg-node[data-sg-to="proof"]');
   check(size.name+': map returns to selected proof topic',await evaluate(`document.querySelector(${JSON.stringify(panel)}).dataset.view==='proof'`));
-  await evaluate("[...document.querySelectorAll('#doc a')].find(a=>/GRAPH-SELECTION-MODEL\\.md$/.test(a.getAttribute('href')||'')).closest('p').scrollIntoView({block:'start',behavior:'instant'})");
+  await evaluate("(()=>{const p=[...document.querySelectorAll('#doc a')].find(a=>/GRAPH-SELECTION-MODEL\\.md$/.test(a.getAttribute('href')||'')).closest('p');window.scrollTo({top:window.scrollY+p.getBoundingClientRect().top-(innerWidth<700?105:65),behavior:'instant'})})()");
   await shot(size.name+'-selection-meaning');
   const refs=await evaluate("['story-graph-selected','story-graph-native','story-graph-intercepted','story-graph-durable'].map(id=>document.querySelector('#cell-'+id+' .result').innerText.match(/:sha256\\s+\"([0-9a-f]{64})\"/)?.[1])");
   check(size.name+': four executed examples retain the original complete question',refs.length===4&&refs.every(Boolean)&&new Set(refs).size===1);
