@@ -34,6 +34,13 @@ checker and primitive evaluator remain reviewed implementation dependencies.
 Quantifiers and uninterpreted mathematics retain their existing incomplete
 behavior; this work does not add a quantified interpretation.
 
+The current source adds a scoped `with-point` consumer so the structured
+[graph observation interpreter](GRAPH-OBSERVATIONS.md) can share demanded roots
+within one operation. Its lookup and diagnostic functions retire on success or
+failure. The new 104-assertion file and complete observation comparisons pass on
+the candidate SDK; the candidate's broader qualification is still running.
+The earlier 92-assertion receipt above identifies its historical source version.
+
 ## The useful improvement and its cost
 
 Across the 748 point maps, graph evaluation totals 66,462 ms, including fresh
