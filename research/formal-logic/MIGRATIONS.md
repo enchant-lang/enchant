@@ -132,3 +132,10 @@ question matched. The reader now compares those exact canonical bytes first,
 then explicitly binds the raw answer before replay. The failure is retained
 under `ledger-before-binding`; it was a consumer error, not a backend failure.
 The rebound answer is a rechecked record, not a newly executed native result.
+
+Checked model truth takes precedence over unchecked backend claims. For example,
+a checked conditional certificate and a valid admitted point still establish
+the declared model promise if a handler falsely reports that admission is
+UNSAT. That untrusted absence remains visible under `:backend`; it cannot erase
+the independently checked point. `:disagreement` concerns contradictory checked
+objects. Native-only vacuity remains a reported result with `verified nil`.
