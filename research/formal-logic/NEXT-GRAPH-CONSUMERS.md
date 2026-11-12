@@ -61,6 +61,32 @@ Recheck saved graph points in a separate pure window with no native query or
 Source compilation. Source observation, when requested, happens after that
 window and retains actual outcome, input domain, artifact and cleanup scope.
 
+## Keep graph data useful without repeatedly unfolding it
+
+The current encoder deliberately counts every raw tree occurrence. Reopening a
+graph restores sharing, but a consumer that immediately re-encodes the expanded
+question still pays that initial walk again. The qualification makes no speed
+claim. Do not hide this cost behind a cache of an unverified caller reference.
+
+Design a prepared question context that starts from a freshly checked graph.
+It must keep the checked node table, original root and reference tied together;
+rebuild or validate all derived views rather than accepting a forgeable map of
+cached fields. A graph-aware consumer can then select assertions, profiles,
+observers and original free variables without decoding unrelated provenance
+or recomputing a reference from the whole expanded object.
+
+A further typed term-forest view can validate/evaluate shared terms by portable
+node IDs and feed both native adapters. Those IDs belong to language data;
+private native arena IDs still belong to their actual owner/revision. Binder
+validation must account for scope, not memoize a bound term by node ID alone.
+A graph-first builder and incremental preparation are subsequent interfaces,
+not capabilities delivered by the current tree-to-graph encoder.
+
+Qualify a graph context against the existing raw-question path on all 187
+subjects, including exact observations, full reference binding, malformed
+cached views, scope-sensitive binders and original-point replay. A fast path
+must preserve the same refusal and authority rules as the existing path.
+
 ## Remaining foundations
 
 Canonical graph and expansion rules deserve a mechanical model, followed by
