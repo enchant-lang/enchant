@@ -30,6 +30,9 @@ No atom is created to make unfamiliar metadata materialize.
 script, identity and reply paths keep their declared formats. A handler must
 provide the named graph method. Native owners/revisions remain private. Retained
 assertions compose into the effective question graph before interception.
+When retained semantic values require joining scope and profile metadata, those
+specific fields are explicitly materialized. An unfamiliar keyword in a field
+needed for that join can refuse the operation; unrelated provenance stays data.
 
 `formal.answer/check-graph` checks complete exact binding and replays candidate
 assignments. Only the owner-supplied matching actual fallback retains native

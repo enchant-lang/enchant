@@ -1,7 +1,8 @@
 (ns formal.graph-context-test
  (:require [formal.data-graph :as g] [formal.question-graph :as qg] [formal.query :as q]
            [formal.term :as t] [formal.identity :as identity] [formal.point :as point]
-           [formal.answer :as answer] [formal.logic :as logic] [formal.check :as check] [oracle]))
+           [formal.answer :as answer] [formal.logic :as logic] [formal.check :as check]
+           [formal.value :as v] [oracle]))
 (defn refused? [f] (try (f) false (catch _ true)))
 (def unavailable {:backend :z3 :worker "/unavailable/formal-worker" :library "/unavailable/libz3.so"})
 (def x (t/variable "graph.x" t/Int))
@@ -203,3 +204,24 @@
      (is (= :error (:verdict child)))
      (is (String/contains? (:error child) "live owned question context"))
      (is (= :sat (:verdict (logic/solve-graph-in session context)))))))))
+
+(deftest retained-semantic-domains-keep-the-same-model-scope-and-profiles-as-the-raw-path
+ (doseq [engine [:z3 :oxiz]]
+  (logic/with-session {:backend engine}
+   (fn [session]
+    (let [semantic (v/make (t/eq x (t/int 7))
+                    {:within (t/le x (t/int 10)) :scope {:mode :bounded :bound 10}
+                     :domain {:kind :scalar :profile :graph/retained-domain-test}})
+          original (q/prove (t/ge x (t/int 0)))
+          ctx (qg/patch (qg/prepare original) {:origin (qg/field-graph (opaque-context) :origin)})]
+     (logic/load! session [{:label "bounded-seven" :term semantic}])
+     (let [raw (logic/solve-in session original)
+           result (logic/solve-graph-in session ctx)
+           effective (:question-graph result)]
+      (is (= :proved (:verdict raw)))
+      (is (= :proved (:verdict result)))
+      (is (= :bounded (:mode (qg/field-data! effective :scope))))
+      (is (= (:scope raw) (qg/field-data! effective :scope)))
+      (is (= (:profiles raw) (qg/field-data! effective :profiles)))
+      (is (some #(= :graph/retained-domain-test %) (qg/field-data! effective :profiles)))
+      (is (refused? #(qg/materialize! effective)))))))))
