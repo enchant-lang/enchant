@@ -1,0 +1,55 @@
+(ns formal.graph-observations-check
+ (:require [formal.graph-observations :as observed] [formal.term-forest-evaluate :as point]
+           [formal.question-forest :as prepared] [formal.point-fixtures :as fixtures]
+           [formal.term :as t] [formal.value :as v] [formal.evaluate :as sdk]
+           [formal.query :as q] [formal.question-graph :as qg] [formal.data-graph :as graph]
+           [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
+           [formal.native-cases :as native] [oracle] [bl.json :as json]))
+
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :display-reconstruction-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  (fn []
+   (vec (mapcat
+    (fn [[family cases]]
+     (mapv
+      (fn [item]
+       (println (str "graph observations " (:id item)))
+       (let [problem (q/validate! (q/from-case item)) data (graph/encode problem)
+             context {:formal/question-graph 1 :profile qg/profile :graph data}
+             plan (prepared/prepare context) roots (vec (concat (q/roots problem) [(get-in problem [:counterexample :term])]))
+             variables (t/variables roots)
+             points
+             (mapv (fn [mode]
+                     (let [assignments (fixtures/bindings variables mode)
+                           actual (observed/reconstruct context assignments)
+                           expected
+                           (into {} (map (fn [[label descriptor]]
+                                           [label (if (v/value? descriptor)
+                                                    (v/decode descriptor (fn [term] (sdk/observation term assignments)))
+                                                    (sdk/observation descriptor assignments))]) (:observe problem)))
+                           actual-roots (point/values data (get-in plan [:forest :source-roots]) assignments)
+                           expected-roots (mapv (fn [term] (sdk/value term assignments)) roots)]
+                      (assert (erlang/=:= expected (:observations actual)))
+                      (assert (erlang/=:= expected-roots (:values actual-roots)))
+                      (assert (= [] (:refused-observations actual)))
+                      (assert (= :not-run (:assertion-replay actual)))
+                      (assert (= 0 (:native-query-calls actual)))
+                      (assert (= false (:compiler-proof-authority actual)))
+                      (assert (= (graph/reference data) (:question-reference actual)))
+                      {:mode mode :exact-observations true :exact-root-values true
+                       :observations (count expected) :roots (count roots)
+                       :observation-reference (graph/reference (graph/encode expected))
+                       :checking (:checking actual)})) [:absent :zero :alternate :ill-sorted])]
+        {:id (:id item) :family family :question-reference (:reference plan)
+         :points points :compiler-proof-authority false})) cases))
+    [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]])))))
+(assert (= 187 (count rows)))
+(assert (= 0 @calls))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.graph-observation-corpus.v1" :rows rows :managed-query-calls @calls
+               :native-execution :not-invoked :compiler-proof-authority false
+               :scope "Original-graph observation reconstruction and refactored graph point values, compared exactly with the selected SDK at four deterministic point maps per preceding question. Display reconstruction is not assertion replay, a native model certificate or a complete interpretation theorem."} {:pretty 2}))
+(println {:questions (count rows) :point-maps (* 4 (count rows)) :managed-query-calls @calls
+          :status :exact-observation-and-point-agreement})

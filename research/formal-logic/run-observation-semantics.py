@@ -30,6 +30,18 @@ elif stage == 'graph-focused':
               'research/formal-logic/test/term_forest_evaluate_test.bl',
               'research/formal-logic/test/graph_observations_test.bl']
     request = ['test', str(R / names[-2]), str(R / names[-1])]
+elif stage == 'observation-corpus':
+    project = True
+    names += ['research/formal-logic/src/formal/term-forest.bl',
+              'research/formal-logic/src/formal/term-forest-evaluate.bl',
+              'research/formal-logic/src/formal/question-forest.bl',
+              'research/formal-logic/src/formal/graph-observations.bl',
+              'research/formal-logic/src/formal/point-fixtures.bl',
+              'research/formal-logic/src/formal/advanced-cases.bl',
+              'research/formal-logic/src/formal/feature-cases.bl',
+              'research/formal-logic/src/formal/native-cases.bl',
+              'research/formal-logic/graph-observations-check.bl']
+    request = ['run', str(R / names[-1]), '--', str(E / 'observation-corpus.json')]
 else:
     raise ValueError(stage)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
