@@ -42,6 +42,13 @@ semantics by silently normalizing keys. Existing typed theory fragments keep
 their declared sorts and relations. Mixed runtime numeric key theories need
 a reviewed profile before admission.
 
+A future collection redesign must also keep saved evidence readable. An old
+graph can remain canonically checkable while a new default map constructor
+cannot materialize all of its exact keys. Keep the graph data, or use an
+explicitly qualified raw-key materializer; do not rewrite its reference or
+silently merge keys. New language collection profiles need compatibility tests
+against these stored graphs.
+
 ## Map literal evaluation needs a language rule
 
 The first corpus report evaluated the hash walk and counter reads as values
