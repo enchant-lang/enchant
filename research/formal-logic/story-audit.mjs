@@ -629,6 +629,7 @@ try{
    await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center',behavior:'instant'})`);await shot(size.name+'-'+id+'-data');
   }
   await navigate('/#use-the-saved-question-without-unpacking-its-history');
+  check(size.name+': graph chapter describes completed interface and corpus',await evaluate("(()=>{let h=document.querySelector('#use-the-saved-question-without-unpacking-its-history'),t='';for(let e=h?.nextElementSibling;e&&!/^H[12]$/.test(e.tagName);e=e.nextElementSibling)t+=e.innerText;return t.includes('The common BL interface now carries')&&t.includes('all 187 paired graph contexts retain their preceding results')&&!t.includes('full graph-context corpus is pending')})()"));
   check(size.name+': graph consumer chapter keeps saved context and reports separate',await evaluate("document.body.innerText.includes('Changing that provenance still changes the complete question reference')&&document.body.innerText.includes('Reopening a saved execution label does not establish a new execution')"));
   await evaluate("document.querySelector('#use-the-saved-question-without-unpacking-its-history').scrollIntoView({block:'start',behavior:'instant'})");
   await shot(size.name+'-graph-consumers');
