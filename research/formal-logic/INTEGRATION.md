@@ -394,7 +394,7 @@ enable a term-native BL formal interface or make an unwired trait trustworthy.
 independent `formal.ieee-arithmetic` evaluator into the SDK. `formal.beam-float`
 and the reviewed Source profile use finite binary64 bits, RNE operations and
 explicit failure outcomes. Float `one-of` inputs preserve both signed zeros;
-returned-value observations preserve type/bits separately from numeric equality.
+returned Float observations preserve runtime kind/bits separately from numeric equality.
 Known Float/declared Real legacy process verification, repair and discovery
 refuse Source claims. Explicit `:semantics :ideal-real-model` keeps the old
 mathematical result nested without top-level Source proof authority.
