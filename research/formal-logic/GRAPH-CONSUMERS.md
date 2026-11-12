@@ -41,7 +41,7 @@ retains the actual returned raw answer under the error's execution report.
 Native UNSAT remains unchecked solver evidence, never a portable certificate.
 
 `veritas.ledger/record-graph!` uses explicit `:bl/graph-verdict-v1` and payload
-media type v2. The complete question occurs once; separate canonical graphs
+media type v2. The complete question occurs once per record; separate canonical graphs
 hold caller evidence, an optional stripped reply body and an optional witness.
 The indexed reference is checked on reopen. `all`/`about` return these as graph
 data; `graph-evidence!` and `graph-witness!` request materialization. A stored
