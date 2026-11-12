@@ -14,13 +14,18 @@ E.mkdir(exist_ok=True)
 pin = json.loads((P / 'sdk-pin.json').read_text())
 assert hashlib.sha256((Path(pin['sdk']) / 'artifact.json').read_bytes()).hexdigest() == pin['descriptor_sha256']
 stage = sys.argv[1]
-assert stage == 'focused'
+if stage == 'focused':
+    request = ['test', str(P / 'test/term_forest_test.bl')]
+elif stage == 'corpus':
+    request = ['run', str(P / 'term-forest-check.bl'), '--', str(E / 'corpus.json')]
+else:
+    raise ValueError(stage)
 runtime = Path(tempfile.mkdtemp(prefix='formal-term-forest-runtime-'))
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            '--working-directory=' + str(R), '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
            '--property=RuntimeMaxSec=900', '--property=KillMode=control-group',
            '--setenv=XDG_RUNTIME_DIR=' + str(runtime), str(Path(pin['sdk']) / 'bin/bl'),
-           '--cold', '-p', str(P / 'src'), 'test', str(P / 'test/term_forest_test.bl')]
+           '--cold', '-p', str(P / 'src'), *request]
 (E / (stage + '-command.json')).write_text(json.dumps(command, indent=2) + '\n')
 (E / (stage + '-memory-before.txt')).write_text(subprocess.check_output([R / 'scripts/bl-mem'], text=True))
 try:

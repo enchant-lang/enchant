@@ -1,0 +1,43 @@
+(ns formal.term-forest-check
+ (:require [formal.term-forest :as forest] [formal.term :as t] [formal.query :as q]
+           [formal.data-graph :as graph] [formal.advanced-cases :as advanced]
+           [formal.feature-cases :as features] [formal.native-cases :as native]
+           [oracle] [bl.json :as json]))
+
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :term-preparation-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  #(vec (mapcat
+    (fn [[family cases]]
+     (mapv (fn [item]
+             (println (str "prepare " (:id item)))
+             (let [started (erlang/monotonic_time :millisecond)
+                   problem (q/from-case item)
+                   roots (vec (concat (q/roots problem) [(get-in problem [:counterexample :term])]))
+                   data (graph/encode roots)
+                   source-roots (second (nth (:nodes data) (:root data)))
+                   encoded-at (erlang/monotonic_time :millisecond)
+                   actual (forest/prepare data source-roots)
+                   prepared-at (erlang/monotonic_time :millisecond)
+                   previous (t/export (t/registry) roots)
+                   ended (erlang/monotonic_time :millisecond)]
+              (assert (erlang/=:= (:nodes previous) (:nodes actual)))
+              (assert (= (:ids previous) (:roots actual)))
+              (assert (= (graph/reference data) (:data-reference actual)))
+              (assert (= false (:compiler-proof-authority actual)))
+              (println (str (:id item) " matched " (count (:nodes actual)) " native definitions"))
+              {:id (:id item) :family family :data-reference (:data-reference actual)
+               :native-definitions (count (:nodes actual)) :root-count (count roots)
+               :checking (:checking actual) :exact-definitions true :ordered-roots true
+               :timing-ms {:initial-graph (- encoded-at started) :graph-preparation (- prepared-at encoded-at)
+                           :legacy-export (- ended prepared-at)}
+               :native-execution :not-invoked :compiler-proof-authority false})) cases))
+    [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
+(assert (= 187 (count rows)))
+(assert (= 0 @calls))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.term-forest-corpus.v1" :rows rows :managed-query-calls @calls
+               :scope "Project preparation prototype versus the selected SDK's full-term exporter. Full input graph references and exact native definitions; not a solver-speed or implementation-soundness claim."
+               :compiler-proof-authority false} {:pretty 2}))
+(println {:questions (count rows) :managed-query-calls @calls :status :exact-preparation-agreement})
