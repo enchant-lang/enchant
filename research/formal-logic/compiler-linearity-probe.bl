@@ -1,0 +1,44 @@
+(ns formal.compiler-linearity-probe
+ (:require [formal.term :as t] [formal.query :as query] [formal.proof :as proof]
+           [formal.certificate :as certificate] [formal.logic :as logic]
+           [formal.identity :as identity] [bl.json :as json]))
+(defn sum [terms] (reduce t/add (t/int 0) terms))
+(defn question [k n overhead duplication]
+ (let [sizes (mapv #(t/variable (str "linearity/size/" %) t/Int) (range n))
+       children (mapv #(t/variable (str "linearity/emitted/" %) t/Int) (range n))
+       h (t/variable "linearity/overhead" t/Int)
+       assumptions (vec (concat (mapv #(t/ge % (t/int 0)) sizes)
+                          (mapv #(t/ge % (t/int 0)) children)
+                          (mapv (fn [s c] (t/le c (t/mul (t/int k) s))) sizes children)
+                          [(t/ge h (t/int 0)) (t/le h (t/int overhead))]))
+       emitted (t/add h (sum (mapv (fn [i c] (t/mul (t/int (if (= i 0) duplication 1)) c))
+                                    (range n) children)))
+       bound (t/mul (t/int k) (t/add (t/int 1) (sum sizes)))]
+  (query/prove (t/le emitted bound)
+    {:id :compiler/constructor-size :profile :bl/declared-constructor-size-v1
+     :assumptions assumptions :observe {"output" emitted "bound" bound}
+     :origin {:arity n :coefficient k :overhead-bound overhead :first-child-placement duplication
+              :compiler-connection :conditional-not-mechanized}})))
+(def rows
+ (mapv (fn [n]
+          (let [problem (question 12 n 8 1) produced (proof/produce problem)
+                checked (when (:certificate produced) (certificate/check problem (:certificate produced)))]
+           {:arity n :status (:status produced) :checking (:status checked) :search (:search produced)
+            :reason (:reason produced) :question (identity/hash problem)})) (range 9)))
+(assert (every? #(and (= :checked (:status %)) (= :checked (:checking %))) rows))
+(def native
+ (mapv (fn [backend]
+          (let [good (question 12 2 8 1) bad (question 12 2 8 2)
+                a (logic/run {:backend backend} good) b (logic/run {:backend backend} bad)]
+           (assert (= :proved (:verdict a)))
+           (assert (= :refuted (:verdict b)))
+           (assert (= :valid (get-in b [:validation :status])))
+           {:backend backend :single-placement (:verdict a) :double-placement (:verdict b)
+            :questions [(identity/hash good) (identity/hash bad)]
+            :native-certificate (get-in a [:certificate :status])})) [:z3 :oxiz]))
+(assert (= (:questions (first native)) (:questions (second native))))
+(def report {:schema "enchant.formal.compiler-linearity-probe.v1" :proofs rows :native native
+             :claim-scope :declared-size-recurrence :compiler-proof-authority false})
+(def output (first (BeamLisp/argv)))
+(File/write! output (json/encode report {:pretty 2}))
+(println (json/encode report {:pretty 2}))
