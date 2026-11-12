@@ -1,0 +1,35 @@
+(ns formal.answer-binding-check
+ (:require [veritas :as v] [veritas.mock :as mock] [formal.term :as t] [formal.value :as value]
+           [formal.logic :as logic] [formal.query :as query] [formal.identity :as identity] [bl.json :as json]))
+(def contract (mock/contract-from [[:x "Int"]] ['(>= x 0)]))
+(def x (value/term (mock/field contract :x)))
+(def prepared (mock/prepare contract {:assumptions [(t/gt x (t/int 10))]}))
+(def other (mock/prepare contract {:pins {:x 0}}))
+(def rows
+ (mapv (fn [backend]
+          (let [options {:backend backend}
+                answer (logic/run options (:question prepared))
+                good (mock/accept-answer prepared answer)
+                foreign (mock/accept-answer prepared (logic/run options (:question other)))
+                absent (mock/accept-answer prepared (logic/run options (query/sat {:assumptions [(t/bool false)]})))
+                misleading (mock/accept-answer prepared (assoc-in answer [:witness "field/x" :value] 0))]
+           (assert (= (:question prepared) (:question answer)))
+           (assert (= :witnessed (:modality good)))
+           (assert (> (get-in good [:value :x]) 10))
+           (assert (= :valid (get-in good [:projection-replay :status])))
+           (assert (= :error (:modality foreign)))
+           (assert (= :error (:modality absent)))
+           (assert (not= true (:none absent)))
+           (assert (= :candidate (:modality misleading)))
+           (assert (= :invalid (get-in misleading [:projection-replay :status])))
+           (assert (not (contains? misleading :value)))
+           {:backend backend :question (identity/hash (:question answer)) :native-question-bound true
+            :good (:modality good) :projection-replay (get-in good [:projection-replay :status])
+            :foreign-model (:modality foreign) :foreign-absence (:modality absent)
+            :corrupt-point (:modality misleading) :corrupt-point-replay (get-in misleading [:projection-replay :status])
+            :artifacts (get-in answer [:identity :artifacts]) :compiler-proof-authority false})) [:z3 :oxiz]))
+(assert (= (:question (first rows)) (:question (second rows))))
+(def report {:schema "enchant.formal.answer-binding.v1" :native rows :cwd (File/cwd!)
+             :research-import-path false :compiler-proof-authority false})
+(File/write! (first (BeamLisp/argv)) (json/encode report {:pretty 2}))
+(println (json/encode report {:pretty 2}))
