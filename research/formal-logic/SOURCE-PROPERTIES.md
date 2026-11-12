@@ -67,3 +67,10 @@ The qualified guarded-division example `(if (= n 0) 0 (quot 1 n))` at input zero
 has a true, normally returning term interpretation. Z3 settles its property;
 OxiZ 0.3.4 returns unknown on that exact question. Backend decision strength is
 reported separately from the shared source meaning.
+
+Quoted function and predicate forms now enter through the compiler's bounded
+first-order datum conversion. Strings retain the explicit Reader path. Literal
+quotes, backslashes, newlines and NUL survive the source/property/coverage checks
+as data; pretty printing is only a display description. The related
+[response interface](RESPONSE-CONTRACTS.md) compiles every law and executes each
+exact ANF on the concrete response. Unsupported laws reject construction.

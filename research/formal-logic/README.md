@@ -32,6 +32,15 @@ products, vector lengths and text prefixes without hiding their abstraction
 boundaries. Concrete replay, exhaustive search and sampling retain distinct
 result meanings; nil and false remain valid witnesses. The ledger stores the
 whole question and caller evidence without promoting their authority.
+The [typed response interface](RESPONSE-CONTRACTS.md) replaces the mock and fault
+SMT-script paths with portable relations, exact source replay and named pins.
+It distinguishes isolated faults, all-law faults, vacuity and global integer
+boundaries. A server retains its first complete answer per key; the ledger keeps
+feasible-response evidence separate from an unchecked optimality claim.
+Checkpoint 37 passes 9,376 assertion executions, an SDK-only consumer and a
+separate-process compound-ledger reopen on one immutable SDK. OxiZ's opaque
+unconstrained model coordinates remain candidates instead of invented values.
+
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes

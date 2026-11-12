@@ -68,3 +68,9 @@ does not verify it. Reports keep unfamiliar future modalities visible.
 On the exact shared Unicode-prefix law, Z3 reports UNSAT and OxiZ 0.3.4
 returns unknown. Constructing a native string term and deciding its query are
 different capabilities; the native answer keeps that distinction.
+
+[Typed response contracts](RESPONSE-CONTRACTS.md) now use the same term path for
+mock responses, isolated faults, every-law faults and integer boundaries.
+Quoted predicates, properties and guards enter as bounded code data. Native
+model incompleteness stays separate from an actual replayed response. The
+response chapter qualifies 1,274 focused and 8,102 regression assertions.

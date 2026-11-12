@@ -151,3 +151,10 @@ fallback, and raw transport requires a managed reset before portable reuse.
 Client bookkeeping is diagnostic. The added 136 owner assertions bring the
 focused SDK run to 356. See `NATIVE-CONTEXTS.md`; these are API consistency
 checks, not security capabilities against arbitrary Erlang introspection.
+
+The [response relation interface](RESPONSE-CONTRACTS.md) extends the same question
+boundary to `veritas.mock` and `veritas.fault`. `formal.response` owns portable
+relations, `formal.response-runtime` owns source and concrete replay, and
+`formal.integer-optimize` owns integer extremum search. A semantic assumption's
+constraints, admission and scope travel with it, including through a retained
+context. Mock and fault consumers take options maps and complete question data.

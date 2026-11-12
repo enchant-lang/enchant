@@ -1,7 +1,11 @@
 # Typed response relations and measured fault sets
 
-Implementation draft under qualification. The selected research SDK still points
-to checkpoint 36 until this batch has passed its immutable-SDK checks.
+Checkpoint 37 qualifies this implementation on one immutable SDK: 1,274
+focused assertions across 24 files and 8,102 regression assertions across 31
+files passed. All 187 preceding paired questions retain their complete identities
+and native verdicts. SDK-only consumers and a separate-process compound ledger
+reopen passed. Exact artifacts and source hashes are in
+[evidence/response-contracts/qualification.json](evidence/response-contracts/qualification.json).
 
 A response contract contains named typed fields and every law. `formal.response`
 is the portable relation and question constructor. `formal.response-runtime`
