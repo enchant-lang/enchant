@@ -143,9 +143,9 @@ def lean_instance(packet):
     n=len(rows);root='⟨'+str(packet['root'])+', by decide⟩'
     lines.extend([
       'theorem original_expanded_nodes : (interpret table'+str(n)+' '+root+').expandedNodes = '+str(infos[-1]['expanded'])+' := by',
-      '  rw [expanded_node_count_agrees]','  decide',
+      '  exact (expanded_node_count_agrees table'+str(n)+' '+root+').trans (by decide +kernel)',
       'theorem original_depth : (interpret table'+str(n)+' '+root+').height = '+str(infos[-1]['height'])+' := by',
-      '  rw [height_agrees]','  decide',
+      '  exact (height_agrees table'+str(n)+' '+root+').trans (by decide +kernel)',
       '#print axioms original_expanded_nodes','#print axioms original_depth','end GraphInstance'])
     source='\n'.join(lines)+'\n';require(len(source.encode())<=LIMITS['wire'],'generated proof source capacity')
     return source,{'id':packet['id'],'reference':packet['checking']['reference'],'wire_sha256':digest(wire),'nodes':len(rows),'edges':sum(len(x['children']) for x in infos),'expanded_nodes':infos[-1]['expanded'],'depth':infos[-1]['height'],'scalar_cost_bridge':'not-instantiated','scope':'Exact owned graph wire and structural node/depth instances; no BL implementation or compiler theorem.'}
