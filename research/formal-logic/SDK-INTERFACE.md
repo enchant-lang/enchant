@@ -171,3 +171,14 @@ relations, `formal.response-runtime` owns source and concrete replay, and
 `formal.integer-optimize` owns integer extremum search. A semantic assumption's
 constraints, admission and scope travel with it, including through a retained
 context. Mock and fault consumers take options maps and complete question data.
+
+## Typed migration previews
+
+`formal.migration` reconstructs exact Bool/Int message relations with separate
+admission, preservation and counterexample questions. The two-argument
+`reload.migrate/verify-migration` consumes its closed definition. The research
+facade supports the same subject through check, compare and describe.
+Checkpoint 40 qualifies 9,891 assertion executions, three paired subjects,
+SDK-only consumption and six reopened records, including stored Source forms.
+Read [MIGRATIONS.md](MIGRATIONS.md) for truth policy, Source phase effects and
+the explicit absence of mailbox delivery authority.

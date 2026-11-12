@@ -139,3 +139,12 @@ the declared model promise if a handler falsely reports that admission is
 UNSAT. That untrusted absence remains visible under `:backend`; it cannot erase
 the independently checked point. `:disagreement` concerns contradictory checked
 objects. Native-only vacuity remains a reported result with `verified nil`.
+
+The selected checkpoint 40 SDK passes 9,891 assertion executions: 167 migration
+assertions in four files, 299 preparation assertions, 1,307 preceding focused
+assertions and 8,118 regression assertions. All 187 preceding paired question
+identities and verdicts remain unchanged. Three new migration subjects run on
+both engines. SDK-only consumption from an unrelated directory, six records
+reopened by another process, the 141-file compiler artifact check, exhaustive
+577-namespace source preflight and negative controls all pass. The exact
+implementation and program bindings are in `evidence/migrations/qualification.json`.

@@ -57,6 +57,16 @@ executions (299 new focused, 1,307 preceding focused and
 8,106 regression), SDK-only consumption and a fresh-process
 four-record recheck. Whole-compiler preservation remains open.
 
+[Typed migration previews](MIGRATIONS.md) separate admitted inputs, preservation
+and counterexamples. A fresh conditional certificate and checked admission
+permit `verified true`; a checked counterexample gives false; incomplete or
+native-only evidence leaves nil. Quoted Source functions are reconstructed and
+can be observed at concrete points. Checkpoint 40 passes 9,891 assertion
+executions, SDK-only consumption, six fresh-process record checks and the
+compiler/source gates. All 187 preceding paired questions remain unchanged;
+three new migration subjects use the same questions on both backends. This
+grants no mailbox delivery or compiler authority.
+
 [ANSWER-INTEGRITY.md](ANSWER-INTEGRITY.md) records the implemented typed-answer
 boundary: exact question binding, checked model sorts, reconstructed handler
 observations, phase rules and tracked context guards. Its immutable SDK passes
