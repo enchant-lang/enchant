@@ -28,12 +28,22 @@ The complete native answers are retained in `evidence/compiler-linearity`.
 The new implementation replaces the ignored port argument with an options map.
 `(linear/prove-bound 12 8 6)` requests portable evidence; adding an initial
 `{:backend :z3}` or `{:backend :oxiz}` requests a separate native comparison.
-`:holds` depends on the positive portable certificates, constructed feasible
-premises and checked double-placement counterexamples. Native unknown or an
-unchecked positive label cannot decide it. The admitted family is explicitly
+`:status` distinguishes checked, refuted, unknown, unsupported and error.
+`:holds` is true for checked positive evidence, false for a checked counterexample
+to the single-placement bound, and nil when truth was not established. Every
+positive object is checked afresh outside its producer. Duplicated-child
+negative controls retain their own status. Native labels cannot decide truth.
+The theorem `:search` and `:preparation` search budgets are independent.
+The admitted family is explicitly
 nonempty, with maximum arity one through eight; `size-lemma` separately supports
 arity zero, where there is no child to duplicate. Runtime qualification is
 still pending, and compiler proof authority remains false.
+
+The second candidate passed the earlier focused/regression gates, but a further
+semantic review found that proof exhaustion still projected to false and reused
+the theorem budget for preparation. A retained baseline passes one assertion
+and fails six. The new verdict and budget correction is under qualification;
+checkpoint 38 remains selected until that review passes.
 
 The next architectural split should be:
 

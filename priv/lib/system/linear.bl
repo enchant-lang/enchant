@@ -47,7 +47,7 @@
 ; any of the three fails a test with the offending function named.
 
 (ns system.linear
-  (:require [formal.term :as term] [formal.query :as query] [formal.proof :as proof]
+  (:require [formal.term :as term] [formal.query :as query] [formal.proof :as proof] [formal.certificate :as certificate]
             [formal.witness :as witness] [formal.affine :as affine] [formal.preparation :as preparation]
             [system.ir :as ir]
             [system.emission :as emission]
@@ -506,13 +506,45 @@
  (into {} (mapv (fn [variable] [(:data variable) 0]) (term/variables (query/roots question)))))
 (defn- native-comparison [options question]
  (when (:backend options)
-  (let [plan (affine/prepare question (select-keys options [:search]))]
+  (let [plan (affine/prepare question (get options :preparation {}))]
    {:plan plan :result (preparation/execute options plan)})))
+
+(defn- single-counterexample [question k n h]
+ ;; If declared overhead exceeds k, saturated children exhibit a failure of
+ ;; the SINGLE-placement bound. This is different from the duplicated-child
+ ;; negative control. The actual packet must still pass independent replay.
+ (when (> h k)
+  (let [problem (sat-question question true)
+        bindings (reduce (fn [out i]
+                            (assoc out (str "linearity/size/" i) 1 (str "linearity/emitted/" i) k))
+                          {"linearity/overhead" h} (range n))]
+   (constructed problem bindings))))
+
+(defn- linear-evidence [options question k n h]
+ (let [produced (proof/produce question (get options :search {}))
+       checking (certificate/check question (:certificate produced))
+       feasible-question (sat-question question false)
+       feasible (constructed feasible-question (zeros feasible-question))
+       counterexample (single-counterexample question k n h)
+       proved? (= :checked (:status checking))
+       refuted? (= :checked-data-connection (get-in counterexample [:checking :status]))
+       status (cond (and proved? refuted?) :error
+                    refuted? :refuted
+                    (and proved? (= :checked-data-connection (get-in feasible [:checking :status]))) :checked
+                    (= :error (:status produced)) :error
+                    (= :unsupported (:status produced)) :unsupported
+                    :else :unknown)]
+  {:status status :question question :certificate produced :checking checking
+   :feasibility feasible :counterexample counterexample :native (native-comparison options question)}))
 
 (defn prove-bound
  "Check arities 1..max-arity with portable positive certificates, feasible
   premises and constructed double-placement counterexamples. Optional :backend
-  comparisons never decide :holds. This is not a compiler preservation theorem."
+  comparisons never decide :holds. True needs checked positive evidence; false
+  needs a checked SINGLE-placement counterexample. Unknown, unsupported and
+  errors retain nil with their explicit status. Negative controls stay separate.
+  Theorem :search and :preparation search options have independent budgets.
+  This is not a compiler preservation theorem."
  ([k h max-arity] (prove-bound {} k h max-arity))
  ([options k h max-arity]
   (when-not (and (map? options) (int? max-arity) (<= 1 max-arity 8))
@@ -520,21 +552,23 @@
   (size-parameters! k max-arity h 1)
   (let [rows (mapv (fn [n]
                      (let [single (size-lemma k n h) doubled (size-lemma k n h 2)
-                           feasible-question (sat-question single false)
                            counterexample-question (sat-question doubled true)
-                           feasible (constructed feasible-question (zeros feasible-question))
                            counterexample (constructed counterexample-question
                                             (assoc (zeros counterexample-question)
                                               "linearity/size/0" 2 "linearity/emitted/0" (* 2 k)))]
                       {:n n
-                       :linear {:question single :certificate (proof/produce single (get options :search {}))
-                                :feasibility feasible :native (native-comparison options single)}
+                       :linear (linear-evidence options single k n h)
                        :duplicated {:question doubled :counterexample counterexample
                                     :native (native-comparison options doubled)}})) (range 1 (inc max-arity)))
-        holds (every? (fn [row]
-                         (and (= :checked (get-in row [:linear :certificate :status]))
-                              (= :checked-data-connection (get-in row [:linear :feasibility :checking :status]))
-                              (= :checked-data-connection (get-in row [:duplicated :counterexample :checking :status])))) rows)]
-   {:holds holds :arities rows :claim-scope :declared-size-recurrence
-    :basis :portable-certificate-and-constructed-counterexample :native-requested (boolean (:backend options))
+        statuses (mapv #(get-in % [:linear :status]) rows)
+        status (cond (some #(= :error %) statuses) :error
+                     (some #(= :refuted %) statuses) :refuted
+                     (every? #(= :checked %) statuses) :checked
+                     (some #(= :unsupported %) statuses) :unsupported
+                     :else :unknown)
+        negative-controls (if (every? #(= :checked-data-connection (get-in % [:duplicated :counterexample :checking :status])) rows)
+                            :checked :unknown)]
+   {:status status :holds (case status :checked true :refuted false nil)
+    :arities rows :claim-scope :declared-size-recurrence :negative-controls negative-controls
+    :basis :portable-certificate-or-checked-counterexample :native-requested (boolean (:backend options))
     :compiler-connection :conditional-not-mechanized :compiler-proof-authority false})))

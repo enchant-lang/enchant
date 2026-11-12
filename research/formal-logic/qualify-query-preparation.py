@@ -54,13 +54,15 @@ for name, digest in checked['source_sha256'].items():
 units = read(sdk / 'unit-store/unit-index.json')['units']
 require(all(n in units for n in ('formal.preparation', 'formal.affine', 'formal.integer-optimize', 'system.linear'))
         and 'formal.optimize' not in units, 'native SDK interfaces and namespace separation')
-focused = counts('focused-checks.txt', 4)
+focused = counts('focused-checks.txt', 5)
 preceding = counts('preceding-focused-checks.txt', 26)
 regression = counts('regression-checks.txt', 31)
 require(regression['veritas.model-serve-test'] >= 59, 'owned admission control and rejected-body checks')
 require(focused['system.formal-preparation-test'] >= 109 and focused['system.linear-terms-test'] >= 126
         and focused['system.linear-term-baseline-test'] == 8 and focused['system.linear-test'] >= 36,
         'fresh connection, model boundary, constructive arithmetic and actual emission checks')
+require(focused['system.linear-verdict-baseline-test'] == 7, 'unknown truth and independent search budgets')
+require('1 passed, 6 failed' in (E / 'verdict-baseline-checks.txt').read_text(), 'retained verdict and budget baseline')
 require('0 passed, 8 failed' in (P / 'evidence/compiler-linearity/baseline-checks.txt').read_text(), 'retained legacy interface baseline')
 require('95 passed, 4 failed' in (E / 'focused-1-checks.txt').read_text(), 'retained first candidate model-boundary review')
 http_failure = (E / 'regression-before-http-isolation/regression-checks.txt').read_text()

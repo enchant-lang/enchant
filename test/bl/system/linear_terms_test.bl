@@ -1,7 +1,7 @@
 (ns system.linear-terms-test
  (:require [system.linear :as linear] [formal.query :as q] [formal.term :as t]
            [formal.proof :as proof] [formal.certificate :as certificate]
-           [formal.affine :as affine] [formal.preparation :as preparation] [oracle]))
+           [formal.affine :as affine] [formal.preparation :as preparation] [formal.witness :as witness] [oracle]))
 
 (deftest zero-arity-has-no-child-to-duplicate
  (let [one (linear/size-lemma 12 0 8) two (linear/size-lemma 12 0 8 2)]
@@ -24,11 +24,14 @@
 (deftest premise-feasibility-and-constructed-counterexamples-are-separate-data
  (let [result (linear/prove-bound 12 8 3)]
   (is (= true (:holds result)))
+  (is (= :checked (:status result)))
+  (is (= :checked (:negative-controls result)))
   (is (= :declared-size-recurrence (:claim-scope result)))
   (is (= false (:native-requested result)))
   (is (= false (:compiler-proof-authority result)))
   (doseq [row (:arities result)]
    (is (= :checked (get-in row [:linear :certificate :status])))
+   (is (= :checked (get-in row [:linear :checking :status])))
    (is (= :checked-data-connection (get-in row [:linear :feasibility :checking :status])))
    (is (= :checked-data-connection (get-in row [:duplicated :counterexample :checking :status])))
    (is (= :sat (get-in row [:duplicated :counterexample :question :mode])))
@@ -56,10 +59,28 @@
                           (oracle/query-answer question {:phase :query :solver-status :unsat}))}
                 #(linear/prove-bound {:backend :z3} 12 13 1))]
   (is (= false (:holds result)))
+  (is (= :refuted (:status result)))
+  (let [counterexample (get-in result [:arities 0 :linear :counterexample])]
+   (is (= :checked-data-connection (get-in counterexample [:checking :status])))
+   (is (= :checked-data-connection
+          (:status (witness/check-data (:question counterexample) (get-in counterexample [:production :packet]))))))
   (is (not= :checked (get-in result [:arities 0 :linear :certificate :status])))
   (is (= :proved (get-in result [:arities 0 :linear :native :result :verdict])))
   (is (= :not-checked (get-in result [:arities 0 :linear :native :result :certificate :status])))
   (is (= false (:compiler-proof-authority result)))))
+
+(deftest a-preparation-budget-cannot-deny-an-independent-positive-certificate
+ (let [seen (atom 0)
+       result (oracle/with-oracle
+                {:query (fn [question _]
+                          (swap! seen inc)
+                          (oracle/query-answer question {:phase :query :solver-status :unknown}))}
+                #(linear/prove-bound {:backend :z3 :preparation {:search {:nodes 1}}} 12 8 1))]
+  (is (= true (:holds result)))
+  (is (= :checked (:status result)))
+  (is (= :checked (get-in result [:arities 0 :linear :checking :status])))
+  (is (= :error (get-in result [:arities 0 :linear :native :result :verdict])))
+  (is (= 0 @seen))))
 
 (deftest the-controlled-affine-form-helps-both-engines-without-replacing-the-original
  (doseq [placement [1 2]]
