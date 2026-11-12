@@ -1,0 +1,89 @@
+(ns formal.graph-consumer-examples
+ (:require [formal.term :as t] [formal.query :as q] [formal.data-graph :as graph]
+           [formal.question-graph :as qg] [formal.logic :as logic] [formal.check :as check]
+           [formal.answer :as answer] [formal.point :as point] [veritas.ledger :as ledger]
+           [datom] [oracle]))
+
+(defn- graph-context []
+ (let [x (t/variable "story.saved.x" t/Int)
+       original (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"next" (t/add x (t/int 1))}})
+       unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" (str "story.saved.unknown." (System/unique_integer (list :positive)))]]}
+       history (reduce (fn [data _] (graph/assemble "vector" [data data])) unknown (range 16))]
+  (qg/patch (qg/prepare original) {:origin history})))
+
+(defn question [] (graph-context))
+
+(defn selected-view [ctx]
+ (let [opened (qg/open! ctx) stats (:graph-checking opened)
+       full (try (qg/materialize! ctx) :accepted (catch _ :refused))
+       prepared (point/prepare-context ctx {"story.saved.x" 7})
+       checked (point/check-context ctx (:packet prepared))]
+  (assert (> (:expanded-nodes stats) 100000))
+  (assert (< (:nodes stats) 1000))
+  (assert (= :refused full))
+  (assert (= :checked-data-connection (:status checked)))
+  {:question-reference (:reference opened) :stored-nodes (:nodes stats) :expanded-nodes (:expanded-nodes stats)
+   :full-materialization full :operational-mode (get-in opened [:view :mode])
+   :original-point (:status checked) :next (get-in checked [:observations "next"])
+   :kernel-execution (:kernel-execution checked) :compiler-proof-authority false}))
+
+(defn paired [ctx]
+ (let [replies (mapv #(check/query {:backend %} ctx) [:z3 :oxiz])]
+  (assert (every? #(= :sat (:verdict %)) replies))
+  (assert (every? #(= 8 (get-in % [:witness "next"])) replies))
+  (assert (apply = (map :question-reference replies)))
+  {:question-reference (:question-reference (first replies)) :backends [:z3 :oxiz] :same-complete-reference true
+   :verdicts (mapv :verdict replies) :next-values (mapv #(get-in % [:witness "next"]) replies)
+   :reply-versions (mapv :formal/query-reply replies)
+   :subject-kinds (mapv :subject-kind replies)
+   :fallback-statuses (mapv #(get-in % [:execution :status]) replies)
+   :certificate-statuses (mapv #(get-in % [:certificate :status]) replies)
+   :compiler-proof-authority false}))
+
+(defn intercepted [ctx]
+ (let [calls (atom 0)
+       result (oracle/with-query-graph-handler
+               (fn [original _execute]
+                (swap! calls inc)
+                (oracle/query-graph-answer original
+                 {:solver-status :sat :assignments {"story.saved.x" 7} :witness {"next" 999}}))
+               #(logic/run-graph {:backend :z3 :worker "/unavailable/formal-worker"} ctx))]
+  (assert (= 1 @calls)) (assert (= :sat (:verdict result)))
+  (assert (= 8 (get-in result [:witness "next"])))
+  (assert (= :not-invoked (get-in result [:execution :status])))
+  {:question-reference (:question-reference result) :named-effect :query-graph :handler-calls @calls :supplied-next 999 :replayed-next 8
+   :provided-fallback (get-in result [:execution :status]) :delegation (:delegation result)
+   :observation-basis (:observation-basis result) :compiler-proof-authority false}))
+
+(defn durable [ctx]
+ (let [native (logic/run-graph {:backend :z3} ctx)
+       packet (:packet (point/prepare-context ctx {"story.saved.x" 7}))
+       connection (ledger/open nil) calls (atom 0)
+       deny (fn [& _] (swap! calls inc) (throw :ledger-story-must-not-query))]
+  (assert (= :returned (get-in native [:execution :status])))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny}
+    #(do
+      (ledger/record-graph! connection
+       {:modality :solver-claim :question-graph ctx :answer native :witness false
+        :evidence {:point packet} :compiler-proof-authority true}
+       {:claim "Saved graph story" :about ["story/graph"]})
+      (let [row (first (ledger/about connection "story/graph"))
+            evidence (ledger/graph-evidence! row)
+            rechecked (answer/check-graph ctx (:answer evidence))
+            checked (point/check-context ctx (get-in evidence [:evidence :point]))]
+       (assert (= :sat (:verdict rechecked)))
+       (assert (= false (ledger/graph-witness! row)))
+       (assert (not (contains? rechecked :execution)))
+       (assert (= :returned (get-in rechecked [:reported-execution :status])))
+       (assert (= :recorded (:verdict/assurance row)))
+       (assert (= false (:verdict/compiler-authority row)))
+       (assert (= 0 @calls))
+       {:question-reference (:verdict/question-reference row) :record-format (:verdict/format row) :question-form :graph-data
+        :answer (:verdict rechecked) :original-point (:status checked)
+        :false-witness (ledger/graph-witness! row) :assurance (:verdict/assurance row)
+        :recorded-execution (get-in rechecked [:reported-execution :status])
+        :actual-execution-claimed-by-recheck (contains? rechecked :execution)
+        :queries-during-record-and-recheck @calls :compiler-proof-authority false})))
+   (finally (datom/close! connection)))))
