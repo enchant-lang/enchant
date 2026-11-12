@@ -49,6 +49,8 @@ require('formal.migration' in units and 'formal.integer-optimize' in units and '
 require('103 passed, 2 errored' in (E / 'candidate-1/focused-checks.txt').read_text(), 'retained closed-admission failure')
 require(':closed-within true' in (E / 'candidate-1/domain-checks.txt').read_text(), 'observed composed Source admission')
 require('0 passed, 1 errored' in (E / 'candidate-2/conditional-baseline-checks.txt').read_text(), 'retained conditional Source admission defect')
+require('unknown primitive operation' in (E / 'candidate-3/focused-checks.txt').read_text()
+        and 'INCOHERENT' in (E / 'candidate-3/focused-checks.txt').read_text(), 'retained literal-constructor regression')
 focused = counts('focused', 4)
 prepared = counts('preparation-focused', 5)
 preceding = counts('preceding-focused', 26)

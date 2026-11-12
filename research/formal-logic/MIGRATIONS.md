@@ -112,3 +112,9 @@ conditional baseline. The next correction reduces equal branch bounds only
 when the test uses total Bool/Int operations. A partial division or unresolved
 function test cannot be erased by that rule. Partial branch *results* remain
 allowed, and the concrete inactive-error example checks lazy definedness.
+
+The third candidate introduced a constructor regression in that bound walker:
+it sent literal Boolean nodes through the compound-operation constructor.
+The retained run records an incoherent migration test module and one errored
+conditional case. Literal leaves now retain their original validated nodes.
+Only the subsequently qualified SDK is eligible for selection.
