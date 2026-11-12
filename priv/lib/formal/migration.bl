@@ -19,12 +19,24 @@
                              (not (blank? (first %))) (contains? #{[:int] [:bool]} (second %))) parameters)
                 (= (count parameters) (count (set (map first parameters))))) "ordered distinct Bool/Int parameters required")
  (into {} (mapv (fn [[role sort]] [role (t/variable (str "migration." name "." role) sort)]) parameters)))
+(defn- total-test? [term]
+ (every? #(contains? #{:var :bool :int :not :and :or :implies :xor :eq :lt :le :gt :ge
+                      :ite :add :sub :neg :mul} (:op %)) (t/walk [term])))
+(defn- closed-bound [term]
+ ;; Bounds assembled by a lazy branch can be unconditionally true even when
+ ;; its total test contains inputs. Do not erase a partial division/UF test.
+ (let [args (mapv closed-bound (:args term))
+       rebuilt (if (and (= :ite (:op term)) (= (second args) (nth args 2))
+                        (total-test? (first args))) (second args)
+                 (t/app (:op term) (:sort term) args (:data term)))
+       value (replay/value rebuilt {})]
+  (if (boolean? value) (t/bool value) rebuilt)))
 (defn- value! [value allowed boolean?]
  (let [value (v/lift value) roots (vec (concat (v/terms value) (v/constraints value)))]
   (require! (and (= :scalar (get-in value [:domain :kind]))
                  (contains? #{[:int] [:bool]} (t/sort-of (v/term value)))
                  (or (not boolean?) (= t/Bool (t/sort-of (v/term value))))
-                 (= {:mode :exact} (v/scope value)) (= true (replay/value (v/within value) {})))
+                 (= {:mode :exact} (v/scope value)) (= (t/bool true) (closed-bound (v/within value))))
             "initial migration values require exact scalar Bool/Int domains")
   (t/validate! roots)
   (require! (every? #(contains? #{[:int] [:bool]} (:sort %)) (t/walk roots)) "only Bool/Int term sorts are supported")
