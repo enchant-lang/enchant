@@ -10,7 +10,13 @@ def require(ok,why):
 pin=read(E/'sdk-candidate.json');sdk=Path(pin['sdk']);source=Path(pin['source']);meta=read(sdk/'artifact.json')
 require(sha(sdk/'artifact.json')==pin['descriptor_sha256'] and meta['source']==str(source),'exact selected SDK')
 oldmeta=read(Path(read(prior/'sdk-candidate.json')['sdk'])/'artifact.json')
-require(all(meta[k]==oldmeta[k] for k in ('compiler','formalWorker')),'unchanged compiler and worker')
+require(meta['formalWorker']==oldmeta['formalWorker'],'unchanged formal worker')
+old_inputs=read(Path(oldmeta['compiler'])/'qualification/inputs.json')
+new_inputs=read(Path(meta['compiler'])/'qualification/inputs.json')
+compiler_changes={p:{'old_sha256':old_inputs.get(p),'new_sha256':new_inputs.get(p)}
+                  for p in sorted(old_inputs.keys()|new_inputs.keys()) if old_inputs.get(p)!=new_inputs.get(p)}
+require(set(compiler_changes)=={'priv/boot/core.bl'},'explicit existing eager-doseq compiler input transition')
+require(sha(R/'priv/boot/core.bl')==sha(source/'priv/boot/core.bl')==compiler_changes['priv/boot/core.bl']['new_sha256'],'actual qualified core input')
 require(read(E/'preparation-result.json')['output']==str(sdk),'managed production result')
 for name,immutable in [('sdk-source-pin.json',True),('check-source-pin.json',False)]:
     snapshot=read(E/name)
@@ -20,14 +26,14 @@ for name,immutable in [('sdk-source-pin.json',True),('check-source-pin.json',Fal
         if immutable:require(sha(source/path)==digest,'SDK runtime bytes: '+path)
 units=read(sdk/'unit-store/unit-index.json')['units'];require('formal.question-graph' in units,'packaged question context namespace')
 runs={}
-for stage,files in [('focused',6),('facade',7),('regression',31)]:
+for stage,files in [('focused',6),('facade',7),('regression',31),('compiler-macro',1)]:
     log=(E/(stage+'-checks.txt')).read_text()
     rows={name:int(count) for name,count in re.findall(r'✓\s+([\w.-]+)\s+(\d+) passed',log)}
     require(len(rows)==files and f'{files} file(s) passed, 0 failed, 0 incoherent' in log,'complete tests: '+stage)
     runs[stage]=rows
-for stage in ['focused','facade','regression','corpus','writer','consumer-one','consumer-two','compiler-floor','preflight','preflight-controls']:
+for stage in ['focused','facade','regression','compiler-macro','corpus','writer','consumer-one','consumer-two','compiler-floor','preflight','preflight-controls']:
     require(read(E/(stage+'-exit.json'))['exit_code']==0,'terminal result: '+stage)
-    if stage in ['focused','facade','regression','corpus','writer','consumer-one','consumer-two']:
+    if stage in ['focused','facade','regression','compiler-macro','corpus','writer','consumer-one','consumer-two']:
         command=read(E/(stage+'-command.json'));runtime=read(E/(stage+'-runtime.json'))
         require(str(sdk/'bin/bl') in command,'exact runtime: '+stage)
         require(runtime['retired'] and all(not Path(x).exists() for x in runtime['paths']),'cleanup: '+stage)
@@ -77,5 +83,7 @@ require('SDK-PREFLIGHT-CONTROL passed: parse, target edge and cycle refusals' in
 total=sum(sum(rows.values()) for rows in runs.values())
 report={'schema':'enchant.formal.graph-consumers-qualification.v1','checkpoint':44,'status':'passed','recorded_utc':datetime.now(timezone.utc).isoformat(),'sdk_pin':pin,'runs':runs,'assertion_executions':total,'complete_graph_contexts':187,'same_preceding_native_subjects':187,'fresh_sdk_only_writer':1,'fresh_sdk_only_readers':2,'pure_reader_managed_query_calls':0,'new_untrusted_byte_ingress':False,'compiler_proof_authority':False,'scope':'Explicit graph-backed question contexts, selective composition/materialization, v2 typed answers, named graph effects, retained contexts, versioned durable verdicts and common native check/compare. Existing worker/compiler and old paths retained. Owned ledger codec. No graph evaluator theorem, portable graph proof migration, Source/compiler preservation or universal totality.'}
 report['owned_fixture']=fixture
+report['compiler_transition']={'previous':oldmeta['compiler'],'qualified':meta['compiler'],'changed_inputs':compiler_changes,
+ 'basis':'Existing main eager-doseq implementation, with the exact new 141-file P/B/C floor and focused zero-memo-budget behavior checks. No compiler soundness theorem.'}
 (E/'qualification.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps({'checkpoint':44,'status':'passed','assertions':total,'graph_contexts':187,'durable_readers':2}))

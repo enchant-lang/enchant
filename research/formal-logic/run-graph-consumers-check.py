@@ -28,6 +28,8 @@ def command_for(arguments, consumer=False):
             sdk + '/bin/bl', '--cold', *arguments]
 if stage == 'focused':
     command = command_for(['test', 'test/bl/formal/graph_ops_test.bl', 'test/bl/formal/graph_context_test.bl', 'test/bl/veritas/graph_ledger_test.bl', 'test/bl/formal/data_graph_test.bl', 'test/bl/formal/point_test.bl', 'test/bl/formal/float_points_test.bl'])
+elif stage == 'compiler-macro':
+    command = command_for(['test', 'test/bl/doseq_eager_test.bl'])
 elif stage == 'facade':
     command = command_for(['-p', str(P/'src'), 'test', str(P/'test/graph_facade_test.bl'), str(P/'test/facade_test.bl'), str(P/'test/api_test.bl'), 'test/bl/system/formal_answer_test.bl', 'test/bl/system/formal_oracle_test.bl', 'test/bl/system/formal_effect_test.bl', 'test/bl/veritas/ledger_test.bl'])
 elif stage == 'corpus':
