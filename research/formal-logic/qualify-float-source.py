@@ -42,7 +42,8 @@ require(all(name in units for name in ('formal.beam-float','formal.floating','fo
 base = read(E / 'baseline.json')
 require(base['modeled']['holds'] is True and base['modeled']['checked'] is True and base['modeled']['complete'] is True and base['actual']['value'] is False, 'retained actual false Source proof')
 require('823 passed, 2 failed, 1 errored' in (E/'candidate-1/focused-checks.txt').read_text(), 'retained missing canonical division refusal')
-stages = {'focused':4,'arithmetic-sdk':1,'migration-focused':4,'preparation-focused':5,'preceding-focused':26,'regression':31}
+require('28 file(s) passed, 3 failed, 0 incoherent' in (E/'candidate-2/regression-checks.txt').read_text(), 'retained semantic NaN payload regression')
+stages = {'focused':7,'arithmetic-sdk':1,'migration-focused':4,'preparation-focused':5,'preceding-focused':26,'regression':31}
 runs = {stage: counts(stage, files) for stage, files in stages.items()}
 require(runs['arithmetic-sdk']['formal.ieee-arithmetic-test'] == 8191, 'arithmetic correspondence scope')
 require(runs['focused']['formal.beam-float-test'] > 823, 'integrated runtime, Source, guard and owner tests')
