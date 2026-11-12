@@ -27,7 +27,7 @@ for stage,files in [('focused',3),('regression',31)]:
     text=(E/(stage+'-checks.txt')).read_text(); rows={name:int(count) for name,count in re.findall(r'✓\s+([\w.-]+)\s+(\d+) passed',text)}
     require(len(rows)==files and f'{files} file(s) passed, 0 failed, 0 incoherent' in text,'complete tests: '+stage)
     runs[stage]=rows
-require(runs['focused']['formal.point-test']==92 and runs['focused']['formal.float-points-test']==219 and runs['focused']['formal.data-graph-test']>=281,'old points and new graph coverage')
+require(runs['focused']['formal.point-test']==92 and runs['focused']['formal.float-points-test']==219 and runs['focused']['formal.data-graph-test']>=297,'old points and new graph coverage')
 for stage in ('focused','regression','corpus','consumer-one','consumer-two','compiler-floor','preflight','preflight-controls'):
     require(read(E/(stage+'-exit.json'))['exit_code']==0,'terminal exit: '+stage)
     if stage in ('focused','regression','corpus','consumer-one','consumer-two'):
@@ -42,6 +42,10 @@ for row in corpus['rows']:
     require(row['standard-identity']==old[row['id']]['standard-identity'],'unchanged standard identity: '+row['id'])
     require(row['roundtrip']=='exact-public-data' and row['graph']['status']=='checked-data-graph','exact graph roundtrip: '+row['id'])
     require(row['graph']['reference']['profile']=='bl/public-data-graph-v1','explicit graph profile')
+previous_graphs={r['id']:r for r in read(E/'before-early-input-bounds/corpus.json')['rows']}
+for row in corpus['rows']:
+    require(row['graph']==previous_graphs[row['id']]['graph'],'same graph bytes reference and costs after early guards: '+row['id'])
+require(sha(E/'owned-points.etf')==sha(E/'before-early-input-bounds/owned-points.etf'),'byte-identical owned fixture across guard SDKs')
 large=next(r for r in corpus['rows'] if r['id']=='relation/closure-is-transitive')
 require(large['content']['walks']==110551 and large['standard-identity']['status']=='unavailable','retained standard capacity boundary')
 point=corpus['point-example'];require(point['version-one']['status']=='rejected' and point['checking']['status']=='checked-data-connection','explicit large point migration')
@@ -51,6 +55,7 @@ require(a['process']!=b['process'],'fresh independent processes')
 for data,stage in [(a,'consumer-one'),(b,'consumer-two')]:
     require(data['sdk-only'] and not data['research-import-path'] and not Path(data['cwd']).is_relative_to(R) and '-p' not in read(E/(stage+'-command.json')),'SDK-only unrelated reader')
     require(data['original']==large['graph'] and data['subject']==point['graph'] and data['point']==point['point']['identity'],'same durable graphs and point')
+    require(data['runtime-key-cardinalities']=={'int-float-map':2,'int-float-set':2,'signed-zero-map':2,'signed-zero-set':2},'pinned runtime key semantics')
     require(data['managed-query-calls']==0 and data['source-compilation'] is False and data['compiler-proof-authority'] is False,'pure graph/point checking')
     require(data['checking']['status']=='checked-data-connection' and data['checking']['kernel-execution']=='not-run','separate evaluator assurance')
 require(corpus['managed-query-calls']==0,'pure graph corpus construction')

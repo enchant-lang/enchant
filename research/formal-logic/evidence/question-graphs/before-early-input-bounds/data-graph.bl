@@ -1,0 +1,225 @@
+(ns formal.data-graph)
+
+;; An explicit public-data format. This does not change formal.identity v1,
+;; term arena IDs, evaluator authority, or any solver's answer. Construction
+;; visits the supplied tree; checking and storage use its unique structure.
+(def profile :bl/public-data-graph-v1)
+(def limits {:nodes 32768 :edges 262144 :depth 192 :scalar-bytes 8388608
+             :bytes 8388608 :expanded-nodes 4000000 :expanded-scalar-bytes 67108864})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.data-graph: " why) {:kind :data-graph :profile profile}))))
+(defn- clean! [x]
+ (require! (or (nil? (meta x)) (= {} (meta x))) "metadata must be an explicit data field"))
+(defn- plain-vector! [x]
+ (clean! x) (require! (vector? x) "plain vector required") x)
+(defn- encoded [x] (erlang/term_to_binary x (list :deterministic (tuple :minor_version 2))))
+(defn- sha [x] (Base/encode16 (crypto/hash :sha256 x) (list (tuple :case :lower))))
+(defn- children [[kind payload]]
+ (cond (= "map" kind) (vec (mapcat identity payload))
+       (contains? #{"vector" "list" "set" "tuple"} kind) payload
+       :else []))
+(defn- wire-row [[kind payload]]
+ (tuple kind (cond (= "map" kind) (to-list (map (fn [[k v]] (tuple k v)) payload))
+                   (contains? #{"vector" "list" "set" "tuple"} kind) (to-list payload)
+                   :else payload)))
+(defn- wire [root rows]
+ (encoded (tuple "bl/public-data-graph-v1" root (to-list (map wire-row rows)))))
+(defn- node-info [row preceding]
+ (let [[kind payload] row cs (children row) infos (mapv #(nth preceding %) cs)
+       container? (contains? #{"map" "vector" "list" "set" "tuple"} kind)
+       content (if container?
+                 (if (= "map" kind)
+                  (to-list (map (fn [[k v]] (tuple (:hash (nth preceding k)) (:hash (nth preceding v)))) payload))
+                  (to-list (map :hash infos))) payload)
+       height (if (seq infos) (inc (apply max (map :height infos))) 0)
+       scalar (if container? 0 (erlang/external_size payload))
+       expanded (inc (reduce + 0 (map :expanded infos)))
+       expanded-bytes (+ scalar (reduce + 0 (map :expanded-bytes infos)))]
+  (require! (<= height (:depth limits)) "depth capacity")
+  (require! (<= expanded (:expanded-nodes limits)) "expanded node capacity")
+  (require! (<= expanded-bytes (:expanded-scalar-bytes limits)) "expanded scalar byte capacity")
+  {:hash (sha (encoded (tuple "bl/public-data-node-v1" kind content)))
+   :height height :scalar scalar :expanded expanded :expanded-bytes expanded-bytes}))
+(def reserved-tuple-heads
+ #{"symbol" "meta" "$blfn" "$remote" "$macro" "$protocol" "$transient" "bl_deftype" "bl_reify" "bl_vec"})
+(defn- keyword-name! [payload]
+ (require! (string? payload) "keyword name must be bytes")
+ (require! (not (contains? #{"nil" "true" "false"} payload)) "nil and Boolean names are not keywords")
+ (let [chars (unicode/characters_to_list payload :utf8)]
+  (require! (and (erlang/is_list chars) (<= (erlang/length chars) 255)) "invalid keyword name")))
+(defn- float-bytes! [payload]
+ (require! (and (string? payload) (= 10 (erlang/byte_size payload))
+                (= 131 (binary/at payload 0)) (= 70 (binary/at payload 1))) "canonical Float64 payload required")
+ (let [bits (binary/decode_unsigned (binary/part payload 2 8))]
+  (require! (not= 2047 (erlang/band 2047 (erlang/bsr bits 52))) "nonfinite runtime Float64 refused")))
+(defn- row! [row index rows infos]
+ (plain-vector! row) (require! (= 2 (count row)) "two-field node required")
+ (let [[kind payload] row]
+  (clean! kind) (clean! payload)
+  (require! (and (string? kind) (contains? #{"nil" "bool" "int" "float64" "binary" "keyword" "symbol"
+                                                         "vector" "list" "set" "tuple" "map"} kind)) "unknown node kind")
+  (cond
+   (= "nil" kind) (require! (nil? payload) "nil payload required")
+   (= "bool" kind) (require! (erlang/is_boolean payload) "Boolean payload required")
+   (= "int" kind) (require! (int? payload) "integer payload required")
+   (= "float64" kind) (float-bytes! payload)
+   (= "keyword" kind) (keyword-name! payload)
+   (contains? #{"binary" "symbol"} kind) (require! (string? payload) "byte payload required")
+   :else
+    (do
+     (plain-vector! payload)
+     (require! (<= (count payload) (:edges limits)) "node edge capacity")
+     (when (= "map" kind)
+      (doseq [pair payload]
+       (plain-vector! pair) (require! (= 2 (count pair)) "map entry must contain two references")))
+     (doseq [child (children row)]
+      (clean! child)
+      (require! (and (int? child) (<= 0 child) (< child index)) "children must precede their parent"))
+     (when (contains? #{"set" "map"} kind)
+      (let [keys (if (= "map" kind) (mapv first payload) payload)
+            hashes (mapv #(:hash (nth infos %)) keys)]
+       (require! (and (= hashes (vec (sort hashes))) (= (count hashes) (count (distinct hashes))))
+                 "set elements and map keys must have unique canonical content order")))
+     ;; No row may reconstruct one of the runtime's reserved representations.
+     (when (and (= "tuple" kind) (seq payload))
+      (let [[head name] (nth rows (first payload))]
+       (require! (not (and (= "keyword" head) (contains? reserved-tuple-heads name))) "reserved runtime tuple refused")))
+     (when (= "map" kind)
+      (doseq [[key _] payload]
+       (require! (not= ["keyword" "__struct__"] (nth rows key)) "runtime struct maps refused")))))))
+(defn check!
+ "Validate canonical structure and all unique/expanded budgets before decoding.
+  Unknown keyword names remain data here; decode! only admits existing atoms."
+ [graph]
+ (clean! graph)
+ (require! (and (= :map (rt/kind-kind graph))
+                (= #{:formal/data-graph :profile :root :nodes} (set (keys graph)))
+                (int? (:formal/data-graph graph)) (= 1 (:formal/data-graph graph))
+                (= profile (:profile graph))) "closed versioned graph required")
+ (let [rows (plain-vector! (:nodes graph)) root (:root graph) n (count rows)
+       infos (atom []) seen (atom {}) edges (atom 0) scalar (atom 0)]
+  (clean! root)
+  (require! (and (pos? n) (<= n (:nodes limits)) (int? root) (= root (dec n))) "dense rooted graph required")
+  (doseq [index (range n)]
+   (let [row (nth rows index)]
+    (row! row index rows @infos)
+    (swap! edges + (count (children row)))
+    (require! (<= @edges (:edges limits)) "unique edge capacity")
+    (when-not (contains? #{"map" "vector" "list" "set" "tuple"} (first row))
+     (require! (<= (+ @scalar (erlang/external_size (second row))) (:scalar-bytes limits)) "unique scalar byte capacity"))
+    (let [info (node-info row @infos) order [(:height info) (:hash info)]]
+     (swap! scalar + (:scalar info))
+     (require! (<= @scalar (:scalar-bytes limits)) "unique scalar byte capacity")
+     (require! (not (contains? @seen (:hash info))) "duplicate content or digest collision")
+     (when (pos? index)
+      (let [previous (peek @infos)]
+       (require! (neg? (compare [(:height previous) (:hash previous)] order)) "canonical node order required")))
+     (swap! seen assoc (:hash info) index)
+     (swap! infos conj info))))
+  (let [reachable (loop [pending [root] reached #{}]
+                   (if (empty? pending) reached
+                    (let [id (peek pending) tail (pop pending)]
+                     (if (contains? reached id) (recur tail reached)
+                      (recur (into tail (children (nth rows id))) (conj reached id))))))
+        bytes (wire root rows) final (nth @infos root)]
+   (require! (= n (count reachable)) "unreachable nodes refused")
+   (require! (<= (erlang/byte_size bytes) (:bytes limits)) "encoded byte capacity")
+   {:status :checked-data-graph :profile profile :nodes n :edges @edges :scalar-bytes @scalar
+    :expanded-nodes (:expanded final) :expanded-scalar-bytes (:expanded-bytes final)
+    :depth (:height final) :bytes (erlang/byte_size bytes)
+    :reference {:profile profile :sha256 (sha bytes)} :compiler-proof-authority false})))
+(defn encode
+ "Canonicalize public data using exact tagged structure. Initial conversion is
+  a bounded tree walk; it is not an O(unique nodes) scan of an arbitrary term."
+ [data]
+ (let [rows (atom []) infos (atom []) interned (atom {}) digests (atom {})
+       visits (atom 0) raw-bytes (atom 0) unique-bytes (atom 0) edges (atom 0)]
+  (letfn [(intern [row]
+           (let [key (encoded (wire-row row))]
+            (if-let [old (get @interned key)] old
+             (let [id (count @rows) info (node-info row @infos)]
+              (require! (< id (:nodes limits)) "unique node capacity")
+              (swap! unique-bytes + (:scalar info))
+              (swap! edges + (count (children row)))
+              (require! (<= @unique-bytes (:scalar-bytes limits)) "unique scalar byte capacity")
+              (require! (<= @edges (:edges limits)) "unique edge capacity")
+              ;; Exact descriptor bytes own interning. A digest never merges
+              ;; unequal descriptors, even under a hypothetical SHA collision.
+              (require! (not (contains? @digests (:hash info))) "node digest collision")
+              (swap! digests assoc (:hash info) key)
+              (swap! interned assoc key id)
+              (swap! rows conj row) (swap! infos conj info) id))))
+          (walk [x depth]
+           (swap! visits inc)
+           (require! (and (<= @visits (:expanded-nodes limits)) (<= depth (:depth limits))) "input walk capacity")
+           (clean! x)
+           (let [kind (rt/kind-kind x)
+                 _ (require! (contains? #{:nil :bool :int :float :text :atom :symbol :vector :list :set :tuple :map} kind)
+                             "value is not portable public data")
+                 row
+                 (cond
+                  (= :nil kind) ["nil" nil]
+                  (= :bool kind) ["bool" x]
+                  (= :int kind) ["int" x]
+                  (= :float kind) ["float64" (encoded x)]
+                  (= :text kind) ["binary" x]
+                  (= :atom kind) ["keyword" (erlang/atom_to_binary x :utf8)]
+                  (= :symbol kind)
+                   (do (require! (and (erlang/is_tuple x) (= 2 (erlang/tuple_size x)) (string? (erlang/element 2 x)))
+                                 "plain symbol datum required") ["symbol" (erlang/element 2 x)])
+                  :else
+                   (let [items (if (= :tuple kind) (erlang/tuple_to_list x) x)]
+                    (require! (<= (count items) (:edges limits)) "input edge capacity")
+                    (cond
+                     (= :map kind)
+                      (do (require! (not (contains? x :__struct__)) "runtime struct maps refused")
+                       ["map" (vec (sort-by (fn [[k _]] (:hash (nth @infos k)))
+                                    (mapv (fn [[k v]] [(walk k (inc depth)) (walk v (inc depth))]) x)))])
+                     (= :set kind)
+                      ["set" (vec (sort-by #(:hash (nth @infos %)) (mapv #(walk % (inc depth)) items)))]
+                     :else [(case kind :tuple "tuple" :vector "vector" :list "list") (mapv #(walk % (inc depth)) items)])))]
+            (when (empty? (children row))
+             (swap! raw-bytes + (if (contains? #{"map" "vector" "list" "set" "tuple"} (first row)) 0
+                                  (erlang/external_size (second row))))
+             (require! (<= @raw-bytes (:expanded-scalar-bytes limits)) "input scalar byte capacity"))
+            (intern row)))]
+   (let [root (walk data 0)
+         order (vec (sort-by (fn [id] (let [i (nth @infos id)] [(:height i) (:hash i)])) (range (count @rows))))
+         ids (into {} (map-indexed (fn [i old] [old i]) order))
+         rewrite (fn [[kind payload]]
+                   [kind (cond (= "map" kind) (mapv (fn [[k v]] [(get ids k) (get ids v)]) payload)
+                               (contains? #{"vector" "list" "set" "tuple"} kind) (mapv #(get ids %) payload)
+                               :else payload)])
+         graph {:formal/data-graph 1 :profile profile :root (get ids root) :nodes (mapv #(rewrite (nth @rows %)) order)}]
+    (check! graph) graph))))
+(defn reference [graph] (:reference (check! graph)))
+(defn of [data] (reference (encode data)))
+(defn bytes [graph] (check! graph) (wire (:root graph) (:nodes graph)))
+(defn decode!
+ "Decode an already bounded graph into data. Never creates atoms, loads modules
+  or invokes a value. Runtime equality must preserve map/set cardinality."
+ [graph]
+ (check! graph)
+ (let [values (atom [])]
+  (doseq [[kind payload] (:nodes graph)]
+   (let [cs (when (contains? #{"vector" "list" "set" "tuple"} kind) (mapv #(nth @values %) payload))
+         x (cond
+            (= "nil" kind) nil
+            (= "bool" kind) payload
+            (= "int" kind) payload
+            (= "float64" kind) (BeamLisp.Env/decode_data_term! payload (list :safe))
+            (= "binary" kind) payload
+            (= "keyword" kind)
+             (let [a (erlang/binary_to_existing_atom payload :utf8)]
+              (require! (keyword? a) "keyword must remain a keyword, not nil or Boolean") a)
+            (= "symbol" kind) (symbol payload)
+            (= "vector" kind) cs
+            (= "list" kind) (to-list cs)
+            (= "tuple" kind) (erlang/list_to_tuple (to-list cs))
+            (= "set" kind) (let [s (set cs)] (require! (= (count s) (count cs)) "runtime set equality collapses graph elements") s)
+            (= "map" kind)
+             (let [m (into {} (mapv (fn [[k v]] [(nth @values k) (nth @values v)]) payload))]
+              (require! (= :map (rt/kind-kind m)) "runtime map must remain plain data")
+              (require! (= (count m) (count payload)) "runtime map equality collapses graph keys") m))]
+    (swap! values conj x)))
+  (nth @values (:root graph))))
