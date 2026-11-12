@@ -1,7 +1,8 @@
 # A compiler check with its own arithmetic proof
 
-Implementation exploration after checkpoint 37. `system.linear` has not yet
-been migrated. The selected SDK remains checkpoint 37.
+Implementation exploration started after checkpoint 37. `system.linear` has
+not yet been migrated. The retained arithmetic probes use the checkpoint 37
+SDK, regardless of later selected SDKs.
 
 The retained baseline exposes the current boundary: `size-lemma` returns
 SMT command forms, the typed query handler sees no question, and `prove-bound`
@@ -43,8 +44,17 @@ input size before code emission begins. A checked recurrence is therefore not
 a whole-compiler complexity or preservation theorem. Compiler proof authority
 remains false.
 
-Before choosing a canonical question representation, compare factored,
-distributed and addition-based affine terms on both engines, with independent
-certificates connecting equivalent forms. This can distinguish native API
-normalization behavior from the language's mathematical meaning. Keep the
-original question and every observed unknown result.
+The controlled comparison now retains eighteen cases: arities zero through
+two, single and double placement, and original, affine and repeated-addition
+forms. All 162 component equivalences have checked certificates. Z3 settles
+every case. OxiZ settles the affine and addition forms, including the concrete
+double-placement refutations that were unknown in the original form. Arity zero
+has no child to duplicate and retains the bound in every form.
+
+This makes checked query preparation a useful language capability. An explicit
+plan should retain its original question, executed question and independently
+checked connection. No backend silently changes the public mathematical
+meaning. SAT responses need replay against the original question and original
+observations; native UNSAT remains an unchecked claim. The small probe does
+not prove a general normalizer or qualify an implicit rewrite of live retained
+contexts. [PREPARATION.md](PREPARATION.md) records the next interface design.
