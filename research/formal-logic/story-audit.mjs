@@ -599,7 +599,7 @@ try{
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
   await shot(size.name+'-model-replay');
   await navigate('/#an-explicit-input-can-outlive-a-missing-solver-model');
-  check(size.name+': explicit point chapter separates backend answer, data and Source',await evaluate("document.body.innerText.includes('an explicit point is not a recovered native model')&&document.body.innerText.includes('Numeric equality can agree on Int and Float')"));
+  check(size.name+': explicit point chapter separates backend answer, data and Source',await evaluate("document.body.innerText.includes('mathematical point against the complete question')&&document.body.innerText.includes('three inspectable facts')"));
   await evaluate("document.querySelector('#an-explicit-input-can-outlive-a-missing-solver-model').scrollIntoView({block:'start'})");
   await shot(size.name+'-explicit-point');
   const pointPanel='[data-graph="formal-explicit-points"] .sg-stage>[data-view]:not([hidden])';
