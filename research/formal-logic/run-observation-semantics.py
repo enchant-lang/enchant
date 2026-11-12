@@ -91,6 +91,11 @@ command += ['env', '-u', 'BEAM_LISP_PATH', '-u', 'ENCHANT_FORMAL_WORKER', '-u', 
 if project:
     command += ['-p', str(P / 'src')]
 command += request
+(E / (stage + '-exit.json')).unlink(missing_ok=True)
+output_names = {'native': 'native.json', 'observation-corpus': 'observation-corpus.json',
+                'paired-native-corpus': 'paired-native-corpus.json'}
+if stage in output_names:
+    (E / output_names[stage]).unlink(missing_ok=True)
 (E / (stage + '-source-pin.json')).write_text(json.dumps({'code_commit': commit, 'source_sha256': sources, 'sdk_pin': pin}, indent=2) + '\n')
 (E / (stage + '-command.json')).write_text(json.dumps(command, indent=2) + '\n')
 (E / (stage + '-memory-before.txt')).write_text(subprocess.check_output([R / 'scripts/bl-mem'], text=True))
