@@ -551,13 +551,18 @@ try{
   check(size.name+': reply panel binds complete questions and validates actual fields',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('refuses foreign questions')&&t.includes('every original condition and pin')&&t.includes('final absence question gets no witness')})()"));
   await evaluate("document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
   await shot(size.name+'-answer-binding-panel');
+  if(size.name==='phone'){
+    await evaluate("(()=>{const d=document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden]) .review-detail');d.scrollTop=d.scrollHeight})()");
+    check(size.name+': reply evidence remains readable above the graph controls after panel scroll',await evaluate("(()=>{const g=document.querySelector('[data-graph=\"formal-response-contracts\"]'),d=g.querySelector('.sg-stage>[data-view]:not([hidden]) .review-detail'),r=d.querySelector('.review-facts dd').getBoundingClientRect(),box=d.getBoundingClientRect(),tools=g.querySelector('.sg-toolbar').getBoundingClientRect();return r.top>=box.top&&r.bottom<=box.bottom&&r.bottom<=tools.top})()"));
+    await shot(size.name+'-answer-binding-details');
+  }
   if(size.name==='desktop'){
     await click('#theme');
     await evaluate("document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
     await shot(size.name+'-answer-binding-night');await click('#theme');
   }
   await navigate('/#a-reply-belongs-to-one-exact-question');
-  check(size.name+': reply chapter distinguishes identity replay and durable payloads',await evaluate("document.body.innerText.includes('A decoded zero cannot borrow credibility')&&document.body.innerText.includes('explicit payload capacity is 16 MiB')&&document.body.innerText.includes('Missing or corrupt payloads raise an error')"));
+  check(size.name+': reply chapter distinguishes identity replay and durable payloads',await evaluate("document.body.innerText.includes('Asking for zero and asking for a value above ten')&&document.body.innerText.includes('A decoded zero cannot borrow credibility')&&document.body.innerText.includes('explicit payload capacity is 16 MiB')&&document.body.innerText.includes('Missing or corrupt payloads raise an error')"));
   await evaluate("document.querySelector('#a-reply-belongs-to-one-exact-question').scrollIntoView({block:'start'})");
   await shot(size.name+'-answer-binding');
   await navigate('/#a-better-question-shape-can-help-both-engines');

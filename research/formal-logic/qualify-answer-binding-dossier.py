@@ -46,6 +46,7 @@ images = {name: sha(E / 'browser-audit' / name) for name in audit['screenshots']
 frames = ('response-contracts', 'answer-binding', 'answer-binding-panel', 'story-answer-binding-data', 'question-preparation')
 manual = [size + '-' + frame + '.png' for size in ('phone', 'desktop') for frame in frames]
 manual.append('desktop-answer-binding-night.png')
+manual.append('phone-answer-binding-details.png')
 require(all(name in images for name in manual), 'retained actual response frames')
 visual = read(E / 'browser-audit/visual-review.json')
 require(visual['inspected'] == manual and visual['status'] in ('reviewed', 'reviewed-with-capture-limitation'), 'manual frame review')
