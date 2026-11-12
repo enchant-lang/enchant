@@ -69,6 +69,10 @@ for name, digest in snapshot['source_sha256'].items():
 full_pin = read(E / 'full-browser-source-pin.json')
 assert full_pin['document_sha256'] == sha(document) and full_pin['sdk_pin'] == pin
 assert full_pin['kit_state_sha256'] == sha(E / 'kit-state.json')
+for name, digest in full_pin['source_sha256'].items():
+    original(full_pin, name)
+    if name not in ('research/formal-logic/observation-browser.mjs', 'research/formal-logic/run-observation-browser.py'):
+        assert sha(R / name) == digest
 audits = {}
 for stage in ('focused', 'full'):
     assert read(E / (stage + '-browser-exit.json'))['exit_code'] == 0
