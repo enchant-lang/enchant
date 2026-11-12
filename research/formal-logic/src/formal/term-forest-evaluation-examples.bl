@@ -1,0 +1,39 @@
+(ns formal.term-forest-evaluation-examples
+ (:require [formal.term-forest-evaluate :as point] [formal.term :as t]
+           [formal.data-graph :as graph] [oracle]))
+
+(defn- doubled [data]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode :and)]
+   [(graph/encode :sort) (graph/encode t/Bool)]
+   [(graph/encode :args) (graph/assemble "vector" [data data])]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(defn run-sharing []
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :graph-point-must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   #(let [data (reduce (fn [value _] (doubled value)) (graph/encode (t/bool true)) (range 16))
+          result (point/values data [(:root data) (:root data)] {}) checked (graph/check! data)]
+     (assert (= [true true] (:values result)))
+     (assert (= 17 (get-in result [:checking :evaluated-nodes])))
+     (assert (= 17 (get-in result [:checking :typed-nodes])))
+     (assert (= 45 (:nodes checked)))
+     (assert (= 1572852 (:expanded-nodes checked)))
+     (assert (= (graph/reference data) (:data-reference result)))
+     (assert (= 0 @calls))
+     {:schema "enchant.formal.term-forest-evaluation-sharing.v1" :result result
+      :data-graph checked :canonical-graph-bytes (erlang/byte_size (graph/bytes data))
+      :term-occurrences 131071 :managed-query-calls @calls :native-execution :not-invoked
+      :compiler-proof-authority false}))))
+
+(defn story []
+ (let [result (run-sharing) evaluation (:result result)]
+  (into-sorted-map
+   {:subject :graph-point-evaluation :stored-data-nodes (get-in result [:data-graph :nodes])
+    :term-occurrences (:term-occurrences result) :requested-roots (count (:source-roots evaluation))
+    :typed-nodes (get-in evaluation [:checking :typed-nodes])
+    :evaluated-nodes (get-in evaluation [:checking :evaluated-nodes])
+    :values (:values evaluation) :graph-bytes (:canonical-graph-bytes result)
+    :argument-traversal :graph-references :semantics :selected-sdk-primitive-rules
+    :managed-query-calls (:managed-query-calls result) :native-execution :not-invoked
+    :compiler-proof-authority false})))

@@ -18,6 +18,8 @@ if stage == 'focused':
     request = ['test', str(P / 'test/term_forest_evaluate_test.bl')]
 elif stage == 'corpus':
     request = ['run', str(P / 'term-forest-evaluation-check.bl'), '--', str(E / 'corpus.json')]
+elif stage == 'sharing':
+    request = ['run', str(P / 'term-forest-evaluation-sharing.bl'), '--', str(E / 'sharing.json')]
 else:
     raise ValueError(stage)
 sources = [P / 'src/formal/term-forest.bl', P / 'src/formal/term-forest-evaluate.bl',
@@ -25,6 +27,8 @@ sources = [P / 'src/formal/term-forest.bl', P / 'src/formal/term-forest-evaluate
 if stage == 'corpus':
     sources += [P / 'term-forest-evaluation-check.bl', P / 'src/formal/advanced-cases.bl',
                 P / 'src/formal/feature-cases.bl', P / 'src/formal/native-cases.bl']
+if stage == 'sharing':
+    sources += [P / 'term-forest-evaluation-sharing.bl', P / 'src/formal/term-forest-evaluation-examples.bl']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 digests = {}
 for source in sources:
