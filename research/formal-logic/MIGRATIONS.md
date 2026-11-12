@@ -103,3 +103,12 @@ interface expected a literal true. The correction independently evaluates
 closed Boolean admission with no assignments. A false or unresolved bound is
 still refused. The failed run and exact candidate are retained; qualification
 requires a later complete pass.
+
+The second candidate passed all 156 assertions across the new migration file
+and both legacy files. A subsequent review exposed a conditional Source
+case: both result branches have unconditional bounds, but the bound expression
+contains the input-dependent test. That candidate is retained with the failing
+conditional baseline. The next correction reduces equal branch bounds only
+when the test uses total Bool/Int operations. A partial division or unresolved
+function test cannot be erased by that rule. Partial branch *results* remain
+allowed, and the concrete inactive-error example checks lazy definedness.

@@ -37,7 +37,7 @@ elif stage == 'focused':
                '--property=RuntimeMaxSec=900', '--property=KillMode=control-group',
                '--setenv=XDG_RUNTIME_DIR=' + runtime,
                'env', '-u', 'ENCHANT_FORMAL_WORKER', '-u', 'ENCHANT_Z3_LIBRARY', '-u', 'BEAM_LISP_PATH',
-               sdk + '/bin/bl', '--cold', 'test', 'test/bl/reload/formal_migration_test.bl',
+               sdk + '/bin/bl', '--cold', 'test', 'test/bl/reload/formal_migration_test.bl', 'test/bl/reload/migration_conditional_baseline_test.bl',
                'test/bl/reload/migrate_test.bl', 'test/bl/reload/verify_adversarial_test.bl']
 elif stage in ('examples', 'ledger-write', 'ledger-read'):
     directory = tempfile.mkdtemp(prefix='formal-migration-consumer-')
