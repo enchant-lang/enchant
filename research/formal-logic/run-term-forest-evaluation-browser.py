@@ -63,6 +63,7 @@ write(E / 'dossier-source-pin.json', {'code_commit': commit, 'source_sha256': so
                                     'kit_state_sha256': sha(P / 'evidence/graph-consumers/kit-state.json')})
 if not focused_only:
     write(E / 'full-browser-source-pin.json', read(E / 'dossier-source-pin.json'))
+    (E / 'full-browser-exit.json').unlink(missing_ok=True)
 raw = subprocess.check_output(['systemctl', '--user', 'show', 'work-enchant-formal-review.service',
                                '--property=ActiveState,SubState,ExecMainPID,MemoryMax'], text=True)
 state = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
@@ -81,7 +82,7 @@ write(E / 'dossier-host.json', {'recorded_utc': datetime.now(timezone.utc).isofo
       'sha256': hashlib.sha256(body).hexdigest(), 'new_preview_present': True}})
 stages = [('focused', 'term-forest-evaluation-browser.mjs', 'focused-browser', 300)]
 if not focused_only:
-    stages.insert(0, ('full', 'story-audit.mjs', 'full-browser', 900))
+    stages.append(('full', 'story-audit.mjs', 'full-browser', 900))
 for stage, script, folder, ceiling in stages:
     command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
                '--working-directory=' + str(R), '--property=MemoryMax=2G', '--property=MemorySwapMax=0',
