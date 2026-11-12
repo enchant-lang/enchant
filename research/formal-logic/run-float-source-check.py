@@ -41,7 +41,7 @@ if stage in ('preceding-focused', 'regression', 'preparation-focused', 'migratio
     if stage == 'regression':
         (E / 'regression').mkdir(exist_ok=True)
 elif stage == 'focused':
-    command = command_for(['test', 'test/bl/formal/beam_float_test.bl', 'test/bl/system/sorts_test.bl',
+    command = command_for(['-p', str(P / 'src'), 'test', 'test/bl/formal/beam_float_test.bl', 'test/bl/system/sorts_test.bl',
                            'test/bl/system/seam_test.bl', 'test/bl/system/native_eligible_test.bl',
                            str(P / 'test/api_test.bl'), 'test/bl/system/oracle_test.bl',
                            str(P / 'test/intrinsics_test.bl')])
