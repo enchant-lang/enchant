@@ -536,6 +536,30 @@ try{
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#a-contract-can-generate-its-own-responses');
+  check(size.name+': response chapter preserves fault and boundary distinctions',await evaluate("document.body.innerText.includes('This is stronger than failing their conjunction')&&document.body.innerText.includes('1,274 focused assertions')&&document.body.innerText.includes('8,102 regression assertions')&&document.body.innerText.includes('missing values are never invented')"));
+  await evaluate("document.querySelector('#a-contract-can-generate-its-own-responses').scrollIntoView({block:'start'})");
+  await shot(size.name+'-response-contracts');
+  await click('[data-graph="formal-response-contracts"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="boundary"]');
+  check(size.name+': boundary panel separates feasible replay and unchecked optimality',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('strict-improvement question')&&t.includes('cannot establish an optimum or unboundedness')&&t.includes('unchecked optimality claim')})()"));
+  await evaluate("document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+  await shot(size.name+'-response-boundary-panel');
+  if(size.name==='desktop'){
+    await click('#theme');await shot(size.name+'-response-boundary-night');await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger']){
+    const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+    check(size.name+': visible executed response result '+id,t.length>100);
+    if(id==='story-response-relation')check(size.name+': response source replay and exact mathematical rationals stay distinct',t.includes(':responses [:witnessed :witnessed]')&&t.includes(':source-replay [:reproduced :reproduced]')&&t.includes(':formal/real [1 3]')&&t.includes(':math-source-claim false')&&t.includes(':same-complete-question true'));
+    if(id==='story-response-faults')check(size.name+': isolated all-law and vacuous results retain separate meanings',t.includes(':isolated [[:witnessed :witnessed :solver-claim] [:witnessed :witnessed :solver-claim]]')&&t.includes(':infeasible-premises [:vacuous :vacuous]')&&t.includes(':any-law-fails :witnessed')&&t.includes(':every-law-fails :solver-claim'));
+    if(id==='story-response-boundary')check(size.name+': global minimum keeps feasibility and budget limitations',t.includes(':minimum [-41 -41]')&&t.includes(':feasibility [:witnessed :witnessed]')&&t.includes(':optimality [:solver-claim :solver-claim]')&&t.includes(':budget-result :candidate')&&t.includes(':unboundedness :not-established'));
+    if(id==='story-response-assumptions')check(size.name+': semantic assumptions retain conditions and bounded scope',t.includes(':semantic-assumptions :conditions-preserved')&&t.includes(':native-verdicts [:proved :proved]')&&t.includes(':scope :bounded')&&t.includes(':certificate :not-checked'));
+    if(id==='story-response-completion')check(size.name+': missing OxiZ coordinates remain candidates until concrete pins replay',t.includes(':unconstrained-models [:witnessed :candidate]')&&t.includes(':oxiz-model :partial')&&t.includes(':pinned-crashes [:raised :raised]')&&t.includes(':invented-native-values false'));
+    if(id==='story-response-ledger')check(size.name+': compound ledger evidence grants no witness or proof to the absence claim',t.includes(':assurance :recorded')&&t.includes(':top-level-witness false')&&t.includes(':feasible-value {:x -41}')&&t.includes(':absence-claim :unsat')&&t.includes(':compiler-proof-authority false'));
+    await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
+    await shot(size.name+'-'+id+'-data');
+  }
   const canonical=await evaluate("document.querySelector('#cell-story-canonical-identity')?.innerText||''");
   check(size.name+': canonical identity preserves namespaces and collection kinds',canonical.includes(':identity-profile :bl/canonical-formal-data-v1')&&canonical.includes(':reordered-map :same-identity')&&canonical.includes(':keyword-namespaces :preserved')&&canonical.includes(':vector-and-list :distinct')&&canonical.includes(':runtime-authority-granted false'));
   await evaluate("document.querySelector('#cell-story-canonical-identity').scrollIntoView({block:'center'})");
@@ -858,6 +882,10 @@ try{
  for(const path of ['/VERITAS-TERMS.md','/CALLABLE-CUSTODY.md','/sdk-src/formal/runtime-values.bl','/sdk-src/formal/coverage.bl','/sdk-src/veritas/ledger.bl','/veritas-terms-check.bl','/veritas-ledger-check.bl','/evidence/veritas-terms/examples.json','/evidence/veritas-terms/focused-current-checks.txt','/evidence/veritas-terms/qualification.json']){
   const r=await fetch(base+path);const body=await r.text();
   check('Declared Veritas interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/RESPONSE-CONTRACTS.md','/response-contracts-check.bl','/response-contracts-ledger.bl','/sdk-src/formal/response.bl','/sdk-src/formal/response-runtime.bl','/sdk-src/formal/ground.bl','/sdk-src/formal/integer-optimize.bl','/sdk-src/veritas/mock.bl','/sdk-src/veritas/fault.bl','/evidence/response-contracts/examples.json','/evidence/response-contracts/ledger-read.json','/evidence/response-contracts/focused-current-checks.txt','/evidence/response-contracts/regression-current-checks.txt','/evidence/response-contracts/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared response interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/formal/source-runtime.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
