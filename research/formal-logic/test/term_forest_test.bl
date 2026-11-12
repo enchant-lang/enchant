@@ -1,0 +1,100 @@
+(ns formal.term-forest-test
+ (:require [formal.term-forest :as forest] [formal.term :as t] [formal.query :as q]
+           [formal.data-graph :as graph] [formal.native-cases :as native] [oracle]))
+
+(defn- prepared [roots]
+ (let [data (graph/encode (vec roots)) ids (second (nth (:nodes data) (:root data)))]
+  (forest/prepare data ids)))
+(defn- compare-roots [label roots]
+ (let [original (t/export (t/registry) roots) actual (prepared roots)]
+  (is (erlang/=:= (:nodes original) (:nodes actual)) (str label " exact definitions"))
+  (is (= (:ids original) (:roots actual)) (str label " ordered root translation"))
+  (is (= (count (:nodes original)) (get-in actual [:checking :typed-nodes])))
+  (is (= false (:compiler-proof-authority actual)))
+  (is (= :graph-references (get-in actual [:checking :argument-traversal])))
+  actual))
+(defn- reason [action]
+ (try (action) :accepted (catch error (ex-message error))))
+
+(deftest every-native-primitive-family-agrees-with-existing-term-export
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :preparation-must-not-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   #(doseq [item (native/cases)]
+     (let [problem (q/from-case item)
+           roots (vec (concat (q/roots problem) [(get-in problem [:counterexample :term])]))]
+      (compare-roots (:id item) roots))))
+  (is (= 0 @calls))))
+
+(deftest repeated-roots-and-portable-list-arguments-preserve-exact-export
+ (let [x (t/variable "forest.x" t/Int) expr (t/add x (t/int 1))
+       alias (assoc expr :args (to-list (:args expr)))
+       result (compare-roots :shared [expr expr alias])]
+  (is (= (first (:roots result)) (second (:roots result)))))
+ (compare-roots :empty []))
+
+(deftest local-canonical-and-root-forgeries-are-refused
+ (doseq [term [(assoc (t/int 1) :extra :cached)
+              (assoc (t/int 1) :formal/term 1.0)
+              (assoc (t/int 1) :args "not-arguments")
+              (assoc (t/real 1 2) :data [2 4])
+              (assoc (t/add (t/int 1) (t/int 2)) :sort t/Bool)]]
+  (is (thrown? (prepared [term]))))
+ (let [data (graph/encode [(t/bool true)]) ids (second (nth (:nodes data) (:root data)))
+       ready (forest/prepare data ids)]
+  (is (thrown? (forest/prepare data [-1])))
+  (is (thrown? (forest/prepare data [1.0])))
+  (is (thrown? (forest/prepare data [(count (:nodes data))])))
+  (is (thrown? (forest/prepare ready ids)))
+  (is (thrown? (forest/prepare (assoc data :root (count (:nodes data))) ids)))))
+
+(deftest shared-bound-nodes-are-checked-in-each-environment
+ (let [integer (t/bound "forest.nominal" t/Int) boolean (t/bound "forest.nominal" t/Bool)
+       body (t/eq integer (t/int 0)) closed (t/forall [integer] body)
+       wrong (t/forall [boolean] body)]
+  (compare-roots :closed [closed closed])
+  (is (includes? (reason #(prepared [closed body])) "free or wrong-sort bound variable"))
+  (is (includes? (reason #(prepared [closed wrong])) "free or wrong-sort bound variable"))
+  (is (includes? (reason #(prepared [(t/forall [integer integer] body)])) "duplicate binder"))
+  (is (includes? (reason #(prepared [(t/forall [integer] closed)])) "shadowing")))
+ (is (includes? (reason #(prepared [(t/variable "same.free" t/Int) (t/variable "same.free" t/Bool)])) "conflicting free-variable sorts")))
+
+(defn- map-field [data name]
+ (second (first (filter (fn [[key _]] (= ["keyword" name] (nth (:nodes data) key)))
+                       (second (nth (:nodes data) (:root data)))))))
+(defn- with-history [name]
+ (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0 :nodes [["keyword" name]]}
+       history (reduce (fn [data _] (graph/assemble "vector" [data data])) unknown (range 16))]
+  (graph/assemble "map" [[(graph/encode :terms) (graph/encode [(t/bool true)])]
+                          [(graph/encode :history) history]])))
+
+(deftest unrelated-unadmitted-history-stays-bound-without-materialization
+ (let [a (with-history "forest.preview.unadmitted.history.a")
+       b (with-history "forest.preview.unadmitted.history.b")
+       roots (fn [data] (second (nth (:nodes data) (map-field data "terms"))))
+       one (forest/prepare a (roots a)) two (forest/prepare b (roots b))]
+  (is (= 1 (get-in one [:checking :typed-nodes])))
+  (is (> (get-in one [:checking :expanded-source-nodes]) 100000))
+  (is (= (:nodes one) (:nodes two)))
+  (is (not= (:data-reference one) (:data-reference two)))
+  (is (= (graph/reference a) (:data-reference one)))
+  (is (thrown? (graph/decode! a)))
+  (is (thrown? (graph/decode! b)))))
+
+(defn- doubled [data]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)]
+   [(graph/encode :op) (graph/encode :and)]
+   [(graph/encode :sort) (graph/encode t/Bool)]
+   [(graph/encode :args) (graph/assemble "vector" [data data])]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(deftest graph-built-argument-expansion-prepares-as-seventeen-native-nodes
+ (let [data (reduce (fn [value _] (doubled value)) (graph/encode (t/bool true)) (range 16))
+       ready (forest/prepare data [(:root data)])]
+  (is (= 17 (get-in ready [:checking :typed-nodes])))
+  (is (= 17 (get-in ready [:checking :scope-states])))
+  (is (= 16 (get-in ready [:checking :typed-depth])))
+  (is (> (get-in ready [:checking :expanded-source-nodes]) 1000000))
+  (is (< (get-in ready [:checking :materialized-components]) 10))
+  (is (= [17] (:roots ready)))
+  (is (= [17 "and" t/Bool [16 16] nil] (last (:nodes ready))))))
