@@ -63,7 +63,7 @@ try{
   await click(panel+' .review-index [data-sg-to="point"]');
   await evaluate(`document.querySelector(${JSON.stringify(panel)}).querySelector('.review-detail').scrollTo({top:0,behavior:'instant'})`);
   await center(panel);
-  check(size.name+': graph point branch states scope and demand',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(panel)}).innerText;return t.includes('6,300 exact root comparisons')&&t.includes('Project preview on SDK 45')&&t.includes('implication keeps')&&t.includes('managed reply integration remain open')})()`));
+  check(size.name+': graph point branch states scope and demand',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(panel)}).innerText;return t.includes('6,300 exact root comparisons')&&t.includes('Project preview on SDK 45')&&t.includes('implication keeps')&&t.includes('managed reply integration remains open')})()`));
   await shot(size.name+'-graph-point');
   if(size.name==='desktop'){
    await click('#theme');await center(panel);await shot('desktop-graph-point-night');await click('#theme');

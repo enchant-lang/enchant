@@ -7,10 +7,15 @@ memoized evaluator across the term roots actually demanded by observations.
 Its output is display reconstruction. Assertion replay is explicitly
 `:not-run`; no native query or compiler proof authority is granted.
 
-The shared language fixes and project implementation are under qualification
-against one immutable SDK candidate in
-`evidence/observation-semantics/sdk-candidate.json`. The project pin and live
-dossier still select the preceding qualified SDK while this work is checked.
+The [complete code qualification](evidence/observation-semantics/qualification.json)
+passes 9,964 targeted assertions, all 187 exact inventories, all preceding paired
+native outcomes and two fresh SDK-only durable readers. The project pin now
+selects this exact immutable SDK. The live presentation is qualified separately.
+
+The observation comparison covers 748 deterministic point maps: 1,176 exact
+observation values and 6,300 exact root values match the SDK, without managed
+queries in that reconstruction window. Its approximately 14-minute run is
+compatibility evidence, not a speed comparison.
 
 ## The common semantic repairs
 
