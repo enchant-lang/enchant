@@ -1,0 +1,63 @@
+(ns formal.term-forest-evaluation-check
+ (:require [formal.term-forest-evaluate :as point] [formal.term :as t]
+           [formal.evaluate :as sdk] [formal.query :as q] [formal.data-graph :as graph]
+           [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
+           [formal.native-cases :as native] [oracle] [bl.json :as json]))
+
+(defn- coordinate [sort alternate]
+ (case (first sort)
+  :bool alternate :int (if alternate -3 0) :real (sdk/real (if alternate -3 0) 2)
+  :string (if alternate "λ🦊" "") :rounding (if alternate "RTZ" "RNE")
+  :bv (sdk/bv (second sort) (if alternate -1 0))
+  :fp {:formal/fp [(second sort) (nth sort 2) (if alternate 1 0)]}
+  :enum {:formal/enum [(second sort) ((if alternate last first) (nth sort 2))]}
+  :seq (if alternate [(coordinate (second sort) false)] [])
+  :array {:formal/array {:default (coordinate (nth sort 2) alternate) :updates []}}
+  (sdk/unavailable :sort-not-materialized)))
+(defn- bindings [variables mode]
+ (if (= :absent mode) {}
+  (into {} (map (fn [variable]
+                  [(:data variable) (if (= :ill-sorted mode) nil
+                                     (coordinate (t/sort-of variable) (= :alternate mode)))]) variables))))
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :graph-evaluation-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  #(vec (mapcat
+    (fn [[family cases]]
+     (mapv
+      (fn [item]
+       (println (str "evaluate " (:id item)))
+       (let [problem (q/from-case item)
+             roots (vec (concat (q/roots problem) [(get-in problem [:counterexample :term])]))
+             variables (t/variables roots) data (graph/encode roots)
+             source-roots (second (nth (:nodes data) (:root data)))
+             points
+             (mapv (fn [mode]
+                     (let [assignments (bindings variables mode)
+                           start (erlang/monotonic_time :millisecond)
+                           actual (point/values data source-roots assignments)
+                           middle (erlang/monotonic_time :millisecond)
+                           expected (mapv (fn [term] (sdk/value term assignments)) roots)
+                           end (erlang/monotonic_time :millisecond)]
+                      (assert (erlang/=:= expected (:values actual)))
+                      (assert (= (graph/reference data) (:data-reference actual)))
+                      (assert (= false (:compiler-proof-authority actual)))
+                      {:mode mode :exact-values true :roots (count roots)
+                       :unavailable (count (filter sdk/unavailable? expected))
+                       :value-reference (graph/reference (graph/encode expected))
+                       :checking (:checking actual)
+                       :timing-ms {:graph-evaluation (- middle start) :legacy-evaluation (- end middle)}}))
+                   [:absent :zero :alternate :ill-sorted])]
+        {:id (:id item) :family family :data-reference (graph/reference data)
+         :variables (count variables) :points points :compiler-proof-authority false})) cases))
+    [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
+(assert (= 187 (count rows)))
+(assert (= 0 @calls))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.term-forest-evaluation-corpus.v1" :rows rows
+               :managed-query-calls @calls :native-execution :not-invoked
+               :scope "Exact point-evaluation agreement with the selected SDK on four deterministic point maps per existing question. Missing, zero, alternate and ill-sorted assignments are compatibility fixtures, not exhaustive semantics or checked model certificates."
+               :compiler-proof-authority false} {:pretty 2}))
+(println {:questions (count rows) :point-maps (* 4 (count rows)) :managed-query-calls @calls
+          :status :exact-point-evaluation-agreement})

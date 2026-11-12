@@ -16,10 +16,15 @@ assert hashlib.sha256((Path(pin['sdk']) / 'artifact.json').read_bytes()).hexdige
 stage = sys.argv[1]
 if stage == 'focused':
     request = ['test', str(P / 'test/term_forest_evaluate_test.bl')]
+elif stage == 'corpus':
+    request = ['run', str(P / 'term-forest-evaluation-check.bl'), '--', str(E / 'corpus.json')]
 else:
     raise ValueError(stage)
 sources = [P / 'src/formal/term-forest.bl', P / 'src/formal/term-forest-evaluate.bl',
            P / 'test/term_forest_evaluate_test.bl', Path(__file__), P / 'sdk-pin.json']
+if stage == 'corpus':
+    sources += [P / 'term-forest-evaluation-check.bl', P / 'src/formal/advanced-cases.bl',
+                P / 'src/formal/feature-cases.bl', P / 'src/formal/native-cases.bl']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 digests = {}
 for source in sources:
