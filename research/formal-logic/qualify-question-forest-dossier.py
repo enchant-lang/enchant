@@ -46,7 +46,8 @@ for name, digest in retained['source_pin']['source_sha256'].items():
 checked_commit = '7bd5a85484ff264e68416f3ab71c1ff0bff18cef'
 checked_text = subprocess.check_output(['git', 'show', checked_commit + ':research/formal-logic/ATLAS.bl.org'], cwd=R).decode()
 patterns = [r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
-            r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*']
+            r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*',
+            r'^#\+name:[^\n]*\n(?:\|[^\n]*(?:\n|$))*']
 for pattern in patterns:
     assert re.findall(pattern, checked_text, re.M | re.S) == re.findall(pattern, text, re.M | re.S)
 implementation = read(E / 'qualification.json')
@@ -85,7 +86,7 @@ report = {'schema': 'enchant.formal.question-forest-dossier-qualification.v1', '
           'document': {'sha256': sha(P / 'ATLAS.bl.org'), 'cells': 83,
           'cell_check_commit': checked_commit,
           'cell_check_document_sha256': hashlib.sha256(checked_text.encode()).hexdigest(),
-          'cell_check_scope': 'All executable spans and stored results identical to the committed fresh 83-cell check. This update changes presentation prose, graph topics and source links only.',
+          'cell_check_scope': 'All executable spans, stored results and named notebook input/formula tables are identical to the committed fresh 83-cell check. This update changes presentation prose, graph topics and source links only.',
           'run_log_sha256': sha(C / 'dossier-cells-checks.txt'), 'unchanged_check_log_sha256': sha(C / 'dossier-checks.txt')},
           'browser': {'full_checks': len(full['checks']), 'focused_checks': len(focused['checks']),
           'full_input_source_pin': full_source,
