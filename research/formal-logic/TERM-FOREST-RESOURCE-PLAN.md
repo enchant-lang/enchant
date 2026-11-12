@@ -32,6 +32,12 @@ refuse before expensive work. Do not advertise universal evaluator termination
 or cost bounds until the implementation and its cost model have their own
 correspondence argument.
 
-This is a planned gate, not implemented resource accounting. The current
-project checks run under whole-process memory and time caps. Its graph evaluator
-has admission/node bounds but no general derived-value preflight policy yet.
+The first [integer primitive planner](INTEGER-PREFLIGHT.md) is now committed for
+focused qualification, alongside three capped concrete growth probes. It returns
+term-based forecasts without running the primitive. It is not integrated with
+the graph evaluator, and does not cover the whole gate. Cumulative accounting,
+other value families and a cost-model correspondence remain open.
+
+The current project checks run under whole-process memory and time caps. Its
+graph evaluator has admission/node bounds but no general derived-value preflight
+policy yet.
