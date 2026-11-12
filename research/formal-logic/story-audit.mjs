@@ -594,6 +594,31 @@ try{
   check(size.name+': size chapter gives unknown its own truth result and budgets',await evaluate("document.body.innerText.includes('A tiny theorem-search budget leaves the answer unknown')&&document.body.innerText.includes('The theorem search and preparation search have independent budgets')&&document.body.innerText.includes('checked counterexample to the single-placement bound')"));
   await evaluate("document.querySelector('#what-a-size-result-actually-means').scrollIntoView({block:'start'})");
   await shot(size.name+'-size-evidence');
+  await navigate('/#a-large-question-should-still-travel-as-language-data');
+  check(size.name+': graph chapter preserves the whole question and initial conversion cost',await evaluate("document.body.innerText.includes('Saving only a formula digest loses part of the question')&&document.body.innerText.includes('Initial conversion still visits the supplied tree')"));
+  await evaluate("document.querySelector('#a-large-question-should-still-travel-as-language-data').scrollIntoView({block:'start'})");
+  await shot(size.name+'-question-graph');
+  const graphPanel='[data-graph="formal-question-graphs"] .sg-stage>[data-view]:not([hidden])';
+  await click(graphPanel+' .review-index [data-sg-to="runtime"]');
+  check(size.name+': graph materialization panel keeps unfamiliar atoms and equality refusal visible',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(graphPanel)}).innerText;return t.includes('existing keywords only')&&t.includes('Runtime machinery is refused')&&t.includes('collapse distinct entries')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(graphPanel)}).scrollIntoView({block:'center'})`);
+  await shot(size.name+'-graph-runtime-panel');
+  if(size.name==='phone'){
+   await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(graphPanel)}).querySelector('.review-detail');d.scrollTop=d.scrollHeight})()`);
+   await shot(size.name+'-graph-runtime-details');
+  }
+  if(size.name==='desktop'){
+   await click('#theme');await shot(size.name+'-graph-night');await click('#theme');
+  }
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-question-graph','story-graph-point','story-graph-budget']){
+   const text=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+   check(size.name+': visible graph result '+id,text.length>100);
+   if(id==='story-question-graph')check(size.name+': repeated data keeps exact kinds in six stored nodes',text.includes(':stored-nodes 6')&&text.includes(':expanded-nodes 5001')&&text.includes(':exact-roundtrip true'));
+   if(id==='story-graph-point')check(size.name+': graph point opts in explicitly without native or kernel authority',text.includes(':point-version 2')&&text.includes(':question-profile :bl/public-data-graph-v1')&&text.includes(':old-interface :rejected')&&text.includes(':checking :checked-data-connection')&&text.includes(':native-query-calls 0')&&text.includes(':kernel-execution :not-run'));
+   if(id==='story-graph-budget')check(size.name+': expansion bomb is refused before decoding',text.includes(':small-graph-nodes 21')&&text.includes(':expanded-nodes 2097151')&&text.includes(':next-doubling :refused')&&text.includes(':decoded-before-refusal false'));
+   await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center'})`);await shot(size.name+'-'+id+'-data');
+  }
   await navigate('/#model-access-and-recovered-values-are-different-facts');
   check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
