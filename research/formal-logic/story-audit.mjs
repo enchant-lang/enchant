@@ -547,8 +547,21 @@ try{
   if(size.name==='desktop'){
     await click('#theme');await shot(size.name+'-response-boundary-night');await click('#theme');
   }
+  await click('[data-graph="formal-response-contracts"] .sg-stage>[data-view]:not([hidden]) .review-index [data-sg-to="reply"]');
+  check(size.name+': reply panel binds complete questions and validates actual fields',await evaluate("(()=>{const t=document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').innerText;return t.includes('refuses foreign questions')&&t.includes('every original condition and pin')&&t.includes('final absence question gets no witness')})()"));
+  await evaluate("document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+  await shot(size.name+'-answer-binding-panel');
+  if(size.name==='desktop'){
+    await click('#theme');
+    await evaluate("document.querySelector('[data-graph=\"formal-response-contracts\"] .sg-stage>[data-view]:not([hidden])').scrollIntoView({block:'center'})");
+    await shot(size.name+'-answer-binding-night');await click('#theme');
+  }
+  await navigate('/#a-reply-belongs-to-one-exact-question');
+  check(size.name+': reply chapter distinguishes identity replay and durable payloads',await evaluate("document.body.innerText.includes('A decoded zero cannot borrow credibility')&&document.body.innerText.includes('explicit payload capacity is 16 MiB')&&document.body.innerText.includes('Missing or corrupt payloads raise an error')"));
+  await evaluate("document.querySelector('#a-reply-belongs-to-one-exact-question').scrollIntoView({block:'start'})");
+  await shot(size.name+'-answer-binding');
   await navigate('/#s-the-model-running');
-  for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger']){
+  for(const id of ['story-response-relation','story-response-faults','story-response-boundary','story-response-assumptions','story-response-completion','story-response-ledger','story-answer-binding']){
     const t=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
     check(size.name+': visible executed response result '+id,t.length>100);
     if(id==='story-response-relation')check(size.name+': response source replay and exact mathematical rationals stay distinct',t.includes(':responses [:witnessed :witnessed]')&&t.includes(':source-replay [:reproduced :reproduced]')&&t.includes(':formal/real [1 3]')&&t.includes(':math-source-claim false')&&t.includes(':same-complete-question true'));
@@ -557,6 +570,7 @@ try{
     if(id==='story-response-assumptions')check(size.name+': semantic assumptions retain conditions and bounded scope',t.includes(':semantic-assumptions :conditions-preserved')&&t.includes(':native-verdicts [:proved :proved]')&&t.includes(':scope :bounded')&&t.includes(':certificate :not-checked'));
     if(id==='story-response-completion')check(size.name+': missing OxiZ coordinates remain candidates until concrete pins replay',t.includes(':unconstrained-models [:witnessed :candidate]')&&t.includes(':oxiz-model :partial')&&t.includes(':pinned-crashes [:raised :raised]')&&t.includes(':invented-native-values false'));
     if(id==='story-response-ledger')check(size.name+': compound ledger evidence grants no witness or proof to the absence claim',t.includes(':assurance :recorded')&&t.includes(':top-level-witness false')&&t.includes(':feasible-value {:x -41}')&&t.includes(':absence-claim :unsat')&&t.includes(':compiler-proof-authority false'));
+    if(id==='story-answer-binding')check(size.name+': both engines reject foreign replies and conflicting decoded points',t.includes(':native-question-bound [true true]')&&t.includes(':published [:witnessed :witnessed]')&&t.includes(':response-replay [:valid :valid]')&&t.includes(':foreign-models [:error :error]')&&t.includes(':foreign-absence [:error :error]')&&t.includes(':decoded-mismatch [:candidate :candidate]')&&t.includes(':mismatch-replay [:invalid :invalid]')&&t.includes(':compiler-proof-authority false'));
     await evaluate(`document.querySelector('#cell-${id} .result').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
@@ -886,6 +900,10 @@ try{
  for(const path of ['/RESPONSE-CONTRACTS.md','/response-contracts-check.bl','/response-contracts-ledger.bl','/sdk-src/formal/response.bl','/sdk-src/formal/response-runtime.bl','/sdk-src/formal/ground.bl','/sdk-src/formal/integer-optimize.bl','/sdk-src/veritas/mock.bl','/sdk-src/veritas/fault.bl','/evidence/response-contracts/examples.json','/evidence/response-contracts/ledger-read.json','/evidence/response-contracts/focused-current-checks.txt','/evidence/response-contracts/regression-current-checks.txt','/evidence/response-contracts/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared response interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
+ }
+ for(const path of ['/ANSWER-BINDING.md','/answer-binding-check.bl','/sdk-src/formal/logic.bl','/sdk-src/veritas/ledger.bl','/evidence/answer-binding/baseline-checks.txt','/evidence/answer-binding/candidate-1/ledger-write-checks.txt','/evidence/answer-binding/examples.json','/evidence/answer-binding/ledger-read.json','/evidence/answer-binding/focused-checks.txt','/evidence/answer-binding/regression-checks.txt','/evidence/answer-binding/qualification.json']){
+  const r=await fetch(base+path),body=await r.text();
+  check('Declared answer-binding interface or evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
  for(const path of ['/SOURCE-PROPERTIES.md','/sdk-src/formal/source.bl','/sdk-src/formal/anf-function.bl','/sdk-src/formal/source-runtime.bl','/sdk-src/veritas/property.bl','/source-properties-check.bl','/evidence/source-properties/examples.json','/evidence/source-properties/focused-checks.txt','/evidence/source-properties/qualification.json']){
   const r=await fetch(base+path),body=await r.text();
