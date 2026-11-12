@@ -1,0 +1,69 @@
+(ns formal.question-graphs-check
+ (:require [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
+           [formal.native-cases :as native] [formal.query :as q] [formal.term :as t]
+           [formal.identity :as identity] [formal.data-graph :as graph] [formal.point :as point]
+           [oracle] [bl.json :as json]))
+;; Independent comparison-only tree audit, deliberately not the graph's hash.
+;; This is the preceding checkpoint's public content comparison profile.
+(def comparison-profile :bl/full-public-data-merkle-comparison-v1)
+(defn content [data]
+ (let [walks (atom 0) scalar-bytes (atom 0)]
+  (letfn [(hash-node [node] (identity/hash [comparison-profile node]))
+          (walk [x depth]
+           (swap! walks inc)
+           (assert (and (<= @walks 4000000) (<= depth 192)))
+           (assert (not (or (fn? x) (and (some? (meta x)) (not= {} (meta x))) (sorted-map? x) (sorted-set? x))))
+           (cond
+            (map? x) (hash-node [:map (vec (sort-by first (mapv (fn [[k v]] [(walk k (inc depth)) (walk v (inc depth))]) x)))])
+            (set? x) (hash-node [:set (vec (sort (mapv #(walk % (inc depth)) x)))])
+            (vector? x) (hash-node [:vector (mapv #(walk % (inc depth)) x)])
+            (list? x) (hash-node [:list (mapv #(walk % (inc depth)) x)])
+            (erlang/is_tuple x) (hash-node [:tuple (mapv #(walk % (inc depth)) (erlang/tuple_to_list x))])
+            :else (let [bytes (identity/bytes x)]
+                    (swap! scalar-bytes + (erlang/byte_size bytes))
+                    (assert (<= @scalar-bytes 67108864)) (hash-node [:scalar bytes]))))]
+   {:sha256 (walk data 0) :walks @walks :scalar-bytes @scalar-bytes})))
+(def argv (BeamLisp/argv))
+(def saved (atom nil))
+(def calls (atom 0))
+(def rows
+ (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :graph-construction-must-not-query))}
+  #(vec (mapcat
+    (fn [[family cases]]
+     (mapv (fn [c]
+              (let [question (q/from-case c) g (graph/encode question) decoded (graph/decode! g)
+                    before (content question) after (content decoded)
+                    standard (try {:status :available :sha256 (identity/hash question)}
+                                  (catch e {:status :unavailable :reason (ex-message e)}))]
+               (q/validate! decoded)
+               (assert (= before after))
+               (assert (= (t/digest (q/roots question)) (t/digest (q/roots decoded))))
+               (assert (= (graph/reference g) (graph/of decoded)))
+               (when (= :available (:status standard))
+                (assert (= (identity/bytes question) (identity/bytes decoded))))
+               (when (= :relation/closure-is-transitive (:id c)) (reset! saved {:question question :graph g}))
+               {:id (:id c) :family family :content before :standard-identity standard :graph (graph/check! g)
+                :roots (t/digest (q/roots decoded)) :roundtrip :exact-public-data})) cases))
+    [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
+(assert (= 187 (count rows)))
+(assert (= 0 @calls))
+;; Keep the large original proof question as explicit provenance for a separate
+;; SAT point. This does not pretend that a transitivity theorem has a refutation.
+(def original (:question @saved))
+(def subject (q/sat {:observe (:observe original) :origin {:saved-proof-question original}
+                     :profile :bl/graph-provenance-example-v1 :scope (:scope original)}))
+(def inputs (into {} (map (fn [x] [(:data x) false]) (t/variables (q/roots subject)))))
+(def old (point/prepare subject inputs))
+(assert (= :rejected (:status old)))
+(def ready (point/prepare-graph subject inputs))
+(assert (= :ready (:status ready)))
+(def checked (point/check-graph subject (:packet ready)))
+(assert (= :checked-data-connection (:status checked)))
+(def durable {:original (:graph @saved) :subject (graph/encode subject) :point (:packet ready)})
+(File/write! (second argv) (erlang/term_to_binary durable (list :deterministic (tuple :minor_version 2))))
+(File/write! (first argv)
+ (json/encode {:schema "enchant.formal.question-graph-corpus.v1" :rows rows
+               :point-example {:reference (graph/of subject) :graph (graph/check! (:subject durable))
+                               :version-one old :point (:packet ready) :checking checked :input-count (count inputs)}
+               :managed-query-calls @calls :compiler-proof-authority false} {:pretty 2}))
+(println {:questions (count rows) :queries @calls :point (:status checked) :authority false})

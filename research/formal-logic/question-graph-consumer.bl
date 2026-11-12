@@ -1,0 +1,25 @@
+(ns formal.question-graph-consumer
+ (:require [formal.data-graph :as graph] [formal.point :as point] [formal.query :as q]
+           [formal.identity :as identity] [formal.term :as t] [oracle] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+;; Owned qualification file, not an advertised untrusted ETF ingress. Public
+;; graph checking below precedes materialization of its described values.
+(def saved (BeamLisp.Env/decode_data_term! (File/read! (first argv)) (list :safe)))
+(def calls (atom 0))
+(def report
+ (oracle/with-oracle {:query (fn [_ _] (swap! calls inc) (throw :pure-data-read-must-not-query))}
+  #(let [original (graph/decode! (:original saved)) question (graph/decode! (:subject saved))
+         checked (point/check-graph question (:point saved))]
+    (q/validate! original) (q/validate! question)
+    (assert (= :checked-data-connection (:status checked)))
+    (assert (= (graph/reference (:subject saved)) (:question checked)))
+    (assert (= (graph/of original) (graph/of (get-in question [:origin :saved-proof-question]))))
+    (assert (= 0 @calls))
+    {:schema "enchant.formal.question-graph-consumer.v1" :process (System/pid) :cwd (File/cwd!)
+     :sdk-only true :research-import-path false :original (graph/check! (:original saved))
+     :subject (graph/check! (:subject saved)) :point (:identity (:point saved)) :checking checked
+     :original-standard-identity (try {:status :available :sha256 (identity/hash original)}
+                                      (catch e {:status :unavailable :reason (ex-message e)}))
+     :managed-query-calls @calls :source-compilation false :compiler-proof-authority false})))
+(File/write! (second argv) (json/encode report {:pretty 2}))
+(println {:point (get-in report [:checking :status]) :queries @calls :sdk-only true})
