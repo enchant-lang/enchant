@@ -69,6 +69,8 @@ def check(source, expected, audits=0):
             assert set(re.findall(r'[\w.]+', axioms)) <= {'propext', 'Quot.sound'}, (result, axioms)
     else:
         assert code != 0 and 'error:' in text and not output.exists(), (name, 'expected actual proof rejection')
+        reason = 'error: unsolved goals' if name == 'MissingDependencyClosure' else 'error: Tactic `rfl` failed'
+        assert text.count('error:') == 1 and reason in text, (name, 'wrong rejection reason', text[-2000:])
     result = {'source': str(source.relative_to(R)), 'source_sha256': sha(source),
               'exit_code': code, 'expected_acceptance': expected, 'log_sha256': sha(log),
               'axiom_audits': audits, 'olean_sha256': sha(output) if output.exists() else None}
