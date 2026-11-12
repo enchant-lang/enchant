@@ -22,6 +22,9 @@ pin = read(P / 'sdk-pin.json')
 qualification = read(E / 'qualification.json')
 assert qualification['status'] == 'passed' and qualification['sdk_pin'] == pin
 kit = read(E / 'kit-state.json')
+assert kit['root'].startswith('/nix/store/')
+assert str(Path(kit['snapshot_retention_root']).resolve(strict=True)) == kit['root']
+assert subprocess.check_output(['nix-store', '--query', '--hash', kit['root']], text=True).strip() == kit['snapshot_nar_hash']
 for name, digest in kit['rendering_source_sha256'].items():
     body = (Path(kit['root']) / name).read_bytes()
     assert hashlib.sha256(body).hexdigest() == digest
@@ -103,6 +106,9 @@ assert host['document_sha256'] == sha(document) and host['live_process_sdk_boot'
 assert host['state']['ActiveState'] == 'active' and host['state']['MemoryMax'] == '2147483648'
 assert host['http']['status'] == 200 and host['http']['bytes'] > 1000000
 assert host['kit_commit'] == kit['commit']
+assert host['live_process_kit_root'] == kit['root']
+activation = read(E / 'host-launch-exit.json')
+assert activation['exit_code'] == 0 and activation['controller_sdk'] == pin['sdk']
 tailnet = read(E / 'tailnet.json')
 assert tailnet['status'] == 200 and tailnet['document_sha256'] == sha(document)
 report = {'schema': 'enchant.formal.observation-dossier-qualification.v1', 'status': 'passed',

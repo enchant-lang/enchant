@@ -56,11 +56,15 @@ state = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
 assert state['ActiveState'] == 'active' and state['SubState'] == 'running' and state['MemoryMax'] == '2147483648'
 boots = [x.decode() for x in Path('/proc/' + state['ExecMainPID'] + '/cmdline').read_bytes().split(b'\0') if x.endswith(b'/boot.exs')]
 assert boots == [pin['sdk'] + '/boot.exs']
+process_kit = [x.decode().split('=', 1)[1] for x in
+               Path('/proc/' + state['ExecMainPID'] + '/environ').read_bytes().split(b'\0')
+               if x.startswith(b'FORMAL_REVIEW_KIT_ROOT=')]
+assert process_kit == [kit['root']], 'actual host must select the immutable kit'
 with urllib.request.urlopen('http://127.0.0.1:24089/', timeout=60) as response:
     body, status = response.read(), response.status
 assert status == 200 and b'let-observations-demand-only-what-they-display' in body and b'cell-story-graph-observations' in body
 write(E / 'dossier-host.json', {'recorded_utc': datetime.now(timezone.utc).isoformat(), 'state': state,
-      'live_process_sdk_boot': boots[0], 'kit_commit': kit['commit'],
+      'live_process_sdk_boot': boots[0], 'live_process_kit_root': process_kit[0], 'kit_commit': kit['commit'],
       'document_sha256': sha(P / 'ATLAS.bl.org'), 'http': {'status': status, 'bytes': len(body),
       'sha256': hashlib.sha256(body).hexdigest()}, 'review_url': 'https://work.tailcb5318.ts.net:18100/'})
 stages = [('focused', 'observation-browser.mjs', 300)]
