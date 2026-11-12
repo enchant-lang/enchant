@@ -100,7 +100,7 @@ for stage in ('compiler-floor','preflight','preflight-controls'): require(read(E
 total=sum(sum(row.values()) for row in runs.values())
 report={'schema':'enchant.formal.explicit-point-qualification.v1','status':'passed','checkpoint':42,'recorded_utc':datetime.now(timezone.utc).isoformat(),
         'sdk_pin':pin,'source':snapshot,'checked_programs':checked,'assertion_executions':total,'runs':runs,'preceding_paired_questions':paired,'reviewed_replay_upgrades':upgrades,
-        'new_paired_source_subjects':4,'sdk_only':True,'durable_fresh_process_rechecking':True,'record_rechecking_managed_query_calls':0,'pure_rechecking_source_compilation':False,'separate_fresh_source_observations':6,
+        'new_paired_subjects':4,'new_paired_source_subjects':3,'new_paired_mathematical_subjects':1,'sdk_only':True,'durable_fresh_process_rechecking':True,'record_rechecking_managed_query_calls':0,'pure_rechecking_source_compilation':False,'separate_fresh_source_observations':6,
         'examples_sha256':sha(E/'examples.json'),'scope':'Original mathematical data points under the independent evaluator, exact runtime scalar observations, finite binary64 interval generators and separately observed Source counterexamples. No borrowed Int/Bool metatheory, universal IEEE/Source preservation or compiler authority.',
         'compiler_proof_authority':False}
 (E/'qualification.json').write_text(json.dumps(report,indent=2)+'\n')
