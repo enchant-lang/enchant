@@ -18,9 +18,21 @@ if stage == 'focused':
     request = ['test', str(P / 'test/term_forest_test.bl')]
 elif stage == 'corpus':
     request = ['run', str(P / 'term-forest-check.bl'), '--', str(E / 'corpus.json')]
+elif stage == 'native':
+    request = ['run', str(P / 'term-forest-native.bl'), '--', str(E / 'native.json')]
 else:
     raise ValueError(stage)
 runtime = Path(tempfile.mkdtemp(prefix='formal-term-forest-runtime-'))
+commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
+sources = [P / 'src/formal/term-forest.bl', P / 'test/term_forest_test.bl', P / 'term-forest-check.bl',
+           P / 'term-forest-native.bl', Path(__file__), P / 'sdk-pin.json']
+digests = {}
+for source in sources:
+    name = str(source.relative_to(R))
+    assert subprocess.check_output(['git', 'show', commit + ':' + name], cwd=R) == source.read_bytes()
+    digests[name] = hashlib.sha256(source.read_bytes()).hexdigest()
+(E / (stage + '-source-pin.json')).write_text(json.dumps({'code_commit': commit, 'source_sha256': digests,
+                                                        'sdk_pin': pin}, indent=2) + '\n')
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            '--working-directory=' + str(R), '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
            '--property=RuntimeMaxSec=900', '--property=KillMode=control-group',

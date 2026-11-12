@@ -1,0 +1,63 @@
+(ns formal.term-forest-native
+ (:require [formal.term-forest :as forest] [formal.term :as t] [formal.query :as q]
+           [formal.data-graph :as graph] [formal.native-cases :as native]
+           [formal.backend :as backend] [bl.json :as json] [oracle]))
+
+;; Exercise one declared fixture per native family. These are raw native scopes,
+;; not managed graph questions or independently checked proof/replay results.
+(def representatives
+ (reduce (fn [out item]
+           (if (some #(= (:family %) (:family item)) out) out (conj out item))) [] (native/cases)))
+(def calls (atom 0))
+(def raw-calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :raw-forest-probe-must-not-use-managed-oracle))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  #(mapv
+    (fn [item]
+     (println (str "native forest " (:id item)))
+     (let [problem (q/from-case item)
+           assertions (conj (vec (:assertions problem)) (:counterexample problem))
+           terms (vec (concat (map :term assertions) (q/roots problem)))
+           data (graph/encode terms) roots (second (nth (:nodes data) (:root data)))
+           prepared (forest/prepare data roots) previous (t/export (t/registry) terms)
+           _ (assert (erlang/=:= (:nodes previous) (:nodes prepared)))
+           _ (assert (= (:ids previous) (:roots prepared)))
+           count-assertions (count assertions)
+           named (mapv (fn [i] [(:label (nth assertions i)) (nth (:roots prepared) i)]) (range count-assertions))
+           observed (mapv (fn [i] [(str "root/" i) (nth (:roots prepared) i)])
+                          (range count-assertions (count terms)))
+           engines
+           (mapv
+            (fn [engine]
+             (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+              (fn [session]
+               (let [context (backend/context session)
+                     request (tuple :scope (:generation context)
+                              (backend/native-data (:nodes prepared))
+                              (backend/native-data named) (list) (backend/native-data observed) 500)
+                     _ (swap! raw-calls inc)
+                     reply (backend/invoke session request)
+                     accepted (contains? (get-in item [:expectations engine :solver-statuses]) (:status reply))
+                     invalidated (when (:ok reply) (not (backend/context-matches? session context)))]
+                (assert accepted (str (:id item) " " engine " unexpected raw status " (pr-str reply)))
+                (when (:ok reply)
+                 (assert invalidated)
+                 (assert (try (backend/context session) false (catch _ true))))
+                {:engine engine :accepted accepted :identity (:identity session)
+                 :native-status (:status reply) :reply (select-keys reply [:ok :status :backend :generation :model-status
+                                                                         :observations :stats :error :why])
+                 :managed-context-invalidated invalidated :transport :raw-compatibility
+                 :independent-replay :not-run :certificate :not-checked :compiler-proof-authority false}))))
+            [:z3 :oxiz])]
+      {:id (:id item) :family (:family item) :mathematical-expected (:expected item)
+       :data-reference (:data-reference prepared) :checking (:checking prepared)
+       :exact-legacy-definitions true :engines engines :compiler-proof-authority false})) representatives)))
+(assert (= 0 @calls))
+(assert (= (* 2 (count representatives)) @raw-calls))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.term-forest-native.v1" :rows rows
+               :managed-query-calls @calls :raw-native-scopes @raw-calls
+               :scope "Fresh borrower-owned raw protocol scopes from graph-prepared tables, with existing declared native-status expectations. Raw success invalidates managed portable context. No managed query execution or independent solver certificate/replay is claimed."
+               :compiler-proof-authority false} {:pretty 2}))
+(println {:families (count rows) :raw-native-scopes @raw-calls :managed-query-calls @calls})
