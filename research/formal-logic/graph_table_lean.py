@@ -124,10 +124,10 @@ def lean_scalar(kind,payload):
     if kind=='float64':return 'Scalar.float64 ⟨'+str(int.from_bytes(payload[2:],'big'))+', by decide⟩'
     return 'Scalar.'+{'binary':'bytes','keyword':'keyword','symbol':'symbol'}[kind]+' '+lean_bytes(payload)
 
-def lean_refs(refs):
-    out='(fun i => Fin.elim0 i)'
-    for ref in reversed(refs):out='(Fin.cases ⟨'+str(ref)+', by decide⟩ '+out+')'
-    return out
+def lean_refs(refs,bound):
+    # An explicit element type avoids dependent-motive inference across a
+    # nested Fin.cases chain; the same ordered finite coordinates remain.
+    return '(List.get (['+', '.join('⟨'+str(ref)+', by decide⟩' for ref in refs)+'] : List (Fin '+str(bound)+')))'
 
 def lean_instance(packet):
     rows,infos,wire=read_packet(packet)
@@ -136,8 +136,8 @@ def lean_instance(packet):
         if kind not in CONTAINERS:row='Row.scalar ('+lean_scalar(kind,payload)+')'
         else:
             if kind=='map':
-                children='(fun slot => if slot.2 then '+lean_refs([v for _,v in payload])+' slot.1 else '+lean_refs([k for k,_ in payload])+' slot.1)'
-            else:children=lean_refs(payload)
+                children='(fun (slot : Fin '+str(len(payload))+' × Bool) => if slot.2 then '+lean_refs([v for _,v in payload],i)+' slot.1 else '+lean_refs([k for k,_ in payload],i)+' slot.1)'
+            else:children=lean_refs(payload,i)
             row='Row.node (Kind.'+kind+' '+str(len(payload))+') '+children
         lines.append('def table'+str(i+1)+' : Table '+str(i+1)+' := .push table'+str(i)+' ('+row+')')
     n=len(rows);root='⟨'+str(packet['root'])+', by decide⟩'

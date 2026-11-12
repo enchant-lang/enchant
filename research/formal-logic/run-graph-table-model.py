@@ -24,7 +24,8 @@ elif stage=='instances':
         command=bounded([lean,'--root='+str(source.parent),'-o',output,source],['--setenv=LEAN_PATH='+str(E)])
         write(source.with_suffix('.command.json'),command)
         with log.open('w') as f:code=subprocess.run(command,cwd=R,stdout=f,stderr=subprocess.STDOUT).returncode
-        text=log.read_text();assert code==0 and output.is_file() and 'sorryAx' not in text and 'error:' not in text,(row['id'],text[-2000:])
+        write(source.with_suffix('.exit.json'),{'exit_code':code,'olean_present':output.is_file()})
+        text=log.read_text();assert code==0 and output.is_file() and 'sorryAx' not in text and 'error:' not in text,(row['id'],code,text[-2000:])
         results.append({**row,'exit_code':code,'olean_sha256':sha(output),'log_sha256':sha(log),'imported_graph_table_sha256':sha(model)})
     write(E/'instances/results.json',{'status':'passed','instances':results,'sdk_pin':pin,'tool_pin':tool,'scope':'Owned exact-wire graph instances and structural node/depth model. No BL implementation or compiler preservation theorem.'})
     print(json.dumps({'stage':stage,'instances':len(results),'status':'passed'}));sys.exit(0)
