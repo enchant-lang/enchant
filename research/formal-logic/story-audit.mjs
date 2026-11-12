@@ -628,6 +628,38 @@ try{
    if(id==='story-graph-budget')check(size.name+': expansion bomb is refused before decoding',text.includes(':small-graph-nodes 21')&&text.includes(':expanded-nodes 2097151')&&text.includes(':next-doubling :refused')&&text.includes(':decoded-before-refusal false'));
    await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center',behavior:'instant'})`);await shot(size.name+'-'+id+'-data');
   }
+  await navigate('/#use-the-saved-question-without-unpacking-its-history');
+  check(size.name+': graph consumer chapter keeps saved context and reports separate',await evaluate("document.body.innerText.includes('Changing that provenance still changes the complete question reference')&&document.body.innerText.includes('Reopening a saved execution label does not establish a new execution')"));
+  await evaluate("document.querySelector('#use-the-saved-question-without-unpacking-its-history').scrollIntoView({block:'start',behavior:'instant'})");
+  await shot(size.name+'-graph-consumers');
+  const consumerPanel='[data-graph="formal-graph-consumers"] .sg-stage>[data-view]:not([hidden])';
+  await click(consumerPanel+' .review-index [data-sg-to="selected"]');
+  check(size.name+': selected term view leaves unknown provenance as bytes',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(consumerPanel)}).innerText;return t.includes('stays bytes rather than becoming a VM atom')&&t.includes('scope-sensitive validator and evaluator')&&t.includes('materialize!')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(consumerPanel)}).scrollIntoView({block:'center',behavior:'instant'})`);
+  await shot(size.name+'-graph-selected-panel');
+  if(size.name==='desktop'){
+   await click('#theme');await evaluate(`document.querySelector(${JSON.stringify(consumerPanel)}).scrollIntoView({block:'center',behavior:'instant'})`);await shot(size.name+'-graph-consumers-night');await click('#theme');
+  }
+  await click(consumerPanel+' .review-index [data-sg-to="ledger"]');
+  check(size.name+': durable panel separates graph payloads and recorded assurance',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(consumerPanel)}).innerText;return t.includes('once, with separate answer')&&t.includes('false and nil keep their presence')&&t.includes('cannot grant compiler authority')})()`));
+  await evaluate(`document.querySelector(${JSON.stringify(consumerPanel)}).scrollIntoView({block:'center',behavior:'instant'})`);await shot(size.name+'-graph-ledger-panel');
+  if(size.name==='phone'){
+   await evaluate(`(()=>{const d=document.querySelector(${JSON.stringify(consumerPanel)}).querySelector('.review-detail');d.scrollTo({top:d.scrollHeight,behavior:'instant'})})()`);
+   check(size.name+': graph ledger relationships fit above phone controls',await evaluate(`(()=>{const g=document.querySelector('[data-graph="formal-graph-consumers"]'),d=document.querySelector(${JSON.stringify(consumerPanel)}).querySelector('.review-detail'),r=d.querySelector('.review-related').getBoundingClientRect(),b=d.getBoundingClientRect(),t=g.querySelector('.sg-toolbar').getBoundingClientRect();return r.top>=b.top&&r.bottom<=b.bottom&&r.bottom<=t.top})()`));
+   await shot(size.name+'-graph-ledger-details');
+  }
+  await click(consumerPanel+' .review-index [data-sg-to="proof"]');
+  check(size.name+': graph proof panel keeps metatheory and implementation connection open',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(consumerPanel)}).innerText;return t.includes('finite shared tables')&&t.includes('compiler correctness remain separate obligations')})()`));
+  await navigate('/#s-the-model-running');
+  for(const id of ['story-graph-selected','story-graph-native','story-graph-intercepted','story-graph-durable']){
+   const text=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
+   check(size.name+': visible graph consumer result '+id,text.length>100);
+   if(id==='story-graph-selected')check(size.name+': selected terms work while unknown full materialization refuses',text.includes(':full-materialization :refused')&&text.includes(':original-point :checked-data-connection')&&text.includes(':next 8'));
+   if(id==='story-graph-native')check(size.name+': both engines share an explicit graph reply format',text.includes(':reply-versions [2 2]')&&text.includes(':same-complete-reference true')&&text.includes(':verdicts [:sat :sat]'));
+   if(id==='story-graph-intercepted')check(size.name+': graph handler replay replaces a supplied observation without native execution',text.includes(':supplied-next 999')&&text.includes(':replayed-next 8')&&text.includes(':provided-fallback :not-invoked'));
+   if(id==='story-graph-durable')check(size.name+': reopened graph record does not claim execution or compiler authority',text.includes(':assurance :recorded')&&text.includes(':queries-during-record-and-recheck 0')&&text.includes(':actual-execution-claimed-by-recheck false')&&text.includes(':compiler-proof-authority false'));
+   await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center',behavior:'instant'})`);await shot(size.name+'-'+id+'-data');
+  }
   await navigate('/#model-access-and-recovered-values-are-different-facts');
   check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
