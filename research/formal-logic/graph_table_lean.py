@@ -131,7 +131,11 @@ def lean_refs(refs,bound):
 
 def lean_instance(packet):
     rows,infos,wire=read_packet(packet)
-    lines=['import GraphTable','set_option autoImplicit false','set_option maxRecDepth 100000','set_option maxHeartbeats 8000000','open FormalGraphTable','namespace GraphInstance','def table0 : Table 0 := .empty']
+    lines=['import GraphTable','set_option autoImplicit false','set_option maxRecDepth 100000','set_option maxHeartbeats 8000000','open FormalGraphTable','namespace GraphInstance','def table0 : Table 0 := .empty',
+      'def counts0 : Fin 0 → Nat := fun i => Fin.elim0 i',
+      'def heights0 : Fin 0 → Nat := fun i => Fin.elim0 i',
+      'theorem counts0_eq : Table.fold (fun _ => 1) nodeCountAlgebra table0 = counts0 := rfl',
+      'theorem heights0_eq : Table.fold (fun _ => 0) heightAlgebra table0 = heights0 := rfl']
     for i,(kind,payload) in enumerate(rows):
         if kind not in CONTAINERS:row='Row.scalar ('+lean_scalar(kind,payload)+')'
         else:
@@ -139,13 +143,19 @@ def lean_instance(packet):
                 children='(fun (slot : Fin '+str(len(payload))+' × Bool) => if slot.2 then '+lean_refs([v for _,v in payload],i)+' slot.1 else '+lean_refs([k for k,_ in payload],i)+' slot.1)'
             else:children=lean_refs(payload,i)
             row='Row.node (Kind.'+kind+' '+str(len(payload))+') '+children
-        lines.append('def table'+str(i+1)+' : Table '+str(i+1)+' := .push table'+str(i)+' ('+row+')')
+        lines.append('def row'+str(i)+' : Row '+str(i)+' := '+row)
+        lines.append('def table'+str(i+1)+' : Table '+str(i+1)+' := .push table'+str(i)+' row'+str(i))
+        for stem,leaf,algebra,value in [('counts','1','nodeCountAlgebra',infos[i]['expanded']),('heights','0','heightAlgebra',infos[i]['height'])]:
+            previous=stem+str(i);current=stem+str(i+1)
+            lines.append('def '+current+' : Fin '+str(i+1)+' → Nat := extend '+previous+' '+str(value))
+            lines.append('theorem '+current+'_eq : Table.fold (fun _ => '+leaf+') '+algebra+' table'+str(i+1)+' = '+current+' := by')
+            lines.append('  exact fold_push_of_certified_prefix (fun _ => '+leaf+') '+algebra+' table'+str(i)+' row'+str(i)+' '+previous+' '+str(value)+' '+previous+'_eq (by decide +kernel)')
     n=len(rows);root='⟨'+str(packet['root'])+', by decide⟩'
     lines.extend([
       'theorem original_expanded_nodes : (interpret table'+str(n)+' '+root+').expandedNodes = '+str(infos[-1]['expanded'])+' := by',
-      '  exact (expanded_node_count_agrees table'+str(n)+' '+root+').trans (by decide +kernel)',
+      '  exact (expanded_node_count_agrees table'+str(n)+' '+root+').trans ((congrFun counts'+str(n)+'_eq '+root+').trans (by decide +kernel))',
       'theorem original_depth : (interpret table'+str(n)+' '+root+').height = '+str(infos[-1]['height'])+' := by',
-      '  exact (height_agrees table'+str(n)+' '+root+').trans (by decide +kernel)',
+      '  exact (height_agrees table'+str(n)+' '+root+').trans ((congrFun heights'+str(n)+'_eq '+root+').trans (by decide +kernel))',
       '#print axioms original_expanded_nodes','#print axioms original_depth','end GraphInstance'])
     source='\n'.join(lines)+'\n';require(len(source.encode())<=LIMITS['wire'],'generated proof source capacity')
     return source,{'id':packet['id'],'reference':packet['checking']['reference'],'wire_sha256':digest(wire),'nodes':len(rows),'edges':sum(len(x['children']) for x in infos),'expanded_nodes':infos[-1]['expanded'],'depth':infos[-1]['height'],'scalar_cost_bridge':'not-instantiated','scope':'Exact owned graph wire and structural node/depth instances; no BL implementation or compiler theorem.'}

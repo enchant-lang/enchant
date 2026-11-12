@@ -121,6 +121,14 @@ def Table.fold {α : Type} (leaf : Scalar → α) (node : Algebra α) :
       Row.apply leaf node (Table.fold leaf node previous) row := by
   simp [Table.fold]
 
+theorem fold_push_of_certified_prefix {α : Type} (leaf : Scalar → α) (node : Algebra α)
+    (previous : Table size) (row : Row size) (values : Fin size → α) (latest : α)
+    (prefix : Table.fold leaf node previous = values)
+    (step : Row.apply leaf node values row = latest) :
+    Table.fold leaf node (.push previous row) = extend values latest := by
+  simp only [Table.fold]
+  rw [prefix, step]
+
 def interpret (table : Table size) : Fin size → Value :=
   Table.fold Value.scalar Value.node table
 
@@ -188,6 +196,7 @@ theorem checked_expansion_bound (table : Table size) (index : Fin size) (limit :
 #print axioms slots_complete
 #print axioms apply_rename
 #print axioms interpretation_preserves_prefix
+#print axioms fold_push_of_certified_prefix
 #print axioms table_fold_fusion
 #print axioms expanded_node_count_agrees
 #print axioms expanded_scalar_cost_agrees
