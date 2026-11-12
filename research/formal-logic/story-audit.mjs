@@ -651,15 +651,18 @@ try{
   await click(consumerPanel+' .review-index [data-sg-to="proof"]');
   check(size.name+': graph proof panel keeps metatheory and implementation connection open',await evaluate(`(()=>{const t=document.querySelector(${JSON.stringify(consumerPanel)}).innerText;return t.includes('finite shared tables')&&t.includes('compiler correctness remain separate obligations')})()`));
   await navigate('/#s-the-model-running');
+  const consumerReferences=[];
   for(const id of ['story-graph-selected','story-graph-native','story-graph-intercepted','story-graph-durable']){
    const text=await evaluate(`document.querySelector('#cell-${id} .result')?.innerText||''`);
    check(size.name+': visible graph consumer result '+id,text.length>100);
+   const ref=text.match(/:sha256\s+"([0-9a-f]{64})"/);if(ref)consumerReferences.push(ref[1]);
    if(id==='story-graph-selected')check(size.name+': selected terms work while unknown full materialization refuses',text.includes(':full-materialization :refused')&&text.includes(':original-point :checked-data-connection')&&text.includes(':next 8'));
    if(id==='story-graph-native')check(size.name+': both engines share an explicit graph reply format',text.includes(':reply-versions [2 2]')&&text.includes(':same-complete-reference true')&&text.includes(':verdicts [:sat :sat]'));
    if(id==='story-graph-intercepted')check(size.name+': graph handler replay replaces a supplied observation without native execution',text.includes(':supplied-next 999')&&text.includes(':replayed-next 8')&&text.includes(':provided-fallback :not-invoked'));
    if(id==='story-graph-durable')check(size.name+': reopened graph record does not claim execution or compiler authority',text.includes(':assurance :recorded')&&text.includes(':queries-during-record-and-recheck 0')&&text.includes(':actual-execution-claimed-by-recheck false')&&text.includes(':compiler-proof-authority false'));
    await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center',behavior:'instant'})`);await shot(size.name+'-'+id+'-data');
   }
+  check(size.name+': all four graph consumer cells retain one complete question',consumerReferences.length===4&&new Set(consumerReferences).size===1);
   await navigate('/#model-access-and-recovered-values-are-different-facts');
   check(size.name+': model access chapter preserves unavailable original coordinates',await evaluate("document.body.innerText.includes('That label belongs to the executed question')&&document.body.innerText.includes('incomplete original replay')"));
   await evaluate("document.querySelector('#model-access-and-recovered-values-are-different-facts').scrollIntoView({block:'start'})");
