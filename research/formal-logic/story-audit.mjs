@@ -21,6 +21,9 @@ try{
   await call({op:'viewport',...size});await navigate('/#s-the-big-idea');await wait("!!document.querySelector('#s-the-big-idea')");
   const top=await evaluate("({title:document.title,w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth,failed:document.querySelectorAll('.cell.failed,.ms-errors,.review-errors,.cl-errors,.lt-errors').length})");
   check(size.name+': readable page width',top.sw<=top.w+2,top);check(size.name+': no failed cells or declarations',top.failed===0,top);
+  const authoring=await evaluate("[...document.querySelectorAll('aside.callout.warning')].filter(e=>e.textContent.includes('Review authoring errors')).map(e=>e.textContent)");
+  check(size.name+': connected review grammar is valid',authoring.length===0,{errors:authoring});
+  if(authoring.length)throw Error('Connected review authoring errors: '+authoring.join(' | '));
   check(size.name+': model proofs retain their implementation boundary',await evaluate("document.body.innerText.includes('18 theorems')&&document.body.innerText.includes('not that the BL implementation or compiler faithfully implements it')"));
   check(size.name+': loop model exposes its proof-rule assumptions',await evaluate("document.body.innerText.includes('twenty-two checked theorems')&&document.body.innerText.includes('Classical.choice')"));
   await shot(size.name+'-introduction');
