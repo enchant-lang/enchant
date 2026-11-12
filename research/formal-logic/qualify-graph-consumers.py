@@ -1,6 +1,6 @@
 """Qualify checkpoint 44 without promoting graph data into proof authority."""
 from datetime import datetime, timezone
-import hashlib,json,re,subprocess
+import hashlib,json,re,subprocess,tarfile
 from pathlib import Path
 P=Path(__file__).resolve().parent; R=P.parent.parent; E=P/'evidence/graph-consumers'; prior=P/'evidence/question-graphs'
 def read(p):return json.loads(p.read_text())
@@ -53,6 +53,10 @@ for family in ['advanced','features','native']:
             require(all(row[engine][k]==old[engine][k] for k in ['solver-status','verdict','phase']),'old native outcomes')
 writer=read(E/'writer.json');require(writer['sdk-only'] and writer['rows']==3,'fresh writer mixed formats')
 require(writer['graph']['expanded-nodes']>100000 and writer['graph']['nodes']<1000,'graph-first shared opaque provenance')
+fixture=read(E/'owned-ledger.json');require(fixture['active_db_retired'] and sha(E/fixture['archive'])==fixture['archive_sha256'],'closed owned fixture archive')
+with tarfile.open(E/fixture['archive'],'r:gz') as saved:
+    for name,digest in fixture['files'].items():
+        require(hashlib.sha256(saved.extractfile(name).read()).hexdigest()==digest,'owned archive file: '+name)
 a,b=read(E/'consumer-one.json'),read(E/'consumer-two.json')
 require(len({writer['process'],a['process'],b['process']})==3,'three independent processes')
 for data,stage in [(writer,'writer'),(a,'consumer-one'),(b,'consumer-two')]:
@@ -72,5 +76,6 @@ require(all(flight[k]['modality']=='exhausted' and flight[k]['complete'] for k i
 require('SDK-PREFLIGHT-CONTROL passed: parse, target edge and cycle refusals' in (E/'preflight-controls-checks.txt').read_text(),'negative admission controls')
 total=sum(sum(rows.values()) for rows in runs.values())
 report={'schema':'enchant.formal.graph-consumers-qualification.v1','checkpoint':44,'status':'passed','recorded_utc':datetime.now(timezone.utc).isoformat(),'sdk_pin':pin,'runs':runs,'assertion_executions':total,'complete_graph_contexts':187,'same_preceding_native_subjects':187,'fresh_sdk_only_writer':1,'fresh_sdk_only_readers':2,'pure_reader_managed_query_calls':0,'new_untrusted_byte_ingress':False,'compiler_proof_authority':False,'scope':'Explicit graph-backed question contexts, selective composition/materialization, v2 typed answers, named graph effects, retained contexts, versioned durable verdicts and common native check/compare. Existing worker/compiler and old paths retained. Owned ledger codec. No graph evaluator theorem, portable graph proof migration, Source/compiler preservation or universal totality.'}
+report['owned_fixture']=fixture
 (E/'qualification.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps({'checkpoint':44,'status':'passed','assertions':total,'graph_contexts':187,'durable_readers':2}))
