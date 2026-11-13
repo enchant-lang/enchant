@@ -40,7 +40,7 @@ assert sha(P / 'evidence/floor-modulus-model/FloorModulus.olean') == floor_check
 parents['floor'] = {'qualification_sha256': sha(P / 'evidence/floor-modulus-model/qualification.json'),
                     'source_sha256': floor_check['source_sha256'], 'olean_sha256': floor_check['olean_sha256']}
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
-sources = [P / 'metatheory/TermFloorModulus.lean',
+sources = [P / 'metatheory/TermFloorModulus.lean', P / 'metatheory/TermFloorModulusDependencies.lean',
            *sorted((P / 'metatheory/term-floor-modulus-controls').glob('*.lean'))]
 inputs = [*sources, Path(__file__), P / 'metatheory/tool-pin.json',
           P / 'metatheory/terms-pin.json', P / 'metatheory/refutation-pin.json']
@@ -59,9 +59,13 @@ expected = {
     'zero_failure': {'propext'},
     'missing_left': {'propext'},
     'missing_right': {'propext'},
-    'negative_divisor_example': set(),
+    # Reflexivity still inherits the named partial evaluator's propext.
+    'negative_divisor_example': {'propext'},
 }
 expected = {'FormalTermFloorModulus.' + name: values for name, values in expected.items()}
+dependencies = {'FormalTerms.Term.eval': {'propext'},
+                'FormalTermFloorModulus.floorModTerm': set(),
+                'FormalTerms.modulus': set(), 'FormalRefutation.pOr': set()}
 checked = []
 paths = [E, P / 'evidence/term-refutation', P / 'evidence/refutation-kernel', P / 'evidence/floor-modulus-model']
 for index, source in enumerate(sources):
@@ -81,20 +85,22 @@ for index, source in enumerate(sources):
                                            'elapsed_seconds': time.monotonic() - started})
     text = log.read_text()
     audits = []
-    accepted = index == 0
+    dependency_audit = source.stem == 'TermFloorModulusDependencies'
+    accepted = index == 0 or dependency_audit
     if accepted:
         assert code == 0 and output.exists() and 'error:' not in text, text[-5000:]
         reports = re.findall(r"'([^']+)' (?:depends on axioms: \[([^]]*)\]|does not depend on any axioms)", text)
-        assert len(reports) == 6 and {name for name, _ in reports} == set(expected), reports
+        ledger = dependencies if dependency_audit else expected
+        assert len(reports) == len(ledger) and {name for name, _ in reports} == set(ledger), reports
         for theorem, raw in reports:
             axioms = re.findall(r'[\w.]+', raw)
-            assert set(axioms) == expected[theorem], (theorem, axioms)
+            assert set(axioms) == ledger[theorem], (theorem, axioms)
             audits.append({'theorem': theorem, 'axioms': axioms})
     else:
         assert code != 0 and not output.exists() and text.count('error:') == 1
         assert 'error: Tactic `rfl` failed' in text, text[-2500:]
     checked.append({'source': str(source.relative_to(R)), 'source_sha256': sha(source),
-                    'exit_code': code, 'accepted': accepted, 'axiom_audits': audits,
+                    'exit_code': code, 'accepted': accepted, 'dependency_audit': dependency_audit, 'axiom_audits': audits,
                     'log_sha256': sha(log), 'olean_sha256': sha(output) if output.exists() else None})
     print(json.dumps({'stage': source.stem, 'status': 'accepted' if accepted else 'rejected-as-required'}), flush=True)
 assert all(sha(R / name) == digest for name, digest in digests.items())
@@ -103,7 +109,9 @@ write(E / 'qualification.json', {
     'recorded_utc': datetime.now(timezone.utc).isoformat(), 'tool_pin': tool,
     'source_pin': read(E / 'source-pin.json'), 'checks': checked,
     'universal_and_example_theorems': 6, 'refusal_controls': 2,
+    'definition_dependency_audits': 4,
     'declared_axiom_ledger': {name: sorted(values) for name, values in expected.items()},
+    'declared_definition_dependencies': {name: sorted(values) for name, values in dependencies.items()},
     'compiler_proof_authority': False,
     'scope': 'Connection between the pinned partial typed mathematical term evaluator and the floor-modulus arithmetic model, including zero failure and missing operands. No BL decoder, graph constructor, renderer, compiler, concrete exception or native solver correspondence theorem.'})
 print(json.dumps({'status': 'passed', 'theorems': 6, 'refusal_controls': 2}))
