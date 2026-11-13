@@ -7,8 +7,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 P = Path(__file__).resolve().parent
@@ -55,13 +57,31 @@ write(E / (stage + '-source-pin.json'), {'code_commit': commit, 'source_sha256':
 (E / (stage + '-memory-before.txt')).write_text(subprocess.check_output([R / 'scripts/bl-mem'], text=True))
 environment = os.environ.copy()
 environment['PATH'] = str(platform) + ':' + environment['PATH']
+recovery = None
 if stage == 'seed':
     output = R / '.bl/regen' / ('formal-numeric-' + commit[:12])
     assert not output.exists(), 'Retain and inspect an earlier generation before restarting.'
-    environment.update(BL_BOOTSTRAP_INSTALL='1', BL_REGEN_MEMORY_MAX='4G')
-    command = [str(R / 'scripts/regenerate-seed'), str(output)]
+    # The checkout's historical build/ can be older than its current compiler
+    # sources. Recover through the qualified image, without a second checkout,
+    # recompiling dependencies, or modifying any SDK bytes.
+    recovery = Path(tempfile.mkdtemp(prefix='formal-numeric-recovery-'))
+    (recovery / 'scripts').mkdir()
+    wrapper = recovery / 'scripts/regenerate-seed'
+    shutil.copy2(R / 'scripts/regenerate-seed', wrapper)
+    (recovery / 'priv').symlink_to(Path(baseline['sdk']) / 'lib/beam_lisp-0.1.0/priv')
+    (recovery / 'build').symlink_to(Path(baseline['sdk']) / 'image/ebin')
+    libraries = recovery / '.bl/lib'
+    libraries.mkdir(parents=True)
+    for library in sorted((Path(baseline['sdk']) / 'lib').iterdir()):
+        (libraries / library.name).symlink_to(library)
+    environment.update(BL_BOOTSTRAP_INSTALL='1', BL_REGEN_MEMORY_MAX='4G', BL_REGEN_ROOT=str(R))
+    command = [str(wrapper), str(output)]
     policy = {'memory_max': '4G', 'memory_swap_max': '1G', 'install_after_fresh_source_floor_check': True,
-              'toolchain_platform': metadata['platform'], 'output': str(output)}
+              'toolchain_platform': metadata['platform'], 'output': str(output),
+              'recovery_image': str(recovery), 'recovery_sdk': baseline['sdk'],
+              'recovery_wrapper_sha256': sha(wrapper), 'target': str(R),
+              'recovery_links': {str(path.relative_to(recovery)): str(path.resolve(strict=True))
+                                 for path in [recovery / 'priv', recovery / 'build', *libraries.iterdir()]}}
 else:
     fingerprint = subprocess.check_output([R / 'scripts/prepare-checkout-sdk', '--fingerprint'], text=True).strip()
     command = [str(R / 'scripts/prepare-checkout-sdk')]
@@ -70,8 +90,13 @@ else:
 write(E / (stage + '-command.json'), {'argv': command, 'policy': policy})
 (E / (stage + '-exit.json')).unlink(missing_ok=True)
 started = time.monotonic()
-with (E / (stage + '-checks.txt')).open('w') as stream:
-    code = subprocess.run(command, cwd=R, env=environment, stdout=stream, stderr=subprocess.STDOUT).returncode
+try:
+    with (E / (stage + '-checks.txt')).open('w') as stream:
+        code = subprocess.run(command, cwd=R, env=environment, stdout=stream, stderr=subprocess.STDOUT).returncode
+finally:
+    if recovery:
+        shutil.rmtree(recovery)
+        write(E / 'seed-recovery-retirement.json', {'path': str(recovery), 'retired': not recovery.exists()})
 write(E / (stage + '-exit.json'), {'exit_code': code, 'elapsed_seconds': time.monotonic() - started})
 if code:
     raise SystemExit(code)
