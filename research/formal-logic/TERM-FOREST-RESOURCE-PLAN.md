@@ -41,3 +41,26 @@ other value families and a cost-model correspondence remain open.
 The current project checks run under whole-process memory and time caps. Its
 graph evaluator has admission/node bounds but no general derived-value preflight
 policy yet.
+
+## The first integration boundary
+
+Start with an explicit Bool/Int resource profile and retain the current preview
+profile as a separate interface. Unsupported policies must return incomplete
+work rather than fall through to an unmetered primitive. Constructor admission
+and concrete evaluation need separate accounting: an untaken branch is still
+typed, but does not spend its concrete evaluation capacity.
+
+Share primitive application with the ordinary evaluator instead of maintaining
+two arithmetic implementations. The actual owner derives forecasts from its
+admitted node and real child values, reserves capacity, then invokes the SDK
+primitive. A caller's ready plan or exported counter map is never authorization.
+Scoped lookup functions need a same-process guard before they carry accounting;
+they already retire after the operation returns or fails.
+
+A per-value refusal is not automatically a failed whole expression. Preserve
+the SDK's three-valued demand rules: an incomplete child followed by false can
+still determine a conjunction; true can determine a disjunction. A refused
+expensive operation does not spend work that it never performed. Report root
+completion, resource refusals and charged work separately. Bind the original
+question, point assignments and normalized settings in distinct references;
+none of those diagnostics grants a solver verdict or compiler authority.
