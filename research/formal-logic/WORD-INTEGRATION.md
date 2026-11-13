@@ -1,8 +1,13 @@
 # One policy dispatcher, one complete question and one point account
 
-The next canonical runtime batch is in source and awaits projection checks
-before producing a new immutable SDK. The selected retained-request SDK and
-its qualified live dossier remain the baseline.
+The canonical runtime batch has passed 2,574 assertions through explicit
+namespace projections, plus a cold twelve-packet reader without manual schema
+preloading. One immutable candidate SDK has now been built. Its 718 packaged
+source files match the reviewed main checkout, including exactly thirteen
+changes; its 141-file compiler floor, native workers and platform are unchanged.
+The candidate passes source analysis of 599 namespaces and three negative
+preflight controls. The selected retained-request SDK and its qualified live
+dossier remain the baseline while runtime qualification is in progress.
 
 `formal.point-profile` dispatches settings, original question admission,
 coordinate syntax and the reply envelope for both live native owners and fresh
@@ -27,10 +32,16 @@ modules before decoding and replay; data never chooses a module or interns
 application names. The earlier in-memory prototype and durable-reader work
 remain separate evidence levels.
 
-Projection stages cover pure words/requests, actual owners, legacy interfaces
-and the actual twelve-record ledger corpus. Then one coherent SDK must pass
+The completed projection stages cover pure words/requests, actual owners, legacy
+interfaces and the actual twelve-record ledger corpus. A cold reader found a
+missing protocol-vocabulary initialization; the source fix and repeated stages
+are recorded separately from that preserved failed attempt. The coherent SDK
+must now pass
 source/floor linkage, focused and legacy checks, both native backends and fresh
 solver-denied durable readers before selection. The actual Org writer,
-unchanged replay and browser review follow. No new SDK, managed word capability
-or presentation qualification is claimed yet. Broader theory and formal/total
+unchanged replay and browser review follow. The candidate build is real; managed word capability, project selection and
+presentation qualification still require the remaining actual gates. The first
+focused SDK run found a negative test whose own constructor rejected its malformed
+sort before the managed boundary. Its correction and rerun retain that failed
+receipt rather than treating a partial green log as qualification. Broader theory and formal/total
 language work remains active.

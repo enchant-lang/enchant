@@ -646,3 +646,8 @@ valuable language experiments are refinement contracts, residual miniKanren
 constraints, Datom invariants and actor protocol simulations. Each can reuse
 the term/value/query/evidence architecture while retaining its own semantic
 and operational boundaries.
+
+The [coherent word-policy integration](WORD-INTEGRATION.md) has a built immutable
+candidate and is running its SDK gates. Its shared policy dispatcher and indexed
+record access are pending selection; the retained-request SDK remains selected.
+The full formal/total-language goal remains active.
