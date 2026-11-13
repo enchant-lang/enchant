@@ -59,3 +59,10 @@ admission, syntax-only text coordinates, demanded value/operation charges, a
 named combined checking profile, both actual owners and solver-denied fresh
 saved-record readers. Mapping BL grapheme operations or Source program outcomes
 to scalar-text terms remains a separate semantic and implementation obligation.
+
+Implementation sources: [the canonical evaluator](sdk-src/formal/evaluate.bl),
+[typed constructors](sdk-src/formal/term.bl),
+[the actual native Unicode cases](src/formal/native-cases.bl), and
+[the reviewed unit distinction](SEMANTICS.md#text-and-target-qualification).
+The capped [pending runner](run-text-resource-prototype.py) requires the word SDK
+to be fully qualified and selected before starting this independent gate.
