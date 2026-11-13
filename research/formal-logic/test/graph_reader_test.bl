@@ -39,3 +39,17 @@
   (is (thrown? (reader/with-data data (fn [operation] (reset! held operation) (throw :consumer-failure)))))
   (is (thrown? ((:read-nodes! @held) [0])))
   (is (thrown? (reader/with-data (assoc data :cached true) (fn [_] :must-not-run))))))
+
+(deftest live-readers-refuse-other-processes-before-reading-or-counting
+ (let [data (graph/encode false) parent (erlang/self)]
+  (reader/with-data data
+   (fn [operation]
+    (erlang/spawn
+     (fn [] (erlang/send parent
+             [:reader-foreign
+              (try ((:read-nodes! operation) [(:root data)]) :unexpected (catch _ :refused))
+              (try ((:checking operation)) :unexpected (catch _ :refused))])))
+    (receive [:reader-foreign a b] (is (= [:refused :refused] [a b]))
+             (after 3000 (is false "foreign reader did not reply")))
+    (is (= 0 (:requested-roots ((:checking operation)))))
+    (is (= [false] ((:read-nodes! operation) [(:root data)])))))))

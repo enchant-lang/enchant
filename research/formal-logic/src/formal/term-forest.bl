@@ -27,12 +27,12 @@
    (require! (contains? #{"vector" "list"} (first (nth rows (get found "args")))) "ordered argument sequence required")
    found)))
 
-(defn prepare
+(defn- prepare-profile
  "Compile checked public graph roots to a fresh portable native term table.
   Argument edges stay graph references. Operation/sort/data fields are decoded
   together and checked with the existing constructors. Scope memoization uses
   both node and environment. The output is derived data, never query authority."
- [data roots]
+ [data roots bool-int?]
  (let [checked (graph/check! data) rows (:nodes data)
        _ (require! (and (vector? roots) (or (nil? (meta roots)) (= {} (meta roots)))) "plain root vector required")
        _ (require! (<= (count roots) (:roots limits)) "root capacity")
@@ -42,6 +42,15 @@
   (letfn [(visit [id]
            (when-not (contains? @seen id)
             (let [record (term-fields! rows id) children (second (nth rows (get record "args")))]
+             ;; Inspect the portable descriptor before SDK constructor admission.
+             ;; The bounded scalar profile must never admit an FP/container
+             ;; value merely to discover that its policy is unavailable.
+             (when bool-int?
+              (let [[kind parts] (nth rows (get record "sort"))]
+               (require! (and (= "vector" kind) (= 1 (count parts))
+                              (contains? #{["keyword" "bool"] ["keyword" "int"]}
+                                         (nth rows (first parts))))
+                         "bounded scalar profile requires Bool/Int sorts")))
              (doseq [child children] (visit child))
              (require! (< (count @seen) (:typed-nodes limits)) "typed-node capacity")
              (swap! descriptions assoc id (assoc record :children children))
@@ -97,3 +106,9 @@
                  :materialized-components (count selected) :argument-traversal :graph-references
                  :source-nodes (:nodes checked) :expanded-source-nodes (:expanded-nodes checked)}
       :compiler-proof-authority false})))))
+
+(defn prepare [data roots] (prepare-profile data roots false))
+(defn prepare-bool-int
+ "Fresh typed admission with a raw Bool/Int descriptor gate before constructors.
+  Other sorts are out-of-profile requests; no concrete evaluator is invoked."
+ [data roots] (prepare-profile data roots true))

@@ -112,3 +112,15 @@
   (is (thrown? (point/with-point data [root] {"scoped.point" 7}
                  (fn [operation] (reset! held operation) (throw :consumer-failure)))))
   (is (thrown? ((:resolve @held) root)))))
+
+(deftest unbudgeted-scopes-also-enforce-the-process-owner
+ (let [data (graph/encode (t/bool false)) parent (erlang/self)]
+  (point/with-point data [(:root data)] {}
+   (fn [operation]
+    (erlang/spawn
+     (fn [] (erlang/send parent
+             [:point-foreign (try ((:resolve operation) (:root data)) :unexpected (catch _ :refused))])))
+    (receive [:point-foreign reply] (is (= :refused reply))
+             (after 3000 (is false "foreign point did not reply")))
+    (is (= 0 (:evaluated-nodes ((:checking operation)))))
+    (is (= false ((:resolve operation) (:root data)))))))))

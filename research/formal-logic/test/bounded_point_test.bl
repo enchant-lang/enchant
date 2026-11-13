@@ -1,0 +1,173 @@
+(ns formal.bounded-point-test
+ (:require [formal.term-forest-evaluate :as point] [formal.term-forest :as forest]
+           [formal.term :as t] [formal.evaluate :as sdk] [formal.data-graph :as graph]
+           [formal.integer-preflight :as integer] [oracle]))
+
+(defn- evaluate [terms assignments limits]
+ (let [data (graph/encode (vec terms)) roots (second (nth (:nodes data) (:root data)))]
+  (point/bounded-values data roots assignments limits)))
+(defn- reason [result] (get-in result [:values 0 :formal/unavailable :reason]))
+(defn- repeated [operation data]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode operation)]
+   [(graph/encode :sort) (graph/encode t/Int)]
+   [(graph/encode :args) (graph/assemble "vector" [data data])]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(deftest complete-small-integer-semantics-agree-with-the-selected-sdk
+ (let [terms (vec (for [a (range -2 3) b (range -2 3)
+                       op [:add :sub :mul :div :mod :eq :lt :le :gt :ge]]
+                   (t/app op (if (contains? #{:eq :lt :le :gt :ge} op) t/Bool t/Int)
+                          [(t/int a) (t/int b)] nil)))
+       result (evaluate terms {} {:request-work-units 100000})]
+  (doseq [i (range (count terms))]
+   (is (erlang/=:= (sdk/value (nth terms i) {}) (nth (:values result) i))))
+  (is (= :incomplete (:status result))) ;; Division by zero remains mathematical incompleteness.
+  (is (= [] (get-in result [:resources :refusals])))
+  (is (= false (:compiler-proof-authority result)))
+  (is (= 0 (:native-calls result)))
+  (is (= :not-run (:assertion-replay result)))))
+
+(deftest primitive-reservations-happen-before-allocation-and-shared-work-is-once
+ (let [data (reduce (fn [value _] (repeated :mul value)) (graph/encode (t/int 2)) (range 40))
+       root (:root data) result (point/bounded-values data [root root] {}
+                                {:integer {:integer-bits 32 :intermediate-bits 64 :work-units 100000}
+                                 :request-work-units 100000})]
+  ;; Forty layers would attempt a 2^40+1-bit integer without preflight.
+  (is (= :incomplete (:status result)))
+  (is (= (:values result) [(first (:values result)) (first (:values result))]))
+  (is (= :integer-bits (:metric (reason result))))
+  (is (= 34 (:required (reason result))))
+  (is (= 4 (get-in result [:resources :integer-primitive-calls])))
+  (is (= 119 (get-in result [:resources :charged-work-units])))
+  (is (= 1 (count (get-in result [:resources :refusals]))))
+  (is (= 41 (get-in result [:checking :typed-nodes])))
+  (is (= 41 (get-in result [:checking :attempted-nodes])))))
+
+(deftest per-operation-width-work-and-request-work-have-distinct-boundaries
+ (let [term (t/mul (t/int 7) (t/int 9))]
+  (doseq [[limits metric] [[{:integer {:integer-bits 6}} :integer-bits]
+                           [{:integer {:intermediate-bits 6}} :intermediate-bits]
+                           [{:integer {:work-units 11}} :work-units]
+                           [{:request-work-units 11} :request-work-units]]]
+   (let [result (evaluate [term] {} limits)]
+    (is (= :incomplete (:status result)))
+    (is (= metric (:metric (reason result))))
+    (is (= 0 (get-in result [:resources :integer-primitive-calls])))
+    (is (= 0 (get-in result [:resources :charged-work-units])))))
+  (let [result (evaluate [term term] {} {:integer {:integer-bits 7 :intermediate-bits 7 :work-units 12}
+                                       :request-work-units 12})]
+   (is (= [63 63] (:values result)))
+   (is (= :complete (:status result)))
+   (is (= 1 (get-in result [:resources :integer-primitive-calls])))
+   (is (= 12 (get-in result [:resources :charged-work-units])))))
+
+(deftest cumulative-work-denial-does-not-consume-unperformed-work
+ (let [a (t/mul (t/int 7) (t/int 9)) b (t/mul (t/int 8) (t/int 9))
+       cheap (t/neg (t/int 1)) result (evaluate [a b cheap a] {} {:request-work-units 13})]
+  (is (= [63 :incomplete -1 63]
+         (mapv #(if (sdk/unavailable? %) :incomplete %) (:values result))))
+  (is (= [:complete :incomplete :complete :complete] (:root-statuses result)))
+  (is (= 13 (get-in result [:resources :charged-work-units])))
+  (is (= 2 (get-in result [:resources :integer-primitive-calls])))
+  (is (= 28 (get-in result [:resources :refusals 0 :reason :required]))))))
+
+(deftest selective-demand-and-decisive-booleans-survive-refused-subexpressions
+ (let [large (t/mul (t/int 7) (t/int 9)) refused (t/eq large (t/int 0))
+       yes (t/bool true) no (t/bool false)
+       terms [(t/ite yes (t/int 1) large) (t/all [no refused]) (t/any [yes refused])]
+       result (evaluate terms {} {:integer {:integer-bits 4}})]
+  (is (= [1 false true] (:values result)))
+  (is (= [] (get-in result [:resources :refusals])))
+  (is (= 0 (get-in result [:resources :integer-primitive-calls])))
+  (doseq [[term expected] [[(t/all [refused no]) false] [(t/any [refused yes]) true]
+                          [(t/implies no refused) true] [(t/implies refused yes) true]]]
+   (let [actual (evaluate [term] {} {:integer {:integer-bits 4}})]
+    (is (= [expected] (:values actual)))
+    (is (= :complete (:status actual)))
+    (is (= 1 (count (get-in actual [:resources :refusals]))))))
+  (let [actual (evaluate [(t/ite refused yes no)] {} {:integer {:integer-bits 4}})]
+   (is (= :incomplete (:status actual)))
+   (is (= 6 (get-in actual [:resources :evaluated-nodes]))))))
+
+(deftest unsupported-policy-never-falls-through-to-an-unmetered-primitive
+ (let [large (t/mul (t/int 7) (t/int 9)) term (t/distinct [large (t/int 0)])
+       result (evaluate [term] {} {})]
+  (is (= :resource-policy-unsupported (:kind (reason result))))
+  (is (= :distinct (:operation (reason result))))
+  (is (= 0 (get-in result [:resources :sdk-calls])))
+  (is (= 1 (get-in result [:resources :evaluated-nodes])))
+  (is (= true (sdk/value term {})))))
+
+(deftest input-width-and-node-reservations-are-independent
+ (let [x (t/variable "bounded.input" t/Int)]
+  (doseq [term [x (t/int 16)]]
+   (let [result (evaluate [term] {"bounded.input" 16} {:integer {:integer-bits 4}})]
+    (is (= :integer-bits (:metric (reason result))))
+    (is (= 0 (get-in result [:resources :sdk-calls])))))
+  (is (= [15] (:values (evaluate [x] {"bounded.input" 15} {:integer {:integer-bits 4}}))))
+  (let [result (evaluate [(t/add (t/int 1) (t/int 2))] {} {:evaluated-nodes 2})]
+   (is (= :incomplete (:status result)))
+   (is (= 2 (get-in result [:resources :evaluated-nodes])))
+   (is (= 3 (get-in result [:checking :attempted-nodes])))
+   (is (= :evaluated-nodes (get-in result [:resources :refusals 0 :reason :metric]))))
+  (let [result (evaluate [(t/bool true)] {} {:evaluated-nodes 0})]
+   (is (= :evaluated-nodes (:metric (reason result))))
+   (is (= 0 (get-in result [:resources :sdk-calls]))))))
+
+(deftest exact-original-assignments-settings-and-root-order-bind-the-result
+ (let [x (t/variable "bounded.ref" t/Int) data (graph/encode [x (t/bool false)])
+       roots (second (nth (:nodes data) (:root data)))
+       a (point/bounded-values data roots {"bounded.ref" 1} {})
+       b (point/bounded-values data roots {"bounded.ref" 2} {})
+       c (point/bounded-values data roots {"bounded.ref" 1} {:request-work-units 0})
+       d (point/bounded-values data (vec (reverse roots)) {"bounded.ref" 1} {})
+       e (point/bounded-values data roots {"bounded.ref" 1} point/resource-defaults)]
+  (is (= (graph/reference data) (:data-reference a) (:data-reference b)))
+  (is (= (graph/of {"bounded.ref" 1}) (:assignment-reference a)))
+  (is (not= (:assignment-reference a) (:assignment-reference b)))
+  (is (not= (:settings-reference a) (:settings-reference c)))
+  (is (not= (:evaluation-reference a) (:evaluation-reference d)))
+  (is (= (:evaluation-reference a) (:evaluation-reference e)))
+  (is (= [false 1] (:values d)))
+  (is (thrown? (point/bounded-values (forest/prepare data roots) roots {} {})))))
+
+(deftest malformed-and-out-of-profile-requests-refuse-before-evaluation
+ (doseq [limits [nil [] {:prepared true} {:integer {:ready true}}
+                  {:request-work-units -1} {:evaluated-nodes 1.0}]]
+  (is (thrown? (evaluate [(t/int 1)] {} limits))))
+ (doseq [term [(t/real 1 2) (t/text "outside")
+                (t/ite (t/bool true) (t/int 1) (assoc (t/int 0) :extra :forged))]]
+  (is (thrown? (evaluate [term] {} {}))))
+ ;; Unsupported sort is rejected even in an unused branch; no giant FP
+ ;; literal constructor or arithmetic is needed for the descriptor gate.
+ (let [raw {:formal/term 1 :op :fp-bits :sort [:fp 32 4096] :args [] :data 0}]
+  (is (thrown? (evaluate [raw] {} {}))))
+ (is (= :complete (:status (evaluate [] {} {:evaluated-nodes 0 :request-work-units 0})))))
+
+(deftest budgeted-scopes-are-process-owned-and-retire-on-return-and-failure
+ (let [data (graph/encode (t/int 1)) root (:root data) held (atom nil)]
+  (point/with-bounded-point data [root] {} {}
+   (fn [operation]
+    (reset! held operation)
+    (let [parent (erlang/self)]
+     (erlang/spawn (fn []
+                    (erlang/send parent
+                     [:foreign (try ((:resolve operation) root) :unexpected (catch _ :refused))
+                               (try ((:checking operation)) :unexpected (catch _ :refused))
+                               (try ((:resources operation)) :unexpected (catch _ :refused))])))
+     (receive [:foreign a b c] (is (= [:refused :refused :refused] [a b c]))
+              (after 3000 (is false "foreign scope check did not reply"))))
+    (is (= 0 (:evaluated-nodes ((:resources operation)))))
+    (is (= 1 ((:resolve operation) root)))))
+  (is (thrown? ((:resolve @held) root)))
+  (is (thrown? ((:resources @held))))
+  (is (thrown? (point/with-bounded-point data [root] {} {}
+                (fn [operation] (reset! held operation) (throw :consumer-failure)))))
+  (is (thrown? ((:checking @held))))))
+
+(deftest the-resource-profile-does-not-query-a-native-or-managed-oracle
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :no-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn [] (is (= [2] (:values (evaluate [(t/neg (t/int -2))] {} {}))))))
+  (is (= 0 @calls))))
