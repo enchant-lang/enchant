@@ -1,0 +1,128 @@
+--- a/priv/lib/js/rt.mjs
++++ b/priv/lib/js/rt.mjs
+@@ -49,8 +49,8 @@
+ }
+ 
+ /** An exact decimal (`1.50M`): unscaled BigInt `u` and scale `s` >= 0, value
+-    u * 10^-s (PLAN-157 D3). As on the BEAM the scale is part of the value:
+-    (= 1.5M 1.50M) is false, and `1.50M` prints with its two places. */
++    u * 10^-s. Generic equality compares exact numeric values; keyEq retains
++    coefficient and scale. Printing and arithmetic preserve the representation. */
+ export class Dec {
+   constructor(u, s) { this.u = BigInt(u); this.s = s; }
+   plain() {
+@@ -573,15 +573,13 @@
+   if (a instanceof Lazy) a = realize(a);
+   if (b instanceof Lazy) b = realize(b);
+   if (a === null || b === null || a === undefined || b === undefined) return false;
+-  // decimals (BEAM, measured): two decimals compare by unscaled+scale
+-  // ((= 1.5M 1.50M) false); a decimal and an int/float by value
+-  // ((= 1.5M 1.5) true, (= 2M 2) true)
++  // Exact-value equality is transitive across Decimal/Int/finite Float.
++  // Raw collection keyEq still has its separately named representation rule.
+   if (a instanceof Dec || b instanceof Dec) {
+-    if (a instanceof Dec && b instanceof Dec) return a.u === b.u && a.s === b.s;
++    if (a instanceof Dec && b instanceof Dec) return decCmp(a, b) === 0;
+     const d = a instanceof Dec ? a : b, o = a instanceof Dec ? b : a;
+     if (!isNumV(o)) return false;
+-    if (o instanceof Flt) return Number(d.plain()) === o.v;
+-    return decCmp(d, o) === 0;
++    return (o instanceof Flt ? decimalFloatCompare(d, o.v) : decCmp(d, o)) === 0;
+   }
+   // JS numeric equality compares BigInt/Number without rounding the BigInt.
+   if (isNumV(a)) return isNumV(b) && numOf(a) == numOf(b); // eslint-disable-line eqeqeq
+@@ -648,7 +646,12 @@
+   switch (ra) {
+     case 0: {
+       if (a instanceof Dec || b instanceof Dec) {
+-        if (a instanceof Flt || b instanceof Flt) { const x = a instanceof Dec ? Number(a.plain()) : a.v, y = b instanceof Dec ? Number(b.plain()) : b.v; return x < y ? -1 : x > y ? 1 : 0; }
++        if (a instanceof Flt || b instanceof Flt) {
++          const c = a instanceof Dec ? decimalFloatCompare(a, b.v) : -decimalFloatCompare(b, a.v);
++          // Foreign JS NaN remains outside the finite-number language profile.
++          // Retain the existing comparator tie without calling it equality.
++          return Number.isNaN(c) ? 0 : c;
++        }
+         return decCmp(a, b);
+       }
+       const x = numOf(a), y = numOf(b); return x < y ? -1 : x > y ? 1 : 0;
+@@ -727,6 +730,23 @@
+   }
+   const s = Math.max(x.s, y.s), xu = x.u * P10(s - x.s), yu = y.u * P10(s - y.s);
+   return new Dec(op === "+" ? xu + yu : xu - yu, s);
++}
++// Compare a Decimal with the Float's actual IEEE binary64 value. There is
++// no conversion of the Decimal through Number or the Float through its text.
++// No GCD is needed: the exact cross-products determine the order directly.
++function decimalFloatCompare(decimal, value) {
++  if (!Number.isFinite(value)) return Number.isNaN(value) ? NaN : value > 0 ? -1 : 1;
++  if (value === 0) return decimal.u < 0n ? -1 : decimal.u > 0n ? 1 : 0;
++  const view = new DataView(new ArrayBuffer(8));
++  view.setFloat64(0, value, false);
++  const bits = view.getBigUint64(0, false), exponent = Number((bits >> 52n) & 0x7ffn);
++  const fraction = bits & ((1n << 52n) - 1n);
++  let numerator = exponent === 0 ? fraction : fraction + (1n << 52n);
++  if ((bits >> 63n) !== 0n) numerator = -numerator;
++  const shift = exponent === 0 ? -1074 : exponent - 1075;
++  let left = decimal.u, right = numerator * P10(decimal.s);
++  if (shift < 0) left <<= BigInt(-shift); else right <<= BigInt(shift);
++  return left < right ? -1 : left > right ? 1 : 0;
+ }
+ function decCmp(a, b) {
+   const x = toDec(a, "compare"), y = toDec(b, "compare"), s = Math.max(x.s, y.s);
+--- /dev/null
++++ b/test/js/numeric-equality.test.mjs
+@@ -0,0 +1,54 @@
++// Proposed finite exact-value equality profile; apply with the BEAM change.
++import {test} from "node:test";
++import assert from "node:assert/strict";
++import * as R from "../../priv/lib/js/rt.mjs";
++
++const values = [0, R.flt(-0), R.dec(0n, 0), R.dec(0n, 2), 1, R.flt(1),
++ R.dec(1n, 0), R.dec(100n, 2), R.flt(1.5), R.dec(15n, 1), R.dec(150n, 2),
++ R.flt(0.1), R.dec(1n, 1), R.flt(0.5), R.dec(50n, 2),
++ 9007199254740992n, R.flt(9007199254740992), 9007199254740993n, -9007199254740993n];
++
++test("finite numeric equality is an equivalence relation and agrees with compare", () => {
++ for (const a of values) assert.ok(R.eqv(a, a));
++ for (const a of values) for (const b of values) {
++  assert.equal(R.eqv(a, b), R.eqv(b, a));
++  assert.equal(R.eqv(a, b), R.compare(a, b) === 0);
++  assert.ok(R.compare(a, b) === -R.compare(b, a));
++  for (const c of values) if (R.eqv(a, b) && R.eqv(b, c)) assert.ok(R.eqv(a, c));
++ }
++});
++
++test("Decimal/Float comparison keeps actual IEEE values at rounding boundaries", () => {
++ assert.ok(R.eqv(R.dec(15n, 1), R.dec(150n, 2)));
++ assert.ok(R.eqv(R.dec(150n, 2), R.flt(1.5)));
++ assert.ok(!R.eqv(R.dec(1n, 1), R.flt(0.1)));
++ assert.equal(R.compare(R.dec(1n, 1), R.flt(0.1)), -1);
++ assert.equal(R.compare(R.dec(9007199254740993n, 0), R.flt(9007199254740992)), 1);
++ assert.equal(R.compare(R.dec(-9007199254740993n, 0), R.flt(-9007199254740992)), -1);
++ // Independent exact constants, not an expected value computed by the helper.
++ const exactTenthFloat = R.dec(3602879701896397n * 5n ** 55n, 55);
++ assert.ok(R.eqv(exactTenthFloat, R.flt(0.1)));
++ const minSubnormal = R.dec(5n ** 1074n, 1074);
++ assert.ok(R.eqv(minSubnormal, R.flt(Number.MIN_VALUE)));
++ assert.equal(R.compare(R.dec(1n, 324), R.flt(Number.MIN_VALUE)), -1);
++ assert.ok(R.eqv(R.dec(-minSubnormal.u, minSubnormal.s), R.flt(-Number.MIN_VALUE)));
++ const maxFinite = R.dec(((1n << 53n) - 1n) << 971n, 0);
++ assert.ok(R.eqv(maxFinite, R.flt(Number.MAX_VALUE)));
++ assert.equal(R.compare(R.dec(maxFinite.u + 1n, 0), R.flt(Number.MAX_VALUE)), 1);
++});
++
++test("nested values use exact numeric equality while raw keys retain their own rule", () => {
++ for (const a of values) for (const b of values) {
++  assert.equal(R.eqv(a, b), R.eqv(R.vec(a), R.list(b)));
++  assert.equal(R.eqv(a, b), R.eqv(R.hashMap("value", a), R.hashMap("value", b)));
++  assert.equal(R.eqv(a, b), R.eqv(R.tup([a]), R.tup([b])));
++ }
++ const a = R.dec(15n, 1), b = R.dec(150n, 2);
++ assert.ok(R.eqv(a, b));
++ assert.ok(!R.keyEq(a, b));
++ assert.equal(R.hashMap(a, "tenths", b, "hundredths").cnt, 2);
++ assert.ok(!R.keyEq(1, R.flt(1)));
++ assert.equal(R.hashMap(1, "integer").get(R.flt(1), null), null);
++ assert.equal(R.dec(150n, 2).plain(), "1.50");
++ assert.throws(() => R.add(a, R.flt(1)), /float cannot enter decimal arithmetic/);
++});

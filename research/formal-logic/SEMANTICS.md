@@ -2,8 +2,9 @@
 
 The experiment runs on the immutable SDK recorded in `sdk-pin.json`. Its current
 runtime observations, pure proposed profiles and backend qualifications are
-different evidence. The patch in `proposals/numeric-equality.patch` is an
-**unapplied, unqualified BEAM proposal**. It must not change the meaning assigned
+different evidence. The patches in `proposals/numeric-equality.patch` and
+`proposals/numeric-equality-js.patch` are **unapplied, unqualified BEAM and JS
+proposals**. They must not change the meaning assigned
 to results obtained from the pinned SDK.
 
 ## Equality: repair the inconsistent relation
@@ -157,6 +158,22 @@ Native FP terms must also declare rounding and choose their equality relation.
 IEEE `fp.eq` makes positive and negative zero equal and makes NaN unequal even
 to itself; structural equality of IEEE bit patterns asks a different question.
 Neither relation should silently inherit the finite-number generic profile.
+
+The [JS companion patch](proposals/numeric-equality-js.patch) now implements
+the finite Decimal/Float comparison using actual binary64 fields and exact
+BigInt cross-products. Generic Decimal equality uses exact value, while its
+separate `keyEq` retains coefficient and scale. The helper is shared by generic
+equality and ordering; Decimal arithmetic continues to refuse Float operands.
+It does not normalize a Decimal through `Number` or a Float through printed
+text. This is prepared code, not an applied runtime or a passed semantic gate.
+
+Its proposed tests check finite equivalence laws, compare-zero agreement,
+nested values, the 0.1 rounding boundary, integers beyond 2^53, the minimum
+subnormal and the maximum finite Float using independent exact constants.
+They explicitly retain the current raw-key relation. Existing JS raw signed
+zero key behavior, compound ordering, nonfinite foreign values and the actual
+compiled `decimal/same-representation?` route need their own cross-target
+qualification; the companion patch does not establish those properties.
 
 ## Gates before adopting a proposed profile
 
