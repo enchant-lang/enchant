@@ -4,8 +4,10 @@ The experiment runs on the immutable SDK recorded in `sdk-pin.json`. Its current
 runtime observations, pure proposed profiles and backend qualifications are
 different evidence. The patches in `proposals/numeric-equality.patch` and
 `proposals/numeric-equality-js.patch` are now applied to integration source,
-along with the modulus repair, but **remain unqualified on a new SDK**. The
-selected project and live dossier still use the preceding qualified SDK. These
+along with the modulus repair. The numeric SDK has now passed its complete
+core qualification; cross-version point readers and the separate arithmetic
+model remain adoption gates. The selected project and live dossier still use
+the preceding qualified SDK. These
 source edits must not change the meaning assigned
 to results obtained from the pinned SDK.
 

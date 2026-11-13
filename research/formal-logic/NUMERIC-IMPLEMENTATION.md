@@ -1,14 +1,17 @@
 # Exact values before stronger logical promises
 
-The integration source now repairs generic numeric equality and the legacy
-modulus translation. This batch is **not qualified on a new SDK yet**. The
-selected SDK and live dossier keep their already qualified behavior while the
-new compiler floor, SDK and checks are produced.
+The integration source repairs generic numeric equality and the legacy
+modulus translation. The second numeric SDK is now **core-qualified**. Its
+12,151 BEAM assertions, 40 JS tests, three real numeric routes and all 187 paired
+native questions pass, with native outcomes unchanged. The selected project
+SDK and live dossier still keep the preceding qualified artifact while the
+separate cross-version readers and mathematical model finish their adoption
+gates. See `evidence/numeric-semantics/qualification.json`.
 
 The compiler-only P/B/C product has now passed its complete 141-file check;
 84 files of the checked-in floor changed when that verified product was
 installed with its manifest last. Two numeric SDK candidates have been produced;
-the second is undergoing its remaining gates. The compiler
+the second has passed the complete core qualification. The compiler
 receipt binds its actual inputs; subsequent changes confined to JavaScript
 runtime source do not rewrite that historical compiler receipt.
 
@@ -73,13 +76,15 @@ one missing host registration: `Elixir.BeamLisp.Decimal/rescale/2`.
 self-contained source-only recovery bundle and Git archive ref. No JVM oracle
 execution or project adoption is claimed for that candidate. The registration
 is now repaired, with a test of both rescale arities and their rounding behavior;
-the replacement must pass all packaged gates on its own exact SDK.
+the replacement has now passed all packaged core gates on its own exact SDK.
 
 The second SDK now matches all 900 exact-number pairs on BEAM, direct JS and
 actual compiled BL. It also matches all 1,051 captured Decimal oracle cases,
 five compiled representation API cases and eleven named Float approximations
 per route. Its 40 JS unit tests, compiler floor, source preflight and refusal
-controls pass. These completed gates do not select the project SDK.
+controls pass. These completed gates do not select the project SDK. The native corpus also
+completed at the unchanged 500/2000ms limits, with zero differences from the
+preceding 187-question run.
 
 The focused BEAM gate exposed a source-relative fixture omission and one stale
 scale-equality expectation in the older host ABI tests. Both are corrected in
@@ -116,3 +121,17 @@ preflight, then compare the affected formal/backend paths at their unchanged
 deadlines. Only complete passing gates may select the candidate and update
 the live dossier's executed observations. No compiler theorem or whole-language
 totality follows from finite test vectors.
+
+Two fresh SDK-only consumers are checking the preceding managed graph records
+without rewriting their subjects, coordinates or recorded producer identity.
+The first has reopened all 187 records and replayed 52 points with zero native
+exchanges or managed queries. The second reader and 11 tamper controls must
+pass before selection. Producer SDK identity and current checker SDK identity
+remain separate; this does not attest historical native execution.
+
+The separate integer modulus model's first attempt failed at its negative-bound
+proof script. That unqualified attempt and actual audit are retained. The
+source now reduces the local binding before the split and declares exact
+per-theorem axiom footprints, including the imported Std floor identities'
+`Classical.choice` dependency. A new actual Lean run and both refusal controls
+remain required; no model qualification is claimed from the corrected source.
