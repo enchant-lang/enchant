@@ -63,7 +63,7 @@ theorem missing_right (a b : Term .integer) (integers : Nat → Int) (booleans :
 theorem negative_divisor_example (integers : Nat → Int) (booleans : Nat → Bool) :
     (floorModTerm (.int 7) (.int (-3))).eval integers booleans = some (-2) ∧
     (Term.mod (.int 7) (.int (-3))).eval integers booleans = some 1 := by
-  decide
+  constructor <;> rfl
 
 #print axioms known_value
 #print axioms known_floor_value
