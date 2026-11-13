@@ -59,6 +59,11 @@ elif stage in ('reader-one', 'reader-two'):
     output = E / (stage + '.json')
     assert (E / 'direct-corpus.json').is_file()
     request = ['run', str(R / names[-1]), '--', str(E / 'direct-corpus.json'), str(output)]
+elif stage == 'managed-native-corpus':
+    project = True
+    names += ['research/formal-logic/managed-graph-check.bl']
+    output = E / 'managed-native-corpus.json'
+    request = ['run', str(R / names[-1]), '--', str(output)]
 elif stage == 'paired-native-corpus':
     project = True
     names += ['research/formal-logic/graph-consumers-check.bl']
@@ -94,7 +99,8 @@ for name in sorted(set(names)):
     sources[name] = hashlib.sha256(body).hexdigest()
 runtime = Path(tempfile.mkdtemp(prefix='formal-managed-runtime-'))
 cwd = Path(tempfile.mkdtemp(prefix='formal-managed-consumer-'))
-ceiling = 3600 if stage == 'paired-native-corpus' else (720 if stage == 'sdk-preflight-controls' else 900)
+ceiling = 3600 if stage == 'paired-native-corpus' else (1800 if stage == 'managed-native-corpus'
+          else (720 if stage == 'sdk-preflight-controls' else 900))
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe', '--expand-environment=no',
            '--working-directory=' + str(cwd), '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
            '--property=RuntimeMaxSec=' + str(ceiling), '--property=KillMode=control-group',
