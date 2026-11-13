@@ -209,6 +209,18 @@ runtime classes; it cannot silently fall back to direct JS helpers. All three
 routes need their own actual executions before cross-target adoption can be
 qualified.
 
+The candidate now also implements the named Decimal JavaScript host ABI.
+Ordinary BL importing `decimal` needs those operations even when its first
+use is the new representation predicate. Exact JS division no longer guesses
+at most 64 fractional places: it uses the reduced denominator's factors and
+the BEAM preferred scale. A generated ordinary-BL module executes all 1,051
+existing JVM-captured cases on the compiled target; expectations remain a
+separate unchanged reference fixture. Named Float approximation has its own
+17-case qualified-BEAM observation and a pinned OTP formatting-policy reference.
+Seven new focused JS source tests and 32 existing primitive tests pass.
+Candidate-SDK execution, compiled BL and native/backend gates are still pending;
+these source checks do not select a new runtime.
+
 ## Gates before adopting a proposed profile
 
 1. Preserve reproducible current-SDK canaries and label changed expectations as
