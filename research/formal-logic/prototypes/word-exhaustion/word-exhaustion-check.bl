@@ -1,0 +1,57 @@
+(ns formal.word-exhaustion-check
+ (:require [formal.word-exhaustion :as proof] [formal.term :as t] [formal.query :as q]
+           [formal.request :as request] [formal.question-graph :as qg] [formal.point-profile :as policy]
+           [formal.backend :as backend] [formal.data-graph :as graph] [oracle]))
+(defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric-word}}))
+(defn checked [query] (let [r (prepared query)] (proof/check r (proof/candidate r))))
+(deftest every-small-word-valuation-is-derived-and-checked
+ (doseq [width (range 1 6)]
+  (let [sort [:bv width] x (t/variable "proof.x" sort)
+        one (t/literal sort 1) add (t/app :bv-add sort [x one] nil)
+        zero (t/literal sort 0) max (t/literal sort (dec (erlang/bsl 1 width)))
+        theorem (checked (q/prove (t/implies (t/eq x max) (t/eq add zero))))
+        falsehood (checked (q/prove (t/eq add zero)))]
+   (is (= :checked (:status theorem)))
+   (is (= :entails (:verdict theorem)))
+   (is (= (erlang/bsl 1 width) (:points-checked theorem)))
+   (is (= width (:domain-bits theorem)))
+   (is (= :not-established (:feasibility theorem)))
+   (is (= false (:checked-native-execution theorem) (:compiler-proof-authority theorem)))
+   (is (= :counterexample (:status falsehood)))
+   (is (= :not-established (:verdict falsehood)))))
+ (let [b (t/variable "proof.boolean" t/Bool) x (t/variable "proof.byte" [:bv 2])
+       theorem (checked (q/prove (t/eq (t/ite b x x) x)))]
+  (is (= :checked (:status theorem)))
+  (is (= 8 (:points-checked theorem))))
+ (let [x (t/variable "proof.inconsistent" [:bv 2])
+       result (checked (q/sat {:assumptions [(t/eq x (t/literal [:bv 2] 0))
+                                             (t/eq x (t/literal [:bv 2] 1))]}))]
+  (is (= :checked (:status result)))
+  (is (= :unsatisfiable (:verdict result)))
+  (is (= :not-established (:feasibility result)))))
+(deftest coverage-and-statement-cannot-be-supplied-by-a-producer
+ (let [r (prepared (q/prove (t/bool true))) c (proof/candidate r)]
+  (doseq [changed [(assoc c :valuations []) (assoc c :checked true)
+                   (assoc c :formal/finite-word-certificate 1.0)
+                   (assoc-in c [:request-reference :sha256] "forged")
+                   (assoc c :rule :sampled-valuations)]]
+   (is (= :rejected (:status (proof/check r changed)))))
+  (is (= :rejected (:status (proof/check (request/for-backend r :oxiz) c)))))
+ (let [x (t/variable "proof.too-wide" [:bv 6]) result (checked (q/prove (t/eq x x)))]
+  (is (= :rejected (:status result))))
+ (let [x (t/variable "proof.unbounded" t/Int) result (checked (q/prove (t/eq x x)))]
+  (is (= :rejected (:status result)))))
+(deftest checker-needs-no-solver-or-request-handler
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1)
+       pattern (tuple module :exchange! 4) calls (atom 0)
+       deny (fn [& _] (swap! calls inc) (throw :exhaustion-must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+    (fn []
+     (let [x (t/variable "proof.no-native" [:bv 2]) result (checked (q/prove (t/eq x x)))]
+      (is (= :checked (:status result)))
+      (is (= 4 (:points-checked result))))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1) @calls))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)
