@@ -91,6 +91,24 @@ Both backends receive that same effective graph. A future graph-based load
 must retain the original graph inside the owner instead of reconstructing
 large assumptions from a client-provided term table.
 
+The owner now has a staged source implementation under
+`formal.graph-execution`, `formal.graph-question`, `formal.evaluate` and
+`formal.backend/graph-question!`. Its local admission scope precedes native
+coordinates and captures the checked forest privately; subsequent point
+evaluation does not repeat literal admission. Explicit binding checks retain
+missing, invalid and resource-refused coordinates separately. The new format
+keeps observation descriptors and point roots as data, with full semantic-value
+materialization still deferred. This source batch has passed namespace/target
+preflight; it is not yet a qualified SDK or live managed capability.
+
+Whole-operation time is a separate setting (`owner-ms`, default 30 seconds,
+maximum 60 seconds). It covers preparation and replay without increasing the
+existing solver or worker deadlines. The owner reserves enough remaining time
+for a complete worker exchange before sending. A borrower that abandons its
+RPC retires the owner; an owner-deadline refusal retires its port. These are
+implemented lifecycle rules awaiting the new artifact's actual checks, not a
+universal cost or termination proof.
+
 ## Start with an explicit numeric fragment
 
 The first managed graph profile should opt into Bool/Int/Real admission and
