@@ -95,9 +95,24 @@ Only the evaluator and three new SDK library files differ from the preceding
 SDK. Compiler, dependencies, platform and backend worker artifacts are
 identical. Fresh source preflight and its negative controls pass.
 
-Wider regression, complete point corpora, fresh SDK-only readers and paired
-native questions are separate gates in progress. The project keeps its
-preceding qualified pin until those gates qualify the candidate. No managed
+The wider regression gates now pass: 899 SDK assertions, 8,141 project
+regression assertions and 585 facade assertions, in addition to the 130 SDK
+boundary and 4,412 focused project assertions. These are 14,167 assertion
+executions across the targeted runs, not a count of distinct tests.
+
+All 187 questions agree between tree, legacy graph and direct graph evaluation
+under four point maps each: 748 point maps and 6,300 root values. Two fresh
+SDK-only reader processes independently consume the owned JSON fixtures from
+different private directories, without a research import path or solver
+queries. The transport control preserves both floating zero signs and invalid
+UTF-8 binary bytes; the fixtures encode both Float64 and binary rows as Base64
+without changing their graph tags. These fixtures carry data, not Source code
+or proof authority.
+
+The paired native questions are running at the existing solver deadlines.
+The project keeps its preceding qualified pin until the final candidate gate
+passes. Project adapter migration and the new live presentation then have
+their own integration checks. No managed
 assertion replay, native retained-context promotion, additional backend theory
 support or checked proof/kernel/compiler authority is claimed by these point
 APIs. Other value-family policies and mechanized cost/implementation
