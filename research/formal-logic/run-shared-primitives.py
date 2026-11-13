@@ -42,6 +42,16 @@ elif stage == 'general-corpus':
     names += ['research/formal-logic/term-forest-evaluation-check.bl']
     output = E / 'general-corpus.json'
     request = ['run', str(R / names[-1]), '--', str(output)]
+elif stage == 'direct-corpus':
+    project = True
+    names += ['research/formal-logic/shared-primitives-corpus.bl']
+    output = E / 'direct-corpus.json'
+    request = ['run', str(R / names[-1]), '--', str(output)]
+elif stage in ('reader-one', 'reader-two'):
+    names += ['research/formal-logic/shared-primitives-reader.bl']
+    output = E / (stage + '.json')
+    assert (E / 'direct-corpus.json').is_file()
+    request = ['run', str(R / names[-1]), '--', str(E / 'direct-corpus.json'), str(output)]
 elif stage == 'paired-native-corpus':
     project = True
     names += ['research/formal-logic/graph-consumers-check.bl']
