@@ -45,8 +45,8 @@ The broader formal-language goal remains active: richer managed theory
 profiles, collection key semantics and stronger Source/compiler connections
 remain work to implement and qualify.
 
-The [numeric repair batch](NUMERIC-IMPLEMENTATION.md) is now qualified and
-selected. It repairs exact generic equality across Decimal scales on BEAM and
+The [numeric repair batch](NUMERIC-IMPLEMENTATION.md) is qualified and
+inherited by the selected retained-request SDK. It repairs exact generic equality across Decimal scales on BEAM and
 JS, adds explicit representation equality and the named compiled JS Decimal
 API, and corrects negative-divisor modulus lowering. Its 12,151 BEAM assertions,
 40 JS tests, 900-pair observations on three real routes and 1,051 compiled
@@ -65,7 +65,8 @@ The [retained-request SDK](RETAINED-REQUEST-IMPLEMENTATION.md) is now
 qualified and selected after 9,528 BEAM assertions, source preflight and fresh
 saved-record checks. Two SDK-only processes reopen twelve
 new packets and durable rows with zero formal exchanges, and two more reopen
-the exact prior 187-record corpus and 52 points each. Its full 187-question paired-native audit passes with unchanged outcomes.
+the exact prior 187-record corpus and 52 points each. Its full 187-question
+paired-native audit passes with unchanged outcomes.
 The live [retained-question chapter](https://work.tailcb5318.ts.net:18100/#keep-every-assumption-with-the-question)
 now runs on that selected SDK, with actual results for both backends and a
 qualified 90-cell presentation.
