@@ -35,6 +35,7 @@ for name in ('compiler', 'dependencies', 'platform', 'formalWorker'):
 assert parent['compiler_floor']['files'] == 141
 assert parent['compiler_floor']['compiler'] == metadata['compiler']
 stages = {}
+historical_dispatch_only = {}
 required = ('source-preflight', 'sdk-preflight', 'sdk-preflight-controls', 'sdk-focused', 'format-focused',
             'project-focused', 'sdk-regression', 'regression', 'facade', 'profile-sorts',
             'managed-reader-one', 'managed-reader-two', 'managed-reader-controls',
@@ -46,7 +47,22 @@ for stage in required:
     for name, digest in source['source_sha256'].items():
         body = subprocess.check_output(['git', 'show', source['code_commit'] + ':' + name], cwd=R)
         assert hashlib.sha256(body).hexdigest() == digest
-        if name != 'research/formal-logic/run-managed-graph.py':
+        if (name == 'research/formal-logic/managed-graph-reader.bl'
+                and stage in ('managed-reader-one', 'managed-reader-two') and sha(R / name) != digest):
+            # These actual two-argument runs selected the normal reader. The
+            # only later edit fixes third-argument selection for controls; no
+            # graph, coordinate, assertion or observation checking changed.
+            old_dispatch = b'(get argv 2)'
+            new_dispatch = b'(nth argv 2 nil)'
+            assert body.count(old_dispatch) == 1
+            assert (R / name).read_bytes() == body.replace(old_dispatch, new_dispatch)
+            prior_command = read(E / (stage + '-command.json'))
+            assert prior_command[prior_command.index('run'):] == [
+                'run', str(R / name), '--', str(E / 'managed-native-corpus.json'), str(E / (stage + '.json'))]
+            historical_dispatch_only[stage] = {'before_commit': source['code_commit'], 'before_sha256': digest,
+                'current_sha256': sha(R / name), 'actual_arguments': 2,
+                'scope': 'Exact single-expression mode-dispatch repair; the original no-mode normal-reader execution is unchanged.'}
+        elif name != 'research/formal-logic/run-managed-graph.py':
             assert sha(R / name) == digest, name
     result = read(E / (stage + '-exit.json'))
     assert result['exit_code'] == 0 and result['runtime_retired'] and result['consumer_cwd_retired'], stage
@@ -221,6 +237,7 @@ report = {'schema': 'enchant.formal.managed-graph-qualification.v1', 'status': '
               'request-ledger-reader-two.json', 'request-ledger-controls.json', 'managed-native-corpus.json', 'managed-reader-one.json', 'managed-reader-two.json',
               'managed-reader-controls.json', 'managed-vs-legacy.json', 'paired-native-corpus.json', 'native-differences.json')},
           'assertion_executions': sum(sum(rows.values()) for rows in runs.values()),
+          'historical_reader_dispatch_only_changes': historical_dispatch_only,
           'runtime_sources': 700, 'build_linkage_sha256': sha(E / 'build-linkage.json'),
           'compiler_floor': parent['compiler_floor'], 'actual_sdk_traces': traces,
           'managed_questions': 187, 'numeric_questions': 94, 'saved_replayed_points': points,

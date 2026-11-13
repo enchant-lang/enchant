@@ -1,0 +1,196 @@
+(ns formal.managed-graph-reader
+ (:require [formal.graph-question :as question] [formal.graph-execution :as execution]
+           [formal.request :as request] [formal.request-point :as point-reader]
+           [formal.coordinates :as coordinates] [formal.evaluate :as evaluator] [formal.backend :as backend]
+           [formal.question-graph :as qg] [formal.data-graph :as graph]
+           [bl.json :as json] [oracle]))
+
+;; An SDK-only consumer of owned diagnostic fixtures. Loading backend obtains
+;; its immutable artifact descriptor and configures a call counter; this script
+;; never starts a session or supplies a native callback.
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "managed graph reader: " why) {}))))
+(defn- restore [wire]
+ (require! (and (map? wire) (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (int? (get wire "formal/data-graph")) (= 1 (get wire "formal/data-graph"))
+                (= "bl/public-data-graph-v1" (get wire "profile"))) "closed owned graph header")
+ (let [data {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+             :nodes (mapv (fn [[tag payload]]
+                            [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+                          (get wire "nodes"))}]
+  (graph/check! data) data))
+(defn- reference= [actual expected]
+ (and (= #{"profile" "sha256"} (set (keys expected)))
+      (= "bl/public-data-graph-v1" (get expected "profile"))
+      (= (:sha256 actual) (get expected "sha256"))))
+(defn- recorded-reference [reference]
+ {"profile" "bl/public-data-graph-v1" "sha256" (:sha256 reference)})
+(defn- wire [data]
+ {"formal/data-graph" 1 "profile" "bl/public-data-graph-v1" "root" (:root data)
+  "nodes" (mapv (fn [[tag payload]]
+                   [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)])
+                 (:nodes data))})
+
+(defn- point [context configuration assignment-data engine]
+ (let [r (request/prepare context {:policy configuration :adapter {:backend engine}})
+       result (point-reader/replay-graph r assignment-data)
+       checking (:validation result)]
+  (require! (= :run (:point-replay result)) "complete numeric admission for a saved model")
+  {:status (:status checking) :mode (:mode result)
+   :bindings-reference (graph/of (:bindings checking))
+   :assertion-value-reference (graph/of (mapv :value (:results checking)))
+   :observation-value-reference
+    (graph/of (mapv (fn [row]
+                     {:label-source (:label-source row) :descriptor-source (:descriptor-source row)
+                      :roots (mapv #(select-keys % [:source-node :value]) (:roots row))}) (:observations result)))
+   :resources (:resources result) :checking (:checking result) :compiler-proof-authority false}))
+
+(defn- header! [answer engine assets reference]
+ (require! (and (int? (get answer "formal/managed-graph-reply"))
+                (= 2 (get answer "formal/managed-graph-reply"))
+                (= "bl/managed-numeric-graph-preview-v2" (get answer "reply-profile"))
+                (= false (get answer "trusted") (get answer "compiler-proof-authority"))
+                (= "not-checked" (get-in answer ["certificate" "status"]))) "reply format and authority")
+ (require! (and (reference= reference (get answer "request-reference"))
+                (reference= reference (get answer "question-reference"))) "complete original question binding")
+ (require! (= {"generation" 0 "revision" 0} (get answer "context-state")) "fresh corpus context")
+ (require! (= {"solver-ms" 500 "hard-ms" 2000} (get answer "native-limits")) "unchanged native deadlines")
+ (require! (and (= (name engine) (get-in answer ["identity" "backend"]))
+                (= (:sdk assets) (get-in answer ["identity" "sdk"]))
+                (= (get-in assets [:worker :sha256]) (get-in answer ["identity" "worker-sha256"]))
+                (= (get-in assets [:library :sha256]) (get-in answer ["identity" "library-sha256"])))
+           "recorded artifact identity matches this SDK; execution remains unverified")
+ (require! (= "managed-native-owner" (get-in answer ["execution" "scope"])) "reported execution scope")
+ (let [settings-data (restore (get answer "settings-graph"))
+       configuration (execution/settings (graph/decode! settings-data))]
+  (require! (reference= (graph/reference settings-data) (get answer "settings-reference")) "settings graph reference")
+  (require! (reference= (graph/of configuration) (get answer "settings-reference")) "fresh normalized settings")
+  configuration))
+
+(defn- recheck-answer [context reference answer engine assets]
+ (let [configuration (header! answer engine assets reference)
+       model? (and (= "sat" (get answer "solver-status")) (= "run" (get answer "assertion-replay")))]
+  (if-not model?
+   (do
+    (require! (not (contains? answer "assignment-graph")) "nonmodel reply cannot carry checked point evidence")
+    {:scope :structure-and-recorded-identity :point-replay :not-run
+     :unverified-native-status (get answer "solver-status") :checked-native-execution false
+     :compiler-proof-authority false})
+   (let [assignment-data (restore (get answer "assignment-graph"))
+         _ (require! (reference= (graph/reference assignment-data) (get answer "assignment-reference")) "assignment graph reference")
+         fresh (point context configuration assignment-data engine)
+         verdict (cond (= :invalid (:status fresh)) "invalid-model"
+                       (= :incomplete (:status fresh)) "candidate"
+                       (= :prove (:mode fresh)) "refuted" :else "sat")]
+    (doseq [key [:bindings-reference :assertion-value-reference :observation-value-reference]]
+     (require! (reference= (get fresh key) (get answer (name key))) (str "fresh " key)))
+    (require! (= (name (:status fresh)) (get-in answer ["validation" "status"])) "replayed validation status")
+    (require! (= verdict (get answer "verdict")) "point-derived verdict")
+    (merge fresh {:scope :original-graph-point-replay :point-replay :run :verdict verdict
+                  :recorded-native-status "sat" :checked-native-execution false})))))
+
+(defn- recheck [input assets]
+ (require! (= "enchant.formal.managed-original-graph-corpus.v2" (get input "schema")) "fixture schema")
+ (require! (= false (get input "compiler-proof-authority")) "fixture cannot grant compiler authority")
+ (require! (= {"solver-ms" 500 "hard-ms" 2000} (get input "native-deadlines")) "fixture deadlines")
+ (let [items (get input "rows")]
+  (require! (and (= 187 (count items)) (= 187 (count (set (map #(get % "id") items))))) "complete unique case inventory")
+  (mapv
+   (fn [item]
+    (let [data (restore (get item "graph")) reference (graph/reference data)
+          context {:formal/question-graph 1 :profile qg/profile :graph data}]
+     (require! (reference= reference (get item "reference")) "row original reference")
+     {:id (get item "id") :reference reference
+      :z3 (recheck-answer context reference (get item "z3") :z3 (:z3 assets))
+      :oxiz (recheck-answer context reference (get item "oxiz") :oxiz (:oxiz assets))})) items)))
+
+(defn- controls [input assets]
+ (let [selected
+       (first
+        (keep
+         (fn [item]
+          (first (keep (fn [engine]
+                         (let [answer (get item (name engine))]
+                          (when (and (= "sat" (get answer "solver-status"))
+                                     (= "run" (get answer "assertion-replay"))
+                                     (= "valid" (get-in answer ["validation" "status"]))
+                                     (contains? answer "assignment-graph"))
+                           (let [assignments (:assignments (coordinates/prepare (restore (get answer "assignment-graph"))))
+                                 checked-names (set (map #(get % "name")
+                                                     (filter #(= "valid" (get % "status"))
+                                                             (get-in answer ["validation" "bindings" "rows"]))))
+                                 coordinate (first (filter (fn [[name value]]
+                                                            (and (contains? checked-names name)
+                                                                 (not (evaluator/unavailable? value)))) assignments))]
+                            (when coordinate {:item item :engine engine :answer answer
+                                              :assignments assignments :coordinate coordinate}))))) [:z3 :oxiz])))
+         (get input "rows")))
+       _ (require! (some? selected) "a real complete saved model with a concrete coordinate")
+       {:keys [item engine answer assignments coordinate]} selected
+       data (restore (get item "graph")) reference (graph/reference data)
+       context {:formal/question-graph 1 :profile qg/profile :graph data}
+       configuration (header! answer engine (get assets engine) reference)
+       check-answer (fn [candidate] (recheck-answer context reference candidate engine (get assets engine)))
+       baseline (check-answer answer)
+       altered-data (graph/patch-map (restore (get answer "assignment-graph"))
+                      [[(graph/encode (first coordinate)) (graph/encode nil)]])
+       fresh (point context configuration altered-data engine)
+       forged (-> answer
+                   (assoc "assignment-graph" (wire altered-data)
+                          "assignment-reference" (recorded-reference (graph/reference altered-data)))
+                   (assoc "bindings-reference" (recorded-reference (:bindings-reference fresh))
+                          "assertion-value-reference" (recorded-reference (:assertion-value-reference fresh))
+                          "observation-value-reference" (recorded-reference (:observation-value-reference fresh))))
+       _ (require! (= :run (:point-replay baseline)) "positive reader calibration")
+       _ (require! (= :invalid (:status fresh)) "altered supplied coordinate is actually invalid")
+       rows
+       (mapv
+        (fn [[label candidate]]
+         (let [message (try (check-answer candidate) nil (catch error (ex-message error)))]
+          (require! (some? message) (str "altered fixture accepted: " label))
+          (when (= "rehashed-invalid-coordinate-with-valid-claim" label)
+           (require! (String/contains? message "replayed validation status")
+                     "rehashed invalid coordinate reaches the semantic validation gate"))
+          {:id label :status :refused :message message}))
+        [["compiler-assurance" (assoc answer "compiler-proof-authority" true)]
+         ["trusted-bit" (assoc answer "trusted" true)]
+         ["certificate-upgrade" (assoc-in answer ["certificate" "status"] "checked")]
+         ["numeric-version-alias" (assoc answer "formal/managed-graph-reply" 2.0)]
+         ["worker-identity" (assoc-in answer ["identity" "worker-sha256"] "forged")]
+         ["original-reference" (assoc-in answer ["request-reference" "sha256"] "forged")]
+         ["settings-reference" (assoc-in answer ["settings-reference" "sha256"] "forged")]
+         ["assignment-reference" (assoc-in answer ["assignment-reference" "sha256"] "forged")]
+         ["rehashed-invalid-coordinate-with-valid-claim" forged]
+         ["model-record-relabeled-unsat" (assoc answer "solver-status" "unsat")]])]
+  {:positive {:id (get item "id") :engine engine :status :accepted :point-replay :run}
+   :controls rows :rehashed-invalid-coordinate :independently-invalid
+   :checked-native-execution false :compiler-proof-authority false}))
+
+(def argv (BeamLisp/argv))
+(def input (json/decode (File/read! (first argv))))
+(def assets {:z3 (backend/artifacts {:backend :z3}) :oxiz (backend/artifacts {:backend :oxiz})})
+(def calls (atom 0))
+(defn- deny [& _] (swap! calls inc) (throw :managed-reader-must-not-query))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "loaded SDK native exchange counter")
+(try
+ (let [control? (= "controls" (get argv 2))
+       result (oracle/with-oracle {:query deny :query-graph deny :script deny}
+                #(if control? (controls input assets) {:rows (recheck input assets)}))
+       rows (:rows result)
+       exchanges (elem (erlang/trace_info pattern :call_count) 1)
+       checked (count (filter #(= :run (:point-replay %)) (mapcat (fn [row] [(:z3 row) (:oxiz row)]) rows)))]
+  (require! (= 0 exchanges @calls) "no native exchange or managed query during rechecking")
+  (File/write! (second argv)
+   (json/encode (merge result
+                {:schema (if control? "enchant.formal.managed-graph-reader-controls.v1" "enchant.formal.managed-graph-reader.v1")
+                 :process (System/pid) :cwd (File/cwd!) :sdk (System/get_env "BL_SDK_PRODUCT")
+                 :sdk-only true :research-import-path false :source-payload-execution false
+                 :native-exchanges exchanges :managed-query-calls @calls :replayed-points checked
+                 :checked-native-execution false :compiler-proof-authority false
+                 :scope "Fresh original graph/coordinate checks. Saved native status/execution remain reported, not independently established."})
+                {:pretty 2}))
+  (println {:questions (count rows) :replayed-points checked :controls (count (:controls result)) :native-exchanges exchanges
+            :managed-query-calls @calls :compiler-proof-authority false}))
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))

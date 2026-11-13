@@ -17,7 +17,8 @@ R = P.parent.parent
 C = P / 'evidence/managed-graph'
 E = P / 'evidence/managed-integration'
 E.mkdir(exist_ok=True)
-unit = 'work-formal-managed-batch-4-resume-20261113.service'
+unit = sys.argv[1] if len(sys.argv) > 1 else 'work-formal-managed-batch-4-resume-20261113.service'
+assert len(sys.argv) <= 2 and unit.startswith('work-formal-managed-batch-4-') and unit.endswith('.service')
 
 
 def read(path):
