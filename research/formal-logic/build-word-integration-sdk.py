@@ -31,6 +31,11 @@ for stage in ('pure', 'owners', 'legacy', 'ledger'):
     for name, digest in result['source_pin']['source_sha256'].items():
         assert sha(R / name) == digest, name
     prototype[stage] = {'sha256': sha(path), 'assertions': result['assertions']}
+cold_path = P / 'evidence/word-integration-prototype/packets/qualification.json'
+cold = read(cold_path)
+assert cold['status'] == 'passed' and cold['base_sdk_pin'] == baseline and cold['records'] == 12
+assert cold['manual_schema_preload'] is False
+prototype['packets'] = {'sha256': sha(cold_path), 'records': 12}
 runtime_names = ['priv/lib/formal/' + name + '.bl' for name in
                  ['backend', 'coordinates', 'evaluate', 'graph-execution', 'graph-question', 'graph-terms',
                   'logic', 'point-profile', 'request-answer', 'request-point', 'request-record', 'resources/word']]
