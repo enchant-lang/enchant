@@ -74,6 +74,11 @@ A handler can call `fallback` instead. That callback belongs to its creating
 process, can be used once, and expires on return. It opens a fresh owner only
 when called. Native session handles never enter the portable request.
 
+The [retained-request extension design](RETAINED-REQUEST-PLAN.md) makes every
+retained assumption part of the portable subject before execution. Reuse can
+then change execution without silently strengthening the mathematical claim.
+That extension is not implemented by the current fresh-owner bridge.
+
 Every supplied answer is freshly checked. It cannot carry a caller verdict,
 validation result, trusted bit or checked-certificate upgrade. Local delegation
 reports whether the returned body exactly matches the actual fallback body.
