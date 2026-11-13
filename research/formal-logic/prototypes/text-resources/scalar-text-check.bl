@@ -1,0 +1,63 @@
+(ns formal.scalar-text-check
+ (:require [formal.scalar-text-prototype :as text] [formal.term :as t] [formal.value :as value]
+           [formal.data :as data] [formal.evaluate :as evaluate] [formal.logic :as logic]
+           [formal.query :as q] [formal.question-graph :as qg] [bl.json :as json]))
+(defn decoded [v bindings] (value/decode v #(evaluate/value % bindings)))
+(defn payload [v] (:value (decoded v {})))
+(defn same! [expected actual] (is (= expected actual)))
+(deftest same-original-terms-offer-total-option-and-strict-access
+ (same! 2 (payload (text/length "é")))
+ (same! "́" (payload (text/at-total "é" 1)))
+ (same! "" (payload (text/at-total "é" 2)))
+ (same! {:present true :value "́"} (payload (text/at "é" 1)))
+ (same! {:present false} (payload (text/at "é" 2)))
+ (same! false (:defined (decoded (text/at! "é" 2) {})))
+ (same! "fallback" (payload (text/at-or "é" 2 "fallback")))
+ (same! "́" (payload (text/at-or "é" 1 "fallback")))
+ (same! {:present true :value 1} (payload (text/find "aéb" "é" 0)))
+ (same! {:present false} (payload (text/find "aéb" "z" 0)))
+ (same! "" (payload (text/slice "abc" -1 3)))
+ (same! "abc" (payload (text/concat "a" "bc")))
+ (same! true (payload (text/starts? "aéb" "aé")))
+ (same! true (payload (text/ends? "aéb" "éb")))
+ (same! true (payload (text/contains? "aéb" "é")))
+ (same! "xabc" (payload (text/replace-first "abc" "" "x")))
+)
+(deftest definedness-bounds-and-constraints-survive-term-building
+ (let [x (text/variable "scalar.text") i (value/lift (t/variable "scalar.index" t/Int))
+       current (text/at x i) binding {"scalar.text" "é" "scalar.index" 1}]
+  (same! {:present true :value "́"} (:value (decoded current binding)))
+  (same! :exact (get-in current [:scope :mode])))
+ (let [a (assoc (text/literal "a") :defined (t/bool false))
+       b (assoc (text/literal "b") :within (t/bool false))
+       c (assoc (text/literal "c") :constraints [(t/bool false)])]
+  (same! false (:defined (decoded (text/concat a "x") {})))
+  (same! false (:within (decoded (text/concat b "x") {})))
+  (same! [(t/bool false)] (:constraints (text/concat c "x"))))
+ (is (thrown? (text/length (t/int 1))))
+ (is (thrown? (text/at "abc" (t/text "index"))))
+ (is (thrown? (text/literal (erlang/list_to_binary (list 255)))))
+ (is (thrown? (text/literal (unicode/characters_to_binary (list 196608)))))
+)
+(deftest compare-one-symbolic-codepoint-contract-on-both-real-owners
+ (let [x (text/variable "scalar.native")
+       claim (value/equal (text/at x 1) (data/some (text/literal "́")))
+       question (q/prove claim {:assumptions [(value/equal x (text/literal "é"))]})
+       subject (qg/prepare question)
+       rows (mapv (fn [engine]
+                    (let [response (logic/run-graph {:backend engine :solver-ms 500 :hard-ms 2000} subject)]
+                     (same! (qg/reference subject) (:question-reference response))
+                     (same! 2 (:formal/query-reply response))
+                     (same! false (:trusted response))
+                     (same! false (:compiler-proof-authority response))
+                     (same! :not-checked (get-in response [:certificate :status]))
+                     (is (contains? #{:unsat :unknown :unsupported} (:solver-status response)))
+                     {:backend engine :status (:solver-status response) :validation (:validation response)
+                      :question-reference (:question-reference response) :identity (:identity response)
+                      :checked-native-execution false :compiler-proof-authority false})) [:z3 :oxiz])]
+  (same! true (evaluate/value (value/term claim) {"scalar.native" "é"}))
+  (when-let [output (System/get_env "TEXT_NATIVE_OUTPUT")]
+   (File/write! output (json/encode {:schema "bl.scalar-text-constructor-native-comparison.v1"
+                                    :managed-text-profile false :rows rows :compiler-proof-authority false} {:pretty 2}))))
+)
+(run-tests)

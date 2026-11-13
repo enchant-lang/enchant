@@ -66,3 +66,21 @@ Implementation sources: [the canonical evaluator](sdk-src/formal/evaluate.bl),
 [the reviewed unit distinction](SEMANTICS.md#text-and-target-qualification).
 The capped [pending runner](run-text-resource-prototype.py) requires the word SDK
 to be fully qualified and selected before starting this independent gate.
+
+The same isolated source tree now contains a pending language-facing term
+interface, `formal.scalar-text-prototype`. It builds ordinary existing terms
+and `formal.value` descriptors. `at-total` exposes the SMT empty-text rule;
+`at` returns the existing explicit Option; `at!` is a deliberately strict new
+formal accessor; `at-or` selects a fallback. `find-index` exposes the signed
+SMT offset, while `find` returns an Option. Concatenation, length, substring,
+prefix/suffix/contains and first replacement keep their codepoint unit.
+Existing definedness, bounds, constraints and Option payload guarding are reused.
+No ordinary BL String operation or Source lowering has changed.
+
+The pending runner checks both envelope and interface files in one fresh VM.
+A separate real-owner comparison asks the same symbolic combining-character
+contract of Z3 and OxiZ, recording their actual identities and statuses.
+Unknown and unsupported remain explicit capability gaps; a claimed satisfying
+counterexample to this concrete true contract fails the gate. Native UNSAT
+remains unchecked evidence. This comparison does not advertise a bounded
+managed-text profile or verify either native solver.

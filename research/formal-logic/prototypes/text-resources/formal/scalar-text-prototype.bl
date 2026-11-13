@@ -1,0 +1,62 @@
+(ns formal.scalar-text-prototype
+ (:require [formal.term :as t] [formal.value :as value] [formal.data :as data]
+           [formal.evaluate :as evaluate] [formal.text-resource-prototype :as resource]))
+
+;; A term-building interface, not an interpretation of ordinary BL String APIs.
+(def profile :bl/smt-scalar-text-terms-prototype-v1)
+(def domain {:kind :scalar :profile profile :text-unit :unicode-codepoint
+             :encoding :utf8 :alphabet [0 196607]})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.scalar-text-prototype: " why) {:profile profile}))))
+(defn literal
+ "One SMT scalar-text literal. Reserve local validation before decoding.
+  This constructor's check is never an accepted point-admission token."
+ [text]
+ (require! (string? text) "UTF-8 binary required")
+ (let [plan (resource/value-plan (erlang/byte_size text) {})]
+  (require! (= :ready (:status plan)) "literal validation exceeds constructor budget")
+  (require! (= :valid (:status (evaluate/check-value t/String text))) "text outside the declared scalar alphabet")
+  (value/make (t/text text) {:domain domain})))
+(defn variable [name] (value/make (t/variable name t/String) {:domain domain}))
+(defn- text [item]
+ (let [v (if (string? item) (literal item) (value/lift item))]
+  (require! (= t/String (t/sort-of (value/term v))) "scalar-text term required") v))
+(defn- index [item]
+ (let [v (value/lift (if (int? item) (t/int item) item))]
+  (require! (= t/Int (t/sort-of (value/term v))) "integer index term required") v))
+(defn- apply-term [operation result-sort operands]
+ (value/scalar (t/app operation result-sort (mapv value/term operands) nil) operands
+  (if (= t/String result-sort) {:domain domain} {})))
+(defn concat [a b] (apply-term :str-concat t/String [(text a) (text b)]))
+(defn length [item] (apply-term :str-len t/Int [(text item)]))
+(defn contains? [item needle] (apply-term :str-contains t/Bool [(text item) (text needle)]))
+(defn starts? [item prefix] (apply-term :str-prefix t/Bool [(text prefix) (text item)]))
+(defn ends? [item suffix] (apply-term :str-suffix t/Bool [(text suffix) (text item)]))
+(defn at-total
+ "The total SMT accessor: an invalid codepoint position yields empty text."
+ [item position] (apply-term :str-at t/String [(text item) (index position)]))
+(defn slice
+ "The total SMT substring: negative position or nonpositive length yields empty text."
+ [item start amount] (apply-term :str-substr t/String [(text item) (index start) (index amount)]))
+(defn find-index
+ "The SMT codepoint offset; -1 means no match from this position."
+ [item needle start] (apply-term :str-index t/Int [(text item) (text needle) (index start)]))
+(defn replace-first [item needle replacement]
+ (apply-term :str-replace t/String [(text item) (text needle) (text replacement)]))
+(defn at
+ "A language-facing Option of one codepoint, with explicit absence."
+ [item position]
+ (let [v (text item) i (index position)
+       inside (value/scalar (t/all [(t/le (t/int 0) (value/term i))
+                                    (t/lt (value/term i) (value/term (length v)))]) [v i] {})]
+  (data/option inside (at-total v i))))
+(defn at!
+ "An explicitly strict formal accessor. This is not BL's existing String.at."
+ [item position] (data/unwrap (at item position)))
+(defn at-or [item position fallback] (data/get-or (at item position) (text fallback)))
+(defn find
+ "An Option of a codepoint index, rather than a sentinel integer."
+ [item needle start]
+ (let [i (find-index item needle start)
+       found (value/scalar (t/le (t/int 0) (value/term i)) [i] {})]
+  (data/option found i)))
