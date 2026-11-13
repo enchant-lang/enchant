@@ -1,0 +1,194 @@
+(ns formal.request-test
+ (:require [formal.request :as request] [formal.request-point :as point]
+           [formal.prototype-request-answer :as answer] [formal.prototype-request-runtime :as run]
+           [formal.request-record :as recorded] [formal.term :as t] [formal.query :as q]
+           [formal.question-graph :as qg] [formal.data-graph :as graph] [formal.prototype-backend :as backend]
+           [veritas.ledger :as ledger] [datom] [effect] [oracle]))
+
+(def x (t/variable "request.x" t/Int))
+(def subject (qg/prepare (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"next" (t/add x (t/int 1))}})))
+(def original (request/prepare subject))
+
+(defn- counted [function name arity action]
+ (let [module (elem (erlang/fun_info function :module) 1) pattern (tuple module name arity)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (action) calls (elem (erlang/trace_info pattern :call_count) 1)] {:result result :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(defn- no-exchanges [action]
+ (let [actual (counted backend/invoke :exchange! 4 action)]
+  (is (= 0 (:calls actual))) (:result actual)))
+(defn- checked [assignments] (answer/recheck original (answer/supply original assignments)))
+
+(deftest subject-policy-and-adapter-identities-do-not-collapse
+ (let [other (request/for-backend original :oxiz)
+       limited (request/prepare subject {:policy {:limits {:request-work-units 0}}})]
+  (is (= (request/subject-reference original) (request/subject-reference other) (request/subject-reference limited)))
+  (is (not= (request/reference original) (request/reference other)))
+  (is (not= (request/reference original) (request/reference limited)))
+  (is (= (request/reference original) (request/reference (request/prepare subject {:adapter {:backend :z3}}))))
+  (is (thrown? (request/check! (assoc original :formal/request 2.0))))
+  (is (thrown? (request/check! (assoc original :admitted true))))
+  (is (thrown? (request/check! (update original :policy dissoc :owner-ms))))
+  (is (thrown? (request/prepare subject {:adapter {:solver-ms 500.0}})))
+  (is (thrown? (request/prepare subject {:adapter {:backend :other}})))
+  (is (thrown? (request/prepare subject {:owner (erlang/self)})))))
+
+(deftest request-preparation-does-not-decode-history-or-normalize-rational-terms
+ (let [fraction (qg/prepare (q/sat {:assumptions [(t/eq (t/real 1 3) (t/real 1 3))]}))
+       shared (loop [data (graph/encode 0) layers 0]
+               (if (= 19 layers) data
+                (let [id (count (:nodes data)) root (:root data)]
+                 (recur (assoc data :root id :nodes (conj (:nodes data) ["vector" [root root]])) (inc layers)))))
+       large (assoc fraction :graph (graph/patch-map (:graph fraction) [[(graph/encode :context) shared]]))
+       actual
+       (counted t/rational :rational 2
+        #(counted graph/decode-nodes! :decode-nodes! 2
+          (fn [] (request/reference (request/prepare large)))))]
+  (is (> (:expanded-nodes (graph/check! (:graph large))) 1000000))
+  (is (= 0 (:calls actual) (get-in actual [:result :calls])))
+  (is (= graph/profile (get-in actual [:result :result :profile])))))
+
+(deftest supplied-coordinates-are-checked-instead-of-accepting-verdict-labels
+ (no-exchanges
+  (fn []
+   (let [valid (checked {"request.x" 7}) false-point (checked {"request.x" 8})
+         missing (checked {}) wrong-encoding (checked {"request.x" 7.0})]
+    (is (= :sat (:verdict valid)))
+    (is (= :valid (get-in valid [:point-check :validation :status])))
+    (is (= 8 (get-in valid [:point-check :observations 0 :roots 0 :value])))
+    (is (= :invalid-point (:verdict false-point) (:verdict wrong-encoding)))
+    (is (= :valid (get-in false-point [:point-check :validation :bindings :status])))
+    (is (= :invalid (get-in wrong-encoding [:point-check :validation :bindings :status])))
+    (is (= :candidate (:verdict missing)))
+    (is (= :incomplete (get-in missing [:point-check :validation :status])))
+    (is (thrown? (answer/supply original 7)))
+    (is (thrown? (point/replay original [])))
+    (is (thrown? (answer/check! original (assoc (answer/supply original {"request.x" 7}) :verdict :proved))))
+    (doseq [result [valid false-point missing wrong-encoding]]
+     (is (= false (:checked-native-execution result) (:compiler-proof-authority result) (:trusted result)))
+     (is (= :not-checked (get-in result [:certificate :status]))))))))
+
+(deftest proof-points-replay-the-actual-counterexample
+ (let [subject (qg/prepare (q/prove (t/eq x (t/int 0)) {:assumptions [(t/eq x (t/int 7))]}))
+       r (request/prepare subject)]
+  (is (= :refuted (:verdict (point/replay r {"request.x" 7}))))
+  (is (= :invalid-point (:verdict (point/replay r {"request.x" 0}))))))
+
+(deftest irrelevant-missing-bindings-and-invalid-supplied-bindings-stay-distinct
+ (let [subject (qg/prepare (q/sat {:assumptions [(t/any [(t/bool true) (t/eq x (t/int 7))])]}))
+       r (request/prepare subject) missing (point/replay r {}) bad (point/replay r {"request.x" 7.0})]
+  (is (= :sat (:verdict missing)))
+  (is (= :incomplete (get-in missing [:validation :bindings :status])))
+  (is (= :invalid-point (:verdict bad)))
+  (is (= :invalid (get-in bad [:validation :bindings :status])))))
+
+(deftest effect-supplied-points-need-no-native-owner-and-the-fallback-expires
+ (let [held (atom nil) calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :unexpected-oracle))]
+  (no-exchanges
+   (fn [] (oracle/with-oracle {:query deny :query-graph deny :script deny}
+     (fn []
+      (let [result (run/with-handler (fn [r fallback] (reset! held fallback) (answer/supply r {"request.x" 7}))
+                     #(run/execute original))]
+       (is (= :sat (:verdict result)))
+       (is (= :not-invoked (get-in result [:local-delegation :status])))
+       (is (= 0 (get-in result [:local-delegation :attempts])))
+       (is (thrown? (@held))))))))
+  (is (= 0 @calls))))
+
+(deftest missing-method-and-foreign-fallback-refuse-before-exchange
+ (no-exchanges
+  (fn []
+   (is (thrown? (effect/with-methods :oracle {:different (fn [] nil)} #(run/execute original))))
+   (is (thrown? (oracle/with-oracle oracle/deny #(run/execute original))))
+   (is (thrown? (oracle/with-oracle {:query (fn [& _] nil)} #(run/execute original))))
+   (run/with-handler
+    (fn [r fallback]
+     (let [parent (erlang/self)]
+      (erlang/spawn (fn [] (erlang/send parent
+                            [:request-foreign (try (fallback) :accepted (catch error (:kind (ex-data error))))])))
+      (receive [:request-foreign status] (is (= :fallback-lease status))
+               (after 3000 (is false "foreign fallback did not return"))))
+     (answer/supply r {"request.x" 7})) #(run/execute original)))))
+
+(deftest both-native-backends-use-the-same-question-and-pure-rechecker
+ (let [actual (counted backend/invoke :exchange! 4 #(run/compare original)) paired (:result actual)]
+  ;; Each fallback owns one worker handshake and one SAT scope exchange.
+  (is (= 4 (:calls actual)))
+  (is (= true (:reported-status-agreement paired)))
+  (is (= false (:reported-status-disagreement paired) (:compiler-proof-authority paired)))
+  (is (= [:valid :valid] (:point-replay paired)))
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (get paired engine)]
+    (is (= :matching-response (get-in result [:local-delegation :status])))
+    (is (= 1 (get-in result [:local-delegation :attempts])))
+    (is (= engine (get-in result [:source :identity :backend])))
+    (is (= (System/get_env "BL_SDK_PRODUCT") (get-in result [:source :identity :sdk])))
+    (is (= :sat (:verdict result)))
+    (is (= false (:checked-native-execution result)))))))
+
+(deftest changed-coordinates-lose-fallback-matching-and-replay-as-invalid
+ (let [actual
+       (counted backend/invoke :exchange! 4
+        (fn [] (run/with-handler
+          (fn [_ fallback]
+           (let [response (fallback)]
+            (is (thrown? (fallback)))
+            (assoc response :point-graph (graph/encode {"request.x" 8})))) #(run/execute original))))
+       result (:result actual)]
+  (is (= 2 (:calls actual)))
+  (is (= :invalid-point (:verdict result)))
+  (is (= :returned-different-response (get-in result [:local-delegation :status])))
+  (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))))
+
+(deftest native-unsat-remains-a-solver-claim-without-a-checked-certificate
+ (let [subject (qg/prepare (q/prove (t/gt (t/add x (t/int 1)) x)))
+       paired (run/compare (request/prepare subject))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (get paired engine)]
+    (is (= :unsat (get-in result [:source :status])))
+    (is (= :solver-claim (:verdict result)))
+    (is (= :proved (:reported-verdict result)))
+    (is (= :not-run (:point-replay result)))
+    (is (= :matching-response (get-in result [:local-delegation :status])))
+    (is (= :not-checked (get-in result [:certificate :status])))
+    (is (= false (:compiler-proof-authority result)))))))
+
+(deftest out-of-profile-declarations-remain-admission-refusals-at-the-language-boundary
+ (let [subject (qg/prepare (q/prove (t/forall [(t/bound "request.unused.fp" (t/fp-sort 5 2))] (t/bool true))))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (request/prepare subject {:adapter {:backend engine}})
+         actual (counted backend/invoke :exchange! 4 #(run/execute r)) result (:result actual)]
+    ;; Acquisition performs its handshake, but no scope is sent.
+    (is (= 1 (:calls actual)))
+    (is (= :not-run (get-in result [:source :status]) (:verdict result)))
+    (is (= :refused (get-in result [:subject-admission :status])))
+    (is (= :not-run (:point-replay result)))
+    (is (= :matching-response (get-in result [:local-delegation :status])))))))
+
+(deftest ledger-storage-preserves-the-request-and-reopening-replays-it
+ (let [connection (ledger/open nil) response (answer/supply original {"request.x" 7})]
+  (try
+   (no-exchanges
+    (fn []
+     (let [id (recorded/record! connection original response {:claim "A saved request point"})
+           fresh (recorded/reopen connection id) row (first (ledger/all connection))]
+      (is (= :sat (get-in fresh [:result :verdict])))
+      (is (= :payload-checked (:ledger-envelope fresh)))
+      (is (= :recorded-request (:verdict/modality row)))
+      (is (= :recorded (:verdict/assurance row)))
+      (is (= (graph/bytes (:graph subject))
+             (graph/bytes (get-in row [:verdict/request :subject :graph]))))
+      (is (= false (:checked-native-execution fresh) (:compiler-proof-authority fresh))))))
+   (finally (datom/close! connection)))))
+
+(deftest evidence-cannot-upgrade-its-authority-or-rebind-a-point-to-another-request
+ (let [response (answer/supply original {"request.x" 7}) packet (recorded/pack original response)]
+  (doseq [changed [(assoc response :trusted true) (assoc response :compiler-proof-authority true)
+                   (assoc response :formal/request-answer 2.0) (assoc response :verdict :proved)
+                   (assoc-in response [:certificate :status] :checked)]]
+   (is (thrown? (answer/recheck original changed))))
+  (is (thrown? (answer/recheck (request/for-backend original :oxiz) response)))
+  (is (thrown? (recorded/recheck (assoc packet :compiler-proof-authority true))))
+  (let [changed (assoc-in packet [:answer :point-graph] (graph/encode {"request.x" 8}))]
+   (is (= :invalid-point (:verdict (recorded/recheck changed)))))))
