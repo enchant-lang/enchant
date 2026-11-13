@@ -1,11 +1,11 @@
 (ns formal.graph-execution
  (:require [formal.graph-question :as question] [formal.evaluate :as evaluator]
            [formal.question-graph :as qg] [formal.data-graph :as graph]
-           [formal.value :as value] [formal.term :as term]))
+           [formal.graph-replay :as replay] [formal.coordinates :as coordinates] [formal.value :as value] [formal.term :as term]))
 
 ;; Local owner-turn machinery. These functions cannot obtain a native port;
 ;; the actual backend owner supplies the scope callback from its own custody.
-(def profile :bl/managed-numeric-graph-preview-v1)
+(def profile :bl/managed-numeric-graph-preview-v2)
 (def defaults {:profile profile :owner-ms 30000 :limits {}})
 (defn settings [overrides]
  (when-not (and (map? overrides) (every? #{:profile :owner-ms :limits} (keys overrides)))
@@ -64,31 +64,17 @@
        (map (fn [[id _ sort _ name]] {:name name :sort sort :term id})
             (filter #(= "var" (nth % 1)) (:nodes forest))))))
 
-(defn- validation [point roots assertions]
- (let [bindings ((:check-bindings point) roots)
-       rows (mapv (fn [i]
-                   (let [actual ((:resolve point) (nth roots i))]
-                    {:label (:label (nth assertions i)) :value actual
-                     :status (cond (= true actual) :valid (= false actual) :invalid :else :incomplete)}))
-                  (range (count assertions)))
-       invalid (vec (filter #(= :invalid (:status %)) rows))
-       incomplete (vec (filter #(= :incomplete (:status %)) rows))]
-  {:status (cond (= :invalid (:status bindings)) :invalid (seq invalid) :invalid
-                 (or (:resource-refused bindings) (seq incomplete)) :incomplete :else :valid)
-   :kind :independent-graph-replay :bindings bindings :results rows :invalid invalid :incomplete incomplete
-   :checked (- (count rows) (count incomplete))}))
 
-(defn- observations [effective inventory point source-for wire watch-names]
- (into {}
-  (mapv
-   (fn [{:keys [label descriptor-source terms]}]
-    [label {:descriptor-graph (graph/subgraph (:graph effective) descriptor-source)
-            :materialization :deferred :basis :original-descriptor-and-point-roots
-            :roots (mapv (fn [id]
-                           {:source-node (get source-for id) :value ((:resolve point) (get source-for id))
-                            :native-wire (get wire (get watch-names id))
-                            :native-availability :backend-reported-unchecked}) terms)}])
-   (:observations inventory))))
+(defn- observations [inventory point source-for wire watch-names]
+ (let [pure (replay/observations inventory point source-for) descriptions (:observations inventory)]
+  (mapv (fn [i]
+          (let [row (nth pure i) terms (:terms (nth descriptions i))]
+           (assoc row :roots
+            (mapv (fn [j]
+                    (assoc (nth (:roots row) j)
+                     :native-wire (get wire (get watch-names (nth terms j)))
+                     :native-availability :backend-reported-unchecked)) (range (count terms))))))
+        (range (count pure)))))
 
 (defn execute
  "Execute original graph data inside one local owner turn. The native owner
@@ -103,7 +89,7 @@
                  (throw (ex-info "formal graph owner operation deadline exceeded"
                                  {:kind :owner-deadline :phase phase :owner-ms (:owner-ms configuration)}))))
        effective (effective-question original snapshot)
-       base {:formal/managed-graph-reply 1 :reply-profile profile
+       base {:formal/managed-graph-reply 2 :reply-profile profile
              :request-graph original :request-reference (graph/reference (:graph original))
              :question-graph effective :question-reference (graph/reference (:graph effective))
              :settings configuration :settings-reference (graph/of configuration)
@@ -122,10 +108,10 @@
                     (reset! last-native reply) reply))]
   (try
    (check! :admission 0)
-   (question/with-numeric effective (:limits configuration)
+   (question/with-numeric-keys effective (:limits configuration)
     (fn [inventory admitted]
      (check! :admission 0)
-     (if (= 1 (:formal/question-forest-refusal inventory))
+     (if (= 2 (:formal/question-forest-refusal inventory))
       (merge base {:ok false :solver-status :not-run :verdict :incomplete :phase :admission
                    :admission (:admission inventory) :validation {:status :incomplete :kind :admission}
                    :assertion-replay :not-run :native-scope-attempts 0})
@@ -156,16 +142,21 @@
                                       (= :unsupported (:status reply)) :unsupported :else :error)
                        :validation {:status :not-applicable} :assertion-replay :not-run})
         (let [wire (into {} (:observations reply))
-              assignments (into {} (mapv (fn [v] [(:name v)
-                                      (coordinate (get wire (str "var/" (:name v))))]) vars))]
+              original-assignments (into {} (mapv (fn [v] [(:name v)
+                                      (coordinate (get wire (str "var/" (:name v))))]) vars))
+              assignment-data (graph/encode original-assignments)
+              coordinate-view (coordinates/prepare assignment-data)
+              assignments (:assignments coordinate-view)]
          ((:with-point admitted) assignments
           (fn [point]
            (let [source-roots (mapv #(get source-for (:term %)) assertions)
-                 checking (validation point source-roots assertions)
-                 display (observations effective inventory point source-for wire watch-names)]
+                 checking (replay/validation point source-roots assertions)
+                 display (observations inventory point source-for wire watch-names)]
             (check! :replay 0)
             (merge common
-             {:assignments assignments :validation checking :assertion-replay :run
+             {:assignments assignments :assignment-graph assignment-data
+              :assignment-reference (:reference coordinate-view) :coordinate-profile coordinates/profile
+              :binding-reference (graph/of assignments) :validation checking :assertion-replay :run
               :verdict (cond (= :invalid (:status checking)) :invalid-model
                              (not= :valid (:status checking)) :candidate
                              (= :prove (:mode inventory)) :refuted :else :sat)

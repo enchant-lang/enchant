@@ -17,7 +17,7 @@
                       :validation :assertion-replay :admission :admission-account :admission-reference
                       :native-scope-attempts :nodes-imported :resources :checking :observation-decoding :execution])
   (when (contains? result :assignments)
-   (let [data (graph/encode (:assignments result))]
+   (let [data (:assignment-graph result)]
     {:assignment-graph (wire data) :assignment-reference (graph/reference data)
      :bindings-reference (graph/of (get-in result [:validation :bindings]))
      :assertion-value-reference (graph/of (mapv :value (get-in result [:validation :results])))}))
@@ -25,12 +25,13 @@
   {:validation-reference (when (:validation result) (graph/of (:validation result)))
    :observation-value-reference
     (when (contains? result :observations)
-     (graph/of (into {} (mapv (fn [[label value]]
-                                [label (mapv #(select-keys % [:source-node :value]) (:roots value))])
-                              (:observations result)))))
+     (graph/of (mapv (fn [value]
+                        {:label-source (:label-source value) :descriptor-source (:descriptor-source value)
+                         :roots (mapv #(select-keys % [:source-node :value]) (:roots value))})
+                      (:observations result))))
    :observation-roots
-   (into {} (mapv (fn [[label value]] [label (select-keys value [:materialization :basis :roots])])
-                 (:observations result)))}))
+   (mapv #(select-keys % [:label-source :descriptor-source :materialization :basis :roots])
+         (:observations result))}))
 
 (def rows
  (vec
@@ -40,7 +41,7 @@
      (fn [item]
       (println (str "managed start " (:id item)))
       (let [context (qg/prepare (q/from-case item)) data (:graph context)
-            reference (graph/reference data) prepared (inventory/prepare context)
+            reference (graph/reference data) prepared (inventory/prepare-keys context)
             numeric? (every? (fn [[_ op sort _ datum]]
                               (and (contains? #{t/Bool t/Int t/Real} sort)
                                    (or (not (contains? #{"forall" "exists"} op))
@@ -56,7 +57,7 @@
                 (println (str (:id item) " managed " engine "=" (:solver-status result)
                               " verdict=" (:verdict result) " phase=" (:phase result)
                               " ms=" (- (erlang/monotonic_time :millisecond) started)))
-                (assert (= 1 (:formal/managed-graph-reply result)))
+                (assert (= 2 (:formal/managed-graph-reply result)))
                 (assert (= reference (:request-reference result) (:question-reference result)))
                 (assert (= (graph/bytes data) (graph/bytes (get-in result [:question-graph :graph]))))
                 (assert (= {:solver-ms 500 :hard-ms 2000} (:native-limits result)))
@@ -78,7 +79,7 @@
 
 (assert (= 187 (count rows)))
 (File/write! (first (BeamLisp/argv))
- (json/encode {:schema "enchant.formal.managed-original-graph-corpus.v1" :rows rows
+ (json/encode {:schema "enchant.formal.managed-original-graph-corpus.v2" :rows rows
                :native-deadlines {:solver-ms 500 :hard-ms 2000} :compiler-proof-authority false
                :scope "Actual original graph owner calls. Numeric profile/refusal and native statuses are separate; no certificate or speed claim."}
               {:pretty 2}))

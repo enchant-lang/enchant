@@ -1,0 +1,56 @@
+(ns formal.request-runtime
+ (:require [formal.request :as request] [formal.request-answer :as answer]
+           [formal.backend :as backend] [formal.data-graph :as graph] [effect]))
+
+(defn with-handler
+ "Handle the explicit :oracle/:request method with [portable-request fallback]."
+ ([handler action] (effect/with-methods :oracle {:request handler} action))
+ ([handler dependencies action] (effect/with-methods :oracle {:request handler} dependencies action)))
+
+(defn execute
+ "Ask through the named formal effect. A fresh owner is acquired only if its
+  local fallback is called. The fallback is same-process, single-use and
+  expires when this call returns; it is never portable request data.
+  Pure response rechecking has its own fresh scope/account. owner-ms applies
+  to the native owner operation, not arbitrary handler code or this recheck."
+ [original]
+ (let [fresh (request/check! original) borrower (erlang/self)
+       lease (atom {:active true :used false}) returned (atom nil)
+       fallback
+       (fn []
+        (when-not (and (= borrower (erlang/self)) (:active @lease) (not (:used @lease)))
+         (throw (ex-info "formal request fallback is expired, foreign-process or already used" {:kind :fallback-lease})))
+        (swap! lease assoc :used true)
+        (let [response
+              (backend/with-session (:adapter fresh)
+               (fn [session]
+                (answer/from-managed fresh (backend/graph-question! session (:subject fresh) (:policy fresh)))))]
+         (reset! returned response)
+         response))]
+  (try
+   (let [response (effect/call :oracle :request [fresh fallback] fallback)
+         checked (answer/recheck fresh response)
+         matching (and (some? @returned)
+                       (= (graph/bytes (graph/encode @returned)) (graph/bytes (graph/encode response))))]
+    (assoc checked :response response
+     :local-delegation {:scope :provided-fallback :attempts (if (:used @lease) 1 0)
+                        :status (cond matching :matching-response @returned :returned-different-response
+                                      (:used @lease) :attempted :else :not-invoked)}))
+   (finally (swap! lease assoc :active false)))))
+
+(defn compare
+ "Preserve the complete subject/policy while changing the requested adapter.
+  Status agreement, fresh point replay and execution provenance stay separate."
+ [original]
+ (let [fresh (request/check! original) z3-request (request/for-backend fresh :z3)
+       oxiz-request (request/for-backend fresh :oxiz)
+       z3 (execute z3-request) oxiz (execute oxiz-request)
+       reported (fn [result]
+                  (when (= :reported-native (get-in result [:source :kind])) (get-in result [:source :status])))
+       left (reported z3) right (reported oxiz)
+       decisive (and (contains? #{:sat :unsat} left) (contains? #{:sat :unsat} right))]
+  {:subject-reference (request/subject-reference fresh) :policy-reference (graph/of (:policy fresh))
+   :z3 z3 :oxiz oxiz :authority :none :compiler-proof-authority false
+   :reported-status-agreement (and decisive (= left right))
+   :reported-status-disagreement (and decisive (not= left right))
+   :point-replay [(get-in z3 [:point-check :validation :status]) (get-in oxiz [:point-check :validation :status])]}))

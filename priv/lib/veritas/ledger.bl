@@ -6,7 +6,8 @@
 (ns veritas.ledger
   (:require [datom] [datom.store-fjall] [datom.file :as file] [datom.value-codec :as codec]
             [formal.identity :as identity] [formal.query :as query]
-            [formal.data-graph :as graph] [formal.question-graph :as question-graph] [formal.answer :as answer]))
+            [formal.data-graph :as graph] [formal.question-graph :as question-graph] [formal.answer :as answer]
+            [formal.request :as request] [formal.request-answer :as request-answer]))
 
 (def schema
   [{:db/ident :verdict/id       :db/valueType :db.type/string :db/unique :db.unique/identity}
@@ -30,7 +31,8 @@
    {:db/ident :verdict/replay   :db/valueType :db.type/string}
    {:db/ident :verdict/about    :db/valueType :db.type/string :db/cardinality :db.cardinality/many :db/index true}
    {:db/ident :verdict/by       :db/valueType :db.type/string}
-   {:db/ident :verdict/at       :db/valueType :db.type/long :db/index true}])
+   {:db/ident :verdict/at       :db/valueType :db.type/long :db/index true}
+   {:db/ident :verdict/request-reference :db/valueType :db.type/term}])
 
 (defn open
   "A ledger: a durable datom conn at `path` (fjall), or in memory when `path` is
@@ -47,6 +49,8 @@
 (def ^:private payload-media-type "application/vnd.beam-lisp.verdict-payload.v1")
 (def graph-format :bl/graph-verdict-v1)
 (def ^:private graph-payload-media-type "application/vnd.beam-lisp.verdict-payload.v2")
+(def request-format :bl/request-verdict-preview-v1)
+(def ^:private request-payload-media-type "application/vnd.beam-lisp.request-verdict-payload.v1")
 (defn- payload!
  ([ledger payload] (payload! ledger payload payload-media-type))
  ([ledger payload media-type]
@@ -144,11 +148,62 @@
       (:by meta) (assoc :verdict/by (:by meta)))]
     (mapv (fn [a] [:db/add -1 :verdict/about a]) (distinct (:about meta))))) id))
 
+(defn record-request!
+ "Store one complete portable request and a separately bound answer graph.
+  The small index holds request/subject references and point presence only.
+  Storage does not establish validity, delegation or native execution."
+ [ledger original response metadata]
+ (let [fresh (request/check! original) _ (request-answer/check! fresh response)
+       _ (when-not (and (string? (:claim metadata))
+                        (or (nil? (:by metadata)) (string? (:by metadata)))
+                        (or (nil? (:replay metadata)) (string? (:replay metadata)))
+                        (or (nil? (:about metadata))
+                            (and (sequential? (:about metadata)) (every? string? (:about metadata)))))
+           (throw (ex-info "Request ledger metadata has invalid types" {})))
+       data {:veritas/verdict-payload 3 :profile request-format :request fresh
+             :answer-body-graph (graph/encode response)}
+       payload (payload! ledger data request-payload-media-type)
+       at (erlang/system_time :millisecond) id (vid)]
+  (datom/transact! ledger
+   (into [(cond-> {:db/id -1 :verdict/id id :verdict/claim (:claim metadata)
+              :verdict/modality :recorded-request :verdict/engine (get-in fresh [:adapter :backend])
+              :verdict/at at :verdict/format request-format
+              :verdict/question-reference (request/subject-reference fresh)
+              :verdict/request-reference (request/reference fresh)
+              :verdict/witness-present (:point-present response) :verdict/assurance :recorded
+              :verdict/compiler-authority false :verdict/payload payload}
+      (:replay metadata) (assoc :verdict/replay (:replay metadata))
+      (:by metadata) (assoc :verdict/by (:by metadata)))]
+    (mapv (fn [name] [:db/add -1 :verdict/about name]) (distinct (:about metadata)))))
+  id))
+
 (def ^:private PULL
   [:verdict/id :verdict/claim :verdict/modality :verdict/engine :verdict/why
    :verdict/seed :verdict/tried :verdict/witness :verdict/replay :verdict/about
    :verdict/by :verdict/at :verdict/witness-present :verdict/witness-value
-   :verdict/question-id :verdict/question :verdict/format :verdict/question-reference :verdict/evidence :verdict/payload :verdict/assurance :verdict/compiler-authority])
+   :verdict/question-id :verdict/question :verdict/format :verdict/question-reference :verdict/evidence :verdict/payload :verdict/assurance :verdict/compiler-authority :verdict/request-reference])
+
+(defn- request-payload-row [row payload]
+ (when-not (and (= :map (rt/kind-kind payload))
+                (= #{:veritas/verdict-payload :profile :request :answer-body-graph} (set (keys payload)))
+                (int? (:veritas/verdict-payload payload)) (= 3 (:veritas/verdict-payload payload))
+                (= request-format (:profile payload) (:verdict/format row))
+                (= :recorded-request (:verdict/modality row)) (= :recorded (:verdict/assurance row))
+                (= false (:verdict/compiler-authority row))
+                (erlang/is_boolean (:verdict/witness-present row))
+                (every? #(not (contains? row %))
+                  [:verdict/question-id :verdict/question :verdict/evidence :verdict/witness :verdict/witness-value]))
+  (throw (ex-info "Request ledger payload format mismatch" {})))
+ (let [fresh (request/check! (:request payload)) body (:answer-body-graph payload)
+       response (request-answer/restore fresh body)]
+  (when-not (and (= (graph/bytes (graph/encode (request/reference fresh)))
+                   (graph/bytes (graph/encode (:verdict/request-reference row))))
+                 (= (graph/bytes (graph/encode (request/subject-reference fresh)))
+                    (graph/bytes (graph/encode (:verdict/question-reference row))))
+                 (= (:point-present response) (:verdict/witness-present row))
+                 (= (get-in fresh [:adapter :backend]) (:verdict/engine row)))
+   (throw (ex-info "Request ledger payload differs from its indexed record" {})))
+  (assoc (dissoc row :verdict/payload) :verdict/request fresh :verdict/answer-body-graph body)))
 
 (defn- graph-payload-row [row payload]
  (let [required #{:veritas/verdict-payload :profile :question-graph :evidence-graph}
@@ -156,6 +211,7 @@
   (when-not (and (= :map (rt/kind-kind payload))
                  (int? (:veritas/verdict-payload payload)) (= 2 (:veritas/verdict-payload payload))
                  (= graph-format (:profile payload)) (= graph-format (:verdict/format row))
+                 (not (contains? row :verdict/request-reference))
                  (every? #(contains? payload %) required) (every? #(contains? allowed %) (keys payload))
                  (= :recorded (:verdict/assurance row)) (= false (:verdict/compiler-authority row))
                  (erlang/is_boolean (:verdict/witness-present row))
@@ -182,7 +238,7 @@
 (defn- legacy-payload-row [row payload]
  (let [question (:question payload)]
   (when-not (and (map? payload) (= 1 (:veritas/verdict-payload payload)) (map? (:evidence payload))
-                 (nil? (:verdict/format row)) (nil? (:verdict/question-reference row))
+                 (nil? (:verdict/format row)) (nil? (:verdict/question-reference row)) (nil? (:verdict/request-reference row))
                  (= (boolean (:verdict/question-id row)) (contains? payload :question))
                  (or (not (contains? payload :question)) (= (:verdict/question-id row) (identity/hash (query/validate! question))))
                  (= (= true (:verdict/witness-present row)) (contains? payload :witness))
@@ -195,7 +251,7 @@
  (let [row (if-let [descriptor (:verdict/payload row)]
              (do
               (when-not (and (file/file? descriptor)
-                             (contains? #{payload-media-type graph-payload-media-type} (:media-type descriptor))
+                             (contains? #{payload-media-type graph-payload-media-type request-payload-media-type} (:media-type descriptor))
                              (int? (:size descriptor)) (<= 1 (:size descriptor) payload-byte-limit))
                (throw (ex-info "Ledger payload descriptor is invalid" {})))
               (let [bytes (datom/file-bytes db descriptor)]
@@ -203,12 +259,15 @@
                               (= (:sha descriptor) (file/sha256 bytes)))
                 (throw (ex-info "Ledger payload is missing or corrupt" {})))
                (let [payload (codec/decode bytes)]
-                (if (= graph-payload-media-type (:media-type descriptor))
-                 (graph-payload-row row payload) (legacy-payload-row row payload)))))
-             (do (when (or (contains? row :verdict/format) (contains? row :verdict/question-reference)) (throw (ex-info "Graph ledger record requires its payload" {}))) row))]
+                (cond (= graph-payload-media-type (:media-type descriptor)) (graph-payload-row row payload)
+                      (= request-payload-media-type (:media-type descriptor)) (request-payload-row row payload)
+                      :else (legacy-payload-row row payload)))))
+             (do (when (or (contains? row :verdict/format) (contains? row :verdict/question-reference)
+                           (contains? row :verdict/request-reference))
+                   (throw (ex-info "Referenced ledger record requires its payload" {}))) row))]
   ;; Version 1 keeps its original public shape, including false/nil values.
   ;; Version 2 returns graph data; materialization is always explicit.
-  (if (and (not= graph-format (:verdict/format row)) (= true (:verdict/witness-present row)))
+  (if (and (nil? (:verdict/format row)) (= true (:verdict/witness-present row)))
    (assoc row :verdict/witness (first (:verdict/witness-value row))) row)))
 (defn graph-evidence!
  "Explicitly materialize caller evidence and reattach a separately stored
@@ -225,6 +284,17 @@
  (when-not (and (= graph-format (:verdict/format row)) (= true (:verdict/witness-present row)))
   (throw (ex-info "Present graph witness required" {})))
  (first (graph/decode! (:verdict/witness-graph row))))
+
+(defn request-answer!
+ "Restore explicitly graph-bound request evidence, without mathematical replay."
+ [row]
+ (when-not (= request-format (:verdict/format row)) (throw (ex-info "Request ledger row required" {})))
+ (request-answer/restore (:verdict/request row) (:verdict/answer-body-graph row)))
+(defn recheck-request
+ "Freshly replay a stored point. Native status/artifact/delegation labels
+  remain recorded claims even after storage integrity and point checks."
+ [row]
+ (request-answer/recheck (:verdict/request row) (request-answer! row)))
 
 (defn all
   "Every verdict, newest first; `since` (epoch ms) narrows."
@@ -246,7 +316,8 @@
           (into [] (datom/q '[:find ?e :in $ ?t :where [?e :verdict/about ?t]] d thing)))))
 
 (def ^:private SECTIONS
- [[:error "Execution or interface errors"] [:refuted "Refuted"] [:candidate "Unconfirmed candidates"]
+ [[:recorded-request "Recorded formal requests (recheck points explicitly)"]
+  [:error "Execution or interface errors"] [:refuted "Refuted"] [:candidate "Unconfirmed candidates"]
   [:unknown "Unknown"] [:unsupported "Unsupported"] [:vacuous "Vacuous"]
   [:witnessed "Witnessed (inspect engine and completeness)"] [:exhausted "Exhausted finite domains"]
   [:solver-claim "Solver claims (certificate unchecked)"]

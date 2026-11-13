@@ -48,7 +48,7 @@ elif stage in ('managed-reader-one', 'managed-reader-two', 'managed-reader-contr
     if stage == 'managed-reader-controls':
         request += ['controls']
 elif stage == 'sdk-focused':
-    names += ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl', 'test/bl/formal/managed_graph_test.bl']
+    names += ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl', 'test/bl/formal/managed_graph_test.bl', 'test/bl/formal/request_test.bl', 'test/bl/formal/graph_keys_test.bl']
     request = ['test', *[str(R / name) for name in names[1:]]]
     output = E / 'sdk-traces.json'
 elif stage in ('project-focused', 'adapter-integration'):
@@ -82,6 +82,21 @@ elif stage == 'managed-native-corpus':
     names += ['research/formal-logic/managed-graph-check.bl']
     output = E / 'managed-native-corpus.json'
     request = ['run', str(R / names[-1]), '--', str(output)]
+elif stage in ('request-ledger-write', 'request-ledger-reader-one', 'request-ledger-reader-two', 'request-ledger-controls'):
+    names += ['research/formal-logic/request-ledger-check.bl']
+    fixture_pin = E / 'request-ledger-fixture.json'
+    if stage == 'request-ledger-write':
+        assert not fixture_pin.exists(), 'Retire the preceding ledger fixture before writing another.'
+        fixture = Path(tempfile.mkdtemp(prefix='formal-request-ledger-fixture-'))
+        fixture_pin.write_text(json.dumps({'path': str(fixture), 'sdk_pin': pin}, indent=2) + '\n')
+    else:
+        fixture_info = json.loads(fixture_pin.read_text())
+        assert fixture_info['sdk_pin'] == pin
+        fixture = Path(fixture_info['path'])
+        assert fixture.parent == Path('/tmp') and fixture.name.startswith('formal-request-ledger-fixture-') and fixture.is_dir()
+    output = E / (stage + '.json')
+    mode = 'write' if stage == 'request-ledger-write' else ('controls' if stage == 'request-ledger-controls' else 'read')
+    request = ['run', str(R / names[-1]), '--', mode, str(fixture / 'ledger'), str(output)]
 elif stage == 'paired-native-corpus':
     project = True
     names += ['research/formal-logic/graph-consumers-check.bl']
@@ -109,6 +124,7 @@ else:
 if project:
     names += [str(path.relative_to(R)) for path in (P / 'src').rglob('*.bl')]
 names += [str(path.relative_to(R)) for path in (R / 'priv/lib/formal').rglob('*.bl')]
+names += ['priv/lib/oracle.bl', 'priv/lib/veritas/ledger.bl']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = {}
 for name in sorted(set(names)):
@@ -120,6 +136,7 @@ cwd = Path(tempfile.mkdtemp(prefix='formal-managed-consumer-'))
 ceiling = 3600 if stage == 'paired-native-corpus' else (1800 if stage == 'managed-native-corpus'
           else (720 if stage == 'sdk-preflight-controls' else 900))
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe', '--expand-environment=no',
+           '--unit=work-formal-managed-' + stage + '-' + pin['engine_fingerprint'][:12],
            '--working-directory=' + str(cwd), '--property=MemoryMax=4G', '--property=MemorySwapMax=0',
            '--property=RuntimeMaxSec=' + str(ceiling), '--property=KillMode=control-group',
            '--setenv=XDG_RUNTIME_DIR=' + str(runtime)]
@@ -151,5 +168,9 @@ finally:
 (E / (stage + '-exit.json')).write_text(json.dumps(
     {'exit_code': code, 'runtime_retired': not runtime.exists(), 'consumer_cwd_retired': not cwd.exists(),
      'elapsed_seconds': time.monotonic() - started}, indent=2) + '\n')
+if stage == 'request-ledger-controls' and code == 0:
+    shutil.rmtree(fixture)
+    (E / 'request-ledger-fixture-retired.json').write_text(json.dumps(
+        {'path': str(fixture), 'retired': not fixture.exists(), 'sdk_pin': pin}, indent=2) + '\n')
 print(json.dumps({'stage': stage, 'exit_code': code}), flush=True)
 raise SystemExit(code)

@@ -9,11 +9,10 @@ R = P.parent.parent
 E = P / 'evidence/managed-graph'
 E.mkdir(exist_ok=True)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
-names = ['priv/lib/formal/evaluate.bl', 'priv/lib/formal/backend.bl',
-         'priv/lib/formal/graph-question.bl', 'priv/lib/formal/graph-execution.bl',
-         'priv/lib/formal/graph-terms.bl',
-         'test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl',
-         'test/bl/formal/managed_graph_test.bl', str(Path(__file__).relative_to(R))]
+runtime_names = ['priv/lib/formal/evaluate.bl', 'priv/lib/formal/backend.bl', 'priv/lib/formal/graph-question.bl', 'priv/lib/formal/graph-execution.bl', 'priv/lib/formal/graph-terms.bl', 'priv/lib/formal/graph-replay.bl', 'priv/lib/formal/coordinates.bl', 'priv/lib/formal/request.bl', 'priv/lib/formal/request-point.bl', 'priv/lib/formal/request-answer.bl', 'priv/lib/formal/request-runtime.bl', 'priv/lib/formal/request-record.bl', 'priv/lib/formal/logic.bl', 'priv/lib/oracle.bl', 'priv/lib/veritas/ledger.bl']
+names = runtime_names + ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl',
+         'test/bl/formal/managed_graph_test.bl', 'test/bl/formal/request_test.bl', 'test/bl/formal/graph_keys_test.bl',
+         str(Path(__file__).relative_to(R))]
 digests = {}
 for name in names:
     body = (R / name).read_bytes()
@@ -36,7 +35,7 @@ assert fingerprint == subprocess.check_output(['scripts/prepare-checkout-sdk', '
 sdk = (R / '.bl/sdks' / fingerprint / 'result-sdk').resolve(strict=True)
 source = (R / '.bl/sdks' / fingerprint / 'source-engine').resolve(strict=True)
 assert str(sdk).startswith('/nix/store/') and str(source).startswith('/nix/store/')
-for name in names[:5]:
+for name in runtime_names:
     assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digests[name]
 candidate = {'sdk': str(sdk), 'descriptor_sha256': hashlib.sha256((sdk / 'artifact.json').read_bytes()).hexdigest(),
              'source': str(source), 'base_commit': commit, 'engine_fingerprint': fingerprint}

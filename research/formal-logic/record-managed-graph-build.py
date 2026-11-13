@@ -46,7 +46,7 @@ fingerprint = subprocess.check_output([R / 'scripts/sdk-inputs', '--root', engin
 assert fingerprint == pin['engine_fingerprint']
 assembly = Path(meta['source'])
 engine_sources = sources(engine)
-assert len(engine_sources) == 693 and engine_sources == sources(assembly)
+assert len(engine_sources) == 700 and engine_sources == sources(assembly)
 runtime = sdk / 'lib/beam_lisp-0.1.0'
 for name, digest in engine_sources.items():
     assert sha(runtime / name) == digest, name
@@ -55,12 +55,12 @@ old_sources = sources(Path(old['source']))
 changes = {name: {'before': old_sources.get(name), 'after': engine_sources.get(name)}
            for name in sorted(old_sources.keys() | engine_sources.keys())
            if old_sources.get(name) != engine_sources.get(name)}
-assert set(changes) == {'priv/lib/formal/evaluate.bl', 'priv/lib/formal/backend.bl', 'priv/lib/formal/graph-question.bl', 'priv/lib/formal/graph-execution.bl', 'priv/lib/formal/graph-terms.bl'}
+assert set(changes) == {'priv/lib/formal/request-point.bl', 'priv/lib/formal/graph-question.bl', 'priv/lib/formal/graph-terms.bl', 'priv/lib/formal/logic.bl', 'priv/lib/formal/request-runtime.bl', 'priv/lib/formal/request-record.bl', 'priv/lib/oracle.bl', 'priv/lib/formal/graph-execution.bl', 'priv/lib/formal/request-answer.bl', 'priv/lib/formal/graph-replay.bl', 'priv/lib/formal/coordinates.bl', 'priv/lib/formal/backend.bl', 'priv/lib/formal/evaluate.bl', 'priv/lib/veritas/ledger.bl', 'priv/lib/formal/request.bl'}
 oldmeta = read(Path(old['sdk']) / 'artifact.json')
 unchanged = {name: meta[name] for name in ('compiler', 'dependencies', 'platform', 'formalWorker')}
 assert all(oldmeta[name] == value for name, value in unchanged.items())
 units = read(sdk / 'unit-store/unit-index.json')
-assert all(name in units['units'] for name in ('formal.evaluate', 'formal.backend', 'formal.graph-question', 'formal.graph-execution', 'formal.graph-terms'))
+assert all(name in units['units'] for name in ('formal.evaluate', 'formal.backend', 'formal.graph-question', 'formal.graph-execution', 'formal.graph-terms', 'formal.graph-replay', 'formal.coordinates', 'formal.request', 'formal.request-point', 'formal.request-answer', 'formal.request-runtime', 'formal.request-record', 'formal.logic', 'oracle', 'veritas.ledger'))
 (E / 'managed-operation.json').write_bytes(operation.read_bytes())
 (E / 'managed-preparation-result.json').write_text(json.dumps(receipt, indent=2) + '\n')
 report = {'schema': 'enchant.formal.managed-graph-build-linkage.v1', 'sdk_pin': pin,
@@ -69,7 +69,7 @@ report = {'schema': 'enchant.formal.managed-graph-build-linkage.v1', 'sdk_pin': 
           'engine_fingerprint': fingerprint, 'assembly_source': str(assembly),
           'runtime_source_sha256': engine_sources, 'source_changes': changes,
           'unchanged_components': unchanged,
-          'compiled_namespace_units': {name: units['units'][name] for name in ('formal.evaluate', 'formal.backend', 'formal.graph-question', 'formal.graph-execution', 'formal.graph-terms')},
+          'compiled_namespace_units': {name: units['units'][name] for name in ('formal.evaluate', 'formal.backend', 'formal.graph-question', 'formal.graph-execution', 'formal.graph-terms', 'formal.graph-replay', 'formal.coordinates', 'formal.request', 'formal.request-point', 'formal.request-answer', 'formal.request-runtime', 'formal.request-record', 'formal.logic', 'oracle', 'veritas.ledger')},
           'operation_sha256': sha(E / 'managed-operation.json'),
           'receipt_sha256': sha(E / 'managed-preparation-result.json'),
           'scope': 'Managed preparation and byte identity of all packaged BL source files; not a compiler preservation proof.'}

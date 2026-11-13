@@ -1,0 +1,111 @@
+(ns formal.request-ledger-check
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.question-graph :as qg] [formal.data-graph :as graph]
+           [formal.request :as request] [formal.request-answer :as answer]
+           [formal.request-runtime :as run] [formal.request-record :as record]
+           [formal.backend :as backend] [veritas.ledger :as ledger] [datom]
+           [bl.json :as json] [oracle]))
+
+(def outer-name "formal.ledger.reader/outer.never.interned.20261113")
+(def nested-name "formal.ledger.reader/nested.never.interned.20261113")
+(defn- absent? [name] (try (erlang/binary_to_existing_atom name :utf8) false (catch _ true)))
+(defn- key-graph [name]
+ {:formal/data-graph 1 :profile graph/profile :root 0 :nodes [["keyword" name]]})
+(defn- require! [ok why] (when-not ok (throw (ex-info (str "request ledger check: " why) {}))))
+(defn- subject []
+ (let [x (t/variable "ledger.request.x" t/Int)
+       base (qg/prepare (q/sat {:assumptions [(t/eq x (t/int 7))]}))
+       payload (graph/assemble "map" [[(graph/encode "next") (graph/encode (t/add x (t/int 1)))]
+                                       [(key-graph nested-name) (graph/encode (t/add x (t/int 2)))]])
+       descriptor (graph/patch-map (graph/encode (v/make {} {})) [[(graph/encode :value) payload]])]
+  (assoc base :graph (graph/patch-map (:graph base)
+                      [[(graph/encode :observe) (graph/assemble "map" [[(key-graph outer-name) descriptor]])]]))))
+
+(defn- write-records [connection]
+ (let [base (request/prepare (subject))]
+  (mapv (fn [engine]
+          (let [r (request/for-backend base engine) result (run/execute r)
+                _ (require! (= :sat (:verdict result)) "native point replay")
+                id (record/record! connection r (:response result) {:claim "A question with original application keys"})]
+           {:id id :backend engine :request-reference (request/reference r)
+            :subject-reference (request/subject-reference r)})) [:z3 :oxiz])))
+
+(defn- read-records [connection]
+ (let [rows (ledger/all connection)]
+  (require! (= 2 (count rows)) "both durable request records")
+  (mapv (fn [row]
+          (let [r (:verdict/request row) restored (ledger/request-answer! row)
+                fresh (record/reopen connection (:verdict/id row)) result (:result fresh)
+                engine (get-in r [:adapter :backend]) assets (backend/artifacts {:backend engine})
+                observations (get-in result [:point-check :observations]) data (get-in r [:subject :graph])]
+           (require! (= :sat (:verdict result)) "fresh point replay")
+           (require! (= :valid (get-in result [:point-check :validation :status])) "all actual assertions")
+           (require! (= :not-checked (get-in result [:certificate :status])) "unchecked certificate")
+           (require! (= false (:checked-native-execution result) (:compiler-proof-authority result)) "recorded execution stays unverified")
+           (require! (= (System/get_env "BL_SDK_PRODUCT") (get-in result [:source :identity :sdk])) "recorded SDK matches this fixture SDK")
+           (require! (= (get-in assets [:worker :sha256]) (get-in result [:source :identity :worker-sha256])) "recorded worker matches this SDK artifact")
+           (require! (= (get-in assets [:library :sha256]) (get-in result [:source :identity :library-sha256])) "recorded library matches this SDK artifact")
+           (require! (= #{8 9 true} (set (mapcat #(map :value (:roots %)) observations))) "original observation roots")
+           (require! (= 1 (count observations)) "one original observation")
+           (require! (= (graph/bytes (key-graph outer-name))
+                        (graph/bytes (graph/subgraph data (:label-source (first observations))))) "unknown original label identity")
+           {:id (:verdict/id row) :backend engine :request-reference (request/reference r)
+            :subject-reference (request/subject-reference r) :point-reference (graph/reference (:point-graph restored))
+            :observation-reference (graph/of observations) :validation :valid :verdict :sat
+            :recorded-artifact-matches-this-sdk true :checked-native-execution false
+            :compiler-proof-authority false})) rows)))
+
+(defn- controls [connection]
+ (let [row (first (ledger/all connection)) r (:verdict/request row) response (ledger/request-answer! row)
+       positive (answer/recheck r response)
+       variants [["compiler-authority" (assoc response :compiler-proof-authority true)]
+                 ["trusted-bit" (assoc response :trusted true)]
+                 ["certificate-upgrade" (assoc-in response [:certificate :status] :checked)]
+                 ["version-float" (assoc response :formal/request-answer 2.0)]
+                 ["request-reference" (assoc-in response [:request-reference :sha256] "forged")]
+                 ["native-deadline" (assoc-in response [:source :native-limits :hard-ms] 3000)]]
+       refused (mapv (fn [[id candidate]]
+                       (let [message (try (answer/recheck r candidate) nil (catch error (ex-message error)))]
+                        (require! (some? message) (str "tampered response accepted: " id))
+                        {:id id :status :refused :message message})) variants)
+       invalid (answer/recheck r (assoc response :point-graph (graph/encode {"ledger.request.x" 8})))
+       _ (require! (= :sat (:verdict positive)) "positive semantic control")
+       _ (require! (= :invalid-point (:verdict invalid)) "changed point actually violates its assertion")
+       id (:verdict/id row)
+       entity (first (first (into [] (datom/q '[:find ?e :in $ ?id :where [?e :verdict/id ?id]] (datom/db connection) id))))
+       _ (datom/transact! connection [[:db/add entity :verdict/request-reference (graph/of :forged-request)]])
+       index-message (try (ledger/all connection) nil (catch error (ex-message error)))
+       _ (require! (some? index-message) "actual index tampering is refused")
+       _ (datom/transact! connection [[:db/add entity :verdict/request-reference (request/reference r)]])]
+  {:positive :sat :controls refused :changed-point :independently-invalid
+   :actual-index-tampering {:status :refused :message index-message}
+   :checked-native-execution false :compiler-proof-authority false}))
+
+(def args (BeamLisp/argv))
+(def mode (first args))
+(require! (contains? #{"write" "read" "controls"} mode) "known mode")
+(require! (and (absent? outer-name) (absent? nested-name)) "application key names initially absent")
+(def connection (ledger/open (second args)))
+(def queries (atom 0))
+(defn- deny [& _] (swap! queries inc) (throw :ledger-reader-must-not-query))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "actual native exchange counter")
+(try
+ (let [result (if (= "write" mode) {:rows (write-records connection)}
+                (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+                 #(if (= "read" mode) {:rows (read-records connection)} (controls connection))))
+       exchanges (elem (erlang/trace_info pattern :call_count) 1)]
+  (require! (= (if (= "write" mode) 4 0) exchanges) "actual native exchanges: handshakes/scopes only in writer")
+  (require! (= 0 @queries) "no managed query while reopening")
+  (require! (and (absent? outer-name) (absent? nested-name)) "application key names remain absent")
+  (File/write! (nth args 2)
+   (json/encode (merge result {:schema "enchant.formal.request-ledger-check.v1" :mode mode
+                              :sdk (System/get_env "BL_SDK_PRODUCT") :process (System/pid) :cwd (File/cwd!)
+                              :sdk-only true :research-import-path false :source-payload-execution false
+                              :key-names-still-absent true :native-exchanges exchanges :managed-query-calls @queries
+                              :checked-native-execution false :compiler-proof-authority false}) {:pretty 2}))
+  (println {:mode mode :native-exchanges exchanges :key-names-still-absent true :compiler-proof-authority false}))
+ (finally
+  (erlang/trace_pattern pattern false (list :local :call_count))
+  (datom/close! connection)))

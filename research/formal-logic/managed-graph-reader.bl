@@ -1,6 +1,7 @@
 (ns formal.managed-graph-reader
  (:require [formal.graph-question :as question] [formal.graph-execution :as execution]
-           [formal.evaluate :as evaluator] [formal.backend :as backend]
+           [formal.request :as request] [formal.request-point :as point-reader]
+           [formal.coordinates :as coordinates] [formal.evaluate :as evaluator] [formal.backend :as backend]
            [formal.question-graph :as qg] [formal.data-graph :as graph]
            [bl.json :as json] [oracle]))
 
@@ -30,36 +31,24 @@
                    [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)])
                  (:nodes data))})
 
-(defn- point [context configuration assignments]
- (question/with-numeric context (:limits configuration)
-  (fn [inventory admitted]
-   (require! (= 1 (:formal/question-forest inventory)) "complete numeric admission for a saved model")
-   ((:with-point admitted) assignments
-    (fn [operation]
-     (let [forest (:forest inventory) source-for (zipmap (:roots forest) (:source-roots forest))
-           assertions (vec (concat (:assertions inventory)
-                                   (when (:counterexample inventory) [(:counterexample inventory)])))
-           roots (mapv #(get source-for (:term %)) assertions)
-           bindings ((:check-bindings operation) roots)
-           values (mapv (:resolve operation) roots)
-           status (cond (= :invalid (:status bindings)) :invalid (some #(= false %) values) :invalid
-                        (or (:resource-refused bindings) (not (every? #(= true %) values))) :incomplete :else :valid)
-           observations (into {}
-                         (mapv (fn [{:keys [label terms]}]
-                                 [label (mapv (fn [id]
-                                                {:source-node (get source-for id)
-                                                 :value ((:resolve operation) (get source-for id))}) terms)])
-                               (:observations inventory)))]
-      {:status status :mode (:mode inventory)
-       :bindings-reference (graph/of bindings) :assertion-value-reference (graph/of values)
-       :observation-value-reference (graph/of observations)
-       :resources ((:resources operation)) :checking ((:checking operation))
-       :compiler-proof-authority false}))))))
+(defn- point [context configuration assignment-data engine]
+ (let [r (request/prepare context {:policy configuration :adapter {:backend engine}})
+       result (point-reader/replay-graph r assignment-data)
+       checking (:validation result)]
+  (require! (= :run (:point-replay result)) "complete numeric admission for a saved model")
+  {:status (:status checking) :mode (:mode result)
+   :bindings-reference (graph/of (:bindings checking))
+   :assertion-value-reference (graph/of (mapv :value (:results checking)))
+   :observation-value-reference
+    (graph/of (mapv (fn [row]
+                     {:label-source (:label-source row) :descriptor-source (:descriptor-source row)
+                      :roots (mapv #(select-keys % [:source-node :value]) (:roots row))}) (:observations result)))
+   :resources (:resources result) :checking (:checking result) :compiler-proof-authority false}))
 
 (defn- header! [answer engine assets reference]
  (require! (and (int? (get answer "formal/managed-graph-reply"))
-                (= 1 (get answer "formal/managed-graph-reply"))
-                (= "bl/managed-numeric-graph-preview-v1" (get answer "reply-profile"))
+                (= 2 (get answer "formal/managed-graph-reply"))
+                (= "bl/managed-numeric-graph-preview-v2" (get answer "reply-profile"))
                 (= false (get answer "trusted") (get answer "compiler-proof-authority"))
                 (= "not-checked" (get-in answer ["certificate" "status"]))) "reply format and authority")
  (require! (and (reference= reference (get answer "request-reference"))
@@ -89,8 +78,7 @@
      :compiler-proof-authority false})
    (let [assignment-data (restore (get answer "assignment-graph"))
          _ (require! (reference= (graph/reference assignment-data) (get answer "assignment-reference")) "assignment graph reference")
-         assignments (graph/decode! assignment-data)
-         fresh (point context configuration assignments)
+         fresh (point context configuration assignment-data engine)
          verdict (cond (= :invalid (:status fresh)) "invalid-model"
                        (= :incomplete (:status fresh)) "candidate"
                        (= :prove (:mode fresh)) "refuted" :else "sat")]
@@ -102,7 +90,7 @@
                   :recorded-native-status "sat" :checked-native-execution false})))))
 
 (defn- recheck [input assets]
- (require! (= "enchant.formal.managed-original-graph-corpus.v1" (get input "schema")) "fixture schema")
+ (require! (= "enchant.formal.managed-original-graph-corpus.v2" (get input "schema")) "fixture schema")
  (require! (= false (get input "compiler-proof-authority")) "fixture cannot grant compiler authority")
  (require! (= {"solver-ms" 500 "hard-ms" 2000} (get input "native-deadlines")) "fixture deadlines")
  (let [items (get input "rows")]
@@ -127,7 +115,7 @@
                                      (= "run" (get answer "assertion-replay"))
                                      (= "valid" (get-in answer ["validation" "status"]))
                                      (contains? answer "assignment-graph"))
-                           (let [assignments (graph/decode! (restore (get answer "assignment-graph")))
+                           (let [assignments (:assignments (coordinates/prepare (restore (get answer "assignment-graph"))))
                                  checked-names (set (map #(get % "name")
                                                      (filter #(= "valid" (get % "status"))
                                                              (get-in answer ["validation" "bindings" "rows"]))))
@@ -144,8 +132,9 @@
        configuration (header! answer engine (get assets engine) reference)
        check-answer (fn [candidate] (recheck-answer context reference candidate engine (get assets engine)))
        baseline (check-answer answer)
-       altered (assoc assignments (first coordinate) nil)
-       altered-data (graph/encode altered) fresh (point context configuration altered)
+       altered-data (graph/patch-map (restore (get answer "assignment-graph"))
+                      [[(graph/encode (first coordinate)) (graph/encode nil)]])
+       fresh (point context configuration altered-data engine)
        forged (-> answer
                    (assoc "assignment-graph" (wire altered-data)
                           "assignment-reference" (recorded-reference (graph/reference altered-data)))
@@ -166,7 +155,7 @@
         [["compiler-assurance" (assoc answer "compiler-proof-authority" true)]
          ["trusted-bit" (assoc answer "trusted" true)]
          ["certificate-upgrade" (assoc-in answer ["certificate" "status"] "checked")]
-         ["numeric-version-alias" (assoc answer "formal/managed-graph-reply" 1.0)]
+         ["numeric-version-alias" (assoc answer "formal/managed-graph-reply" 2.0)]
          ["worker-identity" (assoc-in answer ["identity" "worker-sha256"] "forged")]
          ["original-reference" (assoc-in answer ["request-reference" "sha256"] "forged")]
          ["settings-reference" (assoc-in answer ["settings-reference" "sha256"] "forged")]
