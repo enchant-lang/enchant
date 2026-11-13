@@ -1,0 +1,82 @@
+(ns formal.word-batch.request
+ (:require [formal.data-graph :as graph] [formal.question-graph :as question]
+           [formal.word-batch.graph-execution :as execution]))
+
+;; Portable language request. Live sessions and callbacks remain local.
+;; Profile v2 uses graph-native application keys and explicit execution policy.
+(def profile :bl/formal-request-preview-v2)
+(def ^:private fields #{:formal/request :profile :subject :policy :adapter})
+
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.request: " reason) {:kind :formal-request}))))
+(defn- plain-map? [value]
+ (and (= :map (rt/kind-kind value)) (or (nil? (meta value)) (= {} (meta value)))))
+
+(defn- subject! [subject]
+ ;; field-graph checks the closed original wrapper and whole canonical graph.
+ ;; Selecting these tiny headers never materializes term argument trees or
+ ;; invokes a term constructor. Typed admission belongs to execution/replay.
+ (let [version (question/field-graph subject :formal/query)
+       mode (question/field-graph subject :mode)
+       assertions (question/field-graph subject :assertions)]
+  (require! (and version (= ["int" 1] (nth (:nodes version) (:root version)))) "version-1 subject required")
+  (require! (and mode (contains? #{["keyword" "sat"] ["keyword" "prove"]}
+                                 (nth (:nodes mode) (:root mode)))) "SAT or proof subject required")
+  (require! (and assertions (= "vector" (first (nth (:nodes assertions) (:root assertions)))))
+            "subject assertion vector required")
+  subject))
+
+(defn adapter [options]
+ (require! (and (plain-map? options) (every? #{:backend :solver-ms :hard-ms} (keys options)))
+           "closed portable adapter settings required")
+ (let [settings (merge {:backend :z3 :solver-ms 500 :hard-ms 2000} options)
+       {:keys [backend solver-ms hard-ms]} settings]
+  (require! (and (contains? #{:z3 :oxiz} backend) (int? solver-ms) (int? hard-ms)
+                 (< 0 solver-ms hard-ms) (<= solver-ms 10000) (<= hard-ms 15000))
+            "known backend and native deadlines required")
+  settings))
+
+(defn prepare
+ "Build a portable request without typed admission or native execution.
+  Subject semantics and execution policy have separate identities."
+ ([subject] (prepare subject {}))
+ ([subject options]
+  (require! (and (plain-map? options) (every? #{:policy :adapter} (keys options))) "closed request options required")
+  {:formal/request 2 :profile profile :subject (subject! subject)
+   :policy (execution/settings (get options :policy {}))
+   :adapter (adapter (get options :adapter {}))}))
+
+(defn check!
+ "Reconstruct the closed request. No cached reference or ready admission is accepted."
+ [request]
+ (require! (and (plain-map? request) (= fields (set (keys request)))
+                (int? (:formal/request request)) (= 2 (:formal/request request)) (= profile (:profile request)))
+           "closed version-2 request required")
+ (let [fresh (prepare (:subject request) (select-keys request [:policy :adapter]))]
+  (require! (= (graph/bytes (graph/encode (:policy fresh))) (graph/bytes (graph/encode (:policy request))))
+            "normalized policy required")
+  (require! (= (graph/bytes (graph/encode (:adapter fresh))) (graph/bytes (graph/encode (:adapter request))))
+            "normalized adapter required")
+  fresh))
+
+(defn from-graph
+ "Accept original flat graph data without opening a materialized query view.
+  Fresh typed admission still belongs to execution or point rechecking."
+ ([data] (from-graph data {}))
+ ([data options]
+  (prepare {:formal/question-graph 1 :profile question/profile :graph data} options)))
+
+(defn subject-reference [request]
+ (graph/reference (:graph (:subject (check! request)))))
+(defn reference
+ "Content reference of the original subject plus normalized policy/adapter.
+  The original flat graph is bound by its freshly checked complete reference,
+  avoiding another graph-of-the-entire-graph expansion at this boundary."
+ [request]
+ (let [fresh (check! request)]
+  (graph/of [:formal/request-preview-v2 (graph/reference (:graph (:subject fresh)))
+             (:policy fresh) (:adapter fresh)])))
+
+(defn for-backend [request backend]
+ (let [fresh (check! request)]
+  (prepare (:subject fresh) {:policy (:policy fresh) :adapter (assoc (:adapter fresh) :backend backend)})))

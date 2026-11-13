@@ -1,0 +1,70 @@
+(ns formal.word-batch.point-profile
+ (:require [formal.word-batch.evaluate :as evaluator] [formal.word-batch.graph-question :as question]
+           [formal.word-batch.coordinates :as coordinates] [formal.data-graph :as graph] [formal.word-batch.resources.word :as word]))
+
+;; One closed dispatcher for owner turns and fresh pure readers. No backend,
+;; request runtime, caller callbacks or executable policy definitions live here.
+(def numeric :bl/managed-numeric-graph-preview-v2)
+(def numeric-word :bl/managed-numeric-word-graph-preview-v1)
+(def reply-profile :bl/managed-graph-reply-preview-v3)
+(def defaults {:profile numeric :owner-ms 30000 :limits {}})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.point-profile: " why) {:kind :point-profile}))))
+(defn evaluation-profile [policy]
+ (case (:profile policy)
+  :bl/managed-numeric-graph-preview-v2 evaluator/direct-numeric-graph-profile
+  :bl/managed-numeric-word-graph-preview-v1 evaluator/word-graph-profile
+  (throw (ex-info "formal.point-profile: unknown checking profile" {}))))
+(defn settings [overrides]
+ (require! (and (map? overrides) (every? #{:profile :owner-ms :limits} (keys overrides))) "closed settings required")
+ (graph/encode overrides)
+ (let [options (merge defaults overrides)]
+  (require! (and (int? (:owner-ms options)) (<= 1 (:owner-ms options) 60000)) "owner deadline 1..60000 required")
+  (assoc options :limits (evaluator/graph-resource-limits (evaluation-profile options) (:limits options)))))
+(defn data-vocabulary
+ "Initialize this SDK's fixed policy schemas before data decoding. No graph
+  value chooses a module or becomes an application atom. These are ordinary
+  policy data, not an admission token or native capability."
+ [] [(settings {}) (settings {:profile numeric-word})])
+
+(defn reply-header [policy]
+ (if (= numeric (:profile policy)) {:formal/managed-graph-reply 2 :reply-profile numeric}
+  (do (evaluation-profile policy) {:formal/managed-graph-reply 3 :reply-profile reply-profile})))
+(defn reply-header? [policy raw]
+ (let [header (reply-header policy)]
+  (and (int? (:formal/managed-graph-reply raw))
+       (= header (select-keys raw [:formal/managed-graph-reply :reply-profile])))))
+(defn with-question [subject policy consume]
+ (let [configuration (settings policy)]
+  (question/with-policy-keys subject {:profile (evaluation-profile configuration) :limits (:limits configuration)} consume)))
+(defn coordinate-profile [policy]
+ (evaluation-profile policy)
+ (if (= numeric-word (:profile policy)) coordinates/word-profile coordinates/profile))
+(defn read-coordinates [policy data]
+ (evaluation-profile policy)
+ (if (= numeric-word (:profile policy)) (coordinates/prepare-numeric-word data) (coordinates/prepare data)))
+(defn native-coordinate
+ "Convert only the named primitive wire shape. Canonical value checks and
+  derived work remain in the actual point, never in unmetered decoding."
+ [policy wire]
+ (evaluation-profile policy)
+ (cond
+  (not (and (vector? wire) (seq wire))) (evaluator/unavailable :malformed-native-coordinate)
+  (and (contains? #{"bool" "int"} (first wire)) (= 2 (count wire))) (second wire)
+  (and (= "real" (first wire)) (= 3 (count wire))) {:formal/real [(second wire) (nth wire 2)]}
+  (and (= numeric-word (:profile policy)) (= "bv" (first wire)) (= 3 (count wire)))
+   {:formal/bv [(second wire) (nth wire 2)]}
+  :else (evaluator/unavailable {:kind (first wire) :reason (get wire 1 :native-coordinate-unavailable)})))
+(defn describe
+ "Describe the language checking policy. This is not a native capability
+  probe, completeness claim, certificate, Source or compiler proof."
+ [overrides]
+ (let [policy (settings overrides) words? (= numeric-word (:profile policy))]
+  {:profile (:profile policy) :policy policy :evaluation-profile (evaluation-profile policy)
+   :coordinate-profile (coordinate-profile policy) :reply-header (reply-header policy)
+   :sorts (if words? [:bool :int :real [:bv 1 4096]] [:bool :int :real])
+   :word-operations (when words? (vec (sort word/operations)))
+   :admission :fresh-original-graph :point-replay :sdk-private-primitives
+   :resources :prospective-literal-and-demanded-point-policy
+   :native-support :requires-backend-evidence :certificates :not-checked
+   :quantifier-replay :not-supported :source-connection :not-established :compiler-proof-authority false}))
