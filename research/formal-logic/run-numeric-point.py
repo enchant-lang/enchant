@@ -19,6 +19,9 @@ if stage == 'focused':
     files = ['rational_preflight_test.bl', 'numeric_point_test.bl', 'bounded_point_test.bl', 'term_forest_evaluate_test.bl', 'term_forest_test.bl',
              'graph_reader_test.bl', 'graph_observations_test.bl', 'question_forest_test.bl']
     request = ['test', *[str(P / 'test' / name) for name in files]]
+elif stage == 'trace':
+    files = ['numeric_execution_trace_test.bl']
+    request = ['test', str(P / 'test' / files[0])]
 elif stage == 'example':
     files = []
     request = ['run', str(P / 'numeric-point-example.bl'), '--', str(E / 'example.json')]
@@ -49,6 +52,9 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            '--setenv=XDG_RUNTIME_DIR=' + str(runtime),
            'env', '-u', 'BEAM_LISP_PATH', '-u', 'ENCHANT_FORMAL_WORKER', '-u', 'ENCHANT_Z3_LIBRARY',
            str(Path(pin['sdk']) / 'bin/bl'), '--cold', '-p', str(P / 'src'), *request]
+if stage == 'trace':
+    command.insert(command.index('env'), '--setenv=ENCHANT_NUMERIC_TRACE_RECEIPT=' + str(E / 'trace.json'))
+    (E / 'trace.json').unlink(missing_ok=True)
 (E / (stage + '-exit.json')).unlink(missing_ok=True)
 if stage == 'example':
     (E / 'example.json').unlink(missing_ok=True)

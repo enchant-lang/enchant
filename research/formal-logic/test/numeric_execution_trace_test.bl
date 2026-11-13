@@ -1,0 +1,83 @@
+(ns formal.numeric-execution-trace-test
+ (:require [formal.term :as t] [formal.evaluate :as sdk]
+           [formal.term-forest-evaluate :as point] [formal.data-graph :as graph] [bl.json :as json]))
+
+(defn- module-of [function] (elem (erlang/fun_info function :module) 1))
+(def events (atom []))
+(defn- counted [label module function arity action]
+ (let [pattern (tuple module function arity)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [value (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+    (swap! events conj {:label label :module (str module) :function (str function) :arity arity :calls calls
+                        :result-status (when (map? value) (:status value))
+                        :result-phase (when (map? value) (:phase value))})
+    (when-let [path (System/get_env "ENCHANT_NUMERIC_TRACE_RECEIPT")]
+     (File/write! path (json/encode {:events @events :compiler-proof-authority false} {:pretty 2})))
+    {:value value :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest admission-refusal-actually-skips-sdk-rational-normalization
+ (let [module (module-of t/rational)
+       data (graph/encode {:formal/term 1 :op :real :sort t/Real :args [] :data [1 3]})
+       roots [(:root data)]
+       direct (counted "normalizer-direct" module :rational 2 (fn [] (t/rational 1 3)))
+       denied (counted "normalizer-admission-denied" module :rational 2
+                (fn [] (point/numeric-values data roots {} {:admission-work-units 0})))
+       admitted (counted "normalizer-admitted" module :rational 2
+                  (fn [] (point/numeric-values data roots {} {})))]
+  (is (= 1 (:calls direct)))
+  (is (= :incomplete (get-in denied [:value :status])))
+  (is (= :admission (get-in denied [:value :phase])))
+  (is (= 0 (:calls denied)))
+  ;; Positive control observes both actual constructor admission and actual
+  ;; concrete literal evaluation through the SDK's normalization function.
+  (is (= :complete (get-in admitted [:value :status])))
+  (is (= 2 (:calls admitted)))))
+
+(deftest refused-cancellation-actually-skips-sdk-addition
+ (let [module (module-of sdk/value) term (t/add (t/real 1 3) (t/real -1 3))
+       data (graph/encode term) roots [(:root data)]
+       direct (counted "addition-direct" module :radd 2 (fn [] (sdk/value term {})))
+       denied (counted "addition-denied" module :radd 2
+                (fn [] (point/numeric-values data roots {} {:rational {:component-bits 4 :intermediate-bits 3}})))
+       admitted (counted "addition-admitted" module :radd 2 (fn [] (point/numeric-values data roots {} {})))]
+  (is (= 1 (:calls direct)))
+  (is (= :incomplete (get-in denied [:value :status])))
+  (is (= 0 (:calls denied)))
+  (is (= 1 (:calls admitted)))
+  (is (= [(sdk/real 0 1)] (get-in admitted [:value :values])))))
+
+(deftest refused-multiplication-actually-skips-sdk-cross-products
+ (let [module (module-of sdk/value) term (t/mul (t/real 7 3) (t/real 9 5))
+       data (graph/encode term) roots [(:root data)]
+       direct (counted "multiplication-direct" module :rmul 2 (fn [] (sdk/value term {})))
+       denied (counted "multiplication-denied" module :rmul 2
+                (fn [] (point/numeric-values data roots {} {:rational {:component-bits 6}})))
+       admitted (counted "multiplication-admitted" module :rmul 2 (fn [] (point/numeric-values data roots {} {})))]
+  (is (= 1 (:calls direct)))
+  (is (= :incomplete (get-in denied [:value :status])))
+  (is (= 0 (:calls denied)))
+  (is (= 1 (:calls admitted)))
+  (is (= [(sdk/real 21 5)] (get-in admitted [:value :values])))))
+
+(deftest actual-sdk-input-rechecks-are-part-of-the-rational-path
+ (let [module (module-of t/rational) term (t/mul (t/real 1 3) (t/real 2 5))
+       data (graph/encode term) roots [(:root data)]
+       direct (counted "whole-normalization-direct" module :rational 2 (fn [] (sdk/value term {})))
+       admitted (counted "whole-normalization-admitted" module :rational 2 (fn [] (point/numeric-values data roots {} {})))]
+  (is (= 3 (:calls direct)))
+  ;; Two literal admissions, two concrete literals, two shallow SDK child
+  ;; variable checks and one result normalization. No speed claim is inferred.
+  (is (= 7 (:calls admitted)))
+  (is (= (sdk/real 2 15) (first (get-in admitted [:value :values]))))))
+
+(deftest unused-real-branches-normalize-only-during-syntax-admission
+ (let [module (module-of t/rational)
+       term (t/all [(t/bool false) (t/eq (t/real 1 3) (t/real 1 5))])
+       data (graph/encode term) roots [(:root data)]
+       actual (counted "inactive-branch-admission" module :rational 2
+                (fn [] (point/numeric-values data roots {} {:request-work-units 0})))]
+  (is (= [false] (get-in actual [:value :values])))
+  (is (= 2 (:calls actual)))
+  (is (= 0 (get-in actual [:value :resources :rational-value-check-calls])))))
