@@ -37,8 +37,8 @@ validation on both engines; the other 93 refuse before a native scope call.
 Two distinct fresh SDK-only processes each check all 187 records and replay
 all 52 saved SAT points, producing identical rows with zero native exchanges.
 Tamper controls and persisted-ledger readers are still in qualification.
-The live project still selects the
-qualified shared-primitives SDK. See the [request interface](REQUEST-INTERFACE.md)
+The project now selects this exact core- and integration-qualified SDK.
+Live dossier execution and browser activation still have their own gates. See the [request interface](REQUEST-INTERFACE.md)
 for the higher language surface; this document describes the owner primitive.
 
 ```clojure
