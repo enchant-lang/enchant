@@ -61,7 +61,7 @@ private theorem negative_correction_bounds (e b : Int) (hb : b < 0)
   have notPositive : ¬ 0 < b := Int.lt_asymm hb
   cases (inferInstance : Decidable (e = 0)) with
   | isTrue zero =>
-    simp only [if_pos (Or.inl zero : e = 0 ∨ 0 < b)]
+    simp only [ite_eq_left (Or.inl zero : e = 0 ∨ 0 < b)]
     constructor
     · simpa only [zero] using hb
     · simpa only [zero] using Int.le_refl 0
@@ -69,7 +69,7 @@ private theorem negative_correction_bounds (e b : Int) (hb : b < 0)
     simp only [nonzero, false_or, notPositive, ite_false]
     have positive : 0 < e := Int.lt_iff_le_and_ne.mpr ⟨lo, Ne.symm nonzero⟩
     have upper : e + b < 0 := by
-      simpa only [Int.neg_add_cancel] using Int.add_lt_add_right hi b
+      simpa only [Int.add_left_neg] using Int.add_lt_add_right hi b
     exact ⟨Int.lt_add_of_pos_left b positive, Int.le_of_lt upper⟩
 
 theorem negative_bounds (a b : Int) (hb : b < 0) :
