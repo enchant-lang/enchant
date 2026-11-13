@@ -46,6 +46,8 @@ sort before the managed boundary. The malformed graph now enters the actual boun
 focused gate passes all 1,963 assertions across twelve files, including fifty
 actual admission controls and 129 selected-row checks. The failed receipt is
 preserved; the legacy gate also passes 818 assertions and the 31-file project gate passes
-8,141. The three disjoint assertion gates total 10,922 executions. The paired
-native comparison and independent readers remain pending. Broader theory and formal/total
+8,141. The three disjoint assertion gates total 10,922 executions. The complete paired
+native comparison also passes all 187 questions with unchanged graph/standard
+identities, worker/library identities and status/verdict/phase/observation/validation
+results. Independent saved-record readers remain pending. Broader theory and formal/total
 language work remains active.
