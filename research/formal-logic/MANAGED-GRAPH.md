@@ -21,7 +21,11 @@ and Rounding. Each reached one app constructor. The source repair checks raw
 binder declarations, including list representations, before any constructor.
 Generic theory admission still permits these valid sorts. Candidate 2 and its
 actual reproducer are retained under [candidate-2](evidence/managed-graph/candidate-2/candidate-review.json).
-A new immutable candidate and qualification are required before promotion.
+Candidate 3 repaired the declared-sort gate and passed 15,674 assertions and
+both native corpora. Its first fresh SDK-only reader then found a separate
+application-key materialization gap, reproduced by graph-only unknown outer
+and nested keys. It remains unpromoted. The [graph-key repair design](GRAPH-KEYS-PLAN.md)
+keeps keys as data without creating atoms or importing application Source.
 The live project still selects the qualified shared-primitives SDK.
 
 ```clojure

@@ -35,12 +35,15 @@ request indexes and split graph bodies remain SDK ledger integration work.
 The test file covers complete identity, large ignored history without decoder
 or normalizer calls, false/missing/ill-sorted points, actual counterexamples,
 effect denial and lifetime, both native owners, changed fallback coordinates,
-ledger transport and assurance tampering. Only lexical balance has been checked
-so far; no runtime test result is claimed.
+ledger transport and assurance tampering. The focused file passed 118 assertions on the exact candidate-3 SDK, including
+both native backends. This is a limited implementation checkpoint: the separate
+fresh-reader/key probe exposed the SDK application-key materialization gap, so
+this code is still staged and unpromoted.
 
 Run `python3 research/formal-logic/run-request-interface.py focused` in durable
-supervision after the managed-owner native/reader chain finishes. That driver
-refuses to overlap the active chain. It uses the existing exact candidate SDK,
+supervision after active managed-owner checks finish. That driver refuses overlap.
+The failed prerequisite waiter and later successful focused probe are retained
+in `evidence/request-interface/supervision-retirement.json`. It uses the existing exact candidate SDK,
 one cold VM and private capped directories, and records committed source pins.
 Further fresh-process persisted-ledger checks and integration remain required.
 Promote reviewed code into the normal project/SDK interface in a coherent batch;
