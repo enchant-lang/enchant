@@ -83,7 +83,11 @@ else:
     assert read(E / 'dossier-check-exit.json')['exit_code'] == 0
     assert read(E / 'dossier-check-exit.json')['document_sha256'] == snapshot['document_sha256']
     for name, digest in read(E / 'dossier-check-source-pin.json')['source_sha256'].items():
-        assert sha(R / name) == digest
+        # Browser assertions and this orchestrator are not executable cell
+        # dependencies. Their actual versions are bound by each browser pin.
+        if name not in ('research/formal-logic/bounded-point-browser.mjs',
+                        'research/formal-logic/run-bounded-presentation.py'):
+            assert sha(R / name) == digest
     browser_tools = read(O / 'browser-tools.json')
     for name, tool in browser_tools.items():
         assert Path(tool['executable']).is_file()

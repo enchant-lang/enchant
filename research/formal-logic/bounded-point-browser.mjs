@@ -19,7 +19,7 @@ try{
   await call({op:'viewport',...size});await call({op:'navigate',url:base+'/#'+chapter});
   check(size.name+': all 85 cells present; no authoring failures',await evaluate("document.querySelectorAll('.cell').length===85&&document.querySelectorAll('.cell.failed,.review-errors,.nb-errors').length===0&&!document.body.innerText.includes('Review authoring errors')"));
   check(size.name+': no page overflow',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
-  check(size.name+': separate root completion and refusal are explained',await evaluate("document.body.innerText.includes('A refusal does not erase what we can still know')&&document.body.innerText.includes('A cheaper later root')"));
+  check(size.name+': separate root completion and refusal are explained',await evaluate("document.body.innerText.includes('A refused predicate followed by false in AND')&&document.body.innerText.includes('A cheaper later root')"));
   check(size.name+': cost and implementation limits remain explicit',await evaluate("document.body.innerText.includes('not a theorem about CPU time or heap use')&&document.body.innerText.includes('actual managed assertion replay remain next')"));
   for(const theme of ['day','night']){
    if(theme==='night')await call({op:'click',selector:'#theme'});
