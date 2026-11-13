@@ -8,7 +8,10 @@ Finish qualifying the word-policy SDK before checking this next slice.
 A native unsatisfiable answer remains a claim. A separate exhaustive checker
 can establish some small finite propositions by deriving every possible Boolean
 and word valuation itself and independently replaying the complete question.
-Its candidate object carries the exact request reference and one fixed strategy.
+Its candidate object carries the complete original subject reference, the named
+word semantics and one fixed strategy. A proof can be checked again for another
+backend without rewriting its mathematical statement. Each returned checking
+record separately binds its actual full request reference.
 It accepts no supplied valuation list, sampled coverage, native status, cached
 forest or checked flag. Creating a candidate establishes nothing.
 
@@ -31,14 +34,18 @@ A case satisfying all assertions returns its actual counterexample.
 Complete coverage yields conditional entailment for proof questions or
 unsatisfiability for SAT questions. Inconsistent assumptions can yield that
 conditional result; their feasibility is deliberately not established. The
-question's complete graph, checking policy and backend settings remain bound
-in the request reference. The fixed checking strategy uses its own conservative
-resource ceilings, without changing the mathematical word operators or adding
-assumptions to the subject.
+question's complete graph and named word semantics determine the logical
+statement. The full request reference separately binds checking policy and
+backend settings. The fixed checking strategy uses its own conservative resource
+ceilings, without changing the mathematical word operators or adding assumptions
+to the subject. It is an independent checking operation, rather than execution
+of the native request. Before entering the common answer interface, its own
+checking work must be composed with that interface's caller resource account;
+this prototype does not establish that integration contract.
 
 The prospective checks cover every valuation at widths one through five,
 wrapping, actual false claims, mixed Boolean/word domains, contradictory
-assumptions, changed request references and adapters, added trust/coverage
+assumptions, changed logical-subject references, reuse across backend choices, added trust/coverage
 fields, floating versions, oversized domains, unbounded sorts, unused quantification and solver-denied
 execution. A separate planned comparison asks both real native owners for the
 same three-bit wrapping theorem: native UNSAT must remain a solver claim, while

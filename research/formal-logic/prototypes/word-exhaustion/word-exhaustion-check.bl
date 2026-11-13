@@ -33,10 +33,13 @@
  (let [r (prepared (q/prove (t/bool true))) c (proof/candidate r)]
   (doseq [changed [(assoc c :valuations []) (assoc c :checked true)
                    (assoc c :formal/finite-word-certificate 1.0)
-                   (assoc-in c [:request-reference :sha256] "forged")
+                   (assoc-in c [:statement :subject-reference :sha256] "forged")
                    (assoc c :rule :sampled-valuations)]]
    (is (= :rejected (:status (proof/check r changed)))))
-  (is (= :rejected (:status (proof/check (request/for-backend r :oxiz) c)))))
+  (let [other (request/for-backend r :oxiz) a (proof/check r c) b (proof/check other c)]
+   (is (= :checked (:status a) (:status b))))
+   (is (= (:statement a) (:statement b)))
+   (is (not= (:request-reference a) (:request-reference b))))))
  (let [x (t/variable "proof.too-wide" [:bv 6]) result (checked (q/prove (t/eq x x)))]
   (is (= :rejected (:status result))))
  (let [x (t/variable "proof.unbounded" t/Int) result (checked (q/prove (t/eq x x)))]
@@ -62,12 +65,13 @@
  (let [sort [:bv 3] x (t/variable "proof.native" sort)
        one (t/literal sort 1) zero (t/literal sort 0) last (t/literal sort 7)
        claim (t/implies (t/eq x last) (t/eq (t/app :bv-add sort [x one] nil) zero))
-       query (q/prove claim) subject (qg/prepare query)]
+       query (q/prove claim) subject (qg/prepare query)
+       certificate (proof/candidate (prepared query))]
   (doseq [engine [:z3 :oxiz]]
    (let [native (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
                   (fn [session] (backend/graph-question! session subject {:profile policy/numeric-word})))
          r (request/for-backend (prepared query) engine)
-         independent (proof/check r (proof/candidate r))]
+         independent (proof/check r certificate)]
     (is (= :unsat (:solver-status native)))
     (is (= :solver-claim (:verdict native)))
     (is (= :not-checked (get-in native [:certificate :status])))
