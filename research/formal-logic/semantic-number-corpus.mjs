@@ -4,8 +4,17 @@ import {pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 import assert from 'node:assert/strict';
 
-const [runtimePath, fixturePath, outputPath, mode] = process.argv.slice(2);
+const [runtimePath, fixturePath, outputPath, mode, compiledBuild] = process.argv.slice(2);
 const R = await import(pathToFileURL(resolve(runtimePath)).href);
+let relations = (a, b) => [R.eqv(a, b), R.compare(a, b), R.eqv(R.vec(a), R.list(b)),
+                          R.eqv(R.hashMap('value', a), R.hashMap('value', b)), R.hashSet(a, b).cnt];
+if (compiledBuild) {
+ // Emitted namespaces and fixture values must use the same runtime classes.
+ assert.equal(resolve(runtimePath), resolve(compiledBuild, 'rt.mjs'));
+ const compiled = await import(pathToFileURL(resolve(compiledBuild, 'ns/semantics.numeric.mjs')).href);
+ assert.equal(typeof compiled.d_relations, 'function');
+ relations = (a, b) => Array.from(compiled.d_relations(a, b));
+}
 const fixture = JSON.parse(await readFile(fixturePath, 'utf8'));
 assert.equal(fixture.schema, 'bl.proposed-finite-exact-numeric-cases.v1');
 function value(row) {
@@ -25,20 +34,24 @@ function value(row) {
 }
 const values = new Map(fixture.values.map(row => [row.id, value(row)]));
 const rows = fixture.pairs.map(pair => {
- const a = values.get(pair.left), b = values.get(pair.right), equal = R.eqv(a, b), compare = R.compare(a, b);
- const sequenceEqual = R.eqv(R.vec(a), R.list(b)), mapEqual = R.eqv(R.hashMap('value', a), R.hashMap('value', b));
+ const a = values.get(pair.left), b = values.get(pair.right);
+ const actual = relations(a, b);
+ assert.equal(actual.length, 5);
+ const [equal, compare, sequenceEqual, mapEqual, keyCardinality] = actual;
  return {left: pair.left, right: pair.right, equal, compare,
          'sequence-equal': sequenceEqual, 'map-value-equal': mapEqual,
-         'key-cardinality': R.hashSet(a, b).cnt,
+         'key-cardinality': keyCardinality,
          'matches-exact-profile': equal === pair.equal && sequenceEqual === pair.equal && mapEqual === pair.equal && compare === pair.compare};
 });
 assert.equal(values.size, 30);
 assert.equal(rows.length, 900);
 const differences = rows.filter(row => !row['matches-exact-profile']);
 if (mode === 'require-profile') assert.equal(differences.length, 0);
-await writeFile(outputPath, JSON.stringify({schema: 'bl.finite-number-runtime-observation.v1', target: 'js-direct-runtime',
+const target = compiledBuild ? 'js-compiled-language' : 'js-direct-runtime';
+await writeFile(outputPath, JSON.stringify({schema: 'bl.finite-number-runtime-observation.v1', target,
  'runtime-path': resolve(runtimePath), process: process.pid, cwd: process.cwd(), profile: fixture.profile,
  values: values.size, pairs: rows.length, rows, differences, 'managed-query-calls': 0,
- scope: 'Direct runtime numeric and nested equality/ordering observations. Raw key cardinality is recorded separately; this is not the compiled BL path.',
+ scope: compiledBuild ? 'Actual compiled BL function observations; raw key cardinality is recorded separately.' :
+                       'Direct runtime observations; raw key cardinality is recorded separately. This is not the compiled BL path.',
  'compiler-proof-authority': false}, null, 2) + '\n');
-console.log(JSON.stringify({target: 'js-direct-runtime', values: values.size, pairs: rows.length, differences: differences.length}));
+console.log(JSON.stringify({target, values: values.size, pairs: rows.length, differences: differences.length}));

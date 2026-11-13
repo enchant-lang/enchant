@@ -192,8 +192,13 @@ bits, Decimal coefficients/scales and large integers without JSON rounding.
 Its expected value relations come from independent rational arithmetic. Both
 observers record leaf and nested equality, ordering and raw-key cardinality;
 their optional `require-profile` mode checks the proposed value relation.
-These observers have not run yet. The direct JS route also needs an actual
-compiled BL/JS companion before cross-target adoption can be qualified.
+These observers have not run yet. The
+[actual BL comparison function](semantics-src/semantics/numeric.bl) is also
+prepared for compilation to JS. Passing a compiled build directory as the
+observer's fifth argument selects that emitted function and requires its exact
+runtime classes; it cannot silently fall back to direct JS helpers. All three
+routes need their own actual executions before cross-target adoption can be
+qualified.
 
 ## Gates before adopting a proposed profile
 
