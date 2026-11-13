@@ -64,6 +64,16 @@ retraction, no-op representation retention and durable payload reopen. Index
 version 2 and the existing immutable identity format remain unchanged in source;
 their compatibility is a gate to execute, not a conclusion inferred from the diff.
 
+The first packaged SDK passed the complete compiler-floor check, the
+595-namespace source preflight and its refusal controls. BEAM and direct JS
+both matched all 900 exact-number pairs. Compiled BL then correctly refused
+one missing host registration: `Elixir.BeamLisp.Decimal/rescale/2`.
+`candidate-1/` retains the real failure and its unqualified SDK pin, plus a
+self-contained source-only recovery bundle and Git archive ref. No JVM oracle
+execution or project adoption is claimed for that candidate. The registration
+is now repaired, with a test of both rescale arities and their rounding behavior;
+the replacement must pass all packaged gates on its own exact SDK.
+
 The legacy bare-VM regeneration attempts are retained under the three
 `before-*` recovery directories plus `before-local-image/`. They stopped on
 initialization, protected SDK routes or kernel attestation; no candidate floor
