@@ -1,0 +1,73 @@
+(ns formal.managed-graph-check
+ (:require [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
+           [formal.native-cases :as native] [formal.query :as q] [formal.term :as t]
+           [formal.question-graph :as qg] [formal.graph-question :as inventory]
+           [formal.data-graph :as graph] [formal.backend :as backend] [bl.json :as json]))
+
+;; Owned diagnostic fixtures, not an untrusted interchange or execution format.
+(defn- wire [data]
+ (assoc data :nodes (mapv (fn [[tag payload]]
+                          [tag (if (contains? #{"float64" "binary"} tag) (Base/encode64 payload) payload)])
+                        (:nodes data))))
+(defn- summary [result]
+ (merge
+  (select-keys result [:formal/managed-graph-reply :reply-profile :request-reference :question-reference
+                      :settings :settings-reference :context-state :identity :native-limits :trusted
+                      :certificate :compiler-proof-authority :solver-status :verdict :phase :why :error
+                      :validation :assertion-replay :admission :admission-account :admission-reference
+                      :native-scope-attempts :nodes-imported :resources :checking :observation-decoding :execution])
+  (when (contains? result :assignments)
+   (let [data (graph/encode (:assignments result))]
+    {:assignment-graph (wire data) :assignment-reference (graph/reference data)}))
+  {:observation-roots
+   (into {} (mapv (fn [[label value]] [label (select-keys value [:materialization :basis :roots])])
+                 (:observations result)))}))
+
+(def rows
+ (vec
+  (mapcat
+   (fn [[family cases]]
+    (mapv
+     (fn [item]
+      (println (str "managed start " (:id item)))
+      (let [context (qg/prepare (q/from-case item)) data (:graph context)
+            reference (graph/reference data) prepared (inventory/prepare context)
+            numeric? (every? #(contains? #{t/Bool t/Int t/Real} (nth % 2)) (get-in prepared [:forest :nodes]))
+            answers
+            (into {}
+             (mapv
+              (fn [engine]
+               (let [started (erlang/monotonic_time :millisecond)
+                     result (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+                              (fn [session] (backend/graph-question! session context {})))]
+                (println (str (:id item) " managed " engine "=" (:solver-status result)
+                              " verdict=" (:verdict result) " phase=" (:phase result)
+                              " ms=" (- (erlang/monotonic_time :millisecond) started)))
+                (assert (= 1 (:formal/managed-graph-reply result)))
+                (assert (= reference (:request-reference result) (:question-reference result)))
+                (assert (= (graph/bytes data) (graph/bytes (get-in result [:question-graph :graph]))))
+                (assert (= {:solver-ms 500 :hard-ms 2000} (:native-limits result)))
+                (assert (= false (:trusted result) (:compiler-proof-authority result)))
+                (assert (= :not-checked (get-in result [:certificate :status])))
+                (assert (= :managed-native-owner (get-in result [:execution :scope])))
+                ;; Out-of-fragment refusal precedes scope checks. The explicit
+                ;; session has already completed its worker handshake.
+                (when-not numeric?
+                 (assert (= :admission (:phase result)))
+                 (assert (= :not-run (:solver-status result)))
+                 (assert (= 0 (:native-scope-attempts result))))
+                (when (contains? #{:sat :refuted} (:verdict result))
+                 (assert (= :valid (get-in result [:validation :status]))))
+                [engine (summary result)])) [:z3 :oxiz]))]
+       (merge {:id (:id item) :family family :numeric-sorts numeric? :reference reference
+               :graph (wire data) :inventory-checking (:checking prepared)} answers))) cases))
+   [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]])))
+
+(assert (= 187 (count rows)))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.managed-original-graph-corpus.v1" :rows rows
+               :native-deadlines {:solver-ms 500 :hard-ms 2000} :compiler-proof-authority false
+               :scope "Actual original graph owner calls. Numeric profile/refusal and native statuses are separate; no certificate or speed claim."}
+              {:pretty 2}))
+(println {:questions (count rows) :numeric-questions (count (filter :numeric-sorts rows))
+          :backends [:z3 :oxiz] :compiler-proof-authority false})
