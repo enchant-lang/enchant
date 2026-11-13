@@ -10,12 +10,16 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 
 P = Path(__file__).resolve().parent
 R = P.parent.parent
-E = P / 'evidence/managed-presentation'
+stage = sys.argv[1:]
+assert stage in ([], ['numeric-semantics']), 'Optional stage: numeric-semantics'
+numeric = stage == ['numeric-semantics']
+E = P / ('evidence/numeric-semantics-presentation' if numeric else 'evidence/managed-presentation')
 E.mkdir(exist_ok=True)
 S = Path('/home/othman/projects/enchanted-skills')
 
@@ -38,7 +42,7 @@ css = (S / style).read_bytes()
 base_css = git('show', head + ':' + style)
 patch = git('diff', head, '--', style)
 archive = git('archive', '--format=tar', head, 'bl-org-dossier/kit', 'codebase-review/kit')
-retention = R / '.bl/formal-dossier-kit-managed-request'
+retention = R / ('.bl/formal-dossier-kit-numeric-semantics' if numeric else '.bl/formal-dossier-kit-managed-request')
 with tempfile.TemporaryDirectory(prefix='formal-managed-kit-') as temporary:
     source = Path(temporary) / ('formal-dossier-kit-' + head[:8])
     source.mkdir()
