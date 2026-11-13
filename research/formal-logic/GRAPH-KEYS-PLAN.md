@@ -20,25 +20,30 @@ construction decide traversal/collapse behavior before display decoding.
 
 Add an explicit graph-key inventory profile. It must:
 
-- Keep outer labels and nested keys as original component graphs/references.
-  No key value must be materialized merely to find term roots.
+- Keep outer labels and nested keys as original source-node cursors, bound to
+  the complete original question graph/reference. No key value must be
+  materialized merely to find term roots.
 - Traverse every original map value in its canonical portable row order.
   Preserve exact key identity and all entries; do not reconstruct a host map
   or silently drop an entry through runtime key equality.
-- Choose and document deterministic outer observation ordering over original
-  key graph bytes. Keep original source IDs in every root description.
+- Use the validated canonical map-row order for outer observations too.
+  This is deterministic without extracting/hashing every key subgraph. Keep
+  original source IDs in every root description.
 - Read required assertion labels as string data only. Existing assertion labels
   are strings; a malformed raw declaration is a refusal, not a request to
   intern a keyword.
 - Keep the existing generic/value-label inventory under its declared profile
   for the qualified project APIs. The new managed path uses the raw-key mode.
 
-Observation output should become ordered rows with `label-graph`, a fresh
-label reference, the original descriptor graph and evaluated source roots.
-A map keyed by decoded application values is no longer the compulsory
-transport. Optional explicit materialization can use the existing safe decoder
-and refuse unavailable atoms or collapsing runtime keys. The portable data
-remains available when materialization is refused.
+Observation output should become ordered rows with `label-source`,
+`descriptor-source` and evaluated original source roots. These are immutable
+data cursors in the reply's complete effective question graph, not native IDs
+or live handles. The graph occurs once; there is no need to clone an entire
+key/descriptor subgraph merely to report its location. Optional component
+references or explicit materialization can derive a subgraph lazily. Safe
+materialization may refuse unavailable atoms or collapsing runtime keys while
+the original portable data remains readable. A map keyed by decoded
+application values is no longer the compulsory transport.
 
 ## Version the changed contract
 
@@ -50,8 +55,9 @@ callbacks never become public key identities.
 
 Update the owner observation builder, native corpus recorder, fresh reader and
 staged request point/answer implementations together. Bind observation values
-using graph composition with original key fragments where a map reference is
-needed; do not recreate application atoms to compute a reference. Keep binding
+using the ordered source cursor/value rows. Where a compatibility map reference
+is explicitly needed, use graph composition with original key fragments; do
+not recreate application atoms to compute a reference. Keep binding
 checks and actual assertion replay before observation work.
 
 The current general graph APIs and their durable version-2 answers stay under
@@ -78,7 +84,7 @@ readable independently of those preview language choices.
    Add tests using unknown outer/nested keyword *bytes* that remain absent
    after both admission and native execution. Include original key identity,
    deterministic order and all-entry traversal checks.
-2. Adapt the 118-assertion staged language request/answer/effect/ledger code to
+2. Adapt the 120-assertion staged language request/answer/effect/ledger code to
    the new inventory/output contract. Its existing basic Int/native/lifetime/
    in-memory ledger tests pass on the exact candidate-3 SDK; arbitrary graph
    keys and fresh persisted ledger consumers remain unqualified.
@@ -91,7 +97,10 @@ readable independently of those preview language choices.
 5. Run both native corpora and two genuinely fresh SDK-only readers with no
    application import path, no input atom creation and no source-payload
    execution. Preserve false-point and assurance tamper controls.
-6. Exercise the common request interface and actual persisted-ledger reopening
+6. Preserve the existing `:oracle` deny scopes: the staged request route now
+   uses its explicit `:request` method. Extend the SDK oracle method table in
+   the integration batch; a missing method must refuse before opening a worker.
+   Exercise the common request interface and actual persisted-ledger reopening
    in separate processes. Complete its formal effect/ledger SDK integration
    without adding proof or execution authority to recorded labels.
 7. Promote only after these gates, then execute/check actual Org cells,

@@ -35,7 +35,7 @@ request indexes and split graph bodies remain SDK ledger integration work.
 The test file covers complete identity, large ignored history without decoder
 or normalizer calls, false/missing/ill-sorted points, actual counterexamples,
 effect denial and lifetime, both native owners, changed fallback coordinates,
-ledger transport and assurance tampering. The focused file passed 118 assertions on the exact candidate-3 SDK, including
+ledger transport and assurance tampering. The focused file passed 120 assertions on the exact candidate-3 SDK, including
 both native backends. This is a limited implementation checkpoint: the separate
 fresh-reader/key probe exposed the SDK application-key materialization gap, so
 this code is still staged and unpromoted.
