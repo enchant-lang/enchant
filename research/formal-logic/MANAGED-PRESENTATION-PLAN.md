@@ -1,16 +1,18 @@
 # Finish qualification, then show the request
 
 The SDK4 core is now qualified in `evidence/managed-graph/qualification.json`.
-The selected project SDK and live dossier host remain on qualified SDK46.
-Project integration and presentation still require their own actual gates.
+The project now selects the qualified SDK4 artifact `f3kqn31w…`; separate
+project integration passed before that selection. The 88-cell dossier has
+executed and a fresh run reproduced all saved results unchanged. Browser
+activation and actual rendering qualification are the remaining presentation
+gates. The goal remains active beyond this checkpoint.
 
-`work-formal-managed-after-core-4-control-repair-20261113.service` owns the
-read-only inventory comparison, which is running after successful core
-qualification. It observed the exact control-repair supervisor invocation and
-required a newly generated complete qualification chain before starting BL.
-It exits after that comparison and never edits source or selects a pin. Inspect its real
-PID/state and `evidence/managed-integration/after-core-state.json` before
-starting any manual inventory run, so the comparison has only one writer.
+The deferred inventory comparison completed: all 187 complete encoded
+inventories matched the old project implementation byte for byte. The seven-line
+SDK delegate then passed 4,412 adapter and 585 facade assertions. See
+`evidence/managed-integration/qualification.json` and the separate
+`promotion.json` receipt. The core qualification retains its historical
+pre-promotion state; it is not rewritten to claim it selected the project pin.
 
 The first final qualification correctly rejected a driver bug: the purported
 control invocation selected normal replay through `get` on its argv list.
@@ -22,10 +24,11 @@ single-expression delta and their actual two-argument launches. Their graph
 and mathematical checking code did not change; the control run uses current
 source. All runtime bytes and the immutable SDK stay fixed.
 
-The skill repository now has a newer kit at `a86599fc`; its tracked local CSS
-edit remains user-owned. The next presentation needs a separate immutable kit
-snapshot and receipt, preserving the older observation-semantics kit state and
-GC root used by historical qualifications. Do not overwrite those old pins.
+The newer skill kit at `a86599fc` is frozen separately under
+`evidence/managed-presentation/kit-state.json`: all 61 rendering files and the
+observed working CSS overlay are hashed. The source repository is untouched.
+The older observation-semantics kit state and GC root remain intact for their
+historical qualifications.
 
 ## Preserve the old project contract
 
@@ -46,16 +49,14 @@ snapshot and its qualification intact.
 
 ## Add one real story
 
-The new chapter and unexecuted cell drafts are in
-`/tmp/formal-managed-chapter.org` and `/tmp/formal-managed-story.cell`. Review
-them against the actual qualified results before inserting them into the one
-live `ATLAS.bl.org`. The first cell's require list needs `formal.question-graph`
-as `question-graph` and `formal.request-record` as `request-record`. The request
-story calls both engines, checks canonical rational coordinates and shows a
-supplied point, a changed point and a freshly reopened portable packet. It
-must get results from actual `bl doc run`, never authored result text.
+The chapter “One portable request, either backend” and `story-formal-request`
+are in the live `ATLAS.bl.org`. Their results came from actual `bl doc run`:
+both engines supply coordinates whose product checks to `2/15`; a handler
+supplies a point with zero native attempts; a changed point fails; a saved
+packet rechecks. The retired project preview has a source-only Git archive
+and verified recovery bundle under `evidence/request-interface/`.
 
-There will be 88 cells: 87 fresh cells and the one frozen historical Float
+There are 88 cells: 87 fresh cells and the one frozen historical Float
 native observation. Update `dossier-inputs-check.bl`, the visible cell-count
 prose and its matching `story-audit.mjs` assertion together. Retain the exact
 historical Float source, result and SDK45 execution receipt.
