@@ -54,10 +54,17 @@ try:
  write('browser-command.json',browser)
  with (E/'checks.txt').open('w') as out:code=subprocess.run(browser,stdout=out,stderr=subprocess.STDOUT).returncode
 finally:
- subprocess.run(['systemctl','--user','stop',unit],check=False)
+ # Preserve the live unit's real state before retirement. A disappeared
+ # transient unit's default dead/success fields are not a terminal receipt.
+ before_stop=subprocess.run(['systemctl','--user','show',unit,
+  '--property=ActiveState,SubState,MainPID,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp'],
+  text=True,capture_output=True)
+ write('host-before-stop.json',{'returncode':before_stop.returncode,'state':dict(x.split('=',1) for x in before_stop.stdout.splitlines() if '=' in x)})
+ stopped=subprocess.run(['systemctl','--user','stop',unit],check=False)
  (E/'host-journal.txt').write_text(subprocess.check_output(['journalctl','--user','-u',unit,'--no-pager','-n','60'],text=True))
  shutil.rmtree(runtime);shutil.rmtree(fixture)
- write('exit.json',{'exit_code':code,'elapsed_seconds':time.monotonic()-started,'runtime_retired':not runtime.exists(),'fixture_retired':not fixture.exists(),'host_stopped':True})
+ write('exit.json',{'exit_code':code,'elapsed_seconds':time.monotonic()-started,'runtime_retired':not runtime.exists(),'fixture_retired':not fixture.exists(),'host_stopped':stopped.returncode==0,'host_stop_exit_code':stopped.returncode})
+ assert stopped.returncode==0, 'Owned browser host retirement failed'
 assert code==0 and read(E/'audit.json')['passed']
 assert all(sha(R/n)==digest for n,digest in digests.items())
 print(json.dumps({'status':'browser-save-passed','checks':len(read(E/'audit.json')['checks']),'fixture_retired':True}))
