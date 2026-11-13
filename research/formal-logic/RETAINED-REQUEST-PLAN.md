@@ -25,6 +25,15 @@ The callback needs the existing same-process, single-use and retirement rules.
 Plain `execute-request` on the same portable request remains useful: it opens
 a fresh owner and asks the complete question.
 
+There are two nested lifetimes. The outer execution callback expires when the
+`with-context-request` body ends. A fallback passed to an effect handler expires
+as soon as that particular execution returns, even when the outer body remains
+active. Capturing the fallback and calling it after returning a candidate point
+must fail before native scope work. Qualify both expirations, cross-process
+calls, repeated calls and exception cleanup separately. A count of local
+fallback attempts does not establish that an arbitrary handler made no other
+native calls; whole-process observations need their own instrumented boundary.
+
 ## Reuse the owner primitive without composing twice
 
 The local callback can call `backend/graph-question!` with the captured
