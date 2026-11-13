@@ -37,6 +37,10 @@ recorded = read(E / 'recorded-float-native.json')
 assert recorded['sdk_pin'] == pin and recorded['execution']['exit_code'] == 0
 assert hashlib.sha256(recorded['source'].encode()).hexdigest() == recorded['source_sha256']
 assert hashlib.sha256(recorded['result_span'].encode()).hexdigest() == recorded['result_sha256']
+captured = subprocess.check_output(['git', 'show', recorded['result_commit'] + ':research/formal-logic/ATLAS.bl.org'], cwd=R)
+assert hashlib.sha256(captured).hexdigest() == recorded['execution']['document_sha256']
+captured_cell = re.search(r'^#\+begin_src beam-lisp :id story-float-backends\n(.*?)^#\+end_src\n#\+RESULTS: story-float-backends\n(:[^\n]*\n)', captured.decode(), re.M | re.S)
+assert captured_cell and captured_cell.group(1) == recorded['source'] and captured_cell.group(2) == recorded['result_span']
 retained = re.search(r'^#\+begin_src beam-lisp :id story-float-backends :frozen\n(.*?)^#\+end_src\n#\+RESULTS: story-float-backends\n(:[^\n]*\n)', text, re.M | re.S)
 assert retained and retained.group(1) == recorded['source'] and retained.group(2) == recorded['result_span']
 identities = re.findall(r'^#\+begin_src beam-lisp\b[^\n]*:id ([^\s]+)', text, re.M)
