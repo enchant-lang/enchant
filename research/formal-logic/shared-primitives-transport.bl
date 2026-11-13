@@ -1,0 +1,25 @@
+(ns formal.shared-primitives-transport
+ (:require [formal.evaluate :as e] [formal.term :as t] [formal.data-graph :as g] [bl.json :as json]))
+(defn- wire [graph]
+ (assoc graph :nodes (mapv (fn [[kind payload]] [kind (if (contains? #{"float64" "binary"} kind) (Base/encode64 payload) payload)]) (:nodes graph))))
+(defn- restore [wire]
+ (assert (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire))))
+ (assert (= "bl/public-data-graph-v1" (get wire "profile")))
+ (let [graph {:formal/data-graph (get wire "formal/data-graph") :profile g/profile :root (get wire "root")
+              :nodes (mapv (fn [[kind payload]] [kind (if (contains? #{"float64" "binary"} kind) (Base/decode64! payload) payload)])
+                           (get wire "nodes"))}]
+  (g/check! graph) graph))
+(def raw-bytes (erlang/list_to_binary (list 255 0 131)))
+(def data (g/encode [(t/real 1 3) 0.0 -0.0 raw-bytes]))
+(def roots (second (nth (:nodes data) (:root data))))
+(def decoded (restore (json/decode (json/encode (wire data)))))
+(assert (erlang/=:= data decoded))
+(assert (= (g/reference data) (g/reference decoded)))
+(assert (erlang/=:= [0.0 -0.0 raw-bytes] (g/decode-nodes! decoded (vec (rest roots)))))
+(def result (e/graph-values decoded [(first roots)] {} {}))
+(assert (= [(e/real 1 3)] (:values result)))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.shared-sdk-transport-control.v1" :reference (g/reference data)
+               :exact-graph-bytes true :both-zero-signs true :invalid-utf8-bytes true
+               :selected-real-root :evaluated :native-query-calls 0 :compiler-proof-authority false} {:pretty 2}))
+(println {:transport :exact-graph-and-float64-bytes :selected-root :evaluated :compiler-proof-authority false})

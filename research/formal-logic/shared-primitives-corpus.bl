@@ -5,10 +5,16 @@
            [formal.native-cases :as native] [oracle] [bl.json :as json]))
 
 ;; Owned compatibility fixtures, not a generic evidence interchange. JSON
-;; cannot carry ETF Float64 payload bytes directly, so their row payload is
-;; base64 here. The SDK reader reconstructs and freshly checks the public graph.
+;; cannot carry arbitrary binary or ETF Float64 payload bytes directly, so
+;; those row payloads are base64. The SDK reader freshly checks the public graph.
 (defn- wire [graph]
- (assoc graph :nodes (mapv (fn [[kind payload]] [kind (if (= "float" kind) (Base/encode64 payload) payload)]) (:nodes graph))))
+ (assoc graph :nodes (mapv (fn [[kind payload]] [kind (if (contains? #{"float64" "binary"} kind) (Base/encode64 payload) payload)]) (:nodes graph))))
+(def transport-graph (g/encode [(t/real 1 3) 0.0 -0.0 (erlang/list_to_binary (list 255 0 131))]))
+(def transport-root (first (second (nth (:nodes transport-graph) (:root transport-graph)))))
+(def transport-point (e/graph-values transport-graph [transport-root] {} {}))
+(assert (= [(e/real 1 3)] (:values transport-point)))
+;; Check byte transport before doing the long mathematical comparison.
+(json/encode (wire transport-graph))
 (def calls (atom 0))
 (defn deny [& _] (swap! calls inc) (throw :point-corpus-must-not-query))
 (def rows
@@ -48,10 +54,6 @@
           :source-roots roots :points points :compiler-proof-authority false})) cases))
      [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]])))))
 
-(def transport-graph (g/encode [(t/real 1 3) 0.0 -0.0]))
-(def transport-root (first (second (nth (:nodes transport-graph) (:root transport-graph)))))
-(def transport-point (e/graph-values transport-graph [transport-root] {} {}))
-(assert (= [(e/real 1 3)] (:values transport-point)))
 (assert (= 187 (count rows)))
 (assert (= 0 @calls))
 (File/write! (first (BeamLisp/argv))

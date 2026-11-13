@@ -47,6 +47,10 @@ elif stage == 'direct-corpus':
     names += ['research/formal-logic/shared-primitives-corpus.bl']
     output = E / 'direct-corpus.json'
     request = ['run', str(R / names[-1]), '--', str(output)]
+elif stage == 'transport':
+    names += ['research/formal-logic/shared-primitives-transport.bl']
+    output = E / 'transport.json'
+    request = ['run', str(R / names[-1]), '--', str(output)]
 elif stage in ('reader-one', 'reader-two'):
     names += ['research/formal-logic/shared-primitives-reader.bl']
     output = E / (stage + '.json')
