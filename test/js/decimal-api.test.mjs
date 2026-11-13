@@ -2,9 +2,18 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import * as R from '../../priv/lib/js/rt.mjs';
+import {LEAVES} from '../../priv/lib/js/leaves.mjs';
 
 const mode = R.kw;
 const decimalError = type => error => error instanceof R.BLError && error.data?.get(R.kw('type'), null) === R.kw(type);
+
+test('both named rescale arities link with their default and explicit rounding behavior', () => {
+ const exact = LEAVES['Elixir.BeamLisp.Decimal/rescale/2'];
+ const rounded = LEAVES['Elixir.BeamLisp.Decimal/rescale/3'];
+ assert.equal(exact(R.dec(150n, 2), 1).plain(), '1.5');
+ assert.throws(() => exact(R.dec(155n, 2), 1), decimalError('decimal/rounding-necessary'));
+ assert.equal(rounded(R.dec(155n, 2), 1, mode('half-even')).plain(), '1.6');
+});
 
 test('exact division has no guessed digit ceiling and preserves the BEAM preferred scale', () => {
  const result = R.div(R.dec(1n, 0), R.dec(1n << 80n, 0));
