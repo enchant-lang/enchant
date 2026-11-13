@@ -1,8 +1,7 @@
 # One complete question, with an optional live owner
 
-The retained-request source batch has produced one immutable SDK candidate.
-The selected project SDK is still the qualified numeric predecessor while its
-last paired-native gate runs. The candidate has passed 9,528 BEAM assertions
+The retained-request source batch is qualified and selected as one immutable
+SDK. It has passed 9,528 BEAM assertions
 across the focused, legacy and project regression gates, plus source preflight
 for 597 namespaces and three negative preflight controls.
 
@@ -17,8 +16,10 @@ remain explicit and different where required.
 
 The earlier graph/owner/composition/answer/lease prototypes remain separately
 recorded. Their overlapping assertion counts are not added to this actual SDK
-qualification. Complete native outcome comparison, the final artifact audit,
-project selection and the live dossier refresh remain pending.
+qualification. The complete 187-question paired native audit passes with unchanged graph
+identities, outcomes and replay validation. The exact artifact qualification
+and separate selection receipt are in `evidence/retained-request/`; the live
+dossier refresh remains pending.
 
 ## The architectural pieces
 
@@ -94,10 +95,9 @@ the separately accounted pure replay.
 
 ## Remaining qualification
 
-Finish the running 187-question paired-native gate on this exact artifact,
-then audit all source, compiler-floor and reader bindings before selecting it.
 The seven changed packaged sources preserve all 141 qualified compiler-floor
-files and the existing numeric/JS implementation bytes. After selection, run
-the real Org writer, an independent unchanged check and the actual browser
+files and the existing numeric/JS implementation bytes. The final audit checks
+all source, compiler-floor, saved-record and native bindings before selection.
+Run the real Org writer, an independent unchanged check and the actual browser
 review before publishing a new dossier qualification. Wider theory profiles,
 compiler preservation and native-history authentication remain separate work.

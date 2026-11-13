@@ -59,13 +59,13 @@ remains separate. The live numeric chapter now shows its actual equality,
 scale, Float, raw-key and modulus results alongside the source-backed measured
 JavaScript discrepancy chart.
 
-The next [retained-request batch](RETAINED-REQUEST-IMPLEMENTATION.md) has
-produced one immutable candidate and passed 9,528 BEAM assertions, source
-preflight and fresh saved-record checks. Two SDK-only processes reopen twelve
+The [retained-request SDK](RETAINED-REQUEST-IMPLEMENTATION.md) is now
+qualified and selected after 9,528 BEAM assertions, source preflight and fresh
+saved-record checks. Two SDK-only processes reopen twelve
 new packets and durable rows with zero formal exchanges, and two more reopen
-the exact prior 187-record corpus and 52 points each. Its paired-native gate is
-still running; the selected project pin and live dossier retain the qualified
-numeric predecessor until the complete candidate audit passes.
+the exact prior 187-record corpus and 52 points each. Its full 187-question paired-native audit passes with unchanged outcomes.
+The live dossier still runs on the qualified numeric predecessor while its
+retained-question chapter awaits actual execution and browser review.
 
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
