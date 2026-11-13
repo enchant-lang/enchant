@@ -10,8 +10,11 @@ preceding evaluator assertions and 45 new admission-scope assertions, then
 failed its native owner file. A `reset!` name collision selected the session
 API after a native exchange, instead of updating the private state atom. The
 corrected source uses an explicit atomic update and retires the context after
-unexpected post-native errors. A replacement SDK is building; these owner
-capabilities are not yet qualified or selected for the live project.
+unexpected post-native errors. The replacement SDK passes the 130 preceding
+evaluator and 45 admission-scope assertions, and the updated owner file passes
+164 assertions including actual Real coordinates on both backends. Wider
+source, regression, corpus and presentation gates remain pending; these owner
+capabilities are not yet selected for the live project.
 
 ```clojure
 (backend/with-session {:backend :oxiz :solver-ms 500 :hard-ms 2000}
@@ -63,9 +66,14 @@ incomplete. These checks share the point memo and its accounting.
 
 Native Real wire components enter this boundary without an unmetered SDK GCD.
 The numeric point checks their encoding and canonicality under its policy.
-The existing generic native decoder remains unchanged. Compatibility of the
-new path, including actual Real replies and refusal behavior, is a runtime
-qualification obligation rather than an assumed equivalence of decoders.
+The existing generic native decoder remains unchanged. A focused fixture pins
+the deliberate distinction: it normalizes wire `2/4`, while the new managed
+profile rejects that noncanonical coordinate. Here `invalid-model` includes
+an invalid coordinate encoding; it does not establish that the solver's
+mathematical SAT claim is false. Binding diagnostics distinguish that failure
+from a false assertion. Actual focused Z3/OxiZ replies provide canonical
+`1/3` and `2/5`, with independently replayed product `2/15`. Broader native
+compatibility and refusal behavior still need their own corpus gates.
 
 SAT replay includes retained assumptions and the actual counterexample. A
 false assertion invalidates the point. Incomplete replay leaves SAT as a
