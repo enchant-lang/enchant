@@ -32,11 +32,13 @@ saved native labels never grant proof authority.
 
 The live [request chapter](https://work.tailcb5318.ts.net:18100/#one-portable-request-either-backend)
 shows actual Z3/OxiZ execution, a supplied point, a changed point and a reopened
-packet. All 88 dossier cells reproduce their saved results; 87 run freshly and
+packet. All 89 dossier cells reproduce their saved results; 88 run freshly and
 one preserves an explicitly frozen historical Float observation. The current
-kit, host SDK, 34 focused browser checks, 1,601 full browser checks and inspected
+kit, host SDK, 50 focused browser checks, 1,601 full browser checks and inspected
 phone/desktop frames are bound by
-[the presentation receipt](evidence/managed-presentation/dossier-qualification.json).
+[the numeric presentation receipt](evidence/numeric-semantics-presentation/dossier-qualification.json).
+The preceding [request presentation receipt](evidence/managed-presentation/dossier-qualification.json)
+retains its own 88-cell source and SDK identity.
 The broader formal-language goal remains active: retained language requests,
 semantic repairs, richer observations and stronger implementation connections
 are still work to qualify.
@@ -50,8 +52,19 @@ captured Decimal cases pass. All 187 paired native outcomes remain unchanged.
 Two fresh SDK-only readers reopen the preceding 187 records and 52 points each,
 with eleven tamper refusals and zero native exchanges. The independent
 [modulus model](FLOOR-MODULUS-MODEL.md) has its own ten-result theorem ledger and
-Std axiom audits. Dossier execution and live browser activation are being
-refreshed separately; the earlier presentation receipt above retains its scope.
+Std axiom audits. A further [typed-term connection](TERM-FLOOR-MODULUS-MODEL.md)
+qualifies six results, four definition audits and two refused false claims.
+These connect mathematical models; implementation/compiler correspondence
+remains separate. The live numeric chapter now shows its actual equality,
+scale, Float, raw-key and modulus results alongside the source-backed measured
+JavaScript discrepancy chart.
+
+The next retained-request batch is in progress. Its pure graph composer has
+passed 54 prototype assertions, including byte-for-byte compatibility with both
+existing native owners, preserved unfamiliar metadata and complete-subject
+point replay. The atomic owner-configuration read and shared owner composition
+are being checked under explicit namespace projections beside the selected
+SDK. These prototypes have not produced or selected a replacement SDK.
 
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
