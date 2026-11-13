@@ -85,7 +85,8 @@ def run(name, command, runtime=None):
 if stage in ('inputs', 'cells', 'check'):
     runtime = Path(tempfile.mkdtemp(prefix='formal-managed-dossier-'))
     imports = [str(P / 'src'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
-               str(Path(kit['root']) / 'codebase-review/kit')]
+               str(Path(kit['root']) / 'codebase-review/kit'),
+               str(Path(kit['root']) / 'research-elements/kit')]
     request = [pin['sdk'] + '/bin/bl', '--cold']
     for path in imports:
         request += ['-p', path]

@@ -70,6 +70,7 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            pin['sdk'] + '/bin/bl', '--cold', '-p', str(P / 'src'),
            '-p', str(Path(kit['root']) / 'bl-org-dossier/kit'),
            '-p', str(Path(kit['root']) / 'codebase-review/kit'),
+           '-p', str(Path(kit['root']) / 'research-elements/kit'),
            'run', str(P / 'review-serve.bl'), '--', str(P / 'ATLAS.bl.org')]
 (E / 'host-launch-exit.json').unlink(missing_ok=True)
 (E / 'host-launch-command.json').write_text(json.dumps(command, indent=2) + '\n')
