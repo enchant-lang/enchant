@@ -3,7 +3,9 @@
 `formal.integer-preflight/plan` is the first executable piece of the derived-value
 policy. It takes an operation keyword, a vector of existing integer operands,
 and limit overrides. It returns ordinary BL data; neither backend is involved.
-Its focused qualification passes; it is not connected to the evaluator yet.
+Its focused qualification passes. The separate
+[bounded Bool/Int graph point profile](BOUNDED-POINT.md) now consumes it inside
+private request accounting; the broader SDK/managed-owner gate remains open.
 
 ```clojure
 (integer-preflight/plan :mul [65536 65536]

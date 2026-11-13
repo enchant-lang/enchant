@@ -22,6 +22,9 @@ if stage == 'focused':
 elif stage == 'example':
     files = []
     request = ['run', str(P / 'numeric-point-example.bl'), '--', str(E / 'example.json')]
+elif stage == 'compatibility':
+    files = []
+    request = ['run', str(P / 'term-forest-evaluation-check.bl'), '--', str(E / 'compatibility.json')]
 else:
     raise ValueError(stage)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
@@ -29,6 +32,8 @@ sources = [*(P / 'src').rglob('*.bl'), *[P / 'test' / name for name in files],
            P / 'sdk-pin.json', Path(__file__)]
 if stage == 'example':
     sources.append(P / 'numeric-point-example.bl')
+if stage == 'compatibility':
+    sources.append(P / 'term-forest-evaluation-check.bl')
 digests = {}
 for source in sorted(sources):
     name = str(source.relative_to(R))
@@ -47,6 +52,8 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
 (E / (stage + '-exit.json')).unlink(missing_ok=True)
 if stage == 'example':
     (E / 'example.json').unlink(missing_ok=True)
+if stage == 'compatibility':
+    (E / 'compatibility.json').unlink(missing_ok=True)
 (E / (stage + '-source-pin.json')).write_text(json.dumps(
     {'code_commit': commit, 'source_sha256': digests, 'sdk_pin': pin}, indent=2) + '\n')
 (E / (stage + '-command.json')).write_text(json.dumps(command, indent=2) + '\n')

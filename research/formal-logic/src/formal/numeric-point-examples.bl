@@ -1,0 +1,52 @@
+(ns formal.numeric-point-examples
+ (:require [formal.term-forest-evaluate :as point] [formal.term :as t]
+           [formal.evaluate :as sdk] [formal.data-graph :as graph]))
+
+(defn- application [op sort arguments]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode op)]
+   [(graph/encode :sort) (graph/encode sort)]
+   [(graph/encode :args) (graph/assemble "vector" arguments)]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(defn run []
+ (let [data (reduce (fn [value _] (application :mul t/Real [value value]))
+                    (graph/encode (t/real 3 2)) (range 16))
+       policy {:rational {:component-bits 32 :intermediate-bits 64}}
+       evaluated (point/numeric-values data [(:root data) (:root data)] {} policy)
+       refused (point/numeric-values data [(:root data) (:root data)] {} (assoc policy :admission-work-units 0))
+       predicate (application :eq t/Bool [data (graph/encode (t/real 0 1))])
+       conjunction (application :and t/Bool [predicate (graph/encode (t/bool false))])
+       decided (point/numeric-values conjunction [(:root conjunction)] {} policy)
+       small (graph/encode (t/add (t/real 1 3) (t/real 1 6)))
+       complete (point/numeric-values small [(:root small)] {} {})]
+  (assert (= :evaluation (:phase evaluated)))
+  (assert (= 4 (get-in evaluated [:resources :rational-primitive-calls])))
+  (assert (= 52 (get-in evaluated [:resources :refusals 0 :reason :required])))
+  (assert (= :admission (:phase refused)))
+  (assert (= 0 (get-in refused [:admission :charged-work-units])))
+  (assert (= :not-run (get-in refused [:admission :constructor-execution])))
+  (assert (= 0 (get-in refused [:resources :sdk-calls])))
+  (assert (= (:data-reference evaluated) (:data-reference refused)))
+  (assert (= [false] (:values decided)))
+  (assert (= :complete (:status decided)))
+  (assert (= [(sdk/real 1 2)] (:values complete)))
+  {:evaluated evaluated :admission-refused refused :decided decided :complete complete}))
+
+(defn story []
+ (let [{:keys [evaluated admission-refused decided complete]} (run)]
+  (into-sorted-map
+   {:subject :numeric-resource-phases :typed-nodes (get-in evaluated [:checking :typed-nodes])
+    :rational-component-limit (get-in evaluated [:limits :rational :component-bits])
+    :admission-work (get-in evaluated [:admission :charged-work-units])
+    :evaluation-work (get-in evaluated [:resources :charged-work-units])
+    :performed-multiplications (get-in evaluated [:resources :rational-primitive-calls])
+    :refused-component-forecast (get-in evaluated [:resources :refusals 0 :reason :required])
+    :admission-denial-phase (:phase admission-refused)
+    :constructors-on-denied-admission (get-in admission-refused [:admission :constructor-execution])
+    :sdk-calls-on-denied-admission (get-in admission-refused [:resources :sdk-calls])
+    :same-original-graph (= (:data-reference evaluated) (:data-reference admission-refused))
+    :decisive-boolean (first (:values decided)) :decisive-root-status (:status decided)
+    :retained-refusals (count (get-in decided [:resources :refusals]))
+    :small-result (first (:values complete)) :assertion-replay :not-run
+    :native-calls 0 :compiler-proof-authority false})))
