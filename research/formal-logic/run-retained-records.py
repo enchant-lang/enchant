@@ -36,7 +36,7 @@ corpus = E / 'corpus.json'
 output = corpus if stage == 'capture' else E / (stage + '.json')
 inputs = [Path(__file__), script, E / 'sdk-candidate.json', E / 'baseline-sdk-pin.json', E / 'build-linkage.json']
 if stage != 'capture':
-    assert read(E / 'capture-exit.json')['exit_code'] == 0
+    assert read(E / 'capture-exit.json')['exit_code'] == 0 and read(E / 'capture-exit.json')['postconditions_passed']
     assert sha(corpus) == read(E / 'capture-exit.json')['output_sha256']
     inputs += [corpus, E / 'corpus-ledger.json']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
@@ -80,9 +80,10 @@ try:
 finally:
     shutil.rmtree(runtime)
     shutil.rmtree(cwd)
-write(stage + '-exit.json', {'exit_code': code, 'elapsed_seconds': time.monotonic() - started,
+exit_data = {'exit_code': code, 'elapsed_seconds': time.monotonic() - started, 'postconditions_passed': False,
       'runtime_retired': not runtime.exists(), 'consumer_cwd_retired': not cwd.exists(),
-      'output_sha256': sha(output) if output.exists() else None, 'ledger_retained_for_readers': ledger_path.is_dir()})
+      'output_sha256': sha(output) if output.exists() else None, 'ledger_retained_for_readers': ledger_path.is_dir()}
+write(stage + '-exit.json', exit_data)
 assert all(sha(R / name) == digest for name, digest in digests.items())
 assert code == 0 and output.exists(), stage
 result = read(output)
@@ -106,4 +107,6 @@ else:
         assert len(result['rows']) == len(result['ledger']) == 12
         assert result['application-atoms-before'] == result['application-atoms-after']
         assert all(row['ledger-envelope'] == 'payload-checked' for row in result['ledger'])
+exit_data['postconditions_passed'] = True
+write(stage + '-exit.json', exit_data)
 print(json.dumps({'stage': stage, 'status': 'passed', 'sdk_pin_selected': False}), flush=True)
