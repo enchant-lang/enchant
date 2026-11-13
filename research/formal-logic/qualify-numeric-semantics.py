@@ -77,7 +77,7 @@ for stage in ('compiler-floor', 'preflight', 'preflight-controls', 'js-unit',
         'log_sha256': sha(E / (stage + '-checks.txt'))}
 
 compiler = read(E / 'produced-compiler.json')
-assert compiler['status'] == 'passed' and compiler['files'] == 141 and compiler['generations'] == 3
+assert compiler['status'] == 'passed' and compiler['files'] == 141 and compiler['generations'] == ['P', 'B', 'C']
 assert compiler['sdk'] == pin['sdk'] and compiler['sdk_descriptor_sha256'] == pin['descriptor_sha256']
 assert compiler['compiler'] == metadata['compiler']
 preflight = read(E / 'source-preflight.json')
