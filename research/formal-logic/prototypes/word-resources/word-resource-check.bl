@@ -1,5 +1,6 @@
 (ns formal.word-resource-prototype-check
- (:require [formal.word-resource-prototype :as word] [formal.data-graph :as graph]))
+ (:require [formal.word-resource-prototype :as word] [formal.data-graph :as graph]
+           [formal.term :as term] [formal.evaluate :as evaluate] [formal.resources.integer :as integer]))
 
 (deftest shape-and-sort-controls
  (doseq [args [[:bv-add [:bv 8] [[:bv 8]] nil]
@@ -68,5 +69,26 @@
                                         {:word-bits 8 :intermediate-bits 9 :work-units work}))))
   (is (= false (:compiler-proof-authority p)))
   (is (string? (graph/bytes (graph/encode p))))))
+
+(deftest plans-cover-actual-sdk-word-results-and-arithmetic-temporaries
+ (doseq [width (range 1 9)]
+  (let [sort [:bv width] top (dec (erlang/bsl 1 width))
+        samples (vec (distinct [0 1 (erlang/bsr top 1) top]))]
+   (doseq [a samples b samples
+           op [:bv-add :bv-sub :bv-mul :bv-and :bv-or :bv-xor :bv-shl :bv-lshr :bv-ashr]]
+    (let [p (word/plan op sort [sort sort] nil {})
+          result (evaluate/value (term/app op sort [(term/literal sort a) (term/literal sort b)] nil) {})]
+     (is (= :ready (:status p)))
+     (is (= :valid (:status (evaluate/check-value sort result))))
+     (is (<= (integer/bits (second (:formal/bv result))) (get-in p [:forecast :result-bits])))
+     (when (contains? #{:bv-add :bv-mul :bv-shl} op)
+      (let [temporary (cond (= :bv-add op) (+ a b) (= :bv-mul op) (* a b)
+                            (>= b width) 0 :else (erlang/bsl a b))]
+       (is (<= (integer/bits temporary) (get-in p [:forecast :intermediate-bits])))))))
+   (doseq [a samples op [:bv-not :bv-neg]]
+    (let [p (word/plan op sort [sort] nil {})
+          result (evaluate/value (term/app op sort [(term/literal sort a)] nil) {})]
+     (is (= :valid (:status (evaluate/check-value sort result))))
+     (is (<= (integer/bits (second (:formal/bv result))) (get-in p [:forecast :result-bits]))))))))
 
 (run-tests)
