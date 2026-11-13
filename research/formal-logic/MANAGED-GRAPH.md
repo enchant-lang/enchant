@@ -29,8 +29,10 @@ keeps keys as data without creating atoms or importing application Source.
 Candidate 4 implements that repair and the common language request API in one
 immutable SDK containing 700 BL sources. It has passed namespace preflight and
 15,853 targeted assertion executions, including actual owner, unknown-key,
-request, oracle and ledger controls. Both native corpora and fresh persisted
-readers are still in qualification. The live project still selects the
+request, oracle and ledger controls. Its legacy native corpus has completed
+all 187 questions and 374 backend rows with no exact comparison differences
+from the qualified baseline. The managed corpus and fresh persisted readers
+are still in qualification. The live project still selects the
 qualified shared-primitives SDK. See the [request interface](REQUEST-INTERFACE.md)
 for the higher language surface; this document describes the owner primitive.
 
