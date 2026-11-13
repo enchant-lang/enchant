@@ -112,6 +112,15 @@ assert visual['status'] == 'reviewed' and len(visual['inspected']) >= 6
 assert all(name in audits['focused']['screenshots'] for name in visual['inspected'])
 assert any('phone' in name for name in visual['inspected']) and any('desktop' in name for name in visual['inspected'])
 assert any('night' in name for name in visual['inspected'])
+native_visual = read(E / 'full-browser/native-observation-visual-review.json')
+assert native_visual['status'] == 'reviewed' and len(native_visual['inspected']) == 2
+for name in native_visual['inspected']:
+    assert name in audits['full']['screenshots'] and sha(E / 'full-browser' / name) == native_visual['sha256'][name]
+tools = read(E / 'browser-tools.json')
+for name, tool in tools.items():
+    assert tool['executable'].startswith(tool['package'] + '/') and tool['package'].startswith('/nix/store/')
+    assert str((R / ('.bl/formal-dossier-' + name)).resolve(strict=True)) == tool['package']
+    assert subprocess.check_output(['nix-store', '--query', '--hash', tool['package']], text=True).strip() == tool['nar_hash']
 host = read(E / 'dossier-host.json')
 assert host['document_sha256'] == sha(document) and host['live_process_sdk_boot'] == pin['sdk'] + '/boot.exs'
 assert host['state']['ActiveState'] == 'active' and host['state']['MemoryMax'] == '2147483648'
@@ -132,6 +141,7 @@ report = {'schema': 'enchant.formal.observation-dossier-qualification.v1', 'stat
                       'full_source_pin': full_pin, 'review_graphs': graphs,
                       'full_audit_sha256': sha(E / 'full-browser/audit.json'),
                       'focused_audit_sha256': sha(E / 'focused-browser/audit.json'), 'visual_review': visual,
+                      'native_observation_visual_review': native_visual, 'tools': tools,
                       'inspected_frame_sha256': {name: sha(E / 'focused-browser' / name) for name in visual['inspected']}},
           'scope': 'Fresh executed dossier cells, upgraded committed kit, actual host and browser/source interactions. Code compatibility and native outcomes have separate qualification. No complete evaluator/decoder/implementation or compiler proof is granted.',
           'compiler_proof_authority': False}
