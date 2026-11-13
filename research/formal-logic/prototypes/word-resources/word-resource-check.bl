@@ -1,0 +1,72 @@
+(ns formal.word-resource-prototype-check
+ (:require [formal.word-resource-prototype :as word] [formal.data-graph :as graph]))
+
+(deftest shape-and-sort-controls
+ (doseq [args [[:bv-add [:bv 8] [[:bv 8]] nil]
+              [:bv-add [:bv 8] [[:bv 8] [:bv 9]] nil]
+              [:bv-add [:bool] [[:bv 8] [:bv 8]] nil]
+              [:bv-ult [:bv 8] [[:bv 8] [:bv 8]] nil]
+              [:bv-not [:bv 0] [[:bv 0]] nil]
+              [:bv-not [:bv 8.0] [[:bv 8.0]] nil]
+              [:bv-concat [:bv 8] [[:bv 8] [:bv 8]] nil]
+              [:bv-extract [:bv 4] [[:bv 8]] [8 5]]
+              [:bv-extract [:bv 4] [[:bv 8]] [3 -1]]
+              [:bv-extract [:bv 4] [[:bv 8]] [7 4 0]]
+              [:bv-sign-extend [:bv 7] [[:bv 8]] -1]
+              [:bv-zero-extend [:bv 16] [[:bv 8]] 7]
+              [:bv-neg [:bv 8] [[:bv 8]] :unexpected]]]
+  (is (thrown? (apply word/plan (conj args {})))))
+ (doseq [limits [{:unknown 1} {:word-bits -1} {:work-units 1.0} nil]]
+  (is (thrown? (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil limits)))))
+
+(deftest all-current-word-primitives-have-conservative-width-plans
+ (doseq [op [:bv-add :bv-sub :bv-mul :bv-and :bv-or :bv-xor :bv-shl :bv-lshr :bv-ashr]]
+  (let [p (word/plan op [:bv 8] [[:bv 8] [:bv 8]] nil {})]
+   (is (= :ready (:status p)))
+   (is (= 8 (get-in p [:forecast :result-bits])))
+   (is (>= (get-in p [:forecast :intermediate-bits]) 9))
+   (is (= :not-run (:primitive-execution p)))))
+ (doseq [op [:bv-not :bv-neg]]
+  (is (= :ready (:status (word/plan op [:bv 8] [[:bv 8]] nil {})))))
+ (doseq [op [:bv-ult :bv-ule :bv-slt :bv-sle]]
+  (is (= 0 (get-in (word/plan op [:bool] [[:bv 8] [:bv 8]] nil {}) [:forecast :result-bits]))))
+ (is (= 17 (get-in (word/plan :bv-concat [:bv 16] [[:bv 8] [:bv 8]] nil {}) [:forecast :intermediate-bits])))
+ (is (= :ready (:status (word/plan :bv-extract [:bv 4] [[:bv 8]] [7 4] {}))))
+ (doseq [op [:bv-sign-extend :bv-zero-extend]]
+  (is (= 17 (get-in (word/plan op [:bv 16] [[:bv 8]] 8 {}) [:forecast :intermediate-bits])))))
+
+(deftest wrapped-results-do-not-hide-temporary-work
+ (let [p (word/plan :bv-mul [:bv 2] [[:bv 2] [:bv 2]] nil {:word-bits 2 :intermediate-bits 3})]
+  (is (= :incomplete (:status p)))
+  (is (= :intermediate-bits (get-in p [:reason :metric])))
+  (is (= 4 (get-in p [:reason :required]))))
+ (let [p (word/plan :bv-shl [:bv 8] [[:bv 8] [:bv 8]] nil {:intermediate-bits 15})]
+  (is (= :incomplete (:status p)))
+  (is (= 16 (get-in p [:reason :required]))))
+ (let [p (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil {:work-units 0})]
+  (is (= :work-units (get-in p [:reason :metric]))))
+ ;; A billion-bit declaration is refused using small metadata arithmetic.
+ ;; No billion-bit integer or mask is constructed by this planner.
+ (let [p (word/plan :bv-mul [:bv 1000000000] [[:bv 1000000000] [:bv 1000000000]] nil {})]
+  (is (= :incomplete (:status p)))
+  (is (= :word-bits (get-in p [:reason :metric])))
+  (is (= 1000000000 (get-in p [:reason :required]))))
+ (is (= :resource-policy-unsupported
+        (get-in (word/plan :bv-udiv [:bv 8] [[:bv 8] [:bv 8]] nil {}) [:reason :kind]))))
+
+(deftest exact-resource-boundaries-and-references
+ (let [p (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil {})
+       work (get-in p [:forecast :work-units])
+       exact (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil
+                        {:word-bits 8 :intermediate-bits 9 :work-units work})]
+  (is (= :ready (:status exact)))
+  (is (= :incomplete (:status (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil {:word-bits 7}))))
+  (is (= :incomplete (:status (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil {:work-units (dec work)}))))
+  (is (not= (:request-reference p) (:request-reference exact)))
+  (is (= (:request-reference exact)
+         (:request-reference (word/plan :bv-add [:bv 8] [[:bv 8] [:bv 8]] nil
+                                        {:word-bits 8 :intermediate-bits 9 :work-units work}))))
+  (is (= false (:compiler-proof-authority p)))
+  (is (string? (graph/bytes (graph/encode p))))))
+
+(run-tests)
