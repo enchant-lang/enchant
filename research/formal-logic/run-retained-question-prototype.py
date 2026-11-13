@@ -13,8 +13,10 @@ import time
 P = Path(__file__).resolve().parent
 R = P.parent.parent
 stage = sys.argv[1] if len(sys.argv) == 2 else 'composition'
-assert len(sys.argv) <= 2 and stage in ('composition', 'configuration')
-E = P / ('evidence/retained-question-prototype' if stage == 'composition' else 'evidence/retained-configuration-prototype')
+assert len(sys.argv) <= 2 and stage in ('composition', 'configuration', 'provenance')
+directories = {'composition': 'retained-question-prototype', 'configuration': 'retained-configuration-prototype',
+               'provenance': 'retained-composition-prototype'}
+E = P / 'evidence' / directories[stage]
 E.mkdir(exist_ok=True)
 
 def read(path):
@@ -31,22 +33,29 @@ assert read(P / 'evidence/numeric-semantics/qualification.json')['sdk_pin'] == p
 assert read(P / 'evidence/numeric-semantics/qualification.json')['status'] == 'passed'
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
-module = R / ('priv/lib/formal/retained-question.bl' if stage == 'composition' else 'priv/lib/formal/backend.bl')
-test = P / 'retained-question-check.bl' if stage == 'composition' else R / 'test/bl/formal/retained_configuration_test.bl'
-sources = [module, test, Path(__file__), P / 'sdk-pin.json']
+module_paths = {'composition': 'priv/lib/formal/retained-question.bl', 'configuration': 'priv/lib/formal/backend.bl',
+                'provenance': 'priv/lib/formal/retained-composition.bl'}
+test_paths = {'composition': P / 'retained-question-check.bl',
+              'configuration': R / 'test/bl/formal/retained_configuration_test.bl',
+              'provenance': P / 'retained-composition-check.bl'}
+module, test = R / module_paths[stage], test_paths[stage]
+dependencies = [R / 'priv/lib/formal/retained-question.bl'] if stage == 'provenance' else []
+sources = [module, *dependencies, test, Path(__file__), P / 'sdk-pin.json']
 digests = {}
 for path in sources:
     name = str(path.relative_to(R))
     assert subprocess.check_output(['git', 'show', commit + ':' + name], cwd=R) == path.read_bytes()
     digests[name] = sha(path)
 write('source-pin.json', {'code_commit': commit, 'source_sha256': digests, 'base_sdk_pin': pin,
-                          'stage': stage, 'overlay': [str(module.relative_to(R))], 'sdk_produced': False})
+                          'stage': stage, 'overlay': [str(x.relative_to(R)) for x in [module, *dependencies]], 'sdk_produced': False})
 (E / 'memory-before.txt').write_text(subprocess.check_output([R / 'scripts/bl-mem'], text=True))
 runtime = Path(tempfile.mkdtemp(prefix='formal-retained-question-'))
 imports = runtime / 'imports'
 (imports / 'formal').mkdir(parents=True)
 projection = {}
-if stage == 'composition':
+for dependency in dependencies:
+    shutil.copyfile(dependency, imports / 'formal' / dependency.name)
+if stage != 'configuration':
     shutil.copyfile(module, imports / 'formal' / module.name)
 else:
     # Canonical SDK modules own declaration metadata. Test the exact new body
@@ -98,7 +107,8 @@ write('qualification.json', {
     'command_sha256': sha(E / 'command.json'), 'log_sha256': sha(E / 'checks.txt'),
     'exit': read(E / 'exit.json'), 'base_sdk_pin': pin, 'sdk_produced': False,
     'compiler_proof_authority': False,
-    'scope': ('Explicit one-module prototype overlay, pure graph composition and complete point meaning; compatibility against the unchanged selected SDK owner on both native backends.'
-              if stage == 'composition' else 'Explicit namespaced source projection alongside the selected SDK, actual owner configuration reads, corrupted mirror controls and observed zero native exchanges for metadata reads. The canonical SDK declaration remains unchanged.')
+    'scope': ({'composition': 'Explicit one-module prototype overlay, pure graph composition and complete point meaning; compatibility against the unchanged selected SDK owner on both native backends.',
+               'configuration': 'Explicit namespaced source projection alongside the selected SDK, actual owner configuration reads, corrupted mirror controls and observed zero native exchanges for metadata reads. The canonical SDK declaration remains unchanged.',
+               'provenance': 'Explicit two-module prototype imports; closed portable retained composition, exact complete-subject recomputation and changed provenance/subject controls.'}[stage])
              + ' This is not integrated retained-request execution or a qualified replacement SDK.'})
 print(json.dumps({'status': 'passed', 'sdk_produced': False}))
