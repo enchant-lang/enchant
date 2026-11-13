@@ -12,6 +12,7 @@ E = P / 'evidence/managed-presentation'
 C = P / 'evidence/managed-graph'
 I = P / 'evidence/managed-integration'
 O = P / 'evidence/observation-semantics'
+K = E / 'kit-state.json'
 def read(path):
     return json.loads(path.read_text())
 def sha(path):
@@ -23,7 +24,7 @@ assert read(C / 'qualification.json')['sdk_pin'] == pin
 assert read(I / 'qualification.json')['status'] == 'passed'
 assert read(I / 'qualification.json')['sdk_pin'] == pin
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
-kit = read(O / 'kit-state.json')
+kit = read(K)
 assert str(Path(kit['snapshot_retention_root']).resolve(strict=True)) == kit['root']
 assert subprocess.check_output(['nix-store', '--query', '--hash', kit['root']], text=True).strip() == kit['snapshot_nar_hash']
 for name, digest in kit['rendering_source_sha256'].items():
@@ -45,7 +46,7 @@ assert hashlib.sha256(retained.group(2).encode()).hexdigest() == recorded['resul
 checks = {}
 for stage in ('dossier-inputs', 'dossier-cells', 'dossier-check', 'focused-browser', 'full-browser'):
     source = read(E / (stage + '-source-pin.json'))
-    assert source['sdk_pin'] == pin and source['kit_state_sha256'] == sha(O / 'kit-state.json')
+    assert source['sdk_pin'] == pin and source['kit_state_sha256'] == sha(K)
     for name, digest in source['source_sha256'].items():
         body = subprocess.check_output(['git', 'show', source['code_commit'] + ':' + name], cwd=R)
         assert hashlib.sha256(body).hexdigest() == digest
@@ -101,8 +102,8 @@ host = read(E / 'dossier-host.json')
 assert host['document_sha256'] == sha(document) and host['sdk_boot'] == pin['sdk'] + '/boot.exs' and host['kit_root'] == kit['root']
 assert host['state']['ActiveState'] == 'active' and host['state']['MemoryMax'] == '2147483648'
 assert all(response['status'] == 200 and response['bytes'] > 1000000 for response in host['responses'].values())
-# The retained rendering process and styles are unchanged from its actual
-# preceding presentation receipt. New code and document hashes are above.
+# Project host and local styles remain unchanged. The current immutable kit
+# snapshot and its actual source hashes are checked separately above.
 old = read(O / 'full-browser-source-pin.json')['source_sha256']
 styles = {}
 for name in ('research/formal-logic/dossier-local.css', 'research/formal-logic/presentation.css',
@@ -116,7 +117,7 @@ report = {'schema': 'enchant.formal.managed-request-dossier-qualification.v1', '
           'document_sha256': sha(document), 'cells': {'total': 88, 'fresh_live': 87, 'recorded_native': 1},
           'recorded_native_sha256': sha(O / 'recorded-float-native.json'),
           'recorded_native_sdk_pin': recorded['sdk_pin'], 'checks': checks,
-          'host': host, 'kit_state_sha256': sha(O / 'kit-state.json'), 'unchanged_rendering_sources': styles,
+          'host': host, 'kit_state_sha256': sha(K), 'unchanged_rendering_sources': styles,
           'browser': {'focused_checks': len(audits['focused-browser']['checks']),
                       'full_checks': len(audits['full-browser']['checks']), 'visual_review': visual,
                       'focused_audit_sha256': sha(E / 'focused-browser/audit.json'),

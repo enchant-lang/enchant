@@ -12,6 +12,7 @@ E = P / 'evidence/managed-presentation'
 C = P / 'evidence/managed-graph'
 I = P / 'evidence/managed-integration'
 O = P / 'evidence/observation-semantics'
+K = E / 'kit-state.json'
 def read(path):
     return json.loads(path.read_text())
 def sha(path):
@@ -23,6 +24,7 @@ assert pin == read(I / 'qualification.json')['sdk_pin'] and read(I / 'qualificat
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
 assert read(E / 'dossier-check-exit.json')['exit_code'] == 0
 checked = read(E / 'dossier-check-source-pin.json')
+assert checked['kit_state_sha256'] == sha(K)
 assert checked['sdk_pin'] == pin
 for name, digest in checked['source_sha256'].items():
     if name == 'research/formal-logic/ATLAS.bl.org':
@@ -35,7 +37,7 @@ for name, digest in checked['source_sha256'].items():
             assert re.findall(pattern, body, re.M | re.S) == re.findall(pattern, current, re.M | re.S)
     else:
         assert sha(R / name) == digest
-kit = read(O / 'kit-state.json')
+kit = read(K)
 for name, digest in kit['rendering_source_sha256'].items():
     assert sha(Path(kit['root']) / name) == digest
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
@@ -68,7 +70,7 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
 (E / 'host-launch-command.json').write_text(json.dumps(command, indent=2) + '\n')
 (E / 'host-launch-source-pin.json').write_text(json.dumps(
     {'code_commit': commit, 'source_sha256': {relative: sha(Path(__file__))},
-     'sdk_pin': pin, 'document_sha256': sha(P / 'ATLAS.bl.org'), 'kit_state_sha256': sha(O / 'kit-state.json')}, indent=2) + '\n')
+     'sdk_pin': pin, 'document_sha256': sha(P / 'ATLAS.bl.org'), 'kit_state_sha256': sha(K)}, indent=2) + '\n')
 started = time.monotonic()
 with (E / 'host-launch-checks.txt').open('w') as stream:
     code = subprocess.run(command, cwd=R, stdout=stream, stderr=subprocess.STDOUT).returncode

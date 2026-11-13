@@ -17,6 +17,7 @@ C = P / 'evidence/managed-graph'
 I = P / 'evidence/managed-integration'
 E.mkdir(exist_ok=True)
 O = P / 'evidence/observation-semantics'
+K = E / 'kit-state.json'
 def read(path):
     return json.loads(path.read_text())
 def sha(path):
@@ -32,13 +33,13 @@ assert code['status'] == 'passed' and code['sdk_pin'] == pin
 integration = read(I / 'qualification.json')
 assert integration['status'] == 'passed' and integration['sdk_pin'] == pin
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
-kit = read(O / 'kit-state.json')
+kit = read(K)
 for name, digest in kit['rendering_source_sha256'].items():
     assert sha(Path(kit['root']) / name) == digest
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = [*(P / 'src').rglob('*.bl'), P / 'ATLAS.bl.org', P / 'sdk-pin.json', Path(__file__),
            P / 'dossier-inputs-check.bl', P / 'managed-request-browser.mjs', P / 'story-audit.mjs',
-           P / 'browser-driver.mjs', P / 'REQUEST-INTERFACE.md', P / 'MANAGED-GRAPH.md', C / 'qualification.json', I / 'qualification.json']
+           P / 'browser-driver.mjs', K, E / 'kit-working-css.patch', P / 'REQUEST-INTERFACE.md', P / 'MANAGED-GRAPH.md', C / 'qualification.json', I / 'qualification.json']
 digests = {}
 for source in sorted(sources):
     name = str(source.relative_to(R))
@@ -46,7 +47,7 @@ for source in sorted(sources):
     assert subprocess.check_output(['git', 'show', commit + ':' + name], cwd=R) == body
     digests[name] = hashlib.sha256(body).hexdigest()
 snapshot = {'code_commit': commit, 'source_sha256': digests, 'sdk_pin': pin,
-            'kit_state_sha256': sha(O / 'kit-state.json'), 'document_sha256': sha(P / 'ATLAS.bl.org')}
+            'kit_state_sha256': sha(K), 'document_sha256': sha(P / 'ATLAS.bl.org')}
 
 def run(name, command, runtime=None):
     (E / (name + '-exit.json')).unlink(missing_ok=True)
