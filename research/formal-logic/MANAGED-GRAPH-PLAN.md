@@ -74,6 +74,23 @@ evaluation request. Native scope identifiers belong only to the owning process.
 The same graph under different resource settings has the same mathematical
 identity and a different execution identity.
 
+Both legacy and graph imports share one actual arena ID allocator. A graph
+definition key can contain its operator, bounded sort/data components and
+already translated native child IDs; it does not need an expanded term as a
+key. Keep the legacy tree lookup separate, while advancing the shared allocator
+after either import. Test mixed legacy/graph load, scope and reset operations
+so that two registries cannot allocate the same native ID independently.
+
+There is also a retained-context identity boundary to version explicitly. The
+current `retained-graph` helper puts `t/digest` of retained term trees into the
+public context; that can reintroduce expansion even after graph import is
+fixed. Preserve that representation on the legacy path. An opt-in graph
+retained-context profile should bind an original assertion graph/reference and
+generation under its own declared format, with no silent digest fallback.
+Both backends receive that same effective graph. A future graph-based load
+must retain the original graph inside the owner instead of reconstructing
+large assumptions from a client-provided term table.
+
 ## Start with an explicit numeric fragment
 
 The first managed graph profile should opt into Bool/Int/Real admission and
