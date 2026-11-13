@@ -1,0 +1,131 @@
+(ns formal.retained-request-check
+ (:require [formal.backend :as backend] [formal.logic :as logic] [formal.request :as request]
+           [formal.request-answer :as answer] [formal.request-runtime :as run]
+           [formal.query :as q] [formal.question-graph :as qg] [formal.term :as t] [formal.data-graph :as g]))
+
+(def x (t/variable "retained.request.x" t/Int))
+(def caller (qg/prepare (q/sat {:assumptions [(t/le x (t/int 9))]})))
+(def seven (q/assertion "seven" (t/eq x (t/int 7))))
+(defn with-owned [engine action]
+ (backend/with-session {:backend engine}
+  (fn [session] (is (:ok (backend/load! session [seven]))) (action session))))
+(defn kind [action] (try (action) :accepted (catch e (:kind (ex-data e)))))
+(defn counted [action]
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try (let [result (action)] {:value result :calls (elem (erlang/trace_info pattern :call_count) 1)})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(defn foreign-kind [execute]
+ (let [parent (erlang/self)]
+  (erlang/spawn #(erlang/send parent [:foreign-retained-lease (kind execute)]))
+  (receive [:foreign-retained-lease k] k (after 3000 :foreign-timeout))))
+
+(defn exercise-supplied [session]
+ (let [held-inner (atom nil) held-outer (atom nil) frozen (atom nil)
+       measured
+       (counted
+        #(logic/with-context-request session caller
+          (fn [r execute]
+           (reset! frozen r) (reset! held-outer execute)
+           (is (= :retained-request-lease (foreign-kind execute)))
+           (let [result (run/with-handler
+                         (fn [r fallback] (reset! held-inner fallback) (answer/supply r {"retained.request.x" 7})) execute)]
+            (is (= :sat (:verdict result)))
+            (is (= :not-invoked (get-in result [:local-delegation :status])))
+            ;; The shorter fallback has expired while the outer body is open.
+            (is (= :fallback-lease (kind @held-inner)))
+            (is (= :retained-request-lease (kind execute)))
+            result))))]
+  (is (= 0 (:calls measured)))
+  (is (= :retained-request-lease (kind @held-outer)))
+  (is (= @frozen (request/check! @frozen)))
+  (is (some? (g/encode @frozen)))))
+
+(deftest supplied-points-use-no-scope-and-inner-fallbacks-expire-before-the-outer-body
+ (doseq [engine [:z3 :oxiz]] (with-owned engine exercise-supplied)))
+
+(deftest unused-and-exceptional-outer-leases-expire
+ (with-owned :z3
+  (fn [session]
+   (let [held (atom nil)]
+    (logic/with-context-request session caller (fn [_ execute] (reset! held execute)))
+    (is (= :retained-request-lease (kind @held)))
+    (is (= :body-failure
+         (kind #(logic/with-context-request session caller
+                 (fn [_ execute] (reset! held execute) (throw (ex-info "body" {:kind :body-failure})))))))
+    (is (= :retained-request-lease (kind @held)))))))
+
+(defn exercise-native [session]
+ ;; Advance generation as well as revision before freezing the request.
+ (is (:ok (backend/reset! session)))
+ (is (:ok (backend/load! session [seven])))
+ (let [saved (atom nil)
+       corrupted (assoc session :identity {:backend :fabricated} :solver-ms -1 :hard-ms :invalid)
+       measured (counted #(logic/with-context-request corrupted caller
+                           (fn [r execute] (reset! saved r) (execute))))
+       result (:value measured)]
+  (is (= 1 (:calls measured)))
+  (is (= :sat (:verdict result)))
+  (is (= :matching-response (get-in result [:local-delegation :status])))
+  (is (= {:generation 1 :revision 3} (get-in result [:source :context-state])))
+  (is (= 3 (get-in result [:response :formal/request-answer])))
+  (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+  (let [fresh (counted #(run/execute @saved))]
+   (is (= 2 (:calls fresh)))
+   (is (= :sat (get-in fresh [:value :verdict])))
+   (is (= {:generation 0 :revision 0} (get-in fresh [:value :source :context-state])))
+   (is (= (:subject-reference result) (get-in fresh [:value :subject-reference]))))))
+
+(deftest actual-owner-reuse-and-fresh-execution-ask-the-identical-complete-subject
+ (doseq [engine [:z3 :oxiz]] (with-owned engine exercise-native)))
+
+(deftest stale-load-and-reset-refuse-before-native-scope-work
+ (doseq [change [#(backend/reset! %) #(backend/load! % [(q/assertion "extra" (t/bool true))])]]
+  (with-owned :z3
+   (fn [session]
+    (logic/with-context-request session caller
+     (fn [_ execute]
+      (is (:ok (change session)))
+      (let [measured (counted #(kind execute))]
+       (is (= :retained-request-context (:value measured)))
+       (is (= 0 (:calls measured))))))))))
+
+(deftest changed-adapter-settings-refuse-before-body-or-scope
+ (with-owned :z3
+  (fn [session]
+   (doseq [adapter [{:backend :oxiz} {:solver-ms 499} {:hard-ms 3000}]]
+    (let [entered (atom false)
+          measured (counted #(kind (fn [] (logic/with-context-request session caller {:adapter adapter}
+                                           (fn [_ _] (reset! entered true))))))]
+     (is (= :retained-request-context (:value measured)))
+     (is (= false @entered))
+     (is (= 0 (:calls measured))))))))
+
+(deftest handler-context-changes-are-detected-and-never-count-as-local-fallback-work
+ (with-owned :z3
+  (fn [session]
+   (let [held (atom nil)
+         measured (counted #(kind (fn []
+                    (logic/with-context-request session caller
+                     (fn [_ execute]
+                      (run/with-handler
+                       (fn [r fallback]
+                        (reset! held fallback)
+                        (is (:ok (backend/load! session [(q/assertion "extra" (t/bool true))])))
+                        (answer/supply r {"retained.request.x" 7})) execute))))))]
+    ;; This exchange is the handler's own load, not its provided fallback.
+    (is (= 1 (:calls measured)))
+    (is (= :retained-request-context (:value measured)))
+    (is (= :fallback-lease (kind @held)))))))
+
+(deftest an-actually-retired-owner-is-not-restarted-by-a-captured-execution
+ (with-owned :z3
+  (fn [session]
+   (logic/with-context-request session caller
+    (fn [_ execute]
+     (is (= false (:ok (backend/invoke session (tuple :reset 999)))))
+     (let [measured (counted #(kind execute))]
+      (is (= :retired (:value measured)))
+      (is (= 0 (:calls measured)))))))))
+
+(run-tests)
