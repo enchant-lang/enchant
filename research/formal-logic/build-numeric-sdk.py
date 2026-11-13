@@ -3,6 +3,7 @@
 Run `seed` first; review and commit its actual floor before `prepare`. Neither
 stage changes the selected project pin or the live dossier host.
 """
+import atexit
 import hashlib
 import json
 import os
@@ -28,6 +29,11 @@ def sha(path):
 
 def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
+
+def retire_recovery(path):
+    if path.exists():
+        shutil.rmtree(path)
+        write(E / 'seed-recovery-retirement.json', {'path': str(path), 'retired': not path.exists()})
 
 baseline = read(E / 'baseline/sdk-pin.json')
 assert read(E / 'baseline/state.json')['status'] == 'completed'
@@ -65,6 +71,7 @@ if stage == 'seed':
     # sources. Recover through the qualified image, without a second checkout,
     # recompiling dependencies, or modifying any SDK bytes.
     recovery = Path(tempfile.mkdtemp(prefix='formal-numeric-recovery-'))
+    atexit.register(retire_recovery, recovery)
     (recovery / 'scripts').mkdir()
     wrapper = recovery / 'scripts/regenerate-seed'
     shutil.copy2(R / 'scripts/regenerate-seed', wrapper)
@@ -85,8 +92,7 @@ if stage == 'seed':
         if entry.is_file():
             shutil.copy2(entry, recovered_ebin / entry.name)
             floor_members[entry.name] = sha(entry)
-    assert len(floor_members) == 141 and 'Elixir.BeamLisp.beam' in floor_members
-    shutil.copy2(Path(baseline['sdk']) / 'image/ebin/beam_lisp.app', recovered_ebin / 'beam_lisp.app')
+    assert len(floor_members) == 141 and 'Elixir.BeamLisp.beam' in floor_members and 'beam_lisp.app' in floor_members
     libraries = recovery / '.bl/lib'
     libraries.mkdir(parents=True)
     for library in sorted((Path(baseline['sdk']) / 'lib').iterdir()):
@@ -120,8 +126,7 @@ try:
         code = subprocess.run(command, cwd=R, env=environment, stdout=stream, stderr=subprocess.STDOUT).returncode
 finally:
     if recovery:
-        shutil.rmtree(recovery)
-        write(E / 'seed-recovery-retirement.json', {'path': str(recovery), 'retired': not recovery.exists()})
+        retire_recovery(recovery)
 write(E / (stage + '-exit.json'), {'exit_code': code, 'elapsed_seconds': time.monotonic() - started})
 if code:
     raise SystemExit(code)
