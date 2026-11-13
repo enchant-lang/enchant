@@ -266,6 +266,13 @@
   (= request :context)
    (if (:portable state) {:state state :result {:ok true :context (owner-context state)}}
      (refuse state :context-unavailable "formal native context is not portable after raw transport; reset required"))
+  (= request :context-configuration)
+   (if (:portable state)
+    {:state state :result {:ok true :configuration
+      {:context (owner-context state)
+       :adapter (select-keys state [:backend :solver-ms :hard-ms])
+       :identity (select-keys (:identity state) [:backend :worker-sha256 :library-sha256 :sdk])}}}
+    (refuse state :context-unavailable "formal native context is not portable after raw transport; reset required"))
   (and (vector? request) (= :managed (first request)) (= 3 (count request)))
    (managed-exchange state (second request) (nth request 2))
   (and (vector? request) (= :invoke (first request)) (= 2 (count request)))
@@ -426,6 +433,18 @@
  [session expected]
  (let [reply (owner-call session [:context-matches expected])]
   (and (:ok reply) (= true (:matches reply)))))
+(defn context-configuration
+ "Atomically read the actual owner's context and adapter configuration.
+  Session mirrors are ignored. The context contains a local owner PID; only
+  the separately selected adapter/artifact fields are portable recorded data.
+  This read performs no native exchange and grants no proof authority."
+ [session]
+ (when-not (and (= (:borrower session) (erlang/self)) (Process/alive? (:pid session)))
+  (throw (ex-info "formal backend: a live owned question context is required" {})))
+ ;; Bounded local metadata read, independent of a caller-corrupted hard-ms
+ ;; mirror. The actual native solver and worker deadlines remain unchanged.
+ (let [reply (call (:pid session) :context-configuration 16000)]
+  (if (:ok reply) (:configuration reply) (throw (ex-info (:error reply) (:why reply))))))
 (defn- managed-call [session operation payload]
  (let [reply (owner-call session [:managed operation payload])]
   (when (:ok reply)

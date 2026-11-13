@@ -1,0 +1,40 @@
+(ns formal.retained-configuration-test
+ (:require [formal.backend :as backend] [formal.query :as q] [formal.term :as t]))
+
+(deftest configuration-is-owner-read-and-no-native-exchange-occurs
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+   (fn [session]
+    (let [module (elem (erlang/fun_info backend/invoke :module) 1)
+          pattern (tuple module :exchange! 4)
+          before (backend/context session)
+          corrupted (assoc session :identity {:backend :fabricated} :solver-ms -3 :hard-ms :invalid)]
+     (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+     (try
+      (let [actual (backend/context-configuration corrupted)]
+       (is (= before (:context actual))))
+       (is (= {:backend engine :solver-ms 500 :hard-ms 2000} (:adapter actual)))
+       (is (= (select-keys (:identity session) [:backend :worker-sha256 :library-sha256 :sdk]) (:identity actual)))
+       (is (= #{:context :adapter :identity} (set (keys actual))))
+       (is (= 0 (elem (erlang/trace_info pattern :call_count) 1))))
+      (finally (erlang/trace_pattern pattern false (list :local :call_count)))))))))
+
+(deftest snapshots-track-actual-load-reset-and-local-owner-lifetime
+ (let [captured (atom nil)]
+  (backend/with-session {:backend :z3}
+   (fn [session]
+    (reset! captured session)
+    (let [before (backend/context-configuration session)]
+     (is (= 0 (get-in before [:context :generation]) (get-in before [:context :revision]))))
+     (is (:ok (backend/load! session [(q/assertion "true" (t/bool true))])))
+     (let [loaded (backend/context-configuration session)]
+      (is (= 1 (get-in loaded [:context :revision])))
+      (is (= 1 (count (get-in loaded [:context :assertions])))))
+     (is (:ok (backend/reset! session)))
+     (let [after (backend/context-configuration session)]
+      (is (= 1 (get-in after [:context :generation])))
+      (is (= 2 (get-in after [:context :revision])))
+      (is (= [] (get-in after [:context :assertions])))))))
+  (is (thrown? (backend/context-configuration @captured)))))
+
+(run-tests)
