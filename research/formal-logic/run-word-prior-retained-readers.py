@@ -18,6 +18,11 @@ def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 def write(path, value): path.write_text(json.dumps(value, indent=2) + '\n')
 pin, producer = read(E / 'sdk-candidate.json'), read(E / 'baseline-sdk-pin.json')
 assert read(P / 'sdk-pin.json') == producer
+assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
+linkage = read(E / 'build-linkage.json')
+assert linkage['status'] == 'bound' and linkage['sdk_pin'] == pin
+for name, digest in linkage['source_sha256'].items():
+    assert sha(R / name) == digest == sha(Path(pin['sdk']) / 'lib/beam_lisp-0.1.0' / name)
 parent = read(B / 'records-qualification.json')
 assert parent['status'] == 'passed' and parent['sdk_pin'] == producer
 assert read(E / 'focused-exit.json')['exit_code'] == 0
