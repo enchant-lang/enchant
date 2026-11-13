@@ -1,4 +1,4 @@
-(ns formal.backend (:require [formal.term :as t] [formal.evaluate :as ev] [bl.json :as json]
+(ns formal.backend (:require [formal.point-profile :as point-profile] [formal.term :as t] [formal.evaluate :as ev] [bl.json :as json]
                             [formal.graph-execution :as graph-execution]))
 
 (def ^:private wire-atoms
@@ -198,23 +198,25 @@
        (swap! translated assoc id native-id) (swap! added conj definition))))))
   {:registry @registry :nodes @added :ids @translated}))
 
-(defn- refuse-graph [state kind message]
- (update (refuse state kind message) :result merge
-  {:formal/managed-graph-reply 2 :reply-profile graph-execution/profile
-   :solver-status :not-run :verdict :error :phase :admission :binding :not-established
-   :native-scope-attempts 0 :identity (:identity state) :trusted false :compiler-proof-authority false
-   :certificate {:status :not-checked :kind :managed-graph-refusal}
-   :execution {:scope :managed-native-owner :status :not-invoked}}))
+(defn- refuse-graph [state kind message requested]
+ (let [header (try (point-profile/reply-header (graph-execution/settings (or requested {})))
+                (catch _ {:formal/managed-graph-reply 2 :reply-profile graph-execution/profile}))]
+  (update (refuse state kind message) :result merge
+   (merge header
+    {:solver-status :not-run :verdict :error :phase :admission :binding :not-established
+     :native-scope-attempts 0 :identity (:identity state) :trusted false :compiler-proof-authority false
+     :certificate {:status :not-checked :kind :managed-graph-refusal}
+     :execution {:scope :managed-native-owner :status :not-invoked}}))))
 
 (defn- managed-graph-exchange [state payload]
  (cond
-  (:retired state) (refuse-graph state :retired "formal graph context retired")
+  (:retired state) (refuse-graph state :retired "formal graph context retired" (get payload :settings))
   (not (:portable state))
-   (refuse-graph state :context-unavailable "formal native context is not portable after raw transport; reset required")
+   (refuse-graph state :context-unavailable "formal native context is not portable after raw transport; reset required" (get payload :settings))
   (not (and (map? payload) (= #{:question :settings :context} (set (keys payload)))))
-   (refuse-graph state :invalid "closed managed graph payload required")
+   (refuse-graph state :invalid "closed managed graph payload required" (get payload :settings))
   (not (same-context? state (:context payload)))
-   (refuse-graph state :context-changed "formal native question context changed before graph admission")
+   (refuse-graph state :context-changed "formal native question context changed before graph admission" (get payload :settings))
   :else
    (let [owned (atom state)]
     (try
@@ -255,7 +257,7 @@
      (catch error
       ;; An invalid original graph/settings request has not acquired a native
       ;; scope. Preserve the actual state, including any already retired port.
-      (refuse-graph @owned :invalid (ex-message error)))))))
+      (refuse-graph @owned :invalid (ex-message error) (:settings payload)))))))
 
 (defn- handle-owned [state request]
  (cond
@@ -459,7 +461,7 @@
 (defn load! [session assertions] (managed-call session :load {:assertions (vec assertions)}))
 
 (defn graph-question!
- "Opt-in original numeric graph execution in the actual native owner. The
+ "Opt-in original graph execution under a named checking policy in the actual native owner. The
   owner rechecks context/settings, composes its retained assumptions, admits the
   original graph, translates owner-local IDs and replays SAT coordinates under
   one SDK admission scope. This is an explicit managed-graph reply format;

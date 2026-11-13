@@ -1,6 +1,7 @@
 (ns formal.request-record
  (:require [formal.request :as request] [formal.request-answer :as answer]
-           [formal.data-graph :as graph] [veritas.ledger :as ledger]))
+           [formal.data-graph :as graph] [veritas.ledger :as ledger]
+           [formal.retained-composition :as composition] [formal.question-graph :as qg]))
 
 (def profile :bl/formal-request-record-preview-v2)
 (defn- require! [ok reason]
@@ -40,11 +41,21 @@
  "Fetch an actual ledger row, check its payload/index binding, then freshly
   recheck the point. No stored label authenticates native execution."
  [connection id]
- (let [rows (filter #(= id (:verdict/id %)) (ledger/all connection))]
-  (require! (= 1 (count rows)) "one actual ledger record required")
-  (let [row (first rows)]
-   (require! (and (= ledger/request-format (:verdict/format row))
-                  (= :recorded-request (:verdict/modality row)) (= :recorded (:verdict/assurance row))
-                  (= false (:verdict/compiler-authority row))) "recorded request ledger envelope required")
-   {:id id :ledger-envelope :payload-checked :result (ledger/recheck-request row)
-    :checked-native-execution false :compiler-proof-authority false})))
+ (let [row (ledger/lookup connection id)]
+  (require! (some? row) "one actual ledger record required")
+  (require! (and (= ledger/request-format (:verdict/format row))
+                 (= :recorded-request (:verdict/modality row)) (= :recorded (:verdict/assurance row))
+                 (= false (:verdict/compiler-authority row))) "recorded request ledger envelope required")
+  {:id id :ledger-envelope :payload-checked :result (ledger/recheck-request row)
+   :checked-native-execution false :compiler-proof-authority false}))
+
+(defn pack-graph
+ "Encode the closed portable evidence packet as an original data graph."
+ [original response] (graph/encode (pack original response)))
+(defn recheck-graph
+ "Read and freshly recheck a graph packet with this SDK's closed vocabulary.
+  Only these named schema modules are initialized. Graph data never chooses
+  a module to load, creates application atoms or authenticates native history."
+ [data]
+ (let [_ [profile request/profile answer/profile answer/retained-profile composition/profile qg/profile]]
+  (recheck (graph/decode! data))))

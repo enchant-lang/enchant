@@ -1,6 +1,6 @@
 (ns formal.graph-terms
  (:require [formal.data-graph :as graph] [formal.term :as t]
-           [formal.resources.rational :as rational]))
+           [formal.resources.rational :as rational] [formal.resources.word :as word]))
 
 ;; Fresh graph preparation. This is not managed owner admission, an accepted
 ;; cached question view, a native arena handle, or an independently checked proof.
@@ -54,6 +54,39 @@
          :charged-work-units 0 :rational-literals literal-count :constructor-execution :not-run}
         (recur (rest pending) required (inc literal-count))))))))))
 
+(defn- word-numeric-admission [order records values sorts settings]
+ (let [wide (first (filter (fn [[_ width]] (> width (get-in settings [:word :word-bits]))) (sort-by first sorts)))]
+  (if wide
+   {:status :incomplete :source-node (first wide)
+    :reason {:kind :resource-limit :metric :word-bits :required (second wide) :limit (get-in settings [:word :word-bits])}
+    :reserved-work-units 0 :charged-work-units 0 :word-literals 0 :rational-literals 0
+    :constructor-execution :not-run}
+   (loop [pending order work 0 words 0 reals 0]
+    (if (empty? pending)
+     {:status :complete :reserved-work-units work :charged-work-units work
+      :word-literals words :rational-literals reals :word-sort-descriptors (count sorts) :constructor-execution :run}
+     (let [id (first pending) record (get records id)
+           op (get values (get record "op")) sort (get values (get record "sort"))
+           datum (get values (get record "data"))
+           real? (and (= t/Real sort) (contains? literals op))
+           word? (and (= :bv (first sort)) (contains? literals op))]
+      (if-not (or real? word?) (recur (rest pending) work words reals)
+       (let [_ (if real?
+                 (require! (and (sequential? datum) (= 2 (count datum)) (every? int? datum) (not= 0 (second datum)))
+                           "rational literal requires an integer pair with nonzero denominator")
+                 (require! (and (int? datum) (>= datum 0)) "word literal requires nonnegative integer bits"))
+             plan (if real? (rational/plan :normalize [(vec datum)] (:rational settings))
+                            (word/value-plan sort datum (:word settings)))
+             charge (get-in plan [:forecast :work-units] 0) required (+ work charge)
+             reason (cond (not= :ready (:status plan)) (:reason plan)
+                          (> required (:admission-work-units settings))
+                           {:kind :resource-limit :metric :admission-work-units :required required
+                            :limit (:admission-work-units settings)} :else nil)]
+        (if reason
+         {:status :incomplete :source-node id :reason reason :reserved-work-units work :charged-work-units 0
+          :word-literals words :rational-literals reals :constructor-execution :not-run}
+         (recur (rest pending) required (if word? (inc words) words) (if real? (inc reals) reals)))))))))))
+
 (defn- prepare-profile
  "Compile checked public graph roots to a fresh portable native term table.
   Argument edges stay graph references. Operation/sort/data fields are decoded
@@ -65,15 +98,20 @@
        _ (require! (<= (count roots) (:roots limits)) "root capacity")
        _ (doseq [id roots]
            (require! (and (int? id) (<= 0 id) (< id (count rows))) "root reference"))
-       seen (atom #{}) ordered (atom []) descriptions (atom {})]
+       seen (atom #{}) ordered (atom []) descriptions (atom {}) word-sorts (atom {})]
   (letfn [(scalar-sort! [id]
            (let [[kind parts] (nth rows id)
-                 permitted (if (= :numeric mode)
-                            #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"]}
-                            #{["keyword" "bool"] ["keyword" "int"]})]
-            (require! (and (= "vector" kind) (= 1 (count parts))
-                           (contains? permitted (nth rows (first parts))))
-                      "sort is outside the bounded scalar profile")))
+                 numeric? (contains? #{:numeric :numeric-word} mode)
+                 permitted (if numeric? #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"]}
+                                        #{["keyword" "bool"] ["keyword" "int"]})
+                 scalar? (and (= "vector" kind) (= 1 (count parts))
+                              (contains? permitted (nth rows (first parts))))
+                 word? (and (= :numeric-word mode) (= "vector" kind) (= 2 (count parts))
+                            (= ["keyword" "bv"] (nth rows (first parts)))
+                 width-row (when word? (nth rows (second parts)))]
+            (require! (or scalar? (and word? (= "int" (first width-row)) (<= 1 (second width-row) 4096)))
+                      "sort is outside the bounded scalar profile")
+            (when word? (swap! word-sorts assoc id (second width-row)))))
           (declarations! [record]
            ;; An unused binder has no :bound expression node. Its declared
            ;; sort still belongs to the profile, before any constructor runs.
@@ -106,7 +144,10 @@
         decoded (graph/decode-nodes! data selected)
         values (into {} (mapv (fn [i] [(nth selected i) (nth decoded i)]) (range (count selected))))
         nodes (atom {}) variables (atom {}) depths (atom {})
-        admission (when resource-settings (rational-admission order records values resource-settings))]
+        admission (when resource-settings
+                    (if (= :numeric-word mode)
+                     (word-numeric-admission order records values @word-sorts resource-settings)
+                     (rational-admission order records values resource-settings)))]
    (if (= :incomplete (:status admission))
     {:formal/term-forest-refusal 1 :profile profile :data-reference (:reference checked)
      :source-roots roots :admission admission
@@ -179,3 +220,17 @@
                  :admission-work-units (get overrides :admission-work-units 1073741824)}]
   (require! (and (int? (:admission-work-units settings)) (>= (:admission-work-units settings) 0)) "nonnegative admission allowance required")
   (prepare-profile data roots :numeric settings)))
+
+(defn prepare-numeric-word
+ "Fresh Bool/Int/Real/word admission. All sorts and unused declarations retain
+  the fixed 1..4096 word grammar. Reserve combined literal work before any
+  constructor; resource refusal cannot authorize a partial typed forest."
+ [data roots overrides]
+ (require! (and (map? overrides) (every? #{:rational :word :admission-work-units} (keys overrides)))
+           "known numeric-word admission settings required")
+ (let [settings {:rational (rational/limits (get overrides :rational {}))
+                 :word (word/limits (get overrides :word {}))
+                 :admission-work-units (get overrides :admission-work-units 1073741824)}]
+  (require! (and (int? (:admission-work-units settings)) (>= (:admission-work-units settings) 0))
+            "nonnegative admission allowance required")
+  (prepare-profile data roots :numeric-word settings)))
