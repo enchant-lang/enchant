@@ -25,7 +25,7 @@ tool = read(P / 'metatheory/tool-pin.json')
 lean = Path(tool['path']) / 'bin/lean'
 assert sha(lean) == tool['binary_sha256']
 assert subprocess.check_output(['nix', 'hash', 'path', tool['path']], text=True).strip() == tool['narHash']
-sources = [P / 'metatheory/WordEnvelope.lean', *sorted((P / 'metatheory/word-envelope-controls').glob('*.lean'))]
+sources = [P / 'metatheory/WordEnvelope.lean', P / 'metatheory/WordEnvelopeDependencies.lean', *sorted((P / 'metatheory/word-envelope-controls').glob('*.lean'))]
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 digests = {}
 for path in [*sources, Path(__file__), P / 'metatheory/tool-pin.json']:
@@ -39,6 +39,11 @@ write('source-pin.json', {'code_commit': commit, 'source_sha256': digests})
 expected = {'FormalWordEnvelope.' + name: set() for name in
             ['capacity_positive', 'wrapped_value_bound', 'addition_temporary_bound',
              'multiplication_temporary_bound', 'zero_width_refused', 'wrapped_result_does_not_bound_temporary']}
+expected['FormalWordEnvelope.multiplication_temporary_bound'] = {'propext'}
+dependencies = {name: set() for name in ['FormalWordEnvelope.capacity', 'FormalWordEnvelope.wrap',
+                'FormalWordEnvelope.admittedWidth', 'Nat.pow_add', 'Nat.mul_le_mul_left',
+                'Nat.mul_lt_mul_of_pos_right', 'Nat.lt_of_le_of_lt', 'Nat.mod_lt', 'Nat.two_pow_pos']}
+dependencies['Nat.pow_add'] = {'propext'}
 checks = []
 for index, source in enumerate(sources):
     output = E / (source.stem + '.olean')
@@ -56,27 +61,30 @@ for index, source in enumerate(sources):
                                        'elapsed_seconds': time.monotonic() - started})
     text = log.read_text()
     audits = []
-    accepted = index == 0
+    dependency_audit = source.stem == 'WordEnvelopeDependencies'
+    accepted = index == 0 or dependency_audit
     if accepted:
         assert code == 0 and output.exists() and 'error:' not in text, text[-4000:]
         reports = re.findall(r"'([^']+)' (?:depends on axioms: \[([^]]*)\]|does not depend on any axioms)", text)
-        assert len(reports) == 6 and {name for name, _ in reports} == set(expected), reports
+        ledger = dependencies if dependency_audit else expected
+        assert len(reports) == len(ledger) and {name for name, _ in reports} == set(ledger), reports
         for name, raw in reports:
             axioms = re.findall(r'[\w.]+', raw)
-            assert set(axioms) == expected[name], (name, axioms)
+            assert set(axioms) == ledger[name], (name, axioms)
             audits.append({'theorem': name, 'axioms': axioms})
     else:
         assert code != 0 and not output.exists() and text.count('error:') == 1
         assert 'decide' in text and 'false' in text, text[-2000:]
     checks.append({'source': str(source.relative_to(R)), 'source_sha256': sha(source), 'accepted': accepted,
-                   'exit_code': code, 'log_sha256': sha(log), 'olean_sha256': sha(output) if output.exists() else None,
+                   'dependency_audit': dependency_audit, 'exit_code': code, 'log_sha256': sha(log), 'olean_sha256': sha(output) if output.exists() else None,
                    'axiom_audits': audits})
     print(json.dumps({'stage': source.stem, 'status': 'accepted' if accepted else 'refused-as-required'}), flush=True)
 assert all(sha(R / name) == digest for name, digest in digests.items())
 write('qualification.json', {'schema': 'bl.word-envelope-model-qualification.v1', 'status': 'passed',
       'recorded_utc': datetime.now(timezone.utc).isoformat(), 'tool_pin': tool, 'source_pin': read(E / 'source-pin.json'),
-      'checks': checks, 'theorems': 6, 'false_claim_controls': 2,
+      'checks': checks, 'theorems': 6, 'dependency_audits': 9, 'false_claim_controls': 2,
       'declared_axiom_ledger': {name: sorted(values) for name, values in expected.items()},
+      'declared_dependency_ledger': {name: sorted(values) for name, values in dependencies.items()},
       'compiler_proof_authority': False,
       'scope': 'Mathematical modular result and intermediate arithmetic magnitude bounds, plus explicit positive-width admission. No BL bit-vector implementation, allocation/work-cost, compiler or native solver correspondence theorem.'})
 print(json.dumps({'status': 'passed', 'theorems': 6, 'false_claim_controls': 2}))
