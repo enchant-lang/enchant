@@ -175,3 +175,39 @@
    (is (nil? (:execution r)))
    (is (= :not-checked (get-in r [:certificate :status])))
    (is (= false (:compiler-proof-authority r))))))
+
+(deftest both-native-real-models-enter-the-metered-coordinate-boundary
+ (let [a (t/variable "managed.real.a" t/Real) b (t/variable "managed.real.b" t/Real)
+       original (qg/prepare (q/sat {:assumptions [(t/eq a (t/real 1 3)) (t/eq b (t/real 2 5))]
+                                    :observe {"product" (t/mul a b)}}))]
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session (assoc options :backend engine)
+    (fn [session]
+     (let [r (backend/graph-question! session original {})]
+      (is (= :sat (:verdict r)) (pr-str r))
+      (is (= :valid (get-in r [:validation :status])))
+      (is (= (evaluator/real 1 3) (get-in r [:assignments "managed.real.a"])))
+      (is (= (evaluator/real 2 5) (get-in r [:assignments "managed.real.b"])))
+      (is (= (evaluator/real 2 15) (get-in r [:observations "product" :roots 0 :value])))
+      (is (= [:valid :valid] (mapv :status (get-in r [:validation :bindings :rows]))))
+      (is (= :shared-scope (:admission-account r)))))))))
+
+(deftest canonical-coordinate-policy-is-distinct-from-the-legacy-wire-normalizer
+ (let [a (t/variable "managed.real.a" t/Real)
+       original (qg/prepare (q/sat {:assumptions [(t/eq a (t/real 1 2))]}))
+       snapshot {:generation 0 :revision 0 :assertions [] :identity {:backend :fixture}
+                 :solver-ms 500 :hard-ms 2000}
+       replay (fn [wire]
+                (execution/execute original snapshot {}
+                 (fn [_forest _assertions _watched]
+                  {:ok true :status :sat :model-status :available
+                   :observations [["var/managed.real.a" wire]] :core [] :core-kind :unsupported :stats {}})))
+       noncanonical (replay ["real" 2 4]) canonical (replay ["real" 1 2])]
+  ;; The preview profile admits canonical mathematical coordinates. A malformed
+  ;; encoding does not establish that a backend's mathematical SAT claim is false.
+  (is (= (evaluator/real 1 2) (backend/decode-native ["real" 2 4])))
+  (is (= :invalid-model (:verdict noncanonical)))
+  (is (= :invalid (get-in noncanonical [:validation :bindings :status])))
+  (is (= :value-sort-mismatch (get-in noncanonical [:validation :bindings :rows 0 :reason :reason])))
+  (is (= :sat (:verdict canonical)))
+  (is (nil? (:execution noncanonical)))))
