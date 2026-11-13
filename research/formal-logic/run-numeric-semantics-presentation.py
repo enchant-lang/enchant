@@ -34,6 +34,8 @@ integration = read(I / 'qualification.json')
 assert integration['status'] == 'passed' and integration['sdk_pin'] == code['baseline_sdk_pin']
 model = read(P / 'evidence/floor-modulus-model/qualification.json')
 assert model['status'] == 'passed' and model['universal_and_example_theorems'] == 10
+compatibility = read(C / 'previous-readers-qualification.json')
+assert compatibility['status'] == 'passed' and compatibility['sdk_pin'] == pin
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
 kit = read(K)
 for name, digest in kit['rendering_source_sha256'].items():
@@ -42,7 +44,8 @@ commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True)
 sources = [*(P / 'src').rglob('*.bl'), P / 'ATLAS.bl.org', P / 'sdk-pin.json', Path(__file__),
            P / 'dossier-inputs-check.bl', P / 'numeric-semantics-browser.mjs', P / 'story-audit.mjs',
            P / 'browser-driver.mjs', K, E / 'kit-working-css.patch', P / 'NUMERIC-IMPLEMENTATION.md', P / 'SEMANTICS.md', P / 'FLOOR-MODULUS-MODEL.md',
-           P / 'evidence/floor-modulus-model/qualification.json', C / 'qualification.json', I / 'qualification.json']
+           P / 'evidence/floor-modulus-model/qualification.json', C / 'qualification.json',
+           C / 'previous-readers-qualification.json', C / 'promotion.json', I / 'qualification.json']
 digests = {}
 for source in sorted(sources):
     name = str(source.relative_to(R))

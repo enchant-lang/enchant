@@ -52,6 +52,14 @@ for check in model['checks']:
     assert sha(directory / (stem + '-checks.txt')) == check['log_sha256']
     if check['accepted']:
         assert sha(directory / (stem + '.olean')) == check['olean_sha256']
+compatibility = read(E / 'previous-readers-qualification.json')
+assert compatibility['status'] == 'passed' and compatibility['sdk_pin'] == pin
+assert compatibility['recorded_producer_sdk_pin'] == before
+assert compatibility['native_exchanges'] == compatibility['managed_query_calls'] == 0
+for name, digest in compatibility['artifact_sha256'].items():
+    assert sha(E / 'previous-readers' / name) == digest
+for name, digest in compatibility['source_pin']['source_sha256'].items():
+    assert sha(R / name) == digest
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 recipe = str(Path(__file__).relative_to(R))
 assert subprocess.check_output(['git', 'show', commit + ':' + recipe], cwd=R) == Path(__file__).read_bytes()
@@ -60,6 +68,7 @@ promotion = {'schema': 'bl.numeric-sdk-selection.v1', 'status': 'selected',
              'recorded_utc': datetime.now(timezone.utc).isoformat(), 'previous_sdk_pin': before,
              'sdk_pin': pin, 'qualification_sha256': sha(E / 'qualification.json'),
              'mathematical_model_qualification_sha256': sha(P / 'evidence/floor-modulus-model/qualification.json'),
+             'previous_records_qualification_sha256': sha(E / 'previous-readers-qualification.json'),
              'recipe': {'code_commit': commit, 'path': recipe, 'sha256': sha(Path(__file__))},
              'presentation_refresh': 'pending-actual-cell-execution-and-browser-qualification',
              'compiler_proof_authority': False}
