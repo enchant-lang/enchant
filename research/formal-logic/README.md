@@ -32,8 +32,8 @@ saved native labels never grant proof authority.
 
 The live [request chapter](https://work.tailcb5318.ts.net:18100/#one-portable-request-either-backend)
 shows actual Z3/OxiZ execution, a supplied point, a changed point and a reopened
-packet. All 90 dossier cells reproduce their saved results; 89 run freshly and
-one preserves an explicitly frozen historical Float observation. The current
+packet. The preceding qualified presentation has 90 cells: 89 ran freshly and
+one preserves an explicitly frozen historical Float observation. Its
 kit, host SDK, 84 focused browser checks, 1,601 full browser checks and inspected
 phone/desktop frames are bound by
 [the retained-request presentation receipt](evidence/retained-request-presentation/dossier-qualification.json).
@@ -46,7 +46,7 @@ profiles, collection key semantics and stronger Source/compiler connections
 remain work to implement and qualify.
 
 The [numeric repair batch](NUMERIC-IMPLEMENTATION.md) is qualified and
-inherited by the selected retained-request SDK. It repairs exact generic equality across Decimal scales on BEAM and
+inherited by the selected word SDK. It repairs exact generic equality across Decimal scales on BEAM and
 JS, adds explicit representation equality and the named compiled JS Decimal
 API, and corrects negative-divisor modulus lowering. Its 12,151 BEAM assertions,
 40 JS tests, 900-pair observations on three real routes and 1,051 compiled
@@ -61,22 +61,23 @@ remains separate. The live numeric chapter now shows its actual equality,
 scale, Float, raw-key and modulus results alongside the source-backed measured
 JavaScript discrepancy chart.
 
-The [retained-request SDK](RETAINED-REQUEST-IMPLEMENTATION.md) is now
-qualified and selected after 9,528 BEAM assertions, source preflight and fresh
+The preceding [retained-request SDK](RETAINED-REQUEST-IMPLEMENTATION.md) was
+qualified after 9,528 BEAM assertions, source preflight and fresh
 saved-record checks. Two SDK-only processes reopen twelve
 new packets and durable rows with zero formal exchanges, and two more reopen
 the exact prior 187-record corpus and 52 points each. Its full 187-question
 paired-native audit passes with unchanged outcomes.
 The live [retained-question chapter](https://work.tailcb5318.ts.net:18100/#keep-every-assumption-with-the-question)
-now runs on that selected SDK, with actual results for both backends and a
-qualified 90-cell presentation.
+has actual results for both backends and a separately qualified 90-cell
+presentation. That receipt retains its original SDK identity.
 
-The next word profile has separate checked groundwork: a [project resource and
+The word profile has separate checked groundwork: a [project resource and
 coordinate prototype](WORD-RESOURCE-PROTOTYPE.md) passed 3,526 assertions, and a
 [mathematical envelope model](WORD-ENVELOPE-MODEL.md) passed six theorem and nine
-dependency audits plus two false-claim controls. These do not yet extend the
-managed request profile. The [integration plan](WORD-PROFILE-PLAN.md) keeps
-policy dispatch and point resource ownership shared across both backends.
+dependency audits plus two false-claim controls. The [integration](WORD-INTEGRATION.md)
+now extends managed requests with Boolean and bounded word graphs while sharing
+policy dispatch and point resource ownership across both backends. The envelope
+theorems remain mathematical models rather than an implementation proof.
 
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
@@ -647,10 +648,13 @@ constraints, Datom invariants and actor protocol simulations. Each can reuse
 the term/value/query/evidence architecture while retaining its own semantic
 and operational boundaries.
 
-The [coherent word-policy integration](WORD-INTEGRATION.md) has a built immutable
-candidate and is running its SDK gates. Its shared policy dispatcher and indexed
-record access are pending selection; the retained-request SDK remains selected.
-The full formal/total-language goal remains active.
+The [coherent word-policy integration](WORD-INTEGRATION.md) is qualified and
+selected: 10,922 BEAM assertion executions, 599 namespace preflight checks,
+unchanged outcomes for 187 paired native questions, and two fresh readers of
+twelve new packets and indexed durable rows with zero solver exchanges. The
+91-cell dossier writer has passed; independent repetition, host activation
+and browser qualification are still in progress. The full formal/total-language
+goal remains active.
 
 Two next slices are prepared as isolated source, with functional qualification
 queued behind the current word SDK: [finite word proof checking](WORD-EXHAUSTION-PROTOTYPE.md),
