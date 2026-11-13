@@ -1,0 +1,87 @@
+--- a/priv/lib/system/smt.bl
++++ b/priv/lib/system/smt.bl
+@@ -114,7 +114,7 @@
+    [:erlang :>] '> [:erlang :<] '< [:erlang :>=] '>= [:erlang :=<] '<=
+    [:erlang :==] '= [:erlang :=:=] '=
+    [rt :not_] 'not
+-   [rt :eqv] '= [:Elixir.BeamLisp.Ns.Core :mod] 'mod})
++   [rt :eqv] '=})
+ 
+ ; truncated division from z3's Euclidean div/mod (see the quot/rem note below).
+ (defn- smt-quot [a b]
+@@ -123,6 +123,14 @@
+               (list 'ite (list '> b 0) 1 (list '- 1)) 0)))
+ (defn- smt-rem [a b]
+   (list '- a (list '* b (smt-quot a b))))
++
++; BL mod is floor modulus: a nonzero result carries the DIVISOR's sign.
++; SMT Euclidean mod is nonnegative even for a negative divisor. This correction
++; is exact for b != 0. The legacy expression API does not encode the raised
++; zero-divisor outcome; callers still need their explicit domain obligation.
++(defn- smt-mod [a b]
++  (let [e (list 'mod a b)]
++    (list 'ite (list 'or (list '= e 0) (list '> b 0)) e (list '+ e b))))
+ 
+ ; ── quot / rem: TRUNCATED division from z3's EUCLIDEAN div/mod ──────────────
+ ;
+@@ -388,6 +396,10 @@
+           (if (untranslatable? ts) :untranslatable
+             (let [a (first ts) b (second ts) cmp (if (= fun :max) '>= '<=)]
+               (list 'ite (list cmp a b) a b))))
++      ; Exact resolved Core mod, preserving the divisor-sign convention.
++      (and (= key [:Elixir.BeamLisp.Ns.Core :mod]) (= 2 (count args)))
++        (let [ts (t-args ctx args)]
++          (if (untranslatable? ts) :untranslatable (smt-mod (first ts) (second ts))))
+       ; quot (Core) / rem (erlang)
+       (and (= fun :quot) (= 2 (count args)))
+         (let [ts (t-args ctx args)]
+--- /dev/null
++++ b/test/bl/system/smt_mod_test.bl
+@@ -0,0 +1,47 @@
++; Legacy expression lowering, qualified only on the explicit nonzero domain.
++; Native UNSAT in this file is a solver claim, not a checked BL certificate.
++(ns system.smt-mod-test
++ (:require [system.smt :as smt] [smt :as smtlib] [z3] [oracle]))
++
++(defn- translated [source] (smt/of-source #{"a" "b"} source))
++(defn- declarations []
++ [(list 'declare-const 'a 'Int) (list 'declare-const 'b 'Int)])
++
++(deftest modulus-is-resolved-and-reconstructed
++ (let [m (translated "(mod a b)") qualified (translated "(core/mod a b)")]
++  (is (not= :untranslatable m))
++  (is (= m qualified))
++  (is (= "(ite (or (= (mod a b) 0) (> b 0)) (mod a b) (+ (mod a b) b))"
++         (smtlib/emit m)))))
++
++(deftest modulus-sign-cases-match-live-runtime-and-translated-expression
++ (let [port (z3/open) m (translated "(mod a b)")]
++  (doseq [[a b expected] [[7 3 1] [-7 3 2] [7 -3 -2] [-7 -3 -1]
++                         [6 -3 0] [-6 -3 0] [0 -3 0]]]
++   (is (= expected (mod a b)))
++   (is (oracle/proven?
++         (z3/check port
++           (into (declarations)
++             [(list 'assert (list '= 'a a)) (list 'assert (list '= 'b b))
++              (list 'assert (list 'not (list '= m expected)))])))))))
++
++(deftest reported-universal-nonzero-modulus-laws
++ (let [port (z3/open) m (translated "(mod a b)")
++       law (list 'and
++             (list '< (list 'abs m) (list 'abs 'b))
++             (list 'or (list '= m 0)
++               (list 'and (list '> 'b 0) (list '> m 0))
++               (list 'and (list '< 'b 0) (list '< m 0)))
++             (list '= (list 'mod (list '- 'a m) 'b) 0))]
++  (is (oracle/proven?
++        (z3/check port
++          (into (declarations)
++            [(list 'assert (list 'not (list '= 'b 0)))
++             (list 'assert (list 'not law))]))))))
++
++(deftest zero-divisor-is-a-runtime-failure-outside-the-law-domain
++ ;; A totalized SMT expression cannot establish preservation of this outcome.
++ (is (try (mod 7 0) false (catch _ true)))
++ (is (try (mod 0 0) false (catch _ true))))
++
++(run-tests)

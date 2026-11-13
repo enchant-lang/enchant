@@ -137,6 +137,15 @@ universal nonzero-divisor laws: `abs(m) < abs(b)`, nonzero `m` has the divisor's
 sign, and `a - m` is divisible by `b`. The proposed equality patch deliberately
 does not mix this separate translator repair into its diff.
 
+The [modulus companion patch](proposals/modulus-lowering.patch) now prepares
+that exact resolved-MFA correction, with compiler translation checks, all four
+operand-sign examples, exact-division zeros and the universal nonzero-divisor
+laws above. It is unapplied and its tests have not run. It preserves the
+existing quotient/remainder reconstruction. Its legacy expression API still
+requires a nonzero-divisor obligation; the patch does not model a raised
+zero-divisor outcome or grant a solver claim checked-certificate authority.
+The typed formal numeric interface keeps its explicit definedness term.
+
 ## Text and target qualification
 
 BL string count/indexing uses graphemes; SMT string length/indexing uses Unicode
