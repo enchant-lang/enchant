@@ -1,4 +1,5 @@
-(ns formal.backend (:require [formal.term :as t] [formal.evaluate :as ev] [bl.json :as json]))
+(ns formal.backend (:require [formal.term :as t] [formal.evaluate :as ev] [bl.json :as json]
+                            [formal.graph-execution :as graph-execution]))
 
 (def ^:private wire-atoms
  #{:ok :protocol :generation :backend :name :version :capabilities :operations :sorts :limits :pid
@@ -160,6 +161,92 @@
     (catch e
      (close! (:port state))
      (refuse (assoc state :retired true) :invalid (ex-message e))))))
+
+(defn- prepare-graph-owned [state forest roots]
+ ;; The forest comes directly from this owner turn's SDK admission callback.
+ ;; Neither this registry nor a caller-supplied forest is a request argument.
+ (let [definitions (into {} (map (fn [row] [(first row) row]) (:nodes forest)))
+       wanted (loop [pending (vec roots) seen #{}]
+                (if (empty? pending) seen
+                 (let [id (peek pending) tail (pop pending)]
+                  (when-not (contains? definitions id)
+                   (throw (ex-info "formal graph import: missing admitted node" {})))
+                  (if (contains? seen id) (recur tail seen)
+                   (recur (into tail (nth (get definitions id) 3)) (conj seen id))))))
+       registry (atom (:registry state)) translated (atom {}) added (atom [])]
+  (doseq [[id op sort children datum] (:nodes forest)]
+   (when (contains? wanted id)
+    (let [arguments (mapv #(get @translated %) children)
+          _ (when-not (every? int? arguments)
+              (throw (ex-info "formal graph import: admitted topological order required" {})))
+          key (erlang/term_to_binary (native-data [op sort arguments datum])
+                                    (list :deterministic (tuple :minor_version 2)))
+          known (get (get @registry :graph-ids {}) key)]
+     (if (some? known) (swap! translated assoc id known)
+      (let [native-id (:next @registry) definition [native-id op sort arguments datum]]
+       ;; Legacy t/export preserves these extra fields and advances this same
+       ;; next counter. Two import paths never own independent ID allocators.
+       (swap! registry (fn [r] (-> r (update :next inc)
+                                  (assoc-in [:graph-ids key] native-id)
+                                  (assoc-in [:definitions native-id] definition))))
+       (swap! translated assoc id native-id) (swap! added conj definition))))))
+  {:registry @registry :nodes @added :ids @translated}))
+
+(defn- refuse-graph [state kind message]
+ (update (refuse state kind message) :result merge
+  {:formal/managed-graph-reply 1 :reply-profile graph-execution/profile
+   :solver-status :not-run :verdict :error :phase :admission :binding :not-established
+   :native-scope-attempts 0 :identity (:identity state) :trusted false :compiler-proof-authority false
+   :certificate {:status :not-checked :kind :managed-graph-refusal}
+   :execution {:scope :managed-native-owner :status :not-invoked}}))
+
+(defn- managed-graph-exchange [state payload]
+ (cond
+  (:retired state) (refuse-graph state :retired "formal graph context retired")
+  (not (:portable state))
+   (refuse-graph state :context-unavailable "formal native context is not portable after raw transport; reset required")
+  (not (and (map? payload) (= #{:question :settings :context} (set (keys payload)))))
+   (refuse-graph state :invalid "closed managed graph payload required")
+  (not (same-context? state (:context payload)))
+   (refuse-graph state :context-changed "formal native question context changed before graph admission")
+  :else
+   (let [owned (atom state)]
+    (try
+     (let [configuration (graph-execution/settings (:settings payload))
+           deadline (+ (erlang/monotonic_time :millisecond) (:owner-ms configuration))
+           check! (fn []
+                    (when (> (+ (erlang/monotonic_time :millisecond) (:hard-ms @owned)) deadline)
+                     (throw (ex-info "formal graph owner deadline cannot admit another native exchange"
+                                     {:kind :owner-deadline :phase :native-exchange}))))
+           snapshot (select-keys state [:assertions :generation :revision :identity :solver-ms :hard-ms])
+           result
+           (graph-execution/execute (:question payload) snapshot configuration
+            (fn [forest assertions observations]
+             (when (:retired @owned)
+              (throw (ex-info "formal graph context retired" {:kind :retired})))
+             (check!)
+             (let [roots (vec (concat (map :term assertions) (map second observations)))
+                   prepared (prepare-graph-owned @owned forest roots)
+                   assertion-rows (mapv (fn [a] [(:label a) (get (:ids prepared) (:term a))]) assertions)
+                   observation-rows (mapv (fn [[label id]] [label (get (:ids prepared) id)]) observations)
+                   request (tuple :scope (:generation @owned) (native-data (:nodes prepared))
+                                  (native-data assertion-rows) (list) (native-data observation-rows) (:solver-ms @owned))]
+              ;; Import preparation may spend time; check the outer budget
+              ;; again before sending, retaining the existing worker deadline.
+              (check!)
+              (let [exchanged (exchange-owned @owned request) reply (:result exchanged)
+                    after (cond-> (:state exchanged) (:ok reply) (assoc :registry (:registry prepared)))]
+               (reset! owned after)
+               (assoc reply :graph-imported (count (:nodes prepared)))))))
+           _ (when (= :owner-deadline (get-in result [:why :kind]))
+               (close! (:port @owned)) (swap! owned assoc :retired true))]
+      {:state @owned :result (assoc result :owned-context (owner-context @owned)
+                                          :execution {:scope :managed-native-owner :status :returned})})
+     (catch error
+      ;; An invalid original graph/settings request has not acquired a native
+      ;; scope. Preserve the actual state, including any already retired port.
+      (refuse-graph @owned :invalid (ex-message error)))))))
+
 (defn- handle-owned [state request]
  (cond
   (= request :hello) {:state state :result (:hello state)}
@@ -167,6 +254,8 @@
    ;; A completed refusal can retire a worker without changing its question.
    ;; Matching this token grants no ability to execute in a retired context.
    {:state state :result {:ok true :matches (and (:portable state) (same-context? state (second request)))}}
+  (and (vector? request) (= :managed-graph (first request)) (= 2 (count request)))
+   (managed-graph-exchange state (second request))
   (:retired state) (refuse state :retired "formal context retired")
   (= request :context)
    (if (:portable state) {:state state :result {:ok true :context (owner-context state)}}
@@ -197,6 +286,7 @@
         (throw (ex-info "formal protocol handshake refused" {:reply hello})))
        (ok {:port port :borrower (:borrower config) :monitor monitor :hello hello
             :backend (:backend config) :generation 0 :revision 0 :registry (t/registry) :assertions [] :portable true
+            :identity (:identity config)
             :solver-ms (:solver-ms config) :hard-ms (:hard-ms config) :retired false}))
       (catch error (close! port) (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__))))
     (catch error (Process/demonitor monitor (list :flush))
@@ -297,7 +387,7 @@
                   :sdk (System/get_env "BL_SDK_PRODUCT")}
         state (atom {:generation 0 :revision 0 :assertions [] :portable true :retired false})
         pid (start native-owner {:backend backend :worker (Path/expand worker) :library library
-                                 :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms})]
+                                 :borrower (erlang/self) :solver-ms solver-ms :hard-ms hard-ms :identity identity})]
    ;; Everything after a successful start, including session setup, is owned
    ;; by the same cleanup bracket as the user callback.
    (try
@@ -338,6 +428,32 @@
   (dissoc reply :owned-context)))
 (defn reset! [session] (managed-call session :reset {}))
 (defn load! [session assertions] (managed-call session :load {:assertions (vec assertions)}))
+
+(defn graph-question!
+ "Opt-in original numeric graph execution in the actual native owner. The
+  owner rechecks context/settings, composes its retained assumptions, admits the
+  original graph, translates owner-local IDs and replays SAT coordinates under
+  one SDK admission scope. This is an explicit managed-graph reply format;
+  legacy tree and version-2 graph reply APIs remain separate. Observations keep
+  their descriptor graphs and point roots; full value materialization is deferred.
+  The whole-operation budget does not increase the solver/worker deadlines."
+ ([session original options] (graph-question! session original options (context session)))
+ ([session original options expected]
+  (when-not (and (= (:borrower session) (erlang/self)) (Process/alive? (:pid session)))
+   (throw (ex-info "formal backend: a live owned graph context is required" {})))
+  (let [configuration (graph-execution/settings options)]
+   (try
+    (let [reply (call (:pid session) [:managed-graph {:question original :settings configuration :context expected}]
+                      (+ 1000 (:owner-ms configuration)))]
+     (when (:owned-context reply)
+      (swap! (:state session) (fn [_] (dissoc (:owned-context reply) :owner))))
+     (dissoc reply :owned-context))
+    (catch error
+     ;; A caller that stops waiting cannot leave an owner working on an
+     ;; abandoned graph operation, or later accept a reply from that operation.
+     (stop-owner! (:pid session))
+     (throw (ex-info (str "formal graph owner call failed: " (ex-message error))
+                     {:kind :owner-call-failed :native-state :not-established})))))))
 
 (defn decode-native [wire]
  (if-not (and (vector? wire) (seq wire)) (ev/unavailable :malformed-observation)

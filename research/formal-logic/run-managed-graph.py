@@ -27,7 +27,7 @@ elif stage == 'sdk-preflight-controls':
     names += ['scripts/sdk-preflight', 'scripts/sdk-preflight.bl', 'test/scripts/sdk_preflight.py']
     request = ['python3', str(R / names[-1]), '--sdk', pin['sdk']]
 elif stage == 'sdk-focused':
-    names += ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl']
+    names += ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl', 'test/bl/formal/managed_graph_test.bl']
     request = ['test', *[str(R / name) for name in names[1:]]]
     output = E / 'sdk-traces.json'
 elif stage in ('project-focused', 'adapter-integration'):
