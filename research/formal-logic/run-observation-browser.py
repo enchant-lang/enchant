@@ -23,6 +23,18 @@ pin = read(P / 'sdk-pin.json')
 assert pin == read(E / 'qualification.json')['sdk_pin'] == read(E / 'sdk-candidate.json')
 assert read(E / 'qualification.json')['status'] == 'passed'
 kit = read(E / 'kit-state.json')
+browser_tools = {}
+for name, executable in (('node', 'node'), ('chromium', 'chromium')):
+    path = Path('/home/othman/.nix-profile/bin') / executable
+    path = path.resolve(strict=True)
+    assert str(path).startswith('/nix/store/')
+    root = Path(*path.parts[:4])
+    retention = R / ('.bl/formal-dossier-' + name)
+    subprocess.run(['nix-store', '--add-root', retention, '--indirect', '--realise', root],
+                   check=True, stdout=subprocess.DEVNULL)
+    browser_tools[name] = {'executable': str(path), 'package': str(root),
+                          'nar_hash': subprocess.check_output(['nix-store', '--query', '--hash', root], text=True).strip()}
+write(E / 'browser-tools.json', browser_tools)
 for name, digest in kit['rendering_source_sha256'].items():
     assert sha(Path(kit['root']) / name) == digest
 names = {str(path.relative_to(R)) for path in (P / 'src').rglob('*.bl')}
@@ -74,7 +86,8 @@ for stage, script, ceiling in stages:
     command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
                '--working-directory=' + str(R), '--property=MemoryMax=2G', '--property=MemorySwapMax=0',
                '--property=RuntimeMaxSec=' + str(ceiling), '--property=KillMode=control-group',
-               '/home/othman/.nix-profile/bin/node', str(P / script), 'http://127.0.0.1:24089', str(E / (stage + '-browser'))]
+               '--setenv=FORMAL_BROWSER_EXECUTABLE=' + browser_tools['chromium']['executable'],
+               browser_tools['node']['executable'], str(P / script), 'http://127.0.0.1:24089', str(E / (stage + '-browser'))]
     (E / (stage + '-browser-exit.json')).unlink(missing_ok=True)
     write(E / (stage + '-browser-command.json'), command)
     (E / (stage + '-browser-memory-before.txt')).write_text(subprocess.check_output([R / 'scripts/bl-mem'], text=True))

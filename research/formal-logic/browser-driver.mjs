@@ -38,7 +38,7 @@ async function dispatch(message) {
     '--user-data-dir='+profile,'--disable-background-networking','--disable-extensions','--disable-sync',
     '--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--hide-scrollbars','about:blank'];
   if(process.getuid?.()===0)flags.unshift('--no-sandbox');
-  browser=spawn('/home/othman/.nix-profile/bin/chromium',flags,{detached:true,stdio:['ignore','ignore','ignore']});
+  browser=spawn(process.env.FORMAL_BROWSER_EXECUTABLE||'/home/othman/.nix-profile/bin/chromium',flags,{detached:true,stdio:['ignore','ignore','ignore']});
   let active;
   for(let i=0;i<150;i++){try{active=(await readFile(join(profile,'DevToolsActivePort'),'utf8')).trim().split('\n');break;}catch{await sleep(100);}}
   if(!active)throw Error('Chromium did not become ready');

@@ -7,7 +7,7 @@ const project=resolve('research/formal-logic');
 const base=process.argv[2]||'http://127.0.0.1:24089';
 const output=resolve(process.argv[3]||join(project,'evidence/observation-semantics/focused-browser'));
 await mkdir(output,{recursive:true});
-const helper=spawn('/home/othman/.nix-profile/bin/node',[join(project,'browser-driver.mjs'),output],{stdio:['pipe','pipe','inherit']});
+const helper=spawn(process.execPath,[join(project,'browser-driver.mjs'),output],{stdio:['pipe','pipe','inherit']});
 let buffer=Buffer.alloc(0),waiting=[];
 helper.stdout.on('data',chunk=>{buffer=Buffer.concat([buffer,chunk]);while(buffer.length>=4){const n=buffer.readUInt32BE(0);if(buffer.length<n+4)break;const value=JSON.parse(buffer.subarray(4,n+4).toString());buffer=buffer.subarray(4+n);const request=waiting.shift();clearTimeout(request.timer);value.ok?request.resolve(value.result):request.reject(Error(value.error));}});
 function call(message){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Browser helper deadline')),35000);waiting.push({resolve,reject,timer});const body=Buffer.from(JSON.stringify(message)),size=Buffer.alloc(4);size.writeUInt32BE(body.length);helper.stdin.write(Buffer.concat([size,body]));});}
