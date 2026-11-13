@@ -51,7 +51,8 @@ elif stage == 'managed':
 elif stage == 'regression':
     project = True
     old = read(P / 'evidence/managed-graph/regression-command.json')
-    files = old[old.index('test') + 1:]
+    files = [str(Path(name).relative_to(R)) if Path(name).is_absolute() else name
+             for name in old[old.index('test') + 1:]]
     assert len(files) == 31
 elif stage == 'native':
     project = True
