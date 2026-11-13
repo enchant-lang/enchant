@@ -1,24 +1,24 @@
 # One complete question, with an optional live owner
 
-The retained-request implementation is now in source. The selected numeric SDK
-is unchanged; the new source is being checked under explicit namespace
-projections before producing a coherent replacement SDK.
+The retained-request source batch has produced one immutable SDK candidate.
+The selected project SDK is still the qualified numeric predecessor while its
+last paired-native gate runs. The candidate has passed 9,528 BEAM assertions
+across the focused, legacy and project regression gates, plus source preflight
+for 597 namespaces and three negative preflight controls.
 
-The checked prototype boundaries are:
+Twelve actual saved request/answer packets and durable ledger rows reopen in
+two fresh SDK-only processes with formal exchanges and oracle methods denied.
+Those readers include retained version-3 and fresh/supplied version-2 answers,
+invalid points, recorded UNSAT claims, reset contexts and unfamiliar shared
+origin metadata. Twelve tamper controls pass. Two further fresh processes reopen
+the exact earlier 187-record corpus and 52 saved points each, with eleven prior
+refusal controls and zero formal exchanges. The producer and checker SDK pins
+remain explicit and different where required.
 
-- Graph composition: 54 assertions, including exact compatibility with both
-  preceding native owners and retained assumptions in point replay.
-- Integrated owner/composer: 278 assertions, including atomic configuration
-  reads, corrupted client mirrors and zero native exchanges for metadata reads.
-- Portable composition envelope: 22 controls for exact subject binding and
-  declared provenance.
-- Retained answers and existing fresh requests: 479 assertions, including
-  strict version-2 compatibility, version-3 point replay and refused tampering.
-
-The nested lease and facade checks are running separately. These numbers are
-overlapping prototype gates, not a total of unique tests or a replacement SDK
-qualification. Their exact source projections and base SDK identities are in
-the corresponding `evidence/retained-*/qualification.json` receipts.
+The earlier graph/owner/composition/answer/lease prototypes remain separately
+recorded. Their overlapping assertion counts are not added to this actual SDK
+qualification. Complete native outcome comparison, the final artifact audit,
+project selection and the live dossier refresh remain pending.
 
 ## The architectural pieces
 
@@ -94,9 +94,10 @@ the separately accounted pure replay.
 
 ## Remaining qualification
 
-Complete the actual lease checks, then exercise portable records and ledger
-payloads in fresh processes. Batch the source changes into one immutable SDK,
-qualify its runtime and native corpus, and reopen the prior version-2 records
-without native calls. Only then select the replacement SDK and refresh the live
-dossier with actual new language execution results. Compiler preservation and
-historical native-execution authentication remain separate obligations.
+Finish the running 187-question paired-native gate on this exact artifact,
+then audit all source, compiler-floor and reader bindings before selecting it.
+The seven changed packaged sources preserve all 141 qualified compiler-floor
+files and the existing numeric/JS implementation bytes. After selection, run
+the real Org writer, an independent unchanged check and the actual browser
+review before publishing a new dossier qualification. Wider theory profiles,
+compiler preservation and native-history authentication remain separate work.
