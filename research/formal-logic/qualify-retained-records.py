@@ -57,6 +57,9 @@ for result in (one, two, controls):
     assert result['checked-native-execution'] is False and result['compiler-proof-authority'] is False
 for result in (one, two):
     assert result['application-atoms-before'] == result['application-atoms-after']
+commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
+recipe = str(Path(__file__).relative_to(R))
+assert subprocess.check_output(['git', 'show', commit + ':' + recipe], cwd=R) == Path(__file__).read_bytes()
 owned = read(E / 'corpus-ledger.json')
 root, ledger = Path(owned['root']), Path(owned['path'])
 assert owned['sdk_pin'] == pin and root.parent == R / '.bl' and root.name.startswith('formal-retained-corpus-')
@@ -72,9 +75,6 @@ shutil.rmtree(root)
 retirement['retired'] = not root.exists()
 assert retirement['retired']
 retirement_path.write_text(json.dumps(retirement, indent=2) + '\n')
-commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
-recipe = str(Path(__file__).relative_to(R))
-assert subprocess.check_output(['git', 'show', commit + ':' + recipe], cwd=R) == Path(__file__).read_bytes()
 report = {'schema': 'bl.retained-request-records-qualification.v1', 'status': 'passed',
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': pin, 'records': 12,
           'retained_v3_records': 8, 'fresh_or_supplied_v2_records': 4, 'fresh_sdk_only_readers': 2,
