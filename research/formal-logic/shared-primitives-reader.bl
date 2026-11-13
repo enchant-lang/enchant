@@ -1,0 +1,50 @@
+(ns formal.shared-primitives-reader
+ (:require [formal.evaluate :as e] [formal.data-graph :as g] [oracle] [bl.json :as json]))
+
+(defn- require! [ok why] (when-not ok (throw (ex-info (str "shared SDK reader: " why) {}))))
+(defn- restore [wire]
+ (require! (and (map? wire) (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (= 1 (get wire "formal/data-graph")) (= "bl/public-data-graph-v1" (get wire "profile"))) "owned graph fixture header")
+ (let [graph {:formal/data-graph (get wire "formal/data-graph") :profile g/profile :root (get wire "root")
+              :nodes (mapv (fn [[kind payload]] [kind (if (= "float" kind) (Base/decode64! payload) payload)])
+                           (get wire "nodes"))}]
+  (g/check! graph) graph))
+(defn- reference= [actual recorded]
+ (and (= "bl/public-data-graph-v1" (get recorded "profile")) (= (:sha256 actual) (get recorded "sha256"))))
+(def input (json/decode (File/read! (first (BeamLisp/argv)))))
+(require! (= "enchant.formal.shared-sdk-point-fixtures.v1" (get input "schema")) "fixture schema")
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :sdk-reader-must-not-query))
+;; The reason is an authored compatibility coordinate, not an atom admitted
+;; from arbitrary graph history. It must already exist before materialization.
+(def coordinate-reason :sort-not-materialized)
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  (fn []
+   (mapv
+    (fn [item]
+     (let [data (restore (get item "graph")) roots (get item "source-roots")]
+      (require! (reference= (g/reference data) (get item "data-reference")) "original graph reference")
+      (let [points (mapv
+                    (fn [point]
+                     (let [bindings (g/decode! (restore (get point "assignments")))
+                           result (e/graph-values data roots bindings {})]
+                      (require! (reference= (g/reference (g/encode (:values result))) (get point "value-reference")) "fresh SDK value agreement")
+                      (require! (= :shared-sdk-primitive-rules (:semantics result)) "shared dispatcher")
+                      (require! (= false (:compiler-proof-authority result)) "no compiler proof authority")
+                      {:mode (get point "mode") :roots (count roots) :exact-values true
+                       :checking (:checking result) :resources (:resources result)})) (get item "points"))]
+       {:id (get item "id") :points points}))) (get input "rows")))))
+(def control (get input "transport-control"))
+(def control-graph (restore (get control "graph")))
+(require! (reference= (g/reference control-graph) (get control "data-reference")) "Float64 history identity")
+(def control-result (e/graph-values control-graph (get control "source-roots") {} {}))
+(require! (reference= (g/reference (g/encode (:values control-result))) (get control "expected")) "selected root beside Float64 history")
+(require! (= 187 (count rows)) "question count")
+(require! (= 0 @calls) "no managed query calls")
+(File/write! (second (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.shared-sdk-reader.v1" :process (System/pid) :cwd (File/cwd!)
+               :sdk-only true :research-import-path false :source-payload-execution false
+               :managed-query-calls @calls :rows rows :transport-float-history :identity-kept
+               :compiler-proof-authority false} {:pretty 2}))
+(println {:questions (count rows) :point-maps 748 :managed-query-calls @calls :sdk-only true :status :fresh-values-agree})
