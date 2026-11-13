@@ -1,4 +1,4 @@
-"""Qualify a declared one-module overlay; never label it a produced SDK."""
+"""Check explicit prototype imports/projections; never label them a produced SDK."""
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -45,7 +45,29 @@ write('source-pin.json', {'code_commit': commit, 'source_sha256': digests, 'base
 runtime = Path(tempfile.mkdtemp(prefix='formal-retained-question-'))
 imports = runtime / 'imports'
 (imports / 'formal').mkdir(parents=True)
-shutil.copyfile(module, imports / 'formal' / module.name)
+projection = {}
+if stage == 'composition':
+    shutil.copyfile(module, imports / 'formal' / module.name)
+else:
+    # Canonical SDK modules own declaration metadata. Test the exact new body
+    # under an isolated namespace until the coherent replacement SDK is built.
+    source_text = module.read_text()
+    old_name, new_name = '(ns formal.backend ', '(ns formal.prototype-backend '
+    assert source_text.count(old_name) == 1
+    source_text = source_text.replace(old_name, new_name, 1)
+    test_text = test.read_text()
+    old_import, new_import = '[formal.backend :as backend]', '[formal.prototype-backend :as backend]'
+    assert test_text.count(old_import) == 1
+    test_text = test_text.replace(old_import, new_import, 1)
+    (imports / 'formal/prototype-backend.bl').write_text(source_text)
+    projected_test = runtime / 'retained-configuration-test.bl'
+    projected_test.write_text(test_text)
+    (E / 'prototype-backend.bl').write_text(source_text)
+    (E / 'prototype-configuration-test.bl').write_text(test_text)
+    projection = {'source_replacement': [old_name, new_name], 'test_replacement': [old_import, new_import],
+                  'source_sha256': sha(imports / 'formal/prototype-backend.bl'), 'test_sha256': sha(projected_test)}
+    test = projected_test
+write('projection.json', projection)
 xdg = runtime / 'xdg'
 xdg.mkdir(mode=0o700)
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe', '--expand-environment=no',
@@ -72,10 +94,11 @@ write('qualification.json', {
     'schema': 'bl.retained-question-prototype-qualification.v1', 'status': 'passed',
     'recorded_utc': datetime.now(timezone.utc).isoformat(), 'source_pin': read(E / 'source-pin.json'),
     'stage': stage,
+    'projection': projection,
     'command_sha256': sha(E / 'command.json'), 'log_sha256': sha(E / 'checks.txt'),
     'exit': read(E / 'exit.json'), 'base_sdk_pin': pin, 'sdk_produced': False,
     'compiler_proof_authority': False,
     'scope': ('Explicit one-module prototype overlay, pure graph composition and complete point meaning; compatibility against the unchanged selected SDK owner on both native backends.'
-              if stage == 'composition' else 'Explicit one-module backend overlay, actual owner configuration reads, corrupted mirror controls and observed zero native exchanges for metadata reads.')
+              if stage == 'composition' else 'Explicit namespaced source projection alongside the selected SDK, actual owner configuration reads, corrupted mirror controls and observed zero native exchanges for metadata reads. The canonical SDK declaration remains unchanged.')
              + ' This is not integrated retained-request execution or a qualified replacement SDK.'})
 print(json.dumps({'status': 'passed', 'sdk_produced': False}))
