@@ -28,6 +28,20 @@ steps += [(stage, ['run-managed-graph.py', stage]) for stage in (
     'request-ledger-reader-two', 'request-ledger-controls')]
 steps += [('qualification', ['qualify-managed-graph.py'])]
 completed = []
+if len(sys.argv) > 1:
+    resume = sys.argv[1]
+    previous = json.loads((E / 'batch-state.json').read_text())
+    assert previous['status'] == 'failed' and previous['stage'] == resume
+    pin = json.loads((E / 'sdk-candidate.json').read_text())
+    assert hashlib.sha256((Path(pin['sdk']) / 'artifact.json').read_bytes()).hexdigest() == pin['descriptor_sha256']
+    link = json.loads((E / 'build-linkage.json').read_text())
+    assert link['sdk_pin'] == pin
+    for name, digest in link['runtime_source_sha256'].items():
+        assert hashlib.sha256((R / name).read_bytes()).hexdigest() == digest, name
+    position = [name for name, _ in steps].index(resume)
+    assert position >= 3, 'Resume after an immutable SDK exists; preserve earlier source/build failures separately.'
+    completed = previous['completed']
+    steps = steps[position:]
 for stage, arguments in steps:
     command = [sys.executable, str(P / arguments[0]), *arguments[1:]]
     state = {'schema': 'enchant.formal.managed-batch.v1', 'stage': stage, 'status': 'running',
