@@ -1,0 +1,192 @@
+(ns formal.prototype-request-answer
+ (:require [formal.request :as request] [formal.request-point :as point]
+           [formal.graph-question :as question] [formal.graph-execution :as execution]
+           [formal.data-graph :as graph] [formal.coordinates :as coordinates] [formal.question-graph :as qg]
+           [formal.retained-composition :as retained]))
+
+(def profile :bl/formal-request-answer-preview-v2)
+(def result-profile :bl/formal-request-result-preview-v2)
+(def retained-profile :bl/formal-request-answer-retained-preview-v3)
+(def retained-result-profile :bl/formal-request-result-retained-preview-v3)
+(def ^:private certificate {:status :not-checked :kind :request-answer})
+(def ^:private fields #{:formal/request-answer :profile :request-reference :subject-reference
+                       :source :point-present :point-graph :trusted :compiler-proof-authority :certificate})
+(def ^:private retained-fields (conj fields :composition))
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.request-answer: " reason) {:kind :request-answer}))))
+(defn- same? [left right] (= (graph/bytes (graph/encode left)) (graph/bytes (graph/encode right))))
+(defn- plain-map? [value]
+ (and (= :map (rt/kind-kind value)) (or (nil? (meta value)) (= {} (meta value)))))
+
+(defn- source!
+ ([fresh source] (source! fresh source {:generation 0 :revision 0}))
+ ([fresh source expected-context]
+ (require! (plain-map? source) "plain recorded source required")
+ (case (:kind source)
+  :supplied-point (require! (= #{:kind} (set (keys source))) "closed supplied-point source required")
+  :reported-native
+   (do
+    (require! (= #{:kind :status :phase :identity :native-limits :context-state :details-graph} (set (keys source)))
+              "closed reported-native source required")
+    (require! (contains? #{:sat :unsat :unknown :unsupported :error :not-run} (:status source)) "known reported status required")
+    (require! (contains? #{:query :assumption-consistency :admission :native-exchange :replay :execution} (:phase source))
+              "known reported phase required")
+    (require! (= (:backend (:adapter fresh)) (:backend (:identity source))) "recorded backend differs from request")
+    (require! (same? (select-keys (:adapter fresh) [:solver-ms :hard-ms]) (:native-limits source))
+              "recorded native limits differ from request")
+    (require! (same? expected-context (:context-state source))
+              (if (same? expected-context {:generation 0 :revision 0})
+                "fresh-owner profile required" "recorded retained context differs from declared composition"))
+    (require! (and (plain-map? (:identity source))
+                   (= #{:backend :worker-sha256 :library-sha256 :sdk} (set (keys (:identity source))))
+                   (string? (get-in source [:identity :worker-sha256]))
+                   (or (nil? (get-in source [:identity :library-sha256]))
+                       (string? (get-in source [:identity :library-sha256])))
+                   (or (nil? (get-in source [:identity :sdk])) (string? (get-in source [:identity :sdk]))))
+              "closed recorded artifact data required")
+    (graph/check! (:details-graph source))
+    (graph/encode source))
+  (throw (ex-info "formal.request-answer: unknown source kind" {})))
+ source))
+
+(defn- bind [original source present point-data]
+ (let [fresh (request/check! original)]
+  (source! fresh source)
+  (when present (coordinates/check! point-data))
+  (cond-> {:formal/request-answer 2 :profile profile :request-reference (request/reference fresh)
+           :subject-reference (request/subject-reference fresh) :source source :point-present present
+           :trusted false :compiler-proof-authority false :certificate certificate}
+   present (assoc :point-graph point-data))))
+
+(defn supply
+ "Propose coordinates without pretending that a native solver ran.
+  No verdict, validation result or proof flag is accepted."
+ [original assignments]
+ (require! (= :map (rt/kind-kind assignments)) "coordinate map required")
+ (bind original {:kind :supplied-point} true (graph/encode assignments)))
+
+(defn check!
+ "Check exact request binding and the closed evidence envelope only.
+  Artifact and native-status fields remain recorded claims."
+ [original response]
+ (let [fresh (request/check! original) present (:point-present response)
+       version (:formal/request-answer response) retained? (= 3 version)
+       allowed (if retained? retained-fields fields)]
+  (require! (and (plain-map? response) (int? (:formal/request-answer response))
+                 (contains? #{2 3} version) (= (if retained? retained-profile profile) (:profile response))
+                 (contains? #{true false} present)
+                 (= (if present allowed (disj allowed :point-graph)) (set (keys response)))
+                 (= false (:trusted response) (:compiler-proof-authority response))
+                 (same? certificate (:certificate response))) "closed unprivileged answer required")
+  (require! (same? (request/reference fresh) (:request-reference response)) "complete request reference differs")
+  (require! (same? (request/subject-reference fresh) (:subject-reference response)) "complete subject reference differs")
+  (if retained?
+   (let [composition (retained/require-subject! (:composition response) (:subject fresh))]
+    (require! (= :reported-native (get-in response [:source :kind])) "retained native answer source required")
+    (source! fresh (:source response) (select-keys composition [:generation :revision])))
+   (source! fresh (:source response)))
+  (when (= :supplied-point (get-in response [:source :kind]))
+   (require! present "a supplied point must contain its coordinates"))
+  (when present
+   (require! (or (= :supplied-point (get-in response [:source :kind]))
+                 (and (= :sat (get-in response [:source :status])) (= :query (get-in response [:source :phase]))))
+             "point evidence requires a supplied point or reported query SAT")
+   (coordinates/check! (:point-graph response)))
+  response))
+
+(defn- managed-data [fresh raw original-subject]
+ (let [subject (:subject fresh) ref (request/subject-reference fresh)
+       original-ref (graph/reference (:graph original-subject))
+       present (contains? raw :assignments)]
+  (require! (and (int? (:formal/managed-graph-reply raw)) (= 2 (:formal/managed-graph-reply raw))
+                 (= execution/profile (:reply-profile raw))
+                 (= false (:trusted raw) (:compiler-proof-authority raw))
+                 (= :not-checked (get-in raw [:certificate :status]))) "managed primitive reply required")
+  (require! (and (same? original-ref (:request-reference raw)) (same? ref (:question-reference raw)))
+            "primitive original/effective subject binding required")
+  (doseq [[context expected] [[(:request-graph raw) original-subject] [(:question-graph raw) subject]]]
+   (request/prepare context)
+   (require! (= (graph/bytes (:graph expected)) (graph/bytes (:graph context))) "primitive subject bytes differ"))
+  (require! (and (same? (:policy fresh) (:settings raw))
+                 (same? (graph/of (:policy fresh)) (:settings-reference raw))) "primitive policy differs")
+  (when present
+   (require! (= :run (:assertion-replay raw)) "primitive coordinates require completed replay invocation")
+   (graph/check! (:assignment-graph raw))
+   (require! (same? (graph/reference (:assignment-graph raw)) (:assignment-reference raw))
+             "primitive coordinate graph reference differs"))
+  {:source {:kind :reported-native :status (:solver-status raw) :phase (:phase raw)
+               :identity (select-keys (:identity raw) [:backend :worker-sha256 :library-sha256 :sdk])
+               :native-limits (:native-limits raw) :context-state (:context-state raw)
+               :details-graph (graph/encode
+                               (select-keys raw [:why :error :preflight :core :admission :admission-account
+                                                 :admission-reference :resources :checking :coordinate-profile
+                                                 :binding-reference :native-scope-attempts :nodes-imported]))}
+   :present present :point (when present (:assignment-graph raw))}))
+
+(defn from-managed
+ "Bind a fresh-owner primitive result under its strict version-2 contract.
+  Public callers record claims here; execution provenance is never established."
+ [original raw]
+ (let [fresh (request/check! original) data (managed-data fresh raw (:subject fresh))]
+  (bind fresh (:source data) (:present data) (:point data))))
+
+(defn from-retained
+ "Bind a retained primitive result to recomputed declared composition under
+  version 3. Recorded owner history and artifact labels remain untrusted data."
+ [original composition raw]
+ (let [fresh (request/check! original)
+       composition (retained/require-subject! composition (:subject fresh))
+       data (managed-data fresh raw (:caller composition))
+       response (cond-> {:formal/request-answer 3 :profile retained-profile
+                         :request-reference (request/reference fresh) :subject-reference (request/subject-reference fresh)
+                         :composition composition :source (:source data) :point-present (:present data)
+                         :trusted false :compiler-proof-authority false :certificate certificate}
+                  (:present data) (assoc :point-graph (:point data)))]
+  (check! fresh response)))
+
+(defn- admit-without-point [fresh]
+ (try
+  (question/with-numeric-keys (:subject fresh) (get-in fresh [:policy :limits])
+   (fn [inventory admitted]
+    (if (= 2 (:formal/question-forest-refusal inventory))
+     {:status :incomplete :admission (:admission inventory)}
+     {:status :complete :admission (:admission admitted)})))
+  (catch error
+   (if (= :term-forest (:kind (ex-data error)))
+    {:status :refused :why {:kind :profile-refusal :message (ex-message error)}}
+    (throw error)))))
+
+(defn recheck
+ "Reconstruct this answer's meaning using a fresh pure scope. No native
+  invocation is established by a record, even when all its labels match."
+ [original response]
+ (let [fresh (request/check! original) response (check! fresh response)
+       retained? (= 3 (:formal/request-answer response))
+       base {:formal/request-result (if retained? 3 2) :profile (if retained? retained-result-profile result-profile)
+             :request-reference (request/reference fresh)
+             :subject-reference (request/subject-reference fresh) :source (:source response)
+             :checked-native-execution false :compiler-proof-authority false :trusted false :certificate certificate}
+       base (if retained? (assoc base :composition (:composition response) :composition-connection :recomputed) base)]
+  (if (:point-present response)
+   (let [checked (point/replay-graph fresh (:point-graph response))]
+    (merge base {:interpretation :independent-point-replay :point-check checked
+                 :point-replay (:point-replay checked) :verdict (:verdict checked)}))
+   (let [admission (admit-without-point fresh) source (:source response)
+         status (:status source) phase (:phase source)
+         mode (qg/field-data! (:subject fresh) :mode)]
+    (merge base {:point-replay :not-run :subject-admission admission :interpretation :reported-native-status
+                 :verdict (cond (not= :complete (:status admission)) :not-run
+                                (and (= :unsat status) (contains? #{:query :assumption-consistency} phase)) :solver-claim
+                                (and (= :sat status) (= :query phase)) :candidate
+                                (= :unknown status) :unknown (= :unsupported status) :unsupported
+                                (= :not-run status) :not-run :else :error)}
+           (when (and (= :unsat status) (contains? #{:query :assumption-consistency} phase))
+            {:reported-verdict (if (= :assumption-consistency phase) :vacuous (if (= :prove mode) :proved :unsat))}))))))
+
+(defn restore
+ "Restore a bounded answer body. Application points and native diagnostics
+  remain nested graph data; only this closed SDK vocabulary is materialized.
+  Binding is checked here. Mathematical rechecking remains explicit."
+ [original body]
+ (graph/check! body)
+ (check! original (graph/decode! body)))
