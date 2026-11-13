@@ -1,0 +1,84 @@
+(ns formal.retained-question-check
+ (:require [formal.retained-question :as retained] [formal.data-graph :as g]
+           [formal.question-graph :as qg] [formal.query :as q] [formal.term :as t]
+           [formal.backend :as backend] [formal.request :as request] [formal.request-point :as point]))
+
+(def x (t/variable "retained.x" t/Int))
+(def caller (qg/prepare (q/sat {:assumptions [(t/le x (t/int 9))]})))
+(def assertion (q/assertion "seven" (t/eq x (t/int 7))))
+(defn same-bytes? [a b] (= (g/bytes a) (g/bytes b)))
+(defn field [data key]
+ (when-let [id (get (g/keyword-nodes data [key]) key)] (g/subgraph data id)))
+(defn items [data]
+ (mapv #(g/subgraph data %) (second (nth (:nodes data) (:root data)))))
+(defn apply-retained [data] (retained/compose caller data 3))
+
+(deftest complete-point-meaning-includes-retained-assumptions
+ (let [complete (apply-retained (g/encode [assertion])) r (request/prepare complete)]
+  (is (= :sat (:verdict (point/replay (request/prepare caller) {"retained.x" 8}))))
+  (is (= :invalid-point (:verdict (point/replay r {"retained.x" 8}))))
+  (is (= :sat (:verdict (point/replay r {"retained.x" 7}))))
+  (is (= ["context/0/seven"] (:assertions (qg/field-data! complete :context))))
+  (is (= 3 (:generation (qg/field-data! complete :context))))
+  (is (= 2 (count (:assertions (:view (qg/open! complete))))))
+  (is (same-bytes? (:graph caller) (:graph (apply-retained (g/encode [])))))
+  (is (thrown? (retained/compose caller (g/encode [assertion]) -1)))
+  (is (thrown? (retained/compose caller (g/encode [assertion]) 1.0)))))
+
+(deftest composition-matches-the-existing-owner-on-both-engines
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (doseq [domain [nil {:scope {:mode :bounded :limit 9} :profiles [:formal/retained-test]}]]
+     (is (:ok (backend/reset! session)))
+     (let [a (if domain (assoc assertion :origin {:formal/retained-domain domain :note "declared"}) assertion)]
+      (is (:ok (backend/load! session [a a])))
+      (let [snapshot (backend/context session)
+            expected (retained/compose caller (g/encode (:assertions snapshot)) (:generation snapshot))
+            actual (backend/graph-question! session caller {} snapshot)]
+       (is (= :sat (:solver-status actual)) (pr-str actual))
+       (is (same-bytes? (:graph expected) (:graph (:question-graph actual))))
+       (is (= ["context/0/seven" "context/1/seven"] (:assertions (qg/field-data! expected :context))))
+       (is (= :sat (:verdict (point/replay (request/prepare expected) {"retained.x" 7}))))))))))))
+
+(deftest unfamiliar-origin-keywords-and-shared-data-are-never-materialized
+ (let [unknown {:formal/data-graph 1 :profile g/profile :root 0
+                :nodes [["keyword" (str "retained.unknown." (System/unique_integer (list :positive)))]]}
+       shared (reduce (fn [data _] (g/assemble "vector" [data data])) unknown (range 17))
+       a (g/patch-map (g/encode assertion) [[(g/encode :origin) shared]])
+       data (g/assemble "vector" [a a])
+       _ (apply-retained data) before (erlang/system_info :atom_count)
+       result (apply-retained data) rows (items (qg/field-graph result :assertions))]
+  (is (= before (erlang/system_info :atom_count)))
+  (is (same-bytes? shared (field (first rows) :origin)))
+  (is (same-bytes? shared (field (second rows) :origin)))
+  (is (thrown? (qg/materialize! result)))
+  (is (< (count (:nodes (:graph result))) 150))
+  (is (> (:expanded-nodes (g/check! (:graph result))) 500000))
+  (is (= :sat (:verdict (point/replay (request/prepare result) {"retained.x" 7}))))))
+
+(deftest presence-and-duplicate-labels-remain-exact-data
+ (let [missing (dissoc assertion :origin)
+       left (apply-retained (g/encode [missing])) right (apply-retained (g/encode [assertion]))
+       l (first (items (qg/field-graph left :assumptions)))
+       r (first (items (qg/field-graph right :assumptions)))
+       nil-context (assoc caller :graph (g/patch-map (:graph caller) [[(g/encode :context) (g/encode nil)]]))
+       a (retained/compose caller (g/encode [assertion]) 0)
+       b (retained/compose nil-context (g/encode [assertion]) 0)]
+  (is (nil? (field l :origin)))
+  (is (some? (field r :origin)))
+  (is (not (same-bytes? (:graph left) (:graph right))))
+  (is (= false (:requested-context-present (qg/field-data! a :context))))
+  (is (= true (:requested-context-present (qg/field-data! b :context))))
+  (is (contains? (qg/field-data! b :context) :requested-context))
+  (is (not (same-bytes? (:graph a) (:graph b))))))
+
+(deftest reserved-domains-have-a-closed-grammar
+ (doseq [domain [false {:scope {:mode :exact}} {:scope {:mode :unknown} :profiles []}
+                 {:scope {:mode :exact} :profiles nil}
+                 {:scope {:mode :exact} :profiles [] :unreviewed true}]]
+  (is (thrown? (apply-retained (g/encode [(assoc assertion :origin {:formal/retained-domain domain})])))))
+ (doseq [bad [(assoc assertion :label :keyword) (dissoc assertion :term)]]
+  (is (thrown? (apply-retained (g/encode [bad]))))))
+
+(run-tests)
