@@ -1,0 +1,151 @@
+(ns formal.word-reader
+ (:require [formal.request :as request] [formal.request-answer :as answer] [formal.request-record :as recorded]
+           [formal.backend :as backend] [formal.query :as q] [formal.term :as t]
+           [formal.question-graph :as qg] [formal.data-graph :as graph]
+           [veritas.ledger :as ledger] [datom] [bl.json :as json] [oracle]))
+
+(defn require! [ok why] (when-not ok (throw (ex-info (str "word reader: " why) {}))))
+(defn digest [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn restore [wire]
+ (require! (and (map? wire) (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (int? (get wire "formal/data-graph")) (= 1 (get wire "formal/data-graph"))
+                (= "bl/public-data-graph-v1" (get wire "profile"))) "closed wire graph")
+ (let [data {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+             :nodes (mapv (fn [[tag payload]]
+                            [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)]) (get wire "nodes"))}]
+  (graph/check! data) data))
+(def argv (BeamLisp/argv))
+(def input (json/decode (File/read! (nth argv 0))))
+(def producer-pin (json/decode (File/read! (nth argv 3))))
+(def producer-sdk (get producer-pin "sdk"))
+(require! (and (= "bl.word-request-corpus.v1" (get input "schema"))
+               (= producer-sdk (get input "producer-sdk"))
+               (= (get producer-pin "descriptor_sha256") (get input "producer-descriptor-sha256")
+                  (digest (File/read! (str producer-sdk "/artifact.json"))))
+               (= false (get input "compiler-proof-authority") (get input "checked-native-execution")))
+          "actual expected producer descriptor, separate from checker and execution authentication")
+(def assets {:z3 (backend/artifacts {:backend :z3}) :oxiz (backend/artifacts {:backend :oxiz})})
+(def row-fields #{"id" "ledger-id" "expected" "answer-version" "request-reference" "subject-reference" "packet-reference" "packet"})
+(defn packet [row]
+ (require! (and (map? row) (= row-fields (set (keys row))) (string? (get row "id"))) "closed captured row")
+ (let [data (restore (get row "packet"))]
+  (require! (= (get row "packet-reference") (:sha256 (graph/reference data))) "captured packet bytes differ")
+  (recorded/recheck-graph data)
+  (graph/decode! data)))
+(defn check-record [p]
+ ;; The generic record checker establishes mathematical/data connections only.
+ (let [result (recorded/recheck p) source (get-in p [:answer :source])
+       engine (get-in p [:request :adapter :backend])]
+  (when (= :reported-native (:kind source))
+   ;; This fixture has a separately pinned recorded producer. Matching its
+   ;; immutable artifact labels still authenticates no historical execution.
+   (require! (= producer-sdk (get-in source [:identity :sdk])) "fixture producer label differs")
+   (require! (= (get-in assets [engine :worker :sha256]) (get-in source [:identity :worker-sha256])) "fixture worker label differs")
+   (require! (= (get-in assets [engine :library :sha256]) (get-in source [:identity :library-sha256])) "fixture library label differs"))
+  (require! (= false (:storage-authenticated result) (:checked-native-execution result)
+                       (:compiler-proof-authority result) (:trusted result)) "recorded evidence cannot grant authority")
+  result))
+(defn read-row [row]
+ (let [p (packet row) result (check-record p)]
+  (require! (= (get row "expected") (name (:verdict result))) "actual interpretation differs from captured fixture")
+  (require! (= (get row "answer-version") (get-in p [:answer :formal/request-answer])) "captured answer version differs")
+  (require! (= (get row "request-reference") (:sha256 (request/reference (:request p)))) "captured request differs")
+  (require! (= (get row "subject-reference") (:sha256 (request/subject-reference (:request p)))) "captured subject differs")
+  {:id (get row "id") :verdict (:verdict result) :answer-version (get row "answer-version")
+   :point-replay (:point-replay result) :request-reference (:sha256 (:request-reference result))
+   :subject-reference (:sha256 (:subject-reference result)) :checked-native-execution false :compiler-proof-authority false}))
+(defn normalized [action]
+ (let [module (elem (erlang/fun_info ledger/lookup :module) 1)
+       pattern (tuple module :normalize-row 2)]
+  (require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "actual private row normalizer counter")
+  (try (let [result (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+         (require! (= 1 calls) "selected lookup decodes precisely one actual row")
+         {:result result :normalizer-calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(defn read-ledger [path]
+ (let [connection (ledger/open path)]
+  (try
+   (mapv (fn [row]
+           ;; This happens before any portable packet decoding in the process.
+           ;; The ledger must initialize its own closed protocol vocabulary.
+           (let [reopened (normalized #(recorded/reopen connection (get row "ledger-id")))
+                 selected (normalized #(ledger/lookup connection (get row "ledger-id")))
+                 actual (:result reopened) loaded (:result selected) p (packet row)]
+            (require! (= (get row "expected") (name (get-in actual [:result :verdict]))) "actual reopened ledger interpretation")
+            (require! (= (graph/bytes (graph/encode (:request p)))
+                         (graph/bytes (graph/encode (:verdict/request loaded)))) "actual ledger complete request bytes")
+            (require! (= false (:checked-native-execution actual) (:compiler-proof-authority actual)) "ledger grants no native authority")
+            {:id (get row "id") :ledger-envelope (:ledger-envelope actual) :verdict (get-in actual [:result :verdict])
+             :reopen-normalizer-calls (:normalizer-calls reopened) :lookup-normalizer-calls (:normalizer-calls selected)}))
+         (get input "rows"))
+   (finally (datom/close! connection)))))
+(defn controls []
+ (let [p (packet (first (get input "rows"))) r (:request p)
+       x (t/variable "word.corpus.x" [:bv 8])
+       changed-adapter (request/prepare (:subject r) {:policy (:policy r) :adapter (assoc (:adapter r) :solver-ms 499)})
+       adapter-ref (request/reference changed-adapter)
+       changed-request (-> p (assoc :request changed-adapter :request-reference adapter-ref)
+                           (assoc-in [:answer :request-reference] adapter-ref))
+       cases [["record-request-reference" (assoc-in p [:request-reference :sha256] "forged")]
+              ["record-subject-reference" (assoc-in p [:subject-reference :sha256] "forged")]
+              ["claimed-trust" (assoc-in p [:answer :trusted] true)]
+              ["claimed-compiler-authority" (assoc-in p [:answer :compiler-proof-authority] true)]
+              ["changed-context-state" (assoc-in p [:answer :source :context-state :revision] 999)]
+              ["changed-retained-assumptions" (assoc-in p [:answer :composition :assertions-graph]
+                                                  (graph/encode [(q/assertion "eight" (t/eq x (t/literal [:bv 8] 8)))]))]
+              ["changed-recorded-backend" (assoc-in p [:answer :source :identity :backend] :oxiz)]
+              ["changed-adapter-with-recomputed-references" changed-request]
+              ["claimed-local-owner" (assoc-in p [:answer :composition :owner] "impostor")]
+              ["changed-caller-origin" (update-in p [:answer :composition :caller] #(qg/patch % {:origin (graph/encode {:changed true})}))]
+              ["claimed-checked-certificate" (assoc-in p [:answer :certificate :status] :checked)]
+              ["floating-answer-version" (assoc-in p [:answer :formal/request-answer] 3.0)]
+              ["unknown-checking-policy" (assoc-in p [:request :policy :profile] :bl/unknown-checking-policy)]
+              ["numeric-policy-downgrade" (assoc-in p [:request :policy :profile] :bl/managed-numeric-graph-preview-v2)]
+              ["extra-record-field" (assoc p :trusted true)]]
+       refusals (mapv (fn [[label changed]]
+                       (let [refused (try (check-record changed) false (catch _ true))]
+                        (require! refused (str "control must refuse: " label)) {:id label :status :refused})) cases)
+       changed-point (assoc-in p [:answer :point-graph] (graph/encode {"word.corpus.x" {:formal/bv [8 8]}}))
+       rehashed (graph/decode! (graph/encode changed-point))
+       invalid (check-record rehashed)
+       changed-history (-> p (assoc-in [:answer :composition :revision] 99)
+                            (assoc-in [:answer :source :context-state :revision] 99))
+       history (check-record changed-history)]
+  (require! (= :invalid-point (:verdict invalid)) "a consistently encoded false point is still independently invalid")
+  (require! (= :sat (:verdict history)) "edited untrusted history does not change this point's mathematics")
+  {:controls refusals :rehashed-invalid-coordinate :independently-invalid
+   :edited-history :recorded-only :checked-native-execution false :compiler-proof-authority false}))
+
+(def calls (atom 0))
+(defn deny [& _] (swap! calls inc) (throw :word-reader-must-not-query))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "actual SDK solver exchange counter")
+(try
+ (let [control? (= "controls" (nth argv 2))
+       result (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+                (fn []
+                 (if control? (controls)
+                  (let [ledger-rows (when-let [path (nth argv 4 nil)] (read-ledger path))
+                        rows (mapv read-row (get input "rows"))
+                        unknown-row (first (filter #(= "shared-unfamiliar-origin" (get % "id")) (get input "rows")))
+                        unknown-subject (get-in (packet unknown-row) [:request :subject])
+                        _ (require! (try (qg/materialize! unknown-subject) false (catch _ true)) "unknown metadata remains graph data")
+                        before (erlang/system_info :atom_count)
+                        repeated (mapv read-row (get input "rows"))
+                        after (erlang/system_info :atom_count)]
+                   (require! (= rows repeated) "fresh replay produces the same observations")
+                   (require! (= before after) "warmed repeated replay must not intern application keywords")
+                   (require! (= 12 (count rows)) "complete actual fixture")
+                   {:rows rows :application-atoms-before before :application-atoms-after after
+                    :ledger ledger-rows :ledger-before-packets true}))))
+       exchanges (elem (erlang/trace_info pattern :call_count) 1)]
+  (require! (= 0 exchanges @calls) "zero actual solver exchanges and denied oracle calls")
+  (File/write! (nth argv 1)
+   (json/encode (merge result {:schema (if control? "bl.word-reader-controls.v1" "bl.word-reader.v1")
+                              :process (System/pid) :cwd (File/cwd!) :sdk (System/get_env "BL_SDK_PRODUCT")
+                              :recorded-producer-sdk producer-sdk :sdk-only true :research-import-path false
+                              :source-payload-execution false :solver-exchanges exchanges :oracle-calls @calls
+                              :checked-native-execution false :compiler-proof-authority false}) {:pretty 2}))
+  (println {:records (count (:rows result)) :controls (count (:controls result)) :solver-exchanges exchanges :oracle-calls @calls}))
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))
