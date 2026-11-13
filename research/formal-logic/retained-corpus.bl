@@ -1,0 +1,86 @@
+(ns formal.retained-corpus
+ (:require [formal.backend :as backend] [formal.logic :as logic] [formal.request-runtime :as run]
+           [formal.request :as request] [formal.request-answer :as answer] [formal.request-record :as recorded]
+           [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [veritas.ledger :as ledger] [datom] [bl.json :as json]))
+
+(defn require! [ok why] (when-not ok (throw (ex-info (str "retained corpus: " why) {}))))
+(defn wire [data]
+ {"formal/data-graph" 1 "profile" "bl/public-data-graph-v1" "root" (:root data)
+  "nodes" (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)]) (:nodes data))})
+(defn digest [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(def argv (BeamLisp/argv))
+(def output (nth argv 0))
+(def ledger-path (nth argv 1))
+(require! (not (File/exists? ledger-path)) "owned ledger destination must be new")
+(def connection (ledger/open ledger-path))
+(def rows (atom []))
+(def x (t/variable "retained.corpus.x" t/Int))
+(def caller (qg/prepare (q/sat {:assumptions [(t/le x (t/int 9))]})))
+(def seven (q/assertion "seven" (t/eq x (t/int 7))))
+(defn save! [name r response expected]
+ (let [packet (recorded/pack r response) checking (recorded/recheck packet)
+       _ (require! (= expected (:verdict checking)) (str "actual expected interpretation for " name))
+       id (recorded/record! connection r response {:claim name :by "retained-sdk-qualification"})
+       reopened (recorded/reopen connection id)
+       _ (require! (= expected (get-in reopened [:result :verdict])) "immediate actual ledger recheck")
+       data (graph/encode packet)]
+  (swap! rows conj {"id" name "ledger-id" id "expected" (str (name expected))
+                    "answer-version" (:formal/request-answer response)
+                    "request-reference" (:sha256 (request/reference r))
+                    "subject-reference" (:sha256 (request/subject-reference r))
+                    "packet-reference" (:sha256 (graph/reference data)) "packet" (wire data)})
+  checking))
+(defn retained! [session original]
+ (let [saved (atom nil)
+       result (logic/with-context-request session original
+                (fn [r execute] (reset! saved r) (execute)))]
+  {:request @saved :response (:response result) :result result}))
+(defn capture-engine! [engine]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (require! (:ok (backend/reset! session)) "actual owner reset")
+   (require! (:ok (backend/load! session [seven])) "actual retained assertion load")
+   (let [captured (retained! session caller) r (:request captured) response (:response captured)
+         prefix (name engine)]
+    (require! (= :matching-response (get-in captured [:result :local-delegation :status])) "actual local fallback response")
+    (save! (str prefix "/retained-sat") r response :sat)
+    (save! (str prefix "/changed-point") r (assoc response :point-graph (graph/encode {"retained.corpus.x" 8})) :invalid-point)
+    (let [fresh (run/execute r)]
+     (require! (= (:subject-reference (:result captured)) (:subject-reference fresh)) "fresh route complete subject")
+     (save! (str prefix "/fresh-same-subject") r (:response fresh) :sat))
+    (let [supplied (logic/with-context-request session caller
+                     (fn [_ execute] (run/with-handler (fn [r _] (answer/supply r {"retained.corpus.x" 7})) execute)))]
+     (require! (= 0 (get-in supplied [:local-delegation :attempts])) "supplied point avoids its fallback")
+     (save! (str prefix "/supplied-point") r (:response supplied) :sat)))
+   (let [bad-caller (qg/prepare (q/sat {:assumptions [(t/eq x (t/int 8))]}))
+         captured (retained! session bad-caller)]
+    (save! (str (name engine) "/retained-unsat") (:request captured) (:response captured) :solver-claim)))))
+
+(try
+ (doseq [engine [:z3 :oxiz]] (capture-engine! engine))
+ (backend/with-session {:backend :z3}
+  (fn [session]
+   (require! (:ok (backend/reset! session)) "empty actual retained state after reset")
+   (let [captured (retained! session caller)]
+    (save! "empty-after-reset" (:request captured) (:response captured) :sat))))
+ (backend/with-session {:backend :z3}
+  (fn [session]
+   (require! (:ok (backend/load! session [seven])) "retained load for unknown metadata")
+   (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                  :nodes [["keyword" (str "retained.saved.unknown." (System/unique_integer (list :positive)))]]}
+         shared (reduce (fn [data _] (graph/assemble "vector" [data data])) unknown (range 17))
+         original (qg/patch caller {:origin shared})
+         captured (retained! session original)]
+    (require! (> (:expanded-nodes (graph/check! (:graph original))) 100000) "actual shared metadata fixture")
+    (require! (try (qg/materialize! original) false (catch _ true)) "unfamiliar keyword stays unmaterializable")
+    (save! "shared-unfamiliar-origin" (:request captured) (:response captured) :sat))))
+ (require! (= 12 (count @rows)) "twelve actual saved records")
+ (let [sdk (System/get_env "BL_SDK_PRODUCT")
+       result {"schema" "bl.retained-request-corpus.v1" "producer-sdk" sdk
+               "producer-descriptor-sha256" (digest (File/read! (str sdk "/artifact.json")))
+               "rows" @rows "compiler-proof-authority" false "checked-native-execution" false}]
+  (File/write! output (json/encode result))
+  (println {:status :captured :records (count @rows) :sdk sdk :actual-ledger ledger-path
+            :compiler-proof-authority false :checked-native-execution false}))
+ (finally (datom/close! connection)))
