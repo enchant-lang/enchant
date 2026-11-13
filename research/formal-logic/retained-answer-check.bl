@@ -1,0 +1,76 @@
+(ns formal.retained-answer-check
+ (:require [formal.backend :as backend] [formal.request :as request] [formal.request-answer :as answer]
+           [formal.retained-composition :as composition] [formal.question-graph :as qg]
+           [formal.data-graph :as g] [formal.query :as q] [formal.term :as t]))
+
+(def x (t/variable "retained.answer.x" t/Int))
+(def caller (qg/prepare (q/sat {:assumptions [(t/le x (t/int 9))]})))
+(defn with-answer [engine original action]
+ (backend/with-session {:backend engine}
+  (fn [session]
+   (is (:ok (backend/load! session [(q/assertion "seven" (t/eq x (t/int 7)))])))
+   (let [actual (backend/context-configuration session) context (:context actual)
+         declared (composition/prepare original (g/encode (:assertions context)) (:generation context) (:revision context))
+         r (request/prepare (composition/question declared) {:adapter (:adapter actual)})
+         raw (backend/graph-question! session original (:policy r) context)
+         response (answer/from-retained r declared raw)]
+    (action r declared raw response)))))
+(defn without-exchanges [action]
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try (let [result (action)] (is (= 0 (elem (erlang/trace_info pattern :call_count) 1))) result)
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest retained-native-points-replay-the-entire-complete-subject
+ (doseq [engine [:z3 :oxiz]]
+  (with-answer engine caller
+   (fn [r declared raw response]
+    (is (= 3 (:formal/request-answer response)))
+    (is (= answer/retained-profile (:profile response)))
+    (is (= {:generation 0 :revision 1} (get-in response [:source :context-state])))
+    (is (= :sat (:solver-status raw)))
+    (without-exchanges
+     (fn []
+      (let [checked (answer/recheck r response)
+            bad (answer/recheck r (assoc response :point-graph (g/encode {"retained.answer.x" 8})))]
+       (is (= :sat (:verdict checked)))
+       (is (= :recomputed (:composition-connection checked)))
+       (is (= :invalid-point (:verdict bad)))
+       (is (= false (:checked-native-execution checked) (:compiler-proof-authority checked) (:trusted checked)))
+       (is (thrown? (answer/from-managed r raw)))
+       (is (thrown? (answer/check! r (-> response (dissoc :composition)
+                                         (assoc :formal/request-answer 2 :profile answer/profile)))))
+       (is (thrown? (answer/check! r (assoc response :compiler-proof-authority true))))
+       (is (thrown? (answer/check! r (assoc response :formal/request-answer 3.0))))
+       (is (thrown? (answer/from-retained r (assoc declared :generation 3) raw)))
+       (is (thrown? (answer/from-retained r declared
+                      (assoc raw :request-graph (:subject r) :request-reference (request/subject-reference r)))))
+       (is (= response (answer/restore r (g/encode response))))))))))))
+
+(deftest self-consistent-recorded-history-still-does-not-authenticate-an-owner
+ (with-answer :z3 caller
+  (fn [r _ _ response]
+   (without-exchanges
+    (fn []
+     (let [changed (-> response (assoc-in [:composition :revision] 99)
+                        (assoc-in [:source :context-state :revision] 99))
+           checked (answer/recheck r changed)]
+      (is (= :sat (:verdict checked)))
+      (is (= 99 (get-in checked [:source :context-state :revision])))
+      (is (= false (:checked-native-execution checked) (:compiler-proof-authority checked)))
+      (is (thrown? (answer/check! r (assoc-in response [:source :context-state :revision] 99)))))))))))
+
+(deftest retained-unsat-is-a-solver-claim-without-a-proof
+ (doseq [engine [:z3 :oxiz]]
+  (with-answer engine (qg/prepare (q/sat {:assumptions [(t/eq x (t/int 8))]}))
+   (fn [r _ _ response]
+    (without-exchanges
+     (fn []
+      (let [checked (answer/recheck r response)]
+       (is (= false (:point-present response)))
+       (is (= :solver-claim (:verdict checked)))
+       (is (= :unsat (:reported-verdict checked)))
+       (is (= :not-run (:point-replay checked)))
+       (is (= false (:checked-native-execution checked) (:compiler-proof-authority checked))))))))))
+
+(run-tests)
