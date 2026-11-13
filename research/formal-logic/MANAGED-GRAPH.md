@@ -34,8 +34,10 @@ all 187 questions and 374 backend rows with no exact comparison differences
 from the qualified baseline. The managed corpus also completes all 187
 questions: its 94 numeric questions match legacy status, verdict, phase and
 validation on both engines; the other 93 refuse before a native scope call.
-Fresh SDK-only replay of the 52 saved SAT points and persisted ledger readers
-are still in qualification. The live project still selects the
+Two distinct fresh SDK-only processes each check all 187 records and replay
+all 52 saved SAT points, producing identical rows with zero native exchanges.
+Tamper controls and persisted-ledger readers are still in qualification.
+The live project still selects the
 qualified shared-primitives SDK. See the [request interface](REQUEST-INTERFACE.md)
 for the higher language surface; this document describes the owner primitive.
 
