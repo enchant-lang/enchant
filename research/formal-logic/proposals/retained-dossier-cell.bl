@@ -1,0 +1,42 @@
+(let [x (t/variable "dossier.retained.x" t/Int)
+      caller (question-graph/prepare (q/sat {:assumptions [(t/le x (t/int 9))]}))
+      reader-receipt (json/decode (File/read! "research/formal-logic/evidence/retained-request/records-qualification.json"))
+      rows
+      (mapv (fn [engine]
+              (backend/with-session {:backend engine}
+               (fn [session]
+                (assert (:ok (backend/reset! session)))
+                (assert (:ok (backend/load! session [(q/assertion "seven" (t/eq x (t/int 7)))])))
+                (let [frozen (atom nil) unused (atom nil)
+                      borrowed (logic/with-context-request session caller
+                                 (fn [r execute] (reset! frozen r) (execute)))
+                      _ (logic/with-context-request session caller (fn [_ execute] (reset! unused execute)))
+                      expired (try (@unused) :accepted (catch e (:kind (ex-data e))))
+                      changed (logic/recheck-request @frozen (logic/answer-request @frozen {"dossier.retained.x" 8}))
+                      caller-request (logic/prepare-request caller {:adapter {:backend engine}})
+                      caller-only (logic/recheck-request caller-request (logic/answer-request caller-request {"dossier.retained.x" 8}))
+                      reopened (request-record/recheck (request-record/pack @frozen (:response borrowed)))
+                      supplied (logic/with-context-request session caller
+                                 (fn [_ execute]
+                                  (logic/with-request-handler
+                                   (fn [r _] (logic/answer-request r {"dossier.retained.x" 7})) execute)))]
+                 (assert (= :sat (:verdict borrowed) (:verdict reopened) (:verdict supplied) (:verdict caller-only)))
+                 (assert (= :invalid-point (:verdict changed)))
+                 (assert (= :retained-request-lease expired))
+                 (assert (= 3 (get-in borrowed [:response :formal/request-answer])))
+                 (assert (= :matching-response (get-in borrowed [:local-delegation :status])))
+                 (assert (= 0 (get-in supplied [:local-delegation :attempts])))
+                 (into-sorted-map
+                  {:backend engine :complete-point (:verdict borrowed) :caller-only-eight (:verdict caller-only)
+                   :complete-eight (:verdict changed) :reopened-point (:verdict reopened)
+                   :answer-version (get-in borrowed [:response :formal/request-answer])
+                   :unused-callback :expired :supplied-fallback-attempts (get-in supplied [:local-delegation :attempts])
+                   :checked-native-execution (:checked-native-execution reopened)
+                   :compiler-proof-authority false}))))) [:z3 :oxiz])]
+ (assert (= 2 (get reader-receipt "fresh_sdk_only_readers")))
+ (assert (= 0 (get reader-receipt "solver_exchanges")))
+ (into-sorted-map {:subject :retained-complete-request :backends rows
+                   :saved-records (get reader-receipt "records")
+                   :fresh-sdk-readers (get reader-receipt "fresh_sdk_only_readers")
+                   :reader-solver-exchanges (get reader-receipt "solver_exchanges")
+                   :compiler-proof-authority false}))
