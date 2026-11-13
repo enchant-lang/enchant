@@ -27,7 +27,8 @@ assert sha(E / 'compiler-qualification.json') == floor['qualification_sha256']
 assert all(sha(R / 'priv/bootstrap/seed' / name) == digest for name, digest in floor['after'].items())
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 runtime_names = ['priv/boot/rt.bl', 'priv/host/decimal.bl', 'priv/host/num.bl',
-                 'priv/lib/decimal.bl', 'priv/lib/js/rt.mjs', 'priv/lib/system/smt.bl']
+                 'priv/lib/decimal.bl', 'priv/lib/js/rt.mjs', 'priv/lib/js/host-leaves.mjs',
+                 'priv/lib/js/leaves.mjs', 'priv/lib/system/smt.bl']
 names = runtime_names + [str(Path(__file__).relative_to(R))] + ['priv/bootstrap/seed/' + name for name in floor['after']]
 sources = {}
 for name in names:

@@ -1,17 +1,18 @@
 // Direct runtime observations; actual compiled BL/JS qualification is separate.
 import {readFile, writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
-import {resolve} from 'node:path';
+import {resolve, dirname, join} from 'node:path';
 import assert from 'node:assert/strict';
 
 const [runtimePath, fixturePath, outputPath, mode, compiledBuild] = process.argv.slice(2);
 const R = await import(pathToFileURL(resolve(runtimePath)).href);
 let relations = (a, b) => [R.eqv(a, b), R.compare(a, b), R.eqv(R.vec(a), R.list(b)),
                           R.eqv(R.hashMap('value', a), R.hashMap('value', b)), R.hashSet(a, b).cnt];
+let compiled = null;
 if (compiledBuild) {
  // Emitted namespaces and fixture values must use the same runtime classes.
  assert.equal(resolve(runtimePath), resolve(compiledBuild, 'rt.mjs'));
- const compiled = await import(pathToFileURL(resolve(compiledBuild, 'ns/semantics.numeric.mjs')).href);
+ compiled = await import(pathToFileURL(resolve(compiledBuild, 'ns/semantics.numeric.mjs')).href);
  assert.equal(typeof compiled.d_relations, 'function');
  relations = (a, b) => Array.from(compiled.d_relations(a, b));
 }
@@ -46,10 +47,8 @@ const rows = fixture.pairs.map(pair => {
 assert.equal(values.size, 30);
 assert.equal(rows.length, 900);
 const differences = rows.filter(row => !row['matches-exact-profile']);
-if (mode === 'require-profile') assert.equal(differences.length, 0);
 const representationSamples = [];
 if (compiledBuild && mode === 'require-profile') {
- const compiled = await import(pathToFileURL(resolve(compiledBuild, 'ns/semantics.numeric.mjs')).href);
  assert.equal(typeof compiled.d_representations, 'function');
  for (const [name, a, b, expected] of [
   ['same-decimal-representation', R.dec(150n, 2), R.dec(150n, 2), [true, true]],
@@ -62,12 +61,47 @@ if (compiledBuild && mode === 'require-profile') {
   representationSamples.push({name, actual});
  }
 }
+const approximations = [], decimalOracle = {rows: [], differences: []};
+if (mode === 'require-profile') {
+ const beam = JSON.parse(await readFile(join(dirname(resolve(outputPath)), 'beam.json'), 'utf8'));
+ const expected = new Map(beam['named-float-approximations'].map(row => [row.id, row.value]));
+ for (const row of fixture.values.filter(row => row.kind === 'float')) {
+  const value = values.get(row.id);
+  let actual;
+  if (compiled) {
+   assert.equal(typeof compiled.d_approximation, 'function');
+   actual = Array.from(compiled.d_approximation(value));
+  } else {
+   const converted = R.decimalFromFloat(value);
+   actual = [R.decimalCoefficient(converted).toString(), R.decimalScale(converted), converted.plain()];
+  }
+  const reference = expected.get(row.id);
+  approximations.push({id: row.id, value: actual, 'matches-beam': JSON.stringify(actual) === JSON.stringify(reference)});
+ }
+ assert.equal(approximations.length, expected.size);
+ if (compiled) {
+  const cases = JSON.parse(await readFile(join(dirname(resolve(fixturePath)), 'decimal-oracle-cases.json'), 'utf8'));
+  assert.equal(cases.schema, 'bl.captured-decimal-oracle-cases.v1');
+  assert.equal(cases.rows.length, 1051);
+  assert.equal(typeof compiled.d_decimal_oracle, 'function');
+  const actual = Array.from(compiled.d_decimal_oracle());
+  assert.equal(actual.length, cases.rows.length);
+  decimalOracle.rows = cases.rows.map((row, index) => ({index, expected: row.expected, actual: actual[index]}));
+  decimalOracle.differences = decimalOracle.rows.filter(row => row.expected !== row.actual);
+ }
+}
 const target = compiledBuild ? 'js-compiled-language' : 'js-direct-runtime';
 await writeFile(outputPath, JSON.stringify({schema: 'bl.finite-number-runtime-observation.v1', target,
  'runtime-path': resolve(runtimePath), process: process.pid, cwd: process.cwd(), profile: fixture.profile,
  values: values.size, pairs: rows.length, rows, differences, 'managed-query-calls': 0,
  'representation-samples': representationSamples,
+ 'named-float-approximations': approximations, 'decimal-oracle': decimalOracle,
  scope: compiledBuild ? 'Actual compiled BL function observations; raw key cardinality is recorded separately.' :
                        'Direct runtime observations; raw key cardinality is recorded separately. This is not the compiled BL path.',
  'compiler-proof-authority': false}, null, 2) + '\n');
 console.log(JSON.stringify({target, values: values.size, pairs: rows.length, differences: differences.length}));
+if (mode === 'require-profile') {
+ assert.equal(differences.length, 0, 'Exact-value finite pairs');
+ assert.ok(approximations.every(row => row['matches-beam']), 'Named Float approximation matches BEAM representation');
+ assert.equal(decimalOracle.differences.length, 0, 'Compiled BL Decimal API matches the captured JVM oracle');
+}

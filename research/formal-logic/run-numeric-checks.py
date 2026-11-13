@@ -27,7 +27,8 @@ sdk = Path(pin['sdk'])
 assert sha(sdk / 'artifact.json') == pin['descriptor_sha256']
 assert read(P / 'sdk-pin.json') == read(E / 'baseline/sdk-pin.json')
 runtime_names = ['priv/boot/rt.bl', 'priv/host/decimal.bl', 'priv/host/num.bl',
-                 'priv/lib/decimal.bl', 'priv/lib/js/rt.mjs', 'priv/lib/system/smt.bl']
+                 'priv/lib/decimal.bl', 'priv/lib/js/rt.mjs', 'priv/lib/js/host-leaves.mjs',
+                 'priv/lib/js/leaves.mjs', 'priv/lib/system/smt.bl']
 for name in runtime_names:
     assert sha(R / name) == sha(Path(pin['source']) / name) == sha(sdk / 'lib/beam_lisp-0.1.0' / name)
 files = []
@@ -68,7 +69,10 @@ elif stage == 'preflight':
 elif stage == 'preflight-controls':
     names += ['test/scripts/sdk_preflight.py']
 elif stage == 'js-unit':
-    names += ['test/js/numeric-equality.test.mjs']
+    names += ['test/js/numeric-equality.test.mjs', 'test/js/decimal-api.test.mjs',
+              'research/formal-logic/evidence/numeric-semantics/float-format.json',
+              'research/formal-logic/evidence/numeric-semantics/float-format-exit.json',
+              'research/formal-logic/decimal-format-probe.bl']
     for path in (R / 'priv/lib/js').glob('*.mjs'):
         name = str(path.relative_to(R))
         assert sha(path) == sha(sdk / 'lib/beam_lisp-0.1.0' / name)
@@ -100,7 +104,8 @@ elif stage == 'js-unit':
     assert subprocess.check_output(['nix-store', '--query', '--hash', tools['node']['package']], text=True).strip() == tools['node']['nar_hash']
     # The unit test imports checkout JS source; bind it to the exact candidate
     # bytes here. SDK-only/direct and actual compiled routes are separate gates.
-    request = [tools['node']['executable'], '--test', str(R / 'test/js/numeric-equality.test.mjs')]
+    request = [tools['node']['executable'], '--test', str(R / 'test/js/numeric-equality.test.mjs'),
+               str(R / 'test/js/decimal-api.test.mjs')]
     cap, ceiling = '2G', 120
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe', '--expand-environment=no',
            '--unit=work-formal-numeric-' + stage + '-' + pin['engine_fingerprint'][:12],

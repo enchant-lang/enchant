@@ -46,6 +46,9 @@ commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True)
 sources = [Path(__file__), P / 'semantic-number-corpus.bl', P / 'semantic-number-corpus.mjs',
            P / 'semantics-src/semantics/numeric.bl', P / 'proposals/finite-number-cases.json',
            P / 'proposals/make-finite-number-cases.py']
+if mode == 'candidate':
+    sources += [P / 'semantics-src/semantics/decimal-oracle.bl', P / 'proposals/decimal-oracle-cases.json',
+                P / 'proposals/make-decimal-oracle.py', R / 'test/bl/decimal_oracle_port_test.bl']
 digests = {}
 for source in sources:
     name = str(source.relative_to(R))
@@ -58,6 +61,8 @@ write(E / 'sdk-pin.json', pin)
 fixture = P / 'proposals/finite-number-cases.json'
 assert read(fixture)['qualified_runtime'] is False
 subprocess.run([sys.executable, str(P / 'proposals/make-finite-number-cases.py'), '--check'], check=True, cwd=R)
+if mode == 'candidate':
+    subprocess.run([sys.executable, str(P / 'proposals/make-decimal-oracle.py'), '--check'], check=True, cwd=R)
 runtime = Path(tempfile.mkdtemp(prefix='formal-numeric-runtime-'))
 cwd = Path(tempfile.mkdtemp(prefix='formal-numeric-consumer-'))
 build = E / 'compiled'

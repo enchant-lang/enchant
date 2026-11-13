@@ -5,12 +5,36 @@ modulus translation. This batch is **not qualified on a new SDK yet**. The
 selected SDK and live dossier keep their already qualified behavior while the
 new compiler floor, SDK and checks are produced.
 
+The compiler-only P/B/C product has now passed its complete 141-file check;
+84 files of the checked-in floor changed when that verified product was
+installed with its manifest last. The new SDK is still pending. The compiler
+receipt binds its actual inputs; subsequent changes confined to JavaScript
+runtime source do not rewrite that historical compiler receipt.
+
 The original proposed diffs remain in `proposals/` as review history. Applied
 source defines finite generic numeric equality by exact value and introduces
 `decimal/same-representation?` for coefficient and scale. Decimal arithmetic
 still refuses Float operands. JavaScript compares actual binary64 values using
 exact BigInt cross-products. Ordinary map/set keys retain their existing raw
 relation; changing that language contract is a separate implementation.
+
+The candidate also implements Decimal's named JavaScript host API, so ordinary
+BL importing `decimal` can compile to JS. Its construction, scale, arithmetic,
+eight rounding modes and conversions use the same JS value representation as
+core operators. Exact division now computes termination from denominator
+factors instead of guessing a 64-place ceiling, and keeps the BEAM preferred
+operand-scale difference. The generated compiled-BL program executes all
+1,051 existing JVM-captured cases, with expectations in a separate fixture.
+Those cases compare values and raisedness; exception type/message coverage is
+separate. No new JVM reference answers are authored.
+
+Named Float approximation is separate from exact comparison and arithmetic.
+A real 17-case observation on the preceding qualified BEAM SDK records its
+shortest Float spelling and resulting Decimal coefficient/scale. The JS
+implementation follows the pinned OTP 17 formatting policy, including its
+scientific-form boundary at `2^53`. Fresh candidate observations also compare
+every Float in the shared fixture through BEAM, direct JS and compiled BL.
+These are pending qualification gates, not claims of a whole-target theorem.
 
 `system.smt` now reconstructs BL divisor-sign modulus instead of aliasing SMT's
 Euclidean modulus. The repaired legacy expression is qualified only when its
