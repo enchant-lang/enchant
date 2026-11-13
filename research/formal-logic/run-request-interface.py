@@ -22,7 +22,7 @@ active = subprocess.run(['systemctl', '--user', 'show', 'work-formal-managed-qua
                          '-p', 'MainPID', '-p', 'SubState'], capture_output=True, text=True, check=True)
 state = dict(line.split('=', 1) for line in active.stdout.splitlines() if '=' in line)
 assert state.get('MainPID', '0') == '0', 'The managed-owner corpus/reader chain is still running; do not overlap checks.'
-pin = json.loads((P / 'evidence/managed-graph/sdk-candidate.json').read_text())
+pin = json.loads((E / 'sdk-pin.json').read_text())
 assert hashlib.sha256((Path(pin['sdk']) / 'artifact.json').read_bytes()).hexdigest() == pin['descriptor_sha256']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = [Path(__file__), *(P / 'managed-interface').rglob('*.bl')]
