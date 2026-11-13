@@ -29,6 +29,17 @@ elif stage == 'sdk-preflight-controls':
 elif stage == 'owner-focused':
     names += ['test/bl/formal/managed_graph_test.bl']
     request = ['test', str(R / names[-1])]
+elif stage == 'profile-sorts':
+    names += ['research/formal-logic/managed-profile-sorts.bl']
+    output = E / 'profile-sorts.json'
+    request = ['run', str(R / names[-1]), '--', str(output)]
+elif stage in ('managed-reader-one', 'managed-reader-two', 'managed-reader-controls'):
+    names += ['research/formal-logic/managed-graph-reader.bl']
+    output = E / (stage + '.json')
+    assert (E / 'managed-native-corpus.json').is_file()
+    request = ['run', str(R / names[-1]), '--', str(E / 'managed-native-corpus.json'), str(output)]
+    if stage == 'managed-reader-controls':
+        request += ['controls']
 elif stage == 'sdk-focused':
     names += ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl', 'test/bl/formal/managed_graph_test.bl']
     request = ['test', *[str(R / name) for name in names[1:]]]
