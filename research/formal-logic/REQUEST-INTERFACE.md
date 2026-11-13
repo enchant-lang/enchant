@@ -1,8 +1,10 @@
 # One portable request, either native backend
 
-This interface is implemented in candidate SDK4 and passes its focused tests.
-The full qualification chain is still running; the live project continues to
-select its preceding qualified SDK. This is not a compiler or totality proof.
+This interface passes the complete SDK4 core qualification, including both
+native corpora, fresh point readers and actual persisted-ledger reopening.
+Project delegation and browser presentation have separate gates; the live
+project still selects its preceding qualified SDK. This is not a compiler or
+totality proof.
 
 A request contains an original question graph, a normalized execution policy
 and requested adapter settings. Backend choice does not change the subject.
