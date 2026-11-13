@@ -59,8 +59,12 @@ theorem negative_bounds (a b : Int) (hb : b < 0) :
   have hn : b ≠ 0 := by omega
   have lo := Int.emod_nonneg a hn
   have hi := Int.emod_lt_of_neg a hb
-  dsimp only [repairedMod]
-  split <;> omega
+  have notPositive : ¬ 0 < b := by omega
+  cases (inferInstance : Decidable (a % b = 0)) with
+  | isTrue zero => simp [repairedMod, zero, hb]
+  | isFalse nonzero =>
+    simp only [repairedMod, nonzero, false_or, notPositive, if_false]
+    omega
 
 theorem congruence (a b : Int) (hb : b ≠ 0) :
     b ∣ a - repairedMod a b := by
