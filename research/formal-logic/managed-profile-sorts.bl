@@ -1,0 +1,40 @@
+(ns formal.managed-profile-sorts
+ (:require [formal.term :as t] [formal.graph-terms :as forest]
+           [formal.data-graph :as graph] [bl.json :as json] [oracle]))
+
+;; Pure admission probes. In particular, no Z3 FP-sort constructor is invoked.
+(defn- probe [label sort selected]
+ (let [expression (t/forall [(t/bound "unused.profile.binding" sort)] (t/bool true))
+       data (graph/encode expression) roots [(:root data)]
+       module (elem (erlang/fun_info t/app :module) 1) pattern (tuple module :app 4)]
+  (assert (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (try
+                 (let [value (case selected
+                               :general (forest/prepare data roots)
+                               :bool-int (forest/prepare-bool-int data roots)
+                               :numeric (forest/prepare-numeric data roots {}))]
+                  {:status :admitted :node-sorts (mapv #(nth % 2) (:nodes value))
+                   :quantifier-data (mapv #(nth % 4) (filter #(= "forall" (nth % 1)) (:nodes value)))})
+                 (catch error {:status :refused :message (ex-message error) :why (ex-data error)}))
+         calls (elem (erlang/trace_info pattern :call_count) 1)]
+    (assoc result :case label :declared-sort sort :profile selected :actual-app-constructor-calls calls))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(def queries (atom 0))
+(defn- deny [& _] (swap! queries inc) (throw :sort-profile-probe-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny}
+  (fn []
+   [(probe "general-unused-real" t/Real :general)
+    (probe "bool-int-unused-real" t/Real :bool-int)
+    (probe "numeric-unused-fp-s2" (t/fp-sort 5 2) :numeric)
+    (probe "numeric-unused-rounding" t/Rounding :numeric)
+    (probe "numeric-unused-int" t/Int :numeric)])))
+(assert (= 0 @queries))
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.formal.declared-sort-admission-probe.v1" :rows rows
+               :managed-query-calls @queries :native-sessions 0 :compiler-proof-authority false
+               :scope "Actual SDK constructor counts in pure admission. Unused declarations count toward the intended scalar profile."}
+              {:pretty 2}))
+(println {:cases (count rows) :native-sessions 0 :managed-query-calls @queries})
