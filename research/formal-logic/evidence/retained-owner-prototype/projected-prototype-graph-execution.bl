@@ -1,0 +1,141 @@
+(ns formal.prototype-graph-execution
+ (:require [formal.graph-question :as question] [formal.evaluate :as evaluator]
+           [formal.data-graph :as graph] [formal.retained-question :as retained]
+           [formal.graph-replay :as replay] [formal.coordinates :as coordinates]))
+
+;; Local owner-turn machinery. These functions cannot obtain a native port;
+;; the actual backend owner supplies the scope callback from its own custody.
+(def profile :bl/managed-numeric-graph-preview-v2)
+(def defaults {:profile profile :owner-ms 30000 :limits {}})
+(defn settings [overrides]
+ (when-not (and (map? overrides) (every? #{:profile :owner-ms :limits} (keys overrides)))
+  (throw (ex-info "formal.graph-execution: closed settings required" {})))
+ (graph/encode overrides)
+ (let [options (merge defaults overrides)]
+  (when-not (and (= profile (:profile options)) (int? (:owner-ms options))
+                 (<= 1 (:owner-ms options) 60000))
+   (throw (ex-info "formal.graph-execution: named profile and owner deadline 1..60000 required" {})))
+  (assoc options :limits (evaluator/graph-resource-limits evaluator/direct-numeric-graph-profile (:limits options)))))
+
+(defn- effective-question [original snapshot]
+ ;; The portable reader and actual owner must share one composition rule.
+ ;; This local snapshot-to-graph conversion establishes no native authority.
+ (retained/compose original (graph/encode (:assertions snapshot)) (:generation snapshot)))
+
+(defn- coordinate [wire]
+ ;; Real canonicality belongs to the metered point, not to unmetered decoding.
+ (cond
+  (not (and (vector? wire) (seq wire))) (evaluator/unavailable :malformed-native-coordinate)
+  (and (contains? #{"bool" "int"} (first wire)) (= 2 (count wire))) (second wire)
+  (and (= "real" (first wire)) (= 3 (count wire))) {:formal/real [(second wire) (nth wire 2)]}
+  :else (evaluator/unavailable {:kind (first wire) :reason (get wire 1 :native-coordinate-unavailable)})))
+
+(defn- variables [forest]
+ (vec (sort-by :name
+       (map (fn [[id _ sort _ name]] {:name name :sort sort :term id})
+            (filter #(= "var" (nth % 1)) (:nodes forest))))))
+
+
+(defn- observations [inventory point source-for wire watch-names]
+ (let [pure (replay/observations inventory point source-for) descriptions (:observations inventory)]
+  (mapv (fn [i]
+          (let [row (nth pure i) terms (:terms (nth descriptions i))]
+           (assoc row :roots
+            (mapv (fn [j]
+                    (assoc (nth (:roots row) j)
+                     :native-wire (get wire (get watch-names (nth terms j)))
+                     :native-availability :backend-reported-unchecked)) (range (count terms))))))
+        (range (count pure)))))
+
+(defn execute
+ "Execute original graph data inside one local owner turn. The native owner
+  supplies its actual snapshot and a custody-held scope callback. This helper
+  cannot acquire native execution authority, and a caller-simulated callback
+  establishes no native execution. Results remain unchecked portable data."
+ [original snapshot overrides scope]
+ (let [configuration (settings overrides) started (erlang/monotonic_time :millisecond)
+       deadline (+ started (:owner-ms configuration)) attempts (atom 0) last-native (atom nil)
+       check! (fn [phase reserve]
+                (when (> (+ (erlang/monotonic_time :millisecond) reserve) deadline)
+                 (throw (ex-info "formal graph owner operation deadline exceeded"
+                                 {:kind :owner-deadline :phase phase :owner-ms (:owner-ms configuration)}))))
+       effective (effective-question original snapshot)
+       base {:formal/managed-graph-reply 2 :reply-profile profile
+             :request-graph original :request-reference (graph/reference (:graph original))
+             :question-graph effective :question-reference (graph/reference (:graph effective))
+             :settings configuration :settings-reference (graph/of configuration)
+             :context-state (select-keys snapshot [:generation :revision])
+             :identity (:identity snapshot) :native-limits (select-keys snapshot [:solver-ms :hard-ms])
+             :trusted false :certificate {:status :not-checked :kind :managed-graph-answer}
+             :compiler-proof-authority false}
+       run-scope (fn [forest assertions watched]
+                   (check! :native-exchange (:hard-ms snapshot))
+                   (swap! attempts inc)
+                   (let [reply (scope forest assertions watched)]
+                    ;; Retain only a bounded header until the complete reply
+                    ;; has passed the portable-data boundary.
+                    (reset! last-native (select-keys reply [:status]))
+                    (graph/encode reply)
+                    (reset! last-native reply) reply))]
+  (try
+   (check! :admission 0)
+   (question/with-numeric-keys effective (:limits configuration)
+    (fn [inventory admitted]
+     (check! :admission 0)
+     (if (= 2 (:formal/question-forest-refusal inventory))
+      (merge base {:ok false :solver-status :not-run :verdict :incomplete :phase :admission
+                   :admission (:admission inventory) :validation {:status :incomplete :kind :admission}
+                   :assertion-replay :not-run :native-scope-attempts 0})
+      (let [forest (:forest inventory)
+            source-for (zipmap (:roots forest) (:source-roots forest))
+            vars (variables forest)
+            watched (vec (distinct (mapcat :terms (:observations inventory))))
+            watch-names (into {} (mapv (fn [i] [(nth watched i) (str "watch/" i)]) (range (count watched))))
+            observation-rows (vec (concat (mapv (fn [v] [(str "var/" (:name v)) (:term v)]) vars)
+                                         (mapv (fn [id] [(get watch-names id) id]) watched)))
+            background (:assertions inventory)
+            preflight (when (and (= :prove (:mode inventory)) (not= :allow (:vacuity inventory)))
+                        (run-scope forest background []))
+            feasibility-refused? (and preflight (or (not (:ok preflight)) (not= :sat (:status preflight))))
+            assertions (vec (concat background (when (:counterexample inventory) [(:counterexample inventory)])))
+            reply (if feasibility-refused? preflight (run-scope forest assertions observation-rows))
+            common (merge base (select-keys reply [:ok :model-status :why :error :stats :backend])
+                     {:solver-status (:status reply) :native-scope-attempts @attempts
+                      :nodes-imported (:graph-imported reply) :admission (:admission admitted)
+                      :admission-reference (:admission-reference admitted) :admission-account :shared-scope
+                      :phase (if feasibility-refused? :assumption-consistency :query)
+                      :core {:kind (:core-kind reply) :labels (:core reply)}
+                      :preflight (when preflight (select-keys preflight [:status :stats]))})]
+       (if (or feasibility-refused? (not= :sat (:status reply)))
+        (merge common {:verdict (cond (= :unsat (:status reply))
+                                      (if feasibility-refused? :vacuous (if (= :prove (:mode inventory)) :proved :unsat))
+                                      (= :unknown (:status reply)) :unknown
+                                      (= :unsupported (:status reply)) :unsupported :else :error)
+                       :validation {:status :not-applicable} :assertion-replay :not-run})
+        (let [wire (into {} (:observations reply))
+              original-assignments (into {} (mapv (fn [v] [(:name v)
+                                      (coordinate (get wire (str "var/" (:name v))))]) vars))
+              assignment-data (graph/encode original-assignments)
+              coordinate-view (coordinates/prepare assignment-data)
+              assignments (:assignments coordinate-view)]
+         ((:with-point admitted) assignments
+          (fn [point]
+           (let [source-roots (mapv #(get source-for (:term %)) assertions)
+                 checking (replay/validation point source-roots assertions)
+                 display (observations inventory point source-for wire watch-names)]
+            (check! :replay 0)
+            (merge common
+             {:assignments assignments :assignment-graph assignment-data
+              :assignment-reference (:reference coordinate-view) :coordinate-profile coordinates/profile
+              :binding-reference (graph/of assignments) :validation checking :assertion-replay :run
+              :verdict (cond (= :invalid (:status checking)) :invalid-model
+                             (not= :valid (:status checking)) :candidate
+                             (= :prove (:mode inventory)) :refuted :else :sat)
+              :observations display :observation-decoding :deferred
+              :resources ((:resources point)) :checking ((:checking point))}))))))))))
+   (catch error
+    (merge base {:ok false :solver-status (if (zero? @attempts) :not-run (get @last-native :status :error))
+                 :verdict :error :phase (if (zero? @attempts) :admission :replay)
+                 :error (ex-message error) :why (ex-data error) :native-scope-attempts @attempts
+                 :reported-native (select-keys @last-native [:status :stats :why :error])
+                 :validation {:status :incomplete :kind :operation-refused} :assertion-replay :incomplete})))))
