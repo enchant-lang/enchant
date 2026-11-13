@@ -1,0 +1,40 @@
+(ns formal.retained-composition-check
+ (:require [formal.retained-composition :as composition] [formal.retained-question :as retained]
+           [formal.data-graph :as g] [formal.question-graph :as qg] [formal.query :as q]
+           [formal.term :as t] [formal.request :as request] [formal.request-point :as point]))
+
+(def x (t/variable "composition.x" t/Int))
+(def caller (qg/prepare (q/sat {:assumptions [(t/le x (t/int 9))]})))
+(def assertions (g/encode [(q/assertion "seven" (t/eq x (t/int 7)))]))
+(def original (composition/prepare caller assertions 2 5))
+(def complete (composition/question original))
+
+(deftest declared-provenance-rebuilds-the-exact-complete-question
+ (is (= original (composition/require-subject! original complete)))
+ (is (= (g/bytes (:graph complete)) (g/bytes (:graph (retained/compose caller assertions 2)))))
+ (is (= :sat (:verdict (point/replay (request/prepare complete) {"composition.x" 7}))))
+ (is (= :invalid-point (:verdict (point/replay (request/prepare complete) {"composition.x" 8}))))
+ (is (thrown? (composition/require-subject! original caller)))
+ (doseq [bad [(assoc original :owner (erlang/self)) (assoc original :reference (composition/reference original))
+              (assoc original :formal/retained-composition 1.0) (assoc original :generation 2.0)
+              (assoc original :revision -1) (assoc original :profile :other)]]
+  (is (thrown? (composition/check! bad)))))
+
+(deftest changed-assumptions-or-caller-cannot-keep-the-original-subject
+ (let [changed (assoc original :assertions-graph (g/encode [(q/assertion "eight" (t/eq x (t/int 8)))]))
+       relabeled (assoc original :caller (qg/patch caller {:origin (g/encode {:changed true})}))]
+  (doseq [c [changed relabeled (assoc original :generation 3)]]
+   (is (thrown? (composition/require-subject! c complete)))
+   (is (not= (composition/reference original) (composition/reference c))))
+  (is (= :invalid-point (:verdict (point/replay (request/prepare (composition/question changed)) {"composition.x" 7}))))))
+
+(deftest revision-and-empty-context-are-provenance-rather-than-owner-authentication
+ (let [changed (assoc original :revision 6)]
+  (is (= changed (composition/require-subject! changed complete)))
+  (is (not= (composition/reference changed) (composition/reference original))))
+ (let [a (composition/prepare caller (g/encode []) 0 0)
+       b (composition/prepare caller (g/encode []) 9 20)]
+  (is (= (g/bytes (:graph caller)) (g/bytes (:graph (composition/question b)))))
+  (is (not= (composition/reference a) (composition/reference b)))))
+
+(run-tests)
