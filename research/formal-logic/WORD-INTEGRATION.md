@@ -42,6 +42,8 @@ solver-denied durable readers before selection. The actual Org writer,
 unchanged replay and browser review follow. The candidate build is real; managed word capability, project selection and
 presentation qualification still require the remaining actual gates. The first
 focused SDK run found a negative test whose own constructor rejected its malformed
-sort before the managed boundary. Its correction and rerun retain that failed
-receipt rather than treating a partial green log as qualification. Broader theory and formal/total
+sort before the managed boundary. The malformed graph now enters the actual boundary directly. The repeated
+focused gate passes all 1,963 assertions across twelve files, including fifty
+actual admission controls and 129 selected-row checks. The failed receipt is
+preserved; legacy/project/native checks and independent readers remain pending. Broader theory and formal/total
 language work remains active.
