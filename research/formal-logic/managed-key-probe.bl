@@ -1,0 +1,52 @@
+(ns formal.managed-key-probe
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.question-graph :as qg] [formal.graph-question :as question]
+           [formal.data-graph :as graph] [formal.backend :as backend] [bl.json :as json] [oracle]))
+
+(def outer-name "formal.key.probe/outer.never.interned.20261113")
+(def nested-name "formal.key.probe/nested.never.interned.20261113")
+(defn- absent? [name]
+ (try (erlang/binary_to_existing_atom name :utf8) false (catch _ true)))
+(defn- key-graph [name]
+ (let [data {:formal/data-graph 1 :profile graph/profile :root 0 :nodes [["keyword" name]]}]
+  (graph/check! data) data))
+(assert (and (absent? outer-name) (absent? nested-name)))
+(def leaf (t/int 3))
+(def base (qg/prepare (q/sat {})))
+(defn- with-observation [label descriptor]
+ (assoc base :graph (graph/patch-map (:graph base)
+                     [[(graph/encode :observe) (graph/assemble "map" [[label descriptor]])]])))
+(def nested
+ (graph/patch-map (graph/encode (v/make {"placeholder" leaf} {}))
+  [[(graph/encode :value) (graph/assemble "map" [[(key-graph nested-name) (graph/encode leaf)]])]]))
+(def contexts [["string-label-control" (with-observation (graph/encode "data") (graph/encode leaf))]
+               ["unknown-outer-key" (with-observation (key-graph outer-name) (graph/encode leaf))]
+               ["unknown-nested-key" (with-observation (graph/encode "data") nested)]])
+(def queries (atom 0))
+(defn- deny [& _] (swap! queries inc) (throw :key-probe-must-not-query))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(assert (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+(try
+ (let [rows
+       (oracle/with-oracle {:query deny :query-graph deny :script deny}
+        (fn []
+         (mapv (fn [[label context]]
+                 (merge {:case label :reference (graph/reference (:graph context))}
+                  (try
+                   (question/with-numeric context {}
+                    (fn [inventory _]
+                     {:status :admitted :checking (:checking inventory)
+                      :typed-nodes (get-in inventory [:forest :checking :typed-nodes])}))
+                   (catch error {:status :refused :message (ex-message error)})))) contexts)))
+       exchanges (elem (erlang/trace_info pattern :call_count) 1)]
+  (assert (and (absent? outer-name) (absent? nested-name)))
+  (assert (= 0 exchanges @queries))
+  (File/write! (first (BeamLisp/argv))
+   (json/encode {:schema "enchant.formal.unknown-key-admission-probe.v1" :rows rows
+                 :keyword-names-still-absent true :native-exchanges exchanges :managed-query-calls @queries
+                 :native-sessions 0 :compiler-proof-authority false
+                 :scope "Original graph-only keys, never interned. Positive string-key control and outer/nested key admission under the exact SDK."}
+                {:pretty 2}))
+  (println {:cases (count rows) :native-exchanges exchanges :keyword-names-still-absent true}))
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))

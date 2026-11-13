@@ -36,6 +36,10 @@ elif stage == 'profile-sorts':
     names += ['research/formal-logic/managed-profile-sorts.bl']
     output = E / 'profile-sorts.json'
     request = ['run', str(R / names[-1]), '--', str(output)]
+elif stage == 'key-probe':
+    names += ['research/formal-logic/managed-key-probe.bl']
+    output = E / 'key-probe.json'
+    request = ['run', str(R / names[-1]), '--', str(output)]
 elif stage in ('managed-reader-one', 'managed-reader-two', 'managed-reader-controls'):
     names += ['research/formal-logic/managed-graph-reader.bl']
     output = E / (stage + '.json')
