@@ -12,8 +12,9 @@ import time
 P = Path(__file__).resolve().parent
 R = P.parent.parent
 stage = sys.argv[1] if len(sys.argv) == 2 else 'owner'
-assert len(sys.argv) <= 2 and stage in ('owner', 'answers')
-E = P / ('evidence/retained-owner-prototype' if stage == 'owner' else 'evidence/retained-answer-prototype')
+assert len(sys.argv) <= 2 and stage in ('owner', 'answers', 'leases')
+directories = {'owner': 'retained-owner-prototype', 'answers': 'retained-answer-prototype', 'leases': 'retained-request-prototype'}
+E = P / 'evidence' / directories[stage]
 E.mkdir(exist_ok=True)
 
 def read(path):
@@ -43,11 +44,22 @@ modules = {
 }
 tests = [R / 'test/bl/formal/managed_graph_test.bl', R / 'test/bl/formal/retained_configuration_test.bl',
          P / 'retained-question-check.bl']
-if stage == 'answers':
+if stage in ('answers', 'leases'):
     modules['formal/retained-composition.bl'] = (R / 'priv/lib/formal/retained-composition.bl', [])
     modules['formal/prototype-request-answer.bl'] = (R / 'priv/lib/formal/request-answer.bl', [
         ['(ns formal.request-answer', '(ns formal.prototype-request-answer']])
     tests += [P / 'retained-composition-check.bl', R / 'test/bl/formal/request_test.bl', P / 'retained-answer-check.bl']
+if stage == 'leases':
+    modules['formal/prototype-request-runtime.bl'] = (R / 'priv/lib/formal/request-runtime.bl', [
+        ['(ns formal.request-runtime', '(ns formal.prototype-request-runtime'],
+        ['[formal.backend :as backend]', '[formal.prototype-backend :as backend]'],
+        ['[formal.request-answer :as answer]', '[formal.prototype-request-answer :as answer]']])
+    modules['formal/prototype-logic.bl'] = (R / 'priv/lib/formal/logic.bl', [
+        ['(ns formal.logic', '(ns formal.prototype-logic'],
+        ['[formal.backend :as backend]', '[formal.prototype-backend :as backend]'],
+        ['[formal.request-answer :as request-answer]', '[formal.prototype-request-answer :as request-answer]'],
+        ['[formal.request-runtime :as request-runtime]', '[formal.prototype-request-runtime :as request-runtime]']])
+    tests += [P / 'retained-request-check.bl']
 inputs = [*(value[0] for value in modules.values()), *tests, Path(__file__), P / 'sdk-pin.json']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 digests = {}
@@ -83,12 +95,16 @@ for name, (source, replacements) in modules.items():
 paths = []
 for source in tests:
     replacements = []
-    if source in [R / 'test/bl/formal/managed_graph_test.bl', R / 'test/bl/formal/retained_configuration_test.bl', P / 'retained-answer-check.bl']:
+    if source in [R / 'test/bl/formal/managed_graph_test.bl', R / 'test/bl/formal/retained_configuration_test.bl', P / 'retained-answer-check.bl', P / 'retained-request-check.bl'] or (stage == 'leases' and source == R / 'test/bl/formal/request_test.bl'):
         replacements += [['[formal.backend :as backend]', '[formal.prototype-backend :as backend]']]
     if source == R / 'test/bl/formal/managed_graph_test.bl':
         replacements += [['[formal.graph-execution :as execution]', '[formal.prototype-graph-execution :as execution]']]
-    if source in [R / 'test/bl/formal/request_test.bl', P / 'retained-answer-check.bl']:
+    if source in [R / 'test/bl/formal/request_test.bl', P / 'retained-answer-check.bl', P / 'retained-request-check.bl']:
         replacements += [['[formal.request-answer :as answer]', '[formal.prototype-request-answer :as answer]']]
+    if stage == 'leases' and source in [R / 'test/bl/formal/request_test.bl', P / 'retained-request-check.bl']:
+        replacements += [['[formal.request-runtime :as run]', '[formal.prototype-request-runtime :as run]']]
+    if source == P / 'retained-request-check.bl':
+        replacements += [['[formal.logic :as logic]', '[formal.prototype-logic :as logic]']]
     destination = checks / source.name
     project(source, destination, replacements)
     paths.append(str(destination))
@@ -121,6 +137,7 @@ write('qualification.json', {
     'command_sha256': sha(E / 'command.json'), 'log_sha256': sha(E / 'checks.txt'), 'exit': read(E / 'exit.json'),
     'compiler_proof_authority': False,
     'scope': 'Explicit namespace/import projections alongside the qualified SDK. Existing managed native-owner controls, new authoritative metadata reads and label normalization, plus complete graph compatibility with the unchanged canonical owners.'
-             + (' Retained version-3 answers, recomputed portable composition and strict version-2 answer compatibility are exercised too.' if stage == 'answers' else '')
-             + ' No replacement SDK, retained language request, historical execution authentication or compiler preservation theorem is established.'})
+             + (' Retained version-3 answers, recomputed portable composition and strict version-2 answer compatibility are exercised too.' if stage in ('answers', 'leases') else '')
+             + (' The retained request facade, nested execution leases, actual owner guards and the new fresh execution implementation are exercised as prototype source too.' if stage == 'leases' else '')
+             + ' No replacement SDK, historical execution authentication or compiler preservation theorem is established.'})
 print(json.dumps({'status': 'passed', 'files': len(tests), 'sdk_produced': False}))
