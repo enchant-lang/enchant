@@ -1,0 +1,105 @@
+(ns formal.word-graph-test
+ (:require [formal.term :as t] [formal.data-graph :as g] [formal.word-batch.evaluate :as e]
+           [formal.word-batch.graph-terms :as forest] [formal.word-batch.resources.word :as word]))
+(def options {:profile e/word-graph-profile})
+(defn- evaluated [terms assignments limits]
+ (let [data (g/encode terms) roots (second (nth (:nodes data) (:root data)))]
+  (e/graph-values data roots assignments (assoc options :limits limits))))
+(defn- counted [function name arity action]
+ (let [module (elem (erlang/fun_info function :module) 1) pattern (tuple module name arity)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try (let [result (try {:value (action)} (catch error {:error (ex-message error)}))
+             calls (elem (erlang/trace_info pattern :call_count) 1)] (assoc result :calls calls))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(defn- bv [width bits] (t/literal [:bv width] bits))
+
+(deftest all-word-primitives-share-the-existing-private-semantics
+ (doseq [width [1 2 8]
+         op [:bv-add :bv-sub :bv-mul :bv-and :bv-or :bv-xor :bv-shl :bv-lshr :bv-ashr
+             :bv-ult :bv-ule :bv-slt :bv-sle :eq :distinct]]
+  (let [sort [:bv width] x (t/variable "word.x" sort) y (t/variable "word.y" sort)
+        result-sort (if (contains? #{:bv-ult :bv-ule :bv-slt :bv-sle :eq :distinct} op) t/Bool sort)
+        expression (t/app op result-sort [x y] nil)]
+   (doseq [a [0 (dec (erlang/bsl 1 width))] b [0 1]]
+    (let [point {"word.x" {:formal/bv [width a]} "word.y" {:formal/bv [width b]}}
+          actual (evaluated [expression] point {})]
+     (is (= :complete (:status actual)) (pr-str actual))
+     (is (= [(e/value expression point)] (:values actual)))
+     (is (= :private-sdk-function (:primitive-dispatch actual)))
+     (is (= 1 (get-in actual [:resources :word-primitive-calls])))
+     (is (= 2 (get-in actual [:resources :word-value-check-calls])))
+     (is (= false (:compiler-proof-authority actual)))))))
+ (doseq [op [:bv-not :bv-neg :bv-zero-extend :bv-sign-extend]
+         width [1 8]]
+  (let [x (t/variable "word.unary" [:bv width]) extension? (contains? #{:bv-zero-extend :bv-sign-extend} op)
+        expression (t/app op [:bv (if extension? (+ width 3) width)] [x] (when extension? 3))
+        point {"word.unary" {:formal/bv [width (dec (erlang/bsl 1 width))]}}
+        actual (evaluated [expression] point {})]
+   (is (= :complete (:status actual)))
+   (is (= [(e/value expression point)] (:values actual)))))
+ (doseq [data [[6 2] (list 6 2)]]
+  (let [expression (t/app :bv-extract [:bv 5] [(bv 8 255)] data)]
+   (is (= [{:formal/bv [5 31]}] (:values (evaluated [expression] {} {}))))))
+ (let [expression (t/app :bv-concat [:bv 5] [(bv 2 3) (bv 3 5)] nil)]
+  (is (= [{:formal/bv [5 29]}] (:values (evaluated [expression] {} {}))))))
+
+(deftest literal-work-is-reserved-before-constructors-even-in-inactive-syntax
+ (let [expression (t/ite (t/bool true) (bv 8 1) (bv 8 255))
+       data (g/encode expression) roots [(:root data)]
+       refused (counted t/app :literal 2 #(forest/prepare-numeric-word data roots {:admission-work-units 0}))]
+  (is (= 0 (:calls refused)))
+  (is (= :incomplete (get-in refused [:value :admission :status])))
+  (is (= :not-run (get-in refused [:value :admission :constructor-execution]))))
+ (doseq [order [vec #(apply list %)]]
+  (let [expression (t/forall [(t/bound "unused.word" [:bv 128])] (t/bool true))
+        expression (assoc expression :data (order (map order (:data expression))))
+        data (g/encode expression)
+        refused (counted t/app :literal 2 #(forest/prepare-numeric-word data [(:root data)] {:word {:word-bits 64}}))]
+   (is (= 0 (:calls refused)))
+   (is (= :word-bits (get-in refused [:value :admission :reason :metric])))
+   (is (= :not-run (get-in refused [:value :admission :constructor-execution])))))
+ (doseq [sort [[:bv 0] [:bv 4097] [:bv 8.0] t/String]]
+  (let [expression (assoc (t/forall [(t/bound "unused.invalid" t/Int)] (t/bool true)) :data [["unused.invalid" sort]])
+        data (g/encode expression)
+        refused (counted t/app :literal 2 #(forest/prepare-numeric-word data [(:root data)] {:word {:word-bits 1000000}}))]
+   (is (= 0 (:calls refused)))
+   (is (string? (:error refused))))))
+
+(deftest point-work-precedes-value-checks-and-word-primitives
+ (let [x (t/variable "guarded.word" [:bv 8]) expression (t/app :bv-add [:bv 8] [x (bv 8 1)] nil)
+       actual (evaluated [expression] {"guarded.word" {:formal/bv [8 (erlang/bsl 1 10000)]}} {:word {:work-units 1000}})]
+  (is (= :incomplete (:status actual)))
+  (is (= 0 (get-in actual [:resources :word-value-check-calls])))
+  (is (= 0 (get-in actual [:resources :word-primitive-calls])))
+  (is (= :work-units (get-in actual [:resources :refusals 0 :reason :metric]))))
+ (let [expression (t/app :bv-mul [:bv 8] [(bv 8 255) (bv 8 255)] nil)
+       actual (evaluated [expression] {} {:word {:intermediate-bits 15}})]
+  (is (= :incomplete (:status actual)))
+  (is (= 0 (get-in actual [:resources :word-primitive-calls])))
+  (is (= :intermediate-bits (get-in actual [:resources :refusals 0 :reason :metric]))))
+ (let [x (t/variable "aggregate.word" [:bv 8]) expression (t/app :bv-add [:bv 8] [x (bv 8 1)] nil)
+       actual (evaluated [expression] {"aggregate.word" {:formal/bv [8 255]}} {:request-work-units 263})]
+  (is (= :incomplete (:status actual)))
+  (is (= 0 (get-in actual [:resources :word-value-check-calls])))))
+
+(deftest selected-branches-do-not-evaluate-denied-word-arithmetic
+ (let [large (t/app :bv-mul [:bv 8] [(bv 8 255) (bv 8 255)] nil)
+       expression (t/ite (t/bool true) (bv 8 7) large)
+       actual (evaluated [expression] {} {:word {:intermediate-bits 15}})]
+  (is (= :complete (:status actual)))
+  (is (= [{:formal/bv [8 7]}] (:values actual)))
+  (is (= 0 (get-in actual [:resources :word-primitive-calls])))))
+
+(deftest numeric-profile-and-caller-owned-forest-guards-remain-explicit
+ (let [expression (bv 8 7) data (g/encode expression)]
+  (is (thrown? (forest/prepare-numeric data [(:root data)] {})))
+  (is (thrown? (e/graph-values data [(:root data)] {} {:profile e/word-graph-profile :checked true})))
+  (let [escaped (atom nil)]
+   (e/with-graph-admission data [(:root data)] options
+    (fn [admitted]
+     (reset! escaped (:with-point admitted))
+     (let [edited (assoc admitted :forest {:nodes [] :checked true})]
+      ((:with-point edited) {} (fn [point] (is (= {:formal/bv [8 7]} ((:resolve point) (:root data)))))))))
+   (is (thrown? (@escaped {} identity))))))
+
+(run-tests)
