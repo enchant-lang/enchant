@@ -137,6 +137,31 @@
   (is (= :returned-different-response (get-in result [:local-delegation :status])))
   (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))))
 
+(deftest native-unsat-remains-a-solver-claim-without-a-checked-certificate
+ (let [subject (qg/prepare (q/prove (t/gt (t/add x (t/int 1)) x)))
+       paired (run/compare (request/prepare subject))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (get paired engine)]
+    (is (= :unsat (get-in result [:source :status])))
+    (is (= :solver-claim (:verdict result)))
+    (is (= :proved (:reported-verdict result)))
+    (is (= :not-run (:point-replay result)))
+    (is (= :matching-response (get-in result [:local-delegation :status])))
+    (is (= :not-checked (get-in result [:certificate :status])))
+    (is (= false (:compiler-proof-authority result)))))))
+
+(deftest out-of-profile-declarations-remain-admission-refusals-at-the-language-boundary
+ (let [subject (qg/prepare (q/prove (t/forall [(t/bound "request.unused.fp" (t/fp-sort 5 2))] (t/bool true))))]
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (request/prepare subject {:adapter {:backend engine}})
+         actual (counted backend/invoke :exchange! 4 #(run/execute r)) result (:result actual)]
+    ;; Acquisition performs its handshake, but no scope is sent.
+    (is (= 1 (:calls actual)))
+    (is (= :not-run (get-in result [:source :status]) (:verdict result)))
+    (is (= :refused (get-in result [:subject-admission :status])))
+    (is (= :not-run (:point-replay result)))
+    (is (= :matching-response (get-in result [:local-delegation :status])))))))
+
 (deftest ledger-storage-preserves-the-request-and-reopening-replays-it
  (let [connection (ledger/open nil) response (answer/supply original {"request.x" 7})]
   (try
