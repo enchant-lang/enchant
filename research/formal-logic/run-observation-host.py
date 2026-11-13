@@ -37,6 +37,10 @@ commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True)
 relative = str(Path(__file__).relative_to(R))
 assert subprocess.check_output(['git', 'show', commit + ':' + relative], cwd=R) == Path(__file__).read_bytes()
 service = 'work-enchant-formal-review.service'
+controller = Path('/nix/store/nnbprv49qyrf7iqa349dnqbz2qf0kpdq-work')
+assert (controller / 'bin/work').is_file()
+subprocess.run(['nix-store', '--add-root', R / '.bl/formal-dossier-controller', '--indirect',
+                '--realise', controller], check=True, stdout=subprocess.DEVNULL)
 launcher = Path('/home/othman/.local/state/workstation/enchant-formal-review/run.sh')
 before = launcher.read_bytes()
 assert str(R).encode() in before and b'review-serve.bl' in before
@@ -47,7 +51,7 @@ subprocess.run(stop, check=True)
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            '--working-directory=' + str(R), '--property=MemoryMax=1G', '--property=MemorySwapMax=0',
            '--property=RuntimeMaxSec=180', '--property=KillMode=control-group',
-           'env', 'WORK_BL=' + pin['sdk'] + '/bin/bl', '/home/othman/.nix-profile/bin/work',
+           'env', 'WORK_BL=' + pin['sdk'] + '/bin/bl', str(controller / 'bin/work'),
            'serve', 'enchant-formal-review', '--http', '24089', '--cwd', str(R),
            '--env-file', '/home/othman/.config/baton-dossier/service.env', '--memory', '2G',
            '--ready-timeout', '120', '--', 'env', 'FORMAL_REVIEW_PROFILE=0', 'FORMAL_REVIEW_KIT_ROOT=' + kit['root'],
