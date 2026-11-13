@@ -21,7 +21,7 @@ point outcomes; native UNSAT remains a solver claim. Its current native bridge
 requires a fresh owner. Retained-session request execution needs an owner-side
 adapter/context extension before it can be exposed.
 
-`formal.request-run-preview` uses the generic `:formal` effect's explicit
+`formal.request-run-preview` uses the existing `:oracle` effect's explicit
 `:request` method. Handlers can supply coordinates or delegate to a leased,
 same-process, single-use fallback. Local matching provenance is separate from
 portable evidence. The owner operation and the independent pure recheck have
