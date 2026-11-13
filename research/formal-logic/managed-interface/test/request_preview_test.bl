@@ -30,8 +30,8 @@
   (is (thrown? (request/check! (assoc original :formal/request 1.0))))
   (is (thrown? (request/check! (assoc original :admitted true))))
   (is (thrown? (request/check! (update original :policy dissoc :owner-ms))))
-  (is (thrown? (request/prepare subject {:adapter {:solver-ms 500.0}}))))
-  (is (thrown? (request/prepare subject {:adapter {:backend :other}}))))
+  (is (thrown? (request/prepare subject {:adapter {:solver-ms 500.0}})))
+  (is (thrown? (request/prepare subject {:adapter {:backend :other}})))
   (is (thrown? (request/prepare subject {:owner (erlang/self)})))))
 
 (deftest request-preparation-does-not-decode-history-or-normalize-rational-terms
@@ -74,7 +74,7 @@
   (is (= :invalid-point (:verdict (point/replay r {"request.x" 0}))))))
 
 (deftest irrelevant-missing-bindings-and-invalid-supplied-bindings-stay-distinct
- (let [subject (qg/prepare (q/sat {:assumptions [(t/or (t/bool true) (t/eq x (t/int 7)))]}))
+ (let [subject (qg/prepare (q/sat {:assumptions [(t/any [(t/bool true) (t/eq x (t/int 7))])]}))
        r (request/prepare subject) missing (point/replay r {}) bad (point/replay r {"request.x" 7.0})]
   (is (= :sat (:verdict missing)))
   (is (= :incomplete (get-in missing [:validation :bindings :status])))
@@ -84,15 +84,15 @@
 (deftest effect-supplied-points-need-no-native-owner-and-the-fallback-expires
  (let [held (atom nil) calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :unexpected-oracle))]
   (no-exchanges
-   #(oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn [] (oracle/with-oracle {:query deny :query-graph deny :script deny}
      (fn []
       (let [result (run/with-handler (fn [r fallback] (reset! held fallback) (answer/supply r {"request.x" 7}))
                      #(run/execute original))]
        (is (= :sat (:verdict result)))
        (is (= :not-invoked (get-in result [:local-delegation :status])))
        (is (= 0 (get-in result [:local-delegation :attempts])))
-       (is (thrown? (@held)))))))
-  (is (= 0 @calls)))))
+       (is (thrown? (@held))))))))
+  (is (= 0 @calls))))
 
 (deftest missing-method-and-foreign-fallback-refuse-before-exchange
  (no-exchanges
@@ -101,7 +101,7 @@
    (run/with-handler
     (fn [r fallback]
      (let [parent (erlang/self)]
-      (spawn (fn [] (send parent [:request-foreign (try (fallback) :accepted (catch _ :refused))])))
+      (erlang/spawn (fn [] (erlang/send parent [:request-foreign (try (fallback) :accepted (catch _ :refused))])))
       (receive [:request-foreign status] (is (= :refused status))
                (after 3000 (is false "foreign fallback did not return"))))
      (answer/supply r {"request.x" 7})) #(run/execute original)))))
@@ -125,11 +125,11 @@
 (deftest changed-coordinates-lose-fallback-matching-and-replay-as-invalid
  (let [actual
        (counted backend/invoke :exchange! 4
-        #(run/with-handler
+        (fn [] (run/with-handler
           (fn [_ fallback]
            (let [response (fallback)]
             (is (thrown? (fallback)))
-            (assoc response :point-graph (graph/encode {"request.x" 8})))) #(run/execute original)))
+            (assoc response :point-graph (graph/encode {"request.x" 8})))) #(run/execute original))))
        result (:result actual)]
   (is (= 2 (:calls actual)))
   (is (= :invalid-point (:verdict result)))
