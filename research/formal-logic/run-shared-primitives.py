@@ -30,7 +30,7 @@ elif stage == 'sdk-focused':
     names += ['test/bl/formal/shared_evaluator_test.bl']
     request = ['test', str(R / names[-1])]
     output = E / 'sdk-traces.json'
-elif stage == 'project-focused':
+elif stage in ('project-focused', 'adapter-integration'):
     project = True
     names += ['research/formal-logic/test/' + name for name in (
         'rational_preflight_test.bl', 'numeric_point_test.bl', 'numeric_execution_trace_test.bl',
