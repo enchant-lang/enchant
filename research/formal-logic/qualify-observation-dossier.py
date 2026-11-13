@@ -32,6 +32,13 @@ for name, digest in kit['rendering_source_sha256'].items():
 document = P / 'ATLAS.bl.org'
 text = document.read_text()
 assert len(re.findall(r'^#\+begin_src beam-lisp\b', text, re.M)) == 84
+assert re.findall(r'^#\+begin_src beam-lisp\b[^\n]*:id ([^\s]+)[^\n]*:frozen\b', text, re.M) == ['story-float-backends']
+recorded = read(E / 'recorded-float-native.json')
+assert recorded['sdk_pin'] == pin and recorded['execution']['exit_code'] == 0
+assert hashlib.sha256(recorded['source'].encode()).hexdigest() == recorded['source_sha256']
+assert hashlib.sha256(recorded['result_span'].encode()).hexdigest() == recorded['result_sha256']
+retained = re.search(r'^#\+begin_src beam-lisp :id story-float-backends :frozen\n(.*?)^#\+end_src\n#\+RESULTS: story-float-backends\n(:[^\n]*\n)', text, re.M | re.S)
+assert retained and retained.group(1) == recorded['source'] and retained.group(2) == recorded['result_span']
 identities = re.findall(r'^#\+begin_src beam-lisp\b[^\n]*:id ([^\s]+)', text, re.M)
 assert len(identities) == len(set(identities))
 checks = {}
@@ -114,7 +121,8 @@ assert tailnet['status'] == 200 and tailnet['document_sha256'] == sha(document)
 report = {'schema': 'enchant.formal.observation-dossier-qualification.v1', 'status': 'passed',
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': pin,
           'source_pin': snapshot, 'implementation_qualification_sha256': sha(E / 'qualification.json'),
-          'host': host, 'tailnet': tailnet, 'document': {'sha256': sha(document), 'cells': 84, 'execution': checks},
+          'host': host, 'tailnet': tailnet, 'document': {'sha256': sha(document), 'cells': 84, 'live_cells': 83,
+          'recorded_native_cells': 1, 'recorded_native_sha256': sha(E / 'recorded-float-native.json'), 'execution': checks},
           'kit_state_sha256': sha(E / 'kit-state.json'), 'kit_commit': kit['commit'],
           'browser': {'full_checks': len(audits['full']['checks']), 'focused_checks': len(audits['focused']['checks']),
                       'full_source_pin': full_pin, 'review_graphs': graphs,
