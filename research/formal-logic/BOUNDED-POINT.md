@@ -92,8 +92,9 @@ revision checks are a later integration gate.
 
 These limits are an implementation policy, not a proof of CPU, heap, wall-clock
 cost or universal totality. Graph checking, hashing, constructor admission and
-the cost of the forecasting machinery have their own costs. Rationals, text,
-sequences, arrays, FP format admission and aggregate value budgets still need
-policies. Whole-process memory/time caps remain part of qualification. A
+the cost of the forecasting machinery have their own costs. A separate
+[numeric preview](NUMERIC-POINT.md) now adds rational admission and concrete
+work policies. Text, sequences, arrays, FP format admission and aggregate value
+budgets still need policies. Whole-process memory/time caps remain part of qualification. A
 mechanized correspondence between the cost model and actual BL implementation
 is still open.

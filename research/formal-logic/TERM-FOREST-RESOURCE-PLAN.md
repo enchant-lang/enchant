@@ -37,7 +37,9 @@ focused assertions, alongside three capped concrete growth probes. It returns
 term-based forecasts without running the primitive. The separate
 [bounded Bool/Int point profile](BOUNDED-POINT.md) now integrates it with private
 cumulative accounting, node reservations, selective demand and exact input and
-settings identities. Other value families, ordinary SDK entry-point policy,
+settings identities. The [numeric profile](NUMERIC-POINT.md) also covers rational
+normalization, cross-products, conversions and separate literal admission.
+Other value families, ordinary SDK entry-point policy,
 actual managed replay and a cost-model correspondence remain open.
 
 The current project checks run under whole-process memory and time caps. Its
@@ -46,8 +48,9 @@ must explicitly select the new scalar profile for derived-integer preflight.
 
 ## The first integration boundary
 
-Start with an explicit Bool/Int resource profile and retain the current preview
-profile as a separate interface. Unsupported policies must return incomplete
+The initial explicit Bool/Int resource profile and the subsequent Bool/Int/Real
+numeric profile retain the preceding general preview as a separate interface.
+Unsupported policies must return incomplete
 work rather than fall through to an unmetered primitive. Constructor admission
 and concrete evaluation need separate accounting: an untaken branch is still
 typed, but does not spend its concrete evaluation capacity.
@@ -66,3 +69,18 @@ expensive operation does not spend work that it never performed. Report root
 completion, resource refusals and charged work separately. Bind the original
 question, point assignments and normalized settings in distinct references;
 none of those diagnostics grants a solver verdict or compiler authority.
+
+The numeric profile preflights all reachable rational literal normalizations
+before any SDK constructor runs. A refused reservation grants no typed forest;
+it reports admission incomplete and zero charged constructor work. Complete
+admission and demanded concrete evaluation have separate accounts. Inactive
+syntax may therefore need normalization admission while spending no concrete
+arithmetic work. Actual BEAM call-count controls retain positive cases and
+observe zero normalizer/arithmetic calls at the refused boundaries.
+
+Those controls also expose repeated SDK binding checks in the current shallow
+adapter: the small multiplication control makes seven normalizer calls versus
+three in direct SDK tree evaluation. Extract a shared primitive boundary that
+can reuse private checked child values, preserving semantics and preflight
+without accepting caller-supplied checked-value claims. No speed advantage is
+established by the current preview or those call counts.

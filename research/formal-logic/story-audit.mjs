@@ -733,7 +733,7 @@ try{
     check(size.name+': visible Float result '+id,t.length>100);
     if(id==='story-float-source')check(size.name+': Float Source cell demonstrates the repaired mismatch and zero distinction',t.includes(':term-value false')&&t.includes(':actual-value false')&&t.includes(':legacy-source-status :unsupported')&&t.includes(':legacy-source-holds nil')&&t.includes(':zeros-numerically-equal true')&&t.includes(':zeros-strictly-identical false')&&t.includes(':module-retired true')&&t.includes(':compiler-proof-authority false'));
     if(id==='story-float-backends')check(size.name+': Float backends receive identical questions without certificate authority',t.includes(':same-complete-question true')&&t.includes(':backends [:z3 :oxiz]')&&t.includes(':native-proof-certificate :not-checked')&&t.includes(':compiler-proof-authority false'));
-    if(id==='story-float-backends')check(size.name+': native observation is explicitly recorded beside live Source evaluation',await evaluate("document.body.innerText.includes('This one native observation is explicitly frozen')&&document.body.innerText.includes('The other 84 cells execute afresh')"));
+    if(id==='story-float-backends')check(size.name+': native observation is explicitly recorded beside live Source evaluation',await evaluate("document.body.innerText.includes('This one native observation is explicitly frozen')&&document.body.innerText.includes('The other 85 cells execute afresh')"));
     await evaluate(`document.querySelector('#cell-${id}').scrollIntoView({block:'center'})`);
     await shot(size.name+'-'+id+'-data');
   }
