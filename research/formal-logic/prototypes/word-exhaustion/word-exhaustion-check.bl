@@ -54,4 +54,25 @@
       (is (= 4 (:points-checked result))))))
    (is (= 0 (elem (erlang/trace_info pattern :call_count) 1) @calls))
    (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest unused-quantification-still-belongs-to-the-admitted-grammar
+ (let [b (t/bound "proof.bound" t/Bool)
+       result (checked (q/prove (t/forall [b] (t/bool true))))]
+  (is (= :rejected (:status result)))))
+(deftest compare-real-native-claims-to-independent-exhaustion
+ (let [sort [:bv 3] x (t/variable "proof.native" sort)
+       one (t/literal sort 1) zero (t/literal sort 0) last (t/literal sort 7)
+       claim (t/implies (t/eq x last) (t/eq (t/app :bv-add sort [x one] nil) zero))
+       query (q/prove claim) subject (qg/prepare query)]
+  (doseq [engine [:z3 :oxiz]]
+   (let [native (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+                  (fn [session] (backend/graph-question! session subject {:profile policy/numeric-word})))
+         r (request/for-backend (prepared query) engine)
+         independent (proof/check r (proof/candidate r))]
+    (is (= :unsat (:solver-status native)))
+    (is (= :solver-claim (:verdict native)))
+    (is (= :not-checked (get-in native [:certificate :status])))
+    (is (= :checked (:status independent)))
+    (is (= :entails (:verdict independent)))
+    (is (= 8 (:points-checked independent)))
+    (is (= false (:checked-native-execution independent) (:compiler-proof-authority independent)))))))
 (run-tests)

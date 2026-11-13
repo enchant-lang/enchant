@@ -39,8 +39,10 @@ assumptions to the subject.
 The prospective checks cover every valuation at widths one through five,
 wrapping, actual false claims, mixed Boolean/word domains, contradictory
 assumptions, changed request references and adapters, added trust/coverage
-fields, floating versions, oversized domains, unbounded sorts and solver-denied
-execution. These are planned checks until the actual runner passes.
+fields, floating versions, oversized domains, unbounded sorts, unused quantification and solver-denied
+execution. A separate planned comparison asks both real native owners for the
+same three-bit wrapping theorem: native UNSAT must remain a solver claim, while
+the independently exhausted candidate must check all eight points. These are planned checks until the actual runner passes.
 
 A passing implementation run would still trust this enumeration checker, SDK
 admission and word semantics, BL compilation and BEAM. It would establish no
