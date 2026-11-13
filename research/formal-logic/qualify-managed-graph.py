@@ -51,6 +51,20 @@ for stage in required:
             assert sha(R / name) == digest, name
     result = read(E / (stage + '-exit.json'))
     assert result['exit_code'] == 0 and result['runtime_retired'] and result['consumer_cwd_retired'], stage
+    if result.get('exit_source') == 'retained-original-systemd-service':
+        adoption = read(E / (stage + '-adoption-source-pin.json'))
+        terminal = read(E / (stage + '-adoption-terminal.json'))
+        assert stage == 'paired-native-corpus'
+        assert sha(E / (stage + '-adoption-terminal.json')) == result['adoption_terminal_sha256']
+        assert terminal['Id'] == adoption['unit'] and terminal['InvocationID'] == adoption['invocation']
+        assert terminal['ActiveState'] == 'inactive' and terminal['MainPID'] == '0'
+        assert terminal['Result'] == 'success' and terminal['ExecMainCode'] == '1' and terminal['ExecMainStatus'] == '0'
+        assert adoption['initial_state']['ActiveState'] == 'active'
+        assert adoption['original_source_pin_sha256'] == sha(E / (stage + '-source-pin.json'))
+        assert adoption['outer_handle_exit_code'] == 143
+        assert sha(R / adoption['recipe']) == adoption['recipe_sha256']
+        recipe_body = subprocess.check_output(['git', 'show', adoption['code_commit'] + ':' + adoption['recipe']], cwd=R)
+        assert hashlib.sha256(recipe_body).hexdigest() == adoption['recipe_sha256']
     command = read(E / (stage + '-command.json'))
     ceiling = 3600 if stage == 'paired-native-corpus' else (1800 if stage == 'managed-native-corpus' else (720 if stage == 'sdk-preflight-controls' else 900))
     assert all(flag in command for flag in ('--property=MemoryMax=4G', '--property=MemorySwapMax=0',
