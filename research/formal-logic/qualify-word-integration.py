@@ -125,6 +125,10 @@ packets = read(E / 'packets.json')
 assert packets['records'] == 12 and len(packets['rows']) == 12
 assert packets['manual-schema-preload'] is False and packets['source-payload-execution'] is False
 assert packets['checked-native-execution'] is False and packets['compiler-proof-authority'] is False
+assert (E / 'packets-command.json').stat().st_mtime_ns <= (E / 'packets.json').stat().st_mtime_ns <= (E / 'packets-exit.json').stat().st_mtime_ns
+comparison = read(E / 'native-comparison.json')
+assert comparison['status'] == 'passed' and comparison['sdk_pin'] == pin and comparison['questions'] == 187
+assert comparison['differences'] == [] and comparison['native_sha256'] == sha(E / 'native.json')
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 recipe = str(Path(__file__).relative_to(R))
 assert subprocess.check_output(['git', 'show', commit + ':' + recipe], cwd=R) == Path(__file__).read_bytes()
@@ -138,7 +142,7 @@ report = {'schema': 'bl.word-integration-sdk-qualification.v1', 'status': 'passe
           'preflight_namespaces': 599, 'records_qualification_sha256': sha(E / 'records-qualification.json'),
           'previous_records_qualification_sha256': sha(E / 'previous-readers-qualification.json'),
           'prior_retained_qualification_sha256': sha(E / 'prior-retained-readers-qualification.json'),
-          'native_questions': 187, 'native_outcome_differences': differences, 'native_sha256': sha(E / 'native.json'),
+          'native_questions': 187, 'native_outcome_differences': differences, 'native_comparison_sha256': sha(E / 'native-comparison.json'), 'native_sha256': sha(E / 'native.json'),
           'recipe': {'code_commit': commit, 'path': recipe, 'sha256': sha(Path(__file__))},
           'project_pin_selected': False, 'compiler_proof_authority': False,
           'scope': 'One immutable numeric-word SDK: graph-native composition, resource-accounted word admission/replay, atomic owner settings, indexed selected-row lookup, versioned portable answers, nested leases, canonical/legacy/project regressions, actual durable records and fresh solver-denied readers, previous record compatibility and unchanged paired native outcomes. Numeric implementation bytes and the compiler floor inherit explicit preceding qualifications. No general native-history authentication, complete theory coverage, compiler preservation or language totality theorem is established.'}
