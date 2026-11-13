@@ -70,6 +70,7 @@ elif stage == 'preflight-controls':
     names += ['test/scripts/sdk_preflight.py']
 elif stage == 'js-unit':
     names += ['test/js/numeric-equality.test.mjs', 'test/js/decimal-api.test.mjs',
+              'test/js/rt.test.mjs', 'test/js/leaves.test.mjs',
               'research/formal-logic/evidence/numeric-semantics/float-format.json',
               'research/formal-logic/evidence/numeric-semantics/float-format-exit.json',
               'research/formal-logic/decimal-format-probe.bl']
@@ -104,8 +105,9 @@ elif stage == 'js-unit':
     assert subprocess.check_output(['nix-store', '--query', '--hash', tools['node']['package']], text=True).strip() == tools['node']['nar_hash']
     # The unit test imports checkout JS source; bind it to the exact candidate
     # bytes here. SDK-only/direct and actual compiled routes are separate gates.
-    request = [tools['node']['executable'], '--test', str(R / 'test/js/numeric-equality.test.mjs'),
-               str(R / 'test/js/decimal-api.test.mjs')]
+    request = [tools['node']['executable'], '--test', '--test-concurrency=1', str(R / 'test/js/numeric-equality.test.mjs'),
+               str(R / 'test/js/decimal-api.test.mjs'), str(R / 'test/js/rt.test.mjs'),
+               str(R / 'test/js/leaves.test.mjs')]
     cap, ceiling = '2G', 120
 command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe', '--expand-environment=no',
            '--unit=work-formal-numeric-' + stage + '-' + pin['engine_fingerprint'][:12],
