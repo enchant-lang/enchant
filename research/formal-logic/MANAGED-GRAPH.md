@@ -26,7 +26,13 @@ both native corpora. Its first fresh SDK-only reader then found a separate
 application-key materialization gap, reproduced by graph-only unknown outer
 and nested keys. It remains unpromoted. The [graph-key repair design](GRAPH-KEYS-PLAN.md)
 keeps keys as data without creating atoms or importing application Source.
-The live project still selects the qualified shared-primitives SDK.
+Candidate 4 implements that repair and the common language request API in one
+immutable SDK containing 700 BL sources. It has passed namespace preflight and
+15,853 targeted assertion executions, including actual owner, unknown-key,
+request, oracle and ledger controls. Both native corpora and fresh persisted
+readers are still in qualification. The live project still selects the
+qualified shared-primitives SDK. See the [request interface](REQUEST-INTERFACE.md)
+for the higher language surface; this document describes the owner primitive.
 
 ```clojure
 (backend/with-session {:backend :oxiz :solver-ms 500 :hard-ms 2000}
@@ -55,7 +61,7 @@ admission belongs to the outer scope. Each point gets its own private work
 account and memo. Both levels enforce their creating process and retire on
 return or failure.
 
-`formal.graph-question/with-numeric` derives the complete question inventory
+`formal.graph-question/with-numeric-keys` derives the complete question inventory
 around that scope. Assertions, the claim, its exact negation, semantic
 predicates and observation roots keep their original graph identity. Native
 imports follow a dependency closure over admitted nodes. Their shallow
@@ -93,18 +99,34 @@ candidate. Native observations never repair that decision. The first profile
 admits Bool/Int/Real sorts; valid operations without a concrete policy can
 still leave replay incomplete. Other value-family policies remain open.
 
-Observation output currently retains original descriptor graphs, point root
-values and separately labelled native wire data. Full semantic-value
-materialization is explicitly deferred. This preserves the data needed for
-the structured decoder without presenting a raw backend coordinate as a
-checked language value.
+Observation output is an ordered vector of original source cursors, point root
+values and separately labelled native wire data. `label-source` and
+`descriptor-source` refer into the complete effective question graph. They are
+not native IDs. No application key needs to become an atom or a host map key
+merely to find and replay terms. Every map value is traversed in canonical
+graph-row order, preserving entries with different original key kinds.
+
+Full semantic-value materialization is explicitly deferred. This preserves
+the original data without presenting a raw backend coordinate as a checked
+language value. Point assignments and native diagnostics also remain graph
+data; the shared coordinate reader interprets only its declared encodings.
+Malformed coordinates and unavailable reasons keep original point-graph
+cursors. Mathematical canonicality checks remain inside the metered evaluator.
 
 ## Keep the new result format explicit
 
-The staged result uses `:formal/managed-graph-reply 1` and
-`:bl/managed-numeric-graph-preview-v1`. It is separate from the existing
-version-2 graph answer/effect interfaces. Integrating those higher layers,
-their independent readers and durable records remains part of the work.
+The current candidate result uses `:formal/managed-graph-reply 2` and
+`:bl/managed-numeric-graph-preview-v2`. Its new graph-key inventory is separate
+from the retained value-key inventory profile. Earlier candidate records stay
+under their original formats.
+
+The new `formal.logic` request functions, explicit oracle `:request` method
+and dedicated ledger payload are implemented on this owner primitive. The
+higher request bridge currently uses fresh owners; retained-session request
+integration remains open. Pure readers re-admit the original graphs and replay
+points in fresh scopes, using the same SDK mathematics and report functions
+as the owner. This is independence from native and saved claims, not a second
+independently verified implementation.
 
 | Field | What it describes |
 | --- | --- |

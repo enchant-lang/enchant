@@ -1,9 +1,18 @@
 # From the owner primitive to one language request
 
-Design for the next implementation batch. These interfaces are proposed;
-the managed owner candidate and its qualification have their own
-[progress receipt](evidence/managed-graph/progress.json). The current language
-answer/effect/ledger APIs still use their existing formats.
+Design record for the common request interface now implemented in candidate
+SDK4. Read [REQUEST-INTERFACE.md](REQUEST-INTERFACE.md) for the actual API and
+the [progress receipt](evidence/managed-graph/progress.json) for completed
+qualification gates. The retained-session extension, full structured display
+and wider resource families below remain open. Older answer/effect/ledger
+formats remain readable under their own declarations.
+
+The concrete surface is `formal.logic/prepare-request`, `request-from-graph`,
+`execute-request`, `compare-request`, `answer-request`, `recheck-request` and
+`with-request-handler`. The dedicated `formal.request-record` interface writes
+and reopens the existing ledger's typed request payload. No owner handle,
+admitted forest or caller verdict enters a request. Application observation
+keys, point data and diagnostic data remain original graphs.
 
 ## Keep three kinds of identity
 
@@ -25,7 +34,7 @@ handles, callbacks, admitted forests and native node IDs never enter request
 or evidence data. Existing `backend/graph-question!` is the primitive behind
 this bridge; it already derives admission and imports inside the owner.
 
-Suggested surface, to refine in actual code and tests:
+Original sketch, retained to show the intended separation (actual names above):
 
 ```clojure
 (request subject {:policy numeric-policy
