@@ -119,7 +119,10 @@ for target in ('beam', 'js-direct', 'js-compiled'):
     assert report['managed-query-calls'] == 0 and report['compiler-proof-authority'] is False
     assert len(report['named-float-approximations']) == 11
     observations[target] = report
-assert observations['beam']['named-float-approximations'] == observations['js-direct']['named-float-approximations'] == observations['js-compiled']['named-float-approximations']
+approximation_values = lambda report: [(row['id'], row['value']) for row in report['named-float-approximations']]
+assert approximation_values(observations['beam']) == approximation_values(observations['js-direct']) == approximation_values(observations['js-compiled'])
+assert all(row['matches-beam'] for target in ('js-direct', 'js-compiled')
+           for row in observations[target]['named-float-approximations'])
 compiled = observations['js-compiled']
 assert len(compiled['representation-samples']) == 5
 assert len(compiled['decimal-oracle']['rows']) == 1051 and not compiled['decimal-oracle']['differences']
