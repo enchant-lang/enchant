@@ -1,0 +1,45 @@
+(ns formal.bounded-point-examples
+ (:require [formal.term-forest-evaluate :as point] [formal.term :as t]
+           [formal.data-graph :as graph]))
+
+(defn- application [op sort arguments]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode op)]
+   [(graph/encode :sort) (graph/encode sort)]
+   [(graph/encode :args) (graph/assemble "vector" arguments)]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(defn run []
+ (let [data (reduce (fn [value _] (application :mul t/Int [value value]))
+                    (graph/encode (t/int 2)) (range 16))
+       policy {:integer {:integer-bits 32 :intermediate-bits 64 :work-units 100000}
+               :request-work-units 100000}
+       bounded (point/bounded-values data [(:root data) (:root data)] {} policy)
+       predicate (application :eq t/Bool [data (graph/encode (t/int 0))])
+       conjunction (application :and t/Bool [predicate (graph/encode (t/bool false))])
+       decided (point/bounded-values conjunction [(:root conjunction)] {} policy)
+       small (graph/encode (t/mul (t/int 7) (t/int 9)))
+       complete (point/bounded-values small [(:root small)] {} {})]
+  (assert (= :incomplete (:status bounded)))
+  (assert (= 4 (get-in bounded [:resources :integer-primitive-calls])))
+  (assert (= 119 (get-in bounded [:resources :charged-work-units])))
+  (assert (= 34 (get-in bounded [:resources :refusals 0 :reason :required])))
+  (assert (= [false] (:values decided)))
+  (assert (= :complete (:status decided)))
+  (assert (= [63] (:values complete)))
+  {:bounded bounded :decided decided :complete complete}))
+
+(defn story []
+ (let [{:keys [bounded decided complete]} (run)]
+  (into-sorted-map
+   {:subject :bounded-graph-integer-evaluation :layers 16
+    :typed-nodes (get-in bounded [:checking :typed-nodes]) :requested-roots 2
+    :integer-bit-limit (get-in bounded [:limits :integer :integer-bits])
+    :status (:status bounded) :first-refused-forecast-bits 34
+    :performed-multiplications (get-in bounded [:resources :integer-primitive-calls])
+    :charged-work-units (get-in bounded [:resources :charged-work-units])
+    :decisive-boolean (first (:values decided)) :decisive-root-status (:status decided)
+    :retained-refusals (count (get-in decided [:resources :refusals]))
+    :small-result (first (:values complete))
+    :separate-graph-assignment-settings true :assertion-replay :not-run
+    :native-calls 0 :compiler-proof-authority false}))))
