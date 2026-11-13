@@ -152,6 +152,11 @@ try {
    check(size.name+': actual graph replay and fresh indexed readers in '+name,result.includes(':graph-packet-replay :sat')&&result.includes(':saved-word-records 12')&&result.includes(':fresh-sdk-readers 2')&&result.includes(':normalizer-calls-per-selected-lookup 1')&&result.includes(':reader-solver-exchanges 0'));
    check(size.name+': supplied point needs no fallback or execution authority in '+name,result.includes(':supplied-fallback-attempts 0')&&result.includes(':checked-native-execution false')&&result.includes(':compiler-proof-authority false'));
    await shot(size.name+'-word-cell-'+name);
+   await evaluate("document.getElementById('research-word-answer-evidence').scrollIntoView({block:'center',behavior:'instant'})");
+   check(size.name+': actual saved evidence is current in '+name,await evaluate("document.querySelector('[data-research-element]').dataset.researchFreshness==='current'&&document.querySelectorAll('[data-research-row]').length===7&&document.querySelector('.research-status').innerText.includes('Revision 1.')"));
+   check(size.name+': proof and program gaps remain visible in '+name,await evaluate("document.querySelector('[data-research-row=proof]').innerText.includes('Still open')&&document.querySelector('[data-research-row=program]').innerText.includes('Still open')"));
+   check(size.name+': anonymous dossier has no save action in '+name,await evaluate("!document.querySelector('[data-research-save]')"));
+   await shot(size.name+'-word-saved-evidence-'+name);
   }
   await theme('light');
   check(size.name+': no page overflow after word views',await evaluate('document.documentElement.scrollWidth<=document.documentElement.clientWidth+2'));
