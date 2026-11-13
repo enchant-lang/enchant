@@ -1,0 +1,234 @@
+(ns formal.managed-graph-test
+ (:require [formal.word-batch.backend :as backend] [formal.word-batch.graph-execution :as execution]
+           [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.word-batch.evaluate :as evaluator]))
+
+(def options {:solver-ms 500 :hard-ms 2000})
+(def x (t/variable "managed.graph.x" t/Int))
+(def subject (qg/prepare (q/sat {:assumptions [(t/eq x (t/int 7))]
+                               :observe {"next" (t/add x (t/int 1))}})))
+(defn- counted [action]
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [value (action) calls (elem (erlang/trace_info pattern :call_count) 1)] {:value value :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest unused-out-of-profile-declarations-refuse-without-native-exchanges
+ (let [requests (mapv (fn [sort]
+                        (qg/prepare (q/prove (t/forall [(t/bound "unused.owner" sort)] (t/bool true)))))
+                      [(t/fp-sort 5 2) t/Rounding (t/array-sort t/Int t/Real)])]
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session (assoc options :backend engine)
+    (fn [session]
+     (let [before (backend/context session)]
+      (doseq [request requests]
+       (let [actual (counted #(backend/graph-question! session request {})) reply (:value actual)]
+        (is (= 0 (:calls actual) (:native-scope-attempts reply)))
+        (is (= :not-run (:solver-status reply)))
+        (is (= :admission (:phase reply)))
+        (is (= before (backend/context session)))))
+      ;; Calibrate the same counter and confirm the refused import did not
+      ;; retire or change the actual owner. Its handshake precedes this test.
+      (let [actual (counted #(backend/graph-question! session subject {}))]
+       (is (= 1 (:calls actual)))
+       (is (= :sat (get-in actual [:value :verdict])))
+       (is (= :valid (get-in actual [:value :validation :status]))))))))))
+
+(deftest both-native-owners-admit-original-graphs-and-replay-real-models
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session (assoc options :backend engine)
+   (fn [session]
+    (let [actual (counted #(backend/graph-question! session subject {})) r (:value actual)]
+     (is (= 1 (:calls actual)))
+     (is (= 2 (:formal/managed-graph-reply r)))
+     (is (= execution/profile (:reply-profile r)))
+     (is (= :sat (:solver-status r)))
+     (is (= :sat (:verdict r)) (pr-str r))
+     (is (= :valid (get-in r [:validation :status])))
+     (is (= :run (:assertion-replay r)))
+     (is (= 7 (get-in r [:assignments "managed.graph.x"])))
+     (is (= 8 (get-in r [:observations 0 :roots 0 :value])))
+     (is (= :deferred (get-in r [:observations 0 :materialization])))
+     (is (= :shared-scope (:admission-account r)))
+     (is (= :managed-native-owner (get-in r [:execution :scope])))
+     (is (= options (:native-limits r)))
+     (is (= (qg/reference subject) (:request-reference r) (:question-reference r)))
+     (is (= (:identity session) (:identity r)))
+     (is (= false (:trusted r)))
+     (is (= false (:compiler-proof-authority r)))
+     (is (= :not-checked (get-in r [:certificate :status])))
+     (is (map? (graph/encode r))))))))
+
+(deftest owner-retained-context-and-identity-survive-corrupted-client-mirrors
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session (assoc options :backend engine)
+   (fn [session]
+    (is (:ok (backend/load! session [(q/assertion "retained-seven" (t/eq x (t/int 7)))])))
+    (reset! (:state session) {:generation 99 :assertions [] :portable true})
+    (let [request (qg/prepare (assoc (q/prove (t/ge x (t/int 0))) :context nil))
+          changed (assoc session :identity {:backend :forged} :solver-ms 1 :hard-ms 1)
+          r (backend/graph-question! changed request {})
+          context (qg/field-data! (:question-graph r) :context)]
+     (is (= :proved (:verdict r)) (pr-str r))
+     (is (= :unsat (:solver-status r)))
+     (is (not= (:request-reference r) (:question-reference r)))
+     (is (= :bl/retained-graph-v1 (:profile context)))
+     (is (= ["context/0/retained-seven"] (:assertions context)))
+     (is (= true (:requested-context-present context)))
+     (is (nil? (:requested-context context)))
+     (is (= options (:native-limits r)))
+     (is (= (:identity session) (:identity r)))
+     (is (= 1 (count (:assertions (backend/context session))))))))))
+
+(deftest stale-guards-raw-transport-and-forged-views-refuse-before-native-work
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session (assoc options :backend engine)
+   (fn [session]
+    (let [old (backend/context session)]
+     (is (:ok (backend/reset! session)))
+     (let [stale (counted #(backend/graph-question! session subject {} old))]
+      (is (= 0 (:calls stale)))
+      (is (= :context-changed (get-in stale [:value :why :kind])))
+      (is (= :not-invoked (get-in stale [:value :execution :status])))))
+    (let [forged (counted #(backend/graph-question! session (assoc subject :forest {:checked true}) {}))]
+     (is (= 0 (:calls forged)))
+     (is (= :not-established (get-in forged [:value :binding]))))
+    (let [generation (:generation (backend/context session))]
+     (is (:ok (backend/invoke session (tuple :reset generation))))
+     ;; Obtain an old token from the actual diagnostic fields; portable
+     ;; accounting must refuse before it can be used to erase the raw exchange.
+     (let [r (counted #(backend/graph-question! session subject {}
+                        {:owner (:pid session) :generation generation :revision 0}))]
+      (is (= 0 (:calls r)))
+      (is (= :context-unavailable (get-in r [:value :why :kind])))))
+    (is (:ok (backend/reset! session)))
+    (is (= :sat (:verdict (backend/graph-question! session subject {}))))))))
+
+(deftest graph-and-legacy-imports-share-the-actual-arena-id-allocator
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session (assoc options :backend engine)
+   (fn [session]
+    (is (:ok (backend/load! session [(q/assertion "seven" (t/eq x (t/int 7)))])))
+    (is (= :proved (:verdict (backend/graph-question! session (qg/prepare (q/prove (t/ge x (t/int 0)))) {}))))
+    (is (:ok (backend/load! session [(q/assertion "eight" (t/eq x (t/int 8)))])))
+    (is (= :unsat (:status (backend/scope! session [] [] []))))
+    (is (= 2 (:revision (backend/context session))))))))
+
+(defn- doubled [data]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode :and)]
+   [(graph/encode :sort) (graph/encode t/Bool)]
+   [(graph/encode :args) (graph/assemble "vector" [data data])]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(deftest a-highly-shared-original-question-reaches-both-native-arenas
+ (let [term (reduce (fn [g _] (doubled g)) (graph/encode (t/bool true)) (range 16))
+       assertion (graph/assemble "map" [[(graph/encode :label) (graph/encode "shared")]
+                                        [(graph/encode :term) term]])
+       data (graph/assemble "map"
+             [[(graph/encode :formal/query) (graph/encode 1)] [(graph/encode :mode) (graph/encode :sat)]
+              [(graph/encode :assertions) (graph/assemble "vector" [assertion])]
+              [(graph/encode :observe) (graph/encode {})]])
+       request {:formal/question-graph 1 :profile qg/profile :graph data}]
+  (is (> (:expanded-nodes (graph/check! data)) 1000000))
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session (assoc options :backend engine)
+    (fn [session]
+     (let [r (backend/graph-question! session request {})]
+      (is (= :sat (:verdict r)) (pr-str r))
+      (is (= :valid (get-in r [:validation :status])))
+      (is (= 17 (get-in r [:checking :typed-nodes])))
+      (is (= 17 (:nodes-imported r)))
+      (is (= (:request-reference r) (:question-reference r)))
+      (is (= [true] (mapv :value (get-in r [:validation :results]))))))))))
+
+(deftest real-owner-admission-refusal-precedes-worker-and-normalizer-calls
+ (let [expression (t/eq (t/mul (t/real 1 3) (t/real 2 5)) (t/real 2 15))
+       request (qg/prepare (q/sat {:assumptions [expression]}))
+       module (elem (erlang/fun_info t/rational :module) 1) pattern (tuple module :rational 2)]
+  (backend/with-session (assoc options :backend :z3)
+   (fn [session]
+    (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+    (try
+     (let [denied (counted #(backend/graph-question! session request {}))
+           calls (elem (erlang/trace_info pattern :call_count) 1)]
+      (is (= :sat (get-in denied [:value :verdict])))
+      ;; Three literals are admitted once, then the product normalizes once.
+      (is (= 4 calls)))
+     (finally (erlang/trace_pattern pattern false (list :local :call_count))))
+    (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+    (try
+     (let [denied (counted #(backend/graph-question! session request {:limits {:admission-work-units 0}}))
+           calls (elem (erlang/trace_info pattern :call_count) 1)]
+      (is (= 0 (:calls denied)))
+      (is (= 0 calls))
+      (is (= :incomplete (get-in denied [:value :verdict])))
+      (is (= :admission (get-in denied [:value :phase]))))
+     (finally (erlang/trace_pattern pattern false (list :local :call_count))))))))
+
+(deftest whole-owner-deadline-does-not-inflate-worker-deadlines
+ (backend/with-session (assoc options :backend :z3)
+  (fn [session]
+   ;; Less than one complete worker deadline: refuse deterministically before
+   ;; sending, without relying on a one-millisecond scheduling race.
+   (let [r (counted #(backend/graph-question! session subject {:owner-ms 500}))]
+    (is (= 0 (:calls r)))
+    (is (= :owner-deadline (get-in r [:value :why :kind])))
+    (is (= options (get-in r [:value :native-limits])))
+    (is (= :retired (get-in (backend/graph-question! session subject {} (get-in r [:value :context-state])) [:why :kind])))))))
+
+(deftest supplied-coordinate-fixtures-replay-without-claiming-native-execution
+ (let [snapshot {:generation 0 :revision 0 :assertions [] :identity {:backend :fixture}
+                 :solver-ms 500 :hard-ms 2000}
+       run (fn [wire]
+             (execution/execute subject snapshot {}
+              (fn [_forest _assertions _watched]
+               {:ok true :status :sat :model-status :available
+                :observations (if wire [["var/managed.graph.x" wire]] [])
+                :core [] :core-kind :unsupported :stats {}})))
+       valid (run ["int" 7]) bad (run ["int" 8]) missing (run nil) wrong (run ["int" 1.0])]
+  (is (= :sat (:verdict valid)))
+  (is (= :invalid-model (:verdict bad)))
+  (is (= :candidate (:verdict missing)))
+  (is (= :invalid-model (:verdict wrong)))
+  (doseq [r [valid bad missing wrong]]
+   (is (nil? (:execution r)))
+   (is (= :not-checked (get-in r [:certificate :status])))
+   (is (= false (:compiler-proof-authority r))))))
+
+(deftest both-native-real-models-enter-the-metered-coordinate-boundary
+ (let [a (t/variable "managed.real.a" t/Real) b (t/variable "managed.real.b" t/Real)
+       original (qg/prepare (q/sat {:assumptions [(t/eq a (t/real 1 3)) (t/eq b (t/real 2 5))]
+                                    :observe {"product" (t/mul a b)}}))]
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session (assoc options :backend engine)
+    (fn [session]
+     (let [r (backend/graph-question! session original {})]
+      (is (= :sat (:verdict r)) (pr-str r))
+      (is (= :valid (get-in r [:validation :status])))
+      (is (= (evaluator/real 1 3) (get-in r [:assignments "managed.real.a"])))
+      (is (= (evaluator/real 2 5) (get-in r [:assignments "managed.real.b"])))
+      (is (= (evaluator/real 2 15) (get-in r [:observations 0 :roots 0 :value])))
+      (is (= [:valid :valid] (mapv :status (get-in r [:validation :bindings :rows]))))
+      (is (= :shared-scope (:admission-account r)))))))))
+
+(deftest canonical-coordinate-policy-is-distinct-from-the-legacy-wire-normalizer
+ (let [a (t/variable "managed.real.a" t/Real)
+       original (qg/prepare (q/sat {:assumptions [(t/eq a (t/real 1 2))]}))
+       snapshot {:generation 0 :revision 0 :assertions [] :identity {:backend :fixture}
+                 :solver-ms 500 :hard-ms 2000}
+       replay (fn [wire]
+                (execution/execute original snapshot {}
+                 (fn [_forest _assertions _watched]
+                  {:ok true :status :sat :model-status :available
+                   :observations [["var/managed.real.a" wire]] :core [] :core-kind :unsupported :stats {}})))
+       noncanonical (replay ["real" 2 4]) canonical (replay ["real" 1 2])]
+  ;; The preview profile admits canonical mathematical coordinates. A malformed
+  ;; encoding does not establish that a backend's mathematical SAT claim is false.
+  (is (= (evaluator/real 1 2) (backend/decode-native ["real" 2 4])))
+  (is (= :invalid-model (:verdict noncanonical)))
+  (is (= :invalid (get-in noncanonical [:validation :bindings :status])))
+  (is (= :value-sort-mismatch (get-in noncanonical [:validation :bindings :rows 0 :reason :reason])))
+  (is (= :sat (:verdict canonical)))
+  (is (nil? (:execution noncanonical)))))

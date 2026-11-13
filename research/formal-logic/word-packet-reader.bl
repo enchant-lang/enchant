@@ -1,0 +1,27 @@
+(ns formal.word-packet-reader
+ (:require [formal.request-record :as record] [formal.data-graph :as graph] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+(def input (json/decode (File/read! (nth argv 0))))
+(defn- restore [wire]
+ {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+  :nodes (mapv (fn [[tag payload]]
+                 [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)]) (get wire "nodes"))})
+(def rows
+ (mapv (fn [row]
+         (let [data (restore (get row "packet"))]
+          (assert (= (get row "packet-reference") (:sha256 (graph/reference data))))
+          (let [result (try (record/recheck-graph data)
+                        (catch error
+                         (let [missing (keep (fn [[kind value]]
+                                               (when (= "keyword" kind)
+                                                (try (erlang/binary_to_existing_atom value :utf8) nil (catch _ value)))) (:nodes data))]
+                          (throw (ex-info (str (ex-message error) " / uninitialized packet words: " missing) {})))))]
+           (assert (= (get row "expected") (name (:verdict result))))
+           (assert (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+           {:id (get row "id") :verdict (:verdict result) :checked-native-execution false :compiler-proof-authority false})))
+       (get input "rows")))
+(assert (= 12 (count rows)))
+(File/write! (nth argv 1) (json/encode {:schema "bl.closed-request-packet-reader.v1" :records 12 :rows rows
+                                      :manual-schema-preload false :source-payload-execution false
+                                      :checked-native-execution false :compiler-proof-authority false} {:pretty 2}))
+(println {:records (count rows) :manual-schema-preload false :compiler-proof-authority false})
