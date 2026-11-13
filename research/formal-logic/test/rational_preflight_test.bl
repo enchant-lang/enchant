@@ -1,0 +1,90 @@
+(ns formal.rational-preflight-test
+ (:require [formal.rational-preflight :as policy] [formal.integer-preflight :as integer]
+           [formal.term :as t] [formal.evaluate :as sdk] [formal.data-graph :as graph] [oracle]))
+
+(def generous {:component-bits 100000 :intermediate-bits 200000 :work-units 100000000000000000})
+(defn- evaluate [op pairs]
+ (sdk/value (t/app op (if (contains? #{:eq :lt :le :gt :ge :is-int} op) t/Bool
+                        (if (= :to-int op) t/Int t/Real))
+                  (mapv #(t/real (first %) (second %)) pairs) nil) {}))
+
+(deftest request-data-and-limit-normalization-are-explicit
+ (let [p (policy/plan :mul [[1 3] [2 5]] {})]
+  (is (= :ready (:status p)))
+  (is (= [[1 2] [2 3]] (:argument-bits p)))
+  (is (= [3 5] (get-in p [:forecast :result-component-bits])))
+  (is (= :not-run (:primitive-execution p)))
+  (is (= false (:compiler-proof-authority p)))
+  (is (= (:request-reference p) (:request-reference (policy/plan :mul [[1 3] [2 5]] policy/defaults))))
+  (is (not= (:request-reference p) (:request-reference (policy/plan :mul [[2 5] [1 3]] {}))))
+  (is (not= (:request-reference p) (:request-reference (policy/plan :mul [[1 3] [2 5]] {:work-units 1}))))
+  (is (= (graph/of {:profile policy/profile :operation :mul :operands [[1 3] [2 5]] :limits policy/defaults})
+         (:request-reference p)))))
+
+(deftest finite-rational-results-and-actual-cross-products-fit-the-forecasts
+ (let [pairs (vec (set (for [n (range -2 3) d (range 1 4)] (t/rational n d))))]
+  (doseq [op [:add :sub :mul :div :eq :lt :le :gt :ge] a pairs b pairs]
+   (let [p (policy/plan op [a b] generous) value (evaluate op [a b])
+         actual-pair (:formal/real value) [an ad] a [bn bd] b
+         actual-temporaries
+         (cond (contains? #{:add :sub} op) [(* an bd) (* bn ad) ((if (= :sub op) - +) (* an bd) (* bn ad)) (* ad bd)]
+               (= :mul op) [(* an bn) (* ad bd)]
+               (= :div op) (if (zero? bn) [] [(* an bd) (* ad bn)])
+               (contains? #{:lt :le :gt :ge} op) [(* an bd) (* bn ad)]
+               :else [])]
+    (is (= :ready (:status p)))
+    (when actual-pair
+     (is (every? true? (map <= (mapv integer/bits actual-pair) (get-in p [:forecast :result-component-bits])))))
+    (is (<= (reduce max 0 (map integer/bits actual-temporaries)) (get-in p [:forecast :intermediate-bits])))))
+  (doseq [pair pairs op [:neg :to-int :is-int]]
+   (let [p (policy/plan op [pair] generous) value (evaluate op [pair])]
+    (is (= :ready (:status p)))
+    (when (int? value) (is (<= (integer/bits value) (get-in p [:forecast :result-integer-bits]))))
+    (when (:formal/real value)
+     (is (every? true? (map <= (mapv integer/bits (:formal/real value)) (get-in p [:forecast :result-component-bits])))))))))
+
+(deftest normalization-can-be-forecast-without-performing-gcd-or-cancellation
+ (let [large (dec (erlang/bsl 1 65536)) p (policy/plan :normalize [[large large]] {})]
+  (is (= :ready (:status (policy/plan :normalize [[-6 -8]] {}))))
+  (is (= :incomplete (:status p)))
+  (is (= :work-units (get-in p [:reason :metric])))
+  (is (= [65536 65536] (get-in p [:forecast :result-component-bits])))
+  (is (= :not-run (:primitive-execution p))))
+ (is (= :component-bits (get-in (policy/plan :normalize [[1 (erlang/bsl 1 128)]] {:component-bits 64}) [:reason :metric]))))
+
+(deftest every-policy-boundary-is-explicit-and-conservative
+ (let [p (policy/plan :add [[1 3] [-1 3]] {}) forecast (:forecast p)
+       exact {:component-bits (apply max (:result-component-bits forecast))
+              :intermediate-bits (:intermediate-bits forecast) :work-units (:work-units forecast)}]
+  (is (= :ready (:status (policy/plan :add [[1 3] [-1 3]] exact))))
+  (doseq [metric [:component-bits :intermediate-bits :work-units]]
+   (let [denied (policy/plan :add [[1 3] [-1 3]] (update exact metric dec))]
+    (is (= :incomplete (:status denied)))
+    (is (= metric (get-in denied [:reason :metric])))))
+  (is (= (sdk/real 0 1) (evaluate :add [[1 3] [-1 3]])))
+  (is (> (first (:result-component-bits forecast)) 0)))
+ (is (> (get-in (policy/plan :sub [[1 3] [1 5]] {}) [:forecast :work-units])
+        (get-in (policy/plan :add [[1 3] [1 5]] {}) [:forecast :work-units])))
+ (is (= [0 0] (get-in (policy/plan :div [[1 3] [0 1]] {}) [:forecast :result-component-bits]))))
+
+(deftest sparse-large-signed-values-and-conversions-retain-component-bounds
+ (doseq [a [[(dec (erlang/bsl 1 127)) 7] [(- (erlang/bsl 1 128)) 3]]
+         b [[-1 11] [19 23]] op [:add :sub :mul :div]]
+  (let [p (policy/plan op [a b] generous) value (evaluate op [a b])]
+   (is (= :ready (:status p)))
+   (is (every? true? (map <= (mapv integer/bits (:formal/real value)) (get-in p [:forecast :result-component-bits]))))))
+ (doseq [n [-256 -1 0 1 256]]
+  (let [p (policy/plan :to-real [[n 1]] generous)]
+   (is (= :ready (:status p)))
+   (is (= [(integer/bits n) 1] (get-in p [:forecast :result-component-bits]))))))
+
+(deftest unsupported-and-malformed-requests-never-authorize-arithmetic
+ (is (= :resource-policy-unsupported (get-in (policy/plan :future [[1 2]] {}) [:reason :kind])))
+ (doseq [[op pairs limits] [[:mul [[1 0] [1 2]] {}] [:neg [[1 2] [1 3]] {}]
+                            [:to-real [[1 2]] {}] [:mul [(list 1 2) [1 3]] {}]
+                            [:mul [[1 2] [1.0 3]] {}] [:mul [[1 2] [1 3]] {:ready true}]
+                            [:mul [[1 2] [1 3]] {:component-bits -1}]]]
+  (is (thrown? (policy/plan op pairs limits))))
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :no-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny} #(policy/plan :mul [[1 3] [2 5]] {}))
+  (is (= 0 @calls))))

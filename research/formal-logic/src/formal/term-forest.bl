@@ -1,5 +1,6 @@
 (ns formal.term-forest
- (:require [formal.data-graph :as graph] [formal.term :as t]))
+ (:require [formal.data-graph :as graph] [formal.term :as t]
+           [formal.rational-preflight :as rational]))
 
 ;; Research preparation only. This is not managed owner admission, an accepted
 ;; cached question view, a native arena handle, or an independently checked proof.
@@ -27,12 +28,38 @@
    (require! (contains? #{"vector" "list"} (first (nth rows (get found "args")))) "ordered argument sequence required")
    found)))
 
+(defn- rational-admission [order records values settings]
+ (loop [pending order work 0 literal-count 0]
+  (if (empty? pending)
+   {:status :complete :reserved-work-units work :charged-work-units work :rational-literals literal-count
+    :constructor-execution :run}
+   (let [id (first pending) record (get records id)
+         op (get values (get record "op")) sort (get values (get record "sort"))
+         datum (get values (get record "data"))]
+    (if-not (and (= t/Real sort) (contains? literals op))
+     (recur (rest pending) work literal-count)
+     (do
+      (require! (and (sequential? datum) (= 2 (count datum)) (every? int? datum) (not= 0 (second datum)))
+                "rational literal requires an integer pair with nonzero denominator")
+      (let [plan (rational/plan :normalize [(vec datum)] (:rational settings))
+            required (+ work (get-in plan [:forecast :work-units]))
+            reason (cond (not= :ready (:status plan)) (:reason plan)
+                         (> required (:admission-work-units settings))
+                          {:kind :resource-limit :metric :admission-work-units :required required
+                           :limit (:admission-work-units settings)} :else nil)]
+       (if reason
+        ;; No constructor has run. Reservations for the entire fresh admission
+        ;; must fit before starting any normalization, including inactive syntax.
+        {:status :incomplete :reason reason :source-node id :reserved-work-units work
+         :charged-work-units 0 :rational-literals literal-count :constructor-execution :not-run}
+        (recur (rest pending) required (inc literal-count))))))))))
+
 (defn- prepare-profile
  "Compile checked public graph roots to a fresh portable native term table.
   Argument edges stay graph references. Operation/sort/data fields are decoded
   together and checked with the existing constructors. Scope memoization uses
   both node and environment. The output is derived data, never query authority."
- [data roots bool-int?]
+ [data roots mode resource-settings]
  (let [checked (graph/check! data) rows (:nodes data)
        _ (require! (and (vector? roots) (or (nil? (meta roots)) (= {} (meta roots)))) "plain root vector required")
        _ (require! (<= (count roots) (:roots limits)) "root capacity")
@@ -45,12 +72,14 @@
              ;; Inspect the portable descriptor before SDK constructor admission.
              ;; The bounded scalar profile must never admit an FP/container
              ;; value merely to discover that its policy is unavailable.
-             (when bool-int?
-              (let [[kind parts] (nth rows (get record "sort"))]
+             (when (not= :all mode)
+              (let [[kind parts] (nth rows (get record "sort"))
+                    permitted (if (= :numeric mode)
+                               #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"]}
+                               #{["keyword" "bool"] ["keyword" "int"]})]
                (require! (and (= "vector" kind) (= 1 (count parts))
-                              (contains? #{["keyword" "bool"] ["keyword" "int"]}
-                                         (nth rows (first parts))))
-                         "bounded scalar profile requires Bool/Int sorts")))
+                              (contains? permitted (nth rows (first parts))))
+                         "sort is outside the bounded scalar profile")))
              (doseq [child children] (visit child))
              (require! (< (count @seen) (:typed-nodes limits)) "typed-node capacity")
              (swap! descriptions assoc id (assoc record :children children))
@@ -60,8 +89,15 @@
         selected (vec (distinct (mapcat (fn [id] (map #(get (get records id) %) ["op" "sort" "data"])) order)))
         decoded (graph/decode-nodes! data selected)
         values (into {} (mapv (fn [i] [(nth selected i) (nth decoded i)]) (range (count selected))))
-        nodes (atom {}) variables (atom {}) depths (atom {})]
-   (doseq [id order]
+        nodes (atom {}) variables (atom {}) depths (atom {})
+        admission (when resource-settings (rational-admission order records values resource-settings))]
+   (if (= :incomplete (:status admission))
+    {:formal/term-forest-refusal 1 :profile profile :data-reference (:reference checked)
+     :source-roots roots :admission admission
+     :checking {:typed-nodes 0 :candidate-term-nodes (count order) :argument-traversal :graph-references}
+     :compiler-proof-authority false}
+    (do
+    (doseq [id order]
     (let [record (get records id) op (get values (get record "op")) sort (get values (get record "sort"))
           datum (get values (get record "data")) children (:children record)
           ;; Child sort descriptors are private products of earlier checks.
@@ -98,17 +134,31 @@
           definitions (mapv (fn [id]
                              (let [{:keys [op sort data children]} (get typed id)]
                               [(get ids id) (name op) sort (mapv #(get ids %) children) data])) order)]
-     {:formal/term-forest 1 :profile profile :data-reference (:reference checked)
+     (merge {:formal/term-forest 1 :profile profile :data-reference (:reference checked)
       :source-roots roots :roots (mapv #(get ids %) roots) :nodes definitions
       :variables @variables :limits limits
       :checking {:typed-nodes (count order) :scope-states (count @states) :largest-scope @largest-scope
                  :typed-depth (reduce max 0 (map #(get @depths %) roots))
                  :materialized-components (count selected) :argument-traversal :graph-references
                  :source-nodes (:nodes checked) :expanded-source-nodes (:expanded-nodes checked)}
-      :compiler-proof-authority false})))))
+      :compiler-proof-authority false} (when resource-settings {:admission admission}))))))))
 
-(defn prepare [data roots] (prepare-profile data roots false))
+(defn prepare
+ "Fresh typed graph admission under the selected SDK's existing constructors.
+  Derived output is data and is never accepted as a caller admission token."
+ [data roots] (prepare-profile data roots :all nil))
 (defn prepare-bool-int
  "Fresh typed admission with a raw Bool/Int descriptor gate before constructors.
   Other sorts are out-of-profile requests; no concrete evaluator is invoked."
- [data roots] (prepare-profile data roots true))
+ [data roots] (prepare-profile data roots :bool-int nil))
+
+(defn prepare-numeric
+ "Fresh Bool/Int/Real admission. Reserve all rational literal normalizations
+  before SDK constructors run. Budget refusal returns an explicit admission
+  refusal, with no typed forest and no constructors executed."
+ [data roots overrides]
+ (require! (and (map? overrides) (every? #{:rational :admission-work-units} (keys overrides))) "known admission settings required")
+ (let [settings {:rational (rational/limits (get overrides :rational {}))
+                 :admission-work-units (get overrides :admission-work-units 1073741824)}]
+  (require! (and (int? (:admission-work-units settings)) (>= (:admission-work-units settings) 0)) "nonnegative admission allowance required")
+  (prepare-profile data roots :numeric settings)))

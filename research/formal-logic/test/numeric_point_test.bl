@@ -1,0 +1,179 @@
+(ns formal.numeric-point-test
+ (:require [formal.term-forest-evaluate :as point] [formal.term-forest :as forest]
+           [formal.rational-preflight :as rational] [formal.term :as t]
+           [formal.evaluate :as sdk] [formal.data-graph :as graph] [oracle]))
+
+(defn- evaluate [terms bindings limits]
+ (let [data (graph/encode (vec terms)) roots (second (nth (:nodes data) (:root data)))]
+  (point/numeric-values data roots bindings limits)))
+(defn- reason [result] (get-in result [:values 0 :formal/unavailable :reason]))
+(defn- raw-real [pair] {:formal/term 1 :op :real :sort t/Real :args [] :data pair})
+(defn- doubled [data]
+ (graph/assemble "map"
+  [[(graph/encode :formal/term) (graph/encode 1)] [(graph/encode :op) (graph/encode :mul)]
+   [(graph/encode :sort) (graph/encode t/Real)]
+   [(graph/encode :args) (graph/assemble "vector" [data data])]
+   [(graph/encode :data) (graph/encode nil)]]))
+
+(deftest canonical-rational-arithmetic-agrees-exactly-with-sdk-values
+ (let [pairs [[-2 3] [-1 1] [0 1] [1 3] [1 1] [3 2]]
+       terms (vec (for [a pairs b pairs op [:add :sub :mul :div :eq :lt :le :gt :ge]]
+                    (t/app op (if (contains? #{:eq :lt :le :gt :ge} op) t/Bool t/Real)
+                           [(t/real (first a) (second a)) (t/real (first b) (second b))] nil)))
+       result (evaluate terms {} {})]
+  (doseq [i (range (count terms))]
+   (is (erlang/=:= (sdk/value (nth terms i) {}) (nth (:values result) i))))
+  (is (= :complete (get-in result [:admission :status])))
+  (is (= :evaluation (:phase result)))
+  (is (= :incomplete (:status result)))
+  (is (= [] (get-in result [:resources :refusals])))
+  (is (= false (:compiler-proof-authority result)))))
+
+(deftest floor-embedding-negation-and-integrality-retain-exact-meaning
+ (let [terms [(t/app :to-int t/Int [(t/real -7 3)] nil)
+              (t/app :to-int t/Int [(t/real -6 3)] nil)
+              (t/app :to-real t/Real [(t/int 7)] nil)
+              (t/app :is-int t/Bool [(t/real 6 3)] nil)
+              (t/app :is-int t/Bool [(t/real 7 3)] nil)
+              (t/neg (t/real -2 3))]]
+  (is (= [-3 -2 (sdk/real 7 1) true false (sdk/real 2 3)] (:values (evaluate terms {} {}))))))
+
+(deftest whole-literal-admission-reserves-before-any-sdk-constructor
+ (let [data (graph/encode [(t/real 1 3) (t/real 1 5)])
+       roots (second (nth (:nodes data) (:root data)))
+       ready (point/numeric-values data roots {} {:admission-work-units 364})
+       denied (point/numeric-values data roots {} {:admission-work-units 363})]
+  (is (= :complete (:status ready)))
+  (is (= 364 (get-in ready [:admission :charged-work-units])))
+  (is (= :incomplete (:status denied)))
+  (is (= :admission (:phase denied)))
+  (is (= :admission-work-units (:metric (reason denied))))
+  (is (= 364 (:required (reason denied))))
+  (is (= 108 (get-in denied [:admission :reserved-work-units])))
+  (is (= 0 (get-in denied [:admission :charged-work-units])))
+  (is (= :not-run (get-in denied [:admission :constructor-execution])))
+  (is (= 0 (get-in denied [:resources :sdk-calls])))
+  (is (= 0 (get-in denied [:checking :typed-nodes])))
+  (is (= (graph/reference data) (:data-reference denied)))
+  (is (thrown? (point/numeric-values (forest/prepare-numeric data roots {:admission-work-units 0}) roots {} {}))))
+ (let [large (erlang/bsl 1 1024) result (evaluate [(raw-real [large large])] {} {:rational {:component-bits 128}})]
+  (is (= :component-bits (:metric (reason result))))
+  (is (= :admission (:phase result)))
+  (is (= :not-run (get-in result [:admission :constructor-execution])))))
+
+(deftest inactive-syntax-still-needs-admission-but-not-concrete-arithmetic
+ (let [predicate (t/eq (t/real 1 3) (t/real 1 5)) term (t/all [(t/bool false) predicate])
+       ready (evaluate [term] {} {:admission-work-units 364 :request-work-units 0})
+       denied (evaluate [term] {} {:admission-work-units 363})]
+  (is (= [false] (:values ready)))
+  (is (= 364 (get-in ready [:admission :charged-work-units])))
+  (is (= 0 (get-in ready [:resources :charged-work-units])))
+  (is (= 0 (get-in ready [:resources :rational-primitive-calls])))
+  (is (= 0 (get-in ready [:resources :rational-value-check-calls])))
+  (is (= :admission (:phase denied)))
+  (is (= :incomplete (:status denied)))))
+
+(deftest shared-rational-growth-stops-before-cross-products-are-formed
+ (let [data (reduce (fn [value _] (doubled value)) (graph/encode (t/real 3 2)) (range 16))
+       result (point/numeric-values data [(:root data) (:root data)] {}
+                {:rational {:component-bits 32 :intermediate-bits 64}})]
+  (is (= :evaluation (:phase result)))
+  (is (= :incomplete (:status result)))
+  (is (= :component-bits (:metric (reason result))))
+  (is (= 52 (:required (reason result))))
+  (is (= 4 (get-in result [:resources :rational-primitive-calls])))
+  (is (= 1 (get-in result [:resources :rational-value-check-calls])))
+  (is (= 5 (get-in result [:resources :sdk-calls])))
+  (is (= 1 (count (get-in result [:resources :refusals]))))
+  (is (= 17 (get-in result [:checking :evaluated-nodes])))
+  (is (= (first (:values result)) (second (:values result))))))
+
+(deftest cancellation-does-not-hide-oversized-temporaries
+ (let [term (t/add (t/real 1 3) (t/real -1 3))
+       result (evaluate [term] {} {:rational {:component-bits 4 :intermediate-bits 3}})]
+  (is (= :intermediate-bits (:metric (reason result))))
+  (is (= 0 (get-in result [:resources :rational-primitive-calls])))
+  (is (= (sdk/real 0 1) (sdk/value term {})))))
+
+(deftest per-operation-and-cumulative-work-refusal-leave-cheaper-roots-possible
+ (let [x (t/variable "numeric.x" t/Real) one-third (sdk/real 1 3)
+       denied (evaluate [x] {"numeric.x" one-third} {:rational {:work-units 107}})]
+  (is (= :evaluation (:phase denied)))
+  (is (= :work-units (:metric (reason denied))))
+  (is (= 0 (get-in denied [:resources :sdk-calls]))))
+ (let [large (t/add (t/real 1 3) (t/real 1 5)) cheap (t/neg (t/int 1))
+       result (evaluate [large cheap] {} {:request-work-units 365})]
+  (is (= [:incomplete :complete] (:root-statuses result)))
+  (is (= -1 (second (:values result))))
+  (is (= :request-work-units (:metric (reason result))))
+  (is (= 365 (get-in result [:resources :charged-work-units])))
+  (is (= 0 (get-in result [:resources :rational-primitive-calls])))
+  (is (= 1 (get-in result [:resources :integer-primitive-calls])))))
+
+(deftest a-decisive-boolean-root-can-complete-after-evaluation-refusal
+ (let [bad (t/eq (t/add (t/real 1 3) (t/real -1 3)) (t/real 0 1))
+       no (t/bool false) yes (t/bool true)]
+  (doseq [[term expected] [[(t/all [bad no]) false] [(t/any [bad yes]) true]
+                          [(t/implies no bad) true] [(t/implies bad yes) true]]]
+   (let [result (evaluate [term] {} {:rational {:component-bits 4 :intermediate-bits 3}})]
+    (is (= :complete (:status result)))
+    (is (= [expected] (:values result)))
+    (is (= :complete (get-in result [:admission :status])))
+    (is (= 1 (count (get-in result [:resources :refusals]))))))))
+
+(deftest integer-and-rational-component-limits-both-apply-at-conversions
+ (let [floor (t/app :to-int t/Int [(t/variable "numeric.large" t/Real)] nil)
+       result (evaluate [floor] {"numeric.large" (sdk/real 256 1)} {:integer {:integer-bits 8}})]
+  (is (= :integer-bits (:metric (reason result))))
+  (is (= 0 (get-in result [:resources :rational-primitive-calls]))))
+ (let [embedding (t/app :to-real t/Real [(t/int 256)] nil)
+       result (evaluate [embedding] {} {:rational {:component-bits 8}})]
+  (is (= :component-bits (:metric (reason result))))
+  (is (= 0 (get-in result [:resources :rational-primitive-calls])))))
+
+(deftest ill-sorted-and-missing-coordinates-retain-sdk-semantics
+ (let [x (t/variable "numeric.binding" t/Real)]
+  (doseq [bindings [{} {"numeric.binding" nil} {"numeric.binding" 1}
+                   {"numeric.binding" {:formal/real [1 0]}}
+                   {"numeric.binding" {:formal/real [1 -2]}}
+                   {"numeric.binding" {:formal/real [2 4]}}
+                   {"numeric.binding" {:formal/real (list 1 2)}}
+                   {"numeric.binding" {:formal/real [1 2] :extra true}}
+                   {"numeric.binding" (sdk/unavailable :supplied-unknown)}]]
+   (is (erlang/=:= [(sdk/value x bindings)] (:values (evaluate [x] bindings {})))))
+  (let [term (t/add x (t/real 1 3)) result (evaluate [term] {} {})]
+   (is (erlang/=:= [(sdk/value term {})] (:values result)))
+   (is (= 0 (get-in result [:resources :rational-primitive-calls]))))))
+
+(deftest exact-identity-profile-and-closed-settings-remain-separate
+ (let [data (graph/encode (t/int 7)) roots [(:root data)]
+       old (point/bounded-values data roots {} {}) a (point/numeric-values data roots {} {})
+       b (point/numeric-values data roots {} point/numeric-resource-defaults)
+       c (point/numeric-values data roots {} {:admission-work-units 0})]
+  (is (= (:values old) (:values a)))
+  (is (= (:data-reference old) (:data-reference a)))
+  (is (= (:assignment-reference old) (:assignment-reference a)))
+  (is (not= (:settings-reference old) (:settings-reference a)))
+  (is (= (:evaluation-reference a) (:evaluation-reference b)))
+  (is (not= (:evaluation-reference a) (:evaluation-reference c))))
+ (doseq [limits [nil {:prepared true} {:rational {:ready true}} {:admission-work-units -1}]]
+  (is (thrown? (evaluate [(t/int 1)] {} limits))))
+ (is (thrown? (evaluate [(t/text "outside")] {} {})))
+ (is (thrown? (evaluate [(raw-real [1 0])] {} {})))
+ (is (thrown? (evaluate [(raw-real [2 4])] {} {})))
+ (is (= (sdk/real 1 3) (first (:values (evaluate [(raw-real (list 1 3))] {} {}))))))
+
+(deftest numeric-scopes-stay-local-and-never-query-the-native-backends
+ (let [data (graph/encode (t/real 1 3)) root (:root data) held (atom nil) parent (erlang/self)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :no-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn []
+    (point/with-numeric-point data [root] {} {}
+     (fn [operation]
+      (reset! held operation)
+      (erlang/spawn (fn [] (erlang/send parent [:numeric-foreign (try ((:resolve operation) root) :unexpected (catch _ :refused))])))
+      (receive [:numeric-foreign reply] (is (= :refused reply)) (after 3000 (is false "foreign point did not reply")))
+      (is (= (sdk/real 1 3) ((:resolve operation) root)))))))
+  (is (= 0 @calls))
+  (is (thrown? ((:resolve @held) root)))
+  (is (thrown? ((:resources @held))))))
