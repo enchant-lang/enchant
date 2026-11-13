@@ -95,6 +95,11 @@ previous = read(E / 'previous-readers-qualification.json')
 assert previous['status'] == 'passed' and previous['sdk_pin'] == pin
 assert previous['questions'] == 187 and previous['replayed_points_per_reader'] == 52
 assert previous['fresh_sdk_only_readers'] == 2 and previous['refusal_controls'] == 11 and previous['solver_exchanges'] == 0
+prior_retained = read(E / 'prior-retained-readers-qualification.json')
+assert prior_retained['status'] == 'passed' and prior_retained['sdk_pin'] == pin
+assert prior_retained['recorded_producer_sdk_pin'] == baseline
+assert prior_retained['records'] == 12 and prior_retained['fresh_sdk_only_readers'] == 2
+assert prior_retained['refusal_controls'] == 12 and prior_retained['solver_exchanges'] == prior_retained['oracle_calls'] == 0
 native = read(E / 'native.json')
 before = {row['id']: row for row in read(P / 'evidence/retained-request/native.json')['rows']}
 assert native['compiler-proof-authority'] is False and len(native['rows']) == 187
@@ -132,6 +137,7 @@ report = {'schema': 'bl.word-integration-sdk-qualification.v1', 'status': 'passe
           'stages': stages, 'assertion_runs': runs, 'beam_assertions': sum(sum(rows.values()) for rows in runs.values()),
           'preflight_namespaces': 599, 'records_qualification_sha256': sha(E / 'records-qualification.json'),
           'previous_records_qualification_sha256': sha(E / 'previous-readers-qualification.json'),
+          'prior_retained_qualification_sha256': sha(E / 'prior-retained-readers-qualification.json'),
           'native_questions': 187, 'native_outcome_differences': differences, 'native_sha256': sha(E / 'native.json'),
           'recipe': {'code_commit': commit, 'path': recipe, 'sha256': sha(Path(__file__))},
           'project_pin_selected': False, 'compiler_proof_authority': False,

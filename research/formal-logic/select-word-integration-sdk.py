@@ -22,9 +22,10 @@ assert qualification['status'] == 'passed' and qualification['sdk_pin'] == pin
 assert qualification['baseline_sdk_pin'] == baseline and qualification['project_pin_selected'] is False
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
 assert qualification['native_questions'] == 187 and qualification['native_outcome_differences'] == []
-for name in ('records', 'previous-readers'):
+for name in ('records', 'previous-readers', 'prior-retained-readers'):
     path = E / (name + '-qualification.json')
     assert read(path)['status'] == 'passed' and read(path)['sdk_pin'] == pin
+assert sha(E / 'prior-retained-readers-qualification.json') == qualification['prior_retained_qualification_sha256']
 assert sha(E / 'records-qualification.json') == qualification['records_qualification_sha256']
 assert sha(E / 'previous-readers-qualification.json') == qualification['previous_records_qualification_sha256']
 linkage = read(E / 'build-linkage.json')
