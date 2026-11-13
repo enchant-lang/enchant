@@ -84,7 +84,8 @@ preflight = read(E / 'source-preflight.json')
 assert preflight['root'] == pin['source'] and preflight['runtime'] == pin['sdk']
 assert preflight['selected-count'] == 595
 for name in ('source-errors', 'target-dependency-errors', 'require-cycles', 'sources_changed_during_analysis'):
-    assert preflight[name] == 0
+    assert preflight[name] == []
+assert preflight['selector_changed_during_analysis'] is False and preflight['driver_changed_during_analysis'] is False
 assert 'SDK-PREFLIGHT-CONTROL passed: parse, target edge and cycle refusals' in (E / 'preflight-controls-checks.txt').read_text()
 jslog = (E / 'js-unit-checks.txt').read_text()
 assert re.search(r'# tests 40\b', jslog) and re.search(r'# pass 40\b', jslog)
