@@ -1,0 +1,43 @@
+(ns formal.semantic-number-corpus
+ (:require [bl.json :as json] [decimal :as d] [formal.beam-float :as beam-float] [oracle]))
+
+;; Run with an explicit selected SDK, fixture path, output path and optional
+;; "require-profile". Observation mode retains the old runtime's discrepancies;
+;; it never relabels proposed expectations as current language semantics.
+(def args (BeamLisp/argv))
+(def fixture (json/decode (File/read! (first args))))
+(assert (= "bl.proposed-finite-exact-numeric-cases.v1" (get fixture "schema")))
+(defn- value [row]
+ (case (get row "kind")
+  "integer" (String/to_integer (get row "digits"))
+  "decimal" (d/of-scaled (String/to_integer (get row "coefficient")) (get row "scale"))
+  "float" (beam-float/to-runtime {:formal/fp [11 53 (String/to_integer (get row "bits") 16)]})
+  (throw :unknown-finite-number-fixture-kind)))
+(def values (into {} (mapv (fn [row] [(get row "id") (value row)]) (get fixture "values"))))
+(def denied (atom 0))
+(defn- deny [& _] (swap! denied inc) (throw :numeric-comparison-must-not-query))
+(def rows
+ (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+  (fn []
+   (mapv (fn [pair]
+           (let [a (get values (get pair "left")) b (get values (get pair "right"))
+                 equality (= a b) order (compare a b)
+                 expected (= equality (get pair "equal")) expected-order (= order (get pair "compare"))]
+            {:left (get pair "left") :right (get pair "right") :equal equality :compare order
+             :sequence-equal (= [a] (list b)) :map-value-equal (= {"value" a} {"value" b})
+             :key-cardinality (count (set [a b]))
+             :matches-exact-profile (and expected expected-order)})) (get fixture "pairs")))))
+(assert (= 0 @denied))
+(assert (= 30 (count values)))
+(assert (= 900 (count rows)))
+(def differences (filterv #(not (:matches-exact-profile %)) rows))
+(when (= "require-profile" (nth args 2 nil)) (assert (empty? differences)))
+(File/write! (second args)
+ (json/encode {:schema "bl.finite-number-runtime-observation.v1" :target :beam
+               :sdk (System/get_env "BL_SDK_PRODUCT") :process (System/pid) :cwd (File/cwd!)
+               :profile (get fixture "profile") :values (count values) :pairs (count rows)
+               :rows rows :differences differences :managed-query-calls @denied
+               :scope "Actual runtime numeric and nested equality/ordering observations. Raw key cardinality is recorded separately."
+               :compiler-proof-authority false} {:pretty 2}))
+(println {:target :beam :values (count values) :pairs (count rows) :differences (count differences)
+          :managed-query-calls @denied :compiler-proof-authority false})
