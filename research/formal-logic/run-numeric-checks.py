@@ -39,6 +39,8 @@ if stage == 'focused':
              'test/bl/host_decimal_test.bl', 'test/bl/decimal_oracle_port_test.bl',
              'test/bl/decimal_codec_port_test.bl', 'test/bl/system/smt_mod_test.bl',
              'test/bl/system/smt_quot_rem_test.bl']
+elif stage == 'modulus':
+    files = ['test/bl/system/smt_mod_test.bl']
 elif stage == 'datom':
     files = ['test/bl/datom/sequential_key_test.bl', 'test/bl/datom/query_composite_join_test.bl',
              'test/bl/datom/offline_unique_test.bl']
@@ -142,7 +144,16 @@ finally:
     shutil.rmtree(runtime)
     shutil.rmtree(cwd)
 assert all(sha(R / name) == digest for name, digest in sources.items())
-write(E / (stage + '-exit.json'), {'exit_code': code, 'elapsed_seconds': time.monotonic() - started,
+process_code = code
+summary_ok = None
+if files and stage != 'native':
+    # An assertion failure may be printed while the test CLI exits zero.
+    # Require the actual complete green summary in addition to process success.
+    summary_ok = f'{len(files)} file(s) passed, 0 failed, 0 incoherent' in (E / (stage + '-checks.txt')).read_text()
+    if not summary_ok and code == 0:
+        code = 1
+write(E / (stage + '-exit.json'), {'exit_code': code, 'process_exit_code': process_code,
+      'complete_green_test_summary': summary_ok, 'elapsed_seconds': time.monotonic() - started,
       'runtime_retired': not runtime.exists(), 'consumer_cwd_retired': not cwd.exists()})
 print(json.dumps({'stage': stage, 'exit_code': code}), flush=True)
 raise SystemExit(code)
