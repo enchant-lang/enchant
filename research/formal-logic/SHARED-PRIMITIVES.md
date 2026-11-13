@@ -103,8 +103,8 @@ support or checked proof/kernel/compiler authority is claimed by these point
 APIs. Other value-family policies and mechanized cost/implementation
 correspondence remain open.
 
-Sources: [SDK evaluator](/home/othman/code/undefine/beam-lisp--execution-protocol/priv/lib/formal/evaluate.bl),
-[typed graph admission](/home/othman/code/undefine/beam-lisp--execution-protocol/priv/lib/formal/graph-terms.bl),
-[SDK boundary controls](/home/othman/code/undefine/beam-lisp--execution-protocol/test/bl/formal/shared_evaluator_test.bl),
+Sources: [SDK evaluator](../../priv/lib/formal/evaluate.bl),
+[typed graph admission](../../priv/lib/formal/graph-terms.bl),
+[SDK boundary controls](../../test/bl/formal/shared_evaluator_test.bl),
 [candidate pin](evidence/shared-primitives/sdk-candidate.json) and
 [actual SDK traces](evidence/shared-primitives/sdk-traces.json).
