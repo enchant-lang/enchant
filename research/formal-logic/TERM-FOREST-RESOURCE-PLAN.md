@@ -34,13 +34,15 @@ correspondence argument.
 
 The first [integer primitive planner](INTEGER-PREFLIGHT.md) now passes 10,248
 focused assertions, alongside three capped concrete growth probes. It returns
-term-based forecasts without running the primitive. It is not integrated with
-the graph evaluator, and does not cover the whole gate. Cumulative accounting,
-other value families and a cost-model correspondence remain open.
+term-based forecasts without running the primitive. The separate
+[bounded Bool/Int point profile](BOUNDED-POINT.md) now integrates it with private
+cumulative accounting, node reservations, selective demand and exact input and
+settings identities. Other value families, ordinary SDK entry-point policy,
+actual managed replay and a cost-model correspondence remain open.
 
 The current project checks run under whole-process memory and time caps. Its
-graph evaluator has admission/node bounds but no general derived-value preflight
-policy yet.
+general graph evaluator retains its previous admission/node bounds; callers
+must explicitly select the new scalar profile for derived-integer preflight.
 
 ## The first integration boundary
 
