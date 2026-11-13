@@ -58,18 +58,23 @@ private theorem negative_correction_bounds (e b : Int) (hb : b < 0)
     (lo : 0 ≤ e) (hi : e < -b) :
     b < (if e = 0 ∨ 0 < b then e else e + b) ∧
     (if e = 0 ∨ 0 < b then e else e + b) ≤ 0 := by
-  -- Keep the linear arithmetic argument independent of variable div/mod.
-  -- Instantiating this lemma below does not ask omega to preprocess modulus.
-  have notPositive : ¬ 0 < b := by omega
+  have notPositive : ¬ 0 < b := Int.lt_asymm hb
   cases (inferInstance : Decidable (e = 0)) with
-  | isTrue zero => simp [zero, hb]
+  | isTrue zero =>
+    simp only [if_pos (Or.inl zero : e = 0 ∨ 0 < b)]
+    constructor
+    · simpa only [zero] using hb
+    · simpa only [zero] using Int.le_refl 0
   | isFalse nonzero =>
     simp only [nonzero, false_or, notPositive, ite_false]
-    omega
+    have positive : 0 < e := Int.lt_iff_le_and_ne.mpr ⟨lo, Ne.symm nonzero⟩
+    have upper : e + b < 0 := by
+      simpa only [Int.neg_add_cancel] using Int.add_lt_add_right hi b
+    exact ⟨Int.lt_add_of_pos_left b positive, Int.le_of_lt upper⟩
 
 theorem negative_bounds (a b : Int) (hb : b < 0) :
     b < repairedMod a b ∧ repairedMod a b ≤ 0 := by
-  have hn : b ≠ 0 := by omega
+  have hn : b ≠ 0 := Int.ne_of_lt hb
   exact negative_correction_bounds (a % b) b hb
     (Int.emod_nonneg a hn) (Int.emod_lt_of_neg a hb)
 
