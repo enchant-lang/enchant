@@ -32,7 +32,14 @@ request = read(operation)
 assert receipt['kind'] == 'preparation-result' and receipt['operation'] == 'sdk'
 assert receipt['source'] == request['source'] == str(engine)
 assert receipt['operation-sha256'] == sha(operation)
-assert request['previous'] == read(E / 'baseline-sdk-pin.json')['sdk']
+baseline = read(E / 'baseline-sdk-pin.json')
+predecessors = [(baseline, 'qualified-baseline')]
+for candidate in E.glob('candidate-*/sdk-candidate.json'):
+    predecessors.append((read(candidate), str(candidate.parent.relative_to(E))))
+matched = [(item, origin) for item, origin in predecessors if item['sdk'] == request['previous']]
+assert len(matched) == 1
+predecessor, predecessor_origin = matched[0]
+assert sha(Path(predecessor['sdk']) / 'artifact.json') == predecessor['descriptor_sha256']
 assert Path(receipt['retention-root']).resolve(strict=True) == sdk
 fingerprint = subprocess.check_output([R / 'scripts/sdk-inputs', '--root', engine,
                                       '--policy', R / 'nix/engine-inputs.json'], text=True).strip()
@@ -57,6 +64,8 @@ assert all(name in units['units'] for name in ('formal.evaluate', 'formal.backen
 (E / 'managed-operation.json').write_bytes(operation.read_bytes())
 (E / 'managed-preparation-result.json').write_text(json.dumps(receipt, indent=2) + '\n')
 report = {'schema': 'enchant.formal.managed-graph-build-linkage.v1', 'sdk_pin': pin,
+          'preparation_predecessor': {'sdk_pin': predecessor, 'origin': predecessor_origin,
+                                      'qualified_baseline': predecessor == baseline},
           'engine_fingerprint': fingerprint, 'assembly_source': str(assembly),
           'runtime_source_sha256': engine_sources, 'source_changes': changes,
           'unchanged_components': unchanged,
