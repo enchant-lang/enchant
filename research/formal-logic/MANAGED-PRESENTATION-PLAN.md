@@ -1,18 +1,31 @@
 # Finish qualification, then show the request
 
-The core SDK4 batch is running serially under
-`work-formal-managed-batch-4-resume-20261113.service`. The selected project SDK
-and live dossier host remain on qualified SDK46. These next-stage scripts are
-prepared source, not qualification receipts. Do not run another substantive
-check while the core batch is active.
+The SDK4 core is now qualified in `evidence/managed-graph/qualification.json`.
+The selected project SDK and live dossier host remain on qualified SDK46.
+Project integration and presentation still require their own actual gates.
 
-`work-formal-managed-after-core-4-20261113.service` now owns the deferred
-read-only inventory comparison. It observes the core supervisor's exact
-invocation and requires both terminal state and a newly generated complete
-qualification chain before starting BL. It exits after that comparison or
-after a core failure; it never edits source or selects a pin. Inspect its real
+`work-formal-managed-after-core-4-control-repair-20261113.service` owns the
+read-only inventory comparison, which is running after successful core
+qualification. It observed the exact control-repair supervisor invocation and
+required a newly generated complete qualification chain before starting BL.
+It exits after that comparison and never edits source or selects a pin. Inspect its real
 PID/state and `evidence/managed-integration/after-core-state.json` before
 starting any manual inventory run, so the comparison has only one writer.
+
+The first final qualification correctly rejected a driver bug: the purported
+control invocation selected normal replay through `get` on its argv list.
+That entire run and terminal failure are retained under
+`evidence/managed-graph/before-reader-control-dispatch/`. The real ten controls
+now pass after the one-expression `nth` repair. The qualification preserves
+the two earlier successful no-mode readers only after verifying that exact
+single-expression delta and their actual two-argument launches. Their graph
+and mathematical checking code did not change; the control run uses current
+source. All runtime bytes and the immutable SDK stay fixed.
+
+The skill repository now has a newer kit at `a86599fc`; its tracked local CSS
+edit remains user-owned. The next presentation needs a separate immutable kit
+snapshot and receipt, preserving the older observation-semantics kit state and
+GC root used by historical qualifications. Do not overwrite those old pins.
 
 ## Preserve the old project contract
 
