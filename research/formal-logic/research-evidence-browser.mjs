@@ -56,6 +56,8 @@ try{
   await call({op:'navigate',url:base+'/research-elements/'+surface});
   check(surface+' uses the same installed comparison component',await evaluate("document.querySelectorAll('[data-research-row]').length===7&&document.querySelector('[data-research-element]').dataset.researchElement==='word-answer-evidence'"));
  }
+ const oversized=await evaluate("fetch('/research-elements/word-answer-evidence/save',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({basis:'x'.repeat(9000)})}).then(r=>r.status)");
+ check('Oversized snapshot requests are refused',oversized===413);
  await call({op:'navigate',url:base+'/explorer?q=id:formal-word-evidence'});
  check('Component discovery registers the actual saved view',await evaluate("document.querySelectorAll('.fl-specimen-example').length===1&&document.querySelectorAll('[data-research-row]').length===7"));
  const unknown=await evaluate("fetch('/research-elements/not-installed/view').then(r=>r.status)");
