@@ -10,15 +10,36 @@ The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root
 values across 187 questions and four deterministic point maps each. The shared
 131,071-occurrence example evaluates 17 nodes without an engine call. Small
-cases pay more admission overhead; managed question/reply integration remains
-next. The live dossier includes the actual evaluation and an adjustable,
+cases pay more admission overhead. The live dossier includes the actual evaluation and an adjustable,
 source-backed structural counting notebook.
 
 [Question inventory preparation](QUESTION-FOREST.md) now also preserves exact
 definitions, root order, labels and observation term leaves on all 187 questions,
 with 68 focused assertions. It checks normalized counterexample syntax without
-expanding term arguments. Structured observation reconstruction, complete
-managed owner admission and derived-value resource budgets remain next.
+expanding term arguments. Structured observation reconstruction and wider
+derived-value resource budgets remain next.
+
+The [managed graph implementation](MANAGED-GRAPH.md) and
+[portable request interface](REQUEST-INTERFACE.md) are now qualified in the
+selected immutable SDK. The core qualification passed 15,853 assertions,
+187 paired-backend questions, four fresh SDK-only readers and 16 tamper
+controls. Project integration separately compared all 187 complete inventories
+against the former implementation, then passed 4,997 adapter/facade assertions.
+A portable request binds the complete question, numeric policy and chosen
+adapter. An effect handler can supply a point without opening an engine, or
+invoke its local expiring fallback. BL freshly checks returned coordinates;
+saved native labels never grant proof authority.
+
+The live [request chapter](https://work.tailcb5318.ts.net:18100/#one-portable-request-either-backend)
+shows actual Z3/OxiZ execution, a supplied point, a changed point and a reopened
+packet. All 88 dossier cells reproduce their saved results; 87 run freshly and
+one preserves an explicitly frozen historical Float observation. The current
+kit, host SDK, 34 focused browser checks, 1,601 full browser checks and inspected
+phone/desktop frames are bound by
+[the presentation receipt](evidence/managed-presentation/dossier-qualification.json).
+The broader formal-language goal remains active: retained language requests,
+semantic repairs, richer observations and stronger implementation connections
+are still work to qualify.
 
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
