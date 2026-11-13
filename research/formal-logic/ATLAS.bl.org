@@ -2183,6 +2183,50 @@ Read the [[file:SHARED-PRIMITIVES.md][SDK interface and privacy rules]], [[file:
 
 The project delegates are directly inspectable: [[file:src/formal/integer-preflight.bl][integer policy]], [[file:src/formal/rational-preflight.bl][rational policy]], [[file:src/formal/term-forest.bl][typed admission]] and [[file:src/formal/term-forest-evaluate.bl][point evaluation]]. The [[file:evidence/shared-primitives/integration-qualification.json][separate integration receipt]] binds those files and their 4,412 passing assertions to the promoted SDK.
 
+** Keep every assumption with the question
+A solver session remembers facts. Your next question may mention only some of them. Beam Lisp can now freeze the complete question before execution: the caller's terms, every retained assumption, the checking policy and the requested backend settings.
+
+Suppose the session remembers =x = 7= and the caller asks for =x ≤ 9=. The point =x = 8= fits the caller's line but breaks the remembered fact. The [[#cell-story-retained-request][executed example]] rejects it against the complete question. The same frozen question can go through the existing owner, a fresh Z3 or OxiZ owner, a supplied point handler, or a saved-record reader.
+
+#+begin_rosetta :title "What travels, and what stays local"
+Piece | What it contains | What you can rely on
+Portable request | Complete question, policy and adapter settings | Every retained assumption is part of the subject.
+Recorded composition | Caller graph, retained graph, declared generation and revision | The complete bytes can be rebuilt and checked.
+Local execution callback | Actual owner and captured guard | Same-process, single-use execution during its body.
+Saved native answer | A status claim and any returned coordinates | Coordinates get fresh replay; native history remains recorded data.
+#+end_rosetta
+
+#+begin_graph :title "Keep meaning portable, execution local"
+node caller | Caller question | Original terms | 0,0 | you
+node retained | Retained facts | Explicit assumptions | 0,1 | station
+node complete | Complete question | Portable graph data | 1,0 | door
+node choice | Execution choice | Owner or handler | 2,0 | builder
+node replay | Fresh replay | Check the full point | 3,0 | you
+edge caller -> complete | freeze | solid
+edge retained -> complete | include | solid
+edge complete -> choice | ask | solid
+edge choice -> replay | inspect | solid
+#+end_graph
+
+#+begin_sequence :title "A remembered fact never becomes a hidden premise"
+lanes caller · your program | owner · live context | handler · request effect | reader · fresh checking
+caller -> owner : Read actual facts and adapter settings atomically.
+owner --> caller : Return a snapshot for the complete portable question.
+caller -> handler : Offer that question and a short-lived native fallback.
+handler -> owner : Optionally invoke the fallback under its captured guard.
+owner --> handler : Return a status claim and any candidate coordinates.
+handler -> reader : Recheck the returned point against every assumption.
+note caller, reader : A saved record keeps the complete subject. A local callback does not travel with it.
+#+end_sequence
+
+There are two lifetimes. The outer execution callback ends with its request body. A handler's fallback ends as soon as that individual execution returns, even while the outer body is still open. Changing the live context or requested settings cannot silently change the frozen subject.
+
+The [[file:evidence/retained-request/records-qualification.json][fresh-record receipt]] reopens the actual saved packets and durable ledger rows in two separate SDK-only processes, with formal solver exchanges and oracle methods denied. Wrong points stay invalid after re-encoding. Edited history stays recorded history. A proof requires its own checked object.
+
+The current managed request profile admits Boolean, integer and exact rational real graphs. Wider theory profiles and their resource rules remain active work. This checkpoint strengthens term passing, state ownership and replay for both backends; it does not finish the formal-language goal.
+
+Read [[file:RETAINED-REQUEST-IMPLEMENTATION.md][the interfaces and lifetime rules]], [[file:RETAINED-REQUEST-PLAN.md][the architectural review]], [[file:evidence/retained-request/qualification.json][the exact SDK qualification]] and [[file:TERM-FLOOR-MODULUS-MODEL.md][the separately checked arithmetic-to-term connection]].
+
 ** One number, one value
 If two numbers are equal, equality should not change its mind when a third number enters the comparison. The earlier SDK broke that rule: =1.5M= equalled =1.5=, and =1.5= equalled =1.50M=, but the two Decimals differed. The selected numeric SDK repairs that finite-number relation on BEAM and JavaScript.
 
@@ -4606,6 +4650,51 @@ This one native observation is explicitly frozen under its historical SDK. Its [
 : {:backends [{:backend :z3, :certificate :not-checked, :checked-native-execution false, :delegation :matching-response, :materialization :deferred, :observations :graph-source-cursors, :product {:formal/real [2 15]}, :same-subject true, :validation :valid, :verdict :sat} {:backend :oxiz, :certificate :not-checked, :checked-native-execution false, :delegation :matching-response, :materialization :deferred, :observations :graph-source-cursors, :product {:formal/real [2 15]}, :same-subject true, :validation :valid, :verdict :sat}], :changed-point :invalid-point, :compiler-proof-authority false, :reopened-point :sat, :subject :one-portable-request, :supplied-native-attempts 0, :supplied-point :sat}
 
 
+
+#+begin_src beam-lisp :id story-retained-request
+(let [x (t/variable "dossier.retained.x" t/Int)
+      caller (question-graph/prepare (q/sat {:assumptions [(t/le x (t/int 9))]}))
+      reader-receipt (json/decode (File/read! "research/formal-logic/evidence/retained-request/records-qualification.json"))
+      rows
+      (mapv (fn [engine]
+              (backend/with-session {:backend engine}
+               (fn [session]
+                (assert (:ok (backend/reset! session)))
+                (assert (:ok (backend/load! session [(q/assertion "seven" (t/eq x (t/int 7)))])))
+                (let [frozen (atom nil) unused (atom nil)
+                      borrowed (logic/with-context-request session caller
+                                 (fn [r execute] (reset! frozen r) (execute)))
+                      _ (logic/with-context-request session caller (fn [_ execute] (reset! unused execute)))
+                      expired (try (@unused) :accepted (catch e (:kind (ex-data e))))
+                      changed (logic/recheck-request @frozen (logic/answer-request @frozen {"dossier.retained.x" 8}))
+                      caller-request (logic/prepare-request caller {:adapter {:backend engine}})
+                      caller-only (logic/recheck-request caller-request (logic/answer-request caller-request {"dossier.retained.x" 8}))
+                      reopened (request-record/recheck (request-record/pack @frozen (:response borrowed)))
+                      supplied (logic/with-context-request session caller
+                                 (fn [_ execute]
+                                  (logic/with-request-handler
+                                   (fn [r _] (logic/answer-request r {"dossier.retained.x" 7})) execute)))]
+                 (assert (= :sat (:verdict borrowed) (:verdict reopened) (:verdict supplied) (:verdict caller-only)))
+                 (assert (= :invalid-point (:verdict changed)))
+                 (assert (= :retained-request-lease expired))
+                 (assert (= 3 (get-in borrowed [:response :formal/request-answer])))
+                 (assert (= :matching-response (get-in borrowed [:local-delegation :status])))
+                 (assert (= 0 (get-in supplied [:local-delegation :attempts])))
+                 (into-sorted-map
+                  {:backend engine :complete-point (:verdict borrowed) :caller-only-eight (:verdict caller-only)
+                   :complete-eight (:verdict changed) :reopened-point (:verdict reopened)
+                   :answer-version (get-in borrowed [:response :formal/request-answer])
+                   :unused-callback :expired :supplied-fallback-attempts (get-in supplied [:local-delegation :attempts])
+                   :checked-native-execution (:checked-native-execution reopened)
+                   :compiler-proof-authority false}))))) [:z3 :oxiz])]
+ (assert (= 2 (get reader-receipt "fresh_sdk_only_readers")))
+ (assert (= 0 (get reader-receipt "solver_exchanges")))
+ (into-sorted-map {:subject :retained-complete-request :backends rows
+                   :saved-records (get reader-receipt "records")
+                   :fresh-sdk-readers (get reader-receipt "fresh_sdk_only_readers")
+                   :reader-solver-exchanges (get reader-receipt "solver_exchanges")
+                   :compiler-proof-authority false}))
+#+end_src
 
 #+begin_src beam-lisp :id story-exact-numbers
 (let [triple [(= 1.5M 1.5) (= 1.5 1.50M) (= 1.5M 1.50M)]
