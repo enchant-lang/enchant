@@ -65,7 +65,7 @@ expected = {
 expected = {'FormalTermFloorModulus.' + name: values for name, values in expected.items()}
 dependencies = {'FormalTerms.Term.eval': {'propext'},
                 'FormalTermFloorModulus.floorModTerm': set(),
-                'FormalTerms.modulus': set(), 'FormalRefutation.pOr': set()}
+                'FormalTerms.modulus': set(), 'FormalRefutation.pOr': {'propext'}}
 checked = []
 paths = [E, P / 'evidence/term-refutation', P / 'evidence/refutation-kernel', P / 'evidence/floor-modulus-model']
 for index, source in enumerate(sources):
