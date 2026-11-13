@@ -74,3 +74,54 @@ processes with no application imports or native calls. Compare complete
 question bytes and point results with the fresh-owner route. Keep original,
 effective and execution identities separate. These are future gates; the
 current numeric/fresh-owner API has not implemented this extension yet.
+
+## Review against the current implementation
+
+The owner already composes retained assumptions in
+`formal.graph-execution/effective-question`. That function is private; the
+bridge must not reproduce its label, assumption, domain, profile and scope
+rules in a second implementation. Extract the pure composition into one small
+module shared by the owner and the request bridge. Its input is original graph
+data and declared retained data, not a session or an admitted forest. Calling
+that pure function establishes no owner authority.
+
+`backend/context` currently returns the authoritative owner, generation,
+revision, assertions and portability/retirement flags. It does **not** return
+the owner's adapter configuration. The session's `:identity`, `:solver-ms` and
+`:hard-ms` fields are client mirrors; existing managed tests intentionally
+corrupt them and require the real owner to remain authoritative. The retained
+bridge therefore needs an owner-read configuration operation, or an explicit
+extension of the local context result, before it can freeze request adapter
+settings and reject mismatches before native scope work. Reading the session
+map is insufficient. The adapter settings are ordinary portable data after
+capture; the owner PID and live guard remain local.
+
+Composition currently places a declared generation in the effective question's
+`:context` graph. That is part of the exact content reference and remains
+recorded data. It is not an authenticated owner identity or a canonical identity
+for all logically equivalent propositions. Preserve this distinction when
+comparing a retained answer with fresh execution of its complete subject.
+Changing that annotation policy would require an explicit composition profile,
+with compatibility readers for the existing graph contract.
+
+The fresh-owner answer has two separate restrictions that must remain intact:
+`source!` requires recorded generation/revision zero, and `from-managed`
+requires the original and effective subject references to coincide. A retained
+answer cannot simply relax those conditions. Give the extension a new answer
+profile with closed composition provenance: original caller graph, retained
+assertion graph, declared generation/revision and effective subject. A reader
+must recompute the declared composition and require its complete bytes to match
+the request. It must still recheck the point against that effective subject,
+without accepting recorded owner or execution authenticity. Existing v2 answers
+keep their zero-context contract.
+
+The current request-record and ledger paths delegate answer validation to
+`formal.request-answer`; they do not independently authenticate a solver.
+Review both paths when adding the new answer profile. Keep historical v2 rows
+readable and qualify new retained rows in separate fresh SDK-only processes.
+
+The focused numeric gate also exposed that the test CLI can print failed
+assertions and return process status zero. The local qualification runner now
+checks the complete green summary as well. Repair the general CLI outcome
+contract in a later coherent runtime batch; a process exit alone is presently
+insufficient test evidence.
