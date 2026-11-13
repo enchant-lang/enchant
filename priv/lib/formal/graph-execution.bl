@@ -1,7 +1,7 @@
 (ns formal.graph-execution
  (:require [formal.graph-question :as question] [formal.evaluate :as evaluator]
-           [formal.question-graph :as qg] [formal.data-graph :as graph]
-           [formal.graph-replay :as replay] [formal.coordinates :as coordinates] [formal.value :as value] [formal.term :as term]))
+           [formal.data-graph :as graph] [formal.retained-question :as retained]
+           [formal.graph-replay :as replay] [formal.coordinates :as coordinates]))
 
 ;; Local owner-turn machinery. These functions cannot obtain a native port;
 ;; the actual backend owner supplies the scope callback from its own custody.
@@ -18,38 +18,9 @@
   (assoc options :limits (evaluator/graph-resource-limits evaluator/direct-numeric-graph-profile (:limits options)))))
 
 (defn- effective-question [original snapshot]
- ;; field-graph checks the closed wrapper and canonical graph, without opening
- ;; or materializing any term argument tree.
- (let [assertions (qg/field-graph original :assertions) persistent (:assertions snapshot)]
-  (if (empty? persistent) original
-   (let [retained (mapv (fn [i] (let [a (nth persistent i)]
-                                (assoc a :label (str "context/" i "/" (:label a))))) (range (count persistent)))
-         retained-data (graph/encode retained)
-         old-assumptions (qg/field-graph original :assumptions)
-         old-assumptions (if (or (nil? old-assumptions)
-                                (= ["nil" nil] (nth (:nodes old-assumptions) (:root old-assumptions))))
-                          (graph/encode []) old-assumptions)
-         requested-context (qg/field-graph original :context)
-         context (graph/encode {:formal/retained-context 1 :profile :bl/retained-graph-v1
-                                :generation (:generation snapshot) :assertions (mapv :label retained)
-                                :assertion-reference (graph/reference retained-data)
-                                :requested-context-present (some? requested-context)})
-         context (if requested-context
-                   (graph/patch-map context [[(graph/encode :requested-context) requested-context]]) context)
-         domains (vec (distinct (keep #(get-in % [:origin :formal/retained-domain]) retained)))
-         patches {:assertions (graph/concat-vectors [retained-data assertions])
-                  :assumptions (graph/concat-vectors
-                                [(graph/encode (mapv #(select-keys % [:label :origin]) retained)) old-assumptions])
-                  :context context}
-         patches (if (empty? domains) patches
-                  (assoc patches
-                   :scope (graph/encode
-                           (value/join-scope (mapv #(value/make (term/bool true) {:scope %})
-                                                  (cons (qg/field-data! original :scope) (map :scope domains)))))
-                   :profiles (graph/encode (vec (distinct (concat (qg/field-data! original :profiles)
-                                                                  (mapcat :profiles domains)))))))]
-    (assoc original :graph
-     (graph/patch-map (:graph original) (mapv (fn [[key data]] [(graph/encode key) data]) patches)))))))
+ ;; The portable reader and actual owner must share one composition rule.
+ ;; This local snapshot-to-graph conversion establishes no native authority.
+ (retained/compose original (graph/encode (:assertions snapshot)) (:generation snapshot)))
 
 (defn- coordinate [wire]
  ;; Real canonicality belongs to the metered point, not to unmetered decoding.
