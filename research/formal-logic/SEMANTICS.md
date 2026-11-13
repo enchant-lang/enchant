@@ -184,6 +184,17 @@ zero key behavior, compound ordering, nonfinite foreign values and the actual
 compiled `decimal/same-representation?` route need their own cross-target
 qualification; the companion patch does not establish those properties.
 
+The [shared finite-number fixture](proposals/finite-number-cases.json) now
+supplies 30 identical values and 900 ordered pairs to the prepared
+[BEAM observer](semantic-number-corpus.bl) and
+[direct JS runtime observer](semantic-number-corpus.mjs). It preserves Float
+bits, Decimal coefficients/scales and large integers without JSON rounding.
+Its expected value relations come from independent rational arithmetic. Both
+observers record leaf and nested equality, ordering and raw-key cardinality;
+their optional `require-profile` mode checks the proposed value relation.
+These observers have not run yet. The direct JS route also needs an actual
+compiled BL/JS companion before cross-target adoption can be qualified.
+
 ## Gates before adopting a proposed profile
 
 1. Preserve reproducible current-SDK canaries and label changed expectations as

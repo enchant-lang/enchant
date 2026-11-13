@@ -26,11 +26,11 @@ function value(row) {
 const values = new Map(fixture.values.map(row => [row.id, value(row)]));
 const rows = fixture.pairs.map(pair => {
  const a = values.get(pair.left), b = values.get(pair.right), equal = R.eqv(a, b), compare = R.compare(a, b);
+ const sequenceEqual = R.eqv(R.vec(a), R.list(b)), mapEqual = R.eqv(R.hashMap('value', a), R.hashMap('value', b));
  return {left: pair.left, right: pair.right, equal, compare,
-         'sequence-equal': R.eqv(R.vec(a), R.list(b)),
-         'map-value-equal': R.eqv(R.hashMap('value', a), R.hashMap('value', b)),
+         'sequence-equal': sequenceEqual, 'map-value-equal': mapEqual,
          'key-cardinality': R.hashSet(a, b).cnt,
-         'matches-exact-profile': equal === pair.equal && compare === pair.compare};
+         'matches-exact-profile': equal === pair.equal && sequenceEqual === pair.equal && mapEqual === pair.equal && compare === pair.compare};
 });
 assert.equal(values.size, 30);
 assert.equal(rows.length, 900);
