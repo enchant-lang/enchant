@@ -32,3 +32,9 @@ using a right shift to test the already-present nonnegative integer, avoiding
 power/mask construction. Unknown application keyword names and unavailable
 reasons stay graph cursors. Its cumulative coordinate charge is separate from
 the future complete point-request budget. These prototypes are not yet run.
+
+Malformed coordinates can lie about their input width. The reader therefore
+reserves its charge using both declared width and a conservative bit count from
+the already-present integer's external encoded size before the right shift. A
+small declared width cannot make a large invalid integer look cheap. Whole-graph
+capacity checking remains a separate preceding operation.
