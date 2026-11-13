@@ -1,0 +1,39 @@
+(ns formal.question-inventory-integration
+ (:require [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
+           [formal.native-cases :as native] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.question-forest :as project] [formal.graph-question :as sdk]
+           [formal.data-graph :as graph] [formal.backend :as backend] [bl.json :as json] [oracle]))
+
+;; Run before replacing the existing project implementation with a delegate.
+;; This compares two actual implementations, not an alias with itself.
+(def calls (atom 0))
+(defn- deny [& _] (swap! calls inc) (throw :inventory-comparison-must-not-query))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(assert (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+(try
+ (let [rows
+       (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+        (fn []
+         (vec (mapcat
+               (fn [[family cases]]
+                (mapv (fn [item]
+                        (let [context (qg/prepare (q/from-case item))
+                              before (project/prepare context) after (sdk/prepare context)
+                              left (graph/encode before) right (graph/encode after)]
+                         (assert (= (graph/bytes left) (graph/bytes right)))
+                         {:id (:id item) :family family :question-reference (graph/reference (:graph context))
+                          :inventory-reference (graph/reference left) :exact-values true
+                          :typed-nodes (get-in after [:forest :checking :typed-nodes])})) cases))
+               [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
+       exchanges (elem (erlang/trace_info pattern :call_count) 1)]
+  (assert (= 187 (count rows)))
+  (assert (= 0 @calls exchanges))
+  (File/write! (first (BeamLisp/argv))
+   (json/encode {:schema "enchant.formal.question-inventory-integration.v1" :rows rows
+                 :exact-inventories 187 :native-exchanges exchanges :managed-query-calls @calls
+                 :compiler-proof-authority false
+                 :scope "Pre-delegation exact comparison of existing project and SDK value-key inventories. New raw-key profile remains explicit."}
+                {:pretty 2}))
+  (println {:exact-inventories (count rows) :native-exchanges exchanges :managed-query-calls @calls}))
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))
