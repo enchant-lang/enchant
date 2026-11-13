@@ -27,6 +27,9 @@ elif stage == 'integer-preflight':
 elif stage == 'native':
     names += ['test/bl/formal/observation_native_test.bl']
     request = ['test', str(R / names[-1])]
+elif stage == 'float-source-diagnostic':
+    names += ['research/formal-logic/diagnose-float-source.bl']
+    request = ['run', str(R / names[-1]), '--', str(E / 'float-source-diagnostic.json')]
 elif stage == 'graph-focused':
     project = True
     names += ['research/formal-logic/src/formal/term-forest.bl',
@@ -134,7 +137,8 @@ command += request
 (E / (stage + '-exit.json')).unlink(missing_ok=True)
 output_names = {'native': 'native.json', 'observation-corpus': 'observation-corpus.json',
                 'paired-native-corpus': 'paired-native-corpus.json', 'example': 'example.json',
-                'value-growth': 'value-growth.json', 'question-corpus': 'question-corpus.json'}
+                'value-growth': 'value-growth.json', 'question-corpus': 'question-corpus.json',
+                'float-source-diagnostic': 'float-source-diagnostic.json'}
 if stage in output_names:
     (E / output_names[stage]).unlink(missing_ok=True)
 (E / (stage + '-source-pin.json')).write_text(json.dumps({'code_commit': commit, 'source_sha256': sources, 'sdk_pin': pin}, indent=2) + '\n')
