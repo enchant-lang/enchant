@@ -41,6 +41,13 @@ The broader formal-language goal remains active: retained language requests,
 semantic repairs, richer observations and stronger implementation connections
 are still work to qualify.
 
+The [numeric repair batch](NUMERIC-IMPLEMENTATION.md) is now committed in
+integration source, while its new SDK qualification is pending. It repairs
+generic equality across Decimal scales, adds explicit representation equality,
+and corrects legacy negative-divisor modulus lowering. The preserved baseline
+records BEAM, direct JS and actual compiled BL results separately. The live
+selected SDK above retains its qualified semantics until the new gates pass.
+
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in
 [SEMANTICS.md](SEMANTICS.md). The catalogue has 46 interface families, with

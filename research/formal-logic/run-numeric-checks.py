@@ -69,6 +69,10 @@ elif stage == 'preflight-controls':
     names += ['test/scripts/sdk_preflight.py']
 elif stage == 'js-unit':
     names += ['test/js/numeric-equality.test.mjs']
+    for path in (R / 'priv/lib/js').glob('*.mjs'):
+        name = str(path.relative_to(R))
+        assert sha(path) == sha(sdk / 'lib/beam_lisp-0.1.0' / name)
+        names.append(name)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = {}
 for name in sorted(set(names)):
