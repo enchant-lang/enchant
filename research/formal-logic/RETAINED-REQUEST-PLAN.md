@@ -125,3 +125,37 @@ assertions and return process status zero. The local qualification runner now
 checks the complete green summary as well. Repair the general CLI outcome
 contract in a later coherent runtime batch; a process exit alone is presently
 insufficient test evidence.
+
+## Composition must remain graph-based when records reopen
+
+Extracting the current function verbatim is insufficient for saved v3 answers.
+Its live snapshot contains BL assertions, whereas a portable record must keep
+their terms and application metadata as flat graph data. Decoding the entire
+retained assertion vector would expand shared argument trees and could attempt
+to intern application keywords that the SDK does not know. The fresh-request
+interface deliberately avoids both operations.
+
+Make the shared composition boundary consume an original caller graph and a
+retained-assertion graph. Use `formal.data-graph/keyword-nodes` and subgraphs to
+select the closed SDK fields, patch the renamed labels, and concatenate the
+assertion/assumption vectors. Term bodies and arbitrary origin metadata must
+pass through as graphs. Only the small fields actually needed for composition
+may be materialized: labels and the declared domain/scope/profile vocabulary.
+The pure reader should use that same function to recompute the complete subject.
+
+`q/assertion` already normalizes labels to strings. Raw `backend/load!` currently
+accepts manually constructed assertion maps and stringifies labels for native
+transport, while keeping their original representation in the retained mirror.
+Review normalization at the owner boundary so both paths have a single named
+assertion contract. Preserve the existing `context/index/label` text and
+original origin data; do not silently change the effective question. A strict
+reserved `:formal/retained-domain` grammar also needs explicit treatment rather
+than interpreting arbitrary origin metadata as a trusted domain declaration.
+
+Required graph controls include a shared retained term, unfamiliar keywords
+inside origin metadata, absent versus present-nil origin/context fields, empty
+retained assertions after reset, duplicate original labels, and explicit
+domain/profile joins. Compare complete effective bytes with the existing owner
+composition for every admitted compatibility case. A record with a recomputed
+hash but altered retained assertions must either change the request subject or
+be refused; it cannot keep the original mathematical binding.
