@@ -69,6 +69,10 @@ for stage in ('dossier-inputs', 'dossier-cells', 'dossier-check', 'focused-brows
             # scripts do not execute inside a cell or the independent full
             # audit. The focused audit must match their current source exactly.
             pass
+        elif stage.startswith('dossier-') and name == 'research/formal-logic/story-audit.mjs':
+            # The browser audit is not a cell dependency. Its actual current
+            # source is required by both fresh browser stage pins below.
+            pass
         else:
             assert sha(R / name) == digest, name
     result = read(E / (stage + '-exit.json'))

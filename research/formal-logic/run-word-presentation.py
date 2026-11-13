@@ -109,6 +109,7 @@ else:
         # Browser assertions and this orchestrator are not executable cell
         # dependencies. Their actual versions are bound by each browser pin.
         if name not in ('research/formal-logic/word-browser.mjs',
+                        'research/formal-logic/story-audit.mjs',
                         'research/formal-logic/run-word-presentation.py'):
             assert sha(R / name) == digest
     browser_tools = read(O / 'browser-tools.json')

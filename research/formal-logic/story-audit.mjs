@@ -884,14 +884,16 @@ try{
   }
  }
  const record=await fetch(base+'/explorer.json?q=family:Comparison').then(r=>r.json());
- check('Catalog comes from three annotated renderer definitions',record.length===1&&record[0].qualified==='formal.presentation/comparison-card'&&record[0].source.endsWith('presentation.bl'));
+ check('Comparison catalog comes from the annotated renderer definition',record.length===1&&record[0].qualified==='formal.presentation/comparison-card'&&record[0].source.endsWith('presentation.bl'));
  check('Unknown preview routes refuse explicitly',(await fetch(base+'/views?view=missing')).status===404);
  check('Anonymous answer writes are denied',(await fetch(base+'/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'formal-total-core-direction',answer:'agree'})})).status===403);
  for(const path of ['/metatheory/Core.lean','/evidence/metatheory/qualification.json','/evidence/contracts/qualification.json','/sdk-src/formal/certificate.bl','/LOOPS.md','/evidence/loops/examples.json','/evidence/loops/qualification.json','/evidence/loops/model-qualification.json','/TRANSLATION.md','/src/formal/translation.bl','/src/formal/optimize.bl','/sdk-src/formal/result.bl','/src/formal/api.bl','/evidence/translation/qualification.json','/evidence/translation/examples.json','/PROTOCOLS.md','/sdk-src/formal/protocol.bl','/sdk-src/formal/protocol-run.bl','/evidence/protocol/model-qualification.json','/evidence/protocol/examples.json','/evidence/protocol/qualification.json','/BOUNDED-TRACES.md','/src/formal/protocol-trace.bl','/evidence/protocol-traces/examples.json','/evidence/protocol-traces/qualification.json','/evidence/protocol-traces/model-qualification.json']){
   const r=await fetch(base+path),body=await r.text();
   check('Declared source/evidence is readable: '+path,r.status===200&&body.length>50&&(/text\/plain|application\/json/).test(r.headers.get('content-type')));
  }
- for(const path of ['/sdk-pin.json','/metatheory/tool-pin.json','/evidence/metatheory/Core.olean','/evidence/actor-runtime/examples.etf','/evidence/actor-runtime/ordinary-update.beam']){
+ const publicSdk=await fetch(base+'/sdk-pin.json');
+ check('Declared SDK pin is the exact public evidence source',publicSdk.status===200&&Buffer.from(await publicSdk.arrayBuffer()).equals(await readFile(resolve('research/formal-logic/sdk-pin.json'))));
+ for(const path of ['/metatheory/tool-pin.json','/evidence/metatheory/Core.olean','/evidence/actor-runtime/examples.etf','/evidence/actor-runtime/ordinary-update.beam']){
   check('Undeclared or binary project file stays unavailable: '+path,(await fetch(base+path)).status===404);
  }
  for(const path of ['/RECORD-HANDLERS.md','/src/formal/source-protocol.bl','/test/source_trace_test.bl','/evidence/source-traces/checks.txt','/evidence/source-traces/examples.json','/evidence/source-traces/qualification.json','/evidence/source-traces/model-qualification.json','/evidence/record-handlers/examples.json','/evidence/record-handlers/implementation-qualification.json']){

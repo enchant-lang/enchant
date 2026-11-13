@@ -133,6 +133,7 @@ try {
   await call({op:'navigate',url:base+'/#a-byte-can-carry-its-meaning-across-both-solvers'});
   check(size.name+': word chapter explains width, budget and claim boundaries',await evaluate("document.body.innerText.includes('A byte can carry its meaning across both solvers')&&document.body.innerText.includes('Raising a work allowance cannot enlarge')&&document.body.innerText.includes('A native unsatisfiable answer remains a solver claim')"));
   for(const [name,value] of [['day','light'],['night','dark']]) {
+   await call({op:'navigate',url:base+'/#a-byte-can-carry-its-meaning-across-both-solvers'});
    await theme(value);
    await evaluate("window.scrollBy({top:document.getElementById('a-byte-can-carry-its-meaning-across-both-solvers').getBoundingClientRect().top-92,behavior:'instant'})");
    await shot(size.name+'-word-chapter-'+name);
@@ -145,13 +146,18 @@ try {
    })()`));
    await evaluate(`document.querySelector('svg.graph[aria-label="Width belongs to the question"]').scrollIntoView({block:'center',behavior:'instant'})`);
    await shot(size.name+'-word-meaning-'+name);
-   await evaluate("document.getElementById('cell-story-word-request').scrollIntoView({block:'center',behavior:'instant'})");
+   await call({op:'navigate',url:base+'/#s-the-model-running'});
+   await theme(value);
+   await evaluate("window.scrollBy({top:document.getElementById('cell-story-word-request').getBoundingClientRect().top-110,behavior:'instant'})");
+   check(size.name+': executed word cell is visible in '+name,await evaluate("(()=>{const c=document.getElementById('cell-story-word-request'),r=c.getBoundingClientRect();return c.getClientRects().length>0&&r.top>=90&&r.top<innerHeight&&r.bottom>r.top})()"));
    const result=await evaluate("document.querySelector('#cell-story-word-request .result')?.innerText||''");
    check(size.name+': actual byte wrapping and wrong-point rejection in '+name,result.includes(':eight-bit-wrap :sat')&&result.includes(':changed-counter :invalid-point')&&result.includes(':last-counter 255')&&result.includes(':next-counter 0'));
    check(size.name+': same named word policy on both engines in '+name,result.includes(':backend :z3')&&result.includes(':backend :oxiz')&&result.includes(':checking-policy :bl/managed-numeric-word-graph-preview-v1'));
    check(size.name+': actual graph replay and fresh indexed readers in '+name,result.includes(':graph-packet-replay :sat')&&result.includes(':saved-word-records 12')&&result.includes(':fresh-sdk-readers 2')&&result.includes(':normalizer-calls-per-selected-lookup 1')&&result.includes(':reader-solver-exchanges 0'));
    check(size.name+': supplied point needs no fallback or execution authority in '+name,result.includes(':supplied-fallback-attempts 0')&&result.includes(':checked-native-execution false')&&result.includes(':compiler-proof-authority false'));
    await shot(size.name+'-word-cell-'+name);
+   await call({op:'navigate',url:base+'/#a-byte-can-carry-its-meaning-across-both-solvers'});
+   await theme(value);
    await evaluate("document.getElementById('research-word-answer-evidence').scrollIntoView({block:'center',behavior:'instant'})");
    check(size.name+': actual saved evidence is current in '+name,await evaluate("document.querySelector('[data-research-element]').dataset.researchFreshness==='current'&&document.querySelectorAll('[data-research-row]').length===7&&document.querySelector('.research-status').innerText.includes('Revision 1.')"));
    check(size.name+': proof and program gaps remain visible in '+name,await evaluate("document.querySelector('[data-research-row=proof]').innerText.includes('Still open')&&document.querySelector('[data-research-row=program]').innerText.includes('Still open')"));
