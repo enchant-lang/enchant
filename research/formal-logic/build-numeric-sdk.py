@@ -68,20 +68,45 @@ if stage == 'seed':
     (recovery / 'scripts').mkdir()
     wrapper = recovery / 'scripts/regenerate-seed'
     shutil.copy2(R / 'scripts/regenerate-seed', wrapper)
-    (recovery / 'priv').symlink_to(Path(baseline['sdk']) / 'lib/beam_lisp-0.1.0/priv')
-    (recovery / 'build').symlink_to(Path(baseline['sdk']) / 'image/ebin')
+    # A full SDK carries immutable library forwarder routes. Loading those and
+    # then recompiling a driver under the next compiler correctly refuses its
+    # publication. Build a development image from only the qualified compiler
+    # floor and source; no SDK library receipt enters this recovery VM.
+    recovered_priv = recovery / 'priv'
+    recovered_priv.mkdir()
+    for entry in (Path(baseline['sdk']) / 'lib/beam_lisp-0.1.0/priv').iterdir():
+        if entry.name not in ('precompiled.term', 'sdk-code.term'):
+            (recovered_priv / entry.name).symlink_to(entry)
+    recovered_ebin = recovery / 'build'
+    recovered_ebin.mkdir()
+    compiler_seed = Path(metadata['compiler']) / 'seed'
+    floor_members = {}
+    for entry in compiler_seed.iterdir():
+        if entry.is_file():
+            shutil.copy2(entry, recovered_ebin / entry.name)
+            floor_members[entry.name] = sha(entry)
+    assert len(floor_members) == 141 and 'Elixir.BeamLisp.beam' in floor_members
+    shutil.copy2(Path(baseline['sdk']) / 'image/ebin/beam_lisp.app', recovered_ebin / 'beam_lisp.app')
     libraries = recovery / '.bl/lib'
     libraries.mkdir(parents=True)
     for library in sorted((Path(baseline['sdk']) / 'lib').iterdir()):
-        (libraries / library.name).symlink_to(library)
+        if library.name == 'beam_lisp-0.1.0':
+            app = libraries / library.name
+            app.mkdir()
+            (app / 'ebin').symlink_to(recovered_ebin)
+            (app / 'priv').symlink_to(recovered_priv)
+        else:
+            (libraries / library.name).symlink_to(library)
     environment.update(BL_BOOTSTRAP_INSTALL='1', BL_REGEN_MEMORY_MAX='4G', BL_REGEN_ROOT=str(R))
     command = [str(wrapper), str(output)]
     policy = {'memory_max': '4G', 'memory_swap_max': '1G', 'install_after_fresh_source_floor_check': True,
               'toolchain_platform': metadata['platform'], 'output': str(output),
               'recovery_image': str(recovery), 'recovery_sdk': baseline['sdk'],
               'recovery_wrapper_sha256': sha(wrapper), 'target': str(R),
+              'recovery_compiler': metadata['compiler'], 'compiler_floor_sha256': floor_members,
+              'precompiled_sdk_library_index': False,
               'recovery_links': {str(path.relative_to(recovery)): str(path.resolve(strict=True))
-                                 for path in [recovery / 'priv', recovery / 'build', *libraries.iterdir()]}}
+                                 for path in recovery.rglob('*') if path.is_symlink()}}
 else:
     fingerprint = subprocess.check_output([R / 'scripts/prepare-checkout-sdk', '--fingerprint'], text=True).strip()
     command = [str(R / 'scripts/prepare-checkout-sdk')]
