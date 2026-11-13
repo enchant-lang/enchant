@@ -80,7 +80,7 @@ for stage in ('dossier-inputs', 'dossier-cells', 'dossier-check', 'focused-brows
                '--property=RuntimeMaxSec=' + ceiling, '--property=KillMode=control-group'))
     log = (E / (stage + '-checks.txt')).read_text()
     if stage.startswith('dossier-'):
-        imports = [str(P / 'src'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
+        imports = [str(P / 'src'), str(P / 'dossier'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
                    str(Path(kit['root']) / 'codebase-review/kit'),
                str(Path(kit['root']) / 'research-elements/kit')]
         assert 'BEAM_LISP_PATH=' + ':'.join(imports) in command and pin['sdk'] + '/bin/bl' in command and '--cold' in command

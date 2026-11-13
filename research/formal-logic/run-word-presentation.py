@@ -49,7 +49,7 @@ for name, digest in kit['rendering_source_sha256'].items():
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = [*(P / 'src').rglob('*.bl'), P / 'ATLAS.bl.org', P / 'sdk-pin.json', Path(__file__),
            P / 'word-dossier-inputs-check.bl', P / 'word-browser.mjs', P / 'story-audit.mjs',
-           P / 'browser-driver.mjs', K, E / 'kit-working-css.patch', P / 'NUMERIC-IMPLEMENTATION.md', P / 'SEMANTICS.md', P / 'FLOOR-MODULUS-MODEL.md',
+           P / 'browser-driver.mjs', *(P / 'dossier').rglob('*.bl'), *(P / 'dossier').glob('*.js'), K, E / 'kit-working-css.patch', P / 'NUMERIC-IMPLEMENTATION.md', P / 'SEMANTICS.md', P / 'FLOOR-MODULUS-MODEL.md',
            P / 'evidence/floor-modulus-model/qualification.json', C / 'qualification.json',
            C / 'previous-readers-qualification.json', C / 'records-qualification.json', C / 'promotion.json', I / 'qualification.json',
            P / 'evidence/numeric-semantics/qualification.json', P / 'RETAINED-REQUEST-IMPLEMENTATION.md',
@@ -84,7 +84,7 @@ def run(name, command, runtime=None):
 
 if stage in ('inputs', 'cells', 'check'):
     runtime = Path(tempfile.mkdtemp(prefix='formal-managed-dossier-'))
-    imports = [str(P / 'src'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
+    imports = [str(P / 'src'), str(P / 'dossier'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
                str(Path(kit['root']) / 'codebase-review/kit'),
                str(Path(kit['root']) / 'research-elements/kit')]
     request = [pin['sdk'] + '/bin/bl', '--cold']

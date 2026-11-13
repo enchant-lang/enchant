@@ -4,7 +4,7 @@
            [dossier.answer :as answer] [dossier.feedback :as feedback]
            [dossier.film :as film] [dossier.witness :as witness] [dossier.roster :as roster]
            [codebase-review.blocks :as review] [formal.presentation :as presentation]
-           [formal.review-cache :as view-cache]))
+           [formal.review-cache :as view-cache] [formal.research-view :as research]))
 
 (def root (Path/expand "research/formal-logic"))
 (def source-root (Path/expand "../.." root))
@@ -43,7 +43,8 @@
        filmed (phase "film" (fn [] (film/enrich parsed directory)))
        reviewed (phase "review" (fn [] (review/enrich filmed)))
        witnessed (phase "witness" (fn [] (witness/enrich reviewed directory)))]
-  (phase "roster" (fn [] (roster/enrich witnessed directory (roster-options request))))))
+  (research/enrich (phase "roster" (fn [] (roster/enrich witnessed directory (roster-options request))))
+                   root (boolean (owner? request)))))
 (defn revision [text doc]
  (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary
    [text (mapv :data (:nodes doc))])) (list (tuple :case :lower))))
@@ -53,7 +54,8 @@
    (fn [] (phase (str "serialize-" (name kind)) build))))
 (defn css [] (str (asset "style.css") (File/read! (str review-kit "/review.css"))
                   (asset "roster.css") (File/read! (str root "/dossier-local.css"))))
-(defn scripts [] (str (asset "live.js") (asset "roster.js")))
+(defn scripts [] (str (asset "live.js") (asset "roster.js")
+                     (File/read! (str root "/dossier/research-evidence.js"))))
 (defn linked-file [text route]
  ;; Evidence links are declarations, not a general file browser. Resolve every
  ;; candidate beneath the trusted project root, including symlink targets.
@@ -142,8 +144,12 @@
        text (File/read! path)
        frame (Regex/run (Regex/compile! "^/witness-media/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)
        roster-frame (Regex/run (Regex/compile! "^/roster-media/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)/(frame-[1-9][0-9]*\\.png)$") route)
+       research-response (research/route request root (boolean (owner? request)))
        linked (when (= method "get") (phase "linked-file" (fn [] (linked-file text route))))]
   (cond
+   research-response research-response
+   (and (= method "get") (contains? #{"/research-elements/tool" "/research-elements/workspace" "/research-elements/specimen"} route))
+    (web/html request (standalone (research/component root (last (String/split route "/"))) "" ""))
    (and (= method "post") (contains? #{"/answer" "/roster-note"} route))
     (if-not (owner? request) (web/json request 403 {:error "Only the configured dossier owner can save a review."})
      (let [body (web/read-body-limited* request 16384 10000)]
