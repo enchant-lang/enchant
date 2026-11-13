@@ -36,6 +36,9 @@ cold = read(cold_path)
 assert cold['status'] == 'passed' and cold['base_sdk_pin'] == baseline and cold['records'] == 12
 assert cold['manual_schema_preload'] is False
 prototype['packets'] = {'sha256': sha(cold_path), 'records': 12}
+placement = read(E / 'kvm-sandbox.json')
+assert placement['status'] == 'passed' and placement['api_version'] == 12
+assert placement['device_opened_read_write'] and placement['empty_vm_created_and_closed']
 runtime_names = ['priv/lib/formal/' + name + '.bl' for name in
                  ['backend', 'coordinates', 'evaluate', 'graph-execution', 'graph-question', 'graph-terms',
                   'logic', 'point-profile', 'request-answer', 'request-point', 'request-record', 'resources/word']]
