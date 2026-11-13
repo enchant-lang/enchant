@@ -1,0 +1,85 @@
+(ns formal.research-view
+ (:require [formal.research-evidence :as evidence] [research.elements :as elements]
+           [dossier.ui :as ui] [web] [bl.json :as json]))
+
+(def surfaces #{"tool" "workspace" "dossier" "specimen"})
+(defn- require! [ok why] (when-not ok (throw (ex-info (str "formal.research-view: " why) {}))))
+(defn store-path [root] (Path/join root "elements/word-answer-evidence.bl.org"))
+(defn current [root]
+ (let [snapshots (evidence/read-snapshots (store-path root)) saved (last snapshots)]
+  (when saved {:snapshot saved :revisions (count snapshots) :basis (evidence/basis-id root)
+               :freshness (elements/freshness saved (evidence/basis-id root))})))
+(defn render-h
+ "The same installed pure comparison component serves every named surface."
+ [view]
+ (let [saved (evidence/validate! (:snapshot view)) stale? (= :stale (:freshness view))]
+  [:section.research-element {:id "research-word-answer-evidence" :data-research-element evidence/id
+                              :data-research-freshness (name (:freshness view))}
+   [:h3 (:title saved)]
+   [:p.research-status (if stale? "Sources changed · the saved answer is still shown." "Saved evidence · source basis current.")
+    " Revision " (:revisions view) "."]
+   [:p (:question saved)]
+   [:div.scrollx
+    [:table
+     [:thead [:tr [:th "Part of the answer"] [:th "What the evidence says"] [:th "Basis"]]]
+     [:tbody (mapv (fn [r]
+                     [:tr {:data-research-row (:id r)}
+                      [:th (:label r)] [:td (:finding r)]
+                      [:td (case (:state r) :supported "Located evidence" :candidate "Still open" :disputed "Disputed")]]) (:rows saved))]]]
+   [:details
+    [:summary "Inspect the sources and scope"]
+    [:p "This view records implementation evidence. Native status, point validity and compiler authority are separate facts."]
+    [:p "SDK " (get-in saved [:scope :sdk])]
+    [:p "Recorded " (get-in saved [:scope :recorded-at])]
+    [:p "Basis " [:code (:basis saved)]]
+    (mapv (fn [r]
+            [:div [:b (:label r)]
+             [:ul (mapv (fn [source]
+                          [:li [:a {:href (str "/" (:source source))} (:source source)]
+                           " · " [:code (:locator source)]]) (:evidence r))]]) (:rows saved))]
+   [:p.research-save-result {:role "status" :aria-live "polite"}]]))
+(defn component [root surface]
+ (require! (contains? surfaces surface) "surface is not installed")
+ (if-let [view (current root)] (render-h view)
+  [:p "No evidence snapshot is saved yet."]))
+(defn enrich [doc root writable?]
+ (update doc :nodes
+  (fn [nodes]
+   (mapv (fn [node]
+           (if (and (= :block (:t node)) (= "research_element" (:lang node)))
+            (do
+             (require! (= evidence/id (get-in node [:attrs :id])) "element identity is not installed")
+             (let [view (current root)]
+              (require! (some? view) "saved element required")
+              (assoc node :data view :render-block
+               (fn [_]
+                [:div (render-h view)
+                 (when writable?
+                  [:button {:type "button" :data-research-save evidence/id
+                            :data-research-basis (:basis view)}
+                   (if (= :stale (:freshness view)) "Refresh this evidence snapshot" "Save this evidence snapshot")])]))))
+            node)) nodes))))
+(defn route
+ "The trusted host supplies ownership and fixed root. Browser data selects no path or callable."
+ [request root writable?]
+ (let [path (web/path request) prefix (str "/research-elements/" evidence/id)]
+  (cond
+   (and (= "get" (web/method request)) (= path (str prefix "/view")))
+    (web/json request (or (current root) {:status :missing}))
+   (and (= "post" (web/method request)) (= path (str prefix "/save")))
+    (if-not writable? (web/json request 403 {:error "Only the dossier owner can save a snapshot."})
+     (let [origin (web/req-header request "origin") host (web/req-header request "host")
+           expected (when host [(str "http://" host) (str "https://" host)])]
+      (if-not (and origin (some #(= origin %) expected))
+       (web/json request 403 {:error "Same-origin save required."})
+       (let [body (web/read-body-limited* request 8192 10000)]
+        (if (:error body) (web/json (:conn body) 413 {:error "Snapshot request too large."})
+         (let [input (try (json/decode (:body body)) (catch _ nil))]
+          (cond
+           (not (and (map? input) (= #{"basis"} (set (keys input)))))
+            (web/json (:conn body) 400 {:error "A source basis is required."})
+           (not= (get input "basis") (evidence/basis-id root))
+            (web/json (:conn body) 409 {:error "Sources changed. Inspect before saving."})
+           :else (let [saved (evidence/append-snapshot! root (store-path root))]
+                   (web/json (:conn body) {:ok true :revisions (:revisions saved) :basis (evidence/basis-id root)})))))))))
+   :else nil)))
