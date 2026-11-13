@@ -1,7 +1,8 @@
 (ns formal.indexed-ledger-prototype-check
  (:require [formal.indexed-ledger-prototype :as ledger] [formal.indexed-request-record-prototype :as record]
            [formal.data-graph :as graph] [formal.backend :as backend] [datom] [datom.value-codec :as codec]
-           [bl.json :as json] [oracle]))
+           [bl.json :as json] [oracle] [formal.request :as request] [formal.request-answer :as answer]
+           [formal.retained-composition :as composition] [formal.question-graph :as qg]))
 
 (defn- counted [function name arity action]
  (let [module (elem (erlang/fun_info function :module) 1) pattern (tuple module name arity)]
@@ -14,6 +15,9 @@
   :nodes (mapv (fn [[tag payload]]
                  [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)]) (get wire "nodes"))})
 (def corpus (json/decode (File/read! (System/get_env "INDEXED_LEDGER_CORPUS"))))
+;; Load only the named packet schema modules. Graph payloads never choose a
+;; namespace and unknown application names are never interned here.
+(def protocol-profiles [record/profile request/profile answer/profile answer/retained-profile composition/profile qg/profile])
 (def missing-protocol-names
  (vec (distinct (mapcat (fn [entry]
                          (keep (fn [[tag name]]
@@ -21,7 +25,7 @@
                                   (try (erlang/binary_to_existing_atom name :utf8) nil (catch _ name))))
                                (get-in entry ["packet" "nodes"]))) (get corpus "rows")))))
 (when (seq missing-protocol-names)
- (throw (ex-info "Outer packet vocabulary is not loaded" {:missing missing-protocol-names})))
+ (throw (ex-info (str "Outer packet vocabulary is not loaded: " missing-protocol-names) {:missing missing-protocol-names})))
 (def packets (mapv (fn [row] {:id (get row "id") :expected (keyword (get row "expected"))
                             :packet (graph/decode! (restore (get row "packet")))}) (get corpus "rows")))
 
