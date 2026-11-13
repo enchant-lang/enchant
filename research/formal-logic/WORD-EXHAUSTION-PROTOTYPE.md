@@ -57,3 +57,11 @@ mechanical soundness theorem, Source outcome relation, checked native history,
 compiler preservation, general QF_BV completeness or language-wide totality.
 The next architectural step would connect a reviewed proof strategy to the
 common answer interface while retaining these separate assumptions.
+
+The prepared checked result also reconstructs an assumption ledger from the
+actual admitted question. Each label points to its original term node under
+the bound complete-subject reference, rather than exporting owner-local term
+IDs as portable meaning. The negated goal is not listed as an assumption.
+Feasibility stays unestablished. A changed premise changes the logical subject
+and refuses the old candidate; changing only the requested backend preserves
+the statement but changes the separately reported execution request reference.
