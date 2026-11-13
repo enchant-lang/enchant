@@ -1,5 +1,17 @@
 # Retained owners must not hide assumptions
 
+The first implementation boundary is now checked as a prototype:
+`formal.retained-question/compose` is shared with the native owner, and
+`backend/context-configuration` atomically reads the actual context, adapter
+limits and artifact fields. The pure composer passed 54 assertions against the
+preceding unchanged owners. Explicit namespace projections of the integrated
+owner/composer then passed 278 assertions across three files: 202 existing
+managed-owner controls, 22 configuration controls and those 54 composition
+checks. The receipt is `evidence/retained-owner-prototype/qualification.json`.
+These checks preserve the selected numeric SDK and produce no replacement SDK.
+The versioned retained-answer envelope and local request leases below remain
+the next implementation work.
+
 The public request bridge currently acquires a fresh owner. The lower owner
 primitive already supports retained assertions and authoritative context
 guards. Extending the language bridge should preserve one rule: a portable
@@ -86,23 +98,22 @@ current numeric/fresh-owner API has not implemented this extension yet.
 
 ## Review against the current implementation
 
-The owner already composes retained assumptions in
-`formal.graph-execution/effective-question`. That function is private; the
-bridge must not reproduce its label, assumption, domain, profile and scope
-rules in a second implementation. Extract the pure composition into one small
-module shared by the owner and the request bridge. Its input is original graph
-data and declared retained data, not a session or an admitted forest. Calling
-that pure function establishes no owner authority.
+The owner now delegates its private effective-question operation to
+`formal.retained-question/compose`. The bridge must reuse that rule for labels,
+assumptions, domains, profiles and scope. Its input is original graph data and
+declared retained graph data, not a session or an admitted forest. Calling that
+pure function establishes no owner authority.
 
 `backend/context` currently returns the authoritative owner, generation,
 revision, assertions and portability/retirement flags. It does **not** return
 the owner's adapter configuration. The session's `:identity`, `:solver-ms` and
 `:hard-ms` fields are client mirrors; existing managed tests intentionally
 corrupt them and require the real owner to remain authoritative. The retained
-bridge therefore needs an owner-read configuration operation, or an explicit
-extension of the local context result, before it can freeze request adapter
-settings and reject mismatches before native scope work. Reading the session
-map is insufficient. The adapter settings are ordinary portable data after
+bridge now has the explicit `backend/context-configuration` owner-read
+operation in the prototype source. It reads context and settings atomically,
+ignores corrupted client mirrors and performs no native exchange. It must be
+qualified in the eventual replacement SDK before claiming that SDK capability.
+The adapter settings are ordinary portable data after
 capture; the owner PID and live guard remain local.
 
 Composition currently places a declared generation in the effective question's
@@ -152,14 +163,13 @@ pass through as graphs. Only the small fields actually needed for composition
 may be materialized: labels and the declared domain/scope/profile vocabulary.
 The pure reader should use that same function to recompute the complete subject.
 
-`q/assertion` already normalizes labels to strings. Raw `backend/load!` currently
-accepts manually constructed assertion maps and stringifies labels for native
-transport, while keeping their original representation in the retained mirror.
-Review normalization at the owner boundary so both paths have a single named
-assertion contract. Preserve the existing `context/index/label` text and
-original origin data; do not silently change the effective question. A strict
-reserved `:formal/retained-domain` grammar also needs explicit treatment rather
-than interpreting arbitrary origin metadata as a trusted domain declaration.
+`q/assertion` already normalizes labels to strings. The prototype raw
+`backend/load!` now retains the same string labels it already sent to native
+transport. This preserves existing `context/index/label` text while making the
+stored assertion contract explicit. Original origin data stays untouched. The
+composer requires a closed reserved `:formal/retained-domain` map containing
+scope and profiles; other origin metadata remains opaque. A declared domain
+is recorded meaning, not trusted execution evidence.
 
 Required graph controls include a shared retained term, unfamiliar keywords
 inside origin metadata, absent versus present-nil origin/context fields, empty
