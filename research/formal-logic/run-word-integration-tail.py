@@ -9,9 +9,6 @@ P = Path(__file__).resolve().parent
 R = P.parent.parent
 E = P / 'evidence/word-integration'
 pin = json.loads((E / 'sdk-candidate.json').read_text())
-for name in ():
-    result = json.loads((E / (name + '-qualification.json')).read_text())
-    assert result['status'] == 'passed' and result['sdk_pin'] == pin
 assert json.loads((E / 'prefix-state.json').read_text())['status'] == 'passed'
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 digests = {}
