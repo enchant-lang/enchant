@@ -59,7 +59,9 @@ elif stage in ('compiler-floor', 'preflight', 'preflight-controls', 'js-unit'):
     pass
 else:
     raise ValueError(stage)
-names = runtime_names + files + [str(Path(__file__).relative_to(R))]
+fixture_names = (['priv/host/num.bl', 'priv/host/decimal.bl', 'priv/host/decimal_inspect.bl']
+                 if stage == 'focused' else [])
+names = runtime_names + files + fixture_names + [str(Path(__file__).relative_to(R))]
 if project:
     names += [str(path.relative_to(R)) for path in sorted((P / 'src').rglob('*.bl'))]
 if stage == 'compiler-floor':
@@ -85,6 +87,14 @@ for name in sorted(set(names)):
     sources[name] = sha(R / name)
 runtime = Path(tempfile.mkdtemp(prefix='formal-numeric-gate-runtime-'))
 cwd = Path(tempfile.mkdtemp(prefix='formal-numeric-gate-consumer-'))
+# Host ABI tests compile their pinned source relative to BeamLisp/cwd.
+# Supply exactly those immutable SDK files, without adding checkout code paths.
+for name in fixture_names:
+    packaged = sdk / 'lib/beam_lisp-0.1.0' / name
+    assert sha(packaged) == sources[name]
+    target = cwd / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(packaged, target)
 cap = '4G'
 if files:
     request = [str(sdk / 'bin/bl'), '--cold']
