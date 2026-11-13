@@ -1,10 +1,15 @@
 # Give fixed-width words an explicit replay resource policy
 
-The standalone project prototype passed **3,516 assertions** on the selected
+The standalone project prototype passed **3,526 assertions** on the selected
 retained-request SDK. The [qualification](evidence/word-resource-prototype/qualification.json)
 binds the actual source commit, immutable SDK, capped commands, complete green
-summaries and resource cleanup. The planner file accounts for 3,466 assertions;
+summaries and resource cleanup. The planner file accounts for 3,476 assertions;
 the graph coordinate reader accounts for 50.
+
+Planner prototype v2 refuses excessive declared widths before forecast
+arithmetic. Its earlier v1 qualification remains under
+`before-early-width-admission/`; the current checks add an existing 8-KiB width
+integer, full shape validation before refusal and unchanged valid forecasts.
 
 The planner describes the existing SDK word operations with an exact input
 reference, normalized limits, a ready/incomplete decision, result width,

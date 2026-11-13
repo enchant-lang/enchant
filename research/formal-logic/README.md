@@ -72,7 +72,7 @@ now runs on that selected SDK, with actual results for both backends and a
 qualified 90-cell presentation.
 
 The next word profile has separate checked groundwork: a [project resource and
-coordinate prototype](WORD-RESOURCE-PROTOTYPE.md) passed 3,516 assertions, and a
+coordinate prototype](WORD-RESOURCE-PROTOTYPE.md) passed 3,526 assertions, and a
 [mathematical envelope model](WORD-ENVELOPE-MODEL.md) passed six theorem and nine
 dependency audits plus two false-claim controls. These do not yet extend the
 managed request profile. The [integration plan](WORD-PROFILE-PLAN.md) keeps

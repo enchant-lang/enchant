@@ -2,7 +2,7 @@
 
 The selected retained-request SDK has completed its qualification. The next
 runtime batch can extend its theory profile using the standalone word prototype
-(3,516 assertions) and the separate word-envelope model (six theorems). Neither
+(3,526 assertions) and the separate word-envelope model (six theorems). Neither
 artifact by itself adds managed word solving.
 
 ## Keep representation and semantic policy separate
