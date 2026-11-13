@@ -54,17 +54,24 @@ theorem positive_bounds (a b : Int) (hb : 0 < b) :
   simpa [repairedMod, hb] using
     And.intro (Int.emod_nonneg a hn) (Int.emod_lt_of_pos a hb)
 
+private theorem negative_correction_bounds (e b : Int) (hb : b < 0)
+    (lo : 0 ≤ e) (hi : e < -b) :
+    b < (if e = 0 ∨ 0 < b then e else e + b) ∧
+    (if e = 0 ∨ 0 < b then e else e + b) ≤ 0 := by
+  -- Keep the linear arithmetic argument independent of variable div/mod.
+  -- Instantiating this lemma below does not ask omega to preprocess modulus.
+  have notPositive : ¬ 0 < b := by omega
+  cases (inferInstance : Decidable (e = 0)) with
+  | isTrue zero => simp [zero, hb]
+  | isFalse nonzero =>
+    simp only [nonzero, false_or, notPositive, ite_false]
+    omega
+
 theorem negative_bounds (a b : Int) (hb : b < 0) :
     b < repairedMod a b ∧ repairedMod a b ≤ 0 := by
   have hn : b ≠ 0 := by omega
-  have lo := Int.emod_nonneg a hn
-  have hi := Int.emod_lt_of_neg a hb
-  have notPositive : ¬ 0 < b := by omega
-  cases (inferInstance : Decidable (a % b = 0)) with
-  | isTrue zero => simp [repairedMod, zero, hb]
-  | isFalse nonzero =>
-    simp only [repairedMod, nonzero, false_or, notPositive, if_false]
-    omega
+  exact negative_correction_bounds (a % b) b hb
+    (Int.emod_nonneg a hn) (Int.emod_lt_of_neg a hb)
 
 theorem congruence (a b : Int) (hb : b ≠ 0) :
     b ∣ a - repairedMod a b := by
