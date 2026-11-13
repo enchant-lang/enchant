@@ -153,7 +153,24 @@
   (doseq [options [{:checked-values true} {:profile :future} {:limits {:integer {}}}
                    {:profile e/direct-numeric-graph-profile :limits {:already-admitted true}}]]
    (is (thrown? (e/graph-values data roots {} options))))
-  (is (= false (erlang/function_exported (BeamLisp.Emit/module_for "formal.evaluate") :primitive-value 2)))
+  ;; BL privacy is enforced by actual checked SDK declarations at language
+  ;; resolution. Native BEAM bridges are not a sandbox or proof authority.
+  (is (= :private (BeamLisp.AOT/sdk_declaration_kind "formal.evaluate" "primitive-value")))
+  (let [client "formal.shared-private-client"
+        _ (BeamLisp.Env/add_alias client "subject" "formal.evaluate")
+        messages (mapv
+                   (fn [source]
+                    (try
+                     (BeamLisp.Compiler/compile (first (BeamLisp.Reader/read_string source "shared-private.bl"))
+                       (BeamLisp.Compiler/new_env client))
+                     :unexpected (catch error (ex-message error))))
+                   ["subject/primitive-value" "(subject/primitive-value nil [])"])]
+   (doseq [message messages]
+    (is (and (string? message) (String/contains? message "is not public"))))
+   (swap! events conj {:label "language-privacy" :sdk-declaration :private :qualified-refusals (count messages)
+                       :native-bridge-exported (erlang/function_exported (BeamLisp.Emit/module_for "formal.evaluate") :primitive-value 2)})
+   (when-let [path (System/get_env "ENCHANT_SHARED_PRIMITIVE_TRACE")]
+    (File/write! path (json/encode {:events @events :compiler-proof-authority false} {:pretty 2}))))
   (let [noncanonical (graph/encode {:formal/term 1 :op :real :sort t/Real :args [] :data [2 4]})]
    (is (thrown? (e/graph-values noncanonical [(:root noncanonical)] {} {:profile e/direct-numeric-graph-profile}))))
   (is (thrown? (evaluate [(t/text "outside numeric")] {} {:profile e/direct-numeric-graph-profile})))
