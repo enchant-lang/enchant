@@ -1,6 +1,6 @@
 # One SDK implementation of mathematical primitives
 
-The shared-primitives candidate moves fresh typed graph admission, scalar
+The shared-primitives SDK moves fresh typed graph admission, scalar
 resource forecasts and graph point evaluation into the immutable SDK. Ordinary
 `formal.evaluate/value` and graph evaluation call the same language-private
 primitive dispatcher. The graph entry does not accept a caller's prepared
@@ -51,7 +51,7 @@ forecast then uses the private checked child values without charging or running
 shallow child-variable revalidation. The new rational planner charging profile
 has its own identity; a ready plan still is not an admission token.
 
-Actual candidate-SDK call controls observe three normalizer calls for the
+Actual SDK call controls observe three normalizer calls for the
 small multiplication `1/3 * 2/5`, versus seven in numeric v1. Two calls admit
 the distinct literals; the third normalizes the product. Direct ordinary tree
 evaluation also makes three calls. A shared literal used twice needs one
@@ -73,7 +73,7 @@ establish a wall-clock speed advantage or a universal cost/heap theorem.
 
 ## Language privacy and native interop are different boundaries
 
-The candidate's SDK declarations mark `primitive-value` private. Both a
+The SDK declarations mark `primitive-value` private. Both a
 qualified language value fetch and a qualified language call are refused with
 `is not public`. The SDK's native BEAM namespace shim nevertheless exports a
 bridge for that function. The first test incorrectly equated `defn-` with
@@ -86,9 +86,9 @@ The checked formal interfaces still freshly validate original terms/data and
 do not accept a caller's fabricated result as an admitted forest or proof.
 Full language/implementation and compiler preservation remain open.
 
-## Qualification state and remaining integration
+## Qualification and remaining connections
 
-The candidate passes 130 SDK boundary assertions and the preceding 4,412
+The selected SDK passes 130 SDK boundary assertions and the preceding 4,412
 project assertions. Its packaged runtime binds 691 BL source files to the
 managed build receipt, captured engine, assembly source and actual runtime.
 Only the evaluator and three new SDK library files differ from the preceding
@@ -109,10 +109,23 @@ UTF-8 binary bytes; the fixtures encode both Float64 and binary rows as Base64
 without changing their graph tags. These fixtures carry data, not Source code
 or proof authority.
 
-The paired native questions are running at the existing solver deadlines.
-The project keeps its preceding qualified pin until the final candidate gate
-passes. Project adapter migration and the new live presentation then have
-their own integration checks. No managed
+All 187 paired native questions retain the preceding identities, solver
+statuses, verdicts, phases and replay statuses at the existing solver deadlines.
+Their native worker and Z3 library artifacts remain identical. The
+[SDK qualification](evidence/shared-primitives/qualification.json) binds all
+completed gates and source snapshots to the exact immutable artifact.
+
+The project now selects that qualified pin. Its four former implementations
+are thin SDK delegates, removing 508 lines of duplicate code. A separate
+[post-migration integration check](evidence/shared-primitives/integration-qualification.json)
+passes all 4,412 assertions across nine files, preserving the earlier profiles,
+result shapes, refusal phases, call accounting and scoped lifetimes. These
+4,412 executions are additional to the SDK candidate's 14,167 targeted
+executions. The core qualification records its own pre-migration source
+snapshot; the integration receipt records the actual delegates and promoted pin.
+
+The new live presentation has its own execution, host and browser gates.
+No managed
 assertion replay, native retained-context promotion, additional backend theory
 support or checked proof/kernel/compiler authority is claimed by these point
 APIs. Other value-family policies and mechanized cost/implementation
