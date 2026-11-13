@@ -1,0 +1,120 @@
+(ns formal.graph-admission-test
+ (:require [formal.term :as t] [formal.data-graph :as g] [formal.evaluate :as e]
+           [formal.graph-question :as question] [formal.query :as q] [oracle]))
+
+(defn- counted [action]
+ (let [module (elem (erlang/fun_info t/rational :module) 1) pattern (tuple module :rational 2)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+    {:result result :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(defn- roots [data] (second (nth (:nodes data) (:root data))))
+(defn- collect [point ids]
+ {:values (mapv (:resolve point) ids) :resources ((:resources point)) :checking ((:checking point))})
+
+(deftest original-admission-is-shared-without-accepting-a-copied-forest
+ (let [expression (t/mul (t/real 1 3) (t/real 2 5)) expected (e/real 2 15)
+       data (g/encode [expression expression]) ids (roots data)
+       actual
+       (counted
+        (fn []
+         (e/with-graph-admission data ids {:profile e/direct-numeric-graph-profile}
+          (fn [admitted]
+           ;; A caller may edit the diagnostic copy. The evaluator still uses
+           ;; the SDK's original captured admission, not that exported value.
+           (let [edited (assoc admitted :forest {:nodes [] :roots [] :checked true})
+                 one ((:with-point edited) {} (fn [point] (collect point ids)))
+                 two ((:with-point admitted) {} (fn [point] (collect point ids)))]
+            {:one one :two two :admission (:admission admitted)
+             :account (:admission-account admitted)})))))]
+  ;; Two literal normalizations once, then one product per independent point.
+  (is (= 4 (:calls actual)))
+  (is (= :shared-scope (get-in actual [:result :account])))
+  (is (= 364 (get-in actual [:result :admission :charged-work-units])))
+  (doseq [key [:one :two]]
+   (is (= [expected expected] (get-in actual [:result key :values])))
+   (is (= 872 (get-in actual [:result key :resources :charged-work-units])))
+   (is (= 1 (get-in actual [:result key :resources :primitive-applications]))))))
+
+(deftest admission-refusal-runs-neither-constructors-nor-point-primitives
+ (let [data (g/encode (t/mul (t/real 1 3) (t/real 2 5))) ids [(:root data)]
+       actual (counted (fn []
+                (e/with-graph-admission data ids
+                 {:profile e/direct-numeric-graph-profile :limits {:admission-work-units 0}}
+                 (fn [admitted]
+                  {:admission (:admission admitted)
+                   :point ((:with-point admitted) {} (fn [point] (collect point ids)))}))))]
+  (is (= 0 (:calls actual)))
+  (is (= :incomplete (get-in actual [:result :admission :status])))
+  (is (= :not-run (get-in actual [:result :admission :constructor-execution])))
+  (is (e/unavailable? (first (get-in actual [:result :point :values]))))
+  (is (= 0 (get-in actual [:result :point :resources :primitive-applications])))))
+
+(deftest binding-checking-preserves-missing-invalid-and-refused-coordinates
+ (let [x (t/variable "admission.x" t/Int) expression (t/any [(t/bool true) (t/eq x x)])
+       data (g/encode expression) ids [(:root data)]
+       inspect (fn [bindings limits]
+                 (e/with-graph-admission data ids {:profile e/direct-numeric-graph-profile :limits limits}
+                  (fn [admitted]
+                   ((:with-point admitted) bindings
+                    (fn [point]
+                     {:bindings ((:check-bindings point) ids) :value ((:resolve point) (:root data))
+                      :resources ((:resources point))})))))
+       absent (inspect {} {}) bad (inspect {"admission.x" 1.0} {})
+       valid (inspect {"admission.x" 7} {})
+       refused (inspect {"admission.x" 256} {:integer {:integer-bits 4}})]
+  (doseq [row [absent bad valid refused]] (is (= true (:value row))))
+  (is (= :incomplete (get-in absent [:bindings :status])))
+  (is (= false (get-in absent [:bindings :resource-refused])))
+  (is (= :invalid (get-in bad [:bindings :status])))
+  (is (= :valid (get-in valid [:bindings :status])))
+  (is (= :incomplete (get-in refused [:bindings :status])))
+  (is (= true (get-in refused [:bindings :resource-refused])))
+  (is (= 1 (count (get-in refused [:resources :refusals]))))))
+
+(deftest nested-scopes-retire-and-enforce-their-process-owner
+ (let [data (g/encode (t/bool false)) ids [(:root data)]
+       admission (atom nil) held (atom nil) parent (erlang/self)]
+  (e/with-graph-admission data ids {}
+   (fn [admitted]
+    (reset! admission admitted)
+    ((:with-point admitted) {}
+     (fn [point]
+      (reset! held point)
+      (is (= false ((:resolve point) (:root data))))
+      (is (= :valid (:status ((:check-bindings point) ids))))
+      (is (thrown? ((:check-bindings point) [0.0])))
+      (erlang/spawn
+       (fn [] (erlang/send parent
+                [:admission-foreign
+                 (try ((:with-point admitted) {} identity) :accepted (catch _ :refused))
+                 (try ((:check-bindings point) ids) :accepted (catch _ :refused))])))
+      (receive [:admission-foreign a b] (do (is (= :refused a)) (is (= :refused b)))
+               (after 3000 (is false "foreign admission did not reply")))))
+    (is (thrown? ((:resolve @held) (:root data))))
+    (is (thrown? ((:check-bindings @held) ids)))))
+  (is (thrown? ((:with-point @admission) {} identity)))
+  (is (thrown? (e/with-graph-admission data ids {}
+                (fn [admitted] (reset! admission admitted) (throw :consumer-failed)))))
+  (is (thrown? ((:with-point @admission) {} identity)))))
+
+(deftest admission-and-question-entry-points-refuse-prepared-caller-authority
+ (let [raw (q/prove (t/eq (t/int 1) (t/int 1)))
+       context {:formal/question-graph 1 :profile :bl/portable-question-graph-v1 :graph (g/encode raw)}
+       prepared (question/prepare context) data (:graph context)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (is (= (:reference prepared) (g/reference data)))
+  (is (thrown? (question/prepare (assoc context :forest (:forest prepared)))))
+  (is (thrown? (e/with-graph-admission (:forest prepared) [0] {} identity)))
+  (is (thrown? (e/with-graph-admission data [] {:checked true} identity)))
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn []
+    (question/with-numeric context {}
+     (fn [inventory admitted]
+      (is (= (:reference inventory) (:data-reference admitted)))
+      (is (= :prove (:mode inventory)))
+      ((:with-point admitted) {}
+       (fn [point] (is (= true ((:resolve point) (nth (get-in inventory [:forest :source-roots]) 0))))))))))
+  (is (= 0 @calls))))

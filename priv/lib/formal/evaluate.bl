@@ -350,21 +350,20 @@
             (rational/pair? (:formal/real value)) (> (second (:formal/real value)) 0))
   (:formal/real value)))
 
-(defn- with-graph-point*
- "Use one freshly admitted graph point while consuming demanded root values.
+(defn- prepare-graph-point [data roots policy selected-profile]
+ (cond (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+        (forest/prepare-numeric data roots (select-keys policy [:rational :admission-work-units]))
+       policy (forest/prepare-bool-int data roots) :else (forest/prepare data roots)))
+
+(defn- with-prepared-graph-point*
+ "Use an SDK-owned admitted graph point while consuming demanded root values.
   The callback receives source-root lookup and diagnostic snapshot functions;
   both retire on return or failure. Only the original admitted roots can be
   looked up. These functions are local implementation plumbing, not portable
   query terms, accepted prepared views, native handles or proof authority."
- [data roots assignments policy selected-profile consume]
- (when-not (map? assignments)
-  (throw (ex-info "formal.term-forest-evaluate: point assignments must be a map" {:profile selected-profile})))
- ;; Refuse lazy/executable/nonportable model objects before primitive checking.
- (let [assignment-data (graph/encode assignments)
-       numeric? (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+ [data roots assignments assignment-data policy selected-profile prepared consume]
+ (let [numeric? (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
        direct? (or (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
-       prepared (cond numeric? (forest/prepare-numeric data roots (select-keys policy [:rational :admission-work-units]))
-                      policy (forest/prepare-bool-int data roots) :else (forest/prepare data roots))
        admission-incomplete? (= :incomplete (get-in prepared [:admission :status]))
        nodes (into {} (map (fn [[id op sort children datum]]
                             [id {:op (erlang/binary_to_existing_atom op :utf8)
@@ -484,7 +483,24 @@
                                :required (inc (:evaluated-nodes @accounting)) :limit (:evaluated-nodes policy)})
                    (do (when policy (swap! accounting update :evaluated-nodes inc)) (evaluate-node id)))]
              (swap! memo assoc id result)
-             result)))]
+             result)))
+          (binding-nodes [ids]
+           (loop [pending ids seen #{} variables #{}]
+            (if (empty? pending) (vec (sort-by (fn [id] (:data (get nodes id))) variables))
+             (let [id (peek pending) tail (pop pending) node (get nodes id)]
+              (if (contains? seen id) (recur tail seen variables)
+               (recur (into tail (:children node)) (conj seen id)
+                      (if (= :var (:op node)) (conj variables id) variables)))))))
+          (binding-row [id]
+           (let [node (get nodes id) name (:data node) actual (visit id)
+                 raw (get assignments name (unavailable :unassigned))
+                 reason (when (unavailable? actual) (:formal/unavailable actual))
+                 refused? (and (map? reason) (= :resource-incomplete (:kind reason)))
+                 invalid? (and (not (unavailable? raw)) (map? reason) (= :ill-sorted-value (:kind reason)))]
+            {:name name :sort (:sort node)
+             :status (cond invalid? :invalid (unavailable? actual) :incomplete :else :valid)
+             :reason (if (unavailable? raw) (:formal/unavailable raw) reason)
+             :resource-refused (boolean refused?)}))]
    (let [live! (fn []
                 (when-not (= owner (erlang/self))
                  (throw (ex-info "formal.term-forest-evaluate: point belongs to another process" {:profile selected-profile})))
@@ -505,6 +521,20 @@
                            (unavailable {:kind :resource-incomplete :profile selected-profile :phase :admission
                                              :source-root id :reason (get-in prepared [:admission :reason])})
                            (visit (get root-ids id))))
+               :check-bindings
+                (fn [selected-roots]
+                 (live!)
+                 (when-not (and (vector? selected-roots)
+                                (or (nil? (meta selected-roots)) (= {} (meta selected-roots)))
+                                (every? #(and (int? %) (contains? root-ids %)) selected-roots))
+                  (throw (ex-info "formal.evaluate: admitted binding roots required" {:profile selected-profile})))
+                 (if admission-incomplete?
+                  {:status :incomplete :rows [] :resource-refused true :phase :admission}
+                  (let [rows (mapv binding-row (binding-nodes (mapv #(get root-ids %) selected-roots)))
+                        refused? (boolean (some :resource-refused rows))]
+                   {:status (cond (some #(= :invalid (:status %)) rows) :invalid
+                                  (some #(= :incomplete (:status %)) rows) :incomplete :else :valid)
+                    :rows rows :resource-refused refused?})))
                :checking (fn [] (live!)
                            (merge {:typed-nodes (get-in prepared [:checking :typed-nodes])
                                    :evaluated-nodes (if policy (:evaluated-nodes @accounting) (count @memo))
@@ -526,6 +556,22 @@
    (graph-numeric-limits overrides)
   :else (throw (ex-info "formal.evaluate: unknown graph evaluation profile" {:profile selected-profile}))))
 
+(defn- graph-options [options]
+ (when-not (and (map? options) (every? #{:profile :limits} (keys options)))
+  (throw (ex-info "formal.evaluate: closed graph options required" {})))
+ (graph/encode options)
+ (let [selected-profile (get options :profile direct-graph-profile)
+       limits (graph-resource-limits selected-profile (get options :limits {}))
+       general? (or (= graph-profile selected-profile) (= direct-graph-profile selected-profile))]
+  {:profile selected-profile :policy (when-not general? limits)}))
+
+(defn- point-assignment-data [assignments selected-profile]
+ (when-not (map? assignments)
+  (throw (ex-info "formal.term-forest-evaluate: point assignments must be a map" {:profile selected-profile})))
+ ;; Reject executable/nonportable coordinates before their concrete use.
+ ;; with-graph-point also does this before constructor admission.
+ (graph/encode assignments))
+
 (defn with-graph-point
  "Freshly admit original portable graph roots and assignments inside this SDK.
   Default graph v2 shares private primitive dispatch with tree evaluation;
@@ -536,13 +582,43 @@
   proof/native execution capabilities. No prepared view or checked-child flag
   can be supplied in the closed options map."
  [data roots assignments options consume]
- (when-not (and (map? options) (every? #{:profile :limits} (keys options)))
-  (throw (ex-info "formal.evaluate: closed graph options required" {})))
- (graph/encode options)
- (let [selected-profile (get options :profile direct-graph-profile)
-       limits (graph-resource-limits selected-profile (get options :limits {}))
-       general? (or (= graph-profile selected-profile) (= direct-graph-profile selected-profile))]
-  (with-graph-point* data roots assignments (when-not general? limits) selected-profile consume)))
+ (let [{:keys [profile policy]} (graph-options options)
+       assignment-data (point-assignment-data assignments profile)
+       prepared (prepare-graph-point data roots policy profile)]
+  (with-prepared-graph-point* data roots assignments assignment-data policy profile prepared consume)))
+
+(defn with-graph-admission
+ "Fresh admission before point coordinates are known, for a local owner turn.
+  The forest is diagnostic data. Only the SDK's captured original admission is
+  used by with-point; a copied/edited forest cannot replace it. Admission work
+  belongs to this outer scope, while every point has fresh private evaluation
+  accounts. Source lookups and both levels of callback retire on return/failure
+  and can only run in their creating process. This is local implementation
+  plumbing, not portable query data, a native handle or proof authority."
+ [data roots options consume]
+ (let [{:keys [profile policy]} (graph-options options)
+       prepared (prepare-graph-point data roots policy profile)
+       owner (erlang/self) active (atom true)
+       admission-reference (graph/of {:data-reference (:data-reference prepared) :source-roots roots
+                                      :profile profile :limits policy})
+       live! (fn []
+               (when-not (= owner (erlang/self))
+                (throw (ex-info "formal.evaluate: admission belongs to another process" {:profile profile})))
+               (when-not @active
+                (throw (ex-info "formal.evaluate: admission operation retired" {:profile profile}))))]
+  (try
+   (consume
+    {:profile profile :forest prepared :data-reference (:data-reference prepared) :source-roots roots
+     :admission (:admission prepared) :admission-reference admission-reference
+     :admission-account :shared-scope
+     :with-point
+      (fn [assignments consume-point]
+       (live!)
+       (let [assignment-data (point-assignment-data assignments profile)]
+        (with-prepared-graph-point* data roots assignments assignment-data policy profile prepared
+         (fn [point] (consume-point (assoc point :admission-account :shared-scope
+                                               :admission-reference admission-reference))))))})
+   (finally (reset! active false)))))
 
 (defn graph-values
  "Evaluate term-based graph points through the same private SDK mathematics as
