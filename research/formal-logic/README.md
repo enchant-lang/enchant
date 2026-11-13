@@ -651,3 +651,10 @@ The [coherent word-policy integration](WORD-INTEGRATION.md) has a built immutabl
 candidate and is running its SDK gates. Its shared policy dispatcher and indexed
 record access are pending selection; the retained-request SDK remains selected.
 The full formal/total-language goal remains active.
+
+Two next slices are prepared as isolated source, with functional qualification
+queued behind the current word SDK: [finite word proof checking](WORD-EXHAUSTION-PROTOTYPE.md),
+with backend-independent statement identity and an original-node assumption
+ledger, and [scalar text interfaces and resource envelopes](TEXT-RESOURCE-PROTOTYPE.md),
+with separate total, Option and strict access. Neither prototype is in the SDK
+or the common answer proof slot yet.
