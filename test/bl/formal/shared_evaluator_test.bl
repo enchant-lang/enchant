@@ -19,6 +19,26 @@
 (defn- evaluate [terms bindings options]
  (let [[data roots] (packet terms)] (e/graph-values data roots bindings options)))
 
+(defn- dispatch-count [label action]
+ (let [module (elem (erlang/fun_info e/value :module) 1) pattern (tuple module :primitive-value 2)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [value (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+    (swap! events conj {:label label :private-dispatch-calls calls})
+    (when-let [path (System/get_env "ENCHANT_SHARED_PRIMITIVE_TRACE")]
+     (File/write! path (json/encode {:events @events :compiler-proof-authority false} {:pretty 2})))
+    {:value value :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest both-demand-engines-actually-enter-the-same-private-sdk-function
+ (let [term (t/mul (t/real 1 3) (t/real 2 5)) [data roots] (packet [term])
+       tree (dispatch-count "tree-dispatch" (fn [] (e/value term {})))
+       direct (dispatch-count "graph-dispatch"
+                (fn [] (e/graph-values data roots {} {:profile e/direct-numeric-graph-profile})))]
+  (is (= 1 (:calls tree)))
+  (is (= 1 (:calls direct)))
+  (is (= (:value tree) (first (get-in direct [:value :values]))))))
+
 (deftest the-new-sdk-boundary-retains-existing-scalar-and-compound-values
  (let [bv (t/bv-sort 8) fp (t/fp-sort 5 11) enum (t/enum-sort "SharedColor" ["red" "blue"])
        array (t/store (t/const-array t/Int (t/real 1 2)) (t/int 3) (t/real 2 3))
