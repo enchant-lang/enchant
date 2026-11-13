@@ -1,0 +1,40 @@
+(let [word [:bv 8]
+      x (t/variable "dossier.word.counter" word)
+      zero (t/literal word 0) one (t/literal word 1)
+      wrap (t/app :bv-add word [x one] nil)
+      caller (question-graph/prepare (q/sat {:assumptions [(t/eq wrap zero)]}))
+      policy {:profile logic/numeric-word-policy}
+      receipt (json/decode (File/read! "research/formal-logic/evidence/word-integration/records-qualification.json"))
+      rows
+      (mapv (fn [engine]
+              (backend/with-session {:backend engine}
+               (fn [session]
+                (assert (:ok (backend/load! session [(q/assertion "last-byte" (t/eq x (t/literal word 255)))])))
+                (let [saved (atom nil)
+                      result (logic/with-context-request session caller {:policy policy}
+                               (fn [r execute] (reset! saved r) (execute)))
+                      packet (request-record/pack-graph @saved (:response result))
+                      replayed (request-record/recheck-graph packet)
+                      changed (logic/recheck-request @saved
+                                (logic/answer-request @saved {"dossier.word.counter" {:formal/bv [8 0]}}))
+                      supplied (logic/with-context-request session caller {:policy policy}
+                                 (fn [_ execute]
+                                  (logic/with-request-handler
+                                   (fn [r _] (logic/answer-request r {"dossier.word.counter" {:formal/bv [8 255]}})) execute)))]
+                 (assert (= :sat (:verdict result) (:verdict replayed) (:verdict supplied)))
+                 (assert (= :invalid-point (:verdict changed)))
+                 (assert (= 0 (get-in supplied [:local-delegation :attempts])))
+                 (into-sorted-map {:backend engine :eight-bit-wrap :sat
+                   :changed-counter (:verdict changed) :graph-packet-replay (:verdict replayed)
+                   :checking-policy (get-in @saved [:policy :profile])
+                   :supplied-fallback-attempts (get-in supplied [:local-delegation :attempts])
+                   :checked-native-execution (:checked-native-execution replayed) :compiler-proof-authority false})))))
+            [:z3 :oxiz])]
+ (assert (= 2 (get receipt "fresh_sdk_only_readers")))
+ (assert (= 0 (get receipt "solver_exchanges")))
+ (assert (= 1 (get receipt "normalizer_calls_per_selected_lookup")))
+ (into-sorted-map {:example :word-question :backends rows :word-width 8 :last-counter 255 :next-counter 0
+                  :fresh-sdk-readers (get receipt "fresh_sdk_only_readers")
+                  :saved-word-records (get receipt "records") :reader-solver-exchanges (get receipt "solver_exchanges")
+                  :normalizer-calls-per-selected-lookup (get receipt "normalizer_calls_per_selected_lookup")
+                  :compiler-proof-authority false}))
