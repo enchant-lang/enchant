@@ -98,7 +98,7 @@ try {
  for (const size of [{name:'phone',width:390,height:844,mobile:true},{name:'desktop',width:1440,height:1000,mobile:false}]) {
   await call({op:'viewport',...size});
   await call({op:'navigate',url:base+'/#keep-every-assumption-with-the-question'});
-  check(size.name+': retained assumptions and both lifetimes are explained',await evaluate("document.body.innerText.includes('Keep every assumption with the question')&&document.body.innerText.includes('There are two lifetimes.')&&document.body.innerText.includes('every retained assumption')"));
+  check(size.name+': retained assumptions and both lifetimes are explained',await evaluate("document.body.innerText.includes('Keep every assumption with the question')&&document.body.innerText.includes('There are two lifetimes.')&&document.body.innerText.includes('every retained assumption')&&!document.body.innerText.includes('=x = 7=')&&!document.body.innerText.includes('=x = 8=')"));
   for(const [name,value] of [['day','light'],['night','dark']]) {
    await theme(value);
    await evaluate("window.scrollBy({top:document.getElementById('keep-every-assumption-with-the-question').getBoundingClientRect().top-92,behavior:'instant'})");
