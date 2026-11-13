@@ -48,7 +48,10 @@ assert 'story-word-request' not in before
 assert before.count('** Keep every assumption with the question\n') == 1
 assert before.count('#+begin_src beam-lisp :id story-retained-request\n') == 1
 assert len(re.findall(r'^#\+begin_src beam-lisp\b', before, re.M)) == 90
-after = before.replace('** Keep every assumption with the question\n', section.rstrip() + '\n\n** Keep every assumption with the question\n')
+progress = r'^#\+begin_note :title "Word logic is in qualification"\n.*?^#\+end_note\n\n'
+assert len(re.findall(progress, before, re.M | re.S)) == 1
+after = re.sub(progress, '', before, count=1, flags=re.M | re.S)
+after = after.replace('** Keep every assumption with the question\n', section.rstrip() + '\n\n** Keep every assumption with the question\n')
 after = after.replace('#+begin_src beam-lisp :id story-retained-request\n',
                       '#+begin_src beam-lisp :id story-word-request\n' + cell.rstrip() + '\n#+end_src\n\n'
                       '#+begin_src beam-lisp :id story-retained-request\n')
@@ -61,7 +64,7 @@ report = {'schema': 'bl.word-dossier-source-application.v1', 'status': 'source-a
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'code_commit': commit, 'sdk_pin': pin,
           'input_source_sha256': source_sha, 'document_before_sha256': plan['baseline_document_sha256'],
           'document_after_sha256': sha(document), 'cells': 91, 'new_cell': 'story-word-request',
-          'results_authored': False, 'existing_result_spans_preserved': True,
+          'results_authored': False, 'existing_result_spans_preserved': True, 'prequalification_progress_note_removed': True,
           'readable_source_projection': 'Existing sdk-src symlink to canonical priv/lib; no source copy or runtime mutation.',
           'dossier_qualified': False, 'compiler_proof_authority': False}
 (E / 'dossier-source-application.json').write_text(json.dumps(report, indent=2) + '\n')
