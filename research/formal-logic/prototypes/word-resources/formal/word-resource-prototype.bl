@@ -1,7 +1,7 @@
 (ns formal.word-resource-prototype (:require [formal.data-graph :as graph]))
 
 ;; Project prototype only. No managed request profile admits this plan yet.
-(def profile :bl/word-resource-plan-prototype-v1)
+(def profile :bl/word-resource-plan-prototype-v2)
 (def defaults {:word-bits 4096 :intermediate-bits 8192 :work-units 16777216})
 (def ^:private binary #{:bv-add :bv-sub :bv-mul :bv-and :bv-or :bv-xor :bv-shl :bv-lshr :bv-ashr})
 (def ^:private unary #{:bv-not :bv-neg})
@@ -35,7 +35,7 @@
        widths (mapv second operand-sorts)
        base {:profile profile :operation op :request-reference reference :limits policy
              :argument-widths widths :primitive-execution :not-run :compiler-proof-authority false}]
-  (if-not supported (assoc base :status :incomplete :reason {:kind :resource-policy-unsupported})
+  (if-not supported (assoc base :status :incomplete :forecast-execution :not-run :reason {:kind :resource-policy-unsupported})
    (let [arity (if (or (contains? unary op) (contains? extensions op) (= :bv-extract op)) 1 2)]
     (require! (= arity (count operand-sorts)) "wrong arity")
     (let [a (first widths) b (or (second widths) 0)
@@ -58,8 +58,12 @@
       :else
        (do (require! (and (int? data) (>= data 0)) "nonnegative extension required")
            (require! (= result-sort [:bv (+ a data)]) "wrong extension width")))
-     (let [largest (max a b output)
-           arithmetic (cond (= op :bv-mul) (* 2 a) (= op :bv-shl) (* 2 a)
+     (let [largest (max a b output)]
+      (if (> largest (:word-bits policy))
+       (assoc base :status :incomplete :forecast-execution :not-run
+                   :reason {:kind :resource-limit :metric :word-bits
+                            :required largest :limit (:word-bits policy)})
+       (let [arithmetic (cond (= op :bv-mul) (* 2 a) (= op :bv-shl) (* 2 a)
                             (= op :bv-add) (inc a) (= op :bv-not) (inc a)
                             (= op :bv-concat) (+ a b) :else largest)
            ;; Existing wrapping builds 1 << output before subtracting one.
@@ -68,8 +72,8 @@
            work (if (= op :bv-mul) (+ (* a a) (* 8 (inc temporary)))
                   (* 8 (+ a b output temporary 1)))
            forecast {:result-bits output :intermediate-bits temporary :work-units work}
-           checks [[:word-bits largest] [:intermediate-bits temporary] [:work-units work]]
+           checks [[:intermediate-bits temporary] [:work-units work]]
            refused (first (filter (fn [[metric amount]] (> amount (get policy metric))) checks))]
-      (assoc base :forecast forecast :status (if refused :incomplete :ready)
+      (assoc base :forecast forecast :forecast-execution :run :status (if refused :incomplete :ready)
                   :reason (when refused {:kind :resource-limit :metric (first refused)
-                                         :required (second refused) :limit (get policy (first refused))}))))))))
+                                         :required (second refused) :limit (get policy (first refused))}))))))))))

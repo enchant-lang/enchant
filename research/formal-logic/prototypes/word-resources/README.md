@@ -31,10 +31,16 @@ wrapper in the original flat graph. It checks bounded positive width before
 using a right shift to test the already-present nonnegative integer, avoiding
 power/mask construction. Unknown application keyword names and unavailable
 reasons stay graph cursors. Its cumulative coordinate charge is separate from
-the future complete point-request budget. These prototypes are not yet run.
+the future complete point-request budget. The checked baseline and subsequent qualification are recorded in
+`../../WORD-RESOURCE-PROTOTYPE.md`.
 
 Malformed coordinates can lie about their input width. The reader therefore
 reserves its charge using both declared width and a conservative bit count from
 the already-present integer's external encoded size before the right shift. A
 small declared width cannot make a large invalid integer look cheap. Whole-graph
 capacity checking remains a separate preceding operation.
+
+Prototype planner v2 refuses an excessive declared width before calculating a
+forecast. It preserves full operation shape checks first. The original v1
+qualification is retained under `before-early-width-admission/`; the new
+revision awaits its own focused check. This does not change the selected SDK.

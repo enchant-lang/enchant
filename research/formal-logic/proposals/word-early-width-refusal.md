@@ -14,7 +14,7 @@ can retain their prospective forecast. Check a large existing width integer,
 exact width boundaries and unchanged valid-operation results. The coordinate
 prototype already checks width before its charged right shift.
 
-This is an unapplied project follow-up. The selected SDK does not import these
+This project refinement is now in prototype v2 source and awaits its focused check. The selected SDK does not import these
 prototypes and its managed policy remains numeric. The fixed constructor width
 ceiling and the new managed admission rules remain separate gates; a resource
 override must not enlarge the term grammar. No runtime-cost theorem is claimed.
