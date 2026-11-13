@@ -7,7 +7,8 @@ new compiler floor, SDK and checks are produced.
 
 The compiler-only P/B/C product has now passed its complete 141-file check;
 84 files of the checked-in floor changed when that verified product was
-installed with its manifest last. The new SDK is still pending. The compiler
+installed with its manifest last. Two numeric SDK candidates have been produced;
+the second is undergoing its remaining gates. The compiler
 receipt binds its actual inputs; subsequent changes confined to JavaScript
 runtime source do not rewrite that historical compiler receipt.
 
@@ -73,6 +74,28 @@ self-contained source-only recovery bundle and Git archive ref. No JVM oracle
 execution or project adoption is claimed for that candidate. The registration
 is now repaired, with a test of both rescale arities and their rounding behavior;
 the replacement must pass all packaged gates on its own exact SDK.
+
+The second SDK now matches all 900 exact-number pairs on BEAM, direct JS and
+actual compiled BL. It also matches all 1,051 captured Decimal oracle cases,
+five compiled representation API cases and eleven named Float approximations
+per route. Its 40 JS unit tests, compiler floor, source preflight and refusal
+controls pass. These completed gates do not select the project SDK.
+
+The focused BEAM gate exposed a source-relative fixture omission and one stale
+scale-equality expectation in the older host ABI tests. Both are corrected in
+the check sources without rebuilding the runtime. Its combined nested-modulus
+query returned `unknown/timeout`, retained under
+`focused-before-law-decomposition/`. Three separate universal native queries
+now establish magnitude, divisor sign and explicit quotient reconstruction at
+the unchanged deadline. Their UNSAT results remain solver claims, not checked
+BL certificates. Zero division stays outside that law domain and is tested as
+a runtime failure.
+
+That run also exposed a test CLI limitation: assertion failures may print a
+failed summary while the process exits zero. The numeric runner now requires
+both process success and the complete green test summary, retaining both
+statuses separately. Repairing the general CLI exit behavior belongs to a
+subsequent runtime batch; it is not hidden by these qualification scripts.
 
 The legacy bare-VM regeneration attempts are retained under the three
 `before-*` recovery directories plus `before-local-image/`. They stopped on
