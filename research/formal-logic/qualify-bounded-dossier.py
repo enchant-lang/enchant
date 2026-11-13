@@ -47,11 +47,11 @@ for stage in ('dossier-inputs', 'dossier-cells', 'dossier-check', 'focused-brows
             for pattern in (r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
                             r'^#\+name:[^\n]*\n(?:\|[^\n]*(?:\n|$))*'):
                 assert re.findall(pattern, body.decode(), re.M | re.S) == re.findall(pattern, text, re.M | re.S)
-        elif stage.startswith('dossier-') and name in ('research/formal-logic/bounded-point-browser.mjs',
-                                                       'research/formal-logic/run-bounded-presentation.py'):
+        elif (stage.startswith('dossier-') or stage == 'full-browser') and name in (
+                'research/formal-logic/bounded-point-browser.mjs', 'research/formal-logic/run-bounded-presentation.py'):
             # Preserve the real writer/check launch version above. These two
-            # scripts do not execute inside a cell; actual browser pins below
-            # must still match their current source exactly.
+            # scripts do not execute inside a cell or the independent full
+            # audit. The focused audit must match their current source exactly.
             pass
         else:
             assert sha(R / name) == digest, name

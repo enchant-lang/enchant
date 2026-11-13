@@ -27,13 +27,18 @@ try{
    await shot(size.name+'-budget-chapter-'+theme);
   }
   await call({op:'click',selector:'#theme'});
+  await call({op:'navigate',url:base+'/#s-the-model-running'});
+  await evaluate("document.querySelector('#cell-story-bounded-point').scrollIntoView({block:'center',behavior:'instant'})");
+  check(size.name+': executed budget result is in the visible panel',await evaluate("(()=>{const r=document.querySelector('#cell-story-bounded-point .result').getBoundingClientRect();return r.width>0&&r.height>0&&r.bottom>90&&r.top<innerHeight})()"));
   const text=await evaluate("document.querySelector('#cell-story-bounded-point .result')?.innerText||''");
   check(size.name+': actual limited graph run is visible',text.includes(':typed-nodes 17')&&text.includes(':status :incomplete')&&text.includes(':first-refused-forecast-bits 34')&&text.includes(':performed-multiplications 4')&&text.includes(':charged-work-units 119'));
   check(size.name+': decisive false root and retained refusal coexist',text.includes(':decisive-boolean false')&&text.includes(':decisive-root-status :complete')&&text.includes(':retained-refusals 1'));
   check(size.name+': small integer result and authority boundary visible',text.includes(':small-result 63')&&text.includes(':native-calls 0')&&text.includes(':compiler-proof-authority false')&&text.includes(':assertion-replay :not-run'));
   await evaluate("document.querySelector('#cell-story-bounded-point').scrollIntoView({block:'center',behavior:'instant'})");
   await shot(size.name+'-budget-cell-day');
-  await call({op:'click',selector:'#theme'});await shot(size.name+'-budget-cell-night');await call({op:'click',selector:'#theme'});
+  await call({op:'click',selector:'#theme'});
+  await evaluate("document.querySelector('#cell-story-bounded-point').scrollIntoView({block:'center',behavior:'instant'})");
+  await shot(size.name+'-budget-cell-night');await call({op:'click',selector:'#theme'});
  }
  for(const path of ['BOUNDED-POINT.md','src/formal/term-forest-evaluate.bl','src/formal/bounded-point-examples.bl','test/bounded_point_test.bl','evidence/bounded-point/qualification.json']){
   const r=await fetch(base+'/'+path),body=Buffer.from(await r.arrayBuffer());

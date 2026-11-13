@@ -22,7 +22,7 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 stage = sys.argv[1]
-assert stage in ('inputs', 'cells', 'check', 'browser')
+assert stage in ('inputs', 'cells', 'check', 'browser', 'focused')
 pin = read(P / 'sdk-pin.json')
 code = read(E / 'qualification.json')
 assert code['status'] == 'passed' and code['sdk_pin'] == pin
@@ -61,7 +61,7 @@ def run(name, command, runtime=None):
     if result:
         raise SystemExit(result)
 
-if stage != 'browser':
+if stage in ('inputs', 'cells', 'check'):
     runtime = Path(tempfile.mkdtemp(prefix='formal-budget-dossier-'))
     imports = [str(P / 'src'), str(Path(kit['root']) / 'bl-org-dossier/kit'),
                str(Path(kit['root']) / 'codebase-review/kit')]
@@ -110,7 +110,10 @@ else:
         responses[name] = {'url': url, 'status': status, 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
     write(E / 'dossier-host.json', {'recorded_utc': datetime.now(timezone.utc).isoformat(), 'state': state,
           'sdk_boot': boots[0], 'kit_root': process_kit[0], 'document_sha256': snapshot['document_sha256'], 'responses': responses})
-    for name, script, ceiling in (('focused-browser', 'bounded-point-browser.mjs', 300), ('full-browser', 'story-audit.mjs', 900)):
+    stages = [('focused-browser', 'bounded-point-browser.mjs', 300)]
+    if stage == 'browser':
+        stages.append(('full-browser', 'story-audit.mjs', 900))
+    for name, script, ceiling in stages:
         command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
                    '--working-directory=' + str(R), '--property=MemoryMax=2G', '--property=MemorySwapMax=0',
                    '--property=RuntimeMaxSec=' + str(ceiling), '--property=KillMode=control-group',
