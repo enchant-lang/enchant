@@ -2,7 +2,8 @@
  (:require [datom :as d] [datom.codec :as codec] [datom.value-codec :as payload]
   [datom.index :as index] [datom.identity :as identity] [datom.current :as current]
   [datom.db :as db] [datom.schema :as schema] [datom.conn :as conn]
-  [datom.store :as store] [datom.store-ets :as ets-store] [datom.store-fjall :as fjall]))
+  [datom.store :as store] [datom.store-ets :as ets-store] [datom.store-fjall :as fjall]
+  [decimal :as decimal]))
 
 (defn- sign [a b] (cond (erlang/< a b) -1 (erlang/> a b) 1 :else 0))
 (defn- close-store! [s]
@@ -69,6 +70,48 @@
              {:db/ident :seq/value :db/valueType :db.type/term :db/index true}])
 (defn- matching-ids [database attr value]
  (set (mapv first (d/q '[:find ?e :in $ ?attr ?value :where [?e ?attr ?value]] database attr value))))
+
+(deftest decimal-value-keys-retain-original-scale-in-payloads
+ (is (= 2 codec/INDEX-VERSION))
+ (is (= (codec/encode-value 1.5M) (codec/encode-value 1.50M)))
+ (is (= (index/value-key 1.5M) (index/value-key 1.50M)))
+ (doseq [value [1.5M 1.50M]]
+  (let [restored (get (payload/decode-slot (payload/encode-slot [101 :seq/value value 1000001 true])) 2)]
+   (is (decimal/same-representation? value restored))))
+ (is (not= (payload/encode-slot 1.5M) (payload/encode-slot 1.50M))))
+
+(deftest decimal-scale-variants-share-identity-query-cas-and-retraction
+ (doseq [open (openers)]
+  (let [s (open) c (conn/connect-with s SCHEMA)]
+   (try
+    (let [report (d/transact! c [{:db/id -1 :seq/id 1.50M} {:db/id -2 :seq/id 1.5M}])
+          entity (get (:tempids report) -1)]
+     (is (= entity (get (:tempids report) -2)))
+     (is (= #{entity} (matching-ids (d/db c) :seq/id 1.5M))))
+    (d/transact! c [[:db/add 101 :seq/value 1.50M]])
+    (is (= #{101} (matching-ids (d/db c) :seq/value 1.5M)))
+    (let [report (d/transact! c [[:db/add 101 :seq/value 1.5M]])]
+     (is (empty? (filterv #(= :seq/value (index/-a %)) (:tx-datoms report)))))
+    (is (decimal/same-representation? 1.50M (:seq/value (d/entity (d/db c) 101))))
+    (d/transact! c [[:db/cas 101 :seq/value 1.5M 2.00M]])
+    (is (= #{101} (matching-ids (d/db c) :seq/value 2M)))
+    (is (decimal/same-representation? 2.00M (:seq/value (d/entity (d/db c) 101))))
+    (d/transact! c [[:db/retract 101 :seq/value 2M]])
+    (is (= [] (current/values s 101 :seq/value)))
+    (finally (conn/close! c) (when (:path s) (File/rm_rf! (:path s))))))))
+
+(deftest durable-decimal-payloads-reopen-with-their-original-scale
+ (let [s (fjall/open-fresh) path (:path s) c (conn/connect-with s SCHEMA)]
+  (try
+   (d/transact! c [[:db/add 101 :seq/value 1.50M]])
+   (conn/close! c)
+   (let [again (fjall/open path) reopened (conn/connect-with again)]
+    (try
+     (is (= index/KEY-FORMAT (store/-get again index/KEY-FORMAT-KEY)))
+     (is (= #{101} (matching-ids (d/db reopened) :seq/value 1.5M)))
+     (is (decimal/same-representation? 1.50M (:seq/value (d/entity (d/db reopened) 101))))
+     (finally (conn/close! reopened))))
+   (finally (conn/close! c) (File/rm_rf! path)))))
 
 (deftest large-number-indexes-and-identity-claims-use-exact-numeric-equality
  (doseq [open (openers)]

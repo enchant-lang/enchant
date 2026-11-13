@@ -114,7 +114,7 @@
    [:erlang :>] '> [:erlang :<] '< [:erlang :>=] '>= [:erlang :=<] '<=
    [:erlang :==] '= [:erlang :=:=] '=
    [rt :not_] 'not
-   [rt :eqv] '= [:Elixir.BeamLisp.Ns.Core :mod] 'mod})
+   [rt :eqv] '=})
 
 ; truncated division from z3's Euclidean div/mod (see the quot/rem note below).
 (defn- smt-quot [a b]
@@ -123,6 +123,14 @@
               (list 'ite (list '> b 0) 1 (list '- 1)) 0)))
 (defn- smt-rem [a b]
   (list '- a (list '* b (smt-quot a b))))
+
+; BL mod is floor modulus: a nonzero result carries the DIVISOR's sign.
+; SMT Euclidean mod is nonnegative even for a negative divisor. This correction
+; is exact for b != 0. The legacy expression API does not encode the raised
+; zero-divisor outcome; callers still need their explicit domain obligation.
+(defn- smt-mod [a b]
+  (let [e (list 'mod a b)]
+    (list 'ite (list 'or (list '= e 0) (list '> b 0)) e (list '+ e b))))
 
 ; ── quot / rem: TRUNCATED division from z3's EUCLIDEAN div/mod ──────────────
 ;
@@ -388,6 +396,10 @@
           (if (untranslatable? ts) :untranslatable
             (let [a (first ts) b (second ts) cmp (if (= fun :max) '>= '<=)]
               (list 'ite (list cmp a b) a b))))
+      ; Exact resolved Core mod, preserving the divisor-sign convention.
+      (and (= key [:Elixir.BeamLisp.Ns.Core :mod]) (= 2 (count args)))
+        (let [ts (t-args ctx args)]
+          (if (untranslatable? ts) :untranslatable (smt-mod (first ts) (second ts))))
       ; quot (Core) / rem (erlang)
       (and (= fun :quot) (= 2 (count args)))
         (let [ts (t-args ctx args)]

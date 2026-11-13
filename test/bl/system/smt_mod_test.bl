@@ -1,0 +1,47 @@
+; Legacy expression lowering, qualified only on the explicit nonzero domain.
+; Native UNSAT in this file is a solver claim, not a checked BL certificate.
+(ns system.smt-mod-test
+ (:require [system.smt :as smt] [smt :as smtlib] [z3] [oracle]))
+
+(defn- translated [source] (smt/of-source #{"a" "b"} source))
+(defn- declarations []
+ [(list 'declare-const 'a 'Int) (list 'declare-const 'b 'Int)])
+
+(deftest modulus-is-resolved-and-reconstructed
+ (let [m (translated "(mod a b)") qualified (translated "(core/mod a b)")]
+  (is (not= :untranslatable m))
+  (is (= m qualified))
+  (is (= "(ite (or (= (mod a b) 0) (> b 0)) (mod a b) (+ (mod a b) b))"
+         (smtlib/emit m)))))
+
+(deftest modulus-sign-cases-match-live-runtime-and-translated-expression
+ (let [port (z3/open) m (translated "(mod a b)")]
+  (doseq [[a b expected] [[7 3 1] [-7 3 2] [7 -3 -2] [-7 -3 -1]
+                         [6 -3 0] [-6 -3 0] [0 -3 0]]]
+   (is (= expected (mod a b)))
+   (is (oracle/proven?
+         (z3/check port
+           (into (declarations)
+             [(list 'assert (list '= 'a a)) (list 'assert (list '= 'b b))
+              (list 'assert (list 'not (list '= m expected)))])))))))
+
+(deftest reported-universal-nonzero-modulus-laws
+ (let [port (z3/open) m (translated "(mod a b)")
+       law (list 'and
+             (list '< (list 'abs m) (list 'abs 'b))
+             (list 'or (list '= m 0)
+               (list 'and (list '> 'b 0) (list '> m 0))
+               (list 'and (list '< 'b 0) (list '< m 0)))
+             (list '= (list 'mod (list '- 'a m) 'b) 0))]
+  (is (oracle/proven?
+        (z3/check port
+          (into (declarations)
+            [(list 'assert (list 'not (list '= 'b 0)))
+             (list 'assert (list 'not law))]))))))
+
+(deftest zero-divisor-is-a-runtime-failure-outside-the-law-domain
+ ;; A totalized SMT expression cannot establish preservation of this outcome.
+ (is (try (mod 7 0) false (catch _ true)))
+ (is (try (mod 0 0) false (catch _ true))))
+
+(run-tests)

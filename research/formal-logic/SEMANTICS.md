@@ -3,8 +3,10 @@
 The experiment runs on the immutable SDK recorded in `sdk-pin.json`. Its current
 runtime observations, pure proposed profiles and backend qualifications are
 different evidence. The patches in `proposals/numeric-equality.patch` and
-`proposals/numeric-equality-js.patch` are **unapplied, unqualified BEAM and JS
-proposals**. They must not change the meaning assigned
+`proposals/numeric-equality-js.patch` are now applied to integration source,
+along with the modulus repair, but **remain unqualified on a new SDK**. The
+selected project and live dossier still use the preceding qualified SDK. These
+source edits must not change the meaning assigned
 to results obtained from the pinned SDK.
 
 ## Equality: repair the inconsistent relation
@@ -140,7 +142,8 @@ does not mix this separate translator repair into its diff.
 The [modulus companion patch](proposals/modulus-lowering.patch) now prepares
 that exact resolved-MFA correction, with compiler translation checks, all four
 operand-sign examples, exact-division zeros and the universal nonzero-divisor
-laws above. It is unapplied and its tests have not run. It preserves the
+laws above. It is applied to integration source; its candidate-SDK tests have
+not run. It preserves the
 existing quotient/remainder reconstruction. Its legacy expression API still
 requires a nonzero-divisor obligation; the patch does not model a raised
 zero-divisor outcome or grant a solver claim checked-certificate authority.
@@ -174,7 +177,7 @@ BigInt cross-products. Generic Decimal equality uses exact value, while its
 separate `keyEq` retains coefficient and scale. The helper is shared by generic
 equality and ordering; Decimal arithmetic continues to refuse Float operands.
 It does not normalize a Decimal through `Number` or a Float through printed
-text. This is prepared code, not an applied runtime or a passed semantic gate.
+text. This is applied integration source, not a passed candidate-SDK semantic gate.
 
 Its proposed tests check finite equivalence laws, compare-zero agreement,
 nested values, the 0.1 rounding boundary, integers beyond 2^53, the minimum
@@ -192,7 +195,13 @@ bits, Decimal coefficients/scales and large integers without JSON rounding.
 Its expected value relations come from independent rational arithmetic. Both
 observers record leaf and nested equality, ordering and raw-key cardinality;
 their optional `require-profile` mode checks the proposed value relation.
-These observers have not run yet. The
+The baseline observations on the selected SDK now record 6 discrepant pairs
+through BEAM, 14 through the direct JS runtime and 6 through actual compiled BL.
+These are preserved current
+behaviors, not failures of an adopted new profile. The baseline's four stages
+completed and retired their private directories; its generated JavaScript is
+preserved as a hashed archive. The changed candidate still requires its own
+terminal receipts. The
 [actual BL comparison function](semantics-src/semantics/numeric.bl) is also
 prepared for compilation to JS. Passing a compiled build directory as the
 observer's fifth argument selects that emitted function and requires its exact
@@ -205,7 +214,8 @@ qualified.
 1. Preserve reproducible current-SDK canaries and label changed expectations as
    proposed. Keep the current pin and backend evidence intact.
 2. Review and commit one coherent runtime/doc/test batch in the integration
-   checkout. The attached patch is review material, not an applied change.
+   checkout. The attached patches preserve the reviewed original diffs; the
+   integration source is now changed, with candidate qualification pending.
 3. Batch boot/host changes before compiler-floor regeneration and produce one
    qualified SDK through the existing workflow. Record its immutable artifact
    identity and a new qualified pin; reuse it for focused checks. Do not create

@@ -47,10 +47,26 @@ assert.equal(values.size, 30);
 assert.equal(rows.length, 900);
 const differences = rows.filter(row => !row['matches-exact-profile']);
 if (mode === 'require-profile') assert.equal(differences.length, 0);
+const representationSamples = [];
+if (compiledBuild && mode === 'require-profile') {
+ const compiled = await import(pathToFileURL(resolve(compiledBuild, 'ns/semantics.numeric.mjs')).href);
+ assert.equal(typeof compiled.d_representations, 'function');
+ for (const [name, a, b, expected] of [
+  ['same-decimal-representation', R.dec(150n, 2), R.dec(150n, 2), [true, true]],
+  ['different-decimal-scale', R.dec(15n, 1), R.dec(150n, 2), [true, false]],
+  ['decimal-float', R.dec(15n, 1), R.flt(1.5), [true, false]],
+  ['decimal-integer', R.dec(1n, 0), 1, [true, false]],
+  ['decimal-inexact-float', R.dec(1n, 1), R.flt(0.1), [false, false]]]) {
+  const actual = Array.from(compiled.d_representations(a, b));
+  assert.deepEqual(actual, expected, name);
+  representationSamples.push({name, actual});
+ }
+}
 const target = compiledBuild ? 'js-compiled-language' : 'js-direct-runtime';
 await writeFile(outputPath, JSON.stringify({schema: 'bl.finite-number-runtime-observation.v1', target,
  'runtime-path': resolve(runtimePath), process: process.pid, cwd: process.cwd(), profile: fixture.profile,
  values: values.size, pairs: rows.length, rows, differences, 'managed-query-calls': 0,
+ 'representation-samples': representationSamples,
  scope: compiledBuild ? 'Actual compiled BL function observations; raw key cardinality is recorded separately.' :
                        'Direct runtime observations; raw key cardinality is recorded separately. This is not the compiled BL path.',
  'compiler-proof-authority': false}, null, 2) + '\n');

@@ -41,14 +41,16 @@ product adds the scales.
 
 ## Two equalities, on purpose
 
-`=` is structural: `1.5M` and `1.50M` are different *values*, exactly as
-`equals` says on the JVM. `==`, `compare`, `<` and their family are *numeric*:
-the two are the same *number*. Sorting, `max`, `min` and `sort-by` all go
-through the numeric side, so a mixed column of integers and decimals orders
-correctly.
+`=` compares exact numeric values: `1.5M` and `1.50M` are the same number.
+Their representations retain different scales. `d/same-representation?` asks
+the coefficient-and-scale question that `BigDecimal.equals` asks on the JVM.
+Generic equality and `compare` use the Float's actual IEEE value, so
+`(= 0.1M 0.1)` is false and `(= 0.50M 0.5)` is true. This comparison does not
+convert a Float into Decimal arithmetic. Sorting, `max`, `min` and `sort-by`
+retain numeric ordering; exact arithmetic continues to preserve scale.
 
 ```beam-lisp
-(println "=  " (= 1.5M 1.50M) "  == " (== 1.5M 1.50M))
+(println "=  " (= 1.5M 1.50M) "  same representation? " (d/same-representation? 1.5M 1.50M))
 (println (sort [3M 1.5M 2 0.25M]) (max 1M 2.5M 2) (compare 2.50M 2.5M))
 ```
 

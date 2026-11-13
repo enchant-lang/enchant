@@ -25,14 +25,14 @@
 ;   * a non-number beside a number keeps the plain `:badarith`;
 ;   * ordering and sign predicates are TOTAL over Erlang term order for a
 ;     non-decimal pair, so strings and atoms answer instead of raising;
-;   * `==`/`<` are NUMERIC (`1 == 1.0`, `1.00M == 1.0M`) while `=`/scale are
-;     untouched;
+;   * `==`/`<` are NUMERIC (`1 == 1.0`, `1.00M == 1.0M`), generic `=` uses
+;     exact values, and the separate representation API retains scale;
 ;   * zero division (`1 / 0`, decimal / zero) and non-terminating decimal
 ;     division answer as the live module answers.
 ;
 ; Run: bin/bl test test/bl/host_num_test.bl
 
-(ns host.num.test)
+(ns host.num.test (:require [decimal :as d]))
 
 (defn- t2 [k v] (erlang/list_to_tuple (list k v)))
 
@@ -259,14 +259,15 @@
 ; ── equality and scale ───────────────────────────────────────────────────
 
 (deftest num-pinned-keeps-numeric-equality-and-decimal-scale
-  (testing "== / < are numeric; = and the scale of a decimal are untouched"
+  (testing "numeric equality and representation equality are separate"
     (let [dir (tmp-dir)]
       (compile-probe dir)
       (let [a (of 100 2)   ; 1.00
             b (of 1 0)     ; 1
             c (of 10 1)]   ; 1.0
-        ; the value model keeps the scale: `1.00M` and `1M` are NOT `=`.
-        (is (not= a b))
+        ; Exact values agree while coefficient-and-scale representations differ.
+        (is (= a b))
+        (is (not (d/same-representation? a b)))
         (is (= 2 (BeamLisp.Decimal/scale a)))
         (is (= 0 (BeamLisp.Decimal/scale b)))
         (is (= 1 (BeamLisp.Decimal/scale c)))
@@ -280,11 +281,10 @@
         (doseq [f (list :num_eq :cmp :lt :gt :le :ge)]
           (is (= (erlang/apply live f (list a b)) (erlang/apply probe f (list a b)))
               (str "decimal scale on " f)))
-        ; int vs float: the language's `=` on raw numbers IS the numeric
-        ; `==` (`erlang/==`), and so is the tower's `==` — while a decimal
-        ; pair differs structurally because the map carries the scale.
+        ; Generic equality uses exact numeric value across representations.
         (is (= 1 1.0))
-        (is (not= a b))
+        (is (= a b))
+        (is (not (d/same-representation? a b)))
         (is (erlang/apply probe :num_eq (list 1 1.0)))
         (is (not (erlang/apply probe :lt (list 1 1.0))))
         (is (= 0 (erlang/apply probe :cmp (list 1 1.0)))))

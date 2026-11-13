@@ -4,7 +4,9 @@ Review items exposed by checkpoint 43. These are not installed language
 changes or a new authority profile. The earlier [semantic review](SEMANTICS.md)
 recommends repairing transitive exact-value numeric equality, then adopting
 generic-value keys for ordinary collections with an explicitly named raw-key
-interoperability profile. Its equality patch remains unapplied and unqualified.
+interoperability profile. The equality repair is applied to integration source
+but its new SDK qualification is still pending; selected-SDK observations below
+retain their original meaning.
 The new graph preserves current observations; it neither applies nor reverses
 that recommendation. Cross-target equality qualification and the collection
 redesign remain actual integration work, not promises supplied by this codec.

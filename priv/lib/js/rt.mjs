@@ -49,8 +49,8 @@ export class Flt {
 }
 
 /** An exact decimal (`1.50M`): unscaled BigInt `u` and scale `s` >= 0, value
-    u * 10^-s (PLAN-157 D3). As on the BEAM the scale is part of the value:
-    (= 1.5M 1.50M) is false, and `1.50M` prints with its two places. */
+    u * 10^-s. Generic equality compares exact numeric values; keyEq retains
+    coefficient and scale. Printing and arithmetic preserve the representation. */
 export class Dec {
   constructor(u, s) { this.u = BigInt(u); this.s = s; }
   plain() {
@@ -573,15 +573,13 @@ export function eqv(a, b) {
   if (a instanceof Lazy) a = realize(a);
   if (b instanceof Lazy) b = realize(b);
   if (a === null || b === null || a === undefined || b === undefined) return false;
-  // decimals (BEAM, measured): two decimals compare by unscaled+scale
-  // ((= 1.5M 1.50M) false); a decimal and an int/float by value
-  // ((= 1.5M 1.5) true, (= 2M 2) true)
+  // Exact-value equality is transitive across Decimal/Int/finite Float.
+  // Raw collection keyEq still has its separately named representation rule.
   if (a instanceof Dec || b instanceof Dec) {
-    if (a instanceof Dec && b instanceof Dec) return a.u === b.u && a.s === b.s;
+    if (a instanceof Dec && b instanceof Dec) return decCmp(a, b) === 0;
     const d = a instanceof Dec ? a : b, o = a instanceof Dec ? b : a;
     if (!isNumV(o)) return false;
-    if (o instanceof Flt) return Number(d.plain()) === o.v;
-    return decCmp(d, o) === 0;
+    return (o instanceof Flt ? decimalFloatCompare(d, o.v) : decCmp(d, o)) === 0;
   }
   // JS numeric equality compares BigInt/Number without rounding the BigInt.
   if (isNumV(a)) return isNumV(b) && numOf(a) == numOf(b); // eslint-disable-line eqeqeq
@@ -648,7 +646,12 @@ export function compare(a, b) {
   switch (ra) {
     case 0: {
       if (a instanceof Dec || b instanceof Dec) {
-        if (a instanceof Flt || b instanceof Flt) { const x = a instanceof Dec ? Number(a.plain()) : a.v, y = b instanceof Dec ? Number(b.plain()) : b.v; return x < y ? -1 : x > y ? 1 : 0; }
+        if (a instanceof Flt || b instanceof Flt) {
+          const c = a instanceof Dec ? decimalFloatCompare(a, b.v) : -decimalFloatCompare(b, a.v);
+          // Foreign JS NaN remains outside the finite-number language profile.
+          // Retain the existing comparator tie without calling it equality.
+          return Number.isNaN(c) ? 0 : c;
+        }
         return decCmp(a, b);
       }
       const x = numOf(a), y = numOf(b); return x < y ? -1 : x > y ? 1 : 0;
@@ -727,6 +730,23 @@ function decArith(op, a, b) {
   }
   const s = Math.max(x.s, y.s), xu = x.u * P10(s - x.s), yu = y.u * P10(s - y.s);
   return new Dec(op === "+" ? xu + yu : xu - yu, s);
+}
+// Compare a Decimal with the Float's actual IEEE binary64 value. There is
+// no conversion of the Decimal through Number or the Float through its text.
+// No GCD is needed: the exact cross-products determine the order directly.
+function decimalFloatCompare(decimal, value) {
+  if (!Number.isFinite(value)) return Number.isNaN(value) ? NaN : value > 0 ? -1 : 1;
+  if (value === 0) return decimal.u < 0n ? -1 : decimal.u > 0n ? 1 : 0;
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value, false);
+  const bits = view.getBigUint64(0, false), exponent = Number((bits >> 52n) & 0x7ffn);
+  const fraction = bits & ((1n << 52n) - 1n);
+  let numerator = exponent === 0 ? fraction : fraction + (1n << 52n);
+  if ((bits >> 63n) !== 0n) numerator = -numerator;
+  const shift = exponent === 0 ? -1074 : exponent - 1075;
+  let left = decimal.u, right = numerator * P10(decimal.s);
+  if (shift < 0) left <<= BigInt(-shift); else right <<= BigInt(shift);
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 function decCmp(a, b) {
   const x = toDec(a, "compare"), y = toDec(b, "compare"), s = Math.max(x.s, y.s);
