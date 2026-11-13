@@ -1,0 +1,48 @@
+(ns formal.word-coordinate-prototype-check
+ (:require [formal.word-coordinate-prototype :as coordinate] [formal.data-graph :as graph]))
+(defn read-point [point limits] (coordinate/prepare (graph/encode point) limits))
+(defn value [raw limits] (get-in (read-point {"x" raw} limits) [:assignments "x"]))
+
+(deftest word-encoding-is-exact
+ (doseq [width (range 1 9)]
+  (let [top (dec (erlang/bsl 1 width))]
+   (doseq [bits (distinct [0 1 top])]
+    (is (= {:formal/bv [width bits]} (value {:formal/bv [width bits]} {}))))))
+ (doseq [raw [{:formal/bv [0 0]} {:formal/bv [-1 0]} {:formal/bv [8 -1]}
+              {:formal/bv [8 256]} {:formal/bv [8.0 1]} {:formal/bv [8 1.0]}
+              {:formal/bv [8]} {:formal/bv [8 1 2]} {:formal/bv (list 8 1)}
+              {:formal/bv [8 1] :extra true} {:other [8 1]}]]
+  (is (contains? (value raw {}) :formal/invalid-coordinate)))
+ (is (thrown? (coordinate/prepare (graph/encode {1 {:formal/bv [8 1]}}) {}))))
+
+(deftest width-and-coordinate-charge-are-prospective
+ (let [p (read-point {"x" {:formal/bv [8 255]}} {:word-bits 8 :work-units 72})]
+  (is (= 1 (get-in p [:checking :accepted-words])))
+  (is (= 72 (get-in p [:checking :charged-work-units])))
+  (is (= :not-run (get-in p [:checking :power-construction]))))
+ (is (= :work-units (get-in (value {:formal/bv [8 1]} {:work-units 71}) [:formal/unavailable :reason :metric])))
+ (let [p (read-point {"a" {:formal/bv [8 1]} "b" {:formal/bv [8 2]}} {:work-units 72})
+       values (vals (:assignments p))]
+  (is (= 1 (count (filter #(contains? % :formal/bv) values))))
+  (is (= 1 (count (filter #(contains? % :formal/unavailable) values))))
+  (is (= 72 (get-in p [:checking :charged-work-units]))))
+ ;; Width is refused before any width-sized operation.
+ (is (= :word-bits (get-in (value {:formal/bv [1000000000 1]} {}) [:formal/unavailable :reason :metric]))))
+
+(deftest unknown-application-keywords-stay-data
+ (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" (str "word.coordinate.unknown." (System/unique_integer (list :positive)))]]}
+       bad (graph/assemble "map" [[unknown (graph/encode [8 7])]])
+       data (graph/assemble "map" [[(graph/encode "x") bad]])
+       _ (coordinate/prepare data {}) before (erlang/system_info :atom_count)
+       result (coordinate/prepare data {})]
+  (is (= before (erlang/system_info :atom_count)))
+  (is (contains? (get-in result [:assignments "x"]) :formal/invalid-coordinate))
+  (is (thrown? (graph/decode! data)))))
+
+(deftest unavailable-reasons-never-become-application-values
+ (let [result (value {:formal/unavailable {:arbitrary :application-metadata}} {})]
+  (is (= :graph-unavailable (get-in result [:formal/unavailable :kind])))
+  (is (int? (get-in result [:formal/unavailable :reason :source-node])))))
+
+(run-tests)

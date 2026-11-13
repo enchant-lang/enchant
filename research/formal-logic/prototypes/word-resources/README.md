@@ -25,3 +25,10 @@ Before integration, compare every current primitive against actual SDK point
 semantics, qualify exact policy boundaries and malformed controls, then add
 coordinate normalization admission and aggregate request reservation. Keep the
 existing general evaluator and bounded numeric profile contracts unchanged.
+
+The companion coordinate-reader prototype recognizes the exact reserved word
+wrapper in the original flat graph. It checks bounded positive width before
+using a right shift to test the already-present nonnegative integer, avoiding
+power/mask construction. Unknown application keyword names and unavailable
+reasons stay graph cursors. Its cumulative coordinate charge is separate from
+the future complete point-request budget. These prototypes are not yet run.

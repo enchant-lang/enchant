@@ -1,0 +1,52 @@
+(ns formal.word-coordinate-prototype
+ (:require [formal.coordinates :as coordinates] [formal.data-graph :as graph]
+           [formal.word-resource-prototype :as word]))
+
+(def profile :bl/word-coordinate-prototype-v1)
+(defn prepare
+ "Project-only graph reader. Original unknown application names stay graph
+  cursors. A word is admitted using positive bounded width and a nonnegative
+  integer whose right shift by that width is zero. No power or mask is built.
+  Whole graph capacity checking precedes this reader. The per-coordinate charge
+  is a policy convention, not a theorem about graph checking or BEAM costs."
+ [data overrides]
+ (let [checked (coordinates/check! data) policy (word/limits overrides)
+       rows (:nodes data) [_ pairs] (nth rows (:root data))
+       cursor (fn [id] {:point-reference (:reference checked) :source-node id})
+       invalid (fn [id] {:formal/invalid-coordinate (cursor id)})
+       refused (fn [id metric required]
+                 {:formal/unavailable {:kind :resource-incomplete :profile profile :source (cursor id)
+                                       :reason {:kind :resource-limit :metric metric :required required
+                                                :limit (get policy metric)}}})
+       charges (atom 0) accepted (atom 0)]
+  (letfn [(read-word [id child]
+           (let [[tag ids] (nth rows child)]
+            (if-not (and (= "vector" tag) (= 2 (count ids))
+                         (every? #(= "int" (first (nth rows %))) ids)) (invalid id)
+             (let [[width bits] (mapv #(second (nth rows %)) ids)]
+              (cond
+               (or (<= width 0) (< bits 0)) (invalid id)
+               (> width (:word-bits policy)) (refused id :word-bits width)
+               :else
+                (let [work (* 8 (inc width)) required (+ @charges work)]
+                 (if (> required (:work-units policy)) (refused id :work-units required)
+                  (do (reset! charges required)
+                      (if (zero? (erlang/bsr bits width))
+                       (do (swap! accepted inc) {:formal/bv [width bits]})
+                       (invalid id))))))))))
+          (read-value [id]
+           (let [[tag body] (nth rows id)]
+            (cond
+             (contains? #{"int" "bool" "nil" "binary"} tag) body
+             (and (= "map" tag) (= 1 (count body)))
+              (let [[key child] (first body) key-row (nth rows key)]
+               (cond (= ["keyword" "formal/bv"] key-row) (read-word id child)
+                     (= ["keyword" "formal/unavailable"] key-row)
+                      {:formal/unavailable {:kind :graph-unavailable :reason (cursor child)}}
+                     :else (invalid id)))
+             :else (invalid id))))]
+   {:profile profile :reference (:reference checked) :limits policy
+    :assignments (into {} (mapv (fn [[key id]] [(second (nth rows key)) (read-value id)]) pairs))
+    :checking {:coordinates (count pairs) :accepted-words @accepted :charged-work-units @charges
+               :application-key-materialization :not-run :power-construction :not-run}
+    :compiler-proof-authority false})))

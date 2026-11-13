@@ -42,7 +42,7 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe', 
            '--property=RuntimeMaxSec=300', '--property=KillMode=control-group',
            '--setenv=XDG_RUNTIME_DIR=' + str(runtime), 'env', '-u', 'BEAM_LISP_PATH',
            '-u', 'ENCHANT_FORMAL_WORKER', '-u', 'ENCHANT_Z3_LIBRARY',
-           pin['sdk'] + '/bin/bl', '--cold', '-p', str(S), 'test', str(S / 'word-resource-check.bl')]
+           pin['sdk'] + '/bin/bl', '--cold', '-p', str(S), 'test', str(S / 'word-resource-check.bl'), str(S / 'word-coordinate-check.bl')]
 write('command.json', command)
 started = time.monotonic()
 try:
@@ -52,18 +52,19 @@ finally:
     shutil.rmtree(runtime)
     shutil.rmtree(cwd)
 text = (E / 'checks.txt').read_text()
-green = '1 file(s) passed, 0 failed, 0 incoherent' in text and 'not green' not in text
+green = '2 file(s) passed, 0 failed, 0 incoherent' in text and 'not green' not in text
 write('exit.json', {'process_exit_code': code, 'complete_green_test_summary': green,
       'elapsed_seconds': time.monotonic() - started, 'runtime_retired': not runtime.exists(),
       'consumer_cwd_retired': not cwd.exists()})
 assert code == 0 and green, text[-6000:]
-rows = re.findall(r'✓\s+formal.word-resource-prototype-check\s+(\d+) passed', text)
-assert len(rows) == 1
+rows = re.findall(r'✓\s+(formal.word-(?:resource|coordinate)-prototype-check)\s+(\d+) passed', text)
+assert len(rows) == 2
+counts = {name: int(total) for name, total in rows}
 assert all(sha(R / name) == digest for name, digest in digests.items())
 write('qualification.json', {'schema': 'bl.word-resource-prototype-qualification.v1', 'status': 'passed',
       'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': pin,
-      'source_pin': read(E / 'source-pin.json'), 'assertions': int(rows[0]),
+      'source_pin': read(E / 'source-pin.json'), 'assertions': sum(counts.values()), 'assertion_runs': counts,
       'log_sha256': sha(E / 'checks.txt'), 'exit_sha256': sha(E / 'exit.json'),
       'compiler_proof_authority': False,
-      'scope': 'Project-only declared-width resource planner. No managed graph/profile admission, coordinate normalization, complete request reservation or runtime-cost theorem is claimed.'})
-print(json.dumps({'status': 'passed', 'assertions': int(rows[0])}))
+      'scope': 'Project-only declared-width resource planner and graph coordinate reader. No managed graph/profile admission, complete request reservation or runtime-cost theorem is claimed.'})
+print(json.dumps({'status': 'passed', 'assertions': sum(counts.values())}))
