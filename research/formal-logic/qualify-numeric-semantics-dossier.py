@@ -136,6 +136,10 @@ report = {'schema': 'bl.numeric-semantics-dossier-qualification.v1', 'status': '
                       'full_audit_sha256': sha(E / 'full-browser/audit.json'), 'tools': tools},
           'scope': 'Actual numeric relations and measured source-backed bridge, complete unchanged document checking, exact historical Float observation under its original SDK, current immutable kit/live SDK identity and phone/desktop browser review. Previous managed records are separately reopened with producer and checker identities explicit. Mathematical arithmetic proofs remain separate from implementation correspondence. No theorem of whole-target equivalence, cost, totality, language implementation or compiler preservation is granted.',
           'compiler_proof_authority': False}
+commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
+recipe = str(Path(__file__).relative_to(R))
+assert subprocess.check_output(['git', 'show', commit + ':' + recipe], cwd=R) == Path(__file__).read_bytes()
+report['recipe'] = {'code_commit': commit, 'path': recipe, 'sha256': sha(Path(__file__))}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps({'status': 'passed', 'live_cells': 88, 'full_checks': report['browser']['full_checks'],
                   'focused_checks': report['browser']['focused_checks']}))
