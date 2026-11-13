@@ -6,10 +6,18 @@ and live dossier host remain on qualified SDK46. These next-stage scripts are
 prepared source, not qualification receipts. Do not run another substantive
 check while the core batch is active.
 
+`work-formal-managed-after-core-4-20261113.service` now owns the deferred
+read-only inventory comparison. It observes the core supervisor's exact
+invocation and requires both terminal state and a newly generated complete
+qualification chain before starting BL. It exits after that comparison or
+after a core failure; it never edits source or selects a pin. Inspect its real
+PID/state and `evidence/managed-integration/after-core-state.json` before
+starting any manual inventory run, so the comparison has only one writer.
+
 ## Preserve the old project contract
 
-After the core qualification passes, run
-`run-managed-integration.py inventory` from a durable supervisor. It compares
+After the core qualification passes, the deferred service runs
+`run-managed-integration.py inventory`. It compares
 the existing project inventory with the compatible SDK implementation for all
 187 questions. Their complete encoded values must match byte for byte. The
 runner pins the old implementation before any delegation.
