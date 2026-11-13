@@ -21,7 +21,7 @@ derived-value resource budgets remain next.
 
 The [managed graph implementation](MANAGED-GRAPH.md) and
 [portable request interface](REQUEST-INTERFACE.md) are now qualified in the
-selected immutable SDK. The core qualification passed 15,853 assertions,
+preceding qualified immutable SDK. That core qualification passed 15,853 assertions,
 187 paired-backend questions, four fresh SDK-only readers and 16 tamper
 controls. Project integration separately compared all 187 complete inventories
 against the former implementation, then passed 4,997 adapter/facade assertions.
@@ -41,12 +41,17 @@ The broader formal-language goal remains active: retained language requests,
 semantic repairs, richer observations and stronger implementation connections
 are still work to qualify.
 
-The [numeric repair batch](NUMERIC-IMPLEMENTATION.md) is now committed in
-integration source, while its new SDK qualification is pending. It repairs
-generic equality across Decimal scales, adds explicit representation equality,
-and corrects legacy negative-divisor modulus lowering. The preserved baseline
-records BEAM, direct JS and actual compiled BL results separately. The live
-selected SDK above retains its qualified semantics until the new gates pass.
+The [numeric repair batch](NUMERIC-IMPLEMENTATION.md) is now qualified and
+selected. It repairs exact generic equality across Decimal scales on BEAM and
+JS, adds explicit representation equality and the named compiled JS Decimal
+API, and corrects negative-divisor modulus lowering. Its 12,151 BEAM assertions,
+40 JS tests, 900-pair observations on three real routes and 1,051 compiled
+captured Decimal cases pass. All 187 paired native outcomes remain unchanged.
+Two fresh SDK-only readers reopen the preceding 187 records and 52 points each,
+with eleven tamper refusals and zero native exchanges. The independent
+[modulus model](FLOOR-MODULUS-MODEL.md) has its own ten-result theorem ledger and
+Std axiom audits. Dossier execution and live browser activation are being
+refreshed separately; the earlier presentation receipt above retains its scope.
 
 The design review is in [ATLAS.bl.org](ATLAS.bl.org), its machine-readable
 catalogue in [atlas.json](atlas.json), and the semantic decisions in

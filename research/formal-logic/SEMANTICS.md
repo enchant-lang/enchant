@@ -1,24 +1,21 @@
 # Semantic decisions and proposed changes
 
-The experiment runs on the immutable SDK recorded in `sdk-pin.json`. Its current
-runtime observations, pure proposed profiles and backend qualifications are
-different evidence. The patches in `proposals/numeric-equality.patch` and
-`proposals/numeric-equality-js.patch` are now applied to integration source,
-along with the modulus repair. The numeric SDK has now passed its complete
-core qualification; cross-version point readers and the separate arithmetic
-model remain adoption gates. The selected project and live dossier still use
-the preceding qualified SDK. These
-source edits must not change the meaning assigned
-to results obtained from the pinned SDK.
+The selected immutable SDK in `sdk-pin.json` now includes the exact numeric
+equality, named JS Decimal and legacy modulus repairs. Its core qualification
+and fresh cross-SDK point readers passed; the separate integer modulus model
+has its own checked theorem and axiom ledger. The live dossier refresh is an
+additional execution/browser gate. Other semantic alternatives below remain
+under review. Original canaries and baseline receipts keep their original SDK
+meaning; they are not rewritten to match the adopted numeric profile.
 
 ## Equality: repair the inconsistent relation
 
-The reproduced current-runtime triple is:
+The original reproduced triple, and the selected repair, are:
 
 ```clojure
 [(= 1.5M 1.5) (= 1.5 1.50M) (= 1.5M 1.50M)]
-;; current: [true true false]
-;; proposed exact-value profile: [true true true]
+;; original canary SDK: [true true false]
+;; selected finite exact-value profile: [true true true]
 ```
 
 This is a bug: generic equality is not transitive. The immediate cause is the
@@ -28,7 +25,7 @@ their exact rational values (`ratio`, `number-num-cmp`, around 1660–1690).
 Floats use their actual IEEE value, never their printed approximation.
 `semantic-key` and `semantic-hash` use that same exact rational projection.
 
-**Recommendation:** remove the Decimal exception and define generic numeric
+**Adopted numeric decision:** remove the Decimal exception and define generic numeric
 equality by that existing exact comparator. Preserve scale in storage, printing
 and arithmetic. Add `decimal/same-representation?` for coefficient-and-scale
 equality, including the Java `BigDecimal.equals` oracle. These are separately
@@ -80,7 +77,9 @@ expects a scale-variant lookup not to match. Under the proposed profile it must
 match, with direct scan and hash join agreeing. Stored payloads must still
 round-trip their original coefficient and scale.
 
-**Inference to qualify:** removing the equality exception requires no index
+**Checked numeric-batch scope:** the focused Datom, codec and durable payload
+checks pass with the index and identity formats unchanged. The original
+inference was that removing the equality exception requires no index
 format bump or reindex because it changes unification, not codec bytes. Preserve
 `datom.codec/INDEX-VERSION` and the immutable `datom.identity/value-v1` contract.
 Check this inference with `decimal_codec_port_test.bl`,
@@ -123,8 +122,9 @@ There is a separate concrete bug in the old `system.smt` path:
 (mod -7 -3)  ;; BL: -1; old SMT lowering: (mod (- 7) (- 3)) = 2
 ```
 
-At `priv/lib/system/smt.bl:117`, Core `mod` is mapped directly to SMT Euclidean
-`mod`. Thus lowering `(>= (mod a b) 0)` with `b = -3` yields a solver theorem
+The earlier `priv/lib/system/smt.bl` table mapped Core `mod` directly to SMT
+Euclidean `mod`. The selected SDK reconstructs the divisor-sign result. The
+earlier alias was unsound: the old lowering of `(>= (mod a b) 0)` with `b = -3` yields a solver theorem
 although runtime `a = 7` refutes it. Existing `smt-quot`/`smt-rem` reconstruct
 toward-zero quotient and dividend-sign remainder correctly for nonzero divisors;
 they should not be replaced with direct `div`/`mod` aliases.
@@ -144,8 +144,11 @@ does not mix this separate translator repair into its diff.
 The [modulus companion patch](proposals/modulus-lowering.patch) now prepares
 that exact resolved-MFA correction, with compiler translation checks, all four
 operand-sign examples, exact-division zeros and the universal nonzero-divisor
-laws above. It is applied to integration source; its candidate-SDK tests have
-not run. It preserves the
+laws above. Its resolved-MFA correction is now applied and qualified on the selected
+SDK, including actual compiler translation, runtime signs and three separated
+universal native queries. The original combined query timed out and remains
+undecided evidence. The independent integer model has a separate theorem/axiom
+qualification. It preserves the
 existing quotient/remainder reconstruction. Its legacy expression API still
 requires a nonzero-divisor obligation; the patch does not model a raised
 zero-divisor outcome or grant a solver claim checked-certificate authority.
@@ -229,7 +232,8 @@ these source checks do not select a new runtime.
    proposed. Keep the current pin and backend evidence intact.
 2. Review and commit one coherent runtime/doc/test batch in the integration
    checkout. The attached patches preserve the reviewed original diffs; the
-   integration source is now changed, with candidate qualification pending.
+   numeric changes are now qualified and selected; other proposed semantic
+   changes must pass the same staged process.
 3. Batch boot/host changes before compiler-floor regeneration and produce one
    qualified SDK through the existing workflow. Record its immutable artifact
    identity and a new qualified pin; reuse it for focused checks. Do not create
