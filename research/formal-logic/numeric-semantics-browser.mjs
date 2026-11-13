@@ -57,6 +57,19 @@ try {
    await theme(value);
    await evaluate(`window.scrollBy({top:document.getElementById('${chapter}').getBoundingClientRect().top-92,behavior:'instant'})`);
    await shot(size.name + '-numbers-chapter-' + name);
+   check(size.name + ': meaning graph captions fit their boxes in ' + name, await evaluate(`(()=>{
+    const graph=document.querySelector('svg.graph[aria-label="Meaning stays with Beam Lisp"]');
+    if(!graph||graph.querySelectorAll('.gr-node').length!==5)return false;
+    const boxes=[...graph.querySelectorAll('.gr-node rect')].map(n=>n.getBBox());
+    const inside=[...graph.querySelectorAll('.gr-node')].every(n=>{
+     const r=n.querySelector('rect').getBBox();
+     return [...n.querySelectorAll('text')].every(t=>{const b=t.getBBox();return b.x>=r.x+3&&b.x+b.width<=r.x+r.width-3&&b.y>=r.y&&b.y+b.height<=r.y+r.height});
+    });
+    const clear=[...graph.querySelectorAll('.gr-edge text')].every(t=>{const b=t.getBBox();return boxes.every(r=>b.x+b.width<=r.x||b.x>=r.x+r.width||b.y+b.height<=r.y||b.y>=r.y+r.height)});
+    return inside&&clear;
+   })()`));
+   await evaluate(`document.querySelector('svg.graph[aria-label="Meaning stays with Beam Lisp"]').scrollIntoView({block:'center',behavior:'instant'})`);
+   await shot(size.name + '-numbers-meaning-' + name);
    await evaluate("document.querySelector('.nb-waterfall').scrollIntoView({block:'center',behavior:'instant'})");
    check(size.name + ': observed bridge retains its exact counts in ' + name, await evaluate("(()=>{const n=id=>document.querySelector('.nb-waterfall [data-nb-wf=\"'+id+'\"] .nb-v').textContent.trim();return n('numeric_js_before')==='14'&&n('numeric_js_fixed')==='14'&&n('numeric_js_after')==='0'})()"));
    await shot(size.name + '-numbers-bridge-' + name);
