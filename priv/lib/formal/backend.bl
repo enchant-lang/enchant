@@ -122,6 +122,11 @@
   (map? data) (some z3-small-significand? (vals data))
   (or (vector? data) (list? data)) (some z3-small-significand? data)
   :else false))
+(defn- backend-format-refusal [state]
+ {:state state :result {:ok false :status :unsupported
+   :protocol 1 :generation (:generation state) :backend (:backend (:hello state))
+   :error "Pinned Z3 native API requires FP significand width at least 3; portable s=2 terms remain valid"
+   :why {:kind :backend-format :phase :preflight :significand-minimum 3}}})
 (defn- managed-exchange [state operation payload]
  (cond
   (and (not= operation :reset) (not (:portable state)))
@@ -143,10 +148,7 @@
                                  (native-data (:assertions prepared)) (native-data (:assumptions prepared))
                                  (native-data (:observations prepared)) (:solver-ms state)))
           exchanged (if (and (= :z3 (:backend state)) (z3-small-significand? (:nodes prepared)))
-                      {:state state :result {:ok false :status :unsupported
-                        :protocol 1 :generation (:generation state) :backend (:backend (:hello state))
-                        :error "Pinned Z3 native API requires FP significand width at least 3; portable s=2 terms remain valid"
-                        :why {:kind :backend-format :phase :preflight :significand-minimum 3}}}
+                      (backend-format-refusal state)
                       (exchange-owned state request))
           result (:result exchanged) after (:state exchanged)
           committed (if-not (:ok result) after
@@ -234,11 +236,13 @@
               ;; Import preparation may spend time; check the outer budget
               ;; again before sending, retaining the existing worker deadline.
               (check!)
-              (let [exchanged (exchange-owned @owned request) reply (:result exchanged)
+              (let [format-refused? (and (= :z3 (:backend @owned)) (z3-small-significand? (:nodes prepared)))
+                    exchanged (if format-refused? (backend-format-refusal @owned) (exchange-owned @owned request))
+                    reply (:result exchanged)
                     after (cond-> (:state exchanged) (:ok reply) (assoc :registry (:registry prepared)))]
                ;; reset! in this namespace resets a solver session.
                (swap! owned (fn [_] after))
-               (assoc reply :graph-imported (count (:nodes prepared)))))))
+               (assoc reply :graph-imported (if format-refused? 0 (count (:nodes prepared))))))))
            _ (when (or (= :owner-deadline (get-in result [:why :kind]))
                        (and (= :error (:verdict result)) (pos? (:native-scope-attempts result))))
                (close! (:port @owned)) (swap! owned assoc :retired true))]

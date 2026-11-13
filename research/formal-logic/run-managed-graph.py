@@ -29,6 +29,9 @@ elif stage == 'sdk-preflight-controls':
 elif stage == 'owner-focused':
     names += ['test/bl/formal/managed_graph_test.bl']
     request = ['test', str(R / names[-1])]
+elif stage == 'format-focused':
+    names += ['test/bl/formal/beam_float_test.bl']
+    request = ['test', str(R / names[-1])]
 elif stage == 'profile-sorts':
     names += ['research/formal-logic/managed-profile-sorts.bl']
     output = E / 'profile-sorts.json'

@@ -1,6 +1,49 @@
 (ns formal.graph-admission-test
  (:require [formal.term :as t] [formal.data-graph :as g] [formal.evaluate :as e]
-           [formal.graph-question :as question] [formal.query :as q] [oracle]))
+           [formal.graph-question :as question] [formal.graph-terms :as forest]
+           [formal.query :as q] [oracle]))
+
+(defn- constructors [action]
+ (let [module (elem (erlang/fun_info t/app :module) 1)
+       patterns (mapv (fn [[name arity]] [name (tuple module name arity)])
+                     [[:app 4] [:literal 2] [:variable 2] [:bound 2] [:rational 2]])]
+  (doseq [[_ pattern] patterns]
+   (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count)))))
+  (try
+   (let [result (try {:status :accepted :value (action)}
+                 (catch error {:status :refused :message (ex-message error)}))]
+    {:result result :calls (into {} (mapv (fn [[name pattern]]
+                                          [name (elem (erlang/trace_info pattern :call_count) 1)]) patterns))})
+   (finally
+    (doseq [[_ pattern] patterns] (erlang/trace_pattern pattern false (list :local :call_count)))))))
+
+(deftest unused-declarations-are-part-of-the-scalar-profile-before-all-constructors
+ (doseq [quantify [t/forall t/exists]
+         sort [t/Real t/Rounding (t/fp-sort 5 2) (t/array-sort t/Int t/Int)]
+         ordered [vec #(apply list %)]]
+  (let [expression (quantify [(t/bound "unused.scalar" sort)] (t/bool true))
+        expression (assoc expression :data (ordered (map #(ordered %) (:data expression))))
+        data (g/encode [(t/bool true) expression]) ids (second (nth (:nodes data) (:root data)))]
+   (doseq [selected [ids (vec (reverse ids))]]
+    (let [actual (constructors #(forest/prepare-bool-int data selected))]
+     (is (= :refused (get-in actual [:result :status])))
+     (is (String/contains? (get-in actual [:result :message]) "bounded scalar profile"))
+     (is (= {:app 0 :literal 0 :variable 0 :bound 0 :rational 0} (:calls actual)))))
+   (when (not= t/Real sort)
+    (let [actual (constructors #(forest/prepare-numeric data ids {}))]
+     (is (= :refused (get-in actual [:result :status])))
+     (is (= {:app 0 :literal 0 :variable 0 :bound 0 :rational 0} (:calls actual))))))))
+
+(deftest generic-and-numeric-positive-controls-preserve-valid-unused-declarations
+ (doseq [sort [t/Bool t/Int t/Real t/Rounding (t/fp-sort 5 2)]]
+  (let [data (g/encode (t/forall [(t/bound "unused.allowed" sort)] (t/bool true))) ids [(:root data)]
+        generic (constructors #(forest/prepare data ids))]
+   (is (= :accepted (get-in generic [:result :status])))
+   (is (= {:app 1 :literal 1 :variable 0 :bound 0 :rational 0} (:calls generic)))
+   (when (contains? #{t/Bool t/Int t/Real} sort)
+    (let [numeric (constructors #(forest/prepare-numeric data ids {}))]
+     (is (= :accepted (get-in numeric [:result :status])))
+     (is (= {:app 1 :literal 1 :variable 0 :bound 0 :rational 0} (:calls numeric))))))))
 
 (defn- counted [action]
  (let [module (elem (erlang/fun_info t/rational :module) 1) pattern (tuple module :rational 2)]

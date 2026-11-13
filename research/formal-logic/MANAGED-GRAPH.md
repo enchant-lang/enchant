@@ -5,16 +5,24 @@ into the process that owns the solver port. That process derives its own
 question inventory, translates portable nodes to its private arena and replays
 SAT assignments. Z3 and OxiZ receive the same language question and policy.
 
-This is a candidate interface. The first immutable candidate passed 130
-preceding evaluator assertions and 45 new admission-scope assertions, then
-failed its native owner file. A `reset!` name collision selected the session
-API after a native exchange, instead of updating the private state atom. The
-corrected source uses an explicit atomic update and retires the context after
-unexpected post-native errors. The replacement SDK passes the 130 preceding
-evaluator and 45 admission-scope assertions, and the updated owner file passes
-164 assertions including actual Real coordinates on both backends. Wider
-source, regression, corpus and presentation gates remain pending; these owner
-capabilities are not yet selected for the live project.
+This is a candidate interface. Candidate 1 exposed a `reset!` name collision
+after a native exchange. Candidate 2 corrected the state update and retires
+the port after unexpected post-native errors. It passed 14,520 targeted
+assertion executions, the 187-question legacy paired corpus with no exact
+baseline differences, and the complete managed corpus. All 94 numeric
+questions matched legacy status, verdict, phase and validation status on both
+engines. The other 93 questions were refused before any native scope call;
+the explicit sessions had already completed their handshake.
+
+A separate pure probe then exposed a policy gap missing from that corpus:
+unused quantifier declarations can contain sorts absent from every expression
+node's output sort. Bool/Int admitted unused Real, while numeric admitted FP
+and Rounding. Each reached one app constructor. The source repair checks raw
+binder declarations, including list representations, before any constructor.
+Generic theory admission still permits these valid sorts. Candidate 2 and its
+actual reproducer are retained under [candidate-2](evidence/managed-graph/candidate-2/candidate-review.json).
+A new immutable candidate and qualification are required before promotion.
+The live project still selects the qualified shared-primitives SDK.
 
 ```clojure
 (backend/with-session {:backend :oxiz :solver-ms 500 :hard-ms 2000}

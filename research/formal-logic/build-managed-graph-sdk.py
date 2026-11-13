@@ -11,6 +11,7 @@ E.mkdir(exist_ok=True)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 names = ['priv/lib/formal/evaluate.bl', 'priv/lib/formal/backend.bl',
          'priv/lib/formal/graph-question.bl', 'priv/lib/formal/graph-execution.bl',
+         'priv/lib/formal/graph-terms.bl',
          'test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl',
          'test/bl/formal/managed_graph_test.bl', str(Path(__file__).relative_to(R))]
 digests = {}
@@ -35,7 +36,7 @@ assert fingerprint == subprocess.check_output(['scripts/prepare-checkout-sdk', '
 sdk = (R / '.bl/sdks' / fingerprint / 'result-sdk').resolve(strict=True)
 source = (R / '.bl/sdks' / fingerprint / 'source-engine').resolve(strict=True)
 assert str(sdk).startswith('/nix/store/') and str(source).startswith('/nix/store/')
-for name in names[:4]:
+for name in names[:5]:
     assert hashlib.sha256((source / name).read_bytes()).hexdigest() == digests[name]
 candidate = {'sdk': str(sdk), 'descriptor_sha256': hashlib.sha256((sdk / 'artifact.json').read_bytes()).hexdigest(),
              'source': str(source), 'base_commit': commit, 'engine_fingerprint': fingerprint}

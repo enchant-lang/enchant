@@ -14,6 +14,27 @@
    (let [value (action) calls (elem (erlang/trace_info pattern :call_count) 1)] {:value value :calls calls})
    (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
 
+(deftest unused-out-of-profile-declarations-refuse-without-native-exchanges
+ (let [requests (mapv (fn [sort]
+                        (qg/prepare (q/prove (t/forall [(t/bound "unused.owner" sort)] (t/bool true)))))
+                      [(t/fp-sort 5 2) t/Rounding (t/array-sort t/Int t/Real)])]
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session (assoc options :backend engine)
+    (fn [session]
+     (let [before (backend/context session)]
+      (doseq [request requests]
+       (let [actual (counted #(backend/graph-question! session request {})) reply (:value actual)]
+        (is (= 0 (:calls actual) (:native-scope-attempts reply)))
+        (is (= :not-run (:solver-status reply)))
+        (is (= :admission (:phase reply)))
+        (is (= before (backend/context session)))))
+      ;; Calibrate the same counter and confirm the refused import did not
+      ;; retire or change the actual owner. Its handshake precedes this test.
+      (let [actual (counted #(backend/graph-question! session subject {}))]
+       (is (= 1 (:calls actual)))
+       (is (= :sat (get-in actual [:value :verdict])))
+       (is (= :valid (get-in actual [:value :validation :status]))))))))))
+
 (deftest both-native-owners-admit-original-graphs-and-replay-real-models
  (doseq [engine [:z3 :oxiz]]
   (backend/with-session (assoc options :backend engine)

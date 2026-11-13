@@ -66,20 +66,36 @@
        _ (doseq [id roots]
            (require! (and (int? id) (<= 0 id) (< id (count rows))) "root reference"))
        seen (atom #{}) ordered (atom []) descriptions (atom {})]
-  (letfn [(visit [id]
+  (letfn [(scalar-sort! [id]
+           (let [[kind parts] (nth rows id)
+                 permitted (if (= :numeric mode)
+                            #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"]}
+                            #{["keyword" "bool"] ["keyword" "int"]})]
+            (require! (and (= "vector" kind) (= 1 (count parts))
+                           (contains? permitted (nth rows (first parts))))
+                      "sort is outside the bounded scalar profile")))
+          (declarations! [record]
+           ;; An unused binder has no :bound expression node. Its declared
+           ;; sort still belongs to the profile, before any constructor runs.
+           (when (contains? #{["keyword" "forall"] ["keyword" "exists"]}
+                            (nth rows (get record "op")))
+            (let [[kind binders] (nth rows (get record "data"))]
+             (require! (and (contains? #{"vector" "list"} kind) (seq binders))
+                       "ordered nonempty binder declarations required")
+             (doseq [id binders]
+              (let [[tag pair] (nth rows id)]
+               (require! (and (contains? #{"vector" "list"} tag) (= 2 (count pair)))
+                         "binder name/sort pair required")
+               (scalar-sort! (second pair)))))))
+          (visit [id]
            (when-not (contains? @seen id)
             (let [record (term-fields! rows id) children (second (nth rows (get record "args")))]
              ;; Inspect the portable descriptor before SDK constructor admission.
              ;; The bounded scalar profile must never admit an FP/container
              ;; value merely to discover that its policy is unavailable.
              (when (not= :all mode)
-              (let [[kind parts] (nth rows (get record "sort"))
-                    permitted (if (= :numeric mode)
-                               #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"]}
-                               #{["keyword" "bool"] ["keyword" "int"]})]
-               (require! (and (= "vector" kind) (= 1 (count parts))
-                              (contains? permitted (nth rows (first parts))))
-                         "sort is outside the bounded scalar profile")))
+              (scalar-sort! (get record "sort"))
+              (declarations! record))
              (doseq [child children] (visit child))
              (require! (< (count @seen) (:typed-nodes limits)) "typed-node capacity")
              (swap! descriptions assoc id (assoc record :children children))
@@ -148,12 +164,13 @@
   Derived output is data and is never accepted as a caller admission token."
  [data roots] (prepare-profile data roots :all nil))
 (defn prepare-bool-int
- "Fresh typed admission with a raw Bool/Int descriptor gate before constructors.
+ "Fresh typed admission with a raw Bool/Int descriptor/declaration gate before constructors.
   Other sorts are out-of-profile requests; no concrete evaluator is invoked."
  [data roots] (prepare-profile data roots :bool-int nil))
 
 (defn prepare-numeric
- "Fresh Bool/Int/Real admission. Reserve all rational literal normalizations
+ "Fresh Bool/Int/Real admission, including unused binder declarations.
+  Reserve all rational literal normalizations
   before SDK constructors run. Budget refusal returns an explicit admission
   refusal, with no typed forest and no constructors executed."
  [data roots overrides]
