@@ -73,13 +73,17 @@
       (if-not (and origin (some #(= origin %) expected))
        (web/json request 403 {:error "Same-origin save required."})
        (let [body (web/read-body-limited* request 8192 10000)]
-        (if (:error body) (web/json (:conn body) 413 {:error "Snapshot request too large."})
+        (if (:error body) (web/json (web/resp-header (:conn body) "connection" "close") 413 {:error "Snapshot request too large."})
          (let [input (try (json/decode (:body body)) (catch _ nil))]
           (cond
            (not (and (map? input) (= #{"basis"} (set (keys input)))))
             (web/json (:conn body) 400 {:error "A source basis is required."})
            (not= (get input "basis") (evidence/basis-id root))
             (web/json (:conn body) 409 {:error "Sources changed. Inspect before saving."})
-           :else (let [saved (evidence/append-snapshot! root (store-path root))]
-                   (web/json (:conn body) {:ok true :revisions (:revisions saved) :basis (evidence/basis-id root)})))))))))
+           :else (try
+                   (let [saved (evidence/append-snapshot! root (store-path root) (get input "basis"))]
+                    (web/json (:conn body) {:ok true :revisions (:revisions saved) :basis (get-in saved [:snapshot :basis])}))
+                   (catch error
+                    (web/json (:conn body) (if (= :stale-basis (:kind (ex-data error))) 409 500)
+                     {:error "Snapshot was not saved. Inspect the source basis and retry."}))))))))))
    :else nil)))
