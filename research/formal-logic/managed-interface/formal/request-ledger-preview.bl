@@ -1,0 +1,53 @@
+(ns formal.request-ledger-preview
+ (:require [formal.request-preview :as request] [formal.request-answer-preview :as answer]
+           [formal.data-graph :as graph] [veritas.ledger :as ledger]))
+
+(def profile :bl/formal-request-record-preview-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.request-ledger-preview: " reason) {:kind :request-record}))))
+(defn- same? [a b] (= (graph/bytes (graph/encode a)) (graph/bytes (graph/encode b))))
+
+(defn pack
+ "A versioned evidence packet, not a validity or native-execution assertion."
+ [original response]
+ (let [fresh (request/check! original)]
+  (answer/check! fresh response)
+  {:formal/request-record 1 :profile profile :request fresh :answer response
+   :request-reference (request/reference fresh) :subject-reference (request/subject-reference fresh)
+   :compiler-proof-authority false}))
+
+(defn recheck
+ "Reopen portable recorded data by fresh subject/policy/point checking.
+  No supplied record label establishes storage or native-execution authenticity."
+ [packet]
+ (require! (and (= :map (rt/kind-kind packet)) (or (nil? (meta packet)) (= {} (meta packet)))
+                (= #{:formal/request-record :profile :request :answer :request-reference :subject-reference
+                     :compiler-proof-authority} (set (keys packet)))
+                (int? (:formal/request-record packet)) (= 1 (:formal/request-record packet)) (= profile (:profile packet))
+                (= false (:compiler-proof-authority packet))) "closed unprivileged request record required")
+ (let [fresh (request/check! (:request packet))]
+  (require! (and (same? (request/reference fresh) (:request-reference packet))
+                 (same? (request/subject-reference fresh) (:subject-reference packet))) "record references differ")
+  (assoc (answer/recheck fresh (:answer packet)) :record-profile profile :storage-authenticated false)))
+
+(defn record!
+ "Reuse the existing ledger's blob/presence transport. The typed packet is
+  its witness, under a distinct recorded-request modality. First-class request
+  indexes/body splitting remain an SDK ledger integration step."
+ [connection original response metadata]
+ (let [packet (pack original response)]
+  (ledger/record! connection {:modality :recorded-request :engine (get-in original [:adapter :backend])
+                              :witness packet :compiler-proof-authority false} metadata)))
+
+(defn reopen
+ "Fetch from the actual ledger (which verifies its payload), then freshly
+  recheck the typed packet. Storage integrity establishes no native execution."
+ [connection id]
+ (let [rows (filter #(= id (:verdict/id %)) (ledger/all connection))]
+  (require! (= 1 (count rows)) "one actual ledger record required")
+  (let [row (first rows)]
+   (require! (and (= :recorded-request (:verdict/modality row)) (= :recorded (:verdict/assurance row))
+                  (= true (:verdict/witness-present row)) (= false (:verdict/compiler-authority row)))
+             "recorded request ledger envelope required")
+   {:id id :ledger-envelope :payload-checked :result (recheck (:verdict/witness row))
+    :checked-native-execution false :compiler-proof-authority false})))

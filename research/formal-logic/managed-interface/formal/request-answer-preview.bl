@@ -1,0 +1,135 @@
+(ns formal.request-answer-preview
+ (:require [formal.request-preview :as request] [formal.request-point-preview :as point]
+           [formal.graph-question :as question] [formal.graph-execution :as execution]
+           [formal.data-graph :as graph] [formal.question-graph :as qg]))
+
+(def profile :bl/formal-request-answer-preview-v1)
+(def result-profile :bl/formal-request-result-preview-v1)
+(def ^:private certificate {:status :not-checked :kind :request-answer})
+(def ^:private fields #{:formal/request-answer :profile :request-reference :subject-reference
+                       :source :point-present :point-graph :trusted :compiler-proof-authority :certificate})
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.request-answer-preview: " reason) {:kind :request-answer}))))
+(defn- same? [left right] (= (graph/bytes (graph/encode left)) (graph/bytes (graph/encode right))))
+(defn- plain-map? [value]
+ (and (= :map (rt/kind-kind value)) (or (nil? (meta value)) (= {} (meta value)))))
+
+(defn- source! [fresh source]
+ (require! (plain-map? source) "plain recorded source required")
+ (case (:kind source)
+  :supplied-point (require! (= #{:kind} (set (keys source))) "closed supplied-point source required")
+  :reported-native
+   (do
+    (require! (= #{:kind :status :phase :identity :native-limits :context-state :details} (set (keys source)))
+              "closed reported-native source required")
+    (require! (contains? #{:sat :unsat :unknown :unsupported :error :not-run} (:status source)) "known reported status required")
+    (require! (contains? #{:query :assumption-consistency :admission :native-exchange :replay :execution} (:phase source))
+              "known reported phase required")
+    (require! (= (:backend (:adapter fresh)) (:backend (:identity source))) "recorded backend differs from request")
+    (require! (same? (select-keys (:adapter fresh) [:solver-ms :hard-ms]) (:native-limits source))
+              "recorded native limits differ from request")
+    ;; This first bridge acquires a fresh owner for each fallback. Retained
+    ;; sessions require the next owner-side adapter/context protocol extension.
+    (require! (same? {:generation 0 :revision 0} (:context-state source)) "fresh-owner profile required")
+    (require! (map? (:identity source)) "recorded artifact data required")
+    (graph/encode source))
+  (throw (ex-info "formal.request-answer-preview: unknown source kind" {})))
+ source)
+
+(defn- bind [original source present point-data]
+ (let [fresh (request/check! original)]
+  (source! fresh source)
+  (when present (graph/check! point-data))
+  (cond-> {:formal/request-answer 1 :profile profile :request-reference (request/reference fresh)
+           :subject-reference (request/subject-reference fresh) :source source :point-present present
+           :trusted false :compiler-proof-authority false :certificate certificate}
+   present (assoc :point-graph point-data))))
+
+(defn supply
+ "Propose coordinates without pretending that a native solver ran.
+  No verdict, validation result or proof flag is accepted."
+ [original assignments]
+ (bind original {:kind :supplied-point} true (graph/encode assignments)))
+
+(defn check!
+ "Check exact request binding and the closed evidence envelope only.
+  Artifact and native-status fields remain recorded claims."
+ [original response]
+ (let [fresh (request/check! original) present (:point-present response)]
+  (require! (and (plain-map? response) (int? (:formal/request-answer response))
+                 (= 1 (:formal/request-answer response)) (= profile (:profile response))
+                 (contains? #{true false} present)
+                 (= (if present fields (disj fields :point-graph)) (set (keys response)))
+                 (= false (:trusted response) (:compiler-proof-authority response))
+                 (same? certificate (:certificate response))) "closed unprivileged answer required")
+  (require! (same? (request/reference fresh) (:request-reference response)) "complete request reference differs")
+  (require! (same? (request/subject-reference fresh) (:subject-reference response)) "complete subject reference differs")
+  (source! fresh (:source response))
+  (when (= :supplied-point (get-in response [:source :kind]))
+   (require! present "a supplied point must contain its coordinates"))
+  (when present
+   (require! (or (= :supplied-point (get-in response [:source :kind]))
+                 (and (= :sat (get-in response [:source :status])) (= :query (get-in response [:source :phase]))))
+             "point evidence requires a supplied point or reported query SAT")
+   (graph/check! (:point-graph response)))
+  response))
+
+(defn from-managed
+ "Bind the fresh-owner primitive's portable result. Public callers can invoke
+  this too; it records native claims and never establishes execution provenance."
+ [original raw]
+ (let [fresh (request/check! original) subject (:subject fresh) ref (request/subject-reference fresh)
+       present (contains? raw :assignments)]
+  (require! (and (int? (:formal/managed-graph-reply raw)) (= 1 (:formal/managed-graph-reply raw))
+                 (= execution/profile (:reply-profile raw))
+                 (= false (:trusted raw) (:compiler-proof-authority raw))
+                 (= :not-checked (get-in raw [:certificate :status]))) "managed primitive reply required")
+  (require! (and (same? ref (:request-reference raw)) (same? ref (:question-reference raw)))
+            "fresh primitive original/effective subject binding required")
+  (doseq [context [(:request-graph raw) (:question-graph raw)]]
+   (request/prepare context)
+   (require! (= (graph/bytes (:graph subject)) (graph/bytes (:graph context))) "primitive subject bytes differ"))
+  (require! (and (same? (:policy fresh) (:settings raw))
+                 (same? (graph/of (:policy fresh)) (:settings-reference raw))) "primitive policy differs")
+  (when present (require! (= :run (:assertion-replay raw)) "primitive coordinates require completed replay invocation"))
+  (bind fresh {:kind :reported-native :status (:solver-status raw) :phase (:phase raw)
+               :identity (select-keys (:identity raw) [:backend :worker-sha256 :library-sha256 :sdk])
+               :native-limits (:native-limits raw) :context-state (:context-state raw)
+               :details (select-keys raw [:why :error :preflight :core])}
+        present (when present (graph/encode (:assignments raw))))))
+
+(defn- admit-without-point [fresh]
+ (try
+  (question/with-numeric (:subject fresh) (get-in fresh [:policy :limits])
+   (fn [inventory admitted]
+    (if (= 1 (:formal/question-forest-refusal inventory))
+     {:status :incomplete :admission (:admission inventory)}
+     {:status :complete :admission (:admission admitted)})))
+  (catch error
+   (if (= :term-forest (:kind (ex-data error)))
+    {:status :refused :why {:kind :profile-refusal :message (ex-message error)}}
+    (throw error)))))
+
+(defn recheck
+ "Reconstruct this answer's meaning using a fresh pure scope. No native
+  invocation is established by a record, even when all its labels match."
+ [original response]
+ (let [fresh (request/check! original) response (check! fresh response)
+       base {:formal/request-result 1 :profile result-profile :request-reference (request/reference fresh)
+             :subject-reference (request/subject-reference fresh) :source (:source response)
+             :checked-native-execution false :compiler-proof-authority false :trusted false :certificate certificate}]
+  (if (:point-present response)
+   (let [checked (point/replay fresh (graph/decode! (:point-graph response)))]
+    (merge base {:interpretation :independent-point-replay :point-check checked
+                 :point-replay (:point-replay checked) :verdict (:verdict checked)}))
+   (let [admission (admit-without-point fresh) source (:source response)
+         status (:status source) phase (:phase source)
+         mode (qg/field-data! (:subject fresh) :mode)]
+    (merge base {:point-replay :not-run :subject-admission admission :interpretation :reported-native-status
+                 :verdict (cond (not= :complete (:status admission)) :not-run
+                                (and (= :unsat status) (contains? #{:query :assumption-consistency} phase)) :solver-claim
+                                (and (= :sat status) (= :query phase)) :candidate
+                                (= :unknown status) :unknown (= :unsupported status) :unsupported
+                                (= :not-run status) :not-run :else :error)}
+           (when (and (= :unsat status) (contains? #{:query :assumption-consistency} phase))
+            {:reported-verdict (if (= :assumption-consistency phase) :vacuous (if (= :prove mode) :proved :unsat))}))))))
