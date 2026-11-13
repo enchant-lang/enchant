@@ -127,6 +127,30 @@ for name in ('research/formal-logic/dossier-local.css', 'research/formal-logic/p
              'research/formal-logic/review-serve.bl'):
     assert sha(R / name) == old[name]
     styles[name] = old[name]
+research = read(E / 'research/qualification.json')
+assert research['status'] == 'passed' and research['sdk_pin'] == pin
+assert research['assertions'] == 30 and research['browser_save_qualified'] is False
+for name, digest in research['source_sha256'].items():
+    assert sha(R / name) == digest
+snapshot_path = P / 'elements/word-answer-evidence.bl.org'
+snapshot_capture = read(E / 'research/capture-exit.json')
+assert snapshot_capture['exit_code'] == 0 and snapshot_capture['runtime_retired'] and snapshot_capture['cwd_retired']
+assert snapshot_capture['snapshot_sha256'] == sha(snapshot_path)
+assert len(re.findall(r'^#\+begin_research_element\b', text, re.M)) == 1
+probe = read(E / 'research-browser/audit.json')
+probe_exit = read(E / 'research-browser/exit.json')
+assert probe['passed'] and all(row['passed'] for row in probe['checks'])
+assert probe['snapshot']['revisions'] == 3 and probe['snapshot']['source_fixture_restored']
+assert probe_exit['exit_code'] == 0 and probe_exit['runtime_retired'] and probe_exit['fixture_retired'] and probe_exit['host_stopped']
+probe_source = read(E / 'research-browser/source-pin.json')
+assert probe_source['sdk_pin'] == pin and probe_source['kit_state_sha256'] == sha(K)
+for name, digest in probe_source['source_sha256'].items():
+    assert sha(R / name) == digest
+    assert hashlib.sha256(subprocess.check_output(['git', 'show', probe_source['code_commit'] + ':' + name], cwd=R)).hexdigest() == digest
+probe_visual = read(E / 'research-browser/visual-review.json')
+assert probe_visual['status'] == 'reviewed' and len(probe_visual['inspected']) >= 4
+for name in probe_visual['inspected']:
+    assert name in probe['screenshots'] and sha(E / 'research-browser' / name) == probe_visual['sha256'][name]
 report = {'schema': 'bl.word-dossier-qualification.v1', 'status': 'passed',
           'recorded_utc': datetime.now(timezone.utc).isoformat(), 'sdk_pin': pin,
           'implementation_qualification_sha256': sha(C / 'qualification.json'),
@@ -138,6 +162,9 @@ report = {'schema': 'bl.word-dossier-qualification.v1', 'status': 'passed',
           'document_sha256': sha(document), 'cells': {'total': 91, 'fresh_live': 90, 'recorded_native': 1},
           'recorded_native_sha256': sha(O / 'recorded-float-native.json'),
           'recorded_native_sdk_pin': recorded['sdk_pin'], 'checks': checks,
+          'research_evidence': {'checks': 30, 'snapshot_sha256': sha(snapshot_path),
+                                'browser_checks': len(probe['checks']), 'actual_snapshot_revisions': 3,
+                                'browser_audit_sha256': sha(E / 'research-browser/audit.json'), 'visual_review': probe_visual},
           'host': host, 'kit_state_sha256': sha(K), 'unchanged_rendering_sources': styles,
           'browser': {'focused_checks': len(audits['focused-browser']['checks']),
                       'full_checks': len(audits['full-browser']['checks']), 'visual_review': visual,
