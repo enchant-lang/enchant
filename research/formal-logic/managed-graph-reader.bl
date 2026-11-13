@@ -25,9 +25,10 @@
 (defn- recorded-reference [reference]
  {"profile" "bl/public-data-graph-v1" "sha256" (:sha256 reference)})
 (defn- wire [data]
- (assoc data :nodes (mapv (fn [[tag payload]]
-                          [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)])
-                        (:nodes data))))
+ {"formal/data-graph" 1 "profile" "bl/public-data-graph-v1" "root" (:root data)
+  "nodes" (mapv (fn [[tag payload]]
+                   [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)])
+                 (:nodes data))})
 
 (defn- point [context configuration assignments]
  (question/with-numeric context (:limits configuration)
@@ -127,7 +128,12 @@
                                      (= "valid" (get-in answer ["validation" "status"]))
                                      (contains? answer "assignment-graph"))
                            (let [assignments (graph/decode! (restore (get answer "assignment-graph")))
-                                 coordinate (first (filter (fn [[_ value]] (not (evaluator/unavailable? value))) assignments))]
+                                 checked-names (set (map #(get % "name")
+                                                     (filter #(= "valid" (get % "status"))
+                                                             (get-in answer ["validation" "bindings" "rows"]))))
+                                 coordinate (first (filter (fn [[name value]]
+                                                            (and (contains? checked-names name)
+                                                                 (not (evaluator/unavailable? value)))) assignments))]
                             (when coordinate {:item item :engine engine :answer answer
                                               :assignments assignments :coordinate coordinate}))))) [:z3 :oxiz])))
          (get input "rows")))
@@ -153,6 +159,9 @@
         (fn [[label candidate]]
          (let [message (try (check-answer candidate) nil (catch error (ex-message error)))]
           (require! (some? message) (str "altered fixture accepted: " label))
+          (when (= "rehashed-invalid-coordinate-with-valid-claim" label)
+           (require! (String/contains? message "replayed validation status")
+                     "rehashed invalid coordinate reaches the semantic validation gate"))
           {:id label :status :refused :message message}))
         [["compiler-assurance" (assoc answer "compiler-proof-authority" true)]
          ["trusted-bit" (assoc answer "trusted" true)]
