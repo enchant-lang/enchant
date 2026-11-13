@@ -1,81 +1,8 @@
-(ns formal.rational-preflight
- (:require [formal.data-graph :as graph] [formal.integer-preflight :as integer]))
+(ns formal.rational-preflight (:require [formal.resources.rational :as sdk]))
 
-(def profile :bl/rational-preflight-preview-v1)
-(def defaults {:component-bits 65536 :intermediate-bits 131072 :work-units 1073741824})
-(defn- require! [ok why]
- (when-not ok (throw (ex-info (str "formal.rational-preflight: " why) {:profile profile}))))
-(defn limits [overrides]
- (require! (and (map? overrides) (every? #(contains? defaults %) (keys overrides))) "known limit map required")
- (let [result (merge defaults overrides)]
-  (require! (every? #(and (int? %) (>= % 0)) (vals result)) "nonnegative integer limits required")
-  (graph/encode result) result))
-(defn pair? [value]
- (and (vector? value) (= 2 (count value)) (every? int? value) (not= 0 (second value))))
-(defn- normalization [n d]
- ;; Explicit abstract charging convention for sign handling, Euclidean GCD
- ;; and quotient normalization. This does not measure BEAM instructions or
- ;; establish an implementation/time/heap correspondence theorem.
- (let [width (inc (max n d))] (* 4 width width width)))
-(defn- product [a b] (* (max 1 a) (max 1 b)))
-
-(defn plan
- "Forecast rational operations from existing integer pairs without computing
-  products, GCDs or the primitive. Pair shape does not certify canonicality.
-  :normalize covers one literal/binding check; other operations include SDK
-  child-binding normalization as well as their own actual arithmetic path.
-  No returned plan, width table or counter is an execution capability."
- [op operands overrides]
- (require! (and (keyword? op) (vector? operands) (every? pair? operands)) "keyword operation and integer-pair vector required")
- (let [policy (limits overrides) widths (mapv #(mapv integer/bits %) operands)
-       base {:profile profile :request-reference (graph/of {:profile profile :operation op :operands operands :limits policy})
-             :operation op :argument-bits widths :limits policy :primitive-execution :not-run :compiler-proof-authority false}
-       arity (cond (contains? #{:normalize :neg :to-real :to-int :is-int} op) 1
-                   (contains? #{:add :sub :mul :div :eq :lt :le :gt :ge} op) 2 :else nil)]
-  (if (nil? arity) (assoc base :status :incomplete :reason {:kind :resource-policy-unsupported})
-   (do
-    (require! (= arity (count operands)) "wrong primitive arity")
-    (when (= :to-real op) (require! (= 1 (second (first operands))) "to-real embeds an integer over denominator one"))
-    (let [[an ad] (first widths) [bn bd] (or (second widths) [0 0])
-          largest (reduce max 0 (mapcat identity widths))
-          inputs (if (contains? #{:normalize :to-real} op) 0
-                    (reduce + 0 (map #(normalization (first %) (second %)) widths)))
-          left (+ an bd) right (+ bn ad)
-          result
-          (cond
-           (= :normalize op) {:result-component-bits [an ad] :intermediate-bits largest :work-units (normalization an ad)}
-           (= :to-real op) {:result-component-bits [an 1] :intermediate-bits (max an 1) :work-units (normalization an 1)}
-           (= :neg op) {:result-component-bits [an ad] :intermediate-bits largest
-                       :work-units (+ inputs (max 1 an) (normalization an ad))}
-           (contains? #{:add :sub} op)
-            (let [n (inc (max left right)) d (+ ad bd)]
-             {:result-component-bits [n d] :intermediate-bits (max n d)
-              :work-units (+ inputs (product an bd) (product bn ad) (inc (max left right))
-                             (product ad bd) (normalization n d)
-                             (if (= :sub op) (+ (max 1 bn) (normalization bn bd)) 0))})
-           (= :mul op)
-            (let [n (+ an bn) d (+ ad bd)]
-             {:result-component-bits [n d] :intermediate-bits (max n d)
-              :work-units (+ inputs (product an bn) (product ad bd) (normalization n d))})
-           (= :div op)
-            (if (zero? (first (second operands)))
-             {:result-component-bits [0 0] :intermediate-bits largest :work-units (inc inputs)}
-             (let [n left d right]
-              {:result-component-bits [n d] :intermediate-bits (max n d)
-               :work-units (+ inputs (product an bd) (product ad bn) (normalization n d))}))
-           (= :to-int op)
-            {:result-component-bits [0 0] :result-integer-bits (inc an)
-             :intermediate-bits (+ an ad 2) :work-units (+ inputs (* 4 (inc largest) (inc largest)))}
-           (= :is-int op) {:result-component-bits [0 0] :intermediate-bits largest :work-units (inc inputs)}
-           ;; The SDK's equality compares normalized rational data structurally;
-           ;; ordered comparisons instead form the two cross-products.
-           (= :eq op) {:result-component-bits [0 0] :intermediate-bits largest
-                      :work-units (+ inputs (max 1 (+ an ad bn bd)))}
-           :else {:result-component-bits [0 0] :intermediate-bits (inc (max left right))
-                  :work-units (+ inputs (product an bd) (product bn ad) (* 2 (inc (max left right))))})
-          checks [[:component-bits (reduce max largest (:result-component-bits result))]
-                  [:intermediate-bits (:intermediate-bits result)] [:work-units (:work-units result)]]
-          denied (first (filter (fn [[metric required]] (> required (get policy metric))) checks))]
-     (assoc base :forecast result :status (if denied :incomplete :ready)
-                 :reason (when denied {:kind :resource-limit :metric (first denied)
-                                       :required (second denied) :limit (get policy (first denied))})))))))
+;; Keep the original charging policy explicit. New direct plans use the SDK API.
+(def profile sdk/profile)
+(def defaults sdk/defaults)
+(defn limits [overrides] (sdk/limits overrides))
+(defn pair? [value] (sdk/pair? value))
+(defn plan [op operands overrides] (sdk/plan op operands overrides))
