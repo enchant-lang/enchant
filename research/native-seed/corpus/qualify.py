@@ -186,6 +186,63 @@ def main() -> int:
         prefix = path_for(link["prelude"]["path"]).read_bytes() + b"\n"
         if not program_bytes.startswith(prefix) or program_bytes[len(prefix):] != path_for(native["body"]["path"]).read_bytes():
             raise RuntimeError("original actor body is not the exact suffix after its frozen prelude")
+        # Replace only the exact frozen native-text FFI suffix with its pinned
+        # compiled addon. Every byte after the frozen host is unchanged BL code.
+        closure_dir = path_for(link["closure-manifest"]["path"]).resolve().parent
+        frozen_host_path = closure_dir / "host.scm"
+        text_source_path = base / "host/native-text.scm"
+        addon_path = closure_dir / "text.o1"
+        addon_receipt_path = closure_dir / "text-addon.json"
+        export_path = closure_dir / "chunk-export.json"
+        frozen_host_sha = bind(frozen_host_path)
+        text_source_sha = bind(text_source_path)
+        bind(addon_receipt_path)
+        bind(export_path)
+        export = json.loads(export_path.read_text())
+        if (export.get("schema") != "bl.native.chunk-export" or export.get("version") != 2
+                or export["prelude_sha256"] != link["prelude"]["sha256"]
+                or export["inputs"]["host_sha256"] != frozen_host_sha):
+            raise RuntimeError("GSI transport host differs from the exact emitted prelude")
+        frozen_host = frozen_host_path.read_bytes()
+        text_suffix = b"\n" + text_source_path.read_bytes()
+        if not frozen_host.endswith(text_suffix):
+            raise RuntimeError("frozen host lacks its exact native-text FFI suffix")
+        pure_host = frozen_host[:-len(text_suffix)]
+        header = b";; BL native compiler. Generated from canonical BL source.\n"
+        frozen_prefix = header + frozen_host + b"\n"
+        if not program_bytes.startswith(frozen_prefix):
+            raise RuntimeError("GSI transport cannot identify the exact frozen host boundary")
+        receipt = json.loads(addon_receipt_path.read_text())
+        expected_addon_key = hashlib.sha256((text_source_sha + digest(tools_path)).encode()).hexdigest()
+        if receipt.get("key") != expected_addon_key:
+            raise RuntimeError("compiled native-text receipt does not bind exact Source/toolchain")
+        addon_sha = bind(addon_path, receipt["sha256"])
+        bind(Path(tools["gambit"]) / "bin/gsc")
+        library_matches = re.findall(rb'^#define BL_PCRE_PATH "([^"\n]+)"$', text_source_path.read_bytes(), re.MULTILINE)
+        if len(library_matches) != 1:
+            raise RuntimeError("pinned native-text runtime library declaration changed")
+        bind(Path(os.fsdecode(library_matches[0])))
+        compiled_bl_suffix = program_bytes[len(frozen_prefix):]
+        load_addon = ("\n(load " + json.dumps(str(addon_path), ensure_ascii=False) + ")\n").encode()
+        interpreted_bytes = header + pure_host + load_addon + compiled_bl_suffix
+        interpreted_path = evidence / "original-actors-gsi.scm"
+        interpreted_path.write_bytes(interpreted_bytes)
+        bind(interpreted_path)
+        if not interpreted_bytes.endswith(compiled_bl_suffix):
+            raise RuntimeError("GSI transport changed emitted BL bytes")
+        native_program_path = interpreted_path
+        report["native_transport"] = {
+            "kind": "gsi-with-exact-compiled-native-text-addon",
+            "original_program": native["artifact"],
+            "frozen_host": {"path": str(frozen_host_path), "sha256": frozen_host_sha},
+            "pure_host_sha256": hashlib.sha256(pure_host).hexdigest(),
+            "ffi_source": {"path": str(text_source_path), "sha256": text_source_sha},
+            "addon": {"path": str(addon_path), "sha256": addon_sha},
+            "receipt": {"path": str(addon_receipt_path), "sha256": digest(addon_receipt_path)},
+            "unchanged_bl_suffix_sha256": hashlib.sha256(compiled_bl_suffix).hexdigest(),
+            "unchanged_bl_suffix_bytes": len(compiled_bl_suffix),
+            "executed_program": {"path": str(interpreted_path), "sha256": digest(interpreted_path)},
+            "source_assertion_adaptation": "none", "builds_launched": False}
         partition = json.loads(path_for(link["closure-manifest"]["path"]).read_text())
         for record in [partition["metadata"], *partition["units"]]:
             identity(record)
@@ -232,7 +289,7 @@ def main() -> int:
         canonical = None
         oracle_budgets = {}
         for budget in budgets:
-            result = run("native", budget, [str(gsi), str(path_for(native["artifact"]["path"]))])
+            result = run("native", budget, [str(gsi), str(native_program_path)])
             report["results"][budget] = {"native": result}
             if js is not None:
                 cached = cache["budgets"].get(budget) if args.reuse_js else None
