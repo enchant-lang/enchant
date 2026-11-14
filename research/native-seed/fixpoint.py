@@ -57,6 +57,8 @@ def main() -> None:
     parser.add_argument("--actor-body", type=Path)
     parser.add_argument("--actor-oracle", type=Path)
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument("--host-optimization", type=int, choices=(0, 1), default=0,
+                        help="Clang optimization level for the indivisible ordinal-zero host only")
     parser.add_argument("--compile-stage1-only", action="store_true",
                         help="checkpoint the real native stage1 image; never qualify a fixpoint")
     args = parser.parse_args()
@@ -104,6 +106,7 @@ def main() -> None:
                             "status": status, "error": error, "inputs": inputs,
                             "unit_target_bytes": TARGET, "unit_hard_bytes": HARD,
                             "compile_deadline_seconds": COMPILE_DEADLINE,
+                            "host_optimization": args.host_optimization,
                             "builds": builds, "runs": runs})
 
     def run(label, argv, *, cwd=out, timeout=COMPILE_DEADLINE, env=None):
@@ -277,45 +280,62 @@ def main() -> None:
             source = out / (name + ".scm")
             folder, manifest = split_source(source)
             build = {"stage": name, "source_sha256": digest(source), "split_manifest": str(folder / "manifest.json"),
-                     "split_manifest_sha256": digest(folder / "manifest.json"), "units": []}
+                     "split_manifest_sha256": digest(folder / "manifest.json"), "units": [],
+                     "host_optimization": args.host_optimization,
+                     "link_metadata_c_flags": flags, "native_link_flags": link_flags}
             builds.append(build)
+            if (manifest["units"][0].get("file") != "host.scm"
+                    or manifest["units"][0].get("indivisible_ffi_host") is not True):
+                raise RuntimeError("ordinal zero must be the frozen indivisible FFI host")
             c_units, objects = [], []
             for ordinal, row in enumerate(manifest["units"]):
+                # This request intentionally excludes the runtime option:
+                # Scheme -> C is identical at host -O0 and host -O1.
                 request = {"source_sha256": row["sha256"], "ordinal": ordinal, "tools": tool_identity}
                 directory = out / "native-unit-cache" / key(request)
                 directory.mkdir(parents=True, exist_ok=True)
                 stem = f"unit_{ordinal:04d}_{key(request)[:16]}"
-                scheme, cfile, obj = (directory / (stem + suffix) for suffix in (".scm", ".c", ".o"))
+                scheme, cfile = (directory / (stem + suffix) for suffix in (".scm", ".c"))
+                optimization = args.host_optimization if ordinal == 0 else 0
+                object_flags = ["-O" + str(optimization), *flags[1:]]
+                obj = directory / (stem + ".O" + str(optimization) + ".o")
                 raw = (folder / row["file"]).read_bytes()
                 if not scheme.is_file() or scheme.read_bytes() != raw:
                     scheme.write_bytes(raw)
                 reused_c = cached_phase(name + f"-unit-{ordinal:04d}-scheme-to-c",
                     [gsc, "-c", "-o", cfile, scheme], directory, directory / "scheme-c.json", request, [cfile])
-                object_request = {"request": request, "c_sha256": digest(cfile)}
+                object_request = {"request": request, "c_sha256": digest(cfile), "flags": object_flags}
                 reused_o = cached_phase(name + f"-unit-{ordinal:04d}-object",
-                    [clang, *flags, "-c", cfile, "-o", obj], directory,
-                    directory / "object.json", object_request, [obj])
+                    [clang, *object_flags, "-c", cfile, "-o", obj], directory,
+                    directory / ("object-O" + str(optimization) + ".json"), object_request, [obj])
                 c_units.append(cfile)
                 objects.append(obj)
                 build["units"].append({"ordinal": ordinal, **row, "c": str(cfile), "c_sha256": digest(cfile),
                                        "object": str(obj), "object_sha256": digest(obj),
+                                       "c_flags": object_flags,
                                        "reused_c": reused_c, "reused_object": reused_o})
                 progress()
                 print(name, f"UNIT {ordinal + 1}/{len(manifest['units'])}", "REUSED" if reused_c and reused_o else "BUILT", flush=True)
+            # Gambit's link translation consumes C metadata, independently of
+            # which optimization built each object. Reuse it across the option.
             link_request = {"tools": tool_identity, "units": [
-                {"c": str(c), "c_sha256": digest(c), "object": str(o), "object_sha256": digest(o)}
-                for c, o in zip(c_units, objects)]}
+                {"c": str(c), "c_sha256": digest(c)} for c in c_units]}
             directory = out / "native-link-cache" / key(link_request)
             directory.mkdir(parents=True, exist_ok=True)
-            link_c, link_o, executable = directory / "program_.c", directory / "program_.o", directory / "program"
+            link_c, link_o = directory / "program_.c", directory / "program_.o"
             cached_phase(name + "-link-unit", [gsc, "-link", "-o", link_c, *c_units], directory,
                          directory / "link-c.json", link_request, [link_c])
-            object_request = {"link": link_request, "c_sha256": digest(link_c)}
+            object_request = {"link": link_request, "c_sha256": digest(link_c), "flags": flags}
             cached_phase(name + "-link-object", [clang, *flags, "-c", link_c, "-o", link_o], directory,
                          directory / "link-object.json", object_request, [link_o])
-            executable_request = {"link": link_request, "link_object_sha256": digest(link_o)}
+            executable_request = {"link": link_request, "link_object_sha256": digest(link_o),
+                "objects": [{"path": str(o), "sha256": digest(o), "flags": unit["c_flags"]}
+                            for o, unit in zip(objects, build["units"])], "link_flags": link_flags}
+            image_directory = directory / "images" / key(executable_request)
+            image_directory.mkdir(parents=True, exist_ok=True)
+            executable = image_directory / "program"
             cached_phase(name + "-native-link", [clang, *objects, link_o, *link_flags, "-o", executable], directory,
-                         directory / "native-link.json", executable_request, [executable])
+                         image_directory / "native-link.json", executable_request, [executable])
             destination = out / name
             shutil.copy2(executable, destination)
             build["executable_sha256"] = digest(destination)
@@ -391,6 +411,7 @@ def main() -> None:
                   "stage3": "original BL source compiled by native stage2",
                   "stage2-sha256": h2, "stage3-sha256": h3, "stage2-stage3-byte-equal": True,
                   "stage1-stage2-source-corpus-equal": True, "stage1-stage2-original-actor-corpus-equal": True,
+                  "host_optimization": args.host_optimization,
                   "actor_oracle_sha256": digest(args.actor_oracle), "actor_results": actor_results,
                   "inputs": inputs, "builds": builds, "runs": runs}
         save(evidence, report)
