@@ -41,7 +41,7 @@ def main():
     (EVIDENCE / 'qualification.json').unlink(missing_ok=True)
     inputs = [BASE/'host.scm', BASE/'kernel.bl', BASE/'fixture.bl', BASE/'build.bl',
               BASE/'src/native/scheme.bl', ROOT/'priv/lib/js/actor/runtime.bl',
-              BASE/'sdk-pin.json', BASE/'toolchain-pin.json', Path(__file__).resolve()]
+              BASE/'sdk-pin.json', BASE/'toolchain-pin.json', BASE/'js-oracle.bl', Path(__file__).resolve()]
     hashes = {str(p.relative_to(ROOT)): digest(p) for p in inputs}
     run('build', [BASE/'run', 'run', BASE/'build.bl'], cwd=ROOT, timeout=260)
     scheme = run('scheme', [GAMBIT/'bin/gsi', OUT/'actors.scm'])
@@ -67,14 +67,20 @@ def main():
     expected = [line for line in native.splitlines() if line.startswith('PASS ')]
     assert len(expected) == 27 and len(set(expected)) == 27 and 'NATIVE_SEED_ACTORS_OK' in native, native
     assert 'FAIL' not in native
+    run('js-build', [BASE/'run', 'run', BASE/'js-oracle.bl'], cwd=ROOT, timeout=260)
+    javascript = run('javascript', ['node', OUT/'js/out/actors.mjs'])
+    shared = [line for line in expected if line != 'PASS cleanup-and-bounded-turns']
+    assert shared == [line for line in javascript.splitlines() if line.startswith('PASS ')]
+    assert 'NATIVE_SEED_ACTORS_OK' in javascript and 'FAIL' not in javascript
     assert all(digest(ROOT/p) == h for p,h in hashes.items()), 'inputs changed during qualification'
     artifacts = {p.name: {'bytes': p.stat().st_size, 'sha256': digest(p)}
                  for p in OUT.iterdir() if p.suffix in {'.scm', '.c', '.ll'} or p.name in {'actors-native','actors-llvm'}}
     report = {'status': 'pass', 'scope': 'seed actor subset; virtual time; prebuilt Gambit GC/runtime',
-              'self_hosted': False, 'checks': expected, 'inputs': hashes, 'artifacts': artifacts,
+              'self_hosted': False, 'checks': expected, 'javascript_shared_checks': shared,
+              'inputs': hashes, 'artifacts': artifacts,
               'sdk': json.loads((BASE/'sdk-pin.json').read_text()), 'tools': TOOLS, 'runs': RUNS}
     (EVIDENCE/'qualification.json').write_text(json.dumps(report, indent=2)+'\n')
-    print(f'{len(expected)} checks: Scheme → C and LLVM → native agree', flush=True)
+    print(f'{len(expected)} native checks; {len(shared)} shared fixture checks agree with production JavaScript', flush=True)
 
 if __name__ == '__main__':
     main()
