@@ -27,7 +27,7 @@ def main():
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
                        "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
                        "fixtures/host-compiler-cache-check.scm", "fixtures/host-global-cache-check.scm",
-                       "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm"]
+                       "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm", "fixtures/host-runtime-id-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -54,12 +54,14 @@ def main():
     (OUT / "extra.scm").write_text(common + "\n" + (BASE / "fixtures/host-extra-check.scm").read_text()
         + "\n" + (BASE / "fixtures/host-symbol-name-check.scm").read_text()
         + "\n" + (BASE / "fixtures/host-raw-map-get-check.scm").read_text()
-        + "\n" + (BASE / "fixtures/host-array-check.scm").read_text())
+        + "\n" + (BASE / "fixtures/host-array-check.scm").read_text()
+        + "\n" + (BASE / "fixtures/host-runtime-id-check.scm").read_text())
     extra = run("storage-and-raw-leaves", [GAMBIT / "bin/gsi", "extra.scm"])
     assert "native extra checks passed" in extra, extra
     assert "native symbol-name checks: 15" in extra, extra
     assert "native raw-map-get checks: 19" in extra, extra
     assert "NATIVE_HOST_ARRAY_TUPLE_ABI_PASS 13" in extra, extra
+    assert "NATIVE_RUNTIME_ID_ABI_PASS 7" in extra, extra
     (OUT / "source-frames.scm").write_text(common + "\n"
         + (BASE / "host/host-compiler.scm").read_text() + "\n"
         + (BASE / "fixtures/host-compiler-cache-check.scm").read_text() + "\n"
@@ -67,7 +69,7 @@ def main():
         + (BASE / "host/host-source-frames.scm").read_text() + "\n"
         + (BASE / "fixtures/host-source-frames-check.scm").read_text())
     frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
-    assert "native compiler-cache checks: 49" in frames, frames
+    assert "native compiler-cache checks: 56" in frames, frames
     assert "native global-cache checks: 32" in frames, frames
     assert "native source-frame checks passed" in frames, frames
     (OUT / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()

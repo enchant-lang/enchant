@@ -515,14 +515,21 @@
       (native-resolve-call (bl-nth variadic 1) (append (native-take xs minimum) (list (native-drop xs minimum))))))
     (else (error "no callable arity"))))
   (cons f xs)))
+;; The original resolver leaves genuine procedures and their argument spine
+;; unchanged. Avoid allocating its transient (callee . arguments) pair only
+;; while that exact planner is still installed. C/Source/custom planners keep
+;; the complete generic path, including target/argument replacement and errors.
+(define native-invoke-original-resolve native-resolve-call)
 (set! bl-invoke (lambda (f xs)
- (let* ((call (native-resolve-call f xs)) (f (car call)) (xs (cdr call)))
-  (cond ((procedure? f) (apply f xs))
-   ((native-keyword? f) (apply bl-get (cons (car xs) (cons f (cdr xs)))))
-   ((bl-tag? f 'map) (apply bl-get (cons f xs)))
-   ((bl-tag? f 'vec) (apply bl-nth (cons f xs)))
-   ((bl-tag? f 'set) (if (native-map-has? (vector-ref f 1) (car xs)) (car xs) bl-nil))
-   (else (error "value is not callable"))))))
+ (if (and (procedure? f) (eq? native-resolve-call native-invoke-original-resolve))
+  (apply f xs)
+  (let* ((call (native-resolve-call f xs)) (f (car call)) (xs (cdr call)))
+   (cond ((procedure? f) (apply f xs))
+    ((native-keyword? f) (apply bl-get (cons (car xs) (cons f (cdr xs)))))
+    ((bl-tag? f 'map) (apply bl-get (cons f xs)))
+    ((bl-tag? f 'vec) (apply bl-nth (cons f xs)))
+    ((bl-tag? f 'set) (if (native-map-has? (vector-ref f 1) (car xs)) (car xs) bl-nil))
+    (else (error "value is not callable")))))))
 
 ;; A raise has explicit class/reason/raw trace. Catch variables and finally
 ;; flags are lexical; scheduler suspension never runs language finally.

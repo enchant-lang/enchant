@@ -96,7 +96,14 @@
  (cond ((not env) #f) ((null? ps) (and (null? vs) env)) ((null? vs) #f)
        (else (bl-match-args (cdr ps) (cdr vs) (bl-match (car ps) (car vs) env)))))
 
-(define seed-state (bl-map (bl-key "runtime") "native-seed-1"))
+;; Host instance identity follows JS newRuntime: allocate a positive integer,
+;; independently of clocks and pid/ref/table counters. The compiled host is
+;; loaded once; every future host runtime factory uses this same allocator.
+(define native-runtime-id-counter 0)
+(define (native-allocate-runtime-id!)
+ (set! native-runtime-id-counter (+ native-runtime-id-counter 1))
+ native-runtime-id-counter)
+(define seed-state (bl-map (bl-key "runtime") (native-allocate-runtime-id!)))
 (define seed-self bl-nil)
 (define seed-clock 0)
 (define seed-critical 0)

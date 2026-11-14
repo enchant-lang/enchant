@@ -211,4 +211,51 @@
    (set! native-export-arities saved-arities)
    (set! native-global-registry saved-globals)
    (native-refresh-remote-cache!))))
+;; A genuine procedure may bypass only the ORIGINAL planner. Replacing the
+;; planner remains observable without replacing the invoker or the procedure.
+(let ((original native-resolve-call) (body-calls 0) (planned 0))
+ (let ((plain (bl-register-callable!
+               (lambda (value) (set! body-calls (+ body-calls 1)) (+ value 10)) 1))
+       (marker (list 'fixture-resolver-error)))
+  (native-cache-check "plain invoke keeps value effects and callable metadata"
+   (and (= 17 (bl-invoke plain '(7))) (= body-calls 1)
+        (native-callable-accepts? plain 1) (not (native-callable-accepts? plain 2))))
+  (dynamic-wind
+   (lambda ()
+    (set! native-resolve-call (lambda (callee arguments)
+     (set! planned (+ planned 1))
+     (cond ((eq? callee plain)
+            (cons (lambda (value) (+ value 100)) (list (+ 1 (car arguments)))))
+           ((eq? callee (bl-key "fixture-resolve-sentinel"))
+            (cons (lambda (value) (+ value 1000)) arguments))
+           (else (original callee arguments))))))
+   (lambda ()
+    (native-cache-check "replaced planner changes plain target and arguments"
+     (and (= 108 (bl-invoke plain '(7))) (= planned 1) (= body-calls 1)))
+    (native-cache-check "replaced planner still owns nonprocedure values"
+     (and (= 1008 (bl-invoke (bl-key "fixture-resolve-sentinel") '(8))) (= planned 2)))
+    (set! native-resolve-call (lambda (callee arguments)
+     (if (eq? callee plain) (raise marker) (original callee arguments))))
+    (let ((caught #f))
+     (with-exception-catcher (lambda (error) (set! caught error))
+      (lambda () (bl-invoke plain '(9))))
+     (native-cache-check "replaced planner exception precedes plain body"
+      (and (eq? caught marker) (= body-calls 1)))))
+   (lambda () (set! native-resolve-call original)))
+  (native-cache-check "restored planner restores the original procedure"
+   (and (= 19 (bl-invoke plain '(9))) (= body-calls 2)))
+  (let ((baseline #f) (actual #f))
+   (with-exception-catcher (lambda (error) (set! baseline error)) (lambda () (apply plain '())))
+   (with-exception-catcher (lambda (error) (set! actual error)) (lambda () (bl-invoke plain '())))
+   (native-cache-check "plain wrong arity preserves actual procedure and arguments"
+    (and (wrong-number-of-arguments-exception? actual)
+         (wrong-number-of-arguments-exception? baseline)
+         (eq? (wrong-number-of-arguments-exception-procedure actual)
+              (wrong-number-of-arguments-exception-procedure baseline))
+         (equal? (wrong-number-of-arguments-exception-arguments actual)
+                 (wrong-number-of-arguments-exception-arguments baseline))
+         (= body-calls 2))))
+  (let ((callback (native-mark-host-callable! (lambda (value) (bl-invoke plain (list value))))))
+   (native-cache-check "marked callback retains nested invocation behavior"
+    (and (= 20 (bl-invoke callback '(10))) (= body-calls 3))))))
 (display "native compiler-cache checks: ") (display native-cache-checks) (newline)
