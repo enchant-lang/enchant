@@ -59,8 +59,11 @@ try{
     if(!await evaluate(`document.querySelector('${section} details.seq-narrow').open`))await call({op:'click',selector:summary});
     await evaluate(`document.querySelector('${section} details.seq-narrow .scrollx').scrollIntoView({block:'center',behavior:'instant'})`);
     check('phone: full diagram opens locally '+name,await evaluate(`document.querySelector('${section} details.seq-narrow').open`));
+    await evaluate(`document.querySelector('${section} details.seq-narrow .scrollx').scrollLeft=0`);
+    check('phone: diagram left edge resets '+name,await evaluate(`document.querySelector('${section} details.seq-narrow .scrollx').scrollLeft===0`));
     await shot('phone-wide-flow-diagram-left-'+name);
     await evaluate(`(()=>{const e=document.querySelector('${section} details.seq-narrow .scrollx');e.scrollLeft=e.scrollWidth})()`);
+    check('phone: diagram right edge reached '+name,await evaluate(`(()=>{const e=document.querySelector('${section} details.seq-narrow .scrollx');return e.scrollLeft>0&&e.scrollLeft+e.clientWidth>=e.scrollWidth-1})()`));
     await shot('phone-wide-flow-diagram-right-'+name);
     await call({op:'click',selector:summary});
    }
