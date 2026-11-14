@@ -1,5 +1,5 @@
 (ns native.inspect
- (:require [compiler :as c] [codebase] [system.analyze :as analyze]
+ (:require [compiler :as c] [codebase] [system.analyze :as analyze] [reader-node :as rn]
            [bl.json :as json]))
 
 (doseq [source ["(fn add [x] (+ x 1))" "(fn [x] (get x :status))"
@@ -18,9 +18,17 @@
         index (codebase/index-source {} ns-name source {:mode :calls})]
    {:path path :namespace ns-name :functions (count (:fn index))
     :calls (:calls index)
+    :definitions (vec (keep (fn [form]
+      (when-let [name (codebase/defn-form form)]
+       {:name name :position (rn/node-pos form)
+        :annotations (into {} (map (fn [[k v]] [k (codebase/node-data v)])
+          (or (codebase/name-annotation (second (rn/node-items form))) {})))}))
+      (BeamLisp.Ns.Reader/read source {:file path})))
     :sha256 (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))})) files))
 (File/write! "research/native-seed/evidence/codebase.json" (json/encode facts))
 (println "CODEBASE_INDEX_SAVED")
-(let [source "(defn scan [probe messages] (if (empty? messages) :nomatch (let [r (probe (first messages))] (if (= r :nomatch) (scan probe (rest messages)) r))))"]
- (File/write! "research/native-seed/evidence/analysis.edn" (pr-str (analyze/analyze source)))
+(let [path "priv/std/proc/mailbox.bl" source (File/read! path)]
+ (File/write! "research/native-seed/evidence/analysis.edn"
+  (pr-str {:source path :sha256 (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))
+           :scope :actual-source-summaries :summaries (analyze/analyze source)}))
  (println "SYSTEM_ANALYSIS_SAVED"))

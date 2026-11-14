@@ -79,7 +79,7 @@
  (and env
   (case (car p)
    ((var) (let ((old (assoc (cadr p) env)))
-            (if old (and (equal? (cdr old) v) env) (cons (cons (cadr p) v) env))))
+            (if old (and (bl-equal? (cdr old) v) env) (cons (cons (cadr p) v) env))))
    ((lit) (and (bl-equal? (cadr p) v) env))
    ((nil) (and (null? v) env))
    ((tuple) (and (bl-tag? v 'tuple) (bl-match-args (cadr p) (bl-items v) env)))

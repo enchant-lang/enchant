@@ -44,7 +44,7 @@ def main():
               BASE/'sdk-pin.json', BASE/'toolchain-pin.json', Path(__file__).resolve()]
     hashes = {str(p.relative_to(ROOT)): digest(p) for p in inputs}
     run('build', [BASE/'run', 'run', BASE/'build.bl'], cwd=ROOT, timeout=260)
-    run('scheme', [GAMBIT/'bin/gsi', OUT/'actors.scm'])
+    scheme = run('scheme', [GAMBIT/'bin/gsi', OUT/'actors.scm'])
     run('scheme-to-c', [GAMBIT/'bin/gsc', '-c', 'actors.scm'])
     run('c-link-unit', [GAMBIT/'bin/gsc', '-link', 'actors.c'])
     units = ['actors', 'actors_']
@@ -59,13 +59,13 @@ def main():
     run('c-link', [CLANG, 'actors.o', 'actors_.o', *libs, '-o', 'actors-native'])
     native = run('native', [OUT/'actors-native'])
     for name in units:
-        run('llvm-emit-'+name, [CLANG, *flags, '-S', '-emit-llvm', name+'.c', '-o', name+'.ll'])
+        run('llvm-emit-'+name, [CLANG, *flags, '-fno-discard-value-names', '-S', '-emit-llvm', name+'.c', '-o', name+'.ll'])
         run('llvm-object-'+name, [CLANG, '-c', name+'.ll', '-o', name+'-llvm.o'])
     run('llvm-link', [CLANG, 'actors-llvm.o', 'actors_-llvm.o', *libs, '-o', 'actors-llvm'])
     llvm = run('llvm-native', [OUT/'actors-llvm'])
-    assert native == llvm, 'C and LLVM programs disagree'
+    assert scheme == native == llvm, 'Scheme, C and LLVM programs disagree'
     expected = [line for line in native.splitlines() if line.startswith('PASS ')]
-    assert len(expected) >= 20 and 'NATIVE_SEED_ACTORS_OK' in native, native
+    assert len(expected) == 27 and len(set(expected)) == 27 and 'NATIVE_SEED_ACTORS_OK' in native, native
     assert 'FAIL' not in native
     assert all(digest(ROOT/p) == h for p,h in hashes.items()), 'inputs changed during qualification'
     artifacts = {p.name: {'bytes': p.stat().st_size, 'sha256': digest(p)}
