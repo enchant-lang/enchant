@@ -1,9 +1,10 @@
 # A small proof strategy for finite word questions
 
-The isolated module in `prototypes/word-exhaustion` is source preparation only.
-It has not run and has no qualification receipt. It is outside the SDK, the
-common answer certificate slot, compiler decisions and the live dossier.
-Finish qualifying the word-policy SDK before checking this next slice.
+The isolated module in `prototypes/word-exhaustion` passed **82 assertions** on
+the selected immutable word SDK. The [qualification](evidence/word-exhaustion-prototype/qualification.json)
+binds the exact source, actual native comparison and resource-capped run. It is
+outside the SDK, the common answer certificate slot and compiler decisions.
+The live word chapter retains its separately dated SDK qualification scope.
 
 A native unsatisfiable answer remains a claim. A separate exhaustive checker
 can establish some small finite propositions by deriving every possible Boolean
@@ -43,22 +44,24 @@ of the native request. Before entering the common answer interface, its own
 checking work must be composed with that interface's caller resource account;
 this prototype does not establish that integration contract.
 
-The prospective checks cover every valuation at widths one through five,
+The actual checks cover every valuation at widths one through five,
 wrapping, actual false claims, mixed Boolean/word domains, contradictory
 assumptions, changed logical-subject references, reuse across backend choices, added trust/coverage
 fields, floating versions, oversized domains, unbounded sorts, unused quantification and solver-denied
-execution. A separate planned comparison asks both real native owners for the
+execution. A separate [recorded comparison](evidence/word-exhaustion-prototype/native.json) asks both real native owners for the
 same three-bit wrapping theorem: native UNSAT must remain a solver claim, while
-the independently exhausted candidate must check all eight points. These are planned checks until the actual runner passes.
+the independently exhausted candidate checks all eight points. Both actual
+native owners returned UNSAT, retaining the solver-claim verdict. Their exact
+identities, question references and independent checking records are saved.
 
-A passing implementation run would still trust this enumeration checker, SDK
+This implementation run still trusts this enumeration checker, SDK
 admission and word semantics, BL compilation and BEAM. It would establish no
 mechanical soundness theorem, Source outcome relation, checked native history,
 compiler preservation, general QF_BV completeness or language-wide totality.
 The next architectural step would connect a reviewed proof strategy to the
 common answer interface while retaining these separate assumptions.
 
-The prepared checked result also reconstructs an assumption ledger from the
+The checked result also reconstructs an assumption ledger from the
 actual admitted question. Each label points to its original term node under
 the bound complete-subject reference, rather than exporting owner-local term
 IDs as portable meaning. The negated goal is not listed as an assumption.
