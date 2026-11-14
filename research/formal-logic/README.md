@@ -723,8 +723,9 @@ It is an isolated prototype, not yet part of the selected SDK. The [native Strin
 review](STRING-REPRESENTATION-REVIEW.md) binds the actual immutable worker and
 locked crate sources without claiming a quantified-domain theorem.
 
-The next isolated [request-header prototype](proposals/request-header-plan.md)
+The qualified isolated [request-header prototype](proposals/request-header-plan.md)
 compares a single canonical graph check with the repeated field-subgraph path.
-It has not run yet and adds no selected SDK capability. The next coherent
+It passed 54 assertions and recorded nine versus one graph-check invocations
+on its fixture; it adds no selected SDK capability or general timing claim. The next coherent
 [evidence/obligation batch](proposals/evidence-obligation-batch-design.md) will
 connect the qualified semantic pieces while preserving old packet identities.
