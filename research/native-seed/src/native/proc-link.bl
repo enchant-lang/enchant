@@ -8,6 +8,9 @@
            [proc.bus :as bus] [proc.reg :as reg] [clojure.string :as string] [bl.json :as json]))
 
 (def kernel "native.kernel")
+(def original-actor-corpus
+ {:path "research/js-actors/test.bl"
+  :sha256 "5f2ad8223fd9f053157b65266d3ee14e7fe8567b6196a78ed7ac955132b9a5c5"})
 (def helpers
  {"proc.bus" {:path "priv/std/proc/bus.bl"
                :sha256 "0f661669d8e1516a3e19f77e77d0cf75dd6b8af40495a18043f5a8747e79c62a"}
@@ -82,6 +85,7 @@
   (map (fn [definition]
     (assoc definition :ns (:ns unit) :path (:path unit) :requires (:requires unit)
      :external? (boolean (:native-external? unit)) :source-sha256 (:source-sha256 unit)
+     :prototype-actor-abi? (boolean (:prototype-actor-abi? unit))
      :shape (ir/function-shape (:node definition)))) (:defs unit))) units)))
 (defn body-table [definitions]
  (reduce (fn [table definition]
@@ -153,7 +157,10 @@
 (defn selected-remote [definition node bodies by-module remote-aliases leaves]
  (let [module (:mod node) function (erlang/atom_to_binary (:fun node)) arity (count (:args node))
        key (str (erlang/atom_to_binary module) "/" function "/" arity)
-       alias (get remote-aliases [module (:fun node) arity])
+       alias (or (when (and (:prototype-actor-abi? definition) (= module :erlang)
+                            (= function "raise") (contains? #{2 3} arity))
+                   (qname kernel "native-prototype-raise!"))
+                 (get remote-aliases [module (:fun node) arity]))
        namespace (get by-module module) logical (logical-name function)]
   (when (or (= module :ets)
             (contains? #{"erlang/send_after/3" "erlang/send_after/4" "erlang/start_timer/3"
@@ -217,6 +224,7 @@
 (defn options-for [definition context]
  (let [base (ev/context (:ns definition))]
   (assoc base :runtime-namespace kernel :namespace-qualified? (not= kernel (:ns definition))
+   :source-frames? (boolean (:source-frames? context))
    :receive-source (value-source {:target (qname kernel "rt-receive")})
    :global-resolver (fn [node] (value-source (selected-global definition node (:bodies context) (:aliases context))))
    :remote-resolver (fn [node]
@@ -259,6 +267,10 @@
         runtime-unit (project-protocol (prepare (:runtime request) kernel))
         bridge-unit (project-protocol (prepare (:bridges request) kernel))
         app-unit (project-protocol (prepare (:application request) kernel))
+        _ (when (and (:original-actor-corpus? request)
+                     (not= original-actor-corpus (source-identity (:application request))))
+            (throw (ex-info "native proc link: original actor compatibility requires its exact source identity" {})))
+        app-unit (assoc app-unit :prototype-actor-abi? (boolean (:original-actor-corpus? request)))
         own-units (vec (concat [runtime-unit bridge-unit] helper-units [app-unit]))
         own-namespaces (set (map :ns own-units))
         prelude-units (vec (map #(assoc % :native-external? true)
@@ -277,7 +289,8 @@
                     :Elixir.BeamLisp.CompilerData "host.compiler-data"
                     :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta")
         leaves (set (get (json/decode (File/read! (:leaves request))) "registered_leaves"))
-        context {:bodies bodies :aliases aliases :remote-aliases remote-aliases :by-module by-module :leaves leaves}
+        context {:bodies bodies :aliases aliases :remote-aliases remote-aliases :by-module by-module :leaves leaves
+                 :source-frames? (boolean (:source-frames? request))}
         own-paths (set (map :path own-units))
         roots (named-definitions [runtime-unit bridge-unit app-unit])
         graph (reachable roots context)
@@ -287,6 +300,7 @@
             (throw (ex-info "native proc link: application has no main" {:path (:application request)})))
         output (str (File/read! (:prelude request)) "\n"
                   (File/read! (:host-link request)) "\n"
+                  (string/join "\n" (map (fn [path] (File/read! path)) (:host-extensions request))) "\n"
                   (string/join "" (map module-source own-units))
                   (string/join "" (map #(emit-definition % context) emitted))
                   "\n(bl-invoke " (value-source {:target (qname kernel "bl-main")})
@@ -297,6 +311,12 @@
                :closure-manifest (source-identity (:closure-manifest request))
                :prelude (source-identity (:prelude request)) :links (source-identity (:links request))
                :host-link (source-identity (:host-link request))
+               :host-extensions (mapv source-identity (:host-extensions request))
+               :source-frames? (boolean (:source-frames? request))
+               :compatibility (if (:original-actor-corpus? request)
+                [{:source original-actor-corpus :projection :legacy-js-actor-raise-envelope
+                  :targets [[:erlang :raise 2] [:erlang :raise 3]]
+                  :authority "priv/lib/js/actor/host.mjs:BLRaise and ERLANG.raise"}] [])
                :units (mapv #(select-keys % [:ns :path :source-sha256 :module :base-module :wire-protocol]) own-units)
                :compile-time-registrations [{:namespace "proc.bus" :form '(extend-clause! :bus bus-clause)
                                              :owner :explicit-target-vocabulary}
