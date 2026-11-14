@@ -1,0 +1,155 @@
+;; A service is a contract and an authority boundary, independent of its VM.
+;; Wire maps have string keys. Never intern names received from another VM.
+(ns service-world.core (:require [bl.json :as json]))
+
+(def PROTOCOL "enchant.services")
+(def VERSION 1)
+(def MAX-REQUEST 65536)
+(def MAX-RESPONSE 1048576)
+(def LEASE-MS 15000)
+
+(defn now [] (System/system_time :millisecond))
+(defn text? [x] (and (string? x) (<= 1 (erlang/byte_size x) 4096)))
+(defn folder? [x]
+ (and (text? x) (starts-with? x "/") (not= x "/")
+      (= x (Path/expand x)) (not (includes? x (erlang/list_to_binary (list 0))))))
+(defn within?
+ "POSIX folder identity, with a segment boundary. A folder is never a name prefix."
+ [root path tree?]
+ (and (folder? root) (folder? path)
+      (or (= root path) (and tree? (starts-with? path (str root "/"))))))
+
+(defn data?
+ "The portable finite subset. Local calls obey exactly the same restriction."
+ ([value] (data? value 0))
+ ([value depth]
+  (and (<= depth 12)
+   (cond
+    (or (nil? value) (boolean? value) (int? value)) true
+    (string? value) (<= (erlang/byte_size value) MAX-RESPONSE)
+    (vector? value) (and (<= (count value) 4096) (every? #(data? % (inc depth)) value))
+    (map? value) (and (<= (count value) 64)
+                  (every? (fn [[k v]] (and (text? k) (data? v (inc depth)))) value))
+    :else false))))
+(defn encode [value limit]
+ (when-not (data? value) (throw (ex-info "Nonportable service value" {})))
+ (let [bytes (json/encode value)]
+  (when (> (erlang/byte_size bytes) limit) (throw (ex-info "Service value exceeds budget" {})))
+  bytes))
+(defn decode [bytes limit]
+ (when-not (and (string? bytes) (<= (erlang/byte_size bytes) limit))
+  (throw (ex-info "Service frame exceeds budget" {})))
+ (let [value (json/decode bytes)]
+  (when-not (data? value) (throw (ex-info "Nonportable service value" {}))) value))
+
+(defn request [world scope op fields]
+ (merge {"protocol" PROTOCOL "versions" [VERSION] "world" world "scope" scope
+         "id" (Base/encode16 (crypto/strong_rand_bytes 16) (list (tuple :case :lower))) "op" op} fields))
+(defn- envelope [provider request]
+ {"protocol" PROTOCOL "version" VERSION "world" (:world provider)
+  "id" (when (text? (get request "id")) (get request "id"))})
+(defn- refused [provider request code]
+ (assoc (envelope provider request) "error" {"code" code}))
+(defn- require! [condition code]
+ (when-not condition (throw (ex-info "Service request refused" {:service/code code}))))
+(defn- valid-grant? [provider grant at]
+ (and (map? grant) (text? (:subject grant)) (= (:world provider) (:world grant))
+      (int? (:expires-at grant)) (> (:expires-at grant) at) (vector? (:grants grant))))
+(defn- rules [grant scope]
+ (filter #(and (= scope (:scope %)) (folder? (:folder %))) (:grants grant)))
+(defn- allowed? [rules row operation]
+ (some (fn [rule]
+         (and (within? (:folder rule) (:folder row) (= true (:tree rule)))
+              (= (:contract rule) (:contract row))
+              (or (nil? (:service rule)) (= (:service rule) (:id row)))
+              (contains? (:operations rule) operation))) rules))
+(defn- operations [rules row version]
+ (vec (sort (filter #(allowed? rules row %) (keys (get (:versions row) version))))))
+(defn- describe [rules row accept]
+ (let [version (last (sort (filter #(contains? (:versions row) %) accept)))
+       ops (when version (operations rules row version))]
+  (when (seq ops)
+   {"id" (:id row) "name" (:name row) "folder" (:folder row) "contract" (:contract row)
+    "version" version "operations" ops "summary" (:summary row {})})))
+(defn- shape! [request]
+ (require! (and (map? request) (data? request)
+                (= PROTOCOL (get request "protocol")) (text? (get request "id"))
+                (text? (get request "world")) (text? (get request "scope"))) "malformed")
+ (require! (and (vector? (get request "versions"))
+                (some #(= VERSION %) (get request "versions"))) "protocol-mismatch")
+ (let [op (get request "op")
+       base #{"protocol" "versions" "id" "world" "scope" "op"}
+       extra (case op "discover" #{"folder" "recursive" "contract" "accept"}
+                      "call" #{"service" "contract" "version" "operation" "args"} #{})]
+  (require! (contains? #{"discover" "call"} op) "unknown-operation")
+  (require! (every? #(contains? (into base extra) %) (keys request)) "malformed")))
+
+(defn dispatch
+ "Host-authenticated grant in; portable response out. Catalog and grants are
+  observed on every call. No caller identity, eval, module or shell on the wire.
+  Providers own mutation semantics and receipts; the boundary never retries."
+ [provider grant request]
+ (try
+  (shape! request)
+  (encode request MAX-REQUEST)
+  (require! (= (:world provider) (get request "world")) "wrong-world")
+  (let [at (now) _ (require! (valid-grant? provider grant at) "unauthorized")
+        rules (vec (rules grant (get request "scope")))
+        _ (require! (seq rules) "forbidden")
+        op (get request "op")
+        catalog (vec ((:catalog provider)))
+        _ (require! (and (<= (count catalog) 4096)
+                         (= (count catalog) (count (distinct (map :id catalog))))) "provider-invalid")
+        result
+        (if (= "discover" op)
+         (let [raw (get request "folder")
+               _ (require! (folder? raw) "malformed")
+               folder (if-let [resolve (:resolve-folder provider)] (resolve raw) raw)
+               accept (get request "accept") contract (get request "contract")
+               _ (require! (and (folder? folder) (text? contract)
+                                (vector? accept) (seq accept) (every? #(and (int? %) (pos? %)) accept)
+                                (or (not (contains? request "recursive")) (boolean? (get request "recursive")))) "malformed")
+               _ (require! (some #(and (= contract (:contract %))
+                                   (within? (:folder %) folder (= true (:tree %)))) rules) "forbidden")
+               rows (filter #(and (= contract (:contract %))
+                                  (within? folder (:folder %) (= true (get request "recursive")))) catalog)
+               visible (filter #(some (fn [v] (seq (operations rules % v))) (keys (:versions %))) rows)
+               _ (require! (every? #(some (fn [v] (contains? (:versions %) v)) accept) visible) "contract-mismatch")]
+          {"services" (vec (keep #(describe rules % accept) (sort-by :id rows)))
+           "observed-at" at "expires-at" (min (:expires-at grant) (+ at LEASE-MS))})
+         (let [id (get request "service") version (get request "version")
+               operation (get request "operation") args (get request "args")
+               _ (require! (and (text? id) (text? operation) (text? (get request "contract"))
+                                (int? version) (pos? version) (map? args)) "malformed")
+               row (first (filter #(= id (:id %)) catalog))
+               _ (require! (and row (allowed? rules row operation)) "forbidden")
+               _ (require! (and (= (:contract row) (get request "contract"))
+                                (contains? (:versions row) version)) "contract-mismatch")
+               handler (get (get (:versions row) version) operation)
+               _ (require! handler "unknown-operation")]
+          {"value" (handler {:subject (:subject grant) :scope (get request "scope") :service id} args)}))
+        response (assoc (envelope provider request) "ok" result)]
+   (encode response MAX-RESPONSE)
+   response)
+  (catch error
+   (refused provider (if (map? request) request {}) (or (:service/code (ex-data error)) "unavailable")))))
+
+(defn local
+ "Bind a trusted app to a provider in its owning environment. grant-fn rereads
+  host authority at every invocation, so revocation also applies inside one VM."
+ [provider grant-fn]
+ (let [receive (BeamLisp.Env/convey
+                (fn [bytes]
+                 (let [request (decode bytes MAX-REQUEST)]
+                  (encode (dispatch provider (grant-fn) request) MAX-RESPONSE))))]
+  (fn [request] (decode (receive (encode request MAX-REQUEST)) MAX-RESPONSE))))
+
+(defn checked
+ "Correlate the response before trusting a provider. Errors remain values."
+ [request response]
+ (if (and (map? response) (= PROTOCOL (get response "protocol"))
+          (= VERSION (get response "version")) (= (get request "world") (get response "world"))
+          (= (get request "id") (get response "id"))
+          (not= (contains? response "ok") (contains? response "error")))
+  response
+  {"error" {"code" "invalid-response"}}))

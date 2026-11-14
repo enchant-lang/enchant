@@ -1,0 +1,159 @@
+#+title: Enchant services: one contract across realms and VMs
+#+date: 2026-11-14
+
+* The working slice
+
+Team Machine Next's places discover Workstation services by their configured
+physical folder. Service names no longer need to share a prefix. A saved stopped
+service remains visible; an unsaved listener disappears when it stops. A successful
+refresh replaces the place's observation, including removals. A failed refresh
+returns an error and does not invent an empty successful observation.
+
+The consumer is ~/projects/general/team-machine-next, not ora-hub/team-machine.
+The provider projects the actual ora-hub/workstation inventory. All domain,
+authorization and protocol code is Enchant. The existing work-endpoint command
+remains the host fact source; no second process scanner or service registry exists.
+
+The library is source-only and lives under src/. Both applications retain their
+qualified immutable SDKs. The Team Machine env.bl adds this source directory;
+Workstation's services/serve.bl accepts it with -p. No compiler or SDK rebuild is
+required. This is an integration pilot, not a new built-in language API.
+
+* The small model
+
+| Value | Meaning |
+|-------+---------|
+| world | Stable provider audience, such as workstation/othman@work |
+| scope | A consuming place, independently named in the operator grant |
+| service | A stable provider-owned id, folder and versioned contract |
+| contract | A domain name, such as workstation.service |
+| version | Explicit integer contract version, independent of SDK/OTP version |
+| operation | An explicitly exported handler, intersected with app authority |
+| observation | Bounded data with observed-at and expires-at, never authority |
+
+core/local captures the provider's owning environment with Env/convey. This lets
+another realm use its endpoint without executing provider code in the consumer's
+environment. The local path serializes the same finite JSON subset as the HTTP
+path and runs the same dispatcher. No remote callback, pid, Env, module or eval
+crosses the boundary. A local endpoint is an intentionally supplied capability;
+there is no VM-wide ambient registry or automatic importing of another project.
+
+The provider supplies a current catalog callback. Its entries carry :id, :name,
+:folder, :contract, :summary and :versions, where versions maps an integer to
+{"operation" (fn [trusted-context args] result)}. A host can project its existing
+domain model directly into this shape. It does not duplicate its domain writer.
+
+* Authority
+
+A shared Unix account or tailnet grants no HTTP authority. The host authenticates
+a private bearer and supplies the app principal; identity fields on the wire are
+rejected. Grants bind world, app subject, expiry, place scope, physical folder,
+contract and operation set. Optional :service pins one service. :tree true extends
+folder scope to descendants using a path-segment boundary, never a string prefix.
+
+Grant folders must be physical absolute paths when issued. The station resolves
+all components of a requested folder; changing a symlink cannot extend a stored
+physical grant. This first provider serves its own Unix account only. It does not
+inherit the station dashboard's administrator view or delegate another user's
+folder permissions. Exporting cross-account data needs that owner's explicit
+policy and an authenticated provider for that account.
+
+Team Machine's default in-process connection grants inspect only for its owner's
+configured place folders. A member's browser cannot supply a station path,
+credential, principal or operation. The existing Team Machine place membership
+still controls who reads a place's stored projection. Linking a folder deliberately
+shares that small projection with the place; it does not grant filesystem access.
+
+Remote authority is reread on every request, so removing a token or operation
+revokes subsequent calls. Existing observations expire after at most 15 seconds;
+they are never used as permission to execute an action. The initial station
+contract exports inspect only. A provider can add actions through :actions, but
+an independent operator grant must also allow them.
+
+* Wire and compatibility
+
+POST /services/v1 accepts a JSON object with protocol "enchant.services", versions
+[1], world, scope, id and op. Discover adds folder, recursive, contract and accept
+(the supported contract versions). Call adds service, contract, version, operation
+and args. Unknown top-level fields are refused. Discovery selects the highest
+common contract version. A mismatch returns protocol-mismatch or contract-mismatch
+before invoking any handler. There is no guessed compatibility or silent downgrade.
+
+Keys stay strings, including unknown inputs; decoding never creates atoms from
+network names. Requests are capped at 64 KiB, responses at 1 MiB, with depth and
+collection limits. Responses correlate world, protocol and request id. Credentials
+do not travel in descriptors or request data. The HTTP path uses the existing
+connector.transport: bounded streaming, deadlines, TLS host verification, no
+redirects and no implicit retries. HTTP without TLS is allowed only for exact
+127.0.0.1. The server listens on loopback and rejects browser Origin requests.
+
+A request id correlates a reply; it is not an exactly-once transaction promise.
+A timeout after a write is uncertain. Before exposing a real mutation, its domain
+writer must accept a durable idempotency key and return a recoverable receipt.
+The gateway does not retry, implement an in-memory deduplication fiction, or let
+a cached discovery authorize a mutation. Providers retain their own state writers.
+
+* Run the two projects
+
+Team Machine uses the local connection automatically through machine.station.
+For a separate VM, run Workstation's services/serve.bl with its qualified SDK and
+this source directory on the path. Supply PORT and STATION_SERVICE_AUTHORITY.
+The authority is private EDN (mode 0600), for example:
+
+#+begin_src clojure
+{:world "workstation/othman@work"
+ :tokens {"REPLACE-WITH-A-CRYPTOGRAPHIC-RANDOM-TOKEN-AT-LEAST-32-BYTES"
+          {:subject "team-machine-next" :world "workstation/othman@work"
+           :expires-at 1798761600000
+           :grants [{:scope "knowledger" :folder "/home/othman/projects/knowledger"
+                     :tree true :contract "workstation.service"
+                     :operations #{"inspect"}}]}}}
+#+end_src
+
+Set MACHINE_STATION_CONFIG on Team Machine to a separate private EDN file:
+
+#+begin_src clojure
+{:world "workstation/othman@work"
+ :url "http://127.0.0.1:PORT/services/v1"
+ :token-file "/private/path/station.token"}
+#+end_src
+
+The server and client can use different SDKs. Credentials, authority and mutable
+observations belong outside tracked source. These examples do not publish an
+endpoint, modify root-owned station policy, or restart an existing service.
+
+* Why there is no consensus layer here
+
+The VPS and fleet spikes distinguish owner decisions from observations. This
+slice has one authoritative provider per account and one writer per application.
+Discovery is a fresh projection of that provider, not replicated desired state.
+No leader election, replicated log or distributed lock is necessary at this scale.
+
+If several hosts become interchangeable writers of the same desired state,
+that particular writer needs quorum agreement and fencing (the fleet spike's
+Ra/Raft direction). Gossip or a CRDT directory can later distribute expiring
+advertisements, but advertisements must never grant authority or elect a writer.
+Network partition remains visible as unavailable/uncertain; a common API cannot
+make remote failure behave like shared memory.
+
+References inspected in this checkout: priv/std/vm/service.bl (realm-owned
+services), vm/core.bl (environment entry), connector/transport.bl (bounded I/O),
+research/vps_spike and research/fleet_spike/README.md (per-data consistency), and
+Veritas's finite enumeration interface. This pilot reuses those mechanisms and
+does not promote the algorithm simulations into a production consensus service.
+
+* Qualification
+
+Use one capped check at a time, from this checkout:
+
+#+begin_src sh
+systemd-run --user --collect --wait --pipe --working-directory="$PWD" \
+ --property=MemoryMax=2G --property=MemorySwapMax=256M \
+ ./bin/bl -p research/service-world/src test research/service-world/test/world_test.bl
+#+end_src
+
+Tests cover finite folder policy through Veritas, authority and scope confusion,
+version refusal, revocation, effect admission, response correlation, private
+projection, parent symlinks and HTTP authentication. Integration qualification
+must additionally exercise two real VMs and Team Machine's persisted replacement
+behavior, using temporary data and stopping every listener it starts.

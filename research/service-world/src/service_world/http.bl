@@ -1,0 +1,68 @@
+(ns service-world.http
+ (:require [service-world.core :as world] [connector.transport :as transport] [web]
+           [clojure.edn :as edn]))
+
+(def PATH "/services/v1")
+(defn private-data
+ "Operator data only. Never use this EDN reader for a network body."
+ [path]
+ (let [stat (File/stat! path)]
+  (when-not (and (= :regular (:type stat)) (= 0 (bit-and (:mode stat) 63))
+                 (<= (:size stat) world/MAX-REQUEST))
+   (throw (ex-info "Service authority file must be private and bounded" {})))
+  (edn/read-string (File/read! path))))
+(defn authenticate [path request]
+ (let [values (Plug.Conn/get_req_header request "authorization")
+       value (when (= 1 (count values)) (first values))]
+  (when (and value (starts-with? value "Bearer ") (<= (count value) 1024))
+   (let [token (subs value 7)]
+    (when (>= (count token) 32)
+     (some (fn [[secret grant]]
+             (when (and (string? secret) (Plug.Crypto/secure_compare token secret)) grant))
+       (:tokens (private-data path))))))))
+(defn- reply [conn status value]
+ (web/json (-> conn (web/resp-header "cache-control" "no-store")
+                    (web/resp-header "connection" "close")) status value))
+(defn handler
+ "authenticate is host code. A network name, an Origin or a realm name grants nothing."
+ [provider authenticate]
+ (fn [conn]
+  (cond
+   (= "/health" (web/path conn)) (reply conn 200 {:ok true})
+   (not= PATH (web/path conn)) (reply conn 404 {:error "not-found"})
+   (not= "post" (web/method conn)) (reply conn 405 {:error "method-not-allowed"})
+   (seq (Plug.Conn/get_req_header conn "origin")) (reply conn 403 {:error "service-client-required"})
+   :else
+   (try
+    (if-let [grant (authenticate conn)]
+     (let [read (web/read-body-limited* conn world/MAX-REQUEST 3000) c (:conn read)]
+      (if (:error read) (reply c 413 {:error "invalid-body"})
+       (try
+        (reply c 200 (world/dispatch provider grant (world/decode (:body read) world/MAX-REQUEST)))
+        (catch _ (reply c 400 {:error "invalid-json"})))))
+     (reply conn 401 {:error "unauthorized"}))
+    (catch _ (reply conn 503 {:error "authority-unavailable"}))))))
+
+(defn endpoint
+ "A private configured audience. TLS is required off loopback. Tokens are read
+  per request, redirects and implicit retries disabled by connector.transport."
+ [{:keys [url token-file timeout-ms] :or {timeout-ms 5000}}]
+ (let [uri (URI/parse url)]
+  (when-not (and (contains? #{"http" "https"} (:scheme uri)) (world/text? (:host uri))
+                 (or (= "https" (:scheme uri)) (= "127.0.0.1" (:host uri)))
+                 (nil? (:userinfo uri)) (nil? (:query uri)) (nil? (:fragment uri))
+                 (= PATH (:path uri)))
+   (throw (ex-info "Configure the service audience with TLS or exact loopback" {}))))
+ (fn [request]
+  (try
+   (let [token (String/trim (File/read! token-file))
+         _ (when-not (<= 32 (count token) 512) (throw (ex-info "Invalid service credential" {})))
+         response (transport/request!
+                   {:method :post :url url :body (world/encode request world/MAX-REQUEST) :encoding :bytes
+                    :headers {"authorization" (str "Bearer " token) "content-type" "application/json"}
+                    :decode :bytes :timeout-ms timeout-ms :max-bytes world/MAX-RESPONSE})]
+    (if (and (= 200 (:status response)) (not (:error response)))
+     (world/checked request (world/decode (:body response) world/MAX-RESPONSE))
+     {"error" {"code" (if (= 401 (:status response)) "unauthorized" "unavailable")
+               "outcome" (if (= :rejected (:outcome response)) "rejected" "uncertain")}}))
+   (catch _ {"error" {"code" "unavailable" "outcome" "uncertain"}}))))

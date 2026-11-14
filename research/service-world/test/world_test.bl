@@ -1,0 +1,114 @@
+(ns service-world-test
+ (:require [service-world.core :as world] [service-world.http :as http]
+           [service-world.station :as station] [veritas :as v] [web]))
+
+(def grant
+ {:subject "team-machine-next" :world "work/test" :expires-at (+ (world/now) 600000)
+  :grants [{:scope "place-a" :folder "/projects/a" :tree true
+            :contract "example.service" :operations #{"inspect"}}]})
+(def calls (atom []))
+(def provider
+ {:world "work/test"
+  :catalog (fn []
+             [{:id "a.owner" :name "A" :folder "/projects/a" :contract "example.service"
+               :summary {"listening" true}
+               :versions {1 {"inspect" (fn [context args] (swap! calls conj [context args]) {"title" "A"})
+                             "restart" (fn [_ _] (swap! calls conj :restart) {"receipt" "r1"})}}}
+              {:id "secret.owner" :name "Private" :folder "/projects/ab" :contract "example.service"
+               :versions {1 {"inspect" (fn [_ _] "secret")}}}])})
+(defn discover []
+ (world/request "work/test" "place-a" "discover"
+  {"folder" "/projects/a" "recursive" true "contract" "example.service" "accept" [1]}))
+(defn call-request [operation]
+ (world/request "work/test" "place-a" "call"
+  {"service" "a.owner" "contract" "example.service" "version" 1 "operation" operation "args" {}}))
+(defn code [response] (get-in response ["error" "code"]))
+
+(deftest discovery-is-folder-scoped-and-actions-are-filtered
+ (let [r (world/dispatch provider grant (discover)) rows (get-in r ["ok" "services"])]
+  (is (= ["a.owner"] (mapv #(get % "id") rows)))
+  (is (= ["inspect"] (get (first rows) "operations")))
+  (is (= 1 (get (first rows) "version")))
+  (is (<= (get-in r ["ok" "expires-at"]) (:expires-at grant)))))
+
+(deftest policy-finite-domain-is-checked-with-veritas
+ (let [cases (vec (for [root ["/projects/a" "/projects/ab"]
+                       path ["/projects/a" "/projects/ab" "/projects/a/child" "/projects/a/../ab" "/projects/a/" "/"]
+                       tree [true false]]
+                    {:expected (or (= root path) (and tree (= root "/projects/a") (= path "/projects/a/child")))
+                     :actual (world/within? root path tree)}))
+       answer (v/for-all {:engine :enumerate} "c" (apply v/one-of cases)
+                 '(= (:expected c) (:actual c)))]
+  (is (= :exhausted (:modality answer)))))
+
+(deftest discovery-refuses-protocol-contract-world-and-scope-confusion
+ (doseq [[key value expected] [["versions" [9] "protocol-mismatch"]
+                              ["world" "other/test" "wrong-world"]
+                              ["scope" "other-place" "forbidden"]
+                              ["accept" [2] "contract-mismatch"]
+                              ["folder" "/projects/ab" "forbidden"]
+                              ["actor" "owner" "malformed"]]]
+  (is (= expected (code (world/dispatch provider grant (assoc (discover) key value)))))))
+
+(deftest host-identity-cannot-be-spoofed-and-effects-require-two-grants
+ (reset! calls [])
+ (is (= "forbidden" (code (world/dispatch provider grant (call-request "restart")))))
+ (is (empty? @calls))
+ (let [r (world/dispatch provider grant (call-request "inspect"))]
+  (is (= "A" (get-in r ["ok" "value" "title"])))
+  (is (= "team-machine-next" (get-in (first @calls) [0 :subject]))))
+ (is (= "contract-mismatch" (code (world/dispatch provider grant (assoc (call-request "inspect") "version" 2)))))
+ (let [writer (assoc-in grant [:grants 0 :operations] #{"inspect" "restart"})]
+  (is (= "r1" (get-in (world/dispatch provider writer (call-request "restart")) ["ok" "value" "receipt"])))
+  (is (= 1 (count (filter #(= :restart %) @calls))))))
+
+(deftest local-endpoint-rechecks-revocation-and-portability
+ (let [authority (atom grant) local (world/local provider #(deref authority)) request (discover)]
+  (is (= (world/dispatch provider grant request) (local request)))
+  (reset! authority nil)
+  (is (= "unauthorized" (code (local request))))
+  (reset! authority (assoc grant :expires-at 0))
+  (is (= "unauthorized" (code (local request))))
+  (is (thrown? (local (assoc request "args" {"callback" (fn [] 1)}))))
+  (is (thrown? (local (assoc request "id" (apply str (repeat 65537 "x")))))))))
+
+(deftest responses-are-correlated-and-provider-errors-do-not-leak
+ (let [request (discover) r (world/dispatch provider grant request)]
+  (is (= "invalid-response" (code (world/checked request (assoc r "world" "elsewhere")))))
+  (is (= "invalid-response" (code (world/checked request (assoc r "id" "stale")))))
+  (is (= "invalid-response" (code (world/checked request (assoc r "error" {}))))))
+ (let [broken (assoc provider :catalog (fn [] (throw (ex-info "private credential /secrets/key" {}))))
+       r (world/dispatch broken grant (discover))]
+  (is (= "unavailable" (code r)))
+  (is (not (includes? (pr-str r) "credential"))))
+ (is (= "malformed" (code (world/dispatch provider grant {"id" {"bad" "id"}})))))
+
+(deftest physical-folders-and-station-projection
+ (let [root (str (System/tmp_dir!) "/service-world-" (erlang/unique_integer (list :positive)))
+       folder (str root "/a")]
+  (try
+   (File/mkdir_p! (str folder "/child"))
+   (File/ln_s! folder (str root "/alias"))
+   (is (= (str folder "/child") (station/canonical-folder (str root "/alias/child"))))
+   (let [rows (station/project "owner" root
+               [{"name" "strange-name" "cwd" folder "argv" ["secret"]}]
+               [{"name" "strange-name" "owner" "owner" "url" "https://station.example:123/"
+                 "listening" false "published" false}]
+               [{"port" 3333 "owner" "owner" "project" (str folder "/child") "names" []
+                 "command" "private argv" "url" nil}
+                {"port" 3334 "owner" "someone-else" "project" folder "names" []}])]
+    (is (= 2 (count rows)))
+    (is (= false (get (first rows) "listening")))
+    (is (= #{folder (str folder "/child")} (set (map #(get % "folder") rows))))
+    (is (not (includes? (pr-str rows) "secret")))
+    (is (not (includes? (pr-str rows) "private argv"))))
+   (finally (File/rm_rf! root)))))
+
+(deftest http-boundary-authenticates-before-reading-and-rejects-ambient-browser-authority
+ (let [route (http/handler provider (fn [_] nil))
+       conn (Plug.Test/conn "POST" http/PATH "not-json")]
+  (is (= 401 (web/status (route conn))))
+  (is (= 405 (web/status (route (Plug.Test/conn "GET" http/PATH "")))))
+  (is (= 403 (web/status (route (Plug.Conn/put_req_header conn "origin" "https://station.example")))))))
+
+(run-tests)

@@ -1,0 +1,84 @@
+;; Workstation's existing inventory, projected into a portable service contract.
+;; The host owns all paths and commands; clients receive only the public projection.
+(ns service-world.station
+ (:require [service-world.core :as world] [bl.json :as json]))
+
+(def CONTRACT "workstation.service")
+(defn canonical-folder
+ "Resolve every symlink component, including parent directories, with a hop cap.
+  Grant folders must already name physical paths when authority is issued."
+ [path]
+ (when-not (world/folder? path) (throw (ex-info "Invalid service folder" {})))
+ (loop [pending (vec (rest (String/split path "/"))) base "/" hops 0]
+  (when (> hops 40) (throw (ex-info "Service folder symlink cycle" {})))
+  (if (empty? pending)
+   (if (File/dir? base) base (throw (ex-info "Service folder is absent" {})))
+   (let [next (Path/join base (first pending)) link (File/read_link next)]
+    (if (= :ok (elem link 0))
+     (let [target (Path/expand (elem link 1) base)
+           rest (concat (rest (String/split target "/")) (rest pending))]
+      (recur (vec rest) "/" (inc hops)))
+     (recur (vec (rest pending)) next hops))))))
+(defn- url [value]
+ (when (string? value)
+  (let [uri (URI/parse value)]
+   (when (and (contains? #{"http" "https"} (:scheme uri)) (world/text? (:host uri))
+              (nil? (:userinfo uri)) (nil? (:query uri)) (nil? (:fragment uri))) value))))
+(defn project
+ "Normalize saved declarations and observed ports. A closed saved service stays
+  discoverable; an unsaved listener disappears when its observation disappears.
+  Never return argv, environment, pid, private files or shell controls."
+ [owner home declarations endpoints ports]
+ (let [saved
+       (vec (keep
+        (fn [spec]
+         (let [name (get spec "name") cwd (get spec "cwd")
+               endpoint (first (filter #(and (= owner (get % "owner")) (= name (get % "name"))) endpoints))]
+          (when (and (string? name) (world/folder? cwd) endpoint)
+           {"id" (str name "." owner) "name" name "owner" owner
+            "folder" (canonical-folder cwd) "url" (url (get endpoint "url"))
+            "listening" (= true (get endpoint "listening")) "published" (= true (get endpoint "published"))
+            "wanted" (= true (get endpoint "wanted")) "kind" "saved"}))) declarations))
+       saved-names (set (map #(get % "id") saved))]
+  (vec (concat saved
+   (keep (fn [port]
+           (let [cwd (or (get port "project") (get port "cwd"))
+                 folder (when (and (string? cwd) (not (blank? cwd)))
+                          (if (or (= cwd "~") (starts-with? cwd "~/")) (str home (subs cwd 1)) cwd))
+                 names (get port "names" [])]
+            (when (and (= owner (get port "owner")) (world/folder? folder)
+                       (empty? (filter #(contains? saved-names %) names)))
+             {"id" (str "port-" (get port "port") "." owner)
+              "name" (or (first names) (str "Port " (get port "port"))) "owner" owner
+              "folder" (canonical-folder folder) "url" (url (get port "url"))
+              "listening" true "published" (boolean (url (get port "url"))) "wanted" true "kind" "listener"}))) ports)))))
+
+(defn inventory
+ "Read existing Workstation facts without starting another BEAM or changing publication."
+ [{:keys [owner home state-dir endpoint-client]
+   :or {endpoint-client "work-endpoint"}}]
+ (let [query (fn [args]
+               (let [[out code] (System/cmd endpoint-client (apply list args))]
+                (when-not (= 0 code) (throw (ex-info "Station inventory unavailable" {})))
+                (world/decode out world/MAX-RESPONSE)))
+       endpoints (query ["list" "--json"])
+       ports (get (query ["ports" "--json"]) "ports")
+       _ (when-not (and (vector? endpoints) (vector? ports))
+           (throw (ex-info "Station inventory shape changed" {})))
+       declarations (mapv (fn [file] (assoc (world/decode (File/read! file) world/MAX-REQUEST)
+                                     "name" (Path/basename (Path/dirname file))))
+                      (Path/wildcard (str state-dir "/*/service.json")))]
+  (project owner home declarations endpoints ports)))
+(defn provider
+ "The first station contract exposes inspection. A host can add guarded action
+  handlers per service with :actions; grants must independently allow each one."
+ [{:keys [world inventory actions] :or {actions (fn [_] {})}}]
+ {:world world :resolve-folder canonical-folder
+  :catalog (fn []
+             (mapv (fn [row]
+                     {:id (get row "id") :name (get row "name") :folder (get row "folder")
+                      :contract CONTRACT :summary row
+                      :versions {1 (assoc (actions row) "inspect"
+                                    (fn [_ args]
+                                     (when-not (empty? args) (throw (ex-info "Inspect takes no arguments" {})))
+                                     row))}}) (inventory)))})
