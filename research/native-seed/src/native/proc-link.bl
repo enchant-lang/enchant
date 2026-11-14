@@ -38,12 +38,31 @@
  ; explicit vocabulary. Nothing else at top level is silently discarded.
  (or (and (= ns "proc.bus") (= '(extend-clause! :bus bus-clause) (proc/source-data form)))
      (and (= ns "proc.reg") (= '(extend-clause! :registry registry-clause) (proc/source-data form)))))
-(defn expansion [forms ns path]
- (proc/runtime-forms (vec (remove #(registration? % ns) forms)) ns path
-  {:vocabulary {:bus bus/bus-clause :registry reg/registry-clause}}))
-(defn prepare [path fallback]
- (let [prepared (build/prepare-ns path
-                  {:fallback-ns fallback :expand-top expansion
+(defn capture-compiler-vocabulary []
+ ; Provider activation and ALL callable captures precede the Env fork. Runtime
+ ; helper staging masks links in that fork and must not own these pure values.
+ (doseq [[ns spec] helpers]
+  (when-not (= (:sha256 spec) (digest (File/read! (:path spec))))
+   (throw (ex-info "native proc link: admitted helper source changed" {:namespace ns :path (:path spec)}))))
+ (doseq [namespace ["proc.server" "proc.super" "proc.bus" "proc.reg"]]
+  (BeamLisp.Loader/load_provider namespace))
+ {:renderer proc/runtime-forms
+  :vocabulary {:bus bus/bus-clause :registry reg/registry-clause}
+  :planners {:clause-plan (BeamLisp.Env/fetch_exact! "proc.server" "clause-plan")
+             :supervisor-plan (BeamLisp.Env/fetch_exact! "proc.super" "supervisor-plan")
+             :unknown-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "unknown-supervisor-clause-error")
+             :invalid-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "invalid-supervisor-error")
+             :data-tail (BeamLisp.Env/fetch_exact! "server-clause" "data-tail")}
+  :providers (mapv (fn [namespace]
+    (assoc (source-identity (BeamLisp.Loader/source_path namespace)) :namespace namespace))
+   ["proc.server" "proc.super" "proc.bus" "proc.reg"])})
+(defn expansion [captured forms ns path]
+ ((:renderer captured) (vec (remove #(registration? % ns) forms)) ns path
+  {:vocabulary (:vocabulary captured) :planners (:planners captured)}))
+(defn prepare [path fallback captured]
+ (let [expand (fn [forms ns source-path] (expansion captured forms ns source-path))
+       prepared (build/prepare-ns path
+                  {:fallback-ns fallback :expand-top expand
                    :after-staging (fn [unit]
                     ; Compile-time helpers stay available for expansion, while
                     ; runtime references select this source unit's BL bodies.
@@ -251,6 +270,7 @@
      (scheme/text (erlang/atom_to_binary module)) " " (scheme/text (:ns unit)) "))\n"))
    [(:module unit) (:base-module unit)]))))
 (defn build-project [request]
+ (let [captured (capture-compiler-vocabulary)]
  (BeamLisp.Env/isolated (fn []
   (let [closure (artifact/read-closure (:closure-manifest request))
         pin (json/decode (File/read! (:sdk-pin request)))
@@ -263,10 +283,10 @@
         _ (doseq [[ns spec] helpers]
             (when-not (= (:sha256 spec) (digest (File/read! (:path spec))))
              (throw (ex-info "native proc link: admitted helper source changed" {:namespace ns :path (:path spec)}))))
-        helper-units (mapv (fn [ns] (project-protocol (prepare (:path (get helpers ns)) ns))) ["proc.bus" "proc.flow" "proc.reg"])
-        runtime-unit (project-protocol (prepare (:runtime request) kernel))
-        bridge-unit (project-protocol (prepare (:bridges request) kernel))
-        app-unit (project-protocol (prepare (:application request) kernel))
+        helper-units (mapv (fn [ns] (project-protocol (prepare (:path (get helpers ns)) ns captured))) ["proc.bus" "proc.flow" "proc.reg"])
+        runtime-unit (project-protocol (prepare (:runtime request) kernel captured))
+        bridge-unit (project-protocol (prepare (:bridges request) kernel captured))
+        app-unit (project-protocol (prepare (:application request) kernel captured))
         _ (when (and (:original-actor-corpus? request)
                      (not= original-actor-corpus (source-identity (:application request))))
             (throw (ex-info "native proc link: original actor compatibility requires its exact source identity" {})))
@@ -322,6 +342,7 @@
                                              :owner :explicit-target-vocabulary}
                                             {:namespace "proc.reg" :form '(extend-clause! :registry registry-clause)
                                              :owner :explicit-target-vocabulary}]
+               :compile-time-providers (:providers captured)
                :runtime-definitions (count (:defs runtime-unit))
                :emitted-bindings (mapv #(qname (:ns %) (:name %)) emitted)
-               :references (:edges graph) :source-interpreter false}}))))
+               :references (:edges graph) :source-interpreter false}})))))
