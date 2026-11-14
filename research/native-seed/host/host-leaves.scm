@@ -139,7 +139,8 @@
 (native-add-leaf! "erlang/element/2" (lambda (i t) (native-assert-tuple t) (if (or (< i 1) (> i (bl-count t))) (native-badarg "tuple index") (bl-nth t (- i 1)))))
 (native-add-leaf! "erlang/tuple_size/1" (lambda (t) (bl-count (native-assert-tuple t))))
 (native-add-leaf! "erlang/is_tuple/1" (lambda (x) (bl-tag? x 'tuple)))
-(native-add-leaf! "erlang/is_list/1" native-list?)
+;; Raw BEAM is_list is a cell tag test; proper-list validation is separate.
+(native-add-leaf! "erlang/is_list/1" (lambda (x) (or (null? x) (pair? x))))
 (native-add-leaf! "erlang/is_map/1" (lambda (x) (or (bl-tag? x 'map) (bl-tag? x 'vec) (bl-tag? x 'set) (native-opaque-struct? x))))
 (native-add-leaf! "erlang/is_integer/1" h-is-int)
 (native-add-leaf! "erlang/is_float/1" h-is-float)

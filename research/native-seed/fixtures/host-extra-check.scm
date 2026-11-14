@@ -103,4 +103,13 @@
      (= (bl-get (native-exception-reason e) (bl-key "arity")) 2))))
    (lambda () (bl-invoke nth (list '(10 20 30) 1))))
   (native-extra-check "Vector nth nonvector function clause" caught)))
+;; Raw is_list must stay O(1), including improper conses. The actor host's
+;; proper-list match-spec gate is a distinct ABI and must keep rejecting them.
+(let ((raw (native-leaf "erlang/is_list/1")) (improper (cons 1 2)))
+ (native-extra-check "raw is_list empty" (bl-invoke raw (list '())))
+ (native-extra-check "raw is_list proper cons" (bl-invoke raw (list '(1 2))))
+ (native-extra-check "raw is_list improper cons tag" (bl-invoke raw (list improper)))
+ (native-extra-check "raw is_list rejects nil atom" (not (bl-invoke raw (list bl-nil))))
+ (native-extra-check "proper argument validation rejects improper cons" (not (native-list? improper)))
+ (native-extra-check "actor match spec list gate stays proper" (not (h-is-list improper))))
 (display "native extra checks passed") (newline)
