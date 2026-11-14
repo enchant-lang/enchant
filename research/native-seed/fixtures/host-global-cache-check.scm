@@ -87,4 +87,20 @@
    (set! native-env-rows saved-env)
    (set! native-global-registry saved-globals)
    (native-refresh-global-cache!))))
+(let ((saved native-env-rows))
+ (dynamic-wind (lambda () #f)
+  (lambda ()
+   (native-global-cache-check "raw foreign macro probe declines"
+    (not (native-maybe-load-macro "erlang" "length")))
+   (native-global-cache-check "unknown macro provider probe declines"
+    (not (native-maybe-load-macro "not.in.closed.bundle" "missing")))
+   (native-declare-ns "native.loader-probe")
+   (native-intern "native.loader-probe" "ordinary" (lambda (x) x))
+   (native-global-cache-check "known ordinary provider member is not macro"
+    (not (native-maybe-load-macro "native.loader-probe" "ordinary")))
+   (native-intern "native.loader-probe" "macro"
+    (bl-tuple (list (bl-key "$macro") (lambda (x) x))))
+   (native-global-cache-check "actual macro binding is recognized"
+    (native-maybe-load-macro "native.loader-probe" "macro")))
+  (lambda () (set! native-env-rows saved))))
 (display "native global-cache checks: ") (display native-global-cache-checks) (newline)

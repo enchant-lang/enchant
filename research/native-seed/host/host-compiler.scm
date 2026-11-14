@@ -11,8 +11,27 @@
 (define (native-row . parts) (bl-tuple parts))
 (define (native-env-value key)
  (bl-get native-env-rows key native-missing))
+;; Explicit debugging only: never print a macro value, body or source text.
+;; Gambit's public current-time/time->seconds supplies wall-clock seconds;
+;; this does not change the actor runtime's separately selected clock.
+(define native-macro-trace-enabled? (equal? (getenv "BL_NATIVE_TRACE" #f) "1"))
+(define native-macro-trace-start
+ (if native-macro-trace-enabled? (time->seconds (current-time)) #f))
 (define (native-env-put! key value)
- (set! native-env-rows (bl-assoc native-env-rows key value)) (bl-key "ok"))
+ (set! native-env-rows (bl-assoc native-env-rows key value))
+ (if (and native-macro-trace-enabled?
+          (bl-tag? value 'tuple) (= (bl-count value) 2)
+          (eq? (bl-nth value 0) (bl-key "$macro"))
+          (bl-tag? key 'tuple) (= (bl-count key) 2)
+          (string? (bl-nth key 0)) (string? (bl-nth key 1)))
+  (let ((now (time->seconds (current-time))) (port (current-error-port)))
+   (display "NATIVE_MACRO_STORED " port)
+   (write now port) (display " " port)
+   (write (- now native-macro-trace-start) port) (display " " port)
+   (write (bl-nth key 0) port) (display " " port)
+   (write (bl-nth key 1) port) (newline port) (force-output port)))
+ (bl-key "ok"))
+
 (define (native-env-result value)
  (if (eq? value native-missing) (bl-key "error") (bl-tuple (list (bl-key "ok") value))))
 (define (native-lookup key) (native-env-result (native-env-value key)))
@@ -317,7 +336,16 @@
  '("ensure_loaded" "ensure_ready" "load_provider"))
 (native-add-leaf! "Elixir.BeamLisp.Loader/resolvable?/1" native-known-ns?)
 (native-add-leaf! "Elixir.BeamLisp.Loader/declare_require/3" (lambda (ns alias refers) (native-ensure-loaded ns)))
-(native-add-leaf! "Elixir.BeamLisp.Loader/maybe_load_macro/2" (lambda (ns name) (native-ensure-loaded ns) bl-nil))
+;; All admitted source providers are already present. A macro probe of a raw
+;; foreign module is not a request to load a language namespace (loader.bl1680).
+(define (native-maybe-load-macro ns name)
+ (if (not (native-known-ns? ns)) #f
+  (let ((answer (native-fetch ns name #t)))
+   (and (not (eq? answer (bl-key "error")))
+    (let ((value (bl-nth answer 1)))
+     (and (bl-tag? value 'tuple) (= 2 (bl-count value))
+          (eq? (bl-nth value 0) (bl-key "$macro"))))))))
+(native-add-leaf! "Elixir.BeamLisp.Loader/maybe_load_macro/2" native-maybe-load-macro)
 (native-add-leaf! "Elixir.BeamLisp.Loader/source_decl/2" (lambda (ns name) bl-nil))
 
 ;; Finite ETS match-pattern subset over the actual registry rows. These are
