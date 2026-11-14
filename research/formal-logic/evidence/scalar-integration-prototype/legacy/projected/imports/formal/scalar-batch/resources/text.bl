@@ -1,0 +1,92 @@
+(ns formal.scalar-batch.resources.text (:require [formal.data-graph :as graph]))
+
+;; Prospective byte and work bounds. No string decoding or construction here.
+;; The canonical evaluator's text primitives use codepoint vectors and naive
+;; sequence search; the work convention accounts for its repeated drop/take.
+(def profile :bl/smt-scalar-text-resources-preview-v1)
+(def defaults {:text-bytes 65536 :intermediate-scalars 131072 :integer-input-bytes 128
+               :arguments 64 :work-units 16777216})
+(def operations #{:str-concat :str-len :str-contains :str-prefix :str-suffix :str-at :str-substr
+                  :str-index :str-replace :eq :distinct})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.resources.text: " why) {:profile profile}))))
+(defn limits [overrides]
+ (require! (and (map? overrides) (every? #(contains? defaults %) (keys overrides))) "closed resource keys required")
+ (let [p (merge defaults overrides)]
+  (require! (every? #(and (int? %) (>= % 0)) (vals p)) "nonnegative integer limits required")
+  (graph/encode p) p))
+(defn- refusal [base metric amount limit]
+ (assoc base :status :incomplete :forecast-execution :not-run
+             :reason {:kind :resource-limit :metric metric :required amount :limit limit}))
+(defn plan
+ "Forecast existing SDK scalar-text primitives from UTF-8 byte upper bounds
+  and actual index integers. This validates neither UTF-8 nor alphabet range.
+  Input, temporary scalar slots, output bytes and work are separate quantities.
+  A plan is ordinary data, never a checked value, charged token or authority."
+ [op byte-sizes integers overrides]
+ (require! (keyword? op) "named operation required")
+ (let [p (limits overrides)
+       base {:profile profile :operation op :limits p :primitive-execution :not-run
+             :text-unit :unicode-codepoints :compiler-proof-authority false
+             :input-reference (graph/of {:profile profile :operation op :byte-sizes byte-sizes :integers integers :limits p})}]
+  (require! (and (vector? byte-sizes) (every? #(and (int? %) (>= % 0)) byte-sizes)
+                 (vector? integers) (every? int? integers)) "nonnegative byte bounds and integer indices required")
+  (if-not (contains? operations op)
+   (assoc base :status :incomplete :forecast-execution :not-run :reason {:kind :resource-policy-unsupported})
+   (let [expected (case op :str-len [1 0] :str-at [1 1] :str-substr [1 2] :str-index [2 1]
+                          :str-replace [3 0] :distinct [(count byte-sizes) 0] [2 0])]
+    (require! (= expected [(count byte-sizes) (count integers)]) "wrong operand arity")
+    (when (= :distinct op) (require! (>= (count byte-sizes) 2) "distinct needs two operands"))
+    (let [arguments (+ (count byte-sizes) (count integers))
+          too-big (first (filter #(> % (:text-bytes p)) byte-sizes))
+          big-integer (first (filter #(> (erlang/external_size %) (:integer-input-bytes p)) integers))]
+     (cond
+      (> arguments (:arguments p)) (refusal base :arguments arguments (:arguments p))
+      (some? too-big) (refusal base :text-bytes too-big (:text-bytes p))
+      (some? big-integer) (refusal base :integer-input-bytes (erlang/external_size big-integer) (:integer-input-bytes p))
+      :else
+       (let [n (first byte-sizes) m (get byte-sizes 1 0) k (get byte-sizes 2 0)
+             input (reduce + 0 byte-sizes) largest (reduce max 0 byte-sizes)
+             text-result (contains? #{:str-concat :str-at :str-substr :str-replace} op)
+             output (case op
+                      :str-concat (+ n m)
+                      :str-at (if (or (< (first integers) 0) (>= (first integers) n)) 0 (min 4 n))
+                      :str-substr (let [[start length] integers]
+                                    (if (or (< start 0) (>= start n) (<= length 0)) 0
+                                     (min n (* 4 (min n length)))))
+                      :str-replace (+ n k)
+                      0)
+             ;; codepoints creates a list and a vector. Search additionally
+             ;; creates slices; rebuilding replacement creates output scalars.
+             temporary (+ (* 2 input) (if text-result output 0) (* 2 largest))
+             search? (contains? #{:str-contains :str-prefix :str-index :str-replace} op)
+             search-work (if search? (+ (* largest largest) (* n m)) 0)
+             compare-work (if (= :distinct op) (* (count byte-sizes) (count byte-sizes) largest) input)
+             integer-work (reduce + 0 (map erlang/external_size integers))
+             work (* 16 (+ input output temporary search-work compare-work integer-work 1))
+             forecast {:input-bytes input :result-bytes output :intermediate-scalars temporary :work-units work
+                       :result-integer-bits (if (contains? #{:str-len :str-index} op)
+                                              (inc (* 8 (erlang/external_size largest))) 0)}
+             checks [[:text-bytes output] [:intermediate-scalars temporary] [:work-units work]]
+             failed (first (filter (fn [[metric amount]] (> amount (get p metric))) checks))]
+        (assoc base :status (if failed :incomplete :ready) :forecast-execution :run :forecast forecast
+                    :result-kind (cond text-result :text (contains? #{:str-len :str-index} op) :integer :else :boolean)
+                    :reason (when failed {:kind :resource-limit :metric (first failed)
+                                          :required (second failed) :limit (get p (first failed))})))))))))
+(defn value-plan
+ "Reserve before UTF-8 validation, alphabet traversal or codepoint allocation.
+  The byte bound must come freshly from the actual existing binary."
+ [bytes overrides]
+ (require! (and (int? bytes) (>= bytes 0)) "nonnegative byte count required")
+ (let [p (limits overrides)
+       base {:profile profile :operation :text-value :limits p :primitive-execution :not-run
+             :value-validation :not-run :compiler-proof-authority false
+             :input-reference (graph/of {:profile profile :operation :text-value :bytes bytes :limits p})}]
+  (if (> bytes (:text-bytes p)) (refusal base :text-bytes bytes (:text-bytes p))
+   (let [temporary (* 2 bytes) work (* 16 (+ bytes temporary 1))
+         forecast {:input-bytes bytes :result-bytes bytes :intermediate-scalars temporary :work-units work}
+         failed (first (filter (fn [[metric amount]] (> amount (get p metric)))
+                         [[:intermediate-scalars temporary] [:work-units work]]))]
+    (assoc base :status (if failed :incomplete :ready) :forecast-execution :run :forecast forecast
+                :reason (when failed {:kind :resource-limit :metric (first failed)
+                                      :required (second failed) :limit (get p (first failed))}))))))

@@ -1,0 +1,209 @@
+(ns formal.shared-evaluator-test
+ (:require [formal.scalar-batch.evaluate :as e] [formal.term :as t] [formal.data-graph :as graph]
+           [formal.scalar-batch.graph-terms :as forest] [formal.resources.rational :as rational]
+           [oracle] [bl.json :as json]))
+
+(def events (atom []))
+(defn- counted [label action]
+ (let [module (elem (erlang/fun_info t/rational :module) 1) pattern (tuple module :rational 2)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [value (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+    (swap! events conj {:label label :normalizer-calls calls})
+    (when-let [path (System/get_env "ENCHANT_SHARED_PRIMITIVE_TRACE")]
+     (File/write! path (json/encode {:events @events :compiler-proof-authority false} {:pretty 2})))
+    {:value value :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(defn- packet [terms]
+ (let [data (graph/encode (vec terms))] [data (second (nth (:nodes data) (:root data)))]))
+(defn- evaluate [terms bindings options]
+ (let [[data roots] (packet terms)] (e/graph-values data roots bindings options)))
+
+(defn- dispatch-count [label action]
+ (let [module (elem (erlang/fun_info e/value :module) 1) pattern (tuple module :primitive-value 2)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [value (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+    (swap! events conj {:label label :private-dispatch-calls calls})
+    (when-let [path (System/get_env "ENCHANT_SHARED_PRIMITIVE_TRACE")]
+     (File/write! path (json/encode {:events @events :compiler-proof-authority false} {:pretty 2})))
+    {:value value :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest both-demand-engines-actually-enter-the-same-private-sdk-function
+ (let [term (t/mul (t/real 1 3) (t/real 2 5)) [data roots] (packet [term])
+       tree (dispatch-count "tree-dispatch" (fn [] (e/value term {})))
+       direct (dispatch-count "graph-dispatch"
+                (fn [] (e/graph-values data roots {} {:profile e/direct-numeric-graph-profile})))]
+  (is (= 1 (:calls tree)))
+  (is (= 1 (:calls direct)))
+  (is (= (:value tree) (first (get-in direct [:value :values]))))))
+
+(deftest the-new-sdk-boundary-retains-existing-scalar-and-compound-values
+ (let [bv (t/bv-sort 8) fp (t/fp-sort 5 11) enum (t/enum-sort "SharedColor" ["red" "blue"])
+       array (t/store (t/const-array t/Int (t/real 1 2)) (t/int 3) (t/real 2 3))
+       sequence (t/app :seq-unit (t/seq-sort t/Real) [(t/real 2 3)] nil)
+       binder (t/bound "shared.bound" t/Int)
+       terms [(t/div (t/int -7) (t/int 3)) (t/mod (t/int -7) (t/int -3))
+              (t/div (t/real 1 3) (t/real 0 1)) (t/add (t/real 1 3) (t/real 1 6))
+              (t/select array (t/int 3)) (t/eq array array)
+              (t/app :bv-add bv [(t/literal bv 255) (t/literal bv 2)] nil)
+              (t/app :str-len t/Int [(t/text "aλ🦊")] nil)
+              (t/app :seq-nth t/Real [sequence (t/int 0)] nil)
+              (t/app :seq-nth t/Real [sequence (t/int 2)] nil)
+              (t/app :fp-is-nan t/Bool [(t/literal fp 32257)] nil)
+              (t/app :fp-eq t/Bool [(t/literal fp 0) (t/literal fp 32768)] nil)
+              (t/eq (t/literal enum "red") (t/literal enum "blue"))
+              (t/uf "shared.unknown" [] t/Int []) (t/forall [binder] (t/eq binder (t/int 0)))]]
+  (doseq [options [{} {:profile e/graph-profile}]]
+   (let [result (evaluate terms {} options)]
+    (is (erlang/=:= (mapv #(e/value % {}) terms) (:values result)))
+    (is (= false (:compiler-proof-authority result)))
+    (doseq [i (range (count terms))]
+     (let [value (nth (:values result) i)]
+      (when-not (e/unavailable? value) (is (= :valid (:status (e/check-value (t/sort-of (nth terms i)) value)))))))))
+  (let [result (evaluate terms {} {})]
+   (is (= e/direct-graph-profile (:profile result)))
+   (is (= :structural-admission-only (:resource-policy result)))
+   (is (= :private-sdk-function (:primitive-dispatch result))))))
+
+(deftest demand-and-last-unavailable-values-agree-across-the-sdk-entry-points
+ (let [a (t/variable "shared.a" t/Bool) b (t/variable "shared.b" t/Bool)
+       yes (t/bool true) no (t/bool false)]
+  (doseq [term [(t/ite yes no a) (t/ite no a yes) (t/ite a yes no)
+               (t/all [a b]) (t/any [a b]) (t/all [a no b]) (t/any [a yes b])
+               (t/implies no a) (t/implies a yes) (t/implies a b)]]
+   (doseq [options [{} {:profile e/direct-numeric-graph-profile}]]
+    (is (erlang/=:= [(e/value term {})] (:values (evaluate [term] {} options))))))
+  (is (= [(e/unavailable {:unassigned "shared.b"})] (:values (evaluate [(t/all [a b])] {} {}))))))
+
+(deftest actual-normalizer-calls-show-shared-primitive-and-literal-reuse
+ (let [term (t/mul (t/real 1 3) (t/real 2 5)) [data roots] (packet [term])
+       tree (counted "tree" (fn [] (e/value term {})))
+       legacy (counted "legacy-numeric" (fn [] (e/graph-values data roots {} {:profile e/numeric-graph-profile})))
+       direct (counted "direct-numeric" (fn [] (e/graph-values data roots {} {:profile e/direct-numeric-graph-profile})))
+       general (counted "direct-general" (fn [] (e/graph-values data roots {} {})))]
+  (is (= [3 7 3 3] (mapv :calls [tree legacy direct general])))
+  (is (= (e/real 2 15) (:value tree)))
+  (doseq [result [legacy direct general]] (is (= [(e/real 2 15)] (get-in result [:value :values]))))
+  (is (= 2 (get-in direct [:value :resources :literal-reuses])))
+  (is (= 1 (get-in direct [:value :resources :primitive-applications])))
+  (is (= 0 (get-in direct [:value :resources :sdk-calls])))
+  (is (= 872 (get-in direct [:value :resources :charged-work-units])))
+  (is (= 1600 (get-in legacy [:value :resources :charged-work-units])))
+  (is (= 364 (get-in direct [:value :admission :charged-work-units])))
+  (is (= (get-in direct [:value :data-reference]) (get-in legacy [:value :data-reference])))))
+
+(deftest different-charging-profiles-bind-different-settings-with-identical-mathematics
+ (let [term (t/mul (t/real 1 3) (t/real 2 5)) [data roots] (packet [term term])
+       direct (e/graph-values data roots {} {:profile e/direct-numeric-graph-profile :limits {:request-work-units 872}})
+       legacy (e/graph-values data roots {} {:profile e/numeric-graph-profile :limits {:request-work-units 872}})]
+  (is (= :complete (:status direct)))
+  (is (= [(e/real 2 15) (e/real 2 15)] (:values direct)))
+  (is (= 1 (get-in direct [:resources :rational-primitive-calls])))
+  (is (= :incomplete (:status legacy)))
+  (is (= :request-work-units (get-in legacy [:resources :refusals 0 :reason :metric])))
+  (is (= (:data-reference direct) (:data-reference legacy)))
+  (is (= (:assignment-reference direct) (:assignment-reference legacy)))
+  (is (not= (:settings-reference direct) (:settings-reference legacy)))
+  (is (not= (:evaluation-reference direct) (:evaluation-reference legacy)))))
+
+(deftest shared-literal-normalization-is-not-repeated-for-argument-edges
+ (let [term (t/mul (t/real 1 3) (t/real 1 3)) [data roots] (packet [term term])
+       direct (counted "shared-literal" (fn [] (e/graph-values data roots {} {:profile e/direct-numeric-graph-profile})))]
+  (is (= 2 (:calls direct)))
+  (is (= [(e/real 1 9) (e/real 1 9)] (get-in direct [:value :values])))
+  (is (= 1 (get-in direct [:value :resources :literal-reuses])))
+  (is (= 1 (get-in direct [:value :resources :primitive-applications])))))
+
+(deftest admission-and-primitive-refusals-still-precede-normalization
+ (let [term (t/mul (t/real 7 3) (t/real 9 5)) [data roots] (packet [term])
+       denied (counted "admission-denied" (fn [] (e/graph-values data roots {}
+                          {:profile e/direct-numeric-graph-profile :limits {:admission-work-units 0}})))
+       refused (counted "primitive-denied" (fn [] (e/graph-values data roots {}
+                           {:profile e/direct-numeric-graph-profile :limits {:rational {:component-bits 6}}})))
+       decided (evaluate [(t/all [(t/eq term (t/real 0 1)) (t/bool false)])] {}
+                        {:profile e/direct-numeric-graph-profile :limits {:rational {:component-bits 6}}})]
+  (is (= :admission (get-in denied [:value :phase])))
+  (is (= 0 (:calls denied)))
+  (is (= :not-run (get-in denied [:value :admission :constructor-execution])))
+  (is (= 2 (:calls refused))) ;; Only the two literal admissions; no product normalization.
+  (is (= :evaluation (get-in refused [:value :phase])))
+  (is (= :incomplete (get-in refused [:value :status])))
+  (is (= :complete (:status decided)))
+  (is (= [false] (:values decided)))
+  (is (= 1 (count (get-in decided [:resources :refusals]))))))
+
+(deftest variable-canonicality-is-checked-once-and-never-invented
+ (let [x (t/variable "shared.rational" t/Real) [data roots] (packet [x x])
+       binding (e/real 1 3)
+       admitted (counted "variable" (fn [] (e/graph-values data roots {"shared.rational" binding}
+                                {:profile e/direct-numeric-graph-profile})))]
+  (is (= 1 (:calls admitted)))
+  (is (= 1 (get-in admitted [:value :resources :assignment-checks])))
+  (is (= 1 (get-in admitted [:value :resources :rational-value-check-calls])))
+  (doseq [bindings [{} {"shared.rational" {:formal/real [2 4]}} {"shared.rational" {:formal/real [1 0]}}
+                    {"shared.rational" {:formal/real (list 1 3)}}]]
+   (is (erlang/=:= [(e/value x bindings) (e/value x bindings)]
+                  (:values (e/graph-values data roots bindings {:profile e/direct-numeric-graph-profile})))))))
+
+(deftest caller-views-and-flags-cannot-enter-the-private-primitive-path
+ (let [[data roots] (packet [(t/real 1 3)]) prepared (forest/prepare data roots)]
+  (is (thrown? (e/graph-values prepared roots {} {})))
+  (doseq [options [{:checked-values true} {:profile :future} {:limits {:integer {}}}
+                   {:profile e/direct-numeric-graph-profile :limits {:already-admitted true}}]]
+   (is (thrown? (e/graph-values data roots {} options))))
+  ;; BL privacy is enforced by actual checked SDK declarations at language
+  ;; resolution. Native BEAM bridges are not a sandbox or proof authority.
+  (is (= :private (BeamLisp.AOT/sdk_declaration_kind "formal.evaluate" "primitive-value")))
+  (let [client "formal.shared-private-client"
+        _ (BeamLisp.Env/add_alias client "subject" "formal.evaluate")
+        messages (mapv
+                   (fn [source]
+                    (try
+                     (BeamLisp.Compiler/compile (first (BeamLisp.Reader/read_string source "shared-private.bl"))
+                       (BeamLisp.Compiler/new_env client))
+                     :unexpected (catch error (ex-message error))))
+                   ["subject/primitive-value" "(subject/primitive-value nil [])"])]
+   (doseq [message messages]
+    (is (and (string? message) (String/contains? message "is not public"))))
+   (swap! events conj {:label "language-privacy" :sdk-declaration :private :qualified-refusals (count messages)
+                       :native-bridge-exported (erlang/function_exported (BeamLisp.Emit/module_for "formal.evaluate") :primitive-value 2)})
+   (when-let [path (System/get_env "ENCHANT_SHARED_PRIMITIVE_TRACE")]
+    (File/write! path (json/encode {:events @events :compiler-proof-authority false} {:pretty 2}))))
+  (let [noncanonical (graph/encode {:formal/term 1 :op :real :sort t/Real :args [] :data [2 4]})]
+   (is (thrown? (e/graph-values noncanonical [(:root noncanonical)] {} {:profile e/direct-numeric-graph-profile}))))
+  (is (thrown? (evaluate [(t/text "outside numeric")] {} {:profile e/direct-numeric-graph-profile})))
+  (is (= :resource-policy-unsupported
+       (get-in (evaluate [(t/distinct [(t/int 1) (t/int 2)])] {} {:profile e/direct-numeric-graph-profile})
+               [:resources :refusals 0 :reason :kind])))))
+
+(deftest scoped-sdk-callbacks-are-process-owned-and-retire
+ (let [[data roots] (packet [(t/real 1 3)]) root (first roots) held (atom nil) parent (erlang/self)]
+  (e/with-graph-point data roots {} {:profile e/direct-numeric-graph-profile}
+   (fn [point]
+    (reset! held point)
+    (erlang/spawn (fn [] (erlang/send parent [:foreign (try ((:resolve point) root) :unexpected (catch _ :refused))])))
+    (receive [:foreign reply] (is (= :refused reply)) (after 3000 (is false "foreign point did not reply")))
+    (is (= (e/real 1 3) ((:resolve point) root)))
+    (is (thrown? ((:resolve point) (erlang/float root))))))
+  (is (thrown? ((:resolve @held) root)))
+  (is (thrown? ((:resources @held))))
+  (is (thrown? (e/with-graph-point data roots {} {} (fn [point] (reset! held point) (throw :consumer-failed)))))
+  (is (thrown? ((:checking @held))))))
+
+(deftest direct-and-legacy-plans-are-diagnostic-data-with-separate-identities
+ (let [legacy (rational/plan :mul [[1 3] [2 5]] {}) direct (rational/plan-direct :mul [[1 3] [2 5]] {})]
+  (is (= (:result-component-bits (:forecast legacy)) (:result-component-bits (:forecast direct))))
+  (is (= 872 (get-in direct [:forecast :work-units])))
+  (is (= 1236 (get-in legacy [:forecast :work-units])))
+  (is (not= (:request-reference legacy) (:request-reference direct)))
+  (is (= :not-run (:primitive-execution direct)))
+  (is (= false (:compiler-proof-authority direct)))))
+
+(deftest the-sdk-evaluation-boundary-does-not-request-a-solver
+ (let [calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :no-query))]
+  (oracle/with-oracle {:query deny :query-graph deny :script deny}
+   (fn [] (is (= [(e/real 1 2)] (:values (evaluate [(t/add (t/real 1 3) (t/real 1 6))] {}
+                                        {:profile e/direct-numeric-graph-profile}))))))
+  (is (= 0 @calls))))

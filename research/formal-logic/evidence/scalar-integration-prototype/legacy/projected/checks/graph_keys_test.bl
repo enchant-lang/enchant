@@ -1,0 +1,128 @@
+(ns formal.graph-keys-test
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.question-graph :as qg] [formal.scalar-batch.graph-question :as inventory]
+           [formal.data-graph :as graph] [formal.scalar-batch.coordinates :as coordinates]
+           [formal.scalar-batch.request :as request] [formal.scalar-batch.request-point :as point]
+           [formal.scalar-batch.request-answer :as answer] [formal.scalar-batch.request-runtime :as run]
+           [formal.scalar-batch.request-record :as record] [formal.scalar-batch.logic :as logic]
+           [formal.scalar-batch.backend :as backend] [formal.scalar-batch.ledger :as ledger] [datom] [oracle]))
+
+;; These are strings, never keyword literals or names to be interned.
+(def outer-name "formal.keys.test/outer.never.interned.20261113")
+(def nested-name "formal.keys.test/nested.never.interned.20261113")
+(defn- absent? [name] (try (erlang/binary_to_existing_atom name :utf8) false (catch _ true)))
+(defn- key-graph [name]
+ {:formal/data-graph 1 :profile graph/profile :root 0 :nodes [["keyword" name]]})
+(defn- original [pairs]
+ (let [base (qg/prepare (q/sat {}))]
+  (assoc base :graph (graph/patch-map (:graph base) [[(graph/encode :observe) (graph/assemble "map" pairs)]]))))
+(defn- observation-pairs [context]
+ (let [data (:graph context) id (:observe (graph/keyword-nodes data [:observe]))]
+  (second (nth (:nodes data) id))))
+(defn- nested-value []
+ (graph/patch-map (graph/encode (v/make {} {}))
+  [[(graph/encode :value)
+    (graph/assemble "map" [[(graph/encode 1) (graph/encode (t/int 11))]
+                           [(graph/encode 1.0) (graph/encode (t/int 22))]
+                           [(key-graph nested-name) (graph/encode (t/int 33))]])]]))
+
+(defn- counted [action]
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (action)] {:result result :calls (elem (erlang/trace_info pattern :call_count) 1)})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest raw-inventory-keeps-labels-and-nested-keys-as-original-cursors
+ (is (and (absent? outer-name) (absent? nested-name)))
+ (let [subject (original [[(key-graph outer-name) (graph/encode (t/int 9))]
+                          [(graph/encode "nested") (nested-value)]])
+       expected (observation-pairs subject) prepared (inventory/prepare-keys subject)
+       result (point/replay (request/prepare subject) {})]
+  (is (= 2 (:formal/question-forest prepared)))
+  (is (= (request/reference (request/prepare subject))
+         (request/reference (request/from-graph (:graph subject)))))
+  (is (= inventory/key-profile (:profile prepared)))
+  (is (= :original-source-cursors (:observation-policy prepared)))
+  (is (= 0 (get-in prepared [:checking :materialized-keys])))
+  (is (= :canonical-map-row (get-in prepared [:checking :observation-order])))
+  (is (= expected (mapv (fn [row] [(:label-source row) (:descriptor-source row)]) (:observations prepared))))
+  (is (every? #(not (contains? % :label)) (:observations prepared)))
+  (is (= expected (mapv (fn [row] [(:label-source row) (:descriptor-source row)]) (:observations result))))
+  (is (= :sat (:verdict result)))
+  (is (= #{9 11 22 33 true} (set (mapcat #(map :value (:roots %)) (:observations result)))))
+  (is (every? #(and (= :deferred (:materialization %)) (not (contains? % :descriptor-graph))) (:observations result))))
+ (is (and (absent? outer-name) (absent? nested-name))))
+
+(deftest both-native-owners-accept-original-unknown-keys-without-interning
+ (let [subject (original [[(key-graph outer-name) (nested-value)]]) expected (observation-pairs subject)]
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (request/prepare subject {:adapter {:backend engine}}) actual (counted #(run/execute r)) result (:result actual)]
+    (is (= 2 (:calls actual)))
+    (is (= :sat (:verdict result)))
+    (is (= :valid (get-in result [:point-check :validation :status])))
+    (is (= :matching-response (get-in result [:local-delegation :status])))
+    (is (= expected (mapv (fn [row] [(:label-source row) (:descriptor-source row)])
+                         (get-in result [:point-check :observations]))))
+    (is (= #{11 22 33 true} (set (mapcat #(map :value (:roots %)) (get-in result [:point-check :observations])))))
+    (is (= false (:checked-native-execution result) (:compiler-proof-authority result))))))
+ (is (and (absent? outer-name) (absent? nested-name))))
+
+(deftest coordinate-graphs-never-materialize-unfamiliar-values-or-reasons
+ (let [x (t/variable "key.point.x" t/Int)
+       r (request/prepare (qg/prepare (q/sat {:assumptions [(t/eq x (t/int 7))]})))
+       data (graph/assemble "map" [[(graph/encode "key.point.x") (key-graph outer-name)]])
+       unavailable (graph/assemble "map" [[(graph/encode :formal/unavailable) (key-graph nested-name)]])
+       missing (graph/assemble "map" [[(graph/encode "key.point.x") unavailable]])
+       actual (counted (fn [] [(point/replay-graph r data) (point/replay-graph r missing)]))
+       bad (first (:result actual)) incomplete (second (:result actual))]
+  (is (= 0 (:calls actual)))
+  (is (= :invalid-point (:verdict bad)))
+  (is (= :invalid (get-in bad [:validation :bindings :status])))
+  (is (= :candidate (:verdict incomplete)))
+  (is (= :graph-unavailable (get-in incomplete [:validation :bindings :rows 0 :reason :kind])))
+  (is (= (graph/reference data) (:assignment-reference bad)))
+  (is (= (graph/reference missing) (:assignment-reference incomplete)))
+  (is (thrown? (coordinates/prepare (graph/assemble "map" [[(key-graph outer-name) (graph/encode 7)]])))))
+ (is (and (absent? outer-name) (absent? nested-name))))
+
+(deftest real-encoding-is-not-normalized-by-coordinate-reading
+ (let [data (graph/encode {"x" {:formal/real [2 4]}})
+       module (elem (erlang/fun_info t/rational :module) 1) pattern (tuple module :rational 2)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [view (coordinates/prepare data)]
+    (is (= {:formal/real [2 4]} (get-in view [:assignments "x"])))
+    (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+    (is (= (graph/reference data) (:reference view))))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+
+(deftest unknown-diagnostic-data-and-labels-survive-the-request-ledger
+ (let [subject (original [[(key-graph outer-name) (nested-value)]]) r (logic/prepare-request subject)
+       native (logic/execute-request r)
+       response (assoc-in (:response native) [:source :details-graph] (key-graph nested-name))
+       connection (ledger/open nil)]
+  (try
+   (let [actual (counted
+                 (fn []
+                  (let [id (record/record! connection r response {:claim "Original application keys stay data"})
+                        row (first (ledger/all connection)) fresh (record/reopen connection id)]
+                   (is (= ledger/request-format (:verdict/format row)))
+                   (is (= (request/reference r) (:verdict/request-reference row)))
+                   (is (not (contains? row :verdict/witness)))
+                   (is (= :sat (get-in fresh [:result :verdict])))
+                   (is (= (graph/bytes (key-graph nested-name))
+                          (graph/bytes (get-in fresh [:result :source :details-graph]))))
+                   (is (= (graph/bytes (:graph subject)) (graph/bytes (get-in row [:verdict/request :subject :graph]))))
+                   (is (= false (:checked-native-execution fresh) (:compiler-proof-authority fresh))))))]
+    (is (= 0 (:calls actual))))
+   (finally (datom/close! connection))))
+ (is (and (absent? outer-name) (absent? nested-name))))
+
+(deftest oracle-request-method-is-part-of-the-existing-effect-table
+ (let [subject (original [[(key-graph outer-name) (graph/encode (t/int 7))]]) r (logic/prepare-request subject)
+       actual (counted #(oracle/with-oracle {:request (fn [request _] (logic/answer-request request {}))}
+                         (fn [] (logic/execute-request r))))]
+  (is (= 0 (:calls actual)))
+  (is (= :sat (get-in actual [:result :verdict])))
+  (is (= :not-invoked (get-in actual [:result :local-delegation :status])))))

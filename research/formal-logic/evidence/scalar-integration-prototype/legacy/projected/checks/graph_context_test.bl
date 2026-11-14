@@ -1,0 +1,227 @@
+(ns formal.graph-context-test
+ (:require [formal.data-graph :as g] [formal.question-graph :as qg] [formal.query :as q]
+           [formal.term :as t] [formal.identity :as identity] [formal.point :as point]
+           [formal.answer :as answer] [formal.scalar-batch.logic :as logic] [formal.check :as check]
+           [formal.value :as v] [oracle]))
+(defn refused? [f] (try (f) false (catch _ true)))
+(def unavailable {:backend :z3 :worker "/unavailable/formal-worker" :library "/unavailable/libz3.so"})
+(def x (t/variable "graph.x" t/Int))
+(def question (q/sat {:assumptions [(t/eq x (t/int 7))] :observe {"next" (t/add x (t/int 1))}}))
+(def context (qg/prepare question))
+(defn unknown [name] {:formal/data-graph 1 :profile g/profile :root 0 :nodes [["keyword" name]]})
+(defn opaque-context []
+ (let [name (str "graph.ctx.unknown." (System/unique_integer (list :positive)))]
+  (qg/patch context {:origin (unknown name)})))
+(defn bound [ctx payload] (answer/bind-graph ctx (merge {:phase :query :solver-status :sat :assignments {"graph.x" 7}} payload)))
+
+(deftest original-question-and-context-points-share-the-same-explicit-reference
+ (let [prepared (point/prepare-graph question {"graph.x" 7})
+       saved (point/prepare-context context {"graph.x" 7})
+       checking (point/check-context context (:packet saved))]
+  (is (= (identity/bytes (:packet prepared)) (identity/bytes (:packet saved))))
+  (is (= :checked-data-connection (:status checking)))
+  (is (= 8 (get-in checking [:observations "next"])))
+  (is (= (g/of question) (qg/reference context)))
+  (is (= (identity/bytes question) (identity/bytes (qg/materialize! context))))
+  (is (= :not-run (:kernel-execution checking)))
+  (is (= false (:compiler-proof-authority checking)))
+))
+
+(deftest context-views-are-rebuilt-and-unknown-provenance-is-not-materialized
+ (let [ctx (opaque-context) _ (point/prepare-context ctx {"graph.x" 7}) before (erlang/system_info :atom_count)
+       opened (qg/open! ctx) prepared (point/prepare-context ctx {"graph.x" 7})]
+  (is (= :sat (get-in opened [:view :mode])))
+  (is (= :ready (:status prepared)))
+  (is (= :checked-data-connection (:status (point/check-context ctx (:packet prepared)))))
+  (is (= (:reference opened) (get-in prepared [:packet :question])))
+  (is (= before (erlang/system_info :atom_count)))
+  (is (refused? #(qg/materialize! ctx)))
+  (is (some? (qg/field-graph ctx :origin)))
+  (is (nil? (qg/field-graph ctx :absent)))
+  (doseq [bad [(assoc ctx :view (:view opened)) (assoc ctx :reference (:reference opened))
+              (assoc ctx :formal/question-graph 1.0) (assoc ctx :profile :other)
+              (assoc ctx :graph (g/patch-map (:graph ctx) [[(g/encode :formal/query) (g/encode 2)]]))]]
+   (is (refused? #(qg/open! bad)))
+)))
+
+(deftest every-original-public-field-binds-even-when-term-roots-stay-the-same
+ (let [response (bound context {})]
+  (doseq [changed [(qg/patch context {:origin (g/encode {:different true})})
+                   (qg/patch context {:profile (g/encode :other-meaning)})
+                   (qg/patch context {:scope (g/encode {:mode :other})})]]
+   (is (= (t/digest (q/roots (:view (qg/open! context)))) (t/digest (q/roots (:view (qg/open! changed))))))
+   (is (not= (qg/reference context) (qg/reference changed)))
+   (is (refused? #(answer/check-graph changed response)))
+   (is (refused? #(answer/check-graph context (assoc response :question-graph changed :question-reference (qg/reference changed)))))
+)))
+
+(deftest graph-reply-reconstruction-refuses-forged-authority-and-replays-assignments
+ (let [ready (bound context {:witness {"next" 999}}) checked (answer/check-graph context ready)]
+  (is (= :sat (:verdict checked)))
+  (is (= 8 (get-in checked [:witness "next"])))
+  (is (= :independent-replay (:observation-basis checked)))
+  (is (= :not-matched (:delegation checked)))
+  (doseq [bad [(assoc ready :formal/query-reply 2.0) (assoc ready :reply-profile :wrong)
+              (assoc ready :trusted true) (assoc ready :compiler-proof-authority true)
+              (assoc ready :certificate {:status :checked}) (assoc ready :mode :prove)
+              (assoc ready :unknown-field true) (assoc ready :question-reference (identity/hash question))]]
+   (is (refused? #(answer/check-graph context bad)))
+)
+  (is (= :invalid-model (:verdict (answer/check-graph context (bound context {:assignments {"graph.x" 1.0}})))))
+  (is (= :candidate (:verdict (answer/check-graph context (bound context {:assignments {}})))))
+  (is (refused? #(answer/check question ready)))
+  (is (refused? #(answer/check-graph context (answer/bind question {:phase :query :solver-status :unknown}))))
+))
+
+(deftest named-graph-effects-intercept-before-native-startup-and-never-fall-back-to-query
+ (let [ctx (opaque-context) calls (atom 0)
+       result (oracle/with-query-graph-handler
+               (fn [original _execute] (swap! calls inc) (bound original {:witness {"next" 999}}))
+               #(logic/run-graph unavailable ctx))]
+  (is (= 1 @calls))
+  (is (= :sat (:verdict result)))
+  (is (= 8 (get-in result [:witness "next"])))
+  (is (= :not-invoked (get-in result [:execution :status])))
+  (is (= :handler (get-in result [:oracle-effect :kind])))
+  (is (= (qg/reference ctx) (:question-reference result)))
+  (is (= :not-checked (get-in result [:certificate :status])))
+)
+ (let [result (oracle/with-query-handler (fn [_ _] (throw :wrong-format)) #(logic/run-graph unavailable context))]
+  (is (= :error (:verdict result)))
+  (is (= :not-run (:solver-status result)))
+  (is (String/contains? (:error result) "no graph query method"))
+))
+
+(deftest graph-first-provenance-survives-the-standard-expanded-identity-limit
+ (let [large (reduce (fn [data _] (g/assemble "vector" [data data])) (g/encode "provenance") (range 16))
+       ctx (qg/patch context {:origin large})
+       prepared (point/prepare-context ctx {"graph.x" 7})]
+  (is (> (get-in (qg/open! ctx) [:graph-checking :expanded-nodes]) 100000))
+  (is (refused? #(identity/hash (qg/materialize! ctx))))
+  (is (= :ready (:status prepared)))
+  (is (= :checked-data-connection (:status (point/check-context ctx (:packet prepared)))))
+  (is (= :sat (:verdict (answer/check-graph ctx (bound ctx {})))))
+))
+
+(deftest both-engines-run-the-same-context-and-the-common-envelope-keeps-metadata-as-graphs
+ (let [ctx (opaque-context)]
+  (doseq [engine [:z3 :oxiz]]
+   (let [result (logic/run-graph {:backend engine} ctx)
+         projected (check/query {:backend engine} ctx)
+         rechecked (answer/check-graph ctx result)]
+    (is (= :sat (:solver-status result)) (pr-str result))
+    (is (= :sat (:verdict result)))
+    (is (= 8 (get-in result [:witness "next"])))
+    (is (= :returned (get-in result [:execution :status])))
+    (is (= :sat (:verdict rechecked)))
+    (is (not (contains? rechecked :execution)))
+    (is (= (:execution result) (:reported-execution rechecked)))
+    (is (= :query-graph (:subject-kind projected)))
+    (is (= :graph-data (get-in projected [:evidence :claim :metadata-availability])))
+    (is (= false (get-in projected [:evidence :authority :compiler])))
+    (is (= :not-checked (get-in projected [:evidence :certificate :status])))
+))
+  (is (= :unsupported (:status (check/query ctx))))
+))
+
+(deftest retained-contexts-compose-into-the-exact-question-and-live-mutations-are-refused
+ (doseq [engine [:z3 :oxiz]]
+  (logic/with-session {:backend engine}
+   (fn [session]
+    (logic/load! session [(q/assertion "retained-seven" (t/eq x (t/int 7)))])
+    (let [ctx (qg/prepare (q/prove (t/ge x (t/int 0)))) result (logic/solve-graph-in session ctx)
+          effective (:question-graph result)]
+     (is (= :unsat (:solver-status result)))
+     (is (= :proved (:verdict result)))
+     (is (not= (qg/reference ctx) (qg/reference effective)))
+     (is (= ["context/0/retained-seven"] (:assertions (qg/field-data! effective :context))))
+     (is (= (inc (count (:assertions (:view (qg/open! ctx)))))
+            (count (:assertions (:view (qg/open! effective))))))
+     (let [bad (oracle/with-query-graph-handler
+                (fn [_ execute] (logic/reset! session) (execute))
+                #(logic/solve-graph-in session ctx))]
+      (is (= :error (:verdict bad)))
+      (is (= :not-invoked (get-in bad [:execution :status])))
+      (is (String/contains? (:error bad) "context changed"))
+))))))
+
+(deftest scope-sensitive-binders-are-validated-from-original-graph-terms
+ (let [b (t/bound "graph.bound" t/Int)
+       term (t/app :forall t/Bool [(t/eq b b)] [["graph.bound" t/Int]])
+       good (q/prove term) ctx (qg/prepare good)
+       escaped (q/sat {})
+       escaped (assoc escaped :assertions [(q/assertion "escape" (t/eq b b))])]
+  (is (= (t/digest (q/roots good)) (t/digest (q/roots (:view (qg/open! ctx))))))
+  (is (refused? #(qg/from-graph (g/encode escaped))))
+ ))
+
+(deftest a-rejected-handler-reply-retains-the-actual-returned-native-answer
+ (doseq [engine [:z3 :oxiz]]
+  (let [result (oracle/with-query-graph-handler
+                (fn [_ execute] (assoc (execute) :question-reference {:profile g/profile :sha256 "wrong"}))
+                #(logic/run-graph {:backend engine} context))]
+   (is (= :error (:verdict result)))
+   (is (= :query (:phase result)))
+   (is (= :returned (get-in result [:execution :status])))
+   (is (= :sat (get-in result [:execution :reported-answer :solver-status])))
+   (is (= false (:compiler-proof-authority result)))
+  )
+ ))
+
+(deftest original-vacuity-policy-survives-the-operational-projection
+ (doseq [engine [:z3 :oxiz]]
+  (let [raw (q/prove (t/bool false) {:assumptions [(t/bool false)]})
+        ctx (qg/prepare raw) permissive (qg/patch ctx {:vacuity (g/encode :allow)})
+        a (logic/run-graph {:backend engine} ctx) b (logic/run-graph {:backend engine} permissive)]
+   (is (= :vacuous (:verdict a)))
+   (is (= :assumption-consistency (:phase a)))
+   (is (= :proved (:verdict b)))
+   (is (= :query (:phase b)))
+   (is (not= (:question-reference a) (:question-reference b)))
+  )
+ ))
+
+(deftest graph-effects-follow-managed-futures-and-execution-registrations
+ (let [handle (fn [ctx _] (bound ctx {}))
+       ask (fn [] (logic/run-graph unavailable context))
+       child (oracle/with-query-graph-handler handle #(deref (future (ask))))
+       registration (oracle/with-query-graph-handler handle #(BeamLisp.Execution/register! ask))]
+  (try
+   (is (= :sat (:verdict child)))
+   (is (= :not-invoked (get-in child [:execution :status])))
+   (let [invoked (BeamLisp.Execution/invoke! registration [])]
+    (is (= :completed (:status invoked)))
+    (is (= :sat (get-in invoked [:value :verdict])))
+    (is (= :handler (get-in invoked [:value :oracle-effect :kind]))))
+   (finally (BeamLisp.Execution/close! registration)))))
+
+(deftest graph-effect-conveyance-does-not-transfer-native-session-ownership
+ (doseq [engine [:z3 :oxiz]]
+  (logic/with-session {:backend engine}
+   (fn [session]
+    (let [handle (fn [ctx _] (answer/bind-graph ctx (logic/solve-graph-in session ctx)))
+          child (oracle/with-query-graph-handler handle #(deref (future (logic/run-graph unavailable context))))]
+     (is (= :error (:verdict child)))
+     (is (String/contains? (:error child) "live owned question context"))
+     (is (= :sat (:verdict (logic/solve-graph-in session context)))))))))
+
+(deftest retained-semantic-domains-keep-the-same-model-scope-and-profiles-as-the-raw-path
+ (doseq [engine [:z3 :oxiz]]
+  (logic/with-session {:backend engine}
+   (fn [session]
+    (let [semantic (v/make (t/eq x (t/int 7))
+                    {:within (t/le x (t/int 10)) :scope {:mode :bounded :bound 10}
+                     :domain {:kind :scalar :profile :graph/retained-domain-test}})
+          original (q/prove (t/ge x (t/int 0)))
+          ctx (qg/patch (qg/prepare original) {:origin (qg/field-graph (opaque-context) :origin)})]
+     (logic/load! session [{:label "bounded-seven" :term semantic}])
+     (let [raw (logic/solve-in session original)
+           result (logic/solve-graph-in session ctx)
+           effective (:question-graph result)]
+      (is (= :proved (:verdict raw)))
+      (is (= :proved (:verdict result)))
+      (is (= :bounded (:mode (qg/field-data! effective :scope))))
+      (is (= (:scope raw) (qg/field-data! effective :scope)))
+      (is (= (:profiles raw) (qg/field-data! effective :profiles)))
+      (is (some #(= :graph/retained-domain-test %) (qg/field-data! effective :profiles)))
+      (is (refused? #(qg/materialize! effective)))))))))

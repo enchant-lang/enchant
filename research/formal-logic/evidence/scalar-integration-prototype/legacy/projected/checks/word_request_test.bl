@@ -1,0 +1,69 @@
+(ns formal.word-request-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.scalar-batch.request :as request] [formal.scalar-batch.request-answer :as answer]
+           [formal.scalar-batch.request-point :as point] [formal.scalar-batch.request-record :as record] [formal.scalar-batch.point-profile :as policy]
+           [formal.scalar-batch.graph-execution :as execution] [formal.scalar-batch.coordinates :as coordinates] [formal.scalar-batch.logic :as logic]))
+(def x (t/variable "request.word" [:bv 8]))
+(def subject (qg/prepare (q/sat {:assumptions [(t/eq x (t/literal [:bv 8] 7))]
+                               :observe {"wrapped" (t/app :bv-add [:bv 8] [x (t/literal [:bv 8] 255)] nil)}})))
+(def options {:profile policy/numeric-word})
+(def original (request/prepare subject {:policy options}))
+(def good {"request.word" {:formal/bv [8 7]}})
+(def snapshot {:assertions [] :generation 0 :revision 0 :solver-ms 500 :hard-ms 2000
+               :identity {:backend :z3 :worker-sha256 "recorded-worker" :library-sha256 nil :sdk "recorded-sdk"}})
+
+(deftest named-policies-bind-the-same-subject-with-different-checking-rules
+ (is (= policy/numeric-word logic/numeric-word-policy))
+ (is (= (policy/describe options) (logic/checking-policy options)))
+ (is (= (request/subject-reference original) (request/subject-reference (request/prepare subject))))
+ (is (not= (request/reference original) (request/reference (request/prepare subject))))
+ (is (= coordinates/word-profile (policy/coordinate-profile (:policy original))))
+ (is (= {:formal/managed-graph-reply 3 :reply-profile policy/reply-profile} (policy/reply-header (:policy original))))
+ (is (= {:formal/managed-graph-reply 2 :reply-profile policy/numeric} (policy/reply-header (policy/settings {}))))
+ (doseq [bad [{:profile :other} {:owner-ms 0} {:limits {:alien 1}} {:limits {:word {:word-bits -1}}}]]
+  (is (thrown? (policy/settings bad)))))
+
+(deftest supplied-word-points-and-graph-records-replay-without-native-history
+ (let [response (answer/supply original good) checked (answer/recheck original response)
+       packet (record/pack-graph original response) reopened (record/recheck-graph packet)]
+  (is (= :sat (:verdict checked)))
+  (is (= :sat (:verdict reopened)))
+  (is (= false (:checked-native-execution reopened)))
+  (is (= false (:compiler-proof-authority reopened)))
+  (is (= :run (:point-replay reopened)))
+  (is (pos? (get-in checked [:point-check :resources :word-value-check-calls]))))
+ (doseq [bad [{:formal/bv [8 8]} {:formal/bv [8 256]} {:formal/bv [9 7]} {:formal/bv [8 -1]}
+              {:formal/bv [8.0 7]} {:formal/bv [8 7] :extra true}]]
+  (is (= :invalid-point (:verdict (point/replay original {"request.word" bad})))))
+ (is (= :candidate (:verdict (point/replay original {}))))
+ (is (thrown? (point/replay (request/prepare subject) good))))
+
+(deftest native-coordinates-and-supplied-coordinates-use-one-word-grammar
+ (is (= {:formal/bv [8 7]} (policy/native-coordinate (:policy original) ["bv" 8 7])))
+ (is (contains? (policy/native-coordinate (policy/settings {}) ["bv" 8 7]) :formal/unavailable))
+ (let [data (graph/encode good)]
+  (is (= good (:assignments (coordinates/prepare-numeric-word data))))
+  (is (contains? (get-in (coordinates/prepare data) [:assignments "request.word"]) :formal/invalid-coordinate)))
+ (let [limited (request/prepare subject {:policy {:profile policy/numeric-word :limits {:word {:work-units 1000}}}})
+       result (point/replay limited {"request.word" {:formal/bv [8 (erlang/bsl 1 10000)]}})]
+  (is (= :candidate (:verdict result)))
+  (is (= :incomplete (get-in result [:validation :status])))))
+
+(deftest generic-managed-envelope-cannot-be-downgraded-to-the-numeric-reply
+ ;; A fabricated scope reports coordinates; it authenticates no execution.
+ (let [scope (fn [_ _ watched] {:ok true :status :sat :observations (mapv (fn [[name _]] [name ["bv" 8 7]]) watched)})
+       raw (execution/execute subject snapshot options scope)
+       response (answer/from-managed original raw) result (answer/recheck original response)]
+  (is (= 3 (:formal/managed-graph-reply raw)))
+  (is (= :sat (:verdict result)))
+  (is (= false (:checked-native-execution result)))
+  (is (= {:formal/bv [8 6]} (get-in raw [:observations 0 :roots 0 :value])))
+  (is (thrown? (answer/from-managed original (assoc raw :formal/managed-graph-reply 2 :reply-profile policy/numeric))))
+  (is (thrown? (answer/from-managed (request/prepare subject) raw))))
+ (let [raw (execution/execute subject snapshot options (fn [& _] {:ok true :status :unsat}))
+       result (answer/recheck original (answer/from-managed original raw))]
+  (is (= :solver-claim (:verdict raw)))
+  (is (= :solver-claim (:verdict result)))
+  (is (= :not-checked (get-in result [:certificate :status])))))
+
+(run-tests)
