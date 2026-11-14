@@ -24,6 +24,9 @@
   (let [uri (URI/parse value)]
    (when (and (contains? #{"http" "https"} (:scheme uri)) (world/text? (:host uri))
               (nil? (:userinfo uri)) (nil? (:query uri)) (nil? (:fragment uri))) value))))
+(defn- located-folder [path]
+ (when (world/folder? path)
+  (try (canonical-folder path) (catch _ nil))))
 (defn project
  "Normalize saved declarations and observed ports. A closed saved service stays
   discoverable; an unsaved listener disappears when its observation disappears.
@@ -32,11 +35,11 @@
  (let [saved
        (vec (keep
         (fn [spec]
-         (let [name (get spec "name") cwd (get spec "cwd")
+         (let [name (get spec "name") folder (located-folder (get spec "cwd"))
                endpoint (first (filter #(and (= owner (get % "owner")) (= name (get % "name"))) endpoints))]
-          (when (and (string? name) (world/folder? cwd) (or endpoint (= "service" (get spec "kind"))))
+          (when (and (string? name) folder (or endpoint (= "service" (get spec "kind"))))
            {"id" (str name "." owner) "name" name "owner" owner
-            "folder" (canonical-folder cwd) "url" (url (get endpoint "url"))
+            "folder" folder "url" (url (get endpoint "url"))
             "listening" (when endpoint (= true (get endpoint "listening"))) "published" (= true (get endpoint "published"))
             "wanted" (= true (get endpoint "wanted")) "kind" "saved"}))) declarations))
        saved-names (set (map #(get % "id") saved))]
@@ -44,13 +47,13 @@
    (keep (fn [port]
            (let [cwd (or (get port "project") (get port "cwd"))
                  folder (when (and (string? cwd) (not (blank? cwd)))
-                          (if (or (= cwd "~") (starts-with? cwd "~/")) (str home (subs cwd 1)) cwd))
+                          (located-folder (if (or (= cwd "~") (starts-with? cwd "~/")) (str home (subs cwd 1)) cwd)))
                  names (get port "names" [])]
-            (when (and (= owner (get port "owner")) (world/folder? folder)
+            (when (and (= owner (get port "owner")) folder
                        (empty? (filter #(contains? saved-names %) names)))
              {"id" (str "port-" (get port "port") "." owner)
               "name" (or (first names) (str "Port " (get port "port"))) "owner" owner
-              "folder" (canonical-folder folder) "url" (url (get port "url"))
+              "folder" folder "url" (url (get port "url"))
               "listening" true "published" (boolean (url (get port "url"))) "wanted" true "kind" "listener"}))) ports)))))
 
 (defn inventory
