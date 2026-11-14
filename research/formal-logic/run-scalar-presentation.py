@@ -55,7 +55,8 @@ sources = [*(P / 'src').rglob('*.bl'), P / 'ATLAS.bl.org', P / 'sdk-pin.json', P
            P / 'evidence/floor-modulus-model/qualification.json', C / 'qualification.json',
            C / 'previous-readers-qualification.json', C / 'records-qualification.json', C / 'promotion.json', I / 'qualification.json',
            P / 'evidence/numeric-semantics/qualification.json', P / 'RETAINED-REQUEST-IMPLEMENTATION.md',
-           P / 'RETAINED-REQUEST-PLAN.md', P / 'TERM-FLOOR-MODULUS-MODEL.md', P / 'WORD-INTEGRATION.md', P / 'WORD-PROFILE-PLAN.md', P / 'SCALAR-INTEGRATION.md', P / 'SCALAR-TEXT-DOMAIN.md', P / 'POST-SCALAR-ROADMAP.md',
+           P / 'RETAINED-REQUEST-PLAN.md', P / 'TERM-FLOOR-MODULUS-MODEL.md', P / 'WORD-INTEGRATION.md', P / 'WORD-PROFILE-PLAN.md', P / 'SCALAR-INTEGRATION.md', P / 'SCALAR-TEXT-DOMAIN.md', P / 'POST-SCALAR-ROADMAP.md', P / 'STRING-REPRESENTATION-REVIEW.md', P / 'VACUITY-SEMANTICS-REVIEW.md',
+           P / 'FINITE-FEASIBILITY-PROTOTYPE.md', P / 'FINITE-OBLIGATION-PROTOTYPE.md', P / 'GRAPH-INTEGER-PROTOTYPE.md', P / 'evidence/string-representation-review/source-review.json',
            P / 'evidence/word-envelope-model/qualification.json', P / 'WORD-ENVELOPE-MODEL.md']
 digests = {}
 for source in sorted(sources):

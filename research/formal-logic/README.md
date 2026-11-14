@@ -684,9 +684,11 @@ checks, three negative controls and 11,705 SDK assertion executions. The full
 187-question paired native audit passed with unchanged results and solver
 binaries. Cold SDK-only packet readers passed twelve older word packets, four
 text packets with 52 checks, and two certificate bundles with six fresh finite
-checks; all recorded zero solver/oracle calls. The twenty-record actual durable
-cohort and older-generation reader gates are still in progress, so the project
-pin remains on the qualified word SDK. The
+checks; all recorded zero solver/oracle calls. Two fresh SDK-only readers have also reopened all twenty actual packets and
+durable rows, with sixteen refusal controls, three independently invalid text
+points and exactly one normalization per selected lookup. The owned ledger was
+hashed and retired. Older-generation reader gates are still in progress, so the
+project pin remains on the qualified word SDK. The
 [next implementation work](POST-SCALAR-ROADMAP.md) includes a graph-native entry
 for the integer certificate kernel and separately checked premise feasibility.
 
@@ -696,3 +698,9 @@ value to `:report`. The prepared [finite feasibility](FINITE-FEASIBILITY-PROTOTY
 and [obligation policy](FINITE-OBLIGATION-PROTOTYPE.md) experiments have not run;
 they will separately check conditional entailment, actual feasible or inconsistent
 premises, and exact caller acceptance policy. They do not change the current SDK.
+
+The pending [graph integer checker](GRAPH-INTEGER-PROTOTYPE.md) prepares an
+original-graph, linear-only proof kernel with shared formulas, a closed proof DAG
+and prospective arithmetic limits; it has not run. The [native String carrier
+review](STRING-REPRESENTATION-REVIEW.md) binds the actual immutable worker and
+locked crate sources without claiming a quantified-domain theorem.
