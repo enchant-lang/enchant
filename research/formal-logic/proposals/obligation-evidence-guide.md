@@ -1,13 +1,12 @@
 # A proof, usable premises, and permission to accept it
 
-This is the common interface being integrated on main. The selected scalar SDK
-is still the qualified baseline. The final canonical source projection passed
-**1,714 assertions across 18 files**, including the SAT reporting fix and policy
-namespace relocation. Its [qualification](../evidence/obligation-integration-prototype/all/qualification.json)
-and [actual log](../evidence/obligation-integration-prototype/all/checks.txt) bind
-those exact source bytes. The final cold packet rerun and new artifact gates are
-pending. Earlier 284/501-assertion passes and the first four-packet/two-reader
-pass are retained under their actual historical revisions.
+This interface is installed in the selected immutable obligation SDK. Its
+[qualification](../evidence/obligation-integration/qualification.json) records
+**11,914 assertion executions**, 612 namespace checks, the unchanged 187-question
+paired native corpus and fresh current/historical packet readers. The preceding
+[1,714-assertion source qualification](../evidence/obligation-integration-prototype/all/qualification.json)
+retains its original scope. The [live presentation receipt](../evidence/obligation-presentation/dossier-qualification.json)
+binds the 94-cell dossier, actual browser checks and reviewed frames separately.
 
 A conditional theorem says that every assignment satisfying the premises also
 satisfies the claim. An impossible premise can make that theorem true. A caller
@@ -114,16 +113,19 @@ The existing model framework reconstructs contracts and exports explicit
 `requires` assertions. Its `formal.obligation` namespace still owns model proof
 plans. The new independent consumer helper is `formal.obligation-policy`.
 
-An additional, unqualified prototype in `prototypes/graph-search` proposes graph
+An additional project prototype in `prototypes/graph-search` proposes graph
 integer certificates through bounded Boolean splitting and Fourier–Motzkin
 elimination. It uses the kernel's diagnostic normalization to search; that view
 never becomes a checking premise. Every candidate must pass the independent
 original-subject checker. Search failure is unknown, never satisfiable.
 
-Its pending examples connect a straight affine source contract to the common
-carrier, retain a separately checked premise witness, and distinguish a false
-contract from search failure through point replay. Integer choices are an
-explicit next fragment. The reviewed Source/core interpretation, compiler
+Its [43-assertion qualification](../evidence/graph-search-prototype/qualification.json)
+connects a straight affine source contract to the common carrier, retains a
+separately checked premise witness, and distinguishes a false contract from
+search failure through point replay. Integer choices have a separate
+[50-assertion graph-transform qualification](../evidence/graph-choice-prototype/qualification.json)
+and [Lean model](../evidence/choice-extension-model/qualification.json); the
+transform is not installed in the common dispatcher. The reviewed Source/core interpretation, compiler
 preservation and mechanical verification of the BL implementation remain
 separate obligations. An accepted symbolic request does not establish all of
 those program connections.

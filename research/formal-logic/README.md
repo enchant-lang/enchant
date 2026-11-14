@@ -35,8 +35,11 @@ whole-language totality or compiler-preservation claim.
 A [wider request overlay](prototypes/wide-owner/README.md) is being implemented
 through the existing common API. It separates bounded typed admission from
 interpreter/proof availability so arrays, quantifiers, abstract sorts, sequences
-and floating-point terms can keep their native reports as claims. Its actual
-checks and later SDK qualification are still pending.
+and floating-point terms can keep their native reports as claims. Its
+[pure qualification](evidence/wide-owner-prototype/pure/qualification.json)
+passed 424 assertions across all 187 question vocabularies, including six
+measured solver-free operational windows. Actual native owners, narrow-policy
+regressions, cold readers and later immutable SDK integration remain separate gates.
 
 The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root

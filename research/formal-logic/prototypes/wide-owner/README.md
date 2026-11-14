@@ -1,8 +1,10 @@
 # One request interface for the full existing typed vocabulary
 
-This is an unqualified project source batch beside the selected immutable SDK.
-It is not installed in that SDK. Its BL checks, native corpus, fresh readers
-and later SDK build are still required. Qualification explicitly relocates namespaces/imports; it does not replace
+This project source batch is beside the selected immutable SDK; it is not
+installed in that SDK. Its [pure qualification](../../evidence/wide-owner-prototype/pure/qualification.json)
+passed 424 assertions across all 187 question vocabularies and six measured
+solver-free operational windows. Actual native owners, narrow-policy regressions,
+fresh readers and later SDK integration are separate gates. Qualification explicitly relocates namespaces/imports; it does not replace
 installed SDK forwarder routes. The eventual batch reuses the ordinary `formal.logic`
 prepare/propose/recheck/execute/compare API; it introduces no parallel facade.
 
@@ -52,3 +54,11 @@ code-custody guard before theory checks. Its failure and unavailable trace resul
 remain in `evidence/wide-owner-prototype/pure/before-namespace-projection/`.
 The replacement harness projects explicit namespaces and imports, recording every
 input hash, transformation and resulting source. It grants no SDK artifact status.
+
+The initial native smoke attempt hit the default isolated test-file timeout
+after 305 seconds, before all nine families ran. Its partial packets, actual
+failed summary and terminal state remain in
+`../../evidence/wide-owner-prototype/native-smoke/before-explicit-harness-deadline/`.
+The runner now sets a finite explicit test-file allowance inside the outer
+process deadline. Per-query native deadlines are unchanged. A partial run is
+not native qualification.
