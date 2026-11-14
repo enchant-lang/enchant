@@ -37,4 +37,23 @@
     (lambda () (set! cleanup (+ 1 cleanup))))))
  (native-frame-check "raw and frame traces remain distinct" captured)
  (native-frame-check "protected cleanup once" (= cleanup 1)))
+;; The raw BIF forwards to its target, never through a native callback fence.
+(define native-test-raw-countdown #f)
+(set! native-test-raw-countdown
+ (bl-register-callable! (lambda (n)
+  (bl-with-source-frame (native-test-source "raw-countdown" 30 "direct")
+   (lambda ()
+    (if (> n 0)
+     (bl-source-call (native-test-source "raw-countdown" 31 "tail") #t
+      (lambda () (native-raw-apply native-test-raw-countdown (list (- n 1)))))
+     (h-logical-stack))))) 1))
+(let ((frames
+ (bl-with-source-frame (native-test-source "raw-caller" 40 "direct")
+  (lambda ()
+   (bl-source-call (native-test-source "raw-caller" 41 "tail") #t
+    (lambda () (bl-invoke (native-leaf "erlang/apply/2") (list native-test-raw-countdown '(100)))))))))
+ (native-frame-check "raw apply target tail frame remains bounded" (= 1 (length frames)))
+ (native-frame-check "raw apply preserves actual target call site"
+  (and (string=? (bl-get (car frames) (bl-key "fn")) "raw-countdown")
+       (= (bl-get (car frames) (bl-key "line")) 31))))
 (display "native source-frame checks passed") (newline)

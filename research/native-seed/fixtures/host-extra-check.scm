@@ -126,4 +126,32 @@
  (native-extra-check "UTF16 lone-surrogate fallback preserved"
   (and (< (h-str-cmp high "😀") 0) (> (h-str-cmp low "😀") 0)
        (< (h-str-cmp high "") 0) (= 0 (h-str-cmp high (h-str-slice "😀" 0 1))))))
+;; Raw BIF contract is distinct from the language callable ABI.
+(let* ((raw (native-leaf "erlang/apply/2")) (entered #f)
+       (function (bl-register-callable! (lambda args (set! entered #t) (+ 1 (car args))) 1))
+       (arguments '(9 10))
+       (multi (bl-tuple (list (bl-key "$blfn") (bl-map 1 function) bl-nil))))
+ (define (capture-error thunk)
+  (with-exception-catcher (lambda (e) (if (native-raised? e) (native-exception-reason e) (raise e))) thunk))
+ (native-extra-check "raw apply valid fun" (= 10 (bl-invoke raw (list function '(9)))))
+ (set! entered #f)
+ (let* ((reason (capture-error (lambda () (bl-invoke raw (list function arguments)))))
+        (details (bl-nth reason 1)))
+  (native-extra-check "raw apply badarity original function and arguments"
+   (and (eq? (bl-nth reason 0) (bl-key "badarity")) (eq? (bl-nth details 0) function)
+        (eq? (bl-nth details 1) arguments) (not entered))))
+ (native-extra-check "raw apply improper args badarg"
+  (eq? (capture-error (lambda () (bl-invoke raw (list function (cons 1 2))))) (bl-key "badarg")))
+ (native-extra-check "raw apply nonlist before badfun"
+  (eq? (capture-error (lambda () (bl-invoke raw (list (bl-key "x") (bl-vec '(1)))))) (bl-key "badarg")))
+ (for-each (lambda (value)
+  (let ((reason (capture-error (lambda () (bl-invoke raw (list value '(9)))))))
+   (native-extra-check "raw apply rejects nonfun callable"
+    (and (eq? (bl-nth reason 0) (bl-key "badfun")) (eq? (bl-nth reason 1) value)))))
+  (list (bl-key "x") (bl-map 9 10) (bl-vec '(10)) multi))
+ (native-extra-check "raw function predicate rejects dispatcher"
+  (not (bl-invoke (native-leaf "erlang/is_function/1") (list multi))))
+ (native-extra-check "language callable dispatch preserved"
+  (and (= 10 (bl-invoke multi '(9))) (= 10 (bl-invoke (bl-map 9 10) '(9)))
+       (= 10 (bl-invoke (bl-key "x") (list (bl-map (bl-key "x") 10)))))))
 (display "native extra checks passed") (newline)

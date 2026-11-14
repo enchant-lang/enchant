@@ -45,7 +45,7 @@ def check(path):
 
 if __name__ == "__main__":
     paths = list(BASE.glob("*.bl"))
-    for directory in ["src", "direct", "fixtures"]:
+    for directory in ["src", "direct", "fixtures", "corpus"]:
         paths.extend((BASE / directory).rglob("*.bl"))
     failures = []
     for path in sorted(paths):

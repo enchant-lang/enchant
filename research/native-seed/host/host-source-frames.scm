@@ -61,10 +61,13 @@
    (native-source-protect thunk))))
 ;; Native leaves may synchronously invoke callbacks. Their callback is not the
 ;; callee of the pending BL call, so it must not inherit that call's tail jump.
+;; Raw apply is an explicit forwarding boundary: preserve its call context
+;; until native-raw-apply validates and reaches the actual target through bl-invoke.
 (define native-invoke-without-source-context bl-invoke)
 (set! bl-invoke (lambda (f xs)
  (let* ((call (native-resolve-call f xs)) (target (car call)) (arguments (cdr call)))
-  (if (and (procedure? target) (table-ref native-host-callables target #f))
+  (if (and (procedure? target) (not (eq? target native-raw-apply))
+           (table-ref native-host-callables target #f))
    (parameterize ((native-next-source-call #f))
     (native-invoke-without-source-context target arguments))
    (native-invoke-without-source-context target arguments)))))

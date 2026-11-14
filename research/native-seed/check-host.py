@@ -25,7 +25,8 @@ def main():
     inputs = sources + ["host/native-posix.scm", "fixtures/host-values-check.scm",
                        "fixtures/native-posix-check.scm", "fixtures/host-lazy-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
-                       "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm"]
+                       "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
+                       "fixtures/host-compiler-cache-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -54,9 +55,11 @@ def main():
     assert "native extra checks passed" in extra, extra
     (OUT / "source-frames.scm").write_text(common + "\n"
         + (BASE / "host/host-compiler.scm").read_text() + "\n"
+        + (BASE / "fixtures/host-compiler-cache-check.scm").read_text() + "\n"
         + (BASE / "host/host-source-frames.scm").read_text() + "\n"
         + (BASE / "fixtures/host-source-frames-check.scm").read_text())
     frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
+    assert "native compiler-cache checks: 22" in frames, frames
     assert "native source-frame checks passed" in frames, frames
     (OUT / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
                                     + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())

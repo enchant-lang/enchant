@@ -67,13 +67,15 @@
   (str "(let ((callee " callee ")) (let* (" (string/join " " binds) ") "
        (source-call node invoke options) "))")))
 
+(defn- ordered-target-call [node function arguments operation options]
+ ; Evaluate the ACTUAL target and arglist before installing its source context.
+ ; The raw-fun operation validates before calling; language dispatch stays generic.
+ (str "(let* ((actual-callee " (emit function (operand-options options)) ") "
+      "(actual-arguments " (emit arguments (operand-options options)) ")) "
+      (source-call node (str "(" operation " actual-callee actual-arguments)") options) ")"))
 (defn- ordered-language-call [node function arguments options]
- ; Forward the language call itself. Routing it through a second bl-invoke
- ; would classify that forwarding procedure as a native callback boundary.
  (if (:source-frames? options)
-  (str "(let* ((actual-callee " (emit function (operand-options options)) ") "
-       "(actual-arguments " (emit arguments (operand-options options)) ")) "
-       (source-call node "(bl-invoke actual-callee actual-arguments)" options) ")")
+  (ordered-target-call node function arguments "bl-invoke" options)
   (ordered "bl-invoke" [function arguments] options)))
 
 (defn pattern [p options]
@@ -249,8 +251,8 @@
   (and (:source-frames? options) (loop-parts n)) (emit-source-loop n (loop-parts n) options)
   (and (:source-frames? options) (:loop options) (recur-node? n (:self (:loop options))))
    (ordered (:name (:loop options)) (:args n) (operand-options options))
-  (and (:source-frames? options) (self-knot? n options)) (get (:selves options) (:name (:fn n)))
-  (and (:source-frames? options) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
+  (self-knot? n options) (get (:selves options) (:name (:fn n)))
+  (and (= :let (:op n)) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
   :else
  (case (:op n)
   :lit (literal (:val n))
@@ -262,7 +264,7 @@
   :binding (or (when-let [resolver (:binding-resolver options)] (resolver n)) (refuse n))
   :remote (if (and (:source-frames? options) (= :erlang (:mod n))
                     (= :apply (:fun n)) (= 2 (count (:args n))))
-            (ordered-language-call n (first (:args n)) (second (:args n)) options)
+            (ordered-target-call n (first (:args n)) (second (:args n)) "native-raw-apply" options)
             (ordered-call n (remote n options) (:args n) options))
   :arith (if-let [f (or (when-let [resolver (:arithmetic-resolver options)] (resolver n))
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
