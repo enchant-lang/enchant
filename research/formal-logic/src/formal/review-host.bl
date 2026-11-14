@@ -57,6 +57,26 @@
                   (asset "roster.css") (File/read! (str root "/dossier-local.css"))))
 (defn scripts [] (str (asset "live.js") (asset "roster.js")
                      (File/read! (str root "/dossier/research-evidence.js"))))
+(defn sdk-source-file [reference]
+ ;; This is the one explicitly selected immutable SDK projection. It is not
+ ;; permission to browse arbitrary external paths or follow a changed symlink.
+ (when (starts-with? reference "sdk-src/")
+  (try
+   (let [pin-path (str root "/sdk-pin.json")
+         _ (when (> (:size (File/stat! pin-path)) 8192) (throw :sdk-source-pin-capacity))
+         pin (json/decode (File/read! pin-path)) selected (get pin "sdk") snapshot (get pin "source")
+         store-path? (fn [value] (and (string? value)
+                                      (Regex/match? #"^/nix/store/[a-z0-9]{32}-[^/]+$" value)))
+         _ (when-not (and (= selected (System/get_env "BL_SDK_PRODUCT"))
+                          (store-path? selected) (store-path? snapshot)) (throw :sdk-source-pin-mismatch))
+         descriptor (str selected "/artifact.json")
+         _ (when (> (:size (File/stat! descriptor)) 65536) (throw :sdk-descriptor-capacity))
+         bytes (File/read! descriptor)
+         digest (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower)))
+         _ (when-not (= digest (get pin "descriptor_sha256")) (throw :sdk-descriptor-mismatch))
+         projection (str snapshot "/priv/lib")]
+    (roster/resolve-file projection projection (subs reference 8)))
+   (catch _ nil))))
 (defn linked-file [text route]
  ;; Org links and the installed evidence component declare the closed source set. Resolve every
  ;; candidate beneath the trusted project root, including symlink targets.
@@ -67,7 +87,7 @@
                           (let [path (first row)]
                            (when (= route (str "/" path)) path))) refs))]
   (when (and reference (contains? #{".md" ".bl" ".org" ".lean" ".json" ".txt" ".patch"} (Path/extname reference)))
-     (when-let [file (roster/resolve-file source-root directory reference)]
+     (when-let [file (or (roster/resolve-file source-root directory reference) (sdk-source-file reference))]
     (when (<= (:size (File/stat! file)) 8388608)
      {:file file :mime (if (= ".json" (Path/extname file)) "application/json" "text/plain")})))))
 (defn readonly-script []
