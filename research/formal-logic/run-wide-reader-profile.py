@@ -8,8 +8,8 @@ B = P / 'evidence/wide-owner-prototype/native-smoke'
 mode = sys.argv[1] if sys.argv[1:] else 'baseline'
 assert mode in ('baseline', 'components')
 E = P / 'evidence/wide-owner-prototype' / ('reader-profile' + ('-components' if mode == 'components' else ''))
-assert not E.exists(), 'Archive an earlier profile attempt before repeating it.'
-E.mkdir()
+E.mkdir(exist_ok=True)
+assert all(path.is_dir() and path.name.startswith('before-') for path in E.iterdir()), 'Archive an earlier profile attempt before repeating it.'
 def read(path): return json.loads(path.read_text())
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 def write(name, value): (E / name).write_text(json.dumps(value, indent=2) + '\n')
