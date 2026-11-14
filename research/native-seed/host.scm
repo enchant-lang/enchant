@@ -43,6 +43,7 @@
 (define (bl-str . xs) (apply string-append (map bl-show xs)))
 (define (bl-str-v xs) (apply bl-str xs))
 (define (bl-list-v xs) xs)
+(define (bl-key-value x) x)
 (define (bl-invoke f xs)
  (cond ((procedure? f) (apply f xs)) ((symbol? f) (apply bl-get (cons (car xs) (cons f (cdr xs)))))
        ((bl-tag? f 'map) (apply bl-get (cons f xs)))

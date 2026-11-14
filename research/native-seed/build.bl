@@ -1,5 +1,5 @@
 (ns native.build
- (:require [compiler :as c] [reader-node :as rn] [js.build :as build]
+ (:require [compiler :as c] [reader-node :as rn] [js.build :as build] [anf]
            [native.scheme :as scheme] [bl.json :as json] [clojure.string :as string]))
 
 (def imported
@@ -23,6 +23,13 @@
 (def env (assoc (c/new-env "native.kernel") :file "native-seed"))
 (def compiled (mapv #(assoc % :node (c/compile (:form %) env)) definitions))
 (assert (= (count imported) (count (filter #(contains? imported (:name %)) compiled))))
+(defn all-nodes [n] (cons n (mapcat all-nodes (anf/executable-children n))))
+(def remote-refusals (set (keep (fn [n] (when (= :remote (:op n))
+     (try (scheme/remote n options) nil (catch e (ex-message e)))))
+     (mapcat #(all-nodes (:node %)) compiled))))
+(when (seq remote-refusals)
+ (doseq [message remote-refusals] (println message))
+ (throw (ex-info "native seed: remote capability audit refused" {})))
 (def refusals (vec (keep (fn [d] (try (scheme/emit-definition d options) nil
                   (catch e (ex-message e)))) compiled)))
 (when (seq refusals)
