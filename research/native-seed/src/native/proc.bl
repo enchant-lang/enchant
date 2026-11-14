@@ -12,7 +12,7 @@
   (case tag
    :symbol form
    :keyword (keyword (rn/node-name form))
-   :list (apply list (map source-data (rn/node-items form)))
+   :list (to-list (map source-data (rn/node-items form)))
    :vector (vec (map source-data (rn/node-items form)))
    :set (set (map source-data (rn/node-items form)))
    :map (reduce (fn [out pair]
@@ -35,14 +35,17 @@
 (defn map-code [f form]
  (cond
   (list? form) (if (contains? #{'quote 'syntax-quote} (first form)) form
-                (f (apply list (map #(map-code f %) form))))
+                (f (to-list (map #(map-code f %) form))))
   (vector? form) (vec (map #(map-code f %) form))
   (map? form) (reduce (fn [out entry] (assoc out (key entry) (map-code f (val entry)))) {} form)
   :else form))
 
 (defn body-form [forms]
- (cond (empty? forms) nil (= 1 (count forms)) (first forms)
-       :else (apply list (cons 'do forms))))
+ ; `cons` deliberately permits a LazySeq tail. Generated Source must instead
+ ; contain proper lists before argument arity checks, printing or compilation.
+ (let [forms (to-list forms)]
+  (cond (empty? forms) nil (= 1 (count forms)) (first forms)
+        :else (cons 'do forms))))
 
 (defn reply-markers [form caller reference where]
  (map-code (fn [call]
@@ -72,7 +75,7 @@
  ; Operator names and quoted forms are not variable uses. Guards do not bind.
  (cond
   (list? form) (if (contains? #{'quote 'syntax-quote} (first form)) form
-                (cons (first form) (map #(rebind-guard % name replacement) (rest form))))
+                (cons (first form) (to-list (map #(rebind-guard % name replacement) (rest form)))))
   (= form name) replacement
   :else form))
 
@@ -126,14 +129,14 @@
        init (first (filter #(= 'init (first %)) body))
        init-params (if init (parameters! (second init) 1 where "init") ['_])
        init-value (if init (strip-ok (body-form (drop 2 init))) {})
-       termination (filter #(= 'terminate (first %)) body)
+       termination (vec (filter #(= 'terminate (first %)) body))
        stop-body (body-form
          (concat (map (fn [part]
             (let [parameters (parameters! (second part) 2 where "terminate")]
              (list 'let [(first parameters) reason (second parameters) state]
                (reply-markers (body-form (drop 2 part)) nil reference where)))) termination)
           (list (list 'erlang/exit reason))))
-       arms (map #(lower-arm % loop-name state reference used where planners)
+       arms (mapv #(lower-arm % loop-name state reference used where planners)
                  (filter #(contains? #{'handle-call 'handle-cast 'handle-info} (first %)) body))
        _ (when (empty? arms)
            (throw (ex-info (str where ": at least one receive callback is required")
@@ -141,7 +144,7 @@
        receive-parts (reduce into [[:stop reason] stop-body] arms)]
   (vec (concat (:definitions plan)
          [(list 'defn server-name init-params (list loop-name init-value))
-          (list 'defn loop-name [state] (apply list (cons 'receive receive-parts)))]))))
+          (list 'defn loop-name [state] (cons 'receive (to-list receive-parts)))]))))
 
 (defn lower-server-with [form vocabulary extra-used]
  (lower-server-captured form vocabulary extra-used {}))
