@@ -29,7 +29,10 @@
   (let ((v (bl-get (native-assert-map m) key native-missing)))
    (if (eq? v native-missing) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badkey") key)) (native-capture-stack)) v))))
 (define (native-raw-map-get m key default)
- (if (native-raw-map-has? m key) (native-map-fetch key m) default))
+ ;; Ordinary maps (including plain tagged structs) already have the raw
+ ;; fields. Search once; retain existing specialized projection/type gates.
+ (if (bl-tag? m 'map) (bl-get m key default)
+  (if (native-raw-map-has? m key) (native-map-fetch key m) default)))
 ;; Deferred collection algorithms belong to the compiled canonical runtime.
 ;; Storage-only hosts intentionally cannot enumerate a deferred struct as data.
 (define native-canonical-sequence-items #f)
