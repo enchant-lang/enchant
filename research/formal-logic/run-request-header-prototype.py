@@ -33,7 +33,7 @@ log=(E/'checks.txt').read_text();green='1 file(s) passed, 0 failed, 0 incoherent
 write('exit.json',{'exit_code':code,'green_summary':green,'elapsed_seconds':time.monotonic()-started,
  'runtime_retired':not runtime.exists(),'cwd_retired':not cwd.exists()})
 assert code==0 and green
-counts=re.findall(r'✓\s+formal.request-header-check\s+(\d+) passed',log);assert len(counts)==1 and int(counts[0])>=40
+counts=re.findall(r'✓\s+formal.request-header-check\s+(\d+) passed',log);assert len(counts)==1 and int(counts[0])>=54
 assert all(sha(R/n)==d for n,d in digests.items())
 observed=read(E/'observations.json')
 assert observed['sdk']==pin['sdk'] and observed['compiler-proof-authority'] is False

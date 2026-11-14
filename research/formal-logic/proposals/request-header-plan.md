@@ -11,10 +11,11 @@ wrapper and complete graph once, then reads only those raw header rows. It
 returns the original subject and freshly derived reference as diagnostics. No
 consumer accepts this output as a cached typed admission or trusted request.
 
-The six prepared tests compare valid and invalid wrappers/headers, preserve
+The six prepared tests compare valid and invalid wrappers/headers against both the copied header
+block and the actual installed `request/prepare` entry, preserve
 unfamiliar shared metadata without decoding, show that a valid header can still
 fail later typed admission, count actual `graph/check!` invocations under a calibrated
-trace, and deny native/oracle execution. At least forty assertions and all six
+trace, and deny native/oracle execution. At least 54 assertions and all six
 named bodies are required. The operation-count observation must come from the
 running tests, not from a top-level write during file loading.
 
