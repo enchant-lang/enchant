@@ -17,7 +17,11 @@
               :namespace-qualified? true})
 (def out (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure"))
 (defn sha [s] (Base/encode16 (crypto/hash :sha256 s) (list (tuple :case :lower))))
-(defn nodes [n] (cons n (mapcat nodes (anf/executable-children n))))
+(defn nodes [root]
+ (loop [todo (list root) out (list)]
+  (if (erlang/== (list) todo) (lists/reverse out)
+   (let [node (erlang/hd todo)]
+    (recur (erlang/++ (anf/executable-children node) (erlang/tl todo)) (cons node out))))))
 (defn atom-text [a] (if (string? a) a (erlang/atom_to_binary a)))
 (defn source-path [ns]
  (or (get {"host.compiler-data" "priv/host/compiler_data.bl"
@@ -97,13 +101,14 @@
                 (conj order ns) (assoc units ns unit)))))))))))
 (defn inventory [closure]
  (let [facts
-  (loop [todo (mapcat (fn [ns] (map :node (:defs (get (:units closure) ns)))) (:order closure))
+  (loop [todo (BeamLisp.CompilerData/eager_mapcat
+               (fn [ns] (BeamLisp.CompilerData/eager_map :node (:defs (get (:units closure) ns)))) (:order closure))
          operations {} remotes #{} globals #{} bindings #{}]
-   (if (empty? todo)
+   (if (erlang/== (list) todo)
     {:operations (vec (sort-by str operations)) :remotes (vec (sort-by str remotes))
      :globals (vec (sort-by str globals)) :bindings (vec (sort-by str bindings))}
-    (let [n (first todo) op (:op n)]
-     (recur (concat (anf/executable-children n) (rest todo))
+    (let [n (erlang/hd todo) op (:op n)]
+     (recur (erlang/++ (anf/executable-children n) (erlang/tl todo))
       (assoc operations op (inc (get operations op 0)))
       (if (= op :remote) (conj remotes [(atom-text (:mod n)) (atom-text (:fun n)) (count (:args n))]) remotes)
       (if (= op :global) (conj globals [(:ns n) (:name n)]) globals)
@@ -139,9 +144,10 @@
 (def final-closure (assoc closure :provider-sources final-providers))
 (def artifact (erlang/term_to_binary final-closure (list :deterministic)))
 (File/write! (str out "/closure.etf") artifact)
-(File/write! (str out "/inventory.json") (json/encode (inventory closure)))
 (File/write! (str out "/identity.json")
  (json/encode {:schema "bl.native.compiler-closure-identity" :version 1
                :artifact-sha256 (sha artifact) :sdk-pin-sha256 (sha pin)
                :options options :providers final-providers}))
+(when (= "--inventory" (second (BeamLisp/argv)))
+ (File/write! (str out "/inventory.json") (json/encode (inventory final-closure))))
 (println (str "NATIVE_CLOSURE " (count (:order closure)) " namespaces " (sha artifact)))
