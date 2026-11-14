@@ -25,10 +25,11 @@ def main():
     started = time.monotonic()
     try:
         build = json.loads((OUT / "native-build.json").read_text())
-        assert build["status"] == "stage1-compiled-not-qualified"
+        assert build["status"] in ("stage1-compiled-not-qualified", "stage1-actors-compiled-not-qualified")
         image = OUT / "stage1"
-        stage = build["builds"][-1]
-        assert stage["stage"] == "stage1"
+        stages = [stage for stage in build["builds"] if stage["stage"] == "stage1"]
+        assert len(stages) == 1
+        stage = stages[0]
         assert digest(image) == stage["executable_sha256"]
         assert digest(OUT / "stage1.scm") == stage["source_sha256"]
         for name, expected in build["inputs"].items():
