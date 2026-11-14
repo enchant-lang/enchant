@@ -2,7 +2,7 @@
  (:require [formal.logic :as logic] [formal.request :as request] [formal.request-answer :as answer]
            [formal.request-evidence :as evidence] [formal.request-point :as point]
            [formal.point-profile :as policy] [formal.graph-question :as question]
-           [formal.resources.typed :as typed] [formal.finite-word-certificate :as finite]
+           [formal.resources.typed :as typed] [formal.graph-terms :as forest] [formal.finite-word-certificate :as finite]
            [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
            [formal.data-graph :as graph] [formal.backend :as backend]
            [formal.advanced-cases :as advanced] [formal.feature-cases :as features]
@@ -74,13 +74,17 @@
  (let [r (original (t/eq (t/real 1 3) (t/real 1 3)))
        limited (request/prepare (:subject r)
                  {:policy {:profile policy/wide-native :limits {:admission-work-units 0}}})
-       prepared (point/replay limited {})
-       supplied (answer/supply limited {})
-       checked (answer/recheck limited supplied)]
-  (is (= :incomplete (:verdict prepared) (:verdict checked)))
-  (is (= :not-installed (:point-replay prepared) (:point-replay checked)))
-  (is (= :admission-work-units (get-in prepared [:admission :reason :metric])))
-  (is (= :not-run (get-in prepared [:admission :constructor-execution])))
+       constructors (tuple (elem (erlang/fun_info forest/prepare :module) 1) :prepare 2)]
+  (is (= 1 (erlang/trace_pattern constructors true (list :local :call_count))))
+  (try
+   (let [prepared (point/replay limited {}) supplied (answer/supply limited {})
+         checked (answer/recheck limited supplied)]
+    (is (= :incomplete (:verdict prepared) (:verdict checked)))
+    (is (= :not-installed (:point-replay prepared) (:point-replay checked)))
+    (is (= :admission-work-units (get-in prepared [:admission :reason :metric])))
+    (is (= :not-run (get-in prepared [:admission :constructor-execution])))
+    (is (= 0 (elem (erlang/trace_info constructors :call_count) 1))))
+   (finally (erlang/trace_pattern constructors false (list :local :call_count))))
   (is (thrown? (policy/settings {:profile policy/wide-native :limits {:cached-inventory {}}})))))
 (deftest only-selected-operational-descriptors-enter-typing-work
  (enter! :metadata)
@@ -106,12 +110,16 @@
  (let [huge (t/int (erlang/bsl 1 300))
        deep-sort (reduce (fn [sort _] (t/array-sort sort sort)) t/Int (range 11))
        unused (t/bound "wide.unused" deep-sort)
-       questions [(t/eq huge huge) (t/forall [unused] (t/bool true))]]
-  (doseq [claim questions]
-   (let [r (original claim)
-         inventory (policy/with-question (:subject r) (:policy r) (fn [inventory _] inventory))]
-    (is (= 2 (:formal/question-forest-refusal inventory)))
-    (is (= :not-run (get-in inventory [:admission :constructor-execution])))))))
+       requests (mapv original [(t/eq huge huge) (t/forall [unused] (t/bool true))])
+       constructors (tuple (elem (erlang/fun_info forest/prepare :module) 1) :prepare 2)]
+  (is (= 1 (erlang/trace_pattern constructors true (list :local :call_count))))
+  (try
+   (doseq [r requests]
+    (let [inventory (policy/with-question (:subject r) (:policy r) (fn [inventory _] inventory))]
+     (is (= 2 (:formal/question-forest-refusal inventory)))
+     (is (= :not-run (get-in inventory [:admission :constructor-execution])))))
+   (is (= 0 (elem (erlang/trace_info constructors :call_count) 1)))
+   (finally (erlang/trace_pattern constructors false (list :local :call_count))))))
 (deftest no-native-or-oracle-execution-was-used
  (enter! :no-native)
  (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
