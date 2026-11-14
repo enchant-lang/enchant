@@ -161,7 +161,7 @@
         (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
 ;; Positive exact-MFA dispatch cache. Registry objects are persistent; an
 ;; identity change retires all resolved wrappers before the next lookup.
-;; A compiled wrapper reads its LIVE slot on every invocation, so redefining
+;; A compiled wrapper observes its LIVE registry root on every invocation, so redefining
 ;; a source var neither leaves a stale procedure nor grants new membership.
 (define native-remote-cache (make-table test: equal?))
 (define native-remote-cache-leaves #f)
@@ -220,9 +220,17 @@
         (cond
          ((not (eq? ns native-missing))
           (let* ((slot (string-append ns "/" logical))
+                 ;; A persistent registry root is a complete value epoch.
+                 ;; Source redefinition/removal/readdition changes that root;
+                 ;; otherwise this exact slot cannot have changed in place.
+                 (slot-root #f) (slot-value native-missing)
                  (wrapper
                   (lambda arguments
-                   (let ((value (bl-get native-global-registry slot native-missing)))
+                   (if (not (eq? slot-root native-global-registry))
+                    (begin
+                     (set! slot-value (bl-get native-global-registry slot native-missing))
+                     (set! slot-root native-global-registry)))
+                   (let ((value slot-value))
                     (if (eq? value native-missing) (error "missing compiled native export" key)
                      (if variadic?
                       (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))

@@ -23,6 +23,23 @@
     (native-register! "native.cache-one" "pick" (lambda (x) (+ x 100)))
     (native-cache-check "same escaped wrapper reads redefined live slot" (= 105 (bl-invoke first '(5))))
     (native-cache-check "global value change preserves cached dispatch identity" (eq? first (native-remote key)))
+    ;; Removing the selected value must retire an already escaped wrapper's
+    ;; previous value. Readding it under a new root must recover the SAME
+    ;; wrapper; no missing-slot observation is sticky across registry roots.
+    (set! native-global-registry
+     (native-map-remove native-global-registry "native.cache-one/pick"))
+    (let ((refused #f))
+     (with-exception-catcher (lambda (e) (set! refused #t))
+      (lambda () (bl-invoke first '(5))))
+     (native-cache-check "held compiled wrapper cannot use a removed slot value" refused))
+    (let ((refused #f))
+     (with-exception-catcher (lambda (e) (set! refused #t))
+      (lambda () (bl-invoke first '(5))))
+     (native-cache-check "removed slot remains absent within the same root" refused))
+    (native-register! "native.cache-one" "pick" (lambda (x) (+ x 100)))
+    (native-cache-check "held compiled wrapper sees readded slot value" (= 105 (bl-invoke first '(5))))
+    (native-cache-check "slot removal and readdition preserve dispatch membership identity"
+     (eq? first (native-remote key)))
     ;; Arity admission changes invalidate resolutions even when this arity
     ;; remains present. An unadmitted MFA never becomes a cached negative.
     (native-cache-check "unadmitted second arity absent"
