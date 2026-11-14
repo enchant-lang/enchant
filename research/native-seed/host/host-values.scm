@@ -833,10 +833,10 @@
             (let* ((tail-size (+ 1 (modulo (- count 1) 32))) (tree-count (- count tail-size))
                    (shift (let level ((bits 5)) (if (> tree-count (expt 2 (+ bits 5))) (level (+ bits 5)) bits)))
                    (tail (bl-tuple (let loop ((i (- count 1)) (out '()))
-                     (if (< i tree-count) out (loop (- i 1) (cons (native-vector-ref value i) out))))))
+                     (if (< i tree-count) out (loop (- i 1) (cons (native-vector-ref value i) out)))))))
              (bl-tuple (list (bl-key "bl_vec") count shift
               (native-vector-project-node value 0 shift tree-count) tail))))))
-    (table-set! native-vector-projections storage items) items)))))
+    (table-set! native-vector-projections storage items) items))))
 (define (native-vector-canonical-trie? items)
  (and (bl-tag? items 'tuple) (= (bl-count items) 5)
       (eq? (bl-nth items 0) (bl-key "bl_vec"))
