@@ -42,10 +42,12 @@
  (let [value (project-env/project root)]
   (when (seq (:errors value))
    (throw (ex-info "Invalid auth project configuration" {:kind :auth/configuration :errors (:errors value)})))
-  (assoc (merge value (:auth/realm value))
+  ;; Normalizer diagnostics are lazy sequences with runtime cache identities;
+  ;; they must never enter a stable service/configuration fingerprint.
+  (assoc (merge (select-keys value [:root :name :bl :paths]) (:auth/realm value))
     :imports (:auth/imports value) :realms (:auth/realms value))))
 (defn- declaration-for [root logical]
- (let [config (project root) declaration (get (:imports config) (symbol logical))
+ (let [config (project root) root (:root config) declaration (get (:imports config) (symbol logical))
        realm (get (:realms config) (:from declaration))
        provider-root (when (:root realm) (Path/expand (:root realm) root))
        provider-config (if provider-root (project provider-root) realm)
@@ -53,7 +55,8 @@
        source (when (:source config) (Path/expand (:source config) (or provider-root root)))
        interface (when (:interface config) (Path/expand (:interface config) root))]
   (when-not (and declaration realm (if (= :remote (:transport realm)) interface source)) (throw (ex-info "No explicit namespace binding in env.bl" {:kind :auth/unbound-import})))
-  {:declaration (update declaration :namespace str) :config (assoc config :source source :interface interface)}))
+  {:declaration (update declaration :namespace str)
+   :config (assoc config :root (or provider-root root) :source source :interface interface)}))
 (declare unlink!)
 (defn- host-factory [factory config]
  (let [parts (String/split (str factory) "/")]
