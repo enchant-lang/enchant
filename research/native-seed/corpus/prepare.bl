@@ -1,13 +1,23 @@
 ; One canonical compilation of the ORIGINAL complete acceptance source. No
 ; rewritten test file, assertion replacement, scheduler or ANF interpretation.
 (ns native.prepare-original-corpus
- (:require [native.proc-link :as linker] [bl.json :as json]))
+ (:require [native.proc-link :as linker] [native.proc :as proc] [js.build :as build] [bl.json :as json]))
 (def base "research/native-seed")
 (def args (BeamLisp/argv))
 (def closure-dir (or (first args) (str base "/out/compiler-closure")))
 (def out (or (second args) (str base "/out/original-actor-corpus")))
 (def app "research/js-actors/test.bl")
 (def runtime "priv/lib/js/actor/runtime.bl")
+(def helper-symbols
+ (vec (filter (fn [symbol]
+        (let [text (str symbol)]
+         (or (contains? #{"bus" "registry" "proc.bus" "proc.reg" "proc.flow"} text)
+             (String/starts_with? text "proc.bus/") (String/starts_with? text "proc.reg/")
+             (String/starts_with? text "proc.flow/"))))
+       (reduce (fn [out form] (into out (proc/symbols-in (proc/source-data form))))
+        #{} (build/read-forms app)))))
+(when (seq helper-symbols)
+ (throw (ex-info "original actor source now requires helper admission" {:symbols helper-symbols})))
 (def extensions [(str base "/host/host-source-frames.scm")
                  (str base "/host/actor-invariants.scm")
                  (str base "/corpus/native-witness.scm")])
@@ -17,7 +27,7 @@
   :host-link (str base "/host/host-proc-link.scm")
   :prelude (str closure-dir "/prelude.scm")
   :closure-manifest (str closure-dir "/partition.json") :leaves (str closure-dir "/leaves.json")
-  :host-extensions extensions :source-frames? true :original-actor-corpus? true}))
+  :host-extensions extensions :source-frames? true :original-actor-corpus? true :helper-namespaces []}))
 (when-not (String/contains? (:program result) "(bl-source-call ")
  (throw (ex-info "original corpus requires the source-call emitter; source frames were not emitted" {})))
 (when-not (= 202 (get-in result [:manifest :runtime-definitions]))
@@ -38,7 +48,8 @@
  (json/encode {:schema "bl.native.original-actor-corpus" :version 1 :target :scheme
   :status :prepared-not-executed :application (linker/source-identity app)
   :runtime (linker/source-identity runtime) :assertion-adaptation :none :source-path-adaptation :none
-  :clock :virtual-deadlines :link (:manifest result)
+  :clock :virtual-deadlines :helper-admission {:requested [] :canonical-source-symbols helper-symbols}
+  :link (:manifest result)
   :inputs (mapv linker/source-identity
    (concat [app runtime (str base "/bridges.bl") (str base "/actor-links.edn")
             (str base "/sdk-pin.json") (str base "/src/native/proc-link.bl")

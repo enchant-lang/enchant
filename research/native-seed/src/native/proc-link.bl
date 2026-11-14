@@ -38,16 +38,19 @@
  ; explicit vocabulary. Nothing else at top level is silently discarded.
  (or (and (= ns "proc.bus") (= '(extend-clause! :bus bus-clause) (proc/source-data form)))
      (and (= ns "proc.reg") (= '(extend-clause! :registry registry-clause) (proc/source-data form)))))
-(defn capture-compiler-vocabulary []
+(defn capture-compiler-vocabulary [helper-namespaces]
  ; Provider activation and ALL callable captures precede the Env fork. Runtime
  ; helper staging masks links in that fork and must not own these pure values.
- (doseq [[ns spec] helpers]
+ (doseq [ns helper-namespaces :let [spec (get helpers ns)]]
   (when-not (= (:sha256 spec) (digest (File/read! (:path spec))))
    (throw (ex-info "native proc link: admitted helper source changed" {:namespace ns :path (:path spec)}))))
- (doseq [namespace ["proc.server" "proc.super" "proc.bus" "proc.reg"]]
-  (BeamLisp.Loader/load_provider namespace))
+ (let [providers (vec (concat ["proc.server" "proc.super"]
+                             (filter #(contains? #{"proc.bus" "proc.reg"} %) helper-namespaces)))]
+ (doseq [namespace providers] (BeamLisp.Loader/load_provider namespace))
  {:renderer proc/runtime-forms
-  :vocabulary {:bus bus/bus-clause :registry reg/registry-clause}
+  :vocabulary (cond-> {}
+                (some #(= "proc.bus" %) helper-namespaces) (assoc :bus bus/bus-clause)
+                (some #(= "proc.reg" %) helper-namespaces) (assoc :registry reg/registry-clause))
   :planners {:clause-plan (BeamLisp.Env/fetch_exact! "proc.server" "clause-plan")
              :supervisor-plan (BeamLisp.Env/fetch_exact! "proc.super" "supervisor-plan")
              :unknown-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "unknown-supervisor-clause-error")
@@ -55,7 +58,7 @@
              :data-tail (BeamLisp.Env/fetch_exact! "server-clause" "data-tail")}
   :providers (mapv (fn [namespace]
     (assoc (source-identity (BeamLisp.Loader/source_path namespace)) :namespace namespace))
-   ["proc.server" "proc.super" "proc.bus" "proc.reg"])})
+   providers)}))
 (defn expansion [captured forms ns path]
  ((:renderer captured) (vec (remove #(registration? % ns) forms)) ns path
   {:vocabulary (:vocabulary captured) :planners (:planners captured)}))
@@ -270,7 +273,13 @@
      (scheme/text (erlang/atom_to_binary module)) " " (scheme/text (:ns unit)) "))\n"))
    [(:module unit) (:base-module unit)]))))
 (defn build-project [request]
- (let [captured (capture-compiler-vocabulary)]
+ (let [helper-namespaces (if (contains? request :helper-namespaces) (:helper-namespaces request)
+                          ["proc.bus" "proc.flow" "proc.reg"])
+       _ (when-not (and (vector? helper-namespaces)
+                        (= (count helper-namespaces) (count (distinct helper-namespaces)))
+                        (every? #(contains? helpers %) helper-namespaces))
+           (throw (ex-info "native proc link: helper list is not an exact admitted namespace vector" {})))
+       captured (capture-compiler-vocabulary helper-namespaces)]
  (BeamLisp.Env/isolated (fn []
   (let [closure (artifact/read-closure (:closure-manifest request))
         pin (json/decode (File/read! (:sdk-pin request)))
@@ -280,10 +289,10 @@
         sdk-descriptor (File/read! (str (get pin "sdk") "/artifact.json"))
         _ (when-not (= (digest sdk-descriptor) (get pin "descriptor_sha256"))
             (throw (ex-info "native proc link: qualified SDK descriptor changed" {})))
-        _ (doseq [[ns spec] helpers]
+        _ (doseq [ns helper-namespaces :let [spec (get helpers ns)]]
             (when-not (= (:sha256 spec) (digest (File/read! (:path spec))))
              (throw (ex-info "native proc link: admitted helper source changed" {:namespace ns :path (:path spec)}))))
-        helper-units (mapv (fn [ns] (project-protocol (prepare (:path (get helpers ns)) ns captured))) ["proc.bus" "proc.flow" "proc.reg"])
+        helper-units (mapv (fn [ns] (project-protocol (prepare (:path (get helpers ns)) ns captured))) helper-namespaces)
         runtime-unit (project-protocol (prepare (:runtime request) kernel captured))
         bridge-unit (project-protocol (prepare (:bridges request) kernel captured))
         app-unit (project-protocol (prepare (:application request) kernel captured))
@@ -342,7 +351,7 @@
                                              :owner :explicit-target-vocabulary}
                                             {:namespace "proc.reg" :form '(extend-clause! :registry registry-clause)
                                              :owner :explicit-target-vocabulary}]
-               :compile-time-providers (:providers captured)
+               :compile-time-providers (:providers captured) :helper-namespaces helper-namespaces
                :runtime-definitions (count (:defs runtime-unit))
                :emitted-bindings (mapv #(qname (:ns %) (:name %)) emitted)
                :references (:edges graph) :source-interpreter false}})))))
