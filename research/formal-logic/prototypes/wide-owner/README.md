@@ -11,9 +11,12 @@ The [first](../../evidence/wide-owner-prototype/native-smoke/reader-one/qualific
 and [second](../../evidence/wide-owner-prototype/native-smoke/reader-two/qualification.json)
 cold readers each pass 307 checks on twenty packets, with eight refusal controls
 and actual zero native/oracle calls. These receipts bind the original frozen
-batch. A subsequent local `request-evidence` reference-reuse patch now has its
-own exact-result and regression gates under `evidence/wide-reference-reuse`;
-those gates have not passed yet. The full corpus, narrow regressions and later
+batch. A subsequent local `request-evidence` reference-reuse patch has its
+own [786-assertion qualification](../../evidence/wide-reference-reuse/identities/qualification.json):
+all 187 pure vocabularies plus 31 byte-identical complete-result comparisons
+across native candidates, proof/premise policies and legacy/limited reads.
+Every comparison observes exactly one fewer reference calculation. The
+corresponding twelve-file narrow-owner regression stage is running. The full corpus and later
 SDK integration remain separate. Qualification explicitly relocates namespaces/imports; it does not replace
 installed SDK forwarder routes. The eventual batch reuses the ordinary `formal.logic`
 prepare/propose/recheck/execute/compare API; it introduces no parallel facade.

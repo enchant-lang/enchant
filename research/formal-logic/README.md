@@ -46,8 +46,9 @@ custody/lease controls, with unchanged statuses. The
 passes 307 checks on twenty candidates with no solver/oracle exchanges.
 The [second reader](evidence/wide-owner-prototype/native-smoke/reader-two/qualification.json)
 independently passes the same 307 checks. A separately reviewed local reference
-reuse is now being checked against entire original results and old packets;
-its [review](proposals/evidence-reference-review.md) records the measured cost and
+reuse now passes [786 assertions](evidence/wide-reference-reuse/identities/qualification.json),
+including 31 byte-identical complete-result comparisons and all 187 pure vocabularies.
+Its [review](proposals/evidence-reference-review.md) records the measured cost and
 preserves the reference format. The full native corpus, narrow regressions and
 later immutable SDK integration remain separate gates.
 
