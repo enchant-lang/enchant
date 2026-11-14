@@ -64,7 +64,13 @@ def main() -> None:
                         help="assert immutable stock Gambit primitive bindings during Scheme -> C only")
     parser.add_argument("--compile-stage1-only", action="store_true",
                         help="checkpoint the real native stage1 image; never qualify a fixpoint")
+    parser.add_argument("--compile-stage1-actors-only", action="store_true",
+                        help="build exact stage1 core + original actor body; never execute or qualify")
     args = parser.parse_args()
+    if args.compile_stage1_only and args.compile_stage1_actors_only:
+        parser.error("select only one stage1 checkpoint mode")
+    if args.compile_stage1_actors_only and not args.actor_body:
+        parser.error("--compile-stage1-actors-only requires --actor-body")
     # This is a compiler declaration, not an edit to the original Source or
     # Scheme artifact. Keep the existing separate/safe/interrupt/tail policies.
     gsc_flags = ["-prelude", STANDARD_BINDING_PRELUDE] if args.standard_bindings else []
@@ -75,7 +81,7 @@ def main() -> None:
         args.actor_oracle = args.actor_oracle.resolve()
     if not 1 <= args.timeout <= 240:
         raise RuntimeError("native self-compilation retains its 240-second deadline")
-    if not args.compile_stage1_only and (not args.actor_body or not args.actor_oracle):
+    if not (args.compile_stage1_only or args.compile_stage1_actors_only) and (not args.actor_body or not args.actor_oracle):
         raise RuntimeError("full fixpoint requires --actor-body and --actor-oracle")
     root, out = args.root.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -87,6 +93,7 @@ def main() -> None:
     base = root / "research/native-seed"
     inputs: dict[str, str] = {}
     runs, builds = [], []
+    actor_capture = None
 
     def path_for(name: str) -> Path:
         path = Path(name)
@@ -115,7 +122,7 @@ def main() -> None:
                             "host_optimization": args.host_optimization,
                             "standard_bindings": args.standard_bindings,
                             "scheme_compiler_flags": gsc_flags,
-                            "builds": builds, "runs": runs})
+                            "builds": builds, "runs": runs, "actor_capture": actor_capture})
 
     def run(label, argv, *, cwd=out, timeout=COMPILE_DEADLINE, env=None):
         argv = [str(x) for x in argv]
@@ -190,8 +197,33 @@ def main() -> None:
                                       gambit / "gambit/include/gambit.h", gambit / "gambit/lib/libgambit.so")}}
         actor_results = {}
         oracle = None
-        if not args.compile_stage1_only:
+        if args.actor_body:
             bind(args.actor_body)
+        if args.compile_stage1_actors_only:
+            manifest_path = args.actor_body.parent / "manifest.json"
+            bind(manifest_path)
+            captured = json.loads(manifest_path.read_text())
+            captured_link = captured["link"]
+            if (captured.get("schema") != "bl.native.original-actor-corpus" or captured.get("version") != 1
+                    or captured.get("target") != "scheme" or captured.get("assertion-adaptation") != "none"
+                    or captured.get("source-path-adaptation") != "none"
+                    or captured["application"] != {"path": "research/js-actors/test.bl", "sha256": ORIGINAL}
+                    or captured_link["sdk-pin"] != pin or captured_link["runtime-definitions"] != 202
+                    or captured_link.get("source-frames?") is not True
+                    or path_for(captured["body"]["path"]).resolve() != args.actor_body
+                    or path_for(captured_link["prelude"]["path"]).resolve() != (out / "prelude.scm").resolve()
+                    or captured_link["prelude"]["sha256"] != digest(out / "prelude.scm")):
+                raise RuntimeError("actor checkpoint must use the complete exact original capture and this stage1 core")
+            for record in [captured["application"], captured["runtime"], captured["body"], captured["artifact"],
+                           *captured["inputs"], captured_link["links"], captured_link["host-link"],
+                           *captured_link["host-extensions"]]:
+                bind(path_for(record["path"]), record["sha256"])
+            if path_for(captured["artifact"]["path"]).read_bytes() != (out / "prelude.scm").read_bytes() + b"\n" + args.actor_body.read_bytes():
+                raise RuntimeError("actor checkpoint body is not the unchanged suffix of its exact captured core")
+            actor_capture = {"manifest": {"path": str(manifest_path), "sha256": digest(manifest_path)},
+                             "body": {"path": str(args.actor_body), "sha256": digest(args.actor_body)},
+                             "runtime_definitions": 202, "source_assertion_adaptation": "none"}
+        if args.actor_oracle and not args.compile_stage1_only:
             bind(args.actor_oracle)
             oracle = json.loads(args.actor_oracle.read_text())
             if (oracle.get("schema") != "bl.native.original-actor-oracle" or oracle.get("version") != 1
@@ -350,11 +382,12 @@ def main() -> None:
             destination = out / name
             shutil.copy2(executable, destination)
             build["executable_sha256"] = digest(destination)
+            build["executable"] = str(destination)
             build["link_order"] = [str(p) for p in c_units]
             progress()
             return destination
 
-        def actor_gate(name):
+        def actor_image(name):
             original = (out / (name + ".scm")).read_bytes()
             if not original.endswith(ENTRY):
                 raise RuntimeError("compiler source lacks its exact final native-main entry")
@@ -362,6 +395,10 @@ def main() -> None:
             overlay.write_bytes(original[:-len(ENTRY)] + b"\n" + args.actor_body.read_bytes())
             bind(overlay)
             executable = compile_native(name + "-actors")
+            return executable, overlay
+
+        def actor_gate(name):
+            executable, _ = actor_image(name)
             results = {}
             for budget in BUDGETS:
                 env = os.environ.copy()
@@ -379,6 +416,26 @@ def main() -> None:
 
         stage1 = compile_native("stage1")
         unchanged()
+        if args.compile_stage1_actors_only:
+            image, overlay = actor_image("stage1")
+            unchanged()
+            receipt = {"schema": "bl.native.stage1-actor-build", "version": 1,
+                       "status": "compiled-not-qualified", "executed": False,
+                       "sdk-pin": pin, "actor_capture": actor_capture,
+                       "core": {"path": str(out / "stage1.scm"), "sha256": digest(out / "stage1.scm"),
+                                "prefix_sha256": hashlib.sha256((out / "stage1.scm").read_bytes()[:-len(ENTRY)]).hexdigest(),
+                                "entry": ENTRY.decode()},
+                       "body": {"path": str(args.actor_body), "sha256": digest(args.actor_body)},
+                       "source": {"path": str(overlay), "sha256": digest(overlay)},
+                       "image": {"path": str(image), "sha256": digest(image)},
+                       "compile_deadline_seconds": COMPILE_DEADLINE,
+                       "host_optimization": args.host_optimization,
+                       "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
+                       "inputs": dict(inputs), "builds": builds, "runs": runs}
+            save(out / "stage1-actors-build.json", receipt)
+            progress("stage1-actors-compiled-not-qualified")
+            print("NATIVE_STAGE1_ACTOR_IMAGE_READY", digest(image), flush=True)
+            return
         if args.compile_stage1_only:
             progress("stage1-compiled-not-qualified")
             print("NATIVE_STAGE1_IMAGE_READY", digest(stage1), flush=True)
