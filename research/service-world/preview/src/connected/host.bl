@@ -1,0 +1,122 @@
+;; A session-isolated review host. It never invokes work, a shell, or production data.
+(ns connected.host
+ (:require [web] [bl.json :as json] [live.hiccup :as html]
+           [connected.model :as model] [connected.views :as views]
+           [dossier.org :as org] [dossier.page :as page]))
+(def root (Path/expand "../.." (Path/dirname (BeamLisp.Loader/source_path "connected.host"))))
+(def team "/home/othman/projects/general/team-machine-next")
+(def station "/home/othman/code/products/ora-hub/workstation")
+(def kit "/home/othman/projects/enchanted-skills/bl-org-dossier/kit")
+(def documents {"inventory" (str root "/../dossiers/integration.bl.org")
+                "team" (str team "/design/station.bl.org")
+                "station" (str station "/dossiers/team-machine.bl.org")})
+(def sessions (atom {}))
+(defn nonce [] (lower-case (Base/encode16 (crypto/strong_rand_bytes 24))))
+(defn now [] (System/system_time :second))
+(defn cookie [request]
+ (first (keep (fn [part]
+  (let [p (trim part)] (when (starts-with? p "connected_demo=") (subs p 15))))
+  (String/split (or (web/req-header request "cookie") "") ";"))))
+(defn session! [request]
+ (let [candidate (cookie request) existing (get @sessions candidate)]
+  (if (and existing (< (- (now) (:at existing)) 7200)) candidate
+   (let [id (nonce)]
+    (swap! sessions (fn [rows]
+     (let [fresh (into {} (filter (fn [[_ v]] (< (- (now) (:at v)) 7200)) rows))]
+      (when (>= (count fresh) 100) (throw (ex-info "This rehearsal is at its session limit." {})))
+      (assoc fresh id {:csrf (nonce) :world (model/seed) :role "operator" :at (now)}))))
+    id))))
+(defn context [id side query]
+ (let [s (get @sessions id) view (views/view-id (get query "view" "today"))]
+  (when-not (contains? views/titles view) (throw (ex-info "Unknown rehearsal screen." {})))
+  {:world (:world s) :csrf (:csrf s) :role (:role s) :side side :view view :q (get query "q" "")}))
+(defn protected-response [request id]
+ (-> request
+  (web/resp-header "cache-control" "no-store")
+  (web/resp-header "set-cookie" (str "connected_demo=" id "; Path=/; HttpOnly; SameSite=Strict; Max-Age=7200"))
+  (web/resp-header "referrer-policy" "no-referrer")
+  (web/resp-header "x-content-type-options" "nosniff")))
+(defn same-origin? [request]
+ (let [origin (web/req-header request "origin") host (web/req-header request "host")]
+  (and origin host (contains? #{(str "http://" host) (str "https://" host)} origin))))
+(defn post! [request id]
+ (when-not (same-origin? request) (throw (ex-info "Open the rehearsal before submitting an action." {})))
+ (let [read (web/read-body-limited* request 20000 10000)]
+  (when (:error read) (throw (ex-info "The submitted draft exceeds the rehearsal limit." {})))
+  (let [p (URI/decode_query (:body read)) side (get p "side") view (views/view-id (get p "view" "today"))
+        s (get @sessions id) path (web/path request)]
+   (when-not (and (= (:csrf s) (get p "csrf")) (contains? #{"team" "station"} side) (contains? views/titles view))
+    (throw (ex-info "The rehearsal form expired. Reload this screen." {})))
+   (try
+    (global/trans (tuple (tuple :connected/rehearsal id) (erlang/self))
+     (fn []
+      (let [current (get @sessions id)]
+       (if (= path "/fixture")
+        (let [role (get p "role" (:role current))]
+         (model/need! (contains? #{"operator" "reader"} role) "Unknown fixture role.")
+         (swap! sessions assoc id (assoc current :role role :at (now)
+            :world (if (= "yes" (get p "reset")) (model/seed) (:world current)))))
+        (let [actor (if (= "operator" (:role current)) "othman" "ahmed")
+              payload (into {} (for [k ["id" "value" "text"] :when (contains? p k)] [(keyword k) (get p k)]))
+              next (model/execute (:world current) actor (:role current) (get p "op") payload
+                       (get p "request") (String/to_integer (get p "basis" "0")))]
+         (swap! sessions assoc id (assoc current :world next :at (now))))))))
+    (web/redirect (:conn read) (str "/" side "?view=" view))
+    (catch error
+     (web/html (:conn read) (views/document (assoc (context id side {"view" view})
+                                :error (ex-message error) :draft (get p "text")))))))))
+(defn dossier [key]
+ (let [doc (org/read-doc (File/read! (get documents key)))]
+  (str "<!doctype html>" (html/hiccup->html
+   (page/page-h doc (File/read! (str kit "/style.css")) (File/read! (str kit "/live.js")))))))
+(defn asset [path]
+ (cond
+  (= path "/preview.css") [(str root "/public/preview.css") "text/css"]
+  (= path "/preview.js") [(str root "/public/preview.js") "application/javascript"]
+  (= path "/assets/team/machine.css") [(str team "/public/machine.css") "text/css"]
+  (= path "/assets/team/collections.css") [(str team "/public/collections.css") "text/css"]
+  (= path "/assets/station/style.css") [(str station "/live/style.css") "text/css"]
+  (= path "/assets/fonts.css") [(str team "/public/assets/fonts.css") "text/css"]
+  (Regex/match? #"^/assets/font-[0-9]+\.woff2$" path) [(str team "/public" path) "font/woff2"]
+  :else nil))
+(defn handler [request]
+ (let [path (web/path request) method (web/method request)]
+  (try
+   (cond
+    (= path "/health") (web/json request {:ok true :fixture true :app "connected-workspace-rehearsal"})
+    (= path "/favicon.ico") (web/text request 204 "")
+    (asset path) (let [[file kind] (asset path)] (web/bytes request kind (File/read! file)))
+    :else
+    (let [id (session! request) response (protected-response request id)
+          query (URI/decode_query (or (web/query request) ""))
+          doc-key (when (starts-with? path "/dossiers/") (subs path 10))
+          source-key (get {"/sources/inventory.org" "inventory" "/sources/team.org" "team" "/sources/station.org" "station"} path)]
+     (cond
+      (= path "/") (web/redirect response "/dossiers/inventory")
+      (and (= method "get") (contains? #{"/team" "/station"} path))
+       (web/html response (views/document (context id (subs path 1) query)))
+      (and (= method "get") (contains? documents doc-key)) (web/html response (dossier doc-key))
+      (and (= method "get") source-key) (web/bytes response "text/org; charset=utf-8" (File/read! (get documents source-key)))
+      (and (= method "get") (= path "/demo/state")) (web/json response (:world (get @sessions id)))
+      (and (= method "get") (= path "/demo/revision")) (web/json response {:revision (get-in @sessions [id :world :revision])})
+      (and (= method "get") (= path "/rev")) (web/json response {:rev "connected-dossiers-1"})
+      (and (= method "get") (= path "/demo/service"))
+       (let [s (model/service (:world (get @sessions id)) (get query "id" "app"))]
+        (web/html response (str "<!doctype html><html lang='en'><title>Illustrative service</title><body>"
+          (html/hiccup->html [:main [:h1 (:title s)] [:p (str "Release " (:version s) " · " (if (:running? s) "Listening" "Stopped"))]
+            [:p "This is the rehearsal's service view. It does not open a production application."]
+            [:a {:href "/team?view=services"} "Back to services"]]) "</body></html>")))
+      (and (= method "get") (= path "/demo/publication"))
+       (let [w (:world (get @sessions id)) shared (:publication w)]
+        (if (= "shared" (:state shared))
+         (web/html response (str "<!doctype html><html lang='en'><title>Shared rehearsal copy</title><body>"
+          (html/hiccup->html [:main [:h1 "Onboarding brief"] [:p "Read-only rehearsal projection"]
+           [:p (str "Published revision " (:revision shared))] [:p (:text shared)] [:a {:href "/team?view=knowledge"} "Return to the workspace"]]) "</body></html>"))
+         (web/text response 410 "This rehearsal publication has been revoked.")))
+      (and (= method "post") (contains? #{"/action" "/fixture"} path)) (post! response id)
+      :else (web/text response 404 "This route is outside the rehearsal."))))
+   (catch error (web/json request 400 {:error (ex-message error)})))))
+(defn start! []
+ (System/put_env "DOSSIER_DESIGN_CSS" (str team "/design/gather.css"))
+ (web/serve {:port (String/to_integer (or (System/get_env "PORT") "24136"))
+             :ip (tuple 127 0 0 1) :plug handler :log :off}))

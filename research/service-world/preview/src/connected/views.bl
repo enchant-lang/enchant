@@ -1,0 +1,367 @@
+;; Both compositions call the original product shell/components and one fixture writer.
+(ns connected.views
+ (:require [connected.ui :as u] [connected.model :as model]
+           [machine.ui :as gather] [machine.collections :as collections]
+           [work-live.screens :as station] [live.hiccup :as html]))
+(def titles {"today" "A little clarity for today" "project" "Knowledger" "services" "Services & previews"
+ "inbox" "Work arriving from Station" "tasks" "The work, together" "knowledge" "Shared knowledge"
+ "jobs" "Procedures & tools" "access" "People & access" "runtime" "Runtime & environment"
+ "activity" "What changed" "connections" "Connections" "recovery" "Recovery & attention"
+ "clients" "Client & product handoffs" "gateway" "Approved connections" "roadmap" "The company system"
+ "capture" "Make room for the thought" "features" "Every connection"})
+(def station-views {"now" "today" "ports" "services" "projects" "project" "messages" "inbox"
+ "processes" "runtime" "time" "activity" "people" "access" "work" "tasks"})
+(def station-paths {"today" "/" "services" "/services" "project" "/projects" "inbox" "/messages"
+ "runtime" "/processes" "activity" "/time" "access" "/people" "recovery" "/recovery"
+ "connections" "/connections" "gateway" "/gateway"})
+(defn view-id [value] (get station-views value value))
+(defn task-row [ctx task]
+ (let [action (when-not (= "done" (:state task)) (u/action ctx "complete-task" "Complete" {:id (:id task)}))]
+  (if (u/team? ctx)
+   (gather/task-row {:id (:id task) :title (:title task) :status (:state task) :place "Knowledger"
+                    :detail (:source task) :badge (:state task) :tone "mint" :action action})
+   [:article {:class "preview-row"} [:div [:strong (:title task)] [:p (:source task)]]
+    (u/pill ctx (:state task)) action])))
+(defn today [ctx]
+ (let [w (:world ctx) open (filter #(= "open" (:state %)) (:tasks w))]
+  (u/stack
+   [:div {:class "preview-stats"}
+    (u/stat "Needs you" (+ (count open) (if (= "handled" (:inbox-state w)) 0 1)) "Tasks and received work")
+    (u/stat "Your project" "Knowledger" "One place, two responsible systems")
+    (u/stat "Station" (if (= "connected" (:connection w)) "Connected" "Needs attention") "Observed state, with its source")]
+   [:div {:class "preview-columns"}
+    (u/panel ctx "Your next moves"
+     (if (seq open) (into [:div] (map #(task-row ctx %) open)) [:p "Everything that needed you is settled."]))
+    (u/panel ctx "A handoff from Ahmed"
+     (u/stack (u/pill ctx (:inbox-state w)) [:h3 "The onboarding preview is ready"]
+      [:p "A short brief, its source revision, and a question for you."]
+      (u/actions (u/link ctx "inbox" "Open the conversation →") (u/link ctx "services" "See the preview"))))]
+   (u/panel ctx "Where the work lives"
+    [:div {:class "preview-projects"}
+     (if (u/team? ctx)
+      (gather/place-card {:id "knowledger" :title "Knowledger" :detail "Product · shared knowledge · services" :tone "mint" :tasks (count open) :documents 2 :href (u/url ctx "project")})
+      [:a {:class "preview-project-card" :href (u/url ctx "project")} [:strong "knowledger.othman.work"] [:p "Product work, services and physical folder"]])
+     [:div {:class "preview-note"} [:strong "Two views, the same rehearsal"]
+      [:p "Make a task from the handoff or stop a preview. Switch interfaces to see the same result."]
+      [:a {:href (str "/" (if (u/team? ctx) "station" "team") "?view=today")} "Open the other interface →"]]]))))
+(defn project [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:div {:class "preview-stats"}
+    (u/stat "Place" "Knowledger" "Team Machine owns this workspace")
+    (u/stat "Station project" "knowledger.othman.work" "Bound to its physical folder")
+    (u/stat "Folder" (:folder w) "Station owns filesystem access")]
+   (u/panel ctx "A home for the work"
+    (u/stack [:p "Product knowledge, a reviewable onboarding brief, and the tools needed to keep it moving."]
+     (u/actions (u/link ctx "knowledge" "Knowledge") (u/link ctx "tasks" "Tasks & plans")
+      (u/link ctx "services" "Services") (u/link ctx "jobs" "Procedures") (u/link ctx "clients" "Client handoffs"))))
+   [:div {:class "preview-columns"}
+    (u/panel ctx "Project connection"
+     (u/stack (u/fact "Bound project" (if (:bound? w) "knowledger.othman.work" "Choose a project"))
+      (u/fact "Folder" (:folder w)) (u/fact "Observation" (:observation w))
+      (u/actions (u/action ctx "bind-project" "Use this Station project") (u/link ctx "connections" "Connection details"))))
+    (u/panel ctx "Working together"
+     (u/stack (u/fact "Ahmed · app membership" "Member") (u/fact "Ahmed · folder access" (get-in w [:grants "ahmed"]))
+      [:p "Shared knowledge stays inside its audience. A folder grant is a separate choice."]
+      (u/actions (u/link ctx "access" "Manage access") (u/link ctx "inbox" "Project conversations"))))])))
+(defn service-card [ctx s]
+ [:article {:class "preview-service" :data-service (:id s)}
+  [:header [:span {:class (str "preview-lamp " (when (:running? s) "on"))}]
+   [:div [:h3 (:title s)] [:code (:name s)]] (u/pill ctx (if (:running? s) "Listening" "Stopped") (if (:running? s) "good" "neutral"))]
+  [:div {:class "preview-facts"} (u/fact "Port" (:port s)) (u/fact "Release" (:version s))
+   (u/fact "Publication" (if (:published? s) "Published" "Private")) (u/fact "Boot" (if (:boot? s) "Enabled" "Disabled"))]
+  (u/actions
+   (u/action ctx (if (:running? s) "stop" "start") (if (:running? s) "Stop" "Start") {:id (:id s)})
+   (u/action ctx "restart" "Restart" {:id (:id s)})
+   (u/action ctx (if (:published? s) "withdraw" "publish-service") (if (:published? s) "Withdraw link" "Publish preview") {:id (:id s)})
+   [:a {:class "preview-link" :href (str "/demo/service?id=" (:id s))} "Inspect →"])
+  [:details [:summary "Release, boot & saved declaration"]
+   (u/actions (u/action ctx "update" "Update to r43" {:id (:id s)}) (u/action ctx "rollback" "Roll back" {:id (:id s)})
+    (u/action ctx "boot" (if (:boot? s) "Disable boot" "Enable boot") {:id (:id s)})
+    (u/action ctx "remove" "Remove stopped declaration" {:id (:id s)}))]])
+(defn services [ctx]
+ (let [w (:world ctx) q (lower-case (:q ctx ""))
+       rows (filter #(includes? (lower-case (str (:title %) " " (:name %))) q) (:services w))]
+  (u/stack
+   [:div {:class (str "preview-observation " (when (= "stale" (:observation w)) "warning"))}
+    (u/pill ctx (:observation w) (if (= "fresh" (:observation w)) "good" "bad"))
+    [:span "Station · project Knowledger · " (:refreshed w)]
+    (u/action ctx "refresh" "Refresh services")]
+   [:form {:method "get" :action (str "/" (:side ctx)) :class "preview-search"}
+    (u/hidden "view" "services") [:label {:for "service-search"} "Find a service"]
+    [:input {:id "service-search" :type "search" :name "q" :value (:q ctx "") :placeholder "Name or project…"}]
+    [:button {:class "button"} "Search"]]
+   (u/actions (u/action ctx "preview" "Start review preview") (u/link ctx "activity" "Logs & history") (u/link ctx "runtime" "Runtime health"))
+   (if (seq rows) (into [:div {:class "preview-service-grid"}] (map #(service-card ctx %) rows))
+    (u/empty ctx "No matching services" "Try the product name or clear the search. Failed observations are never shown as an empty success.")))))
+(defn inbox [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:div {:class "preview-columns"}
+    (u/panel ctx "Onboarding · Ahmed → Othman"
+     (u/stack (u/pill ctx (:inbox-state w))
+      (u/fact "Topic" (:topic w)) (u/fact "Claim" (or (:claim w) "Available"))
+      (u/fact "Source" "Station · thread/handoff")
+      (u/actions (u/action ctx "read-thread" "Mark read") (u/action ctx "claim" "Claim work")
+       (u/action ctx "release-claim" "Release claim") (u/action ctx "handle" "Mark handled"))
+      (u/actions (u/action ctx "make-task" "Create linked task") (u/link ctx "tasks" "Open tasks"))
+      [:p {:class "muted"} "Reading clears unread. Handling settles your received work. The linked task has its own completion."]))
+    (u/panel ctx "Conversation"
+     (u/stack
+      (into [:div {:class "preview-thread"}] (for [m (:messages w)]
+       [:article [:strong (:author m)] [:p (:text m)] [:small "Onboarding brief · source revision " (:basis m)]]))
+      (u/action ctx "reply" "Send reply" {} (u/field "Your reply" "text" "Thanks — I will review the brief." "textarea"))
+      (u/actions (u/action ctx "attach-snapshot" "Attach current brief") (u/link ctx "knowledge" "Inspect the attachment"))))]
+   (u/panel ctx "Where this work arrives"
+    (u/stack (u/fact "Topic" (str (:topic w) (if (:following? w) " · followed" " · not followed")))
+     (u/fact "Receiver's route" (if (:route? w) "Knowledger / .work/inbox/handoff" "No default folder"))
+     (u/actions (u/action ctx "follow" (if (:following? w) "Unfollow topic" "Follow topic"))
+      (u/action ctx "route" (if (:route? w) "Remove folder route" "Bind to Knowledger"))
+      (u/action ctx "incoming-reply" "Rehearse a new incoming reply")))))))
+(defn tasks [ctx]
+ (u/stack
+  (u/panel ctx "Knowledger · shared work" (into [:div] (map #(task-row ctx %) (get-in ctx [:world :tasks]))))
+  (u/panel ctx "Make the next move explicit"
+   (u/action ctx "new-task" "Create task" {} (u/field "Task title" "text" "Check the onboarding preview")))
+  (u/panel ctx "One reviewable plan"
+   (u/stack [:h3 "A clear first session"] [:p "Review the brief, check the actual preview, then share the accepted revision."]
+    (u/actions (u/link ctx "knowledge" "Review the brief") (u/link ctx "services" "Check the preview") (u/link ctx "jobs" "Prepare a contribution"))))))
+(defn knowledge [ctx]
+ (let [w (:world ctx) doc (:document w) shared (:publication w)]
+  (u/stack
+   [:div {:class "preview-columns"}
+    (u/panel ctx (:title doc)
+     (u/stack (u/pill ctx (:review doc)) (u/fact "Current source revision" (:revision doc))
+      [:p (:text doc)]
+      (u/action ctx "save-document" "Save a new revision" {} (u/field "Shared prose" "text" (:text doc) "textarea"))
+      (u/actions (u/action ctx "accept-review" "Accept this revision") (u/action ctx "return-review" "Request a correction"))))
+    (u/panel ctx "Received snapshot"
+     (u/stack (u/fact "World / object" "team-machine / document/onboarding")
+      (u/fact "Sent source basis" (:snapshot-basis w))
+      [:blockquote (:snapshot-text w)]
+      [:p "The received copy stays at its sent revision. Current-source access is checked separately."]
+      (u/actions (u/action ctx "resolve-source" "Open current source") (u/action ctx "promote" "Add to shared knowledge"))
+      (when (:source-open? w) (u/fact "Authorized current source" (str "Opened · revision " (:revision doc))))
+      (when (:promoted? w) (u/pill ctx "Added with its source" "good"))))]
+   (u/panel ctx "Share deliberately"
+    (u/stack (u/fact "Public copy" (:state shared)) (u/fact "Published revision" (or (:revision shared) "None"))
+     [:p "Publish the accepted projection. A correction does not change the old public revision until Update."]
+     (u/actions (u/action ctx "attach-snapshot" "Send snapshot in conversation")
+      (u/action ctx "share-document" (if (= "shared" (:state shared)) "Update shared copy" "Share accepted copy"))
+      (u/action ctx "revoke-publication" "Stop sharing"))
+     (when (= "shared" (:state shared)) [:a {:href "/demo/publication" :class "preview-link"} "Open the rehearsal public copy →"]))))))
+(defn jobs [ctx]
+ (let [w (:world ctx) j (:job w)]
+  (u/stack
+   [:div {:class "preview-columns"}
+    (u/panel ctx "Prepare the onboarding brief"
+     (u/stack (u/pill ctx (:state j)) [:p "A fixed brief profile receives the shared project snapshot and returns a reviewable result."]
+      (u/fact "Intent" (:intent j)) (u/fact "Actual executions" (:executions j))
+      (u/fact "Result" (or (:receipt j) "Not prepared yet"))
+      (u/actions (u/action ctx "run-job" "Prepare brief") (u/action ctx "accept-job" "Keep output") (u/action ctx "return-job" "Return for changes"))))
+    (u/panel ctx "A toolbox belonging to this project"
+     (u/stack (u/fact "Selected tool" (:tool j)) (u/fact "Context" "Shared brief, project tasks, three service observations")
+      [:p "Owner-defined working directory, executable and limits. Context is bounded to the readable place."]
+      (u/actions (u/action ctx "tool" "Open shell profile" {:value "shell"})
+       (u/action ctx "tool" "Open REPL profile" {:value "repl"}) (u/action ctx "tool" "Open desktop profile" {:value "desktop"}))))]
+   (u/panel ctx "From result to a useful handoff"
+    (u/stack [:p "The receipt keeps the repository, commit and source basis. A person chooses what enters the shared library."]
+     (u/actions (u/link ctx "knowledge" "Review shared output") (u/link ctx "inbox" "Reply with the result")
+      (u/link ctx "clients" "Client & product actions")))))))
+(defn access [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   (u/panel ctx "Ahmed · one person, distinct permissions"
+    (u/stack (u/fact "Team Machine" "Member of Knowledger") (u/fact "Station project folder" (get-in w [:grants "ahmed"]))
+     (u/fact "Join" (if (:joined? w) "Joined · existing source preserved" "Not joined"))
+     (u/actions (u/action ctx "grant" "Grant read" {:value "read"}) (u/action ctx "grant" "Grant read-write" {:value "read-write"})
+      (u/action ctx "grant" "Revoke folder access" {:value "none"}) (u/action ctx "join" "Join project"))
+     [:p "A client invitation does not create a Unix account or grant access to this folder."]))
+   (u/panel ctx "A new teammate"
+    (u/stack (u/fact "Account request" (:onboarding w)) (u/action ctx "onboard" "Request operator onboarding")))
+   (u/panel ctx "Try a permission boundary"
+    [:p "Use the rehearsal role switch above to browse as a reader. Typed actions stay disabled, and forged submissions are refused by the writer."]))))
+(defn runtime [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:div {:class "preview-stats"} (u/stat "Project RAM" "486 MiB" "Synthetic observed sample")
+    (u/stat "Swap" "0 MiB" "Project process scope") (u/stat "Document realms" 3 "One account, aggregate limit")]
+   (u/panel ctx "Runtime & environment"
+    (u/stack (u/fact "Declared SDK" "Qualified namespace SDK")
+     (u/fact "Observed runtime" (if (:sdk-drift? w) "Previous runtime · differs from declaration" "Matches the qualified project pin"))
+     (u/fact "Freshness" (:observation w)) (u/action ctx "sdk-drift" "Rehearse runtime drift")))
+   (u/panel ctx "Document placement"
+    (u/stack (u/fact "Pool" (:pool w)) (u/fact "Aggregate memory limit" (:memory w))
+     (u/actions (u/action ctx "pool" "Move to main pool" {:value "main"}) (u/action ctx "pool" "Split into dedicated VM" {:value "dedicated"})
+      (u/action ctx "limits" "Use 1G profile" {:value "1G"}) (u/action ctx "limits" "Use 2G profile" {:value "2G"})
+      (u/action ctx "limits" "Use 4G profile" {:value "4G"})))))))
+(defn activity [ctx]
+ (u/stack
+  (u/panel ctx "Recent activity · named owners"
+   (into [:ol {:class "preview-timeline"}]
+    (for [e (reverse (get-in ctx [:world :events]))]
+     [:li [:span {:class "preview-event-number"} (:number e)] [:div [:strong (:text e)] [:small (:owner e) " · source basis " (:basis e)]]])))
+  (u/panel ctx "Authorized log excerpt"
+   [:pre {:class "preview-log"} "[Station] project knowledger · observation admitted\n[service/knowledger] ready on loopback\n[import] private argv and environment omitted\n[writer] requests retain a stable operation receipt"])) )
+(defn connections [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:div {:class "preview-stats"} (u/stat "Connection" (:connection w) "Freshness is independent of the transport")
+    (u/stat "Identity adapter" (:provider w) "The app sees the same person") (u/stat "Placement" (:placement w) "Ordinary application calls")]
+   (u/panel ctx "Provider & placement"
+    (u/stack
+     (u/actions (for [p ["tailscale" "headscale" "netbird"]] (u/action ctx "provider" p {:value p})))
+     (u/actions (u/action ctx "placement" "Same VM" {:value "local"}) (u/action ctx "placement" "Another VM" {:value "remote"}))
+     (u/fact "Interface" "workstation.services · version 1")
+     [:p "This changes only the rehearsal configuration. Actual mesh enrollment and deployment remain operator work."]))
+   (u/panel ctx "Exercise a connection state"
+    (u/stack
+     (u/actions (for [[state label] [["connected" "Reconnect"] ["offline" "Disconnect"] ["stale" "Make observations stale"] ["incompatible" "Version mismatch"]]]
+       (u/action ctx "connection" label {:value state})))
+     [:p "A failed refresh keeps the previous service rows. An incompatible interface refuses submission."]
+     (u/link ctx "services" "Inspect the retained services →"))))))
+(defn recovery [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:div {:class "preview-columns"}
+    (u/panel ctx "Recovery coverage"
+     (u/stack (u/fact "Project coverage" (if (:coverage? w) "Included" "Unknown"))
+      (u/fact "Last complete recovery point" (:backup w)) (u/fact "Restore proof" "Sample passed · not a full application rehearsal")
+      (u/action ctx "backup" "Request recovery point")))
+    (u/panel ctx "Inspect a separate restore copy"
+     (u/stack (u/fact "Copy" (:restore w)) [:p "The original folder and live work stay in place."] (u/action ctx "restore" "Prepare separate copy")))]
+   (u/panel ctx "Needs an operator"
+    (u/stack (u/fact "Request" (:operator w))
+     [:p "A deployment or access request enters review. The operator keeps the existing root activation path."]
+     (u/action ctx "operator" "Send for operator review"))))))
+(defn clients [ctx]
+ (let [w (:world ctx) invite (:invitation w)]
+  (u/stack
+   (u/panel ctx "Salma's client space"
+    (u/stack (u/fact "Selected publication" (:client-state w))
+     [:p "Only the selected document revision reaches the client. Colleagues' private contribution answers remain private."]
+     (u/action ctx "client" "Publish selected revision to client")))
+   (u/panel ctx "An independent Knowledger trial"
+    (u/stack (u/fact "Invitation" (:state invite)) (u/fact "Product executions" (:executions invite))
+     (u/fact "Authoritative receipt" (or (:receipt invite) "None"))
+     (u/actions (u/action ctx "invite" "Create trial invitation") (u/action ctx "invite" "Rehearse a lost reply" {:value "lost-reply"})
+      (u/action ctx "inspect-invitation" "Inspect product receipt"))
+     [:p "An uncertain reply is inspected. Retrying an existing invitation does not create a second one."])))))
+(defn gateway [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:div {:class "preview-stats"} (u/stat "Project requests" (:gateway-calls w) "Approved connection metadata")
+    (u/stat "Observed tokens" (:gateway-tokens w) "Illustrative usage, not a bill")
+    (u/stat "Brief model operation" (if (:gateway-allowed? w) "Granted" "Revoked") "Host-owned credentials")]
+   (u/panel ctx "Use a connection, keep the key with its owner"
+    (u/stack [:p "A bounded brief operation uses the configured gateway. The app handles the result and its receipt."]
+     (u/actions (u/action ctx "gateway" "Prepare a short suggestion") (u/action ctx "gateway-grant" "Toggle operation grant")))))))
+(defn roadmap [ctx]
+ (let [w (:world ctx)]
+  (u/stack
+   [:p {:class "preview-scope"} "Design rehearsal · these business features still need production implementation."]
+   (u/panel ctx "One company day, one occurrence"
+    (u/stack (u/fact "Daily task occurrences" (:occurrences w)) [:p "A stable person + definition + period key prevents duplicate work."]
+     (u/action ctx "schedule" "Rehearse today's occurrence")))
+   (u/panel ctx "Confirmed daily activity"
+    (u/stack (u/fact "Connections accepted" (:daily-total w)) (u/fact "Report revision" (:report-revision w))
+     (u/action ctx "report" "Replace today's total" {} (u/field "Confirmed total" "value" (:daily-total w) "number"))))
+   (u/panel ctx "An optional browser helper"
+    (u/stack (u/fact "Pairing" (if (:browser-paired? w) "Paired in rehearsal" "Not paired"))
+     [:p "Observed suggestions would remain separate from confirmed reports until reconciled."] (u/action ctx "pair-browser" "Toggle rehearsal pairing")))
+   (u/panel ctx "A product release needs evidence"
+    (u/stack (u/fact "Release" (if (:release-receipt? w) "Confirmed by product receipt" "Unknown; a listening process is insufficient"))
+     (u/action ctx "release-receipt" "Receive an illustrative release receipt"))))))
+(defn features [ctx]
+ (let [q (lower-case (:q ctx "")) rows (filter #(includes? (lower-case (str (:title %) " " (:description %) " " (:status %))) q) model/features)]
+  (u/stack
+   [:form {:method "get" :action (str "/" (:side ctx)) :class "preview-search"}
+    (u/hidden "view" "features") [:label {:for "feature-search"} "Find a capability"]
+    [:input {:id "feature-search" :name "q" :value (:q ctx "") :placeholder "Messages, access, recovery…"}]
+    [:button {:class "button"} "Search"]]
+   [:p (str (count rows) " of 44 capabilities · Connected is the current bridge; Connect needs exports; Build needs domain behavior.")]
+   (into [:div {:class "preview-feature-list"}]
+    (for [f rows] [:article {:id (str "feature-" (:id f)) :data-feature (:id f)}
+     [:span {:class "preview-feature-number"} (str "0" (:id f))]
+     [:div [:h3 (:title f)] [:p (:description f)] [:small "Authority: " (:owner f)]]
+     (u/pill ctx (:status f) (if (= "connected" (:status f)) "good" "neutral"))
+     (u/link ctx (:view f) "Try its screen →")])))))
+(defn content [ctx]
+ (case (:view ctx)
+  "today" (today ctx) "project" (project ctx) "services" (services ctx) "inbox" (inbox ctx)
+  "tasks" (tasks ctx) "knowledge" (knowledge ctx) "jobs" (jobs ctx) "access" (access ctx)
+  "runtime" (runtime ctx) "activity" (activity ctx) "connections" (connections ctx)
+  "recovery" (recovery ctx) "clients" (clients ctx) "gateway" (gateway ctx) "roadmap" (roadmap ctx)
+  "capture" (u/panel ctx "A thought becomes chosen work"
+              (u/action ctx "new-task" "Keep as a task" {} (u/field "What's on your mind?" "text" "" "textarea")))
+  "features" (features ctx)
+  (u/empty ctx "Choose a screen" "Use the navigation or open the connection inventory.")))
+(defn controls [ctx]
+ [:div {:class "preview-controls"}
+  [:span [:strong "Connected workspace"] " · illustrative, isolated rehearsal"]
+  [:a {:href (str "/" (if (u/team? ctx) "station" "team") "?view=" (:view ctx))} (if (u/team? ctx) "Open Station ↗" "Open Team Machine ↗")]
+  [:a {:href "/dossiers/inventory"} "44 capabilities"]
+  [:a {:href (str "/dossiers/" (:side ctx))} "Design dossier"]
+  [:form {:method "post" :action "/fixture" :class "preview-action"}
+   (u/hidden "csrf" (:csrf ctx)) (u/hidden "side" (:side ctx)) (u/hidden "view" (:view ctx))
+   [:label {:class "preview-role"} "Try as " [:select {:name "role" :aria-label "Rehearsal role"}
+    [:option {:value "operator" :selected (= "operator" (:role ctx))} "Othman · operator"]
+    [:option {:value "reader" :selected (= "reader" (:role ctx))} "Ahmed · reader"]]]
+   [:button {:type "submit"} "Switch"]]
+  [:button {:type "button" :data-demo-theme true} "Light / dark"]
+  [:form {:method "post" :action "/fixture" :class "preview-action"}
+   (u/hidden "csrf" (:csrf ctx)) (u/hidden "side" (:side ctx)) (u/hidden "view" (:view ctx)) (u/hidden "reset" "yes")
+   [:button {:type "submit"} "Reset rehearsal"]]])
+(def nav [["today" "Today"] ["project" "Place"] ["services" "Services"] ["inbox" "Handoffs"]
+ ["tasks" "Tasks"] ["knowledge" "Knowledge"] ["jobs" "Procedures"] ["access" "Access"]
+ ["runtime" "Runtime"] ["activity" "Activity"] ["clients" "Clients"] ["gateway" "Gateway"]
+ ["connections" "Connection"] ["recovery" "Recovery"] ["roadmap" "Company system"] ["features" "All 44"]])
+(defn native-tree
+ "Adapt the products' existing navigation nodes to ordinary same-origin links.
+  Components, markup and styling stay owned by the products."
+ [ctx node]
+ (cond
+  (and (vector? node) (keyword? (first node)))
+   (let [tag (first node) attrs (when (map? (second node)) (second node))
+         children (if attrs (drop 2 node) (rest node)) event (:on-click attrs)
+         target (when (= :navigate (first event)) (second event))
+         view (when target (cond
+          (or (= target "/today") (= target "/")) "today"
+          (starts-with? target "/u/") "today" (starts-with? target "/p/") "access"
+          (= target "/settings") "access" (= target "/plans") "tasks" (= target "/capture") "capture"
+          (starts-with? target "/places/") "project" (= target "/places") "project"
+          :else (view-id (subs target 1))))
+         attrs (if target (assoc (dissoc attrs :on-click) :href (u/url ctx view)) attrs)
+         tag (if (and target (= tag :button)) :a tag)
+         attrs (if target (dissoc attrs :type) attrs)]
+    (into (if attrs [tag attrs] [tag]) (map #(native-tree ctx %) children)))
+  (sequential? node) (map #(native-tree ctx %) node)
+  :else node))
+(defn document [ctx]
+ (let [w (:world ctx) team? (u/team? ctx)
+       body (u/stack
+        (controls ctx)
+        [:nav {:class "preview-tabs" :aria-label "Connected project views"}
+         (for [[id label] nav] [:a {:href (u/url ctx id) :class (when (= (:view ctx) id) "active") :aria-current (when (= (:view ctx) id) "page")} label])]
+        (when (:notice w) [:div {:class "preview-notice" :role "status"} (:notice w)])
+        (when (:error ctx) [:div {:class "preview-error" :role "alert"} [:strong (:error ctx)]
+         (when-let [draft (:draft ctx)] [:details {:open true} [:summary "Your submitted words"] [:pre draft]])])
+        (when (= "reader" (:role ctx)) [:p {:class "preview-readonly"} "Ahmed has read-only access. Operational writes require a separate operator grant."])
+        (when team? (collections/place-heading {:title (get titles (:view ctx) "Knowledger") :eyebrow "ORA / KNOWLEDGER"
+           :description "A home for the work. A connection to the tools." :tone "mint" :icon "place"}))
+        (content ctx))
+       tree (if team?
+        (gather/shell {:me (if (= "reader" (:role ctx)) "Ahmed" "Othman") :active (case (:view ctx) "today" "today" "tasks" "tasks" "places")
+          :places [{:id "knowledger" :title "Knowledger" :tone "mint"} {:id "knowledge" :title "Shared knowledge" :tone "lilac"}]
+          :today-count (count (filter #(= "open" (:state %)) (:tasks w))) :content body})
+        (station/frame {:me (if (= "reader" (:role ctx)) "ahmed" "othman") :station "work" :params {} :work/admin? (= "operator" (:role ctx)) :people ["othman" "ahmed"]}
+          (get station-paths (:view ctx) "/") body))]
+  (str "<!doctype html>" (html/hiccup->html
+   [:html {:lang "en" :data-surface (:side ctx) :data-revision (:revision w)}
+    [:head [:meta {:charset "utf-8"}] [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
+     [:title (str (get titles (:view ctx)) " · " (if team? "Team Machine" "Station") " rehearsal")]
+     [:link {:rel "stylesheet" :href (if team? "/assets/team/machine.css" "/assets/station/style.css")}]
+     (when team? [:link {:rel "stylesheet" :href "/assets/team/collections.css"}])
+     (when-not team? [:link {:rel "stylesheet" :href "https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"}])
+     [:link {:rel "stylesheet" :href "/preview.css"}]]
+    [:body (native-tree ctx tree) [:script {:src "/preview.js"}]]]))))

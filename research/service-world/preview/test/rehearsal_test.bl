@@ -1,0 +1,85 @@
+(ns connected.rehearsal-test
+ (:require [connected.model :as model] [connected.views :as views] [connected.host :as host]))
+(defn act
+ ([w op] (act w op {}))
+ ([w op p] (model/execute w "othman" "operator" op p (str "test-" (:revision w)) (:revision w))))
+(deftest exact-request-replay-and-current-authority
+ (let [w (model/seed) p {:text "Review the preview"}
+       a (model/execute w "othman" "operator" "new-task" p "same" 1)
+       b (model/execute a "othman" "operator" "new-task" p "same" 1)]
+  (is (= 2 (count (:tasks a)) (count (:tasks b))))
+  (is (= (:revision a) (:revision b)))
+  (is (thrown? (model/execute a "othman" "operator" "new-task" {:text "Different"} "same" 1)))
+  (is (thrown? (model/execute a "othman" "reader" "new-task" p "same" 1)))
+  (is (thrown? (model/execute a "ahmed" "operator" "new-task" p "same" 1)))
+  (is (thrown? (model/execute a "othman" "operator" "new-task" p "stale" 1)))
+  (is (= 1 (count (:tasks w))))))
+(deftest handoff-task-and-triage-retain-independent-lifecycles
+ (let [read (act (model/seed) "read-thread")
+       claimed (act read "claim") task (act claimed "make-task") repeated (act task "make-task")
+       done (act repeated "complete-task" {:id "handoff"}) handled (act done "handle")
+       incoming (act handled "incoming-reply")]
+  (is (= "read" (:inbox-state read)))
+  (is (= "claimed" (:inbox-state done)))
+  (is (= 2 (count (:tasks task)) (count (:tasks repeated))))
+  (is (= "handled" (:inbox-state handled)))
+  (is (= "new" (:inbox-state incoming)))
+  (is (= "done" (:state (first (filter #(= "handoff" (:id %)) (:tasks incoming))))))
+  (is (thrown? (act (model/seed) "handle")))))
+(deftest snapshots-and-published-revisions-stay-fixed
+ (let [w (model/seed) saved (act w "save-document" {:text "A reviewed new brief"})
+       accepted (act saved "accept-review") shared (act accepted "share-document")
+       later (act shared "save-document" {:text "Later source words"})]
+  (is (= 7 (:snapshot-basis later)))
+  (is (= 9 (get-in later [:document :revision])))
+  (is (= 8 (get-in later [:publication :revision])))
+  (is (= "A reviewed new brief" (get-in later [:publication :text])))
+  (is (not= (:snapshot-text w) (get-in later [:document :text])))
+  (is (thrown? (act saved "share-document")))
+  (is (= "revoked" (get-in (act later "revoke-publication") [:publication :state])))))
+(deftest stopped-publication-and-disconnected-observations-are-explicit
+ (let [w (model/seed) started (act w "start" {:id "website"})
+       published (act started "publish-service" {:id "website"})
+       offline (act published "connection" {:value "offline"})]
+  (is (thrown? (act w "publish-service" {:id "website"})))
+  (is (:published? (model/service published "website")))
+  (is (= (:services offline) (:services published)))
+  (is (= "stale" (:observation offline)))
+  (is (thrown? (act offline "refresh")))
+  (is (thrown? (act w "stop" {:id "outside-project"})))
+  (is (thrown? (act w "remove" {:id "app"})))
+  (is (not (:published? (model/service (act published "stop" {:id "website"}) "website"))))))
+(deftest product-uncertainty-is-inspected-without-another-execution
+ (let [uncertain (act (model/seed) "invite" {:value "lost-reply"})
+       inspected (act uncertain "inspect-invitation") retried (act inspected "invite")
+       job (act (model/seed) "run-job")]
+  (is (= "uncertain" (get-in uncertain [:invitation :state])))
+  (is (= "completed" (get-in inspected [:invitation :state])))
+  (is (= 1 (get-in retried [:invitation :executions])))
+  (is (= 1 (get-in job [:job :executions])))
+  (is (thrown? (act job "run-job")))
+  (is (= "accepted" (get-in (act job "accept-job") [:job :state])))))
+(deftest folder-grants-do-not-follow-app-membership-and-future-examples-are-finite
+ (let [revoked (act (model/seed) "grant" {:value "none"})
+       once (act (model/seed) "schedule") twice (act once "schedule")
+       report (act twice "report" {:value "18"})]
+  (is (thrown? (act revoked "join")))
+  (is (thrown? (act revoked "tool" {:value "arbitrary-shell-command"})))
+  (is (= 1 (:occurrences once) (:occurrences twice)))
+  (is (= 18 (:daily-total report)))
+  (is (= 2 (:report-revision report)))
+  (is (= "Separate copy ready · restore-copy/001 · live files unchanged" (:restore (act report "restore"))))))
+(deftest complete-inventory-and-both-native-product-compositions
+ (is (= (vec (range 1 45)) (mapv :id model/features)))
+ (is (= #{"connected" "connect" "build"} (set (map :status model/features))))
+ (doseq [side ["team" "station"] view (keys views/titles)]
+  (let [body (views/document {:world (model/seed) :csrf "test" :role "operator" :side side :view view})]
+   (is (includes? body "Connected workspace"))
+   (is (includes? body (if (= side "team") "app-frame" "brand-row")))))
+ (doseq [key ["inventory" "team" "station"]]
+  (is (includes? (host/dossier key) "<!doctype html>")))
+ (let [w (act (model/seed) "new-task" {:text "<script>throw 'unsafe'</script>"})
+       body (views/document {:world w :csrf "test" :role "operator" :side "team" :view "tasks"})]
+  (is (includes? body "&lt;script&gt;"))
+  (is (not (includes? body "<script>throw")))))
+(run-tests)

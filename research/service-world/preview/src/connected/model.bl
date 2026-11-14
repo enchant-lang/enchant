@@ -1,0 +1,148 @@
+;; A finite rehearsal world. No port here can operate the workstation or an app.
+(ns connected.model (:require [bl.json :as json]))
+(def features (json/decode (File/read! (Path/expand "../../features.json"
+                 (Path/dirname (BeamLisp.Loader/source_path "connected.model")))) {:keys :keyword}))
+(defn need! [value text] (when-not value (throw (ex-info text {}))))
+(defn seed []
+ {:revision 1 :requests {} :notice nil :connection "connected" :provider "tailscale" :placement "local"
+  :project "knowledger" :folder "~/projects/knowledger" :bound? true :topic "products/knowledger"
+  :grants {"ahmed" "read"} :joined? false :onboarding "No request"
+  :services [{:id "app" :name "knowledger.othman" :title "Knowledger" :port 4070 :running? true :published? true :boot? true :version "r42" :previous "r41" :pool "products"}
+             {:id "website" :name "website.othman" :title "Product website" :port 4321 :running? false :published? false :boot? false :version "r12" :previous "r11" :pool "products"}
+             {:id "preview" :name "review.othman" :title "Review preview" :port 24136 :running? false :published? false :boot? false :version "draft" :previous "draft" :pool "reviews"}]
+  :observation "fresh" :refreshed "Just now" :sdk-drift? false :pool "main" :memory "2G"
+  :inbox-state "new" :claim nil :following? true :route? true :snapshot-basis 7
+  :snapshot-text "A clear first session: choose a library, read the shared note, then invite your team."
+  :messages [{:author "Ahmed" :text "The preview is ready. Can you review the onboarding brief?" :basis 7}]
+  :tasks [{:id "review" :title "Review the onboarding brief" :state "open" :source "Team Machine"}]
+  :document {:title "Onboarding brief" :text "A clear first session: choose a library, read the shared note, then invite your team." :revision 7 :review "Awaiting review"}
+  :promoted? false :publication {:state "private" :revision nil}
+  :job {:state "ready" :tool "brief" :intent "brief-001" :executions 0 :receipt nil}
+  :client-state "Waiting for review" :invitation {:state "absent" :executions 0 :receipt nil}
+  :gateway-calls 12 :gateway-tokens 4820 :gateway-allowed? true
+  :coverage? true :backup "Today, 08:00" :restore "Not requested" :operator "No request"
+  :schedule? false :occurrences 0 :daily-total 12 :report-revision 1 :browser-paired? false :release-receipt? false
+  :events [{:number 1 :owner "Station" :text "Project observations refreshed" :basis 1}]} )
+(def read-ops #{"refresh" "read-thread" "inspect" "follow" "route" "join" "resolve-source"})
+(def fixture-ops #{"connection" "sdk-drift"})
+(defn service [world id]
+ (or (first (filter #(= id (:id %)) (:services world)))
+     (throw (ex-info "This service does not belong to the selected project." {}))))
+(defn change-service [world id f]
+ (service world id)
+ (update world :services (fn [rows] (mapv #(if (= id (:id %)) (f %) %) rows))))
+(defn text! [value]
+ (need! (and (string? value) (<= 1 (count (trim value)) 4000)) "Write between 1 and 4,000 characters.")
+ (trim value))
+(defn perform [w actor op p]
+ (case op
+  "refresh" (do (need! (= "connected" (:connection w)) "Station could not refresh. Previous observations are retained.")
+                (assoc w :observation "fresh" :refreshed "Just now"))
+  "connection" (do (need! (contains? #{"connected" "offline" "stale" "incompatible"} (:value p)) "Unknown connection state.")
+                   (cond-> (assoc w :connection (:value p)) (not= "connected" (:value p)) (assoc :observation "stale")))
+  "sdk-drift" (update w :sdk-drift? not)
+  "bind-project" (assoc w :bound? true)
+  "grant" (do (need! (contains? #{"read" "read-write" "none"} (:value p)) "Choose an existing folder permission.")
+              (assoc-in w [:grants "ahmed"] (:value p)))
+  "join" (do (need! (not= "none" (get-in w [:grants "ahmed"] "none")) "Folder access was revoked. Joining cannot grant access.")
+             (assoc w :joined? true))
+  "onboard" (assoc w :onboarding "Pending operator review; no Unix account created")
+  "start" (change-service w (:id p) #(assoc % :running? true))
+  "stop" (change-service w (:id p) #(assoc % :running? false :published? false))
+  "restart" (change-service w (:id p) #(assoc % :running? true))
+  "publish-service" (do (need! (:running? (service w (:id p))) "Start the service before publishing its preview link.")
+                        (change-service w (:id p) #(assoc % :published? true)))
+  "withdraw" (change-service w (:id p) #(assoc % :published? false))
+  "boot" (change-service w (:id p) #(update % :boot? not))
+  "update" (change-service w (:id p) #(assoc % :previous (:version %) :version "r43" :running? true))
+  "rollback" (change-service w (:id p) #(assoc % :version (:previous %) :previous (:version %) :running? true))
+  "remove" (do (need! (not (:running? (service w (:id p)))) "Stop this service before removing its saved declaration.")
+               (update w :services #(filterv (fn [s] (not= (:id s) (:id p))) %)))
+  "preview" (change-service w "preview" #(assoc % :running? true :published? true))
+  "pool" (do (need! (contains? #{"main" "dedicated"} (:value p)) "Choose a declared pool.") (assoc w :pool (:value p)))
+  "limits" (do (need! (contains? #{"1G" "2G" "4G"} (:value p)) "Choose a bounded memory profile.") (assoc w :memory (:value p)))
+  "read-thread" (if (= "new" (:inbox-state w)) (assoc w :inbox-state "read") w)
+  "claim" (do (need! (or (nil? (:claim w)) (= actor (:claim w))) "Another person holds this claim.")
+              (assoc w :claim actor :inbox-state "claimed"))
+  "release-claim" (do (need! (= actor (:claim w)) "Only the current claimant can release this work.")
+                      (assoc w :claim nil :inbox-state "read"))
+  "handle" (do (need! (= actor (:claim w)) "Claim the incoming work before marking it handled.")
+               (assoc w :claim nil :inbox-state "handled"))
+  "follow" (update w :following? not)
+  "route" (update w :route? not)
+  "make-task" (if (some #(= "handoff" (:id %)) (:tasks w)) w
+                (update w :tasks conj {:id "handoff" :title "Review Ahmed's Station handoff" :state "open" :source "Station · thread/handoff · basis 7"}))
+  "new-task" (update w :tasks conj {:id (str "task-" (:revision w)) :title (text! (:text p)) :state "open" :source actor})
+  "complete-task" (do (need! (some #(= (:id p) (:id %)) (:tasks w)) "Task not found.")
+                     (update w :tasks #(mapv (fn [t] (if (= (:id p) (:id t)) (assoc t :state "done") t)) %)))
+  "reply" (update w :messages conj {:author actor :text (text! (:text p)) :basis (get-in w [:document :revision])})
+  "incoming-reply" (-> w (assoc :inbox-state "new" :claim nil)
+                       (update :messages conj {:author "Ahmed" :text "I've added the requested correction. Please take another look." :basis 7}))
+  "attach-snapshot" (update w :messages conj {:author actor :text "Attached: Onboarding brief" :basis (get-in w [:document :revision])})
+  "resolve-source" (assoc w :source-open? true)
+  "promote" (assoc w :promoted? true)
+  "save-document" (-> w (assoc-in [:document :text] (text! (:text p))) (update-in [:document :revision] inc)
+                       (assoc-in [:document :review] "Awaiting review"))
+  "accept-review" (assoc-in w [:document :review] "Accepted")
+  "return-review" (assoc-in w [:document :review] "Changes requested")
+  "share-document" (do (need! (= "Accepted" (get-in w [:document :review])) "Accept this exact document revision before publishing its public projection.")
+                        (assoc w :publication {:state "shared" :revision (get-in w [:document :revision])
+                                              :text (get-in w [:document :text])}))
+  "revoke-publication" (assoc-in w [:publication :state] "revoked")
+  "tool" (do (need! (contains? #{"shell" "repl" "desktop"} (:value p)) "Use a host-declared tool profile.")
+             (assoc-in w [:job :tool] (:value p)))
+  "run-job" (do (need! (contains? #{"ready" "returned"} (get-in w [:job :state])) "This job already has an intent. Inspect its result first.")
+                (-> w (assoc-in [:job :state] "review") (update-in [:job :executions] inc)
+                    (assoc-in [:job :receipt] "job/brief-001 · commit 8c42be1 · output/brief-001")))
+  "accept-job" (do (need! (= "review" (get-in w [:job :state])) "There is no reviewed output to accept.")
+                   (assoc-in w [:job :state] "accepted"))
+  "return-job" (do (need! (= "review" (get-in w [:job :state])) "There is no output to return.")
+                   (assoc-in w [:job :state] "returned"))
+  "client" (assoc w :client-state "Selected revision published to Salma; private colleague answers remain private")
+  "invite" (if (get-in w [:invitation :receipt]) (assoc-in w [:invitation :state] "completed")
+               (-> w (assoc-in [:invitation :state] (if (= "lost-reply" (:value p)) "uncertain" "completed"))
+                   (update-in [:invitation :executions] inc)
+                   (assoc-in [:invitation :receipt] "knowledger/trial-001 · read-only trial library")))
+  "inspect-invitation" (do (need! (get-in w [:invitation :receipt]) "No product receipt was found.")
+                           (assoc-in w [:invitation :state] "completed"))
+  "gateway" (do (need! (:gateway-allowed? w) "This model operation is not granted.")
+                (-> w (update :gateway-calls inc) (update :gateway-tokens + 180)))
+  "gateway-grant" (update w :gateway-allowed? not)
+  "backup" (assoc w :backup "Just completed in rehearsal" :coverage? true)
+  "restore" (assoc w :restore "Separate copy ready · restore-copy/001 · live files unchanged")
+  "operator" (assoc w :operator "Review request queued · no privileged action performed")
+  "provider" (do (need! (contains? #{"tailscale" "headscale" "netbird"} (:value p)) "Choose a configured adapter.")
+                 (assoc w :provider (:value p)))
+  "placement" (do (need! (contains? #{"local" "remote"} (:value p)) "Choose a declared realm placement.")
+                  (assoc w :placement (:value p)))
+  "schedule" (assoc w :schedule? true :occurrences 1)
+  "report" (let [n (String/to_integer (:value p "0"))]
+             (need! (<= 0 n 100000) "Enter a nonnegative daily total.")
+             (-> w (assoc :daily-total n) (update :report-revision inc)))
+  "pair-browser" (update w :browser-paired? not)
+  "release-receipt" (assoc w :release-receipt? true)
+  (throw (ex-info "Unknown rehearsal operation." {}))))
+(defn execute
+ "Authorize before deduplication; enforce exact request and optimistic source basis.
+  All state is synthetic. Submitted effects are never silently retried."
+ [w actor role op p request expected]
+ (need! (contains? #{"operator" "reader"} role) "Unknown fixture role.")
+ (need! (or (= role "operator") (contains? read-ops op) (contains? fixture-ops op)) "Read-only access. An operator grant is required for this action.")
+ (need! (and (string? request) (<= 1 (count request) 100)) "A bounded request identity is required.")
+ (let [identity [actor op p] previous (get-in w [:requests request])]
+  (if previous
+   (do (need! (= identity (:identity previous)) "This request identity was already used for different work.")
+       (assoc w :notice "The original receipt was reused; the operation was not repeated."))
+   (do
+    (need! (= expected (:revision w)) "The workspace changed. Your unsaved words are preserved below; reload the current basis before submitting again.")
+    (when-not (or (contains? fixture-ops op) (contains? #{"provider" "placement" "operator"} op))
+     (need! (not= "incompatible" (:connection w)) "The interface version is incompatible. No operation was submitted.")
+     (need! (not= "offline" (:connection w)) "The provider is unavailable. No operation was submitted."))
+    (let [next (perform w actor op p) revision (inc (:revision w))
+          next (assoc next :revision revision :notice (str "Recorded · " op " · receipt " request))]
+     (-> next
+      (assoc-in [:requests request] {:identity identity :revision revision})
+      (update :requests (fn [rows] (into {} (filter (fn [[_ r]] (> (:revision r) (- revision 256))) rows))))
+      (update :tasks #(vec (take-last 100 %)))
+      (update :messages #(vec (take-last 100 %)))
+      (update :events #(vec (take-last 100 (conj % {:number revision :owner actor :text op :basis revision}))))))))))
