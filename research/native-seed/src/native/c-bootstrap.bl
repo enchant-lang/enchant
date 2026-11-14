@@ -1,0 +1,34 @@
+; Self-emission path. Call from a native compiler with native.c and this module
+; in its ORIGINAL SOURCE bundle. Canonical prepare reads/expands/compiles that
+; source again; native.c then emits the compiler's C control graph itself.
+(ns native.c-bootstrap
+ (:require [native.bootstrap :as bootstrap] [native.eval :as ev]
+           [native.c :as c] [clojure.string :as string]))
+(defn unit-definitions [unit]
+ (mapv #(assoc % :ns (:ns unit)) (:defs unit)))
+(defn direct-definitions [units]
+ (vec (concat
+  (mapcat (fn [unit] (filter #(= :fn (:kind %)) (unit-definitions unit))) units)
+  (mapcat (fn [unit]
+   (concat (when (= "core" (:ns unit))
+             [{:ns "core" :kind :expr :name nil
+               :node (c/internal "(lambda () (bl-invoke (native-global \"rt\" \"seed-core\") '()))" [])}])
+           (remove #(= :fn (:kind %)) (unit-definitions unit)))) units))))
+(defn compile-bundle [bundle host-source]
+ (bootstrap/install-source-macros! bundle)
+ (let [units (mapv bootstrap/prepare (:units bundle))
+       emitted (c/emit-definitions (direct-definitions units)
+                 (assoc (ev/context "user") :unit-name "native_self_compiler"))]
+  (assoc emitted :compiler-source
+   (str host-source "\n(native-install-bundle! " (bootstrap/data (dissoc bundle :units)) ")\n"
+        (:wrapper-source emitted) "\n(native-main (native-command-line))\n"))))
+(defn main [args]
+ (cond
+  (and (= 4 (count args)) (= "--compile-c" (first args)))
+   (let [bundle (host/eval-scheme (host/read-file (nth args 1)))
+         host-source (host/read-file (nth args 2))
+         emitted (compile-bundle bundle host-source)]
+    (host/write-file (nth args 3) (:compiler-source emitted))
+    (host/write-file (str (nth args 3) ".control.c") (:c-source emitted))
+    (println "NATIVE_DIRECT_SELF_EMISSION"))
+  :else (throw (ex-info "usage: native-compiler --compile-c bundle.scm host.scm output.scm" {:args args}))))

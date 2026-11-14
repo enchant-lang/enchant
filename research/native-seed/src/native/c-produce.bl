@@ -1,0 +1,55 @@
+; One producer over an ALREADY CAPTURED immutable ANF artifact. This never
+; recompiles an SDK, re-reads source to construct IR, or runs program fixtures.
+(ns native.c-produce
+ (:require [native.c :as c] [native.eval :as ev] [native.scheme :as scalar]
+           [native.artifact :as artifact] [clojure.string :as string] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def input (or (first args) "research/native-seed/out/full-actors.scm.anf.etf"))
+(def output (or (second args) "research/native-seed/out/direct"))
+(def host-path (nth args 2 nil))
+(def captured
+ (if (String/ends_with? input ".json") (artifact/read-closure input)
+  (let [bytes (File/read! input)]
+   (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
+   (let [value (erlang/binary_to_term bytes)]
+    (BeamLisp.CompilerData/check_compiler_data! value artifact/limits) value))))
+(when-not (contains? #{"bl.native.anf-unit" "bl.native.compiler-closure"} (:schema captured))
+ (throw (ex-info "direct C producer: unsupported captured ANF artifact" {:input input})))
+(def units (if (= "bl.native.compiler-closure" (:schema captured))
+             (mapv #(get (:units captured) %) (:order captured))
+             [{:ns (:namespace captured) :defs (:definitions captured)}]))
+(defn unit-definitions [unit]
+ (mapv #(assoc % :ns (or (:ns %) (:ns unit))) (:defs unit)))
+(def all-definitions (vec (mapcat unit-definitions units)))
+; Match the canonical bootstrap's boot order: bind all finite function values,
+; then each namespace's value/initializer forms in dependency order.
+(def functions (filter #(= :fn (:kind %)) all-definitions))
+(def initializers (mapcat (fn [unit]
+ (concat
+  (when (= "core" (:ns unit))
+   [{:ns "core" :name nil :kind :expr
+     :node (c/internal "(lambda () (bl-invoke (native-global \"rt\" \"seed-core\") '()))" [])}])
+  (remove #(= :fn (:kind %)) (unit-definitions unit)))) units))
+(def definitions (vec (concat functions initializers)))
+(def emitted (c/emit-definitions definitions
+ (assoc (ev/context (or (:namespace captured) "user")) :unit-name "native_captured_unit")))
+(def stem (str output "/unit"))
+(def entry (:entry captured))
+(def entry-source
+ (if (:actor-runtime entry)
+  (str "(bl-invoke (native-global " (scalar/text (:namespace entry)) " \"bl-main\") "
+       "(list (native-global " (scalar/text (:namespace entry)) " " (scalar/text (:name entry)) ")))\n")
+  ""))
+(File/mkdir_p! output)
+(File/write! (str stem "-control.c") (:c-source emitted))
+(File/write! (str stem "-ffi.scm") (:wrapper-source emitted))
+(when host-path
+ (File/write! (str output "/program.scm")
+  (str (File/read! host-path) "\n" (:wrapper-source emitted) "\n" entry-source)))
+(File/write! (str stem ".manifest.json")
+ (json/encode (assoc (:manifest emitted)
+  :status :emitted-not-executed :artifact input
+  :artifact-sha256 (Base/encode16 (crypto/hash :sha256 (File/read! input)) (list (tuple :case :lower)))
+  :definition-count (count definitions) :sdk-pin (:sdk-pin captured) :entry entry)))
+(println (str "DIRECT_C_EMITTED " (count definitions) " definitions; "
+              (:blocks (:manifest emitted)) " C blocks")))

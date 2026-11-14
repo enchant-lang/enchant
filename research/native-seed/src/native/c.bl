@@ -1,0 +1,270 @@
+; Direct bl-ANF -> C control flow. Scheme text below initializes literal roots
+; and checked primitive tables only; no authored function/body is Scheme-emitted.
+; The pc graph and closure entries are C. See direct-machine.scm for the root ABI.
+(ns native.c
+ (:require [clojure.string :as string] [native.scheme :as scalar] [anf]))
+
+(defn fail [node]
+ (throw (ex-info "direct C: unsupported ANF or unresolved native capability"
+  (select-keys node [:op :pop :mod :fun :ns :name :ann :reference]))))
+(defn state []
+ {:next 0 :slot 2 :blocks [] :constants ["bl-nil"] :constant-index {"bl-nil" 0}
+  :services [] :service-index {} :functions []})
+(defn reg [s] [(update s :slot inc) (:slot s)])
+(defn pool [s source]
+ (if-let [i (get (:constant-index s) source)] [s i]
+  (let [i (count (:constants s))]
+   [(-> s (update :constants conj source) (assoc-in [:constant-index source] i)) i])))
+(defn service [s source]
+ (if-let [i (get (:service-index s) source)] [s i]
+  (let [i (count (:services s))]
+   [(-> s (update :services conj source) (assoc-in [:service-index source] i)) i])))
+(defn block [s code]
+ (let [i (:next s)] [(-> s (update :next inc) (update :blocks conj {:id i :code code})) i]))
+(defn r [i] (str "BLC_REG(m," i ")"))
+(defn k [i] (str "BLC_CONST(m," i ")"))
+(defn jump [next] (str " BLC_PC(m," next "); continue;"))
+(defn action [kind a destination next args tail?]
+ (str " blc_set(m,11,BLC_CONST(m,0)); BLC_ACTION(m," a "," destination "," next "," args "," (if tail? 1 0) "); return " kind ";"))
+(defn action-at [kind a destination next args tail? site]
+ (str " blc_set(m,11," site "); BLC_ACTION(m," a "," destination "," next "," args "," (if tail? 1 0) "); return " kind ";"))
+(defn call-site [options tail?]
+ (when-let [ann (:direct-callsite options)]
+  (assoc (select-keys ann [:file :line :col :end-line :end-col])
+    :fn (:source-fn options) :arity (:source-arity options)
+    :call (if tail? :tail :direct)
+    :internal (and (:file ann) (String/ends_with? (:file ann) "/actor/runtime.bl")))))
+(defn internal [source args] {:op :direct-service :service source :args (vec args) :ann {}})
+(defn value-source [source] {:op :direct-value :source source :ann {}})
+(defn lit [v] {:op :lit :val v :ann {}})
+(defn list-node [nodes] (internal "list" nodes))
+(defn thunk [body] {:op :fn :clauses [{:pats [] :guard nil :body body}] :ann (:ann body)})
+(defn vector-node [nodes] (internal "bl-make-vec" nodes))
+(defn variable [name] {:op :var :name name :ann {}})
+(defn slot-node [i] {:op :direct-register :register i :ann {}})
+(defn names-in [node]
+ (let [own (if (and (contains? #{:let :var} (:op node)) (:name node)) #{(:name node)} #{})
+       clauses (concat (:clauses node) (:catch node))
+       bound (mapcat (fn [clause] (mapcat anf/pattern-vars (:pats clause))) clauses)]
+  (reduce (fn [out child] (into out (names-in child))) (into own bound)
+   (filter some? (anf/executable-children node)))))
+(defn fresh-name [prefix node]
+ (let [used (names-in node)]
+  (loop [i 0]
+   (let [candidate (str prefix i)]
+    (if (contains? used candidate) (recur (inc i)) candidate)))))
+(declare lower)
+
+(defn lower-arguments [s arguments slots env continuation options]
+ ; Build the graph backward. The resulting entry evaluates operands left to
+ ; right and exactly once, independently of C argument evaluation rules.
+ (reduce (fn [[s next] pair]
+           (lower s (first pair) env (second pair) next false options))
+  [s continuation] (reverse (map vector arguments slots))))
+
+(defn lower-service [s source arguments env destination next tail? options]
+ (let [[s index] (service s source)
+       [s slots] (reduce (fn [[s out] _] (let [[s i] (reg s)] [s (conj out i)])) [s []] arguments)
+       [s plan] (pool s (str "'(" (string/join " " slots) ")"))
+       [s site] (pool s (scalar/literal (call-site options tail?)))
+       [s call] (block s (action-at "BLC_SERVICE" (str "___FIX(" index ")") destination next (k plan) tail? (k site))) ]
+  (lower-arguments s arguments slots env call (dissoc options :direct-callsite))))
+
+(defn pattern-node [p]
+ (case (:pop p)
+  :pvar (list-node [(value-source "'var") (lit (:name p))])
+  :plit (list-node [(value-source "'lit") (lit (:val p))])
+  :pnil (list-node [(value-source "'nil")])
+  :ptuple (list-node [(value-source "'tuple") (list-node (map pattern-node (:elems p)))])
+  :pcons (list-node [(value-source "'cons") (pattern-node (:head p)) (pattern-node (:tail p))])
+  :palias (list-node [(value-source "'alias") (pattern-node (:a p)) (pattern-node (:b p))])
+  :pmap (list-node [(value-source "'map")
+          (list-node (map (fn [[key p]] (list-node [key (pattern-node p)])) (:pairs p)))])
+  :pstruct (if (= :Elixir.BeamLisp.Vector (:mod p))
+    (list-node [(value-source "'vector") (pattern-node (second (first (:fields p))))])
+    (list-node [(value-source "'struct") (lit (:mod p))
+      (list-node (map (fn [[key p]] (list-node [(lit key) (pattern-node p)])) (:fields p)))]))
+  (fail p)))
+
+(defn lower-binders [s names binding-slot env continuation options]
+ (let [[s bindings]
+       (reduce (fn [[s bindings] name]
+         (let [[s slot] (reg s)] [s (conj bindings [name slot])])) [s []] names)
+       extended (reduce (fn [env [name slot]] (assoc env name slot)) env bindings)
+       [s next] (continuation s extended)]
+  (reduce (fn [[s next] [name slot]]
+    (lower-service s "native-c-binding" [(slot-node binding-slot) (lit name)]
+      env slot next false options))
+   [s next] (reverse bindings))))
+
+(defn lower-clauses [s clauses argv env destination next tail? fallback options]
+ (if (empty? clauses) (lower s fallback env destination next tail? options)
+  (let [clause (first clauses)
+        [s more] (lower-clauses s (rest clauses) argv env destination next tail? fallback options)
+        [s bindings] (reg s)
+        [s body]
+        (lower-binders s (distinct (mapcat anf/pattern-vars (:pats clause))) bindings env
+         (fn [s extended]
+          (let [[s body] (lower s (:body clause) extended destination next tail? options)]
+           (if (:guard clause)
+            (let [[s guard-result] (reg s)
+                  [s choose] (block s (str " BLC_PC(m,BLC_TRUTHY(m," (r guard-result) ")?" body ":" more "); continue;"))]
+             (lower-service s "native-c-guard" [(thunk (:guard clause))] extended guard-result choose false options))
+            [s body]))) options)
+        [s choose] (block s (str " BLC_PC(m,___FALSEP(" (r bindings) ")?" more ":" body "); continue;"))]
+   (lower-service s "bl-match-args" [(list-node (map pattern-node (:pats clause)))
+                       (slot-node argv) (value-source "'()")]
+     env bindings choose false options))))
+
+(defn lower-function [s node env destination next options]
+ (let [parent-slot (:slot s) captured (vec (sort (keys env)))
+       captures (mapv env captured) capture-slots (vec (range 1 (inc (count captured))))
+       inner-env (into {} (map vector captured capture-slots))
+       s (assoc s :slot (+ 2 (count captured))) return-slot (inc (count captured))
+       [s finish] (block s (str " blc_set(m,4," (r return-slot) "); return BLC_RETURN;"))
+       arity (count (:pats (first (:clauses node))))
+       body-options (assoc (dissoc options :direct-callsite) :source-fn (:direct-source-fn node) :source-arity arity)
+       [s entry] (lower-clauses s (:clauses node) 0 inner-env return-slot finish true
+                   (internal "native-c-clause-error" []) body-options)
+       [s tick] (block s (action "BLC_TICK" "___FIX(0)" 0 entry "___NUL" false))
+       size (:slot s)
+       source-frame (assoc (select-keys (:ann node) [:file :line :col :end-line :end-col])
+                      :fn (:direct-source-fn node) :arity arity)
+       [s metadata] (pool s (str "(list " tick " " size " '(" (string/join " " capture-slots)
+                             ") " (scalar/literal source-frame) ")"))
+       [s capture-plan] (pool s (str "'(" (string/join " " captures) ")"))
+       s (-> s (assoc :slot parent-slot) (update :functions conj {:entry tick :frame-size size :source source-frame}))]
+  (block s (action "BLC_CLOSURE" (k metadata) destination next (k capture-plan) false))))
+
+(defn receive-node [n options id]
+ (let [message (fresh-name "__native_c_receive_" n) selected (fresh-name "__native_c_selected_" n)
+       selector {:op :fn :ann (:ann n)
+                 :clauses [{:pats [{:pop :pvar :name message}] :guard nil
+                  :body {:op :case :subj (variable message) :ann (:ann n)
+                   :clauses (vec (concat
+                    (map #(assoc % :body (vector-node [(lit :match) (thunk (:body %))])) (:clauses n))
+                    [{:pats [{:pop :pvar :name (fresh-name "__native_c_unmatched_" n)}]
+                      :guard nil :body (lit :nomatch)}]))}}]}
+       receive-call {:op :apply :fn {:op :global :ns (or (:runtime-namespace options) "native.kernel") :name "rt-receive"}
+                     :args [selector (thunk (or (:after n) (lit nil))) (or (:timeout n) (lit nil))] :ann (:ann n)}]
+  {:op :let :name selected :init receive-call :ann (:ann n)
+   :body {:op :apply :fn (internal "bl-nth" [(variable selected) (lit 1)]) :args [] :ann (:ann n)}}))
+
+(defn try-node [n id]
+ (let [stack (BeamLisp.CompilerData/catch_stack_bindings)
+       trace (fresh-name "__native_c_trace_" n) kind (fresh-name "__native_c_kind_" n) reason (fresh-name "__native_c_reason_" n)
+       with-trace (fn [body]
+         {:op :let :name (:frames stack) :init (variable trace) :ann (:ann n)
+          :body {:op :let :name (:raw stack) :init (variable trace) :body body :ann (:ann n)}})
+       catches (map (fn [clause]
+         (assoc clause :pats (conj (vec (:pats clause)) {:pop :pvar :name trace})
+          :guard (when (:guard clause) (with-trace (:guard clause)))
+          :body (with-trace (:body clause)))) (:catch n))
+       fallback {:pats [{:pop :pvar :name kind} {:pop :pvar :name reason} {:pop :pvar :name trace}]
+                 :guard nil :body (internal "bl-reraise" [(variable kind) (variable reason) (variable trace)])}
+       handler {:op :fn :clauses (vec (concat catches [fallback])) :ann (:ann n)}]
+  (internal "native-c-try" [(thunk (:body n)) handler (if (:after n) (thunk (:after n)) (lit false))])))
+
+(defn lower-call [s callee arguments env destination next tail? options]
+ (let [[s f] (reg s) [s args] (reg s)
+       [s site] (pool s (scalar/literal (call-site options tail?)))
+       [s invoke] (block s (action-at "BLC_CALL" (r f) destination next (r args) tail? (k site)))
+       inner-options (dissoc options :direct-callsite)
+       [s arguments] (lower s arguments env args invoke false inner-options)]
+  (lower s callee env f arguments false inner-options)))
+
+(defn lower [s node env destination next tail? options]
+ (case (:op node)
+  :lit (let [[s constant] (pool s (scalar/literal (:val node)))]
+         (block s (str " BLC_PUT(m," destination "," (k constant) ");" (jump next))))
+  :direct-value (let [[s constant] (pool s (:source node))]
+                  (block s (str " BLC_PUT(m," destination "," (k constant) ");" (jump next))))
+  :direct-register (block s (str " BLC_PUT(m," destination "," (r (:register node)) ");" (jump next)))
+  :enil (lower s (value-source "'()") env destination next tail? options)
+  :var (if-let [slot (get env (:name node))]
+         (block s (str " BLC_PUT(m," destination "," (r slot) ");" (jump next))) (fail node))
+  :global (let [value (if-let [resolver (:global-resolver options)] (resolver node)
+                       (str "(" (if (= :exact (:lookup node)) "native-global-exact" "native-global") " "
+                            (scalar/text (:ns node)) " " (scalar/text (:name node)) ")"))]
+            (when-not value (fail node))
+            (lower-service s (str "(lambda () " value ")") [] env destination next tail? options))
+  :binding (if-let [resolver (:binding-resolver options)]
+             (let [value (resolver node)]
+              (when-not value (fail node))
+              (lower-service s (str "(lambda () " value ")") [] env destination next tail? options)) (fail node))
+  :remote (lower-service s (scalar/remote node options) (:args node) env destination next tail?
+             (assoc options :direct-callsite (:ann node)))
+  :arith (let [source (or (when-let [resolver (:arithmetic-resolver options)] (resolver node))
+                       (get scalar/arithmetic (:fun node)))]
+           (when-not source (fail node))
+           (lower-service s source (:args node) env destination next tail? (assoc options :direct-callsite (:ann node))))
+  :direct-service (lower-service s (:service node) (:args node) env destination next tail? options)
+  :apply (lower-call s (:fn node) (list-node (:args node)) env destination next tail? (assoc options :direct-callsite (:ann node)))
+  :invoke (lower-call s (:callee node) (:arguments node) env destination next tail? (assoc options :direct-callsite (:ann node)))
+  :let (let [[s slot] (reg s)
+             [s body] (lower s (:body node) (assoc env (:name node) slot) destination next tail? options)]
+         (lower s (:init node) env slot body false options))
+  :if (let [[s test] (reg s)
+            [s yes] (lower s (:then node) env destination next tail? options)
+            [s no] (lower s (:else node) env destination next tail? options)
+            [s choose] (block s (str " BLC_PC(m,BLC_TRUTHY(m," (r test) ")?" yes ":" no "); continue;"))]
+        (lower s (:test node) env test choose false options))
+  :do (let [statements (:stmts node)]
+        (if (empty? statements) (lower s (lit nil) env destination next tail? options)
+         (let [[s last] (lower s (last statements) env destination next tail? options)]
+          (reduce (fn [[s next] statement]
+            (let [[s ignored] (reg s)] (lower s statement env ignored next false options)))
+           [s last] (reverse (butlast statements))))))
+  :fn (lower-function s node env destination next options)
+  :case (let [[s argv] (reg s)
+              [s subject] (reg s)
+              [s clauses] (lower-clauses s (:clauses node) argv env destination next tail?
+                             (internal "native-c-clause-error" []) options)
+              [s pack] (lower-service s "list" [(slot-node subject)] env argv clauses false options)]
+          (lower s (:subj node) env subject pack false options))
+  :recv (lower s (receive-node node options (:next s)) env destination next tail? options)
+  :try (lower s (try-node node (:next s)) env destination next tail? options)
+  :tuple (lower-service s "bl-make-tuple" (:elems node) env destination next tail? options)
+  :map (lower-service s "bl-map" (mapcat identity (:pairs node)) env destination next tail? options)
+  :cons (lower-service s "cons" [(:head node) (:tail node)] env destination next tail? options)
+  :struct (if (= :Elixir.BeamLisp.Vector (:mod node))
+            (if (= :tuple (:op (second (first (:fields node)))))
+             (lower-service s "bl-make-vec" (:elems (second (first (:fields node)))) env destination next tail? options)
+             (fail node))
+            (lower-service s "bl-struct" [(lit (:mod node)) {:op :map :pairs (:fields node) :ann (:ann node)}]
+              env destination next tail? options))
+  (fail node)))
+
+(defn emit-unit
+ "Return direct C and a literal/FFI wrapper. Options use the SAME checked
+  leaf/global/binding resolvers as native.scheme. The wrapper contains no BL
+  executable body emitted as Scheme. host/eval-c-unit must bind/load exactly
+  this unit under the qualified native toolchain; annotations grant no rights."
+ [node options]
+ (let [unit (scalar/ident (or (:unit-name options) "native_direct_unit"))
+       [s finish] (block (state) " blc_set(m,4,BLC_REG(m,1)); return BLC_RETURN;")
+       [s entry] (lower s node {} 1 finish true options)
+       c-source (str "#include \"native-direct.h\"\nstatic int " unit "(___SCMOBJ m) { for (;;) { switch ((int)___INT(blc_ref(m,1))) {\n"
+                  (string/join "\n" (map #(str "case " (:id %) ": {" (:code %) "}\n") (sort-by :id (:blocks s))))
+                  "default: return -1; } } }\n")
+       preamble (str "(c-declare " (scalar/text c-source) ")\n")
+       expression (str "(let ((unit (vector (c-lambda (scheme-object) int " (scalar/text unit) ")\n"
+                " (vector " (string/join " " (:constants s)) ")\n"
+                " (vector " (string/join " " (:services s)) "))))\n"
+                " (native-c-invoke (native-c-new-closure unit (list " entry " " (:slot s) " '() bl-nil) '()) '()))\n")]
+  {:c-source c-source :preamble-source preamble :expression-source expression
+   :wrapper-source (str preamble "(native-c-publish-loaded! " expression ")\n")
+   :manifest {:schema "bl.native.direct-c-unit" :version 1 :unit-name unit
+              :blocks (count (:blocks s)) :functions (count (:functions s))
+              :root-slots (:slot s) :literals (count (:constants s))
+              :primitive-services (:services s) :source-interpreter false :anf-interpreter false
+              :program-control :emitted-c :value-services :shared-native-host}}))
+
+(defn definitions-node [definitions]
+ {:op :do :ann {}
+  :stmts (mapv (fn [d]
+   (if (:name d)
+    (internal "(lambda (ns name value) (native-register! ns name value) (native-intern ns name value) value)"
+     [(lit (:ns d)) (lit (:name d)) (assoc (:node d) :direct-source-fn (:name d))]) (:node d))) definitions)})
+(defn emit-definitions [definitions options]
+ (emit-unit (definitions-node definitions) options))
