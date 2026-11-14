@@ -1,0 +1,40 @@
+(ns formal.project-handoff
+ (:require [bl.doc :as doc] [bl.json :as json] [dossier.org :as org]
+           [dossier.page :as page] [dossier.roster :as roster]
+           [dossier.roster.model :as model] [live.hiccup :as h]
+           [formal.review-svg :as svg]))
+(def argv (BeamLisp/argv))
+(def project (nth argv 0))
+(def kit (nth argv 1))
+(def output (nth argv 2))
+(def file (str project "/PROJECT.bl.org"))
+(def checked (doc/run-and-write! file {:check? true}))
+(assert (and (= 0 (:cells checked)) (empty? (:errors checked)) (= false (:drift checked))))
+(def text (File/read! file))
+(def parsed (model/parse text))
+(assert (empty? (:errors parsed)))
+(assert (= 18 (count (:items parsed))))
+(assert (every? :stable-id? (:items parsed)))
+(assert (every? #(and (:next %) (get-in % [:props "WORKSTREAM"])) (:items parsed))))
+(def grouped (model/group-items (:items parsed) "WORKSTREAM"))
+(assert (= 9 (count (set (map :stream grouped)))))
+(def enriched (roster/enrich (org/read-doc text) project {:root project :can-write? false}))
+(def rb (first (filter #(= "roster" (:lang %)) (:nodes enriched))))
+(assert (and rb (empty? (get-in rb [:data :errors])) (= 18 (count (get-in rb [:data :items])))))
+(assert (every? :available? (mapcat :proof-links (get-in rb [:data :items]))))
+(defn eager [node]
+ (cond (vector? node) (mapv eager node)
+       (or (seq? node) (list? node)) (mapv eager node)
+       :else node))
+(def css (str (File/read! (str kit "/style.css")) (File/read! (str kit "/roster.css"))))
+(def js (str (File/read! (str kit "/live.js")) (File/read! (str kit "/roster.js"))))
+;; A read-only captured preview, not an authenticated live review service.
+(def readonly (assoc-in enriched [:meta :locked] "true"))
+(File/write! (str output "/index.html")
+ (str "<!doctype html>" (h/hiccup->html (svg/scope-markers (eager (page/page-h readonly css js))))))
+(File/write! (str output "/model.json")
+ (json/encode {:status :passed :tasks (count grouped) :workstreams (count (set (map :stream grouped)))
+               :open (count (remove :done? grouped)) :done (count (filter :done? grouped))
+               :task-errors (:errors parsed) :document-check checked :can-write false
+               :rows (mapv #(select-keys % [:id :state :stream :owner :next :blockers]) grouped)} {:pretty 2}))
+(println {:handoff :passed :tasks (count grouped) :workstreams (count (set (map :stream grouped)))} )
