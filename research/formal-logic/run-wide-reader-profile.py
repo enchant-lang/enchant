@@ -57,14 +57,15 @@ result = read(E / 'observations.json')
 assert result['status'] == 'passed' and result['sdk'] == pin['sdk']
 windows = 5 if mode == 'components' else 7
 assert len(result['measurements']) == windows and result['oracle-calls'] == 0
-assert result['component-mode'] == result['manual-schema-initialization'] == (mode == 'components')
+assert result['component-mode'] == result['unmeasured-initial-reopen'] == (mode == 'components')
+assert result['manual-schema-initialization'] is False
 assert all(type(row['elapsed-us']) is int and row['elapsed-us'] >= 0 for row in result['measurements'])
 assert all(type(row['call-counts']['native-exchange']) is int and row['call-counts']['native-exchange'] == 0 for row in result['measurements'])
 assert result['packet-reference'] == packet['packet-reference']
 write('qualification.json', {'schema': 'bl.wide-reader-profile-qualification.v1', 'status': 'passed',
                             'source_pin': read(E / 'source-pin.json'), 'observations_sha256': sha(E / 'observations.json'),
                             'scope': f'{windows} serial operation windows on one exact native candidate. Baseline includes first/warmed reopen; '
-                                     'component mode explicitly initializes fixed schemas and isolates encoding/reference/answer checks. '
+                                     'Component mode initializes through one public reopen outside its five encoding/reference/answer windows. '
                                      'Actual function call counts and wall times with trace instrumentation; no native/oracle exchanges. '
                                      'This is diagnostic evidence on this host, not a speed comparison, physical cost proof or new mathematical capability.'})
 print(json.dumps({'status': 'passed', 'windows': windows, 'mode': mode}))
