@@ -1,0 +1,77 @@
+(ns formal.finite-feasibility-test
+ (:require [formal.obligation-batch.finite-feasibility :as feasibility] [formal.obligation-batch.finite-word-certificate :as finite]
+           [formal.obligation-batch.request :as request] [formal.obligation-batch.point-profile :as policy] [formal.obligation-batch.backend :as backend]
+           [formal.term :as t] [formal.obligation-batch.query :as q] [formal.obligation-batch.question-graph :as qg]
+           [formal.data-graph :as graph] [oracle]))
+(defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric-word}}))
+(defn word [n] (t/literal [:bv 2] n))
+(deftest a-satisfying-background-needs-an-actual-replayed-point
+ (let [x (t/variable "feasibility.x" [:bv 2])
+       r (prepared (q/prove (t/bool false) {:assumptions [(q/assertion "three" (t/eq x (word 3)))]}))
+       result (feasibility/assess r)]
+  (is (= :checked (:status result)))
+  (is (= :witnessed (:feasibility result)))
+  (is (= {:formal/bv [2 3]} (get-in result [:witness "feasibility.x"])))
+  (is (= :sat (get-in result [:point-check :verdict])))
+  (is (= (request/subject-reference r) (:original-subject-reference result)))
+  (is (= (graph/reference (qg/field-graph (:subject r) :assertions))
+          (get-in result [:connection :assertion-reference])))
+  (is (= false (:compiler-proof-authority result) (:checked-native-execution result)))))
+(deftest a-conditional-theorem-does-not-establish-feasible-premises
+ (let [x (t/variable "feasibility.inconsistent" [:bv 2])
+       r (prepared (q/prove (t/bool true) {:assumptions [(t/eq x (word 0)) (t/eq x (word 1))]}))
+       conditional (finite/check r (finite/candidate r)) result (feasibility/assess r)]
+  (is (= :checked (:status conditional)))
+  (is (= :entails (:verdict conditional)))
+  (is (= :not-established (:feasibility conditional)))
+  (is (= :checked (:status result)))
+  (is (= :inconsistent (:feasibility result)))
+  (is (= :finite-contradiction (:basis result)))
+  (is (nil? (:witness result)))))
+(deftest empty-environments-and-budget-refusal-remain-distinct
+ (let [r (prepared (q/prove (t/bool true)))
+       module (elem (erlang/fun_info policy/with-question :module) 1) pattern (tuple module :with-question 3)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [limited (feasibility/assess r {:work-units (dec feasibility/allowance)})]
+    (is (= :incomplete (:status limited)))
+    (is (= :not-established (:feasibility limited)))
+    (is (= :not-run (:checker-invocation limited))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (let [result (feasibility/assess r {:work-units feasibility/allowance})]
+    (is (= :witnessed (:feasibility result)))
+    (is (= {} (:witness result))))
+   (is (> (elem (erlang/trace_info pattern :call_count) 1) 0))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest unsupported-backgrounds-never-become-feasible-by-default
+ (let [x (t/variable "feasibility.unbounded" t/Int)
+       r (prepared (q/prove (t/bool true) {:assumptions [(t/lt (t/int 0) x)]}))]
+  (is (= :not-established (:feasibility (feasibility/assess r)))))
+ (let [x (t/variable "feasibility.wide" [:bv 17]) r (prepared (q/prove (t/eq x x)))]
+  (is (= :not-established (:feasibility (feasibility/assess r)))))
+ (let [r (prepared (q/prove (t/bool true)))]
+  (doseq [bad [{:work-units -1} {:work-units 1.0} {:work-units 36000001} {:feasible true}]]
+   (is (thrown? (feasibility/assess r bad))))))
+(deftest opaque-shared-metadata-is-preserved-without-a-materializer
+ (let [r (prepared (q/prove (t/bool true)))
+       unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" (str "feasibility.unknown." (System/unique_integer (list :positive)))]]}
+       shared (reduce (fn [data _] (graph/assemble "vector" [data data])) unknown (range 17))
+       data (graph/patch-map (get-in r [:subject :graph]) [[(graph/encode :origin) shared]])
+       original (request/from-graph data {:policy (:policy r) :adapter (:adapter r)})
+       result (feasibility/assess original)]
+  (is (> (:expanded-nodes (graph/check! data)) 100000))
+  (is (thrown? (qg/materialize! (:subject original))))
+  (is (= :witnessed (:feasibility result)))
+  (is (= (graph/bytes shared)
+          (graph/bytes (qg/field-graph (get-in result [:checking-request :subject]) :origin))))))
+(deftest feasibility-needs-no-native-or-oracle-execution
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :feasibility-must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    #(is (= :witnessed (:feasibility (feasibility/assess (prepared (q/prove (t/bool true))))))))
+   (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)

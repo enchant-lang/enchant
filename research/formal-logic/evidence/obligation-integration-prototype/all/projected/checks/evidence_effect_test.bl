@@ -1,0 +1,81 @@
+(ns formal.evidence-effect-test
+ (:require [formal.obligation-batch.request-runtime :as runtime] [formal.obligation-batch.request-evidence :as evidence]
+           [formal.obligation-batch.finite-word-certificate :as proof] [formal.obligation-batch.request :as request]
+           [formal.obligation-batch.request-answer :as answer] [formal.obligation-batch.backend :as backend]
+           [formal.obligation-batch.point-profile :as policy] [formal.term :as t] [formal.obligation-batch.query :as q]
+           [formal.obligation-batch.question-graph :as qg] [formal.obligation-batch.logic :as logic]))
+(defn prepared [query profile] (request/prepare (qg/prepare query) {:policy {:profile profile}}))
+(defn same! [expected actual] (is (= expected actual)))
+(deftest supplied-certificates-avoid-native-owners-and-fallbacks-expire
+ (let [x (t/variable "evidence.effect" [:bv 2])
+       r (prepared (q/prove (t/eq x x)) policy/numeric-word)
+       held (atom nil) module (elem (erlang/fun_info backend/invoke :module) 1)
+       pattern (tuple module :exchange! 4)]
+  (same! 1 (erlang/trace_pattern pattern true (list :local :call_count)))
+  (try
+   (let [result (runtime/with-evidence-handler
+                 (fn [original fallback]
+                  (reset! held fallback)
+                  (evidence/propose original {:certificate (proof/candidate original)}))
+                 #(runtime/execute-evidence r))]
+    (same! :conditional-entailment (get-in result [:conclusion :kind]))
+    (same! :checked (get-in result [:proof-check :status]))
+    (same! 0 (get-in result [:local-delegation :attempts]))
+    (same! :not-invoked (get-in result [:local-delegation :status]))
+    (is (thrown? (@held))))
+   (let [comparison (logic/with-evidence-handler
+                     (fn [original _] (logic/propose-evidence original {:certificate (proof/candidate original)}))
+                     #(logic/compare-evidence r))]
+    (is (:conclusion-agreement comparison))
+    (same! false (:reported-status-agreement comparison))
+    (same! false (:compiler-proof-authority comparison))
+    (same! (get-in comparison [:z3 :proof-check :statement]) (get-in comparison [:oxiz :proof-check :statement])))
+   (same! 0 (elem (erlang/trace_info pattern :call_count) 1))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest caller-proof-budget-and-closed-evidence-are-checked-after-the-effect
+ (let [r (prepared (q/prove (t/bool true)) policy/numeric-word) calls (atom 0)
+       handler (fn [original _] (swap! calls inc) (evidence/propose original {:certificate (proof/candidate original)}))]
+  (is (thrown? (runtime/with-evidence-handler handler #(runtime/execute-evidence r {:trusted true}))))
+  (same! 0 @calls)
+  (let [result (runtime/with-evidence-handler handler #(runtime/execute-evidence r {:proof-work-units 0}))]
+   (same! :incomplete (get-in result [:proof-check :status]))
+   (same! :not-run (get-in result [:proof-check :checker-invocation]))
+   (same! :not-established (get-in result [:conclusion :status])))
+  (same! 1 @calls)
+  (is (thrown? (runtime/with-evidence-handler (fn [_ _] {:status :checked}) #(runtime/execute-evidence r))))))
+(deftest evidence-fallbacks-remain-same-process
+ (let [r (prepared (q/prove (t/bool true)) policy/numeric-word) parent (erlang/self)
+       result (runtime/with-evidence-handler
+               (fn [original fallback]
+                (erlang/spawn
+                 (fn [] (erlang/send parent [:evidence-foreign (try (fallback) :accepted (catch error (:kind (ex-data error))))])))
+                (receive [:evidence-foreign status] (same! :fallback-lease status)
+                         (after 3000 (is false "foreign evidence fallback did not return")))
+                (evidence/propose original {:certificate (proof/candidate original)}))
+               #(runtime/execute-evidence r))]
+  (same! :checked (get-in result [:proof-check :status]))
+  (same! 0 (get-in result [:local-delegation :attempts]))))
+(deftest actual-native-fallback-and-supplied-text-point-share-the-interface
+ (let [x (t/variable "text.effect" t/String)
+       r (prepared (q/sat {:assumptions [(t/eq x (t/text "é"))]}) policy/numeric-word-text)
+       held (atom nil)
+       native (runtime/with-evidence-handler
+               (fn [_ fallback]
+                (let [response (fallback)]
+                 (reset! held fallback)
+                 (is (thrown? (fallback))) response))
+               #(runtime/execute-evidence r))
+       supplied (runtime/with-evidence-handler
+                 (fn [original _] (evidence/propose original {:answer (answer/supply original {"text.effect" "é"})}))
+                 #(runtime/execute-evidence r {:proof-work-units 0}))]
+  (same! :witness (get-in native [:conclusion :kind]))
+  (same! :witness (get-in supplied [:conclusion :kind]))
+  (same! :reported-native (get-in native [:answer-check :source :kind]))
+  (same! :supplied-point (get-in supplied [:answer-check :source :kind]))
+  (same! 1 (get-in native [:local-delegation :attempts]))
+  (same! :matching-response (get-in native [:local-delegation :status]))
+  (same! 0 (get-in supplied [:local-delegation :attempts]))
+  (is (thrown? (@held)))
+  (same! false (:checked-native-execution native))
+  (same! false (:compiler-proof-authority native))))
+(run-tests)

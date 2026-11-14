@@ -1,11 +1,13 @@
 # A proof, usable premises, and permission to accept it
 
 This is the common interface being integrated on main. The selected scalar SDK
-is still the qualified baseline; the new artifact and final combined checks
-are pending. Earlier source projections passed 284 pure assertions and 501
-ownership assertions. Four packets passed two fresh readers, including 16 full
-and 16 allowance-limited checks. Those receipts precede the final SAT display
-fix and policy namespace relocation; they are preserved as historical results.
+is still the qualified baseline. The final canonical source projection passed
+**1,714 assertions across 18 files**, including the SAT reporting fix and policy
+namespace relocation. Its [qualification](../evidence/obligation-integration-prototype/all/qualification.json)
+and [actual log](../evidence/obligation-integration-prototype/all/checks.txt) bind
+those exact source bytes. The final cold packet rerun and new artifact gates are
+pending. Earlier 284/501-assertion passes and the first four-packet/two-reader
+pass are retained under their actual historical revisions.
 
 A conditional theorem says that every assignment satisfying the premises also
 satisfies the claim. An impossible premise can make that theorem true. A caller
@@ -25,7 +27,9 @@ result rather than hiding these distinctions in one Boolean.
 | yes | not established | accepted | reported | incomplete |
 | no | any | not established | not established | not established |
 
-Conflicting independently checked evidence refuses acceptance. Native UNSAT
+The table concerns accepting conditional entailment. A checked counterexample
+remains a separate decisive result. Conflicting independently checked evidence
+refuses acceptance. Native UNSAT
 alone remains a solver claim, regardless of the selected consumer policy.
 Missing policy defaults to report; explicit nil, strings, booleans and unknown
 keywords refuse. All question readers preserve allow/report/reject exactly.

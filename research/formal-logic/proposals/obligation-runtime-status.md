@@ -33,3 +33,10 @@ existing qualification remains a historical scalar checkpoint. An updated live
 dossier awaits actual new runtime and browser checks. Source correspondence,
 compiler preservation, kernel implementation verification and whole-language
 totality remain open.
+
+The final exact canonical source projection passed 1,714 assertions across 18
+files. That run includes the seven SAT reporting regressions, all nine consumer
+policy cases, integer witnesses/contradictions, strict policy readers, common
+carrier/effect ownership and existing graph/word regressions. Its actual parent
+owner exited successfully and was stopped after recording its terminal state.
+Final cold readers and the single new SDK build follow separately.

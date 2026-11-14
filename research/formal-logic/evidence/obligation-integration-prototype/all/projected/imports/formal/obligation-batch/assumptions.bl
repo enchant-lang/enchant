@@ -1,0 +1,30 @@
+(ns formal.obligation-batch.assumptions
+ (:require [formal.obligation-batch.request :as request] [formal.obligation-batch.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.obligation-batch.point-profile :as policy]))
+
+(def profile :bl/original-assumptions-as-sat-preview-v1)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.assumptions: " why) {}))))
+(defn background
+ "Freshly admit the original, then derive SAT from precisely its assertion
+  graph. Preserve observations, provenance, scope and the retained background.
+  This derivation establishes neither consistency nor a Source connection."
+ [original checking-policy]
+ (let [r (request/check! original) configuration (policy/settings checking-policy)
+       _ (require! (= (get-in r [:policy :profile]) (:profile configuration)) "same semantic profile required")
+       _ (policy/with-question (:subject r) configuration
+           (fn [inventory _]
+            (require! (not= 2 (:formal/question-forest-refusal inventory)) "fresh original admission required")))
+       data (graph/patch-map (get-in r [:subject :graph])
+              [[(graph/encode :mode) (graph/encode :sat)]
+               [(graph/encode :claim) (graph/encode nil)]
+               [(graph/encode :counterexample) (graph/encode nil)]])
+       derived (request/from-graph data {:policy configuration :adapter (:adapter r)})
+       before (qg/field-graph (:subject r) :assertions)
+       after (qg/field-graph (:subject derived) :assertions)]
+  (require! (= (graph/bytes before) (graph/bytes after)) "complete original assertions must be unchanged")
+  {:request derived :connection {:profile profile :kind :original-assertions-as-sat
+                                :original-subject-reference (request/subject-reference r)
+                                :background-subject-reference (request/subject-reference derived)
+                                :assertion-reference (graph/reference before)
+                                :source-connection :not-established}}))
