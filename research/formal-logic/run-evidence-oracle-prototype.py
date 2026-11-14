@@ -29,6 +29,10 @@ def project(source,target):
  for old,new in sorted(modules.items(),key=lambda item:-len(item[0])):
   for pattern in [r'(\(ns\s+)'+re.escape(old)+r'(?=\s|\))',r'(\[)'+re.escape(old)+r'(?=\s|\])']:
    text=re.sub(pattern,lambda m:m.group(1)+new,text)
+ # An originally unaliased root namespace is still used as oracle/foo.
+ # Requiring its projected qualified name alone would leave those calls
+ # resolving to the selected SDK's original oracle namespace.
+ text=text.replace('[formal.scalar-batch.oracle]','[formal.scalar-batch.oracle :as oracle]')
  target.parent.mkdir(parents=True,exist_ok=True);target.write_text(text)
  saved=E/'projected'/target.relative_to(runtime);saved.parent.mkdir(parents=True,exist_ok=True);saved.write_text(text)
  return {'source':str(source.relative_to(R)),'saved':str(saved.relative_to(E)),'sha256':sha(saved)}

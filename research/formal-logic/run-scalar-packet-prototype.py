@@ -48,6 +48,7 @@ modules['oracle']='formal.scalar-batch.oracle';copied.append({'source':str(sourc
 reader=(P/'scalar-packet-reader.bl').read_text()
 for old,new in sorted(modules.items(),key=lambda item:-len(item[0])):
  reader=re.sub(r'(\[)'+re.escape(old)+r'(?=\s|\])',lambda m:m.group(1)+new,reader)
+reader=reader.replace('[formal.scalar-batch.oracle]','[formal.scalar-batch.oracle :as oracle]')
 target=runtime/'reader.bl';target.write_text(reader);(E/'projected-reader.bl').write_text(reader)
 write('projection.json',{'modules':modules,'copied':copied,'reader_sha256':sha(target)})
 command=['systemd-run','--user','--quiet','--collect','--wait','--pipe','--expand-environment=no',
