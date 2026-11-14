@@ -1,0 +1,28 @@
+(ns auth.namespace-project-test
+ (:require [bl.env :as project] [bl.auth-imports :as config] [auth.contract :as contract]))
+(def declarations
+ {:auth/imports {'world.catalog {:from :catalog :namespace 'example.catalog :version 1 :only '[services-in]}}
+  :auth/realms {:catalog {:root "provider" :transport :local}}})
+(deftest native-project-map-and-legacy-extension-blocks-have-one-reader
+ (let [value (project/normalize (merge {:name "consumer"} declarations) "/tmp" "/tmp/env.bl")]
+  (is (empty? (:errors value)))
+  (is (= (:auth/imports declarations) (:auth/imports value)))
+  (is (= (:auth/realms declarations) (:auth/realms value))))
+ (is (= (merge {:name "consumer"} declarations) (config/extensions [declarations {:name "consumer"}])))
+ (is (thrown? (config/extensions [declarations (merge declarations {:name "consumer"})]))))
+(deftest malformed-environment-policy-is-an-error-instead-of-an-implicit-import
+ (doseq [value [(assoc declarations :auth/realms 1)
+               (assoc-in declarations [:auth/imports 'world.catalog :only] [])
+               (assoc-in declarations [:auth/realms :catalog :transport] :automatic)
+               (assoc declarations :auth/realm {:source "x.bl"})
+               (assoc declarations :auth/realms {:catalog {:transport :remote :world "w" :url "https://host/realms/v1"
+                                                         :issuer-public "public" :interface "interface.edn"}})]]
+  (is (seq (config/errors value)))))
+(deftest interface-identity-is-canonical-and-checks-the-declared-abi
+ (let [a {:namespace "example.catalog" :version 1 :exports {"b" 2 "a" 1}}
+       b (assoc a :exports {"a" 1 "b" 2})]
+  (is (= (contract/id a) (contract/id b)))
+  (is (not= (contract/id a) (contract/id (assoc a :version 2))))
+  (is (not= (contract/id a) (contract/id (assoc a :exports {"a" 2 "b" 2}))))
+  (is (thrown? (contract/validate (assoc a :format contract/FORMAT :id "supplied-success"))))))
+(run-tests)
