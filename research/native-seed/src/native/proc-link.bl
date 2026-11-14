@@ -5,7 +5,7 @@
  (:require [js.build :as build] [js.actor :as actor] [reader-node :as rn]
            [native.proc :as proc] [native.scheme :as scheme] [native.eval :as ev]
            [native.artifact :as artifact] [system.ir :as ir] [anf]
-           [proc.bus :as bus] [proc.reg :as reg] [clojure.string :as string] [bl.json :as json]))
+           [native.proc-planner-capsules :as capsules] [clojure.string :as string] [bl.json :as json]))
 
 (def kernel "native.kernel")
 (def original-actor-corpus
@@ -39,26 +39,26 @@
  (or (and (= ns "proc.bus") (= '(extend-clause! :bus bus-clause) (proc/source-data form)))
      (and (= ns "proc.reg") (= '(extend-clause! :registry registry-clause) (proc/source-data form)))))
 (defn capture-compiler-vocabulary [helper-namespaces]
- ; Provider activation and ALL callable captures precede the Env fork. Runtime
- ; helper staging masks links in that fork and must not own these pure values.
+ ; Capture actual pure values before the build fork. Bus/registry transforms
+ ; use lexical anonymous capsules, never runtime namespace initialization.
  (doseq [ns helper-namespaces :let [spec (get helpers ns)]]
   (when-not (= (:sha256 spec) (digest (File/read! (:path spec))))
    (throw (ex-info "native proc link: admitted helper source changed" {:namespace ns :path (:path spec)}))))
- (let [providers (vec (concat ["proc.server" "proc.super"]
-                             (filter #(contains? #{"proc.bus" "proc.reg"} %) helper-namespaces)))]
- (doseq [namespace providers] (BeamLisp.Loader/load_provider namespace))
- {:renderer proc/runtime-forms
-  :vocabulary (cond-> {}
-                (some #(= "proc.bus" %) helper-namespaces) (assoc :bus bus/bus-clause)
-                (some #(= "proc.reg" %) helper-namespaces) (assoc :registry reg/registry-clause))
-  :planners {:clause-plan (BeamLisp.Env/fetch_exact! "proc.server" "clause-plan")
-             :supervisor-plan (BeamLisp.Env/fetch_exact! "proc.super" "supervisor-plan")
-             :unknown-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "unknown-supervisor-clause-error")
-             :invalid-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "invalid-supervisor-error")
-             :data-tail (BeamLisp.Env/fetch_exact! "server-clause" "data-tail")}
-  :providers (mapv (fn [namespace]
-    (assoc (source-identity (BeamLisp.Loader/source_path namespace)) :namespace namespace))
-   providers)}))
+ (let [providers ["proc.server" "proc.super"]
+       _ (doseq [namespace providers] (BeamLisp.Loader/load_provider namespace))
+       bus (when (some #(= "proc.bus" %) helper-namespaces) (capsules/activate "proc.bus"))
+       registry (when (some #(= "proc.reg" %) helper-namespaces) (capsules/activate "proc.reg"))]
+  {:renderer proc/runtime-forms
+   :vocabulary (cond-> {} bus (assoc :bus (:value bus)) registry (assoc :registry (:value registry)))
+   :planners {:clause-plan (BeamLisp.Env/fetch_exact! "proc.server" "clause-plan")
+              :supervisor-plan (BeamLisp.Env/fetch_exact! "proc.super" "supervisor-plan")
+              :unknown-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "unknown-supervisor-clause-error")
+              :invalid-supervisor-error (BeamLisp.Env/fetch_exact! "proc.super" "invalid-supervisor-error")
+              :data-tail (BeamLisp.Env/fetch_exact! "server-clause" "data-tail")}
+   :providers (vec (concat
+                (mapv (fn [namespace]
+                  (assoc (source-identity (BeamLisp.Loader/source_path namespace)) :namespace namespace)) providers)
+                (keep :record [bus registry])))}))
 (defn expansion [captured forms ns path]
  ((:renderer captured) (vec (remove #(registration? % ns) forms)) ns path
   {:vocabulary (:vocabulary captured) :planners (:planners captured)}))

@@ -1,0 +1,72 @@
+; Exact pure DSL functions from original Source, compiled as lexical closures.
+; No namespace declaration, def, registration, server or initializer executes.
+(ns native.proc-planner-capsules
+ (:require [js.build :as build] [reader-node :as rn]))
+
+(def admitted
+ {"proc.bus" {:path "priv/std/proc/bus.bl"
+               :sha256 "0f661669d8e1516a3e19f77e77d0cf75dd6b8af40495a18043f5a8747e79c62a"
+               :members ["declared-demand" "bus-clause"] :entry "bus-clause" :arity 2}
+  "proc.reg" {:path "priv/std/proc/reg.bl"
+               :sha256 "2c72188b1e420d1c06edf43c0287c2d966039fb9418b38c60595ab4c2e26a5f1"
+               :members ["declared-keys" "registry-clause"] :entry "registry-clause" :arity 2}})
+
+(defn digest [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+
+(defn select-members [namespace spec forms]
+ (let [definitions (build/definition-values forms)]
+  (mapv (fn [name]
+    (let [found (vec (filter #(= name (:name %)) definitions))]
+     (when-not (and (= 1 (count found)) (= :fn (:kind (first found))))
+      (throw (ex-info "native planner capsule: exact original function is absent"
+                      {:namespace namespace :name name :path (:path spec)})))
+     (first found))) (:members spec))))
+
+(defn lexical-capsule [spec members]
+ (let [entry (first (filter #(= (:entry spec) (:name %)) members))
+       helpers (vec (remove #(= (:entry spec) (:name %)) members))
+       bindings (reduce (fn [out member]
+                   (into out [(rn/sym-node (:name member)) (:form member)])) [] helpers)
+       capsule (rn/list-node (list (rn/sym-node "let")
+                         (rn/->tuple [:vector (to-list bindings)]) (:form entry)))
+       position (rn/node-pos (:form entry))]
+  (if position (rn/meta-node capsule position) capsule)))
+
+(defn activate
+ "Return only an admitted planner closure and its immutable Source provenance.
+  The Reader and declaration interpreter select original FN forms; canonical
+  Compiler.eval_form lowers the lexical capsule into an anonymous Eval module.
+  Logical namespace and original inner spans remain intact for syntax-quote.
+  No protected SDK namespace is loaded, initialized or republished."
+ [namespace]
+ (let [spec (get admitted namespace)]
+  (when-not spec
+   (throw (ex-info "native planner capsule: namespace is not admitted" {:namespace namespace})))
+  (let [source (File/read! (:path spec)) actual (digest source)]
+   (when-not (= (:sha256 spec) actual)
+    (throw (ex-info "native planner capsule: admitted source changed"
+                    {:namespace namespace :path (:path spec) :expected (:sha256 spec) :actual actual})))
+   (let [members (select-members namespace spec (mapv first (build/read-forms+text (:path spec) source)))
+         capsule (lexical-capsule spec members)
+         value (BeamLisp.Env/isolated
+                (fn []
+                 ; Private loaded state prevents missed macro lookups from
+                 ; initializing the original namespace. No namespace header or
+                 ; declaration is evaluated, and helpers are lexical locals.
+                 (BeamLisp.Env/mark_loaded namespace)
+                 (BeamLisp.Compiler/eval_form capsule
+                   (assoc (BeamLisp.Compiler/new_env namespace)
+                          :file (:path spec) :target :beam))))]
+    (when-not (erlang/is_function value (:arity spec))
+     (throw (ex-info "native planner capsule: expected an actual single-arity function"
+                     {:namespace namespace :entry (:entry spec) :arity (:arity spec)})))
+    (let [module (erlang/element 2 (erlang/fun_info value :module))]
+     (when-not (String/starts_with? (erlang/atom_to_binary module) "Elixir.BeamLisp.Eval.M")
+      (throw (ex-info "native planner capsule: canonical anonymous module was not used"
+                      {:namespace namespace :module module}))))
+    {:value value
+     :record {:namespace namespace :path (:path spec) :sha256 actual
+              :members (:members spec) :entry (:entry spec) :arity (:arity spec)
+              :evaluation :canonical-anonymous-eval :logical-namespace namespace
+              :namespace-publication false :top-level-effects false}}))))
