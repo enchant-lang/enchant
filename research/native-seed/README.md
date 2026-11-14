@@ -28,9 +28,10 @@ systemd-run --user --collect --wait --pipe --working-directory="$PWD" \
 research/native-seed/run realm stop
 ```
 
-`run` verifies the immutable SDK pin and uses this checkout's `./bin/bl`, with
-one private compiler VM. Stop it when finished. `toolchain-pin.json` records the
-immutable Gambit and Clang products. Provision missing tools from that Nixpkgs
+`run` verifies `sdk-pin.json` and directly invokes that retained SDK for
+bounded cold snapshot commands. It does not prepare another SDK when unrelated
+engine edits move the integration checkout's SDK selection. Each command exits
+its VM. `toolchain-pin.json` records the immutable Gambit and Clang products. Provision missing tools from that Nixpkgs
 revision; do not silently replace the pinned SDK.
 
 The executable fixture covers selective receive, clause/message order, guards,
@@ -56,3 +57,16 @@ research/native-seed/run \
 node research/native-seed/browser-check.mjs
 research/native-seed/run realm stop
 ```
+
+The five approved milestones continue beyond that frozen seed. Current focused
+witnesses live in `evidence/host.json`, `evidence/text-host.json` and
+`evidence/direct-scalar/qualification.json`. The direct route lowers authored
+BL control into C program counters and rooted slots; Gambit supplies values,
+GC and host services. Its ten scalar checks pass through both pinned Clang C
+and LLVM IR builds with byte-identical output. Full actor and native compiler
+fixpoint qualification remain separate gates in the live dossier.
+
+`check-compiler.py` cheaply executes the emitted canonical compiler on GSI
+before a full native image is built. It authenticates its emitted artifact and
+records any host adapter replacement used for preflight. Final stage artifacts
+are assembled by `native.chunks`, which reuses exact checked emission chunks.
