@@ -46,7 +46,7 @@ is inferred from conditional entailment.
 Its six actual tests passed on the selected scalar SDK; runtime integration
 remains a separate batch. The separate
 `FINITE-OBLIGATION-PROTOTYPE.md` sources prepare policy composition and candidate-only
-packets, with six tests and at least 93 assertions planned; they have not run.
+packets; its six tests and 93 assertions have now passed on the selected SDK.
 `VACUITY-SEMANTICS-REVIEW.md` records the current allow/report collapse and the
 proposed distinct acceptance judgments. Compose all admission/search/
 replay accounts. Then specify the result of `:allow`, `:report` and `:reject`

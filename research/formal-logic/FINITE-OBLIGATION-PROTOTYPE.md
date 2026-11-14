@@ -1,8 +1,10 @@
 # Conditional proof, feasible premises, and caller policy
 
-The isolated `prototypes/finite-obligation` experiment is prepared and has not
-run. Its runner requires the scalar SDK to be qualified and selected and the
-separate finite-feasibility experiment to pass first. It changes no SDK code.
+The isolated `prototypes/finite-obligation` experiment passed all 93 assertions
+on the qualified and selected scalar SDK after the separate 35-assertion
+finite-feasibility experiment passed. Its exact source, actual command, green
+summary and success receipt are retained in
+`evidence/finite-obligation-prototype/qualification.json`. It changes no SDK code.
 
 `formal.finite-obligation/check` accepts the complete original request and a
 finite-word certificate candidate. It freshly checks conditional entailment,
@@ -28,13 +30,13 @@ under the reader's current allowance; a saved producer result or limit is not
 accepted. This isolated packet format has no durable ledger integration and no
 authentication or native execution authority.
 
-The six prepared tests cover all nine policy/feasibility combinations using
+The six actual tests cover all nine policy/feasibility combinations using
 actual checker calls, malformed candidates under every policy, prospective
 proof-budget refusal with a calibrated invocation trace, changed policy and
 assumptions, solver/oracle-denied execution, and saved packets reopened with a
-smaller current allowance. The planned complete run has at least 93 assertions, including the common
+smaller current allowance. The complete run passed 93 assertions, including the common
 ordinary-value/raw-node policy parser and missing-versus-explicit-nil behavior.
-A passing same-process packet test alone would not qualify fresh-process
+The passing same-process packet tests do not qualify fresh-process
 schema vocabulary or durable storage; those remain explicit later gates.
 
 There is no Source, compiler or mechanical soundness theorem in this prototype.

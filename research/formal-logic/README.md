@@ -705,7 +705,8 @@ for the integer certificate kernel and separately checked premise feasibility.
 The [vacuity review](VACUITY-SEMANTICS-REVIEW.md) found that the current query
 layer accepts arbitrary values while graph readers collapse every non-`:allow`
 value to `:report`. The [finite feasibility](FINITE-FEASIBILITY-PROTOTYPE.md) experiment passed
-35 assertions. The [obligation policy](FINITE-OBLIGATION-PROTOTYPE.md) experiment is now running;
+35 assertions. The [obligation policy](FINITE-OBLIGATION-PROTOTYPE.md) experiment passed
+93 assertions;
 they will separately check conditional entailment, actual feasible or inconsistent
 premises, and exact caller acceptance policy. They do not change the current SDK.
 

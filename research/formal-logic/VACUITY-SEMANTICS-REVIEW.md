@@ -1,7 +1,10 @@
 # A conditional theorem and a usable obligation need separate judgments
 
-The scalar SDK remains frozen during qualification. This review records a
-concrete next semantic change; it does not claim that change is implemented.
+The scalar SDK is now qualified and selected. The isolated policy composition
+in `FINITE-OBLIGATION-PROTOTYPE.md` passed 93 assertions after finite feasibility
+passed 35. The installed SDK query constructors/readers still have the older
+behavior below: applying the new vocabulary and judgments globally is a separate
+runtime batch.
 
 ## What the code currently does
 
@@ -45,10 +48,10 @@ classical implication. Use separate result fields rather than overloading one
 
 ## Integration order
 
-First run the isolated finite-feasibility experiment: derive the background
+The isolated finite-feasibility experiment passed all six tests and 35 assertions: derive the background
 from the original graph, prove assertion-byte preservation, check a finite
 contradiction or independently replay its witness, and reserve admission/search/
-replay before execution. Then qualify an isolated policy composition across all
+replay before execution. The isolated policy composition then passed 93 assertions across all
 nine rows, proof failures, insufficient combined allowance, changed assumptions
 and saved-record reopening. All evidence must bind the original complete
 question, including its exact policy.
