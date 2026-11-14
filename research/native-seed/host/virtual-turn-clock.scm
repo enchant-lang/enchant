@@ -1,0 +1,25 @@
+;; Deterministic semantic-fixture clock cost model, not actor scheduling policy.
+;; Existing virtual idle waits still advance time. Every COMPLETED host turn
+;; additionally costs exactly one millisecond, including yield/park/done/error.
+;; Thus a runnable after0 peer cannot freeze another actor's positive deadline.
+(if (not native-virtual-time?) (error "virtual-turn-ms-v1 requires the virtual host clock"))
+(define native-virtual-turn-clock-model "virtual-turn-ms-v1")
+(define native-virtual-turn-clock-tick-ms 1)
+(define native-virtual-turn-clock-start seed-clock)
+(define native-virtual-turn-clock-completed 0)
+(define native-virtual-turn-clock-yields 0)
+(define native-virtual-turn-clock-turn-ms 0)
+(define native-virtual-turn-clock-original-run h-run-turn)
+(set! h-run-turn (lambda (frame budget)
+ (let* ((before seed-clock)
+        (answer (native-virtual-turn-clock-original-run frame budget)))
+  (if (not native-virtual-time?) (error "virtual turn clock mode changed during a semantic run"))
+  (set! seed-clock (+ seed-clock native-virtual-turn-clock-tick-ms))
+  (set! native-virtual-turn-clock-completed (+ native-virtual-turn-clock-completed 1))
+  (set! native-virtual-turn-clock-turn-ms (+ native-virtual-turn-clock-turn-ms native-virtual-turn-clock-tick-ms))
+  (if (eq? (bl-get answer (bl-key "status")) (bl-key "yield"))
+   (set! native-virtual-turn-clock-yields (+ native-virtual-turn-clock-yields 1)))
+  (if (not (> seed-clock before)) (error "completed host turn failed to advance virtual time"))
+  answer)))
+(native-mark-host-callable! h-run-turn)
+(bl-register-callable! h-run-turn 2)

@@ -24,6 +24,24 @@ ZERO = {"procs": 0, "monitors": 0, "tables": 0, "names": 0, "table_names": 0,
         "runnable": 0, "input_sink": None, "critical": 0, "errors": 0}
 
 
+CLOCK_MODEL = {"name": "virtual-turn-ms-v1", "tick-ms": 1,
+               "event": "completed-host-turn", "idle-progress": "existing-host-wait", "real-time": False}
+
+
+def validate_native_clock(witness):
+    clock = witness.get("clock", {})
+    if clock.get("model") != "virtual-turn-ms-v1" or clock.get("tick_ms") != 1:
+        raise RuntimeError("native corpus lacks its declared deterministic runnable-progress clock")
+    for name in ("completed_turns", "yield_turns", "turn_ms", "elapsed_ms"):
+        if type(clock.get(name)) is not int or clock[name] <= 0:
+            raise RuntimeError("native corpus clock lacks positive actual " + name)
+    if (clock["yield_turns"] > clock["completed_turns"]
+            or clock["turn_ms"] != clock["completed_turns"] * clock["tick_ms"]
+            or clock["elapsed_ms"] < clock["turn_ms"]):
+        raise RuntimeError("native corpus completed/yield turn time progress is inconsistent")
+    return clock
+
+
 def digest(path: Path) -> str:
     result = hashlib.sha256()
     with path.open("rb") as source:
@@ -130,6 +148,7 @@ def main() -> int:
                 or capture["manifest"]["sha256"] != digest(args.native.resolve())
                 or capture.get("runtime_definitions") != 202
                 or capture.get("source_assertion_adaptation") != "none"
+                or capture.get("clock_model") != native["clock-model"]
                 or path_for(build["body"]["path"]).resolve() != path_for(native["body"]["path"]).resolve()
                 or build["body"]["sha256"] != native["body"]["sha256"]
                 or path_for(build["image"]["path"]).resolve() != image_path):
@@ -191,6 +210,8 @@ def main() -> int:
         witness = witnesses[0]
         if witness.get("budget") != budget or witness.get("cleanup") != ZERO:
             raise RuntimeError(role + " budget or final cleanup mismatch")
+        if role == "native":
+            validate_native_clock(witness)
         for key in ("samples", "deaths", "max_procs", "max_monitors", "max_tables", "max_links"):
             if not isinstance(witness.get(key), int) or witness[key] <= 0:
                 raise RuntimeError(role + " lacks a positive " + key + " observation")
@@ -251,6 +272,10 @@ def main() -> int:
         bind(gsi)
         native, native_inputs = admit(args.native.resolve(), "scheme")
         link = native["link"]
+        if native.get("clock") != "virtual-turn-ms-v1" or native.get("clock-model") != CLOCK_MODEL:
+            raise RuntimeError("original native manifest has no exact clock cost model")
+        if not any(record["path"].endswith("/host/virtual-turn-clock.scm") for record in link["host-extensions"]):
+            raise RuntimeError("original native clock model has no captured clock primitive adapter")
         if link.get("source-frames?") is not True or link.get("runtime-definitions") != 202:
             raise RuntimeError("native artifact lacks source frames or the complete runtime")
         for record in [link["closure-manifest"], link["prelude"], link["links"], link["host-link"], *link["host-extensions"]]:
@@ -362,6 +387,8 @@ def main() -> int:
                 cache["identity"] = js_identity
         report["sdk"] = pin
         report["clock"] = native["clock"]
+        report["clock_model"] = native["clock-model"]
+        report["javascript_clock"] = "original-real-clock"
         save()
         canonical = None
         oracle_budgets = {}
@@ -396,6 +423,7 @@ def main() -> int:
             oracle_path.write_text(json.dumps({"schema": "bl.native.original-actor-oracle", "version": 1,
                 "status": "complete" if complete else "partial", "application": native["application"],
                 "runtime": native["runtime"], "sdk-pin": pin, "body": native["body"],
+                "clock-model": native["clock-model"], "javascript-clock": "original-real-clock",
                 "inputs": inputs, "budgets": oracle_budgets}, indent=2) + "\n")
             artifacts.add(oracle_path)
         report.update({"status": "pass" if complete else "observed-not-qualified",

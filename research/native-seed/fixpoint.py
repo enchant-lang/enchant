@@ -33,6 +33,24 @@ ZERO = {"procs": 0, "monitors": 0, "tables": 0, "names": 0, "table_names": 0,
         "runnable": 0, "input_sink": None, "critical": 0, "errors": 0}
 
 
+CLOCK_MODEL = {"name": "virtual-turn-ms-v1", "tick-ms": 1,
+               "event": "completed-host-turn", "idle-progress": "existing-host-wait", "real-time": False}
+
+
+def validate_native_clock(witness):
+    clock = witness.get("clock", {})
+    if clock.get("model") != "virtual-turn-ms-v1" or clock.get("tick_ms") != 1:
+        raise RuntimeError("native corpus lacks its declared deterministic runnable-progress clock")
+    for name in ("completed_turns", "yield_turns", "turn_ms", "elapsed_ms"):
+        if type(clock.get(name)) is not int or clock[name] <= 0:
+            raise RuntimeError("native corpus clock lacks positive actual " + name)
+    if (clock["yield_turns"] > clock["completed_turns"]
+            or clock["turn_ms"] != clock["completed_turns"] * clock["tick_ms"]
+            or clock["elapsed_ms"] < clock["turn_ms"]):
+        raise RuntimeError("native corpus completed/yield turn time progress is inconsistent")
+    return clock
+
+
 def digest(path: Path) -> str:
     result = hashlib.sha256()
     with path.open("rb") as source:
@@ -243,6 +261,7 @@ def main() -> None:
                     or captured.get("source-path-adaptation") != "none"
                     or captured["application"] != {"path": "research/js-actors/test.bl", "sha256": ORIGINAL}
                     or captured_link["sdk-pin"] != pin or captured_link["runtime-definitions"] != 202
+                    or captured.get("clock-model") != CLOCK_MODEL or captured.get("clock") != "virtual-turn-ms-v1"
                     or captured_link.get("source-frames?") is not True
                     or path_for(captured["body"]["path"]).resolve() != args.actor_body
                     or path_for(captured_link["prelude"]["path"]).resolve() != (out / "prelude.scm").resolve()
@@ -256,12 +275,14 @@ def main() -> None:
                 raise RuntimeError("actor checkpoint body is not the unchanged suffix of its exact captured core")
             actor_capture = {"manifest": {"path": str(manifest_path), "sha256": digest(manifest_path)},
                              "body": {"path": str(args.actor_body), "sha256": digest(args.actor_body)},
-                             "runtime_definitions": 202, "source_assertion_adaptation": "none"}
+                             "runtime_definitions": 202, "source_assertion_adaptation": "none",
+                             "clock_model": captured["clock-model"]}
         if args.actor_oracle and not args.compile_stage1_only:
             bind(args.actor_oracle)
             oracle = json.loads(args.actor_oracle.read_text())
             if (oracle.get("schema") != "bl.native.original-actor-oracle" or oracle.get("version") != 1
                     or oracle.get("status") != "complete" or oracle.get("sdk-pin") != pin
+                    or oracle.get("clock-model") != CLOCK_MODEL
                     or oracle["application"] != {"path": "research/js-actors/test.bl", "sha256": ORIGINAL}
                     or set(oracle["budgets"]) != set(BUDGETS)):
                 raise RuntimeError("actor oracle is not the complete freshly rebuilt original-source baseline")
@@ -552,6 +573,8 @@ def observe(text, budget, prefix):
     witness = witnesses[0]
     if witness.get("budget") != budget or witness.get("cleanup") != ZERO:
         raise RuntimeError("actor budget/cleanup differs")
+    if prefix == "NATIVE":
+        validate_native_clock(witness)
     if any(not isinstance(witness.get(k), int) or witness[k] <= 0
            for k in ("samples", "deaths", "max_procs", "max_monitors", "max_tables", "max_links")):
         raise RuntimeError("actor execution lacks actual lifecycle observations")
