@@ -1,7 +1,7 @@
 (ns formal.word-exhaustion-check
  (:require [formal.word-exhaustion :as proof] [formal.term :as t] [formal.query :as q]
            [formal.request :as request] [formal.question-graph :as qg] [formal.point-profile :as policy]
-           [formal.backend :as backend] [formal.data-graph :as graph] [oracle]))
+           [formal.backend :as backend] [formal.data-graph :as graph] [bl.json :as json] [oracle]))
 (defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric-word}}))
 (defn checked [query] (let [r (prepared query)] (proof/check r (proof/candidate r))))
 (deftest every-small-word-valuation-is-derived-and-checked
@@ -66,7 +66,7 @@
        one (t/literal sort 1) zero (t/literal sort 0) last (t/literal sort 7)
        claim (t/implies (t/eq x last) (t/eq (t/app :bv-add sort [x one] nil) zero))
        query (q/prove claim) subject (qg/prepare query)
-       certificate (proof/candidate (prepared query))]
+       certificate (proof/candidate (prepared query)) rows (atom [])]
   (doseq [engine [:z3 :oxiz]]
    (let [native (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
                   (fn [session] (backend/graph-question! session subject {:profile policy/numeric-word})))
@@ -78,7 +78,13 @@
     (is (= :checked (:status independent)))
     (is (= :entails (:verdict independent)))
     (is (= 8 (:points-checked independent)))
-    (is (= false (:checked-native-execution independent) (:compiler-proof-authority independent)))))))
+    (is (= false (:checked-native-execution independent) (:compiler-proof-authority independent)))
+    (swap! rows conj {:backend engine :identity (:identity native) :question-reference (:question-reference native)
+                     :native-status (:solver-status native) :native-verdict (:verdict native)
+                     :native-certificate (:certificate native) :independent-check independent}))))
+  (when-let [output (System/get_env "WORD_EXHAUSTION_NATIVE_OUTPUT")]
+   (File/write! output (json/encode {:schema "bl.finite-word-native-comparison.v1" :rows @rows
+                                    :compiler-proof-authority false} {:pretty 2}))))
 (deftest exact-assumptions-remain-visible-and-bound
  (let [sort [:bv 3] x (t/variable "proof.ledger.x" sort)
        premise (t/eq x (t/literal sort 7))

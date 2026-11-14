@@ -36,12 +36,14 @@ command = ['systemd-run','--user','--quiet','--collect','--wait','--pipe','--exp
            '--unit=work-formal-word-exhaustion-' + pin['engine_fingerprint'][:12],
            '--working-directory=' + str(cwd), '--property=MemoryMax=4G','--property=MemorySwapMax=0',
            '--property=RuntimeMaxSec=600','--property=KillMode=control-group',
-           '--setenv=XDG_RUNTIME_DIR=' + str(runtime),'env','-u','BEAM_LISP_PATH',
+           '--setenv=XDG_RUNTIME_DIR=' + str(runtime),
+           '--setenv=WORD_EXHAUSTION_NATIVE_OUTPUT=' + str(E / 'native.json'),'env','-u','BEAM_LISP_PATH',
            '-u','ENCHANT_FORMAL_WORKER','-u','ENCHANT_Z3_LIBRARY',pin['sdk'] + '/bin/bl','--cold',
            '-p',str(prototype),'test',str(prototype / 'word-exhaustion-check.bl')]
 write('command.json',command)
 (E / 'memory-before.txt').write_text(subprocess.check_output([R / 'scripts/bl-mem'],text=True))
 (E / 'qualification.json').unlink(missing_ok=True)
+(E / 'native.json').unlink(missing_ok=True)
 started = time.monotonic()
 try:
     with (E / 'checks.txt').open('w') as stream:
@@ -57,10 +59,21 @@ assert code == 0 and green
 assert all(sha(R / name) == digest for name,digest in digests.items())
 counts = re.findall(r'✓\s+formal.word-exhaustion-check\s+(\d+) passed',log)
 assert len(counts) == 1
+native = read(E / 'native.json')
+assert native['compiler-proof-authority'] is False
+assert len(native['rows']) == 2 and {r['backend'] for r in native['rows']} == {'z3','oxiz'}
+assert native['rows'][0]['question-reference'] == native['rows'][1]['question-reference']
+assert all(r['identity']['sdk'] == pin['sdk'] and r['native-status'] == 'unsat'
+           and r['native-verdict'] == 'solver-claim' and r['native-certificate']['status'] == 'not-checked'
+           and r['independent-check']['status'] == 'checked' and r['independent-check']['points-checked'] == 8
+           and r['independent-check']['checked-native-execution'] is False
+           and r['independent-check']['compiler-proof-authority'] is False for r in native['rows'])
+assert native['rows'][0]['independent-check']['statement'] == native['rows'][1]['independent-check']['statement']
 write('qualification.json',{'schema':'bl.word-exhaustion-prototype-qualification.v1','status':'passed',
       'sdk_pin':pin,'code_commit':commit,'source_sha256':digests,'assertions':int(counts[0]),
       'in_sdk':False,'in_common_answer_proof_slot':False,'compiler_proof_authority':False,
       'checked_native_execution':False,'solver_denied_control':'actual SDK exchange counter and denied oracle methods',
-      'artifact_sha256':{name:sha(E / name) for name in ['source-pin.json','command.json','checks.txt','exit.json']},
+      'native_comparison_sha256':sha(E / 'native.json'),
+      'artifact_sha256':{name:sha(E / name) for name in ['source-pin.json','command.json','checks.txt','exit.json','native.json']},
       'scope':'A bounded exhaustive strategy over small Boolean/word graphs, actual finite counterexamples, strict request binding and negative controls. This implementation is not mechanically proved sound and grants no Source, compiler or native-execution authority.'})
 print(json.dumps({'status':'passed','assertions':int(counts[0]),'in_sdk':False}))
