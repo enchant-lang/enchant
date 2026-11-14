@@ -4,6 +4,7 @@
 (define native-env-rows (bl-empty-map))
 (define native-module-names (bl-empty-map))
 (define native-namespace-modules (bl-empty-map))
+(define native-export-arities (bl-empty-map))
 (define native-stub-names (bl-empty-map))
 (define native-env-current "user")
 (define native-bundle-metadata bl-nil)
@@ -75,6 +76,31 @@
      (loop (cdr pairs) (bl-assoc m (bl-nth (car pairs) 0) (bl-nth (car pairs) 1))))))))
 (define (native-module-name module)
  (if (native-keyword? module) (native-atom-name module) module))
+(define (native-register-arities! ns name fixed variadic)
+ (set! native-export-arities
+  (bl-assoc native-export-arities (native-row ns name) (bl-tuple (list fixed variadic))))
+ (bl-key "ok"))
+(define native-excluded-host-leaves
+ '("Elixir.BeamLisp.Env/check_source_callable!/1"
+   "Elixir.BeamLisp.Env/check_source_invocation!/2"
+   "Elixir.BeamLisp.Env/check_source_invocation1!/2"
+   "Elixir.BeamLisp.Env/check_source_invocation2!/3"
+   "Elixir.BeamLisp.Env/assert_native_framework_execution!/0"))
+(define (native-remote-available? module function arity)
+ (let* ((module (native-module-name module)) (function (native-module-name function))
+        (key (string-append module "/" function "/" (number->string arity)))
+        (ns (bl-get native-module-names module native-missing)))
+  (and (not (member key native-excluded-host-leaves))
+   (or (native-map-has? native-leaf-registry key)
+    (and (not (eq? ns native-missing))
+     (let* ((size (string-length function))
+            (variadic? (and (>= size 6) (string=? (substring function (- size 6) size) "__bl_v")))
+            (name (if variadic? (substring function 0 (- size 6)) function))
+            (info (bl-get native-export-arities (native-row ns name) native-missing)))
+      (and (not (eq? info native-missing))
+       (if variadic?
+        (and (not (bl-is-nil (bl-nth info 1))) (= arity (+ 1 (bl-nth info 1))))
+        (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
 (define (native-remote key)
  (let ((leaf (bl-get native-leaf-registry key native-missing)))
   (if (not (eq? leaf native-missing)) leaf
@@ -266,3 +292,4 @@
 (native-add-leaf! "Elixir.BeamLisp.Emit/module_for/1" native-known-module)
 (native-add-leaf! "Elixir.BeamLisp.Emit/base_module_for/1" native-known-module)
 (native-add-leaf! "Elixir.BeamLisp.Link/settle/0" (lambda () (bl-key "ok")))
+(native-add-leaf! "erlang/function_exported/3" native-remote-available?)

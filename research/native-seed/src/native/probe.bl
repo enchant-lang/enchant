@@ -116,11 +116,20 @@
     :options options :roots roots :entries entries :stubs (vec (sort stubs))
     :core-links (core-links) :return-constructor-shapes (BeamLisp.Server/return_constructor_shapes)
     :provider-sources providers :sdk-pin pin))))
-(def artifact (erlang/term_to_binary closure (list :deterministic)))
+(def final-providers (provider-sources))
+(doseq [[ns unit] (:units closure)]
+ (when-not (and (= (:source-sha256 unit) (sha (:source unit)))
+                (= (:source-sha256 unit) (sha (File/read! (:path unit)))))
+  (throw (ex-info "native closure: source changed during capture; rerun uses exact unit checkpoints"
+                  {:namespace ns :path (:path unit)}))))
+(when-not (= (filter :macro-provider? providers) (filter :macro-provider? final-providers))
+ (throw (ex-info "native closure: macro providers changed during capture; rerun required" {})))
+(def final-closure (assoc closure :provider-sources final-providers))
+(def artifact (erlang/term_to_binary final-closure (list :deterministic)))
 (File/write! (str out "/closure.etf") artifact)
 (File/write! (str out "/inventory.json") (json/encode (inventory closure)))
 (File/write! (str out "/identity.json")
  (json/encode {:schema "bl.native.compiler-closure-identity" :version 1
                :artifact-sha256 (sha artifact) :sdk-pin-sha256 (sha pin)
-               :options options :providers providers}))
+               :options options :providers final-providers}))
 (println (str "NATIVE_CLOSURE " (count (:order closure)) " namespaces " (sha artifact)))

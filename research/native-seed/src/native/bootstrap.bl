@@ -52,6 +52,22 @@
     (assoc d :node (c/compile (:form d) (assoc (c/new-env ns) :file path :target :js)))) defs))))
 
 (defn binding-name [ns name] (scheme/ident (str ns "/" name)))
+(defn declaration-arities
+ "Project arity data from the canonical declaration's ALREADY VALIDATED fn
+  value. This is only export metadata; the compiler owns parsing and code."
+ [form]
+ (let [tail (rest (rn/node-items (rn/node-form form)))
+       tail (if (= :symbol (rn/node-tag (rn/node-form (first tail)))) (rest tail) tail)
+       params (if (= :vector (rn/node-tag (rn/node-form (first tail)))) [(first tail)]
+                  (map #(first (rn/node-items (rn/node-form %))) tail))
+       shapes (map (fn [p]
+                  (let [items (rn/node-items (rn/node-form p))
+                        fixed (take-while (fn [item]
+                          (let [n (rn/node-form item)]
+                           (not (and (= :symbol (rn/node-tag n)) (= "&" (rn/node-name n)))))) items)]
+                   [(if (= (count fixed) (count items)) :fixed :variadic) (count fixed)])) params)]
+  {:fixed (vec (sort (distinct (map second (filter #(= :fixed (first %)) shapes)))))
+   :variadic (some (fn [[kind n]] (when (= :variadic kind) n)) shapes)}))
 (defn install-source-macros! [bundle]
  ; Same boot order as js/boot.mjs. The compiled definitions are present;
  ; macros remain SOURCE and are compiled in the native realm before any
@@ -69,7 +85,11 @@
    (str "(define " (binding-name ns (:name d)) " " value ")\n"
         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " (binding-name ns (:name d)) ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
-        " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n")
+        " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
+        (when (= :fn (:kind d))
+         (let [arities (declaration-arities (:form d))]
+          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d))
+               " " (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))))
    (str value "\n"))))
 (defn emit-compiled-bundle
  ([units bundle host-source]
