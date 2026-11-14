@@ -36,15 +36,45 @@
                 {:op (:op n) :module (:mod n) :function (:fun n) :ann (:ann n)})))
 
 (declare emit)
+(defn- operand-options [options] (assoc options :tail? false))
+(defn- source-call-frame [n options]
+ (let [ann (:ann n)]
+  {:file (:file ann) :line (:line ann) :col (:col ann)
+   :end-line (:end-line ann) :end-col (:end-col ann)
+   :ns (:source-ns options) :fn (:source-fn options) :arity (:source-arity options)
+   :call (if (:tail? options) :tail :direct)
+   :internal (and (string? (:file ann)) (string/ends-with? (:file ann) "/actor/runtime.bl"))}))
+(defn- source-call [node expression options]
+ (if (:source-frames? options)
+  (str "(bl-source-call " (literal (source-call-frame node options)) " "
+       (if (:tail? options) "#t" "#f") " (lambda () " expression "))") expression))
 (defn joined [xs options] (string/join " " (map #(emit % options) xs)))
 (defn ordered
  "Pin source operand order explicitly, as js.emit/emit-all and current lower
   operand tests do. Scheme application order is unspecified. Capture callee first."
  [callee args options]
  (let [names (mapv #(str "a" %) (range (count args)))
-       binds (mapv (fn [name arg] (str "(" name " " (emit arg options) ")")) names args)]
+       binds (mapv (fn [name arg] (str "(" name " " (emit arg (operand-options options)) ")")) names args)]
   (str "(let ((callee " callee ")) (let* (" (string/join " " binds) ") (callee "
        (string/join " " names) ")))")))
+
+(defn- ordered-call [node callee args options]
+ (let [names (mapv #(str "a" %) (range (count args)))
+       binds (mapv (fn [name arg] (str "(" name " " (emit arg (operand-options options)) ")")) names args)
+       invoke (if (:source-frames? options)
+                (str "(bl-invoke callee (list " (string/join " " names) "))")
+                (str "(callee " (string/join " " names) ")"))]
+  (str "(let ((callee " callee ")) (let* (" (string/join " " binds) ") "
+       (source-call node invoke options) "))")))
+
+(defn- ordered-language-call [node function arguments options]
+ ; Forward the language call itself. Routing it through a second bl-invoke
+ ; would classify that forwarding procedure as a native callback boundary.
+ (if (:source-frames? options)
+  (str "(let* ((actual-callee " (emit function (operand-options options)) ") "
+       "(actual-arguments " (emit arguments (operand-options options)) ")) "
+       (source-call node "(bl-invoke actual-callee actual-arguments)" options) ")")
+  (ordered "bl-invoke" [function arguments] options)))
 
 (defn pattern [p options]
  (let [op (:pop p)]
@@ -55,7 +85,7 @@
         (= op :pcons) (str "(list 'cons " (pattern (:head p) options) " " (pattern (:tail p) options) ")")
         (= op :palias) (str "(list 'alias " (pattern (:a p) options) " " (pattern (:b p) options) ")")
         (= op :pmap) (str "(list 'map (list "
-          (string/join " " (map (fn [[k p]] (str "(list " (emit k options) " " (pattern p options) ")")) (:pairs p))) "))")
+          (string/join " " (map (fn [[k p]] (str "(list " (emit k (assoc (operand-options options) :source-frames? false)) " " (pattern p options) ")")) (:pairs p))) "))")
         (and (= op :pstruct) (= :Elixir.BeamLisp.Vector (:mod p)))
           (str "(list 'vector " (pattern (second (first (:fields p))) options) ")")
         (= op :pstruct)
@@ -79,7 +109,7 @@
         names (distinct (mapcat binders (:pats cl)))
         body (emit (:body cl) options)
         body (if wrap? (str "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
-        body (if (:guard cl) (str "(if (bl-guard (lambda () " (emit (:guard cl) options) ")) " body " " more ")") body)]
+        body (if (:guard cl) (str "(if (bl-guard (lambda () " (emit (:guard cl) (assoc (operand-options options) :source-frames? false)) ")) " body " " more ")") body)]
    (str "(let ((bindings (bl-match-args (list "
         (string/join " " (map #(pattern % options) (:pats cl))) ") " argv " '()))) "
         "(if bindings (let (" (string/join " " (map (fn [s] (str "(" (ident s) " (cdr (assoc " (text s) " bindings)))")) names))
@@ -116,15 +146,112 @@
   {:op :cons :head (first args) :tail (argument-list (rest args)) :ann {}}))
 
 (defn- emit-try [n options]
- (let [stack (BeamLisp.CompilerData/catch_stack_bindings)
+ ; js.emit delivers body/catches to an assignment destination, even when
+ ; the try expression is in function tail position. Preserve its live handler.
+ (let [options (operand-options options)
+       stack (BeamLisp.CompilerData/catch_stack_bindings)
        handler (clauses (:catch n) "(list caught-kind caught-reason)"
                    "(bl-reraise caught-kind caught-reason caught-trace)" options false)]
   (str "(bl-try (lambda () " (emit (:body n) options) ") "
-   "(lambda (caught-kind caught-reason caught-trace) (let ((" (ident (:frames stack)) " caught-trace) ("
+   "(lambda (caught-kind caught-reason caught-trace) (let ((" (ident (:frames stack)) " " (if (:source-frames? options) "(bl-trace-frames caught-trace)" "caught-trace") ") ("
    (ident (:raw stack)) " caught-trace)) " handler ")) "
    (if (:after n) (str "(lambda () " (emit (:after n) options) ")") "#f") ")")))
 
+(defn- self-parts [n]
+ (BeamLisp.CompilerData/self_application_parts n))
+(defn- loop-parts [n]
+ (when (= :apply (:op n))
+  (when-let [parts (self-parts (:fn n))]
+   (let [clause (first (:clauses (:inner parts)))]
+    {:self (:name (:fn n)) :vars (map :name (:pats clause))
+     :body (:body clause) :inits (:args n)}))))
+(defn- recur-node? [n self]
+ (let [g (:fn n)]
+  (and (= :apply (:op n)) (= :apply (:op g)) (= :var (:op (:fn g)))
+       (= self (:name (:fn g))))))
+(defn- self-knot? [n options]
+ (let [f (:fn n) args (:args n)]
+  (and (= :apply (:op n)) (= :var (:op f))
+       (contains? (or (:selves options) {}) (:name f))
+       (= 1 (count args)) (= :var (:op (first args))) (= (:name f) (:name (first args))))))
+(defn- emit-source-loop [n parts options]
+ (let [variables (:vars parts)
+       loop-name (ident (str "$loop/" (:self parts)))
+       names (mapv #(str "loop-initial-" %) (range (count (:inits parts))))
+       bindings (mapv (fn [name initial] (str "(" name " " (emit initial (operand-options options)) ")")) names (:inits parts))
+       parameters (mapv (fn [variable initial] (str "(" (ident variable) " " initial ")")) variables names)
+       body (emit (:body parts) (assoc options :loop {:self (:self parts) :name loop-name}))]
+  (str "(let* (" (string/join " " bindings) ") (let " loop-name " (" (string/join " " parameters)
+       ") (h-tick) " body "))")))
+(defn- emit-source-function [n options]
+ (let [arity (count (:pats (first (:clauses n))))
+       function-name (:fn-label options)
+       inside (assoc options :source-fn function-name :source-ns (or (:definition-ns options) (:ns options))
+                     :source-arity arity :fn-label nil :tail? true :loop nil)
+       frame (merge {:file nil :line nil :col nil :end-line nil :end-col nil} (:ann n)
+                    {:ns (or (:definition-ns options) (:ns options)) :fn function-name :arity arity :call :direct})
+       body (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" inside false)
+       body (str "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
+       function (str "(lambda argv " body ")")]
+  (if (:callable-arities? options) (str "(bl-register-callable! " function " " arity ")") function)))
+(defn- emit-source-scaffold [n parts options]
+ (let [self (:name n) local (ident self)
+       body (emit (:inner parts) (assoc options :selves (assoc (or (:selves options) {}) self local)))]
+  (str "(letrec ((" local " " body ")) " local ")")))
+
+(defn- multi-layout [n]
+ ; The compiler's exact $blfn constructor, with checked inert function
+ ; scaffolds in its slots. This is the same container js.emit/emit-blfn owns.
+ (when (and (= :tuple (:op n)) (= 3 (count (:elems n))))
+  (let [[tag fixed variadic] (:elems n) pairs (:pairs fixed)
+        var? (= :tuple (:op variadic))
+        arms (concat (map second pairs) (when var? [(second (:elems variadic))]))]
+   (when (and (= :lit (:op tag)) (= :"$blfn" (:val tag)) (= :map (:op fixed))
+               (erlang/is_list pairs)
+               (every? (fn [pair]
+                 (and (= 2 (count pair)) (= :lit (:op (first pair)))
+                      (integer? (:val (first pair))) (>= (:val (first pair)) 0))) pairs)
+               (= (count pairs) (count (distinct (map #(:val (first %)) pairs))))
+               (or (and (= :lit (:op variadic)) (nil? (:val variadic)))
+                   (and var? (= 2 (count (:elems variadic)))
+                        (= :lit (:op (first (:elems variadic))))
+                        (integer? (:val (first (:elems variadic))))
+                        (>= (:val (first (:elems variadic))) 0)))
+               (seq arms) (every? #(some? (BeamLisp.CompilerData/self_application_parts %)) arms))
+    {:tag tag :fixed pairs :variadic (when var? variadic) :arms arms}))))
+(defn- emit-multi-arm [node target options]
+ (let [parts (BeamLisp.CompilerData/self_application_parts node)
+       self (:name node)
+       inside (assoc (dissoc options :self-target) :selves
+                     (assoc (or (:selves options) {}) self target))]
+  ; Original ANF uses (self self) for its self value. Bind that ORIGINAL
+  ; scaffold variable to a one-argument thunk of the WHOLE dispatcher.
+  ; The arm still receives its original parameters/rest-list convention.
+  (str "(let ((" (ident self) " (lambda (ignored-self) " target "))) "
+       (emit (:inner parts) inside) ")")))
+(defn- emit-multi [layout options]
+ (let [target (ident (str "$multi/" (:name (first (:arms layout)))))
+       fixed (:fixed layout) variadic (:variadic layout)
+       arms (map-indexed (fn [i pair]
+              [(str "multi-arm-" i) (first pair) (second pair)]) fixed)
+       bindings (map (fn [[name _ node]] (str "(" name " " (emit-multi-arm node target options) ")")) arms)
+       bindings (if variadic (concat bindings [(str "(multi-variadic-arm "
+                                 (emit-multi-arm (second (:elems variadic)) target options) ")")]) bindings)
+       fixed-source (str "(bl-map " (string/join " " (mapcat (fn [[name key _]] [(emit key options) name]) arms)) ")")
+       variadic-source (if variadic (str "(bl-make-tuple " (emit (first (:elems variadic)) options) " multi-variadic-arm)") "bl-nil")]
+  (str "(let ((" target " bl-nil)) (let* (" (string/join " " bindings) ") "
+       "(set! " target " (bl-make-tuple " (emit (:tag layout) options) " " fixed-source " " variadic-source ")) "
+       target "))")))
+
 (defn emit [n options]
+ (if-let [layout (multi-layout n)] (emit-multi layout options)
+ (cond
+  (and (:source-frames? options) (loop-parts n)) (emit-source-loop n (loop-parts n) options)
+  (and (:source-frames? options) (:loop options) (recur-node? n (:self (:loop options))))
+   (ordered (:name (:loop options)) (:args n) (operand-options options))
+  (and (:source-frames? options) (self-knot? n options)) (get (:selves options) (:name (:fn n)))
+  (and (:source-frames? options) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
+  :else
  (case (:op n)
   :lit (literal (:val n))
   :var (ident (:name n))
@@ -133,29 +260,38 @@
             (ident (:name n))
             (or (when (contains? #{"core" "rt"} (:ns n)) (get core-leaves (:name n))) (refuse n))))
   :binding (or (when-let [resolver (:binding-resolver options)] (resolver n)) (refuse n))
-  :remote (ordered (remote n options) (:args n) options)
+  :remote (if (and (:source-frames? options) (= :erlang (:mod n))
+                    (= :apply (:fun n)) (= 2 (count (:args n))))
+            (ordered-language-call n (first (:args n)) (second (:args n)) options)
+            (ordered-call n (remote n options) (:args n) options))
   :arith (if-let [f (or (when-let [resolver (:arithmetic-resolver options)] (resolver n))
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
-  :apply (ordered "bl-invoke" [(:fn n) (argument-list (:args n))] options)
-  :invoke (ordered "bl-invoke" [(:callee n) (:arguments n)] options)
-  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) options) ")) " (emit (:body n) options) ")")
-  :if (str "(if (bl-truthy " (emit (:test n) options) ") " (emit (:then n) options) " " (emit (:else n) options) ")")
-  :do (str "(begin " (if (empty? (:stmts n)) "bl-nil" (joined (:stmts n) options)) ")")
-  :fn (let [body (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" options false)
+  :apply (ordered-language-call n (:fn n) (argument-list (:args n)) options)
+  :invoke (ordered-language-call n (:callee n) (:arguments n) options)
+  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) options) ")")
+  :if (str "(if (bl-truthy " (emit (:test n) (operand-options options)) ") " (emit (:then n) options) " " (emit (:else n) options) ")")
+  :do (let [statements (:stmts n)]
+        (str "(begin " (if (empty? statements) "bl-nil"
+          (str (joined (drop-last statements) (operand-options options)) " " (emit (last statements) options))) ")"))
+  :fn (if (:source-frames? options) (emit-source-function n options)
+       (let [body (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" options false)
             frame (assoc (:ann n) :arity (count (:pats (first (:clauses n)))))
             body (if (:source-frames? options)
                   (str "(bl-with-source-frame " (literal frame) " (lambda () " body "))") body)]
         (let [function (str "(lambda argv (h-tick) " body ")")]
          (if (:callable-arities? options)
           (str "(bl-register-callable! " function " " (count (:pats (first (:clauses n)))) ")")
-          function)))
-  :case (str "(let ((subject " (emit (:subj n) options) ")) "
+          function))))
+  :case (str "(let ((subject " (emit (:subj n) (operand-options options)) ")) "
           (clauses (:clauses n) "(list subject)" "(error \"native seed: case clause\")" options false) ")")
-  :recv (str "(let* ((timeout " (if (:timeout n) (emit (:timeout n) options) "bl-nil") ") "
-    "(selection (" (ident "rt-receive") " (lambda (message) "
-     (clauses (:clauses n) "(list message)" "(bl-key \"nomatch\")" options true)
-     ") (lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ") timeout))) "
-     "((bl-nth selection 1)))")
+  :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")
+              scan (str "(lambda (message) "
+                    (clauses (:clauses n) "(list message)" "(bl-key \"nomatch\")" options true) ")")
+              after (str "(lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ")")
+              receive (source-call n (str "(" (ident "rt-receive") " " scan " " after " timeout)")
+                         (operand-options options))]
+          (str "(let* ((timeout " timeout ") (selection " receive ")) ((bl-nth selection 1)))"))
+
   :try (emit-try n options)
   :tuple (ordered "bl-make-tuple" (:elems n) options)
   :map (ordered "bl-map" (mapcat identity (:pairs n)) options)
@@ -166,12 +302,15 @@
             (ordered "bl-make-vec" (:elems (second (first (:fields n)))) options)
             (str "(bl-struct " (literal (:mod n)) " "
               (ordered "bl-map" (mapcat identity (:fields n)) options) ")"))
-  (refuse n)))
+  (refuse n)))))
 
 (defn emit-definition [definition options]
  (try
   (str "(define " (or (:scheme-name definition)
                       (when (:namespace-qualified? options)
                        (ident (str (or (:ns definition) (:ns options)) "/" (:name definition))))
-                      (ident (:name definition))) " " (emit (:node definition) options) ")\n")
+                      (ident (:name definition))) " "
+       (emit (:node definition)
+        (assoc options :definition-ns (or (:ns definition) (:ns options)) :fn-label (:name definition)
+                       :source-fn nil :source-arity nil :tail? false :loop nil)) ")\n")
   (catch e (throw (ex-info (str (:name definition) ": " (ex-message e)) (ex-data e))))))
