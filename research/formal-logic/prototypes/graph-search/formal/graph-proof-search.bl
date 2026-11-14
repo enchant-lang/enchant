@@ -34,8 +34,9 @@
 (defn- contradiction [rows]
  (first (filter #(and (empty? (:coeff %)) (< (:bound %) 0)) rows)))
 (defn- linear-proof [context prepared assignment]
- (let [rows (mapv (fn [[id _]] (assoc (assigned-row context prepared assignment id) :weights {id 1}))
-                  (filter (fn [[id _]] (= :linear (:kind (nth (:atoms prepared) id)))) assignment))
+ (let [selected (vec (filter (fn [[id _]] (= :linear (:kind (nth (:atoms prepared) id)))) assignment))]
+  (when (<= (count selected) (:rows (:limits context)))
+   (let [rows (mapv (fn [[id _]] (assoc (assigned-row context prepared assignment id) :weights {id 1})) selected)
        variables (vec (sort (set (mapcat (comp keys :coeff) rows))))]
   (loop [rows rows remaining variables]
    (charge! context (inc (count rows)))
@@ -49,7 +50,7 @@
       ;; Counts are bounded before constructing pairs or coefficient products.
       (when (<= (+ (count zero) pairs) (:rows (:limits context)))
        (charge! context pairs)
-       (recur (vec (concat zero (for [p positive n negative] (combine context p n x)))) (rest remaining)))))))))
+       (recur (vec (concat zero (for [p positive n negative] (combine context p n x)))) (rest remaining)))))))))))
 (defn- truth [context prepared assignment]
  (reduce (fn [out [kind body]]
            (charge! context (+ 1 (if (vector? body) (count body) 0)))
@@ -85,7 +86,8 @@
                (swap! nodes conj node) (swap! ids assoc node id) id)))
             (search [assignment depth]
              (charge! context 1)
-             (when (and (<= (swap! visited inc) (:states limits)) (<= depth (:proof-depth kernel/limits)))
+             (when (and (< @visited (:states limits)) (<= depth (:proof-depth kernel/limits)))
+              (swap! visited inc)
               (let [values (truth context prepared assignment)]
                (if (some #(= false (nth values %)) (:roots prepared)) (emit [:boolean])
                 (if-let [leaf (linear-proof context prepared assignment)] (emit leaf)
