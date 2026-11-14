@@ -26,7 +26,7 @@ as data. A broken `env.bl` degrades what the tree can do — its tasks, its port
 ```beam-lisp silent
 (ns bl.env
   (:require [bl.util :as u] [bl.loading-policy :as loading]
-            [bl.native-declarations :as native-declarations] [bl.auth-imports :as auth-imports]))
+            [bl.native-declarations :as native-declarations]))
 ```
 
 ## Discovery
@@ -36,6 +36,44 @@ The walk starts at the command's own directory and climbs until it finds an
 way from anywhere inside it.
 
 ```beam-lisp silent
+(def auth-extension-keys #{:auth/imports :auth/realms :auth/realm})
+(defn auth-extensions [forms]
+ (let [base (last forms)
+       blocks (filter #(and (map? %) (some (fn [key] (contains? % key)) auth-extension-keys)) (butlast forms))]
+  (doseq [block blocks]
+   (when-not (every? #(contains? auth-extension-keys %) (keys block))
+    (throw (ex-info "Auth extension blocks contain only namespaced auth keys" {}))))
+  (reduce (fn [project block]
+            (when (some #(contains? project %) (keys block))
+             (throw (ex-info "Duplicate auth environment declaration" {})))
+            (merge project block)) base blocks)))
+(defn auth-errors [project]
+ (let [imports (:auth/imports project) realms (:auth/realms project) provider (:auth/realm project)]
+  (vec (concat
+   (when-not (or (nil? imports)
+                 (and (map? imports) (<= (count imports) 64)
+                      (every? (fn [[name spec]]
+                                (and (symbol? name) (map? spec)
+                                     (every? #(contains? #{:from :namespace :version :only} %) (keys spec))
+                                     (map? realms) (contains? realms (:from spec)) (symbol? (:namespace spec))
+                                     (int? (:version spec)) (pos? (:version spec))
+                                     (vector? (:only spec)) (<= 1 (count (:only spec)) 64)
+                                     (every? symbol? (:only spec)))) imports)))
+    ["invalid :auth/imports: explicit realm, namespace, positive version and nonempty :only required"])
+   (when-not (or (nil? realms)
+                 (and (map? realms) (<= (count realms) 64)
+                      (every? (fn [[name spec]]
+                                (and (keyword? name) (map? spec) (contains? #{:local :remote} (:transport spec))
+                                     (if (= :local (:transport spec)) (string? (:root spec))
+                                      (and (string? (:interface spec)) (string? (:world spec))
+                                           (string? (:url spec)) (string? (:issuer-public spec))
+                                           (or (string? (:token-file spec)) (map? (:delegation spec))))))) realms)))
+    ["invalid :auth/realms: explicit local root or remote interface, audience, URL and issuer required"])
+   (when-not (or (nil? provider)
+                 (and (map? provider) (string? (:source provider)) (string? (:world provider))
+                      (or (nil? (:factory provider)) (symbol? (:factory provider)))))
+    ["invalid :auth/realm: source and world required"])))))
+
 (def file-name "env.bl")
 
 (defn- parent [d] (Path/dirname d))
@@ -79,7 +117,7 @@ one.
     (let [forms (BeamLisp.Compiler/read_all_data (File/read! path))]
       (cond
         (empty? forms) {:error "the file has no forms"}
-        (map? (last forms)) {:ok (auth-imports/extensions forms)}
+        (map? (last forms)) {:ok (auth-extensions forms)}
         :else :dynamic))
     (catch e {:error (ex-message e)})))
 
@@ -925,7 +963,7 @@ shape, whatever the file said.
      :browser brw
      :catalog cat
      :android andr
-     :errors (concat (auth-imports/errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
+     :errors (concat (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
                      fnderr brerr cerr lerr anderr
                      (map (fn [k] (str "unknown key " k)) (unknown-keys m known-keys)))}))
 
