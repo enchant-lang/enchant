@@ -120,8 +120,8 @@
      (update definition :node (fn [node] (ir/rewrite rewrite node))) definition)) (:defs unit))
    :wire-protocol (if admitted? :erlang-process-envelope-to-actor-vector :canonical-actor-only))))
 (defn named-definitions [units]
- (vec (mapcat (fn [unit]
-  (map (fn [definition]
+ (vec (BeamLisp.CompilerData/eager_mapcat (fn [unit]
+  (BeamLisp.CompilerData/eager_map (fn [definition]
     (assoc definition :ns (:ns unit) :path (:path unit) :requires (:requires unit)
      :external? (boolean (:native-external? unit)) :source-sha256 (:source-sha256 unit)
      :prototype-actor-abi? (boolean (:prototype-actor-abi? unit))
@@ -267,7 +267,7 @@
  ; Capture the SAME checked selection while this private staging Env exists.
  {:schema "bl.native.proc-resolvers" :version 1 :runtime-namespace kernel
   :definitions
-  (into {} (map (fn [definition]
+  (into {} (BeamLisp.CompilerData/eager_map (fn [definition]
    [(qname (:ns definition) (:name definition))
     (reduce (fn [out node]
      (if-let [query (resolver-query node)]
@@ -283,20 +283,39 @@
 (defn value-source [selection]
  (let [[ns name] (target-parts (:target selection))]
   (str "(native-global-exact " (scheme/text ns) " " (scheme/text name) ")")))
+(defn resolver-sources [definition context]
+ ; Eager selection stays inside the staging Env. The result contains only
+ ; finite query keys and emitted strings: never ANF bodies or Env functions.
+ (reduce (fn [out node]
+  (if-let [query (resolver-query node)]
+   (let [source (case (:op node)
+                  :global (value-source (selected-global definition node (:bodies context) (:aliases context)))
+                  :remote
+                   (let [selection (selected-remote definition node (:bodies context) (:by-module context)
+                                    (:remote-aliases context) (:leaves context))]
+                    (cond
+                     (:source selection) (:source selection)
+                     (:packed? selection)
+                      (str "(lambda arguments (native-linked-packed-call " (value-source selection) " arguments))")
+                     :else (str "(lambda arguments (bl-invoke " (value-source selection) " arguments))"))))]
+    (assoc out query source)) out)) {} (walk (:node definition))))
+(defn resolver-source! [sources caller node]
+ (let [query (resolver-query node)]
+  (if (contains? sources query) (get sources query)
+   (throw (ex-info "native proc link: emitter requested an uncaptured ANF query"
+                   {:caller caller :query query :ann (:ann node)})))))
 (defn options-for [definition context]
- (let [base (ev/context (:ns definition))]
+ (let [base (ev/context (:ns definition))
+       sources (resolver-sources definition context)
+       caller (qname (:ns definition) (:name definition))]
+  ; Emission's lazy combinators may copy callback environments into memo
+  ; resources. Capture ONLY this tiny per-definition string table, never the
+  ; complete linked body graph or the definition's recursive ANF tree.
   (assoc base :runtime-namespace kernel :namespace-qualified? (not= kernel (:ns definition))
    :source-frames? (boolean (:source-frames? context))
    :receive-source (value-source {:target (qname kernel "rt-receive")})
-   :global-resolver (fn [node] (value-source (selected-global definition node (:bodies context) (:aliases context))))
-   :remote-resolver (fn [node]
-    (let [selection (selected-remote definition node (:bodies context) (:by-module context)
-                     (:remote-aliases context) (:leaves context))]
-     (cond
-      (:source selection) (:source selection)
-      (:packed? selection)
-       (str "(lambda arguments (native-linked-packed-call " (value-source selection) " arguments))")
-      :else (str "(lambda arguments (bl-invoke " (value-source selection) " arguments))")))))))
+   :global-resolver (fn [node] (resolver-source! sources caller node))
+   :remote-resolver (fn [node] (resolver-source! sources caller node)))))
 (defn emit-definition [definition context]
  (println (str "NATIVE_PROC_EMIT_BEGIN " (qname (:ns definition) (:name definition))))
  (let [options (options-for definition context) ns (:ns definition) name (:name definition)
@@ -351,9 +370,9 @@
         app-unit (assoc app-unit :prototype-actor-abi? (boolean (:original-actor-corpus? request)))
         own-units (vec (concat [runtime-unit bridge-unit] helper-units [app-unit]))
         own-namespaces (set (map :ns own-units))
-        prelude-units (vec (map #(assoc % :native-external? true)
-                             (remove #(contains? own-namespaces (:ns %))
-                              (map #(get (:units closure) %) (:order closure)))))
+        prelude-units (vec (BeamLisp.CompilerData/eager_map #(assoc % :native-external? true)
+                             (BeamLisp.CompilerData/eager_filter #(not (contains? own-namespaces (:ns %)))
+                              (BeamLisp.CompilerData/eager_map #(get (:units closure) %) (:order closure)))))
         _ (println "NATIVE_PROC_STAGE units-prepared")
         all (named-definitions (concat prelude-units own-units))
         _ (println (str "NATIVE_PROC_STAGE bodies-indexed " (count all)))
@@ -383,8 +402,8 @@
         output (str (File/read! (:prelude request)) "\n"
                   (File/read! (:host-link request)) "\n"
                   (string/join "\n" (map (fn [path] (File/read! path)) (:host-extensions request))) "\n"
-                  (string/join "" (map module-source own-units))
-                  (string/join "" (map #(emit-definition % context) emitted))
+                  (string/join "" (BeamLisp.CompilerData/eager_map module-source own-units))
+                  (string/join "" (BeamLisp.CompilerData/eager_map #(emit-definition % context) emitted))
                   "\n(bl-invoke " (value-source {:target (qname kernel "bl-main")})
                   " (list " (value-source {:target (qname (:ns app-unit) "main")}) "))\n"
                   "(if (not (null? seed-errors)) (error \"native actor errors\"))\n")]
