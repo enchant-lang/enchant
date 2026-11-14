@@ -36,6 +36,20 @@ if phase!='pure':
  pure=read(P/'evidence/wide-owner-prototype/pure/qualification.json')
  assert pure['status']=='passed' and pure['source_pin']['module_inputs']==base
  assert pure['qualified_runtime_sdk']==pin and pure['native_exchanges']==0
+ assert sha(D/'wide-owner-pure-check.bl')==pure['source_pin']['source_sha256'][str((D/'wide-owner-pure-check.bl').relative_to(R))]
+ if phase=='native':
+  smoke=P/'evidence/wide-owner-prototype/native-smoke';smoke_q=read(smoke/'qualification.json')
+  assert smoke_q['status']=='passed' and smoke_q['questions']==9 and smoke_q['raw_status_differences']==0
+  assert smoke_q['qualified_runtime_sdk']==pin and smoke_q['source_pin']['module_inputs']==base
+  for gate in [smoke,smoke/'reader-one',smoke/'reader-two',P/'evidence/wide-owner-prototype/narrow-regressions']:
+   receipt=read(gate/'qualification.json');assert receipt['status']=='passed'
+   terminal=read(gate/'owner-terminal.json');terminal=terminal.get('state',terminal)
+   assert terminal['SubState']=='exited' and terminal['MainPID']=='0'
+   assert terminal['Result']=='success' and terminal['ExecMainStatus']=='0'
+   if gate!=smoke:
+    assert receipt['sdk_pin']==pin
+    assert receipt['source_pin']['producer_qualification_sha256']==sha(smoke/'qualification.json')
+  assert read(smoke/'reader-one/qualification.json')['packets']==read(smoke/'reader-two/qualification.json')['packets']==20
  assert not (E/'packets').exists(),'Archive the previous run before another native attempt.'
  (E/'packets').mkdir()
 write('source-pin.json',{'code_commit':commit,'source_sha256':digests,'qualified_runtime_sdk':pin,
@@ -60,7 +74,7 @@ for name,path in paths.items():project(path,imports/(modules[name].replace('.','
 test_name='wide-owner-pure-check.bl' if phase=='pure' else 'wide-owner-native-check.bl'
 test=checks/test_name;project(D/test_name,test)
 write('projection.json',projections)
-ceiling='1500' if phase=='pure' else ('900' if phase=='native-smoke' else '3600')
+ceiling='1500' if phase=='pure' else ('1500' if phase=='native-smoke' else '21600')
 command=['timeout','--kill-after=15',ceiling,'env','-u','BEAM_LISP_PATH','-u','ENCHANT_FORMAL_WORKER','-u','ENCHANT_Z3_LIBRARY',
  'XDG_RUNTIME_DIR='+str(xdg),'BL_TEST_TIMEOUT='+str(int(ceiling)-60),
  'FORMAL_WIDE_OWNER_OUTPUT='+str(E/'observations.json'),pin['sdk']+'/bin/bl','--cold',
