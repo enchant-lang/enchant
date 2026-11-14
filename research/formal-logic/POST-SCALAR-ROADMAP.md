@@ -12,7 +12,10 @@ arithmetic rules. `formal.request-evidence` currently has one installed strategy
 `formal.finite-word-certificate`. It must not imply that every existing proof
 format is accepted by the common bundle.
 
-Add an original-graph entry to the integer checker before connecting it. Reuse
+The isolated `GRAPH-INTEGER-PROTOTYPE.md` sources now prepare a linear-only
+original-graph kernel and seven tests, but have not run. They deliberately do
+not replace all the existing piecewise/ground rules. Qualify and review this
+entry before connecting it. Reuse
 its reviewed arithmetic/rule semantics while retaining argument references.
 Bound normal-form construction, coefficient growth, branch expansion and proof
 traversal before arithmetic. Do not solve the interface gap by materializing an
@@ -30,7 +33,11 @@ preservation, and reuses the installed finite strategy. A satisfying point gets
 ordinary point replay; a checked contradiction records inconsistency. Neither
 is inferred from conditional entailment.
 
-Qualify its six prepared tests before integration. Compose all admission/search/
+Qualify its six prepared tests before integration. The separate
+`FINITE-OBLIGATION-PROTOTYPE.md` sources prepare policy composition and candidate-only
+packets, with six tests and at least 77 assertions planned; they have not run.
+`VACUITY-SEMANTICS-REVIEW.md` records the current allow/report collapse and the
+proposed distinct acceptance judgments. Compose all admission/search/
 replay accounts. Then specify the result of `:allow`, `:report` and `:reject`
 vacuity policies: a checked component is not automatically a fully discharged
 request. Save and reopen the derivation and checker scope without trusting a
@@ -44,6 +51,9 @@ String sort has a broader specified alphabet. Domain metadata does not constrain
 native quantified variables. Keep native String UNSAT as a claim until a checked
 domain relation and proof strategy exist. See `SCALAR-TEXT-DOMAIN.md`.
 
+The exact built-source `STRING-REPRESENTATION-REVIEW.md` records that Z3 already
+exposes a u32 constructor/model API while the pinned OxiZ literal carrier is Rust
+String. This is a carrier finding, not a theorem about either symbolic domain.
 Choose a separate full SMT-codepoint representation or explicit portable scalar
 domain constraints. Regex membership is one possible encoding, with its own
 resource/admission/replay and backend qualification. Keep codepoint, byte and
