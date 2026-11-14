@@ -4,17 +4,29 @@
   (host/raise (str "FAIL " label ": " (host/describe actual)))))
 (defn ds-adder [x] (fn [y] (+ x y)))
 (defn ds-tail [n sum] (if (= n 0) sum (ds-tail (- n 1) (+ sum n))))
+(defn ds-apply-tail [n sum]
+ (if (= n 0) sum (erlang/apply ds-apply-tail (list (- n 1) (+ sum n)))))
 (defn ds-operand [label value]
  (host/write (str "SCALAR_ORDER " label)) value)
 (defn main []
- (ds-check "direct-scalar-closure" ((ds-adder 7) 9) 16)
- (ds-check "direct-scalar-tail" (ds-tail 2000 0) 2001000)
+ (let [f (ds-adder 7)]
+  (ds-check "direct-scalar-closure"
+   [(f 9) (erlang/apply f (list 9)) (erlang/is_function f) (erlang/is_function f 1)
+    (erlang/is_function (fn ([x] x) ([x y] y)))
+    (try (erlang/apply {:a 1} (list :a))
+     (catch-raw [kind reason stack] [kind (erlang/element 1 reason)]))
+    (try (erlang/apply f (list 1 2))
+     (catch-raw [kind reason stack] [kind (erlang/element 1 reason)]))
+    (try (erlang/is_function f -1) (catch-raw [kind reason stack] [kind reason]))]
+   [16 16 true true false [:error :badfun] [:error :badarity] [:error :badarg]]))
+ (ds-check "direct-scalar-tail"
+  [(ds-tail 2000 0) (ds-apply-tail 512 0) (< (host/max-frames) 32)] [2001000 131328 true])
  (ds-check "direct-scalar-loop"
   (loop [n 100 sum 0] (if (= n 0) sum (recur (- n 1) (+ sum n)))) 5050)
  (ds-check "direct-scalar-operand-order"
   ((fn [a b] [a b]) (ds-operand "first" 1) (ds-operand "second" 2)) [1 2])
  (ds-check "direct-scalar-try"
-  (try (erlang/error :expected) (catch e (if (= e :expected) :caught :wrong))) :caught)
+  (try (throw :expected) (catch e (if (= e :expected) :caught :wrong))) :caught)
  (ds-check "direct-scalar-finally-value"
   (try 17 (finally (host/write "SCALAR_FINALLY once"))) 17)
  (ds-check "direct-scalar-map" (:a {:a [1 2]}) [1 2])

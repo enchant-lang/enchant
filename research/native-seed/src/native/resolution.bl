@@ -1,7 +1,7 @@
 ; Closed source-derived namespace/seed ledger. Inert Reader projection only:
 ; no source evaluation, ambient Env admission, or ANF interpretation.
 (ns native.resolution
- (:require [reader :as rd] [reader-node :as rn] [compiler :as c]))
+ (:require [reader :as rd] [reader-node :as rn]))
 (defn symbol? [node name]
  (let [n (rn/node-form node)] (and (= :symbol (rn/node-tag n)) (= name (rn/node-name n)))))
 (defn definition [closure name]
@@ -15,14 +15,28 @@
    (throw (ex-info "native resolution: seed declaration changed shape" {:name (:name d)})))
   (nth items 3)))
 (defn quoted-seed-rows [closure name]
- (let [body (function-body (definition closure name)) items (rn/node-items body)]
+ (let [declaration (definition closure name)
+       body (function-body declaration) items (rn/node-items body)]
   (when-not (and (= :list (rn/node-tag (rn/node-form body))) (= 2 (count items))
                  (symbol? (first items) "quote"))
    (throw (ex-info "native resolution: seed rows must remain original inert quote data" {:name name})))
-  (let [rows (c/datum (second items))]
-   (doseq [row rows] (when-not (string? (first row))
+  ; The checked compiler has already produced this quote's inert literal.
+  ; Project only the exact zero-argument literal-return function shape; no
+  ; expression evaluation or private compiler helper participates here.
+  (let [node (:node declaration)
+        function (if (= :fn (:op node)) node
+                    (:inner (BeamLisp.CompilerData/self_application_parts node)))
+        clauses (:clauses function)
+        clause (when (and (erlang/is_list clauses) (= 1 (count clauses))) (first clauses))
+        literal (:body clause)]
+   (when-not (and (= :fn (:op function)) (some? clause) (nil? (:guard clause))
+                  (erlang/is_list (:pats clause)) (empty? (:pats clause)) (= :lit (:op literal)))
+    (throw (ex-info "native resolution: seed is not one unguarded zero-parameter literal function" {:name name})))
+   (let [rows (:val literal)]
+    (when-not (erlang/is_list rows) (throw (ex-info "native resolution: seed literal is not a proper list" {:name name})))
+    (doseq [row rows] (when-not (and (erlang/is_list row) (string? (first row)))
                     (throw (ex-info "native resolution: invalid literal seed row" {:name name}))))
-   rows)))
+    rows))))
 (defn seed-closure-names [closure]
  (let [body (function-body (definition closure "seed-closures")) items (rn/node-items body)
        bindings (rn/node-items (second items))]
