@@ -31,6 +31,8 @@ assert sha(E / 'previous-readers-qualification.json') == qualification['previous
 assert sha(E / 'previous-word-readers-qualification.json') == qualification['previous_word_records_qualification_sha256']
 assert sha(E / 'text-packets.json') == qualification['text_packets_sha256']
 assert sha(E / 'evidence-packets.json') == qualification['evidence_packets_sha256']
+for name, digest in qualification['focused_artifact_sha256'].items():
+    assert sha(E / name) == digest
 linkage = read(E / 'build-linkage.json')
 assert linkage['sdk_pin'] == pin and sha(E / 'build-linkage.json') == qualification['build_linkage_sha256']
 for name, digest in linkage['source_sha256'].items():

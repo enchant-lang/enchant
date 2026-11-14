@@ -106,6 +106,36 @@ assert evidence_packets['sdk'] == pin['sdk'] and evidence_packets['warmed-atoms-
 assert runs['focused'] == {'formal.scalar-text-graph-test':72, 'formal.scalar-text-resource-test':474,
  'formal.scalar-text-interface-test':38, 'formal.scalar-text-owner-test':21, 'formal.finite-word-certificate-test':82,
  'formal.request-evidence-test':47, 'formal.evidence-effect-test':32, 'formal.evidence-oracle-test':17}
+focused_artifacts = {}
+for name in ('text-native.json', 'term-native.json', 'word-native.json', 'bundle-corpus.json', 'bundle-corpus.json.coverage.json'):
+    path = E / name
+    assert (E / 'focused-command.json').stat().st_mtime_ns <= path.stat().st_mtime_ns <= (E / 'focused-exit.json').stat().st_mtime_ns
+    focused_artifacts[name] = sha(path)
+text_rows = read(E / 'text-native.json')['observations']
+assert len(text_rows) == 4
+assert {(row['case'], row['backend']) for row in text_rows} == {
+    ('coordinate','z3'), ('coordinate','oxiz'), ('codepoint-contract','z3'), ('codepoint-contract','oxiz')}
+for row in text_rows:
+    assert row['source']['identity']['sdk'] == pin['sdk'] and row['compiler-proof-authority'] is False
+    if row['case'] == 'coordinate':
+        assert row['source']['status'] == row['verdict'] == 'sat'
+    else:
+        assert row['source']['status'] == ('unsat' if row['backend'] == 'z3' else 'unknown')
+word_rows = read(E / 'word-native.json')['rows']
+assert len(word_rows) == 2 and {row['backend'] for row in word_rows} == {'z3','oxiz'}
+for row in word_rows:
+    assert row['identity']['sdk'] == pin['sdk'] and row['native-status'] == 'unsat'
+    assert row['native-verdict'] == 'solver-claim' and row['native-certificate']['status'] == 'not-checked'
+    independent = row['independent-check']
+    assert independent['status'] == 'checked' and independent['points-checked'] == 8
+    assert independent['feasibility'] == 'not-established' and independent['compiler-proof-authority'] is False
+assert word_rows[0]['independent-check']['statement'] == word_rows[1]['independent-check']['statement']
+bundle_rows = read(E / 'bundle-corpus.json')['rows']
+assert len(bundle_rows) == 2 and {row['backend'] for row in bundle_rows} == {'z3','oxiz'}
+assert len(read(E / 'bundle-corpus.json.coverage.json')) == 5
+assert all(row['identity']['sdk'] == pin['sdk'] and row['result']['proof-check']['points-checked'] == 8 for row in bundle_rows)
+term_rows = read(E / 'term-native.json')['rows']
+assert len(term_rows) == 2 and all(row['identity']['sdk'] == pin['sdk'] for row in term_rows)
 previous_word = read(E / 'previous-word-readers-qualification.json')
 assert previous_word['status'] == 'passed' and previous_word['sdk_pin'] == pin
 assert previous_word['recorded_producer_sdk_pin'] == baseline and previous_word['records'] == 12
@@ -163,6 +193,7 @@ report = {'schema': 'bl.scalar-integration-sdk-qualification.v1', 'status': 'pas
           'previous_records_qualification_sha256': sha(E / 'previous-readers-qualification.json'),
           'previous_word_records_qualification_sha256': sha(E / 'previous-word-readers-qualification.json'),
           'text_packets_sha256': sha(E / 'text-packets.json'), 'evidence_packets_sha256': sha(E / 'evidence-packets.json'),
+          'focused_artifact_sha256': focused_artifacts,
           'prior_retained_qualification_sha256': sha(E / 'prior-retained-readers-qualification.json'),
           'native_questions': 187, 'native_outcome_differences': differences, 'native_comparison_sha256': sha(E / 'native-comparison.json'), 'native_sha256': sha(E / 'native.json'),
           'recipe': {'code_commit': commit, 'path': recipe, 'sha256': sha(Path(__file__))},
