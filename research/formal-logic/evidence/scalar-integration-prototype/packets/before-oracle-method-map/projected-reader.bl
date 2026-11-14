@@ -1,0 +1,75 @@
+(ns formal.scalar-packet-reader
+ (:require [formal.scalar-batch.request-record :as record] [formal.scalar-batch.backend :as backend]
+           [formal.data-graph :as graph] [formal.scalar-batch.evaluate :as evaluate] [formal.term :as t]
+           [bl.json :as json] [oracle]))
+(def checks (atom 0))
+(defn require! [ok why]
+ (swap! checks inc)
+ (when-not ok (throw (ex-info (str "scalar packet reader: " why) {}))))
+(defn restore [wire]
+ (require! (and (map? wire) (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (int? (get wire "formal/data-graph")) (= 1 (get wire "formal/data-graph"))
+                (= "bl/public-data-graph-v1" (get wire "profile"))) "closed graph wire")
+ (let [data {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+             :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+                          (get wire "nodes"))}]
+  (graph/check! data) data))
+(def argv (BeamLisp/argv))
+(def input (json/decode (File/read! (nth argv 0))))
+(def rows (get input "observations"))
+(require! (= 4 (count rows)) "four actual managed text records")
+(def packets (mapv #(restore (get % "packet")) rows))
+(def expected (mapv (fn [row]
+                      (let [status (get-in row ["source" "status"])]
+                       (case status "sat" :sat "unsat" :solver-claim "unknown" :unknown "unsupported" :unsupported
+                         (throw (ex-info "unexpected captured text status" {}))))) rows))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "native counter installed")
+(def calls (atom 0))
+(def deny (fn [& _] (swap! calls inc) (throw :scalar-reader-must-not-query)))
+(def domain-observations (atom []))
+(defn rejected? [action] (try (action) false (catch _ true)))
+(defn check-records []
+ (mapv (fn [i]
+         ;; No caller vocabulary preload. The record reader must initialize
+         ;; only its installed closed schema before decoding the actual packet.
+         (let [result (record/recheck-graph (nth packets i))]
+          (require! (= (nth expected i) (:verdict result)) "fresh interpretation of original text question")
+          (require! (= false (:checked-native-execution result) (:compiler-proof-authority result) (:storage-authenticated result))
+                    "no saved status grants native, compiler or storage authority")
+          (when (= :sat (:verdict result))
+           (require! (= :valid (get-in result [:point-check :validation :status])) "actual saved text coordinates checked"))
+          result)) (range 4)))
+(try
+ (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+  (fn []
+   (check-records)
+   (let [before (erlang/system_info :atom_count)]
+    (check-records) (check-records)
+    (require! (= before (erlang/system_info :atom_count)) "stable warmed atom count"))
+   (let [packet (graph/decode! (first packets))]
+    (require! (rejected? #(record/recheck (assoc packet :compiler-proof-authority true))) "authority bit refused")
+    (require! (rejected? #(record/recheck (assoc packet :request-reference {}))) "request binding refused")
+    (require! (rejected? #(record/recheck (assoc-in packet [:answer :trusted] true))) "answer trust bit refused")
+    (require! (rejected? #(record/recheck (assoc-in packet [:answer :certificate] {:status :checked}))) "producer proof flag refused"))
+   ;; Deliberately after cold reopening and warmed-atom measurement: these
+   ;; concrete domain checks cannot preload a schema for the first packet.
+   (doseq [[name bytes utf8? status]
+           [[:before-surrogate (unicode/characters_to_binary (list 55295)) true :valid]
+            [:after-surrogate (unicode/characters_to_binary (list 57344)) true :valid]
+            [:surrogate-utf8-bytes (erlang/list_to_binary (list 237 160 128)) false :invalid]
+            [:highest-smt-codepoint (unicode/characters_to_binary (list 196607)) true :valid]
+            [:above-smt-alphabet (unicode/characters_to_binary (list 196608)) true :invalid]]]
+    (let [valid (String/valid? bytes) actual (:status (evaluate/check-value t/String bytes))]
+     (require! (= utf8? valid) "actual UTF-8 boundary")
+     (require! (= status actual) "actual SDK point alphabet")
+     (swap! domain-observations conj {:case name :utf8-valid valid :point-value-status actual})))))
+ (require! (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)) "zero actual native and oracle calls")
+ (File/write! (nth argv 1) (json/encode {:status :passed :records 4 :checks @checks :negative-controls 4
+                                       :native-exchanges 0 :oracle-calls @calls :manual-schema-preload false
+                                       :warmed-atoms-stable true :domain-observations @domain-observations
+                                       :sdk (System/get_env "BL_SDK_PRODUCT")
+                                       :compiler-proof-authority false} {:pretty 2}))
+ (println {:scalar-reader :passed :records 4 :negative-controls 4 :native-exchanges 0})
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))
