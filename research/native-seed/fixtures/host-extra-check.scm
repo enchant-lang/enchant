@@ -184,4 +184,13 @@
   (for-each (lambda (right)
    (native-extra-check "tuple order preserves previous list projection relation"
     (= (bl-key-compare left right) (native-compare-lists (bl-items left) (bl-items right))))) cases)) cases))
+;; A storage-only host has no authority to replace canonical lazy walking.
+(let ((forced #f) (refused #f))
+ (let ((value (native-lazy-new (lambda () (set! forced #t) '("hidden")))))
+  (with-exception-catcher (lambda (e) (set! refused #t)) (lambda () (native-finite-items value))))
+ (native-extra-check "Enum LazySeq requires compiled runtime before forcing" (and refused (not forced))))
+(let ((refused #f))
+ (with-exception-catcher (lambda (e) (set! refused #t))
+  (lambda () (native-finite-items (native-cursor-new '("hidden")))))
+ (native-extra-check "Enum cursor cannot leak struct fields without runtime" refused))
 (display "native extra checks passed") (newline)

@@ -83,6 +83,10 @@
  (let ((value (native-fetch! ns name #t)))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
+;; Resolve the live EXACT canonical runtime only when Enum consumes a
+;; deferred collection. Missing compiled rt/k-to-list fails closed in lookup.
+(set! native-canonical-sequence-items
+ (lambda (value) (bl-invoke (native-global-exact "rt" "k-to-list") (list value))))
 (define (native-env-link ns name owner?)
  (let ((row (native-resolve-row (native-candidates ns name) (bl-key "link") #f)))
   (if (eq? row native-missing) (bl-key "error")
