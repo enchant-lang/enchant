@@ -1,233 +1,162 @@
-#+title: Authenticated Beam Lisp namespaces across realms and VMs
+#+title: Enchant authenticated namespace imports
 #+date: 2026-11-14
 
-* The application interface
+* Native implementation
 
-Team Machine Next imports a namespace and calls ordinary functions:
+The reusable implementation now lives in priv/lib/auth and
+priv/lib/veritas/assurance.bl. bl.env reads the declarations and normal bl.cli
+project startup activates them before compiling application code. Generated
+import files and a research source directory are no longer required by the
+native runtime.
 
 #+begin_src clojure
-(ns machine.station (:require [station.services :as station]))
+(ns my.app (:require [station.services :as station]))
 (station/services-in "knowledger")
-(station/inspect "knowledger" "some-service.othman")
 #+end_src
 
-The same interface can target another Env in this VM or an authenticated endpoint
-in another VM. The application does not construct RPC, select an identity
-adapter, supply a folder, or handle a bearer token. This is a working source
-prototype under src/, using the existing qualified SDKs without a compiler or
-SDK rebuild. It is not yet a built-in loader feature.
+Application code uses the same interface for another Env or VM. It supplies a
+project identity, not a folder, bearer, role list or RPC request.
 
-The integration targets ~/projects/general/team-machine-next and
-ora-hub/workstation, not the older Team Machine in ora-hub. Workstation projects
-its existing work-endpoint inventory; no second process registry is introduced.
+* Five executable sets
 
-* The namespace owns its policy
+The [[file:../../examples/namespace-world/README.org][walkthrough]] links each part to executable examples.
 
-The provider uses existing namespace metadata syntax:
+| Part | Examples | Implementation |
+|------+----------+----------------|
+| 1. Native require | [[file:../../examples/namespace-world/01-require/functions.bl][functions]], [[file:../../examples/namespace-world/01-require/allowlist.bl][allowlist]] | bl.env, bl.cli startup, auth.imports |
+| 2. Runtime identity | [[file:../../examples/namespace-world/02-identity/tasks.bl][tasks]], [[file:../../examples/namespace-world/02-identity/adapters.bl][adapters]] | auth.identity registered runtime context, auth.ingress, auth.delegation |
+| 3. Compiler admission | [[file:../../examples/namespace-world/03-effects/admission.bl][admission]], [[file:../../examples/namespace-world/03-effects/proof.bl][proof]] | auth.logic source/ANF checks, veritas.assurance |
+| 4. Versioned interfaces | [[file:../../examples/namespace-world/04-interfaces/artifact.bl][artifact]], [[file:../../examples/namespace-world/04-interfaces/mismatch.bl][mismatch]] | auth.contract, protocol 2 |
+| 5. Runtime operation | [[file:../../examples/namespace-world/05-lifetime/retirement.bl][retirement]], [[file:../../examples/namespace-world/05-lifetime/failures.bl][failures]] | realm service ownership, scope guardian, generation fencing |
+
+#+begin_src sh
+cd examples/namespace-world
+../../bin/bl --cold run check.bl
+#+end_src
+
+* Namespace policy and environment placement
+
+The provider owns its explicit exports, application grants, resource selection,
+role requirements and effect budgets using existing namespace metadata:
 
 #+begin_src clojure
-(ns ^{:auth
-      {:version 1
-       :exports
-       {services-in {:roles #{:viewer :operator}
-                     :resource {:arg 0}
-                     :effects {:read #{:catalog}}}
-        inspect {:roles #{:viewer :operator}
-                 :resource {:arg 0}
-                 :effects {:read #{:catalog}}}}
-       :grants {"team-machine-next" #{services-in inspect}}}}
+(ns ^{:auth {:version 1
+             :exports {services-in {:roles #{:viewer :operator}
+                                    :resource {:arg 0}
+                                    :effects {:read #{:catalog}}}}
+             :grants {"team-machine-next" #{services-in}}}}
  workstation.services
  (:require [auth.resource :as resource]))
-
 (defn services-in [project] (resource/read :catalog))
-(defn inspect [project service-id]
- (first (filterv (fn [service] (= service-id (get service "id")))
-                 (get (resource/read :catalog) "services"))))
 #+end_src
 
-Only explicitly exported functions are importable. Every export needs roles,
-a resource argument, and an effect budget; absent policy denies access. The
-application allowlist is an additional ceiling. Roles are provider-owned live
-memberships, never claims accepted from browser headers or request arguments.
-The trusted :catalog port receives only the authenticated subject and authorized
-project. The exported function sees that project's finite projection, not the
-full host inventory. A host resolver may map an object argument to its owning
-resource using :resource {:arg 0 :lookup :some-trusted-resolver}.
-
-Pure functions use :effects :pure. A mutation can declare
-:effects {:send #{:counter}} and call (resource/perform! :counter payload), with
-an operator role and an explicitly installed host port. The tests exercise this
-path. Workstation currently exports read operations only.
-
-* Environment bindings, without application paths
-
-Team Machine's env.bl contains the imports and placement, before its ordinary
-SDK project map:
+A consumer declares only its desired surface and deployment binding:
 
 #+begin_src clojure
-{:auth/imports
- {station.services {:from :workstation :namespace workstation.services
-                    :version 1 :only [services-in inspect]}}
- :auth/realms
- {:workstation {:root "/path/to/workstation/services" :transport :local}}}
-
-{:name "team-machine-next" :bl "/nix/store/QUALIFIED-SDK"
- :paths ["imports" "src" "/path/to/service-world/src"]}
+{:name "team-machine-next"
+ :paths ["src"]
+ :auth/imports {station.services {:from :station :namespace workstation.services
+                                 :version 1 :only [services-in]}}
+ :auth/realms {:station {:root "/path/to/workstation/services" :transport :local}}}
 #+end_src
 
-The provider's env.bl supplies :auth/realm with :world, :source,
-:factory auth.station/open and a private :authority-file. No folder links or
-credentials are embedded in application functions. Namespace grants remain with
-the namespace; operator configuration binds identities and physical resources.
+The provider's :auth/realm declares its source, world, host factory and private
+operator policy. The native reader also accepts the earlier namespaced prefix
+blocks before a normal trailing project map. It rejects malformed and duplicate
+auth declarations. Unknown identities, missing grants, empty roles and unsupported
+source never become ambient access.
 
-These namespaced data blocks work with the existing SDK reader, which reads the
-trailing project map and rejects unknown project keys. auth.imports/project reads
-the extension blocks. auth.imports/prepare! materializes a credential-free shim
-under imports/; the checked-in station shim contains only a normal ns declaration
-and (imports/link! "station.services"). The ordinary require then loads it.
-Generic provider factories are configured host code, not a hardcoded station
-special case in the importer. Import binding generations fence retained function
-references after rebinding. Hosts close local provider scopes with imports/unlink!.
+Pure functions use :effects :pure. Read and mutation ports are explicit and
+scoped to the authenticated subject and authorized resource. Membership comes
+from the provider, not caller headers or arguments. A host resolver may map an
+object argument to its owning resource. Workstation's initial surface remains
+read-only: services-in and inspect.
 
-For a separate VM, change the realm binding to :transport :remote and configure
-:world, a local interface :source, :url ending in /realms/v1, :issuer-public, and
-:token-file. A trusted host may instead supply :token-for to obtain a credential
-for the current subject and request. The app code stays the same. The example
-uses files for a narrow rehearsal; a production per-person credential broker has
-not been installed. A person's credential cannot stand in for another user.
-Application-only jobs need their own explicit identity, rights and membership.
+* Identity and remote calls
 
-* Generic identity, safe ingress
+auth.identity uses the runtime's registered callable context. Native tasks and
+Env conveyance carry it and retain its executable dependencies automatically;
+nested extents restore the previous context. Verified ingress remains trusted
+host code. The example entry supplies a fixture identity, not a login shortcut.
 
-auth.identity carries a host-established subject, application and identity kind.
-auth.ingress normalizes the existing host adapters through auth.strategy:
+Tailscale, Headscale with Tailscale ingress, the existing Workstation NetBird
+gateway, and station identity headers normalize to the same subject/application/
+kind model through auth.strategy. A header requires trusted connecting-socket
+UID evidence or a host verifier. Tailscale-style ingress also rejects self/local
+sources; the configured gateway must sanitize headers and reject tagged/shared
+node human misattribution. Host configuration maps external subjects to station
+accounts before the app's provider-neutral person mapping runs. The adapters
+were contract tested; an actual mesh migration is separate operational work.
 
-| Adapter | Verified gateway claim |
-|---------+------------------------|
-| Tailscale | tailscale-user-login |
-| Headscale with Tailscale ingress | tailscale-user-login |
-| Workstation NetBird gateway | work-user-id |
-| Workstation identity gateway | x-station-viewer |
+For another VM, publish auth.contract/publish!'s bounded public interface data.
+Use :transport :remote with :interface, :world, :url and :issuer-public. The
+consumer needs no implementation source. Namespace, version and exported arities
+form a canonical interface fingerprint checked at both ends. Protocol version 2
+and namespace contract versions are separate from SDK versions.
 
-A header alone is insufficient. The IPv4 loopback adapter verifies the actual
-connecting socket UID from /proc/net/tcp against an explicit host allowlist.
-Tailscale-style ingress also requires current self addresses and a remote source;
-a local/self request is not a human. The trusted gateway must sanitize headers
-and reject tagged/shared-node human misattribution. The NetBird header is the
-existing Workstation gateway contract, not a claim that every NetBird deployment
-injects a user header. A host :verify callback can replace the header mechanism
-with another verified auth strategy while preserving the same application API.
+A remote realm may configure a private token file or a host :delegation broker.
+The broker uses issuer-file, authority-file, application, world, namespace and an
+export ceiling. It requires the current verified caller and current resource
+membership, then issues one short-lived signed namespace/operation/resource right.
+The app handles no bearer strings or issuer keys. The receiver independently
+checks signature, audience, expiry, revocation, application grant and fresh roles.
+Removing explicit revocation policy denies requests. A person's token cannot
+substitute another person.
 
-configured rereads /etc/workstation-endpoints.json on each request. The selected
-adapter maps the external identity to a canonical station account before the
-application's provider-neutral account-to-person callback runs. Switching the
-host provider or identity mapping requires no application branch. Unknown,
-ambiguous, missing, or unverifiable identities deny; no anonymous fallback or
-role inference exists. The four adapter contracts and one unchanged application
-mapping are tested with injected gateway evidence. Live Headscale/NetBird
-control-plane migration was not performed by these checks.
+Remote credentials require TLS by default. The isolated test explicitly enables
+:allow-loopback-http? for exact 127.0.0.1; this test transport does not defend
+against a hostile local listener. RPC rejects browser Origin and uses bounded
+connector.transport requests without redirects or automatic retries.
 
-Cross-VM calls use existing Biscuit authority and attenuation/revocation checks.
-Audience, expiry, subject, application, identity kind and exact
-[namespace operation resource] rights are checked. The provider rereads issuer
-and explicit revocation data each request, then independently checks current
-roles. Missing revocation policy denies. Wire fields cannot install an identity,
-role, proof receipt, or callback.
+* Assurance and lifetime
 
-* What the logic checks establish
+auth.logic checks the actual source and transitive helper graph through existing
+compiler ANF/footprint analysis. Explicit resource ports are modeled with unknown
+finite results, so branches cannot disappear through constant stubs. Purity
+annotations are checked assertions. Ambient I/O, opaque calls, top-level effects,
+unsupported signatures and unsupported metadata refuse publication. The check is
+bound to source, compiler generation and exact executable identities.
 
-auth.logic reads actual source, builds a local helper call graph, lowers explicit
-resource ports into an analysis model with unconstrained finite return values,
-and invokes the existing system.analyze compiler/ANF footprint analysis. It
-infers pure, read, or effectful classifications and checks transitive ports
-against each export's budget. ^:pure is an optional assertion that is checked,
-not trusted. Ambient I/O, dynamic opaque calls, top-level effects, unsupported
-metadata/imports, and unsupported function signatures refuse publication.
+Veritas exhausts all 32 boolean combinations of the actual entry gate:
+authentication, application, role, resource and current code. veritas.assurance
+preserves modality; samples, unknown results and solver claims are not promoted
+to proofs. No caller-supplied proof receipt is accepted as authority.
 
-This initial admitted fragment supports fixed arguments, ordinary pure helpers,
-closures and supported pure core operations, plus explicit auth.resource ports.
-It does not support arbitrary existing modules, live database handles, PIDs, or
-remote closures. Unsupported analysis fails closed instead of assuming purity.
-The model, compiler, analyzer, runtime resource guards, host ports, identity
-verifiers and operator policy remain trusted components; no whole-runtime formal
-verification or OS sandbox is claimed.
+This covers an admitted source/ANF fragment and finite policy, not arbitrary
+programs, termination, the whole compiler/runtime or filesystem semantics. Host
+ports, verifiers, compiler/analyzer, operator policy and runtime guards remain
+trusted components. PIDs, Env handles, callbacks and arbitrary executable values
+never cross the finite-data boundary.
 
-veritas.assurance composes structural checks and actual finite Veritas evidence.
-It preserves modality: :witnessed, :solver-claim and :unknown never become a proof.
-Veritas exhausts all 32 boolean combinations of the actual five-gate policy:
-authenticated AND application AND role AND resource AND current code. This is
-an exhaustive result for that finite gate, not a theorem about arbitrary source
-or filesystem paths. The loader recomputes evidence before evaluation; callers
-cannot present a success receipt as authority. Exact source and compiled module
-identity are checked again under a code lease at invocation.
+Warm local providers are realm services. Their scopes close on normal stop and
+owner death. A later call can reacquire a crashed provider; an interrupted call
+is never replayed. Relinking retires old function references. Repeated activation
+reuses unchanged bindings; changed source/interface data is admitted again.
+Embedded hosts close explicit imports with imports/close!. A remote failure can
+still have an uncertain outcome. Real mutation ports must own durable idempotency
+and recoverable receipts.
 
-* Wire, failures and ownership
+There is one authoritative provider per account and one owner per domain writer.
+No consensus layer is needed for namespace lookup or inventory projection. The
+VPS/fleet research places consensus and fencing at a future replicated writer.
+Cached observations and interface advertisements confer no authority.
 
-Local and remote calls enter auth.interface/dispatch and use the same finite
-JSON value subset. POST /realms/v1 uses protocol enchant.namespaces version 1,
-world, namespace, explicit contract version, operation, arguments and request ID.
-Unknown request fields reject. Contract and protocol versions are independent
-of the SDK version; mismatch refuses before execution, with no guessed downgrade.
-Responses correlate protocol, world, namespace and request ID. Unknown remote
-names stay strings, never newly interned atoms. No Env, executable value or PID
-crosses the boundary. Requests are capped at 64 KiB, replies at 1 MiB, with depth
-and collection limits.
+* Application integration and evidence
 
-The existing connector.transport provides bounded streaming, deadlines, TLS
-verification, no redirects and no implicit retries. Plain HTTP is permitted only
-for exact 127.0.0.1. The provider binds loopback and rejects browser Origin.
-The current OTP logs that its optional max_body_size request setting is ignored;
-successful response streaming and this provider's own encoded replies remain
-bounded. These checks target configured providers, not arbitrary hostile HTTP
-servers.
+Team Machine Next consumes the namespace; Workstation owns its inventory and
+resource-port adapters under services/src/workstation. Project roles bind stable
+subjects to physical project roots. Successful refresh replaces saved observations;
+failure retains the previous values, which expire locally after at most 15 seconds.
+Only currently resolvable folders enter the inventory. No secondary scanner or
+service registry is added.
 
-Ordinary catch receives mapped auth errors. A remote call can still be unavailable
-or have an uncertain outcome. BEAM supervision does not remove network partitions
-or create exactly-once writes. Real mutation ports must implement domain-owned
-durable idempotency and recoverable receipts before automatic recovery is safe.
+The canonical checks are test/bl/auth/namespace*_test.bl. check_namespaces.py
+runs independent VMs with distinct immutable SDKs, a source-free consumer
+interface, temporary issuer material, live role/revocation changes and the host
+credential broker. It stops its provider and removes its private temporary state.
 
-The station authority binds project IDs to canonical physical folders and stable
-subjects to project roles. Aliases cannot silently widen a stored physical root.
-Only services with a currently resolvable folder enter the inventory; saved
-workers and stopped services remain visible when their folder exists. Successful
-Team Machine refresh replaces saved observations, including removals. Failure
-retains the previous observations, which expire locally after at most 15 seconds.
-Browser place membership still controls reading that deliberately shared view.
-A stored observation never grants permission to invoke a provider operation.
-
-There is one authoritative provider per account and one owner of each domain
-writer. No consensus layer is needed for this projection. The inspected VPS/fleet
-spikes place consensus and fencing at a future replicated writer, not in namespace
-lookup. Advertisements or cached observations must not grant write authority.
-
-* Qualification and activation
-
-Use one capped check at a time. Focused tests live in test/auth_logic_test.bl,
-auth_ingress_test.bl and auth_namespace_test.bl. Team Machine's station/model/app
-checks exercise its projection and persisted replacement. check_namespaces.py
-runs two real VMs using different immutable SDK selections, ordinary require and
-calls, temporary signed credentials, revocation and live role/source changes;
-it stops the provider and removes its temporary authority afterward.
-
-test/inspect_namespace_station.bl performs read-only calls through Team Machine's
-actual import against Workstation's current inventory. The private authority
-provisioner refuses to overwrite existing policy or issuer files. It creates
-only viewer membership for the five existing project roots; credentials are
-mode 0600 inside a mode 0700 directory and are never printed.
-
-Qualified on 2026-11-14: all 197 assertions in six focused suites passed,
-followed by a 14-assertion namespace lifecycle recheck (overlapping the first
-run). The independent two-SDK rehearsal passed 12 assertions. The final real
-station read returned 111 observations across five projects, with every folder
-checked against its project boundary. No production data was mutated.
-
-Results, source hashes, memory peaks and precise limitations are recorded in
-evidence/namespaces-qualification.json. evidence/qualification.json retains the
-previous folder-RPC prototype's historical results; src/service_world/core.bl's
-old dispatcher remains for compatibility experiments and is not Team Machine's
-current API. Its finite-data helpers and station inventory adapter are reused.
-
-No SDK pins changed, no SDK was built for this source prototype, no public endpoint
-or NixOS service was installed, and no production service was restarted. The
-shared source checkout remains an explicit env.bl dependency. Production
-activation follows the existing application release workflow.
+Earlier source prototype results remain in evidence/qualification.json and
+evidence/namespaces-qualification.json. The source prototype is retained at Git
+ref refs/archive/service-world-source-prototype with a local recovery bundle.
+They are historical results, not qualification of the native SDK. Native SDK,
+example and application results are recorded separately after final qualification.
