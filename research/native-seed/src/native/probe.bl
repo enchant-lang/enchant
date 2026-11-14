@@ -91,15 +91,22 @@
          (recur (concat (rest todo) extra) (disj active ns) (conj done ns)
                 (conj order ns) (assoc units ns unit)))))))))))
 (defn inventory [closure]
- (let [all (mapcat (fn [ns] (mapcat #(nodes (:node %)) (:defs (get (:units closure) ns)))) (:order closure))]
-  {:operations (vec (sort-by str (frequencies (map :op all))))
-   :remotes (vec (sort-by str (distinct (keep (fn [n] (when (= :remote (:op n))
-                       [(atom-text (:mod n)) (atom-text (:fun n)) (count (:args n))])) all))))
-   :globals (vec (sort-by str (distinct (keep (fn [n] (when (= :global (:op n)) [(:ns n) (:name n)])) all))))
-   :bindings (vec (distinct (keep (fn [n] (when (= :binding (:op n)) (:reference n))) all)))
-   :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
-            {:namespace ns :path (:path u) :sha256 (:source-sha256 u)
-             :definitions (count (:defs u)) :requires (:requires u)})) (:order closure))}))
+ (let [facts
+  (loop [todo (mapcat (fn [ns] (map :node (:defs (get (:units closure) ns)))) (:order closure))
+         operations {} remotes #{} globals #{} bindings #{}]
+   (if (empty? todo)
+    {:operations (vec (sort-by str operations)) :remotes (vec (sort-by str remotes))
+     :globals (vec (sort-by str globals)) :bindings (vec (sort-by str bindings))}
+    (let [n (first todo) op (:op n)]
+     (recur (concat (anf/executable-children n) (rest todo))
+      (assoc operations op (inc (get operations op 0)))
+      (if (= op :remote) (conj remotes [(atom-text (:mod n)) (atom-text (:fun n)) (count (:args n))]) remotes)
+      (if (= op :global) (conj globals [(:ns n) (:name n)]) globals)
+      (if (= op :binding) (conj bindings (:reference n)) bindings)))))]
+  (assoc facts :units
+   (mapv (fn [ns] (let [u (get (:units closure) ns)]
+    {:namespace ns :path (:path u) :sha256 (:source-sha256 u)
+     :definitions (count (:defs u)) :requires (:requires u)})) (:order closure)))))
 (File/mkdir_p! out)
 (File/mkdir_p! (str out "/units"))
 (def providers (provider-sources))
