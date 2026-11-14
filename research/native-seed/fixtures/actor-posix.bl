@@ -1,0 +1,68 @@
+; Actual canonical BL actors + Source timer + native eventfd input, not a raw
+; h-run-turn probe. The worker cannot finish until a Source actor releases it.
+(ns native.actor-posix)
+
+(defn ap-check [label actual expected]
+ (if (host/eq actual expected) (host/write (str "PASS " label))
+  (host/raise (str "FAIL " label ": " (host/describe actual)))))
+
+(defn ap-await [job token]
+ (native.readiness/watch! job token)
+ (receive [:ffi-ready found result] :when (= found token) result
+  (after 5000 (host/raise "native completion did not reach canonical receive"))))
+
+(defn ap-await-entered [library attempts]
+ (let [probe (native.readiness/submit! library "bl_fixture_entered" 0)
+       entered (ap-await probe :entered)]
+  (native.readiness/close-job! probe)
+  (if (= entered 1) true
+   (if (= attempts 0) (host/raise "foreign worker never entered its gate")
+    (recur library (- attempts 1))))))
+
+(defn ap-peer [parent job]
+ ; The original scheduler must wake this real deadline while the gated
+ ; foreign call is still blocked, then deliver this message through rt-send.
+ (let [before (host/now)]
+  (receive :never :unexpected
+   (after 20
+    (rt-send parent [:peer-progress (not (native.host/ffi-ready? job))
+                     (- (host/now) before)])))))
+
+(defn main []
+ (native.host/clock-real!)
+ (native.readiness/install!)
+ (rt-register-input!)
+ (let [library (native.readiness/open-library! (native.readiness/fixture-library))
+       job (native.readiness/submit! library "bl_fixture_gated" 500)
+       start (host/now)]
+  (native.readiness/watch! job :blocked)
+  (ap-check "ffi-worker-entered-real-blocking-call" (ap-await-entered library 1000) true)
+  (let [pair (rt-spawn-monitor ap-peer [(rt-self) job]) peer (nth pair 0) reference (nth pair 1)]
+   (let [observation
+         (receive [:peer-progress pending elapsed] [pending elapsed]
+          (after 5000 (host/raise "canonical peer could not progress during FFI")))]
+    (ap-check "canonical-peer-progresses-while-worker-blocked" (first observation) true)
+    (ap-check "canonical-timer-uses-real-monotonic-clock" (>= (second observation) 20) true))
+   (ap-check "canonical-peer-normal-death-cleans-monitor"
+    (receive [:down ref :process pid reason] :when (= ref reference) [pid reason]
+     (after 5000 :timeout)) [peer :normal]))
+  (ap-check "worker-remains-blocked-until-source-release" (native.host/ffi-ready? job) false)
+  (ap-check "pending-ffi-retains-native-library"
+   (try (native.readiness/close-library! library) :closed (catch error :busy)) :busy)
+  (let [release (native.readiness/submit! library "bl_fixture_release" 1)]
+   (ap-check "source-releases-worker-through-scalar-ffi" (ap-await release :released) 1)
+   (native.readiness/close-job! release))
+  ; No Source deadline remains: unchanged rt-sched-loop must use wait-input.
+  (ap-check "eventfd-wakes-canonical-input-sink-and-receive"
+   (receive [:ffi-ready :blocked result] result) 501)
+  (ap-check "blocking-result-owned-until-source-close" (native.host/ffi-result job) 501)
+  (ap-check "blocking-call-observed-by-real-clock" (>= (- (host/now) start) 500) true)
+  (native.readiness/close-job! job)
+  (native.readiness/close-library! library)
+  (let [stats (native.readiness/stats)]
+   (ap-check "readiness-entered-canonical-timed-wait" (> (:timed-waits stats) 0) true)
+   (ap-check "readiness-entered-canonical-input-wait" (> (:input-waits stats) 0) true)
+   (ap-check "poll-observed-real-eventfd-wake" (> (:ready-wakes stats) 0) true)
+   (ap-check "source-released-jobs-and-libraries" [(:jobs stats) (:libraries stats)] [0 0]))
+  (native.readiness/uninstall!)
+  (host/write "NATIVE_ACTOR_POSIX_OK")))
