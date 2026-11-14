@@ -24,6 +24,7 @@ try{
  for(const size of [{name:'phone',width:390,height:844,mobile:true},{name:'desktop',width:1440,height:1000,mobile:false}]){
   await call({op:'viewport',...size});
   for(const [theme,value] of [['day','light'],['night','dark']]){
+   await evaluate("(()=>{try{localStorage.clear()}catch{}return true})()");
    await call({op:'navigate',url:'file://'+join(output,'index.html')+'#a-good-place-to-start-again'});
    await evaluate(`document.documentElement.dataset.theme='${value}'`);
    check(size.name+' '+theme+': introduction visible',await evaluate("document.querySelector('#s-a-good-place-to-start-again').getClientRects().length>0"));

@@ -20,7 +20,7 @@ for name in ['dossier/roster.bl', 'dossier/roster/model.bl', 'dossier/roster/vie
     assert sha(kit / name) == sha(Path('/home/othman/projects/enchanted-skills/bl-org-dossier/kit') / name)
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 paths = [Path(__file__), P / 'PROJECT.bl.org', P / 'render-project-handoff.bl', P / 'sdk-pin.json',
-         P / 'src/formal/review-svg.bl']
+         P / 'src/formal/review-svg.bl', P / 'dossier-local.css']
 digests = {}
 for path in paths:
     name = str(path.relative_to(R))
