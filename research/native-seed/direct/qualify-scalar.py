@@ -48,6 +48,8 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, default=base / "evidence/direct-scalar")
     parser.add_argument("--build-timeout", type=int, default=120)
     parser.add_argument("--run-timeout", type=int, default=30)
+    parser.add_argument("--gc-interval", type=int, default=997,
+                        help="force GC every N completed C steps; 0 disables the explicit stress reruns")
     args = parser.parse_args()
     out = args.out.resolve()
     host = args.host.resolve()
@@ -57,7 +59,7 @@ def main() -> int:
     # No old green evidence survives an unsuccessful new attempt.
     report_path.unlink(missing_ok=True)
     for name in ("compile.log", "run.log", "scheme-to-c.log", "clang-native.log", "native.log",
-                 "llvm-emit.log", "llvm-link.log", "llvm.log"):
+                 "llvm-emit.log", "llvm-link.log", "llvm.log", "gc-native.log", "gc-llvm.log"):
         (evidence / name).unlink(missing_ok=True)
     report = {
         "status": "running", "scope": "direct C scalar ABI over shared Gambit host",
@@ -75,11 +77,15 @@ def main() -> int:
         if changed:
             raise RuntimeError("qualification inputs changed: " + ", ".join(changed))
 
-    def run(label: str, argv: list[str], timeout: int) -> str:
+    def run(label: str, argv: list[str], timeout: int, gc_interval: int = 0) -> str:
         started = time.monotonic()
+        environment = os.environ.copy()
+        environment.pop("BL_NATIVE_C_GC_INTERVAL", None)
+        if gc_interval:
+            environment["BL_NATIVE_C_GC_INTERVAL"] = str(gc_interval)
         process = subprocess.Popen(argv, cwd=out, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, start_new_session=True)
+                                   text=True, start_new_session=True, env=environment)
         timed_out = False
         try:
             output, _ = process.communicate(timeout=timeout)
@@ -100,7 +106,8 @@ def main() -> int:
         (evidence / (label + ".log")).write_text(output)
         report["runs"].append({"label": label, "argv": argv,
                                "seconds": round(time.monotonic() - started, 3),
-                               "exit": process.returncode, "timed_out": timed_out})
+                               "exit": process.returncode, "timed_out": timed_out,
+                               "forced_gc_interval": gc_interval})
         write_report()
         unchanged()
         if timed_out:
@@ -112,6 +119,8 @@ def main() -> int:
     try:
         if not (1 <= args.build_timeout <= 120 and 1 <= args.run_timeout <= 30):
             raise RuntimeError("timeouts must remain within the 120s compiler / 30s runtime deadlines")
+        if args.gc_interval < 0:
+            raise RuntimeError("GC interval must be zero or a positive exact integer")
         tools_path = base / "toolchain-pin.json"
         tools = json.loads(tools_path.read_text())
         gambit = Path(tools["gambit"])
@@ -244,8 +253,31 @@ def main() -> int:
         llvm_transcript = run("llvm", [str(gambit / "bin/gsi"), str(llvm_unit)], args.run_timeout)
         if llvm_transcript != transcript:
             raise RuntimeError("native C and LLVM scalar transcripts differ")
+        gc_artifacts = []
+        gc_witnesses = {}
+        for label, unit in (("gc-native", compiled), ("gc-llvm", llvm_unit)) if args.gc_interval else ():
+            driver = out / (label + ".scm")
+            driver.write_text("(load " + json.dumps(str(unit), ensure_ascii=False) + ")\n"
+                "(if (not (= native-c-gc-interval " + str(args.gc_interval) + ")) (error \"GC interval mismatch\"))\n"
+                "(if (not (> native-c-forced-gc-count 0)) (error \"no forced collections observed\"))\n"
+                "(if (not (= native-c-forced-gc-count (quotient native-c-step-count native-c-gc-interval))) (error \"GC count mismatch\"))\n"
+                "(display \"NATIVE_DIRECT_GC {\\\"steps\\\":\") (display native-c-step-count)\n"
+                "(display \",\\\"collections\\\":\") (display native-c-forced-gc-count)\n"
+                "(display \",\\\"interval\\\":\") (display native-c-gc-interval) (display \"}\\n\")\n")
+            gc_output = run(label, [str(gambit / "bin/gsi"), str(driver)], args.run_timeout, args.gc_interval)
+            body, separator, witness = gc_output.rpartition("NATIVE_DIRECT_GC ")
+            if not separator or body != transcript:
+                raise RuntimeError(label + " changed the exact ten-check scalar transcript")
+            observation = json.loads(witness)
+            if (observation.get("interval") != args.gc_interval or observation.get("collections", 0) <= 0
+                    or observation["collections"] != observation["steps"] // args.gc_interval):
+                raise RuntimeError(label + " did not witness the requested collections")
+            gc_witnesses[label] = observation
+            gc_artifacts.extend([driver, evidence / (label + ".log")])
+        if args.gc_interval and gc_witnesses["gc-native"] != gc_witnesses["gc-llvm"]:
+            raise RuntimeError("native C and LLVM GC witnesses differ")
         unchanged()
-        artifacts = [compiled, generated, adapted, llvm_ir, llvm_unit,
+        artifacts = [compiled, generated, adapted, llvm_ir, llvm_unit, *gc_artifacts,
                      *[evidence / (label + ".log") for label in
                        ("scheme-to-c", "clang-native", "native", "llvm-emit", "llvm-link", "llvm")]]
         if reference.is_file():
@@ -253,6 +285,8 @@ def main() -> int:
         report.update({"status": "pass", "checks": passed,
                        "inputs_after": {name: sha(Path(name)) for name in before},
                        "trace": order + ["SCALAR_FINALLY once"], "llvm_transcript_equal": True,
+                       "gc_stress": {"enabled": bool(args.gc_interval), "interval": args.gc_interval,
+                                     "witnesses": gc_witnesses, "recompiled": False},
                        "artifacts": {str(path): {"sha256": sha(path), "bytes": path.stat().st_size}
                                      for path in artifacts}})
         write_report()

@@ -4,6 +4,40 @@
 (define native-c-closure-marker (list 'native-c-closure-marker-v1))
 (define native-c-step-count 0)
 (define native-c-gc-between-steps? #f)
+(define native-c-forced-gc-count 0)
+(define native-c-gc-interval
+ (let ((text (getenv "BL_NATIVE_C_GC_INTERVAL")))
+  (if (not text) 0
+   (let ((n (string->number text)))
+    (if (not (and (integer? n) (exact? n) (> n 0)))
+     (error "BL_NATIVE_C_GC_INTERVAL requires a positive exact integer")) n))))
+(define (native-c-after-step!)
+ (set! native-c-step-count (+ native-c-step-count 1))
+ (if (or native-c-gc-between-steps?
+         (and (> native-c-gc-interval 0) (= (modulo native-c-step-count native-c-gc-interval) 0)))
+  (begin (##gc) (set! native-c-forced-gc-count (+ native-c-forced-gc-count 1)))))
+(define (native-c-caught-frames trace)
+ ;; The compiler's normalized __STACKTRACE__ list is distinct from the raw
+ ;; {(),frames} envelope passed verbatim to an explicit re-raise.
+ (if (and (bl-tag? trace 'tuple) (= (bl-count trace) 2)) (bl-nth trace 1) trace))
+(define native-c-recursion-marker (list 'native-c-recursion-marker))
+(define (native-c-new-recursion-cell) (vector native-c-recursion-marker #f))
+(define (native-c-recursion-cell? value)
+ (and (vector? value) (= (vector-length value) 2)
+      (eq? (vector-ref value 0) native-c-recursion-marker)))
+(define (native-c-recursion-ref cell)
+ (if (not (and (native-c-recursion-cell? cell) (vector-ref cell 1)))
+  (error "direct C recursive dispatcher used before initialization"))
+ (vector-ref cell 1))
+(define (native-c-fill-recursion! cell value)
+ (if (not (and (native-c-recursion-cell? cell) (not (vector-ref cell 1))
+               (native-multi-callable? value)))
+  (error "direct C recursive dispatcher initialization contract"))
+ (vector-set! cell 1 value) value)
+(for-each (lambda (entry)
+ (native-mark-host-callable! (car entry)) (bl-register-callable! (car entry) (cdr entry)))
+ (list (cons native-c-new-recursion-cell 0) (cons native-c-recursion-ref 1)
+       (cons native-c-fill-recursion! 2) (cons native-c-caught-frames 1)))
 (define (native-c-closure? v)
  (and (vector? v) (= (vector-length v) 7)
       (eq? (vector-ref v 0) native-c-closure-marker)))
@@ -124,8 +158,7 @@
   ;; exception happens. No foreign continuation is captured across a C frame.
   (let* ((unit (vector-ref machine 0))
          (action ((vector-ref unit 0) machine))
-         (_ (begin (set! native-c-step-count (+ native-c-step-count 1))
-              (if native-c-gc-between-steps? (##gc))))
+         (_ (native-c-after-step!))
          (done?
           (case action
            ((1) (native-c-apply-action machine

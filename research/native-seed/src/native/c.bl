@@ -48,11 +48,12 @@
        bound (mapcat (fn [clause] (mapcat anf/pattern-vars (:pats clause))) clauses)]
   (reduce (fn [out child] (into out (names-in child))) (into own bound)
    (filter some? (anf/executable-children node)))))
-(defn fresh-name [prefix node]
- (let [used (names-in node)]
+(defn fresh-name-used [prefix node additional]
+ (let [used (into (names-in node) additional)]
   (loop [i 0]
    (let [candidate (str prefix i)]
     (if (contains? used candidate) (recur (inc i)) candidate)))))
+(defn fresh-name [prefix node] (fresh-name-used prefix node #{}))
 (declare lower)
 
 (defn lower-arguments [s arguments slots env continuation options]
@@ -154,7 +155,7 @@
  (let [stack (BeamLisp.CompilerData/catch_stack_bindings)
        trace (fresh-name "__native_c_trace_" n) kind (fresh-name "__native_c_kind_" n) reason (fresh-name "__native_c_reason_" n)
        with-trace (fn [body]
-         {:op :let :name (:frames stack) :init (variable trace) :ann (:ann n)
+         {:op :let :name (:frames stack) :init (internal "native-c-caught-frames" [(variable trace)]) :ann (:ann n)
           :body {:op :let :name (:raw stack) :init (variable trace) :body body :ann (:ann n)}})
        catches (map (fn [clause]
          (assoc clause :pats (conj (vec (:pats clause)) {:pop :pvar :name trace})
@@ -173,7 +174,69 @@
        [s arguments] (lower s arguments env args invoke false inner-options)]
   (lower s callee env f arguments false inner-options)))
 
+(defn self-constructor-target [node options]
+ ; Only the canonical inert (self self) constructor is elided. Authored calls
+ ; still pass through normal C invocation and the shared callable dispatcher.
+ (when (and (= :apply (:op node)) (= :var (:op (:fn node)))
+            (= 1 (count (:args node))) (= :var (:op (first (:args node))))
+            (= (:name (:fn node)) (:name (first (:args node)))))
+  (get (:direct-selves options) (:name (:fn node)))))
+
+(defn dispatch-count? [node]
+ (and (= :lit (:op node)) (erlang/is_integer (:val node)) (>= (:val node) 0)))
+(defn dispatch-value? [node]
+ ; Exact finite container shape from system.ir/dispatch-layout. Keep the small
+ ; recognition here rather than import the system graph into the seed compiler.
+ (when (and (= :tuple (:op node)) (= 3 (count (:elems node))))
+  (let [[head fixed variadic] (:elems node) pairs (:pairs fixed)]
+   (and (= :lit (:op head)) (erlang/=:= :"$blfn" (:val head))
+        (= :map (:op fixed)) (erlang/is_list pairs)
+        (every? (fn [pair] (and (or (erlang/is_list pair) (vector? pair)) (= 2 (count pair))
+                                  (dispatch-count? (first pair)))) pairs)
+        (= (count pairs) (count (distinct (map (fn [pair] (:val (first pair))) pairs))))
+        (or (and (= :lit (:op variadic)) (nil? (:val variadic)))
+            (and (= :tuple (:op variadic)) (= 2 (count (:elems variadic)))
+                 (dispatch-count? (first (:elems variadic)))))))))
+(defn dispatch-arm [value arity target label]
+ (let [parts (BeamLisp.CompilerData/self_application_parts value)
+       function (if parts (:inner parts) value)]
+  (when-not (and (= :fn (:op function)) (erlang/is_list (:clauses function))
+                (seq (:clauses function))
+                (every? #(and (erlang/is_list (:pats %)) (= arity (count (:pats %)))) (:clauses function)))
+   (fail value))
+  {:op :direct-dispatch-arm :function value :target target :direct-source-fn label :ann (:ann value)}))
+
+(defn dispatch-node [node env]
+ ; The private cell is captured by every arm, then filled with the completed
+ ; tuple. No user body executes while these inert function values are built.
+ (let [target (fresh-name-used "__native_c_dispatch_self_" node (keys env))
+       result (fresh-name-used "__native_c_dispatch_value_" node (conj (set (keys env)) target))
+       [head fixed variadic] (:elems node)
+       label (:direct-source-fn node)
+       fixed (assoc fixed :pairs (mapv (fn [[arity value]]
+          [arity (dispatch-arm value (:val arity) target label)]) (:pairs fixed)))
+       variadic (if (= :tuple (:op variadic))
+                  (assoc variadic :elems [(first (:elems variadic))
+                    (dispatch-arm (second (:elems variadic)) (inc (:val (first (:elems variadic)))) target label)]) variadic)
+       container (assoc node :op :direct-dispatch-container :elems [head fixed variadic])]
+  {:op :let :name target :init (internal "native-c-new-recursion-cell" []) :ann (:ann node)
+   :body {:op :let :name result :init container :ann (:ann node)
+          :body (internal "native-c-fill-recursion!" [(variable target) (variable result)])}}))
+
+(defn lower-dispatch-arm [s node env destination next options]
+ (let [function (:function node) parts (BeamLisp.CompilerData/self_application_parts function)]
+  (cond
+   parts
+    (lower-function s (assoc (:inner parts) :direct-source-fn (:direct-source-fn node))
+     env destination next
+     (assoc options :direct-selves (assoc (or (:direct-selves options) {}) (:name function) (:target node))))
+   (= :fn (:op function))
+    (lower-function s (assoc function :direct-source-fn (:direct-source-fn node)) env destination next options)
+   :else (fail function))))
+
 (defn lower [s node env destination next tail? options]
+ (if-let [target (self-constructor-target node options)]
+  (lower-service s "native-c-recursion-ref" [(variable target)] env destination next tail? options)
  (case (:op node)
   :lit (let [[s constant] (pool s (scalar/literal (:val node)))]
          (block s (str " BLC_PUT(m," destination "," (k constant) ");" (jump next))))
@@ -224,7 +287,11 @@
           (lower s (:subj node) env subject pack false options))
   :recv (lower s (receive-node node options (:next s)) env destination next tail? options)
   :try (lower s (try-node node (:next s)) env destination next tail? options)
-  :tuple (lower-service s "bl-make-tuple" (:elems node) env destination next tail? options)
+  :tuple (if (dispatch-value? node)
+           (lower s (dispatch-node node env) env destination next tail? options)
+           (lower-service s "bl-make-tuple" (:elems node) env destination next tail? options))
+  :direct-dispatch-container (lower-service s "bl-make-tuple" (:elems node) env destination next tail? options)
+  :direct-dispatch-arm (lower-dispatch-arm s node env destination next options)
   :map (lower-service s "bl-map" (mapcat identity (:pairs node)) env destination next tail? options)
   :cons (lower-service s "cons" [(:head node) (:tail node)] env destination next tail? options)
   :struct (if (= :Elixir.BeamLisp.Vector (:mod node))
@@ -233,7 +300,7 @@
              (fail node))
             (lower-service s "bl-struct" [(lit (:mod node)) {:op :map :pairs (:fields node) :ann (:ann node)}]
               env destination next tail? options))
-  (fail node)))
+  (fail node))))
 
 (defn emit-unit
  "Return direct C and a literal/FFI wrapper. Options use the SAME checked
@@ -260,11 +327,28 @@
               :primitive-services (:services s) :source-interpreter false :anf-interpreter false
               :program-control :emitted-c :value-services :shared-native-host}}))
 
+(defn export-shape [node]
+ ; Metadata comes from the compiler's actual finite function value, never from
+ ; parsing authored parameter syntax or guessing an emitted C entry's arity.
+ (let [parts (BeamLisp.CompilerData/self_application_parts node)]
+  (cond
+   parts (export-shape (:inner parts))
+   (dispatch-value? node)
+    (let [[_ fixed variadic] (:elems node)]
+     {:fixed (vec (sort (map (fn [[arity _]] (:val arity)) (:pairs fixed))))
+      :variadic (when (= :tuple (:op variadic)) (:val (first (:elems variadic))))})
+   (and (= :fn (:op node)) (seq (:clauses node)))
+    (let [arities (vec (distinct (map #(count (:pats %)) (:clauses node))))]
+     (when (= 1 (count arities)) {:fixed arities :variadic nil}))
+   :else nil)))
 (defn definitions-node [definitions]
  {:op :do :ann {}
   :stmts (mapv (fn [d]
    (if (:name d)
-    (internal "(lambda (ns name value) (native-register! ns name value) (native-intern ns name value) value)"
-     [(lit (:ns d)) (lit (:name d)) (assoc (:node d) :direct-source-fn (:name d))]) (:node d))) definitions)})
+    (let [shape (export-shape (:node d))]
+     (when (and (= :fn (:kind d)) (nil? shape)) (fail (:node d)))
+     (internal "(lambda (ns name value fixed variadic private) (native-register! ns name value) (native-intern ns name value) (native-put-meta ns name (bl-map (bl-key \"private\") private)) (if (not (bl-is-nil fixed)) (native-register-arities! ns name fixed variadic)) value)"
+      [(lit (:ns d)) (lit (:name d)) (assoc (:node d) :direct-source-fn (:name d))
+       (lit (:fixed shape)) (lit (:variadic shape)) (lit (boolean (:private? d)))])) (:node d))) definitions)})
 (defn emit-definitions [definitions options]
  (emit-unit (definitions-node definitions) options))
