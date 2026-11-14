@@ -71,12 +71,14 @@
                          {:sdk observed-sdk-descriptor :options options :source (:source-sha256 prepared)
                           :macro-providers (vec (filter :macro-provider? providers))} (list :deterministic)))
               checkpoint (str out "/units/" ns ".etf")
-              cached (when (File/regular? checkpoint)
+              cached (when (and (File/regular? checkpoint) (File/regular? (str checkpoint ".sha256")))
                        (let [bytes (File/read! checkpoint)]
                         (assert (< (erlang/byte_size bytes) 33554432))
+                        (assert (= (sha bytes) (File/read! (str checkpoint ".sha256"))))
+                        (BeamLisp.CompilerData/check_closed_etf! bytes {:max-nodes 1000000 :max-bytes 33554432 :max-depth 128})
                         (erlang/binary_to_term bytes)))
               compiled (if (= unit-key (:identity cached)) (:unit cached)
-                          (build/compile-prepared prepared {:check-node identity}))
+                          (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key))
               refs (keep (fn [n] (when (= :remote (:op n)) (module-ns (:mod n))))
                          (mapcat #(nodes (:node %)) (:defs compiled)))
               extra (vec (distinct (filter #(and (not (contains? done %))
@@ -86,6 +88,7 @@
                      :module (BeamLisp.Link/module_for ns)
                      :base-module (BeamLisp.Emit/base_module_for ns))
               _ (File/write! checkpoint (erlang/term_to_binary {:identity unit-key :unit unit} (list :deterministic)))
+              _ (File/write! (str checkpoint ".sha256") (sha (File/read! checkpoint)))
               _ (println (str "NATIVE_CLOSURE_UNIT " ns " " (count (:defs unit))
                               (if (= unit-key (:identity cached)) " checkpoint" " compiled")))]
          ; Every unit is compiled ONCE. Additional module dependencies enqueue
