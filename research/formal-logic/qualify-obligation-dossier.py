@@ -148,6 +148,12 @@ probe = read(E / 'research-browser/audit.json')
 probe_exit = read(E / 'research-browser/exit.json')
 assert probe['passed'] and all(row['passed'] for row in probe['checks'])
 assert probe['snapshot']['revisions'] == 5 and probe['snapshot']['source_fixture_restored']
+fixture = read(E / 'research-browser/fixture-source-pin.json')
+assert probe['snapshot']['initial_sha256'] == fixture['production_snapshot_sha256'] == sha(snapshot_path)
+for relative, digests in fixture['files'].items():
+    assert sha(P / relative) == digests['source_sha256'] == digests['copied_sha256']
+    body = subprocess.check_output(['git', 'show', fixture['code_commit'] + ':research/formal-logic/' + relative], cwd=R)
+    assert hashlib.sha256(body).hexdigest() == digests['source_sha256']
 assert probe_exit['exit_code'] == 0 and probe_exit['runtime_retired'] and probe_exit['fixture_retired'] and probe_exit['host_stopped']
 probe_source = read(E / 'research-browser/source-pin.json')
 assert probe_source['sdk_pin'] == pin and probe_source['kit_state_sha256'] == sha(K)
@@ -171,7 +177,8 @@ report = {'schema': 'bl.obligation-dossier-qualification.v1', 'status': 'passed'
           'recorded_native_sdk_pin': recorded['sdk_pin'], 'checks': checks,
           'research_evidence': {'checks': 38, 'snapshot_sha256': sha(snapshot_path),
                                 'browser_checks': len(probe['checks']), 'actual_snapshot_revisions': 5,
-                                'browser_audit_sha256': sha(E / 'research-browser/audit.json'), 'visual_review': probe_visual},
+                                'browser_audit_sha256': sha(E / 'research-browser/audit.json'),
+                                'fixture_source_pin_sha256': sha(E / 'research-browser/fixture-source-pin.json'), 'visual_review': probe_visual},
           'host': host, 'kit_state_sha256': sha(K), 'rendering_sources': styles,
           'browser': {'focused_checks': len(audits['focused-browser']['checks']),
                       'full_checks': len(audits['full-browser']['checks']), 'visual_review': visual,

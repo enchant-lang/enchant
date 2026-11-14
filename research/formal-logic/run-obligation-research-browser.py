@@ -24,8 +24,16 @@ paths=['evidence/obligation-integration/qualification.json','evidence/obligation
        'evidence/word-integration/native-comparison.json','evidence/word-integration/corpus.json','evidence/word-integration/reader-one.json',
        'evidence/word-integration/reader-two.json','evidence/scalar-integration/word-native.json','evidence/scalar-integration/evidence-packets.json','dossier-local.css','presentation.css',
        'evidence/features.json','evidence/native.json','evidence/advanced.json']
+fixture_sources={}
 for relative in paths:
- dest=fixture/relative;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(P/relative,dest)
+ source=P/relative;name=str(source.relative_to(R))
+ assert subprocess.check_output(['git','show',commit+':'+name],cwd=R)==source.read_bytes()
+ dest=fixture/relative;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,dest)
+ assert sha(source)==sha(dest)
+ fixture_sources[relative]={'source_sha256':sha(source),'copied_sha256':sha(dest)}
+write('fixture-source-pin.json',{'code_commit':commit,'source_root':str(P),'files':fixture_sources,
+ 'production_snapshot_sha256':sha(P/'elements/word-answer-evidence.bl.org'),
+ 'scope':'Actual committed production records/data/styles copied byte-for-byte into the owned fixture. Only its snapshot store and owned JS basis are mutated by the browser scenario.'})
 (fixture/'ATLAS.bl.org').write_text('#+title: Controlled source-change browser check\n#+design: forest\n* Inspect the recorded evidence\n#+begin_research_element :id word-answer-evidence\nOwned fixture copied from actual qualified obligation evidence.\n#+end_research_element\n')
 with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
 unit='work-formal-obligation-research-browser-host-'+pin['engine_fingerprint'][:12]
