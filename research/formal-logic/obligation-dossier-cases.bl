@@ -1,0 +1,54 @@
+(ns formal.obligation-dossier-cases
+ (:require [formal.request-evidence :as evidence] [formal.finite-word-certificate :as finite]
+           [formal.request :as request] [formal.query :as q] [formal.term :as t]
+           [formal.question-graph :as qg] [formal.point-profile :as policy] [formal.backend :as backend]
+           [formal.data-graph :as graph] [bl.json :as json] [oracle]))
+(defn wire [data]
+ {:formal/data-graph 1 :profile graph/profile :root (:root data)
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)]) (:nodes data))})
+(defn original [consumer background]
+ (let [x (t/variable "dossier.premise.bit" [:bv 1]) zero (t/literal [:bv 1] 0) one (t/literal [:bv 1] 1)]
+  (request/prepare (qg/prepare (q/prove (t/eq x x)
+    {:id :dossier-premise-policy :vacuity consumer
+     :assumptions (if (= :inconsistent background) [(t/eq x zero) (t/eq x one)] [(t/eq x one)])
+     :observe {"input" x}})) {:policy {:profile policy/numeric-word}})))
+(defn expected [consumer background]
+ (cond (= :witnessed background) :accepted
+       (= :allow consumer) :accepted (= :report consumer) :reported
+       (= :inconsistent background) :rejected :else :incomplete))
+(defn run-case [consumer background]
+ (let [r (original consumer background) certificate (finite/candidate r)
+       candidate (evidence/propose r {:certificate certificate :feasibility {:strategy :finite}})
+       options {:feasibility-work-units (if (= :not-established background) 0 3600000)}
+       result (evidence/recheck r candidate options)]
+  (is (= :checked (get-in result [:proof-check :status]) (get-in result [:logical-conclusion :status])))
+  (is (= background (get-in result [:feasibility-check :feasibility])))
+  (is (= (expected consumer background) (get-in result [:conclusion :status])))
+  (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+  {:id (str (name consumer) "/" (name background)) :consumer consumer :background background
+   :request-reference (request/reference r) :subject-reference (request/subject-reference r)
+   :candidate candidate :packet (wire (evidence/pack r candidate)) :checking-options options :result result}))
+(deftest capture-real-policy-cases-for-the-dossier
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :dossier-check-must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    (fn []
+     (let [rows (vec (for [consumer [:allow :report :reject]
+                          background [:witnessed :inconsistent :not-established]] (run-case consumer background)))
+           r (request/for-backend (original :reject :witnessed) :oxiz)
+           first-row (first (filter #(= "reject/witnessed" (:id %)) rows))
+           certificate (graph/decode! (get-in first-row [:candidate :certificate-graph]))
+           other (evidence/recheck r (evidence/propose r {:certificate certificate :feasibility {:strategy :finite}}))]
+      (is (= 9 (count rows)))
+      (is (= :accepted (get-in other [:conclusion :status])))
+      (is (= (get-in first-row [:result :proof-check :statement]) (get-in other [:proof-check :statement])))
+      (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+      (when-let [path (System/get_env "FORMAL_OBLIGATION_DOSSIER_CASES")]
+       (File/write! path (json/encode {:schema "bl.obligation-dossier-cases.v1" :rows rows
+          :backend-fork {:backend :oxiz :result other} :sdk (System/get_env "BL_SDK_PRODUCT")
+          :native-exchanges 0 :oracle-calls @calls :source-connection :not-established :compiler-proof-authority false}
+          {:pretty 2}))))))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)

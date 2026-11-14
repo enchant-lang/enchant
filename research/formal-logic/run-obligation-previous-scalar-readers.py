@@ -70,15 +70,4 @@ for stage, mode in [('one','read'),('two','read'),('controls','controls')]:
     assert all(sha(R / name)==digest for name,digest in digests.items())
     results.append(result)
     print(json.dumps({'stage':stage,'status':'passed','solver_exchanges':0}),flush=True)
-assert results[0]['process']!=results[1]['process'] and results[0]['cwd']!=results[1]['cwd']
-assert results[0]['rows']==results[1]['rows']==read(B / 'reader-one.json')['rows']
-assert len(results[0]['rows'])==20 and results[0]['ledger'] is None and results[1]['ledger'] is None
-assert len(results[2]['controls'])==16 and all(row['status']=='refused' for row in results[2]['controls'])
-assert results[2]['rehashed-invalid-coordinate']=='independently-invalid'
-write(E / 'previous-scalar-readers-qualification.json',{'schema':'bl.obligation-sdk-previous-scalar-readers.v1','status':'passed',
-      'sdk_pin':pin,'recorded_producer_sdk_pin':producer,'source_sha256':digests,'code_commit':commit,
-      'records':20,'fresh_sdk_only_readers':2,'refusal_controls':16,
-      'independently_invalid_text_controls':len(results[2]['scalar-controls']['invalid-text-points']),'solver_exchanges':0,'oracle_calls':0,
-      'artifact_sha256':{str(f.relative_to(D)):sha(f) for f in sorted(D.glob('*')) if f.is_file()},
-      'checked_native_execution':False,'compiler_proof_authority':False,
-      'scope':'Actual prior scalar/word retained/fresh/supplied packets replayed with the new SDK. Producer and checker remain separate. The retired prior durable store is not recreated or claimed as reopened here.'})
+subprocess.run([sys.executable, str(P / 'qualify-obligation-previous-scalar-readers.py')], cwd=R, check=True)
