@@ -1,0 +1,63 @@
+(ns formal.finite-feasibility
+ (:require [formal.request :as request] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.finite-word-certificate :as finite]
+           [formal.request-point :as point] [formal.point-profile :as policy]))
+
+;; Pending isolated experiment. No Source/compiler or common answer authority.
+(def profile :bl/finite-assumption-feasibility-prototype-v1)
+(def allowance 3400000)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.finite-feasibility: " why) {}))))
+(defn background
+ "Derive the SAT question from the original graph without materializing
+  unfamiliar metadata or expanding argument trees. Preserve every assertion."
+ [original]
+ (let [r (request/check! original)
+       _ (require! (= policy/numeric-word (get-in r [:policy :profile])) "word semantic profile required")
+       data (graph/patch-map (get-in r [:subject :graph])
+              [[(graph/encode :mode) (graph/encode :sat)]
+               [(graph/encode :claim) (graph/encode nil)]
+               [(graph/encode :counterexample) (graph/encode nil)]])
+       derived (request/from-graph data {:policy finite/checking-policy :adapter (:adapter r)})
+       before (qg/field-graph (:subject r) :assertions)
+       after (qg/field-graph (:subject derived) :assertions)]
+  (require! (= (graph/bytes before) (graph/bytes after)) "complete original assertions must be unchanged")
+  {:request derived :connection {:kind :original-assertions-as-sat
+                                :original-subject-reference (request/subject-reference r)
+                                :background-subject-reference (request/subject-reference derived)
+                                :assertion-reference (graph/reference before)}}))
+(defn assess
+ "Prospectively reserve a finite search and one bounded witness replay.
+  A checked contradiction and a checked satisfying point remain different
+  evidence. Resource refusal establishes neither feasibility nor inconsistency."
+ ([original] (assess original {:work-units allowance}))
+ ([original options]
+  (require! (and (map? options) (= #{:work-units} (set (keys options)))
+                 (int? (:work-units options)) (<= 0 (:work-units options) 34000000)) "closed finite checking allowance required")
+  (let [r (request/check! original)
+        base {:profile profile :original-request-reference (request/reference r)
+              :original-subject-reference (request/subject-reference r)
+              :reservation {:required allowance :limit (:work-units options)
+                            :kind :conservative-finite-search-and-witness-replay}
+              :compiler-proof-authority false :checked-native-execution false
+              :source-connection :not-established}]
+   (if (< (:work-units options) allowance)
+    (assoc base :status :incomplete :feasibility :not-established :checker-invocation :not-run)
+    (try
+     (let [derived (background r) target (:request derived) certificate (finite/candidate target)
+           checked (finite/check target certificate)
+           common (assoc base :connection (:connection derived) :checking-request target
+                              :certificate certificate :finite-check checked)]
+      (cond
+       (and (= :checked (:status checked)) (= :unsatisfiable (:verdict checked)))
+        (assoc common :status :checked :feasibility :inconsistent :basis :finite-contradiction
+                      :trust (:trust checked))
+       (= :counterexample (:status checked))
+        (let [replayed (point/replay target (:point checked))]
+         (if (= :sat (:verdict replayed))
+          (assoc common :status :checked :feasibility :witnessed :basis :independent-point-replay
+                        :witness (:point checked) :point-check replayed
+                        :trust [:sdk-word-admission :sdk-word-point-semantics :bl-compiler :beam-runtime])
+          (assoc common :status :incomplete :feasibility :not-established :point-check replayed)))
+       :else (assoc common :status :incomplete :feasibility :not-established)))
+     (catch error (assoc base :status :incomplete :feasibility :not-established :reason (ex-message error))))))))
