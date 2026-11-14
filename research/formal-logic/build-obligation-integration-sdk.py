@@ -43,7 +43,7 @@ assert placement['device_opened_read_write'] and placement['empty_vm_created_and
 runtime_names = ['priv/lib/formal/' + name + '.bl' for name in
                  ['query', 'question-graph', 'graph-question', 'request', 'request-evidence',
                   'assumptions', 'feasibility', 'finite-feasibility', 'graph-integer-certificate',
-                  'obligation', 'proof-strategy', 'request-header', 'vacuity-policy']]
+                  'obligation-policy', 'proof-strategy', 'request-header', 'vacuity-policy']]
 floor_path = P / 'evidence/numeric-semantics/compiler-floor-install.json'
 floor = read(floor_path)
 assert floor['status'] == 'passed' and floor['manifest_last'] and floor['sdk_produced'] is False

@@ -55,7 +55,7 @@ changes = {name: {'before': old_sources.get(name), 'after': all_sources.get(name
 expected = {'priv/lib/formal/' + name + '.bl' for name in
             ['query', 'question-graph', 'graph-question', 'request', 'request-evidence',
              'assumptions', 'feasibility', 'finite-feasibility', 'graph-integer-certificate',
-             'obligation', 'proof-strategy', 'request-header', 'vacuity-policy']}
+             'obligation-policy', 'proof-strategy', 'request-header', 'vacuity-policy']}
 assert set(changes) == expected
 unchanged = {name: metadata[name] for name in ('platform', 'formalWorker')}
 assert all(old_metadata[name] == value for name, value in unchanged.items())

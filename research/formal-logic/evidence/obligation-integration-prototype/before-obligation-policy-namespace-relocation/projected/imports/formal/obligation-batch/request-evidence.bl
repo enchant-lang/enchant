@@ -1,0 +1,134 @@
+(ns formal.obligation-batch.request-evidence
+ (:require [formal.obligation-batch.request :as request] [formal.obligation-batch.request-answer :as answer]
+           [formal.data-graph :as graph] [formal.obligation-batch.finite-word-certificate :as word]
+           [formal.obligation-batch.graph-integer-certificate :as integer] [formal.obligation-batch.proof-strategy :as proof]
+           [formal.obligation-batch.feasibility :as feasibility] [formal.obligation-batch.obligation :as obligation]
+           [formal.obligation-batch.request-header :as header]))
+
+;; Candidates cross the boundary as closed data. Fresh proof, premise and
+;; acceptance judgments are independent of native reports and producer flags.
+(def legacy-profile :bl/formal-evidence-bundle-preview-v1)
+(def profile :bl/formal-evidence-bundle-preview-v2)
+(def checking-profile :bl/formal-evidence-checking-preview-v2)
+(def legacy-record-profile :bl/formal-evidence-record-preview-v1)
+(def record-profile :bl/formal-evidence-record-preview-v2)
+(def defaults {:proof-work-units 3300000 :feasibility-work-units 3600000})
+(def ^:private fields #{:formal/evidence-bundle :profile :request-reference :subject-reference
+                       :answer-graph :certificate-graph})
+(def ^:private current-fields (conj fields :feasibility-graph))
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.request-evidence: " why) {:kind :evidence-bundle}))))
+(defn- same? [a b] (= (graph/bytes (graph/encode a)) (graph/bytes (graph/encode b))))
+(defn- plain? [x] (and (= :map (rt/kind-kind x)) (or (nil? (meta x)) (= {} (meta x)))))
+(defn settings [options]
+ (require! (and (plain? options) (every? #(contains? defaults %) (keys options))) "closed checking limits required")
+ (let [limits (merge defaults options)]
+  (doseq [[key maximum] [[:proof-work-units 33000000] [:feasibility-work-units 36000000]]]
+   (require! (and (int? (get limits key)) (<= 0 (get limits key) maximum)) "bounded nonnegative integer allowance required"))
+  {:profile checking-profile :limits limits}))
+(defn propose
+ "Bundle existing answer, candidate proof and/or explicit premise evidence.
+  A finite feasibility request is {:strategy :finite}. Integer premises take
+  {:strategy :supplied-integer :point coordinates :certificate candidate},
+  with either evidence slot optional. No result or callable is accepted."
+ [original evidence]
+ (let [r (request/check! original)]
+  (require! (and (plain? evidence) (seq evidence) (every? #{:answer :certificate :feasibility} (keys evidence)))
+            "answer, certificate or feasibility candidate required")
+  (when (contains? evidence :answer) (answer/check! r (:answer evidence)))
+  (when (contains? evidence :feasibility) (feasibility/candidate (:feasibility evidence)))
+  (cond-> {:formal/evidence-bundle 2 :profile profile :request-reference (request/reference r)
+           :subject-reference (request/subject-reference r)}
+   (contains? evidence :answer) (assoc :answer-graph (graph/encode (:answer evidence)))
+   (contains? evidence :certificate) (assoc :certificate-graph (graph/encode (:certificate evidence)))
+   (contains? evidence :feasibility) (assoc :feasibility-graph (graph/encode (:feasibility evidence))))))
+(defn check!
+ "Check versioned closed carrier and exact request binding. This proves nothing.
+  Version 1 remains readable with exactly its historical fields."
+ [original evidence]
+ (let [r (request/check! original) keys (set (keys evidence)) version (:formal/evidence-bundle evidence)
+       old? (= 1 version) allowed (if old? fields current-fields)]
+  (require! (and (plain? evidence) (int? version) (contains? #{1 2} version)
+                 (= (if old? legacy-profile profile) (:profile evidence))
+                 (every? allowed keys)
+                 (every? keys [:formal/evidence-bundle :profile :request-reference :subject-reference])
+                 (some #(contains? keys %) (if old? [:answer-graph :certificate-graph]
+                                                [:answer-graph :certificate-graph :feasibility-graph])))
+            "closed versioned evidence carrier required")
+  (require! (and (same? (request/reference r) (:request-reference evidence))
+                 (same? (request/subject-reference r) (:subject-reference evidence))) "original request differs")
+  (when (contains? evidence :answer-graph) (answer/restore r (:answer-graph evidence)))
+  (when (contains? evidence :certificate-graph) (graph/check! (:certificate-graph evidence)))
+  (when (contains? evidence :feasibility-graph)
+   (feasibility/candidate (graph/decode! (:feasibility-graph evidence))))
+  evidence))
+(defn- logical-conclusion [checked-answer checked-proof]
+ (let [proof? (= :checked (:status checked-proof))
+       point? (contains? #{:sat :refuted} (:verdict checked-answer))]
+  (cond
+   (and proof? point?) {:status :conflicting-evidence :kind :incompatible-checked-results}
+   proof? {:status :checked :kind (if (= :entails (:verdict checked-proof)) :conditional-entailment :unsatisfiable)
+           :feasibility :not-established :basis (:profile checked-proof)
+           :assumption-ledger (:assumption-ledger checked-proof) :trust (:trust checked-proof)}
+   point? {:status :checked :kind (if (= :refuted (:verdict checked-answer)) :counterexample :witness)
+           :basis :independent-point-replay}
+   :else {:status :not-established :kind :no-decisive-independent-check})))
+(defn recheck
+ "Freshly check each axis, then apply the exact original vacuity policy.
+  Proof and feasibility have separate prospective allowances. No implicit
+  search runs when the producer supplied no feasibility candidate."
+ ([original evidence] (recheck original evidence {}))
+ ([original evidence options]
+  (let [r (request/check! original) e (check! r evidence) policy (settings options)
+        vacuity (:vacuity (header/inspect (:subject r)))
+        checked-answer (when (contains? e :answer-graph) (answer/recheck r (answer/restore r (:answer-graph e))))
+        certificate (when (contains? e :certificate-graph) (graph/decode! (:certificate-graph e)))
+        account (when (contains? e :certificate-graph) (proof/reserve certificate (get-in policy [:limits :proof-work-units])))
+        checked-proof (when account
+                       (if (= :refused (:status account))
+                        {:status (if (= :uninstalled-proof-strategy (:kind account)) :rejected :incomplete)
+                         :reason (if (= :uninstalled-proof-strategy (:kind account)) :uninstalled-proof-strategy :proof-work-limit)
+                         :checker-invocation :not-run}
+                        (proof/check r certificate account)))
+        premise (when (contains? e :feasibility-graph) (graph/decode! (:feasibility-graph e)))
+        premise-account (when premise (feasibility/reserve premise (get-in policy [:limits :feasibility-work-units])))
+        checked-premise (if premise (feasibility/assess r premise (get-in policy [:limits :feasibility-work-units]))
+                         {:status :not-established :feasibility :not-established :checker-invocation :not-run})
+        logical (logical-conclusion checked-answer checked-proof)
+        ;; A checked background contradiction conflicts with any checked point
+        ;; for the original assertions, including a counterexample to its claim.
+        conflict? (and (= :checked (:status logical))
+                   (or (and (contains? #{:witness :counterexample} (:kind logical))
+                            (= :inconsistent (:feasibility checked-premise)))
+                       (and (= :unsatisfiable (:kind logical))
+                            (= :witnessed (:feasibility checked-premise)))))
+        logical (if conflict? {:status :conflicting-evidence :kind :incompatible-checked-results} logical)
+        judgment (obligation/judge vacuity logical checked-premise)]
+   {:profile profile :request-reference (request/reference r) :subject-reference (request/subject-reference r)
+    :evidence-reference (graph/of e) :checking-policy policy
+    :checking-reference (graph/of [(request/reference r) (graph/of e) policy])
+    :answer-check checked-answer :proof-check checked-proof :proof-account account
+    :feasibility-check checked-premise :feasibility-account premise-account :vacuity-policy vacuity
+    :logical-conclusion logical :policy-check judgment
+    :conclusion (merge logical judgment {:feasibility (:feasibility checked-premise)})
+    :checked-native-execution false :compiler-proof-authority false :storage-authenticated false})))
+(defn pack
+ "Save original request and candidates only. A packet is not a checked result."
+ [original evidence]
+ (let [r (request/check! original)]
+  (check! r evidence)
+  (graph/encode {:formal/evidence-record 2 :profile record-profile :request r :evidence evidence})))
+(defn reopen
+ "Read old/new closed records and recheck using this reader's current allowances.
+  Historical producer results and checking limits never authorize a conclusion."
+ ([data] (reopen data {}))
+ ([data options]
+  (let [_ [profile legacy-profile record-profile legacy-record-profile checking-profile
+           word/profile integer/profile (answer/data-vocabulary)]
+        packet (graph/decode! data) version (:formal/evidence-record packet)]
+   (require! (and (plain? packet) (= #{:formal/evidence-record :profile :request :evidence} (set (keys packet)))
+                  (int? version) (contains? #{1 2} version)
+                  (= (if (= 1 version) legacy-record-profile record-profile) (:profile packet))) "closed evidence record required")
+   (when (= 1 version)
+    (require! (= 1 (get-in packet [:evidence :formal/evidence-bundle])) "historical record requires historical carrier"))
+   (recheck (:request packet) (:evidence packet) options))))

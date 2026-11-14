@@ -1,0 +1,67 @@
+(ns formal.graph-ops-test (:require [formal.data-graph :as g] [formal.identity :as identity]))
+(defn refused? [f] (try (f) false (catch _ true)))
+(defn exact? [a b] (= (identity/bytes a) (identity/bytes b)))
+(defn unknown [name] {:formal/data-graph 1 :profile g/profile :root 0 :nodes [["keyword" name]]})
+
+(deftest graph-composition-preserves-every-container-kind-and-scalar-kind
+ (let [values [nil true false -3 1 1.0 -0.0 "bytes" :ready 'name/x]
+       fragments (mapv g/encode values)]
+  (doseq [[kind expected] [["vector" values] ["list" (to-list values)] ["tuple" (erlang/list_to_tuple (to-list values))]]]
+   (let [built (g/assemble kind fragments)]
+    (is (exact? expected (g/decode! built)))
+    (is (= (g/bytes (g/encode expected)) (g/bytes built)))))
+  (let [built (g/assemble "set" (mapv g/encode [:a :b :c]))]
+   (is (exact? #{:a :b :c} (g/decode! built))))
+  (let [built (g/assemble "map" [[(g/encode :a) (g/encode values)] [(g/encode "a") (g/encode nil)]])]
+   (is (exact? {:a values "a" nil} (g/decode! built))))))
+
+(deftest subgraphs-and-selective-decoding-leave-unknown-keywords-as-data
+ (let [name (str "graph.ops.unknown." (System/unique_integer (list :positive)))
+       value (g/assemble "map" [[(g/encode :shown) (g/encode [1 1.0 false nil])]
+                               [(g/encode :hidden) (unknown name)]])
+       fields (g/keyword-nodes value [:shown :hidden :absent])
+       before (erlang/system_info :atom_count)
+       decoded (g/decode-nodes! value [(get fields :shown)])]
+  (is (exact? [[1 1.0 false nil]] decoded))
+  (is (not (contains? fields :absent)))
+  (is (= (g/bytes (g/encode [1 1.0 false nil])) (g/bytes (g/subgraph value (get fields :shown)))))
+  (is (= ["keyword" name] (first (:nodes (g/subgraph value (get fields :hidden))))))
+  (is (= before (erlang/system_info :atom_count)))
+  (is (refused? #(g/decode! value)))
+  (doseq [bad [[-1] [1.0] [true] [(count (:nodes value))]]]
+   (is (refused? #(g/decode-nodes! value bad))))))
+
+(deftest map-patching-is-exact-prunes-old-data-and-preserves-unchanged-fields
+ (let [before {:replace [1 2] :retain [false nil] "replace" :separate}
+       built (g/patch-map (g/encode before) [[(g/encode :replace) (g/encode [3 4])]
+                                           [(g/encode :added) (g/encode :yes)]])
+       expected (assoc before :replace [3 4] :added :yes)]
+  (is (exact? expected (g/decode! built)))
+  (is (= (g/bytes (g/encode expected)) (g/bytes built)))
+  (is (= (g/bytes (g/encode before)) (g/bytes (g/patch-map (g/encode before) []))))
+  (is (refused? #(g/patch-map (g/encode before) [[(g/encode :replace) (g/encode 1)]
+                                               [(g/encode :replace) (g/encode 2)]])))))
+
+(deftest concatenation-and-graph-first-doubling-do-not-require-tree-conversion
+ (let [a (g/encode [1 false]) b (g/encode [nil 1.0])
+       joined (g/concat-vectors [a b (g/encode [])])
+       deep (reduce (fn [value _] (g/assemble "vector" [value value])) (g/encode "leaf") (range 16))]
+  (is (exact? [1 false nil 1.0] (g/decode! joined)))
+  (is (= 17 (:nodes (g/check! deep))))
+  (is (= 131071 (:expanded-nodes (g/check! deep))))
+  (is (= (g/bytes deep) (g/bytes (g/subgraph deep (:root deep)))))))
+
+(deftest malformed-composition-is-refused-instead-of-normalized
+ (doseq [f [#(g/assemble "unknown" []) #(g/assemble :vector [])
+            #(g/assemble "set" [(g/encode 1) (g/encode 1)])
+            #(g/assemble "map" [[(g/encode :a) (g/encode 1)] [(g/encode :a) (g/encode 2)]])
+            #(g/assemble "tuple" [(g/encode :meta) (g/encode 0) (g/encode {})])
+            #(g/assemble "map" [[(g/encode :__struct__) (g/encode :unregistered)]])
+            #(g/assemble "vector" (vec (repeat 129 (g/encode 0))))
+            #(g/concat-vectors [(g/encode (list 1))])
+            #(g/patch-map (g/encode []) [])
+            #(g/subgraph (g/encode 0) 1)
+            #(g/subgraph (g/encode 0) 0.0)
+            #(g/keyword-nodes (g/encode []) [:a])
+            #(g/keyword-nodes (g/encode {}) ["a"])]]
+  (is (refused? f))))

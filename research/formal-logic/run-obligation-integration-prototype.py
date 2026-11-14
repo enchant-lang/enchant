@@ -36,7 +36,7 @@ modules = {name: 'formal.obligation-batch.' + name.split('formal.', 1)[1] for na
             'formal.request', 'formal.request-answer', 'formal.request-point', 'formal.request-record',
             'formal.query', 'formal.question-graph', 'formal.request-header', 'formal.vacuity-policy',
             'formal.assumptions', 'formal.finite-feasibility', 'formal.graph-integer-certificate',
-            'formal.proof-strategy', 'formal.feasibility', 'formal.obligation',
+            'formal.proof-strategy', 'formal.feasibility', 'formal.obligation-policy',
             'formal.request-runtime', 'formal.resources.word', 'formal.resources.text',
             'formal.scalar-text', 'formal.scalar-text-value', 'formal.finite-word-certificate', 'formal.request-evidence']}
 modules['veritas.ledger'] = 'formal.obligation-batch.ledger'
