@@ -1,0 +1,60 @@
+(ns formal.evidence-bundle-reader
+ (:require [formal.evidence-bundle :as bundle] [formal.request :as request]
+           [formal.backend :as backend] [formal.data-graph :as graph] [bl.json :as json] [oracle]))
+(defn require! [ok why] (when-not ok (throw (ex-info (str "evidence reader: " why) {}))))
+(defn rejected? [action] (try (action) false (catch _ true)))
+(defn restore [wire]
+ (require! (and (map? wire) (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (int? (get wire "formal/data-graph")) (= 1 (get wire "formal/data-graph"))
+                (= "bl/public-data-graph-v1" (get wire "profile"))) "closed graph wire")
+ (let [data {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+             :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+                          (get wire "nodes"))}]
+  (graph/check! data) data))
+(def argv (BeamLisp/argv))
+(def input (json/decode (File/read! (nth argv 0))))
+(require! (and (= "bl.evidence-bundle-corpus.v1" (get input "schema"))
+               (= false (get input "compiler-proof-authority")) (= 2 (count (get input "rows")))) "actual corpus")
+(def packets (mapv #(restore (get % "packet")) (get input "rows")))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "actual native exchange trace")
+(def calls (atom 0))
+(def deny (fn [& _] (swap! calls inc) (throw :fresh-evidence-reader-must-not-query)))
+(def checks (atom 0))
+(defn check-packet [packet]
+ (let [result (bundle/reopen packet)]
+  (require! (= :solver-claim (get-in result [:answer-check :verdict])) "native remains a reported claim")
+  (require! (= :checked (get-in result [:proof-check :status])) "fresh proof checking")
+  (require! (= 8 (get-in result [:proof-check :points-checked])) "complete finite coverage")
+  (require! (= :conditional-entailment (get-in result [:conclusion :kind])) "conditional conclusion")
+  (require! (= :not-established (get-in result [:conclusion :feasibility])) "no invented feasible premises")
+  (require! (= false (:checked-native-execution result) (:compiler-proof-authority result) (:storage-authenticated result))
+            "no history or compiler authority")
+  (swap! checks inc) result))
+(try
+ (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+  (fn []
+   ;; The first cold pass exercises schema initialization before graph decode.
+   (doseq [packet packets] (check-packet packet))
+   (let [before (erlang/system_info :atom_count)]
+    (doseq [_ (range 2) packet packets] (check-packet packet))
+    (require! (= before (erlang/system_info :atom_count)) "stable warmed atom count"))
+   (let [packet (graph/decode! (first packets)) r (:request packet) e (:evidence packet)
+         changed (request/for-backend r :oxiz)
+         certificate (graph/decode! (:certificate-graph e))]
+    (require! (rejected? #(bundle/recheck r (assoc e :trusted true))) "producer authority field refused")
+    (require! (rejected? #(bundle/recheck r (assoc e :request-reference {}))) "changed request reference refused")
+    (require! (rejected? #(bundle/recheck changed e)) "changed adapter cannot reuse the carrier")
+    (require! (rejected? #(bundle/reopen (graph/encode (assoc packet :result {:status :checked})))) "producer result refused")
+    (require! (= :rejected (get-in (bundle/recheck r (bundle/propose r {:certificate (assoc certificate :checked true)}))
+                                 [:proof-check :status])) "proof flags are not accepted")
+    (require! (= :incomplete (get-in (bundle/reopen (first packets) {:proof-work-units 0}) [:proof-check :status]))
+              "reader allowance replaces no stored authority"))))
+ (require! (= 0 (elem (erlang/trace_info pattern :call_count) 1) @calls) "zero native or oracle calls")
+ (File/write! (nth argv 1)
+  (json/encode {:status :passed :packets 2 :fresh-checks @checks :negative-controls 6
+                :native-exchanges 0 :oracle-calls @calls :warmed-atoms-stable true
+                :sdk (System/get_env "BL_SDK_PRODUCT") :compiler-proof-authority false} {:pretty 2}))
+ (println {:reader :passed :packets 2 :negative-controls 6 :native-exchanges 0})
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))

@@ -1,0 +1,97 @@
+(ns formal.evidence-bundle-check
+ (:require [formal.evidence-bundle :as bundle] [formal.word-exhaustion :as proof]
+           [formal.request :as request] [formal.request-answer :as answer]
+           [formal.question-graph :as qg] [formal.query :as q] [formal.term :as t]
+           [formal.point-profile :as policy] [formal.backend :as backend]
+           [formal.data-graph :as graph] [bl.json :as json] [oracle]))
+(defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric-word}}))
+(defn word [width number] (t/literal [:bv width] number))
+(defn wire [data]
+ {:formal/data-graph 1 :profile graph/profile :root (:root data)
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)]) (:nodes data))})
+(deftest proof-and-point-results-have-separate-meanings
+ (let [x (t/variable "bundle.x" [:bv 2]) r (prepared (q/prove (t/eq x x)))
+       c (proof/candidate r) e (bundle/propose r {:certificate c}) checked (bundle/recheck r e)]
+  (is (= :checked (get-in checked [:proof-check :status])))
+  (is (= :conditional-entailment (get-in checked [:conclusion :kind])))
+  (is (= :not-established (get-in checked [:conclusion :feasibility])))
+  (is (= 3300000 (get-in checked [:proof-account :reserved])))
+  (is (nil? (:answer-check checked)))
+  (is (= false (:compiler-proof-authority checked) (:checked-native-execution checked) (:storage-authenticated checked)))
+  (let [wrong (answer/supply r {"bundle.x" {:formal/bv [2 0]}})
+        both (bundle/recheck r (bundle/propose r {:answer wrong :certificate c}))]
+   (is (= :invalid-point (get-in both [:answer-check :verdict])))
+   (is (= :conditional-entailment (get-in both [:conclusion :kind]))))
+ (let [x (t/variable "bundle.witness" [:bv 2])
+       r (prepared (q/sat {:assumptions [(t/eq x (word 2 1))]}))
+       e (bundle/propose r {:answer (answer/supply r {"bundle.witness" {:formal/bv [2 1]}})})
+       checked (bundle/recheck r e {:proof-work-units 0})]
+  (is (= :witness (get-in checked [:conclusion :kind])))
+  (is (and (nil? (:proof-account checked)) (nil? (:proof-check checked))))))
+(deftest binding-closed-data-and-producer-flags
+ (let [r (prepared (q/prove (t/bool true))) c (proof/candidate r)
+       e (bundle/propose r {:certificate c}) other (request/for-backend r :oxiz)]
+  (doseq [changed [(assoc e :checked true) (assoc e :formal/evidence-bundle 1.0)
+                   (assoc e :profile :not-installed) (assoc e :request-reference {})
+                   (assoc e :subject-reference {}) (dissoc e :certificate-graph)]]
+   (is (thrown? (bundle/recheck r changed))))
+  (is (thrown? (bundle/recheck other e)))
+  (let [checked (bundle/recheck other (bundle/propose other {:certificate c}))]
+   (is (= :checked (get-in checked [:proof-check :status])))
+   (is (= (request/reference other) (:request-reference checked))))
+  (is (thrown? (bundle/propose r {})))
+  (is (thrown? (bundle/propose r {:certificate c :checker identity})))
+  (is (thrown? (bundle/propose r {:certificate identity})))
+  (let [forged (bundle/propose r {:certificate (assoc c :checked true)})
+        result (bundle/recheck r forged)]
+   (is (= :rejected (get-in result [:proof-check :status])))
+   (is (= :not-established (get-in result [:conclusion :status]))))
+  (doseq [options [{:proof-work-units -1} {:proof-work-units 1.0}
+                   {:proof-work-units 33000001} {:trusted true}]]
+   (is (thrown? (bundle/recheck r e options))))))
+(deftest reserve-the-whole-checking-strategy-before-invocation
+ (let [r (prepared (q/prove (t/bool true))) e (bundle/propose r {:certificate (proof/candidate r)})
+       module (elem (erlang/fun_info proof/check :module) 1) pattern (tuple module :check 2)
+       deny (fn [& _] (throw :evidence-must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [limited (bundle/recheck r e {:proof-work-units 3299999})]
+    (is (= :incomplete (get-in limited [:proof-check :status])))
+    (is (= :not-run (get-in limited [:proof-check :checker-invocation])))
+    (is (= 0 (get-in limited [:proof-account :reserved]))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+    (fn []
+     (is (= :checked (get-in (bundle/recheck r e {:proof-work-units 3300000}) [:proof-check :status])))))
+   (is (= 1 (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest saved-data-is-rechecked-under-the-readers-allowance
+ (let [r (prepared (q/prove (t/bool true))) e (bundle/propose r {:certificate (proof/candidate r)})
+       packed (bundle/pack r e)]
+  (is (= :checked (get-in (bundle/reopen packed) [:proof-check :status])))
+  (is (= :incomplete (get-in (bundle/reopen packed {:proof-work-units 0}) [:proof-check :status])))
+  (is (thrown? (bundle/reopen (graph/patch-map packed [[(graph/encode :producer-checked) (graph/encode true)]])))))))
+(deftest record-both-real-native-claims-with-independent-checks
+ (let [x (t/variable "bundle.native" [:bv 3])
+       query (q/prove (t/implies (t/eq x (word 3 7))
+                        (t/eq (t/app :bv-add [:bv 3] [x (word 3 1)] nil) (word 3 0))))
+       subject (qg/prepare query) original (prepared query) c (proof/candidate original)
+       rows (mapv
+             (fn [engine]
+              (let [r (request/for-backend original engine)
+                    raw (backend/with-session (:adapter r)
+                          (fn [session] (backend/graph-question! session subject (:policy r))))
+                    a (answer/from-managed r raw) e (bundle/propose r {:answer a :certificate c})
+                    checked (bundle/recheck r e)]
+               (is (= :solver-claim (get-in checked [:answer-check :verdict])))
+               (is (= :checked (get-in checked [:proof-check :status])))
+               (is (= :conditional-entailment (get-in checked [:conclusion :kind])))
+               (is (= 8 (get-in checked [:proof-check :points-checked])))
+               {:backend engine :identity (:identity raw) :packet (wire (bundle/pack r e))
+                :result checked})) [:z3 :oxiz])]
+  (is (= (get-in (first rows) [:result :proof-check :statement])
+          (get-in (second rows) [:result :proof-check :statement])))
+  (when-let [output (System/get_env "EVIDENCE_BUNDLE_OUTPUT")]
+   (File/write! output (json/encode {:schema "bl.evidence-bundle-corpus.v1" :rows rows
+                                    :compiler-proof-authority false} {:pretty 2})))))
+(run-tests)
