@@ -49,8 +49,10 @@ independently passes the same 307 checks. A separately reviewed local reference
 reuse now passes [786 assertions](evidence/wide-reference-reuse/identities/qualification.json),
 including 31 byte-identical complete-result comparisons and all 187 pure vocabularies.
 Its [review](proposals/evidence-reference-review.md) records the measured cost and
-preserves the reference format. The full native corpus, narrow regressions and
-later immutable SDK integration remain separate gates.
+preserves the reference format. Twelve narrow-owner/request/effect files pass
+[745 assertions](evidence/wide-reference-reuse/narrow/qualification.json), and the
+[eight-file batch is copied into the canonical runtime](evidence/wide-integration/runtime-install.json)
+on main. The full native corpus and immutable SDK qualification remain separate gates.
 
 The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root

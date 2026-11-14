@@ -1,7 +1,9 @@
 # One request interface for the full existing typed vocabulary
 
-This project source batch is beside the selected immutable SDK; it is not
-installed in that SDK. Its [pure qualification](../../evidence/wide-owner-prototype/pure/qualification.json)
+The qualified eight-file batch is now copied into the canonical runtime on main;
+the [installation receipt](../../evidence/wide-integration/runtime-install.json)
+binds exact source bytes. It is not installed in the selected immutable SDK yet.
+Its [pure qualification](../../evidence/wide-owner-prototype/pure/qualification.json)
 passed 424 assertions across all 187 question vocabularies and six measured
 solver-free operational windows. Its
 [native smoke gate](../../evidence/wide-owner-prototype/native-smoke/qualification.json)
@@ -16,7 +18,8 @@ own [786-assertion qualification](../../evidence/wide-reference-reuse/identities
 all 187 pure vocabularies plus 31 byte-identical complete-result comparisons
 across native candidates, proof/premise policies and legacy/limited reads.
 Every comparison observes exactly one fewer reference calculation. The
-corresponding twelve-file narrow-owner regression stage is running. The full corpus and later
+corresponding [twelve-file narrow-owner regression](../../evidence/wide-reference-reuse/narrow/qualification.json)
+passes 745 assertions. The full corpus and later
 SDK integration remain separate. Qualification explicitly relocates namespaces/imports; it does not replace
 installed SDK forwarder routes. The eventual batch reuses the ordinary `formal.logic`
 prepare/propose/recheck/execute/compare API; it introduces no parallel facade.
