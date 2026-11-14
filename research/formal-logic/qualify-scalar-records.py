@@ -89,4 +89,4 @@ report = {'schema': 'bl.scalar-request-records-qualification.v1', 'status': 'pas
           'recipe': {'code_commit': commit, 'path': recipe, 'sha256': sha(Path(__file__))},
           'scope': 'Actual retained/fresh/supplied portable answers and durable ledger rows reopened in two fresh SDK-only processes with solver calls denied. Full subject and point replay, unfamiliar shared metadata, exact version distinctions and independent tamper controls are checked. History, artifact labels, storage authenticity and native execution remain recorded rather than authenticated.'}
 (E / 'records-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
-print(json.dumps({'status': 'passed', 'records': 20, 'fresh_readers': 2, 'ledger_rows_per_reader': 20, 'normalizer_calls_per_selected_lookup': 1, 'ledger_before_packets': True, 'controls': 15, 'ledger_retired': True}))
+print(json.dumps({'status': 'passed', 'records': 20, 'fresh_readers': 2, 'ledger_rows_per_reader': 20, 'normalizer_calls_per_selected_lookup': 1, 'ledger_before_packets': True, 'refusal_controls': 16, 'invalid_text_controls': 3, 'ledger_retired': True}))
