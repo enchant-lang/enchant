@@ -1,0 +1,61 @@
+(ns formal.wide-reader-profile
+ (:require [formal.wide-batch.request-evidence :as evidence]
+           [formal.wide-batch.request-answer :as answer]
+           [formal.wide-batch.request :as request]
+           [formal.wide-batch.point-profile :as policy]
+           [formal.wide-batch.resources.typed :as typed]
+           [formal.wide-batch.graph-terms :as terms]
+           [formal.wide-batch.backend :as backend]
+           [formal.wide-batch.oracle :as oracle]
+           [formal.data-graph :as graph] [bl.json :as json]))
+(def argv (BeamLisp/argv))
+(def measurements (atom []))
+(defn require! [ok why] (when-not ok (throw (ex-info (str "wide profile: " why) {}))))
+(defn module [f] (elem (erlang/fun_info f :module) 1))
+(def targets
+ [{:id :graph-check :pattern (tuple (module graph/check!) :check! 1)}
+  {:id :graph-encode :pattern (tuple (module graph/encode) :encode 1)}
+  {:id :graph-bytes :pattern (tuple (module graph/bytes) :bytes 1)}
+  {:id :request-check :pattern (tuple (module request/check!) :check! 1)}
+  {:id :typed-plan :pattern (tuple (module typed/plan) :plan 3)}
+  {:id :term-prepare :pattern (tuple (module terms/prepare) :prepare 2)}
+  {:id :native-exchange :pattern (tuple (module backend/invoke) :exchange! 4)}])
+(defn measured [id action]
+ (doseq [target targets]
+  (require! (= 1 (erlang/trace_pattern (:pattern target) true (list :local :call_count))) "trace installed"))
+ (try
+  (let [started (erlang/monotonic_time :microsecond) value (action)
+        elapsed (- (erlang/monotonic_time :microsecond) started)
+        counts (into {} (mapv (fn [target]
+                               (let [n (elem (erlang/trace_info (:pattern target) :call_count) 1)]
+                                (require! (int? n) "actual count available") [(:id target) n])) targets))]
+   (require! (= 0 (:native-exchange counts)) "pure operation made no native exchange")
+   (swap! measurements conj {:stage id :elapsed-us elapsed :call-counts counts})
+   (println {:stage id :elapsed-us elapsed :call-counts counts}) value)
+  (finally (doseq [target targets] (erlang/trace_pattern (:pattern target) false (list :local :call_count))))))
+(def bytes (File/read! (first argv)))
+(def wire (json/decode bytes))
+(def packet
+ {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+               (get wire "nodes"))})
+(def oracle-calls (atom 0))
+(def deny (fn [& _] (swap! oracle-calls inc) (throw :profile-reader-must-not-query)))
+(oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+ (fn []
+  (doseq [id [:first-reopen :warmed-reopen]]
+   (let [result (measured id #(evidence/reopen packet))]
+    (require! (= :not-established (get-in result [:logical-conclusion :status])) "claim remains unproved")))
+  (let [data (graph/decode! packet) r (:request data) e (:evidence data)]
+   (measured :request-envelope #(request/check! r))
+   (measured :typed-admission #(policy/with-question (:subject r) (:policy r)
+                               (fn [_ admitted] (:admission admitted))))
+   (measured :answer-envelope #(answer/restore r (:answer-graph e)))
+   (measured :bundle-envelope #(evidence/check! r e))
+   (measured :bundle-recheck #(evidence/recheck r e)))))
+(require! (= 0 @oracle-calls) "no oracle calls")
+(File/write! (second argv)
+ (json/encode {:schema "bl.wide-reader-profile.v1" :status :passed
+               :sdk (System/get_env "BL_SDK_PRODUCT") :measurements @measurements
+               :packet-reference (graph/reference packet) :oracle-calls @oracle-calls
+               :in-sdk false :performance-guarantee false :compiler-proof-authority false} {:pretty 2}))
