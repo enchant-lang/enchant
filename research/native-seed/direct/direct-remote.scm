@@ -1,0 +1,101 @@
+;; Optional direct-backend extension: append after direct-machine.scm. Static
+;; non-host MFAs become private descriptors, never Scheme forwarding lambdas.
+;; Their target resolves at INVOCATION, after exact body/arity publication.
+(define native-c-remote-marker (list 'native-c-remote-marker))
+(define native-c-max-explicit-depth 0)
+(define native-c-max-driver-depth 0)
+(define native-c-driver-depth (make-parameter 0))
+(define native-c-enter-without-remote native-c-enter!)
+(set! native-c-enter! (lambda (machine callee arguments destination next tail?)
+ (native-c-enter-without-remote machine callee arguments destination next tail?)
+ (set! native-c-max-explicit-depth
+  (max native-c-max-explicit-depth (length (vector-ref machine 3))))))
+(define native-c-invoke-without-remote native-c-invoke)
+(set! native-c-invoke (lambda (callee arguments)
+ (let ((depth (+ 1 (native-c-driver-depth))))
+  (set! native-c-max-driver-depth (max native-c-max-driver-depth depth))
+  (parameterize ((native-c-driver-depth depth))
+   (native-c-invoke-without-remote callee arguments)))))
+(define (native-c-remote? value)
+ (and (vector? value) (= (vector-length value) 6)
+      (eq? (vector-ref value 0) native-c-remote-marker)))
+(define (native-c-parse-remote key)
+ (if (not (string? key)) (error "direct C MFA key must be a string"))
+ ;; A function itself can be '/', e.g. erlang///2 and core's divide export.
+ ;; The first separator ends the module; only the LAST begins the arity.
+ (let* ((size (string-length key))
+        (separators
+         (let scan ((i 0) (first #f) (last #f))
+          (if (= i size) (cons first last)
+           (if (char=? (string-ref key i) #\/)
+            (scan (+ i 1) (or first i) i) (scan (+ i 1) first last)))))
+        (first (car separators)) (last (cdr separators)))
+  (if (not (and first last (> first 0) (> last (+ first 1)) (< last (- size 1))))
+   (error "invalid direct C MFA key" key))
+  (let* ((module (substring key 0 first))
+         (function (substring key (+ first 1) last))
+         (arity-text (substring key (+ last 1) size))
+         (arity (string->number arity-text)))
+   (if (not (and (let digits ((i 0))
+                  (or (= i (string-length arity-text))
+                      (and (char>=? (string-ref arity-text i) #\0)
+                           (char<=? (string-ref arity-text i) #\9) (digits (+ i 1)))))
+                 (integer? arity) (exact? arity) (>= arity 0)))
+    (error "invalid direct C MFA arity" key))
+   (let* ((n (string-length function))
+          (packed? (and (>= n 6) (string=? (substring function (- n 6) n) "__bl_v")))
+          (logical (if packed? (substring function 0 (- n 6)) function)))
+    (if (= (string-length logical) 0) (error "empty direct C logical export" key))
+    (vector native-c-remote-marker module logical arity packed? key)))))
+(define (native-c-remote key)
+ ;; Service tables contain inert references, including calls guarded by the
+ ;; canonical Source's false function_exported probe. Reject excluded MFAs
+ ;; only when native-c-remote-target resolves an ACTUAL invocation below.
+ (if (member key native-excluded-host-leaves) (native-c-parse-remote key)
+  (let ((leaf (native-leaf key)))
+   (if (eq? leaf native-missing) (native-c-parse-remote key) leaf))))
+(define (native-c-remote-target descriptor)
+ (let* ((module (vector-ref descriptor 1)) (logical (vector-ref descriptor 2))
+        (arity (vector-ref descriptor 3)) (packed? (vector-ref descriptor 4))
+        (key (vector-ref descriptor 5)) (leaf (native-leaf key)))
+  (if (member key native-excluded-host-leaves) (error "direct C MFA is explicitly excluded" key))
+  (if (not (eq? leaf native-missing)) leaf
+   (let* ((namespace (bl-get native-module-names module native-missing))
+          (row (and (not (eq? namespace native-missing)) (native-row namespace logical)))
+          (metadata (if row (bl-get native-export-arities row native-missing) native-missing))
+          (value (if row (bl-get native-global-registry (string-append namespace "/" logical) native-missing) native-missing)))
+    (if (or (eq? namespace native-missing) (eq? metadata native-missing) (eq? value native-missing))
+     (error "direct C MFA lacks a published source body/arity" key))
+    (if (not (if packed?
+              (and (not (bl-is-nil (bl-nth metadata 1))) (= arity (+ 1 (bl-nth metadata 1))))
+              (member arity (bl-items (bl-nth metadata 0)))))
+     (error "direct C MFA violates the published export arity" key))
+    (let ((target
+           (if packed?
+            (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+             (bl-nth (bl-nth value 2) 1) (error "direct C variadic physical clause is absent" key))
+            (if (native-multi-callable? value)
+             (let ((fixed (bl-get (bl-nth value 1) arity native-missing)))
+              (if (eq? fixed native-missing) (error "direct C fixed clause is absent" key)) fixed)
+             value))))
+     (if (not (and (or (native-c-closure? target) (procedure? target))
+                   (native-callable-accepts? target arity)))
+      (error "direct C MFA selected an invalid physical function" key)) target)))))
+(define native-c-resolve-without-remote native-c-resolve-call)
+(set! native-c-resolve-call (lambda (callee arguments)
+ (let* ((plan (native-c-resolve-without-remote callee arguments))
+        (target (car plan)) (args (cdr plan)))
+  (if (native-c-remote? target)
+   (begin
+    (if (not (= (length args) (vector-ref target 3)))
+     (error "direct C static MFA argument count differs" (vector-ref target 5)))
+    ;; __bl_v already receives the packed physical rest list. Select its raw
+    ;; clause above; never pass it to the logical dispatcher a second time.
+    (native-c-resolve-without-remote (native-c-remote-target target) args)) plan))))
+(native-add-leaf! "host/native-c-control-stats/0" (lambda ()
+ (bl-map (bl-key "max-driver-depth") native-c-max-driver-depth
+         (bl-key "max-explicit-depth") native-c-max-explicit-depth
+         (bl-key "steps") native-c-step-count)))
+(native-add-leaf! "host/native-c-reset-control-stats/0" (lambda ()
+ (set! native-c-max-driver-depth (native-c-driver-depth))
+ (set! native-c-max-explicit-depth 0) bl-nil))

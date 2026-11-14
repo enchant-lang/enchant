@@ -146,7 +146,8 @@
                     (map #(assoc % :body (vector-node [(lit :match) (thunk (:body %))])) (:clauses n))
                     [{:pats [{:pop :pvar :name (fresh-name "__native_c_unmatched_" n)}]
                       :guard nil :body (lit :nomatch)}]))}}]}
-       receive-call {:op :apply :fn {:op :global :ns (or (:runtime-namespace options) "native.kernel") :name "rt-receive"}
+       receive-call {:op :apply :fn (if-let [source (:receive-source options)] (value-source source)
+                                  {:op :global :ns (or (:runtime-namespace options) "native.kernel") :name "rt-receive"})
                      :args [selector (thunk (or (:after n) (lit nil))) (or (:timeout n) (lit nil))] :ann (:ann n)}]
   {:op :let :name selected :init receive-call :ann (:ann n)
    :body {:op :apply :fn (internal "bl-nth" [(variable selected) (lit 1)]) :args [] :ann (:ann n)}}))
@@ -247,6 +248,10 @@
    :else (fail function))))
 
 (defn lower [s node env destination next tail? options]
+ (if-let [definition (:direct-definition node)]
+  (let [base (assoc options :definition-ns (:ns definition) :fn-label (:name definition))
+        scoped (if-let [resolve (:definition-options options)] (resolve definition base) base)]
+   (lower s (dissoc node :direct-definition) env destination next tail? scoped))
  (if-let [target (self-constructor-target node options)]
   (lower-service s "native-c-recursion-ref" [(variable target)] env destination next tail? options)
  (if (and (= :let (:op node)) (BeamLisp.CompilerData/self_application_parts node))
@@ -314,7 +319,7 @@
              (fail node))
             (lower-service s "bl-struct" [(lit (:mod node)) {:op :map :pairs (:fields node) :ann (:ann node)}]
               env destination next tail? options))
-  (fail node)))))
+  (fail node))))))
 
 (defn emit-unit
  "Return direct C and a literal/FFI wrapper. Options use the SAME checked
@@ -362,7 +367,8 @@
     (let [shape (export-shape (:node d))]
      (when (and (= :fn (:kind d)) (nil? shape)) (fail (:node d)))
      (internal "(lambda (ns name value fixed variadic private) (native-register! ns name value) (native-intern ns name value) (native-put-meta ns name (bl-map (bl-key \"private\") private)) (if (not (bl-is-nil fixed)) (native-register-arities! ns name fixed variadic)) value)"
-      [(lit (:ns d)) (lit (:name d)) (assoc (:node d) :direct-source-fn (:name d))
+      [(lit (:ns d)) (lit (:name d)) (assoc (:node d) :direct-source-fn (:name d)
+                           :direct-definition (select-keys d [:ns :name :path]))
        (lit (:fixed shape)) (lit (:variadic shape)) (lit (boolean (:private? d)))])) (:node d))) definitions)})
 (defn emit-definitions [definitions options]
  (emit-unit (definitions-node definitions) options))
