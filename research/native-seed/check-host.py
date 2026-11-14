@@ -24,7 +24,8 @@ def main():
     sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-lazy.scm", "host/host-extra.scm"]
     inputs = sources + ["host/native-posix.scm", "fixtures/host-values-check.scm",
                        "fixtures/native-posix-check.scm", "fixtures/host-lazy-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
-                       "sdk-pin.json", "toolchain-pin.json", "check-host.py"]
+                       "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
+                       "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -51,6 +52,12 @@ def main():
     (OUT / "extra.scm").write_text(common + "\n" + (BASE / "fixtures/host-extra-check.scm").read_text())
     extra = run("storage-and-raw-leaves", [GAMBIT / "bin/gsi", "extra.scm"])
     assert "native extra checks passed" in extra, extra
+    (OUT / "source-frames.scm").write_text(common + "\n"
+        + (BASE / "host/host-compiler.scm").read_text() + "\n"
+        + (BASE / "host/host-source-frames.scm").read_text() + "\n"
+        + (BASE / "fixtures/host-source-frames-check.scm").read_text())
+    frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
+    assert "native source-frame checks passed" in frames, frames
     (OUT / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
                                     + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
     run("foreign-fixture", [CLANG, "-shared", "-fPIC", BASE / "fixtures/ffi-fixture.c", "-o", "fixture.so"])
@@ -68,7 +75,7 @@ def main():
     assert hashes == {p: digest(BASE / p) for p in inputs}, "inputs changed during qualification"
     evidence.write_text(json.dumps({"status": "pass", "scope": "host fixtures; canonical BL gates remain separate",
                                     "inputs": hashes, "tools": TOOLS, "runs": runs,
-                                    "values": values, "lazy": lazy, "extra": extra, "posix": posix}, indent=2) + "\n")
+                                    "values": values, "lazy": lazy, "extra": extra, "source_frames": frames, "posix": posix}, indent=2) + "\n")
 
 
 if __name__ == "__main__":
