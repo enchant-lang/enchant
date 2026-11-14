@@ -1,12 +1,19 @@
 # Finish the common interface across the whole term vocabulary
 
-The new evidence SDK is being qualified. Its portable request still has three
+The selected evidence SDK is qualified. Its portable request still has three
 closed checking profiles: numeric, numeric/word, and numeric/word/scalar-text.
 They couple fresh original-graph admission to the corresponding pure point
 interpreter. The wider 187-question corpus uses the older graph/native route.
 Arrays, generic sequences, datatypes, uninterpreted functions, quantifiers and
 SMT floating-point therefore do not yet have equal access through the newer
 request/evidence envelope. Passing that corpus does not close this interface gap.
+
+The [wide-owner source prototype](../prototypes/wide-owner/README.md) now implements
+this separation beside the immutable SDK. Its
+[pure qualification](../evidence/wide-owner-prototype/pure/qualification.json)
+passed 424 assertions over all 187 existing question vocabularies, with six
+measured zero-exchange windows. Actual native owners, narrow-policy regressions,
+fresh candidate readers and immutable SDK installation have distinct gates.
 
 Keep the current original-graph request, closed data carriers, expiring local
 execution leases and exact original/retained assumption binding. Separate these
