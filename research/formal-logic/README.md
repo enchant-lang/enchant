@@ -680,8 +680,19 @@ next execution/browser checkpoint is pending the current integration work.
 The [scalar-text/evidence SDK candidate](SCALAR-INTEGRATION.md) is now built:
 723 source files, thirteen changed compiled units, unchanged native components
 and the same 141-file compiler floor. It has passed 604 namespace preflight
-checks, three negative controls and 11,705 SDK assertion executions. The paired
-native audit and fresh/durable record gates are still in progress, so the
-project pin remains on the qualified word SDK. The
+checks, three negative controls and 11,705 SDK assertion executions. The full
+187-question paired native audit passed with unchanged results and solver
+binaries. Cold SDK-only packet readers passed twelve older word packets, four
+text packets with 52 checks, and two certificate bundles with six fresh finite
+checks; all recorded zero solver/oracle calls. The twenty-record actual durable
+cohort and older-generation reader gates are still in progress, so the project
+pin remains on the qualified word SDK. The
 [next implementation work](POST-SCALAR-ROADMAP.md) includes a graph-native entry
 for the integer certificate kernel and separately checked premise feasibility.
+
+The [vacuity review](VACUITY-SEMANTICS-REVIEW.md) found that the current query
+layer accepts arbitrary values while graph readers collapse every non-`:allow`
+value to `:report`. The prepared [finite feasibility](FINITE-FEASIBILITY-PROTOTYPE.md)
+and [obligation policy](FINITE-OBLIGATION-PROTOTYPE.md) experiments have not run;
+they will separately check conditional entailment, actual feasible or inconsistent
+premises, and exact caller acceptance policy. They do not change the current SDK.

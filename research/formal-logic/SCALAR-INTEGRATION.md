@@ -1,8 +1,11 @@
 # Text and independent evidence in one term-based interface
 
 The candidate SDK is built and source-bound, with 604 namespace preflight
-checks and 783 focused assertions passing. Full qualification and selection
-are still in progress. The selected research SDK remains the preceding word SDK.
+checks, 783 focused assertions and 11,705 assertion executions across all four
+gates passing. All 187 paired native cases retain their preceding outcomes.
+Cold SDK-only word, text and certificate packet readers also pass with zero
+native/oracle calls. Durable and older-generation readers, full qualification
+and selection are still in progress. The selected research SDK remains the preceding word SDK.
 The candidate is recorded in [sdk-candidate.json](evidence/scalar-integration/sdk-candidate.json);
 its [build linkage](evidence/scalar-integration/build-linkage.json) binds all 723
 packaged sources, thirteen changed units and the unchanged compiler floor.
