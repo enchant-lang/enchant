@@ -1,0 +1,726 @@
+(ns formal.scalar-batch.evaluate
+ (:require [formal.term :as t] [formal.ieee-arithmetic :as ieee]
+           [formal.data-graph :as graph] [formal.scalar-batch.graph-terms :as forest]
+           [formal.resources.integer :as integer] [formal.resources.rational :as rational] [formal.scalar-batch.resources.word :as word]
+           [formal.scalar-batch.resources.text :as text] [formal.scalar-batch.scalar-text-value :as text-value]))
+
+;; This evaluator is deliberately independent of a native solver's get-value.
+;; It reads assignments only for free variables. Unsupported mathematics stays
+;; incomplete; a solver-evaluated predicate is never counted as replay evidence.
+(defn unavailable [reason] {:formal/unavailable reason})
+(defn unavailable? [value] (and (map? value) (contains? value :formal/unavailable)))
+(defn real [n d] {:formal/real (t/rational n d)})
+(defn bv [width value]
+ {:formal/bv [width (erlang/band value (dec (erlang/bsl 1 width)))]})
+(defn- wrapped? [key n data]
+ (and (map? data) (= #{key} (set (keys data))) (vector? (get data key)) (= n (count (get data key)))))
+(defn- checks [items]
+ (or (first (filter #(= :invalid (:status %)) items))
+     (first (filter #(= :incomplete (:status %)) items)) {:status :valid}))
+(defn check-value
+ "Check the concrete BL encoding of a value against its mathematical sort.
+  Unavailable values and uninterpreted representatives stay incomplete."
+ [sort data]
+ (let [kind (first sort)
+       scalar (fn [ok] (if ok {:status :valid} {:status :invalid :reason :value-sort-mismatch}))]
+  (cond
+   (unavailable? data) {:status :incomplete :reason (:formal/unavailable data)}
+   (= kind :bool) (scalar (boolean? data))
+   (= kind :int) (scalar (int? data))
+   (= kind :string) (text-value/check-value data)
+   (= kind :real)
+    (scalar (and (wrapped? :formal/real 2 data)
+                  (let [[n d] (:formal/real data)]
+                   (and (int? n) (int? d) (> d 0) (= [n d] (t/rational n d))))))
+   (= kind :bv)
+    (scalar (and (wrapped? :formal/bv 2 data)
+                  (let [[width bits] (:formal/bv data)]
+                   (and (int? width) (= width (second sort)) (int? bits)
+                        (<= 0 bits) (< bits (erlang/bsl 1 width))))))
+   (= kind :fp)
+    (scalar (and (wrapped? :formal/fp 3 data)
+                  (let [[e s bits] (:formal/fp data)]
+                   (and (int? e) (int? s) (= [e s] [(second sort) (nth sort 2)])
+                        (int? bits) (<= 0 bits) (< bits (erlang/bsl 1 (+ e s)))))))
+   (= kind :enum)
+    (scalar (and (wrapped? :formal/enum 2 data)
+                  (= (second sort) (first (:formal/enum data)))
+                  (contains? (set (nth sort 2)) (second (:formal/enum data)))))
+   (= kind :rounding) (scalar (contains? #{"RNE" "RNA" "RTP" "RTN" "RTZ"} data))
+   (= kind :seq) (if (vector? data) (checks (mapv #(check-value (second sort) %) data))
+                  (scalar false))
+   (= kind :array)
+    (if (and (map? data) (= #{:formal/array} (set (keys data)))
+             (map? (:formal/array data)) (= #{:default :updates} (set (keys (:formal/array data))))
+             (vector? (get-in data [:formal/array :updates]))
+             (every? #(and (vector? %) (= 2 (count %))) (get-in data [:formal/array :updates])))
+     (checks (vec (concat [(check-value (nth sort 2) (get-in data [:formal/array :default]))]
+                   (mapcat (fn [[key item]] [(check-value (second sort) key) (check-value (nth sort 2) item)])
+                           (get-in data [:formal/array :updates])))))
+     (scalar false))
+   :else {:status :incomplete :reason :sort-not-materialized})))
+(defn checked-value [sort data]
+ (let [checking (check-value sort data)]
+  (cond (= :valid (:status checking)) data
+        (unavailable? data) data
+        :else (unavailable {:kind (if (= :invalid (:status checking)) :ill-sorted-value :incomplete-value)
+                           :sort sort :reason (:reason checking)}))))
+(defn check-bindings [roots assignments]
+ (if-not (map? assignments) {:status :invalid :rows [] :reason :assignment-map-required}
+  (let [rows (mapv (fn [variable]
+                    (assoc (check-value (t/sort-of variable)
+                             (get assignments (:data variable) (unavailable :unassigned)))
+                           :name (:data variable) :sort (t/sort-of variable))) (t/variables roots))]
+   {:status (:status (checks rows)) :rows rows})))
+(defn- rational? [value] (and (map? value) (contains? value :formal/real)))
+(defn- pair [value] (if (rational? value) (:formal/real value) [value 1]))
+(defn- radd [a b]
+ (let [[an ad] (pair a) [bn bd] (pair b)] (real (+ (* an bd) (* bn ad)) (* ad bd))))
+(defn- rneg [a] (let [[n d] (pair a)] (real (- n) d)))
+(defn- rmul [a b]
+ (let [[an ad] (pair a) [bn bd] (pair b)] (real (* an bn) (* ad bd))))
+(defn- rdiv [a b]
+ (let [[an ad] (pair a) [bn bd] (pair b)]
+  (if (zero? bn) (unavailable :unspecified-real-division-by-zero) (real (* an bd) (* ad bn)))))
+(defn- compare-real [a b]
+ (let [[an ad] (pair a) [bn bd] (pair b) left (* an bd) right (* bn ad)]
+  (cond (< left right) -1 (> left right) 1 :else 0)))
+(defn- ediv [a b]
+ (if (zero? b) (unavailable :unspecified-integer-division-by-zero)
+  (let [q (erlang/div a b) r (erlang/rem a b)]
+   (if (>= r 0) q (if (> b 0) (dec q) (inc q))))))
+(defn- emod [a b]
+ (let [q (ediv a b)] (if (unavailable? q) q (- a (* b q)))))
+(defn- codepoints [text] (vec (unicode/characters_to_list text)))
+(defn- chars [points] (unicode/characters_to_binary (to-list points)))
+(defn- seq-index [haystack needle start]
+ (let [n (count haystack) m (count needle)]
+  (if (or (< start 0) (> start n)) -1
+   (loop [offset start]
+    (cond (> (+ offset m) n) -1
+     (= needle (vec (take m (drop offset haystack)))) offset
+     :else (recur (inc offset)))))))
+
+(declare value equal)
+(defn- fp-parts [value]
+ (let [[e s bits] (:formal/fp value) fraction (erlang/band bits (dec (erlang/bsl 1 (dec s))))
+       exponent (erlang/band (erlang/bsr bits (dec s)) (dec (erlang/bsl 1 e)))]
+  {:e e :s s :bits bits :negative (>= bits (erlang/bsl 1 (dec (+ e s))))
+   :nan (and (= exponent (dec (erlang/bsl 1 e))) (not= fraction 0))
+   :inf (and (= exponent (dec (erlang/bsl 1 e))) (= fraction 0))
+   :zero (and (= exponent 0) (= fraction 0))}))
+(defn- fp-compare [op a b]
+ (let [a (fp-parts a) b (fp-parts b)
+       equal (or (and (:zero a) (:zero b)) (= (:bits a) (:bits b)))
+       less (cond (and (:zero a) (:zero b)) false
+                  (not= (:negative a) (:negative b)) (:negative a)
+                  (:negative a) (> (:bits a) (:bits b))
+                  :else (< (:bits a) (:bits b)))]
+  (and (not (:nan a)) (not (:nan b))
+       (case op :fp-eq equal :fp-lt less :fp-le (or equal less)))))
+(defn- array-read [sort array key]
+ (if (and (map? array) (contains? array :formal/array))
+  (loop [updates (reverse (:updates (:formal/array array)))]
+   (if (empty? updates) (:default (:formal/array array))
+    (let [[stored item] (first updates) matches (equal (second sort) stored key)]
+     (cond (= true matches) item (= false matches) (recur (rest updates))
+           :else (unavailable :nonconcrete-array-key-equality)))))
+  (unavailable :nonconcrete-array)))
+(defn- array-store [array key item]
+ (if (and (map? array) (contains? array :formal/array))
+  (update-in array [:formal/array :updates] conj [key item])
+  (unavailable :nonconcrete-array)))
+(defn equal
+ "Compare admitted mathematical data at an explicit sort. Unknown or partially
+  represented values return unavailable rather than a fabricated inequality.
+  Floating-point equality here is SMT term equality: all NaN encodings are one
+  value, while positive and negative zero remain distinct."
+ [sort a b]
+ (cond
+  (or (unavailable? a) (unavailable? b)) (unavailable :nonconcrete-equality)
+  (and (map? a) (:formal/fp a) (map? b) (:formal/fp b))
+   (let [aa (fp-parts a) bb (fp-parts b)]
+    (and (= [(:e aa) (:s aa)] [(:e bb) (:s bb)])
+         (or (and (:nan aa) (:nan bb)) (= (:bits aa) (:bits bb)))))
+  (= :seq (first sort))
+   (if (not= (count a) (count b)) false
+    (let [results (mapv #(equal (second sort) (nth a %) (nth b %)) (range (count a)))]
+     (cond (some false? results) false (some unavailable? results) (unavailable :nonconcrete-sequence-equality) :else true)))
+  (= :array (first sort))
+   (let [ad (:default (:formal/array a)) bd (:default (:formal/array b))
+         defaults (equal (nth sort 2) ad bd)
+         keys (set (concat (map first (:updates (:formal/array a))) (map first (:updates (:formal/array b)))))]
+    ;; Different defaults can still describe equal arrays over a finite index
+    ;; sort if their updates cover it; do not guess that case.
+    (if (not= true defaults) (unavailable :array-default-domain-needed)
+     (let [results (mapv (fn [k] (equal (nth sort 2) (array-read sort a k) (array-read sort b k))) keys)]
+      (cond (some false? results) false (some unavailable? results) (unavailable :nonconcrete-array-equality) :else true))))
+  :else (= a b)))
+
+(defn- signed [width bits]
+ (if (>= bits (erlang/bsl 1 (dec width))) (- bits (erlang/bsl 1 width)) bits))
+(defn- bv-op [op sort args data]
+ (let [[width a] (:formal/bv (first args)) b (second (:formal/bv (second args)))]
+  (cond
+   (= op :bv-add) (bv width (+ a b)) (= op :bv-sub) (bv width (- a b))
+   (= op :bv-mul) (bv width (* a b)) (= op :bv-and) (bv width (erlang/band a b))
+   (= op :bv-or) (bv width (erlang/bor a b)) (= op :bv-xor) (bv width (erlang/bxor a b))
+   (= op :bv-not) (bv width (erlang/bnot a)) (= op :bv-neg) (bv width (- a))
+   (= op :bv-shl) (bv width (if (>= b width) 0 (erlang/bsl a b)))
+   (= op :bv-lshr) (bv width (if (>= b width) 0 (erlang/bsr a b)))
+   (= op :bv-ashr) (bv width (erlang/bsr (signed width a) (min b width)))
+   (= op :bv-ult) (< a b) (= op :bv-ule) (<= a b)
+   (= op :bv-slt) (< (signed width a) (signed width b))
+   (= op :bv-sle) (<= (signed width a) (signed width b))
+   (= op :bv-concat) (let [[bw bv-value] (:formal/bv (second args))]
+                      (bv (+ width bw) (+ (erlang/bsl a bw) bv-value)))
+   (= op :bv-extract) (let [[high low] data] (bv (inc (- high low)) (erlang/bsr a low)))
+   (= op :bv-zero-extend) (bv (second sort) a)
+   (= op :bv-sign-extend) (bv (second sort) (signed width a))
+   :else (unavailable :unsupported-bv-evaluation))))
+
+(defn- primitive-value
+ "Shared mathematical dispatch over private evaluated children. Tree demand
+  and freshly admitted graph demand call this same function. It is private:
+  callers cannot supply a checked-value label or invoke this as proof authority."
+ [term args]
+ (let [op (:op term) sort (:sort term) data (:data term) children (:args term)
+       missing (first (filter unavailable? args)) a (first args) b (second args)]
+  (cond
+   (= op :implies)
+    (cond (= false a) true (= true b) true
+          (unavailable? a) a (unavailable? b) b :else (or (= false a) (= true b)))
+   missing missing
+   :else
+    (cond
+       (= op :not) (= false a)
+       (= op :xor) (not= a b)
+       (= op :eq) (equal (t/sort-of (first children)) a b)
+       (= op :distinct)
+        (let [pairs (for [i (range (count args)) j (range i)]
+                      (equal (t/sort-of (first children)) (nth args i) (nth args j)))]
+         (cond (some true? pairs) false (some unavailable? pairs) (unavailable :incomplete-distinct) :else true))
+       (contains? #{:add :sub :mul :neg :div :mod} op)
+        (if (= sort t/Real)
+         (case op :add (radd a b) :sub (radd a (rneg b)) :mul (rmul a b)
+                  :neg (rneg a) :div (rdiv a b) (unavailable :real-mod))
+         (case op :add (+ a b) :sub (- a b) :mul (* a b) :neg (- a)
+                  :div (ediv a b) :mod (emod a b)))
+       (contains? #{:lt :le :gt :ge} op)
+        (let [c (compare-real a b)]
+         (case op :lt (< c 0) :le (<= c 0) :gt (> c 0) :ge (>= c 0)))
+       (= op :to-real) (real a 1)
+       (= op :to-int) (let [[n d] (pair a)] (ediv n d))
+       (= op :is-int) (= 1 (second (pair a)))
+       (= op :array-const) {:formal/array {:default a :updates []}}
+       (= op :select) (array-read (t/sort-of (first children)) a b)
+       (= op :store) (array-store a b (nth args 2))
+       (= op :str-concat) (str a b)
+       (= op :str-len) (count (codepoints a))
+       (= op :str-contains) (>= (seq-index (codepoints a) (codepoints b) 0) 0)
+       (= op :str-prefix) (= 0 (seq-index (codepoints b) (codepoints a) 0))
+       (= op :str-suffix) (let [aa (codepoints a) bb (codepoints b)]
+                            (and (<= (count aa) (count bb)) (= aa (vec (drop (- (count bb) (count aa)) bb)))))
+       (= op :str-at) (let [cps (codepoints a)] (if (and (>= b 0) (< b (count cps))) (chars [(nth cps b)]) ""))
+       (= op :str-substr) (let [cps (codepoints a) length (nth args 2)]
+                            (if (or (< b 0) (>= b (count cps)) (<= length 0)) "" (chars (take length (drop b cps)))))
+       (= op :str-index) (seq-index (codepoints a) (codepoints b) (nth args 2))
+       (= op :str-replace) (let [aa (codepoints a) bb (codepoints b) offset (seq-index aa bb 0)]
+                            (if (< offset 0) a (chars (concat (take offset aa) (codepoints (nth args 2)) (drop (+ offset (count bb)) aa)))))
+       (= op :seq-empty) [] (= op :seq-unit) [a]
+       (= op :seq-concat) (vec (concat a b)) (= op :seq-len) (count a)
+       (= op :seq-nth) (if (and (>= b 0) (< b (count a))) (nth a b) (unavailable :unspecified-seq-nth))
+       (= op :seq-extract) (if (or (< b 0) (< (nth args 2) 0)) [] (vec (take (nth args 2) (drop b a))))
+       (String/starts_with? (name op) "bv-") (bv-op op sort args data)
+       (contains? #{:fp-add :fp-sub :fp-mul :fp-div} op)
+        (try (ieee/operate op a (second args) (nth args 2))
+             (catch error (unavailable {:fp-arithmetic (ex-message error)})))
+       (= op :fp-neg) (let [[e s bits] (:formal/fp a)] {:formal/fp [e s (erlang/bxor bits (erlang/bsl 1 (dec (+ e s))))]})
+       (= op :fp-to-ieee-bv)
+        (let [{:keys [e s bits nan]} (fp-parts a)]
+         (if nan (unavailable :unspecified-nan-bit-pattern) (bv (+ e s) bits)))
+       (contains? #{:fp-eq :fp-lt :fp-le} op) (fp-compare op a b)
+       (= op :fp-is-nan) (:nan (fp-parts a))
+       (= op :fp-is-inf) (:inf (fp-parts a))
+       :else (unavailable {:unsupported-operation op})))))
+
+(defn value [term assignments]
+ (let [op (:op term) sort (:sort term) data (:data term) children (:args term)]
+  (cond
+   (= op :var) (checked-value sort (get assignments data (unavailable {:unassigned data})))
+   (= op :bound) (unavailable {:free-binder data})
+   (contains? #{:bool :int :text :rounding} op) (checked-value sort data)
+   (= op :real) (real (first data) (second data))
+   (= op :bv) (bv (second sort) data)
+   (= op :fp-bits) {:formal/fp [(second sort) (nth sort 2) data]}
+   (= op :enum) {:formal/enum [(second sort) data]}
+   (= op :ite)
+    (let [condition (value (first children) assignments)]
+     (cond (= true condition) (value (second children) assignments)
+           (= false condition) (value (nth children 2) assignments)
+           :else condition))
+   (= op :implies)
+    (primitive-value term [(value (first children) assignments) (value (second children) assignments)])
+   (= op :and)
+    (loop [xs children unknown nil]
+     (if (empty? xs) (or unknown true)
+      (let [v (value (first xs) assignments)]
+       (cond (= false v) false (unavailable? v) (recur (rest xs) v)
+             :else (recur (rest xs) unknown)))))
+   (= op :or)
+    (loop [xs children unknown nil]
+     (if (empty? xs) (or unknown false)
+      (let [v (value (first xs) assignments)]
+       (cond (= true v) true (unavailable? v) (recur (rest xs) v)
+             :else (recur (rest xs) unknown)))))
+   :else
+    (primitive-value term (mapv (fn [child] (value child assignments)) children)))))
+
+(defn- observed-value [sort derived]
+ (cond
+  (unavailable? derived) derived
+  (= :fp (first sort)) (if (:nan (fp-parts derived)) (unavailable :nan-has-no-observable-ieee-payload) derived)
+  (= :seq (first sort)) (mapv #(observed-value (second sort) %) derived)
+  (= :array (first sort))
+   {:formal/array {:default (observed-value (nth sort 2) (get-in derived [:formal/array :default]))
+                   :updates (mapv (fn [[key item]] [(observed-value (second sort) key) (observed-value (nth sort 2) item)])
+                                  (get-in derived [:formal/array :updates]))}}
+  :else derived))
+(defn observation
+ "Evaluate a display observation without inventing IEEE NaN payload bits,
+  including FP elements/keys inside sequences and arrays. Internal value
+  evaluation retains representatives for semantic NaNs, so classification,
+  equality and original assertions can still be replayed."
+ [term assignments]
+ (observed-value (t/sort-of term) (value term assignments)))
+
+(defn validate [assertions assignments]
+ (let [bindings (check-bindings (mapv :term assertions) assignments)
+       assignments (if (map? assignments) assignments {})
+       results (mapv (fn [assertion]
+                  (let [actual (value (:term assertion) assignments)]
+                   {:label (:label assertion) :value actual
+                    :status (cond (= actual true) :valid (= actual false) :invalid :else :incomplete)})) assertions)
+       invalid (vec (filter (fn [r] (= :invalid (:status r))) results))
+       missing (vec (filter (fn [r] (= :incomplete (:status r))) results))]
+  {:status (cond (= :invalid (:status bindings)) :invalid (seq invalid) :invalid (seq missing) :incomplete :else :valid)
+   :kind :independent-replay :checked (- (count results) (count missing))
+   :bindings bindings :invalid invalid :incomplete missing :results results}))
+
+;; Graph point operations enter with original portable data, never a checked
+;; caller view. The private dispatcher above is shared with tree evaluation.
+(def graph-profile :bl/graph-point-evaluation-preview-v1)
+(def bounded-graph-profile :bl/bounded-bool-int-point-preview-v1)
+(def numeric-graph-profile :bl/bounded-numeric-point-preview-v1)
+(def direct-graph-profile :bl/graph-point-evaluation-preview-v2)
+(def direct-numeric-graph-profile :bl/bounded-numeric-point-preview-v2)
+(def word-graph-profile :bl/bounded-numeric-word-point-preview-v1)
+(def text-graph-profile :bl/bounded-numeric-word-scalar-text-point-preview-v1)
+(def graph-resource-defaults {:integer integer/defaults :request-work-units 1048576 :evaluated-nodes 16384})
+(def numeric-graph-resource-defaults
+ (assoc graph-resource-defaults :rational rational/defaults :request-work-units 1073741824 :admission-work-units 1073741824))
+(def word-graph-resource-defaults (assoc numeric-graph-resource-defaults :word word/defaults))
+(def text-graph-resource-defaults (assoc word-graph-resource-defaults :text text/defaults))
+(def ^:private word-ops word/operations)
+(def ^:private supported #{:bool :int :var :ite :and :or :not :implies :xor :eq
+                          :add :sub :mul :neg :div :mod :lt :le :gt :ge})
+(def ^:private integer-ops #{:add :sub :mul :neg :div :mod :lt :le :gt :ge})
+
+(defn- graph-integer-limits
+ "Normalize the explicit scalar preview policy. Arithmetic work units are the
+  integer planner's convention; node visits are a separate request allowance."
+ [overrides]
+ (when-not (and (map? overrides) (every? #(contains? graph-resource-defaults %) (keys overrides)))
+  (throw (ex-info "formal.term-forest-evaluate: unknown resource configuration" {:profile bounded-graph-profile})))
+ (let [limits (assoc (merge graph-resource-defaults overrides) :integer
+                    (integer/limits (get overrides :integer {})))]
+  (when-not (every? #(and (int? %) (>= % 0)) [(:request-work-units limits) (:evaluated-nodes limits)])
+   (throw (ex-info "formal.term-forest-evaluate: nonnegative request limits required" {:profile bounded-graph-profile})))
+  (graph/encode limits)
+  limits))
+
+(defn- graph-numeric-limits [overrides]
+ (when-not (and (map? overrides) (every? #(contains? numeric-graph-resource-defaults %) (keys overrides)))
+  (throw (ex-info "formal.term-forest-evaluate: unknown numeric resource configuration" {:profile numeric-graph-profile})))
+ (let [limits (merge numeric-graph-resource-defaults overrides)
+       scalars (graph-integer-limits (select-keys limits [:integer :request-work-units :evaluated-nodes]))
+       result (merge limits scalars {:rational (rational/limits (:rational limits))})]
+  (when-not (and (int? (:admission-work-units result)) (>= (:admission-work-units result) 0))
+   (throw (ex-info "formal.term-forest-evaluate: nonnegative admission allowance required" {:profile numeric-graph-profile})))
+  (graph/encode result) result))
+
+(defn- graph-word-limits [overrides]
+ (when-not (and (map? overrides) (every? #(contains? word-graph-resource-defaults %) (keys overrides)))
+  (throw (ex-info "formal.evaluate: unknown numeric-word resource configuration" {:profile word-graph-profile})))
+ (assoc (graph-numeric-limits (dissoc overrides :word)) :word (word/limits (get overrides :word {}))))
+
+(defn- word-coordinate-bits [sort value]
+ ;; Only this shape reaches SDK range checking, which constructs a mask.
+ ;; Every other shape can be rejected by its cheap existing structural checks.
+ (when (and (map? value) (= #{:formal/bv} (set (keys value)))
+            (vector? (:formal/bv value)) (= 2 (count (:formal/bv value))))
+  (let [[width bits] (:formal/bv value)]
+   (when (and (int? width) (= width (second sort)) (int? bits) (>= bits 0)) bits))))
+
+(defn- graph-text-limits [overrides]
+ (when-not (and (map? overrides) (every? #(contains? text-graph-resource-defaults %) (keys overrides)))
+  (throw (ex-info "formal.evaluate: unknown scalar-text resource configuration" {:profile text-graph-profile})))
+ (assoc (graph-word-limits (dissoc overrides :text)) :text (text/limits (get overrides :text {}))))
+
+(defn- real-pair [value]
+ ;; Match the SDK's cheap structural tests before its canonicality GCD.
+ (when (and (map? value) (= #{:formal/real} (set (keys value)))
+            (rational/pair? (:formal/real value)) (> (second (:formal/real value)) 0))
+  (:formal/real value)))
+
+(defn- prepare-graph-point [data roots policy selected-profile]
+ (cond (= text-graph-profile selected-profile)
+        (forest/prepare-numeric-word-text data roots (select-keys policy [:rational :word :text :admission-work-units]))
+       (= word-graph-profile selected-profile)
+        (forest/prepare-numeric-word data roots (select-keys policy [:rational :word :admission-work-units]))
+       (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+        (forest/prepare-numeric data roots (select-keys policy [:rational :admission-work-units]))
+       policy (forest/prepare-bool-int data roots) :else (forest/prepare data roots)))
+
+(defn- with-prepared-graph-point*
+ "Use an SDK-owned admitted graph point while consuming demanded root values.
+  The callback receives source-root lookup and diagnostic snapshot functions;
+  both retire on return or failure. Only the original admitted roots can be
+  looked up. These functions are local implementation plumbing, not portable
+  query terms, accepted prepared views, native handles or proof authority."
+ [data roots assignments assignment-data policy selected-profile prepared consume]
+ (let [texts? (= text-graph-profile selected-profile)
+       words? (or texts? (= word-graph-profile selected-profile))
+       numeric? (or words? (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+       direct? (or words? (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+       admission-incomplete? (= :incomplete (get-in prepared [:admission :status]))
+       nodes (into {} (map (fn [[id op sort children datum]]
+                            [id {:op (erlang/binary_to_existing_atom op :utf8)
+                                 :sort sort :children children :data datum}]) (:nodes prepared)))
+       memo (atom {}) active (atom true) owner (erlang/self)
+       root-ids (zipmap roots (if admission-incomplete? roots (:roots prepared)))
+       accounting (atom (merge {:evaluated-nodes 0 :sdk-calls 0 :integer-primitive-calls 0
+                                :charged-work-units 0 :refusals []}
+                         (when numeric? {:rational-primitive-calls 0 :rational-value-check-calls 0})
+                         (when words? {:word-primitive-calls 0 :word-value-check-calls 0 :word-literal-reuses 0})
+                         (when texts? {:text-primitive-calls 0 :text-value-check-calls 0 :text-literal-reuses 0})
+                         (when direct? {:primitive-applications 0 :literal-reuses 0 :assignment-checks 0})
+                         (when admission-incomplete?
+                          {:refusals [(assoc (select-keys (:admission prepared) [:source-node :reason]) :phase :admission)]})))]
+  (letfn [(refuse [id reason]
+           (let [row {:node id :reason reason}]
+            (swap! accounting update :refusals conj row)
+            (unavailable (merge {:kind :resource-incomplete :profile selected-profile :node id :reason reason}
+                                    (when numeric? {:phase :evaluation})))))
+          (call-sdk [term bindings]
+           (when (or policy direct?) (swap! accounting update :sdk-calls inc))
+           (value term bindings))
+          (planned [id counter plan execute]
+           (if (not= :ready (:status plan)) (refuse id (:reason plan))
+            (let [work (get-in plan [:forecast :work-units]) required (+ (:charged-work-units @accounting) work)
+                  integer-result (get-in plan [:forecast :result-integer-bits])]
+             (cond
+              (and integer-result (> integer-result (get-in policy [:integer :integer-bits])))
+               (refuse id {:kind :resource-limit :metric :integer-bits :required integer-result
+                           :limit (get-in policy [:integer :integer-bits])})
+              (> required (:request-work-units policy))
+               (refuse id {:kind :resource-limit :metric :request-work-units :required required
+                           :limit (:request-work-units policy)})
+              :else
+               (do (swap! accounting assoc :charged-work-units required)
+                   (swap! accounting update counter inc)
+                   (execute))))))
+          (primitive [id op sort children datum child-values]
+           (let [names (when-not direct? (mapv #(str "forest.private.child/" %) (range (count children))))
+                 arguments (mapv (fn [i] (let [sort (:sort (get nodes (nth children i)))]
+                                          (if direct? {:formal/term 1 :sort sort} (t/variable (nth names i) sort))))
+                                 (range (count children)))
+                 local {:formal/term 1 :op op :sort sort :args arguments :data datum}
+                 bindings (if (= :var op) assignments (when-not direct? (zipmap names child-values)))
+                 execute (fn []
+                           (cond
+                            (and direct? (= :real op))
+                             ;; This literal was normalized and compared with
+                             ;; the original inside this fresh admission. The
+                             ;; caller cannot provide this private fact.
+                             (do (swap! accounting update :literal-reuses inc) {:formal/real (vec datum)})
+                            (and words? (= :bv op))
+                             (do (swap! accounting update :literal-reuses inc)
+                                 (swap! accounting update :word-literal-reuses inc) {:formal/bv [(second sort) datum]})
+                            (and texts? (= :text op))
+                             (do (swap! accounting update :literal-reuses inc)
+                                 (swap! accounting update :text-literal-reuses inc) datum)
+                            (and direct? (not (contains? #{:var :bound :bool :int :text :rounding :bv :fp-bits :enum} op)))
+                             (do (swap! accounting update :primitive-applications inc) (primitive-value local child-values))
+                            :else
+                             (do (when (and direct? (= :var op)) (swap! accounting update :assignment-checks inc))
+                                 (call-sdk local bindings))))
+                 integer? (or (contains? integer-ops op)
+                              (and (= :eq op) (= t/Int (:sort (get nodes (first children))))))
+                 missing (first (filter unavailable? child-values))
+                 rational? (and numeric? (or (= t/Real sort) (some #(= t/Real (:sort (get nodes %))) children)))
+                 scalar-real (when (and numeric? (= t/Real sort))
+                               (cond (= :real op) (vec datum)
+                                     (= :var op) (real-pair (get assignments datum)) :else nil))
+                 word-arguments? (and words? (seq children) (= :bv (first (:sort (get nodes (first children)))))
+                                      (or (contains? word-ops op) (contains? #{:eq :distinct} op)))
+                 scalar-word (when (and words? (= :var op) (= :bv (first sort)))
+                               (word-coordinate-bits sort (get assignments datum)))
+                 scalar-text (when (and texts? (= :var op) (= t/String sort) (string? (get assignments datum)))
+                               (get assignments datum))
+                 text-arguments? (and texts? (contains? text/operations op)
+                                      (some #(= t/String (:sort (get nodes %))) children))
+                 scalar (cond (= :int op) datum
+                              (and (= :var op) (= t/Int sort)) (get assignments datum)
+                              :else nil)]
+            (cond
+             ;; Existing integer input is measured before SDK value checking.
+             (and policy (int? scalar) (> (integer/bits scalar) (get-in policy [:integer :integer-bits])))
+              (refuse id {:kind :resource-limit :metric :integer-bits :required (integer/bits scalar)
+                          :limit (get-in policy [:integer :integer-bits])})
+             (and direct? (= :real op)) (execute)
+             (and words? (= :bv op)) (execute)
+             (and texts? (= :text op)) (execute)
+             (some? scalar-text)
+              (planned id :text-value-check-calls (text/value-plan (erlang/byte_size scalar-text) (:text policy)) execute)
+             (and text-arguments? missing) missing
+             text-arguments?
+              (planned id :text-primitive-calls
+               (text/plan op
+                (vec (keep-indexed
+                      (fn [i value]
+                       (when (= t/String (:sort (get nodes (nth children i)))) (erlang/byte_size value)))
+                      child-values))
+                (vec (keep-indexed
+                      (fn [i value] (when (= t/Int (:sort (get nodes (nth children i)))) value))
+                      child-values))
+                (:text policy)) execute)
+             (some? scalar-word)
+              (planned id :word-value-check-calls (word/value-plan sort scalar-word (:word policy)) execute)
+             (and word-arguments? missing) missing
+             word-arguments?
+              (planned id :word-primitive-calls
+                       (word/plan op sort (mapv #(:sort (get nodes %)) children) datum (:word policy)) execute)
+             (and words? (= :distinct op))
+              (refuse id {:kind :resource-policy-unsupported :operation op :sort sort})
+             scalar-real
+              (planned id :rational-value-check-calls
+                       (rational/plan :normalize [scalar-real] (:rational policy)) execute)
+             ;; The child walk has already preserved eager demand. The SDK's
+             ;; first unavailable result can be returned without repeating GCD
+             ;; checks on complete sibling coordinates; no primitive will run.
+             (and rational? missing) missing
+             (and rational? (not (contains? #{:real :var} op)))
+              (planned id :rational-primitive-calls
+                       ((if direct? rational/plan-direct rational/plan)
+                        op (if (= :to-real op) [[(first child-values) 1]]
+                               (mapv :formal/real child-values)) (:rational policy)) execute)
+             (and policy integer? (not missing))
+              (planned id :integer-primitive-calls (integer/plan op child-values (:integer policy)) execute)
+             :else (execute))))
+          (evaluate-node [id]
+           (let [{:keys [op sort children data]} (get nodes id)]
+            (cond
+             (and policy (not (or (contains? supported op)
+                                 (and numeric? (contains? #{:real :to-real :to-int :is-int} op))
+                                 (and texts? (or (= :text op) (contains? text/operations op)))
+                                 (and words? (or (contains? word-ops op) (contains? #{:bv :distinct} op))))))
+              (refuse id {:kind :resource-policy-unsupported :operation op})
+             (= :ite op)
+              (let [condition (visit (first children))]
+               (cond (= true condition) (visit (second children))
+                     (= false condition) (visit (nth children 2))
+                     :else condition))
+             (= :and op)
+              (loop [pending children unknown nil]
+               (if (empty? pending) (or unknown true)
+                (let [value (visit (first pending))]
+                 (cond (= false value) false
+                       (unavailable? value) (recur (rest pending) value)
+                       :else (recur (rest pending) unknown)))))
+             (= :or op)
+              (loop [pending children unknown nil]
+               (if (empty? pending) (or unknown false)
+                (let [value (visit (first pending))]
+                 (cond (= true value) true
+                       (unavailable? value) (recur (rest pending) value)
+                       :else (recur (rest pending) unknown)))))
+             :else (primitive id op sort children data (mapv visit children)))))
+          (visit [id]
+           (if (contains? @memo id) (get @memo id)
+            (let [result
+                  (if (and policy (>= (:evaluated-nodes @accounting) (:evaluated-nodes policy)))
+                   (refuse id {:kind :resource-limit :metric :evaluated-nodes
+                               :required (inc (:evaluated-nodes @accounting)) :limit (:evaluated-nodes policy)})
+                   (do (when policy (swap! accounting update :evaluated-nodes inc)) (evaluate-node id)))]
+             (swap! memo assoc id result)
+             result)))
+          (binding-nodes [ids]
+           (loop [pending ids seen #{} variables #{}]
+            (if (empty? pending) (vec (sort-by (fn [id] (:data (get nodes id))) variables))
+             (let [id (peek pending) tail (pop pending) node (get nodes id)]
+              (if (contains? seen id) (recur tail seen variables)
+               (recur (into tail (:children node)) (conj seen id)
+                      (if (= :var (:op node)) (conj variables id) variables)))))))
+          (binding-row [id]
+           (let [node (get nodes id) name (:data node) actual (visit id)
+                 raw (get assignments name (unavailable :unassigned))
+                 reason (when (unavailable? actual) (:formal/unavailable actual))
+                 refused? (and (map? reason) (= :resource-incomplete (:kind reason)))
+                 invalid? (and (not (unavailable? raw)) (map? reason) (= :ill-sorted-value (:kind reason)))]
+            {:name name :sort (:sort node)
+             :status (cond invalid? :invalid (unavailable? actual) :incomplete :else :valid)
+             :reason (if (unavailable? raw) (:formal/unavailable raw) reason)
+             :resource-refused (boolean refused?)}))]
+   (let [live! (fn []
+                (when-not (= owner (erlang/self))
+                 (throw (ex-info "formal.term-forest-evaluate: point belongs to another process" {:profile selected-profile})))
+                (when-not @active (throw (ex-info "formal.term-forest-evaluate: point operation retired" {:profile selected-profile}))))
+         base (merge {:profile selected-profile :data-reference (:data-reference prepared) :source-roots roots}
+                     (when numeric? {:admission (:admission prepared)}))
+         references (when (or policy direct?)
+                     {:assignment-reference (graph/reference assignment-data)
+                      :settings-reference (graph/of {:profile selected-profile :limits (or policy {})}) :limits (or policy {})})]
+    (try
+     (consume (merge base references
+              {:resources (fn [] (live!) (when (or policy direct?) @accounting))
+               :resolve (fn [id]
+                          (live!)
+                          (when-not (and (int? id) (contains? root-ids id))
+                           (throw (ex-info "formal.term-forest-evaluate: unadmitted source root" {:profile selected-profile})))
+                          (if admission-incomplete?
+                           (unavailable {:kind :resource-incomplete :profile selected-profile :phase :admission
+                                             :source-root id :reason (get-in prepared [:admission :reason])})
+                           (visit (get root-ids id))))
+               :check-bindings
+                (fn [selected-roots]
+                 (live!)
+                 (when-not (and (vector? selected-roots)
+                                (or (nil? (meta selected-roots)) (= {} (meta selected-roots)))
+                                (every? #(and (int? %) (contains? root-ids %)) selected-roots))
+                  (throw (ex-info "formal.evaluate: admitted binding roots required" {:profile selected-profile})))
+                 (if admission-incomplete?
+                  {:status :incomplete :rows [] :resource-refused true :phase :admission}
+                  (let [rows (mapv binding-row (binding-nodes (mapv #(get root-ids %) selected-roots)))
+                        refused? (boolean (some :resource-refused rows))]
+                   {:status (cond (some #(= :invalid (:status %)) rows) :invalid
+                                  (some #(= :incomplete (:status %)) rows) :incomplete :else :valid)
+                    :rows rows :resource-refused refused?})))
+               :checking (fn [] (live!)
+                           (merge {:typed-nodes (get-in prepared [:checking :typed-nodes])
+                                   :evaluated-nodes (if policy (:evaluated-nodes @accounting) (count @memo))
+                                   :argument-traversal :graph-references}
+                                  (when policy {:attempted-nodes (count @memo)})))}))
+     (finally (reset! active false) (reset! memo {})))))))
+
+(defn graph-resource-limits
+ "Normalize settings for a named SDK graph evaluation profile. Profiles without
+  a derived-value policy accept no resource overrides. The profile is part of
+  execution identity, separate from the original mathematical graph."
+ [selected-profile overrides]
+ (cond
+  (or (= graph-profile selected-profile) (= direct-graph-profile selected-profile))
+   (do (when-not (and (map? overrides) (empty? overrides))
+        (throw (ex-info "formal.evaluate: general graph profile accepts no resource overrides" {:profile selected-profile}))) {})
+  (= bounded-graph-profile selected-profile) (graph-integer-limits overrides)
+  (= word-graph-profile selected-profile) (graph-word-limits overrides)
+  (= text-graph-profile selected-profile) (graph-text-limits overrides)
+  (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+   (graph-numeric-limits overrides)
+  :else (throw (ex-info "formal.evaluate: unknown graph evaluation profile" {:profile selected-profile}))))
+
+(defn- graph-options [options]
+ (when-not (and (map? options) (every? #{:profile :limits} (keys options)))
+  (throw (ex-info "formal.evaluate: closed graph options required" {})))
+ (graph/encode options)
+ (let [selected-profile (get options :profile direct-graph-profile)
+       limits (graph-resource-limits selected-profile (get options :limits {}))
+       general? (or (= graph-profile selected-profile) (= direct-graph-profile selected-profile))]
+  {:profile selected-profile :policy (when-not general? limits)}))
+
+(defn- point-assignment-data [assignments selected-profile]
+ (when-not (map? assignments)
+  (throw (ex-info "formal.term-forest-evaluate: point assignments must be a map" {:profile selected-profile})))
+ ;; Reject executable/nonportable coordinates before their concrete use.
+ ;; with-graph-point also does this before constructor admission.
+ (graph/encode assignments))
+
+(defn with-graph-point
+ "Freshly admit original portable graph roots and assignments inside this SDK.
+  Default graph v2 shares private primitive dispatch with tree evaluation;
+  bounded numeric v2 also forecasts demanded arithmetic before execution.
+  Legacy graph/Bool-Int/numeric v1 profiles remain explicitly selectable.
+  Only the creating process can resolve the original requested root IDs. Local
+  callbacks retire on return/failure; they are not portable query terms or
+  proof/native execution capabilities. No prepared view or checked-child flag
+  can be supplied in the closed options map."
+ [data roots assignments options consume]
+ (let [{:keys [profile policy]} (graph-options options)
+       assignment-data (point-assignment-data assignments profile)
+       prepared (prepare-graph-point data roots policy profile)]
+  (with-prepared-graph-point* data roots assignments assignment-data policy profile prepared consume)))
+
+(defn with-graph-admission
+ "Fresh admission before point coordinates are known, for a local owner turn.
+  The forest is diagnostic data. Only the SDK's captured original admission is
+  used by with-point; a copied/edited forest cannot replace it. Admission work
+  belongs to this outer scope, while every point has fresh private evaluation
+  accounts. Source lookups and both levels of callback retire on return/failure
+  and can only run in their creating process. This is local implementation
+  plumbing, not portable query data, a native handle or proof authority."
+ [data roots options consume]
+ (let [{:keys [profile policy]} (graph-options options)
+       prepared (prepare-graph-point data roots policy profile)
+       owner (erlang/self) active (atom true)
+       admission-reference (graph/of {:data-reference (:data-reference prepared) :source-roots roots
+                                      :profile profile :limits policy})
+       live! (fn []
+               (when-not (= owner (erlang/self))
+                (throw (ex-info "formal.evaluate: admission belongs to another process" {:profile profile})))
+               (when-not @active
+                (throw (ex-info "formal.evaluate: admission operation retired" {:profile profile}))))]
+  (try
+   (consume
+    {:profile profile :forest prepared :data-reference (:data-reference prepared) :source-roots roots
+     :admission (:admission prepared) :admission-reference admission-reference
+     :admission-account :shared-scope
+     :with-point
+      (fn [assignments consume-point]
+       (live!)
+       (let [assignment-data (point-assignment-data assignments profile)]
+        (with-prepared-graph-point* data roots assignments assignment-data policy profile prepared
+         (fn [point] (consume-point (assoc point :admission-account :shared-scope
+                                               :admission-reference admission-reference))))))})
+   (finally (reset! active false)))))
+
+(defn graph-values
+ "Evaluate term-based graph points through the same private SDK mathematics as
+  ordinary value. Supply original graph data, ordered root IDs, portable point
+  data and explicit options; no admitted forest/plan or native reply is accepted.
+  Completion is point evaluation, not assertion replay or a checked proof."
+ [data roots assignments options]
+ (with-graph-point data roots assignments options
+  (fn [point]
+   (let [result (mapv (:resolve point) roots) selected-profile (:profile point)]
+    (if (= graph-profile selected-profile)
+     {:profile graph-profile :data-reference (:data-reference point) :source-roots roots
+      :values result :checking ((:checking point))
+      :semantics :selected-sdk-primitive-rules :compiler-proof-authority false}
+     (let [states (mapv #(if (unavailable? %) :incomplete :complete) result)
+           bound (select-keys point [:profile :data-reference :source-roots :assignment-reference :settings-reference :limits])
+           direct? (or (= text-graph-profile selected-profile) (= word-graph-profile selected-profile) (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+           numeric? (or (= text-graph-profile selected-profile) (= word-graph-profile selected-profile) (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))]
+      (merge bound
+       {:evaluation-reference (graph/of bound) :values result :root-statuses states
+        :status (if (every? #(= :complete %) states) :complete :incomplete)
+        :checking ((:checking point)) :resources ((:resources point))
+        :semantics (if direct? :shared-sdk-primitive-rules :selected-sdk-primitive-rules)
+        :native-calls 0 :assertion-replay :not-run :compiler-proof-authority false}
+       (when numeric?
+        {:admission (:admission point) :phase (if (= :incomplete (get-in point [:admission :status])) :admission :evaluation)})
+       (when direct?
+        {:primitive-dispatch :private-sdk-function
+         :resource-policy (cond (= text-graph-profile selected-profile) :numeric-word-scalar-text-derived-values
+                                (= word-graph-profile selected-profile) :numeric-word-derived-values
+                                numeric? :numeric-derived-values :else :structural-admission-only)}))))))))
+

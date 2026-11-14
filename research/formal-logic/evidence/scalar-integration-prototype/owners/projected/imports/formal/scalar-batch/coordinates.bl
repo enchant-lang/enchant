@@ -1,0 +1,68 @@
+(ns formal.scalar-batch.coordinates (:require [formal.data-graph :as graph]))
+
+(def profile :bl/numeric-coordinate-graph-preview-v1)
+(def word-profile :bl/numeric-word-coordinate-graph-preview-v1)
+(def text-profile :bl/numeric-word-scalar-text-coordinate-graph-preview-v1)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.coordinates: " reason) {:kind :point-coordinates}))))
+
+(defn check!
+ "Check only the original coordinate graph and its string-name map shape."
+ [data]
+ (let [checked (graph/check! data) rows (:nodes data) [kind pairs] (nth rows (:root data))]
+  (require! (= "map" kind) "coordinate map required")
+  (doseq [[key _] pairs]
+   (let [[tag value] (nth rows key)]
+    (require! (and (= "binary" tag) (string? value)) "coordinate names must be strings")))
+  checked))
+
+(defn- prepare*
+ "Read a checked graph's named numeric coordinates without application atoms.
+  Canonical Real checking and all arithmetic remain in the metered point.
+  Unavailable reasons and invalid encodings stay original graph cursors;
+  they are never decoded as application data or treated as checked values."
+ [data words?]
+ (let [checked (check! data) rows (:nodes data) [_ pairs] (nth rows (:root data))
+       float-ids (vec (distinct (keep (fn [[_ id]] (when (= "float64" (first (nth rows id))) id)) pairs)))
+       floats (zipmap float-ids (graph/decode-nodes! data float-ids))
+       cursor (fn [id] {:point-reference (:reference checked) :source-node id})
+       invalid (fn [id] {:formal/invalid-coordinate (cursor id)})]
+  (letfn [(read-value [id]
+           (let [[tag body] (nth rows id)]
+            (cond
+             (contains? #{"int" "bool" "nil" "binary"} tag) body
+             (= "float64" tag) (get floats id)
+             (and (= "map" tag) (= 1 (count body)))
+              (let [[key child] (first body) key-row (nth rows key)
+                    [child-tag ids] (nth rows child)]
+               (cond
+                (= ["keyword" "formal/unavailable"] key-row)
+                 {:formal/unavailable {:kind :graph-unavailable :reason (cursor child)}}
+                (and (= ["keyword" "formal/real"] key-row) (= "vector" child-tag)
+                     (= 2 (count ids)) (every? #(= "int" (first (nth rows %))) ids))
+                 {:formal/real (mapv #(second (nth rows %)) ids)}
+                (and words? (= ["keyword" "formal/bv"] key-row) (= "vector" child-tag)
+                     (= 2 (count ids)) (every? #(= "int" (first (nth rows %))) ids))
+                 ;; Syntax only. Width/range and input-size work are checked
+                 ;; freshly inside the actual point's resource account.
+                 {:formal/bv (mapv #(second (nth rows %)) ids)}
+                :else (invalid id)))
+             :else (invalid id))))]
+   {:profile (if words? word-profile profile) :reference (:reference checked)
+    :assignments (into {} (mapv (fn [[key id]] [(second (nth rows key)) (read-value id)]) pairs))
+    :checking {:coordinates (count pairs) :float-values (count float-ids)
+               :application-key-materialization :not-run}
+    :compiler-proof-authority false})))
+
+(defn prepare
+ "Read numeric coordinate syntax. Canonical values belong to metered replay."
+ [data] (prepare* data false))
+(defn prepare-numeric-word
+ "Read numeric/word syntax without interpreting application atoms or checking
+  word values outside their point account. Original malformed/unavailable
+  values remain graph cursors; no normalization flag is accepted."
+ [data] (prepare* data true))
+(defn prepare-numeric-word-text
+ "Scalar text adds no eager validation to binary coordinate syntax. UTF-8,
+  alphabet and resource work belong to the fresh demanded point account."
+ [data] (assoc (prepare* data true) :profile text-profile))

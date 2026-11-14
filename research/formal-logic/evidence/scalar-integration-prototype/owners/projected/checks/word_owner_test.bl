@@ -1,0 +1,46 @@
+(ns formal.word-owner-test
+ (:require [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.scalar-batch.request :as request] [formal.scalar-batch.request-answer :as answer] [formal.scalar-batch.request-record :as record]
+           [formal.scalar-batch.backend :as backend] [formal.scalar-batch.logic :as logic] [formal.scalar-batch.point-profile :as policy]))
+(def x (t/variable "native.word" [:bv 8]))
+(def caller (qg/prepare (q/sat {:assumptions [(t/app :bv-ule t/Bool [x (t/literal [:bv 8] 9)] nil)] :observe {"x" x}})))
+
+(deftest actual-native-word-owners-and-fresh-readers-share-the-complete-subject
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+   (fn [session]
+    (is (:ok (backend/load! session [(q/assertion "seven" (t/eq x (t/literal [:bv 8] 7)))])))
+    (let [frozen (atom nil)
+          borrowed (logic/with-context-request session caller {:policy {:profile policy/numeric-word}}
+                     (fn [r execute] (reset! frozen r) (execute)))
+          wrong (answer/recheck @frozen (answer/supply @frozen {"native.word" {:formal/bv [8 8]}}))
+          fresh (logic/execute-request @frozen)
+          reopened (record/recheck-graph (record/pack-graph @frozen (:response borrowed)))]
+     (is (= :sat (:verdict borrowed)) (pr-str borrowed))
+     (is (= 3 (get-in borrowed [:response :formal/request-answer])))
+     (is (= :invalid-point (:verdict wrong)))
+     (is (= :sat (:verdict fresh)))
+     (is (= :sat (:verdict reopened)))
+     (is (= (:subject-reference borrowed) (:subject-reference fresh)))
+     (is (= :matching-response (get-in borrowed [:local-delegation :status])))
+     (is (= false (:checked-native-execution reopened)))
+     (is (= false (:compiler-proof-authority reopened))))))))
+
+(deftest live-owner-raw-generic-replies-retain-profile-and-refuse-stale-guards
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+   (fn [session]
+    (let [before (backend/context session)
+          raw (backend/graph-question! session caller {:profile policy/numeric-word})
+          bits (second (:formal/bv (get-in raw [:assignments "native.word"])))]
+     (is (= 3 (:formal/managed-graph-reply raw)))
+     (is (= :sat (:verdict raw)) (pr-str raw))
+     (is (= :valid (get-in raw [:validation :status])))
+     (is (and (int? bits) (<= 0 bits 9)))
+     (is (:ok (backend/load! session [(q/assertion "one" (t/eq x (t/literal [:bv 8] 1)))])))
+     (let [refused (backend/graph-question! session caller {:profile policy/numeric-word} before)]
+      (is (= 3 (:formal/managed-graph-reply refused)))
+      (is (= :not-run (:solver-status refused)))
+      (is (= 0 (:native-scope-attempts refused)))))))))
+
+(run-tests)
