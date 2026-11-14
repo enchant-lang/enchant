@@ -223,8 +223,22 @@
 (native-add-leaf! "Elixir.BeamLisp.Vector/new/1" (lambda (xs) (bl-vec (native-finite-items xs))))
 (native-add-leaf! "Elixir.BeamLisp.Vector/to_list/1" bl-items)
 (native-add-leaf! "Elixir.BeamLisp.Vector/count/1" native-vector-count)
-(native-add-leaf! "Elixir.BeamLisp.Vector/nth/2" native-vector-ref)
-(native-add-leaf! "Elixir.BeamLisp.Vector/nth/3" bl-nth)
+;; Canonical host/vector.bl:nth/2 nil-fills missing slots (reader nodes use
+;; this for optional fields). Keep strict internal native-vector-ref unchanged.
+(define (native-vector-nth value index)
+ (if (not (eq? (native-struct-module value) (bl-key "Elixir.BeamLisp.Vector")))
+  (native-raise (bl-key "error")
+   (native-function-clause-error
+    (list (bl-tuple (list (bl-key "module") (bl-key "Elixir.BeamLisp.Vector")))
+          (bl-tuple (list (bl-key "function") (bl-key "nth")))
+          (bl-tuple (list (bl-key "arity") 2))))
+   (native-capture-stack))
+  (if (and (h-is-int index) (>= index 0))
+   (let ((vector (if (bl-tag? value 'vec) value
+                  (native-vector-from-canonical-items (native-map-fetch (bl-key "items") value)))))
+    (if (< index (native-vector-count vector)) (native-vector-ref vector index) bl-nil))
+   bl-nil)))
+(native-add-leaf! "Elixir.BeamLisp.Vector/nth/2" native-vector-nth)
 (native-add-leaf! "Elixir.BeamLisp.Vector/conj/2" bl-conj)
 (native-add-leaf! "Elixir.BeamLisp.Vector/assoc/3" native-vector-assoc)
 (native-add-leaf! "Elixir.BeamLisp.Set/new/1" native-set-from-list)

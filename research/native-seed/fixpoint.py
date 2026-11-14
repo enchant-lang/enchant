@@ -171,6 +171,9 @@ def main() -> None:
                       "-Wl,-rpath," + str(gambit / "gambit/lib")]
         tool_identity = {"driver": digest(here), "splitter": digest(splitter), "flags": flags,
                          "link_flags": link_flags, "toolchain": tools,
+                         "compiler_environment_sha256": key({name: value for name, value in os.environ.items()
+                             if name.startswith(("NIX_", "GAMBIT")) or name in
+                             ("PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH", "SDKROOT")}),
                          "tools": {str(p): digest(p) for p in (gsc, gsi, clang,
                                       gambit / "gambit/include/gambit.h", gambit / "gambit/lib/libgambit.so")}}
         actor_results = {}
@@ -326,6 +329,7 @@ def main() -> None:
                 raise RuntimeError("compiler source lacks its exact final native-main entry")
             overlay = out / (name + "-actors.scm")
             overlay.write_bytes(original[:-len(ENTRY)] + b"\n" + args.actor_body.read_bytes())
+            bind(overlay)
             executable = compile_native(name + "-actors")
             results = {}
             for budget in BUDGETS:
@@ -353,8 +357,13 @@ def main() -> None:
         if "NATIVE_COMPILER_SOURCE_CORPUS_OK" not in corpus1:
             raise RuntimeError("source corpus did not witness native compilation and execution")
         actor1 = actor_gate("stage1")
-        run("stage1-builds-stage2", [stage1, "--compile", out / "bundle.scm", out / "host.scm", out / "stage2.scm"],
-            cwd=root, timeout=args.timeout)
+        (out / "stage2.scm").unlink(missing_ok=True)
+        built2 = run("stage1-builds-stage2", [stage1, "--compile", out / "bundle.scm", out / "host.scm", out / "stage2.scm"],
+                     cwd=root, timeout=args.timeout)
+        if (not (out / "stage2.scm").is_file() or not any(
+                line.startswith("NATIVE_SELF_COMPILE ") and line.endswith(" namespaces") for line in built2.splitlines())):
+            raise RuntimeError("native stage1 did not witness a fresh original-source stage2 build")
+        bind(out / "stage2.scm")
         stage2 = compile_native("stage2")
         corpus2 = run("stage2-source-corpus", [stage2, "--eval", out / "bundle.scm", args.corpus.resolve()],
                       cwd=root, timeout=COMPILE_DEADLINE)
@@ -364,8 +373,13 @@ def main() -> None:
         for budget in BUDGETS:
             if any(actor1[budget][field] != actor2[budget][field] for field in ("labels", "traces", "witness")):
                 raise RuntimeError("stage1 and stage2 original actor semantics differ: " + budget)
-        run("stage2-builds-stage3", [stage2, "--compile", out / "bundle.scm", out / "host.scm", out / "stage3.scm"],
-            cwd=root, timeout=args.timeout)
+        (out / "stage3.scm").unlink(missing_ok=True)
+        built3 = run("stage2-builds-stage3", [stage2, "--compile", out / "bundle.scm", out / "host.scm", out / "stage3.scm"],
+                     cwd=root, timeout=args.timeout)
+        if (not (out / "stage3.scm").is_file() or not any(
+                line.startswith("NATIVE_SELF_COMPILE ") and line.endswith(" namespaces") for line in built3.splitlines())):
+            raise RuntimeError("native stage2 did not witness a fresh original-source stage3 build")
+        bind(out / "stage3.scm")
         h2, h3 = digest(out / "stage2.scm"), digest(out / "stage3.scm")
         if h2 != h3 or (out / "stage2.scm").read_bytes() != (out / "stage3.scm").read_bytes():
             raise RuntimeError("native bootstrap did not reach a stage2/stage3 Scheme artifact fixpoint")
