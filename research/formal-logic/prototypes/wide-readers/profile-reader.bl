@@ -9,6 +9,7 @@
            [formal.wide-batch.oracle :as oracle]
            [formal.data-graph :as graph] [bl.json :as json]))
 (def argv (BeamLisp/argv))
+(def component-mode (= "components" (get argv 2)))
 (def measurements (atom []))
 (defn require! [ok why] (when-not ok (throw (ex-info (str "wide profile: " why) {}))))
 (defn module [f] (elem (erlang/fun_info f :module) 1))
@@ -43,19 +44,29 @@
 (def deny (fn [& _] (swap! oracle-calls inc) (throw :profile-reader-must-not-query)))
 (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
  (fn []
-  (doseq [id [:first-reopen :warmed-reopen]]
+  (doseq [id (if component-mode [] [:first-reopen :warmed-reopen])]
    (let [result (measured id #(evidence/reopen packet))]
     (require! (= :not-established (get-in result [:logical-conclusion :status])) "claim remains unproved")))
+  (when component-mode (answer/data-vocabulary))
   (let [data (graph/decode! packet) r (:request data) e (:evidence data)]
+   (if component-mode
+    (let [response (answer/restore r (:answer-graph e))]
+     (measured :evidence-carrier-encode #(graph/encode e))
+     (measured :evidence-carrier-reference #(graph/of e))
+     (measured :answer-recheck #(answer/recheck r response))
+     (measured :answer-source-encode #(graph/encode (:source response)))
+     (measured :answer-graph-value-encode #(graph/encode (:answer-graph e))))
+    (do
    (measured :request-envelope #(request/check! r))
    (measured :typed-admission #(policy/with-question (:subject r) (:policy r)
                                (fn [_ admitted] (:admission admitted))))
    (measured :answer-envelope #(answer/restore r (:answer-graph e)))
    (measured :bundle-envelope #(evidence/check! r e))
-   (measured :bundle-recheck #(evidence/recheck r e)))))
+   (measured :bundle-recheck #(evidence/recheck r e)))))))
 (require! (= 0 @oracle-calls) "no oracle calls")
 (File/write! (second argv)
  (json/encode {:schema "bl.wide-reader-profile.v1" :status :passed
                :sdk (System/get_env "BL_SDK_PRODUCT") :measurements @measurements
                :packet-reference (graph/reference packet) :oracle-calls @oracle-calls
+               :component-mode component-mode :manual-schema-initialization component-mode
                :in-sdk false :performance-guarantee false :compiler-proof-authority false} {:pretty 2}))

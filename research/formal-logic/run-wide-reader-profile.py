@@ -1,11 +1,13 @@
 """Observe request/checking overhead on one exact saved native candidate."""
 from pathlib import Path
-import hashlib, json, shutil, subprocess, tempfile, time
+import hashlib, json, shutil, subprocess, sys, tempfile, time
 
 P = Path(__file__).resolve().parent
 R = P.parent.parent
 B = P / 'evidence/wide-owner-prototype/native-smoke'
-E = P / 'evidence/wide-owner-prototype/reader-profile'
+mode = sys.argv[1] if sys.argv[1:] else 'baseline'
+assert mode in ('baseline', 'components')
+E = P / 'evidence/wide-owner-prototype' / ('reader-profile' + ('-components' if mode == 'components' else ''))
 assert not E.exists(), 'Archive an earlier profile attempt before repeating it.'
 E.mkdir()
 def read(path): return json.loads(path.read_text())
@@ -40,7 +42,7 @@ for row in projection:
 command = ['timeout', '--kill-after=15', '900', 'env', '-u', 'BEAM_LISP_PATH',
            '-u', 'ENCHANT_FORMAL_WORKER', '-u', 'ENCHANT_Z3_LIBRARY', 'XDG_RUNTIME_DIR=' + str(xdg),
            pin['sdk'] + '/bin/bl', '--cold', '-p', str(imports), 'run', str(source), '--',
-           str(B / 'packets' / packet['file']), str(E / 'observations.json')]
+           str(B / 'packets' / packet['file']), str(E / 'observations.json'), mode]
 write('command.json', command)
 started = time.monotonic()
 try:
@@ -53,13 +55,16 @@ assert code == 0, (E / 'checks.txt').read_text()[-6000:]
 assert all(sha(R / name) == digest for name, digest in digests.items())
 result = read(E / 'observations.json')
 assert result['status'] == 'passed' and result['sdk'] == pin['sdk']
-assert len(result['measurements']) == 7 and result['oracle-calls'] == 0
+windows = 5 if mode == 'components' else 7
+assert len(result['measurements']) == windows and result['oracle-calls'] == 0
+assert result['component-mode'] == result['manual-schema-initialization'] == (mode == 'components')
 assert all(type(row['elapsed-us']) is int and row['elapsed-us'] >= 0 for row in result['measurements'])
 assert all(type(row['call-counts']['native-exchange']) is int and row['call-counts']['native-exchange'] == 0 for row in result['measurements'])
 assert result['packet-reference'] == packet['packet-reference']
 write('qualification.json', {'schema': 'bl.wide-reader-profile-qualification.v1', 'status': 'passed',
                             'source_pin': read(E / 'source-pin.json'), 'observations_sha256': sha(E / 'observations.json'),
-                            'scope': 'Seven serial operation windows on one exact native candidate, including first/warmed reopen and component checks. '
+                            'scope': f'{windows} serial operation windows on one exact native candidate. Baseline includes first/warmed reopen; '
+                                     'component mode explicitly initializes fixed schemas and isolates encoding/reference/answer checks. '
                                      'Actual function call counts and wall times with trace instrumentation; no native/oracle exchanges. '
                                      'This is diagnostic evidence on this host, not a speed comparison, physical cost proof or new mathematical capability.'})
-print(json.dumps({'status': 'passed', 'windows': 7}))
+print(json.dumps({'status': 'passed', 'windows': windows, 'mode': mode}))
