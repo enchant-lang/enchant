@@ -1,8 +1,11 @@
 # Feasible premises and conditional entailment are separate checks
 
-The isolated source in `prototypes/finite-feasibility` is pending, has not run
-and adds no capability to the SDK being qualified. The current SDK's finite
-certificate result deliberately leaves assumption feasibility unestablished.
+The isolated source in `prototypes/finite-feasibility` passed all 35 assertions
+on the qualified and selected scalar SDK. Its exact sources, actual command,
+cleaned private process directories and success receipt are retained in
+`evidence/finite-feasibility-prototype/qualification.json`. It adds no capability
+to that immutable SDK: the installed finite certificate still deliberately
+leaves assumption feasibility unestablished.
 
 This next experiment reuses that checker. It derives a background SAT request
 after bounded fresh original admission, by patching only mode, claim and
@@ -22,10 +25,10 @@ the finite strategy, and 200,000 for fresh witness admission plus point work.
 The total is 3,600,000 units. This is separate from the original request's
 execution allowance and is no physical CPU/allocation theorem.
 
-The planned gate must cover feasible and inconsistent Boolean/word premises,
+The actual six-test gate covers feasible and inconsistent Boolean/word premises,
 changed assumptions, empty backgrounds, exact reservation limits, unsupported
 sorts/quantifiers, solver-denied execution and large shared unfamiliar metadata.
-It must also show that an infeasible premise can accompany a checked conditional
+It also shows that an infeasible premise can accompany a checked conditional
 theorem without being presented as a useful unconditional program guarantee.
 
 Before this joins the common interface, define how an explicit vacuity policy

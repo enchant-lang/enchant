@@ -1,7 +1,7 @@
 # Continue beyond the scalar-text and word-evidence SDK
 
-The current candidate is an integration checkpoint, not completion of the
-formal/total-language goal. Keep its immutable artifact while qualifying it;
+The current scalar SDK is qualified and selected. It is an integration
+checkpoint, not completion of the formal/total-language goal. Keep its immutable artifact;
 batch the next language changes before producing another SDK.
 
 ## Make the checked-certificate seam cover the existing integer kernel
@@ -37,13 +37,14 @@ objects before calling it an implementation of the whole existing rule system.
 ## Check premise feasibility separately, then honor vacuity policy explicitly
 
 The finite checker currently establishes conditional entailment while leaving
-feasibility unestablished. The pending `finite-feasibility` experiment derives a
+feasibility unestablished. The qualified 35-assertion `finite-feasibility` experiment derives a
 background SAT request directly from the original graph, checks assertion-byte
 preservation, and reuses the installed finite strategy. A satisfying point gets
 ordinary point replay; a checked contradiction records inconsistency. Neither
 is inferred from conditional entailment.
 
-Qualify its six prepared tests before integration. The separate
+Its six actual tests passed on the selected scalar SDK; runtime integration
+remains a separate batch. The separate
 `FINITE-OBLIGATION-PROTOTYPE.md` sources prepare policy composition and candidate-only
 packets, with six tests and at least 93 assertions planned; they have not run.
 `VACUITY-SEMANTICS-REVIEW.md` records the current allow/report collapse and the

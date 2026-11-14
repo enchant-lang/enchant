@@ -6,6 +6,16 @@ procedures and native theory access together. **The existing compiler/oracle
 defaults retain their trust policy.** `system.linear` is now a term-based compiler
 consumer with an explicitly declared arithmetic scope.
 
+The current [selected scalar SDK](SCALAR-INTEGRATION.md) is fully qualified:
+11,705 assertion executions, 604 namespace checks, all 187 paired native
+questions unchanged, twenty actual word/text records reopened by two fresh
+durable readers, and compatibility readers for three older generations. See
+[the artifact qualification](evidence/scalar-integration/qualification.json)
+and [the selection receipt](evidence/scalar-integration/promotion.json).
+The live dossier's executable/browser checkpoint is being refreshed separately.
+The isolated [premise feasibility experiment](FINITE-FEASIBILITY-PROTOTYPE.md)
+has also passed 35 assertions; it is not yet part of the immutable SDK.
+
 The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root
 values across 187 questions and four deterministic point maps each. The shared
@@ -648,8 +658,8 @@ constraints, Datom invariants and actor protocol simulations. Each can reuse
 the term/value/query/evidence architecture while retaining its own semantic
 and operational boundaries.
 
-The [coherent word-policy integration](WORD-INTEGRATION.md) is qualified and
-selected: 10,922 BEAM assertion executions, 599 namespace preflight checks,
+The preceding [word-policy integration](WORD-INTEGRATION.md) was qualified
+and selected: 10,922 BEAM assertion executions, 599 namespace preflight checks,
 unchanged outcomes for 187 paired native questions, and two fresh readers of
 twelve new packets and indexed durable rows with zero solver exchanges. The
 91-cell dossier passed an independent unchanged repetition. Its selected SDK,
@@ -670,7 +680,7 @@ concrete BL point evaluation agreed with the contract. The
 [evidence-bundle prototype](EVIDENCE-BUNDLE-PROTOTYPE.md) then passed 47 assertions
 and a fresh solver-denied packet reader with six refusal controls. These
 prototypes are being integrated into a candidate runtime batch directly in main;
-the selected research SDK remains the qualified word SDK.
+that preceding prototype checkpoint retains its original word-SDK identity.
 
 The live dossier now includes a prose progress section for these qualified
 prototypes. Its cell sources and saved results are unchanged. The word presentation
@@ -687,15 +697,15 @@ text packets with 52 checks, and two certificate bundles with six fresh finite
 checks; all recorded zero solver/oracle calls. Two fresh SDK-only readers have also reopened all twenty actual packets and
 durable rows, with sixteen refusal controls, three independently invalid text
 points and exactly one normalization per selected lookup. The owned ledger was
-hashed and retired. Older-generation reader gates are still in progress, so the
-project pin remains on the qualified word SDK. The
+hashed and retired. All older-generation reader gates have now passed, and the project pin selects
+the qualified scalar/text/evidence SDK. The
 [next implementation work](POST-SCALAR-ROADMAP.md) includes a graph-native entry
 for the integer certificate kernel and separately checked premise feasibility.
 
 The [vacuity review](VACUITY-SEMANTICS-REVIEW.md) found that the current query
 layer accepts arbitrary values while graph readers collapse every non-`:allow`
-value to `:report`. The prepared [finite feasibility](FINITE-FEASIBILITY-PROTOTYPE.md)
-and [obligation policy](FINITE-OBLIGATION-PROTOTYPE.md) experiments have not run;
+value to `:report`. The [finite feasibility](FINITE-FEASIBILITY-PROTOTYPE.md) experiment passed
+35 assertions. The [obligation policy](FINITE-OBLIGATION-PROTOTYPE.md) experiment is now running;
 they will separately check conditional entailment, actual feasible or inconsistent
 premises, and exact caller acceptance policy. They do not change the current SDK.
 

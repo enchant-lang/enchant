@@ -1,14 +1,17 @@
 # Text and independent evidence in one term-based interface
 
-The candidate SDK is built and source-bound, with 604 namespace preflight
+The immutable SDK is qualified and selected, with 604 namespace preflight
 checks, 783 focused assertions and 11,705 assertion executions across all four
 gates passing. All 187 paired native cases retain their preceding outcomes.
 Cold SDK-only word, text and certificate packet readers also pass with zero
 native/oracle calls. Two fresh durable readers passed all twenty saved packets
 and actual ledger rows, sixteen refusal controls and three invalid text-point
-controls. Older-generation readers, full qualification and selection remain
-in progress. The selected research SDK remains the preceding word SDK.
-The candidate is recorded in [sdk-candidate.json](evidence/scalar-integration/sdk-candidate.json);
+controls. All three older saved generations also passed fresh-reader and
+refusal gates with their original producer identities. Read the exact
+[qualification](evidence/scalar-integration/qualification.json) and
+[selection](evidence/scalar-integration/promotion.json). Dossier execution and
+browser activation remain a separate checkpoint.
+The built artifact is recorded in [sdk-candidate.json](evidence/scalar-integration/sdk-candidate.json);
 its [build linkage](evidence/scalar-integration/build-linkage.json) binds all 723
 packaged sources, thirteen changed units and the unchanged compiler floor.
 
