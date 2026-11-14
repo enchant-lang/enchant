@@ -14,13 +14,20 @@
                  (= (:version declaration) (:version manifest))
                  (every? #(contains? exports (str %)) wanted))
    (throw (ex-info "Imported namespace does not satisfy env.bl" {:kind :auth/contract-mismatch})))
-  (let [context (BeamLisp.Loader/namespace_context logical)]
-   (when (= :tier (:home context)) (throw (ex-info "An import cannot replace an SDK namespace" {:kind :auth/denied}))))
+  (let [relative (str (String/replace (String/replace logical "." "/") "-" "_") ".bl")
+        owned (or (BeamLisp.AOT/sdk_library_unit? logical)
+                  (some #(File/regular? (Path/join % relative)) (BeamLisp.Tiers/dirs)))]
+   (when owned (throw (ex-info "An import cannot replace an SDK namespace" {:kind :auth/denied}))))
+  (let [generation (erlang/make_ref)]
+  (BeamLisp.Env/put_key (tuple :auth/import-binding logical) generation)
   (BeamLisp.Env/declare_ns logical)
   (doseq [name wanted]
    (let [name (str name) arity (get exports name)]
     (BeamLisp.Env/intern logical name
      (fn [& arguments]
+      (let [current (BeamLisp.Env/lookup (tuple :auth/import-binding logical))]
+       (when-not (= (tuple :ok generation) current)
+        (throw (ex-info "Imported interface belongs to a retired binding" {:kind :auth/stale-code}))))
       (when-not (= arity (count arguments))
        (throw (ex-info "Imported function arity mismatch" {:kind :auth/arity})))
       (let [request (namespace/request provider name (vec arguments))]
@@ -28,7 +35,7 @@
     (BeamLisp.Env/put_meta logical name {:import true :arglists (list (mapv #(symbol (str "arg" %)) (range arity)))
                                        :provider (:world provider) :contract-version (:version manifest)})))
   (BeamLisp.Env/mark_loaded logical)
-  logical))
+  logical)))
 (defn project [root]
  (let [path (str (Path/expand root) "/env.bl") forms (BeamLisp.Compiler/read_all_data (File/read! path))]
   (when-not (map? (last forms)) (throw (ex-info "A literal env.bl is required" {:kind :auth/configuration})))
