@@ -1,0 +1,62 @@
+; Shared exact Source fixture preparation. The linker owns compilation and
+; finite capability selection; this module only records/writes its artifacts.
+(ns native.proc-corpus
+ (:require [native.proc-link :as linker] [bl.json :as json]))
+(def base "research/native-seed")
+(def runtime "priv/lib/js/actor/runtime.bl")
+(def helper-namespaces ["proc.bus" "proc.flow" "proc.reg"])
+(def clock-model {:name "virtual-turn-ms-v1" :tick-ms 1 :event :completed-host-turn
+                  :idle-progress :existing-host-wait :real-time false})
+(def extensions [(str base "/host/virtual-turn-clock.scm")
+                 (str base "/host/actor-invariants.scm")
+                 (str base "/proc/witness.scm")])
+(defn write! [request]
+ (let [application (:application request) output (:output request)
+       prelude (:prelude request) host (str (Path/dirname prelude) "/host.scm")
+       frozen-host (File/read! host) frozen-prelude (File/read! prelude)
+       _ (when-not (String/starts_with? frozen-prelude
+                     (str ";; BL native compiler. Generated from canonical BL source.\n" frozen-host "\n"))
+           (throw (ex-info "native proc fixture: frozen compiler host/prelude boundary differs" {})))
+       result (linker/build-project
+        {:application application :runtime runtime :bridges (str base "/bridges.bl")
+         :links (str base "/actor-links.edn") :sdk-pin (str base "/sdk-pin.json")
+         :host-link (str base "/host/host-proc-link.scm") :prelude prelude
+         :closure-manifest (:closure-manifest request) :leaves (:leaves request)
+         :helper-namespaces helper-namespaces :host-extensions extensions :source-frames? false})
+       _ (when-not (= 202 (get-in result [:manifest :runtime-definitions]))
+           (throw (ex-info "native proc fixture requires every canonical actor runtime definition" {})))
+       program (str (:program result) "\n(native-proc-finish)\n")
+       _ (File/mkdir_p! (Path/dirname output))
+       _ (File/write! output program)
+       _ (File/write! (str output ".manifest.json") (json/encode (:manifest result)))
+       _ (File/write! (str output ".anf.etf")
+           (erlang/term_to_binary
+            {:schema "bl.native.anf-unit" :version 1 :definitions (:definitions result)
+             :entry (:entry result) :link-resolutions (:link-resolutions result)
+             :link-manifest (:manifest result)} (list :deterministic)))
+       prefix-size (inc (erlang/byte_size frozen-prelude))
+       _ (when-not (String/starts_with? program (str frozen-prelude "\n"))
+           (throw (ex-info "native proc fixture changed its exact compiler prelude" {})))
+       _ (File/write! (str output ".body.scm")
+           (binary/part program prefix-size (- (erlang/byte_size program) prefix-size)))
+       manifest
+        {:schema "bl.native.proc-corpus" :version 1 :status :prepared-not-executed
+         :backend :gambit-native :clock "virtual-turn-ms-v1" :clock-model clock-model
+         :helper-admission helper-namespaces :source-interpreter false
+         :assertion-adaptation :none :source-path-adaptation :none
+         :application (linker/source-identity application) :runtime (linker/source-identity runtime)
+         :host (linker/source-identity host) :prelude (linker/source-identity prelude)
+         :leaves (linker/source-identity (:leaves request)) :link (:manifest result)
+         :program (linker/source-identity output) :body (linker/source-identity (str output ".body.scm"))
+         :anf (linker/source-identity (str output ".anf.etf"))
+         :link-manifest (linker/source-identity (str output ".manifest.json"))
+         :inputs (mapv linker/source-identity
+          [application runtime (str base "/bridges.bl") (str base "/actor-links.edn")
+           (str base "/sdk-pin.json") (str base "/toolchain-pin.json")
+           (str base "/src/native/proc-link.bl") (str base "/src/native/proc.bl")
+           (str base "/src/native/proc-planner-capsules.bl") (str base "/src/native/scheme.bl")
+           (str base "/src/native/proc-corpus.bl") (str base "/build-runtime.bl")
+           (str base "/proc/prepare.bl")])}
+       _ (File/write! (str output ".source.json") (json/encode manifest))]
+  (println (str "NATIVE_PROC_LINKED " (count (:definitions result)) " exact source bodies"))
+  manifest))
