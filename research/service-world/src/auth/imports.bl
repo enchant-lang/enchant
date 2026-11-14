@@ -2,7 +2,7 @@
 ;; construct RPC requests nor select authentication adapters.
 (ns auth.imports
  (:require [auth.namespace :as namespace] [auth.transport :as transport]
-           [auth.logic :as logic] [auth.station :as station] [env]))
+           [auth.logic :as logic] [env]))
 (defn bind!
  "Host linker entry. Bind a finite imported surface into the current Env.
   endpoint may enter another realm or VM. Authority stays at the provider."
@@ -55,10 +55,17 @@
                                      (filter #(contains? (get-in prepared [:policy :exports]) (symbol (:name %))) (:bodies prepared))))}
          provider {:world (:world config) :manifest manifest}]
     (bind! logical declaration provider (transport/endpoint config)))
-   (let [provider (station/open config)]
+   (let [factory (:factory config)
+         provider (if factory
+                    (let [parts (String/split (str factory) "/")]
+                     (when-not (= 2 (count parts))
+                      (throw (ex-info "A qualified host factory is required" {:kind :auth/configuration})))
+                     (BeamLisp.Loader/ensure_loaded (first parts))
+                     ((BeamLisp.Env/fetch! (first parts) (second parts)) config))
+                    (namespace/open {:file (:source config) :world (:world config)}))]
     (try
      (bind! logical declaration provider (namespace/endpoint provider))
-     ;; Realm teardown destroys this child Env. Explicit unlink is also available.
+     ;; The host owns this provider scope and closes it with unlink!.
      (BeamLisp.Env/put_key (tuple :auth/import logical) provider)
      logical
      (catch error (namespace/close! provider) (throw error)))))))
