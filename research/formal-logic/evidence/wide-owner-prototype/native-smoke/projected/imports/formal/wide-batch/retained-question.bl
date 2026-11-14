@@ -1,0 +1,97 @@
+(ns formal.wide-batch.retained-question
+ (:require [formal.data-graph :as graph] [formal.wide-batch.question-graph :as qg]))
+
+;; Pure declared composition. No owner token or native authority crosses this
+;; boundary. Terms, origins, scopes and application profile names remain graph
+;; fragments; only assertion labels and closed scope modes are inspected.
+(def profile :bl/retained-graph-v1)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.retained-question: " why) {:kind :retained-question}))))
+(defn- row [data] (nth (:nodes data) (:root data)))
+(defn- field [data name]
+ (when-let [id (get (graph/keyword-nodes data [name]) name)] (graph/subgraph data id)))
+(defn- elements [data]
+ (graph/check! data)
+ (let [[kind ids] (row data)]
+  (require! (= "vector" kind) "vector graph required")
+  (mapv #(graph/subgraph data %) ids)))
+(defn- unique [items]
+ ;; Canonical graph bytes distinguish representation without materializing it.
+ (loop [remaining (seq items) seen #{} result []]
+  (if (empty? remaining) result
+   (let [item (first remaining) key (graph/bytes item)]
+    (if (contains? seen key) (recur (next remaining) seen result)
+     (recur (next remaining) (conj seen key) (conj result item)))))))
+(defn- selected-map [data names]
+ (let [fields (graph/keyword-nodes data names)]
+  (graph/assemble "map"
+   (vec (keep (fn [name]
+                (when-let [id (get fields name)] [(graph/encode name) (graph/subgraph data id)])) names)))))
+(defn- domain [assertion]
+ (when-let [origin (field assertion :origin)]
+  (when (= "map" (first (row origin)))
+   (when-let [declared (field origin :formal/retained-domain)]
+    (when-not (= ["nil" nil] (row declared))
+     (let [parts (graph/keyword-nodes declared [:scope :profiles])]
+      (require! (and (= 2 (count (second (row declared)))) (= #{:scope :profiles} (set (keys parts))))
+                "closed retained domain with scope and profiles required")
+      {:scope (graph/subgraph declared (:scope parts)) :profiles (graph/subgraph declared (:profiles parts))}))))))
+(defn- scope-mode [scope]
+ (let [mode (field scope :mode) [kind name] (when mode (row mode))]
+  (require! (and (= "keyword" kind) (contains? #{"exact" "finite-universe" "bounded" "abstract"} name))
+            "declared scope mode required")
+  name))
+(defn- join-scopes [scopes]
+ (let [scopes (unique scopes) modes (set (map scope-mode scopes))
+       mode (cond (contains? modes "abstract") :abstract (contains? modes "bounded") :bounded
+                  (contains? modes "finite-universe") :finite-universe :else :exact)]
+  (if (= 1 (count scopes)) (first scopes)
+   (graph/assemble "map" [[(graph/encode :mode) (graph/encode mode)]
+                           [(graph/encode :components) (graph/assemble "vector" scopes)]]))))
+
+(defn compose
+ "Compose the complete question from original graph data and declared retained
+  assertions. Generation is recorded mathematical context data, never a live
+  owner guard. No term admission, tree decoding or native call occurs here."
+ [original retained-data generation]
+ (require! (and (int? generation) (<= 0 generation)) "nonnegative declared generation required")
+ (let [assertions (qg/field-graph original :assertions) persistent (elements retained-data)]
+  (if (empty? persistent) original
+   (let [retained
+         (mapv (fn [i]
+                 (let [a (nth persistent i) fields (graph/keyword-nodes a [:label :term])
+                       label (when-let [id (:label fields)] (nth (:nodes a) id))]
+                  (require! (and (some? (:term fields)) (= "binary" (first label)))
+                            "retained assertion needs a string label and term graph")
+                  (graph/patch-map a [[(graph/encode :label)
+                                      (graph/encode (str "context/" i "/" (second label)))]])))
+               (range (count persistent)))
+         retained-data (graph/assemble "vector" retained)
+         labels (mapv #(second (row (field % :label))) retained)
+         old-assumptions (qg/field-graph original :assumptions)
+         old-assumptions (if (or (nil? old-assumptions) (= ["nil" nil] (row old-assumptions)))
+                          (graph/encode []) old-assumptions)
+         requested-context (qg/field-graph original :context)
+         context (graph/encode {:formal/retained-context 1 :profile profile :generation generation
+                                :assertions labels :assertion-reference (graph/reference retained-data)
+                                :requested-context-present (some? requested-context)})
+         context (if requested-context
+                   (graph/patch-map context [[(graph/encode :requested-context) requested-context]]) context)
+         domains (unique (keep identity (map (fn [a]
+                                              (when-let [d (domain a)]
+                                               (graph/assemble "map" [[(graph/encode :scope) (:scope d)]
+                                                                       [(graph/encode :profiles) (:profiles d)]]))) retained)))
+         patches {:assertions (graph/concat-vectors [retained-data assertions])
+                  :assumptions (graph/concat-vectors
+                                [(graph/assemble "vector" (mapv #(selected-map % [:label :origin]) retained)) old-assumptions])
+                  :context context}
+         patches (if (empty? domains) patches
+                  (assoc patches
+                   :scope (join-scopes (vec (cons (qg/field-graph original :scope) (map #(field % :scope) domains))))
+                   :profiles (graph/assemble "vector"
+                              (unique (concat (elements (qg/field-graph original :profiles))
+                                              (mapcat #(elements (field % :profiles)) domains))))))]
+    ;; The owner and portable reader perform their own fresh typed admission.
+    ;; A wrapper-preserving patch only checks bounded canonical graph data.
+    (assoc original :graph
+     (graph/patch-map (:graph original) (mapv (fn [[key data]] [(graph/encode key) data]) patches)))))))

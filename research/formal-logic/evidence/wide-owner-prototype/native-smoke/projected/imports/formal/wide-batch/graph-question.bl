@@ -1,0 +1,236 @@
+(ns formal.wide-batch.graph-question
+ (:require [formal.data-graph :as graph] [formal.wide-batch.question-graph :as question]
+           [formal.wide-batch.graph-terms :as forest] [formal.wide-batch.evaluate :as evaluator] [formal.term :as t] [formal.identity :as identity]
+           [formal.wide-batch.vacuity-policy :as vacuity] [formal.wide-batch.resources.typed :as typed]))
+
+;; SDK preparation derives from original graph data. Exported views are data,
+;; never accepted cached-question, native-execution or proof authority.
+(def profile :bl/question-term-inventory-preview-v1)
+(def key-profile :bl/question-graph-key-inventory-preview-v2)
+(def limits {:syntax-pairs 131072})
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.question-forest: " reason) {:profile profile}))))
+(defn- fields [rows id]
+ (let [[kind pairs] (nth rows id)]
+  (require! (= "map" kind) "question or assertion map required")
+  (into {} (keep (fn [[key value]]
+                   (let [[tag name] (nth rows key)] (when (= "keyword" tag) [name value]))) pairs))))
+(defn- nil-node? [rows id] (or (nil? id) (= ["nil" nil] (nth rows id))))
+(defn- assertion [rows id]
+ (let [f (fields rows id)]
+  (require! (and (contains? f "label") (contains? f "term")) "assertion label and term required")
+  {:label-source (get f "label") :term-source (get f "term")}))
+(defn- original-data! [context]
+ (require! (and (= :map (rt/kind-kind context)) (= 3 (erlang/map_size context))
+                (erlang/is_map_key :formal/question-graph context)
+                (erlang/is_map_key :profile context) (erlang/is_map_key :graph context)
+                (or (nil? (meta context)) (= {} (meta context)))
+                (int? (:formal/question-graph context)) (= 1 (:formal/question-graph context))
+                (= question/profile (:profile context))) "original closed question graph required")
+ (:graph context))
+
+(defn- with-prepared
+ "Revalidate original question data, collect the existing observation term
+  inventory, and prepare its ordered forest without expanding term arguments.
+  Uninterpreted observation leaves remain original graph data. No observation
+  reconstruction, managed owner admission or caller-supplied checked view."
+ [context key-mode admit consume]
+ (let [raw-keys? (= :graph key-mode) selected-profile (if raw-keys? key-profile profile)
+       version (if raw-keys? 2 1)
+       data (original-data! context) checked (graph/check! data) rows (:nodes data)
+       f (fields rows (:root data)) tag (get f "formal/query") mode-id (get f "mode")
+       _ (require! (and (some? tag) (= ["int" 1] (nth rows tag))) "version-1 question required")
+       mode-row (when (some? mode-id) (nth rows mode-id))
+       mode (cond (= ["keyword" "sat"] mode-row) :sat
+                  (= ["keyword" "prove"] mode-row) :prove
+                  :else (throw (ex-info "formal.question-forest: proof or SAT mode required" {})))
+       vacuity-value (vacuity/from-row (when-let [id (get f "vacuity")] (nth rows id)))
+       assertions-id (get f "assertions")
+       _ (require! (and (some? assertions-id) (= "vector" (first (nth rows assertions-id)))) "assertion vector required")
+       specs (mapv #(assertion rows %) (second (nth rows assertions-id)))
+       claim-id (get f "claim") counter-id (get f "counterexample") observe-id (get f "observe")
+       counter (when-not (nil-node? rows counter-id) (assertion rows counter-id))
+       _ (if (= :prove mode)
+           (require! (and (not (nil-node? rows claim-id)) (some? counter)) "proof claim and counterexample required")
+           (require! (and (nil-node? rows claim-id) (nil? counter)) "SAT has neither claim nor counterexample"))
+       _ (require! (or (nil-node? rows observe-id) (= "map" (first (nth rows observe-id)))) "observation map required")
+       observation-pairs (if (nil-node? rows observe-id) [] (second (nth rows observe-id)))
+       descriptions (atom {}) selected-keys (atom (set (concat (map :label-source specs)
+                                                        (when counter [(:label-source counter)])
+                                                        (when-not raw-keys? (map first observation-pairs)))))]
+  ;; Discover only observable payload structure. A term stops traversal before
+  ;; its argument edges; ignored value metadata remains in the original graph.
+  (letfn [(discover [id]
+           (when (and (some? id) (not (contains? @descriptions id)))
+            (let [[kind body] (nth rows id)
+                  f (when (= "map" kind) (fields rows id))
+                  marked? (fn [name] (when-let [tag (get f name)] (= ["int" 1] (nth rows tag))))
+                  descriptor
+                  (cond
+                   (marked? "formal/term") {:kind :term}
+                   (marked? "formal/value")
+                    {:kind :value :payload (get f "value")
+                     :predicates [(get f "defined") (get f "within")]}
+                   (= "map" kind) {:kind :map :pairs body}
+                   (contains? #{"vector" "list"} kind) {:kind :sequence :children body}
+                   :else {:kind :leaf})]
+             (case (:kind descriptor)
+              :value (discover (:payload descriptor))
+              :map (doseq [[key child] body]
+                     (when-not raw-keys? (swap! selected-keys conj key)) (discover child))
+              :sequence (doseq [child body] (discover child))
+              nil)
+             (swap! descriptions assoc id descriptor))))]
+   (doseq [[_ id] observation-pairs]
+    (discover id)
+    (require! (contains? #{:term :value} (:kind (get @descriptions id)))
+              "each observation must be a typed term or an explicit formal value")))
+  (let [key-ids (vec @selected-keys)
+        decoded (if raw-keys?
+                  ;; Assertion labels have a fixed string contract. Read only
+                  ;; those scalar rows; observation keys remain source cursors.
+                  (mapv (fn [id]
+                          (let [[tag value] (nth rows id)]
+                           (require! (and (= "binary" tag) (string? value)) "assertion label string required")
+                           value)) key-ids)
+                  (graph/decode-nodes! data key-ids))
+        keys (zipmap key-ids decoded) collected (atom {})]
+   (letfn [(collect [id]
+            (if (nil? id) []
+             (if (contains? @collected id) (get @collected id)
+              (let [descriptor (get @descriptions id)
+                    result
+                    (vec (distinct
+                      (case (:kind descriptor)
+                       :term [id]
+                       :value (concat (collect (:payload descriptor)) (:predicates descriptor))
+                       :map (if raw-keys?
+                               (mapcat (fn [[_ child]] (collect child)) (:pairs descriptor))
+                               (mapcat collect (vals (into {} (map (fn [[key child]] [(get keys key) child]) (:pairs descriptor))))))
+                       :sequence (mapcat collect (:children descriptor))
+                       [])))]
+               (require! (<= (count result) (:roots forest/limits)) "observation term inventory capacity")
+               (swap! collected assoc id result) result))))]
+    (let [observations (when-not raw-keys?
+                         (into {} (map (fn [[key descriptor]] [(get keys key) descriptor]) observation-pairs)))
+          ordered-observations (if raw-keys? observation-pairs
+                                 (sort-by (fn [[label _]] (identity/bytes label)) observations))
+          roots (vec (concat (map :term-source specs) (when (= :prove mode) [claim-id])
+                       (mapcat (fn [[_ id]] (collect id)) ordered-observations)
+                       (when counter [(:term-source counter)])))]
+     (admit data roots
+      (fn [operation]
+       (let [prepared (:forest operation)]
+        (if (= :incomplete (get-in prepared [:admission :status]))
+         (consume {:formal/question-forest-refusal version :profile selected-profile :reference (:reference checked)
+                   :mode mode :source-roots roots :admission (:admission prepared)
+                   :compiler-proof-authority false} operation)
+         (let [translated (zipmap roots (:roots prepared))
+          nodes (into {} (map (fn [[id op sort children datum]]
+                               [id {:op op :sort sort :children children :data datum}]) (:nodes prepared)))
+          comparisons (atom {})
+          _ (doseq [id (concat (map :term-source specs) (when (= :prove mode) [claim-id])
+                               (when counter [(:term-source counter)]))]
+              (require! (= t/Bool (:sort (get nodes (get translated id)))) "Boolean assertion or claim required"))
+          named (fn [spec]
+                  (let [label (get keys (:label-source spec))]
+                   (require! (string? label) "assertion label string required")
+                   {:label label :term (get translated (:term-source spec))}))]
+     (letfn [(same-syntax? [left right]
+              (if (= left right) true
+               (let [pair [left right]]
+                (if (contains? @comparisons pair) (get @comparisons pair)
+                 (let [a (get nodes left) b (get nodes right)]
+                  (require! (< (count @comparisons) (:syntax-pairs limits)) "term syntax comparison capacity")
+                  ;; Reserve capacity before recursively checking dependencies.
+                  (swap! comparisons assoc pair false)
+                  (let [same (and (= (select-keys a [:op :sort :data]) (select-keys b [:op :sort :data]))
+                                  (= (count (:children a)) (count (:children b)))
+                                  (every? true? (map same-syntax? (:children a) (:children b))))]
+                   (swap! comparisons assoc pair same) same))))))]
+      (when counter
+       (let [node (get nodes (get translated (:term-source counter)))]
+        (require! (and (= "not" (:op node)) (nil? (:data node)) (= 1 (count (:children node)))
+                       (same-syntax? (first (:children node)) (get translated claim-id)))
+                  "counterexample must be exactly the negated claim")))
+      (consume {:formal/question-forest version :profile selected-profile :reference (:reference checked)
+       :mode mode :vacuity vacuity-value
+       :assertions (mapv named specs) :claim (when (= :prove mode) (get translated claim-id))
+       :counterexample (when counter (named counter))
+       :observations (mapv (fn [[label id]]
+                              (merge (if raw-keys? {:label-source label} {:label label})
+                                     {:descriptor-source id :terms (mapv #(get translated %) (collect id))}))
+                            ordered-observations)
+       :forest prepared :checking (cond-> {:observation-descriptors (count @descriptions)
+                                   :materialized-labels-and-keys (count key-ids)
+                                   :syntax-comparisons (count @comparisons)}
+                                  raw-keys? (assoc :materialized-keys 0 :assertion-labels (count key-ids)
+                                                  :observation-order :canonical-map-row))
+       :observation-policy (if raw-keys? :original-source-cursors :original-graph-data-and-sdk-term-inventory)
+       :compiler-proof-authority false} operation))))))))))))
+
+(defn prepare
+ "Derive the complete typed question inventory from original graph data.
+  The returned forest is diagnostic data, never an accepted admission token."
+ [context]
+ (with-prepared context :values
+  (fn [data roots use] (use {:forest (forest/prepare data roots)}))
+  (fn [question _operation] question)))
+
+(defn with-numeric
+ "Admit an original numeric question before model coordinates are known.
+  Fresh question validation and point replay share one SDK admission scope.
+  The callback receives the derived question inventory and its local SDK scope;
+  no caller-prepared inventory or forest can be supplied. Scope callbacks are
+  process-owned and retire when this operation returns or fails."
+ [context limits consume]
+ (with-prepared context :values
+  (fn [data roots use]
+   (evaluator/with-graph-admission data roots
+    {:profile evaluator/direct-numeric-graph-profile :limits limits} use))
+  consume))
+
+
+(defn prepare-keys
+ "Fresh generic inventory with graph-native keys. Observation labels and
+  descriptors remain original source-node cursors. Map values are traversed
+  in canonical row order without host map reconstruction or atom creation."
+ [context]
+ (with-prepared context :graph
+  (fn [data roots use] (use {:forest (forest/prepare data roots)}))
+  (fn [question _operation] question)))
+
+(defn with-numeric-keys
+ "Fresh numeric admission with source cursors for all application keys.
+  One local admission is shared with point checking; no key materialization,
+  supplied forest or cached checking result is accepted."
+ [context limits consume]
+ (with-prepared context :graph
+  (fn [data roots use]
+   (evaluator/with-graph-admission data roots
+    {:profile evaluator/direct-numeric-graph-profile :limits limits} use))
+  consume))
+
+(defn with-policy-keys
+ "Fresh graph-native question inventory under a named SDK point policy.
+  Options go directly through closed SDK admission; no prepared inventory,
+  graph forest, key materialization or caller checking result is accepted."
+ [context options consume]
+ (with-prepared context :graph
+  (fn [data roots use] (evaluator/with-graph-admission data roots options use)) consume))
+
+(defn with-wide-keys
+ "Fresh generic typing after prospective selected-descriptor admission.
+  Original operational roots are discovered here, before any term constructor.
+  No supplied inventory or reservation is accepted. No point interpreter is installed."
+ [context options consume]
+ (with-prepared context :graph
+  (fn [data roots use]
+   (let [reservation (typed/plan data roots options)]
+    (if (= :incomplete (:status reservation))
+     (use {:forest {:admission reservation} :admission reservation})
+     (let [prepared (forest/prepare data roots)
+           admission (assoc reservation :status :complete :constructor-execution :run)]
+      (use {:forest prepared :admission admission
+            :admission-reference (graph/of {:profile typed/profile :data-reference (:data-reference reservation)
+                                            :source-roots roots :policy (typed/settings options)})}))))) consume))

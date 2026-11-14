@@ -1,0 +1,47 @@
+(ns formal.wide-batch.finite-feasibility
+ (:require [formal.wide-batch.request :as request] [formal.wide-batch.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.wide-batch.finite-word-certificate :as finite]
+           [formal.wide-batch.request-point :as point] [formal.wide-batch.point-profile :as policy]
+           [formal.wide-batch.assumptions :as assumptions]))
+
+;; Independent bounded background search, followed by fresh witness replay.
+(def profile :bl/finite-assumption-feasibility-preview-v1)
+(def allowance 3600000)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.finite-feasibility: " why) {}))))
+(defn background [original] (assumptions/background original finite/checking-policy))
+(defn assess
+ "Prospectively reserve original admission, finite search and witness replay.
+  A checked contradiction and a checked satisfying point remain different
+  evidence. Resource refusal establishes neither feasibility nor inconsistency."
+ ([original] (assess original {:work-units allowance}))
+ ([original options]
+  (require! (and (map? options) (= #{:work-units} (set (keys options)))
+                 (int? (:work-units options)) (<= 0 (:work-units options) 36000000)) "closed finite checking allowance required")
+  (let [r (request/check! original)
+        base {:profile profile :original-request-reference (request/reference r)
+              :original-subject-reference (request/subject-reference r)
+              :reservation {:required allowance :limit (:work-units options)
+                            :kind :conservative-finite-search-and-witness-replay}
+              :compiler-proof-authority false :checked-native-execution false
+              :source-connection :not-established}]
+   (if (< (:work-units options) allowance)
+    (assoc base :status :incomplete :feasibility :not-established :checker-invocation :not-run)
+    (try
+     (let [derived (background r) target (:request derived) certificate (finite/candidate target)
+           checked (finite/check target certificate)
+           common (assoc base :connection (:connection derived) :checking-request target
+                              :certificate certificate :finite-check checked)]
+      (cond
+       (and (= :checked (:status checked)) (= :unsatisfiable (:verdict checked)))
+        (assoc common :status :checked :feasibility :inconsistent :basis :finite-contradiction
+                      :trust (:trust checked))
+       (= :counterexample (:status checked))
+        (let [replayed (point/replay target (:point checked))]
+         (if (= :sat (:verdict replayed))
+          (assoc common :status :checked :feasibility :witnessed :basis :independent-point-replay
+                        :witness (:point checked) :point-check replayed
+                        :trust [:sdk-word-admission :sdk-word-point-semantics :bl-compiler :beam-runtime])
+          (assoc common :status :incomplete :feasibility :not-established :point-check replayed)))
+       :else (assoc common :status :incomplete :feasibility :not-established)))
+     (catch error (assoc base :status :incomplete :feasibility :not-established :reason (ex-message error))))))))
