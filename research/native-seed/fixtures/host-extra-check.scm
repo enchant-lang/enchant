@@ -366,4 +366,25 @@
       (bl-is-nil (bl-get 42 (bl-key "absent"))) (not (native-map-has? 42 (bl-key "absent")))
       (= 42 (native-map-remove 42 (bl-key "absent")))
       (= 1 (bl-get (bl-assoc 42 (bl-key "added") 1) (bl-key "added")))))
+;; Text assembly keeps the original ABI while avoiding growing-prefix copies.
+(native-extra-check "empty join ignores separator" (string=? "" (native-join 42 '())))
+(let ((part (list->string '(#\a #\b))))
+ (native-extra-check "singleton join preserves exact string identity" (eq? part (native-join "|" (list part)))))
+(native-extra-check "singleton join preserves prior nonstring result" (= 42 (native-join "|" '(42))))
+(native-extra-check "join preserves exact Unicode and empty pieces"
+ (string=? "λ|é||😀" (native-join "|" '("λ" "é" "" "😀"))))
+(let ((part (list->string '(#\a #\b))) (separator (string #\|)))
+ (native-extra-check "join reads current mutable strings" (string=? "ab|ab" (native-join separator (list part part))))
+ (string-set! part 0 #\z) (string-set! separator 0 #\/)
+ (native-extra-check "join never reuses stale string contents" (string=? "zb/zb" (native-join separator (list part part)))))
+(native-extra-check "join assembles many finite pieces"
+ (string=? (make-string 1024 #\x)
+  (native-join "" (let loop ((n 1024) (xs '())) (if (= n 0) xs (loop (- n 1) (cons "x" xs)))))))
+(let ((baseline #f) (actual #f))
+ (with-exception-catcher (lambda (error) (set! baseline error)) (lambda () (string-append "a|b" "|" 42)))
+ (with-exception-catcher (lambda (error) (set! actual error)) (lambda () (native-join "|" '("a" "b" 42))))
+ (native-extra-check "join preserves late primitive type-error details"
+  (and (type-exception? baseline) (type-exception? actual)
+       (eq? (type-exception-procedure baseline) (type-exception-procedure actual))
+       (equal? (type-exception-arguments baseline) (type-exception-arguments actual)))))
 (display "native extra checks passed") (newline)

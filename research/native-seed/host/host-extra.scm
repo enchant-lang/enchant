@@ -1,7 +1,21 @@
 ;; Remaining finite storage/BIF leaves from the immutable compiler inventory.
 (define (native-join separator strings)
- (if (null? strings) "" (let loop ((xs (cdr strings)) (out (car strings)))
-  (if (null? xs) out (loop (cdr xs) (string-append out separator (car xs)))))))
+ ;; Preserve the existing empty/singleton results, including singleton identity.
+ ;; For multiple strings, an output port avoids copying the entire accumulated
+ ;; prefix on every piece. No string identity/cache or immutability assumption.
+ (cond ((null? strings) "") ((null? (cdr strings)) (car strings))
+  (else
+   (let ((first (car strings)) (second (cadr strings)))
+    (if (not (and (string? first) (string? separator) (string? second)))
+     ;; Preserve the exact original primitive/type-error argument order.
+     (string-append first separator second)
+     (let ((port (open-output-string)))
+      (display first port)
+      (let loop ((xs (cdr strings)))
+       (cond ((null? xs) (get-output-string port))
+        ((string? (car xs))
+         (display separator port) (display (car xs) port) (loop (cdr xs)))
+        (else (string-append (get-output-string port) separator (car xs)))))))))))
 (define (native-string-index text pattern . from)
  (let ((n (string-length text)) (m (string-length pattern)) (start (if (null? from) 0 (car from))))
   (let loop ((i start)) (cond ((> (+ i m) n) #f)
