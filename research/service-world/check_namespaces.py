@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -28,11 +29,25 @@ with tempfile.TemporaryDirectory(prefix='enchant-namespace-') as temporary:
         port = probe.getsockname()[1]
     env = {**os.environ, 'BL_DAEMON': 'off', 'PORT': str(port), 'SERVICE_WORLD_FIXTURE_DIR': str(root),
            'SERVICE_WORLD_FIXTURE_URL': f'http://127.0.0.1:{port}/realms/v1', 'SERVICE_WORLD_SOURCE': str(ROOT)}
-    common = ['--cold', '-p', str(ROOT.parents[1] / 'priv/lib')]
+    # An older consumer gets only these new source namespaces, never the
+    # current checkout's existing SDK libraries. Native SDKs use their own units.
+    bundle = root / 'library'
+    for name in ('authority', 'contract', 'delegation', 'identity', 'imports', 'ingress',
+                 'interface', 'logic', 'resource', 'transport', 'wire'):
+        target = bundle / 'auth' / (name + '.bl')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT.parents[1] / 'priv/lib/auth' / target.name, target)
+    target = bundle / 'veritas/assurance.bl'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT.parents[1] / 'priv/lib/veritas/assurance.bl', target)
+
+    def common(sdk):
+        native = (sdk / 'image/priv/lib/auth/imports.bl').is_file()
+        return ['--cold'] if native else ['--cold', '-p', str(bundle)]
     server = None
     with (root / 'server.log').open('w+') as log:
         try:
-            server = subprocess.Popen([str(args.provider_sdk / 'bin/bl'), *common,
+            server = subprocess.Popen([str(args.provider_sdk / 'bin/bl'), *common(args.provider_sdk),
                                        'run', str(ROOT / 'test/namespace_server.bl')],
                                       cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 90
@@ -41,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='enchant-namespace-') as temporary:
                     log.seek(0)
                     raise RuntimeError('Namespace provider failed: ' + log.read()[-3000:])
                 time.sleep(0.1)
-            subprocess.run([str(args.consumer_sdk / 'bin/bl'), *common,
+            subprocess.run([str(args.consumer_sdk / 'bin/bl'), *common(args.consumer_sdk),
                             'test', str(ROOT / 'test/namespace_remote_test.bl')],
                            cwd=root, env=env, timeout=120, check=True)
         finally:
