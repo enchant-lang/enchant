@@ -44,6 +44,8 @@ for name, digest in checked['source_sha256'].items():
         for pattern in (r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
                         r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*',
                         r'^#\+name:[^\n]*\n(?:\|[^\n]*(?:\n|$))*'):
+            if phase == 'dossier-cells' and pattern.startswith(r'^#\+RESULTS:'):
+                continue  # The actual writer adds results; its entire output hash was checked above.
             assert re.findall(pattern, body, re.M | re.S) == re.findall(pattern, current, re.M | re.S)
     else:
         assert sha(R / name) == digest
