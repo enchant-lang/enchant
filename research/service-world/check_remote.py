@@ -10,6 +10,8 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
@@ -61,6 +63,20 @@ with tempfile.TemporaryDirectory(prefix='enchant-service-world-') as temporary:
                     log.seek(0)
                     raise RuntimeError('Provider failed readiness: ' + log.read()[-4000:])
                 time.sleep(0.1)
+            request = {'protocol': 'enchant.services', 'versions': [1], 'world': 'qa/world',
+                       'scope': 'qa-place', 'id': 'harness-probe', 'op': 'discover',
+                       'folder': str(root / 'a'), 'recursive': True,
+                       'contract': 'workstation.service', 'accept': [1]}
+            probe = urllib.request.Request(env['SERVICE_WORLD_FIXTURE_URL'],
+                        data=json.dumps(request).encode(),
+                        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+            try:
+                with urllib.request.urlopen(probe, timeout=10) as response:
+                    value = json.load(response)
+                if 'ok' not in value:
+                    raise RuntimeError('Provider refused the authenticated probe: ' + json.dumps(value))
+            except urllib.error.HTTPError as error:
+                raise RuntimeError('Provider HTTP probe: ' + str(error.code) + ' ' + error.read(2048).decode()) from None
             subprocess.run([str(args.consumer_sdk / 'bin/bl'), *common,
                             'test', str(ROOT / 'test/remote_test.bl')],
                            cwd=root, env=env, timeout=120, check=True)
