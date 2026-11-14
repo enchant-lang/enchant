@@ -289,7 +289,7 @@
       (let loop ((chars (string->list ns)) (upper? #t) (out '()))
        (if (null? chars) (reverse out)
         (let ((ch (car chars)))
-         (cond ((or (char=? ch #\_) (char=? ch #\-)) (loop (cdr chars) #t out))
+         (cond ((char=? ch #\_) (loop (cdr chars) #t out))
                ((char=? ch #\.) (loop (cdr chars) #t (cons ch out)))
                (else (loop (cdr chars) #f (cons (if upper? (char-upcase ch) ch) out)))))))))))))
 (native-add-leaf! "Elixir.BeamLisp.Link/module_for/1" native-known-module)
