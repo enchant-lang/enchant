@@ -13,9 +13,9 @@ arithmetic rules. `formal.request-evidence` currently has one installed strategy
 format is accepted by the common bundle.
 
 The isolated `GRAPH-INTEGER-PROTOTYPE.md` sources now prepare a linear-only
-original-graph kernel and seven tests, but have not run. They deliberately do
-not replace all the existing piecewise/ground rules. Qualify and review this
-entry before connecting it. Reuse
+original-graph kernel; its seven tests and 54 assertions now pass. They deliberately do
+not replace all the existing piecewise/ground rules. Review and connect this
+qualified entry before installing it in the common bundle. Reuse
 its reviewed arithmetic/rule semantics while retaining argument references.
 Bound normal-form construction, coefficient growth, branch expansion and proof
 traversal before arithmetic. Do not solve the interface gap by materializing an

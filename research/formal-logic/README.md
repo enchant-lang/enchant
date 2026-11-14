@@ -710,8 +710,9 @@ value to `:report`. The [finite feasibility](FINITE-FEASIBILITY-PROTOTYPE.md) ex
 they will separately check conditional entailment, actual feasible or inconsistent
 premises, and exact caller acceptance policy. They do not change the current SDK.
 
-The pending [graph integer checker](GRAPH-INTEGER-PROTOTYPE.md) prepares an
+The qualified [graph integer checker](GRAPH-INTEGER-PROTOTYPE.md) implements an
 original-graph, linear-only proof kernel with shared formulas, a closed proof DAG
-and prospective arithmetic limits; it has not run. The [native String carrier
+and prospective arithmetic limits; all 54 assertions and seven named bodies pass.
+It is an isolated prototype, not yet part of the selected SDK. The [native String carrier
 review](STRING-REPRESENTATION-REVIEW.md) binds the actual immutable worker and
 locked crate sources without claiming a quantified-domain theorem.

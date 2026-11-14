@@ -1,6 +1,6 @@
 # A text point domain is not automatically the solver's String domain
 
-The candidate value checker accepts well-formed UTF-8 whose decoded scalar
+The selected SDK value checker accepts well-formed UTF-8 whose decoded scalar
 values are at most 196607 (`0x2FFFF`). This is the existing evaluator's rule,
 now shared with managed admission. Its intervals are `0..0xD7FF` and
 `0xE000..0x2FFFF`: surrogate codepoints cannot appear in well-formed UTF-8.
@@ -39,11 +39,11 @@ backend evidence. A broader native search domain alone does not establish
 equivalence for quantifiers, feasibility, synthesis or arbitrary text operations.
 The connection must be retained as part of the complete question and proof scope.
 
-The candidate SDK cold packet reader passed four records, four negative
+The selected SDK cold packet reader passed four records, four negative
 controls and 52 checks with no native or oracle exchange. Its concrete controls
 accept the scalars immediately before and after the surrogate range and the
 highest SMT codepoint; they reject raw surrogate-shaped UTF-8 bytes and the
 first larger valid Unicode scalar. These controls ran only after the first
 packet reopened, so they could not conceal a missing cold schema load. The
 actual observations are retained in `evidence/scalar-integration/text-packets.json`;
-this gate alone does not qualify or select the whole SDK.
+the complete SDK qualification and selection are retained separately.
