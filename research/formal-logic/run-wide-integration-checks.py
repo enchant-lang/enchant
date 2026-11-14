@@ -6,7 +6,7 @@ P = Path(__file__).resolve().parent
 R = P.parent.parent
 B = P / 'evidence/wide-integration'
 phase, = sys.argv[1:]
-assert phase in ('preflight', 'pure', 'narrow', 'native', 'reader-one', 'reader-two',
+assert phase in ('preflight', 'pure', 'narrow', 'compatibility', 'legacy', 'regression', 'native', 'reader-one', 'reader-two',
                  'word-packets', 'text-packets', 'proof-packets', 'obligation-packets')
 E = B / phase
 E.mkdir(exist_ok=True)
@@ -21,6 +21,8 @@ assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
 for name, row in linkage['source_changes'].items():
     assert sha(R / name) == row['after'] == sha(Path(pin['source']) / name)
 files, project, ceiling = [], False, 1800
+test_phases = ('pure', 'narrow', 'compatibility', 'legacy', 'regression', 'native')
+expected_counts = None
 if phase == 'pure':
     files = [P / 'prototypes/wide-owner/wide-owner-pure-check.bl']; project = True
 elif phase == 'narrow':
@@ -30,6 +32,26 @@ elif phase == 'narrow':
         'scalar_text_interface_test', 'scalar_text_owner_test',
         'request_evidence_test', 'obligation_evidence_test', 'evidence_effect_test', 'evidence_oracle_test']]
     ceiling = 3600
+elif phase == 'compatibility':
+    # Complete the preceding 59-file qualification without repeating the
+    # twelve narrow files. Keep the exact old test bodies and expected counts.
+    files = [R / 'test/bl/formal' / (name + '.bl') for name in [
+        'graph_integer_certificate_test', 'finite_feasibility_test',
+        'scalar_text_graph_test', 'scalar_text_resource_test', 'finite_word_certificate_test',
+        'word_graph_test', 'request_lookup_test']]
+    files += [P / (name + '.bl') for name in ['retained-question-check',
+        'retained-composition-check', 'retained-answer-check', 'retained-request-check']]
+    ceiling = 3600
+elif phase == 'legacy':
+    files = [R / 'test/bl/formal' / (name + '.bl') for name in [
+        'shared_evaluator_test', 'graph_admission_test', 'graph_keys_test',
+        'graph_ops_test', 'graph_context_test']]
+    ceiling = 3600
+elif phase == 'regression':
+    old = read(P / 'evidence/numeric-semantics/regression-command.json')
+    files = [R / name for name in old[old.index('test') + 1:]]
+    assert len(files) == 31
+    project = True; ceiling = 3600
 elif phase == 'native':
     files = [P / 'prototypes/wide-owner/wide-owner-native-check.bl']; project = True; ceiling = 21600
     assert read(B / 'pure/qualification.json')['status'] == read(B / 'narrow/qualification.json')['status'] == 'passed'
@@ -48,8 +70,18 @@ elif phase.startswith('reader-'):
 elif phase != 'preflight':
     files = [P / {'word-packets': 'word-packet-reader.bl', 'text-packets': 'scalar-packet-reader.bl',
                   'proof-packets': 'evidence-packet-reader.bl', 'obligation-packets': 'obligation-packet-reader.bl'}[phase]]
+if phase in ('compatibility', 'legacy', 'regression'):
+    parent = read(P / 'evidence/obligation-integration/qualification.json')
+    assert parent['status'] == 'passed' and parent['sdk_pin'] == baseline
+    prior = {name: count for rows in parent['assertion_runs'].values() for name, count in rows.items()}
+    namespaces = [re.search(r'\(ns\s+([^\s)]+)', path.read_text()).group(1) for path in files]
+    assert len(set(namespaces)) == len(files)
+    expected_counts = {namespace: prior[namespace] for namespace in namespaces}
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 inputs = [Path(__file__), *files, R / 'scripts/sdk-preflight', R / 'scripts/sdk-preflight.bl']
+if expected_counts is not None:
+    inputs += [P / 'evidence/obligation-integration/qualification.json']
+if phase == 'regression': inputs += [P / 'evidence/numeric-semantics/regression-command.json']
 if project: inputs += sorted((P / 'src').rglob('*.bl'))
 digests = {}
 for path in inputs:
@@ -70,7 +102,7 @@ if phase == 'preflight':
 else:
     request = [pin['sdk'] + '/bin/bl', '--cold']
     if project: request += ['-p', str(P / 'src')]
-    if phase in ('pure', 'narrow', 'native'):
+    if phase in test_phases:
         selected_files = files
         if phase in ('pure', 'native'):
             # The same assertion body now calls installed SDK namespaces.
@@ -120,7 +152,7 @@ try:
         code = subprocess.run(command, cwd=cwd, stdout=stream, stderr=subprocess.STDOUT).returncode
 finally: shutil.rmtree(root)
 log = (E / 'checks.txt').read_text()
-tests = phase in ('pure', 'narrow', 'native')
+tests = phase in test_phases
 green = (f'{len(files)} file(s) passed, 0 failed, 0 incoherent' in log and 'not green' not in log) if tests else None
 write('exit.json', {'exit_code': code, 'complete_green_summary': green,
                     'elapsed_seconds': time.monotonic() - started, 'private_runtime_retired': not root.exists()})
@@ -128,10 +160,13 @@ assert code == 0 and (not tests or green), log[-6000:]
 assert all(sha(R / name) == digest for name, digest in digests.items())
 details = {}
 if tests:
-    counts = re.findall(r'✓\s+(formal\.[^\s]+)\s+(\d+) passed', log)
+    counts = re.findall(r'✓\s+([\w.-]+)\s+(\d+) passed', log)
     assert len(counts) == len(files)
     details['assertions'] = sum(int(count) for _, count in counts)
-    assert details['assertions'] >= {'pure': 424, 'narrow': 745, 'native': 5000}[phase]
+    if expected_counts is not None:
+        assert {name: int(count) for name, count in counts} == expected_counts
+        details['unchanged_assertion_counts'] = expected_counts
+    else: assert details['assertions'] >= {'pure': 424, 'narrow': 745, 'native': 5000}[phase]
 if phase == 'pure':
     v = read(E / 'observations.json')
     assert v['sdk'] == pin['sdk'] and v['in-sdk'] is True and len(v['entered-tests']) == 7
