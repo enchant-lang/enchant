@@ -18,6 +18,11 @@
 (defn digest [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
 (defn source-identity [path] {:path path :sha256 (digest (File/read! path))})
 (defn qname [ns name] (str ns "/" name))
+(defn qualified-parts [text]
+ (let [found (binary/match text "/")]
+  (when (and (erlang/is_tuple found) (> (elem found 0) 0))
+   (let [offset (elem found 0) size (erlang/byte_size text)]
+    [(binary/part text 0 offset) (binary/part text (inc offset) (- size offset 1))]))))
 (defn walk [root]
  (loop [todo (list root) out (list)]
   (if (erlang/== (list) todo) (lists/reverse out)
@@ -86,8 +91,8 @@
      (throw (ex-info "native proc link: duplicate body identity" {:binding key})))
     (assoc table key definition)) table)) {} definitions))
 (defn target-parts [target]
- (let [parts (string/split target #"/")]
-  (when-not (= 2 (count parts))
+ (let [parts (qualified-parts target)]
+  (when-not (and parts (not (empty? (second parts))))
    (throw (ex-info "native proc link: malformed qualified target" {:target target}))) parts))
 (defn referred-ns [namespace name bodies]
  (loop [ns namespace seen #{}]
@@ -96,8 +101,8 @@
     (recur owner (conj seen ns)) ns))))
 (defn selected-global [definition node bodies aliases]
  (let [requires (into {} (map (fn [[ns alias]] [alias ns]) (:requires definition)))
-       qualified (string/split (:name node) #"/")
-       [raw-ns name] (if (= 2 (count qualified)) qualified [(:ns node) (:name node)])
+       qualified (qualified-parts (:name node))
+       [raw-ns name] (or qualified [(:ns node) (:name node)])
        exact? (= :exact (:lookup node))
        ns (referred-ns (if exact? raw-ns (get requires raw-ns raw-ns)) name bodies)
        key (qname ns name) core-key (qname "core" name)

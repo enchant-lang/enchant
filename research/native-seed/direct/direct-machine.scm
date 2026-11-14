@@ -2,9 +2,30 @@
 ;; program decisions are C-emitted pc edges and closure entries. The driver
 ;; owns allocation/GC roots and performs an action AFTER the C stack returns.
 (define native-c-closure-marker (list 'native-c-closure-marker-v1))
+(define native-c-step-count 0)
+(define native-c-gc-between-steps? #f)
 (define (native-c-closure? v)
  (and (vector? v) (= (vector-length v) 7)
       (eq? (vector-ref v 0) native-c-closure-marker)))
+(define native-c-host-is-fn h-is-fn)
+(set! h-is-fn (lambda (v) (or (native-c-closure? v) (native-c-host-is-fn v))))
+(define native-c-host-accepts? native-callable-accepts?)
+(set! native-callable-accepts? (lambda (f n)
+ (if (native-c-closure? f)
+  (and (h-is-int n) (>= n 0) (= n (bl-get (vector-ref f 6) (bl-key "arity"))))
+  (native-c-host-accepts? f n))))
+;; C descriptors are this backend's raw function values. Preserve the original
+;; Erlang predicates for all OTHER values, especially $blfn tuples: a language
+;; dispatcher is callable but is not an Erlang fun. Capture the exact registered
+;; leaves so this extension follows the same raw-function ABI as the value host.
+(define native-c-original-is-function1 (native-remote "erlang/is_function/1"))
+(define native-c-original-is-function2 (native-remote "erlang/is_function/2"))
+(native-add-leaf! "erlang/is_function/1" (lambda (f)
+ (if (native-c-closure? f) #t (native-c-original-is-function1 f))))
+(native-add-leaf! "erlang/is_function/2" (lambda (f n)
+ (native-check-function-arity n)
+ (if (native-c-closure? f)
+  (native-callable-accepts? f n) (native-c-original-is-function2 f n))))
 (define (native-c-new-closure unit metadata captures)
  ;; metadata = (entry frame-size capture-destinations source-frame)
  (vector native-c-closure-marker unit (car metadata) (cadr metadata)
@@ -65,6 +86,8 @@
   ;; exception happens. No foreign continuation is captured across a C frame.
   (let* ((unit (vector-ref machine 0))
          (action ((vector-ref unit 0) machine))
+         (_ (begin (set! native-c-step-count (+ native-c-step-count 1))
+              (if native-c-gc-between-steps? (##gc))))
          (done?
           (case action
            ((1) (native-c-apply-action machine
