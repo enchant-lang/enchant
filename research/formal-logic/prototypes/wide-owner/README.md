@@ -7,10 +7,14 @@ solver-free operational windows. Its
 [native smoke gate](../../evidence/wide-owner-prototype/native-smoke/qualification.json)
 passes 330 assertions: nine paired original questions with unchanged statuses,
 retained-array assumptions, fresh complete requests and lease/context refusals.
-The [first cold reader](../../evidence/wide-owner-prototype/native-smoke/reader-one/qualification.json)
-passes 307 checks on twenty packets, with eight refusal controls and actual zero
-native/oracle calls. The full corpus, narrow regressions, second cold process
-and later SDK integration are separate gates. Qualification explicitly relocates namespaces/imports; it does not replace
+The [first](../../evidence/wide-owner-prototype/native-smoke/reader-one/qualification.json)
+and [second](../../evidence/wide-owner-prototype/native-smoke/reader-two/qualification.json)
+cold readers each pass 307 checks on twenty packets, with eight refusal controls
+and actual zero native/oracle calls. These receipts bind the original frozen
+batch. A subsequent local `request-evidence` reference-reuse patch now has its
+own exact-result and regression gates under `evidence/wide-reference-reuse`;
+those gates have not passed yet. The full corpus, narrow regressions and later
+SDK integration remain separate. Qualification explicitly relocates namespaces/imports; it does not replace
 installed SDK forwarder routes. The eventual batch reuses the ordinary `formal.logic`
 prepare/propose/recheck/execute/compare API; it introduces no parallel facade.
 
