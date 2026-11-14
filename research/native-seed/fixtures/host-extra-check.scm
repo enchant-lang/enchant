@@ -248,4 +248,122 @@
   (let ((caught (reason (lambda () (bl-invoke assoc (list two-fields -1 30))))))
    (native-extra-check "Vector invalid index precedes metadata lookup"
     (eq? (native-struct-module caught) (bl-key "Elixir.ArgumentError"))))))
+;; Hybrid maps must preserve the OLD raw key relation and iteration order.
+(let* ((keys (list 1 (bl-float 1.0) bl-nil #f (bl-key "mixed")
+                   (bl-tuple '(1)) (bl-vec '(1)) (native-set-from-list '(1 2))
+                   '() '(1) "λ/()" (bl-map (bl-key "inner") 1) (bl-decimal 100 1)))
+       (rows (let loop ((keys keys) (index 0) (out '()))
+               (if (null? keys) (reverse out)
+                (loop (cdr keys) (+ index 1)
+                 (cons (cons (car keys) (cond ((= index 0) bl-nil) ((= index 1) #f) (else index))) out)))))
+       (hybrid (let loop ((rows rows) (m (bl-empty-map)))
+                 (if (null? rows) m (loop (cdr rows) (bl-assoc m (caar rows) (cdar rows))))))
+       (reference (vector 'map (vector 'pmap-v1
+                     (let loop ((rows rows) (root #f))
+                      (if (null? rows) root (loop (cdr rows) (native-tree-put root (caar rows) (cdar rows)))))
+                     (length rows)))))
+ (native-extra-check "small mixed map representation" (native-map-small? (vector-ref hybrid 1)))
+ (native-extra-check "hybrid raw key count" (= (length rows) (native-map-count hybrid)))
+ (for-each (lambda (row)
+  (native-extra-check "hybrid mixed key lookup matches existing AVL relation"
+   (and (native-map-has? hybrid (car row))
+        (bl-key-equal? (cdr row) (bl-get hybrid (car row) native-missing))))) rows)
+ (native-extra-check "hybrid sorted iteration matches existing AVL"
+  (= 0 (native-compare-lists (native-map-pairs hybrid) (native-map-pairs reference))))
+ (native-extra-check "hybrid equality is representation independent"
+  (and (bl-equal? hybrid reference) (native-erlang-equal? hybrid reference) (= 0 (bl-key-compare hybrid reference))))
+ (native-extra-check "hybrid present nil and false differ from missing"
+  (and (bl-is-nil (bl-get hybrid 1 native-missing))
+       (eq? #f (bl-get hybrid (bl-float 1.0) native-missing))
+       (eq? native-missing (bl-get hybrid (bl-key "missing") native-missing)))))
+(let* ((original (list->string (string->list "same-key")))
+       (lookup (list->string (string->list "same-key")))
+       (before (bl-map original 1)) (after (bl-assoc before lookup 2))
+       (entry (native-map-entry after lookup)))
+ (native-extra-check "distinct equivalent string key fixture" (not (eq? original lookup)))
+ (native-extra-check "small map replacement preserves original stored key and snapshot"
+  (and (eq? (car entry) original) (= 2 (cdr entry)) (= 1 (bl-get before original))
+       (= 1 (native-map-count after))))
+ (native-extra-check "missing removal preserves map identity" (eq? after (native-map-remove after "absent")))
+ (native-extra-check "small map removal leaves old snapshot intact"
+  (and (= 0 (native-map-count (native-map-remove after lookup))) (= 2 (bl-get after original)))))
+;; Both repeated keys and insertion order exercise the one-buffer constructor.
+(let* ((a (bl-map (bl-key "z") 1 (bl-key "a") 2 (bl-key "z") 3))
+       (b (bl-map (bl-key "a") 2 (bl-key "z") 3)))
+ (native-extra-check "bulk small map duplicate keys keep final value"
+  (and (= 2 (native-map-count a)) (= 3 (bl-get a (bl-key "z")))
+       (= 0 (native-compare-lists (native-map-pairs a) (native-map-pairs b))))))
+(let build ((index 0) (full (bl-empty-map)))
+ (if (= index 16)
+  (let* ((large (bl-assoc full 16 161)) (replaced (bl-assoc large 5 -5))
+         (small (native-map-remove large 16)))
+   (native-extra-check "entry17 promotes to AVL without changing old map"
+    (and (native-map-small? (vector-ref full 1)) (native-map-tree? (vector-ref large 1))
+         (= 16 (native-map-count full)) (= 17 (native-map-count large))
+         (eq? native-missing (bl-get full 16 native-missing))))
+   (native-extra-check "AVL replacement remains persistent"
+    (and (= 51 (bl-get large 5)) (= -5 (bl-get replaced 5))))
+   (native-extra-check "deletion back to16 demotes without changing old AVL"
+    (and (native-map-small? (vector-ref small 1)) (= 16 (native-map-count small)) (= 17 (native-map-count large))
+         (= 0 (native-compare-lists (native-map-pairs full) (native-map-pairs small)))))
+   (let remove ((index 0) (current small))
+    (if (= index 16)
+     (native-extra-check "hybrid deletion through empty map"
+      (and (native-map-small? (vector-ref current 1)) (= 0 (native-map-count current))
+           (null? (native-map-pairs current)) (= 16 (native-map-count small))))
+     (remove (+ index 1) (native-map-remove current index)))))
+  (build (+ index 1) (bl-assoc full index (+ 1 (* 10 index))))))
+(let* ((legacy (vector 'map (list (cons (bl-key "b") 2) (cons (bl-key "a") 1))))
+       (written (bl-assoc legacy (bl-key "c") 3))
+       (tree (vector 'map (vector 'pmap-v1 (native-map-root written) 3)))
+       (updated (bl-assoc tree (bl-key "b") 20)))
+ (native-extra-check "legacy alist map read write enumeration compatibility"
+  (and (= 2 (native-map-count legacy)) (= 1 (bl-get legacy (bl-key "a")))
+       (= 3 (native-map-count written)) (= 2 (bl-get written (bl-key "b")))
+       (= 1 (native-map-count (native-map-remove legacy (bl-key "a"))))))
+ (native-extra-check "existing AVL layout can update into immutable small storage"
+  (and (native-map-small? (vector-ref updated 1)) (= 20 (bl-get updated (bl-key "b")))
+       (= 2 (bl-get tree (bl-key "b")))
+       (= 3 (native-map-count updated)))))
+(let* ((small-key (bl-map (bl-key "inner") 7))
+       (tree-key (vector 'map (vector 'pmap-v1 (native-map-root small-key) 1)))
+       (outer (bl-map small-key "retained")))
+ (native-extra-check "map keys keep exact relation across private representations"
+  (and (string=? "retained" (bl-get outer tree-key)) (= 1 (native-map-count (bl-assoc outer tree-key "updated"))))))
+(let* ((fields (bl-map (bl-key "value") bl-nil))
+       (value (bl-struct (bl-key "Elixir.HybridFixture") fields))
+       (vector (native-vector-with-meta (bl-vec '(1 2)) (bl-map (bl-key "note") "kept"))))
+ (native-extra-check "small map fields preserve struct pattern nil presence"
+  (bl-match (list 'struct (bl-key "Elixir.HybridFixture")
+             (list (list (bl-key "value") (list 'lit bl-nil)))) value '()))
+ (native-extra-check "small maps preserve raw vector projection and metadata"
+  (and (= 3 (native-raw-map-size vector))
+       (string=? "kept" (bl-get (native-vector-meta vector) (bl-key "note")))
+       (= 2 (bl-count (native-map-fetch (bl-key "items") vector))))))
+(let* ((table (h-table-new)) (key (list->string (string->list "stored-key")))
+       (lookup (list->string (string->list "stored-key"))))
+ (h-table-insert table key bl-nil) (h-table-insert table lookup #f)
+ (let ((row (h-table-lookup table lookup)))
+  (native-extra-check "small actor table preserves original key and false value"
+   (and (eq? key (bl-nth row 0)) (eq? #f (bl-nth row 1)) (= 1 (h-table-size table)))))
+ (h-table-destroy table))
+;; Legacy duplicate rows historically keep their length count while tree-fold
+;; lookup keeps the last value. Preserve that compatibility on further writes.
+(let* ((key (list->string (string->list "duplicate")))
+       (copy (list->string (string->list "duplicate")))
+       (old (vector 'map (list (cons key 1) (cons copy 2))))
+       (written (bl-assoc old copy 3))
+       (grown (bl-assoc written (bl-key "other") 4))
+       (removed (native-map-remove grown (bl-key "other"))))
+ (native-extra-check "legacy duplicate lookup and count compatibility"
+  (and (= 2 (bl-get old copy)) (= 2 (native-map-count old)) (= 1 (length (native-map-pairs old)))))
+ (native-extra-check "legacy duplicate metadata never creates phantom flat rows"
+  (and (= 3 (bl-get grown key)) (= 3 (native-map-count grown)) (= 2 (length (native-map-pairs grown)))
+       (= 3 (bl-get removed key)) (= 2 (native-map-count removed)) (= 1 (length (native-map-pairs removed)))
+       (native-map-tree? (vector-ref grown 1)) (native-map-tree? (vector-ref removed 1)))))
+(native-extra-check "hybrid preserves existing nonmap facade behavior"
+ (and (eq? native-missing (bl-get 42 (bl-key "absent") native-missing))
+      (bl-is-nil (bl-get 42 (bl-key "absent"))) (not (native-map-has? 42 (bl-key "absent")))
+      (= 42 (native-map-remove 42 (bl-key "absent")))
+      (= 1 (bl-get (bl-assoc 42 (bl-key "added") 1) (bl-key "added")))))
 (display "native extra checks passed") (newline)
