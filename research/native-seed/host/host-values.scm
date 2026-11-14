@@ -632,8 +632,16 @@
 (define h-is-list native-list?)
 (define h-cons-head car)
 (define h-cons-tail cdr)
-(define h-list->array bl-vec)
-(define h-tup bl-tuple)
+;; The native transport for a JavaScript host array is a canonical Vector.
+;; Consume its logical elements, including a >32-element trie, before building
+;; the raw BL tuple. Backend-owned raw proper lists keep their existing ABI.
+(define (h-list->array items)
+ (if (not (native-list? items)) (error "host/list->array requires a proper BL list"))
+ (bl-vec items))
+(define (h-tup items)
+ (cond ((bl-tag? items 'vec) (bl-tuple (bl-items items)))
+       ((native-list? items) (bl-tuple items))
+       (else (error "host/tup requires a native host array transport"))))
 (define (h-is-tup x) (bl-tag? x 'tuple))
 (define h-tup-el bl-nth)
 (define h-tup-size bl-count)
