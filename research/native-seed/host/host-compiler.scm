@@ -357,6 +357,13 @@
    (let ((v (native-env-value (native-row (bl-key tag) ns name)))) (if (eq? v native-missing) bl-nil v))))))
  '(("alias" "add_alias" "alias_target") ("refer" "add_refer" "refer_source") ("import" "add_import" "import_target")))
 (native-add-leaf! "host/eval-scheme/1" native-eval-string)
+;; This finite emission boundary calls the actual compiled BL emitter.
+;; The Scheme profile needs no direct-C namespace and never interprets ANF.
+(define (native-eval-node-scheme node context)
+ (native-eval-string
+  (bl-invoke (native-global-exact "native.scheme" "emit") (list node context))))
+(native-add-leaf! "host/eval-node/2" native-eval-node-scheme)
+
 (native-add-leaf! "host/read-file/1" native-read-file)
 (native-add-leaf! "host/write-file/2" native-write-file)
 (native-add-leaf! "host/command-line/0" native-command-line)
