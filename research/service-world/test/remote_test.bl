@@ -1,0 +1,36 @@
+(ns service-world.remote-test
+ (:require [service-world.core :as world] [service-world.http :as http]))
+(def root (System/fetch_env! "SERVICE_WORLD_FIXTURE_DIR"))
+(def remote (http/endpoint {:url (System/fetch_env! "SERVICE_WORLD_FIXTURE_URL")
+                            :token-file (str root "/token")}))
+(defn request []
+ (world/request "qa/world" "qa-place" "discover"
+  {"folder" (str root "/a") "recursive" true "contract" "workstation.service" "accept" [1]}))
+(deftest two-independent-vms-negotiate-and-call-a-domain-contract
+ (let [r (remote (request)) rows (get-in r ["ok" "services"]) row (first rows)]
+  (is (nil? (get r "error")))
+  (is (= 1 (count rows)))
+  (is (= "different-name.owner" (get row "id")))
+  (is (= ["inspect"] (get row "operations")))
+  (is (= 1 (get row "version")))
+  (let [call (world/request "qa/world" "qa-place" "call"
+              {"service" (get row "id") "contract" (get row "contract") "version" (get row "version")
+               "operation" "inspect" "args" {}})]
+   (is (= "different-name.owner" (get-in (remote call) ["ok" "value" "id"]))))))
+(deftest wire-version-skew-and-ungranted-operations-refuse-before-dispatch
+ (is (= "protocol-mismatch" (get-in (remote (assoc (request) "versions" [99])) ["error" "code"])))
+ (is (= "contract-mismatch" (get-in (remote (assoc (request) "accept" [2])) ["error" "code"])))
+ (is (= "wrong-world" (get-in (remote (assoc (request) "world" "someone-else/world")) ["error" "code"])))
+ (is (= "forbidden" (get-in (remote (world/request "qa/world" "qa-place" "call"
+                          {"service" "different-name.owner" "contract" "workstation.service" "version" 1
+                           "operation" "restart" "args" {}})) ["error" "code"]))))
+(deftest independent-provider-observes-removal-and-authority-revocation
+ (let [catalog (File/read! (str root "/catalog.json")) authority (File/read! (str root "/authority.edn"))]
+  (try
+   (File/write! (str root "/catalog.json") "[]")
+   (is (= [] (get-in (remote (request)) ["ok" "services"])))
+   (File/write! (str root "/authority.edn") "{:tokens {}}")
+   (is (= "unauthorized" (get-in (remote (request)) ["error" "code"])))
+   (finally (File/write! (str root "/catalog.json") catalog)
+            (File/write! (str root "/authority.edn") authority)))))
+(run-tests)
