@@ -1,0 +1,53 @@
+(ns formal.obligation-packet-reader
+ (:require [formal.request-evidence :as evidence] [formal.data-graph :as graph]
+           [formal.backend :as backend] [bl.json :as json] [oracle]))
+(defn require! [ok why] (when-not ok (throw (ex-info (str "obligation reader: " why) {}))))
+(defn restore [wire]
+ (require! (and (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (= 1 (get wire "formal/data-graph")) (int? (get wire "formal/data-graph"))
+                (= "bl/public-data-graph-v1" (get wire "profile"))) "closed graph wire")
+ (let [data {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+             :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+                          (get wire "nodes"))}]
+  (graph/check! data) data))
+(def argv (BeamLisp/argv))
+(def input (json/decode (File/read! (first argv))))
+(require! (and (= "bl.obligation-packet-corpus.v1" (get input "schema"))
+               (= false (get input "producer-results")) (= 4 (count (get input "rows")))) "actual candidate-only corpus")
+(def rows (mapv (fn [row] {:case (get row "case") :expected (get row "expected") :packet (restore (get row "packet"))})
+                (get input "rows")))
+(def module (elem (erlang/fun_info backend/invoke :module) 1))
+(def pattern (tuple module :exchange! 4))
+(def oracle-calls (atom 0))
+(def deny (fn [& _] (swap! oracle-calls inc) (throw :cold-reader-must-not-query)))
+(def checked (atom 0))
+(def results (atom []))
+(defn fresh [row]
+ (let [result (evidence/reopen (:packet row))]
+  (require! (= (:expected row) (name (get-in result [:conclusion :status]))) "current consumer policy result")
+  (require! (= :checked (get-in result [:logical-conclusion :status]) (get-in result [:proof-check :status])) "fresh independent proof")
+  (require! (= false (:compiler-proof-authority result) (:checked-native-execution result)) "trust boundary")
+  (swap! checked inc) result))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "native trace installed")
+(try
+ (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+  (fn []
+   ;; First operation on packet contents is the installed reopen entry point.
+   ;; No manual certificate/policy vocabulary preload or producer result decode.
+   (doseq [row rows] (swap! results conj {:case (:case row) :result (fresh row)}))
+   (let [before (erlang/system_info :atom_count)]
+    (doseq [row rows] (fresh row))
+    (require! (= before (erlang/system_info :atom_count)) "warmed atom count stable"))
+   (doseq [row rows]
+    (let [limited (evidence/reopen (:packet row) {:feasibility-work-units 0})
+          no-proof (evidence/reopen (:packet row) {:proof-work-units 0})]
+     (require! (= :checked (get-in limited [:proof-check :status])) "proof remains independent")
+     (require! (= :incomplete (get-in limited [:conclusion :status])) "reject requires current premise allowance")
+     (require! (= :not-run (get-in limited [:feasibility-check :checker-invocation])) "premise checker not invoked")
+     (require! (= :not-established (get-in no-proof [:conclusion :status])) "premises cannot repair missing proof")))))
+ (require! (= 0 @oracle-calls (elem (erlang/trace_info pattern :call_count) 1)) "no native/oracle calls")
+ (File/write! (second argv) (json/encode {:status :passed :rows @results :fresh-full-checks @checked
+    :limited-checks 8 :native-exchanges 0 :oracle-calls 0 :warmed-atoms-stable true
+    :manual-schema-preload false :sdk (System/get_env "BL_SDK_PRODUCT") :compiler-proof-authority false} {:pretty 2}))
+ (println {:cold-reader :passed :packets 4 :fresh-full-checks @checked :limited-checks 8})
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))
