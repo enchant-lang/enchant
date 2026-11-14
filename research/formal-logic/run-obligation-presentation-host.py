@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 
 P = Path(__file__).resolve().parent
@@ -24,14 +25,21 @@ parent = read(P / 'evidence/scalar-integration/qualification.json')
 assert parent['status'] == 'passed' and parent['sdk_pin'] == read(C / 'qualification.json')['baseline_sdk_pin']
 assert read(C / 'promotion.json')['selected'] == pin
 assert sha(Path(pin['sdk']) / 'artifact.json') == pin['descriptor_sha256']
-assert read(E / 'dossier-check-exit.json')['exit_code'] == 0
-checked = read(E / 'dossier-check-source-pin.json')
+phase = 'dossier-cells' if sys.argv[1:] == ['--writer-checkpoint'] else 'dossier-check'
+assert sys.argv[1:] in ([], ['--writer-checkpoint'])
+assert read(E / (phase + '-exit.json'))['exit_code'] == 0
+assert read(E / (phase + '-exit.json'))['document_sha256'] == sha(P / 'ATLAS.bl.org')
+assert '94 cells, 0 cell errors' in (E / (phase + '-checks.txt')).read_text()
+assert read(E / 'research/qualification.json')['assertions'] == 38
+assert read(E / 'research/capture-exit.json')['exit_code'] == 0
+checked = read(E / (phase + '-source-pin.json'))
 assert checked['kit_state_sha256'] == sha(K)
 assert checked['sdk_pin'] == pin
 for name, digest in checked['source_sha256'].items():
     if name == 'research/formal-logic/ATLAS.bl.org':
         body = subprocess.check_output(['git', 'show', checked['code_commit'] + ':' + name], cwd=R).decode()
-        assert hashlib.sha256(body.encode()).hexdigest() == digest == read(E / 'dossier-check-exit.json')['document_sha256']
+        assert hashlib.sha256(body.encode()).hexdigest() == digest
+        assert read(E / (phase + '-exit.json'))['document_sha256'] == sha(P / 'ATLAS.bl.org')
         current = (R / name).read_text()
         for pattern in (r'^#\+begin_src beam-lisp\b[^\n]*\n.*?^#\+end_src[^\n]*',
                         r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*',
@@ -73,6 +81,7 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
 (E / 'host-launch-command.json').write_text(json.dumps(command, indent=2) + '\n')
 (E / 'host-launch-source-pin.json').write_text(json.dumps(
     {'code_commit': commit, 'source_sha256': {relative: sha(Path(__file__))},
+     'qualification_phase': phase, 'independent_unchanged_check_pending': phase != 'dossier-check',
      'sdk_pin': pin, 'document_sha256': sha(P / 'ATLAS.bl.org'), 'kit_state_sha256': sha(K)}, indent=2) + '\n')
 started = time.monotonic()
 with (E / 'host-launch-checks.txt').open('w') as stream:
