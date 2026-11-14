@@ -3,7 +3,7 @@
 (ns native.chunks
  (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
            [native.eval :as ev] [native.scheme :as scheme]
-           [bl.json :as json] [clojure.string :as string]))
+           [bl.json :as json] [clojure.string :as string] [anf]))
 (def args (BeamLisp/argv))
 (def mode (or (nth args 0 nil) "plan"))
 (def artifact-path (or (nth args 1 nil) "research/native-seed/out/compiler-closure/partition.json"))
@@ -30,8 +30,46 @@
   "bootstrap_sha256" (artifact/sha (File/read! "research/native-seed/src/native/bootstrap.bl"))
   "driver_sha256" (artifact/sha (File/read! "research/native-seed/src/native/chunks.bl"))
   "options_sha256" (artifact/sha (erlang/term_to_binary (:options closure) (list :deterministic)))})
-(defn key-for [row]
- (artifact/sha (erlang/term_to_binary [key-input row] (list :deterministic))))
+(def emission-input
+ (assoc (select-keys key-input ["sdk_descriptor_sha256" "emitter_sha256" "eval_sha256"
+                              "bootstrap_sha256" "options_sha256"])
+        "resolver_policy" "native-exact-late-lookup-v2"))
+(defn remote-decision [n]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
+       logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
+       key (str (erlang/atom_to_binary m) "/" f "/" a)]
+  (cond
+   (contains? leaves key) ["leaf" key]
+   (and (contains? by-module m) (contains? (get table (get by-module m)) logical))
+    ["compiled" key (get by-module m) logical (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
+   (contains? stub-modules m) ["excluded-namespace" key]
+   :else (throw (ex-info "native V2 cache: unresolved remote signature" {:remote key})))))
+(defn global-decision [n]
+ (cond
+  (contains? (get table (:ns n) #{}) (:name n))
+   ["compiled-global" (:ns n) (:name n) (if (= :exact (:lookup n)) "exact" "normal")]
+  (and (contains? #{"core" "cpp"} (:ns n)) (BeamLisp.Env/bound? (:ns n) (:name n)))
+   ["seed-global" (:ns n) (:name n) (if (= :exact (:lookup n)) "exact" "normal")]
+  :else (throw (ex-info "native V2 cache: unresolved global" {:namespace (:ns n) :name (:name n)}))))
+(defn decisions-for [defs]
+ ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
+ ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
+ (loop [todo (BeamLisp.CompilerData/eager_map :node defs) decisions #{}]
+  (if (erlang/== todo (list)) (vec (sort-by str decisions))
+   (let [node (erlang/hd todo)
+         decision (case (:op node) :remote (remote-decision node) :global (global-decision node) nil)]
+    (recur (lists/append (anf/executable-children node) (erlang/tl todo))
+           (if decision (conj decisions decision) decisions))))))
+(defn emission-record [row]
+ (let [u (get (:units closure) (get row "namespace")) offset (get row "offset")
+       defs (subvec (:defs u) offset (+ offset (get row "count")))]
+  {"row" (select-keys row ["namespace" "offset" "count"])
+   "ir_sha256" (artifact/sha (erlang/term_to_binary defs (list :deterministic)))
+   "source_unit_sha256" (when (= offset 0)
+     (artifact/sha (erlang/term_to_binary (select-keys u [:ns :path :source :requires :module :base-module]) (list :deterministic))))
+   "decisions" (decisions-for defs)}))
+(defn key-from-record [record]
+ (artifact/sha (erlang/term_to_binary [emission-input record] (list :deterministic))))
 (defn checked-context [ns]
  (let [base (ev/context ns)]
   (assoc base
@@ -69,22 +107,35 @@
   :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)
   :stub-modules (mapv (fn [ns] [ns (BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))})
 (defn chunk-path [key extension] (str out "/chunks/" key "." extension))
+(defn row-layout [size]
+ (vec (mapcat (fn [u]
+   (map (fn [offset] {"namespace" (:ns u) "offset" offset "count" (min size (- (count (:defs u)) offset))})
+        (map #(* size %) (range (erlang/div (+ (count (:defs u)) (- size 1)) size))))) units)))
 (defn make-plan [size]
- {"schema" "bl.native.chunk-plan" "version" 1 "inputs" key-input "size" size
-  "chunks" (vec (mapcat (fn [u]
-    (map (fn [offset] (let [row {"namespace" (:ns u) "offset" offset "count" (min size (- (count (:defs u)) offset))}]
-                       (assoc row "key" (key-for row)))) (map #(* size %) (range (erlang/div (+ (count (:defs u)) (- size 1)) size))))) units))})
+ {"schema" "bl.native.chunk-plan" "version" 2 "inputs" emission-input "assembly_inputs" key-input "size" size
+  "chunks" (mapv (fn [row]
+              (let [record (emission-record row)]
+               (assoc row "key" (key-from-record record) "emission_record" record))) (row-layout size))})
 (defn read-plan []
  (let [plan (json/decode (File/read! (str out "/chunks.json")))]
   (assert (= "bl.native.chunk-plan" (get plan "schema")))
-  (assert (= 1 (get plan "version")))
-  (assert (= key-input (get plan "inputs")))
-  (assert (= (get plan "chunks") (get (make-plan (get plan "size")) "chunks")))
+  (assert (= 2 (get plan "version")))
+  (assert (= emission-input (get plan "inputs")))
+  (assert (= (mapv #(select-keys % ["namespace" "offset" "count"]) (get plan "chunks"))
+             (row-layout (get plan "size"))))
+  ; Exactly one current IR/signature record per row. Never rebuild an entire
+  ; plan merely to compare it, and never walk a row again for its key.
+  (doseq [row (get plan "chunks")]
+   (let [record (emission-record row)]
+    (assert (= record (get row "emission_record")))
+    (assert (= (key-from-record record) (get row "key")))))
   plan))
 (defn chunk-ready? [row]
  (try
   (let [key (get row "key") report (json/decode (File/read! (chunk-path key "json")))]
    (and (= key (get report "key"))
+        (= emission-input (get report "emission_inputs"))
+        (= (get row "emission_record") (get report "emission_record"))
         (= (artifact/sha (File/read! (chunk-path key "functions.scm"))) (get report "functions_sha256"))
         (= (artifact/sha (File/read! (chunk-path key "initializers.scm"))) (get report "initializers_sha256"))
         (or (not= 0 (get row "offset"))
@@ -94,13 +145,14 @@
 (defn emit-chunk! [row]
  (let [key (get row "key") u (get (:units closure) (get row "namespace"))
        offset (get row "offset") count* (get row "count")
-       _ (assert (= key (key-for (dissoc row "key"))))
+       _ (assert (= key (key-from-record (get row "emission_record"))))
        defs (subvec (:defs u) offset (+ offset count*))
        functions (string/join "" (map #(emit-definition u %) (filter #(= :fn (:kind %)) defs)))
        initializers (str (when (and (= "core" (:ns u)) (= offset 0)) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n")
                          (string/join "" (map #(emit-definition u %) (remove #(= :fn (:kind %)) defs))))
        source-unit (when (= offset 0) (bootstrap/data (select-keys u [:ns :path :source :requires :module :base-module])))
-       report {"key" key "functions_sha256" (artifact/sha functions) "initializers_sha256" (artifact/sha initializers)
+       report {"key" key "emission_inputs" emission-input "emission_record" (get row "emission_record")
+               "functions_sha256" (artifact/sha functions) "initializers_sha256" (artifact/sha initializers)
                "source_unit_sha256" (when source-unit (artifact/sha source-unit))}]
   (File/write! (chunk-path key "functions.scm") functions)
   (File/write! (chunk-path key "initializers.scm") initializers)
@@ -111,6 +163,8 @@
  (let [key (get row "key") report (json/decode (File/read! (chunk-path key "json")))
        text (File/read! (chunk-path key extension))]
   (assert (= key (get report "key")))
+  (assert (= emission-input (get report "emission_inputs")))
+  (assert (= (get row "emission_record") (get report "emission_record")))
   (assert (= (artifact/sha text) (get report hash-key))) text))
 (cond
  (= mode "plan")
@@ -149,7 +203,7 @@
    (File/write! (str out "/prelude.scm") prelude)
    (File/write! (str out "/stage1.scm") (str prelude "(native-main (native-command-line))\n"))
    (File/write! (str out "/chunk-export.json")
-    (json/encode {"schema" "bl.native.chunk-export" "version" 1 "inputs" key-input
+    (json/encode {"schema" "bl.native.chunk-export" "version" 2 "inputs" key-input "emission_inputs" emission-input
                   "jobs" (count rows) "prelude_sha256" (artifact/sha prelude)}))
    (println (str "NATIVE_CHUNKS_ASSEMBLED " (count rows) " checked jobs")))
  :else (throw (ex-info "native chunks: expected plan, emit, emit-next or assemble" {:mode mode})))

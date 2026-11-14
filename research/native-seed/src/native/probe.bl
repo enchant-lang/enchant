@@ -41,17 +41,16 @@
  (vec (sort-by first
   (BeamLisp.Env/match
    (tuple (tuple :link "core" :$1) :$2)))))
-(defn provider-sources []
- ; Bind ALL candidate macro providers in the source roots, including providers
- ; loaded by a macro through a module edge rather than a :require declaration.
- (vec (map (fn [p] (let [source (File/read! p)]
-         {:path p :sha256 (sha source)
-          ; Conservative prefilter, followed by canonical AST declaration
-          ; recognition. A comment/string cannot become a macro provider.
-          :macro-provider? (and (String/contains? source "defmacro")
-                             (boolean (some build/defmacro? (build/read-forms p))))}))
-       (sort (distinct (concat ["priv/host/compiler_data.bl" "priv/host/form_meta.bl" "priv/host/meta.bl"]
-                    (mapcat (fn [r] (Path/wildcard (str r "/**/*.bl"))) roots)))))))
+(defn provider-sources [prior]
+ (let [previous (into {} (map (fn [p] [(:path p) p]) prior))]
+  (mapv (fn [p]
+   (let [source (File/read! p) digest (sha source) old (get previous p)]
+    (if (and (= digest (:sha256 old)) (contains? #{true false} (:macro-provider? old))) old
+     {:path p :sha256 digest
+      :macro-provider? (and (String/contains? source "defmacro")
+                           (boolean (some build/defmacro? (build/read-forms p))))})))
+   (sort (distinct (concat ["priv/host/compiler_data.bl" "priv/host/form_meta.bl" "priv/host/meta.bl"]
+                 (mapcat (fn [r] (Path/wildcard (str r "/**/*.bl"))) roots)))))))
 (declare providers observed-sdk-descriptor)
 (defn compile-closure []
  (loop [todo entries active #{} done #{} order [] units {}]
@@ -119,13 +118,22 @@
      :definitions (count (:defs u)) :requires (:requires u)})) (:order closure)))))
 (File/mkdir_p! out)
 (File/mkdir_p! (str out "/units"))
-(def providers (provider-sources))
 (def pin (File/read! "research/native-seed/sdk-pin.json"))
 (def pin-data (json/decode pin))
 (def observed-sdk-descriptor (File/read! ".bl/sdks/current-sdk/artifact.json"))
 (assert (= (get pin-data "descriptor_sha256") (sha observed-sdk-descriptor)))
 (assert (= (get pin-data "source") (get (json/decode observed-sdk-descriptor) "source")))
 (assert (= observed-sdk-descriptor (File/read! (str (get pin-data "sdk") "/artifact.json"))))
+(def prior-identity
+ (when (File/regular? (str out "/identity.json"))
+  (try (json/decode (File/read! (str out "/identity.json"))) (catch _ nil))))
+(def prior-providers
+ (if (and (= "bl.native.compiler-closure-identity" (get prior-identity "schema"))
+          (= 1 (get prior-identity "version"))
+          (= (sha pin) (get prior-identity "sdk-pin-sha256")))
+  (mapv (fn [p] {:path (get p "path") :sha256 (get p "sha256")
+                :macro-provider? (get p "macro-provider?")}) (get prior-identity "providers")) []))
+(def providers (provider-sources prior-providers))
 (def closure
  (BeamLisp.Env/isolated
   (fn []
@@ -133,7 +141,7 @@
     :options options :roots roots :entries entries :stubs (vec (sort stubs))
     :core-links (core-links) :return-constructor-shapes (BeamLisp.Server/return_constructor_shapes)
     :provider-sources providers :sdk-pin pin))))
-(def final-providers (provider-sources))
+(def final-providers (provider-sources providers))
 (doseq [[ns unit] (:units closure)]
  (when-not (and (= (:source-sha256 unit) (sha (:source unit)))
                 (= (:source-sha256 unit) (sha (File/read! (:path unit)))))

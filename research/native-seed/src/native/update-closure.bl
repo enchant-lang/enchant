@@ -11,15 +11,17 @@
 (assert (= expected-options (:options original)))
 (assert (= (:sdk-pin original) (File/read! "research/native-seed/sdk-pin.json")))
 (def roots ["research/native-seed/src" "priv/boot" "priv/lib" "priv/std" "priv/compat"])
-(defn providers []
+(defn providers [prior]
+ (let [previous (into {} (map (fn [p] [(:path p) p]) prior))]
  (mapv (fn [p]
-  (let [source (File/read! p)]
-   {:path p :sha256 (artifact/sha source)
-    :macro-provider? (and (String/contains? source "defmacro")
-                         (boolean (some build/defmacro? (build/read-forms p))))}))
+  (let [source (File/read! p) sha (artifact/sha source) old (get previous p)]
+   (if (= sha (:sha256 old)) old
+    {:path p :sha256 sha
+     :macro-provider? (and (String/contains? source "defmacro")
+                          (boolean (some build/defmacro? (build/read-forms p))))})))
   (sort (distinct (concat ["priv/host/compiler_data.bl" "priv/host/form_meta.bl" "priv/host/meta.bl"]
-                (mapcat #(Path/wildcard (str % "/**/*.bl")) roots))))))
-(def current-providers (providers))
+                (mapcat #(Path/wildcard (str % "/**/*.bl")) roots)))))))
+(def current-providers (providers (:provider-sources original)))
 (def macros (vec (filter :macro-provider? current-providers)))
 (assert (= macros (vec (filter :macro-provider? (:provider-sources original)))))
 (def result
@@ -45,7 +47,7 @@
             _ (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits)]
        (-> result (assoc-in [:units ns] unit) (update :changed conj ns))))))
     {:units {} :changed []} (:order original)))))
-(def final-providers (providers))
+(def final-providers (providers current-providers))
 (assert (= macros (vec (filter :macro-provider? final-providers))))
 (doseq [[ns u] (:units result)]
  (assert (= (:source-sha256 u) (artifact/sha (:source u))))
