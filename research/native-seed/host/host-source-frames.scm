@@ -55,7 +55,12 @@
         ;; Preserve caller source through generated actor runtime helpers,
         ;; using explicit emitter evidence exactly as JS's callSrc does.
         (source (if (and (bl-truthy (bl-get source (bl-key "internal") #f)) (pair? parent)) (car parent) source))
-        (active (cons source (if (pair? parent) (cdr parent) '()))))
+        (active (if (pair? parent)
+                 ;; JS updates the live frame slot before invoking a callee.
+                 ;; Preserve that site when an exception unwinds to a catch
+                 ;; in THIS function; captured traces already copy their list.
+                 (begin (set-car! parent source) parent)
+                 (list source))))
   (parameterize ((native-logical-frames active)
                  (native-next-source-call (vector source parent tail?)))
    (native-source-protect thunk))))
