@@ -38,6 +38,8 @@ try{
   check(size.name+': wide replay and SDK limits stay explicit',await evaluate(`(()=>{const t=document.querySelector('${section}').innerText;return t.includes('point interpreter and proof strategies are not installed')&&t.includes('prototype beside the selected SDK')&&t.includes('per-query deadlines')})()`));
   check(size.name+': actual pure evidence is scoped',await evaluate(`(()=>{const t=document.querySelector('${section}').innerText;return t.includes('424')&&t.includes('187')&&t.includes('6')&&t.toLowerCase().includes('whole-source capacity limits')})()`));
   check(size.name+': all common operations are present',await evaluate(`(()=>{const t=document.querySelector('${section} pre').innerText;return ['prepare-request','compare-evidence','propose-evidence','recheck-evidence','wide-native-policy'].every(x=>t.includes(x))})()`));
+  check(size.name+': actual native sample keeps unavailable support visible',await evaluate(`(()=>{const t=document.querySelector('${section}').innerText;return t.includes('330 assertions')&&t.includes('Generic sequence empty/unit length')&&t.includes('Unsupported')&&t.includes('Signed zeros are structurally equal')})()`));
+  check(size.name+': two independent cold readers remain separate from native execution',await evaluate(`(()=>{const t=document.querySelector('${section}').innerText;return t.includes('Two separate cold processes')&&t.includes('zero native exchanges and zero oracle calls')})()`));
   for(const [name,theme] of [['day','light'],['night','dark']]){
    const actual=await evaluate("document.documentElement.dataset.theme==='dark'?'dark':'light'");
    if(actual!==theme)await call({op:'click',selector:'#theme'});
@@ -50,6 +52,12 @@ try{
    await shot(size.name+'-wide-judgments-'+name);
    await evaluate("document.getElementById('what-feels-native-in-beam-lisp').scrollIntoView({block:'start',behavior:'instant'})");
    await shot(size.name+'-wide-language-'+name);
+   await evaluate("document.getElementById('what-the-actual-owners-report').scrollIntoView({block:'start',behavior:'instant'})");
+   await shot(size.name+'-wide-native-top-'+name);
+   await evaluate(`document.querySelectorAll('${section} .rosetta')[1].lastElementChild.scrollIntoView({block:'center',behavior:'instant'})`);
+   await shot(size.name+'-wide-native-bottom-'+name);
+   await evaluate("document.getElementById('make-saved-answers-lighter').scrollIntoView({block:'start',behavior:'instant'})");
+   await shot(size.name+'-wide-reference-cost-'+name);
   }
   // Cross-pane navigation and direct links must work with the added chapter.
   await call({op:'click',selector:section+' .pager .next'});
@@ -59,7 +67,16 @@ try{
   await call({op:'wait',expression:`document.querySelector('${section}').getClientRects().length>0`});
   check(size.name+': previous returns to the wide chapter',await evaluate(`document.querySelector('${section}').getClientRects().length>0`));
  }
- for(const path of ['evidence/wide-owner-prototype/pure/qualification.json','prototypes/wide-owner/formal/logic.bl',
+ for(const path of ['evidence/wide-owner-prototype/pure/qualification.json',
+                    'evidence/wide-owner-prototype/native-smoke/qualification.json',
+                    'evidence/wide-owner-prototype/native-smoke/observations.json',
+                    'evidence/wide-owner-prototype/native-smoke/projected/checks/wide-owner-native-check.bl',
+                    'evidence/wide-owner-prototype/native-smoke/reader-one/qualification.json',
+                    'evidence/wide-owner-prototype/native-smoke/reader-two/qualification.json',
+                    'evidence/wide-owner-prototype/reader-profile/qualification.json',
+                    'evidence/wide-owner-prototype/reader-profile-components/qualification.json',
+                    'proposals/evidence-reference-review.md','prototypes/wide-owner/formal/request-evidence.bl',
+                    'prototypes/wide-owner/formal/logic.bl',
                     'prototypes/wide-owner/formal/point-profile.bl','prototypes/wide-owner/README.md',
                     'prototypes/wide-owner/wide-owner-native-check.bl','prototypes/wide-readers/candidate-reader.bl',
                     'proposals/wide-theory-request-interface.md']){
