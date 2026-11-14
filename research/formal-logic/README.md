@@ -666,5 +666,13 @@ with backend-independent statement identity and an original-node assumption
 ledger, and [scalar text interfaces and resource envelopes](TEXT-RESOURCE-PROTOTYPE.md),
 with 512 assertions and separate total, Option and strict access. The actual
 symbolic combining-character contract returned Z3 UNSAT and OxiZ UNKNOWN;
-concrete BL point evaluation agreed with the contract. Neither prototype is in
-the SDK or the common answer proof slot yet.
+concrete BL point evaluation agreed with the contract. The
+[evidence-bundle prototype](EVIDENCE-BUNDLE-PROTOTYPE.md) then passed 47 assertions
+and a fresh solver-denied packet reader with six refusal controls. These
+prototypes are being integrated into a candidate runtime batch directly in main;
+the selected research SDK remains the qualified word SDK.
+
+The live dossier now includes a prose progress section for these qualified
+prototypes. Its cell sources and saved results are unchanged. The word presentation
+receipt above binds the preceding exact document revision; the expanded document's
+next execution/browser checkpoint is pending the current integration work.

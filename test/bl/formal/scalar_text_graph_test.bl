@@ -1,0 +1,94 @@
+(ns formal.scalar-text-graph-test
+ (:require [formal.term :as t] [formal.evaluate :as e] [formal.graph-terms :as forest]
+           [formal.scalar-text-value :as text-value] [formal.data-graph :as graph]
+           [formal.resources.text :as resource] [formal.point-profile :as policy]
+           [formal.request :as request] [formal.request-answer :as answer]
+           [formal.request-point :as point] [formal.query :as q] [formal.question-graph :as qg]))
+(defn packed [terms]
+ (let [data (graph/encode terms)] {:data data :roots (second (nth (:nodes data) (:root data)))}))
+(defn values [terms coordinates limits]
+ (let [{:keys [data roots]} (packed terms)]
+  (e/graph-values data roots coordinates {:profile e/text-graph-profile :limits limits})))
+(defn call [op sort args] (t/app op sort args nil))
+(deftest every-current-text-primitive-uses-the-same-managed-point
+ (let [x (t/variable "text.point" t/String) a (t/text "e") b (t/text "é")
+       terms [(call :str-concat t/String [x b]) (call :str-len t/Int [x])
+              (call :str-contains t/Bool [x a]) (call :str-prefix t/Bool [a x])
+              (call :str-suffix t/Bool [b x]) (call :str-at t/String [x (t/int -1)])
+              (call :str-at t/String [x (t/int 0)]) (call :str-at t/String [x (t/int 99)])
+              (call :str-substr t/String [x (t/int 0) (t/int 2)])
+              (call :str-substr t/String [x (t/int -1) (t/int 2)])
+              (call :str-index t/Int [x a (t/int 0)]) (call :str-index t/Int [x (t/text "") (t/int 0)])
+              (call :str-replace t/String [x (t/text "") b])
+              (call :str-replace t/String [x (t/text "a") (t/text "🙂")])
+              (t/eq x x) (call :distinct t/Bool [x (t/text "xyz")])]]
+  (doseq [text ["" "abc" "é" "é" "🙂" (unicode/characters_to_binary (list 0))]]
+   (let [result (values terms {"text.point" text} {})]
+    (is (= :complete (:status result)))
+    (is (= (mapv #(e/value % {"text.point" text}) terms) (:values result)))
+    (is (= 1 (get-in result [:resources :text-value-check-calls])))
+    (is (> (get-in result [:resources :text-primitive-calls]) 0))
+    (is (> (get-in result [:resources :text-literal-reuses]) 0))
+    (is (> (get-in result [:admission :text-literals]) 0))
+    (is (= false (:compiler-proof-authority result)))))
+  (is (= [2 "́"] (:values (values [(call :str-len t/Int [x]) (call :str-at t/String [x (t/int 1)])]
+                                  {"text.point" "é"} {}))))))
+(deftest prospective-point-work-has-an-exact-aggregate-boundary
+ (let [x (t/variable "text.budget" t/String) term (call :str-len t/Int [x])
+       bytes (erlang/byte_size "é")
+       work (+ (get-in (resource/value-plan bytes {}) [:forecast :work-units])
+               (get-in (resource/plan :str-len [bytes] [] {}) [:forecast :work-units]))
+       exact (values [term] {"text.budget" "é"} {:request-work-units work})
+       short (values [term] {"text.budget" "é"} {:request-work-units (dec work)})]
+  (is (= :complete (:status exact)))
+  (is (= [2] (:values exact)))
+  (is (= work (get-in exact [:resources :charged-work-units])))
+  (is (= :incomplete (:status short)))
+  (is (= 0 (get-in short [:resources :text-primitive-calls])))
+  (is (= :request-work-units (get-in short [:resources :refusals 0 :reason :metric])))))
+(deftest coordinate-and-literal-refusal-precede-validation
+ (let [x (t/variable "text.before-validation" t/String)
+       module (elem (erlang/fun_info text-value/check-value :module) 1)
+       pattern (tuple module :check-value 1)
+       large (String/duplicate "x" 65537)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (is (= :incomplete (:status (values [x] {"text.before-validation" large} {}))))
+   (is (= :incomplete (:status (values [x] {"text.before-validation" "é"} {:request-work-units 0}))))
+   (is (= :incomplete (:status (values [(t/text "é")] {} {:admission-work-units 0}))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (is (= ["é"] (:values (values [x] {"text.before-validation" "é"} {}))))
+   (is (> (elem (erlang/trace_info pattern :call_count) 1) 0))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest inactive-invalid-text-still-invalidates-original-admission
+ (doseq [bad [(erlang/list_to_binary (list 255)) (unicode/characters_to_binary (list 196608))]]
+  (let [term (t/ite (t/bool false) (t/text bad) (t/text "ok"))]
+   (is (thrown? (values [term] {} {})))))
+ (let [bound (t/bound "text.unused" t/String) term (t/forall [bound] (t/bool true))
+       {:keys [data roots]} (packed [term])]
+  (is (thrown? (forest/prepare-numeric-word data roots {})))
+  (is (= :incomplete (:status (values [term] {} {}))))))
+(deftest huge-index-is-refused-before-the-text-primitive
+ (let [term (call :str-at t/String [(t/text "abc") (t/int (erlang/bsl 1 2048))])
+       module (elem (erlang/fun_info e/value :module) 1) pattern (tuple module :codepoints 1)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (values [term] {} {})]
+    (is (= :incomplete (:status result)))
+    (is (= 0 (get-in result [:resources :text-primitive-calls])))
+    (is (= :integer-input-bytes (get-in result [:resources :refusals 0 :reason :metric]))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (is (= ["a"] (:values (values [(call :str-at t/String [(t/text "abc") (t/int 0)])] {} {}))))
+   (is (> (elem (erlang/trace_info pattern :call_count) 1) 0))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest all-request-readers-use-the-same-text-coordinate-policy
+ (let [x (t/variable "text.request" t/String)
+       subject (qg/prepare (q/sat {:assumptions [(t/eq x (t/text "é"))]}))
+       r (request/prepare subject {:policy {:profile policy/numeric-word-text}})
+       good (answer/supply r {"text.request" "é"}) wrong (answer/supply r {"text.request" "é"})]
+  (is (= :sat (:verdict (answer/recheck r good))))
+  (is (= :invalid-point (:verdict (answer/recheck r wrong))))
+  (is (= :valid (get-in (point/replay r {"text.request" "é"}) [:validation :status])))
+  (is (= [:bool :int :real [:bv 1 4096] :string] (:sorts (policy/describe (:policy r)))))
+  (is (= :unicode-codepoint (get-in (policy/describe (:policy r)) [:text-domain :text-unit])))))
+(run-tests)

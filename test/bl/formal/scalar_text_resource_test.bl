@@ -1,0 +1,75 @@
+(ns formal.scalar-text-resource-test
+ (:require [formal.resources.text :as resource] [formal.term :as t] [formal.evaluate :as evaluate]))
+(defn planned [op texts indices limits]
+ (resource/plan op (mapv erlang/byte_size texts) indices limits))
+(defn actual [op texts indices]
+ (let [args (vec (concat (map t/text texts) (map t/int indices)))
+       result (cond (contains? #{:str-concat :str-at :str-substr :str-replace} op) t/String
+                    (contains? #{:str-len :str-index} op) t/Int :else t/Bool)]
+  (evaluate/value (t/app op result args nil) {})))
+(deftest actual-codepoint-primitives-fit-the-prospective-byte-envelopes
+ (doseq [text ["" "a" "abc" "é" "é" "🙂" (unicode/characters_to_binary (list 0))]
+         [op inputs indices] [[:str-len [text] []]
+                               [:str-concat [text "é"] []]
+                               [:str-contains [text "e"] []]
+                               [:str-prefix ["e" text] []]
+                               [:str-suffix ["é" text] []]
+                               [:str-at [text] [-1]]
+                               [:str-at [text] [0]]
+                               [:str-at [text] [999]]
+                               [:str-substr [text] [0 2]]
+                               [:str-substr [text] [-1 2]]
+                               [:str-substr [text] [0 -1]]
+                               [:str-index [text "e"] [0]]
+                               [:str-index [text ""] [0]]
+                               [:str-replace [text "" "é"] []]
+                               [:str-replace [text "a" "🙂"] []]
+                               [:eq [text text] []]
+                               [:distinct [text "xyz"] []]]]
+  (let [plan (planned op inputs indices {}) value (actual op inputs indices)]
+   (is (= :ready (:status plan)))
+   (is (= :not-run (:primitive-execution plan)))
+   (is (not (evaluate/unavailable? value)))
+   (when (= :text (:result-kind plan))
+    (is (<= (erlang/byte_size value) (get-in plan [:forecast :result-bytes])))))))
+(deftest byte-codepoint-and-grapheme-units-remain-explicit
+ (is (= 4 (erlang/byte_size "🙂")))
+ (is (= 1 (actual :str-len ["🙂"] [])))
+ (is (= 3 (erlang/byte_size "é")))
+ (is (= 2 (actual :str-len ["é"] [])))
+ (is (= 1 (String/length "é")))
+ (is (= "́" (actual :str-at ["é"] [1])))
+ (is (= "" (actual :str-at ["é"] [2])))
+ (is (= "" (actual :str-substr ["abc"] [0 -1]))))
+(deftest exact-budget-and-malformed-plans-never-claim-validation
+ (doseq [[op sizes ints] [[:str-concat [3 4] []] [:str-contains [8 3] []]
+                         [:str-prefix [3 8] []] [:str-replace [8 3 5] []]
+                         [:str-substr [8] [0 2]] [:str-index [8 3] [1]]
+                         [:distinct [3 4 5] []]]]
+  (let [plan (resource/plan op sizes ints {}) work (get-in plan [:forecast :work-units])]
+   (is (= :ready (:status (resource/plan op sizes ints {:work-units work}))))
+   (is (= :incomplete (:status (resource/plan op sizes ints {:work-units (dec work)}))))
+   (is (= :work-units (get-in (resource/plan op sizes ints {:work-units (dec work)}) [:reason :metric])))))
+ (is (= :not-run (:forecast-execution (resource/plan :str-concat [65537 0] [] {}))))
+ (is (= :incomplete (:status (resource/plan :str-concat [65536 1] [] {}))))
+ (is (= :not-run (:forecast-execution (resource/plan :str-at [3] [(erlang/bsl 1 2048)] {}))))
+ (is (= :incomplete (:status (resource/plan :unknown-operation [] [] {}))))
+ (is (thrown? (resource/plan :str-at [1] [] {})))
+ (is (thrown? (resource/plan :str-concat [-1 0] [] {})))
+ (is (thrown? (resource/plan :str-concat [1 0] [] {:checked true})))
+ (doseq [bytes [0 1 3 65536]]
+  (let [plan (resource/value-plan bytes {})]
+   (is (= :ready (:status plan)))
+   (is (= :not-run (:value-validation plan)))
+   (is (= :not-run (:primitive-execution plan))))))
+(deftest planning-does-not-decode-text
+ (let [module (elem (erlang/fun_info evaluate/value :module) 1) pattern (tuple module :codepoints 1)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (is (= :ready (:status (planned :str-contains ["é" "é"] [] {}))))
+   (is (= :ready (:status (resource/value-plan 3 {}))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (is (= 2 (actual :str-len ["é"] [])))
+   (is (= 1 (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)

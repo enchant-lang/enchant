@@ -1,7 +1,8 @@
 (ns formal.evaluate
  (:require [formal.term :as t] [formal.ieee-arithmetic :as ieee]
            [formal.data-graph :as graph] [formal.graph-terms :as forest]
-           [formal.resources.integer :as integer] [formal.resources.rational :as rational] [formal.resources.word :as word]))
+           [formal.resources.integer :as integer] [formal.resources.rational :as rational] [formal.resources.word :as word]
+           [formal.resources.text :as text] [formal.scalar-text-value :as text-value]))
 
 ;; This evaluator is deliberately independent of a native solver's get-value.
 ;; It reads assignments only for free variables. Unsupported mathematics stays
@@ -26,8 +27,7 @@
    (unavailable? data) {:status :incomplete :reason (:formal/unavailable data)}
    (= kind :bool) (scalar (boolean? data))
    (= kind :int) (scalar (int? data))
-   (= kind :string) (scalar (and (string? data) (String/valid? data)
-                                 (every? #(<= % 196607) (unicode/characters_to_list data))))
+   (= kind :string) (text-value/check-value data)
    (= kind :real)
     (scalar (and (wrapped? :formal/real 2 data)
                   (let [[n d] (:formal/real data)]
@@ -315,10 +315,12 @@
 (def direct-graph-profile :bl/graph-point-evaluation-preview-v2)
 (def direct-numeric-graph-profile :bl/bounded-numeric-point-preview-v2)
 (def word-graph-profile :bl/bounded-numeric-word-point-preview-v1)
+(def text-graph-profile :bl/bounded-numeric-word-scalar-text-point-preview-v1)
 (def graph-resource-defaults {:integer integer/defaults :request-work-units 1048576 :evaluated-nodes 16384})
 (def numeric-graph-resource-defaults
  (assoc graph-resource-defaults :rational rational/defaults :request-work-units 1073741824 :admission-work-units 1073741824))
 (def word-graph-resource-defaults (assoc numeric-graph-resource-defaults :word word/defaults))
+(def text-graph-resource-defaults (assoc word-graph-resource-defaults :text text/defaults))
 (def ^:private word-ops word/operations)
 (def ^:private supported #{:bool :int :var :ite :and :or :not :implies :xor :eq
                           :add :sub :mul :neg :div :mod :lt :le :gt :ge})
@@ -360,6 +362,11 @@
   (let [[width bits] (:formal/bv value)]
    (when (and (int? width) (= width (second sort)) (int? bits) (>= bits 0)) bits))))
 
+(defn- graph-text-limits [overrides]
+ (when-not (and (map? overrides) (every? #(contains? text-graph-resource-defaults %) (keys overrides)))
+  (throw (ex-info "formal.evaluate: unknown scalar-text resource configuration" {:profile text-graph-profile})))
+ (assoc (graph-word-limits (dissoc overrides :text)) :text (text/limits (get overrides :text {}))))
+
 (defn- real-pair [value]
  ;; Match the SDK's cheap structural tests before its canonicality GCD.
  (when (and (map? value) (= #{:formal/real} (set (keys value)))
@@ -367,7 +374,9 @@
   (:formal/real value)))
 
 (defn- prepare-graph-point [data roots policy selected-profile]
- (cond (= word-graph-profile selected-profile)
+ (cond (= text-graph-profile selected-profile)
+        (forest/prepare-numeric-word-text data roots (select-keys policy [:rational :word :text :admission-work-units]))
+       (= word-graph-profile selected-profile)
         (forest/prepare-numeric-word data roots (select-keys policy [:rational :word :admission-work-units]))
        (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
         (forest/prepare-numeric data roots (select-keys policy [:rational :admission-work-units]))
@@ -380,7 +389,8 @@
   looked up. These functions are local implementation plumbing, not portable
   query terms, accepted prepared views, native handles or proof authority."
  [data roots assignments assignment-data policy selected-profile prepared consume]
- (let [words? (= word-graph-profile selected-profile)
+ (let [texts? (= text-graph-profile selected-profile)
+       words? (or texts? (= word-graph-profile selected-profile))
        numeric? (or words? (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
        direct? (or words? (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
        admission-incomplete? (= :incomplete (get-in prepared [:admission :status]))
@@ -393,6 +403,7 @@
                                 :charged-work-units 0 :refusals []}
                          (when numeric? {:rational-primitive-calls 0 :rational-value-check-calls 0})
                          (when words? {:word-primitive-calls 0 :word-value-check-calls 0 :word-literal-reuses 0})
+                         (when texts? {:text-primitive-calls 0 :text-value-check-calls 0 :text-literal-reuses 0})
                          (when direct? {:primitive-applications 0 :literal-reuses 0 :assignment-checks 0})
                          (when admission-incomplete?
                           {:refusals [(assoc (select-keys (:admission prepared) [:source-node :reason]) :phase :admission)]})))]
@@ -436,6 +447,9 @@
                             (and words? (= :bv op))
                              (do (swap! accounting update :literal-reuses inc)
                                  (swap! accounting update :word-literal-reuses inc) {:formal/bv [(second sort) datum]})
+                            (and texts? (= :text op))
+                             (do (swap! accounting update :literal-reuses inc)
+                                 (swap! accounting update :text-literal-reuses inc) datum)
                             (and direct? (not (contains? #{:var :bound :bool :int :text :rounding :bv :fp-bits :enum} op)))
                              (do (swap! accounting update :primitive-applications inc) (primitive-value local child-values))
                             :else
@@ -452,6 +466,10 @@
                                       (or (contains? word-ops op) (contains? #{:eq :distinct} op)))
                  scalar-word (when (and words? (= :var op) (= :bv (first sort)))
                                (word-coordinate-bits sort (get assignments datum)))
+                 scalar-text (when (and texts? (= :var op) (= t/String sort) (string? (get assignments datum)))
+                               (get assignments datum))
+                 text-arguments? (and texts? (contains? text/operations op)
+                                      (some #(= t/String (:sort (get nodes %))) children))
                  scalar (cond (= :int op) datum
                               (and (= :var op) (= t/Int sort)) (get assignments datum)
                               :else nil)]
@@ -462,6 +480,21 @@
                           :limit (get-in policy [:integer :integer-bits])})
              (and direct? (= :real op)) (execute)
              (and words? (= :bv op)) (execute)
+             (and texts? (= :text op)) (execute)
+             (some? scalar-text)
+              (planned id :text-value-check-calls (text/value-plan (erlang/byte_size scalar-text) (:text policy)) execute)
+             (and text-arguments? missing) missing
+             text-arguments?
+              (planned id :text-primitive-calls
+               (text/plan op
+                (vec (keep-indexed
+                      (fn [i value]
+                       (when (= t/String (:sort (get nodes (nth children i)))) (erlang/byte_size value)))
+                      child-values))
+                (vec (keep-indexed
+                      (fn [i value] (when (= t/Int (:sort (get nodes (nth children i)))) value))
+                      child-values))
+                (:text policy)) execute)
              (some? scalar-word)
               (planned id :word-value-check-calls (word/value-plan sort scalar-word (:word policy)) execute)
              (and word-arguments? missing) missing
@@ -490,6 +523,7 @@
             (cond
              (and policy (not (or (contains? supported op)
                                  (and numeric? (contains? #{:real :to-real :to-int :is-int} op))
+                                 (and texts? (or (= :text op) (contains? text/operations op)))
                                  (and words? (or (contains? word-ops op) (contains? #{:bv :distinct} op))))))
               (refuse id {:kind :resource-policy-unsupported :operation op})
              (= :ite op)
@@ -590,6 +624,7 @@
         (throw (ex-info "formal.evaluate: general graph profile accepts no resource overrides" {:profile selected-profile}))) {})
   (= bounded-graph-profile selected-profile) (graph-integer-limits overrides)
   (= word-graph-profile selected-profile) (graph-word-limits overrides)
+  (= text-graph-profile selected-profile) (graph-text-limits overrides)
   (or (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
    (graph-numeric-limits overrides)
   :else (throw (ex-info "formal.evaluate: unknown graph evaluation profile" {:profile selected-profile}))))
@@ -673,8 +708,8 @@
       :semantics :selected-sdk-primitive-rules :compiler-proof-authority false}
      (let [states (mapv #(if (unavailable? %) :incomplete :complete) result)
            bound (select-keys point [:profile :data-reference :source-roots :assignment-reference :settings-reference :limits])
-           direct? (or (= word-graph-profile selected-profile) (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
-           numeric? (or (= word-graph-profile selected-profile) (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))]
+           direct? (or (= text-graph-profile selected-profile) (= word-graph-profile selected-profile) (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
+           numeric? (or (= text-graph-profile selected-profile) (= word-graph-profile selected-profile) (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))]
       (merge bound
        {:evaluation-reference (graph/of bound) :values result :root-statuses states
         :status (if (every? #(= :complete %) states) :complete :incomplete)
@@ -685,6 +720,7 @@
         {:admission (:admission point) :phase (if (= :incomplete (get-in point [:admission :status])) :admission :evaluation)})
        (when direct?
         {:primitive-dispatch :private-sdk-function
-         :resource-policy (cond (= word-graph-profile selected-profile) :numeric-word-derived-values
+         :resource-policy (cond (= text-graph-profile selected-profile) :numeric-word-scalar-text-derived-values
+                                (= word-graph-profile selected-profile) :numeric-word-derived-values
                                 numeric? :numeric-derived-values :else :structural-admission-only)}))))))))
 

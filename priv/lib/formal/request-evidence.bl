@@ -1,0 +1,106 @@
+(ns formal.request-evidence
+ (:require [formal.request :as request] [formal.request-answer :as answer]
+           [formal.data-graph :as graph] [formal.finite-word-certificate :as word]))
+
+;; A finite, data-only checking interface. Existing answer v2/v3 retain their
+;; ownership contracts; adding a certificate does not rewrite native history.
+(def profile :bl/formal-evidence-bundle-preview-v1)
+(def checking-profile :bl/formal-evidence-checking-preview-v1)
+(def record-profile :bl/formal-evidence-record-preview-v1)
+(def defaults {:proof-work-units 3300000})
+(def ^:private fields #{:formal/evidence-bundle :profile :request-reference :subject-reference
+                       :answer-graph :certificate-graph})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.request-evidence: " why) {:kind :evidence-bundle}))))
+(defn- same? [a b] (= (graph/bytes (graph/encode a)) (graph/bytes (graph/encode b))))
+(defn- plain? [x] (and (= :map (rt/kind-kind x)) (or (nil? (meta x)) (= {} (meta x)))))
+(defn settings [options]
+ (require! (and (plain? options) (every? #(contains? defaults %) (keys options))) "closed checking limits required")
+ (let [limits (merge defaults options)]
+  (require! (and (int? (:proof-work-units limits)) (<= 0 (:proof-work-units limits) 33000000))
+            "proof allowance must be a bounded nonnegative integer")
+  {:profile checking-profile :limits limits}))
+(defn propose
+ "Bundle one existing unprivileged answer, one candidate certificate, or both.
+  No supplied verdict, charge receipt, proof flag or callable is accepted."
+ [original evidence]
+ (let [r (request/check! original)]
+  (require! (and (plain? evidence) (seq evidence) (every? #{:answer :certificate} (keys evidence)))
+            "an answer or certificate is required")
+  (when (contains? evidence :answer) (answer/check! r (:answer evidence)))
+  (cond-> {:formal/evidence-bundle 1 :profile profile :request-reference (request/reference r)
+           :subject-reference (request/subject-reference r)}
+   (contains? evidence :answer) (assoc :answer-graph (graph/encode (:answer evidence)))
+   (contains? evidence :certificate) (assoc :certificate-graph (graph/encode (:certificate evidence))))))
+(defn check!
+ "Check the closed carrier and its exact request binding. This proves nothing."
+ [original evidence]
+ (let [r (request/check! original) keys (set (keys evidence))]
+  (require! (and (plain? evidence) (int? (:formal/evidence-bundle evidence))
+                 (= 1 (:formal/evidence-bundle evidence)) (= profile (:profile evidence))
+                 (every? fields keys)
+                 (every? keys [:formal/evidence-bundle :profile :request-reference :subject-reference])
+                 (or (contains? keys :answer-graph) (contains? keys :certificate-graph)))
+            "closed evidence carrier required")
+  (require! (and (same? (request/reference r) (:request-reference evidence))
+                 (same? (request/subject-reference r) (:subject-reference evidence))) "original request differs")
+  (when (contains? evidence :answer-graph) (answer/restore r (:answer-graph evidence)))
+  (when (contains? evidence :certificate-graph) (graph/check! (:certificate-graph evidence)))
+  evidence))
+(defn- reservation [limit]
+ ;; Reserve the complete fixed checking strategy before invoking it. These
+ ;; are policy work units, not measured CPU/bytes or a proved cost theorem.
+ (let [points (:points word/limits)
+       point-work (get-in word/checking-policy [:limits :request-work-units])
+       admission (get-in word/checking-policy [:limits :admission-work-units])
+       required (+ admission (* points point-work)) ready? (<= required limit)]
+  {:status (if ready? :reserved :refused) :kind :conservative-finite-proof-work
+   :required required :limit limit :reserved (if ready? required 0)
+   :max-points points :point-work-limit point-work :admission-work-limit admission}))
+(defn- conclusion [checked-answer checked-proof]
+ (let [proof? (= :checked (:status checked-proof))
+       point? (contains? #{:sat :refuted} (:verdict checked-answer))]
+  (cond
+   (and proof? point?) {:status :conflicting-evidence :kind :incompatible-checked-results}
+   proof? {:status :checked :kind (if (= :entails (:verdict checked-proof)) :conditional-entailment :unsatisfiable)
+           :feasibility (:feasibility checked-proof) :basis :finite-word-exhaustion
+           :assumption-ledger (:assumption-ledger checked-proof) :trust (:trust checked-proof)}
+   point? {:status :checked :kind (if (= :refuted (:verdict checked-answer)) :counterexample :witness)
+           :basis :independent-point-replay}
+   :else {:status :not-established :kind :no-decisive-independent-check})))
+(defn recheck
+ "Freshly check each evidence axis. The caller selects the checking allowance;
+  stored limits and statuses never choose a checker or authorize its result.
+  A small question currently reserves the whole conservative strategy bound."
+ ([original evidence] (recheck original evidence {}))
+ ([original evidence options]
+  (let [r (request/check! original) e (check! r evidence) policy (settings options)
+        checked-answer (when (contains? e :answer-graph) (answer/recheck r (answer/restore r (:answer-graph e))))
+        account (when (contains? e :certificate-graph) (reservation (get-in policy [:limits :proof-work-units])))
+        checked-proof (when account
+                       (if (= :refused (:status account))
+                        {:status :incomplete :reason :proof-work-limit :checker-invocation :not-run}
+                        (word/check r (graph/decode! (:certificate-graph e)))))]
+   {:profile profile :request-reference (request/reference r) :subject-reference (request/subject-reference r)
+    :evidence-reference (graph/of e) :checking-policy policy
+    :checking-reference (graph/of [(request/reference r) (graph/of e) policy])
+    :answer-check checked-answer :proof-check checked-proof :proof-account account
+    :conclusion (conclusion checked-answer checked-proof)
+    :checked-native-execution false :compiler-proof-authority false :storage-authenticated false})))
+(defn pack
+ "Save original request and candidate evidence. A packet is not a checked result."
+ [original evidence]
+ (let [r (request/check! original)]
+  (check! r evidence)
+  (graph/encode {:formal/evidence-record 1 :profile record-profile :request r :evidence evidence})))
+(defn reopen
+ "Load only installed schema vocabulary, then recheck using this caller's
+  current allowance. A saved producer's checking result is never accepted."
+ ([data] (reopen data {}))
+ ([data options]
+  (let [_ [profile record-profile checking-profile word/profile (answer/data-vocabulary)]
+        packet (graph/decode! data)]
+   (require! (and (plain? packet) (= #{:formal/evidence-record :profile :request :evidence} (set (keys packet)))
+                  (int? (:formal/evidence-record packet)) (= 1 (:formal/evidence-record packet))
+                  (= record-profile (:profile packet))) "closed evidence record required")
+   (recheck (:request packet) (:evidence packet) options))))
