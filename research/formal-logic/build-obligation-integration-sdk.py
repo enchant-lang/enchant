@@ -24,7 +24,7 @@ parent = read(P / 'evidence/scalar-integration/qualification.json')
 assert parent['status'] == 'passed' and parent['sdk_pin'] == baseline
 assert sha(Path(baseline['sdk']) / 'artifact.json') == baseline['descriptor_sha256']
 prototype = {}
-for stage in ('pure', 'owners', 'legacy'):
+for stage in ('all',):
     path = P / 'evidence/obligation-integration-prototype' / stage / 'qualification.json'
     result = read(path)
     assert result['status'] == 'passed' and result['base_sdk_pin'] == baseline

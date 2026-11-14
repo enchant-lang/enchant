@@ -6,7 +6,7 @@ E=P/'evidence/obligation-integration-prototype/packets';E.mkdir(parents=True,exi
 def read(p):return json.loads(p.read_text())
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def write(n,v):(E/n).write_text(json.dumps(v,indent=2)+'\n')
-Q=P/'evidence/obligation-integration-prototype/pure';qualified=read(Q/'qualification.json')
+Q=P/'evidence/obligation-integration-prototype/all';qualified=read(Q/'qualification.json')
 assert qualified['status']=='passed'
 pin=read(P/'sdk-pin.json');assert qualified['base_sdk_pin']==pin
 assert sha(Path(pin['sdk'])/'artifact.json')==pin['descriptor_sha256']

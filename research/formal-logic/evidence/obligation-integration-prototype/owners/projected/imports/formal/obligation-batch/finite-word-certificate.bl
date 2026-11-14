@@ -1,0 +1,108 @@
+(ns formal.obligation-batch.finite-word-certificate
+ (:require [formal.obligation-batch.request :as request] [formal.obligation-batch.point-profile :as policy]
+           [formal.data-graph :as graph] [formal.graph-replay :as replay] [formal.obligation-batch.resources.word :as word]))
+
+;; Installed finite strategy, separate from the native answer certificate slot.
+;; No native status, supplied valuation list or cached inventory is trusted.
+(def profile :bl/finite-word-exhaustion-preview-v1)
+(def limits {:domain-bits 5 :typed-nodes 64 :word-bits 16 :points 32})
+(def checking-policy
+ {:profile policy/numeric-word
+  :limits {:request-work-units 100000 :evaluated-nodes 128 :admission-work-units 100000
+           :word {:word-bits 16 :intermediate-bits 33 :work-units 100000}}})
+(def ^:private operations
+ (set (concat ["bool" "bv" "var" "ite" "and" "or" "not" "implies" "xor" "eq"] (map name word/operations))))
+(def ^:private fields #{:formal/finite-word-certificate :profile :statement :rule})
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.finite-word-certificate: " reason) {:profile profile}))))
+(defn- same? [a b] (= (graph/bytes (graph/encode a)) (graph/bytes (graph/encode b))))
+(defn statement
+ "Logical identity excludes backend/deadline choices. The complete original
+  subject and its named semantic profile remain bound. Execution records keep
+  their own full request references separately."
+ [original]
+ (let [r (request/check! original)]
+  (require! (= policy/numeric-word (get-in r [:policy :profile])) "word policy required")
+  {:subject-reference (request/subject-reference r) :semantic-profile policy/numeric-word}))
+(defn candidate
+ "Describe one bounded checking strategy. Constructing this data proves nothing."
+ [original]
+ {:formal/finite-word-certificate 1 :profile profile :statement (statement original)
+  :rule :all-finite-valuations})
+(defn- finite-width [sort]
+ (cond (= [:bool] sort) 1
+       (and (vector? sort) (= 2 (count sort)) (= :bv (first sort))
+            (int? (second sort)) (<= 1 (second sort) (:word-bits limits))) (second sort)
+       :else (throw (ex-info "formal.finite-word-certificate: only Boolean and bounded word terms" {}))))
+(defn- variables [forest]
+ (require! (<= (count (:nodes forest)) (:typed-nodes limits)) "typed-node capacity")
+ (doseq [[_ op sort _ _] (:nodes forest)]
+  (finite-width sort) (require! (contains? operations op) "operation outside the finite word rule system"))
+ (let [variables (vec (sort-by :name
+                        (distinct (map (fn [[_ _ sort _ name]] {:name name :sort sort :bits (finite-width sort)})
+                                    (filter #(= "var" (nth % 1)) (:nodes forest))))))
+       bits (reduce + 0 (map :bits variables))]
+  (require! (= (count variables) (count (distinct (map :name variables)))) "one sort per variable name")
+  ;; Refuse before constructing the domain power or any coordinate collection.
+  (require! (<= bits (:domain-bits limits)) "combined domain capacity")
+  {:variables variables :bits bits :points (erlang/bsl 1 bits)}))
+(defn- assignment [variables index]
+ (loop [remaining variables code index out {}]
+  (if (empty? remaining) out
+   (let [{:keys [name sort bits]} (first remaining) capacity (erlang/bsl 1 bits)
+         value (erlang/rem code capacity)]
+    (recur (rest remaining) (erlang/div code capacity)
+     (assoc out name (if (= [:bool] sort) (= 1 value) {:formal/bv [bits value]})))))))
+(defn check
+ "Derive every valuation of a small finite word/Boolean question and replay it.
+  Checked entailment is conditional on the listed assumptions, SDK semantics,
+  this checker and its execution. It grants no native or compiler authority."
+ [original certificate]
+ (try
+  (let [r (request/check! original) expected (candidate r)]
+   (graph/encode certificate)
+   (require! (and (map? certificate) (= fields (set (keys certificate)))
+                  (int? (:formal/finite-word-certificate certificate)) (same? expected certificate))
+             "closed certificate bound to this complete logical subject required")
+   (policy/with-question (:subject r) checking-policy
+    (fn [inventory admitted]
+     (require! (not= 2 (:formal/question-forest-refusal inventory)) "fresh typed admission required")
+     (let [forest (:forest inventory) domain (variables forest)
+           source-for (zipmap (:roots forest) (:source-roots forest))
+           rows (vec (concat (:assertions inventory) (when-let [c (:counterexample inventory)] [c])))
+           roots (mapv #(get source-for (:term %)) rows)]
+      (require! (<= (:points domain) (:points limits)) "valuation capacity")
+      (loop [i 0 work 0]
+       (if (= i (:points domain))
+        {:status :checked :verdict (if (= :prove (:mode inventory)) :entails :unsatisfiable)
+         :profile profile :statement (statement r) :request-reference (request/reference r) :subject-reference (request/subject-reference r)
+         :points-checked i :domain-bits (:bits domain) :variables (:variables domain)
+         :assumption-ledger
+          {:profile :bl/finite-word-assumption-ledger-preview-v1
+           :subject-reference (request/subject-reference r) :feasibility :not-established
+           :entries (mapv (fn [row] {:label (:label row) :source-node (get source-for (:term row))})
+                          (:assertions inventory))}
+         :charged-point-work work :checking-policy checking-policy
+         :feasibility :not-established :source-connection :not-established :implementation-verification :not-established
+         :trust [:finite-word-enumeration-checker :sdk-word-admission :sdk-word-point-semantics :bl-compiler :beam-runtime]
+         :checked-native-execution false :compiler-proof-authority false}
+        (let [point (assignment (:variables domain) i)
+              checked ((:with-point admitted) point
+                       (fn [operation]
+                        {:validation (replay/validation operation roots rows) :resources ((:resources operation))}))
+              validation (:validation checked)]
+         (cond
+          (not= :valid (get-in validation [:bindings :status]))
+           {:status :incomplete :verdict :not-established :reason :point-bindings :point point :points-checked i
+            :checked-native-execution false :compiler-proof-authority false}
+          (= :valid (:status validation))
+           {:status :counterexample :verdict :not-established :point point :points-checked (inc i)
+            :checked-native-execution false :compiler-proof-authority false}
+          ;; A false assertion discharges this case, even if another assertion
+          ;; was unavailable. Invalid coordinates never discharge a case.
+          (seq (:invalid validation))
+           (recur (inc i) (+ work (get-in checked [:resources :charged-work-units])))
+          :else {:status :incomplete :verdict :not-established :reason :point-replay :point point :points-checked i
+                 :checked-native-execution false :compiler-proof-authority false}))))))))
+  (catch error {:status :rejected :verdict :not-established :reason (ex-message error)
+                :checked-native-execution false :compiler-proof-authority false})))

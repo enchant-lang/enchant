@@ -1,0 +1,119 @@
+(ns formal.obligation-batch.query (:require [formal.term :as t] [formal.value :as v] [formal.identity :as identity]
+                         [formal.obligation-batch.vacuity-policy :as vacuity]))
+
+(defn assertion
+ ([label expression] (assertion label expression nil))
+ ([label expression origin]
+  (when-not (= t/Bool (t/sort-of expression))
+   (throw (ex-info "Formal assertions must be Boolean" {:label label :sort (t/sort-of expression)})))
+  {:label (str label) :term expression :origin origin}))
+(defn- named-terms [prefix terms]
+ (mapv (fn [i] (assertion (str prefix i) (nth terms i))) (range (count terms))))
+(defn- assumption [index item]
+ (cond
+  (and (map? item) (contains? item :term))
+   (let [value (:term item)]
+    (assertion (:label item) (if (v/value? value) (t/all [(v/defined value) (v/term value)]) value) (:origin item)))
+  (v/value? item) (assertion (str "assume/" index) (t/all [(v/defined item) (v/term item)]))
+  :else (assertion (str "assume/" index) item)))
+(defn- normalize-assumptions [items]
+ (mapv (fn [i] (assumption i (nth items i))) (range (count items))))
+(defn- assumption-value [item]
+ (cond (v/value? item) item
+       (and (map? item) (v/value? (:term item))) (:term item)))
+
+(defn make
+ "A portable question with explicit semantics, domain, source and requested
+  observations. Watchers never add assumptions or alter the claim."
+ [opts]
+ (let [mode (get opts :mode :prove) claim (:claim opts)
+       _ (when-not (contains? #{:sat :prove} mode)
+           (throw (ex-info "Unknown formal query mode" {:mode mode})))
+       _ (when (and (= :sat mode) (some? claim))
+           (throw (ex-info "A SAT query uses assumptions; a claim would be silently discarded" {})))
+       inputs (vec (get opts :inputs []))
+       context (vec (concat inputs (when claim [claim]) (keep assumption-value (get opts :assumptions []))))
+       assumptions (normalize-assumptions (vec (get opts :assumptions [])))
+       constraints (vec (distinct (mapcat v/constraints context)))
+       bounds (vec (distinct (map v/within context)))
+       input-success (mapv v/defined inputs)
+       background (vec (concat (named-terms "domain/" constraints)
+                       (named-terms "within/" bounds)
+                       (named-terms "input-success/" input-success) assumptions))
+       property (when (= mode :prove)
+                  (do (when (nil? claim) (throw (ex-info "A proof needs a claim" {})))
+                      (t/all [(v/defined claim) (v/term claim)])))
+       observations (get opts :observe {})]
+  {:formal/query 1 :identity-profile identity/profile :id (get opts :id :anonymous) :mode mode :claim property
+   :assertions background :counterexample (when property (assertion "goal/counterexample" (t/not property) (:origin opts)))
+   :observe observations :profile (get opts :profile :enchant/formal-preview-v1)
+   :profiles (vec (distinct (keep (fn [x] (get-in x [:domain :profile])) context)))
+   :scope (get opts :scope (v/join-scope context)) :origin (:origin opts)
+   :relation (:relation opts)
+   :vacuity (vacuity/check (get opts :vacuity :report))
+   :assumptions (mapv (fn [a] (select-keys a [:label :origin])) background)}))
+
+(defn prove
+ ([claim] (prove claim {}))
+ ([claim opts] (make (assoc opts :mode :prove :claim claim))))
+(defn sat [opts] (make (assoc opts :mode :sat)))
+(defn equivalent [left right opts]
+ (prove (v/equivalent left right) (assoc opts :relation :raisedness-and-successful-value)))
+(defn from-case [case]
+ (prove (:property case)
+  {:id (:id case) :assumptions (:assumptions case) :observe (:observations case)
+   :scope (:scope case) :profile (get case :profile :enchant/formal-preview-v1)}))
+
+(defn roots [problem]
+ (vec (concat (map :term (:assertions problem)) (when (:claim problem) [(:claim problem)])
+              (mapcat (fn [[_ item]] (v/terms item))
+                      (sort-by (fn [[label _]] (identity/bytes label)) (:observe problem))))))
+(defn validate!
+ "Give every backend and checker the same question meaning. Counterexamples
+  are derived from proof claims; SAT has no extra counterexample assertion.
+  Validate the shared term forest without serializing the expanded query.
+  Evidence formats apply their full-object identity limits at export."
+ [problem]
+ (letfn [(require! [ok reason] (when-not ok (throw (ex-info (str "formal.query: " reason) {}))))
+         (assertion? [item] (and (map? item) (string? (:label item)) (= t/Bool (t/sort-of (:term item)))))]
+  (require! (and (map? problem) (int? (:formal/query problem)) (= 1 (:formal/query problem)) (contains? #{:prove :sat} (:mode problem)))
+            "one proof or SAT question required")
+  (vacuity/check (get problem :vacuity :report))
+  (require! (and (vector? (:assertions problem)) (every? assertion? (:assertions problem))) "Boolean assertion vector required")
+  (require! (or (nil? (:observe problem)) (map? (:observe problem))) "observations must be a map")
+  (require! (every? (fn [item] (or (t/term? item) (v/value? item))) (vals (or (:observe problem) {})))
+            "each observation must be a typed term or an explicit formal value")
+  (if (= :prove (:mode problem))
+   (do (require! (= t/Bool (t/sort-of (:claim problem))) "Boolean proof claim required")
+       (require! (and (assertion? (:counterexample problem))
+                      (= (t/not (:claim problem)) (get-in problem [:counterexample :term])))
+                 "counterexample must be exactly the negated claim"))
+   (require! (and (nil? (:claim problem)) (nil? (:counterexample problem))) "SAT has neither claim nor counterexample"))
+  ;; Generic equality admits sequence aliases and numeric cross-kind equality.
+  ;; It is not a substitute for local typing of the actual execution root.
+  (t/validate! (vec (concat (roots problem)
+                      (when (:counterexample problem) [(get-in problem [:counterexample :term])]))))
+  problem))
+
+(defn constrain
+ "Derive a question by adding one named assumption. Preserve every original
+  claim, model condition, observation, semantic profile and source connection."
+ ([problem label expression] (constrain problem label expression nil))
+ ([problem label expression origin]
+  (validate! problem)
+  (when (or (not (string? label)) (blank? label)
+            (some #(= label (:label %)) (:assertions problem)))
+   (throw (ex-info "A derived query needs a distinct explicit assumption label" {})))
+  (let [extra (assertion label expression origin)]
+   (validate! (-> problem
+                (update :assertions conj extra)
+                (update :assumptions conj (select-keys extra [:label :origin])))))))
+(defn cache-key
+ "A backend result cache cannot cross profiles, bounds, artifacts, settings or
+  requested evidence. This key never grants trusted compiler authority."
+ [problem identity settings result-kind]
+ (identity/hash
+    [:formal/backend-cache (:mode problem) (:vacuity problem) (:relation problem)
+     (:profile problem) (:profiles problem) (:scope problem) (:observe problem)
+     (mapv :label (:assertions problem)) (t/digest (roots problem))
+     identity settings result-kind]))

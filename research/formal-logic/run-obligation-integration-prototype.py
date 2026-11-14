@@ -13,7 +13,7 @@ import time
 P = Path(__file__).resolve().parent
 R = P.parent.parent
 stage = sys.argv[1]
-assert stage in ('pure', 'owners', 'legacy')
+assert stage in ('pure', 'owners', 'legacy', 'all')
 E = P / 'evidence/obligation-integration-prototype' / stage
 E.mkdir(parents=True, exist_ok=True)
 
@@ -49,7 +49,12 @@ tests = {
  'legacy': ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl',
             'test/bl/formal/graph_keys_test.bl', 'test/bl/formal/graph_ops_test.bl',
             'test/bl/formal/graph_context_test.bl', 'test/bl/formal/word_request_test.bl'],
-}[stage]
+}
+# One warm targeted run for the final coherent batch, including prior ownership
+# and graph regressions and the common effect/native evidence interfaces.
+tests['all'] = tests['pure'] + tests['owners'] + tests['legacy'] + [
+    'test/bl/formal/request_evidence_test.bl', 'test/bl/formal/evidence_oracle_test.bl']
+tests = tests[stage]
 module_paths = {name: R / ('priv/lib/' + name.replace('.', '/') + '.bl') for name in modules}
 inputs = [*module_paths.values(), *[R / name for name in tests], Path(__file__), P / 'sdk-pin.json']
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()

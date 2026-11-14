@@ -1,0 +1,102 @@
+(ns formal.obligation-batch.question-graph
+ (:require [formal.data-graph :as graph] [formal.obligation-batch.query :as q] [formal.identity :as identity]
+           [formal.obligation-batch.vacuity-policy :as vacuity]))
+
+(def profile :bl/portable-question-graph-v1)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.question-graph: " why) {:kind :question-graph :profile profile}))))
+(defn- data! [context]
+ (require! (and (= :map (rt/kind-kind context)) (= 3 (erlang/map_size context))
+                (erlang/is_map_key :formal/question-graph context) (erlang/is_map_key :profile context)
+                (erlang/is_map_key :graph context)
+                (or (nil? (meta context)) (= {} (meta context)))
+                (int? (:formal/question-graph context)) (= 1 (:formal/question-graph context))
+                (= profile (:profile context))) "closed graph question required; cached views are not accepted")
+ (:graph context))
+(defn- fields [rows id]
+ (let [[kind entries] (nth rows id)]
+  (require! (= "map" kind) "question or assertion map required")
+  ;; API field names are compared as bytes. Unknown metadata keys stay data.
+  (into {} (keep (fn [[k v]] (let [[tag name] (nth rows k)] (when (= "keyword" tag) [name v]))) entries))))
+(defn- nil-node? [rows id] (or (nil? id) (= ["nil" nil] (nth rows id))))
+(defn- assertion-spec [rows id]
+ (let [f (fields rows id)]
+  (require! (and (contains? f "label") (contains? f "term")) "assertion label and term required")
+  [(get f "label") (get f "term")]))
+(defn open!
+ "Revalidate a graph-backed question and derive its operational term view.
+  Every public field remains in the authoritative graph/reference. Only mode,
+  vacuity, assertions, claim/counterexample and observations are materialized;
+  unrelated provenance, profiles and scope are not decoded or interned.
+  The returned view is derived data, never an accepted input/cache authority."
+ [context]
+ (let [data (data! context) checked (graph/check! data) rows (:nodes data)
+       f (fields rows (:root data))
+       tag (get f "formal/query") mode-id (get f "mode")
+       _ (require! (and (some? tag) (= ["int" 1] (nth rows tag))) "version-1 typed question required")
+       mode-row (when (some? mode-id) (nth rows mode-id))
+       mode (cond (= ["keyword" "sat"] mode-row) :sat (= ["keyword" "prove"] mode-row) :prove
+                  :else (throw (ex-info "formal.question-graph: proof or SAT mode required" {})))
+       assertions-id (get f "assertions")
+       _ (require! (and (some? assertions-id) (= "vector" (first (nth rows assertions-id)))) "assertion vector required")
+       specs (mapv #(assertion-spec rows %) (second (nth rows assertions-id)))
+       claim-id (get f "claim") counter-id (get f "counterexample") observe-id (get f "observe")
+       counter-spec (when-not (nil-node? rows counter-id) (assertion-spec rows counter-id))
+       roots (vec (distinct (concat (mapcat identity specs) counter-spec
+                              (when (some? claim-id) [claim-id]) (when (some? observe-id) [observe-id]))))
+       decoded (graph/decode-nodes! data roots)
+       values (into {} (mapv (fn [i] [(nth roots i) (nth decoded i)]) (range (count roots))))
+       assertion (fn [[label term]] {:label (get values label) :term (get values term)})
+       vacuity-id (get f "vacuity")
+       view {:formal/query 1 :mode mode
+             :assertions (mapv assertion specs) :claim (get values claim-id)
+             :counterexample (when counter-spec (assertion counter-spec))
+             :observe (get values observe-id)
+             :vacuity (vacuity/from-row (when (some? vacuity-id) (nth rows vacuity-id)))}]
+  (q/validate! view)
+  {:view view :reference (:reference checked) :canonical-bytes (graph/bytes data)
+   :graph-checking checked :compiler-proof-authority false}))
+(defn from-graph
+ "Admit a canonical question graph without decoding unrelated metadata."
+ [data]
+ (let [context {:formal/question-graph 1 :profile profile :graph data}]
+  (open! context) context))
+(defn prepare
+ "Convert an ordinary complete question once. Initial conversion retains the
+  data graph's bounded raw-tree walk; later graph operations keep sharing."
+ [question]
+ (q/validate! question) (from-graph (graph/encode question)))
+(defn reference [context] (:reference (open! context)))
+(defn bytes [context] (:canonical-bytes (open! context)))
+(defn same? [left right] (= (bytes left) (bytes right)))
+(defn materialize!
+ "Explicit full materialization under the existing-keyword policy. An unknown
+  provenance keyword can refuse this operation while open! still checks terms."
+ [context]
+ (let [data (data! context) question (graph/decode! data)] (q/validate! question) question))
+(defn field-graph
+ "Select a keyword-named public field as graph data, preserving missing vs nil.
+  No value or unfamiliar keyword is materialized."
+ [context field]
+ (require! (keyword? field) "keyword field selector required")
+ (let [data (data! context) _ (graph/check! data) rows (:nodes data)
+       id (get (fields rows (:root data)) (erlang/atom_to_binary field :utf8))]
+  (when (some? id) (graph/subgraph data id))))
+(defn field-data!
+ "Explicitly materialize one public field. Missing and explicit nil both
+  return nil; use field-graph when presence matters."
+ [context field]
+ (when-let [data (field-graph context field)] (graph/decode! data)))
+(defn patch
+ "Replace/add public fields with graph fragments, then rebuild and validate
+  the original term view. This never accepts caller-supplied cached views."
+ [context replacements]
+ (require! (and (map? replacements) (every? keyword? (keys replacements))) "keyword field patch required")
+ (from-graph
+  (graph/patch-map (data! context)
+   (mapv (fn [[key value]] [(graph/encode key) value]) replacements))))
+(defn cache-key
+ "Bind a diagnostic/cache key to every original public field plus the actual
+  artifact/settings/result kind. It conveys no execution or proof authority."
+ [context artifact settings result-kind]
+ (identity/hash [:formal/graph-question-cache (reference context) artifact settings result-kind]))
