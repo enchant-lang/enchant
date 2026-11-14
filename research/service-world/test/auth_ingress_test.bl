@@ -1,0 +1,45 @@
+(ns auth.ingress-test
+ (:require [auth.ingress :as ingress] [auth.identity :as identity]
+           [auth.namespace :as namespace] [auth] [web]))
+(defn request [header value]
+ (-> (Plug.Test/conn "POST" "/" "")
+     (Plug.Conn/put_req_header header value)
+     (Plug.Conn/put_req_header "x-forwarded-for" "100.64.0.2")))
+(defn adapter [provider peer]
+ (ingress/adapter {:provider provider :application "qa-app" :trusted-uids #{0}
+                   :peer-uid (fn [_ _] peer) :server-port 9999
+                   :machine-addresses #{"100.64.0.1"}
+                   :subjects {"external-subject" "person:alice"}}))
+(deftest all-providers-yield-the-same-stable-principal
+ (doseq [[provider header] ingress/ADAPTERS]
+  (let [principal ((adapter provider 0) (request header "external-subject"))]
+   (is (= "person:alice" (:subject principal)))
+   (is (= "qa-app" (:application principal)))
+   (is (= :person (:kind principal)))
+   (is (not (contains? principal :roles)))
+   (is (nil? ((adapter provider 1001) (request header "external-subject")))))))
+(deftest headers-never-authenticate-without-host-evidence
+ (doseq [[provider header] ingress/ADAPTERS]
+  (is (nil? ((adapter provider 0) (request header "unknown"))))
+  (is (nil? ((adapter provider nil) (request header "external-subject")))))
+ (doseq [provider [:tailscale :headscale]]
+  (is (nil? ((adapter provider 0)
+              (Plug.Conn/put_req_header (request "tailscale-user-login" "external-subject") "x-forwarded-for" "100.64.0.1"))))))
+(deftest ingress-context-is-scoped-and-restored
+ (is (nil? (identity/current)))
+ (let [handler (ingress/authenticated (adapter :netbird 0)
+                 (fn [_] (:subject (identity/current))) (fn [_] :denied))]
+  (is (= "person:alice" (handler (request "work-user-id" "external-subject"))))
+  (is (= :denied (handler (request "work-user-id" "unknown")))))
+ (is (nil? (identity/current))))
+(deftest signed-delegation-has-audience-expiry-and-an-explicit-right-ceiling
+ (let [root (auth/keypair)
+       token (identity/issue root {:subject "person:alice" :application "qa-app" :kind :person
+                                   :audience "qa/world" :expires-at (+ (System/system_time :millisecond) 60000)
+                                   :rights [["demo.catalog" "services-in" "project-a"]]})
+       verified (identity/verify-token (auth/public root) token "qa/world" nil)]
+  (is (= "person:alice" (:subject verified)))
+  (is (= #{["demo.catalog" "services-in" "project-a"]} (:rights verified)))
+  (is (nil? (identity/verify-token (auth/public root) token "other/world" nil)))
+  (is (nil? (identity/verify-token (auth/public (auth/keypair)) token "qa/world" nil)))))
+(run-tests)

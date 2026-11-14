@@ -1,0 +1,22 @@
+;; Trusted host ports over Workstation facts. The exposed namespace only sees
+;; its authorized project's finite projection, never the full host inventory.
+(ns auth.station
+ (:require [auth.namespace :as namespace] [service-world.http :as private]
+           [service-world.station :as station] [service-world.core :as wire]))
+(defn open [config]
+ (let [authority (:authority-file config)
+       state (fn [] (private/private-data authority))
+       owner (System/fetch_env! "USER") home (System/fetch_env! "HOME")]
+  (namespace/open
+   {:world (:world config) :file (:source config)
+    :roles (fn [principal resource]
+             (get-in (state) [:memberships (:subject principal) resource] #{}))
+    :readers
+    {:catalog
+     (fn [_ resource]
+      (let [folder (get-in (state) [:resources resource])
+            _ (when-not (wire/folder? folder) (throw (ex-info "Unknown project resource" {:kind :auth/denied})))
+            folder (station/canonical-folder folder)
+            rows (station/inventory {:owner owner :home home :state-dir (str home "/.local/state/workstation")})]
+       {"services" (vec (filter #(wire/within? folder (get % "folder") true) rows))
+        "observed-at" (wire/now) "valid-for-ms" wire/LEASE-MS}))}})))

@@ -1,0 +1,57 @@
+(ns auth.namespace-test
+ (:require [auth.namespace :as namespace] [auth.identity :as identity]
+           [auth.imports :as imports] [auth.logic :as logic] [env]))
+(def fixture (File/read! "research/service-world/test/fixtures/catalog.bl"))
+(def actor {:subject "person:alice" :application "qa-app" :kind :person})
+(defn provider [roles effects]
+ (namespace/open {:source fixture :world "qa/world"
+                  :roles (fn [principal resource] (get @roles [(:subject principal) resource] #{}))
+                  :readers {:catalog (fn [_ resource] [{"title" resource}])}
+                  :effects {:counter (fn [_ resource value] (swap! effects conj [resource value]) {"receipt" "r1"})}}))
+(defn failure [action] (try (action) nil (catch error (:kind (ex-data error)))))
+(deftest ordinary-require-uses-the-owned-interface-with-no-rpc-code
+ (let [roles (atom {["person:alice" "project-a"] #{:viewer}}) effects (atom [])
+       provider (provider roles effects) consumer (env/fork)]
+  (try
+   (env/with-env consumer
+    (fn []
+     (imports/bind! 'external.catalog {:namespace "demo.catalog" :version 1 :only '[services-in count-in label change!]}
+       provider (namespace/endpoint provider))
+     (identity/with-verified actor
+      (fn []
+       (is (= [{"title" "project-a"}]
+              (BeamLisp.Compiler/eval_string
+               "(ns consumer (:require [external.catalog :as catalog])) (catalog/services-in \"project-a\")"
+               (BeamLisp.Compiler/new_env "user") "ordinary-consumer")))
+       (is (= 1 (BeamLisp.Compiler/eval_string "(external.catalog/count-in \"project-a\")"
+                  (BeamLisp.Compiler/new_env "consumer") "ordinary-consumer")))))))
+   (finally (env/destroy consumer) (namespace/close! provider)))))
+(deftest identity-roles-resource-and-application-are-independent-gates
+ (let [roles (atom {["person:alice" "project-a"] #{:viewer}}) effects (atom []) provider (provider roles effects)]
+  (try
+   (is (= :auth/unauthenticated (failure #(namespace/invoke! provider "services-in" ["project-a"]))))
+   (identity/with-verified actor
+    (fn []
+     (is (= :auth/denied (failure #(namespace/invoke! provider "services-in" ["project-b"]))))
+     (is (= :auth/denied (failure #(namespace/invoke! provider "change!" ["project-a" {"value" 1}]))))
+     (is (empty? @effects))
+     (swap! roles assoc ["person:alice" "project-a"] #{:operator})
+     (is (= "r1" (get (namespace/invoke! provider "change!" ["project-a" {"value" 1}]) "receipt")))
+     (is (= 1 (count @effects)))
+     (reset! roles {})
+     (is (= :auth/denied (failure #(namespace/invoke! provider "services-in" ["project-a"]))))))
+   (identity/with-verified (assoc actor :application "unlisted-app")
+    #(is (= :auth/denied (failure (fn [] (namespace/invoke! provider "services-in" ["project-a"]))))))
+   (finally (namespace/close! provider)))))
+(deftest exact-source-change-retires-admission
+ (let [path (str (System/tmp_dir!) "/auth-provider-" (erlang/unique_integer (list :positive)) ".bl")]
+  (try
+   (File/write! path fixture)
+   (let [provider (namespace/open {:file path :world "qa/world" :roles (fn [_ _] #{:viewer})})]
+    (try
+     (File/write! path (str fixture "\n; changed generation\n"))
+     (identity/with-verified actor
+      #(is (= :auth/stale-code (failure (fn [] (namespace/invoke! provider "label" ["project-a" {"title" "A"}]))))))
+     (finally (namespace/close! provider))))
+   (finally (File/rm! path)))))
+(run-tests)

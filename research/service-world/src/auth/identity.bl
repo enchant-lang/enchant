@@ -1,0 +1,45 @@
+;; Same normalized identity for every ingress strategy. This dynamic extent is
+;; installed by trusted ingress/host code; it is not decoded from call arguments.
+(ns auth.identity (:require [auth] [auth.strategy :as strategy]))
+(def CONTEXT :auth.identity/context)
+(defn current []
+ (let [value (Process/get CONTEXT)]
+  (when (and (map? value) (erlang/is_reference (:evidence value))) value)))
+(defn with-verified
+ "Host entry after verification. Namespace admission rejects calls to this API
+  from exported source. Never use client-provided identity/roles as its input."
+ [identity action]
+ (let [before (Process/get CONTEXT)]
+  (when-not (and (string? (:subject identity)) (string? (:application identity))
+                 (contains? #{:person :application} (:kind identity)))
+   (throw (ex-info "Authenticated subject and application required" {:kind :auth/unauthenticated})))
+  (Process/put CONTEXT (assoc identity :evidence (erlang/make_ref)))
+  (try (action) (finally
+    (if (nil? before) (Process/delete CONTEXT) (Process/put CONTEXT before))))))
+(defn- fact-values [facts kind] (mapv second (filter #(= kind (first %)) facts)))
+(defn verify-token
+ "Verify Biscuit, attenuation checks, audience, expiry and optional revocation.
+  Roles stay provider-owned and are read afresh during every invocation."
+ [public token audience revocation]
+ (let [verdict (auth/authorize public token
+                 (auth/context {:facts [["time" {:date (System/system_time :second)}]]
+                                :policies [(auth/allow [])] :revocation revocation}))
+       facts (when (= :allow (:verdict verdict)) (auth/verified-facts public token))
+       subject (fact-values facts "user") app (fact-values facts "application")
+       world (fact-values facts "audience") expires (fact-values facts "expires")
+       kind (fact-values facts "identity-kind")]
+  (when (and (= 1 (count subject) (count app) (count world) (count expires) (count kind))
+             (every? string? (concat subject app world)) (= audience (first world))
+             (int? (first expires)) (> (first expires) (System/system_time :millisecond))
+             (contains? #{"person" "application"} (first kind)))
+   {:subject (first subject) :application (first app) :kind (if (= "person" (first kind)) :person :application)
+    :expires-at (first expires)
+    :rights (set (mapv #(vec (rest %)) (filter #(and (= "invoke" (first %)) (= 4 (count %))) facts)))})))
+(defn issue
+ "Trusted issuer helper. A receiver never accepts rights or roles from unsigned
+  request data. rights are [namespace operation resource] tuples."
+ [root {:keys [subject application kind audience expires-at rights]}]
+ (auth/issue root
+  (into [["user" subject] ["application" application] ["identity-kind" (name kind)]
+         ["audience" audience] ["expires" expires-at]]
+        (mapv #(into ["invoke"] %) rights))))

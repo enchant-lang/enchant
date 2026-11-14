@@ -1,0 +1,82 @@
+;; Environment bindings become ordinary namespace vars. Applications neither
+;; construct RPC requests nor select authentication adapters.
+(ns auth.imports
+ (:require [auth.namespace :as namespace] [auth.transport :as transport]
+           [auth.logic :as logic] [auth.station :as station] [env]))
+(defn bind!
+ "Host linker entry. Bind a finite imported surface into the current Env.
+  endpoint may enter another realm or VM. Authority stays at the provider."
+ [logical declaration provider endpoint]
+ (let [logical (str logical) manifest (:manifest provider) wanted (:only declaration)
+       exports (:exports manifest)]
+  (when-not (and (vector? wanted) (seq wanted) (<= (count wanted) 64)
+                 (= (:namespace declaration) (:namespace manifest))
+                 (= (:version declaration) (:version manifest))
+                 (every? #(contains? exports (str %)) wanted))
+   (throw (ex-info "Imported namespace does not satisfy env.bl" {:kind :auth/contract-mismatch})))
+  (let [context (BeamLisp.Loader/namespace_context logical)]
+   (when (= :tier (:home context)) (throw (ex-info "An import cannot replace an SDK namespace" {:kind :auth/denied}))))
+  (BeamLisp.Env/declare_ns logical)
+  (doseq [name wanted]
+   (let [name (str name) arity (get exports name)]
+    (BeamLisp.Env/intern logical name
+     (fn [& arguments]
+      (when-not (= arity (count arguments))
+       (throw (ex-info "Imported function arity mismatch" {:kind :auth/arity})))
+      (let [request (namespace/request provider name (vec arguments))]
+       (transport/result! request (endpoint request)))))
+    (BeamLisp.Env/put_meta logical name {:import true :arglists (list (mapv #(symbol (str "arg" %)) (range arity)))
+                                       :provider (:world provider) :contract-version (:version manifest)})))
+  (BeamLisp.Env/mark_loaded logical)
+  logical))
+(defn project [root]
+ (let [path (str (Path/expand root) "/env.bl") forms (BeamLisp.Compiler/read_all_data (File/read! path))]
+  (when-not (map? (last forms)) (throw (ex-info "A literal env.bl is required" {:kind :auth/configuration})))
+  (last forms)))
+(defn- declaration-for [root logical]
+ (let [config (project root) declaration (get (:imports config) (symbol logical))
+       realm (get (:realms config) (:from declaration))
+       provider-root (when (:root realm) (Path/expand (:root realm) root))
+       provider-config (if provider-root (project provider-root) realm)
+       config (merge provider-config realm)
+       source (when (:source config) (Path/expand (:source config) (or provider-root root)))]
+  (when-not (and declaration realm source) (throw (ex-info "No explicit namespace binding in env.bl" {:kind :auth/unbound-import})))
+  {:declaration (update declaration :namespace str) :config (assoc config :source source)}))
+(defn link!
+ "Used by a generated two-line namespace shim. No per-app RPC code. A deployment
+  can instead call bind! directly and needs no generated source at all."
+ [logical]
+ (let [logical (str logical) root (BeamLisp/cwd)
+       {:keys [declaration config]} (declaration-for root logical)]
+  (if (= :remote (:transport config))
+   (let [prepared (logic/declaration (File/read! (:source config)))
+         manifest {:namespace (:namespace prepared) :version (get-in prepared [:policy :version])
+                   :exports (into {} (map (fn [body] [(:name body) (count (:params body))])
+                                     (filter #(contains? (get-in prepared [:policy :exports]) (symbol (:name %))) (:bodies prepared))))}
+         provider {:world (:world config) :manifest manifest}]
+    (bind! logical declaration provider (transport/endpoint config)))
+   (let [provider (station/open config)]
+    (try
+     (bind! logical declaration provider (namespace/endpoint provider))
+     ;; Realm teardown destroys this child Env. Explicit unlink is also available.
+     (BeamLisp.Env/put_key (tuple :auth/import logical) provider)
+     logical
+     (catch error (namespace/close! provider) (throw error)))))))
+(defn unlink! [logical]
+ (let [row (BeamLisp.Env/lookup_own (tuple :auth/import (str logical)))]
+  (when (= :ok (elem row 0)) (namespace/close! (elem row 1)))))
+(defn prepare!
+ "Materialize only declarative import shims. Each loads the generic linker;
+  endpoints, grants and provider-specific credentials never enter generated code."
+ [root]
+ (let [config (project root) directory (str (Path/expand root) "/imports")]
+  (doseq [[logical _] (:imports config)]
+   (let [name (str logical)]
+    (when-not (Regex/match? #"^[A-Za-z][A-Za-z0-9_.-]*$" name)
+     (throw (ex-info "Invalid import namespace" {:kind :auth/configuration})))
+    (let [file (str directory "/" (String/replace (String/replace name "." "/") "-" "_") ".bl")]
+     (File/mkdir_p! (Path/dirname file))
+     (File/write! file (str ";; Generated from env.bl by auth.imports; no credentials.\n"
+                           "(ns " name " (:require [auth.imports :as imports]))\n"
+                           "(imports/link! " (pr-str name) ")\n")))))
+  directory))

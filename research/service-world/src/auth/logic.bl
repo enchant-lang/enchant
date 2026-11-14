@@ -1,0 +1,181 @@
+;; Namespace admission over actual source and compiler ANF. Resource ports are
+;; explicit trusted intrinsics; their runtime guards remain part of the TCB.
+(ns auth.logic
+ (:require [system.analyze :as analyze] [system.footprint :as fp]
+           [veritas.assurance :as assurance] [reader-node :as rn]))
+
+(def FORMAT "auth-namespace-1")
+(def RESERVED "__auth_")
+(defn digest [value]
+ (Base/encode16 (crypto/hash :sha256 (if (string? value) value (erlang/term_to_binary value)))
+                 (list (tuple :case :lower))))
+(defn- refuse [reason detail]
+ (throw (ex-info "Namespace assurance refused" {:kind :auth/unsupported :reason reason :detail detail})))
+(defn- identifier? [x]
+ (and (symbol? x) (Regex/match? #"^[A-Za-z_][A-Za-z0-9_?!*+<>=.-]*$" (str x))
+      (not (starts-with? (str x) RESERVED))))
+(defn- body-shape [form]
+ (let [name (second form) tail (drop 2 form)
+       tail (if (string? (first tail)) (rest tail) tail)
+       attrs (when (map? (first tail)) (first tail))
+       tail (if attrs (rest tail) tail)
+       params (first tail) body (vec (rest tail))]
+  (when-not (and (identifier? name) (vector? params) (seq body)
+                 (every? identifier? params) (= (count params) (count (set params)))
+                 (<= (count params) 16) (not= :when (first body)))
+   (refuse :unsupported-signature (str name)))
+  (when-not (and (every? #(contains? #{:pure :doc} %) (keys (meta name)))
+                 (every? #(= :doc %) (keys attrs)))
+   (refuse :unsupported-definition-metadata (str name)))
+  {:name (str name) :params params :body body :metadata (meta name)}))
+(defn declaration
+ "Read declarations as data. Namespace metadata uses existing language syntax,
+  so no compiler fork or special RPC syntax is required. No code is evaluated."
+ [source]
+ (let [forms (vec (BeamLisp.Compiler/read_all_data source)) ns-form (first forms)
+       namespace (second ns-form) policy (:auth (meta namespace))
+       requires (mapcat rest (filter #(and (list? %) (= :require (first %))) (drop 2 ns-form)))
+       aliases (into {"auth.resource" "auth.resource"}
+                 (map (fn [spec]
+                        (when-not (and (vector? spec) (= 'auth.resource (first spec))
+                                       (= :as (second spec)) (identifier? (nth spec 2 nil)) (= 3 (count spec)))
+                         (refuse :unsupported-import spec))
+                        [(str (nth spec 2)) "auth.resource"]) requires))
+       definitions (vec (rest forms))]
+  (when-not (and (list? ns-form) (= 'ns (first ns-form)) (symbol? namespace)
+                 (every? #(contains? #{:auth :doc} %) (keys (meta namespace)))
+                 (map? policy) (int? (:version policy)) (pos? (:version policy))
+                 (every? #(contains? #{:version :exports :grants} %) (keys policy))
+                 (map? (:exports policy)) (seq (:exports policy)) (map? (:grants policy))
+                 (<= (count (:exports policy)) 64)
+                 (every? #(and (list? %) (contains? #{'defn 'defn-} (first %))) definitions))
+   (refuse :invalid-namespace (str namespace)))
+  (let [bodies (mapv body-shape definitions) names (mapv :name bodies)]
+   (when-not (= (count names) (count (set names))) (refuse :duplicate-definition names))
+   {:namespace (str namespace) :policy policy :forms forms :definitions definitions
+    :bodies bodies :aliases aliases :source source :source-id (digest source)})))
+
+(declare lower-expression)
+(defn- lower-sequence [items state bound] (mapv #(lower-expression % state bound) items))
+(defn- lower-let [items state bound]
+ (let [bindings (second items)]
+  (when-not (and (vector? bindings) (even? (count bindings))) (refuse :unsupported-let items))
+  (loop [pending bindings out [] locals bound]
+   (if (empty? pending)
+    (apply list (concat ['let out] (lower-sequence (drop 2 items) state locals)))
+    (let [name (first pending)]
+     (when-not (identifier? name) (refuse :unsupported-binding name))
+     (recur (vec (drop 2 pending)) (conj out name (lower-expression (second pending) state locals))
+            (conj locals (str name))))))))
+(defn- lower-expression [value state bound]
+ (cond
+  (symbol? value)
+  (do
+   (when (or (starts-with? (str value) RESERVED)
+             (and (contains? (:names state) (str value)) (not (contains? bound (str value)))))
+    (refuse :function-as-value-or-reserved-name (str value))) value)
+  (vector? value) (lower-sequence value state bound)
+  (map? value) (into {} (map (fn [[k v]] [(lower-expression k state bound) (lower-expression v state bound)]) value))
+  (set? value) (set (lower-sequence value state bound))
+  (list? value)
+  (let [head (first value) name (str head) parts (String/split name "/")
+        resource? (= "auth.resource" (get (:aliases state) (first parts)))]
+   (cond
+    (= head 'quote) value
+    (= head 'let) (lower-let value state bound)
+    (= head 'fn)
+    (let [params (second value)]
+     (when-not (and (vector? params) (every? identifier? params)) (refuse :unsupported-lambda value))
+     (apply list (concat ['fn params] (lower-sequence (drop 2 value) state (into bound (map str params))))))
+    (and resource? (contains? #{"read" "perform!"} (second parts)))
+    (let [operation (second parts) port (second value) args (drop 2 value)
+          mode (if (= "read" operation) :read :send)]
+     (when-not (and (= 2 (count parts)) (keyword? port)
+                    (= (count args) (if (= mode :read) 0 1)))
+      (refuse :unbounded-resource-port value))
+     (swap! (:ports state) update mode (fnil conj #{}) port)
+     ;; The injected map is an unconstrained finite value in analysis, not nil:
+     ;; no branch may disappear because an intrinsic got a constant stub value.
+     (apply list (concat ['do] (lower-sequence args state bound)
+                   [(list 'get (symbol "__auth_resources") (str (core/name mode) "/" (core/name port)))])))
+    (and (contains? (:names state) name) (not (contains? bound name)))
+    (do (swap! (:calls state) conj name)
+        (apply list (concat [head (symbol "__auth_resources")] (lower-sequence (rest value) state bound))))
+    :else (apply list (cons head (lower-sequence (rest value) state bound)))))
+  :else value))
+
+(defn- closure-ports [name direct calls]
+ (loop [pending [name] seen #{} ports {:read #{} :send #{}}]
+  (if (empty? pending) ports
+   (let [name (first pending)]
+    (if (contains? seen name) (recur (vec (rest pending)) seen ports)
+     (recur (into (vec (rest pending)) (get calls name)) (conj seen name)
+       {:read (into (:read ports) (get-in direct [name :read]))
+        :send (into (:send ports) (get-in direct [name :send]))}))))))
+(defn permit?
+ "The actual admission conjunction, independently exercised over every boolean
+  combination by Veritas. Inputs are host-established gates, never wire fields."
+ [authenticated application role resource code]
+ (and (= true authenticated) (= true application) (= true role) (= true resource) (= true code)))
+(defn policy-evidence []
+ (let [cases (vec (for [a [true false] b [true false] c [true false] d [true false] e [true false]]
+                    {:authenticated a :application b :role c :resource d :code e
+                     :allowed (permit? a b c d e)}))]
+  (assurance/finite :entry-policy cases
+   '(and (= (:allowed case) (and (:authenticated case) (:application case) (:role case) (:resource case) (:code case)))
+         (or (not (:allowed case)) (:authenticated case))
+         (or (not (:allowed case)) (:role case))
+         (or (not (:allowed case)) (:resource case))))))
+(defn prepare
+ "Analyze the source closure before loading it. Protected code may use ordinary
+  pure helpers and explicit resource ports. Opaque/ambient effects fail closed.
+  This is a checked source/ANF fragment, not a verified compiler theorem."
+ [source]
+ (let [decl (declaration source) names (set (map :name (:bodies decl)))
+       lowered
+       (mapv (fn [body]
+               (let [ports (atom {:read #{} :send #{}}) calls (atom #{})
+                     state {:names names :aliases (:aliases decl) :ports ports :calls calls}
+                     expressions (lower-sequence (:body body) state (set (map str (:params body))))]
+                {:name (:name body) :ports @ports :calls @calls
+                 :form (apply list (concat ['defn (symbol (:name body))
+                                           (into [(symbol "__auth_resources")] (:params body))] expressions))})) (:bodies decl))
+       program (analyze/prepare-program (join "\n" (map #(pr-str (:form %)) lowered)))
+       result (analyze/analyze-prepared program {} names)
+       summaries (:summaries result)
+       direct (into {} (map #(vector (:name %) (:ports %)) lowered))
+       calls (into {} (map #(vector (:name %) (:calls %)) lowered))
+       pure-assertions
+       (every? (fn [body]
+                 (or (not= true (get-in body [:metadata :pure]))
+                     (let [ports (closure-ports (:name body) direct calls) summary (get summaries (:name body))]
+                      (and (empty? (:read ports)) (empty? (:send ports))
+                           (= {} (:footprint summary)) (= {} (:latent summary)))))) (:bodies decl))
+       exports
+       (into {} (map
+        (fn [[symbol spec]]
+         (let [name (str symbol) body (first (filter #(= name (:name %)) (:bodies decl)))
+               summary (get summaries name) ports (closure-ports name direct calls)
+               budget (:effects spec) modes (if (= :pure budget) {:read #{} :send #{}} budget)
+               supported (and body (not= 'defn- (first (first (filter #(= name (str (second %))) (:definitions decl)))))
+                              pure-assertions (map? spec)
+                              (every? #(contains? #{:roles :resource :effects} %) (keys spec))
+                              (set? (:roles spec)) (seq (:roles spec))
+                              (map? (:resource spec)) (int? (get-in spec [:resource :arg]))
+                              (<= 0 (get-in spec [:resource :arg])) (< (get-in spec [:resource :arg]) (count (:params body)))
+                              (map? modes)
+                              (every? #(contains? #{:read :send} %) (keys modes))
+                              (every? #(contains? (get modes :read #{}) %) (:read ports))
+                              (every? #(contains? (get modes :send #{}) %) (:send ports))
+                              (= true (get-in result [:coverage :complete]))
+                              (= {} (:footprint summary)) (= {} (:latent summary)))]
+          [name {:name name :arity (count (:params body)) :policy spec :ports ports
+                 :classification (cond (seq (:send ports)) :effectful (seq (:read ports)) :read :else :pure)
+                 :evidence (assurance/combine [(:source-id decl) name]
+                             [(assurance/structural :actual-code-and-effects (boolean supported)
+                                {:ports ports :footprint (:footprint summary) :latent (:latent summary)
+                                 :coverage (:coverage result)})])}]))
+        (get-in decl [:policy :exports])))]
+  (assoc decl :exports exports :lowered-id (digest (mapv :form lowered))
+         :status (if (and (seq exports) (every? #(= :checked (get-in % [:evidence :status])) (vals exports))) :checked :unsupported)
+         :format FORMAT :analysis result)))

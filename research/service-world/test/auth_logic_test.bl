@@ -1,0 +1,31 @@
+(ns auth.logic-test
+ (:require [auth.logic :as logic] [veritas.assurance :as assurance]))
+(def fixture (File/read! "research/service-world/test/fixtures/catalog.bl"))
+(deftest namespace-declaration-and-effects-come-from-source
+ (let [result (logic/prepare fixture)]
+  (is (= :checked (:status result)))
+  (is (= "demo.catalog" (:namespace result)))
+  (is (= :read (get-in result [:exports "services-in" :classification])))
+  (is (= #{:catalog} (get-in result [:exports "count-in" :ports :read])))
+  (is (= :pure (get-in result [:exports "label" :classification])))
+  (is (= :effectful (get-in result [:exports "change!" :classification])))
+  (is (not (contains? (:exports result) "private-helper")))))
+(deftest misleading-purity-and-transitive-effects-do-not-publish
+ (let [source (String/replace fixture "(get value \"title\")" "(do (println value) (get value \"title\"))")
+       hidden (String/replace fixture "(get value \"title\")" "(do (private-helper value) (get value \"title\"))")
+       hidden (String/replace hidden "(defn- private-helper [value] value)" "(defn- private-helper [value] (println value))")]
+  (is (= :unsupported (:status (logic/prepare source))))
+  (is (= :unsupported (:status (logic/prepare hidden)))))
+ (is (= :unsupported (:status (logic/prepare (String/replace fixture ":effects {:read #{:catalog}}" ":effects :pure"))))))
+(deftest malformed-and-unknown-claims-fail-closed
+ (is (thrown? (logic/prepare "(ns missing) (defn f [x] x)")))
+ (is (thrown? (logic/prepare (str fixture "\n(println \"top-level effect\")"))))
+ (is (thrown? (logic/prepare (String/replace fixture "[project value]" "[project & value]"))))
+ (is (= :unsupported (:status (logic/prepare (String/replace fixture "(get value \"title\")" "(System/get_env value)"))))))
+(deftest assurance-preserves-modality-and-exhausts-the-real-gate
+ (let [proof (logic/policy-evidence)]
+  (is (= :exhausted (:modality proof)))
+  (is (= 32 (:domain-size proof))))
+ (doseq [modality [:witnessed :solver-claim :unknown :unsupported]]
+  (is (= :unsupported (:status (assurance/combine :claim [{:modality modality}]))))))
+(run-tests)

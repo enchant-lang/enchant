@@ -1,0 +1,67 @@
+;; Provider-neutral ingress. A header is a claim, not proof of its origin.
+(ns auth.ingress (:require [auth.strategy :as strategy] [auth.identity :as identity]))
+
+(def ADAPTERS
+ {:station "x-station-viewer" :tailscale "tailscale-user-login"
+  :headscale "tailscale-user-login" :netbird "work-user-id"})
+(defn- one-header [request header]
+ (let [values (Plug.Conn/get_req_header request header)]
+  (when (= 1 (count values)) (first values))))
+(defn- port-of [address] (String/to_integer (last (String/split address ":")) 16))
+(defn socket-uid
+ "The actual connecting socket, not a forwarded identity supplied by a client.
+  The prototype listener is IPv4 loopback; unknown transport evidence denies."
+ [request server-port]
+ (let [peer (Plug.Conn/get_peer_data request)]
+  (when (= (tuple 127 0 0 1) (:address peer))
+   (some (fn [line]
+           (let [fields (String/split (String/trim line))]
+            (when (and (> (count fields) 7)
+                       (starts-with? (nth fields 1) "0100007F:")
+                       (starts-with? (nth fields 2) "0100007F:")
+                       (= (:port peer) (port-of (nth fields 1)))
+                       (= server-port (port-of (nth fields 2))))
+             (String/to_integer (nth fields 7)))))
+         (String/split (File/read! "/proc/net/tcp") "\n")))))
+(defn adapter
+ "Host-owned adapter constructor. subjects maps verified external identifiers
+  to stable app principals. Claims never carry roles. A custom verifier can
+  replace the header adapter while preserving the normalized return interface.
+  peer-uid is injectable by the trusted host for socket integration tests only."
+ [{:keys [provider trusted-uids subjects application server-port peer-uid verify machine-addresses]
+   :or {provider :station peer-uid socket-uid trusted-uids #{}}}]
+ (when-not (and (string? application) (map? subjects)
+                (or verify (contains? ADAPTERS provider)))
+  (throw (ex-info "Invalid identity adapter configuration" {:kind :auth/invalid-ingress})))
+ (let [claims (strategy/claims-strategy :verified-claims
+                (fn [value]
+                  (when-let [subject (get subjects (:subject value))]
+                   [["user" subject]])))]
+  (fn [request]
+   (try
+    (let [external
+          (if verify (verify request)
+           (when (contains? trusted-uids (peer-uid request server-port))
+            (let [subject (one-header request (get ADAPTERS provider))
+                  remote (one-header request "x-forwarded-for")
+                  source (when remote (String/trim (last (String/split remote ","))))
+                  person? (if (contains? #{:tailscale :headscale} provider)
+                            ;; A shared/tagged/local node must not become a person.
+                            ;; The configured ingress must enforce the same rule.
+                            (and (set? machine-addresses) (seq machine-addresses) source
+                                 (not (contains? machine-addresses source))
+                                 (not (starts-with? source "127.")) (not= "::1" source))
+                            true)]
+             (when (and person? (string? subject) (<= 1 (count subject) 512)) {:subject subject}))))
+          facts (when external (claims {:verified-claims external}))
+          subject (second (first facts))]
+     (when subject {:subject subject :application application :kind :person :provider provider}))
+    (catch _ nil)))))
+(defn authenticated
+ "Install verified context around the existing host request handler. Unknown
+  identity is refused; no anonymous or service-identity fallback is performed."
+ [authenticate handler refuse]
+ (fn [request]
+  (if-let [principal (authenticate request)]
+   (identity/with-verified principal #(handler request))
+   (refuse request))))
