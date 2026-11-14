@@ -1,0 +1,18 @@
+;; Host-owned read-only rehearsal of unchanged ordinary application calls.
+(ns auth.inspect-station
+ (:require [station.services :as station] [auth.identity :as identity] [auth.imports :as imports]
+           [service-world.core :as data] [bl.json :as json] [clojure.edn :as edn]))
+(def source (System/fetch_env! "TEAM_MACHINE_SOURCE"))
+(def places (filter :path (edn/read-string (File/read! (str source "/seed/places.edn")))))
+(try
+ (identity/with-verified {:subject (System/fetch_env! "USER") :application "team-machine-next" :kind :person}
+  (fn []
+   (let [observations (mapv (fn [place]
+                             (let [value (station/services-in (:id place)) rows (get value "services")]
+                              (when-not (and (vector? rows) (every? #(data/within? (:path place) (get % "folder") true) rows))
+                               (throw (ex-info "A service escaped its project view" {})))
+                              [(:id place) (count rows)])) places)]
+    (println (json/encode {:result "passed" :interface "ordinary require and function calls"
+                          :read-only true :by-place (into {} observations)
+                          :services (reduce + (map second observations))})))))
+ (finally (imports/unlink! "station.services")))

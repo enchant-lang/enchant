@@ -1,5 +1,5 @@
 ;; Provider-neutral ingress. A header is a claim, not proof of its origin.
-(ns auth.ingress (:require [auth.strategy :as strategy] [auth.identity :as identity]))
+(ns auth.ingress (:require [auth.strategy :as strategy] [auth.identity :as identity] [bl.json :as json]))
 
 (def ADAPTERS
  {:station "x-station-viewer" :tailscale "tailscale-user-login"
@@ -42,7 +42,9 @@
     (let [external
           (if verify (verify request)
            (when (contains? trusted-uids (peer-uid request server-port))
-            (let [subject (one-header request (get ADAPTERS provider))
+            (let [raw-subject (one-header request (get ADAPTERS provider))
+                  subject (if (and (contains? #{:tailscale :headscale} provider) (string? raw-subject))
+                            (String/downcase (String/trim raw-subject)) raw-subject)
                   remote (one-header request "x-forwarded-for")
                   source (when remote (String/trim (last (String/split remote ","))))
                   person? (if (contains? #{:tailscale :headscale} provider)
@@ -65,3 +67,24 @@
   (if-let [principal (authenticate request)]
    (identity/with-verified principal #(handler request))
    (refuse request))))
+(defn configured
+ "Station host integration. Re-read the provider selection and identity mapping
+  on every request. Migration changes host configuration, not application code.
+  principals is host code mapping (settings, adapter) to stable known subjects."
+ [{:keys [settings-file application server-port principals trusted-uids peer-uid]
+   :or {settings-file "/etc/workstation-endpoints.json" trusted-uids #{0} peer-uid socket-uid}}]
+ (fn [request]
+  (try
+   (when (contains? trusted-uids (peer-uid request server-port))
+   (let [settings (json/decode (File/read! settings-file))
+         publication (get settings "publication" {})
+         provider (case (get publication "identityAdapter" (get publication "provider" "tailscale"))
+                    "tailscale" :tailscale "headscale" :headscale "netbird" :netbird "station" :station nil)
+         machine (when (contains? #{:tailscale :headscale} provider)
+                   (let [[out code] (System/cmd "tailscale" (list "status" "--json"))]
+                    (when (= 0 code) (set (get-in (json/decode out) ["Self" "TailscaleIPs"])))))
+         authenticate (adapter {:provider provider :application application :server-port server-port
+                                 :trusted-uids trusted-uids :subjects (principals settings provider)
+                                 :machine-addresses machine :peer-uid peer-uid})]
+    (authenticate request)))
+   (catch _ nil))))

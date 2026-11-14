@@ -2,7 +2,7 @@
 (ns auth.transport
  (:require [auth] [auth.interface :as namespace] [auth.identity :as identity]
            [service-world.core :as wire] [service-world.http :as private]
-           [connector.transport :as transport] [web]))
+           [connector.transport :as transport] [auth.revocation :as revocation] [web]))
 (def PATH "/realms/v1")
 (def KINDS
  {"auth/unauthenticated" :auth/unauthenticated "auth/denied" :auth/denied
@@ -28,6 +28,18 @@
    (when (and (string? value) (starts-with? value "Bearer ") (<= (count value) wire/MAX-REQUEST))
     (try (identity/verify-token public (auth/decode-base64 (subs value 7)) audience revocation)
      (catch _ nil))))))
+(defn authority-authenticator
+ "Fresh issuer and revocation data on every request. Missing/unreadable policy
+  never silently becomes offline authorization. Role membership is checked again
+  by the provider independently of token validity."
+ [file audience]
+ (fn [request]
+  (try
+   (let [authority (private/private-data file) revoked (:revoked authority)]
+    (when-not (set? revoked) (throw (ex-info "Explicit revocation policy required" {})))
+    ((bearer-authenticator (Base/url_decode64! (:issuer-public authority)) audience
+       (revocation/fn-oracle (fn [id] (contains? revoked (Base/url_encode64 id))))) request))
+   (catch _ nil))))
 (defn handler [provider authenticate]
  (fn [request]
   (let [reply (fn [conn status value]
@@ -49,14 +61,24 @@
          (catch _ (reply conn 400 {:error "invalid-body"})))))
       (reply request 401 {:error "unauthenticated"}))
      (catch _ (reply request 503 {:error "authority-unavailable"})))))))
-(defn endpoint [{:keys [url token-file timeout-ms] :or {timeout-ms 5000}}]
+(defn endpoint [{:keys [url token-file token-for issuer-public timeout-ms] :or {timeout-ms 5000}}]
  (let [uri (URI/parse url)]
   (when-not (and (contains? #{"https" "http"} (:scheme uri)) (wire/text? (:host uri))
                  (or (= "https" (:scheme uri)) (= "127.0.0.1" (:host uri))) (= PATH (:path uri))
                  (nil? (:userinfo uri)) (nil? (:query uri)) (nil? (:fragment uri)))
    (throw (ex-info "Invalid imported namespace audience" {:kind :auth/invalid-audience}))))
  (fn [request]
-  (let [token (String/trim (File/read! token-file))
+  (let [principal (identity/current)
+        token (if token-for (token-for principal request) (String/trim (File/read! token-file)))
+        verified (when issuer-public
+                   (try (identity/verify-token (Base/url_decode64! issuer-public)
+                          (auth/decode-base64 token) (get request "world") nil) (catch _ nil)))
+        _ (when-not verified (throw (ex-info "No verified delegation credential" {:kind :auth/unauthenticated})))
+        _ (when (or (and (= :person (:kind verified))
+                         (not (and principal (= (:subject principal) (:subject verified))
+                                   (= (:application principal) (:application verified)))))
+                    (and principal (not= (:kind principal) (:kind verified))))
+            (throw (ex-info "A credential cannot substitute another caller" {:kind :auth/denied})))
         response (transport/request!
                    {:method :post :url url :body (wire/encode request wire/MAX-REQUEST) :encoding :bytes
                     :headers {"authorization" (str "Bearer " token) "content-type" "application/json"}

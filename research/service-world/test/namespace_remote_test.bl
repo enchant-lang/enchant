@@ -1,0 +1,53 @@
+(ns auth.namespace-remote-test
+ (:require [auth.imports :as imports] [auth.transport :as transport]
+           [service-world.http :as private] [auth.identity :as identity] [env]))
+(def root (System/fetch_env! "SERVICE_WORLD_FIXTURE_DIR"))
+(def consumer (env/fork))
+(def provider {:world "qa/world" :manifest {:namespace "demo.catalog" :version 1
+                    :exports {"services-in" 1 "count-in" 1 "label" 2 "change!" 2}}})
+(def endpoint (transport/endpoint {:url (System/fetch_env! "SERVICE_WORLD_FIXTURE_URL") :token-file (str root "/token")
+                                  :issuer-public (:issuer-public (private/private-data (str root "/authority.edn")))}))
+(env/with-env consumer
+ #(imports/bind! 'remote.catalog {:namespace "demo.catalog" :version 1 :only '[services-in count-in label change!]}
+    provider endpoint))
+(defn evaluate [code]
+ (identity/with-verified {:subject "person:alice" :application "qa-app" :kind :person}
+  #(env/with-env consumer
+    (fn [] (BeamLisp.Compiler/eval_string code (BeamLisp.Compiler/new_env "consumer") "remote-ordinary-app")))))
+(defn failure [code] (try (evaluate code) nil (catch error (:kind (ex-data error)))))
+(deftest ordinary-app-code-runs-over-authenticated-rpc-between-sdk-versions
+ (is (= [{"title" "project-a"}]
+        (evaluate "(ns consumer (:require [remote.catalog :as catalog])) (catalog/services-in \"project-a\")")))
+ (is (= 1 (evaluate "(remote.catalog/count-in \"project-a\")")))
+ (is (= "A" (evaluate "(remote.catalog/label \"project-a\" {\"title\" \"A\"})"))))
+(deftest signed-authority-cannot-be-widened-by-the-app
+ (is (= :auth/denied (failure "(remote.catalog/services-in \"project-b\")")))
+ (is (= :auth/denied (failure "(remote.catalog/change! \"project-a\" {\"value\" 1})")))
+ (is (not (File/exists? (str root "/effect-ran")))))
+(deftest current-roles-and-revocation-are-read-by-the-independent-vm
+ (let [file (str root "/authority.edn") authority (private/private-data file)]
+  (try
+   (File/write! file (pr-str (assoc authority :enabled false)))
+   (is (= :auth/denied (failure "(remote.catalog/services-in \"project-a\")")))
+   (File/write! file (pr-str (assoc authority :revoked #{(:token-id authority)})))
+   (is (= :auth/unauthenticated (failure "(remote.catalog/services-in \"project-a\")")))
+   (File/write! file (pr-str (assoc authority :revoked #{"placeholder"})))
+   (is (= 1 (evaluate "(remote.catalog/count-in \"project-a\")")))
+   (File/write! file (pr-str (dissoc authority :revoked)))
+   (is (= :auth/unauthenticated (failure "(remote.catalog/services-in \"project-a\")")))
+   (finally (File/write! file (pr-str authority))))))
+(deftest one-users-delegation-is-never-borrowed-by-another-user
+ (identity/with-verified {:subject "person:bob" :application "qa-app" :kind :person}
+  (fn []
+   (is (= :auth/denied
+          (try (env/with-env consumer
+                 #(BeamLisp.Compiler/eval_string "(remote.catalog/services-in \"project-a\")"
+                    (BeamLisp.Compiler/new_env "consumer") "wrong-user"))
+            nil (catch error (:kind (ex-data error)))))))))
+(deftest stale-provider-source-cannot-reuse-its-old-evidence
+ (let [file (str root "/provider.bl") source (File/read! file)]
+  (try
+   (File/write! file (str source "\n; new source generation\n"))
+   (is (= :auth/stale-code (failure "(remote.catalog/services-in \"project-a\")")))
+   (finally (File/write! file source)))))
+(try (run-tests) (finally (env/destroy consumer)))

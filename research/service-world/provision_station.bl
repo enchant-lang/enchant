@@ -1,0 +1,25 @@
+;; Host provisioning, not app code. Creates a new private authority; never
+;; overwrites existing grants, credentials or SDK pins.
+(ns auth.provision-station
+ (:require [auth] [auth.imports :as imports] [service-world.station :as station]
+           [clojure.edn :as edn]))
+(def root (System/fetch_env! "STATION_SERVICE_ROOT"))
+(def team (System/fetch_env! "TEAM_MACHINE_SOURCE"))
+(def config (imports/project root))
+(def file (:authority-file config))
+(when (File/exists? file) (throw (ex-info "Existing station authority is preserved; edit it explicitly" {})))
+(def places (filter :path (edn/read-string (File/read! (str team "/seed/places.edn")))))
+(def resources (into {} (map (fn [place] [(:id place) (station/canonical-folder (:path place))]) places)))
+(def keypair (auth/keypair))
+(def public (Base/url_encode64 (auth/public keypair)))
+(def issuer (str (Path/dirname file) "/issuer.edn"))
+(when (File/exists? issuer) (throw (ex-info "Existing issuer is preserved" {})))
+(File/mkdir_p! (Path/dirname file))
+(File/chmod! (Path/dirname file) 448)
+(File/write! issuer (pr-str {:public public :private (Base/url_encode64 (:private keypair))}) (list :exclusive))
+(File/chmod! issuer 384)
+(File/write! file (pr-str {:issuer-public public :revoked #{} :resources resources
+                          :memberships {(System/fetch_env! "USER")
+                                        (into {} (map (fn [[id _]] [id #{:viewer}]) resources))}}) (list :exclusive))
+(File/chmod! file 384)
+(println {:created true :resources (count resources) :rights :viewer :credentials-printed false})
