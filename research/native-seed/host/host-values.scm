@@ -755,7 +755,8 @@
  (map (lambda (key) (h-table-lookup table key)) (vector-ref table 4)))
 
 ;; Input is an actual bounded queue, not a manufactured capability result.
-;; No producer is registered by default. Waiting without one fails explicitly.
+;; No producer is registered by default. A finite deadline remains waitable;
+;; an indefinite empty-input wait without a producer fails explicitly.
 (define native-input-queue '())
 (define native-input-producer #f)
 (define (native-input! value)
@@ -765,7 +766,9 @@
 (define (h-take-input)
  (let ((batch native-input-queue)) (set! native-input-queue '()) (bl-vec batch)))
 (set! h-wait-input (lambda ()
- (if native-input-producer (native-input-producer #f) (h-raise "no native input producer is registered"))))
+ (cond ((pair? native-input-queue) bl-nil)
+       (native-input-producer (native-input-producer #f))
+       (else (h-raise "no native input producer is registered")))))
 (define native-output-sink #f)
 (define (h-emit topic value)
  (if native-output-sink (native-output-sink topic value) (h-raise "no native output sink is registered")))
@@ -799,9 +802,12 @@
  (set! native-virtual-time? #f) bl-nil)
 (set! h-now (lambda () (if native-virtual-time? seed-clock (native-clock-reader))))
 (set! h-wait-until (lambda (ms input?)
- (if input?
-  (if native-input-producer (native-input-producer ms) (h-raise "no native input producer is registered"))
-  (if native-virtual-time? (set! seed-clock (+ seed-clock ms)) (native-readiness-waiter ms))) bl-nil))
+ ;; JS hostWait arms its finite timer even when no input transport is active.
+ ;; Enabling optional input must not remove that independent deadline wake.
+ (cond ((and input? (pair? native-input-queue)) bl-nil)
+       ((and input? native-input-producer) (native-input-producer ms))
+       (native-virtual-time? (set! seed-clock (+ seed-clock ms)))
+       (else (native-readiness-waiter ms))) bl-nil))
 
 (define (bl-arithmetic op a b)
  (native-num (cond ((string? op) (string->symbol op))
