@@ -160,6 +160,53 @@
   (assert (= emission-input (get report "emission_inputs")))
   (assert (= (get row "emission_record") (get report "emission_record")))
   (assert (= (artifact/sha text) (get report hash-key))) text))
+(defn ensure-plan! []
+ (let [path (str out "/chunks.json")
+       previous (when (File/regular? path)
+                  (try (json/decode (File/read! path)) (catch _ nil)))
+       requested (nth args 5 nil)
+       size (if requested (String/to_integer requested)
+               (let [prior-size (get previous "size")]
+                (if (and (integer? prior-size) (<= 1 prior-size 128)) prior-size 32)))
+       _ (assert (<= 1 size 128))
+       ; Construct and validate every current IR/signature record exactly
+       ; once. Existing files are reused only after this current plan proves
+       ; complete coverage and all referenced capabilities again.
+       current (make-plan size)]
+  (File/mkdir_p! (str out "/chunks"))
+  (when-not (= previous current)
+   (when (File/regular? (str out "/chunk-export.json")) (File/rm! (str out "/chunk-export.json")))
+   (File/write! path (json/encode current))
+   (println (str "NATIVE_CHUNK_PLAN " (count (get current "chunks")) " jobs")))
+  current))
+(defn emit-window! [plan]
+ (let [start (erlang/monotonic_time :millisecond)]
+  (loop [rows (get plan "chunks") index 0 built 0 reused 0]
+   (cond
+    (empty? rows) {:complete? true :next index :built built :reused reused}
+    (chunk-ready? (first rows)) (recur (rest rows) (inc index) built (inc reused))
+    (>= (- (erlang/monotonic_time :millisecond) start) 110000)
+     {:complete? false :next index :built built :reused reused}
+    :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused))))))
+(defn assemble! [plan]
+ (let [rows (get plan "chunks") metadata (bundle-metadata)
+        metadata-source (bootstrap/data metadata)
+        functions (string/join "" (map #(checked-chunk-text % "functions.scm" "functions_sha256") rows))
+        initializers (string/join "" (map #(checked-chunk-text % "initializers.scm" "initializers_sha256") rows))
+        sources (mapv (fn [u]
+         (let [row (first (filter #(and (= (:ns u) (get % "namespace")) (= 0 (get % "offset"))) rows))
+               report (json/decode (File/read! (chunk-path (get row "key") "json")))
+               text (File/read! (str out "/chunks/" (:ns u) ".source-unit.scm"))]
+          (assert (= (artifact/sha text) (get report "source_unit_sha256"))) text)) units)
+        prelude (str ";; BL native compiler. Generated from canonical BL source.\n" (File/read! host-path) "\n"
+                     "(native-install-bundle! " metadata-source ")\n" functions initializers)]
+   (File/write! (str out "/bundle.scm") (str "(bl-assoc " metadata-source " (bl-key \"units\") (bl-vec (list " (string/join "\n" sources) ")))"))
+   (File/write! (str out "/prelude.scm") prelude)
+   (File/write! (str out "/stage1.scm") (str prelude "(native-main (native-command-line))\n"))
+   (File/write! (str out "/chunk-export.json")
+    (json/encode {"schema" "bl.native.chunk-export" "version" 2 "inputs" key-input "emission_inputs" emission-input
+                  "jobs" (count rows) "prelude_sha256" (artifact/sha prelude)}))
+   (println (str "NATIVE_CHUNKS_ASSEMBLED " (count rows) " checked jobs"))))
 (cond
  (= mode "plan")
   (let [size (String/to_integer (or (nth args 5 nil) "32"))]
@@ -181,23 +228,12 @@
      (>= (- (erlang/monotonic_time :millisecond) start) 110000)
       (println (str "NATIVE_CHUNKS_YIELD next=" index " built=" built " reused=" reused))
      :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused)))))
- (= mode "assemble")
-  (let [plan (read-plan) rows (get plan "chunks") metadata (bundle-metadata)
-        metadata-source (bootstrap/data metadata)
-        functions (string/join "" (map #(checked-chunk-text % "functions.scm" "functions_sha256") rows))
-        initializers (string/join "" (map #(checked-chunk-text % "initializers.scm" "initializers_sha256") rows))
-        sources (mapv (fn [u]
-         (let [row (first (filter #(and (= (:ns u) (get % "namespace")) (= 0 (get % "offset"))) rows))
-               report (json/decode (File/read! (chunk-path (get row "key") "json")))
-               text (File/read! (str out "/chunks/" (:ns u) ".source-unit.scm"))]
-          (assert (= (artifact/sha text) (get report "source_unit_sha256"))) text)) units)
-        prelude (str ";; BL native compiler. Generated from canonical BL source.\n" (File/read! host-path) "\n"
-                     "(native-install-bundle! " metadata-source ")\n" functions initializers)]
-   (File/write! (str out "/bundle.scm") (str "(bl-assoc " metadata-source " (bl-key \"units\") (bl-vec (list " (string/join "\n" sources) ")))"))
-   (File/write! (str out "/prelude.scm") prelude)
-   (File/write! (str out "/stage1.scm") (str prelude "(native-main (native-command-line))\n"))
-   (File/write! (str out "/chunk-export.json")
-    (json/encode {"schema" "bl.native.chunk-export" "version" 2 "inputs" key-input "emission_inputs" emission-input
-                  "jobs" (count rows) "prelude_sha256" (artifact/sha prelude)}))
-   (println (str "NATIVE_CHUNKS_ASSEMBLED " (count rows) " checked jobs")))
- :else (throw (ex-info "native chunks: expected plan, emit, emit-next or assemble" {:mode mode})))
+ (= mode "assemble") (assemble! (read-plan))
+ (= mode "build-next")
+  (let [plan (ensure-plan!) progress (emit-window! plan)]
+   (if (:complete? progress)
+    (do
+     (assemble! plan)
+     (println (str "NATIVE_BUILD_COMPLETE built=" (:built progress) " reused=" (:reused progress))))
+    (println (str "NATIVE_BUILD_YIELD next=" (:next progress) " built=" (:built progress) " reused=" (:reused progress)))))
+ :else (throw (ex-info "native chunks: expected plan, emit, emit-next, assemble or build-next" {:mode mode})))
