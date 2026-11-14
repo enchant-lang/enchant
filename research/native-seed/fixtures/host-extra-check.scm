@@ -159,4 +159,29 @@
   (and (eq? items (bl-invoke drop (list 0 items)))
        (equal? '(30) (bl-invoke drop (list 2 items)))
        (null? (bl-invoke drop (list 3 items))))))
+;; Tuple storage ordering is lexicographic, including prefix length.
+(let ((a (bl-tuple '("ns" "name"))) (same (bl-tuple '("ns" "name")))
+      (longer (bl-tuple '("ns" "name" "meta")))
+      (later (bl-tuple '("ns" "next"))))
+ (native-extra-check "Env two-slot tuple content equality" (= 0 (bl-key-compare a same)))
+ (native-extra-check "Env tuple prefix and next field ordering"
+  (and (< (bl-key-compare a longer) 0) (< (bl-key-compare a later) 0)))
+ (native-extra-check "tuple element order precedes unrelated length"
+  (> (bl-key-compare (bl-tuple '(2)) (bl-tuple '(1 99))) 0)))
+(let* ((a (bl-tuple (list (bl-key "env") (bl-tuple '("ns" "name")))))
+       (b (bl-tuple (list (bl-key "env") (bl-tuple '("ns" "name" "meta"))))))
+ (native-extra-check "nested tuple prefix ordering"
+  (and (< (bl-key-compare a b) 0) (> (bl-key-compare b a) 0)
+       (= 0 (bl-key-compare a (bl-tuple (list (bl-key "env") (bl-tuple '("ns" "name")))))))))
+(let* ((a (bl-tuple '(0))) (b (bl-tuple '(0 1)))
+       (c (bl-tuple (list 0 (bl-float 1.0))))
+       (d (bl-tuple (list 0 (bl-key "value"))))
+       (cases (list (bl-tuple '()) a b c d (bl-tuple '("text")))))
+ (native-extra-check "tuple mixed-type order and transitivity"
+  (and (< (bl-key-compare a b) 0) (< (bl-key-compare b c) 0)
+       (< (bl-key-compare a c) 0) (< (bl-key-compare c d) 0) (< (bl-key-compare a d) 0)))
+ (for-each (lambda (left)
+  (for-each (lambda (right)
+   (native-extra-check "tuple order preserves previous list projection relation"
+    (= (bl-key-compare left right) (native-compare-lists (bl-items left) (bl-items right))))) cases)) cases))
 (display "native extra checks passed") (newline)

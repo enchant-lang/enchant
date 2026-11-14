@@ -47,6 +47,16 @@
         (let ((n (bl-key-compare (car a) (car b))))
          (if (= n 0) (native-compare-lists (cdr a) (cdr b)) n)))
        (else (bl-key-compare a b))))
+;; Raw tuple keys are fixed Scheme vectors. Compare their existing
+;; lexicographic/prefix relation directly, without allocating vector->list.
+(define (native-compare-tuples a b)
+ (let* ((a-items (vector-ref a 1)) (b-items (vector-ref b 1))
+        (a-size (vector-length a-items)) (b-size (vector-length b-items)))
+  (let loop ((index 0))
+   (cond ((= index a-size) (if (= index b-size) 0 -1))
+    ((= index b-size) 1)
+    (else (let ((order (bl-key-compare (vector-ref a-items index) (vector-ref b-items index))))
+     (if (= order 0) (loop (+ index 1)) order)))))))
 (define (bl-key-compare a b)
  (if (eq? a b) 0
   (let ((ra (native-key-rank a)) (rb (native-key-rank b)))
@@ -55,7 +65,8 @@
      ((0) (native-compare-number a b))
      ((1) (native-compare-number (vector-ref a 1) (vector-ref b 1)))
      ((2) (native-compare-string (native-atom-name a) (native-atom-name b)))
-     ((3 5) (native-compare-lists (bl-items a) (bl-items b)))
+     ((3) (native-compare-tuples a b))
+     ((5) (native-compare-lists (bl-items a) (bl-items b)))
      ((4) (native-compare-lists (native-map-pairs a) (native-map-pairs b)))
      ((6) (native-compare-lists (native-set-items a) (native-set-items b)))
      ((7) 0) ((8) (native-compare-lists a b))

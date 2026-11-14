@@ -45,10 +45,33 @@
                  (bl-get native-global-registry (string-append ns "/" name) native-missing) value)))
    (if (eq? value native-missing) (native-resolve-row (cdr candidates) kind compiled?)
     (cons ns value)))))
+;; A successful global selection is valid only under BOTH immutable registry
+;; roots. Any intern/redefinition/refer/alias/shadowing change retires it before
+;; the next lookup. Missing bindings are never cached. Macro tuple unwrapping
+;; remains in native-global/native-global-exact AFTER this raw-value selection.
+(define native-global-cache (make-table test: equal?))
+(define native-global-cache-env #f)
+(define native-global-cache-compiled #f)
+(define (native-refresh-global-cache!)
+ (if (or (not (eq? native-global-cache-env native-env-rows))
+         (not (eq? native-global-cache-compiled native-global-registry)))
+  (begin
+   (set! native-global-cache (make-table test: equal?))
+   (set! native-global-cache-env native-env-rows)
+   (set! native-global-cache-compiled native-global-registry))))
 (define (native-fetch ns name . exact)
- (let ((row (native-resolve-row
-             (if (and (pair? exact) (car exact)) (native-exact-candidates ns name) (native-candidates ns name)) #f #t)))
-  (native-env-result (if (eq? row native-missing) native-missing (cdr row)))))
+ (native-refresh-global-cache!)
+ (let* ((exact? (if (and (pair? exact) (car exact)) #t #f))
+        (key (vector ns name exact?))
+        (cached (table-ref native-global-cache key native-missing)))
+  (if (not (eq? cached native-missing)) (native-env-result cached)
+   (let ((row (native-resolve-row
+               (if exact? (native-exact-candidates ns name) (native-candidates ns name)) #f #t)))
+    (if (eq? row native-missing) (native-env-result native-missing)
+     (let ((value (cdr row)))
+      (table-set! native-global-cache key value)
+      (native-env-result value)))))))
+
 (define (native-fetch! ns name . exact)
  (let ((answer (apply native-fetch ns name exact)))
   (if (eq? answer (bl-key "error")) (error "undefined native var" ns name) (bl-nth answer 1))))
