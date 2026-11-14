@@ -2,6 +2,10 @@
 ;; separately; these implement host storage, finite Enum, and Erlang primitives.
 (define native-leaf-registry (bl-empty-map))
 (define (native-add-leaf! key value)
+ (if (native-map-has? native-leaf-registry key) (error (string-append "duplicate native leaf: " key)))
+ (if (procedure? value)
+  (let find ((i (- (string-length key) 1)))
+   (if (char=? (string-ref key i) #\/) (bl-register-callable! value (string->number (substring key (+ i 1) (string-length key)))) (find (- i 1)))))
  (set! native-leaf-registry (bl-assoc native-leaf-registry key value)) value)
 (define (native-leaf key) (bl-get native-leaf-registry key native-missing))
 (define (native-badarg who) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badarg") who)) (h-logical-stack)))
@@ -123,7 +127,7 @@
 (native-add-leaf! "erlang/is_map/1" (lambda (x) (or (bl-tag? x 'map) (bl-tag? x 'vec) (bl-tag? x 'set))))
 (native-add-leaf! "erlang/is_integer/1" h-is-int)
 (native-add-leaf! "erlang/is_float/1" h-is-float)
-(native-add-leaf! "erlang/is_number/1" native-number?)
+
 (native-add-leaf! "erlang/is_binary/1" string?)
 (native-add-leaf! "erlang/is_bitstring/1" string?)
 (native-add-leaf! "erlang/is_boolean/1" boolean?)
@@ -178,7 +182,7 @@
 (native-add-leaf! "lists/sort/1" (lambda (xs) (native-sort native-term-le (native-assert-list xs))))
 (native-add-leaf! "lists/sort/2" (lambda (f xs) (native-sort (lambda (a b) (bl-truthy (bl-invoke f (list a b)))) (native-assert-list xs))))
 (native-add-leaf! "maps/new/0" bl-empty-map)
-(native-add-leaf! "maps/put/3" (lambda (k v m) (bl-assoc (native-assert-map m) k v)))
+
 (native-add-leaf! "maps/get/2" native-map-fetch)
 (native-add-leaf! "maps/get/3" (lambda (k m d) (bl-get (native-assert-map m) k d)))
 (native-add-leaf! "maps/is_key/2" (lambda (k m) (native-map-has? (native-assert-map m) k)))
@@ -255,7 +259,7 @@
 (native-add-leaf! "erlang/>/2" (lambda (a b) (> (native-term-compare a b) 0)))
 (native-add-leaf! "erlang/=</2" (lambda (a b) (<= (native-term-compare a b) 0)))
 (native-add-leaf! "erlang/>=/2" (lambda (a b) (>= (native-term-compare a b) 0)))
-(native-add-leaf! "erlang/==/2" bl-equal?)
+
 (native-add-leaf! "erlang/=:=/2" bl-key-equal?)
 (native-add-leaf! "erlang/=/=/2" (lambda (a b) (not (bl-key-equal? a b))))
 (native-add-leaf! "erlang/abs/1" (lambda (x) (if (< (native-ratio x) 0) (native-num 'sub 0 x) x)))
@@ -268,10 +272,10 @@
 (native-add-leaf! "Elixir.BeamLisp.Num/neg?/1" (lambda (x) (< (native-ratio x) 0)))
 (native-add-leaf! "Elixir.Float/ratio/1" (native-leaf "Elixir.BeamLisp.Float/ratio/1"))
 (native-add-leaf! "erlang/apply/3" (lambda (module fun args)
- (native-remote (native-atom-name module) (native-atom-name fun) (native-assert-list args))))
+ (bl-invoke (native-remote (string-append (native-atom-name module) "/" (native-atom-name fun) "/" (number->string (length args)))) (native-assert-list args))))
 (native-add-leaf! "erlang/make_fun/3" (lambda (module fun arity)
- (lambda args (if (not (= arity (length args))) (native-badarg "remote function arity")
-  (native-remote (native-atom-name module) (native-atom-name fun) args)))))
+ (bl-register-callable! (lambda args (if (not (= arity (length args))) (native-badarg "remote function arity")
+  (bl-invoke (native-remote (string-append (native-atom-name module) "/" (native-atom-name fun) "/" (number->string arity))) args))) arity)))
 
 ;; Preserve the native vector representation when raw canonical metadata code
 ;; updates fields. General maps keep normal Erlang map semantics.
