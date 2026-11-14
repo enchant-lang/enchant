@@ -223,6 +223,18 @@
    :body {:op :let :name result :init container :ann (:ann node)
           :body (internal "native-c-fill-recursion!" [(variable target) (variable result)])}}))
 
+(defn fixed-function-node [node env]
+ ; CompilerData proved this let/apply is the inert canonical constructor. Build
+ ; its inner C function ONCE; all proven self references read that same value.
+ ; A plain (S S) execution would otherwise manufacture a new inner closure.
+ (let [target (fresh-name-used "__native_c_fixed_self_" node (keys env))
+       result (fresh-name-used "__native_c_fixed_value_" node (conj (set (keys env)) target))
+       function {:op :direct-dispatch-arm :function node :target target
+                 :direct-source-fn (:direct-source-fn node) :ann (:ann node)}]
+  {:op :let :name target :init (internal "native-c-new-recursion-cell" []) :ann (:ann node)
+   :body {:op :let :name result :init function :ann (:ann node)
+          :body (internal "native-c-fill-recursion!" [(variable target) (variable result)])}}))
+
 (defn lower-dispatch-arm [s node env destination next options]
  (let [function (:function node) parts (BeamLisp.CompilerData/self_application_parts function)]
   (cond
@@ -237,6 +249,8 @@
 (defn lower [s node env destination next tail? options]
  (if-let [target (self-constructor-target node options)]
   (lower-service s "native-c-recursion-ref" [(variable target)] env destination next tail? options)
+ (if (and (= :let (:op node)) (BeamLisp.CompilerData/self_application_parts node))
+  (lower s (fixed-function-node node env) env destination next tail? options)
  (case (:op node)
   :lit (let [[s constant] (pool s (scalar/literal (:val node)))]
          (block s (str " BLC_PUT(m," destination "," (k constant) ");" (jump next))))
@@ -300,7 +314,7 @@
              (fail node))
             (lower-service s "bl-struct" [(lit (:mod node)) {:op :map :pairs (:fields node) :ann (:ann node)}]
               env destination next tail? options))
-  (fail node))))
+  (fail node)))))
 
 (defn emit-unit
  "Return direct C and a literal/FFI wrapper. Options use the SAME checked
