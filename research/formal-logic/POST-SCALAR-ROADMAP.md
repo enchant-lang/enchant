@@ -1,0 +1,77 @@
+# Continue beyond the scalar-text and word-evidence SDK
+
+The current candidate is an integration checkpoint, not completion of the
+formal/total-language goal. Keep its immutable artifact while qualifying it;
+batch the next language changes before producing another SDK.
+
+## Make the checked-certificate seam cover the existing integer kernel
+
+`formal.certificate` and `formal.proof` already implement the separate small
+Boolean/linear-integer proof format, with conditional statements and exact
+arithmetic rules. `formal.request-evidence` currently has one installed strategy:
+`formal.finite-word-certificate`. It must not imply that every existing proof
+format is accepted by the common bundle.
+
+Add an original-graph entry to the integer checker before connecting it. Reuse
+its reviewed arithmetic/rule semantics while retaining argument references.
+Bound normal-form construction, coefficient growth, branch expansion and proof
+traversal before arithmetic. Do not solve the interface gap by materializing an
+arbitrary original query: shared terms and unfamiliar metadata must keep the
+same protections as native requests and point replay. Preserve original-node
+assumption labels and separate the logical statement from execution settings.
+Install a closed strategy dispatcher rather than a callable chosen by data.
+
+## Check premise feasibility separately, then honor vacuity policy explicitly
+
+The finite checker currently establishes conditional entailment while leaving
+feasibility unestablished. The pending `finite-feasibility` experiment derives a
+background SAT request directly from the original graph, checks assertion-byte
+preservation, and reuses the installed finite strategy. A satisfying point gets
+ordinary point replay; a checked contradiction records inconsistency. Neither
+is inferred from conditional entailment.
+
+Qualify its six prepared tests before integration. Compose all admission/search/
+replay accounts. Then specify the result of `:allow`, `:report` and `:reject`
+vacuity policies: a checked component is not automatically a fully discharged
+request. Save and reopen the derivation and checker scope without trusting a
+producer's status. Bring the integer kernel's existing contradiction evidence
+through the same seam.
+
+## Relate text domains before promoting symbolic String proofs
+
+Managed point replay accepts bounded valid UTF-8 scalars. The solver-facing
+String sort has a broader specified alphabet. Domain metadata does not constrain
+native quantified variables. Keep native String UNSAT as a claim until a checked
+domain relation and proof strategy exist. See `SCALAR-TEXT-DOMAIN.md`.
+
+Choose a separate full SMT-codepoint representation or explicit portable scalar
+domain constraints. Regex membership is one possible encoding, with its own
+resource/admission/replay and backend qualification. Keep codepoint, byte and
+grapheme semantics explicit through any Source or JS lowering.
+
+## Complete the carriers and consumers without weakening provenance
+
+Add a durable ledger format for certificate bundles only after its closed schema,
+payload/index binding and fresh reader vocabulary are implemented. Existing
+request records support native/point evidence; they do not yet store the new
+bundle as a certified ledger entry. Preserve older producer identities.
+
+Migrate legacy compiler/oracle consumers deliberately. Some older interfaces
+still name a native UNSAT report `:proved`; the default compiler retains its
+existing trust policy. Do not silently reinterpret those recorded results as
+checked certificates. The new evidence effect is an explicit path, with its own
+closed responses and local fallback lease.
+
+## Grow theories and language guarantees together
+
+Continue managed enum/datatype, sequence/collection, IEEE and quantified profiles
+through the same owner, graph, coordinate, resource and reader interfaces. A
+constructor catalog or native capability list is not complete theory support.
+Pair each extension with useful BL features: exhaustive patterns, invariants,
+refinements, residual constraints and protocol checks.
+
+Advance Source extraction, checked lowering/translation, termination and actor
+effects using the existing explicit outcome/context machinery. Keep finite
+replay, mathematical model theorems, implementation correspondence and compiler
+preservation as separately established facts. General BL execution is not made
+total merely by attaching a contract or choosing a different native solver.
