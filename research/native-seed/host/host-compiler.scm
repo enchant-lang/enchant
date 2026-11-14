@@ -167,6 +167,8 @@
 ;; identity change retires all resolved wrappers before the next lookup.
 ;; A compiled wrapper observes its LIVE registry root on every invocation, so redefining
 ;; a source var neither leaves a stale procedure nor grants new membership.
+(define native-remote-original-invoke bl-invoke)
+(define native-remote-original-resolve native-resolve-call)
 (define native-remote-cache (make-table test: equal?))
 (define native-remote-cache-leaves #f)
 (define native-remote-cache-modules #f)
@@ -240,7 +242,14 @@
                       (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
                        (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
                        (error "native variadic clause missing" key))
-                      (bl-invoke value arguments)))))))
+                      ;; The base Scheme invoker only applies plain procedures.
+                      ;; Later Source-frame/C/custom invokers OR planners own
+                      ;; their contexts/peeling; preserve their complete path.
+                      (if (and (eq? bl-invoke native-remote-original-invoke)
+                               (eq? native-resolve-call native-remote-original-resolve)
+                               (procedure? value)
+                               (not (table-ref native-host-callables value #f)))
+                       (apply value arguments) (bl-invoke value arguments))))))))
            ;; Cache membership only when the exact existing arity ledger
            ;; admits this MFA. Missing/stub/wrong-arity decisions stay uncached.
            (if (native-remote-available? module name arity)

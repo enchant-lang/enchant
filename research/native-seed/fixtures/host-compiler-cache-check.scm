@@ -40,6 +40,55 @@
     (native-cache-check "held compiled wrapper sees readded slot value" (= 105 (bl-invoke first '(5))))
     (native-cache-check "slot removal and readdition preserve dispatch membership identity"
      (eq? first (native-remote key)))
+    ;; Fixed plain procedures can use Scheme apply only while BOTH original
+    ;; language invocation/planning adapters remain installed. These checks
+    ;; keep late adapters, callbacks and nonfunction redefinitions observable.
+    (native-register! "native.cache-one" "pick" bl-nil)
+    (let ((actual #f) (baseline #f))
+     (with-exception-catcher (lambda (e) (set! actual e)) (lambda () (first 5)))
+     (with-exception-catcher (lambda (e) (set! baseline e))
+      (lambda () (native-remote-original-invoke bl-nil '(5))))
+     (native-cache-check "fixed cached slot nil redefinition retains invocation refusal"
+      (and actual baseline (eq? (native-exception-kind actual) (native-exception-kind baseline))
+           (bl-equal? (native-exception-reason actual) (native-exception-reason baseline)))))
+    (native-register! "native.cache-one" "pick" (lambda (x) (+ x 100)))
+    (native-cache-check "fixed cached slot recovers after nil redefinition" (= 105 (first 5)))
+    (let ((value (bl-get native-global-registry "native.cache-one/pick")) (actual #f) (baseline #f))
+     (with-exception-catcher (lambda (e) (set! actual e)) (lambda () (first 5 6)))
+     (with-exception-catcher (lambda (e) (set! baseline e))
+      (lambda () (native-remote-original-invoke value '(5 6))))
+     (native-cache-check "fixed direct apply preserves actual raw wrong-arity exception"
+      (and actual baseline (wrong-number-of-arguments-exception? actual)
+           (wrong-number-of-arguments-exception? baseline)
+           (eq? (wrong-number-of-arguments-exception-procedure actual)
+                (wrong-number-of-arguments-exception-procedure baseline))
+           (equal? (wrong-number-of-arguments-exception-arguments actual)
+                   (wrong-number-of-arguments-exception-arguments baseline)))))
+    (let ((original bl-invoke) (calls 0))
+     (dynamic-wind
+      (lambda ()
+       (set! bl-invoke (lambda (value arguments)
+        (set! calls (+ calls 1)) (original value arguments))))
+      (lambda ()
+       (native-register! "native.cache-one" "pick"
+        (lambda (x) (bl-invoke (lambda (y) (+ y 120)) (list x))))
+       (native-cache-check "late Source callback invocation adapter still owns both calls"
+        (and (= 125 (first 5)) (= calls 2))))
+      (lambda () (set! bl-invoke original))))
+    (let ((original native-resolve-call)
+          (value (bl-get native-global-registry "native.cache-one/pick")))
+     (dynamic-wind
+      (lambda ()
+       (set! native-resolve-call (lambda (callee arguments)
+        (if (eq? callee value) (cons (lambda (x) (+ x 300)) arguments)
+         (original callee arguments)))))
+      (lambda ()
+       (native-cache-check "late planner replacement is honored without replacing invoker" (= 305 (first 5))))
+      (lambda () (set! native-resolve-call original))))
+    (native-register! "native.cache-one" "pick"
+     (native-mark-host-callable! (lambda (x) (+ x 140))))
+    (native-cache-check "marked host callback remains callable through generic adapter" (= 145 (first 5)))
+    (native-register! "native.cache-one" "pick" (lambda (x) (+ x 100)))
     ;; Arity admission changes invalidate resolutions even when this arity
     ;; remains present. An unadmitted MFA never becomes a cached negative.
     (native-cache-check "unadmitted second arity absent"
