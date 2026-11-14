@@ -32,7 +32,8 @@ The six prepared tests cover all nine policy/feasibility combinations using
 actual checker calls, malformed candidates under every policy, prospective
 proof-budget refusal with a calibrated invocation trace, changed policy and
 assumptions, solver/oracle-denied execution, and saved packets reopened with a
-smaller current allowance. The planned complete run has at least 77 assertions.
+smaller current allowance. The planned complete run has at least 93 assertions, including the common
+ordinary-value/raw-node policy parser and missing-versus-explicit-nil behavior.
 A passing same-process packet test alone would not qualify fresh-process
 schema vocabulary or durable storage; those remain explicit later gates.
 

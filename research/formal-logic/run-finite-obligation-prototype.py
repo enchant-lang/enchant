@@ -34,7 +34,7 @@ log=(E/'checks.txt').read_text();green='1 file(s) passed, 0 failed, 0 incoherent
 write('exit.json',{'exit_code':code,'green_summary':green,'elapsed_seconds':time.monotonic()-started,
  'runtime_retired':not runtime.exists(),'cwd_retired':not cwd.exists()})
 assert code==0 and green
-counts=re.findall(r'✓\s+formal.finite-obligation-check\s+(\d+) passed',log);assert len(counts)==1 and int(counts[0])>=77
+counts=re.findall(r'✓\s+formal.finite-obligation-check\s+(\d+) passed',log);assert len(counts)==1 and int(counts[0])>=93
 assert all(sha(R/n)==d for n,d in digests.items())
 write('qualification.json',{'schema':'bl.finite-obligation-prototype-qualification.v1','status':'passed','sdk_pin':pin,
  'code_commit':commit,'source_sha256':digests,'assertions':int(counts[0]),'in_sdk':False,'in_common_evidence_interface':False,
