@@ -108,14 +108,19 @@
 (defn clauses [cs argv fallback options wrap?]
  (if (empty? cs) fallback
   (let [cl (first cs) more (clauses (rest cs) argv fallback options wrap?)
+        ; Pattern and guard failure share ONE suspended suffix. Duplicating
+        ; `more` at both sites grows exponentially across guarded clauses.
+        ; Source locals are ident-encoded v_*; this host local cannot capture one.
+        next (if (:guard cl) "(clause-next)" more)
         names (distinct (mapcat binders (:pats cl)))
         body (emit (:body cl) options)
         body (if wrap? (str "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
-        body (if (:guard cl) (str "(if (bl-guard (lambda () " (emit (:guard cl) (assoc (operand-options options) :source-frames? false)) ")) " body " " more ")") body)]
-   (str "(let ((bindings (bl-match-args (list "
+        body (if (:guard cl) (str "(if (bl-guard (lambda () " (emit (:guard cl) (assoc (operand-options options) :source-frames? false)) ")) " body " " next ")") body)
+        arm (str "(let ((bindings (bl-match-args (list "
         (string/join " " (map #(pattern % options) (:pats cl))) ") " argv " '()))) "
         "(if bindings (let (" (string/join " " (map (fn [s] (str "(" (ident s) " (cdr (assoc " (text s) " bindings)))")) names))
-        ") " body ") " more "))"))))
+        ") " body ") " next "))")]
+   (if (:guard cl) (str "(let ((clause-next (lambda () " more "))) " arm ")") arm))))
 
 (defn- function-body
  "A single unguarded clause of DISTINCT plain variables needs no matcher.

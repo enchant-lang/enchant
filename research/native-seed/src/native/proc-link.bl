@@ -89,6 +89,17 @@
     (let [tuple (assoc tuple :elems (assoc (vec elements) 0 (assoc first-pattern :val (first shape))))]
      (if vector? (assoc pattern :fields [[(first (first (:fields pattern))) tuple]])
       {:pop :pstruct :mod :Elixir.BeamLisp.Vector :fields [[:items tuple]]}))) pattern)))
+(defn wire-pattern? [pattern]
+ (let [vector? (and (= :pstruct (:pop pattern)) (= :Elixir.BeamLisp.Vector (:mod pattern)))
+       tuple (if vector? (second (first (:fields pattern))) pattern)
+       first-pattern (first (:elems tuple))]
+  (and (= :ptuple (:pop tuple)) (= :plit (:pop first-pattern))
+       (contains? #{:DOWN :EXIT} (:val first-pattern)))))
+(defn needs-protocol-projection? [definition]
+ (some (fn [node]
+         (and (= :recv (:op node))
+              (some (fn [clause] (some wire-pattern? (:pats clause))) (:clauses node))))
+       (walk (:node definition))))
 (defn project-protocol [unit]
  (let [admitted? (or (contains? helpers (:ns unit))
                     (some (fn [node]
@@ -100,7 +111,11 @@
         (if (= :recv (:op node))
          (assoc node :clauses (mapv (fn [clause]
             (update clause :pats (fn [patterns] (mapv #(wire-pattern % admitted?) patterns)))) (:clauses node))) node))]
-  (assoc unit :defs (mapv #(update % :node (fn [node] (ir/rewrite rewrite node))) (:defs unit))
+  (assoc unit :defs (mapv (fn [definition]
+    ; Canonical actor-only clauses need no rebuilt IR. In particular preserve
+    ; every original runtime/app body and avoid a lazy map per collection.
+    (if (needs-protocol-projection? definition)
+     (update definition :node (fn [node] (ir/rewrite rewrite node))) definition)) (:defs unit))
    :wire-protocol (if admitted? :erlang-process-envelope-to-actor-vector :canonical-actor-only))))
 (defn named-definitions [units]
  (vec (mapcat (fn [unit]
