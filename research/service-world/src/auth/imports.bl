@@ -39,7 +39,16 @@
 (defn project [root]
  (let [path (str (Path/expand root) "/env.bl") forms (BeamLisp.Compiler/read_all_data (File/read! path))]
   (when-not (map? (last forms)) (throw (ex-info "A literal env.bl is required" {:kind :auth/configuration})))
-  (last forms)))
+  ;; Existing SDKs deliberately reject unknown project keys. Namespaced data
+  ;; blocks precede the ordinary trailing project map, which they already read.
+  ;; This keeps env.bl central without replacing the SDK's project validator.
+  (let [blocks (filter map? (butlast forms))
+        allowed #{:auth/imports :auth/realms :auth/realm}
+        _ (when-not (every? #(every? (fn [key] (contains? allowed key)) (keys %)) blocks)
+            (throw (ex-info "Unknown auth environment declaration" {:kind :auth/configuration})))
+        extra (reduce merge {} blocks) base (merge (last forms) (:auth/realm extra))]
+   (assoc base :imports (or (:auth/imports extra) (:imports base))
+               :realms (or (:auth/realms extra) (:realms base))))))
 (defn- declaration-for [root logical]
  (let [config (project root) declaration (get (:imports config) (symbol logical))
        realm (get (:realms config) (:from declaration))
