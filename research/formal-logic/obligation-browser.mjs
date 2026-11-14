@@ -223,6 +223,8 @@ try {
   const response = await fetch(base + '/' + path), body = Buffer.from(await response.arrayBuffer());
   check('Exact declared source: ' + path, response.status === 200 && createHash('sha256').update(body).digest('hex') === createHash('sha256').update(await readFile(join(project, path))).digest('hex'));
  }
+ const undeclared=await fetch(base+'/evidence/obligation-presentation/research/owner-terminal.json');
+ check('An existing undeclared evidence file is not a browseable source',undeclared.status===404);
 } catch (error) {
  report.fatal = {message: error.message, stack: error.stack};
  report.checks.push({name: 'Focused audit completed', passed: false, error: error.message});
