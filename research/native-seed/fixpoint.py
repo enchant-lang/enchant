@@ -11,6 +11,7 @@ stage's actual core/rt and a fresh, hash-bound JavaScript oracle.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -50,6 +51,28 @@ def save(path: Path, value) -> None:
     temporary.replace(path)
 
 
+def compiler_recipe_identity(source_path: Path) -> dict:
+    # Hash actual compiler code independently from orchestration/reporting.
+    # Whole-driver bytes remain a bound input/provenance record.
+    names = ("digest", "key", "save", "run", "split_source", "cached_phase", "compile_native")
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    functions = []
+    for name in names:
+        found = [node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name]
+        if len(found) != 1 or not isinstance(found[0], ast.FunctionDef):
+            raise RuntimeError("compiler recipe requires exactly one synchronous function: " + name)
+        functions.append([name, ast.dump(found[0], annotate_fields=True, include_attributes=False)])
+    constants = {"header": HEADER.decode(), "entry": ENTRY.decode(),
+                 "unit_target_bytes": TARGET, "unit_hard_bytes": HARD,
+                 "compile_deadline_seconds": COMPILE_DEADLINE,
+                 "standard_binding_prelude": STANDARD_BINDING_PRELUDE}
+    payload = {"schema": "bl.native.python-compiler-recipe", "version": 1,
+               "functions": functions, "constants": constants}
+    return {"schema": payload["schema"], "version": 1, "sha256": key(payload),
+            "functions": list(names), "constants": constants}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -66,7 +89,13 @@ def main() -> None:
                         help="checkpoint the real native stage1 image; never qualify a fixpoint")
     parser.add_argument("--compile-stage1-actors-only", action="store_true",
                         help="build exact stage1 core + original actor body; never execute or qualify")
+    parser.add_argument("--actor-diagnostic-prefix", type=Path,
+                        help="observational prefix for a separate NONQUALIFIED actor image")
     args = parser.parse_args()
+    if args.actor_diagnostic_prefix and not args.compile_stage1_actors_only:
+        parser.error("--actor-diagnostic-prefix requires --compile-stage1-actors-only")
+    if args.actor_diagnostic_prefix:
+        args.actor_diagnostic_prefix = args.actor_diagnostic_prefix.resolve()
     if args.compile_stage1_only and args.compile_stage1_actors_only:
         parser.error("select only one stage1 checkpoint mode")
     if args.compile_stage1_actors_only and not args.actor_body:
@@ -94,6 +123,7 @@ def main() -> None:
     inputs: dict[str, str] = {}
     runs, builds = [], []
     actor_capture = None
+    compiler_recipe = None
 
     def path_for(name: str) -> Path:
         path = Path(name)
@@ -122,7 +152,8 @@ def main() -> None:
                             "host_optimization": args.host_optimization,
                             "standard_bindings": args.standard_bindings,
                             "scheme_compiler_flags": gsc_flags,
-                            "builds": builds, "runs": runs, "actor_capture": actor_capture})
+                            "builds": builds, "runs": runs, "actor_capture": actor_capture,
+                            "driver_sha256": digest(here), "compiler_recipe": compiler_recipe})
 
     def run(label, argv, *, cwd=out, timeout=COMPILE_DEADLINE, env=None):
         argv = [str(x) for x in argv]
@@ -187,7 +218,8 @@ def main() -> None:
                  "-D___CAN_IMPORT_SETJMP_DYNAMICALLY", "-I" + str(gambit / "gambit/include")]
         link_flags = [str(gambit / "gambit/lib/libgambit.so"), "-pthread", "-ldl", "-lm",
                       "-Wl,-rpath," + str(gambit / "gambit/lib")]
-        tool_identity = {"driver": digest(here), "splitter": digest(splitter), "flags": flags,
+        compiler_recipe = compiler_recipe_identity(here)
+        tool_identity = {"compiler_recipe": compiler_recipe["sha256"], "splitter": digest(splitter), "flags": flags,
                          "scheme_compiler_flags": gsc_flags,
                          "link_flags": link_flags, "toolchain": tools,
                          "compiler_environment_sha256": key({name: value for name, value in os.environ.items()
@@ -199,6 +231,8 @@ def main() -> None:
         oracle = None
         if args.actor_body:
             bind(args.actor_body)
+        if args.actor_diagnostic_prefix:
+            bind(args.actor_diagnostic_prefix)
         if args.compile_stage1_actors_only:
             manifest_path = args.actor_body.parent / "manifest.json"
             bind(manifest_path)
@@ -387,14 +421,18 @@ def main() -> None:
             progress()
             return destination
 
-        def actor_image(name):
+        def actor_image(name, diagnostic_prefix=None):
             original = (out / (name + ".scm")).read_bytes()
             if not original.endswith(ENTRY):
                 raise RuntimeError("compiler source lacks its exact final native-main entry")
-            overlay = out / (name + "-actors.scm")
-            overlay.write_bytes(original[:-len(ENTRY)] + b"\n" + args.actor_body.read_bytes())
+            stem = name + ("-actors-diagnostic" if diagnostic_prefix else "-actors")
+            overlay = out / (stem + ".scm")
+            prefix = diagnostic_prefix.read_bytes() + b"\n" if diagnostic_prefix else b""
+            overlay.write_bytes(original[:-len(ENTRY)] + b"\n" + prefix + args.actor_body.read_bytes())
+            if not overlay.read_bytes().endswith(args.actor_body.read_bytes()):
+                raise RuntimeError("diagnostic overlay changed the original actor body suffix")
             bind(overlay)
-            executable = compile_native(name + "-actors")
+            executable = compile_native(stem)
             return executable, overlay
 
         def actor_gate(name):
@@ -417,10 +455,14 @@ def main() -> None:
         stage1 = compile_native("stage1")
         unchanged()
         if args.compile_stage1_actors_only:
-            image, overlay = actor_image("stage1")
+            image, overlay = actor_image("stage1", args.actor_diagnostic_prefix)
             unchanged()
-            receipt = {"schema": "bl.native.stage1-actor-build", "version": 1,
-                       "status": "compiled-not-qualified", "executed": False,
+            receipt = {"schema": ("bl.native.stage1-actor-diagnostic-build" if args.actor_diagnostic_prefix else "bl.native.stage1-actor-build"), "version": 1,
+                       "status": ("diagnostic-compiled-not-qualified" if args.actor_diagnostic_prefix else "compiled-not-qualified"), "executed": False,
+                       "diagnostic_prefix": ({"path": str(args.actor_diagnostic_prefix), "sha256": digest(args.actor_diagnostic_prefix)}
+                                             if args.actor_diagnostic_prefix else None),
+                       "original_body_unchanged_suffix": True,
+                       "original_qualifier_admission": not bool(args.actor_diagnostic_prefix),
                        "sdk-pin": pin, "actor_capture": actor_capture,
                        "core": {"path": str(out / "stage1.scm"), "sha256": digest(out / "stage1.scm"),
                                 "prefix_sha256": hashlib.sha256((out / "stage1.scm").read_bytes()[:-len(ENTRY)]).hexdigest(),
@@ -431,10 +473,11 @@ def main() -> None:
                        "compile_deadline_seconds": COMPILE_DEADLINE,
                        "host_optimization": args.host_optimization,
                        "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
-                       "inputs": dict(inputs), "builds": builds, "runs": runs}
-            save(out / "stage1-actors-build.json", receipt)
-            progress("stage1-actors-compiled-not-qualified")
-            print("NATIVE_STAGE1_ACTOR_IMAGE_READY", digest(image), flush=True)
+                       "inputs": dict(inputs), "driver_sha256": digest(here), "compiler_recipe": compiler_recipe,
+                       "builds": builds, "runs": runs}
+            save(out / ("stage1-actors-diagnostic-build.json" if args.actor_diagnostic_prefix else "stage1-actors-build.json"), receipt)
+            progress("stage1-actors-diagnostic-compiled-not-qualified" if args.actor_diagnostic_prefix else "stage1-actors-compiled-not-qualified")
+            print("NATIVE_STAGE1_ACTOR_DIAGNOSTIC_READY" if args.actor_diagnostic_prefix else "NATIVE_STAGE1_ACTOR_IMAGE_READY", digest(image), flush=True)
             return
         if args.compile_stage1_only:
             progress("stage1-compiled-not-qualified")
@@ -482,7 +525,8 @@ def main() -> None:
                   "host_optimization": args.host_optimization,
                   "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
                   "actor_oracle_sha256": digest(args.actor_oracle), "actor_results": actor_results,
-                  "inputs": inputs, "builds": builds, "runs": runs}
+                  "inputs": inputs, "driver_sha256": digest(here), "compiler_recipe": compiler_recipe,
+                  "builds": builds, "runs": runs}
         save(evidence, report)
         progress("qualified")
         print("NATIVE_BOOTSTRAP_FIXPOINT", h2, flush=True)

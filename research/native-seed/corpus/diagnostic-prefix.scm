@@ -1,0 +1,52 @@
+;; DIAGNOSTIC ONLY. Insert after the exact core and before the unchanged actor
+;; body. Samples are observational; no actor/policy/input/budget state changes.
+(define native-actor-diagnostic-main-thread (current-thread))
+(define native-actor-diagnostic-samples 0)
+(define native-actor-diagnostic-original-write h-write)
+(set! h-write (lambda (text)
+ (let ((answer (native-actor-diagnostic-original-write text)))
+  (force-output (current-output-port)) answer)))
+(bl-register-callable! h-write 1)
+(native-mark-host-callable! h-write)
+(define (native-actor-diagnostic-count value)
+ (cond ((bl-is-nil value) 'unset)
+       ((bl-tag? value 'map) (h-map-size value))
+       ((bl-tag? value 'vec) (h-vec-size value))
+       (else 'unknown)))
+(define (native-actor-diagnostic-sample)
+ (with-exception-catcher
+  (lambda (exception)
+   (display "ACTOR_DIAGNOSTIC_SAMPLE_ERROR ") (write exception) (newline)
+   (force-output (current-output-port)))
+  (lambda ()
+   (set! native-actor-diagnostic-samples (+ 1 native-actor-diagnostic-samples))
+   (display "ACTOR_DIAGNOSTIC_STATE ")
+   (write (list native-actor-diagnostic-samples
+      (cons 'critical seed-critical) (cons 'budget seed-budget) (cons 'yields seed-yields)
+      (cons 'self seed-self) (cons 'has-frame (if seed-frame #t #f))
+      (cons 'procs (native-actor-diagnostic-count (bl-get seed-state (bl-key "procs"))))
+      (cons 'runnable (native-actor-diagnostic-count (bl-get seed-state (bl-key "runnable"))))
+      (cons 'errors (length seed-errors)))) (newline)
+   (display "ACTOR_DIAGNOSTIC_FRAMES ")
+   (let loop ((frames (native-logical-frames)) (left 12))
+    (if (and (> left 0) (pair? frames))
+     (begin
+      (write (map (lambda (key) (cons key (bl-get (car frames) (bl-key key))))
+               '("fn" "file" "arity" "line" "col" "call")))
+      (loop (cdr frames) (- left 1))))) (newline)
+   (display "ACTOR_DIAGNOSTIC_BACKTRACE_BEGIN\n")
+   (call-with-current-continuation
+    (lambda (continuation) (display-continuation-backtrace continuation (current-output-port))))
+   (display "ACTOR_DIAGNOSTIC_BACKTRACE_END\n")
+   (force-output (current-output-port)))))
+(define native-actor-diagnostic-sampler
+ (thread-start!
+  (make-thread
+   (lambda ()
+    (let loop ((left 12))
+     (if (> left 0)
+      (begin (thread-sleep! 5)
+       (thread-interrupt! native-actor-diagnostic-main-thread native-actor-diagnostic-sample)
+       (loop (- left 1)))))))))
+(display "ACTOR_DIAGNOSTIC_INSTALLED\n")
+(force-output (current-output-port))
