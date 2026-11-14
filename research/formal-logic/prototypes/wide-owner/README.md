@@ -1,0 +1,47 @@
+# One request interface for the full existing typed vocabulary
+
+This is an unqualified project source overlay on the selected immutable SDK.
+It is not installed in that SDK. Its BL checks, native corpus, fresh readers
+and later SDK build are still required. It reuses the ordinary `formal.logic`
+prepare/propose/recheck/execute/compare API; it introduces no parallel facade.
+
+The new `logic/wide-native-policy` admits the existing mathematical term
+vocabulary under explicit bounded generic typing. It independently advertises
+point replay as `:not-installed`, proof strategies as empty, and native support
+as requiring actual backend evidence. Narrow numeric, word and scalar-text
+policies keep their existing interpreters and proof meanings.
+
+The source changes have distinct jobs:
+
+| Piece | Responsibility |
+| --- | --- |
+| `formal.resources.typed` | Forecast only operational term, sort and declaration dependencies before decoding descriptors or invoking constructors. Keep whole-graph capacities separate. |
+| `formal.graph-question/with-wide-keys` | Discover the original operational roots, reserve their typing work, and derive the typed forest freshly inside the consumer's operation. |
+| `formal.point-profile` | Normalize a closed wide policy and dispatch its admission independently from point interpreter availability. |
+| `formal.graph-execution` | Reuse the actual owner's retained assumptions, revision checks, import callback and deadlines. Keep native model fragments as bounded original graph data. |
+| `formal.request-answer` | Bind the same original request and preserve the native report without turning it into a theorem or witness. |
+| `formal.request-point` | Preserve supplied coordinates as candidates when their policy has no interpreter. Refuse admission limits without inventing values or truth. |
+| `formal.logic` | Expose the additional policy through the established public interface. |
+
+No caller-provided inventory, reservation or success flag can skip fresh typing
+in the owner or reader. No raw native transport bypass is introduced. Opaque
+arrays/functions and unsupported replay remain data rather than invented BL
+values. Native-only entailment reports use claim vocabulary in this new profile.
+Existing finite-word and integer proof strategies remain bound to their original
+semantic profiles; a wide request cannot acquire their authority by relabeling a
+certificate. Source, compiler and checker implementation correspondence remain
+separate obligations.
+
+The first coarse front-end draft screened term-shaped metadata as if it were
+operational syntax. This overlay replaces that design before qualification:
+`with-wide-keys` supplies precisely the actual typed roots to the resource
+planner. Ignored metadata, including an unfamiliar keyword, a large integer or
+a term-shaped map, retains its original bytes and contributes only to the whole
+source envelope. Work reservations are an abstract policy, not a proved relation
+to BEAM time or allocation.
+
+Qualification must cover all 187 retained questions through the ordinary request
+interface; actual paired native results; the narrow policy regressions; retained
+owner mutation and lease refusal; resource refusals before constructor/native
+work; and fresh candidate-only readers without application paths or native
+exchanges. It must keep each scope separate from the later immutable SDK gate.
