@@ -44,7 +44,7 @@ elif phase.startswith('reader-'):
         assert re.fullmatch(r'\d+-(z3|oxiz)\.json', packet['file'])
         assert sha(B / 'native/packets' / packet['file']) == packet['sha256']
     write('corpus.json', {'schema': 'bl.wide-owner-candidate-corpus.v1', 'producer-results': False,
-                         'in-sdk': False, 'compiler-proof-authority': False, 'packets': producer['packets']})
+                         'in-sdk': True, 'compiler-proof-authority': False, 'packets': producer['packets']})
 elif phase != 'preflight':
     files = [P / {'word-packets': 'word-packet-reader.bl', 'text-packets': 'scalar-packet-reader.bl',
                   'proof-packets': 'evidence-packet-reader.bl', 'obligation-packets': 'obligation-packet-reader.bl'}[phase]]
@@ -71,7 +71,19 @@ else:
     request = [pin['sdk'] + '/bin/bl', '--cold']
     if project: request += ['-p', str(P / 'src')]
     if phase in ('pure', 'narrow', 'native'):
-        request += ['test', *map(str, files)]
+        selected_files = files
+        if phase in ('pure', 'native'):
+            # The same assertion body now calls installed SDK namespaces.
+            # Correct only the writer's former project-provenance label.
+            content = files[0].read_text()
+            assert content.count(':in-sdk false') == 1
+            content = content.replace(':in-sdk false', ':in-sdk true')
+            adapted = root / files[0].name; adapted.write_text(content)
+            (E / ('canonical-' + files[0].name)).write_text(content)
+            write('sdk-test-adaptation.json', {'source_sha256': sha(files[0]), 'adapted_sha256': sha(adapted),
+                                              'scope': 'Runtime provenance flag only; unchanged assertions, profile values and imports.'})
+            selected_files = [adapted]
+        request += ['test', *map(str, selected_files)]
         environment += ['FORMAL_WIDE_OWNER_OUTPUT=' + str(E / 'observations.json')]
         if phase == 'native':
             environment += ['BL_TEST_TIMEOUT=21540', 'FORMAL_WIDE_OWNER_SAMPLE=all',
@@ -81,10 +93,15 @@ else:
         # Only import names change. The check body runs against installed SDK
         # namespaces with no prototype or application imports.
         content = files[0].read_text().replace('[formal.wide-batch.oracle', '[oracle').replace('[formal.wide-batch.', '[formal.')
+        old_scope = '(= false (get input "in-sdk") (get input "compiler-proof-authority"))'
+        assert content.count(old_scope) == 1 and content.count(':in-sdk false') == 1
+        content = content.replace(old_scope, '(and (= true (get input "in-sdk")) (= false (get input "compiler-proof-authority")))')
+        content = content.replace(':in-sdk false', ':in-sdk true').replace('"explicit prototype scope"', '"explicit SDK scope"')
         adapted = root / 'candidate-reader.bl'; adapted.write_text(content)
         (E / 'canonical-candidate-reader.bl').write_text(content)
         write('reader-adaptation.json', {'source_sha256': sha(files[0]), 'adapted_sha256': sha(adapted),
-                                         'scope': 'Require namespace spelling only; no test body or profile values change.'})
+                                         'scope': 'Require namespace spelling and actual runtime provenance labels only. '
+                                                  'Mathematical/refusal assertions and profile values stay unchanged.'})
         request += ['run', str(adapted), '--', str(E / 'corpus.json'),
                     str(B / 'native/packets'), str(E / 'observations.json')]
     else:
@@ -117,11 +134,11 @@ if tests:
     assert details['assertions'] >= {'pure': 424, 'narrow': 745, 'native': 5000}[phase]
 if phase == 'pure':
     v = read(E / 'observations.json')
-    assert v['sdk'] == pin['sdk'] and len(v['entered-tests']) == 7
+    assert v['sdk'] == pin['sdk'] and v['in-sdk'] is True and len(v['entered-tests']) == 7
     assert type(v['native-exchanges']) is int and v['native-exchanges'] == v['oracle-calls'] == 0
 elif phase == 'native':
     v = read(E / 'observations.json')
-    assert v['sdk'] == pin['sdk'] and len(v['rows']) == 187 and len(v['packets']) == 376
+    assert v['sdk'] == pin['sdk'] and v['in-sdk'] is True and len(v['rows']) == 187 and len(v['packets']) == 376
     assert len(v['entered-tests']) == 4
     for packet in v['packets']: assert sha(E / 'packets' / packet['file']) == packet['sha256']
     differences = [dict(id=row['id'], **outcome) for row in v['rows'] for outcome in row['outcomes'] if outcome['status-changed']]
@@ -129,14 +146,21 @@ elif phase == 'native':
     details.update(questions=187, candidate_packets=376, raw_status_differences=len(differences), observations_sha256=sha(E / 'observations.json'))
 elif phase.startswith('reader-'):
     v = read(E / 'observations.json')
-    assert v['status'] == 'passed' and v['sdk'] == pin['sdk'] and v['packets'] == len(v['rows']) == 376
+    assert v['status'] == 'passed' and v['sdk'] == pin['sdk'] and v['in-sdk'] is True and v['packets'] == len(v['rows']) == 376
     assert type(v['native-exchanges']) is int and v['native-exchanges'] == v['oracle-calls'] == 0
     assert v['negative-controls'] == 8 and v['manual-schema-preload'] is False and v['warmed-atoms-stable'] is True
     details.update(packets=376, native_exchanges=0, oracle_calls=0, checks=v['checks'])
 elif phase.endswith('-packets'):
     v = read(E / 'observations.json')
-    assert type(v['native-exchanges']) is int and v['native-exchanges'] == v['oracle-calls'] == 0
-    assert v['sdk'] == pin['sdk']
+    if phase == 'word-packets':
+        # This older twelve-record program did not instrument transport.
+        # Record only the checks it actually makes; do not invent zero counts.
+        assert v['records'] == 12 and v['manual-schema-preload'] is False
+        assert v['compiler-proof-authority'] is False
+        details.update(records=12, native_exchange_measurement='not-installed-in-this-historical-reader')
+    else:
+        assert type(v['native-exchanges']) is int and v['native-exchanges'] == v['oracle-calls'] == 0
+        assert v['sdk'] == pin['sdk']
 write('qualification.json', {'schema': 'bl.wide-integration-gate.v1', 'status': 'passed', 'phase': phase,
                             'sdk_pin': pin, 'source_pin': read(E / 'source-pin.json'), **details,
                             'scope': 'One named gate on the immutable candidate. Project selection and whole SDK qualification remain separate.',
