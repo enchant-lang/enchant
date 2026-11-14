@@ -1,0 +1,104 @@
+(ns formal.graph-proof-search
+ (:require [formal.graph-integer-certificate :as kernel] [formal.resources.integer :as integer]))
+
+;; Untrusted producer for the installed graph kernel. Diagnostic normalization
+;; is never a checking premise; only the final candidate crosses that boundary.
+(def profile :bl/graph-linear-proof-search-prototype-v1)
+(def defaults {:states 256 :rows 64 :work-units 2000000})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.graph-proof-search: " why) {}))))
+(defn- charge! [context n]
+ (require! (<= (swap! (:work context) + n) (:work-units (:limits context))) "search work limit"))
+(defn- arithmetic [context operation operands]
+ (let [plan (integer/plan operation operands {:integer-bits 128 :intermediate-bits 256 :work-units 100000})]
+  (require! (= :ready (:status plan)) "prospective coefficient operation refused")
+  (charge! context (get-in plan [:forecast :work-units]))
+  (case operation :add (+ (first operands) (second operands)) :sub (- (first operands) (second operands))
+                  :mul (* (first operands) (second operands)) :neg (- (first operands)))))
+(defn- plus-scaled [context a b scale]
+ (charge! context (count b))
+ (into {} (remove (fn [[_ n]] (zero? n))
+  (reduce (fn [out [x n]]
+            (assoc out x (arithmetic context :add [(get out x 0) (arithmetic context :mul [scale n])]))) a b))))
+(defn- combine [context positive negative variable]
+ (let [pa (get-in positive [:coeff variable]) nb (arithmetic context :neg [(get-in negative [:coeff variable])])]
+  {:coeff (plus-scaled context (plus-scaled context {} (:coeff positive) nb) (:coeff negative) pa)
+   :bound (arithmetic context :add [(arithmetic context :mul [nb (:bound positive)])
+                                   (arithmetic context :mul [pa (:bound negative)])])
+   :weights (plus-scaled context (plus-scaled context {} (:weights positive) nb) (:weights negative) pa)}))
+(defn- assigned-row [context prepared assignment id]
+ (let [atom (nth (:atoms prepared) id)]
+  (if (get assignment id) (select-keys atom [:coeff :bound])
+   {:coeff (plus-scaled context {} (:coeff atom) -1)
+    :bound (arithmetic context :sub [-1 (:bound atom)])})))
+(defn- contradiction [rows]
+ (first (filter #(and (empty? (:coeff %)) (< (:bound %) 0)) rows)))
+(defn- linear-proof [context prepared assignment]
+ (let [rows (mapv (fn [[id _]] (assoc (assigned-row context prepared assignment id) :weights {id 1}))
+                  (filter (fn [[id _]] (= :linear (:kind (nth (:atoms prepared) id)))) assignment))
+       variables (vec (sort (set (mapcat (comp keys :coeff) rows))))]
+  (loop [rows rows remaining variables]
+   (charge! context (inc (count rows)))
+   (if-let [bad (contradiction rows)] [:linear (mapv (fn [[id weight]] [id weight]) (sort-by first (:weights bad)))]
+    (when (seq remaining)
+     (let [x (first remaining)
+           positive (vec (filter #(pos? (get-in % [:coeff x] 0)) rows))
+           negative (vec (filter #(neg? (get-in % [:coeff x] 0)) rows))
+           zero (vec (filter #(zero? (get-in % [:coeff x] 0)) rows))
+           pairs (* (count positive) (count negative))]
+      ;; Counts are bounded before constructing pairs or coefficient products.
+      (when (<= (+ (count zero) pairs) (:rows (:limits context)))
+       (charge! context pairs)
+       (recur (vec (concat zero (for [p positive n negative] (combine context p n x)))) (rest remaining)))))))))
+(defn- truth [context prepared assignment]
+ (reduce (fn [out [kind body]]
+           (charge! context (+ 1 (if (vector? body) (count body) 0)))
+           (conj out
+            (case kind
+             :const body :atom (get assignment body)
+             :not (when (some? (nth out body)) (not (nth out body)))
+             :and (let [xs (mapv #(nth out %) body)]
+                    (cond (some #(= false %) xs) false (every? #(= true %) xs) true :else nil))
+             :or (let [xs (mapv #(nth out %) body)]
+                   (cond (some #(= true %) xs) true (every? #(= false %) xs) false :else nil)))))
+         [] (:formulas prepared)))
+(defn produce
+ "Search for a finite Boolean split/positive linear-combination candidate.
+  Failure means unknown in this bounded strategy, never satisfiable. The
+  consumer must freshly check the candidate against its original request."
+ ([original] (produce original {}))
+ ([original options]
+  (try
+   (require! (and (= :map (rt/kind-kind options)) (or (nil? (meta options)) (= {} (meta options)))
+                  (every? #(contains? defaults %) (keys options))) "closed search limits required")
+   (let [limits (merge defaults options)
+         _ (doseq [[key maximum] [[:states 1024] [:rows 256] [:work-units 20000000]]]
+             (require! (and (int? (get limits key)) (<= 0 (get limits key) maximum)) "bounded nonnegative limits required"))
+         ;; These limits govern search only. Fresh kernel normalization and its
+         ;; fixed admission/representation limits are a separate bounded phase.
+         prepared (kernel/describe original)
+         context {:limits limits :work (atom 0)} visited (atom 0) nodes (atom []) ids (atom {})]
+    (letfn [(emit [node]
+             (if (contains? @ids node) (get @ids node)
+              (let [id (count @nodes)]
+               (require! (< id (:proof-nodes kernel/limits)) "candidate DAG capacity")
+               (swap! nodes conj node) (swap! ids assoc node id) id)))
+            (search [assignment depth]
+             (charge! context 1)
+             (when (and (<= (swap! visited inc) (:states limits)) (<= depth (:proof-depth kernel/limits)))
+              (let [values (truth context prepared assignment)]
+               (if (some #(= false (nth values %)) (:roots prepared)) (emit [:boolean])
+                (if-let [leaf (linear-proof context prepared assignment)] (emit leaf)
+                 (when-let [id (first (remove #(contains? assignment %) (range (count (:atoms prepared)))))]
+                  (when-let [yes (search (assoc assignment id true) (inc depth))]
+                   (when-let [no (search (assoc assignment id false) (inc depth))]
+                    (emit [:split id yes no])))))))))]
+     (if-let [root (search {} 0)]
+      {:status :produced :profile profile :certificate (kernel/candidate original {:root root :nodes @nodes})
+       :search {:states @visited :nodes (count @nodes) :charged-work-units @(:work context) :limits limits}
+       :checking :not-run :checked-native-execution false :compiler-proof-authority false}
+      {:status :unknown :profile profile :reason :no-candidate-within-fragment-and-limits
+       :search {:states @visited :charged-work-units @(:work context) :limits limits}
+       :checking :not-run :compiler-proof-authority false})))
+   (catch error {:status :unknown :profile profile :reason (ex-message error)
+                 :checking :not-run :compiler-proof-authority false}))))

@@ -1,0 +1,76 @@
+(ns formal.graph-search-check
+ (:require [formal.graph-proof-search :as search] [formal.graph-integer-certificate :as kernel]
+           [formal.request-evidence :as evidence] [formal.request :as request]
+           [formal.request-answer :as answer] [formal.assumptions :as assumptions]
+           [formal.contract :as contract] [formal.point-profile :as policy] [formal.question-graph :as qg]
+           [formal.query :as q] [formal.term :as t] [formal.backend :as backend] [oracle]))
+(defn original [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric}}))
+(defn checked [r produced]
+ (evidence/recheck r (evidence/propose r {:certificate (:certificate produced)})))
+(deftest weighted-affine-search-produces-unprivileged-graph-candidates
+ (let [x (t/variable "search.x" t/Int)
+       r (original (q/prove (t/ge x (t/int 0)) {:assumptions [(t/ge (t/mul (t/int 2) x) (t/int 0))]}))
+       produced (search/produce r) result (checked r produced)]
+  (is (= :produced (:status produced)))
+  (is (= :not-run (:checking produced)))
+  (is (= :checked (get-in result [:proof-check :status])))
+  (is (= :entails (get-in result [:proof-check :verdict])))
+  (is (= :reported (get-in result [:conclusion :status])))
+  (is (= :checked (get-in result [:logical-conclusion :status])))
+  (is (<= (get-in produced [:search :nodes]) 1024)))
+ (let [p (t/variable "search.p" t/Bool) r (original (q/prove (t/any [p (t/not p)])))
+       produced (search/produce r)]
+  (is (= :produced (:status produced)))
+  (is (= :checked (get-in (checked r produced) [:proof-check :status])))
+  (is (= 2 (count (get-in produced [:certificate :proof :nodes]))))))
+(deftest a-failed-search-does-not-claim-satisfiability
+ (let [x (t/variable "search.false" t/Int)
+       r (original (q/prove (t/ge x (t/int 1)) {:assumptions [(t/ge x (t/int 0))]}))]
+  (doseq [options [{} {:states 0} {:rows 0 :states 1} {:work-units 0} {:states -1} {:trusted true}]]
+   (let [produced (search/produce r options)]
+    (is (= :unknown (:status produced)))
+    (is (= :not-run (:checking produced)))
+    (is (not (contains? produced :certificate)))))))
+(deftest source-contracts-can-use-the-common-policy-aware-carrier
+ (let [definition (contract/define {:name "graph-search-increment" :parameters {"x" t/Int} :source "(+ x 1)"
+                     :requires (fn [in] (t/ge (get in "x") (t/int 0)))
+                     :ensures (fn [_ out] (t/ge out (t/int 1)))})
+       prepared (contract/prepare definition)
+       r (original (assoc (:problem prepared) :vacuity :reject))
+       produced (search/produce r) variable (get-in prepared [:inputs "x" :data])
+       e (evidence/propose r {:certificate (:certificate produced)
+                              :feasibility {:strategy :supplied-integer :point {variable 0}}})
+       result (evidence/recheck r e)]
+  (is (= :ready (:status prepared)))
+  (is (= :reviewed-not-mechanically-proved (:source-connection prepared)))
+  (is (= :produced (:status produced)))
+  (is (= :accepted (get-in result [:conclusion :status])))
+  (is (= :witnessed (get-in result [:feasibility-check :feasibility])))
+  (is (= false (:compiler-proof-authority result) (:checked-native-execution result)))))
+(deftest an-unsafe-contract-still-needs-a-separate-counterexample-point
+ (let [definition (contract/define {:name "graph-search-decrement" :parameters {"x" t/Int} :source "(- x 1)"
+                     :requires (fn [in] (t/ge (get in "x") (t/int 0)))
+                     :ensures (fn [_ out] (t/ge out (t/int 0)))})
+       prepared (contract/prepare definition) r (original (:problem prepared))
+       variable (get-in prepared [:inputs "x" :data])
+       produced (search/produce r)
+       replayed (evidence/recheck r (evidence/propose r {:answer (answer/supply r {variable 0})}))]
+  (is (= :unknown (:status produced)))
+  (is (= :checked (get-in replayed [:conclusion :status])))
+  (is (= :counterexample (get-in replayed [:conclusion :kind])))))
+(deftest integer-choice-remains-an-explicit-next-fragment
+ (let [x (t/variable "search.choice" t/Int)
+       choice (t/ite (t/lt x (t/int 0)) (t/neg x) x)
+       r (original (q/prove (t/ge choice (t/int 0))))]
+  (is (= :unknown (:status (search/produce r))))))
+(deftest graph-search-opens-no-native-or-oracle-owner
+ (let [r (original (q/prove (t/bool true)))
+       module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    #(is (= :checked (get-in (checked r (search/produce r)) [:proof-check :status]))))
+   (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)
