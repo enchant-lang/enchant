@@ -15,9 +15,6 @@
 (define native-host-callables (make-table test: eq? weak-keys: #t))
 (define (native-mark-host-callable! value)
  (if (procedure? value) (table-set! native-host-callables value #t)) value)
-(define native-host-callables (make-table test: eq? weak-keys: #t))
-(define (native-mark-host-callable! value)
- (if (procedure? value) (table-set! native-host-callables value #t)) value)
 (define native-missing (list 'native-missing))
 (define native-opaque-counter 0)
 (define native-opaque-ids (make-table test: eq? weak-keys: #t))
@@ -231,7 +228,7 @@
 (define (bl-struct mod fields)
  (let ((mod (native-module-key mod)))
   (cond ((eq? mod (bl-key "Elixir.BeamLisp.Vector"))
-         (native-vector-with-meta (bl-vec (bl-items (bl-get fields (bl-key "items")))) (bl-get fields (bl-key "meta"))))
+         (native-vector-with-meta (native-vector-from-canonical-items (bl-get fields (bl-key "items"))) (bl-get fields (bl-key "meta"))))
         ((eq? mod (bl-key "Elixir.BeamLisp.Set"))
          (let ((members (bl-get fields (bl-key "members") (bl-get fields (bl-key "map") native-missing))))
           (if (eq? members native-missing) (error "set struct requires members")
@@ -243,7 +240,7 @@
        ((bl-tag? x 'map) (bl-get x (bl-key "__struct__")))
        (else (let ((descriptor (table-ref native-opaque-structs x #f))) (if descriptor (car descriptor) bl-nil)))))
 (define (native-struct-fields x)
- (cond ((bl-tag? x 'vec) (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.Vector") (bl-key "items") (bl-tuple (bl-items x)) (bl-key "meta") (native-vector-meta x)))
+ (cond ((bl-tag? x 'vec) (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.Vector") (bl-key "items") (native-vector-canonical-items x) (bl-key "meta") (native-vector-meta x)))
        ((bl-tag? x 'set) (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.Set") (bl-key "members")
          (bl-map (bl-key "__struct__") (bl-key "Elixir.MapSet")
           (bl-key "map") (let loop ((xs (native-set-items x)) (m (bl-empty-map)))
@@ -373,6 +370,7 @@
 
 ;; A raise has explicit class/reason/raw trace. Catch variables and finally
 ;; flags are lexical; scheduler suspension never runs language finally.
+(define (native-capture-stack) (h-logical-stack))
 (define native-raise-marker (list 'native-raise-marker))
 (define (native-raised? x)
  (and (vector? x) (= (vector-length x) 4) (eq? (vector-ref x 0) native-raise-marker)))
@@ -382,7 +380,7 @@
 (define (native-exception-reason e)
  (cond ((native-raised? e) (vector-ref e 2)) ((bl-tag? e 'bl-exit) (vector-ref e 1))
        (else (with-output-to-string "" (lambda () (display-exception e (current-output-port)))))))
-(define (native-exception-trace e) (if (native-raised? e) (vector-ref e 3) (h-logical-stack)))
+(define (native-exception-trace e) (if (native-raised? e) (vector-ref e 3) (native-capture-stack)))
 (define (bl-reraise kind reason trace) (native-raise kind reason trace))
 (define (bl-try body handler after)
  ;; No dynamic-wind here: parking/yielding is suspension, not a language exit.
@@ -397,9 +395,9 @@
        (lambda (e) (handler (native-exception-kind e) (native-exception-reason e) (native-exception-trace e))) body)))
       (cleanup) value))))))
 (set! bl-guard (lambda (thunk) (with-exception-catcher (lambda (e) #f) (lambda () (bl-truthy (thunk))))))
-(set! h-exit (lambda (reason) (native-raise (bl-key "exit") reason (h-logical-stack))))
-(set! h-raise (lambda (reason) (native-raise (bl-key "error") (if (string? reason) reason (bl-show reason)) (h-logical-stack))))
-(define (native-throw reason) (native-raise (bl-key "throw") reason (h-logical-stack)))
+(set! h-exit (lambda (reason) (native-raise (bl-key "exit") reason (native-capture-stack))))
+(set! h-raise (lambda (reason) (native-raise (bl-key "error") (if (string? reason) reason (bl-show reason)) (native-capture-stack))))
+(define (native-throw reason) (native-raise (bl-key "throw") reason (native-capture-stack)))
 
 ;; Extend pattern matching with generic struct fields. Missing keys stay
 ;; distinct from nil-valued keys, and raw map patterns use exact key equality.
@@ -810,3 +808,64 @@
    (if readable? (string-append "\"" escaped "\"") escaped))
   (if (bl-tag? x 'utf16-keyword) (string-append ":" (native-render (native-atom-name x) #f))
    (native-scalar-render x readable?)))))
+
+;; Passive Vector projection is the owning host/vector.bl 32-way :bl_vec ABI.
+;; Internal binary tries remain private; CompilerData validates the canonical
+;; tuple snapshot without knowing or trusting the native implementation.
+(define native-vector-projections (make-table test: eq? weak-keys: #t weak-values: #t))
+(define (native-vector-project-node value offset level tree-count)
+ (if (= level 0)
+  (bl-tuple (let loop ((i 31) (out '()))
+   (if (< i 0) out (loop (- i 1) (cons (native-vector-ref value (+ offset i)) out)))))
+  (let ((capacity (expt 2 level)))
+   (bl-tuple (let loop ((i 31) (out '()))
+    (if (< i 0) out
+     (let ((start (+ offset (* i capacity))))
+      (loop (- i 1)
+       (cons (if (>= start tree-count) bl-nil
+              (native-vector-project-node value start (- level 5) tree-count)) out)))))))))
+(define (native-vector-canonical-items value)
+ (let* ((storage (vector-ref value 1)) (cached (table-ref native-vector-projections storage #f)))
+  (if cached cached
+   (let* ((count (native-vector-count value))
+          (items
+           (if (<= count 32) (bl-tuple (bl-items value))
+            (let* ((tail-size (+ 1 (modulo (- count 1) 32))) (tree-count (- count tail-size))
+                   (shift (let level ((bits 5)) (if (> tree-count (expt 2 (+ bits 5))) (level (+ bits 5)) bits)))
+                   (tail (bl-tuple (let loop ((i (- count 1)) (out '()))
+                     (if (< i tree-count) out (loop (- i 1) (cons (native-vector-ref value i) out))))))
+             (bl-tuple (list (bl-key "bl_vec") count shift
+              (native-vector-project-node value 0 shift tree-count) tail))))))
+    (table-set! native-vector-projections storage items) items)))))
+(define (native-vector-canonical-trie? items)
+ (and (bl-tag? items 'tuple) (= (bl-count items) 5)
+      (eq? (bl-nth items 0) (bl-key "bl_vec"))
+      (h-is-int (bl-nth items 1)) (> (bl-nth items 1) 32)))
+(define (native-vector-unproject-node node level expected tail)
+ (if (not (and (bl-tag? node 'tuple) (= (bl-count node) 32))) (error "invalid canonical vector trie node"))
+ (if (= level 0)
+  (if (= expected 32) (append (bl-items node) tail) (error "invalid canonical vector leaf count"))
+  (let ((capacity (expt 2 level)))
+   (let loop ((i 31) (out tail))
+    (if (< i 0) out
+     (let* ((child (bl-nth node i)) (amount (max 0 (min capacity (- expected (* i capacity))))))
+      (loop (- i 1)
+       (if (= amount 0)
+        (if (bl-is-nil child) out (error "non-nil canonical vector unused slot"))
+        (if (bl-is-nil child) (error "missing canonical vector trie child")
+         (native-vector-unproject-node child (- level 5) amount out))))))))))
+(define (native-vector-from-canonical-items items)
+ (if (not (bl-tag? items 'tuple)) (error "canonical vector items must be a tuple"))
+ (if (not (native-vector-canonical-trie? items))
+  (if (<= (bl-count items) 32) (bl-vec (bl-items items)) (error "oversized dense canonical vector items"))
+  (let* ((count (bl-nth items 1)) (shift (bl-nth items 2)) (root (bl-nth items 3)) (tail (bl-nth items 4)))
+   (if (not (and (h-is-int shift) (>= shift 5) (<= shift 30) (= (modulo shift 5) 0)
+                 (bl-tag? tail 'tuple) (>= (bl-count tail) 1) (<= (bl-count tail) 32)))
+    (error "invalid canonical vector trie header"))
+   (let ((tree-count (- count (bl-count tail))))
+    (if (not (and (= (bl-count tail) (+ 1 (modulo (- count 1) 32)))
+                  (> tree-count 0) (= (modulo tree-count 32) 0)
+                  (<= tree-count (expt 2 (+ shift 5)))
+                  (or (= shift 5) (> tree-count (expt 2 shift)))))
+     (error "invalid canonical vector count or shift"))
+    (bl-vec (native-vector-unproject-node root shift tree-count (bl-items tail)))))))

@@ -152,7 +152,26 @@
  (for-each (lambda (row)
    (native-env-put! (native-row (bl-key "link") "core" (bl-nth row 0)) (bl-nth row 1)))
   (bl-items (bl-get metadata (bl-key "core-links"))))
+ (native-install-resolution! (bl-get metadata (bl-key "resolution")))
  (bl-key "ok"))
+(define (native-install-resolution! ledger)
+ (if (not (bl-is-nil ledger))
+  (begin
+   (if (not (= 1 (bl-get ledger (bl-key "version")))) (error "unsupported native namespace ledger"))
+   (for-each (lambda (entry) (native-declare-ns (bl-nth entry 0)))
+    (native-map-pairs (bl-get ledger (bl-key "seed-names"))))
+   (for-each
+    (lambda (entry)
+     (let* ((ns (bl-nth entry 0)) (header (bl-nth entry 1)))
+      (for-each (lambda (pair)
+       (native-env-put! (native-row (bl-key "alias") ns (bl-nth pair 0)) (bl-nth pair 1)))
+       (native-map-pairs (bl-get header (bl-key "aliases"))))
+      (for-each (lambda (pair)
+       (native-env-put! (native-row (bl-key "refer") ns (bl-nth pair 0)) (bl-nth pair 1)))
+       (native-map-pairs (bl-get header (bl-key "refers"))))
+      (native-env-put! (native-row (bl-key "refer_clojure_exclude") ns)
+       (bl-items (bl-get header (bl-key "core-excludes"))))))
+    (native-map-pairs (bl-get ledger (bl-key "headers")))))))
 (define (native-known-ns? ns)
  (not (eq? native-missing (native-env-value (native-row (bl-key "ns") ns)))))
 (define (native-ensure-loaded ns)
@@ -356,7 +375,7 @@
    (cond ((native-exception-value? x) x)
          ((bl-tag? x 'map) (native-ex-info (bl-invoke (native-global "rt" "print_str") (list x)) x))
          (else (native-ex-info (bl-show x) bl-nil)))
-   (h-logical-stack))))
+   (native-capture-stack))))
 
 ;; Closed record registry; declaration/publication APIs require the BEAM's
 ;; Source custody and remain explicit exclusions, just as in the JS target.

@@ -1,0 +1,101 @@
+; Closed source-derived namespace/seed ledger. Inert Reader projection only:
+; no source evaluation, ambient Env admission, or ANF interpretation.
+(ns native.resolution
+ (:require [reader :as rd] [reader-node :as rn] [compiler :as c]))
+(defn symbol? [node name]
+ (let [n (rn/node-form node)] (and (= :symbol (rn/node-tag n)) (= name (rn/node-name n)))))
+(defn definition [closure name]
+ (or (first (filter #(= name (:name %)) (:defs (get (:units closure) "rt"))))
+     (throw (ex-info "native resolution: missing original rt seed declaration" {:name name}))))
+(defn function-body [d]
+ (let [items (rn/node-items (:form d))]
+  (when-not (and (symbol? (first items) "fn") (symbol? (second items) (:name d))
+                 (= :vector (rn/node-tag (rn/node-form (nth items 2))))
+                 (empty? (rn/node-items (nth items 2))) (= 4 (count items)))
+   (throw (ex-info "native resolution: seed declaration changed shape" {:name (:name d)})))
+  (nth items 3)))
+(defn quoted-seed-rows [closure name]
+ (let [body (function-body (definition closure name)) items (rn/node-items body)]
+  (when-not (and (= :list (rn/node-tag (rn/node-form body))) (= 2 (count items))
+                 (symbol? (first items) "quote"))
+   (throw (ex-info "native resolution: seed rows must remain original inert quote data" {:name name})))
+  (let [rows (c/datum (second items))]
+   (doseq [row rows] (when-not (string? (first row))
+                    (throw (ex-info "native resolution: invalid literal seed row" {:name name}))))
+   rows)))
+(defn seed-closure-names [closure]
+ (let [body (function-body (definition closure "seed-closures")) items (rn/node-items body)
+       bindings (rn/node-items (second items))]
+  (when-not (and (symbol? (first items) "let") (= 2 (count bindings)) (symbol? (first bindings) "put"))
+   (throw (ex-info "native resolution: seed-closure publisher changed" {})))
+  ; Verify the publisher is exactly the original core Env/intern closure.
+  (let [publisher (rn/node-items (second bindings)) call (rn/node-items (nth publisher 2))]
+   (when-not (and (symbol? (first publisher) "fn")
+                  (symbol? (first call) "BeamLisp.Env/intern") (= "core" (rn/node-form (second call))))
+    (throw (ex-info "native resolution: seed-closure owner is not core" {}))))
+  (mapv (fn [form]
+   (let [call (rn/node-items form) name (rn/node-form (second call))]
+    (when-not (and (symbol? (first call) "put") (string? name))
+     (throw (ex-info "native resolution: nonliteral seed closure name" {}))) name)) (drop 2 items))))
+(defn source-header [u]
+ ; Read exactly ONE form. Large compiler/rt source bodies are not reparsed.
+ (let [read (rd/read-next (rd/stream (:source u) (:path u)))]
+  (when-not (= :ok (first read)) (throw (ex-info "native resolution: missing namespace header" {:namespace (:ns u)})))
+  (let [header (BeamLisp.AOT/namespace_header (second read))]
+   (or (get header (:ns u)) (throw (ex-info "native resolution: namespace header mismatch" {:namespace (:ns u)}))))))
+(defn build [closure]
+ (let [core (set (concat (map first (:core-links closure))
+                        (map first (quoted-seed-rows closure "seed-rows"))
+                        (seed-closure-names closure)))
+       cpp (set (map first (quoted-seed-rows closure "seed-cpp-rows")))
+       seeds {"core" (vec (sort core)) "cpp" (vec (sort cpp))}
+       public (reduce (fn [m ns]
+                 (assoc m ns (set (concat (get seeds ns [])
+                   (keep (fn [d] (when (and (:name d) (not (:private? d))) (:name d)))
+                         (:defs (get (:units closure) ns)))))))
+                {"core" core "cpp" cpp} (:order closure))
+       headers
+       (into {} (map (fn [ns]
+        (let [raw (source-header (get (:units closure) ns))
+              replay (reduce (fn [state request]
+                       (let [target (elem request 0) alias (elem request 1) refers (elem request 2)
+                             names (if (= :all refers) (get public target #{}) refers)
+                             _ (when-not (or (contains? (:units closure) target)
+                                              (contains? (set (:stubs closure)) target) (contains? seeds target))
+                                 (throw (ex-info "native resolution: dependency absent from closure" {:namespace ns :target target})))
+                             state (if alias (assoc-in state [:aliases alias] target) state)]
+                        (reduce (fn [s name] (assoc-in s [:refers name] target)) state names)))
+                      {:aliases {} :refers {}} (reverse (:require_specs raw)))]
+         [ns (assoc replay :refer-alls (vec (:refer_alls raw))
+                    :core-excludes (vec (:core-excludes raw)) :require-specs (vec (:require_specs raw)))])) (:order closure)))]
+  {:version 1 :seed-names seeds :headers headers}))
+(defn direct [ledger table ns name]
+ (cond (contains? (get table ns #{}) name) ["compiled" ns name]
+       (contains? (set (get-in ledger [:seed-names ns] [])) name) ["seed" ns name]
+       :else nil))
+(defn refer-source [ledger ns name] (get-in ledger [:headers ns :refers name]))
+(defn exact [ledger table ns name]
+ (loop [ns ns seen #{}]
+  (when-not (or (nil? ns) (contains? seen ns))
+   (or (direct ledger table ns name)
+       (recur (refer-source ledger ns name) (conj seen ns))))))
+(defn normal [ledger table ns name]
+ (let [match (binary/match name "/")]
+  (if (and (erlang/is_tuple match) (> (elem match 0) 0))
+   (let [at (elem match 0) prefix (subs name 0 at) suffix (subs name (inc at))
+         target (get-in ledger [:headers ns :aliases prefix] prefix)]
+    (direct ledger table target suffix))
+   ; Mirrors Env/candidates exactly. Core exclusions are recorded by the SDK
+   ; but its current candidate fallback treats them as declaration metadata.
+   (or (direct ledger table ns name)
+       (when-let [source (refer-source ledger ns name)] (direct ledger table source name))
+       (direct ledger table "core" name) (direct ledger table "sugar" name)))))
+(defn global-decision [ledger table node]
+ (when-not (or (contains? table (:ns node)) (contains? (:seed-names ledger) (:ns node)))
+  (throw (ex-info "native resolution: global context namespace absent from closure" {:namespace (:ns node)})))
+ (let [mode (if (= :exact (:lookup node)) "exact" "normal")
+       selected (if (= mode "exact") (exact ledger table (:ns node) (:name node))
+                    (normal ledger table (:ns node) (:name node)))]
+  (if selected ["global" (:ns node) (:name node) mode (first selected) (second selected) (nth selected 2)]
+   (throw (ex-info (str "native resolution: absent " mode " global " (:ns node) "/" (:name node))
+                   {:namespace (:ns node) :name (:name node) :lookup (:lookup node)})))))

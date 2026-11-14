@@ -20,7 +20,7 @@
 (define (native-lazy-failure reason)
  (native-raise (bl-key "error")
   (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.LazySeq.ForceError")
-   (bl-key "reason") reason (bl-key "message") (string-append "LazySeq force failed: " (bl-show reason))) (h-logical-stack)))
+   (bl-key "reason") reason (bl-key "message") (string-append "LazySeq force failed: " (bl-show reason))) (native-capture-stack)))
 (define (native-lazy-edges value)
  (let loop ((todo (list value)) (seen '()) (edges '()))
   (if (null? todo) edges

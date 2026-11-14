@@ -2,12 +2,14 @@
 ; transitive canonical runtime globals this smoke reaches. No reduced kernel,
 ; duplicate scheduler, or source/ANF interpreter is used.
 (ns native.direct-smoke
- (:require [compiler :as compiler] [js.build :as build] [native.c :as c]
+ (:require [compiler :as compiler] [js.build :as build] [js.actor :as actor] [native.c :as c]
            [native.scheme :as scalar] [anf] [bl.json :as json]))
 (def args (BeamLisp/argv))
-(def host-path (or (first args) "research/native-seed/out/compiler-closure/host.scm"))
+(def host-path (or (first args) "research/native-seed/out/compiler-closure/prelude.scm"))
 (def output (or (second args) "research/native-seed/out/direct-smoke"))
 (def fixture (or (nth args 2 nil) "research/native-seed/direct/fixtures/control.bl"))
+(def leaf-path (or (nth args 3 nil) "research/native-seed/out/compiler-closure/leaves.json"))
+(def leaves (set (get (json/decode (File/read! leaf-path)) "registered_leaves")))
 (def namespace "native.kernel")
 (defn forms [path] (BeamLisp.Ns.Reader/read (File/read! path) {:file path}))
 (def source-definitions
@@ -17,7 +19,11 @@
 (def environment (assoc (compiler/new-env namespace) :file fixture))
 (def compiled (mapv #(assoc % :ns namespace :node (compiler/compile (:form %) environment)) source-definitions))
 (def by-name (into {} (map (fn [d] [(:name d) d]) compiled)))
-(defn nodes [node] (cons node (mapcat nodes (filter some? (anf/executable-children node)))))
+(defn nodes [root]
+ (loop [todo (list root) out (list)]
+  (if (erlang/== (list) todo) (lists/reverse out)
+   (let [node (erlang/hd todo)]
+    (recur (erlang/++ (anf/executable-children node) (erlang/tl todo)) (cons node out))))))
 (def reachable
  (loop [todo ["bl-main" "main"] done #{}]
   (if (empty? todo) done
@@ -36,6 +42,12 @@
   (fn [node]
    (or (when (contains? #{"core" "rt"} (:ns node)) (get scalar/core-leaves (:name node)))
        (str "(native-global " (scalar/text (:ns node)) " " (scalar/text (:name node)) ")")))
+  :remote-resolver (fn [node]
+   (let [name (erlang/atom_to_binary (:fun node))
+         key (str (erlang/atom_to_binary (:mod node)) "/" name "/" (count (:args node)))]
+    (if (= :host (:mod node))
+     (if (contains? actor/host-names name) (str "h-" name) (scalar/refuse node))
+     (if (contains? leaves key) (str "(native-remote " (scalar/text key) ")") (scalar/refuse node)))))
   :arithmetic-resolver (fn [node]
     (str "(lambda (a b) (bl-arithmetic " (scalar/literal (:fun node)) " a b))"))})
 (def emitted (c/emit-definitions kept options))
@@ -53,4 +65,4 @@
 (File/write! (str output "/manifest.json")
  (json/encode (assoc (:manifest emitted) :status :emitted-not-executed :fixture fixture
                :canonical-runtime-definitions (count kept) :scope :smoke)))
-(println (str "DIRECT_SMOKE_EMITTED " (count kept) " definitions")))
+(println (str "DIRECT_SMOKE_EMITTED " (count kept) " definitions"))

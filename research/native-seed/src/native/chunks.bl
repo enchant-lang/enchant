@@ -3,7 +3,7 @@
 (ns native.chunks
  (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
            [native.eval :as ev] [native.scheme :as scheme]
-           [bl.json :as json] [clojure.string :as string] [anf]))
+           [bl.json :as json] [clojure.string :as string] [anf] [native.resolution :as resolution]))
 (def args (BeamLisp/argv))
 (def mode (or (nth args 0 nil) "plan"))
 (def artifact-path (or (nth args 1 nil) "research/native-seed/out/compiler-closure/partition.json"))
@@ -16,6 +16,7 @@
 (doseq [u units] (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u))))))
 (def leaves (set (get (json/decode (File/read! leaves-path)) "registered_leaves")))
 (def table (into {} (map (fn [u] [(:ns u) (set (keep :name (:defs u)))]) units)))
+(def resolution-ledger (resolution/build closure))
 (def by-module (assoc (into {} (mapcat (fn [u] [[(:module u) (:ns u)] [(:base-module u) (:ns u)]]) units))
                       :Elixir.BeamLisp.CompilerData "host.compiler-data"
                       :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta"))
@@ -29,10 +30,11 @@
   "eval_sha256" (artifact/sha (File/read! "research/native-seed/src/native/eval.bl"))
   "bootstrap_sha256" (artifact/sha (File/read! "research/native-seed/src/native/bootstrap.bl"))
   "driver_sha256" (artifact/sha (File/read! "research/native-seed/src/native/chunks.bl"))
+  "resolution_sha256" (artifact/sha (File/read! "research/native-seed/src/native/resolution.bl"))
   "options_sha256" (artifact/sha (erlang/term_to_binary (:options closure) (list :deterministic)))})
 (def emission-input
  (assoc (select-keys key-input ["sdk_descriptor_sha256" "emitter_sha256" "eval_sha256"
-                              "bootstrap_sha256" "options_sha256" "driver_sha256"])
+                              "bootstrap_sha256" "options_sha256" "driver_sha256" "resolution_sha256"])
         "resolver_policy" "native-exact-late-lookup-v2"))
 (defn remote-decision [n]
  (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
@@ -44,13 +46,7 @@
     ["compiled" key (get by-module m) logical (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
    (contains? stub-modules m) ["excluded-namespace" key]
    :else (throw (ex-info (str "native V2 cache: unresolved remote signature " key) {:remote key})))))
-(defn global-decision [n]
- (cond
-  (contains? (get table (:ns n) #{}) (:name n))
-   ["compiled-global" (:ns n) (:name n) (if (= :exact (:lookup n)) "exact" "normal")]
-  (and (contains? #{"core" "cpp"} (:ns n)) (BeamLisp.Env/bound? (:ns n) (:name n)))
-   ["seed-global" (:ns n) (:name n) (if (= :exact (:lookup n)) "exact" "normal")]
-  :else (throw (ex-info (str "native V2 cache: unresolved global " (:ns n) "/" (:name n)) {:namespace (:ns n) :name (:name n)}))))
+(defn global-decision [n] (resolution/global-decision resolution-ledger table n))
 (defn decisions-for [defs]
  ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
  ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
@@ -84,9 +80,7 @@
      ((:remote-resolver base) n)))
    :global-resolver
    (fn [n]
-    (when-not (or (contains? (get table (:ns n) #{}) (:name n))
-                  (and (contains? #{"core" "cpp"} (:ns n)) (BeamLisp.Env/bound? (:ns n) (:name n))))
-     (throw (ex-info "native chunks: global absent from source closure" {:namespace ns :global [(:ns n) (:name n)]})))
+    (global-decision n)
     ((:global-resolver base) n)))))
 (defn emit-definition [u d]
  (let [ns (:ns u) value (scheme/emit (:node d) (checked-context ns))]
@@ -101,7 +95,7 @@
                (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))))
    (str value "\n"))))
 (defn bundle-metadata []
- {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure)
+ {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure) :resolution resolution-ledger
   :provider-sources (:provider-sources closure) :options (:options closure) :stubs (:stubs closure)
   :core-links (:core-links closure) :return-constructor-shapes (:return-constructor-shapes closure)
   :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)

@@ -238,7 +238,7 @@
 (native-add-leaf! "erlang/float_to_binary/2" (lambda (x options) (number->string (vector-ref x 1))))
 (define (native-check-function-arity n)
  (if (not (and (h-is-int n) (>= n 0)))
-  (native-raise (bl-key "error") (bl-key "badarg") (h-logical-stack))) n)
+  (native-raise (bl-key "error") (bl-key "badarg") (native-capture-stack))) n)
 (native-add-leaf! "erlang/is_function/2" (lambda (f n)
  (native-check-function-arity n) (and (procedure? f) (native-callable-accepts? f n))))
 (native-add-leaf! "lists/any/2" native-list-any)
