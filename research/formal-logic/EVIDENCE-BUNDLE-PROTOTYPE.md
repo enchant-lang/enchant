@@ -1,7 +1,10 @@
 # One question, several independently checked kinds of evidence
 
-The source in `prototypes/evidence-bundle` is a pending isolated prototype. It
-has not passed its functional gate and changes no SDK or default effect handler.
+The isolated source in `prototypes/evidence-bundle` passed **47 assertions**
+across five explicitly recorded test names, then a fresh reader passed six
+tamper/budget controls on two real packets with zero native or oracle calls.
+Its [qualification](evidence/evidence-bundle-prototype/qualification.json)
+binds the actual source and artifacts. It changes no SDK or default effect handler.
 
 An engine report, a checked point and a checked certificate answer different
 questions. Preserve those results independently. A native UNSAT label must not
@@ -39,12 +42,15 @@ can still be checked against that new request. A saved packet contains only the
 original request and candidate evidence. Reopening uses the reader's current
 allowance and runs the checks again. A producer's saved success is not an input.
 
-The prepared gate tests closed envelopes, changed subjects/adapters, false proof
+The actual gate tests closed envelopes, changed subjects/adapters, false proof
 flags, exact allowance boundaries and refusal before checker invocation. It also
 captures both actual native UNSAT reports beside independent eight-point results,
 then reopens both packets in a fresh SDK-only process with only the two prototype
 imports. That reader denies oracle calls, counts actual native exchanges, checks
-warmed atom stability and exercises six tamper/budget controls.
+warmed atom stability and exercises six tamper/budget controls. The earlier
+19-assertion attempt is preserved under `before-complete-producer-coverage`;
+its qualification was not accepted because three intended tests were nested.
+The final gate requires all five names actually entered and at least 47 assertions.
 
 This is preparation toward a common checking seam. Default oracle integration,
 durable ledger indexing, generalized certificates and Source/compiler outcomes
