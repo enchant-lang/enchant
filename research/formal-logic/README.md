@@ -652,9 +652,13 @@ The [coherent word-policy integration](WORD-INTEGRATION.md) is qualified and
 selected: 10,922 BEAM assertion executions, 599 namespace preflight checks,
 unchanged outcomes for 187 paired native questions, and two fresh readers of
 twelve new packets and indexed durable rows with zero solver exchanges. The
-91-cell dossier writer has passed; independent repetition, host activation
-and browser qualification are still in progress. The full formal/total-language
-goal remains active.
+91-cell dossier passed an independent unchanged repetition. Its selected SDK,
+frozen kit, 147 focused and 1,601 full browser checks, inspected frames, and
+sixteen real browser save/refresh controls are bound by the
+[word presentation receipt](evidence/word-presentation/dossier-qualification.json).
+The [live word chapter](https://work.tailcb5318.ts.net:18100/#a-byte-can-carry-its-meaning-across-both-solvers)
+includes the actual executed result and a saved, source-backed evidence view.
+The full formal/total-language goal remains active.
 
 Two next slices are prepared as isolated source, with functional qualification
 queued behind the current word SDK: [finite word proof checking](WORD-EXHAUSTION-PROTOTYPE.md),
