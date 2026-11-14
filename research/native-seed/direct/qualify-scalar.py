@@ -118,8 +118,9 @@ def main() -> int:
         descriptor = Path(sdk_pin["sdk"]) / "artifact.json"
         if sha(descriptor) != sdk_pin["descriptor_sha256"]:
             raise RuntimeError("qualified SDK descriptor identity changed")
-        if (root / ".bl/sdks/current-sdk").resolve() != Path(sdk_pin["sdk"]).resolve():
-            raise RuntimeError("checkout SDK differs from prototype pin")
+        # Snapshot qualification binds the retained artifact; the integration
+        # checkout may select a different SDK for unrelated engine work.
+        report["sdk_selection"] = "qualified immutable sdk-pin.json artifact"
         program = out / "program.scm"
         control = out / "control.c"
         manifest_path = out / "manifest.json"
