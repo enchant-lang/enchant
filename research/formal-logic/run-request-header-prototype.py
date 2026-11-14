@@ -38,8 +38,8 @@ assert all(sha(R/n)==d for n,d in digests.items())
 observed=read(E/'observations.json')
 assert observed['sdk']==pin['sdk'] and observed['compiler-proof-authority'] is False
 assert len(observed['entered-tests'])==6 and set(observed['entered-tests'])=={'accepted','refusals','metadata','not-typed','measurement','no-native'}
-assert observed['measurement']['previous-full-graph-checks']>=6
-assert observed['measurement']['single-pass-full-graph-checks']==1
+assert observed['measurement']['previous-graph-check-invocations']>=6
+assert observed['measurement']['single-pass-graph-check-invocations']==1
 assert observed['measurement']['universal-speed-claim'] is False
 write('qualification.json',{'schema':'bl.request-header-prototype-qualification.v1','status':'passed','sdk_pin':pin,
  'code_commit':commit,'source_sha256':digests,'assertions':int(counts[0]),'in_sdk':False,'in_common_evidence_interface':False,

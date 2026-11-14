@@ -13,7 +13,7 @@ consumer accepts this output as a cached typed admission or trusted request.
 
 The six prepared tests compare valid and invalid wrappers/headers, preserve
 unfamiliar shared metadata without decoding, show that a valid header can still
-fail later typed admission, count actual full graph checks under a calibrated
+fail later typed admission, count actual `graph/check!` invocations under a calibrated
 trace, and deny native/oracle execution. At least forty assertions and all six
 named bodies are required. The operation-count observation must come from the
 running tests, not from a top-level write during file loading.
@@ -25,3 +25,8 @@ separate measurements and a private checked-operation design; accepting a
 caller-supplied ready flag is not that design. Any timing comparison must name
 its fixture, warmup and process; fewer graph checks alone is not a universal
 speedup claim.
+
+The trace counts all calls, including validation of the small selected field
+subgraphs. Report it as graph-check invocations, not as a count of complete
+original-source scans or native solver checks. The proposed path does directly
+check the complete original graph once.
