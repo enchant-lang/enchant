@@ -17,8 +17,10 @@ bundle, with separate premise checks and allow/report/reject acceptance policy.
 
 The live dossier now has 94 executed cells, independently checked without result
 changes. Its revision-three comparison preserves both earlier native Org answers
-and displays nine actual proof/premise/policy cases. The new browser qualification
-is in progress; the [earlier scalar presentation receipt](evidence/scalar-presentation/dossier-qualification.json)
+and displays nine actual proof/premise/policy cases. The [new presentation qualification](evidence/obligation-presentation/dossier-qualification.json)
+includes 239 focused and 1,601 full browser checks, inspected mobile cards and
+sixteen real save/refresh controls on a separate five-revision fixture. The
+[earlier scalar presentation receipt](evidence/scalar-presentation/dossier-qualification.json)
 retains its own 93-cell document, SDK and browser evidence.
 
 Graph proof search passed [43 assertions](evidence/graph-search-prototype/qualification.json),
