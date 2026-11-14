@@ -1,0 +1,32 @@
+(ns formal.obligation-packet-producer
+ (:require [formal.obligation-batch.request-evidence :as evidence] [formal.obligation-batch.request :as request]
+           [formal.obligation-batch.finite-word-certificate :as finite] [formal.obligation-batch.graph-integer-certificate :as integer]
+           [formal.obligation-batch.assumptions :as assumptions] [formal.obligation-batch.query :as q] [formal.term :as t]
+           [formal.obligation-batch.question-graph :as qg] [formal.obligation-batch.point-profile :as policy] [bl.json :as json]))
+(defn original [query profile] (request/prepare (qg/prepare query) {:policy {:profile profile}}))
+(defn wire [data]
+ {:formal/data-graph 1 :profile (:profile data) :root (:root data)
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)]) (:nodes data))})
+(defn finite-row [inconsistent?]
+ (let [x (t/variable "cold.obligation.bit" [:bv 1]) zero (t/literal [:bv 1] 0) one (t/literal [:bv 1] 1)
+       r (original (q/prove (t/eq x x) {:vacuity :reject
+            :assumptions (if inconsistent? [(t/eq x zero) (t/eq x one)] [(t/eq x one)])}) policy/numeric-word)
+       e (evidence/propose r {:certificate (finite/candidate r) :feasibility {:strategy :finite}})]
+  {:case (if inconsistent? "finite-inconsistent" "finite-witness")
+   :expected (if inconsistent? "rejected" "accepted") :packet (wire (evidence/pack r e))}))
+(defn integer-row [inconsistent?]
+ (let [x (t/variable "cold.obligation.integer" t/Int)
+       query (if inconsistent? (q/prove (t/bool true) {:vacuity :reject :assumptions [(t/bool false)]})
+               (q/prove (t/ge x (t/int 0)) {:vacuity :reject :assumptions [(t/ge x (t/int 0))]}))
+       r (original query policy/numeric)
+       proof (if inconsistent? {:root 0 :nodes [[:boolean]]} {:root 1 :nodes [[:boolean] [:split 0 0 0]]})
+       premise (if inconsistent?
+                 {:strategy :supplied-integer :certificate (integer/candidate (:request (assumptions/background r integer/checking-policy)) proof)}
+                 {:strategy :supplied-integer :point {"cold.obligation.integer" 0}})
+       e (evidence/propose r {:certificate (integer/candidate r proof) :feasibility premise})]
+  {:case (if inconsistent? "integer-inconsistent" "integer-witness")
+   :expected (if inconsistent? "rejected" "accepted") :packet (wire (evidence/pack r e))}))
+(let [rows [(finite-row false) (finite-row true) (integer-row false) (integer-row true)]]
+ (File/write! (first (BeamLisp/argv)) (json/encode {:schema "bl.obligation-packet-corpus.v1" :rows rows
+   :producer-sdk (System/get_env "BL_SDK_PRODUCT") :producer-results false} {:pretty 2}))
+ (println {:produced (count rows) :producer-results false}))
