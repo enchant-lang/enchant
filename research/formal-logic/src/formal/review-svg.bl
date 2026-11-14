@@ -1,0 +1,47 @@
+(ns formal.review-svg)
+
+;; The frozen kit uses these marker names in every sequence/graph. Hidden
+;; chapter panes share one document, so URL fragments need per-SVG scope.
+(def ^:private known #{"sq-head" "gr-head"})
+(defn- tag-name [node]
+ (when (and (vector? node) (keyword? (first node)))
+  (first (String/split (name (first node)) "."))))
+(defn- marker-ids [node root?]
+ (cond
+  (not (vector? node)) #{}
+  (and (not root?) (= "svg" (tag-name node))) #{}
+  :else
+   (let [own (when (and (= "marker" (tag-name node)) (map? (second node))) (:id (second node)))]
+    (reduce into (if (contains? known own) #{own} #{}) (map #(marker-ids % false) node)))))
+(defn- attributes [attrs tag scope]
+ (reduce (fn [out [key value]]
+           (let [key-name (if (keyword? key) (name key) key)
+                 id (when (= "marker" tag) (get attrs :id))
+                 owned (contains? (:ids scope) id)
+                 value (cond
+                         (and owned (= "id" key-name)) (str (:prefix scope) value)
+                         (and (contains? #{"marker-start" "marker-mid" "marker-end"} key-name) (string? value))
+                          (reduce (fn [text marker]
+                                    (String/replace text (str "url(#" marker ")")
+                                                        (str "url(#" (:prefix scope) marker ")"))) value (:ids scope))
+                         :else value)]
+            (assoc out key value)))
+         (if (and (= "marker" tag) (contains? (:ids scope) (:id attrs)))
+           (assoc attrs :data-formal-marker (:id attrs)) attrs) attrs))
+(defn scope-markers
+ "Scope only known locally defined markers and their URL attributes. Leave
+  other element IDs, external markers, links and vector metadata intact.
+  The host passes its already realized Hiccup tree, never browser code."
+ [tree]
+ (let [counter (atom 0)]
+  (letfn [(walk [node inherited]
+            (if-not (vector? node) node
+             (let [tag (tag-name node)
+                   scope (if (= "svg" tag)
+                           {:prefix (str "formal-marker-" (swap! counter inc) "-") :ids (marker-ids node true)} inherited)
+                   out (mapv (fn [i]
+                               (let [child (nth node i)]
+                                (if (and (= i 1) tag scope (map? child))
+                                  (attributes child tag scope) (walk child scope)))) (range (count node)))]
+              (if (meta node) (with-meta out (meta node)) out))))]
+   (walk tree nil))))

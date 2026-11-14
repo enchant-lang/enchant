@@ -1,0 +1,50 @@
+(ns formal.review-svg-check
+ (:require [formal.review-svg :as svg] [live.hiccup :as h]))
+(defn picture [id]
+ [:svg {:viewBox "0 0 100 40"}
+  [:defs [:marker {:id id} [:path {:d "M0,0 L10,5 L0,10 z"}]]]
+  [:line {:marker-end (str "url(#" id ")") :x1 0 :x2 90}]])
+(defn values [pattern text]
+ (mapv first (Regex/scan (Regex/compile! pattern) text (list (tuple :capture :all_but_first)))))
+(deftest hidden-and-visible-panes-get-independent-markers
+ (let [tree [:main [:section {:style "display:none"} (picture "sq-head")]
+                   [:section {:id "visible"} (picture "sq-head")]]
+       before (h/hiccup->html tree) after (h/hiccup->html (svg/scope-markers tree))
+       ids (values "<marker[^>]* id=\"([^\"]+)\"" after)
+       refs (values "marker-end=\"url\\(#([^)]+)\\)\"" after)]
+  (is (= 2 (count (values "id=\"(sq-head)\"" before))))
+  (is (= 2 (count ids) (count (set ids)) (count refs)))
+  (is (= (set ids) (set refs)))
+  (is (not (contains? (set ids) "sq-head")))
+  (is (String/contains? after "data-formal-marker=\"sq-head\""))
+  (is (String/contains? after "id=\"visible\""))
+  (is (= before (h/hiccup->html tree)))))
+(deftest nested-svg-uses-its-own-definitions
+ (let [parent (picture "sq-head") nested (picture "sq-head")
+       tree (conj parent nested) after (h/hiccup->html (svg/scope-markers tree))
+       ids (values "<marker[^>]* id=\"([^\"]+)\"" after)
+       refs (values "marker-end=\"url\\(#([^)]+)\\)\"" after)]
+  (is (= 2 (count ids) (count (set ids))))
+  (is (= ids refs))
+  (is (= after (h/hiccup->html (svg/scope-markers tree))))))
+(deftest non-marker-identities-external-references-and-metadata-survive
+ (let [tree (with-meta [:svg {:id "diagram"}
+                       [:defs [:marker {:id "gr-head"} [:path {:d "M0,0"}]]
+                              [:marker {:id "external-head"} [:path {:d "M0,0"}]]]
+                       [:g {:id "stable-node"} [:a {:href "#stable-node"} "Source"]]
+                       [:path {:marker-start "url(#gr-head)" :marker-mid "url(#gr-head)" :marker-end "url(#external-head)"}]]
+                      {:origin "review specimen"})
+       scoped (svg/scope-markers tree) after (h/hiccup->html scoped)
+       ids (values "<marker[^>]* id=\"([^\"]+)\"" after)
+       starts (values "marker-start=\"url\\(#([^)]+)\\)\"" after)
+       mids (values "marker-mid=\"url\\(#([^)]+)\\)\"" after)]
+  (is (= (meta tree) (meta scoped)))
+  (is (String/contains? after "id=\"diagram\""))
+  (is (String/contains? after "id=\"stable-node\""))
+  (is (String/contains? after "href=\"#stable-node\""))
+  (is (String/contains? after "marker-end=\"url(#external-head)\""))
+  (is (contains? (set ids) "external-head"))
+  (is (= starts mids))
+  (is (contains? (set ids) (first starts)))
+  (is (not (contains? (set ids) "gr-head")))))
+(run-tests)
