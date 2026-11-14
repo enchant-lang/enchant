@@ -6,20 +6,35 @@ procedures and native theory access together. **The existing compiler/oracle
 defaults retain their trust policy.** `system.linear` is now a term-based compiler
 consumer with an explicitly declared arithmetic scope.
 
-The current [selected scalar SDK](SCALAR-INTEGRATION.md) is fully qualified:
-11,705 assertion executions, 604 namespace checks, all 187 paired native
-questions unchanged, twenty actual word/text records reopened by two fresh
-durable readers, and compatibility readers for three older generations. See
-[the artifact qualification](evidence/scalar-integration/qualification.json)
-and [the selection receipt](evidence/scalar-integration/promotion.json).
-The [current dossier checkpoint](evidence/scalar-presentation/dossier-qualification.json)
-is also qualified: 93 cells (92 freshly checked plus one exact historical
-observation), 218 focused and 1,601 full browser checks, inspected phone/desktop
-frames in both themes, and sixteen actual browser save/refresh controls. The
-production evidence store preserves its original revision and appends the current
-one; the isolated browser fixture durably reloads all four revisions.
-The isolated [premise feasibility experiment](FINITE-FEASIBILITY-PROTOTYPE.md)
-has also passed 35 assertions; it is not yet part of the immutable SDK.
+The selected immutable obligation SDK is qualified: 11,914 assertion executions,
+612 namespace checks, all 187 paired native outcomes unchanged from the scalar
+checkpoint, and fresh readers for current and earlier candidate packets. See
+[the artifact qualification](evidence/obligation-integration/qualification.json),
+[the selection receipt](evidence/obligation-integration/promotion.json) and
+[the common proof/premise/policy interface](proposals/obligation-evidence-guide.md).
+Finite word and graph linear-integer certificates now share the closed evidence
+bundle, with separate premise checks and allow/report/reject acceptance policy.
+
+The live dossier now has 94 executed cells, independently checked without result
+changes. Its revision-three comparison preserves both earlier native Org answers
+and displays nine actual proof/premise/policy cases. The new browser qualification
+is in progress; the [earlier scalar presentation receipt](evidence/scalar-presentation/dossier-qualification.json)
+retains its own 93-cell document, SDK and browser evidence.
+
+Graph proof search passed [43 assertions](evidence/graph-search-prototype/qualification.json),
+including an accepted affine Source contract. The integer-choice graph transform
+passed [50 assertions](evidence/graph-choice-prototype/qualification.json); its
+additional implementation trust remains explicit and it is not installed in the
+common dispatcher. The separate [Lean choice model](evidence/choice-extension-model/qualification.json)
+has fifteen theorems and four refused false controls; its evaluator connection
+remains a premise. These are concrete advances toward formal programs, not a
+whole-language totality or compiler-preservation claim.
+
+A [wider request overlay](prototypes/wide-owner/README.md) is being implemented
+through the existing common API. It separates bounded typed admission from
+interpreter/proof availability so arrays, quantifiers, abstract sorts, sequences
+and floating-point terms can keep their native reports as claims. Its actual
+checks and later SDK qualification are still pending.
 
 The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root

@@ -110,7 +110,8 @@ else:
         # dependencies. Their actual versions are bound by each browser pin.
         if name not in ('research/formal-logic/obligation-browser.mjs',
                         'research/formal-logic/story-audit.mjs',
-                        'research/formal-logic/run-obligation-presentation.py'):
+                        'research/formal-logic/run-obligation-presentation.py',
+                        'research/formal-logic/src/formal/review-host.bl'):
             assert sha(R / name) == digest
     browser_tools = read(O / 'browser-tools.json')
     for name, tool in browser_tools.items():

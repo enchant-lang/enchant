@@ -64,7 +64,8 @@ for stage in ('dossier-inputs', 'dossier-cells', 'dossier-check', 'focused-brows
             # scripts do not execute inside a cell or the independent full
             # audit. The focused audit must match their current source exactly.
             pass
-        elif stage.startswith('dossier-') and name == 'research/formal-logic/story-audit.mjs':
+        elif stage.startswith('dossier-') and name in ('research/formal-logic/story-audit.mjs',
+                'research/formal-logic/src/formal/review-host.bl'):
             # The browser audit is not a cell dependency. Its actual current
             # source is required by both fresh browser stage pins below.
             pass
@@ -172,6 +173,7 @@ report = {'schema': 'bl.obligation-dossier-qualification.v1', 'status': 'passed'
                       'focused_audit_sha256': sha(E / 'focused-browser/audit.json'),
                       'full_audit_sha256': sha(E / 'full-browser/audit.json'), 'tools': tools},
           'scope': 'Actual nine-case proof/premise/acceptance grid on the qualified obligation SDK, with all prior source-backed comparison revisions retained. Integer choice and Source examples retain their project-prototype and reviewed implementation boundaries. Actual bounded scalar text and word requests, explicit native text capability differences, solver-free eight-value conditional certificates, fresh proof packet checking and caller-budget refusal. Actual bounded word requests and retained requests on both native backends, caller-only versus complete point meanings, expired unused callbacks and independently reopened point evidence. Numeric relations and the measured source-backed chart remain checked. The complete document is executed and unchanged, with one exact historical Float observation, current immutable kit/live SDK identity and inspected phone/desktop frames. Native history stays recorded; mathematical models and implementation correspondence remain separate. Wider managed theory profiles, compiler preservation and language totality remain open.',
+          'rendering_source_route_change': read(E / 'before-declared-element-source-route-fix/renderer-change.json'),
           'compiler_proof_authority': False}
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 recipe = str(Path(__file__).relative_to(R))

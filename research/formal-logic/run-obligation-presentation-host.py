@@ -47,7 +47,7 @@ for name, digest in checked['source_sha256'].items():
             if phase == 'dossier-cells' and pattern.startswith(r'^#\+RESULTS:'):
                 continue  # The actual writer adds results; its entire output hash was checked above.
             assert re.findall(pattern, body, re.M | re.S) == re.findall(pattern, current, re.M | re.S)
-    else:
+    elif name != 'research/formal-logic/src/formal/review-host.bl':
         assert sha(R / name) == digest
 kit = read(K)
 for name, digest in kit['rendering_source_sha256'].items():
@@ -82,7 +82,8 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
 (E / 'host-launch-exit.json').unlink(missing_ok=True)
 (E / 'host-launch-command.json').write_text(json.dumps(command, indent=2) + '\n')
 (E / 'host-launch-source-pin.json').write_text(json.dumps(
-    {'code_commit': commit, 'source_sha256': {relative: sha(Path(__file__))},
+    {'code_commit': commit, 'source_sha256': {relative: sha(Path(__file__)),
+                            'research/formal-logic/src/formal/review-host.bl': sha(P / 'src/formal/review-host.bl')},
      'qualification_phase': phase, 'independent_unchanged_check_pending': phase != 'dossier-check',
      'sdk_pin': pin, 'document_sha256': sha(P / 'ATLAS.bl.org'), 'kit_state_sha256': sha(K)}, indent=2) + '\n')
 started = time.monotonic()
