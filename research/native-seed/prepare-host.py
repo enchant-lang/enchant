@@ -12,7 +12,7 @@ OUT = BASE / "out/compiler-closure"
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm",
-               "host/host-lazy.scm", "host/host-compiler.scm"]
+               "host/host-lazy.scm", "host/host-extra.scm", "host/host-compiler.scm"]
     hashes = {p: hashlib.sha256((BASE / p).read_bytes()).hexdigest() for p in sources}
     host = "\n".join((BASE / p).read_text() for p in sources)
     (OUT / "host.scm").write_text(host)

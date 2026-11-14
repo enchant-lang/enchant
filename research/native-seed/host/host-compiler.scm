@@ -56,6 +56,10 @@
  (let ((value (native-fetch! ns name)))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
+(define (native-global-exact ns name)
+ (let ((value (native-fetch! ns name #t)))
+  (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
+   (bl-nth value 1) value)))
 (define (native-env-link ns name owner?)
  (let ((row (native-resolve-row (native-candidates ns name) (bl-key "link") #f)))
   (if (eq? row native-missing) (bl-key "error")
@@ -293,3 +297,111 @@
 (native-add-leaf! "Elixir.BeamLisp.Emit/base_module_for/1" native-known-module)
 (native-add-leaf! "Elixir.BeamLisp.Link/settle/0" (lambda () (bl-key "ok")))
 (native-add-leaf! "erlang/function_exported/3" native-remote-available?)
+
+;; The canonical compiler's host facade delegates read_data directly to the
+;; SAME compiler namespace; parsing and datum conversion stay in compiled BL.
+(native-add-leaf! "Elixir.BeamLisp.Compiler/read_data/1"
+ (lambda (source) (bl-invoke (native-global "compiler" "read_data") (list source))))
+
+;; Native symbol accounting. The BEAM table watermark has no native table to
+;; query; bound new source names explicitly instead. Existing names cost zero.
+(define native-source-symbols (bl-empty-map))
+(define native-source-symbol-count 0)
+(define native-source-symbol-bytes 0)
+(define native-source-symbol-limit 65536)
+(define native-source-symbol-byte-limit 16777216)
+(define native-reader-symbol-count 0)
+(define (native-atom-check token)
+ (if (and (string? token) (> (length (native-utf8-bytes token)) 1048576))
+  (error "native symbol token exceeds one MiB"))
+ (if (or (> native-source-symbol-count native-source-symbol-limit)
+         (> native-source-symbol-bytes native-source-symbol-byte-limit))
+  (error "native symbol budget exceeded"))
+ (bl-key "ok"))
+(define (native-atom-account token)
+ (native-atom-check token)
+ (set! native-reader-symbol-count (+ native-reader-symbol-count 1))
+ (if (and (string? token) (not (native-map-has? native-source-symbols token)))
+  (begin
+   (set! native-source-symbols (bl-assoc native-source-symbols token #t))
+   (set! native-source-symbol-count (+ native-source-symbol-count 1))
+   (set! native-source-symbol-bytes (+ native-source-symbol-bytes (length (native-utf8-bytes token))))
+   (native-atom-check token)))
+ (bl-key "ok"))
+(native-add-leaf! "Elixir.BeamLisp.AtomGuard/check!/1" native-atom-check)
+(native-add-leaf! "Elixir.BeamLisp.AtomGuard/account!/1" native-atom-account)
+(native-add-leaf! "Elixir.BeamLisp.AtomGuard/reset/0" (lambda () (set! native-reader-symbol-count 0) (bl-key "ok")))
+(native-add-leaf! "Elixir.BeamLisp.AtomGuard/to_atom/1"
+ (lambda (text) (if (not (string? text)) (error "native atom requires text")
+  (begin (native-atom-account text) (bl-key text)))))
+
+;; Target exception representation is the same tagged data exposed to BL.
+;; Raise/class/trace transport is supplied by host-values.scm.
+(define (native-ex-info message data)
+ (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.ExInfo")
+         (bl-key "__exception__") #t (bl-key "message") message (bl-key "data") data))
+(define (native-exception-value? x)
+ (and (bl-tag? x 'map) (native-keyword? (bl-get x (bl-key "__struct__")))
+      (native-map-has? x (bl-key "__exception__"))))
+(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_info/2" native-ex-info)
+(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_data/1"
+ (lambda (x) (if (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.ExInfo")) (bl-get x (bl-key "data")) bl-nil)))
+(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_message/1"
+ (lambda (x) (if (native-exception-value? x) (bl-get x (bl-key "message")) (bl-show x))))
+(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_original/1"
+ (lambda (x) (if (eq? (native-struct-module x) (bl-key "Elixir.ErlangError")) (bl-get x (bl-key "original")) bl-nil)))
+(native-add-leaf! "Elixir.BeamLisp.ExInfo/raise_payload/1"
+ (lambda (x)
+  (native-raise (bl-key "error")
+   (cond ((native-exception-value? x) x)
+         ((bl-tag? x 'map) (native-ex-info (bl-invoke (native-global "rt" "print_str") (list x)) x))
+         (else (native-ex-info (bl-show x) bl-nil)))
+   (h-logical-stack))))
+
+;; Closed record registry; declaration/publication APIs require the BEAM's
+;; Source custody and remain explicit exclusions, just as in the JS target.
+(define native-record-descriptors (bl-empty-map))
+(native-add-leaf! "Elixir.BeamLisp.Record/info/1" (lambda (module) (bl-get native-record-descriptors module)))
+(native-add-leaf! "Elixir.BeamLisp.Record/record_module?/1" (lambda (module)
+ (let ((info (bl-get native-record-descriptors module)))
+  (and (bl-tag? info 'tuple) (= (bl-count info) 4) (eq? (bl-nth info 0) (bl-key "record"))))))
+(native-add-leaf! "Elixir.BeamLisp.Record/deftype_module?/1" (lambda (module)
+ (let ((info (bl-get native-record-descriptors module)))
+  (and (bl-tag? info 'tuple) (= (bl-count info) 4) (eq? (bl-nth info 0) (bl-key "deftype"))))))
+(native-add-leaf! "Elixir.BeamLisp.Record/record?/1" (lambda (value)
+ (bl-invoke (native-remote "Elixir.BeamLisp.Record/record_module?/1") (list (native-struct-module value)))))
+(native-add-leaf! "Elixir.BeamLisp.Record/fields_of/1" (lambda (module)
+ (let ((info (bl-get native-record-descriptors module)))
+  (if (bl-is-nil info) (error "not a beam-lisp record/deftype" module) (bl-nth info 3)))))
+(native-add-leaf! "Elixir.BeamLisp.Server/callback/1" (lambda (name)
+ (let ((row (assoc name '(("init" "init" 1 "vector") ("handle-call" "handle_call" 3 "pattern")
+                         ("handle-cast" "handle_cast" 2 "pattern") ("handle-info" "handle_info" 2 "pattern")
+                         ("handle-continue" "handle_continue" 2 "vector") ("terminate" "terminate" 2 "vector")))))
+  (if row (bl-tuple (list (bl-key (cadr row)) (caddr row) (bl-key (cadddr row)))) bl-nil))))
+(native-add-leaf! "Elixir.BeamLisp.Server/callback_order/0"
+ (lambda () (map bl-key '("init" "handle_call" "handle_cast" "handle_info" "handle_continue" "terminate" "code_change"))))
+(native-add-leaf! "Elixir.BeamLisp.Server/module_for/2" (lambda (ns name)
+ (let* ((base (native-atom-name (native-known-module (string-append ns "." name))))
+        (prefix "Elixir.BeamLisp.Ns."))
+  (bl-key (string-append "Elixir.BeamLisp.Server." (substring base (string-length prefix) (string-length base)))))))
+
+;; These same execution/metadata seams are named BEAM-only refusals by the
+;; production JS host. Never pretend their registration grants capability.
+(define native-beam-only-leaves
+ '("Elixir.BeamLisp.AOT/constructor_metadata_compiling?/0"
+   "Elixir.BeamLisp.AOT/constructor_call!/5"
+   "Elixir.BeamLisp.AOT/sdk_constructor_binding_reference/2"
+   "Elixir.BeamLisp.AOT/sdk_constructor_declaration_kind/2"
+   "Elixir.BeamLisp.AOT/sdk_declaration_kind/2"
+   "Elixir.BeamLisp.AOT/staged_macro_kind/2"
+   "Elixir.BeamLisp.AOT/staged_macro_lookup/2"
+   "Elixir.BeamLisp.Record/declaration_descriptor/4"
+   "Elixir.BeamLisp.Record/declaration_descriptor/5"
+   "Elixir.BeamLisp.Record/declaration_kind/3"
+   "Elixir.BeamLisp.Trace/trace/3" "Elixir.BeamLisp.Trace/trace/4" "Elixir.BeamLisp.Trace/untrace/2"
+   "Elixir.BeamLisp.Refs/spawn_exec/1" "Elixir.BeamLisp.Refs/spawn_exec/2"
+   "erlang/term_to_binary/2" "erlang/binary_to_term/2"
+   "Elixir.Code/ensure_loaded?/1" "crypto/hash/2" "Elixir.Base/encode16/1" "Elixir.Base/encode16/2"
+   "Elixir.BeamLisp.Env/os_env_call/2" "erlang/monitor/2" "erlang/exit/2"))
+(set! native-excluded-host-leaves (append native-excluded-host-leaves native-beam-only-leaves))
+(for-each (lambda (key) (native-add-leaf! key (native-unavailable key))) native-beam-only-leaves)
