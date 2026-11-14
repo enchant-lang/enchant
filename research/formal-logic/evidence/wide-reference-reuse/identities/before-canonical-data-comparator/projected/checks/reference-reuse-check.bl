@@ -1,0 +1,84 @@
+(ns formal.evidence-reference-reuse-check
+ (:require [formal.wide-batch.request-evidence :as evidence]
+           [formal.reference-baseline.request-evidence :as baseline]
+           [formal.wide-batch.request :as request]
+           [formal.wide-batch.point-profile :as policy]
+           [formal.wide-batch.finite-word-certificate :as finite]
+           [formal.wide-batch.backend :as backend] [formal.wide-batch.oracle :as oracle]
+           [formal.term :as t] [formal.wide-batch.query :as q] [formal.wide-batch.question-graph :as qg]
+           [formal.data-graph :as graph] [bl.json :as json]))
+(def entered (atom []))
+(def observations (atom []))
+(defn persist! []
+ (when-let [path (System/get_env "FORMAL_REFERENCE_REUSE_OUTPUT")]
+  (File/write! path (json/encode {:schema "bl.evidence-reference-reuse.v1" :entered-tests @entered
+                                 :sdk (System/get_env "BL_SDK_PRODUCT") :observations @observations
+                                 :in-sdk false :reference-format-changed false :compiler-proof-authority false} {:pretty 2}))))
+(defn enter! [id] (swap! entered conj id) (persist!))
+(defn restore [wire]
+ {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+               (get wire "nodes"))})
+(defn measured [action]
+ (let [transport (tuple (elem (erlang/fun_info backend/invoke :module) 1) :exchange! 4)
+       references (tuple (elem (erlang/fun_info graph/of :module) 1) :of 1)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :reference-check-must-not-query))]
+  (is (= 1 (erlang/trace_pattern transport true (list :local :call_count))))
+  (is (= 1 (erlang/trace_pattern references true (list :local :call_count))))
+  (try
+   (let [start (erlang/monotonic_time :microsecond)
+         value (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny} action)
+         elapsed (- (erlang/monotonic_time :microsecond) start)
+         exchanges (elem (erlang/trace_info transport :call_count) 1)
+         refs (elem (erlang/trace_info references :call_count) 1)]
+    (is (and (int? exchanges) (= 0 exchanges @calls))) (is (int? refs))
+    {:value value :elapsed-us elapsed :graph-of-calls refs :native-exchanges exchanges :oracle-calls @calls})
+   (finally (erlang/trace_pattern transport false (list :local :call_count))
+            (erlang/trace_pattern references false (list :local :call_count))))))
+(deftest old-native-packets-retain-their-entire-checking-results
+ (enter! :native-packets)
+ (let [input (json/decode (File/read! (System/get_env "FORMAL_REFERENCE_REUSE_INPUT")))
+       directory (System/get_env "FORMAL_REFERENCE_REUSE_PACKETS")]
+  (is (= 20 (count (get input "packets"))))
+  (doseq [row (get input "packets")]
+   (let [packet (restore (json/decode (File/read! (Path/join directory (get row "file")))))
+         before (measured #(baseline/reopen packet)) after (measured #(evidence/reopen packet))
+         same (same-representation? (:value before) (:value after))]
+    (is same)
+    (is (= (dec (:graph-of-calls before)) (:graph-of-calls after)))
+    (is (= (get-in (:value before) [:evidence-reference :sha256]) (get-in (:value after) [:evidence-reference :sha256])))
+    (is (= (get-in (:value before) [:checking-reference :sha256]) (get-in (:value after) [:checking-reference :sha256])))
+    (swap! observations conj {:case (get row "case") :backend (get row "backend")
+                              :before (dissoc before :value) :after (dissoc after :value)
+                              :entire-result-identical same}) (persist!)))))
+(deftest proof-premise-and-policy-results-retain-their-exact-references
+ (enter! :policy-cases)
+ (doseq [vacuity [:allow :report :reject] premise [:witnessed :inconsistent :not-established]]
+  (let [x (t/variable "reuse.word" [:bv 2])
+        subject (qg/prepare (q/prove (t/eq x x) {:vacuity vacuity :assumptions [(t/bool (not= :inconsistent premise))]}))
+        r (request/prepare subject {:policy {:profile policy/numeric-word}})
+        e (evidence/propose r (cond-> {:certificate (finite/candidate r)}
+                               (not= :not-established premise) (assoc :feasibility {:strategy :finite})))
+        before (measured #(baseline/recheck r e)) after (measured #(evidence/recheck r e))
+        same (same-representation? (:value before) (:value after))]
+   (is same)
+   (is (= (dec (:graph-of-calls before)) (:graph-of-calls after)))
+   (is (= (graph/of e) (:evidence-reference (:value after))))
+   (swap! observations conj {:case :proof-policy :vacuity vacuity :premise premise
+                             :before (dissoc before :value) :after (dissoc after :value)
+                             :entire-result-identical same}) (persist!))))
+(deftest historical-version-one-remains-exactly-readable
+ (enter! :legacy)
+ (let [r (request/prepare (qg/prepare (q/prove (t/bool true))) {:policy {:profile policy/numeric-word}})
+       e (assoc (evidence/propose r {:certificate (finite/candidate r)})
+                :formal/evidence-bundle 1 :profile evidence/legacy-profile)
+       packet (graph/encode {:formal/evidence-record 1 :profile evidence/legacy-record-profile :request r :evidence e})]
+  (doseq [options [{} {:proof-work-units 0 :feasibility-work-units 0}]]
+   (let [before (measured #(baseline/reopen packet options)) after (measured #(evidence/reopen packet options))
+         same (same-representation? (:value before) (:value after))]
+    (is same)
+    (is (= (dec (:graph-of-calls before)) (:graph-of-calls after)))
+    (is (= (graph/of e) (:evidence-reference (:value after))))
+    (swap! observations conj {:case :legacy :options options :before (dissoc before :value)
+                              :after (dissoc after :value) :entire-result-identical same}) (persist!)))))
+(run-tests)
