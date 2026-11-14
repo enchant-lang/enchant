@@ -41,17 +41,19 @@ def main():
                                   "reused_objects": sum(row["reused_object"] for row in stage["units"])}
         argv = [str(image), "--eval", str(OUT / "bundle.scm"), str(BASE / "fixtures/compiler-source.bl")]
         report["argv"] = argv
-        process = subprocess.Popen(argv, cwd=BASE.parents[1], stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, start_new_session=True)
-        try:
-            output, _ = process.communicate(timeout=120)
-        except BaseException:
-            os.killpg(process.pid, signal.SIGKILL)
-            output, _ = process.communicate()
-            (OUT / "stage1-source-probe.log").write_text(output)
-            raise
-        (OUT / "stage1-source-probe.log").write_text(output)
+        log = OUT / "stage1-source-probe.log"
+        with log.open("w") as stream:
+            process = subprocess.Popen(argv, cwd=BASE.parents[1], stdin=subprocess.DEVNULL,
+                                       stdout=stream, stderr=subprocess.STDOUT,
+                                       text=True, start_new_session=True)
+            try:
+                process.wait(timeout=120)
+            except BaseException:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                raise
+        output = log.read_text()
         print(output, end="", flush=True)
         report.update({"exit": process.returncode, "output": output})
         assert hashes == {str(p): digest(p) for p in paths}, "compiler inputs changed"
