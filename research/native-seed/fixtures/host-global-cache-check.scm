@@ -67,6 +67,20 @@
    (native-intern "native.cache-live" "answer" bl-nil)
    (native-global-cache-check "present nil shadows compiled positive value"
     (bl-is-nil (native-global-exact "native.cache-live" "answer")))
+   (let ((public (native-fetch "native.cache-live" "answer" #t)))
+    (native-global-cache-check "public fetch preserves tagged present nil"
+     (and (bl-tag? public 'tuple) (= 2 (bl-count public))
+          (eq? (bl-nth public 0) (bl-key "ok")) (bl-is-nil (bl-nth public 1)))))
+   (let ((refused #f))
+    (with-exception-catcher (lambda (e) (set! refused #t))
+     (lambda () (native-fetch! "native.cache-raw-missing" "answer" #t)))
+    (native-global-cache-check "raw internal fetch still raises for absence" refused))
+   (native-intern "native.cache-raw-missing" "answer" (bl-key "error"))
+   (native-global-cache-check "present error atom is a value, not an absent binding"
+    (eq? (native-fetch! "native.cache-raw-missing" "answer" #t) (bl-key "error")))
+   (native-intern "native.cache-raw-missing" "answer" 62)
+   (native-global-cache-check "fetch bang follows new epoch after prior absent lookup"
+    (= 62 (native-fetch! "native.cache-raw-missing" "answer" #t)))
    (native-global-cache-check "missing binding initially absent"
     (eq? (native-fetch "native.cache-late" "answer" #t) (bl-key "error")))
    (native-intern "native.cache-late" "answer" 61)

@@ -839,7 +839,19 @@
 (define native-scalar-keyword? native-keyword?)
 (set! native-keyword? (lambda (x) (or (native-scalar-keyword? x) (bl-tag? x 'utf16-keyword))))
 (define native-scalar-atom-name native-atom-name)
-(set! native-atom-name (lambda (x) (if (bl-tag? x 'utf16-keyword) (vector-ref x 1) (native-scalar-atom-name x))))
+;; Interned Scheme symbol names are immutable. Reuse their decoded BL atom
+;; spelling without allocating a colon-stripping substring on every AVL key
+;; comparison. Weak keys keep this host memo from retaining unused atoms.
+;; Boolean/nil normalization and UTF16 fragment keyword storage are separate.
+(define native-symbol-atom-names (make-table test: eq? weak-keys: #t))
+(set! native-atom-name (lambda (x)
+ (cond ((symbol? x)
+        (let ((cached (table-ref native-symbol-atom-names x native-missing)))
+         (if (not (eq? cached native-missing)) cached
+          (let ((name (native-scalar-atom-name x)))
+           (table-set! native-symbol-atom-names x name) name))))
+       ((bl-tag? x 'utf16-keyword) (vector-ref x 1))
+       (else (native-scalar-atom-name x)))))
 (define native-utf16-keywords (make-table test: equal?))
 (define native-scalar-keyword-intern bl-key)
 (set! bl-key (lambda (name)

@@ -267,7 +267,7 @@
 (native-add-leaf! "Elixir.BeamLisp.Decimal/signum/1" (lambda (x) (native-compare-number (bl-get x (bl-key "unscaled")) 0)))
 (native-add-leaf! "Elixir.BeamLisp.Decimal/to_literal/1" (lambda (x) (string-append (native-decimal-text x) "M")))
 (native-add-leaf! "Elixir.BeamLisp.Decimal/to_plain_string/1" native-decimal-text)
-(native-add-leaf! "Elixir.BeamLisp.Vector/first/1" (lambda (v) (bl-nth v 0 bl-nil)))
+(native-add-leaf! "Elixir.BeamLisp.Vector/first/1" native-vector-first)
 (native-add-leaf! "Elixir.String/contains?/2" (lambda (text pattern) (if (string? pattern) (if (native-string-index text pattern) #t #f) (let loop ((ps pattern)) (and (pair? ps) (or (native-string-index text (car ps)) (loop (cdr ps))))))))
 (native-add-leaf! "Elixir.String/starts_with?/2" native-prefix?)
 (native-add-leaf! "Elixir.String/ends_with?/2" native-suffix?)
@@ -376,6 +376,30 @@
     (let ((k (bl-nth p 0))) (string-append (if (native-keyword? k) (string-append (native-atom-name k) ": ") (string-append (native-erlang-inspect k) " => "))
      (native-erlang-inspect (bl-nth p 1))))) (native-map-pairs x))) "}"))
   (else (native-render x #t))))
+;; Vector's index interpolation is String.Chars, not the BL universal printer.
+;; This mirrors the pinned Atom/BitString/Integer/Float/List implementations;
+;; charlists delegate the existing raw List adapter, as the owning protocol does.
+(define (native-vector-index-text value)
+ (cond ((bl-is-nil value) "")
+  ((or (native-keyword? value) (boolean? value)) (native-atom-name value))
+  ((native-string? value) value) ((h-is-int value) (number->string value))
+  ((h-is-float value) (native-shortest-float-text value))
+  ((or (null? value) (pair? value))
+   (bl-invoke (native-leaf "Elixir.List/to_string/1") (list value)))
+  (else (native-vector-string-protocol-error! value))))
+(define (native-vector-string-protocol-error! value)
+ ;; Protocol.UndefinedError owns protocol/value/description, not a :message
+ ;; field. Preserve the canonical reason; do not reconstruct a diagnostic.
+ (native-raise (bl-key "error")
+  (bl-map (bl-key "__struct__") (bl-key "Elixir.Protocol.UndefinedError")
+          (bl-key "__exception__") #t
+          (bl-key "protocol") (bl-key "Elixir.String.Chars")
+          (bl-key "value") value (bl-key "description") "")
+  (native-capture-stack)))
+(define (native-vector-index-error! index count)
+ (let ((message (string-append "assoc index " (native-vector-index-text index)
+                 " out of bounds" (if count (string-append " (count " (number->string count) ")") ""))))
+  (native-raise (bl-key "error") (native-error-constructor "Elixir.ArgumentError" message) (native-capture-stack))))
 (native-add-leaf! "Elixir.ArgumentError/exception/1" (lambda (x) (native-error-constructor "Elixir.ArgumentError" x)))
 (native-add-leaf! "Elixir.RuntimeError/exception/1" (lambda (x) (native-error-constructor "Elixir.RuntimeError" x)))
 (native-add-leaf! "Elixir.FunctionClauseError/exception/1" native-function-clause-error)

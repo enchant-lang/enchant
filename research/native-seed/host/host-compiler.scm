@@ -78,22 +78,26 @@
    (set! native-global-cache (make-table test: equal?))
    (set! native-global-cache-env native-env-rows)
    (set! native-global-cache-compiled native-global-registry))))
-(define (native-fetch ns name . exact)
+;; Internal consumers need the selected VALUE; the public Env.fetch adapter
+;; alone needs its {:ok,value}/:error transport tag. Share the same exact
+;; selection and root epochs without constructing a tuple to discard it.
+(define (native-fetch-value ns name exact?)
  (native-refresh-global-cache!)
- (let* ((exact? (if (and (pair? exact) (car exact)) #t #f))
-        (key (vector ns name exact?))
+ (let* ((key (vector ns name exact?))
         (cached (table-ref native-global-cache key native-missing)))
-  (if (not (eq? cached native-missing)) (native-env-result cached)
+  (if (not (eq? cached native-missing)) cached
    (let ((row (native-resolve-row
                (if exact? (native-exact-candidates ns name) (native-candidates ns name)) #f #t)))
-    (if (eq? row native-missing) (native-env-result native-missing)
+    (if (eq? row native-missing) native-missing
      (let ((value (cdr row)))
       (table-set! native-global-cache key value)
-      (native-env-result value)))))))
-
+      value))))))
+(define (native-fetch ns name . exact)
+ (native-env-result (native-fetch-value ns name (if (and (pair? exact) (car exact)) #t #f))))
 (define (native-fetch! ns name . exact)
- (let ((answer (apply native-fetch ns name exact)))
-  (if (eq? answer (bl-key "error")) (error "undefined native var" ns name) (bl-nth answer 1))))
+ (let ((value (native-fetch-value ns name (if (and (pair? exact) (car exact)) #t #f))))
+  (if (eq? value native-missing) (error "undefined native var" ns name) value)))
+
 (define (native-global ns name)
  (let ((value (native-fetch! ns name)))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
