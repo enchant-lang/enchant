@@ -117,6 +117,25 @@
         "(if bindings (let (" (string/join " " (map (fn [s] (str "(" (ident s) " (cdr (assoc " (text s) " bindings)))")) names))
         ") " body ") " more "))"))))
 
+(defn- function-body
+ "A single unguarded clause of DISTINCT plain variables needs no matcher.
+  Argument order, function tick, source frame and callable arity are still
+  owned by the surrounding lambda. Every other pattern uses clauses unchanged."
+ [n options]
+ (let [fallback "(error \"native seed: function clause\")"
+       clause (BeamLisp.CompilerData/simple_function_clause n)
+       names (when clause (mapv :name (:pats clause)))]
+  (if (and clause (= (count names) (count (distinct names))))
+   (let [bindings
+         (map-indexed (fn [index name]
+          (str "(" (ident name) " "
+           (cond (= index 0) "(car argv)" (= index 1) "(cadr argv)"
+                 (= index 2) "(caddr argv)" (= index 3) "(cadddr argv)"
+                 :else (str "(list-ref argv " index ")")) ")")) names)]
+    (str "(if (= (length argv) " (count names) ") (let ("
+         (string/join " " bindings) ") " (emit (:body clause) options) ") " fallback ")"))
+   (clauses (:clauses n) "argv" fallback options false))))
+
 (def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
 (def core-leaves
  {"get" "bl-get" "assoc" "bl-assoc" "conj" "bl-conj" "nth" "bl-nth"
@@ -192,7 +211,7 @@
                      :source-arity arity :fn-label nil :tail? true :loop nil)
        frame (merge {:file nil :line nil :col nil :end-line nil :end-col nil} (:ann n)
                     {:ns (or (:definition-ns options) (:ns options)) :fn function-name :arity arity :call :direct})
-       body (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" inside false)
+       body (function-body n inside)
        body (str "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
        function (str "(lambda argv " body ")")]
   (if (:callable-arities? options) (str "(bl-register-callable! " function " " arity ")") function)))
@@ -276,7 +295,7 @@
         (str "(begin " (if (empty? statements) "bl-nil"
           (str (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
   :fn (if (:source-frames? options) (emit-source-function n options)
-       (let [body (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" options false)
+       (let [body (function-body n options)
             frame (assoc (:ann n) :arity (count (:pats (first (:clauses n)))))
             body (if (:source-frames? options)
                   (str "(bl-with-source-frame " (literal frame) " (lambda () " body "))") body)]
