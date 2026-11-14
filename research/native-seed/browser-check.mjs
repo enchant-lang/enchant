@@ -5,8 +5,11 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 
 const base=path.dirname(fileURLToPath(import.meta.url));
+const sha=async file=>createHash('sha256').update(await readFile(file)).digest('hex');
+await rm(path.join(base,'evidence/browser.json'),{force:true});
 const profile=await mkdtemp(path.join(tmpdir(),'bl-native-review-'));
 const browser=spawn('chromium',['--headless=new','--no-sandbox','--disable-gpu',
   '--disable-dev-shm-usage','--disable-background-networking','--no-first-run',
@@ -46,6 +49,7 @@ try {
  checks.connectedNavigation=await evaluate('graph.querySelector(".sg-view:not([hidden]) [data-sg-to=control]").click();graph.querySelector(".sg-view[data-view=control]").hidden===false');
  checks.back=await evaluate('graph.querySelector("[data-sg-back]").click();graph.querySelector(".sg-view[data-view=policy]").hidden===false');
  checks.graphMode=await evaluate('graph.querySelector("[data-sg-mode]").click();graph.classList.contains("sg-graph-mode")');
+ checks.mapSelection=await evaluate('graph.querySelector(".sg-nodes [data-sg-to=values]").click();graph.querySelector(".sg-view[data-view=values]").hidden===false');
  checks.fullscreen=await evaluate('graph.querySelector("[data-sg-expand]").click();graph.classList.contains("sg-expanded")');
  await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
  checks.escape=await evaluate('!graph.classList.contains("sg-expanded")');
@@ -57,7 +61,10 @@ try {
  await writeFile(path.join(base,'evidence/desktop-map.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  checks.noScriptExceptions=errors.length===0;
  for(const [name,passed] of Object.entries(checks))assert.ok(passed,name);
- await writeFile(path.join(base,'evidence/browser.json'),JSON.stringify({status:'pass',checks,errors},null,2)+'\n');
+ await writeFile(path.join(base,'evidence/browser.json'),JSON.stringify({status:'pass',checks,errors,
+  html_sha256:await sha(path.join(base,'evidence/native-seed.html')),
+  source_sha256:await sha(path.join(base,'native-seed.bl.org')),
+  browser_check_sha256:await sha(fileURLToPath(import.meta.url))},null,2)+'\n');
  console.log('DOSSIER_BROWSER_OK',Object.keys(checks).length,'checks');
 } finally {
  socket?.close();browser.kill('SIGTERM');
