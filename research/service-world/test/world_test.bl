@@ -1,6 +1,6 @@
 (ns service-world-test
  (:require [service-world.core :as world] [service-world.http :as http]
-           [service-world.station :as station] [veritas :as v] [web]))
+           [service-world.station :as station] [veritas :as v] [web] [env]))
 
 (def grant
  {:subject "team-machine-next" :world "work/test" :expires-at (+ (world/now) 600000)
@@ -64,13 +64,27 @@
 
 (deftest local-endpoint-rechecks-revocation-and-portability
  (let [authority (atom grant) local (world/local provider #(deref authority)) request (discover)]
-  (is (= (world/dispatch provider grant request) (local request)))
+  (is (= (get-in (world/dispatch provider grant request) ["ok" "services"])
+         (get-in (local request) ["ok" "services"])))
   (reset! authority nil)
   (is (= "unauthorized" (code (local request))))
   (reset! authority (assoc grant :expires-at 0))
   (is (= "unauthorized" (code (local request))))
   (is (thrown? (local (assoc request "args" {"callback" (fn [] 1)}))))
   (is (thrown? (local (assoc request "id" (apply str (repeat 65537 "x"))))))))
+
+(deftest local-endpoint-enters-the-provider-environment-and-restores-the-consumer
+ (let [owner (env/fork) consumer (env/fork)
+       provider (assoc provider :catalog
+                  (fn [] [{:id "a.owner" :name "A" :folder "/projects/a" :contract "example.service"
+                           :versions {1 {"inspect" (fn [_ _] {"provider-env" (= owner (env/current))})}}}]))
+       endpoint (env/with-env owner (fn [] (world/local provider (fn [] grant))))]
+  (try
+   (env/with-env consumer
+    (fn []
+     (is (= true (get-in (endpoint (call-request "inspect")) ["ok" "value" "provider-env"])))
+     (is (= consumer (env/current)))))
+   (finally (env/destroy owner) (env/destroy consumer)))))
 
 (deftest responses-are-correlated-and-provider-errors-do-not-leak
  (let [request (discover) r (world/dispatch provider grant request)]
