@@ -1,0 +1,32 @@
+(let [sort [:bv 3] x (t/variable "dossier.proof.counter" sort)
+      last (t/literal sort 7) one (t/literal sort 1) zero (t/literal sort 0)
+      claim (t/implies (t/eq x last) (t/eq (t/app :bv-add sort [x one] nil) zero))
+      subject (question-graph/prepare (q/prove claim))
+      original (logic/prepare-request subject {:policy {:profile logic/numeric-word-policy}})
+      native (logic/compare-evidence original)
+      candidate (finite-word/candidate original)
+      handler (fn [requested _] (logic/propose-evidence requested {:certificate candidate}))
+      independent (logic/with-evidence-handler handler #(logic/compare-evidence original))
+      limited (logic/with-evidence-handler handler #(logic/execute-evidence original {:proof-work-units 0}))
+      packet (request-evidence/pack original (logic/propose-evidence original {:certificate candidate}))
+      reopened (request-evidence/reopen packet)
+      rows (mapv (fn [engine]
+                    (let [reported (get native engine) checked (get independent engine)]
+                     (assert (= :unsat (get-in reported [:answer-check :source :status])))
+                     (assert (= :solver-claim (get-in reported [:answer-check :verdict])))
+                     (assert (= :not-established (get-in reported [:conclusion :status])))
+                     (assert (= :checked (get-in checked [:proof-check :status])))
+                     (assert (= 8 (get-in checked [:proof-check :points-checked])))
+                     (assert (= 0 (get-in checked [:local-delegation :attempts])))
+                     (into-sorted-map {:backend engine :native-report :unsat :native-meaning :solver-claim
+                                      :independent-check :checked :points 8 :proof-fallback-attempts 0
+                                      :feasibility (get-in checked [:proof-check :feasibility])}))) [:z3 :oxiz])]
+ (assert (= :incomplete (get-in limited [:proof-check :status])))
+ (assert (= :checked (get-in reopened [:proof-check :status])))
+ (into-sorted-map {:example :separate-word-evidence :backends rows
+                  :statement-reused (= (get-in independent [:z3 :proof-check :statement])
+                                      (get-in independent [:oxiz :proof-check :statement]))
+                  :ledger-labels (mapv :label (get-in independent [:z3 :proof-check :assumption-ledger :entries]))
+                  :zero-proof-allowance (get-in limited [:proof-check :status])
+                  :packet-recheck (get-in reopened [:proof-check :status])
+                  :source-connection :not-established :compiler-proof-authority false}))
