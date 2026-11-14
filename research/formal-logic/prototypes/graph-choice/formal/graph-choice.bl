@@ -1,0 +1,201 @@
+(ns formal.graph-choice
+ (:require [formal.request :as request] [formal.point-profile :as policy]
+           [formal.data-graph :as graph] [formal.question-graph :as qg]
+           [formal.graph-integer-certificate :as kernel] [formal.term :as t]))
+
+;; Isolated conservative-extension checker. Original term inference depends
+;; additionally on this reviewed transformation, beyond the linear kernel.
+(def profile :bl/graph-integer-choice-transform-prototype-v1)
+(def certificate-profile :bl/graph-integer-choice-certificate-prototype-v1)
+(def record-profile :bl/graph-integer-choice-record-prototype-v1)
+(def limits {:source-nodes 2048 :source-bytes 65536 :typed-nodes 128 :variables 24
+             :choices 4 :output-nodes 4096 :transform-work-units 500000})
+(def checking-allowance 2500000)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.graph-choice: " why) {}))))
+(defn- plain? [x] (and (= :map (rt/kind-kind x)) (or (nil? (meta x)) (= {} (meta x)))))
+(defn- charge! [context amount]
+ (require! (<= (swap! (:used context) + amount) (:limit context)) "prospective transform work limit"))
+(defn- fields [rows id]
+ (let [[kind pairs] (nth rows id)]
+  (require! (= "map" kind) "original map required")
+  (into {} (keep (fn [[key value]]
+                   (let [[tag name] (nth rows key)] (when (= "keyword" tag) [name value]))) pairs))))
+(defn- marked? [rows f name]
+ (when-let [id (get f name)] (= ["int" 1] (nth rows id))))
+(defn- settings [options]
+ (require! (and (plain? options) (= #{:work-units} (set (keys options)))
+                (int? (:work-units options)) (<= 0 (:work-units options) 5000000)) "closed bounded transform allowance required")
+ options)
+(defn fresh-name [subject-reference source-node]
+ (str "__bl.choice." (:sha256 subject-reference) "." source-node))
+(defn derive
+ "Freshly derive explicit total Int choice definitions, rewriting only the
+  operational fields. The derived target is candidate data, not an original
+  theorem. No provenance map, observation key or ignored value field is walked
+  as an operational term merely because it shares canonical graph nodes."
+ ([original] (derive original {:work-units (:transform-work-units limits)}))
+ ([original options]
+  (let [options (settings options) r (request/check! original) data (get-in r [:subject :graph])
+        rows (:nodes data) checked (graph/check! data) original-ref (request/subject-reference r)
+        _ (require! (= policy/numeric (get-in r [:policy :profile])) "numeric semantic profile required")
+        _ (require! (and (<= (count rows) (:source-nodes limits)) (<= (:bytes checked) (:source-bytes limits))) "original graph capacity")
+        context {:used (atom 0) :limit (:work-units options)}
+        _ (charge! context 100000)]
+   (policy/with-question (:subject r) kernel/checking-policy
+    (fn [inventory _]
+     (require! (not= 2 (:formal/question-forest-refusal inventory)) "fresh original admission required")
+     (let [typed (get-in inventory [:forest :nodes])
+           _ (require! (<= (count typed) (:typed-nodes limits)) "original typed-node capacity")
+           _ (doseq [[_ op sort _ _] typed]
+               (require! (and (contains? #{[:bool] [:int]} sort)
+                              (contains? #{"bool" "int" "var" "ite" "not" "and" "or" "implies" "xor" "eq"
+                                           "add" "sub" "neg" "mul" "le" "lt" "ge" "gt"} op)) "Boolean/affine integer choice vocabulary required"))
+           variables (set (map #(nth % 4) (filter #(= "var" (nth % 1)) typed)))
+           _ (require! (<= (count variables) (:variables limits)) "original variable capacity")
+           _ (require! (<= (count (filter #(and (= "ite" (nth % 1)) (= t/Int (nth % 2))) typed)) (:choices limits)) "choice capacity")
+           source-for (zipmap (get-in inventory [:forest :roots]) (get-in inventory [:forest :source-roots]))
+           raw-cache (atom {}) term-cache (atom {}) value-cache (atom {}) definitions (atom [])
+           names (atom variables) labels (atom (set (map :label (:assertions inventory))))
+           root-fields (fields rows (:root data))]
+      (letfn [(raw [id]
+               (if (contains? @raw-cache id) (get @raw-cache id)
+                (do
+                 (charge! context (+ 1 (count rows)))
+                 (let [result (graph/subgraph data id)] (swap! raw-cache assoc id result) result))))
+              (assemble [kind fragments]
+               (let [forecast (inc (reduce + 0 (map #(count (:nodes %))
+                                                 (if (= "map" kind) (mapcat identity fragments) fragments))))]
+                (require! (<= forecast (:output-nodes limits)) "prospective composition capacity")
+                (charge! context forecast))
+               (graph/assemble kind fragments))
+              (patch [source replacements]
+               (let [forecast (+ 1 (count (:nodes source)) (reduce + 0 (map #(count (:nodes (second %))) replacements)))]
+                (require! (<= forecast (:output-nodes limits)) "prospective patch capacity")
+                (charge! context forecast))
+               (graph/patch-map source (mapv (fn [[key value]] [(graph/encode key) value]) replacements)))
+              (node [op sort arguments]
+               (assemble "map" (mapv (fn [[key value]] [(graph/encode key) value])
+                 [[:formal/term (graph/encode 1)] [:op (graph/encode op)] [:sort (graph/encode sort)]
+                  [:args (assemble "vector" arguments)] [:data (graph/encode nil)]])))
+              (term [id]
+               (if (contains? @term-cache id) (get @term-cache id)
+                (let [_ (charge! context 1) f (fields rows id)
+                      [arg-kind children] (nth rows (get f "args"))
+                      arguments (mapv term children)
+                      choice? (and (= ["keyword" "ite"] (nth rows (get f "op")))
+                                   (= (graph/bytes (raw (get f "sort"))) (graph/bytes (graph/encode t/Int))))
+                      result
+                      (if-not choice? (patch (raw id) [[:args (assemble arg-kind arguments)]])
+                       (let [_ (require! (< (count @definitions) (:choices limits)) "source choice capacity")
+                             _ (charge! context 1000)
+                             name (fresh-name original-ref id)
+                             _ (require! (not (contains? @names name)) "fresh variable collides with an original/generated variable")
+                             _ (swap! names conj name)
+                             variable (graph/encode (t/variable name t/Int))
+                             condition (first arguments) yes (second arguments) no (nth arguments 2)
+                             origin {:profile profile :original-subject-reference original-ref :source-term-node id}
+                             labels-for [(str name "/yes") (str name "/no")]
+                             _ (require! (not-any? #(contains? @labels %) labels-for) "generated assertion label collision")
+                             _ (swap! labels into labels-for)
+                             facts [(node :implies t/Bool [condition (node :eq t/Bool [variable yes])])
+                                    (node :implies t/Bool [(node :not t/Bool [condition]) (node :eq t/Bool [variable no])])]
+                             assertions (mapv (fn [label fact]
+                                               (assemble "map" [[(graph/encode :label) (graph/encode label)]
+                                                                [(graph/encode :term) fact]
+                                                                [(graph/encode :origin) (graph/encode origin)]])) labels-for facts)
+                             descriptors (mapv (fn [label] (graph/encode {:label label :origin origin})) labels-for)]
+                        (swap! definitions conj {:source-term-node id :variable name :labels labels-for
+                                                  :assertions assertions :descriptors descriptors})
+                        variable))]
+                 (swap! term-cache assoc id result) result)))
+              (value [id]
+               (if (contains? @value-cache id) (get @value-cache id)
+                (let [_ (charge! context 1) [kind body] (nth rows id)
+                      f (when (= "map" kind) (fields rows id))
+                      result
+                      (cond
+                       (marked? rows f "formal/term") (term id)
+                       (marked? rows f "formal/value")
+                        (patch (raw id) [[:value (value (get f "value"))]
+                                         [:defined (term (get f "defined"))] [:within (term (get f "within"))]])
+                       (= "map" kind) (assemble kind (mapv (fn [[key child]] [(raw key) (value child)]) body))
+                       (contains? #{"vector" "list"} kind) (assemble kind (mapv value body))
+                       :else (raw id))]
+                 (swap! value-cache assoc id result) result)))
+              (assertion [id]
+               (patch (raw id) [[:term (term (get (fields rows id) "term"))]]))]
+       (let [assertions-id (get root-fields "assertions")
+             original-assertions (mapv assertion (second (nth rows assertions-id)))
+             claim-id (get root-fields "claim") counter-id (get root-fields "counterexample")
+             proof? (= :prove (:mode inventory)) claim (when proof? (term claim-id))
+             counter (when proof? (patch (raw counter-id) [[:term (node :not t/Bool [claim])]]))
+             observe-id (get root-fields "observe")
+             observations (when (and (some? observe-id) (= "map" (first (nth rows observe-id))))
+                            (assemble "map" (mapv (fn [[key item]] [(raw key) (value item)]) (second (nth rows observe-id)))))
+             assumptions-id (get root-fields "assumptions")
+             _ (when (some? assumptions-id) (require! (= "vector" (first (nth rows assumptions-id))) "assumption descriptor vector required"))
+             descriptors (if (some? assumptions-id) (raw assumptions-id) (graph/encode []))
+             extra-assertions (mapcat :assertions @definitions) extra-descriptors (mapcat :descriptors @definitions)
+             target-assertions (assemble "vector" (vec (concat original-assertions extra-assertions)))
+             target-descriptors (graph/concat-vectors [descriptors (assemble "vector" (vec extra-descriptors))])
+             replacements (cond-> [[:assertions target-assertions] [:assumptions target-descriptors]]
+                            proof? (conj [:claim claim] [:counterexample counter])
+                            observations (conj [:observe observations]))
+             output (patch data replacements)
+             _ (require! (<= (count (:nodes output)) (:output-nodes limits)) "derived graph capacity")
+             target (request/from-graph output {:policy kernel/checking-policy :adapter (:adapter r)})]
+        {:status :derived :profile profile :target target :original-subject-reference original-ref
+         :target-subject-reference (request/subject-reference target)
+         :original-assumption-ledger {:subject-reference original-ref
+           :entries (mapv (fn [row] {:label (:label row) :source-node (get source-for (:term row))}) (:assertions inventory))}
+         :definition-ledger (mapv #(select-keys % [:source-term-node :variable :labels]) @definitions)
+         :connection {:kind :unique-total-integer-choice-extension :status :reviewed-not-mechanically-proved
+                      :original-variables (vec (sort variables)) :generated-variables (count @definitions)
+                      :provenance-rewriting :operational-fields-only :source-connection :not-established}
+         :charged-transform-work @(:used context) :checking-limits options
+         :compiler-proof-authority false :checked-native-execution false}))))))))
+(defn statement [original]
+ (let [r (request/check! original)]
+  (require! (= policy/numeric (get-in r [:policy :profile])) "numeric semantic profile required")
+  {:subject-reference (request/subject-reference r) :semantic-profile policy/numeric :extension-profile profile}))
+(defn candidate [original target-certificate]
+ {:formal/choice-certificate 1 :profile certificate-profile :statement (statement original) :target-certificate target-certificate})
+(defn check
+ "Reconstruct the extension and freshly check its exact target. Report the
+  additional reviewed transformation in the trust ledger; this certificate
+  strategy is not installed in the common SDK dispatcher."
+ ([original object] (check original object {:work-units checking-allowance}))
+ ([original object options]
+  (try
+   (require! (and (plain? options) (= #{:work-units} (set (keys options)))
+                  (int? (:work-units options)) (<= 0 (:work-units options) 25000000)) "closed bounded checking allowance required")
+   (graph/encode object)
+   (require! (and (plain? object) (= #{:formal/choice-certificate :profile :statement :target-certificate} (set (keys object)))
+                  (int? (:formal/choice-certificate object)) (= 1 (:formal/choice-certificate object))
+                  (= certificate-profile (:profile object))
+                  (= (graph/bytes (graph/encode (statement original))) (graph/bytes (graph/encode (:statement object)))))
+             "closed original-subject choice certificate required")
+   (if (< (:work-units options) checking-allowance)
+    {:status :incomplete :reason :checking-work-limit :checker-invocation :not-run :compiler-proof-authority false}
+    (let [derived (derive original) checked (kernel/check (:target derived) (:target-certificate object))]
+     {:status (if (= :checked (:status checked)) :checked :rejected)
+      :verdict (if (= :checked (:status checked)) (:verdict checked) :not-established)
+      :profile certificate-profile :statement (statement original) :connection (:connection derived)
+      :target-subject-reference (:target-subject-reference derived) :target-proof-check checked
+      :original-assumption-ledger (:original-assumption-ledger derived) :definition-ledger (:definition-ledger derived)
+      :trust [:reviewed-total-integer-choice-extension :fresh-linear-graph-kernel :bl-compiler :beam-runtime]
+      :implementation-verification :not-established :source-connection :not-established
+      :checking-account {:required checking-allowance :limit (:work-units options) :reserved checking-allowance}
+      :compiler-proof-authority false :checked-native-execution false}))
+   (catch error {:status :rejected :verdict :not-established :reason (ex-message error) :compiler-proof-authority false}))))
+(defn pack [original object]
+ (graph/encode {:formal/choice-record 1 :profile record-profile :request (request/check! original) :candidate object}))
+(defn reopen
+ ([data] (reopen data {:work-units checking-allowance}))
+ ([data options]
+  (let [_ [profile certificate-profile record-profile kernel/profile request/profile]
+        packet (graph/decode! data)]
+   (require! (and (plain? packet) (= #{:formal/choice-record :profile :request :candidate} (set (keys packet)))
+                  (int? (:formal/choice-record packet)) (= 1 (:formal/choice-record packet)) (= record-profile (:profile packet))) "closed choice record required")
+   (check (:request packet) (:candidate packet) options))))

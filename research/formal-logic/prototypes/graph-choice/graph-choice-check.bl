@@ -1,0 +1,134 @@
+(ns formal.graph-choice-check
+ (:require [formal.graph-choice :as choice] [formal.graph-proof-search :as search]
+           [formal.request :as request] [formal.request-point :as point] [formal.request-evidence :as evidence]
+           [formal.query :as q] [formal.term :as t] [formal.value :as v] [formal.question-graph :as qg]
+           [formal.point-profile :as policy] [formal.data-graph :as graph] [formal.backend :as backend]
+           [bl.json :as json] [oracle]))
+(def entered (atom []))
+(def observations (atom []))
+(defn persist! []
+ (when-let [path (System/get_env "FORMAL_GRAPH_CHOICE_OUTPUT")]
+  (File/write! path (json/encode {:entered-tests @entered :observations @observations
+    :sdk (System/get_env "BL_SDK_PRODUCT") :compiler-proof-authority false} {:pretty 2}))))
+(defn enter! [name] (swap! entered conj name) (persist!))
+(defn observe! [name result] (swap! observations conj {:case name :result result}) (persist!))
+(defn original [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric}}))
+(def x (t/variable "choice.x" t/Int))
+(def absolute (t/ite (t/lt x (t/int 0)) (t/neg x) x))
+(defn theorem [] (original (q/prove (t/ge absolute (t/int 0)) {:observe {"absolute" absolute}})))
+(defn proof [r]
+ (let [derived (choice/derive r) proposed (search/produce (:target derived) {:states 1024})]
+  (choice/candidate r (:certificate proposed))))
+(defn child [data row]
+ (let [rows (:nodes data) [_ pairs] (nth rows (:root data))
+       id (second (first (filter (fn [[key _]] (= row (nth rows key))) pairs)))]
+  (graph/subgraph data id)))
+(deftest total-integer-choices-have-an-explicit-derived-proof-target
+ (enter! :extension)
+ (let [r (theorem) derived (choice/derive r) c (proof r) result (choice/check r c)]
+  (is (= :derived (:status derived)))
+  (is (= 1 (count (:definition-ledger derived))))
+  (is (= (inc (* 2 (count (:definition-ledger derived))))
+          (count (policy/with-question (:subject (:target derived)) (:policy (:target derived)) (fn [inventory _] (:assertions inventory))))))
+  (is (= :checked (:status result)))
+  (is (= :entails (:verdict result)))
+  (is (= :checked (get-in result [:target-proof-check :status])))
+  (is (= :reviewed-not-mechanically-proved (get-in result [:connection :status])))
+  (is (= :not-established (:implementation-verification result) (:source-connection result)))
+  (is (= false (:compiler-proof-authority result) (:checked-native-execution result)))
+  (observe! :absolute result))
+ (let [nested (t/ite (t/eq x (t/int 0)) (t/int 0) absolute)
+       r (original (q/prove (t/ge nested (t/int 0))))
+       derived (choice/derive r) result (choice/check r (proof r))]
+  (is (= 2 (count (:definition-ledger derived))))
+  (is (= :checked (:status result)))
+  (is (= :entails (:verdict result)))
+  (observe! :nested result)))
+(deftest fresh-bindings-and-original-preconditions-remain-separate
+ (enter! :hygiene)
+ (let [r (theorem) derived (choice/derive r) c (proof r)
+       row (first (:definition-ledger derived)) variable (:variable row)
+       other (request/for-backend r :oxiz) again (choice/check other c)]
+  (is (not= "choice.x" variable))
+  (is (not-any? #{variable} (get-in derived [:connection :original-variables])))
+  (is (every? int? (map :source-node (get-in derived [:original-assumption-ledger :entries]))))
+  (is (= (count (get-in derived [:original-assumption-ledger :entries])) 1))
+  (is (= :checked (:status again)))
+  (is (= (:statement c) (:statement again)))
+  (is (= (:target-subject-reference derived) (:target-subject-reference again)))
+  (is (= :rejected (:status (choice/check r (assoc-in c [:target-certificate :statement :subject-reference] {})))))))
+(deftest shared-active-terms-do-not-rewrite-untouched-provenance
+ (enter! :provenance)
+ (let [r (theorem)
+       unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" (str "choice.unknown." (System/unique_integer (list :positive)))]]}
+       history (graph/assemble "vector" [(graph/encode absolute) unknown])
+       data (graph/patch-map (get-in r [:subject :graph]) [[(graph/encode :origin) history] [(graph/encode :scope) history]])
+       subject (request/from-graph data {:policy (:policy r) :adapter (:adapter r)})
+       derived (choice/derive subject)]
+  (is (thrown? (qg/materialize! (:subject subject))))
+  (doseq [field [:origin :scope]]
+   (is (= (graph/bytes history) (graph/bytes (qg/field-graph (:subject (:target derived)) field)))))
+  (is (= 1 (count (:definition-ledger derived))))
+  (is (= :checked (:status (choice/check subject (proof subject)))))))
+(deftest formal-value-payloads-change-and-ignored-metadata-does-not
+ (enter! :formal-values)
+ (let [out (v/make {"payload" [absolute]} {:defined (t/ge absolute (t/int 0))
+                                         :domain {:kind :choice-example :archived-term absolute}})
+       r (original (q/prove (t/ge absolute (t/int 0)) {:observe {"out" out}}))
+       derived (choice/derive r)
+       before (child (qg/field-graph (:subject r) :observe) ["binary" "out"])
+       after (child (qg/field-graph (:subject (:target derived)) :observe) ["binary" "out"])
+       active-choices (policy/with-question (:subject (:target derived)) (:policy (:target derived))
+                        (fn [inventory _] (filter #(and (= "ite" (nth % 1)) (= t/Int (nth % 2))) (get-in inventory [:forest :nodes]))))]
+  (is (= (graph/bytes (child before ["keyword" "domain"])) (graph/bytes (child after ["keyword" "domain"]))))
+  (is (not= (graph/bytes (child before ["keyword" "value"])) (graph/bytes (child after ["keyword" "value"]))))
+  (is (not= (graph/bytes (child before ["keyword" "defined"])) (graph/bytes (child after ["keyword" "defined"]))))
+  (is (empty? active-choices))
+  (is (= :checked (:status (choice/check r (proof r)))))))
+(deftest low-allowances-invoke-no-original-admission-or-proof-checker
+ (enter! :budgets)
+ (let [r (theorem) c (proof r) module (elem (erlang/fun_info policy/with-question :module) 1)
+       pattern (tuple module :with-question 3)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (is (thrown? (choice/derive r {:work-units 99999})))
+   (let [result (choice/check r c {:work-units (dec choice/checking-allowance)})]
+    (is (= :incomplete (:status result)))
+    (is (= :not-run (:checker-invocation result))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest false-properties-and-uninstalled-profiles-grant-no-authority
+ (enter! :refusals)
+ (let [r (original (q/prove (t/ge absolute (t/int 1))))
+       checked (point/replay r {"choice.x" 0}) derived (choice/derive r)
+       fake {:formal/graph-integer-certificate 1 :profile :bl/graph-linear-integer-certificate-preview-v1
+             :statement {:subject-reference (:target-subject-reference derived) :semantic-profile policy/numeric}
+             :proof {:root 0 :nodes [[:boolean]]}}
+       result (choice/check r (choice/candidate r fake))]
+  (is (= :refuted (:verdict checked)))
+  (is (= :rejected (:status result))))
+ (let [r (theorem) c (proof r)
+       common (evidence/recheck r (evidence/propose r {:certificate c}))]
+  (is (= :rejected (get-in common [:proof-check :status])))
+  (is (= :uninstalled-proof-strategy (get-in common [:proof-check :reason])))
+  (doseq [changed [(assoc c :checked true) (assoc c :formal/choice-certificate 1.0) (assoc c :statement {})]]
+   (is (= :rejected (:status (choice/check r changed)))))))
+(deftest packets-contain-candidates-and-use-the-current-reader-allowance
+ (enter! :packets)
+ (let [r (theorem) c (proof r) packet (choice/pack r c) record (graph/decode! packet)]
+  (is (= :checked (:status (choice/reopen packet))))
+  (is (= :incomplete (:status (choice/reopen packet {:work-units 0}))))
+  (is (not (contains? record :result)))
+  (is (thrown? (choice/reopen (graph/encode (assoc record :result {:status :checked})))))))
+(deftest the-extension-opens-no-native-or-oracle-owner
+ (enter! :no-native)
+ (let [r (theorem) module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    #(is (= :checked (:status (choice/check r (proof r))))))
+   (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)
