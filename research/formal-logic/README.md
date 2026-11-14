@@ -12,7 +12,12 @@ questions unchanged, twenty actual word/text records reopened by two fresh
 durable readers, and compatibility readers for three older generations. See
 [the artifact qualification](evidence/scalar-integration/qualification.json)
 and [the selection receipt](evidence/scalar-integration/promotion.json).
-The live dossier's executable/browser checkpoint is being refreshed separately.
+The [current dossier checkpoint](evidence/scalar-presentation/dossier-qualification.json)
+is also qualified: 93 cells (92 freshly checked plus one exact historical
+observation), 218 focused and 1,601 full browser checks, inspected phone/desktop
+frames in both themes, and sixteen actual browser save/refresh controls. The
+production evidence store preserves its original revision and appends the current
+one; the isolated browser fixture durably reloads all four revisions.
 The isolated [premise feasibility experiment](FINITE-FEASIBILITY-PROTOTYPE.md)
 has also passed 35 assertions; it is not yet part of the immutable SDK.
 
@@ -685,7 +690,8 @@ that preceding prototype checkpoint retains its original word-SDK identity.
 The live dossier now includes a prose progress section for these qualified
 prototypes. Its cell sources and saved results are unchanged. The word presentation
 receipt above binds the preceding exact document revision; the expanded document's
-next execution/browser checkpoint is pending the current integration work.
+next execution/browser checkpoint has now passed on the selected scalar SDK,
+with its own [exact revision receipt](evidence/scalar-presentation/dossier-qualification.json).
 
 The [scalar-text/evidence SDK candidate](SCALAR-INTEGRATION.md) is now built:
 723 source files, thirteen changed compiled units, unchanged native components
@@ -716,3 +722,9 @@ and prospective arithmetic limits; all 54 assertions and seven named bodies pass
 It is an isolated prototype, not yet part of the selected SDK. The [native String carrier
 review](STRING-REPRESENTATION-REVIEW.md) binds the actual immutable worker and
 locked crate sources without claiming a quantified-domain theorem.
+
+The next isolated [request-header prototype](proposals/request-header-plan.md)
+compares a single canonical graph check with the repeated field-subgraph path.
+It has not run yet and adds no selected SDK capability. The next coherent
+[evidence/obligation batch](proposals/evidence-obligation-batch-design.md) will
+connect the qualified semantic pieces while preserving old packet identities.
