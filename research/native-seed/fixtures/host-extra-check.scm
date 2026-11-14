@@ -23,7 +23,6 @@
   (native-extra-check "canonical MapSet struct projection" (eq? (native-struct-module members) (bl-key "Elixir.MapSet")))
   (native-extra-check "canonical empty list membership marker" (null? (bl-get entries 1)))))
 (native-extra-check "arity annotation" (native-callable-accepts? (bl-register-callable! (lambda (x) x) 1) 1))
-(display "native extra checks passed") (newline)
 (let* ((high (h-str-slice "😀" 0 1)) (low (h-str-slice "😀" 1 2)))
  (native-extra-check "surrogate fragment is actor string" (h-is-str high))
  (native-extra-check "surrogate fragment size" (= 1 (h-str-size high)))
@@ -76,3 +75,17 @@
      (native-extra-check "canonical vector root32" (= 32 (bl-count (bl-nth items 3)))))
     (native-extra-check "canonical small vector dense bound" (<= (bl-count items) 32)))
    (sizes (cdr counts)))))
+(native-extra-check "raw binary order uses codepoints"
+ (< (native-term-compare "" "😀") 0))
+(native-extra-check "actor string order uses UTF16"
+ (> (h-str-cmp "" "😀") 0))
+(native-extra-check "Num nondecimal term comparison retained"
+ (native-num 'lt (bl-key "a") (bl-key "b")))
+(let ((refused #f))
+ (with-exception-catcher (lambda (e) (set! refused #t))
+  (lambda () (native-num 'lt (bl-decimal 1 1) (bl-float 0.1))))
+ (native-extra-check "Num decimal float promotion refuses" refused))
+(native-extra-check "mandatory float decimal point" (string=? "1.0" (native-shortest-float-text (bl-float 1.0))))
+(native-extra-check "negative float zero spelling" (string=? "-0.0" (native-shortest-float-text (bl-float -0.0))))
+(native-extra-check "short float scientific policy" (string=? "1.0e-6" (native-shortest-float-text (bl-float 0.000001))))
+(display "native extra checks passed") (newline)

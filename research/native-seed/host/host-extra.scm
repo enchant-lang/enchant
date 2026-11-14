@@ -235,7 +235,7 @@
 (native-add-leaf! "erlang/make_tuple/2" (lambda (n x) (bl-tuple (native-repeat n x))))
 (native-add-leaf! "erlang/setelement/3" (lambda (index tuple value) (native-assert-tuple tuple) (if (or (< index 1) (> index (bl-count tuple))) (native-badarg "tuple index") (bl-tuple (let loop ((xs (bl-items tuple)) (n 1)) (if (null? xs) xs (cons (if (= n index) value (car xs)) (loop (cdr xs) (+ n 1)))))))))
 (native-add-leaf! "erlang/max/2" (lambda (a b) (if (>= (native-term-compare a b) 0) a b)))
-(native-add-leaf! "erlang/float_to_binary/2" (lambda (x options) (number->string (vector-ref x 1))))
+(native-add-leaf! "erlang/float_to_binary/2" (lambda (x options) (native-shortest-float-text x)))
 (define (native-check-function-arity n)
  (if (not (and (h-is-int n) (>= n 0)))
   (native-raise (bl-key "error") (bl-key "badarg") (native-capture-stack))) n)

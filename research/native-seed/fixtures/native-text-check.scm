@@ -8,4 +8,6 @@
 (native-text-check "grapheme reverse" (string=? "xé" (native-join "" (reverse (native-string-graphemes "éx")))))
 (native-text-check "grapheme slice" (string=? "👩‍💻" (native-string-slice "a👩‍💻b" 1 1)))
 (native-text-check "regex split" (equal? (native-string-split "a  b c" (native-regex-compile " +") '()) '("a" "b" "c")))
+(let* ((answer (native-decimal-parse " -1.230e2 ")) (d (bl-nth answer 1)))
+ (native-text-check "decimal exact exponent parse" (and (= -1230 (bl-get d (bl-key "unscaled"))) (= 1 (bl-get d (bl-key "scale"))))))
 (display "native text checks passed") (newline)

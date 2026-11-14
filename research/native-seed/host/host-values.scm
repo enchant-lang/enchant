@@ -287,10 +287,18 @@
 (define (native-num op a b)
  (cond
   ((or (eq? op 'lt) (eq? op 'gt) (eq? op 'le) (eq? op 'ge) (eq? op 'num_eq))
-   (let ((n (native-number-compare a b)))
-    (case op ((lt) (< n 0)) ((gt) (> n 0)) ((le) (<= n 0)) ((ge) (>= n 0)) (else (= n 0)))))
+   ;; host/num.bl keeps raw term order/equality for non-decimal operands;
+   ;; decimal promotion refuses an implicit float, even for comparisons.
+   (if (and (or (native-decimal? a) (native-decimal? b))
+            (or (bl-tag? a 'float) (bl-tag? b 'float)))
+    (native-decimal-inexact! (if (bl-tag? a 'float) a b)))
+   (if (and (eq? op 'num_eq) (not (or (native-decimal? a) (native-decimal? b))))
+    (native-erlang-equal? a b)
+    (let ((n (if (or (native-decimal? a) (native-decimal? b))
+              (native-number-compare a b) (native-term-compare a b))))
+     (case op ((lt) (< n 0)) ((gt) (> n 0)) ((le) (<= n 0)) ((ge) (>= n 0)) (else (= n 0))))))
   ((and (or (native-decimal? a) (native-decimal? b))
-        (or (bl-tag? a 'float) (bl-tag? b 'float))) (error "float/decimal arithmetic requires explicit conversion"))
+        (or (bl-tag? a 'float) (bl-tag? b 'float))) (native-decimal-inexact! (if (bl-tag? a 'float) a b)))
   ((or (native-decimal? a) (native-decimal? b))
    (let* ((pa (native-decimal-parts a)) (pb (native-decimal-parts b))
           (scale (max (cdr pa) (cdr pb)))
@@ -404,8 +412,12 @@
 (set! bl-match (lambda (p v env)
  (and env
   (case (car p)
-   ((var) (let ((old (assoc (cadr p) env)))
-           (if old (and (bl-key-equal? (cdr old) v) env) (cons (cons (cadr p) v) env))))
+   ((var) (if (string=? (cadr p) "_")
+           ;; Wildcards never unify, but the frozen emitter still emits an
+           ;; unused assoc binding for _. Keep it present until emitter refresh.
+           (cons (cons "_" v) env)
+           (let ((old (assoc (cadr p) env)))
+            (if old (and (bl-key-equal? (cdr old) v) env) (cons (cons (cadr p) v) env)))))
    ((lit) (and (bl-key-equal? (cadr p) v) env))
    ((nil) (and (null? v) env))
    ((tuple) (and (bl-tag? v 'tuple) (bl-match-args (cadr p) (bl-items v) env)))
@@ -646,7 +658,7 @@
  (cond ((bl-is-nil x) "nil") ((eq? x #t) "true") ((eq? x #f) "false")
   ((string? x) (if readable? (let ((p (open-output-string))) (write x p) (get-output-string p)) x))
   ((native-keyword? x) (symbol->string x)) ((h-is-int x) (number->string x))
-  ((bl-tag? x 'float) (number->string (vector-ref x 1)))
+  ((bl-tag? x 'float) (native-shortest-float-text x))
   ((native-decimal? x) (string-append (native-decimal-text x) "M"))
   ((procedure? x) "#<function>")
   ((or (native-list? x) (bl-tag? x 'vec) (bl-tag? x 'tuple) (bl-tag? x 'set) (bl-tag? x 'map))
@@ -869,3 +881,42 @@
                   (or (= shift 5) (> tree-count (expt 2 shift)))))
      (error "invalid canonical vector count or shift"))
     (bl-vec (native-vector-unproject-node root shift tree-count (bl-items tail)))))))
+
+;; OTP's :short spelling, as the owning JS Float adapter also implements:
+;; shortest roundtripping digits, mandatory '.', fixed on length ties, and
+;; scientific form at/above2^53. Storage comparisons never consume this text.
+(define (native-shortest-float-text boxed)
+ (let* ((value (vector-ref boxed 1)) (raw (number->string value)))
+  (if (= value 0)
+   (if (and (> (string-length raw) 0) (char=? (string-ref raw 0) #\-)) "-0.0" "0.0")
+   (let* ((text (native-js-float-text (abs value)))
+          (size (string-length text))
+          (split (let find ((i 0)) (if (or (= i size) (char=? (string-ref text i) #\e)) i (find (+ i 1)))))
+          (power (if (= split size) 0 (string->number (substring text (+ split 1) size))))
+          (whole (substring text 0 split))
+          (point (let find ((i 0)) (if (or (= i split) (char=? (string-ref whole i) #\.)) i (find (+ i 1)))))
+          (digits (list->string (let walk ((xs (string->list whole)))
+                    (cond ((null? xs) '()) ((char=? (car xs) #\.) (walk (cdr xs))) (else (cons (car xs) (walk (cdr xs))))))))
+          (first (let find ((i 0)) (if (char=? (string-ref digits i) #\0) (find (+ i 1)) i)))
+          (last (let find ((i (string-length digits))) (if (and (> i (+ first 1)) (char=? (string-ref digits (- i 1)) #\0)) (find (- i 1)) i)))
+          (digits (substring digits first last))
+          (count (string-length digits))
+          (exponent (+ power (- point first 1)))
+          (scientific (string-append (substring digits 0 1) "." (if (= count 1) "0" (substring digits 1 count)) "e" (number->string exponent)))
+          (at (+ exponent 1))
+          (fixed (cond ((<= at 0) (string-append "0." (make-string (- at) #\0) digits))
+                  ((>= at count) (string-append digits (make-string (- at count) #\0) ".0"))
+                  (else (string-append (substring digits 0 at) "." (substring digits at count))))))
+    (string-append (if (< value 0) "-" "")
+     (if (or (>= (abs value) 9007199254740992) (< (string-length scientific) (string-length fixed))) scientific fixed))))))
+(define (native-decimal-inexact! value)
+ (native-raise (bl-key "error")
+  (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.ExInfo") (bl-key "__exception__") #t
+   (bl-key "message") (string-append "a float cannot enter decimal arithmetic: " (native-shortest-float-text value)
+                         " (use decimal/from-float to approximate on purpose)")
+   (bl-key "data") (bl-map (bl-key "type") (bl-key "decimal/inexact-operand") (bl-key "value") value))
+  (native-capture-stack)))
+;; Exact constructor spellings emitted by native.scheme/literal and
+;; native.bootstrap/data. Both use the existing persistent Set storage.
+(define bl-set-from-list native-set-from-list)
+(define bl-set native-set-from-list)

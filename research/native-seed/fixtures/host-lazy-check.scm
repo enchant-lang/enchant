@@ -20,7 +20,6 @@
  (let* ((claim2 (native-lazy-claim x)) (attempt2 (bl-nth claim2 1)))
   (native-lazy-complete x attempt2 '(4 5))
   (native-lazy-check "recipe publishes memo" (equal? (native-lazy-list x) '(4 5)))))
-(display "native lazy memo checks passed") (newline)
 (let* ((pid (bl-vec (list (bl-key "pid") "fixture-runtime" 1)))
        (x (native-lazy-new (lambda () (h-park "park") '(99))))
        (owner (h-make-frames (lambda () (native-lazy-force x)) '()))
@@ -39,3 +38,4 @@
   (native-lazy-check "owner lost identity preserved" (bl-key-equal? (bl-nth reason 1) pid))
   (native-lazy-check "owner lost attempt is a reference" (native-reference? (bl-nth reason 2))))
  (h-set-state saved-state) (set! seed-self saved-self))
+(display "native lazy memo checks passed") (newline)

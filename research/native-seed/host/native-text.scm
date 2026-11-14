@@ -98,9 +98,11 @@ c-end
 (define (native-byte-slice bytes a b)
  (let loop ((i (- b 1)) (out '())) (if (< i a) (native-utf8-string out) (loop (- i 1) (cons (vector-ref bytes i) out)))))
 (define (native-regex-captures result row bytes)
- (let loop ((i (- (native-text-width result) 1)) (out '()))
+ (let trim ((count (native-text-width result)))
+  (if (and (> count 1) (< (native-text-offset result row (- count 1) 0) 0)) (trim (- count 1))
+   (let loop ((i (- count 1)) (out '()))
   (if (< i 0) out (let ((a (native-text-offset result row i 0)) (b (native-text-offset result row i 1)))
-   (loop (- i 1) (cons (if (< a 0) "" (native-byte-slice bytes a b)) out))))))
+   (loop (- i 1) (cons (if (< a 0) "" (native-byte-slice bytes a b)) out))))))))
 (define (native-regex-run regex text)
  (native-with-matches (vector-ref regex 1) text #f
   (lambda (result) (if (= (native-text-rows result) 0) bl-nil
@@ -177,3 +179,18 @@ c-end
    (let* ((prefix (car captures)) (number (string->number prefix)))
     (bl-tuple (list (bl-float number) (native-drop chars (string-length prefix))))))))
 (native-add-leaf! "string/to_float/1" native-string-to-float)
+;; Same token grammar and exact coefficient/scale normalization as the owning
+;; host/decimal.bl parse/1, using PCRE2 rather than a shortened numeric grammar.
+(set! native-decimal-parse (lambda (text)
+ (let ((match (native-regex-run
+   (native-regex-compile "\\A\\s*([+-])?([0-9]*)(?:\\.([0-9]*))?(?:[eE]([+-]?[0-9]+))?\\s*\\z") text)))
+  (if (bl-is-nil match) (bl-key "error")
+   (let* ((caps (append (cdr match) (native-repeat (max 0 (- 4 (length (cdr match)))) "")))
+          (sign (list-ref caps 0)) (whole (list-ref caps 1)) (fraction (list-ref caps 2)) (exp-text (list-ref caps 3)))
+    (if (and (string=? whole "") (string=? fraction "")) (bl-key "error")
+     (let* ((exponent (if (string=? exp-text "") 0 (string->number exp-text)))
+            (scale (- (string-length fraction) exponent))
+            (coefficient (string->number (string-append whole fraction)))
+            (coefficient (if (string=? sign "-") (- coefficient) coefficient)))
+      (bl-tuple (list (bl-key "ok")
+       (if (< scale 0) (bl-decimal (* coefficient (expt 10 (- scale))) 0) (bl-decimal coefficient scale)))))))))))

@@ -323,6 +323,10 @@
       (and (not (eq? v native-missing)) (native-erlang-equal? (bl-nth p 1) v) (loop (cdr ps))))))))
   (else (bl-key-equal? a b))))
 (set! native-term-compare (lambda (a b)
- (if (and (native-erlang-number? a) (native-erlang-number? b)) (native-number-compare a b) (bl-key-compare a b))))
+ (cond ((and (native-erlang-number? a) (native-erlang-number? b)) (native-number-compare a b))
+  ;; Erlang text-binary order is codepoint/UTF8 order, independent of the
+  ;; actor's explicitly JS-shaped UTF16 str-cmp operation.
+  ((and (native-string? a) (native-string? b)) (native-unit-compare (h-str-codepoints a) (h-str-codepoints b)))
+  (else (bl-key-compare a b)))))
 (native-add-leaf! "erlang/==/2" native-erlang-equal?)
 (native-add-leaf! "erlang//=/2" (lambda (a b) (not (native-erlang-equal? a b))))
