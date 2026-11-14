@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+prototype=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+root=$(CDPATH='' cd "$prototype/../.." && pwd -P)
+python3 - "$prototype/sdk-pin.json" "$root/.bl/sdks/current-sdk" <<'PY'
+import hashlib,json,pathlib,sys
+p=json.loads(pathlib.Path(sys.argv[1]).read_text())
+b=(pathlib.Path(p['sdk'])/'artifact.json').read_bytes()
+assert hashlib.sha256(b).hexdigest()==p['descriptor_sha256'], 'SDK descriptor changed'
+assert json.loads(b)['source']==p['source'], 'SDK Source changed'
+assert pathlib.Path(sys.argv[2]).resolve()==pathlib.Path(p['sdk']), 'checkout SDK differs from prototype pin'
+PY
+runtime=$(mktemp -d /tmp/bl-native-seed-XXXXXXXX)
+trap 'rm -rf -- "$runtime"' EXIT
+systemd-run --user --quiet --collect --wait --pipe \
+  --working-directory="$root" --property=MemoryMax=3G --property=MemorySwapMax=0 \
+  --property=RuntimeMaxSec=240 --property=KillMode=control-group \
+  --setenv=XDG_RUNTIME_DIR="$runtime" \
+  "$root/bin/bl" --cold -p "$prototype/src" "$@"

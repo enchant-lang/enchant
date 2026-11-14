@@ -1,0 +1,26 @@
+(ns native.inspect
+ (:require [compiler :as c] [codebase] [system.analyze :as analyze]
+           [bl.json :as json]))
+
+(doseq [source ["(fn add [x] (+ x 1))" "(fn [x] (get x :status))"
+                "(fn [x] (assoc x :a []))" "(fn [x] (host/state))"
+                "(fn [x] (receive [:a v] v (after 0 :timeout)))"]]
+ (println (str "SOURCE " source))
+ (println (pr-str (c/compile (BeamLisp.Reader/read_one source) (c/new-env "native.kernel")))))
+
+(def files ["priv/std/proc/server.bl" "priv/std/proc/super.bl"
+ "priv/std/proc/bus.bl" "priv/std/proc/flow.bl" "priv/std/proc/reg.bl"
+ "priv/std/proc/table.bl" "priv/std/proc/queue-runtime.bl" "priv/std/proc/mailbox.bl"
+ "priv/lib/js/actor/runtime.bl"])
+(def facts
+ (mapv (fn [path]
+  (let [source (File/read! path) ns-name (or (BeamLisp.Loader/declared_ns source) "js")
+        index (codebase/index-source {} ns-name source {:mode :calls})]
+   {:path path :namespace ns-name :functions (count (:fn index))
+    :calls (:calls index)
+    :sha256 (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))})) files))
+(File/write! "research/native-seed/evidence/codebase.json" (json/encode facts))
+(println "CODEBASE_INDEX_SAVED")
+(let [source "(defn scan [probe messages] (if (empty? messages) :nomatch (let [r (probe (first messages))] (if (= r :nomatch) (scan probe (rest messages)) r))))"]
+ (File/write! "research/native-seed/evidence/analysis.edn" (pr-str (analyze/analyze source)))
+ (println "SYSTEM_ANALYSIS_SAVED"))
