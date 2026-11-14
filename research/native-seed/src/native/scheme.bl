@@ -9,10 +9,24 @@
   (cond (= c 34) "\\\"" (= c 92) "\\\\" (= c 10) "\\n" (= c 13) "\\r" (= c 9) "\\t"
         (or (< c 32) (= c 127)) (str "\\x" (Integer/to_string c 16) ";")
         :else (unicode/characters_to_binary (list c)))) (unicode/characters_to_list s))) "\""))
+(declare literal)
+(defn- literal-items [xs] (string/join " " (map literal xs)))
 (defn literal [v]
  (cond (nil? v) "bl-nil" (= v true) "#t" (= v false) "#f"
        (integer? v) (str v) (string? v) (text v)
+       (erlang/is_float v) (str "(bl-float " (erlang/float_to_binary v (list :short)) ")")
+       (= (type v) :Elixir.BeamLisp.Decimal)
+        (str "(bl-decimal " (BeamLisp.Decimal/unscaled v) " " (BeamLisp.Decimal/scale v) ")")
        (keyword? v) (str "(string->symbol " (text (str ":" (erlang/atom_to_binary v))) ")")
+       (vector? v) (str "(bl-make-vec " (literal-items v) ")")
+       (erlang/is_list v) (str "(list " (literal-items v) ")")
+       (set? v) (str "(bl-set-from-list (list " (literal-items v) "))")
+       (erlang/is_map v)
+        (let [module (get v :__struct__)
+              entries (if module (dissoc v :__struct__) v)
+              fields (str "(bl-map " (literal-items (mapcat identity entries)) ")")]
+         (if module (str "(bl-struct " (literal module) " " fields ")") fields))
+       (erlang/is_tuple v) (str "(bl-make-tuple " (literal-items (erlang/tuple_to_list v)) ")")
        :else (throw (ex-info "native seed: unsupported literal" {:value v}))))
 (defn refuse [n]
  (throw (ex-info (str "native seed: unsupported ANF or host capability "
@@ -42,6 +56,9 @@
           (string/join " " (map (fn [[k p]] (str "(list " (emit k options) " " (pattern p options) ")")) (:pairs p))) "))")
         (and (= op :pstruct) (= :Elixir.BeamLisp.Vector (:mod p)))
           (str "(list 'vector " (pattern (second (first (:fields p))) options) ")")
+        (= op :pstruct)
+          (str "(list 'struct " (literal (:mod p)) " (list "
+           (string/join " " (map (fn [[k p]] (str "(list " (literal k) " " (pattern p options) ")")) (:fields p))) "))")
         :else (refuse {:op op}))))
 
 (defn binders [p]
@@ -81,7 +98,8 @@
    "eq" "lt" "arith" "write" "str-cat" "describe" "raise" "record-error" "truthy"})
 (defn remote [n options]
  (let [m (:mod n) f (erlang/atom_to_binary (:fun n))]
-  (cond (and (= m :host) (contains? host-leaves f)) (str "h-" f)
+  (or (when-let [resolver (:remote-resolver options)] (resolver n))
+   (cond (and (= m :host) (contains? host-leaves f)) (str "h-" f)
         (and (contains? #{:Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core} m) (get core-leaves f)) (get core-leaves f)
         (and (= m :Elixir.BeamLisp.Num) (get arithmetic (keyword f))) (get arithmetic (keyword f))
         (and (= m :erlang) (= f "not")) "not"
@@ -89,24 +107,43 @@
         (and (= m :erlang) (contains? #{"==" "=:="} f)) "bl-equal?"
         (and (= m :erlang) (contains? #{">" "<" ">=" "=<" "+" "-" "*"} f))
           (if (= f "=<") "<=" f)
-        :else (refuse n))))
+        :else (refuse n)))))
+
+(defn- argument-list [args]
+ (if (empty? args) {:op :enil :ann {}}
+  {:op :cons :head (first args) :tail (argument-list (rest args)) :ann {}}))
+
+(defn- emit-try [n options]
+ (let [stack (BeamLisp.CompilerData/catch_stack_bindings)
+       handler (clauses (:catch n) "(list caught-kind caught-reason)"
+                   "(bl-reraise caught-kind caught-reason caught-trace)" options false)]
+  (str "(bl-try (lambda () " (emit (:body n) options) ") "
+   "(lambda (caught-kind caught-reason caught-trace) (let ((" (ident (:frames stack)) " caught-trace) ("
+   (ident (:raw stack)) " caught-trace)) " handler ")) "
+   (if (:after n) (str "(lambda () " (emit (:after n) options) ")") "#f") ")")))
 
 (defn emit [n options]
  (case (:op n)
   :lit (literal (:val n))
   :var (ident (:name n))
-  :global (if (and (= (:ns options) (:ns n)) (contains? (:definitions options) (:name n)))
+  :global (or (when-let [resolver (:global-resolver options)] (resolver n))
+          (if (and (= (:ns options) (:ns n)) (contains? (:definitions options) (:name n)))
             (ident (:name n))
-            (or (when (contains? #{"core" "rt"} (:ns n)) (get core-leaves (:name n))) (refuse n)))
-  :binding (refuse n)
+            (or (when (contains? #{"core" "rt"} (:ns n)) (get core-leaves (:name n))) (refuse n))))
+  :binding (or (when-let [resolver (:binding-resolver options)] (resolver n)) (refuse n))
   :remote (ordered (remote n options) (:args n) options)
-  :arith (if-let [f (get arithmetic (:fun n))] (ordered f (:args n) options) (refuse n))
-  :apply (ordered (emit (:fn n) options) (:args n) options)
+  :arith (if-let [f (or (when-let [resolver (:arithmetic-resolver options)] (resolver n))
+                       (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
+  :apply (ordered "bl-invoke" [(:fn n) (argument-list (:args n))] options)
   :invoke (ordered "bl-invoke" [(:callee n) (:arguments n)] options)
   :let (str "(let ((" (ident (:name n)) " " (emit (:init n) options) ")) " (emit (:body n) options) ")")
   :if (str "(if (bl-truthy " (emit (:test n) options) ") " (emit (:then n) options) " " (emit (:else n) options) ")")
   :do (str "(begin " (if (empty? (:stmts n)) "bl-nil" (joined (:stmts n) options)) ")")
-  :fn (str "(lambda argv (h-tick) " (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" options false) ")")
+  :fn (let [body (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" options false)
+            frame (assoc (:ann n) :arity (count (:pats (first (:clauses n)))))
+            body (if (:source-frames? options)
+                  (str "(bl-with-source-frame " (literal frame) " (lambda () " body "))") body)]
+        (str "(lambda argv (h-tick) " body ")"))
   :case (str "(let ((subject " (emit (:subj n) options) ")) "
           (clauses (:clauses n) "(list subject)" "(error \"native seed: case clause\")" options false) ")")
   :recv (str "(let* ((timeout " (if (:timeout n) (emit (:timeout n) options) "bl-nil") ") "
@@ -114,6 +151,7 @@
      (clauses (:clauses n) "(list message)" "(bl-key \"nomatch\")" options true)
      ") (lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ") timeout))) "
      "((bl-nth selection 1)))")
+  :try (emit-try n options)
   :tuple (ordered "bl-make-tuple" (:elems n) options)
   :map (ordered "bl-map" (mapcat identity (:pairs n)) options)
   :cons (ordered "cons" [(:head n) (:tail n)] options)
@@ -121,10 +159,14 @@
   :struct (if (and (= :Elixir.BeamLisp.Vector (:mod n)) (= 1 (count (:fields n)))
                    (= :tuple (:op (second (first (:fields n))))))
             (ordered "bl-make-vec" (:elems (second (first (:fields n)))) options)
-            (refuse n))
+            (str "(bl-struct " (literal (:mod n)) " "
+              (ordered "bl-map" (mapcat identity (:fields n)) options) ")"))
   (refuse n)))
 
 (defn emit-definition [definition options]
  (try
-  (str "(define " (ident (:name definition)) " " (emit (:node definition) options) ")\n")
+  (str "(define " (or (:scheme-name definition)
+                      (when (:namespace-qualified? options)
+                       (ident (str (or (:ns definition) (:ns options)) "/" (:name definition))))
+                      (ident (:name definition))) " " (emit (:node definition) options) ")\n")
   (catch e (throw (ex-info (str (:name definition) ": " (ex-message e)) (ex-data e))))))
