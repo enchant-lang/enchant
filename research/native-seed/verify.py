@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -67,6 +68,9 @@ def main():
     expected = [line for line in native.splitlines() if line.startswith('PASS ')]
     assert len(expected) == 27 and len(set(expected)) == 27 and 'NATIVE_SEED_ACTORS_OK' in native, native
     assert 'FAIL' not in native
+    # The canonical packager preserves the Nix inputs' read-only file modes.
+    # Replace only this task's generated graph before rebuilding that graph.
+    shutil.rmtree(OUT/'js', ignore_errors=True)
     run('js-build', [BASE/'run', 'run', BASE/'js-oracle.bl'], cwd=ROOT, timeout=260)
     javascript = run('javascript', ['node', OUT/'js/out/actors.mjs'])
     shared = [line for line in expected if line != 'PASS cleanup-and-bounded-turns']
