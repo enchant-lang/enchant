@@ -1,0 +1,42 @@
+;; A service is a contract and an authority boundary, independent of its VM.
+;; Wire maps have string keys. Never intern names received from another VM.
+(ns auth.wire (:require [bl.json :as json]))
+
+(def MAX-REQUEST 65536)
+(def MAX-RESPONSE 1048576)
+(def LEASE-MS 15000)
+
+(defn now [] (System/system_time :millisecond))
+(defn text? [x] (and (string? x) (<= 1 (erlang/byte_size x) 4096)))
+(defn folder? [x]
+ (and (text? x) (starts-with? x "/") (not= x "/")
+      (= x (Path/expand x)) (not (includes? x (erlang/list_to_binary (list 0))))))
+(defn within?
+ "POSIX folder identity, with a segment boundary. A folder is never a name prefix."
+ [root path tree?]
+ (and (folder? root) (folder? path)
+      (or (= root path) (and tree? (starts-with? path (str root "/"))))))
+
+(defn data?
+ "The portable finite subset. Local calls obey exactly the same restriction."
+ ([value] (data? value 0))
+ ([value depth]
+  (and (<= depth 12)
+   (cond
+    (or (nil? value) (boolean? value) (int? value)) true
+    (string? value) (<= (erlang/byte_size value) MAX-RESPONSE)
+    (vector? value) (and (<= (count value) 4096) (every? #(data? % (inc depth)) value))
+    (map? value) (and (not (erlang/is_map_key :__struct__ value)) (<= (count value) 64)
+                  (every? (fn [[k v]] (and (text? k) (data? v (inc depth)))) value))
+    :else false))))
+(defn encode [value limit]
+ (when-not (data? value) (throw (ex-info "Nonportable service value" {})))
+ (let [bytes (json/encode value)]
+  (when (> (erlang/byte_size bytes) limit) (throw (ex-info "Service value exceeds budget" {})))
+  bytes))
+(defn decode [bytes limit]
+ (when-not (and (string? bytes) (<= (erlang/byte_size bytes) limit))
+  (throw (ex-info "Service frame exceeds budget" {})))
+ (let [value (json/decode bytes)]
+  (when-not (data? value) (throw (ex-info "Nonportable service value" {}))) value))
+

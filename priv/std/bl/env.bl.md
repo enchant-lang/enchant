@@ -26,7 +26,7 @@ as data. A broken `env.bl` degrades what the tree can do — its tasks, its port
 ```beam-lisp silent
 (ns bl.env
   (:require [bl.util :as u] [bl.loading-policy :as loading]
-            [bl.native-declarations :as native-declarations]))
+            [bl.native-declarations :as native-declarations] [bl.auth-imports :as auth-imports]))
 ```
 
 ## Discovery
@@ -79,7 +79,7 @@ one.
     (let [forms (BeamLisp.Compiler/read_all_data (File/read! path))]
       (cond
         (empty? forms) {:error "the file has no forms"}
-        (map? (last forms)) {:ok (last forms)}
+        (map? (last forms)) {:ok (auth-imports/extensions forms)}
         :else :dynamic))
     (catch e {:error (ex-message e)})))
 
@@ -196,7 +196,8 @@ problems reports all three in one pass.
 
 ```beam-lisp silent
 (def known-keys [:name :instance :bl :warm :vm :realm :shadow :uses :paths :tasks :ports
-                 :schedules :env :loading :doc :app :build :release :deps :browser :catalog :foundry :android])
+                 :schedules :env :loading :doc :app :build :release :deps :browser :catalog :foundry :android
+                 :auth/imports :auth/realms :auth/realm])
 
 ;; How `bl` reaches a warm VM for this tree. The LAUNCHER reads this key (it must
 ;; decide before any VM exists), so the vocabulary lives in
@@ -897,7 +898,10 @@ shape, whatever the file said.
         [brw brerr]    (norm-browser (:browser m))
         [cat cerr]     (norm-catalog (:catalog m) root)
         [andr anderr]  (norm-android (:android m))]
-    {:path path
+    {:auth/imports (:auth/imports m)
+     :auth/realms (:auth/realms m)
+     :auth/realm (:auth/realm m)
+     :path path
      :root root
      :name (if (string? nm) nm nil)
      :instance (if (string? inst) inst nil)
@@ -921,7 +925,7 @@ shape, whatever the file said.
      :browser brw
      :catalog cat
      :android andr
-     :errors (concat perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
+     :errors (concat (auth-imports/errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
                      fnderr brerr cerr lerr anderr
                      (map (fn [k] (str "unknown key " k)) (unknown-keys m known-keys)))}))
 

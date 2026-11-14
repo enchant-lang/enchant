@@ -1,9 +1,8 @@
 (ns auth.namespace-remote-test
- (:require [auth.imports :as imports] [auth.transport :as transport]
-           [service-world.http :as private] [auth.identity :as identity] [env]))
+ (:require [auth.imports :as imports] [auth.interface] [auth.transport :as transport]
+           [auth.authority :as private] [auth.contract :as contract] [auth.delegation :as delegation] [auth.identity :as identity] [env]))
 (def root (System/fetch_env! "SERVICE_WORLD_FIXTURE_DIR"))
-(def provider {:world "qa/world" :manifest {:namespace "demo.catalog" :version 1
-                    :exports {"services-in" 1 "count-in" 1 "label" 2 "change!" 2}}})
+(def provider {:world "qa/world" :manifest (contract/read! (str root "/interface.edn"))})
 (defn with-client [action]
  (let [consumer (env/fork)
        endpoint (transport/endpoint {:url (System/fetch_env! "SERVICE_WORLD_FIXTURE_URL")
@@ -61,4 +60,18 @@
      (File/write! file (str source "\n; new source generation\n"))
      (is (= :auth/stale-code (failure "(catalog/services-in \"project-a\")")))
      (finally (File/write! file source)))))))
+(deftest host-broker-issues-per-call-credentials-without-app-token-handling
+ (let [broker (delegation/broker {:issuer-file (str root "/issuer.edn") :authority-file (str root "/authority.edn")
+                                 :application "qa-app" :world "qa/world" :namespace "demo.catalog"
+                                 :exports #{"services-in" "count-in"}})
+       endpoint (transport/endpoint {:url (System/fetch_env! "SERVICE_WORLD_FIXTURE_URL") :token-for broker
+                                     :issuer-public (:issuer-public (private/private-data (str root "/authority.edn")))})
+       principal {:subject "person:alice" :application "qa-app" :kind :person}
+       request (auth.interface/request provider "services-in" ["project-a"])]
+  (identity/with-verified principal
+   (fn []
+    (is (= [{"title" "project-a"}] (transport/result! request (endpoint request))))
+    (is (= :auth/denied (try (endpoint (auth.interface/request provider "services-in" ["project-b"])) nil
+                              (catch error (:kind (ex-data error))))))))
+  (is (= :auth/denied (try (endpoint request) nil (catch error (:kind (ex-data error))))))))
 (run-tests)

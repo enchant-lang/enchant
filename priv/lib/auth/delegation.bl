@@ -1,0 +1,34 @@
+;; Host-owned credential factory. A request gets one short-lived signed right;
+;; application code never reads the issuer or handles bearer strings.
+(ns auth.delegation
+ (:require [auth] [auth.identity :as identity] [auth.authority :as private] [auth.wire :as wire]))
+(defn broker
+ [{:keys [issuer-file authority-file application world namespace exports resource-arg ttl-ms]
+   :or {resource-arg 0 ttl-ms 30000}}]
+ (when-not (and (string? application) (string? world) (string? namespace)
+                (set? exports) (seq exports) (int? resource-arg) (<= 0 resource-arg 15)
+                (int? ttl-ms) (<= 1 ttl-ms 60000))
+  (throw (ex-info "Invalid delegation broker policy" {:kind :auth/configuration})))
+ (fn [principal request]
+  (let [current (identity/current) operation (get request "operation")
+        resource (nth (get request "args") resource-arg nil)
+        now (wire/now)]
+   (when-not (and current (= current principal) (= application (:application current))
+                  (= world (get request "world")) (= namespace (get request "namespace"))
+                  (contains? exports operation) (wire/text? resource)
+                  (or (nil? (:expires-at current)) (> (:expires-at current) now)))
+    (throw (ex-info "No matching authenticated delegation" {:kind :auth/denied})))
+   (let [authority (private/private-data authority-file)
+         roles (get-in authority [:memberships (:subject current) resource])
+         issuer (private/private-data issuer-file)
+         public (Base/url_decode64! (:public issuer))]
+    (when-not (and (set? roles) (seq roles) (set? (:revoked authority))
+                   (= (:issuer-public authority) (:public issuer))
+                   (or (not (contains? current :rights))
+                       (contains? (:rights current) [namespace operation resource])))
+     (throw (ex-info "No current resource membership for delegation" {:kind :auth/denied})))
+    (auth/encode-base64
+     (identity/issue {:public public :private (Base/url_decode64! (:private issuer))}
+       {:subject (:subject current) :application application :kind (:kind current) :audience world
+        :expires-at (min (+ now ttl-ms) (or (:expires-at current) (+ now ttl-ms)))
+        :rights [[namespace operation resource]]}))))))

@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix='enchant-namespace-') as temporary:
         port = probe.getsockname()[1]
     env = {**os.environ, 'BL_DAEMON': 'off', 'PORT': str(port), 'SERVICE_WORLD_FIXTURE_DIR': str(root),
            'SERVICE_WORLD_FIXTURE_URL': f'http://127.0.0.1:{port}/realms/v1', 'SERVICE_WORLD_SOURCE': str(ROOT)}
-    common = ['--cold', '-p', str(ROOT / 'src')]
+    common = ['--cold', '-p', str(ROOT.parents[1] / 'priv/lib')]
     server = None
     with (root / 'server.log').open('w+') as log:
         try:

@@ -1,0 +1,34 @@
+;; Public interface artifacts contain no executable source or credential.
+(ns auth.contract (:require [auth.logic :as logic] [clojure.edn :as edn]))
+(def FORMAT "enchant.namespace-interface/1")
+(defn id [manifest]
+ (let [exports (:exports manifest)]
+  (when-not (and (string? (:namespace manifest)) (int? (:version manifest)) (pos? (:version manifest))
+                 (map? exports) (<= 1 (count exports) 64)
+                 (every? (fn [[name arity]]
+                           (and (string? name) (Regex/match? #"^[A-Za-z_][A-Za-z0-9_?!*+<>=.-]*$" name)
+                                (int? arity) (<= 0 arity 16))) exports))
+   (throw (ex-info "Invalid namespace interface" {:kind :auth/contract-mismatch})))
+  ;; A canonical list of strings/integers has no map iteration or SDK struct ABI.
+  (logic/digest (pr-str (apply list (:namespace manifest) (:version manifest)
+                         (map (fn [[name arity]] (list name arity)) (sort-by first exports)))))))
+(defn validate [manifest]
+ (let [actual (id manifest)]
+  (when-not (and (= FORMAT (:format manifest)) (= actual (:id manifest))
+                 (every? #(contains? #{:format :namespace :version :exports :source-id :id} %) (keys manifest)))
+   (throw (ex-info "Namespace interface identity mismatch" {:kind :auth/contract-mismatch})))
+  manifest))
+(defn from-prepared [prepared]
+ (when-not (= :checked (:status prepared))
+  (throw (ex-info "Only admitted source can publish an interface" {:kind :auth/unproved})))
+ (let [value {:format FORMAT :namespace (:namespace prepared) :version (get-in prepared [:policy :version])
+              :source-id (:source-id prepared)
+              :exports (into {} (map (fn [[name export]] [name (:arity export)]) (:exports prepared)))}]
+  (assoc value :id (id value))))
+(defn publish! [source target]
+ (let [manifest (from-prepared (logic/prepare (File/read! source)))]
+  (File/write! target (pr-str manifest)) manifest))
+(defn read! [file]
+ (when (> (:size (File/stat! file)) 65536)
+  (throw (ex-info "Namespace interface exceeds its budget" {:kind :auth/contract-mismatch})))
+ (validate (edn/read-string (File/read! file))))
