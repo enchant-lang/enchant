@@ -49,7 +49,7 @@ def main():
     (OUT / "compiler-preflight.log").write_text(result.stdout)
     print(result.stdout, end="", flush=True)
     assert hashes == {str(p): digest(p) for p in inputs}, "preflight inputs changed"
-    report = {"status": "pass" if result.returncode == 0 else "fail", "exit": result.returncode,
+    report = {"status": "pass" if result.returncode == 0 and "NATIVE_COMPILER_SOURCE_CORPUS_OK" in result.stdout else "fail", "exit": result.returncode,
               "scope": "emitted Scheme on native GSI host; C compiler/fixpoint remain separate",
               "inputs": hashes, "output": result.stdout}
     evidence.write_text(json.dumps(report, indent=2) + "\n")
