@@ -1,0 +1,69 @@
+; Migrate private deterministic ANF checkpoints without compiling unchanged
+; BL units. This reads only the task-owned local closure artifact; no sources
+; or terms supplied by another application are decoded through this path.
+(ns native.refresh
+ (:require [js.build :as build] [bl.json :as json]))
+(def out (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure"))
+(def roots ["research/native-seed/src" "priv/boot" "priv/lib" "priv/std" "priv/compat"])
+(def expected-options {:target :scheme :contextual-bindings :absent
+                       :stub ["lower"] :staging :canonical-js.build
+                       :namespace-qualified? true})
+(def limits {:max-nodes 1000000 :max-bytes 33554432 :max-depth 128})
+(defn sha [s] (Base/encode16 (crypto/hash :sha256 s) (list (tuple :case :lower))))
+(defn providers []
+ (mapv (fn [path]
+  (let [source (File/read! path)]
+   {:path path :sha256 (sha source)
+    :macro-provider? (and (String/contains? source "defmacro")
+                         (boolean (some build/defmacro? (build/read-forms path))))}))
+  (sort (distinct (concat ["priv/host/compiler_data.bl" "priv/host/form_meta.bl" "priv/host/meta.bl"]
+                (mapcat #(Path/wildcard (str % "/**/*.bl")) roots))))))
+(def pin-text (File/read! "research/native-seed/sdk-pin.json"))
+(def pin (json/decode pin-text))
+(def descriptor (File/read! ".bl/sdks/current-sdk/artifact.json"))
+(assert (= (get pin "descriptor_sha256") (sha descriptor)))
+(assert (= (get pin "source") (get (json/decode descriptor) "source")))
+(assert (= descriptor (File/read! (str (get pin "sdk") "/artifact.json"))))
+(def artifact-path (str out "/closure.etf"))
+(def bytes (File/read! artifact-path))
+(when (> (erlang/byte_size bytes) (:max-bytes limits))
+ (throw (ex-info "native refresh: private artifact exceeds bound" {:path artifact-path})))
+; The canonical predecode grammar rejects funs, refs, pids, compressed payloads,
+; trailing data and unknown tags BEFORE any atom or term is materialized.
+(BeamLisp.CompilerData/check_closed_etf! bytes limits)
+(def closure (erlang/binary_to_term bytes))
+(assert (= "bl.native.compiler-closure" (:schema closure)))
+(assert (= 1 (:version closure)))
+(assert (= expected-options (:options closure)))
+(assert (= pin-text (:sdk-pin closure)))
+(def current-providers (providers))
+(def macro-providers (vec (filter :macro-provider? current-providers)))
+(assert (= (vec (filter :macro-provider? (:provider-sources closure))) macro-providers))
+(BeamLisp.CompilerData/check_first_order! {:sdk descriptor :options expected-options :macro-providers macro-providers} limits)
+(File/mkdir_p! (str out "/units"))
+(def refreshed
+ (reduce (fn [result ns]
+  (let [unit (dissoc (get (:units closure) ns) :cache-status :cache-key)
+        source-sha (:source-sha256 unit)]
+   (assert (= source-sha (sha (:source unit))))
+   (if (= source-sha (sha (File/read! (:path unit))))
+    (let [key-data {:sdk descriptor :options expected-options :source source-sha :macro-providers macro-providers}
+          _ (BeamLisp.CompilerData/check_first_order! key-data limits)
+          ; Reader ASTs and ANF carry native tuples; check_compiler_data! is
+          ; the canonical closed first-order walker WITH that passive domain.
+          _ (BeamLisp.CompilerData/check_compiler_data! unit limits)
+          identity (sha (erlang/term_to_binary key-data (list :deterministic)))
+          checkpoint (erlang/term_to_binary {:identity identity :unit unit} (list :deterministic))]
+     (File/write! (str out "/units/" ns ".etf") checkpoint)
+     (File/write! (str out "/units/" ns ".sha256") (sha checkpoint))
+     (println (str "NATIVE_REFRESH_REUSED " ns))
+     (update result :reused conj ns))
+    (do
+     (println (str "NATIVE_REFRESH_CHANGED " ns))
+     (update result :changed conj ns)))))
+  {:reused [] :changed []} (:order closure)))
+(File/write! (str out "/refresh.json")
+ (json/encode {:schema "bl.native.compiler-checkpoint-refresh" :version 1
+               :artifact-sha256 (sha bytes) :sdk-sha256 (sha descriptor)
+               :providers current-providers :result refreshed}))
+(println (str "NATIVE_REFRESH " (count (:reused refreshed)) " reusable, " (count (:changed refreshed)) " source changed"))
