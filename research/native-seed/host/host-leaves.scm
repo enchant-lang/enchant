@@ -133,7 +133,7 @@
 (native-add-leaf! "erlang/is_binary/1" native-string?)
 (native-add-leaf! "erlang/is_bitstring/1" native-string?)
 (native-add-leaf! "erlang/is_boolean/1" boolean?)
-(native-add-leaf! "erlang/is_function/1" h-is-fn)
+(native-add-leaf! "erlang/is_function/1" procedure?)
 (native-add-leaf! "erlang/is_atom/1" (lambda (x) (or (native-keyword? x) (boolean? x) (bl-is-nil x))))
 (native-add-leaf! "erlang/not/1" (lambda (x) (if (boolean? x) (not x) (native-badarg "not"))))
 (native-add-leaf! "erlang/list_to_tuple/1" (lambda (xs) (bl-tuple (native-assert-list xs))))
@@ -283,7 +283,7 @@
 ;; updates fields. General maps keep normal Erlang map semantics.
 (define (native-raw-map-put k v m)
  (cond ((and (bl-tag? m 'vec) (eq? k (bl-key "meta"))) (native-vector-with-meta m v))
-  ((and (bl-tag? m 'vec) (eq? k (bl-key "items"))) (native-vector-with-meta (bl-vec (bl-items v)) (native-vector-meta m)))
+  ((and (bl-tag? m 'vec) (eq? k (bl-key "items"))) (native-vector-with-meta (native-vector-from-canonical-items v) (native-vector-meta m)))
   (else (bl-assoc (native-assert-map m) k v))))
 (native-add-leaf! "maps/put/3" native-raw-map-put)
 (native-add-leaf! "erlang/atom_to_binary/2" (lambda (x encoding) (if (eq? encoding (bl-key "utf8")) (native-atom-name x) (native-badarg "atom encoding"))))
