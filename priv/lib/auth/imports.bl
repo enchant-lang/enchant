@@ -78,19 +78,25 @@
          provider {:world (:world config) :manifest manifest}
          broker (when (:delegation config) (delegation/broker (:delegation config)))]
     (bind! logical declaration provider (transport/endpoint (cond-> config broker (assoc :token-for broker)))))
-   (let [realm (scope/current)
-         owned (when realm
-                 (service/acquire realm (str "auth/import/" logical) (logic/digest config)
-                   #(local-provider config) namespace/close!))
+   (let [realm (scope/current) slot (str "auth/import/" logical)
+         acquire (fn [] (service/acquire realm slot (logic/digest config)
+                          #(local-provider config) namespace/close!))
+         owned (when realm (assoc (acquire) :realm realm :slot slot))
          provider (if owned (:value owned) (local-provider config))
          endpoint (if owned
                     (fn [request]
                      (let [principal (identity/current)]
-                      (service/apply! (:pid owned)
-                       (fn [value]
-                        (if principal
-                         (identity/with-verified principal #(namespace/dispatch value request))
-                         (identity/without-identity #(namespace/dispatch value request)))))))
+                      (try
+                       ;; Reacquire only before submission. An interrupted call
+                       ;; is never retried, so an uncertain write cannot repeat.
+                       (service/apply! (:pid (acquire))
+                        (fn [value]
+                         (if principal
+                          (identity/with-verified principal #(namespace/dispatch value request))
+                          (identity/without-identity #(namespace/dispatch value request)))))
+                       (catch error
+                        (throw (ex-info "Imported realm is unavailable"
+                                 {:kind :auth/unavailable :outcome :uncertain}))))))
                     (namespace/endpoint provider))]
     (try
      (bind! logical declaration provider endpoint)
@@ -105,7 +111,9 @@
   (when (and (erlang/is_tuple row) (= :ok (elem row 0)))
    (let [provider (elem row 1)]
     (try
-     (if-let [owned (:service provider)] (service/stop! (:pid owned)) (namespace/close! provider))
+     (if-let [owned (:service provider)]
+      (when-let [live (service/lookup (:realm owned) (:slot owned))] (service/stop! (:pid live)))
+      (namespace/close! provider))
      (finally (BeamLisp.Env/delete_key key)))))))
 (defn close!
  "Retire all namespace imports owned by the current project binding. Realm
@@ -120,7 +128,11 @@
   explicit env.bl imports are linked; no ambient provider discovery or grant."
  [project]
  (let [root (:root project) names (vec (keys (:auth/imports project)))
-       fingerprint (logic/digest [root (:auth/imports project) (:auth/realms project)])
+       inputs (mapv (fn [logical]
+                       (let [{:keys [config]} (declaration-for root (str logical))]
+                        [config (logic/digest (File/read! (if (= :remote (:transport config))
+                                                          (:interface config) (:source config))))])) names)
+       fingerprint (logic/digest [root (:auth/imports project) inputs])
        key (tuple :auth/project-imports) previous (BeamLisp.Env/lookup_own key)]
   (when-not (and (erlang/is_tuple previous) (= fingerprint (:fingerprint (elem previous 1))))
    (close!)

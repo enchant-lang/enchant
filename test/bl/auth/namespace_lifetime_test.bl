@@ -1,6 +1,6 @@
 (ns auth.namespace-lifetime-test
  (:require [auth.imports :as imports] [auth.identity :as identity]
-           [bl.env :as project] [vm.manager :as manager] [vm.scope :as scope] [env]))
+           [bl.env :as project] [vm.manager :as manager] [vm.scope :as scope] [vm.service :as service] [env]))
 (deftest realm-owned-imports-serve-the-current-caller-and-close-with-the-realm
  (let [id (str "auth-import-realm-" (erlang/unique_integer (list :positive)))
        root (str (System/fetch_env! "BL_TEST_SOURCE_ROOT") "/examples/namespace-world")]
@@ -17,6 +17,16 @@
       (identity/with-verified {:subject "person:alice" :application "namespace-examples" :kind :person}
        #(is (= 1 (call "project-a"))))
       (is (= :auth/unauthenticated (try (call "project-a") nil (catch error (:kind (ex-data error))))))
+      (let [monitor (erlang/monitor :process pid)]
+       (erlang/exit pid :kill)
+       (receive [:DOWN seen :process _ _] :when (= seen monitor) :ok))
+      (identity/with-verified {:subject "person:alice" :application "namespace-examples" :kind :person}
+       #(is (= 1 (call "project-a"))))
+      (let [replacement (service/lookup id "auth/import/world.catalog")]
+       (is (not= pid (:pid replacement)))
+       (is @(:closed provider))
+       (manager/drain id)
+       (is (not (Process/alive? (:pid replacement)))))
       (manager/drain id)
       (is (not (Process/alive? pid)))
       (is (= :error (env/with-env (:owner provider)

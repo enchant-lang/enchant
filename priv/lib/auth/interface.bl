@@ -18,6 +18,16 @@
  (into {} (map (fn [module] [module (erlang/apply module :module_info (list :md5))])
                (BeamLisp.Env/callback_modules callable))))
 (defn manifest [prepared] (contract/from-prepared prepared))
+(defn- guard-scope [owner closed creator]
+ (spawn
+  (fn []
+   (let [monitor (erlang/monitor :process creator)]
+    (receive
+     [:auth/close from ticket]
+     (do (reset! closed true) (env/destroy owner)
+         (erlang/demonitor monitor (list :flush)) (erlang/send from [:auth/closed ticket]))
+     [:DOWN seen :process _ _] :when (= seen monitor)
+     (do (reset! closed true) (env/destroy owner)))))))
 (defn open
  "Host loader. Source is checked before evaluation and retained in its own Env.
   roles/readers/effects/resolvers are trusted provider ports, not wire callbacks.
@@ -29,7 +39,7 @@
        law (logic/policy-evidence)
        _ (require! (= :exhausted (:modality law)) :auth/unproved)
        _ (BeamLisp.Loader/ensure_loaded "auth.resource")
-       owner (env/fork)]
+       owner (env/fork) closed (atom false) creator (erlang/self)]
   (try
    (let [bindings
          (env/with-env owner
@@ -42,16 +52,27 @@
                             [name {:function f :code (code-ids f)}])) (:exports prepared)))))
          _ (when file (require! (= source (File/read! file)) :auth/stale-code))]
     {:world world :owner owner :prepared prepared :manifest (manifest prepared) :bindings bindings
+     :closed closed :guardian (guard-scope owner closed creator)
      :file file :source source :roles roles :readers readers :effects effects :resolvers resolvers :policy-evidence law})
    (catch error (env/destroy owner) (throw error)))))
-(defn close! [provider] (env/destroy (:owner provider)))
+(defn close! [provider]
+ (reset! (:closed provider) true)
+ (let [guardian (:guardian provider) monitor (erlang/monitor :process guardian)]
+  (erlang/send guardian [:auth/close (erlang/self) monitor])
+  (receive
+   [:auth/closed seen] :when (= seen monitor) (erlang/demonitor monitor (list :flush))
+   [:DOWN seen :process _ _] :when (= seen monitor) (env/destroy (:owner provider))
+   (after 5000
+    (do (erlang/demonitor monitor (list :flush)) (env/destroy (:owner provider)))))
+ :ok)
 (defn- resource-for [provider spec args]
  (let [arg (:arg spec) lookup (:lookup spec) value (when (and (int? arg) (<= 0 arg) (< arg (count args))) (nth args arg))]
   (if lookup
    (when-let [resolve (get (:resolvers provider) lookup)] (resolve value))
    value)))
 (defn- source-current? [provider binding]
- (and (= (get-in provider [:prepared :compiler-id]) (BeamLisp.AOTCache/compiler_key))
+ (and (not @(:closed provider))
+      (= (get-in provider [:prepared :compiler-id]) (BeamLisp.AOTCache/compiler_key))
       (or (nil? (:file provider)) (= (:source provider) (File/read! (:file provider))))
       (= (:code binding) (code-ids (:function binding)))))
 (defn invoke!
