@@ -46,10 +46,15 @@ for name, target in zip(names, runtime):
     expected = (read(P / 'evidence/wide-reference-reuse/identities/source-pin.json')['source_sha256'][str(source.relative_to(R))]
                 if name == 'request-evidence' else native['source_pin']['module_inputs']['formal.' + name.replace('/', '.')]['sha256'])
     assert sha(source) == expected == sha(R / target), target
-placement_path = P / 'evidence/scalar-integration/kvm-sandbox.json'
+placement_path = E / 'kvm-sandbox.json'
 placement = read(placement_path)
 assert placement['status'] == 'passed' and placement['api_version'] == 12
 assert placement['device_opened_read_write'] is True and placement['empty_vm_created_and_closed'] is True
+placement_provenance = read(E / 'kvm-sandbox-provenance.json')
+assert placement_provenance['status'] == 'passed' and placement_provenance['product_sha256'] == sha(placement_path)
+placement_terminal = read(E / 'kvm-owner-terminal.json')['state']
+assert placement_terminal['SubState'] == 'exited' and placement_terminal['MainPID'] == '0'
+assert placement_terminal['Result'] == 'success' and placement_terminal['ExecMainStatus'] == '0'
 floor_path = P / 'evidence/numeric-semantics/compiler-floor-install.json'
 floor = read(floor_path)
 assert floor['status'] == 'passed' and floor['manifest_last'] is True
@@ -64,7 +69,9 @@ assert fingerprint != baseline['engine_fingerprint']
 assert not (E / 'sdk-candidate.json').exists(), 'Reuse the exact candidate; do not produce another SDK for routine checks.'
 write('prepare-source-pin.json', {'code_commit': commit, 'source_sha256': digests,
       'baseline_sdk_pin': baseline, 'engine_fingerprint': fingerprint, 'projection_gates': gates,
-      'reused_sandbox_placement_receipt_sha256': sha(placement_path), 'compiler_floor_install_sha256': sha(floor_path)})
+      'fresh_sandbox_placement_receipt_sha256': sha(placement_path),
+      'sandbox_placement_provenance_sha256': sha(E / 'kvm-sandbox-provenance.json'),
+      'compiler_floor_install_sha256': sha(floor_path)})
 write('baseline-sdk-pin.json', baseline)
 command = [str(R / 'scripts/prepare-checkout-sdk')]
 write('prepare-command.json', command)
