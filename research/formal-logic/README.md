@@ -38,8 +38,14 @@ interpreter/proof availability so arrays, quantifiers, abstract sorts, sequences
 and floating-point terms can keep their native reports as claims. Its
 [pure qualification](evidence/wide-owner-prototype/pure/qualification.json)
 passed 424 assertions across all 187 question vocabularies, including six
-measured solver-free operational windows. Actual native owners, narrow-policy
-regressions, cold readers and later immutable SDK integration remain separate gates.
+measured solver-free operational windows. The
+[native smoke qualification](evidence/wide-owner-prototype/native-smoke/qualification.json)
+passes 330 assertions across nine paired native questions and retained-array
+custody/lease controls, with unchanged statuses. The
+[first cold reader](evidence/wide-owner-prototype/native-smoke/reader-one/qualification.json)
+passes 307 checks on twenty candidates with no solver/oracle exchanges.
+The full native corpus, narrow regressions, second cold process and later
+immutable SDK integration remain separate gates.
 
 The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root

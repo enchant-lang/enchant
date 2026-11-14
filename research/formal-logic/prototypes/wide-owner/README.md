@@ -3,8 +3,14 @@
 This project source batch is beside the selected immutable SDK; it is not
 installed in that SDK. Its [pure qualification](../../evidence/wide-owner-prototype/pure/qualification.json)
 passed 424 assertions across all 187 question vocabularies and six measured
-solver-free operational windows. Actual native owners, narrow-policy regressions,
-fresh readers and later SDK integration are separate gates. Qualification explicitly relocates namespaces/imports; it does not replace
+solver-free operational windows. Its
+[native smoke gate](../../evidence/wide-owner-prototype/native-smoke/qualification.json)
+passes 330 assertions: nine paired original questions with unchanged statuses,
+retained-array assumptions, fresh complete requests and lease/context refusals.
+The [first cold reader](../../evidence/wide-owner-prototype/native-smoke/reader-one/qualification.json)
+passes 307 checks on twenty packets, with eight refusal controls and actual zero
+native/oracle calls. The full corpus, narrow regressions, second cold process
+and later SDK integration are separate gates. Qualification explicitly relocates namespaces/imports; it does not replace
 installed SDK forwarder routes. The eventual batch reuses the ordinary `formal.logic`
 prepare/propose/recheck/execute/compare API; it introduces no parallel facade.
 
