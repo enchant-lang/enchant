@@ -21,24 +21,36 @@
  (native-raise (bl-key "error")
   (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.LazySeq.ForceError")
    (bl-key "reason") reason (bl-key "message") (string-append "LazySeq force failed: " (bl-show reason))) (native-capture-stack)))
+;; Publication examines the exact same value graph as before. Membership is
+;; object identity, not structural equality: local tables preserve shared/cyclic
+;; containers without repeatedly walking a growing linear visited list.
 (define (native-lazy-edges value)
- (let loop ((todo (list value)) (seen '()) (edges '()))
-  (if (null? todo) edges
-   (let ((x (car todo)))
-    (cond ((or (memq x seen) (not (or (pair? x) (vector? x)))) (loop (cdr todo) seen edges))
-     ((native-lazy? x) (loop (cdr todo) (cons x seen) (cons (native-lazy-resource x) edges)))
-     ((pair? x) (loop (cons (car x) (cons (cdr x) (cdr todo))) (cons x seen) edges))
-     ((or (bl-tag? x 'vec) (bl-tag? x 'tuple)) (loop (append (bl-items x) (cdr todo)) (cons x seen) edges))
-     ((bl-tag? x 'set) (loop (append (native-set-items x) (cdr todo)) (cons x seen) edges))
-     ((bl-tag? x 'map) (loop (append (native-map-pairs x) (cdr todo)) (cons x seen) edges))
-     (else (loop (cdr todo) (cons x seen) edges)))))))
+ (let ((seen (make-table test: eq?)))
+  (let loop ((todo (list value)) (edges '()))
+   (if (null? todo) edges
+    (let ((x (car todo)))
+     (cond ((not (or (pair? x) (vector? x))) (loop (cdr todo) edges))
+      ((table-ref seen x #f) (loop (cdr todo) edges))
+      (else
+       (table-set! seen x #t)
+       ;; A list pair cannot be a tagged LazySeq struct. Do not ask the opaque
+       ;; struct registry for every cons cell in a large canonical Source form.
+       (cond ((pair? x) (loop (cons (car x) (cons (cdr x) (cdr todo))) edges))
+        ((native-lazy? x) (loop (cdr todo) (cons (native-lazy-resource x) edges)))
+        ((or (bl-tag? x 'vec) (bl-tag? x 'tuple)) (loop (append (bl-items x) (cdr todo)) edges))
+        ((bl-tag? x 'set) (loop (append (native-set-items x) (cdr todo)) edges))
+        ((bl-tag? x 'map) (loop (append (native-map-pairs x) (cdr todo)) edges))
+        (else (loop (cdr todo) edges))))))))))
 (define (native-lazy-publish x value)
- (let* ((resource (native-lazy-resource x)) (edges (native-lazy-edges value)))
-  (let walk ((todo edges) (seen '()))
+ (let* ((resource (native-lazy-resource x)) (edges (native-lazy-edges value))
+        (seen (make-table test: eq?)))
+  (let walk ((todo edges))
    (cond ((null? todo) (vector-set! resource 2 edges) (native-lazy-state! x (list 'completed value)) (bl-key "ok"))
     ((eq? (car todo) resource) (native-lazy-state! x (list 'terminal (bl-key "cyclic_memo"))) (native-lazy-failure (bl-key "cyclic_memo")))
-    ((memq (car todo) seen) (walk (cdr todo) seen))
-    (else (walk (append (vector-ref (car todo) 2) (cdr todo)) (cons (car todo) seen)))))))
+    ((table-ref seen (car todo) #f) (walk (cdr todo)))
+    (else
+     (table-set! seen (car todo) #t)
+     (walk (append (vector-ref (car todo) 2) (cdr todo))))))))
 (define (native-lazy-force x)
  (let again ()
   (let ((state (native-lazy-state x)) (resource (native-lazy-resource x)))
