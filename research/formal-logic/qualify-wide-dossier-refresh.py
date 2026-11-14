@@ -22,13 +22,18 @@ for phase in ('check', 'browser'):
     for name, digest in q['source_pin']['source_sha256'].items():
         # Browser/skin/orchestration changes are not executable cell inputs.
         # Their exact active versions belong to the browser stage below.
-        if phase == 'browser' or Path(name).suffix not in ('.mjs', '.css', '.py'):
+        renderer_only = name == 'research/formal-logic/src/formal/review-host.bl'
+        if phase == 'browser' or (not renderer_only and Path(name).suffix not in ('.mjs', '.css', '.py')):
             assert sha(R / name) == digest, name
 assert '94 cells, 0 cell errors' in (E / 'check-checks.txt').read_text()
 parent_path = P / 'evidence/obligation-presentation/dossier-qualification.json'
 parent = read(parent_path)
 assert parent['status'] == 'passed' and parent['sdk_pin'] == pin
 browser = read(E / 'browser/audit.json')
+svg = read(E / 'svg-qualification.json')
+assert svg['status'] == 'passed' and svg['assertions'] == 19 and svg['private_runtime_retired'] is True
+for name, digest in svg['source_pin']['source_sha256'].items():
+    if name != 'research/formal-logic/src/formal/review-host.bl': assert sha(R / name) == digest
 assert browser['passed'] is True and all(row['passed'] is True for row in browser['checks'])
 assert len(browser['checks']) >= 35 and len(browser['screenshots']) == 36
 review = read(E / 'visual-review.json')
@@ -70,6 +75,9 @@ report = {'schema': 'bl.wide-owner-dossier-qualification.v1', 'status': 'passed'
           'browser_qualification_sha256': sha(E / 'browser-qualification.json'),
           'cell_sources_and_results_unchanged': True, 'cells': 94,
           'browser_checks': len(browser['checks']), 'frames': 36, 'visual_review_sha256': sha(E / 'visual-review.json'),
+          'renderer_marker_qualification_sha256': sha(E / 'svg-qualification.json'),
+          'renderer_change_scope': 'Per-SVG marker IDs and URLs, preserved marker styling and a new presentation cache version. '
+                                   'The review host is not an executable-cell dependency; browser pins bind its actual active source.',
           'chapter_sources_sha256': sources, 'source_qualifications': receipts,
           'canonical_runtime_install_sha256': sha(P / 'evidence/wide-integration/runtime-install.json'),
           'recipe': {'code_commit': commit, 'path': own, 'sha256': sha(Path(__file__))},

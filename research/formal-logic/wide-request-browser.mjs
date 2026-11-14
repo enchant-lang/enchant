@@ -50,7 +50,8 @@ try{
    await evaluate("document.getElementById('four-separate-promises').scrollIntoView({block:'start',behavior:'instant'})");
    check(size.name+': four judgment rows remain readable '+name,await evaluate(`(()=>{const e=document.querySelector('${section} .rosetta');return e&&e.getBoundingClientRect().width<=innerWidth&&getComputedStyle(e).fontSize!=='0px'})()`));
    await shot(size.name+'-wide-judgments-'+name);
-   await evaluate(`document.querySelector('${section} .seq').scrollIntoView({block:'start',behavior:'instant'})`);
+   await evaluate(`document.querySelector('${section} .seq').scrollIntoView({block:'center',behavior:'instant'})`);
+   check(size.name+': sequence markers belong to their own SVG '+name,await evaluate(`(()=>{const svgs=[...document.querySelectorAll('${section} svg.sequence')];return svgs.length===2&&svgs.every(svg=>[...svg.querySelectorAll('[marker-end]')].every(e=>{const m=e.getAttribute('marker-end').match(/^url\\(#([^)]+)\\)$/);return m&&document.getElementById(m[1])?.closest('svg')===svg}))})()`));
    check(size.name+': request flow retains its portable evidence boundary '+name,await evaluate(`document.querySelector('${section} .seq').innerText.includes('No callable, lease or stored success')`));
    await shot(size.name+'-wide-flow-'+name);
    if(size.mobile){
@@ -71,7 +72,7 @@ try{
    await shot(size.name+'-wide-native-bottom-'+name);
    await evaluate("document.getElementById('make-saved-answers-lighter').scrollIntoView({block:'start',behavior:'instant'})");
    await shot(size.name+'-wide-reference-cost-'+name);
-   await evaluate(`(()=>{const p=[...document.querySelectorAll('${section} p')].find(e=>e.textContent.includes('median reopening in this ordered diagnostic'));if(!p)throw Error('Missing observed timing');p.scrollIntoView({block:'start',behavior:'instant'})})()`);
+   await evaluate(`(()=>{const p=[...document.querySelectorAll('${section} p')].find(e=>e.textContent.includes('median reopening in this ordered diagnostic'));if(!p)throw Error('Missing observed timing');p.scrollIntoView({block:'center',behavior:'instant'})})()`);
    await shot(size.name+'-wide-reference-measurement-'+name);
   }
   // Cross-pane navigation and direct links must work with the added chapter.
