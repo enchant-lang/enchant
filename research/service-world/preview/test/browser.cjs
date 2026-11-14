@@ -54,6 +54,14 @@ try {
     for(const side of ['team','station']) { await go(side,'features'); assert.equal(await page.locator('[data-feature]').count(),44);
       assert.equal(await page.locator('.preview-feature-list a').count(),44); }
   });
+  await check('existing native place cards preserve their real preview links',async()=>{
+    await go('team','today'); await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.locator('.place-card').click()]);
+    assert(page.url().endsWith('/team?view=project'));
+    await go('team','roadmap'); await submit(page.locator('form[data-operation=advance-firm]').first().getByRole('button'));
+    assert.equal((await state()).firms[0].stage,'Contacted');
+    await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.locator('.relationship-title').first().click()]);
+    assert(page.url().includes('view=roadmap#firm-atlas'));
+  });
   await check('handoff claim, duplicate-safe task conversion and independent completion',async()=>{
     await go('team','inbox'); await submit(button('Mark read')); assert.equal((await state())['inbox-state'],'read');
     await submit(button('Claim work')); await submit(button('Create linked task')); await submit(button('Create linked task'));
@@ -151,7 +159,7 @@ try {
       for(const view of ['today','services','inbox','knowledge','access','features']) {await go(side,view);await noOverflow(side,view)}
       await go(side,'today'); await page.locator('[data-demo-theme]').click();
       assert.equal(await page.locator('html').getAttribute('data-theme'),'dark'); await shot(side+'-phone-dark');
-      if(side==='station') {await page.locator('[data-rail-toggle]').click(); assert(await page.locator('body').evaluate(b=>b.classList.contains('demo-rail-open'))); await page.locator('[data-rail-close]').first().click();}
+      if(side==='station') {await page.locator('[data-rail-toggle]').click(); assert(await page.locator('body').evaluate(b=>b.classList.contains('demo-rail-open'))); await page.locator('button[data-rail-close]').click();}
       await go(side,'features'); await page.locator('#feature-search').fill('snapshot');
       await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.locator('.preview-search').getByRole('button',{name:'Search',exact:true}).click()]);
       assert((await page.locator('[data-feature]').count())<44); assert((await page.locator('[data-feature]').count())>0);

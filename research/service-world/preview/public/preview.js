@@ -8,11 +8,13 @@
       try { localStorage.setItem('connected-theme', root.dataset.theme); } catch {}
     });
   });
-  document.querySelector('[data-rail-toggle]')?.addEventListener('click', () => {
-    document.body.classList.toggle('demo-rail-open');
-    document.querySelector('[data-rail-toggle]')?.setAttribute('aria-expanded', String(document.body.classList.contains('demo-rail-open')));
-  });
-  document.querySelectorAll('[data-rail-close]').forEach(b => b.addEventListener('click', () => document.body.classList.remove('demo-rail-open')));
+  function drawer(open) {
+    document.body.classList.toggle('demo-rail-open', open);
+    document.querySelector('.app')?.classList.toggle('rail-open', open);
+    document.querySelector('[data-rail-toggle]')?.setAttribute('aria-expanded', String(open));
+  }
+  document.querySelector('[data-rail-toggle]')?.addEventListener('click', () => drawer(!document.body.classList.contains('demo-rail-open')));
+  document.querySelectorAll('[data-rail-close]').forEach(b => b.addEventListener('click', () => drawer(false)));
   document.querySelectorAll('[data-palette-open]').forEach(b => b.addEventListener('click', () => {
     const palette = document.querySelector('#palette');
     if (palette) { palette.hidden = !palette.hidden; palette.querySelector('input')?.focus(); }
@@ -21,7 +23,7 @@
     document.querySelectorAll('[data-palette-text]').forEach(row => row.hidden = !row.dataset.paletteText.toLowerCase().includes(e.target.value.toLowerCase()));
   });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { document.body.classList.remove('demo-rail-open'); const p = document.querySelector('#palette'); if (p) p.hidden = true; }
+    if (e.key === 'Escape') { drawer(false); const p = document.querySelector('#palette'); if (p) p.hidden = true; }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); document.querySelector('[data-palette-open]')?.click(); }
   });
   // Never resubmit a write automatically. Native forms navigate to a fresh basis.
