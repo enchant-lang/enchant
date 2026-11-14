@@ -107,7 +107,7 @@
    (lambda (return)
     (set! seed-return return)
     (with-exception-catcher
-     (lambda (e) (return (bl-map (bl-key "status") (bl-key "error") (bl-key "reason") e)))
+     (lambda (e) (return (bl-map (bl-key "status") (bl-key "error") (bl-key "kind") (bl-key "error") (bl-key "reason") e)))
      (lambda () ((vector-ref frame 0)) (bl-map (bl-key "status") (bl-key "done"))))))))
   (set! seed-frame #f) (set! seed-return #f) (set! seed-critical 0) result))
 (define (h-now) seed-clock)
