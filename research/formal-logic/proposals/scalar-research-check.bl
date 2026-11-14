@@ -1,0 +1,54 @@
+(ns formal.research-evidence-check
+ (:require [formal.research-evidence :as evidence] [formal.research-view :as view]
+           [research.elements :as elements] [live.hiccup :as h]))
+(def root (System/get_env "FORMAL_EVIDENCE_ROOT"))
+(def target (System/get_env "FORMAL_EVIDENCE_STORE"))
+(defn same! [expected actual] (is (= expected actual)))
+(deftest actual-qualified-retrieval-has-exact-source-and-recorded-period
+ (let [element (evidence/validate! (evidence/build root))
+       supported (filter #(= :supported (:state %)) (:rows element))
+       selected (elements/neighbours (:edges element) ["word-answer"] (:year element) 1)]
+  (same! :qualified-implementation-evidence (:origin element))
+  (same! :comparison (:kind element))
+  (same! 7 (count (:rows element)))
+  (same! :supported (:state (first (filter #(= "proof" (:id %)) (:rows element)))))
+  (same! :candidate (:state (first (filter #(= "program" (:id %)) (:rows element)))))
+  (same! 6 (count supported))
+  (is (every? elements/supported? supported))
+  (same! 7 (count (:entities selected)))
+  (same! 6 (count (:edges selected)))
+  (same! [] (:edges (elements/neighbours (:edges element) ["word-answer"] (dec (:year element)) 3)))
+  (same! [] (:edges (elements/neighbours (:edges element) ["word-answer"] (inc (:year element)) 3)))
+  (same! false (:compiler-proof-authority element))
+  (doseq [changed [(assoc element :kind :eval) (assoc element :function "System/eval")
+                   (assoc element :function-version 1.0)
+                   (assoc-in element [:rows 0 :evidence 0 :locator] "")]]
+   (is (thrown? (evidence/validate! changed)))))
+)
+(deftest native-org-snapshots-preserve-prior-answers-and-explicit-freshness
+ (is (not (File/exists? target)))
+ (let [saved-one (evidence/append-snapshot! root target) saved-two (evidence/append-snapshot! root target)
+       saved (evidence/read-snapshots target)]
+  (same! 1 (:revisions saved-one))
+  (same! 2 (:revisions saved-two))
+  (same! 2 (count saved))
+  (is (thrown? (evidence/append-snapshot! root target "stale-basis")))
+  (same! 2 (count (evidence/read-snapshots target)))
+  (same! (:snapshot saved-one) (first saved))
+  (same! :current (elements/freshness (last saved) (evidence/basis-id root)))
+  (same! :stale (elements/freshness (last saved) "changed-source-basis"))
+  (same! (:snapshot saved-one) (first (evidence/read-snapshots target))))
+)
+(deftest all-surfaces-use-the-same-pure-allowlisted-renderer
+ (let [saved (last (evidence/read-snapshots target))
+       current {:snapshot saved :freshness :current :revisions 2 :basis (:basis saved)}
+       stale (assoc current :freshness :stale)
+       html (h/hiccup->html (view/render-h current))]
+  (is (String/contains? html "What a word answer carries"))
+  (is (String/contains? html "data-research-freshness=\"current\""))
+  (is (String/contains? (h/hiccup->html (view/render-h stale)) "Sources changed"))
+  (is (not (String/contains? html "data-research-save=")))
+  (same! #{"tool" "workspace" "dossier" "specimen"} view/surfaces)
+  (is (thrown? (view/component root "eval"))))
+)
+(run-tests)

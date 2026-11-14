@@ -35,12 +35,15 @@ after=after.replace(anchor,''.join(blocks)+anchor)
 after=after.replace('receipt (json/decode (File/read! "research/formal-logic/evidence/word-integration/records-qualification.json"))',
                     'receipt (json/decode (File/read! "research/formal-logic/evidence/scalar-integration/records-qualification.json"))')
 after=after.replace(':saved-word-records (get receipt "records")',':saved-word-text-records (get receipt "records")')
+after=after.replace('a checked word proof format, Source-level word outcomes',
+                    'checked word proofs beyond the small finite strategy below, Source-level word outcomes')
 results=r'^#\+RESULTS:[^\n]*\n(?::[^\n]*(?:\n|$))*'
 assert re.findall(results,before,re.M)==re.findall(results,after,re.M)
 assert len(re.findall(r'^#\+begin_src beam-lisp\b',after,re.M))==93
 doc.write_text(after)
 producer=P/'dossier/formal/research-evidence.bl';producer_before=sha(producer)
 producer.write_bytes((P/'proposals/scalar-research-evidence.bl').read_bytes())
+(P/'dossier/research-evidence-check.bl').write_bytes((P/'proposals/scalar-research-check.bl').read_bytes())
 report={'schema':'bl.scalar-dossier-source-application.v1','status':'source-applied-awaiting-real-writer',
  'recorded_utc':datetime.now(timezone.utc).isoformat(),'sdk_pin':pin,'code_commit':commit,'input_source_sha256':digests,
  'document_before_sha256':plan['baseline_document_sha256'],'document_after_sha256':sha(doc),'cells':93,'new_cells':plan['new_cells'],
