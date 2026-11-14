@@ -122,24 +122,29 @@
         ") " body ") " next "))")]
    (if (:guard cl) (str "(let ((clause-next (lambda () " more "))) " arm ")") arm))))
 
-(defn- function-body
- "A single unguarded clause of DISTINCT plain variables needs no matcher.
-  Argument order, function tick, source frame and callable arity are still
-  owned by the surrounding lambda. Every other pattern uses clauses unchanged."
- [n options]
+(defn- function-entry [body frame]
+ (if frame
+  (str "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
+  (str "(h-tick) " body)))
+
+(defn- function-expression
+ "Use fixed Scheme formals only for one unguarded DISTINCT-variable clause.
+  Gambit's case-lambda keeps wrong-arity calls on the original entry tick,
+  frame and function-clause path. All other patterns keep the full matcher."
+ [n options frame]
  (let [fallback "(error \"native seed: function clause\")"
        clause (BeamLisp.CompilerData/simple_function_clause n)
        names (when clause (mapv :name (:pats clause)))]
   (if (and clause (= (count names) (count (distinct names))))
-   (let [bindings
-         (map-indexed (fn [index name]
-          (str "(" (ident name) " "
-           (cond (= index 0) "(car argv)" (= index 1) "(cadr argv)"
-                 (= index 2) "(caddr argv)" (= index 3) "(cadddr argv)"
-                 :else (str "(list-ref argv " index ")")) ")")) names)]
-    (str "(if (= (length argv) " (count names) ") (let ("
-         (string/join " " bindings) ") " (emit (:body clause) options) ") " fallback ")"))
-   (clauses (:clauses n) "argv" fallback options false))))
+   (str "(case-lambda ((" (string/join " " (map ident names)) ") "
+        (function-entry (emit (:body clause) options) frame) ") ("
+        ; Gambit 4.9.5's macro needs an optional position when a rest arm is
+        ; present. A one-required rest fallback covers every nonzero arity
+        ; of a zero-parameter function without capturing a Source variable.
+        (if (empty? names) "(extra . argv)" "argv") " "
+        (function-entry fallback frame) "))")
+   (str "(lambda argv "
+        (function-entry (clauses (:clauses n) "argv" fallback options false) frame) ")"))))
 
 (def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
 (def core-leaves
@@ -216,9 +221,7 @@
                      :source-arity arity :fn-label nil :tail? true :loop nil)
        frame (merge {:file nil :line nil :col nil :end-line nil :end-col nil} (:ann n)
                     {:ns (or (:definition-ns options) (:ns options)) :fn function-name :arity arity :call :direct})
-       body (function-body n inside)
-       body (str "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
-       function (str "(lambda argv " body ")")]
+       function (function-expression n inside frame)]
   (if (:callable-arities? options) (str "(bl-register-callable! " function " " arity ")") function)))
 (defn- emit-source-scaffold [n parts options]
  (let [self (:name n) local (ident self)
@@ -300,14 +303,10 @@
         (str "(begin " (if (empty? statements) "bl-nil"
           (str (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
   :fn (if (:source-frames? options) (emit-source-function n options)
-       (let [body (function-body n options)
-            frame (assoc (:ann n) :arity (count (:pats (first (:clauses n)))))
-            body (if (:source-frames? options)
-                  (str "(bl-with-source-frame " (literal frame) " (lambda () " body "))") body)]
-        (let [function (str "(lambda argv (h-tick) " body ")")]
-         (if (:callable-arities? options)
-          (str "(bl-register-callable! " function " " (count (:pats (first (:clauses n)))) ")")
-          function))))
+       (let [function (function-expression n options nil)]
+        (if (:callable-arities? options)
+         (str "(bl-register-callable! " function " " (count (:pats (first (:clauses n)))) ")")
+         function)))
   :case (str "(let ((subject " (emit (:subj n) (operand-options options)) ")) "
           (clauses (:clauses n) "(list subject)" "(error \"native seed: case clause\")" options false) ")")
   :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")
