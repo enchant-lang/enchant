@@ -209,6 +209,10 @@ def actor_plan(witness, directory):
     selected_units = compiler_partition(witness, manifest['closure-manifest'])
     if (len(original_units) != 18 or set(original_units) != ORIGINAL_COMPILER_NAMES):
         raise RuntimeError('actor original link is not its exact eighteen-namespace compiler seed')
+    sdk_pin_path = witness.path('research/native-seed/sdk-pin.json')
+    sdk_pin_sha256 = witness.bind(sdk_pin_path)
+    if json.loads(sdk_pin_path.read_text()) != manifest['sdk-pin']:
+        raise RuntimeError('actor compiler profile differs from the pinned SDK map')
     profile = manifest.get('compiler-profile', {})
     if profile.get('version') != 1:
         raise RuntimeError('actor compiler selection lacks its finite profile admission')
@@ -220,7 +224,7 @@ def actor_plan(witness, directory):
                 or profile.get('scheme-dependencies-preserved') is not True
                 or profile.get('sdk-only-producers-excluded') is not True
                 or profile.get('parent', {}).get('sdk-pin-sha256') !=
-                    hashlib.sha256(manifest['sdk-pin'].encode()).hexdigest()):
+                    sdk_pin_sha256):
             raise RuntimeError('actor C profile changed original units or admitted nonfinite compiler dependencies')
     elif profile.get('name') == 'original-scheme-seed-v1':
         if selected_units != original_units or profile.get('added') != []:
