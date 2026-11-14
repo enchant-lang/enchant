@@ -58,6 +58,7 @@
        source (when (:source config) (Path/expand (:source config) (or provider-root root)))]
   (when-not (and declaration realm source) (throw (ex-info "No explicit namespace binding in env.bl" {:kind :auth/unbound-import})))
   {:declaration (update declaration :namespace str) :config (assoc config :source source)}))
+(declare unlink!)
 (defn link!
  "Used by a generated two-line namespace shim. No per-app RPC code. A deployment
   can instead call bind! directly and needs no generated source at all."
@@ -66,6 +67,7 @@
        {:keys [declaration config]} (declaration-for root logical)]
   (when-not (contains? #{:local :remote} (:transport config))
    (throw (ex-info "Choose an explicit local or remote binding" {:kind :auth/configuration})))
+  (unlink! logical)
   (if (= :remote (:transport config))
    (let [prepared (logic/declaration (File/read! (:source config)))
          manifest {:namespace (:namespace prepared) :version (get-in prepared [:policy :version])
@@ -88,8 +90,13 @@
      logical
      (catch error (namespace/close! provider) (throw error)))))))
 (defn unlink! [logical]
- (let [row (BeamLisp.Env/lookup_own (tuple :auth/import (str logical)))]
-  (when (= :ok (elem row 0)) (namespace/close! (elem row 1)))))
+ (let [logical (str logical) key (tuple :auth/import logical)
+       row (BeamLisp.Env/lookup_own key)]
+  ;; Fence retained callbacks even for remote bindings, and never reveal an
+  ;; inherited binding by deleting the generation marker.
+  (BeamLisp.Env/put_key (tuple :auth/import-binding logical) (erlang/make_ref))
+  (when (= :ok (elem row 0))
+   (try (namespace/close! (elem row 1)) (finally (BeamLisp.Env/delete_key key))))))
 (defn prepare!
  "Materialize only declarative import shims. Each loads the generic linker;
   endpoints, grants and provider-specific credentials never enter generated code."
