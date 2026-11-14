@@ -77,7 +77,7 @@ theorem extension_length (bindings : List Binding) (store : Store) :
     (run bindings store).length = bindings.length + store.length := by
   induction bindings generalizing store with
   | nil => simp [run]
-  | cons binding rest ih => simp [run, ih, Nat.add_assoc, Nat.add_comm, Nat.add_left_comm]
+  | cons binding rest ih => simp [run, ih, Nat.add_comm, Nat.add_left_comm]
 
 theorem extension_prefix (bindings : List Binding) (store : Store) :
     ∃ generated, generated.length = bindings.length ∧
