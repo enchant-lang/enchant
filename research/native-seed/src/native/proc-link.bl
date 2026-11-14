@@ -255,6 +255,29 @@
                           (fn [reference] (and (= :body (:kind reference)) (not (:external? reference)))) references))]
       (recur (erlang/++ (erlang/tl todo) dependencies) (conj seen key) (conj out definition)
        (into edges (map #(assoc % :caller key) references)))))))))
+(defn resolver-query [node]
+ (case (:op node)
+  :global [:global (:ns node) (:name node) (:lookup node)]
+  :remote [:remote (:mod node) (:fun node) (count (:args node))]
+  nil))
+(defn capture-resolvers [definitions context]
+ ; Query keys describe original executable ANF, not Source spelling guesses.
+ ; Capture the SAME checked selection while this private staging Env exists.
+ {:schema "bl.native.proc-resolvers" :version 1 :runtime-namespace kernel
+  :definitions
+  (into {} (map (fn [definition]
+   [(qname (:ns definition) (:name definition))
+    (reduce (fn [out node]
+     (if-let [query (resolver-query node)]
+      (let [selection (case (:op node)
+                       :global (selected-global definition node (:bodies context) (:aliases context))
+                       :remote (selected-remote definition node (:bodies context) (:by-module context)
+                                 (:remote-aliases context) (:leaves context)))
+            record (cond-> (dissoc selection :body :source)
+                     (= :actor-host (:kind selection)) (assoc :host-name (erlang/atom_to_binary (:fun node))))]
+       (when (and (contains? out query) (not= (get out query) record))
+        (throw (ex-info "native proc link: one ANF query has conflicting checked targets" {:query query})))
+       (assoc out query record)) out)) {} (walk (:node definition)))]) definitions))})
 (defn value-source [selection]
  (let [[ns name] (target-parts (:target selection))]
   (str "(native-global-exact " (scheme/text ns) " " (scheme/text name) ")")))
@@ -350,7 +373,7 @@
                   "\n(bl-invoke " (value-source {:target (qname kernel "bl-main")})
                   " (list " (value-source {:target (qname (:ns app-unit) "main")}) "))\n"
                   "(if (not (null? seed-errors)) (error \"native actor errors\"))\n")]
-   {:program output :definitions emitted :entry {:namespace (:ns app-unit) :name "main" :actor-runtime true}
+   {:program output :definitions emitted :link-resolutions (capture-resolvers emitted context) :entry {:namespace (:ns app-unit) :name "main" :actor-runtime true}
     :manifest {:schema "bl.native.proc-link" :version 1 :sdk-pin pin
                :closure-manifest (source-identity (:closure-manifest request))
                :prelude (source-identity (:prelude request)) :links (source-identity (:links request))
