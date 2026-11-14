@@ -80,7 +80,25 @@ def compiler_recipe_identity(source_path: Path) -> dict:
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name]
         if len(found) != 1 or not isinstance(found[0], ast.FunctionDef):
             raise RuntimeError("compiler recipe requires exactly one synchronous function: " + name)
-        functions.append([name, ast.dump(found[0], annotate_fields=True, include_attributes=False)])
+        function = found[0]
+        if name == "compile_native":
+            # This selector changes only the already-bound object argv and
+            # output/proof variant names. Normalize exactly this statement so
+            # unchanged translations and O0 objects retain their prior recipe.
+            # Full driver bytes and actual selected flags remain bound.
+            selector = ast.parse('if ordinal == 0 and args.host_no_inline_functions:\n    object_flags.append("-fno-inline-functions")\n    obj = directory / (stem + ".O1.noinline.o")\n    optimization = "1.noinline"').body[0]
+            selector_dump = ast.dump(selector, annotate_fields=True, include_attributes=False)
+            removed = []
+            class ObjectFlagSelector(ast.NodeTransformer):
+                def visit_If(self, node):
+                    if ast.dump(node, annotate_fields=True, include_attributes=False) == selector_dump:
+                        removed.append(node)
+                        return None
+                    return self.generic_visit(node)
+            function = ObjectFlagSelector().visit(function)
+            if len(removed) != 1:
+                raise RuntimeError("expected exactly one reviewed host object flag selector")
+        functions.append([name, ast.dump(function, annotate_fields=True, include_attributes=False)])
     constants = {"header": HEADER.decode(), "entry": ENTRY.decode(),
                  "unit_target_bytes": TARGET, "unit_hard_bytes": HARD,
                  "compile_deadline_seconds": COMPILE_DEADLINE,
@@ -88,7 +106,10 @@ def compiler_recipe_identity(source_path: Path) -> dict:
     payload = {"schema": "bl.native.python-compiler-recipe", "version": 1,
                "functions": functions, "constants": constants}
     return {"schema": payload["schema"], "version": 1, "sha256": key(payload),
-            "functions": list(names), "constants": constants}
+            "functions": list(names), "constants": constants,
+            "object_flag_selector": {"normalization": "host-O1-no-inline-only-v1",
+                "actual_flags_bound_in_object_request": True,
+                "full_driver_bound_in_report": True}}
 
 
 def main() -> None:
@@ -101,6 +122,8 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--host-optimization", type=int, choices=(0, 1), default=0,
                         help="Clang optimization level for the indivisible ordinal-zero host only")
+    parser.add_argument("--host-no-inline-functions", action="store_true",
+                        help="add -fno-inline-functions only to host -O1; reuse all unchanged O0 units")
     parser.add_argument("--standard-bindings", action="store_true",
                         help="assert immutable stock Gambit primitive bindings during Scheme -> C only")
     parser.add_argument("--compile-stage1-only", action="store_true",
@@ -110,6 +133,8 @@ def main() -> None:
     parser.add_argument("--actor-diagnostic-prefix", type=Path,
                         help="observational prefix for a separate NONQUALIFIED actor image")
     args = parser.parse_args()
+    if args.host_no_inline_functions and args.host_optimization != 1:
+        parser.error("--host-no-inline-functions requires --host-optimization 1")
     if args.actor_diagnostic_prefix and not args.compile_stage1_actors_only:
         parser.error("--actor-diagnostic-prefix requires --compile-stage1-actors-only")
     if args.actor_diagnostic_prefix:
@@ -168,6 +193,7 @@ def main() -> None:
                             "unit_target_bytes": TARGET, "unit_hard_bytes": HARD,
                             "compile_deadline_seconds": COMPILE_DEADLINE,
                             "host_optimization": args.host_optimization,
+                            "host_no_inline_functions": args.host_no_inline_functions,
                             "standard_bindings": args.standard_bindings,
                             "scheme_compiler_flags": gsc_flags,
                             "builds": builds, "runs": runs, "actor_capture": actor_capture,
@@ -396,6 +422,10 @@ def main() -> None:
                 optimization = args.host_optimization if ordinal == 0 else 0
                 object_flags = ["-O" + str(optimization), *flags[1:]]
                 obj = directory / (stem + ".O" + str(optimization) + ".o")
+                if ordinal == 0 and args.host_no_inline_functions:
+                    object_flags.append("-fno-inline-functions")
+                    obj = directory / (stem + ".O1.noinline.o")
+                    optimization = "1.noinline"
                 raw = (folder / row["file"]).read_bytes()
                 if not scheme.is_file() or scheme.read_bytes() != raw:
                     scheme.write_bytes(raw)
@@ -493,6 +523,7 @@ def main() -> None:
                        "image": {"path": str(image), "sha256": digest(image)},
                        "compile_deadline_seconds": COMPILE_DEADLINE,
                        "host_optimization": args.host_optimization,
+                            "host_no_inline_functions": args.host_no_inline_functions,
                        "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
                        "inputs": dict(inputs), "driver_sha256": digest(here), "compiler_recipe": compiler_recipe,
                        "builds": builds, "runs": runs}
@@ -544,6 +575,7 @@ def main() -> None:
                   "stage2-sha256": h2, "stage3-sha256": h3, "stage2-stage3-byte-equal": True,
                   "stage1-stage2-source-corpus-equal": True, "stage1-stage2-original-actor-corpus-equal": True,
                   "host_optimization": args.host_optimization,
+                            "host_no_inline_functions": args.host_no_inline_functions,
                   "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
                   "actor_oracle_sha256": digest(args.actor_oracle), "actor_results": actor_results,
                   "inputs": inputs, "driver_sha256": digest(here), "compiler_recipe": compiler_recipe,
