@@ -1,0 +1,183 @@
+(ns formal.wide-owner-native-check
+ (:require [formal.logic :as logic] [formal.request :as request] [formal.request-answer :as answer]
+           [formal.request-evidence :as evidence] [formal.backend :as backend]
+           [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.advanced-cases :as advanced]
+           [formal.feature-cases :as features] [formal.native-cases :as native] [bl.json :as json]))
+(def entered (atom []))
+(def rows (atom []))
+(def controls (atom []))
+(def packets (atom []))
+(def sample (System/get_env "FORMAL_WIDE_OWNER_SAMPLE"))
+(defn persist! []
+ (when-let [path (System/get_env "FORMAL_WIDE_OWNER_OUTPUT")]
+  (File/write! path (json/encode {:schema "bl.wide-owner-native-prototype.v1"
+    :sdk (System/get_env "BL_SDK_PRODUCT") :sample sample :entered-tests @entered
+    :rows @rows :controls @controls :packets @packets
+    :in-sdk false :compiler-proof-authority false} {:pretty 2}))))
+(defn enter! [id] (swap! entered conj id) (persist!))
+(defn record! [id data] (swap! controls conj {:case id :result data}) (persist!))
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn wire [data]
+ {:formal/data-graph 1 :profile graph/profile :root (:root data)
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)]) (:nodes data))})
+(defn save-packet! [id engine r candidate expected]
+ (when-let [directory (System/get_env "FORMAL_WIDE_OWNER_PACKETS")]
+  (let [packet (evidence/pack r candidate) filename (str (count @packets) "-" (name engine) ".json")
+        bytes (json/encode (wire packet))]
+   (File/write! (Path/join directory filename) bytes)
+   (swap! packets conj {:case id :backend engine :file filename :sha256 (sha bytes)
+                       :packet-reference (graph/reference packet)
+                       :request-reference (request/reference r) :subject-reference (request/subject-reference r)
+                       :expected expected}) (persist!))))
+(defn prepare [subject]
+ (logic/prepare-request subject {:policy {:profile logic/wide-native-policy}}))
+(defn counted [action]
+ (let [pattern (tuple (elem (erlang/fun_info backend/invoke :module) 1) :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try (let [result (action) calls (elem (erlang/trace_info pattern :call_count) 1)]
+        (is (int? calls)) {:value result :exchanges calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(defn error-kind [action] (try (action) :accepted (catch e (:kind (ex-data e)))))
+(defn foreign-kind [action]
+ (let [parent (erlang/self)]
+  (erlang/spawn #(erlang/send parent [:wide-foreign-lease (error-kind action)]))
+  (receive [:wide-foreign-lease result] result (after 3000 :foreign-timeout))))
+(defn details [r result]
+ (let [response (answer/restore r (get-in result [:response :answer-graph]))]
+  (graph/decode! (get-in response [:source :details-graph]))))
+(defn case-list []
+ (if (= sample "smoke")
+  (mapv first [(native/scalar-cases) (native/real-cases) (native/array-cases)
+               (native/enum-and-uf-cases) (native/quantifier-cases) (native/bv-cases)
+               (native/text-cases) (native/sequence-cases) (native/fp-cases)])
+  (vec (concat (advanced/cases) (features/all-cases) (native/cases)))))
+(deftest existing-mathematical-questions-reach-both-actual-native-owners
+ (enter! :corpus)
+ (let [cases (case-list)
+       baseline (into {} (map (fn [row] [(get row "id") row])
+                          (get (json/decode (File/read! (System/get_env "FORMAL_WIDE_OWNER_BASELINE"))) "rows")))
+       measured
+       (counted
+        (fn []
+         (doseq [c cases]
+          (let [id (:id c) original (prepare (qg/prepare (q/from-case c)))
+                _ (println (str "wide native start " id))
+                paired (logic/compare-evidence original)
+                outcomes
+                (mapv (fn [engine]
+                         (let [r (request/for-backend original engine) result (get paired engine)
+                               source (get-in result [:answer-check :source])
+                               report (:status source) diagnostic (details r result)
+                               fragments (:native-observations-graph diagnostic)
+                               old (get baseline (erlang/atom_to_binary id :utf8))
+                               old-status (get-in old [(name engine) "solver-status"])]
+                          (is (some? old))
+                          (is (if-let [declared (get-in c [:expectations engine :solver-statuses])]
+                                (contains? declared report)
+                                (or (= report (if (= :proved (:expected c)) :unsat :sat))
+                                    (and (contains? #{"unknown" "unsupported"} old-status) (= old-status (name report)))))
+                              (str id " " engine " reported " report))
+                          (is (= (:sha256 (request/subject-reference original)) (get-in old ["graph" "reference" "sha256"])))
+                          (is (= (get-in source [:identity :worker-sha256]) (get-in old [(name engine) "identity" "worker-sha256"])))
+                          (is (= (get-in source [:identity :library-sha256]) (get-in old [(name engine) "identity" "library-sha256"])))
+                          (is (= :reported-native (:kind source)))
+                          (is (= engine (get-in source [:identity :backend])))
+                          (is (= (System/get_env "BL_SDK_PRODUCT") (get-in source [:identity :sdk])))
+                          (is (= :not-installed (get-in result [:answer-check :point-replay])))
+                          (is (= :not-established (get-in result [:logical-conclusion :status])))
+                          (is (not= :accepted (get-in result [:conclusion :status])))
+                          (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+                          (is (= :matching-response (get-in result [:local-delegation :status])))
+                          (is (= 1 (get-in result [:local-delegation :attempts])))
+                          (when fragments (is (= :checked-data-graph (:status (graph/check! fragments)))))
+                          (save-packet! id engine r (:response result)
+                            {:reported-status report :point-replay :not-installed :logical-status :not-established})
+                          {:backend engine :reported-status report :baseline-status old-status
+                           :status-changed (not= old-status (name report))
+                           :phase (:phase source) :verdict (get-in result [:answer-check :verdict])
+                           :point-replay (get-in result [:answer-check :point-replay])
+                           :logical-conclusion (:logical-conclusion result) :consumer-conclusion (:conclusion result)
+                           :identity (:identity source) :native-observations-graph fragments
+                           :native-scope-attempts (:native-scope-attempts diagnostic)})) [:z3 :oxiz])]
+           (is (not (and (every? #(contains? #{:sat :unsat} (:reported-status %)) outcomes)
+                         (not= (:reported-status (first outcomes)) (:reported-status (second outcomes))))))
+           (swap! rows conj {:id id :subject-reference (request/subject-reference original)
+                            :policy-reference (graph/of (:policy original)) :outcomes outcomes})
+           (persist!)))))]
+  (is (= (if (= sample "smoke") 9 187) (count @rows)))
+  (is (pos? (:exchanges measured)))
+  (record! :native-corpus {:questions (count @rows) :formal-transport-exchanges (:exchanges measured)
+                         :scope :corpus-window-including-owner-hello-and-native-scope})))
+(deftest retained-array-assumptions-survive-erasing-the-client-mirror
+ (enter! :retained-arrays)
+ (doseq [engine [:z3 :oxiz]]
+  (let [a (t/variable "wide.retained.array" (t/array-sort t/Int t/Int))
+        selected (t/select a (t/int 0))
+        caller (qg/prepare (q/sat {:assumptions [(t/eq selected (t/int 8))]}))
+        kept (q/assertion "retained-seven" (t/eq selected (t/int 7)))
+        held (atom nil) saved (atom nil)]
+   (backend/with-session {:backend engine}
+    (fn [session]
+     (is (:ok (backend/load! session [kept])))
+     (swap! (:state session) assoc :assertions [])
+     (let [measured (counted #(logic/with-context-request session caller
+                              {:policy {:profile logic/wide-native-policy}}
+                              (fn [r execute]
+                               (reset! held execute) (reset! saved r)
+                               (is (= :retained-request-lease (foreign-kind execute)))
+                               (let [result (execute)]
+                                (is (= :retained-request-lease (error-kind execute))) result))))
+           result (:value measured)
+           candidate (evidence/propose @saved {:answer (:response result)})
+           checked (evidence/recheck @saved candidate)
+           caller-only (logic/execute-evidence (request/for-backend (prepare caller) engine))
+           reopened-fresh (logic/execute-evidence @saved)]
+      (is (= 1 (:exchanges measured)))
+      (is (= :unsat (get-in result [:source :status])))
+      (is (= :solver-claim (:verdict result)))
+      (is (= :not-installed (:point-replay result)))
+      (is (= :retained-request-lease (error-kind @held)))
+      (is (= :not-established (get-in checked [:logical-conclusion :status])))
+      (is (= :sat (get-in caller-only [:answer-check :source :status])))
+      (is (= :unsat (get-in reopened-fresh [:answer-check :source :status])))
+      (is (= (request/subject-reference @saved) (:subject-reference reopened-fresh)))
+      (save-packet! :retained-array engine @saved candidate
+                    {:reported-status :unsat :point-replay :not-installed :logical-status :not-established})
+      (record! :retained-array {:backend engine :caller-only :sat :complete-request :unsat
+                               :same-subject-fresh true :old-lease :expired
+                               :owner-scope-exchanges (:exchanges measured)})))))))
+(deftest a-changed-native-context-refuses-before-another-scope-exchange
+ (enter! :stale-context)
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine}
+   (fn [session]
+    (logic/with-context-request session (qg/prepare (q/sat {:assumptions [(t/bool true)]}))
+     {:policy {:profile logic/wide-native-policy}}
+     (fn [_ execute]
+      (is (:ok (backend/load! session [(q/assertion "changed" (t/bool true))])))
+      (let [measured (counted #(error-kind execute))]
+       (is (= :retained-request-context (:value measured)))
+       (is (= 0 (:exchanges measured)))
+       (record! :stale-context {:backend engine :result (:value measured)
+                               :formal-transport-exchanges (:exchanges measured)}))))))))
+(deftest a-term-handler-can-return-data-without-acquiring-a-native-owner
+ (enter! :effect-lease)
+ (let [a (t/variable "wide.effect.array" (t/array-sort t/Int t/Int))
+       r (prepare (qg/prepare (q/prove (t/eq a a)))) held (atom nil)
+       measured (counted #(logic/with-evidence-handler
+                            (fn [requested fallback]
+                             (reset! held fallback)
+                             (is (= :fallback-lease (foreign-kind fallback)))
+                             (evidence/propose requested {:answer (answer/supply requested {})}))
+                            (fn [] (logic/execute-evidence r))))
+       result (:value measured)]
+  (is (= 0 (:exchanges measured)))
+  (is (= :candidate (get-in result [:answer-check :verdict])))
+  (is (= :not-installed (get-in result [:answer-check :point-replay])))
+  (is (= :not-invoked (get-in result [:local-delegation :status])))
+  (is (= :fallback-lease (error-kind @held)))
+  (is (= :not-established (get-in result [:logical-conclusion :status])))
+  (record! :effect-lease {:formal-transport-exchanges (:exchanges measured)
+                         :unreplayed-candidate true :foreign-and-expired-fallback :refused})))
+(run-tests)
