@@ -10,19 +10,34 @@
 (def entered (atom []))
 (def observations (atom []))
 (def calls (atom 0))
-(def pattern (tuple (elem (erlang/fun_info backend/invoke :module) 1) :exchange! 4))
+(def native-windows (atom []))
 (defn persist! []
  (when-let [path (System/get_env "FORMAL_WIDE_OWNER_OUTPUT")]
   (File/write! path (json/encode {:schema "bl.wide-owner-pure-prototype.v1"
      :sdk (System/get_env "BL_SDK_PRODUCT") :entered-tests @entered :observations @observations
-     :native-exchanges (elem (erlang/trace_info pattern :call_count) 1) :oracle-calls @calls
+     :native-exchanges (if (and (seq @native-windows) (every? #(int? (:native-exchanges %)) @native-windows))
+                         (reduce + 0 (map :native-exchanges @native-windows)) :not-measured)
+     :native-windows @native-windows :oracle-calls @calls
      :in-sdk false :compiler-proof-authority false} {:pretty 2}))))
 (defn enter! [id] (swap! entered conj id) (persist!))
 (defn observe! [id result] (swap! observations conj {:case id :result result}) (persist!))
+(defn without-native [label body]
+ (let [pattern (tuple (elem (erlang/fun_info backend/invoke :module) 1) :exchange! 4)
+       denied (atom 0) deny (fn [& _] (swap! calls inc) (swap! denied inc) (throw :wide-pure-check-must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny} body)
+         exchanges (elem (erlang/trace_info pattern :call_count) 1)]
+    (is (and (int? exchanges) (= 0 exchanges @denied)))
+    (swap! native-windows conj {:case label :native-exchanges exchanges :oracle-calls @denied})
+    (persist!) result)
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
 (defn original [term]
  (logic/prepare-request (qg/prepare (q/prove term {:vacuity :reject}))
    {:policy {:profile logic/wide-native-policy}}))
 (deftest all-retained-theories-share-the-public-request-interface
+ (without-native "all-retained-theories-share-the-public-request-interface"
+  (fn []
  (enter! :vocabulary)
  (let [cases (vec (concat (advanced/cases) (features/all-cases) (native/cases)))
        description (logic/checking-policy {:profile logic/wide-native-policy})
@@ -40,8 +55,10 @@
   (is (= [] (:replayed-operations description) (:installed-proof-strategies description)))
   (is (= :requires-backend-evidence (:native-support description)))
   (is (= false (:compiler-proof-authority description)))
-  (observe! :corpus rows)))
+  (observe! :corpus rows)))))
 (deftest supplied-coordinates-and-saved-success-flags-do-not-become-witnesses
+ (without-native "supplied-coordinates-and-saved-success-flags-do-not-become-witnesses"
+  (fn []
  (enter! :candidate-only)
  (let [a (t/variable "wide.array" (t/array-sort t/Int t/Int))
        r (original (t/eq (t/select (t/store a (t/int 2) (t/int 9)) (t/int 2)) (t/int 9)))
@@ -57,8 +74,10 @@
   (is (= checked reopened))
   (is (thrown? (evidence/check! r (assoc candidate :conclusion {:status :accepted}))))
   (is (thrown? (answer/check! r (assoc supplied :trusted true))))
-  (observe! :unreplayed-candidate checked)))
+  (observe! :unreplayed-candidate checked)))))
 (deftest narrow-certificate-authority-cannot-be-renamed-into-a-wide-profile
+ (without-native "narrow-certificate-authority-cannot-be-renamed-into-a-wide-profile"
+  (fn []
  (enter! :semantic-profile)
  (let [subject (qg/prepare (q/prove (t/bool true) {:vacuity :reject}))
        narrow (request/prepare subject {:policy {:profile policy/numeric-word}})
@@ -68,8 +87,10 @@
   (is (= :rejected (get-in checked [:proof-check :status])))
   (is (= :not-established (get-in checked [:logical-conclusion :status])))
   (is (not= :accepted (get-in checked [:conclusion :status])))
-  (is (thrown? (policy/evaluation-profile (:policy wide))))))
+  (is (thrown? (policy/evaluation-profile (:policy wide))))))))
 (deftest reader-work-refusal-precedes-generic-term-construction
+ (without-native "reader-work-refusal-precedes-generic-term-construction"
+  (fn []
  (enter! :prospective-admission)
  (let [r (original (t/eq (t/real 1 3) (t/real 1 3)))
        limited (request/prepare (:subject r)
@@ -85,8 +106,10 @@
     (is (= :not-run (get-in prepared [:admission :constructor-execution])))
     (is (= 0 (elem (erlang/trace_info constructors :call_count) 1))))
    (finally (erlang/trace_pattern constructors false (list :local :call_count))))
-  (is (thrown? (policy/settings {:profile policy/wide-native :limits {:cached-inventory {}}})))))
+  (is (thrown? (policy/settings {:profile policy/wide-native :limits {:cached-inventory {}}})))))))
 (deftest only-selected-operational-descriptors-enter-typing-work
+ (without-native "only-selected-operational-descriptors-enter-typing-work"
+  (fn []
  (enter! :metadata)
  (let [unknown {:formal/data-graph 1 :profile graph/profile :root 0
                 :nodes [["keyword" "wide.owner.unfamiliar.provenance.20261114"]]}
@@ -104,8 +127,10 @@
   (is (> (:expanded-nodes (graph/check! (:graph subject))) 100000))
   (is (thrown? (erlang/binary_to_existing_atom "wide.owner.unfamiliar.provenance.20261114" :utf8)))
   (observe! :metadata {:subject-reference (request/subject-reference r)
-                      :checking (:checking inventory) :forest-checking (get-in inventory [:forest :checking])})))
+                      :checking (:checking inventory) :forest-checking (get-in inventory [:forest :checking])})))))
 (deftest active-literals-and-unused-declarations-keep-their-fixed-shape-bounds
+ (without-native "active-literals-and-unused-declarations-keep-their-fixed-shape-bounds"
+  (fn []
  (enter! :bounded-descriptors)
  (let [huge (t/int (erlang/bsl 1 300))
        deep-sort (reduce (fn [sort _] (t/array-sort sort sort)) t/Int (range 11))
@@ -119,13 +144,11 @@
      (is (= 2 (:formal/question-forest-refusal inventory)))
      (is (= :not-run (get-in inventory [:admission :constructor-execution])))))
    (is (= 0 (elem (erlang/trace_info constructors :call_count) 1)))
-   (finally (erlang/trace_pattern constructors false (list :local :call_count))))))
+   (finally (erlang/trace_pattern constructors false (list :local :call_count))))))))
 (deftest no-native-or-oracle-execution-was-used
  (enter! :no-native)
- (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+ (is (= 6 (count @native-windows)))
+ (is (= 0 @calls))
+ (is (every? #(and (int? (:native-exchanges %)) (= 0 (:native-exchanges %) (:oracle-calls %))) @native-windows))
  (persist!))
-(assert (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
-(try
- (let [deny (fn [& _] (swap! calls inc) (throw :wide-pure-check-must-not-query))]
-  (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny} #(run-tests)))
- (finally (erlang/trace_pattern pattern false (list :local :call_count))))
+(run-tests)

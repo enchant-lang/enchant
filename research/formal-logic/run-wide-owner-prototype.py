@@ -67,14 +67,16 @@ counts=re.findall(r'✓\s+formal.wide-owner-pure-check\s+(\d+) passed',log);asse
 assert all(sha(R/name)==digest for name,digest in digests.items())
 assert all(sha(Path(row['source']))==row['source_sha256'] and sha(E/row['saved'])==row['projected_sha256'] for row in projections)
 observed=read(E/'observations.json');assert observed['sdk']==pin['sdk'] and len(observed['entered-tests'])==7
-assert observed['native-exchanges']==observed['oracle-calls']==0 and observed['in-sdk'] is False
+assert type(observed['native-exchanges']) is int and observed['native-exchanges']==observed['oracle-calls']==0
+assert observed['in-sdk'] is False and len(observed['native-windows'])==6
+assert all(type(row['native-exchanges']) is int and row['native-exchanges']==row['oracle-calls']==0 for row in observed['native-windows'])
 rows=next(row['result'] for row in observed['observations'] if row['case']=='corpus');assert len(rows)==187
 candidate=next(row['result'] for row in observed['observations'] if row['case']=='unreplayed-candidate')
 assert candidate['answer-check']['verdict']=='candidate' and candidate['answer-check']['point-replay']=='not-installed'
 assert candidate['logical-conclusion']['status']=='not-established' and candidate['conclusion']['status']!='accepted'
 write('qualification.json',{'schema':'bl.wide-owner-pure-prototype.v1','status':'passed','recorded_utc':datetime.now(timezone.utc).isoformat(),
  'qualified_runtime_sdk':pin,'source_pin':read(E/'source-pin.json'),'assertions':int(counts[0]),'questions':187,
- 'native_exchanges':0,'oracle_calls':0,'in_sdk':False,'sdk_produced':False,'projection_sha256':sha(E/'projection.json'),
+ 'native_exchanges':0,'oracle_calls':0,'native_exchange_scope':'six recorded operational test windows','in_sdk':False,'sdk_produced':False,'projection_sha256':sha(E/'projection.json'),
  'observations_sha256':sha(E/'observations.json'),'compiler_proof_authority':False,
  'scope':'Explicit namespace/import projection using the common request API shape beside the unchanged SDK. All retained theory vocabularies, precise operational descriptor admission, unprivileged coordinates, candidate-only reopening, refused cross-profile certificates, resource refusals and unchanged ignored provenance. Native owner execution, narrow regression checks, fresh readers and immutable SDK integration remain separate gates.'})
 print(json.dumps({'status':'passed','questions':187,'assertions':int(counts[0]),'in_sdk':False,'sdk_produced':False}))
