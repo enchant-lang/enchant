@@ -72,7 +72,7 @@
    (let* ((b (car xs)) (width (cond ((< b 128) 1) ((and (>= b 194) (< b 224)) 2)
       ((and (>= b 224) (< b 240)) 3) ((and (>= b 240) (< b 245)) 4) (else (native-badarg "invalid UTF-8 leader"))))
       (minimum (case width ((1) 0) ((2) 128) ((3) 2048) (else 65536))))
-    (let consume ((n (- width 1)) (p (cdr xs)) (value (modulo b (expt 2 (- 7 width)))))
+    (let consume ((n (- width 1)) (p (cdr xs)) (value (if (= width 1) b (modulo b (expt 2 (- 7 width))))))
      (if (= n 0)
       (if (or (< value minimum) (> value 1114111) (and (>= value 55296) (< value 57344))) (native-badarg "invalid UTF-8 scalar")
        (loop p (cons (integer->char value) out)))
