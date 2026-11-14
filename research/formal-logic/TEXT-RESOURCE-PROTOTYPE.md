@@ -1,8 +1,10 @@
 # Bound text work before decoding or building a string
 
-The isolated `prototypes/text-resources` module is prepared source only. It has
-not run, is outside the SDK and adds no managed theory capability. The selected
-retained-request SDK and ongoing word SDK qualification remain unchanged.
+The isolated `prototypes/text-resources` module passed **512 assertions** on
+the selected immutable word SDK: 474 resource-planning checks and 38 term-interface
+checks. Its [qualification](evidence/text-resource-prototype/qualification.json)
+binds actual execution, exact source and native observations. It remains outside
+the SDK and adds no managed theory capability.
 
 The next managed profile should reuse the same request carrier, complete subject,
 closed policy dispatcher, owner, graph coordinate syntax and fresh point scope.
@@ -15,7 +17,7 @@ positions. Its value checker requires valid UTF-8 and an alphabet bounded by
 The native workers already import actual scalar values: Z3 uses its u32-string
 API and OxiZ uses native string terms. Existing native cases distinguish bytes,
 combining characters, NUL, escape-looking data and the alphabet boundary. Those
-are current implementation sources; this pending planner adds no native support.
+are current implementation sources; this planner adds no native support.
 
 The planner accepts UTF-8 byte upper bounds and index integers. It constructs
 no text, parses no UTF-8 and asserts no alphabet validity. Actual byte size must
@@ -47,12 +49,12 @@ establishes a checked value. The actual point must derive and charge its own pla
 The counts are a policy convention, not a physical allocation or CPU theorem.
 Graph capacity, aggregate point accounts and process deadlines remain separate.
 
-Prepared checks compare the envelopes with actual SDK primitives over ASCII,
+Actual checks compare the envelopes with actual SDK primitives over ASCII,
 multibyte scalars, a combining sequence, a supplementary-plane scalar and NUL.
 They cover exact work limits, oversized outputs/inputs, large integer positions,
 malformed policies and a calibrated private codepoint-conversion counter that
-must stay zero during planning. These checks are not passing evidence until the
-real capped runner completes.
+stayed zero during planning and increased on the actual SDK length operation.
+The capped runner passed both files in one fresh SDK-only process.
 
 After this groundwork is qualified, the canonical batch needs fresh literal
 admission, syntax-only text coordinates, demanded value/operation charges, a
@@ -64,10 +66,10 @@ Implementation sources: [the canonical evaluator](sdk-src/formal/evaluate.bl),
 [typed constructors](sdk-src/formal/term.bl),
 [the actual native Unicode cases](src/formal/native-cases.bl), and
 [the reviewed unit distinction](SEMANTICS.md#text-and-target-qualification).
-The capped [pending runner](run-text-resource-prototype.py) requires the word SDK
+The capped [runner](run-text-resource-prototype.py) requires the word SDK
 to be fully qualified and selected before starting this independent gate.
 
-The same isolated source tree now contains a pending language-facing term
+The same isolated source tree contains a language-facing term
 interface, `formal.scalar-text-prototype`. It builds ordinary existing terms
 and `formal.value` descriptors. `at-total` exposes the SMT empty-text rule;
 `at` returns the existing explicit Option; `at!` is a deliberately strict new
@@ -77,9 +79,13 @@ prefix/suffix/contains and first replacement keep their codepoint unit.
 Existing definedness, bounds, constraints and Option payload guarding are reused.
 No ordinary BL String operation or Source lowering has changed.
 
-The pending runner checks both envelope and interface files in one fresh VM.
+The runner checks both envelope and interface files in one fresh VM.
 A separate real-owner comparison asks the same symbolic combining-character
 contract of Z3 and OxiZ, recording their actual identities and statuses.
+The [actual native comparison](evidence/text-resource-prototype/native.json)
+records **Z3: UNSAT, OxiZ: UNKNOWN** for this same complete question. The concrete
+SDK replay evaluates the contract to true. This is a measured capability gap for
+that question and these pinned engines, not a universal String-theory ranking.
 Unknown and unsupported remain explicit capability gaps; a claimed satisfying
 counterexample to this concrete true contract fails the gate. Native UNSAT
 remains unchecked evidence. This comparison does not advertise a bounded

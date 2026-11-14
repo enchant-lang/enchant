@@ -660,9 +660,11 @@ The [live word chapter](https://work.tailcb5318.ts.net:18100/#a-byte-can-carry-i
 includes the actual executed result and a saved, source-backed evidence view.
 The full formal/total-language goal remains active.
 
-Two next slices are prepared as isolated source, with functional qualification
-queued behind the current word SDK: [finite word proof checking](WORD-EXHAUSTION-PROTOTYPE.md),
+Two further slices are qualified as isolated prototypes on that same word SDK:
+[finite word proof checking](WORD-EXHAUSTION-PROTOTYPE.md), with 82 assertions,
 with backend-independent statement identity and an original-node assumption
 ledger, and [scalar text interfaces and resource envelopes](TEXT-RESOURCE-PROTOTYPE.md),
-with separate total, Option and strict access. Neither prototype is in the SDK
-or the common answer proof slot yet.
+with 512 assertions and separate total, Option and strict access. The actual
+symbolic combining-character contract returned Z3 UNSAT and OxiZ UNKNOWN;
+concrete BL point evaluation agreed with the contract. Neither prototype is in
+the SDK or the common answer proof slot yet.
