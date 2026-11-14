@@ -102,10 +102,18 @@
  (let ((value (native-fetch! ns name #t)))
   (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
    (bl-nth value 1) value)))
-;; Resolve the live EXACT canonical runtime only when Enum consumes a
-;; deferred collection. Missing compiled rt/k-to-list fails closed in lookup.
+;; Resolve the live EXACT canonical runtime when Enum consumes a deferred
+;; collection. SeqCursor has a canonical source fold, but no k-to-list kind.
+;; This callback is only a raw storage primitive; BL owns cursor traversal.
+(define native-cursor-list-step
+ (bl-register-callable!
+  (native-mark-host-callable! (lambda (acc element) (cons element acc))) 2))
 (set! native-canonical-sequence-items
- (lambda (value) (bl-invoke (native-global-exact "rt" "k-to-list") (list value))))
+ (lambda (value)
+  (if (native-cursor? value)
+   (reverse (bl-invoke (native-global-exact "rt" "lazy-fold-source")
+             (list native-cursor-list-step '() value)))
+   (bl-invoke (native-global-exact "rt" "k-to-list") (list value)))))
 (define (native-env-link ns name owner?)
  (let ((row (native-resolve-row (native-candidates ns name) (bl-key "link") #f)))
   (if (eq? row native-missing) (bl-key "error")

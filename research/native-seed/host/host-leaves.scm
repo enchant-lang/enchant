@@ -329,9 +329,33 @@
 (native-add-leaf! "Elixir.Float/ratio/1" (native-leaf "Elixir.BeamLisp.Float/ratio/1"))
 (native-add-leaf! "erlang/apply/3" (lambda (module fun args)
  (bl-invoke (native-remote (string-append (native-atom-name module) "/" (native-atom-name fun) "/" (number->string (length args)))) (native-assert-list args))))
-(native-add-leaf! "erlang/make_fun/3" (lambda (module fun arity)
- (bl-register-callable! (lambda args (if (not (= arity (length args))) (native-badarg "remote function arity")
-  (bl-invoke (native-remote (string-append (native-atom-name module) "/" (native-atom-name fun) "/" (number->string arity))) args))) arity)))
+;; rt's seed captures exports before all compiled namespaces are initialized.
+;; Form the exact MFA once now, but resolve its first positive target lazily.
+;; Registry root changes retire the target; a compiled dispatch wrapper still
+;; reads its LIVE global slot on every call. The result stays a genuine Scheme
+;; procedure carrying the original arity metadata (including C wrapper hooks).
+(define (native-make-fun module fun arity)
+ (let* ((module-name (native-atom-name module)) (function-name (native-atom-name fun))
+        (key (string-append module-name "/" function-name "/" (number->string arity)))
+        (target native-missing) (leaves #f) (modules #f) (stubs #f) (arities #f))
+  (bl-register-callable!
+   (lambda args
+    (if (not (= arity (length args))) (native-badarg "remote function arity"))
+    (if (or (eq? target native-missing)
+            (not (eq? leaves native-leaf-registry))
+            (not (eq? modules native-module-names))
+            (not (eq? stubs native-stub-names))
+            (not (eq? arities native-export-arities)))
+     (let ((resolved (native-remote key)))
+      (if (native-remote-available? module-name function-name arity)
+       (begin
+        (set! target resolved)
+        (set! leaves native-leaf-registry) (set! modules native-module-names)
+        (set! stubs native-stub-names) (set! arities native-export-arities))
+       (set! target native-missing))
+      (bl-invoke resolved args))
+     (bl-invoke target args))) arity)))
+(native-add-leaf! "erlang/make_fun/3" native-make-fun)
 
 ;; Preserve the native vector representation when raw canonical metadata code
 ;; updates fields. General maps keep normal Erlang map semantics.
