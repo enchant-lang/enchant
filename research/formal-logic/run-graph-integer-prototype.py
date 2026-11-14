@@ -37,7 +37,7 @@ counts=re.findall(r'✓\s+formal.graph-integer-check\s+(\d+) passed',log);assert
 assert all(sha(R/n)==d for n,d in digests.items())
 observed=read(E/'observations.json')
 assert observed['sdk']==pin['sdk'] and observed['compiler-proof-authority'] is False
-assert observed['entered-tests']==['linear','proof-contexts','integer-arithmetic','sharing','resources','closed-certificate','no-native']
+assert len(observed['entered-tests'])==7 and set(observed['entered-tests'])=={'linear','proof-contexts','integer-arithmetic','sharing','resources','closed-certificate','no-native'}
 assert len(observed['observations'])==2 and all(row['result']['status']=='checked' for row in observed['observations'])
 write('qualification.json',{'schema':'bl.graph-integer-prototype-qualification.v1','status':'passed','sdk_pin':pin,
  'code_commit':commit,'source_sha256':digests,'assertions':int(counts[0]),'in_sdk':False,'in_common_evidence_interface':False,

@@ -5,6 +5,10 @@
            [bl.json :as json] [oracle]))
 (def entered (atom []))
 (def observations (atom []))
+(defn persist! []
+ (when-let [path (System/get_env "FORMAL_GRAPH_INTEGER_OUTPUT")]
+  (File/write! path (json/encode {:entered-tests @entered :observations @observations :sdk (System/get_env "BL_SDK_PRODUCT")
+                                 :compiler-proof-authority false} {:pretty 2}))))
 (defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric}}))
 (def x (t/variable "graph-int.x" t/Int))
 (defn theorem [bound]
@@ -23,6 +27,7 @@
                          [(graph/encode :args) (graph/assemble "vector" arguments)] [(graph/encode :data) (graph/encode nil)]]))
 (deftest unbounded-linear-entailment-has-derived-arithmetic-premises
  (swap! entered conj :linear)
+ (persist!)
  (let [r (theorem 1) candidate (linear-candidate r) result (kernel/check r candidate)
        other (request/for-backend r :oxiz) again (kernel/check other candidate)]
   (is (= :checked (:status result) (:status again)))
@@ -36,13 +41,15 @@
   (is (not= (:request-reference result) (:request-reference again)))
   (is (<= (:charged-work-units result) (:work-units kernel/defaults)))
   (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
-  (swap! observations conj {:case :unbounded-linear :result result}))
+  (swap! observations conj {:case :unbounded-linear :result result})
+  (persist!))
  (let [r (theorem 3) result (kernel/check r (linear-candidate r))]
   (is (= :rejected (:status result))))
  (let [r (theorem 1) other (theorem 3)]
   (is (= :rejected (:status (kernel/check other (linear-candidate r)))))))
 (deftest a-shared-proof-leaf-is-checked-in-each-assignment-context
  (swap! entered conj :proof-contexts)
+ (persist!)
  (let [p (t/variable "graph-int.p" t/Bool)
        tautology (prepared (q/prove (t/any [p (t/not p)])))
        falsehood (prepared (q/prove p))
@@ -57,6 +64,7 @@
    (is (= :rejected (:status (kernel/check tautology (kernel/candidate tautology bad))))))))
 (deftest integer-strictness-positive-weights-and-sat-contradictions
  (swap! entered conj :integer-arithmetic)
+ (persist!)
  (let [r (prepared (q/prove (t/ge x (t/int 0)) {:assumptions [(t/ge (t/mul (t/int 2) x) (t/int 0))]}))
        atoms (:atoms (kernel/describe r))
        a (first (filter #(= {"graph-int.x" -2} (:coeff (nth atoms %))) (range (count atoms))))
@@ -79,6 +87,7 @@
   (is (= :unsatisfiable (:verdict result)))) )
 (deftest shared-original-terms-and-unknown-metadata-are-never-materialized
  (swap! entered conj :sharing)
+ (persist!)
  (let [r (prepared (q/prove (t/bool true)))
        shared (reduce (fn [node _] (term-graph :and t/Bool [node node])) (graph/encode (t/bool true)) (range 16))
        counter (graph/assemble "map" [[(graph/encode :label) (graph/encode "goal/counterexample")]
@@ -97,9 +106,11 @@
   (is (= 18 (get-in result [:normalization :typed-nodes])))
   (is (<= (get-in result [:normalization :formula-nodes]) 18))
   (is (= 1 (:proof-states result)))
-  (swap! observations conj {:case :shared-original :result result})))
+  (swap! observations conj {:case :shared-original :result result})
+  (persist!)))
 (deftest resource-and-grammar-refusals-cannot-create-a-theorem
  (swap! entered conj :resources)
+ (persist!)
  (let [r (theorem 1) candidate (linear-candidate r)
        module (elem (erlang/fun_info policy/with-question :module) 1) pattern (tuple module :with-question 3)]
   (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
@@ -119,6 +130,7 @@
    (is (= :incomplete (:status (kernel/check r (kernel/candidate r {:root 0 :nodes [[:boolean]]}) {:work-units budget})))))))
 (deftest producer-rows-and-flags-are-not-accepted-as-premises
  (swap! entered conj :closed-certificate)
+ (persist!)
  (let [r (theorem 1) c (linear-candidate r)]
   (doseq [bad [(assoc c :checked true) (assoc c :atoms []) (assoc c :formal/graph-integer-certificate 1.0)
                (assoc c :profile :invented) (assoc-in c [:statement :subject-reference :sha256] "forged")
@@ -129,6 +141,7 @@
    (is (= :rejected (:status (kernel/check r bad)))))))
 (deftest checking-needs-neither-native-ownership-nor-an-oracle
  (swap! entered conj :no-native)
+ (persist!)
  (let [r (theorem 1) c (linear-candidate r)
        module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
        calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
@@ -139,6 +152,3 @@
    (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
    (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
 (run-tests)
-(when-let [path (System/get_env "FORMAL_GRAPH_INTEGER_OUTPUT")]
- (File/write! path (json/encode {:entered-tests @entered :observations @observations :sdk (System/get_env "BL_SDK_PRODUCT")
-                                :compiler-proof-authority false} {:pretty 2})))
