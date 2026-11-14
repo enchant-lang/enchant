@@ -46,3 +46,36 @@ reuse a narrow proof merely by renaming its semantic profile. An installed wide
 profile can initially retain native claims while returning independent point
 checking as unavailable. Actual per-theory replay and proof rules can then grow
 behind their own named semantics and resource policies.
+
+Typing here uses the installed generic mathematical term vocabulary: arrays,
+generic sequences, enums, uninterpreted sorts/functions, lexical first-order
+binders, words, SMT floating-point, numeric and String operators. It adds no
+regex sort, recursive datatype, higher-order closure model or BL String domain
+restriction. The named admission grammar is distinct from a semantic checking
+profile. In particular, typing a binary String literal does not establish that
+it belongs to the scalar-text point interpreter's UTF-8 domain.
+
+## Planned owner integration
+
+1. Add one named wide admission/checking configuration through the existing
+   `formal.point-profile` settings boundary. The configuration must advertise
+   point replay as unavailable rather than inheriting the narrow interpreter.
+2. Add a fresh typed-key callback to `formal.graph-question`, backed by bounded
+   generic `formal.graph-terms` admission. The actual backend owner must derive
+   that forest inside its own turn. No supplied prototype inventory enters it.
+3. Keep `formal.graph-execution`'s retained-graph composition, revision check,
+   owner deadlines and custody-held native import callback. For the wide route,
+   preserve partial wire observations as bounded original graph data and return
+   the native status as a claim, with point replay explicitly not installed.
+4. Extend the existing request-answer reader with this exact named reply profile.
+   Fresh rechecking can establish original binding and carrier validity while
+   leaving the logical conclusion unestablished. A native SAT reply with opaque
+   arrays or functions is not a checked witness; UNSAT is not a proof object.
+5. Reuse candidate-only evidence bundles, current-reader allowances and expiring
+   handler delegation. Keep existing narrow proof strategies bound to their
+   original semantics; reject a profile substitution without a checked embedding.
+6. Build one coordinated immutable SDK, then run the 187 questions through the
+   public request/evidence path on both backends, with historical packet readers,
+   owner-state adversaries, no-atom creation checks and finite/linear regression
+   checks. Compare raw statuses, actual replay coverage, trust and resources
+   separately. The existing older native corpus is a baseline, not that new test.
