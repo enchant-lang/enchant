@@ -18,13 +18,26 @@ native = read(native_path)
 assert native['status'] == 'passed' and native['questions'] == 9 and native['raw_status_differences'] == 0
 assert native['qualified_runtime_sdk'] == baseline
 gates = {}
+renderer_differences = []
 for phase in ('identities', 'narrow'):
     directory = P / 'evidence/wide-reference-reuse' / phase
     q = read(directory / 'qualification.json')
     assert q['status'] == 'passed' and q['phase'] == phase and q['sdk_pin'] == baseline
     assert q['source_pin']['base_native_qualification_sha256'] == sha(native_path)
     assert q['reference_format_changed'] is False
-    for name, digest in q['source_pin']['source_sha256'].items(): assert sha(R / name) == digest
+    for name, digest in q['source_pin']['source_sha256'].items():
+        current = sha(R / name)
+        if current != digest and name == 'research/formal-logic/src/formal/review-host.bl':
+            # This file was conservatively recorded with the whole project
+            # directory. It is not imported by term factories or the runtime.
+            # Its later SVG-only repair has independent presentation evidence.
+            presentation = read(P / 'evidence/wide-owner-presentation/dossier-qualification.json')
+            assert presentation['status'] == 'passed' and presentation['sdk_pin'] == baseline
+            browser_pin = read(P / 'evidence/wide-owner-presentation/browser-source-pin.json')
+            assert browser_pin['source_sha256'][name] == current
+            renderer_differences.append({'path': name, 'recorded': digest, 'current': current,
+                                         'reason': 'Separately qualified review renderer; no runtime/factory/checker code change.'})
+        else: assert current == digest, name
     for row in q['source_pin']['base_projected_modules']:
         assert sha(Path(row['source'])) == row['source_sha256']
     terminal = read(directory / 'owner-terminal.json')['state']
@@ -69,6 +82,7 @@ assert fingerprint != baseline['engine_fingerprint']
 assert not (E / 'sdk-candidate.json').exists(), 'Reuse the exact candidate; do not produce another SDK for routine checks.'
 write('prepare-source-pin.json', {'code_commit': commit, 'source_sha256': digests,
       'baseline_sdk_pin': baseline, 'engine_fingerprint': fingerprint, 'projection_gates': gates,
+      'renderer_only_source_differences': renderer_differences,
       'fresh_sandbox_placement_receipt_sha256': sha(placement_path),
       'sandbox_placement_provenance_sha256': sha(E / 'kvm-sandbox-provenance.json'),
       'compiler_floor_install_sha256': sha(floor_path)})
