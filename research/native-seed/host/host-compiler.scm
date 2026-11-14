@@ -3,6 +3,7 @@
 ;; their exact module/function/arity instead of consulting a guessed alias.
 (define native-env-rows (bl-empty-map))
 (define native-module-names (bl-empty-map))
+(define native-namespace-modules (bl-empty-map))
 (define native-stub-names (bl-empty-map))
 (define native-env-current "user")
 (define native-bundle-metadata bl-nil)
@@ -104,12 +105,15 @@
   (lambda (row)
    (let ((ns (bl-nth row 0)))
     (native-declare-ns ns)
+    (set! native-namespace-modules (bl-assoc native-namespace-modules ns (bl-nth row 1)))
     (for-each (lambda (module)
       (set! native-module-names (bl-assoc native-module-names (native-module-name module) ns)))
      (list (bl-nth row 1) (bl-nth row 2)))))
   (bl-items (bl-get metadata (bl-key "namespace-modules"))))
  ; CompilerData's exact host implementation is already written in BL.
  (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.CompilerData" "host.compiler-data"))
+ (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.FormMeta" "host.form-meta"))
+ (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.Meta" "host.meta"))
  (for-each (lambda (row)
    (for-each (lambda (module)
      (set! native-stub-names (bl-assoc native-stub-names (native-module-name module) (bl-nth row 0))))
@@ -244,9 +248,21 @@
 (native-add-leaf! "Elixir.BeamLisp.Tiers/boot_namespaces/0"
  (lambda () '("anf" "compiler" "core" "diag" "lower" "optimize" "reader" "reader-node" "rt" "sugar")))
 (define (native-known-module ns)
- (let loop ((rows (native-map-pairs native-module-names)))
-  (cond ((null? rows) (error "namespace has no captured module identity" ns))
-   ((string=? ns (bl-nth (car rows) 1)) (bl-key (bl-nth (car rows) 0)))
-   (else (loop (cdr rows))))))
+ (let ((captured (bl-get native-namespace-modules ns native-missing)))
+  (if (not (eq? captured native-missing)) captured
+   ; Same unqualified platform spelling as Emit/base_module_for and the JS
+   ; moduleFor adapter: one CamelCased alias segment per dot-separated part.
+   ; Existing realm identities ALWAYS use the captured table above.
+   (bl-key
+    (string-append "Elixir.BeamLisp.Ns."
+     (list->string
+      (let loop ((chars (string->list ns)) (upper? #t) (out '()))
+       (if (null? chars) (reverse out)
+        (let ((ch (car chars)))
+         (cond ((or (char=? ch #\_) (char=? ch #\-)) (loop (cdr chars) #t out))
+               ((char=? ch #\.) (loop (cdr chars) #t (cons ch out)))
+               (else (loop (cdr chars) #f (cons (if upper? (char-upcase ch) ch) out)))))))))))))
 (native-add-leaf! "Elixir.BeamLisp.Link/module_for/1" native-known-module)
+(native-add-leaf! "Elixir.BeamLisp.Emit/module_for/1" native-known-module)
+(native-add-leaf! "Elixir.BeamLisp.Emit/base_module_for/1" native-known-module)
 (native-add-leaf! "Elixir.BeamLisp.Link/settle/0" (lambda () (bl-key "ok")))
