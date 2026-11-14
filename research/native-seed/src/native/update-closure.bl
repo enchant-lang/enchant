@@ -1,0 +1,65 @@
+; Recompile ONLY source-changed members of the already qualified closure.
+; Reuse private partition shape proofs; never perform a full ANF inventory.
+(ns native.update-closure
+ (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]))
+(def path (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure/partition.json"))
+(def out (Path/dirname path))
+(def original (artifact/read-closure path))
+(def expected-options {:target :scheme :contextual-bindings :absent
+                       :stub ["lower"] :staging :canonical-js.build
+                       :namespace-qualified? true})
+(assert (= expected-options (:options original)))
+(assert (= (:sdk-pin original) (File/read! "research/native-seed/sdk-pin.json")))
+(def roots ["research/native-seed/src" "priv/boot" "priv/lib" "priv/std" "priv/compat"])
+(defn providers []
+ (mapv (fn [p]
+  (let [source (File/read! p)]
+   {:path p :sha256 (artifact/sha source)
+    :macro-provider? (and (String/contains? source "defmacro")
+                         (boolean (some build/defmacro? (build/read-forms p))))}))
+  (sort (distinct (concat ["priv/host/compiler_data.bl" "priv/host/form_meta.bl" "priv/host/meta.bl"]
+                (mapcat #(Path/wildcard (str % "/**/*.bl")) roots))))))
+(def current-providers (providers))
+(def macros (vec (filter :macro-provider? current-providers)))
+(assert (= macros (vec (filter :macro-provider? (:provider-sources original)))))
+(def result
+ (BeamLisp.Env/isolated
+  (fn []
+   (reduce (fn [result ns]
+    (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
+          source (File/read! (:path old)) sha (artifact/sha source)]
+     (if (= sha (:source-sha256 old))
+      (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
+      (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
+            prepared (build/prepare-ns (:path old))
+            _ (assert (= ns (:ns prepared)))
+            _ (doseq [[dependency _] (:requires prepared)]
+                (when-not (or (contains? (:units original) dependency) (contains? (set (:stubs original)) dependency))
+                 (throw (ex-info "native update: added dependency requires explicit closure extension" {:namespace ns :dependency dependency}))))
+            module (BeamLisp.Link/module_for ns) base (BeamLisp.Emit/base_module_for ns)
+            _ (when-not (and (= (:module old) module) (= (:base-module old) base))
+                (throw (ex-info "native update: physical namespace identity changed; explicit aliases required"
+                                {:namespace ns :old [(:module old) (:base-module old)] :new [module base]})))
+            compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)
+            unit (assoc compiled :source (:source prepared) :module module :base-module base)
+            _ (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits)]
+       (-> result (assoc-in [:units ns] unit) (update :changed conj ns))))))
+    {:units {} :changed []} (:order original)))))
+(def final-providers (providers))
+(assert (= macros (vec (filter :macro-provider? final-providers))))
+(doseq [[ns u] (:units result)]
+ (assert (= (:source-sha256 u) (artifact/sha (:source u))))
+ (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u))))))
+(def closure (assoc original :units (:units result) :provider-sources final-providers))
+(def bytes (erlang/term_to_binary closure (list :deterministic)))
+(File/write! (str out "/closure.etf") bytes)
+(File/write! (str out "/identity.json")
+ (json/encode {:schema "bl.native.compiler-closure-identity" :version 1
+               :artifact-sha256 (artifact/sha bytes) :sdk-pin-sha256 (artifact/sha (:sdk-pin closure))
+               :options (:options closure) :providers final-providers}))
+(File/write! (str out "/update.json")
+ (json/encode {:schema "bl.native.closure-update" :version 1 :changed (:changed result)
+               :artifact-sha256 (artifact/sha bytes)
+               :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
+                       {:namespace ns :source-sha256 (:source-sha256 u) :definitions (count (:defs u))})) (:order closure))}))
+(println (str "NATIVE_UPDATED " (count (:changed result)) " units; no full ANF walk"))
