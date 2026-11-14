@@ -14,7 +14,7 @@ E = P / 'evidence/wide-integration'
 owner, *stages = sys.argv[1:]
 allowed = ['preflight', 'pure', 'narrow', 'compatibility', 'legacy', 'regression',
            'native', 'reader-one', 'reader-two', 'word-packets', 'text-packets',
-           'proof-packets', 'obligation-packets']
+           'proof-packets', 'legacy-proof-packets', 'obligation-packets']
 assert owner.startswith('work-formal-wide-') and owner.endswith('.service')
 assert stages and len(stages) == len(set(stages)) and all(stage in allowed for stage in stages)
 pin = json.loads((E / 'sdk-candidate.json').read_text())

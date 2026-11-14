@@ -7,7 +7,7 @@ R = P.parent.parent
 B = P / 'evidence/wide-integration'
 phase, = sys.argv[1:]
 assert phase in ('preflight', 'pure', 'narrow', 'compatibility', 'legacy', 'regression', 'native', 'reader-one', 'reader-two',
-                 'word-packets', 'text-packets', 'proof-packets', 'obligation-packets')
+                 'word-packets', 'text-packets', 'proof-packets', 'legacy-proof-packets', 'obligation-packets')
 E = B / phase
 E.mkdir(exist_ok=True)
 assert all(path.is_dir() and path.name.startswith('before-') for path in E.iterdir()), 'Retain an earlier gate before retrying.'
@@ -69,7 +69,8 @@ elif phase.startswith('reader-'):
                          'in-sdk': True, 'compiler-proof-authority': False, 'packets': producer['packets']})
 elif phase != 'preflight':
     files = [P / {'word-packets': 'word-packet-reader.bl', 'text-packets': 'scalar-packet-reader.bl',
-                  'proof-packets': 'evidence-packet-reader.bl', 'obligation-packets': 'obligation-packet-reader.bl'}[phase]]
+                  'proof-packets': 'evidence-packet-reader.bl', 'legacy-proof-packets': 'evidence-packet-reader.bl',
+                  'obligation-packets': 'obligation-packet-reader.bl'}[phase]]
 if phase in ('compatibility', 'legacy', 'regression'):
     parent = read(P / 'evidence/obligation-integration/qualification.json')
     assert parent['status'] == 'passed' and parent['sdk_pin'] == baseline
@@ -140,6 +141,7 @@ else:
         corpus = {'word-packets': P / 'evidence/retained-request/corpus.json',
                   'text-packets': P / 'evidence/obligation-integration/text-native.json',
                   'proof-packets': P / 'evidence/obligation-integration/bundle-corpus.json',
+                  'legacy-proof-packets': P / 'evidence/scalar-integration/bundle-corpus.json',
                   'obligation-packets': P / 'evidence/obligation-integration/obligation-corpus.json'}[phase]
         write('historical-input.json', {'path': str(corpus), 'sha256': sha(corpus), 'producer_identity': 'retained historical data'})
         request += ['run', str(files[0]), '--', str(corpus), str(E / 'observations.json')]
