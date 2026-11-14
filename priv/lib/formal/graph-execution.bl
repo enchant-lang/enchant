@@ -84,12 +84,17 @@
             assertions (vec (concat background (when (:counterexample inventory) [(:counterexample inventory)])))
             reply (if feasibility-refused? preflight (run-scope forest assertions observation-rows))
             common (merge base (select-keys reply [:ok :model-status :why :error :stats :backend])
-                     {:solver-status (:status reply) :native-scope-attempts @attempts
+                     (cond-> {:solver-status (:status reply) :native-scope-attempts @attempts
                       :nodes-imported (:graph-imported reply) :admission (:admission admitted)
                       :admission-reference (:admission-reference admitted) :admission-account :shared-scope
                       :phase (if feasibility-refused? :assumption-consistency :query)
                       :core {:kind (:core-kind reply) :labels (:core reply)}
-                      :preflight (when preflight (select-keys preflight [:status :stats]))})]
+                      :preflight (when preflight (select-keys preflight [:status :stats]))}
+                       (= profiles/wide-native (:profile configuration))
+                        (assoc :native-observations-graph
+                          (graph/encode {:observations (get reply :observations [])
+                                         :model-status (:model-status reply)})
+                               :point-replay :not-installed :observation-decoding :deferred)))]
        (if (or feasibility-refused? (not= :sat (:status reply)))
         (merge common {:verdict (cond (= :unsat (:status reply))
                                       (if (not= profiles/numeric (:profile configuration)) :solver-claim
@@ -97,6 +102,9 @@
                                       (= :unknown (:status reply)) :unknown
                                       (= :unsupported (:status reply)) :unsupported :else :error)
                        :validation {:status :not-applicable} :assertion-replay :not-run})
+        (if (= profiles/wide-native (:profile configuration))
+         (merge common {:verdict :candidate :validation {:status :not-checked :kind :point-policy-not-installed}
+                        :assertion-replay :not-installed})
         (let [wire (into {} (:observations reply))
               original-assignments (into {} (mapv (fn [v] [(:name v)
                                       (profiles/native-coordinate configuration (get wire (str "var/" (:name v))))]) vars))
@@ -117,7 +125,7 @@
                              (not= :valid (:status checking)) :candidate
                              (= :prove (:mode inventory)) :refuted :else :sat)
               :observations display :observation-decoding :deferred
-              :resources ((:resources point)) :checking ((:checking point))}))))))))))
+              :resources ((:resources point)) :checking ((:checking point))})))))))))))
    (catch error
     (merge base {:ok false :solver-status (if (zero? @attempts) :not-run (get @last-native :status :error))
                  :verdict :error :phase (if (zero? @attempts) :admission :replay)

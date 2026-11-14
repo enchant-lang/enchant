@@ -1,0 +1,136 @@
+(ns formal.resources.typed
+ (:require [formal.data-graph :as graph] [formal.resources.rational :as rational]))
+
+;; Prospective bounded generic typing. Only operational term roots and their
+;; descriptor/declaration fields enter constructor reservations. Ignored source
+;; metadata stays raw data; the complete graph still obeys the source envelope.
+(def profile :bl/bounded-generic-term-admission-prototype-v1)
+(def limits {:source-nodes 4096 :source-edges 32768 :source-bytes 262144
+             :integer-bits 256 :scalar-bytes 4096 :typed-nodes 512 :arguments 64
+             :sort-expanded-nodes 1024 :sort-depth 12 :datum-expanded-nodes 4096 :datum-depth 24
+             :component-occurrences 32768 :binder-declarations 32 :work-units 10000000})
+(def constructor-reservation 5000000)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.resources.typed: " why) {:kind :term-forest}))))
+(defn- refuse! [metric required maximum]
+ (when (> required maximum)
+  (throw (ex-info "formal.resources.typed: prospective capacity refusal"
+           {:kind :resource-limit :metric metric :required required :limit maximum}))))
+(defn settings [options]
+ (require! (and (= :map (rt/kind-kind options))
+                (or (nil? (meta options)) (= {} (meta options)))
+                (every? #{:admission-work-units} (keys options))) "closed typed admission limits required")
+ (let [work (get options :admission-work-units (:work-units limits))]
+  (require! (and (int? work) (<= 0 work 20000000)) "bounded admission allowance required")
+  {:admission-work-units work}))
+(defn- children [[kind body]]
+ (cond (= "map" kind) (vec (mapcat identity body))
+       (contains? #{"vector" "list" "tuple" "set"} kind) body :else []))
+(defn- fields [rows pairs key-kind]
+ (into {} (keep (fn [[key value]]
+                  (let [[tag name] (nth rows key)]
+                   (when (= key-kind tag) [name value]))) pairs)))
+(defn plan
+ "Freshly inspect original graph roots and all constructor dependencies.
+  A returned reservation is diagnostic data, never an accepted admission token.
+  Abstract work charging does not prove a time/heap correspondence."
+ [data roots options]
+ (let [options (settings options) checked (graph/check! data) rows (:nodes data)
+       work (:admission-work-units options) measures (atom []) records (atom {})
+       components (atom #{}) sorts (atom #{}) binders (atom 0) normalization (atom 0)]
+  (try
+   (doseq [[metric required maximum]
+            [[:source-nodes (count rows) (:source-nodes limits)]
+             [:source-edges (:edges checked) (:source-edges limits)]
+             [:source-bytes (:bytes checked) (:source-bytes limits)]]]
+    (refuse! metric required maximum))
+   (require! (and (vector? roots) (every? #(and (int? %) (<= 0 %) (< % (count rows))) roots)) "source root vector required")
+   (doseq [row rows]
+    (let [prior (mapv #(nth @measures %) (children row))]
+     (swap! measures conj {:occurrences (inc (reduce + 0 (map :occurrences prior)))
+                           :depth (if (seq prior) (inc (reduce max 0 (map :depth prior))) 0)})))
+   (letfn [(sort! [id]
+             (let [m (nth @measures id)]
+              (refuse! :sort-expanded-nodes (:occurrences m) (:sort-expanded-nodes limits))
+              (refuse! :sort-depth (:depth m) (:sort-depth limits))
+              (swap! sorts conj id) (swap! components conj id)))
+           (visit [id]
+            (when-not (contains? @records id)
+             (refuse! :typed-nodes (inc (count @records)) (:typed-nodes limits))
+             (let [[kind pairs] (nth rows id)
+                   _ (require! (and (= "map" kind) (= 5 (count pairs))) "closed term map required")
+                   f (fields rows pairs "keyword")
+                   _ (require! (= #{"formal/term" "op" "sort" "args" "data"} (set (keys f))) "closed term fields required")
+                   _ (require! (= ["int" 1] (nth rows (get f "formal/term"))) "version-one term required")
+                   [arg-kind arguments] (nth rows (get f "args"))
+                   _ (require! (contains? #{"vector" "list"} arg-kind) "ordered arguments required")
+                   _ (refuse! :arguments (count arguments) (:arguments limits))
+                   op (nth rows (get f "op")) datum (get f "data") m (nth @measures datum)]
+              (swap! records assoc id f)
+              (sort! (get f "sort"))
+              (refuse! :datum-expanded-nodes (:occurrences m) (:datum-expanded-nodes limits))
+              (refuse! :datum-depth (:depth m) (:datum-depth limits))
+              (swap! components into [(get f "op") datum])
+              (when (contains? #{["keyword" "forall"] ["keyword" "exists"]} op)
+               (let [[tag declarations] (nth rows datum)]
+                (require! (contains? #{"vector" "list"} tag) "ordered binder declarations required")
+                (refuse! :binder-declarations (+ @binders (count declarations)) (:binder-declarations limits))
+                (swap! binders + (count declarations))
+                (doseq [binding declarations]
+                 (let [[tag pair] (nth rows binding)]
+                  (require! (and (contains? #{"vector" "list"} tag) (= 2 (count pair))) "binder pair required")
+                  (sort! (second pair))))))
+              (when (= ["keyword" "uf"] op)
+               (let [[tag pairs] (nth rows datum)
+                     _ (require! (= "map" tag) "UF descriptor map required")
+                     declaration (fields rows pairs "binary")
+                     domain (get declaration "domain") range (get declaration "range")]
+                (require! (and (some? domain) (some? range)) "UF domain/range required")
+                (let [[kind entries] (nth rows domain)]
+                 (require! (contains? #{"vector" "list"} kind) "UF domain sequence required")
+                 (refuse! :arguments (count entries) (:arguments limits))
+                 (doseq [entry entries] (sort! entry)))
+                (sort! range)))
+              (doseq [child arguments] (visit child)))))]
+    (doseq [root roots] (visit root)))
+   ;; Screen exactly the selected descriptor dependency closure. No unrelated
+   ;; provenance keyword or large ignored scalar is decoded or normalized.
+   (let [selected (loop [pending (vec @components) seen #{}]
+                   (if (empty? pending) seen
+                    (let [id (peek pending) tail (pop pending)]
+                     (if (contains? seen id) (recur tail seen)
+                      (recur (into tail (children (nth rows id))) (conj seen id))))))
+         occurrences (reduce + 0 (map #(:occurrences (nth @measures %)) @components))]
+    (refuse! :component-occurrences occurrences (:component-occurrences limits))
+    (doseq [id selected]
+     (let [[kind body] (nth rows id)]
+      (cond
+       (= "int" kind)
+        (do (refuse! :integer-carrier-bytes (erlang/external_size body) 40)
+            (refuse! :integer-magnitude (if (< body 0) (- body) body) (dec (erlang/bsl 1 (:integer-bits limits)))))
+       (contains? #{"binary" "symbol" "keyword"} kind)
+        (refuse! :scalar-bytes (erlang/byte_size body) (:scalar-bytes limits)))))
+    (doseq [[_ f] @records]
+     (when (= ["keyword" "real"] (nth rows (get f "op")))
+      (let [[tag pair] (nth rows (get f "data"))
+            _ (require! (and (contains? #{"vector" "list"} tag) (= 2 (count pair))) "rational pair required")
+            values (mapv #(nth rows %) pair)
+            _ (require! (every? #(= "int" (first %)) values) "integer rational coordinates required")
+            p (rational/plan :normalize [(mapv second values)]
+                {:component-bits 256 :intermediate-bits 512 :work-units 20000000})]
+       (when-not (= :ready (:status p))
+        (throw (ex-info "formal.resources.typed: rational reservation refused" (:reason p))))
+       (swap! normalization + (get-in p [:forecast :work-units])))))
+    (let [required (+ constructor-reservation (* 64 (count rows)) (* 8 occurrences) @normalization)]
+     (refuse! :admission-work-units required work)
+     {:profile profile :status :ready :data-reference (:reference checked)
+      :source-roots roots :source-nodes (count rows) :typed-nodes (count @records)
+      :sort-descriptors (count @sorts) :descriptor-nodes (count selected)
+      :component-occurrences occurrences :binder-declarations @binders
+      :rational-normalization-work @normalization :reserved-work-units required
+      :constructor-execution :not-run :compiler-proof-authority false}))
+   (catch error
+    (if (= :resource-limit (:kind (ex-data error)))
+     {:profile profile :status :incomplete :reason (ex-data error)
+      :constructor-execution :not-run :compiler-proof-authority false}
+     (throw error))))))

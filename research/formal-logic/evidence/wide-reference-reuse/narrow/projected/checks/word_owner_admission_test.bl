@@ -1,0 +1,51 @@
+(ns formal.word-owner-admission-test
+ (:require [formal.wide-batch.backend :as backend] [formal.term :as t] [formal.wide-batch.query :as q]
+           [formal.wide-batch.question-graph :as qg] [formal.wide-batch.point-profile :as policy] [formal.data-graph :as graph]))
+(defn- counted [action]
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try (let [result (action) calls (elem (erlang/trace_info pattern :call_count) 1)] {:result result :calls calls})
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(def x (t/variable "admission.word" [:bv 8]))
+(def small (qg/prepare (q/sat {:assumptions [(t/eq x (t/literal [:bv 8] 7))]})))
+(def unused (qg/prepare (q/prove (t/forall [(t/bound "unused.word" [:bv 128])] (t/bool true)))))
+
+(deftest word-admission-refuses-without-native-exchanges-and-keeps-the-owner
+ (doseq [engine [:z3 :oxiz]]
+  (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+   (fn [session]
+    (let [before (backend/context session)]
+     (doseq [[subject limits metric] [[unused {:word {:word-bits 64}} :word-bits]
+                                      [small {:admission-work-units 0} :admission-work-units]]]
+      (let [r (counted #(backend/graph-question! session subject {:profile policy/numeric-word :limits limits}))]
+       (is (= 0 (:calls r)))
+       (is (= 0 (get-in r [:result :native-scope-attempts])))
+       (is (= :not-run (get-in r [:result :solver-status])))
+       (is (= :admission (get-in r [:result :phase])))
+       (is (= metric (get-in r [:result :admission :reason :metric])))
+       (is (= :not-run (get-in r [:result :admission :constructor-execution])))
+       (is (= before (backend/context session)))))
+     (let [r (counted #(backend/graph-question! session small {:profile policy/numeric-word}))]
+      (is (= 1 (:calls r)))
+      (is (= :sat (get-in r [:result :verdict])))
+      (is (= :valid (get-in r [:result :validation :status])))))))))
+
+(deftest resource-overrides-do-not-enlarge-the-word-sort-grammar
+ (let [bad (assoc (t/forall [(t/bound "invalid.width" t/Int)] (t/bool true)) :data [["invalid.width" [:bv 4097]]])
+       valid (qg/prepare (q/sat {:assumptions [(t/bool true)]}))
+       ;; Deliberately construct original graph data below the normal typed
+       ;; constructor, whose own 4096-bit grammar already rejects this input.
+       subject (assoc valid :graph
+                 (graph/patch-map (:graph valid)
+                   [[(graph/encode :assertions)
+                     (graph/encode [{:label "invalid-width" :term bad}])]]))]
+  (doseq [engine [:z3 :oxiz]]
+   (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+    (fn [session]
+     (let [r (counted #(backend/graph-question! session subject {:profile policy/numeric-word :limits {:word {:word-bits 1000000}}}))]
+      (is (= 0 (:calls r)))
+      (is (= 3 (get-in r [:result :formal/managed-graph-reply])))
+      (is (= :not-run (get-in r [:result :solver-status])))
+      (is (= :admission (get-in r [:result :phase])))))))))
+
+(run-tests)

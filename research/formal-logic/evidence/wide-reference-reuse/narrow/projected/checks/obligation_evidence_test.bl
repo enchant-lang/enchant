@@ -1,0 +1,126 @@
+(ns formal.obligation-evidence-test
+ (:require [formal.wide-batch.request-evidence :as evidence] [formal.wide-batch.finite-word-certificate :as finite]
+           [formal.wide-batch.graph-integer-certificate :as integer] [formal.wide-batch.assumptions :as assumptions]
+           [formal.wide-batch.request :as request] [formal.wide-batch.request-answer :as answer] [formal.wide-batch.request-point :as point]
+           [formal.wide-batch.query :as q] [formal.wide-batch.question-graph :as qg] [formal.wide-batch.graph-question :as inventory]
+           [formal.wide-batch.point-profile :as policy] [formal.term :as t] [formal.data-graph :as graph]
+           [formal.wide-batch.backend :as backend] [formal.wide-batch.oracle :as oracle]))
+(defn prepared [query profile] (request/prepare (qg/prepare query) {:policy {:profile profile}}))
+(defn original [vacuity inconsistent?]
+ (let [x (t/variable "obligation.bit" [:bv 1]) zero (t/literal [:bv 1] 0) one (t/literal [:bv 1] 1)]
+  (prepared (q/prove (t/eq x x) {:vacuity vacuity
+    :assumptions (if inconsistent? [(t/eq x zero) (t/eq x one)] [(t/eq x one)])}) policy/numeric-word)))
+(deftest nine-consumer-policy-cases-retain-the-conditional-theorem
+ (doseq [p [:allow :report :reject]
+         [fact inconsistent? budget expected] [[:witnessed false 3600000 :accepted]
+          [:inconsistent true 3600000 (case p :allow :accepted :report :reported :reject :rejected)]
+          [:not-established false 0 (case p :allow :accepted :report :reported :reject :incomplete)]]]
+  (let [r (original p inconsistent?) e (evidence/propose r {:certificate (finite/candidate r) :feasibility {:strategy :finite}})
+        result (evidence/recheck r e {:feasibility-work-units budget})]
+   (is (= :checked (get-in result [:proof-check :status]) (get-in result [:logical-conclusion :status])))
+   (is (= fact (get-in result [:feasibility-check :feasibility])))
+   (is (= expected (get-in result [:conclusion :status]) (get-in result [:policy-check :status])))
+   (is (= p (:vacuity-policy result)))
+   (is (= false (:compiler-proof-authority result) (:checked-native-execution result))))))
+(deftest all-question-readers-preserve-the-exact-policy-or-refuse
+ (doseq [p [:allow :report :reject]]
+  (let [r (original p false) subject (:subject r)]
+   (is (= p (get-in (qg/open! subject) [:view :vacuity])))
+   (is (= p (policy/with-question subject (:policy r) (fn [inventory _] (:vacuity inventory)))))))
+ (is (= :report (:vacuity (q/prove (t/bool true)))))
+ (doseq [bad [nil false "allow" :misspelled 1]]
+  (is (thrown? (q/prove (t/bool true) {:vacuity bad})))
+  (let [base (q/prove (t/bool true)) changed (assoc base :vacuity bad)
+        subject {:formal/question-graph 1 :profile qg/profile :graph (graph/encode changed)}]
+   (is (thrown? (q/validate! changed)))
+   (is (thrown? (qg/open! subject)))
+   (is (thrown? (request/prepare subject)))
+   (is (thrown? (policy/with-question subject {:profile policy/numeric-word} (fn [i _] i)))))))
+(deftest integer-premises-are-replayed-without-enumerating-integers
+ (let [x (t/variable "obligation.integer" t/Int)
+       r (prepared (q/prove (t/ge x (t/int 0)) {:vacuity :reject :assumptions [(t/ge x (t/int 0))]}) policy/numeric)
+       c (integer/candidate r {:root 1 :nodes [[:boolean] [:split 0 0 0]]})
+       make (fn [point] (evidence/propose r {:certificate c :feasibility {:strategy :supplied-integer :point point}}))
+       good (evidence/recheck r (make {"obligation.integer" 0}))
+       bad (evidence/recheck r (make {"obligation.integer" -1}))
+       limited (evidence/recheck r (make {"obligation.integer" 0}) {:feasibility-work-units 299999})]
+  (is (= :checked (get-in good [:proof-check :status])))
+  (is (= :accepted (get-in good [:conclusion :status])))
+  (is (= :witnessed (get-in good [:feasibility-check :feasibility])))
+  (is (= 2000000 (get-in good [:proof-account :reserved])))
+  (is (= 300000 (get-in good [:feasibility-account :reserved])))
+  (is (= :incomplete (get-in bad [:conclusion :status])))
+  (is (= :invalid-point (get-in bad [:feasibility-check :point-check :verdict])))
+  (is (= :not-run (get-in limited [:feasibility-check :checker-invocation])))
+  (is (= :checked (get-in limited [:proof-check :status]))))
+ (let [r (prepared (q/prove (t/bool true) {:vacuity :reject :assumptions [(q/assertion "impossible" (t/bool false))]}) policy/numeric)
+       proof {:root 0 :nodes [[:boolean]]}
+       bg (:request (assumptions/background r integer/checking-policy))
+       c (integer/candidate r proof) contradiction (integer/candidate bg proof)
+       e (evidence/propose r {:certificate c :feasibility {:strategy :supplied-integer :certificate contradiction}})
+       checked (evidence/recheck r e)]
+  (is (= :checked (get-in checked [:logical-conclusion :status])))
+  (is (= :inconsistent (get-in checked [:feasibility-check :feasibility])))
+  (is (= :rejected (get-in checked [:conclusion :status])))
+  (is (= :rejected (get-in (evidence/recheck r (evidence/propose r
+    {:certificate c :feasibility {:strategy :supplied-integer :certificate c}}))
+    [:feasibility-check :proof-check :status])))))
+(deftest closed-profiles-candidates-and-current-reader-allowances
+ (let [r (original :reject false)
+       e (evidence/propose r {:certificate (finite/candidate r) :feasibility {:strategy :finite}})
+       packet (evidence/pack r e) record (graph/decode! packet)
+       full (evidence/reopen packet)
+       no-premise (evidence/reopen packet {:feasibility-work-units 0})
+       no-proof (evidence/reopen packet {:proof-work-units 0})]
+  (is (= :accepted (get-in full [:conclusion :status])))
+  (is (= :incomplete (get-in no-premise [:conclusion :status])))
+  (is (= :not-established (get-in no-proof [:conclusion :status])))
+  (is (= :witnessed (get-in no-proof [:feasibility-check :feasibility])))
+  (is (not (contains? record :result)))
+  (doseq [bad [(assoc e :trusted true) (assoc e :formal/evidence-bundle 2.0)
+               (assoc e :formal/evidence-bundle 1 :profile evidence/legacy-profile)]]
+   (is (thrown? (evidence/recheck r bad))))
+  (doseq [bad [{:strategy :finite :checked true} {:strategy identity} {:strategy :supplied-integer}
+               {:strategy :supplied-integer :point {} :trusted true}]]
+   (is (thrown? (evidence/propose r {:feasibility bad}))))
+  (is (thrown? (evidence/reopen (graph/encode (assoc record :result full)))))
+  (is (thrown? (evidence/recheck r e {:feasibility-work-units -1}))))
+ (let [r (original :report false) e (evidence/propose r {:certificate (finite/candidate r)})
+       old (assoc e :formal/evidence-bundle 1 :profile evidence/legacy-profile)
+       packet (graph/encode {:formal/evidence-record 1 :profile evidence/legacy-record-profile :request r :evidence old})
+       checked (evidence/reopen packet)]
+  (is (= :checked (get-in checked [:logical-conclusion :status])))
+  (is (= :reported (get-in checked [:conclusion :status])))
+  (is (= evidence/checking-profile (get-in checked [:checking-policy :profile])))))
+(deftest prospective-reservations-avoid-both-kernels-and-native-owners
+ (let [r (original :reject false) e (evidence/propose r {:certificate (finite/candidate r) :feasibility {:strategy :finite}})
+       module (elem (erlang/fun_info finite/check :module) 1) pattern (tuple module :check 2)
+       native-module (elem (erlang/fun_info backend/invoke :module) 1) native (tuple native-module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (is (= 1 (erlang/trace_pattern native true (list :local :call_count))))
+  (try
+   (let [limited (evidence/recheck r e {:proof-work-units 3299999 :feasibility-work-units 3599999})]
+    (is (= :not-run (get-in limited [:proof-check :checker-invocation]) (get-in limited [:feasibility-check :checker-invocation]))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    #(is (= :accepted (get-in (evidence/recheck r e) [:conclusion :status]))))
+   (is (= 0 @calls (elem (erlang/trace_info native :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))
+            (erlang/trace_pattern native false (list :local :call_count))))))
+(deftest sat-conclusions-report-the-fresh-premise-fact
+ (let [r (prepared (q/sat {:assumptions [(t/bool false)]}) policy/numeric-word)
+       e (evidence/propose r {:certificate (finite/candidate r) :feasibility {:strategy :finite}})
+       result (evidence/recheck r e)]
+  (is (= :checked (get-in result [:conclusion :status])))
+  (is (= :unsatisfiable (get-in result [:conclusion :kind])))
+  (is (= :inconsistent (get-in result [:feasibility-check :feasibility]) (get-in result [:conclusion :feasibility]))))
+ (let [r (prepared (q/sat {:assumptions [(t/bool true)]}) policy/numeric-word)
+       e (evidence/propose r {:answer (answer/supply r {}) :feasibility {:strategy :finite}})
+       result (evidence/recheck r e)
+       premises-only (evidence/recheck r (evidence/propose r {:feasibility {:strategy :finite}}))]
+  (is (= :checked (get-in result [:conclusion :status])))
+  (is (= :witness (get-in result [:conclusion :kind])))
+  (is (= :witnessed (get-in result [:conclusion :feasibility])))
+  (is (= :not-established (get-in premises-only [:conclusion :status])))))
+(run-tests)

@@ -1,0 +1,50 @@
+(ns formal.scalar-text-owner-test
+ (:require [formal.term :as t] [formal.wide-batch.query :as q] [formal.wide-batch.question-graph :as qg]
+           [formal.wide-batch.request :as request] [formal.wide-batch.request-runtime :as runtime]
+           [formal.wide-batch.request-answer :as answer] [formal.wide-batch.request-record :as record]
+           [formal.wide-batch.point-profile :as policy] [formal.wide-batch.scalar-text :as text]
+           [formal.value :as value] [formal.data :as data] [formal.data-graph :as graph] [bl.json :as json]))
+(def observations (atom []))
+(defn wire [data]
+ {:formal/data-graph 1 :profile graph/profile :root (:root data)
+  :nodes (mapv (fn [[tag payload]] [tag (if (contains? #{"binary" "float64"} tag) (Base/encode64 payload) payload)]) (:nodes data))})
+(defn capture [kind r result]
+ (when-let [output (System/get_env "SCALAR_OWNER_OUTPUT")]
+  (swap! observations conj {:case kind :backend (get-in r [:adapter :backend])
+                            :subject-reference (request/subject-reference r)
+                            :request-reference (request/reference r) :source (:source result)
+                            :verdict (:verdict result) :packet (wire (record/pack-graph r (:response result)))
+                            :checked-native-execution false :compiler-proof-authority false})
+  (File/write! output (json/encode {:observations @observations} {:pretty 2}))))
+(deftest both-real-owners-receive-the-same-managed-scalar-text-question
+ (let [x (t/variable "text.native" t/String)
+       subject (qg/prepare (q/sat {:assumptions [(t/eq x (t/text "é"))]
+                                  :observe {"length" (t/app :str-len t/Int [x] nil)}}))
+       original (request/prepare subject {:policy {:profile policy/numeric-word-text}})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (request/for-backend original engine) result (runtime/execute r)
+         status (get-in result [:source :status])]
+    (is (contains? #{:sat :unknown :unsupported} status))
+    (when (= :z3 engine) (is (= :sat status)))
+    (when (= :sat status)
+     (is (= :sat (:verdict result)))
+     (is (= :valid (get-in result [:point-check :validation :status])))
+     (is (= :bl/numeric-word-scalar-text-coordinate-graph-preview-v1 (get-in result [:point-check :coordinate-profile])))
+     (is (= :sat (:verdict (record/recheck-graph (record/pack-graph r (:response result)))))))
+    (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+    (capture :coordinate r result)))))
+(deftest independent-point-and-native-claim-retain-distinct-meanings
+ (let [x (text/variable "text.contract")
+       claim (value/equal (text/at x 1) (data/some (text/literal "́")))
+       subject (qg/prepare (q/prove claim {:assumptions [(value/equal x (text/literal "é"))]}))
+       original (request/prepare subject {:policy {:profile policy/numeric-word-text}})]
+  (doseq [engine [:z3 :oxiz]]
+   (let [r (request/for-backend original engine) result (runtime/execute r)
+         status (get-in result [:source :status])]
+    (is (contains? #{:unsat :unknown :unsupported} status))
+    (when (= :z3 engine) (is (= :unsat status)))
+    (when (= :unsat status) (is (= :solver-claim (:verdict result))))
+    (is (= :not-checked (get-in result [:certificate :status])))
+    (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+    (capture :codepoint-contract r result)))))
+(run-tests)

@@ -1,0 +1,31 @@
+(ns formal.evidence-oracle-test
+ (:require [formal.wide-batch.oracle :as oracle] [effect] [formal.wide-batch.request-runtime :as runtime] [formal.wide-batch.request :as request]
+           [formal.wide-batch.request-evidence :as evidence] [formal.wide-batch.finite-word-certificate :as proof]
+           [formal.wide-batch.point-profile :as policy] [formal.wide-batch.backend :as backend]
+           [formal.term :as t] [formal.wide-batch.query :as q] [formal.wide-batch.question-graph :as qg]))
+(defn original [] (request/prepare (qg/prepare (q/prove (t/bool true))) {:policy {:profile policy/numeric-word}}))
+(defn handle [r _] (evidence/propose r {:certificate (proof/candidate r)}))
+(deftest generic-oracle-map-handles-evidence-and-restores-its-scope
+ (let [r (original) module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (oracle/with-oracle {:request-evidence handle} #(runtime/execute-evidence r))]
+    (is (= :checked (get-in result [:proof-check :status])))
+    (is (= :conditional-entailment (get-in result [:conclusion :kind])))
+    (is (= 0 (get-in result [:local-delegation :attempts]))))
+   (let [result (oracle/with-oracle {:request-evidence handle} #(deref (future (runtime/execute-evidence r))))]
+    (is (= :checked (get-in result [:proof-check :status]))))
+   (is (thrown? (oracle/with-oracle {:request-evidence handle} #(runtime/execute r))))
+   (is (= false (oracle/query-intercepted?)))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest all-explicit-oracle-channels-remain-distinct
+ (let [names [:script :query :query-graph :request :request-evidence]
+       methods (into {} (map (fn [name] [name (fn [& _] name)]) names))]
+  (oracle/with-oracle methods
+   (fn [] (doseq [name names] (is (= name (effect/call :oracle name [] (fn [] :wrong-fallback))))))))
+ (let [entered (atom 0) body #(swap! entered inc)]
+  (doseq [bad [{:request-evidences handle} {:request-evidence true} {}]]
+   (is (thrown? (oracle/with-oracle bad body))))
+  (is (= 0 @entered))))
+(run-tests)

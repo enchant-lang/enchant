@@ -124,7 +124,8 @@
                :details-graph (graph/encode
                                (select-keys raw [:why :error :preflight :core :admission :admission-account
                                                  :admission-reference :resources :checking :coordinate-profile
-                                                 :binding-reference :native-scope-attempts :nodes-imported]))}
+                                                 :binding-reference :native-scope-attempts :nodes-imported
+                                                 :native-observations-graph :point-replay :assertion-replay :validation]))}
    :present present :point (when present (:assignment-graph raw))}))
 
 (defn from-managed
@@ -173,19 +174,24 @@
        base (if retained? (assoc base :composition (:composition response) :composition-connection :recomputed) base)]
   (if (:point-present response)
    (let [checked (point/replay-graph fresh (:point-graph response))]
-    (merge base {:interpretation :independent-point-replay :point-check checked
+    (merge base {:interpretation (if (= :not-installed (:point-replay checked)) :unreplayed-point-data :independent-point-replay)
+                 :point-check checked
                  :point-replay (:point-replay checked) :verdict (:verdict checked)}))
    (let [admission (admit-without-point fresh) source (:source response)
          status (:status source) phase (:phase source)
          mode (qg/field-data! (:subject fresh) :mode)]
-    (merge base {:point-replay :not-run :subject-admission admission :interpretation :reported-native-status
+    (merge base {:point-replay (if (= profiles/wide-native (get-in fresh [:policy :profile])) :not-installed :not-run)
+                 :subject-admission admission :interpretation :reported-native-status
                  :verdict (cond (not= :complete (:status admission)) :not-run
                                 (and (= :unsat status) (contains? #{:query :assumption-consistency} phase)) :solver-claim
                                 (and (= :sat status) (= :query phase)) :candidate
                                 (= :unknown status) :unknown (= :unsupported status) :unsupported
                                 (= :not-run status) :not-run :else :error)}
            (when (and (= :unsat status) (contains? #{:query :assumption-consistency} phase))
-            {:reported-verdict (if (= :assumption-consistency phase) :vacuous (if (= :prove mode) :proved :unsat))}))))))
+            {:reported-verdict (if (= profiles/wide-native (get-in fresh [:policy :profile]))
+                                 (if (= :assumption-consistency phase) :inconsistent-premises-claim
+                                  (if (= :prove mode) :entailment-claim :unsatisfiable-claim))
+                                 (if (= :assumption-consistency phase) :vacuous (if (= :prove mode) :proved :unsat)))}))))))
 
 (defn restore
  "Restore a bounded answer body. Application points and native diagnostics
