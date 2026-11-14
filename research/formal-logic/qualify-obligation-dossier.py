@@ -125,8 +125,13 @@ assert read(E / 'host-launch-exit.json')['exit_code'] == 0
 styles = {}
 for name in ('research/formal-logic/dossier-local.css', 'research/formal-logic/presentation.css',
              'research/formal-logic/review-serve.bl'):
-    assert sha(R / name) == old[name]
-    styles[name] = old[name]
+    current = sha(R / name)
+    if name != 'research/formal-logic/dossier-local.css':
+        assert current == old[name]
+    else:
+        change = read(E / 'before-mobile-evidence-cards/style-change.json')
+        assert change['before_sha256'] == old[name] and change['after_sha256'] == current
+    styles[name] = {'baseline_sha256': old[name], 'current_sha256': current}
 research = read(E / 'research/qualification.json')
 assert research['status'] == 'passed' and research['sdk_pin'] == pin
 assert research['assertions'] == 38 and research['browser_save_qualified'] is False
@@ -167,7 +172,7 @@ report = {'schema': 'bl.obligation-dossier-qualification.v1', 'status': 'passed'
           'research_evidence': {'checks': 38, 'snapshot_sha256': sha(snapshot_path),
                                 'browser_checks': len(probe['checks']), 'actual_snapshot_revisions': 5,
                                 'browser_audit_sha256': sha(E / 'research-browser/audit.json'), 'visual_review': probe_visual},
-          'host': host, 'kit_state_sha256': sha(K), 'unchanged_rendering_sources': styles,
+          'host': host, 'kit_state_sha256': sha(K), 'rendering_sources': styles,
           'browser': {'focused_checks': len(audits['focused-browser']['checks']),
                       'full_checks': len(audits['full-browser']['checks']), 'visual_review': visual,
                       'focused_audit_sha256': sha(E / 'focused-browser/audit.json'),

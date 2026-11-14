@@ -44,7 +44,7 @@ for name, digest in kit['rendering_source_sha256'].items():
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
 sources = [*(P / 'src').rglob('*.bl'), P / 'ATLAS.bl.org', P / 'sdk-pin.json', Path(__file__),
            P / 'obligation-dossier-inputs-check.bl', P / 'obligation-browser.mjs', P / 'story-audit.mjs',
-           P / 'browser-driver.mjs', *(P / 'dossier').rglob('*.bl'), *(P / 'dossier').glob('*.js'), K, P / 'NUMERIC-IMPLEMENTATION.md', P / 'SEMANTICS.md', P / 'FLOOR-MODULUS-MODEL.md',
+           P / 'browser-driver.mjs', P / 'dossier-local.css', P / 'presentation.css', P / 'review-serve.bl', *(P / 'dossier').rglob('*.bl'), *(P / 'dossier').glob('*.js'), K, P / 'NUMERIC-IMPLEMENTATION.md', P / 'SEMANTICS.md', P / 'FLOOR-MODULUS-MODEL.md',
            P / 'evidence/floor-modulus-model/qualification.json', C / 'qualification.json',
            C / 'previous-scalar-readers-qualification.json', C / 'promotion.json', I / 'qualification.json',
            P / 'evidence/numeric-semantics/qualification.json', P / 'RETAINED-REQUEST-IMPLEMENTATION.md',

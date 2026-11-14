@@ -158,7 +158,8 @@ try {
    await shot(size.name+'-word-cell-'+name);
    await call({op:'navigate',url:base+'/#a-byte-can-carry-its-meaning-across-both-solvers'});
    await theme(value);
-   await evaluate("document.getElementById('research-word-answer-evidence').scrollIntoView({block:'center',behavior:'instant'})");
+   await evaluate("window.scrollBy({top:document.getElementById('research-word-answer-evidence').getBoundingClientRect().top-100,behavior:'instant'})");
+   if(size.name==='phone') check('Phone evidence findings use the card width '+name,await evaluate("(()=>{const rows=[...document.querySelectorAll('[data-research-row]')];return rows.length===16&&rows.every(r=>{const b=r.getBoundingClientRect(),finding=r.children[1].getBoundingClientRect();return getComputedStyle(r).display==='grid'&&b.width>=innerWidth-48&&finding.width>=b.width-40})})()"));
    check(size.name+': actual saved evidence is current in '+name,await evaluate("document.querySelector('[data-research-element]').dataset.researchFreshness==='current'&&document.querySelectorAll('[data-research-row]').length===16&&document.querySelector('.research-status').innerText.includes('Revision 3.')"));
    check(size.name+': checked proof and pending program remain separate in '+name,await evaluate("document.querySelector('[data-research-row=proof]').innerText.includes('Located evidence')&&document.querySelector('[data-research-row=program]').innerText.includes('Still open')"));
    check(size.name+': anonymous dossier has no save action in '+name,await evaluate("!document.querySelector('[data-research-save]')"));
