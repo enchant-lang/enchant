@@ -1,8 +1,9 @@
 # One request interface for the full existing typed vocabulary
 
-This is an unqualified project source overlay on the selected immutable SDK.
+This is an unqualified project source batch beside the selected immutable SDK.
 It is not installed in that SDK. Its BL checks, native corpus, fresh readers
-and later SDK build are still required. It reuses the ordinary `formal.logic`
+and later SDK build are still required. Qualification explicitly relocates namespaces/imports; it does not replace
+installed SDK forwarder routes. The eventual batch reuses the ordinary `formal.logic`
 prepare/propose/recheck/execute/compare API; it introduces no parallel facade.
 
 The new `logic/wide-native-policy` admits the existing mathematical term
@@ -45,3 +46,9 @@ interface; actual paired native results; the narrow policy regressions; retained
 owner mutation and lease refusal; resource refusals before constructor/native
 work; and fresh candidate-only readers without application paths or native
 exchanges. It must keep each scope separate from the later immutable SDK gate.
+
+The initial attempt to load same-named source overrides was refused by the SDK
+code-custody guard before theory checks. Its failure and unavailable trace result
+remain in `evidence/wide-owner-prototype/pure/before-namespace-projection/`.
+The replacement harness projects explicit namespaces and imports, recording every
+input hash, transformation and resulting source. It grants no SDK artifact status.
