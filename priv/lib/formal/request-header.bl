@@ -1,0 +1,32 @@
+(ns formal.request-header
+ (:require [formal.data-graph :as graph] [formal.question-graph :as qg]
+           [formal.vacuity-policy :as vacuity]))
+
+;; Single-pass header checking. Returned diagnostics are never accepted as
+;; a cached typed admission or request authority.
+(def profile :bl/single-pass-request-header-preview-v1)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.request-header: " why) {}))))
+(defn inspect
+ "Check the original canonical graph once, then inspect raw header rows.
+  This does not validate terms, perform point replay or open a native owner."
+ [subject]
+ (require! (and (= :map (rt/kind-kind subject)) (= 3 (erlang/map_size subject))
+                (= #{:formal/question-graph :profile :graph} (set (keys subject)))
+                (or (nil? (meta subject)) (= {} (meta subject)))
+                (int? (:formal/question-graph subject)) (= 1 (:formal/question-graph subject))
+                (= qg/profile (:profile subject))) "closed original question wrapper required")
+ (let [data (:graph subject) checked (graph/check! data) rows (:nodes data)
+       [kind entries] (nth rows (:root data))
+       _ (require! (= "map" kind) "question map required")
+       fields (into {} (keep (fn [[key value]]
+                              (let [[tag name] (nth rows key)] (when (= "keyword" tag) [name value]))) entries))
+       row (fn [name] (when-let [id (get fields name)] (nth rows id)))
+       version (row "formal/query") mode (row "mode") assertions (row "assertions")]
+  (require! (= ["int" 1] version) "version-1 subject required")
+  (require! (contains? #{["keyword" "sat"] ["keyword" "prove"]} mode) "SAT or proof subject required")
+  (require! (and assertions (= "vector" (first assertions))) "subject assertion vector required")
+  {:profile profile :subject subject :subject-reference (:reference checked)
+   :vacuity (vacuity/from-row (row "vacuity"))
+   :mode (if (= ["keyword" "sat"] mode) :sat :prove)
+   :typed-admission :not-run :native-execution :not-run :compiler-proof-authority false}))

@@ -1,0 +1,51 @@
+(ns formal.feasibility
+ (:require [formal.assumptions :as assumptions] [formal.finite-feasibility :as finite]
+           [formal.graph-integer-certificate :as integer] [formal.request-point :as point]
+           [formal.data-graph :as graph]))
+
+(def profile :bl/assumption-feasibility-evidence-preview-v1)
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.feasibility: " why) {}))))
+(defn- plain? [x] (and (= :map (rt/kind-kind x)) (or (nil? (meta x)) (= {} (meta x)))))
+(defn candidate
+ "Close a finite search request or supplied integer background evidence.
+  Coordinates and certificates are candidates; no producer results are saved."
+ [evidence]
+ (require! (plain? evidence) "plain candidate required")
+ (case (:strategy evidence)
+  :finite (require! (= #{:strategy} (set (keys evidence))) "closed finite strategy required")
+  :supplied-integer
+   (do
+    (require! (and (every? #{:strategy :point :certificate} (keys evidence))
+                   (or (contains? evidence :point) (contains? evidence :certificate))) "point and/or certificate required")
+    (when (contains? evidence :point) (require! (plain? (:point evidence)) "plain coordinate map required")))
+  (throw (ex-info "formal.feasibility: installed strategy required" {})))
+ (graph/encode evidence)
+ evidence)
+(defn reserve [evidence limit]
+ (candidate evidence)
+ (let [required (if (= :finite (:strategy evidence)) finite/allowance
+                 (+ 100000 (if (contains? evidence :point) 200000 0)
+                            (if (contains? evidence :certificate) 2000000 0)))]
+  {:kind :conservative-background-evidence-work :required required :limit limit
+   :status (if (<= required limit) :reserved :refused) :reserved (if (<= required limit) required 0)}))
+(defn assess [original evidence account]
+ (candidate evidence)
+ (if-not (= :reserved (:status account))
+  {:profile profile :status :incomplete :feasibility :not-established
+   :reason :feasibility-work-limit :checker-invocation :not-run}
+  (if (= :finite (:strategy evidence))
+   (finite/assess original)
+   (try
+    (let [derived (assumptions/background original integer/checking-policy) r (:request derived)
+          witness (when (contains? evidence :point) (point/replay r (:point evidence)))
+          contradiction (when (contains? evidence :certificate) (integer/check r (:certificate evidence)))
+          sat? (= :sat (:verdict witness))
+          unsat? (and (= :checked (:status contradiction)) (= :unsatisfiable (:verdict contradiction)))]
+     {:profile profile :connection (:connection derived) :point-check witness :proof-check contradiction
+      :status (cond (and sat? unsat?) :conflicting-evidence (or sat? unsat?) :checked :else :incomplete)
+      :feasibility (cond (and sat? unsat?) :not-established sat? :witnessed unsat? :inconsistent :else :not-established)
+      :basis :fresh-integer-background-evidence :source-connection :not-established
+      :compiler-proof-authority false :checked-native-execution false})
+    (catch error {:profile profile :status :incomplete :feasibility :not-established :reason (ex-message error)
+                  :compiler-proof-authority false :checked-native-execution false})))))

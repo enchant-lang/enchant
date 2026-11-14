@@ -1,0 +1,154 @@
+(ns formal.graph-integer-certificate-test
+ (:require [formal.graph-integer-certificate :as kernel] [formal.request :as request]
+           [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.point-profile :as policy] [formal.backend :as backend]
+           [bl.json :as json] [oracle]))
+(def entered (atom []))
+(def observations (atom []))
+(defn persist! []
+ (when-let [path (System/get_env "FORMAL_GRAPH_INTEGER_OUTPUT")]
+  (File/write! path (json/encode {:entered-tests @entered :observations @observations :sdk (System/get_env "BL_SDK_PRODUCT")
+                                 :compiler-proof-authority false} {:pretty 2}))))
+(defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric}}))
+(def x (t/variable "graph-int.x" t/Int))
+(defn theorem [bound]
+ (prepared (q/prove (t/ge (t/add x (t/int 2)) (t/int bound)) {:assumptions [(q/assertion "nonnegative" (t/ge x (t/int 0)))]})))
+(defn linear-candidate [r]
+ (let [prepared (kernel/describe r)
+       negative (vec (keep (fn [i] (when (= {"graph-int.x" -1} (:coeff (nth (:atoms prepared) i))) i))
+                            (range (count (:atoms prepared)))))
+       assume (first (filter #(= 0 (:bound (nth (:atoms prepared) %))) negative))
+       conclusion (first (remove #(= assume %) negative))]
+  (kernel/candidate r {:root 3 :nodes [[:boolean] [:linear [[assume 1] [conclusion 1]]]
+                                     [:split conclusion 0 1] [:split assume 2 0]]})))
+(defn term-graph [operation sort arguments]
+ (graph/assemble "map" [[(graph/encode :formal/term) (graph/encode 1)]
+                         [(graph/encode :op) (graph/encode operation)] [(graph/encode :sort) (graph/encode sort)]
+                         [(graph/encode :args) (graph/assemble "vector" arguments)] [(graph/encode :data) (graph/encode nil)]]))
+(deftest unbounded-linear-entailment-has-derived-arithmetic-premises
+ (swap! entered conj :linear)
+ (persist!)
+ (let [r (theorem 1) candidate (linear-candidate r) result (kernel/check r candidate)
+       other (request/for-backend r :oxiz) again (kernel/check other candidate)]
+  (is (= :checked (:status result) (:status again)))
+  (is (= :entails (:verdict result)))
+  (is (= :not-established (:feasibility result) (:source-connection result) (:implementation-verification result)))
+  (is (= 1 (count (filter #(= "nonnegative" (:label %)) (get-in result [:assumption-ledger :entries])))))
+  (is (every? #(int? (:source-node %)) (get-in result [:assumption-ledger :entries])))
+  (is (= (:statement result) (:statement again)))
+  (is (= (graph/of candidate) (:certificate-reference result)))
+  (is (= (:checking-reference result) (:checking-reference again)))
+  (is (not= (:request-reference result) (:request-reference again)))
+  (is (<= (:charged-work-units result) (:work-units kernel/defaults)))
+  (is (= false (:checked-native-execution result) (:compiler-proof-authority result)))
+  (swap! observations conj {:case :unbounded-linear :result result})
+  (persist!))
+ (let [r (theorem 3) result (kernel/check r (linear-candidate r))]
+  (is (= :rejected (:status result))))
+ (let [r (theorem 1) other (theorem 3)]
+  (is (= :rejected (:status (kernel/check other (linear-candidate r)))))))
+(deftest a-shared-proof-leaf-is-checked-in-each-assignment-context
+ (swap! entered conj :proof-contexts)
+ (persist!)
+ (let [p (t/variable "graph-int.p" t/Bool)
+       tautology (prepared (q/prove (t/any [p (t/not p)])))
+       falsehood (prepared (q/prove p))
+       proof {:root 1 :nodes [[:boolean] [:split 0 0 0]]}]
+  (is (= :checked (:status (kernel/check tautology (kernel/candidate tautology proof)))))
+  (is (= :rejected (:status (kernel/check falsehood (kernel/candidate falsehood proof)))))
+  (doseq [bad [{:root 0 :nodes [[:split 0 0 0]]}
+               {:root 0 :nodes [[:boolean :extra]]}
+               {:root 0 :nodes [[:linear [[0 1]]]]}
+               {:root 0 :nodes [[:invented]]}
+               {:root 1024 :nodes (vec (repeat 1025 [:boolean]))}]]
+   (is (= :rejected (:status (kernel/check tautology (kernel/candidate tautology bad))))))))
+(deftest integer-strictness-positive-weights-and-sat-contradictions
+ (swap! entered conj :integer-arithmetic)
+ (persist!)
+ (let [r (prepared (q/prove (t/ge x (t/int 0)) {:assumptions [(t/ge (t/mul (t/int 2) x) (t/int 0))]}))
+       atoms (:atoms (kernel/describe r))
+       a (first (filter #(= {"graph-int.x" -2} (:coeff (nth atoms %))) (range (count atoms))))
+       b (first (filter #(= {"graph-int.x" -1} (:coeff (nth atoms %))) (range (count atoms))))
+       proof {:root 3 :nodes [[:boolean] [:linear [[a 1] [b 2]]] [:split b 0 1] [:split a 2 0]]}
+       result (kernel/check r (kernel/candidate r proof))]
+  (is (= :checked (:status result)))
+  (is (= :entails (:verdict result)))
+  (is (= 5 (:proof-states result)))
+  (is (= :rejected (:status (kernel/check r (kernel/candidate r (assoc-in proof [:nodes 1] [:linear [[a 1] [b 1]]])))))))
+ (let [r (prepared (q/prove (t/gt x (t/int -1)) {:assumptions [(t/ge x (t/int 0))]}))]
+  (is (= :checked (:status (kernel/check r (kernel/candidate r {:root 1 :nodes [[:boolean] [:split 0 0 0]]}))))))
+ (let [r (prepared (q/sat {:assumptions [(t/le x (t/int 0)) (t/ge x (t/int 1))]}))
+       atoms (:atoms (kernel/describe r))
+       a (first (filter #(= {"graph-int.x" 1} (:coeff (nth atoms %))) (range (count atoms))))
+       b (first (filter #(= {"graph-int.x" -1} (:coeff (nth atoms %))) (range (count atoms))))
+       proof {:root 3 :nodes [[:boolean] [:linear [[a 1] [b 1]]] [:split b 1 0] [:split a 2 0]]}
+       result (kernel/check r (kernel/candidate r proof))]
+  (is (= :checked (:status result)))
+  (is (= :unsatisfiable (:verdict result)))) )
+(deftest shared-original-terms-and-unknown-metadata-are-never-materialized
+ (swap! entered conj :sharing)
+ (persist!)
+ (let [r (prepared (q/prove (t/bool true)))
+       shared (reduce (fn [node _] (term-graph :and t/Bool [node node])) (graph/encode (t/bool true)) (range 16))
+       counter (graph/assemble "map" [[(graph/encode :label) (graph/encode "goal/counterexample")]
+                                      [(graph/encode :term) (term-graph :not t/Bool [shared])]])
+       unknown {:formal/data-graph 1 :profile graph/profile :root 0
+                :nodes [["keyword" (str "graph.integer.unknown." (System/unique_integer (list :positive)))]]}
+       history (reduce (fn [node _] (graph/assemble "vector" [node node])) unknown (range 17))
+       data (graph/patch-map (get-in r [:subject :graph]) [[(graph/encode :claim) shared]
+                                                         [(graph/encode :counterexample) counter]
+                                                         [(graph/encode :origin) history]])
+       original (request/from-graph data {:policy (:policy r) :adapter (:adapter r)})
+       candidate (kernel/candidate original {:root 0 :nodes [[:boolean]]}) result (kernel/check original candidate)]
+  (is (> (:expanded-nodes (graph/check! data)) 1000000))
+  (is (thrown? (qg/materialize! (:subject original))))
+  (is (= :checked (:status result)))
+  (is (= 18 (get-in result [:normalization :typed-nodes])))
+  (is (<= (get-in result [:normalization :formula-nodes]) 18))
+  (is (= 1 (:proof-states result)))
+  (swap! observations conj {:case :shared-original :result result})
+  (persist!)))
+(deftest resource-and-grammar-refusals-cannot-create-a-theorem
+ (swap! entered conj :resources)
+ (persist!)
+ (let [r (theorem 1) candidate (linear-candidate r)
+       module (elem (erlang/fun_info policy/with-question :module) 1) pattern (tuple module :with-question 3)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (is (= :incomplete (:status (kernel/check r candidate {:work-units 0}))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count)))))
+ (doseq [claim [(t/eq (t/mul x x) (t/int 0))
+                (t/eq (t/ite (t/eq x (t/int 0)) x (t/int 1)) (t/int 1))
+                (t/eq (t/app :div t/Int [(t/int 4) (t/int 2)] nil) (t/int 2))
+                (t/eq (t/real 1 2) (t/real 1 2))]]
+  (let [r (prepared (q/prove claim))]
+   (is (= :rejected (:status (kernel/check r (kernel/candidate r {:root 0 :nodes [[:boolean]]})))))))
+ (let [large (erlang/bsl 1 127) product (t/mul x (t/int large))
+       r (prepared (q/prove (t/eq (t/mul product (t/int 2)) (t/int 0))))]
+  (doseq [budget [2000000 20000000]]
+   (is (= :incomplete (:status (kernel/check r (kernel/candidate r {:root 0 :nodes [[:boolean]]}) {:work-units budget})))))))
+(deftest producer-rows-and-flags-are-not-accepted-as-premises
+ (swap! entered conj :closed-certificate)
+ (persist!)
+ (let [r (theorem 1) c (linear-candidate r)]
+  (doseq [bad [(assoc c :checked true) (assoc c :atoms []) (assoc c :formal/graph-integer-certificate 1.0)
+               (assoc c :profile :invented) (assoc-in c [:statement :subject-reference :sha256] "forged")
+               (assoc-in c [:proof :rows] [])
+               (assoc-in c [:proof :nodes 1] [:linear [[0 0]]])
+               (assoc-in c [:proof :nodes 1] [:linear [[0 -1]]])
+               (assoc-in c [:proof :nodes 1] [:linear [[0 1.0]]])]]
+   (is (= :rejected (:status (kernel/check r bad)))))))
+(deftest checking-needs-neither-native-ownership-nor-an-oracle
+ (swap! entered conj :no-native)
+ (persist!)
+ (let [r (theorem 1) c (linear-candidate r)
+       module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    #(is (= :checked (:status (kernel/check r c)))))
+   (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(run-tests)
