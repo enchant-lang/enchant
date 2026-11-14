@@ -1,0 +1,46 @@
+; Task-owned canonical ANF artifacts only. Partitioning preserves raw ETF
+; source spans and the public CompilerData limits; it does not execute ANF.
+(ns native.artifact (:require [bl.json :as json]))
+(def limits {:max-nodes 1000000 :max-bytes 33554432 :max-depth 128})
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn part-path [manifest-path path]
+ (if (= :absolute (Path/type path)) path (Path/expand path (Path/dirname manifest-path))))
+(defn read-part [manifest-path record]
+ (let [path (part-path manifest-path (get record "path")) bytes (File/read! path)]
+  (when (> (erlang/byte_size bytes) (:max-bytes limits))
+   (throw (ex-info "native artifact: partition exceeds canonical byte bound" {:path path})))
+  (when-not (= (sha bytes) (get record "sha256"))
+   (throw (ex-info "native artifact: partition SHA mismatch" {:path path})))
+  ; Passive closed grammar BEFORE decode: no fun, pid, reference, runtime
+  ; resource, compressed term, trailing bytes or unknown ETF tag is allowed.
+  (BeamLisp.CompilerData/check_closed_etf! bytes limits)
+  (let [value (erlang/binary_to_term bytes)]
+   (BeamLisp.CompilerData/check_compiler_data! value limits)
+   value)))
+(defn read-closure [manifest-path]
+ (let [manifest (json/decode (File/read! manifest-path)) rows (get manifest "units")]
+  (when-not (and (= "bl.native.partitioned-closure" (get manifest "schema"))
+                (= 1 (get manifest "version")) (vector? rows) (<= (count rows) 256))
+   (throw (ex-info "native artifact: invalid partition manifest" {:path manifest-path})))
+  (let [original (File/read! (part-path manifest-path (get manifest "artifact_path")))]
+   (when-not (and (<= (erlang/byte_size original) (:max-bytes limits))
+                  (= (sha original) (get manifest "artifact_sha256")))
+    (throw (ex-info "native artifact: original closure identity mismatch" {:path manifest-path}))))
+  (let [metadata (read-part manifest-path (get manifest "metadata"))
+        _ (when-not (and (map? metadata) (<= (count metadata) 32)
+                         (= "bl.native.compiler-closure" (:schema metadata)) (= 1 (:version metadata)))
+             (throw (ex-info "native artifact: invalid closure metadata" {:path manifest-path})))
+        units
+        (reduce (fn [units row]
+          (let [ns (get row "namespace") unit (read-part manifest-path row)]
+           (when-not (and (string? ns) (not (contains? units ns)) (= ns (:ns unit))
+                          (string? (:source unit)) (string? (:path unit))
+                          (= (sha (:source unit)) (:source-sha256 unit))
+                          (vector? (:defs unit)) (<= (count (:defs unit)) 65536)
+                          (vector? (:requires unit)) (keyword? (:module unit)) (keyword? (:base-module unit)))
+            (throw (ex-info "native artifact: invalid compiled unit" {:namespace ns})))
+           (assoc units ns unit))) {} rows)]
+   (when-not (and (= (count units) (count (:order metadata)))
+                 (= (set (keys units)) (set (:order metadata))))
+    (throw (ex-info "native artifact: partition namespace order mismatch" {})))
+   (assoc metadata :units units))))

@@ -2,7 +2,7 @@
 ; BL units. This reads only the task-owned local closure artifact; no sources
 ; or terms supplied by another application are decoded through this path.
 (ns native.refresh
- (:require [js.build :as build] [bl.json :as json]))
+ (:require [js.build :as build] [bl.json :as json] [native.artifact :as artifact]))
 (def out (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure"))
 (def roots ["research/native-seed/src" "priv/boot" "priv/lib" "priv/std" "priv/compat"])
 (def expected-options {:target :scheme :contextual-bindings :absent
@@ -24,14 +24,8 @@
 (assert (= (get pin "descriptor_sha256") (sha descriptor)))
 (assert (= (get pin "source") (get (json/decode descriptor) "source")))
 (assert (= descriptor (File/read! (str (get pin "sdk") "/artifact.json"))))
-(def artifact-path (str out "/closure.etf"))
-(def bytes (File/read! artifact-path))
-(when (> (erlang/byte_size bytes) (:max-bytes limits))
- (throw (ex-info "native refresh: private artifact exceeds bound" {:path artifact-path})))
-; The canonical predecode grammar rejects funs, refs, pids, compressed payloads,
-; trailing data and unknown tags BEFORE any atom or term is materialized.
-(BeamLisp.CompilerData/check_closed_etf! bytes limits)
-(def closure (erlang/binary_to_term bytes))
+(def artifact-path (str out "/partition.json"))
+(def closure (artifact/read-closure artifact-path))
 (assert (= "bl.native.compiler-closure" (:schema closure)))
 (assert (= 1 (:version closure)))
 (assert (= expected-options (:options closure)))
@@ -64,6 +58,6 @@
   {:reused [] :changed []} (:order closure)))
 (File/write! (str out "/refresh.json")
  (json/encode {:schema "bl.native.compiler-checkpoint-refresh" :version 1
-               :artifact-sha256 (sha bytes) :sdk-sha256 (sha descriptor)
+               :partition-manifest-sha256 (sha (File/read! artifact-path)) :sdk-sha256 (sha descriptor)
                :providers current-providers :result refreshed}))
 (println (str "NATIVE_REFRESH " (count (:reused refreshed)) " reusable, " (count (:changed refreshed)) " source changed"))
