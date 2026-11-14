@@ -176,6 +176,11 @@ try {
    await evaluate("document.querySelector('svg.graph[aria-label=\"One question, explicit evidence\"]').scrollIntoView({block:'center',behavior:'instant'})");
    check(size.name+': evidence graph labels fit '+name,await evaluate(`(()=>{const g=document.querySelector('svg.graph[aria-label="One question, explicit evidence"]');if(g.querySelectorAll('.gr-node').length!==5)return false;const boxes=[...g.querySelectorAll('.gr-node rect')].map(n=>n.getBBox());return [...g.querySelectorAll('.gr-node')].every(n=>{const r=n.querySelector('rect').getBBox();return [...n.querySelectorAll('text')].every(t=>{const b=t.getBBox();return b.x>=r.x+3&&b.x+b.width<=r.x+r.width-3&&b.y>=r.y&&b.y+b.height<=r.y+r.height})})&&[...g.querySelectorAll('.gr-edge text')].every(t=>{const b=t.getBBox();return boxes.every(r=>b.x+b.width<=r.x||b.x>=r.x+r.width||b.y+b.height<=r.y||b.y>=r.y+r.height)})})()`));
    await shot(size.name+'-evidence-graph-'+name);
+   if(size.name==='phone') {
+    check('Phone can inspect the conclusion column '+name,await evaluate(`(()=>{let n=document.querySelector('svg.graph[aria-label="One question, explicit evidence"]').parentElement;while(n&&n!==document.body&&n.scrollWidth<=n.clientWidth+2)n=n.parentElement;if(!n||n===document.body)return false;n.scrollLeft=n.scrollWidth-n.clientWidth;return n.scrollLeft>=n.scrollWidth-n.clientWidth-2})()`));
+    await shot(size.name+'-evidence-conclusion-'+name);
+    await evaluate(`(()=>{let n=document.querySelector('svg.graph[aria-label="One question, explicit evidence"]').parentElement;while(n&&n!==document.body&&n.scrollWidth<=n.clientWidth+2)n=n.parentElement;if(n&&n!==document.body)n.scrollLeft=0})()`);
+   }
    await call({op:'navigate',url:base+'/#give-text-positions-a-precise-meaning'});
    await theme(value);
    await evaluate("window.scrollBy({top:document.getElementById('give-text-positions-a-precise-meaning').getBoundingClientRect().top-92,behavior:'instant'})");
