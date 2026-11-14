@@ -1,15 +1,47 @@
 ; Cheap stage-zero REPLAY: reads the one captured canonical ANF artifact.
 ; This file never calls compiler/compile or starts a second closure build.
 (ns native.export
- (:require [native.bootstrap :as bootstrap] [bl.json :as json]))
+ (:require [native.bootstrap :as bootstrap] [native.eval :as ev]
+           [native.scheme :as scheme] [anf] [bl.json :as json]))
 (def args (BeamLisp/argv))
 (def artifact-path (or (nth args 0 nil) "research/native-seed/out/compiler-closure/closure.etf"))
 (def host-path (or (nth args 1 nil) "research/native-seed/out/compiler-closure/host.scm"))
 (def out (or (nth args 2 nil) "research/native-seed/out/compiler-closure"))
+(def leaf-manifest-path (or (nth args 3 nil) (str out "/leaves.json")))
 (def closure (erlang/binary_to_term (File/read! artifact-path) (list :safe)))
 (when-not (and (= "bl.native.compiler-closure" (:schema closure)) (= 1 (:version closure)))
  (throw (ex-info "native export: unsupported closure artifact" {:artifact artifact-path})))
 (def units (mapv #(get (:units closure) %) (:order closure)))
+(def leaf-manifest (json/decode (File/read! leaf-manifest-path)))
+(def leaves (set (get leaf-manifest "registered_leaves")))
+(def by-module
+ (assoc (into {} (mapcat (fn [u] [[(:module u) (:ns u)] [(:base-module u) (:ns u)]]) units))
+        :Elixir.BeamLisp.CompilerData "host.compiler-data"))
+(def stub-modules (set (mapcat (fn [ns] [(BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))))
+(def table (into {} (map (fn [u] [(:ns u) (set (keep :name (:defs u)))]) units)))
+(defn all-nodes [n] (cons n (mapcat all-nodes (anf/executable-children n))))
+(defn remote-decision [n]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
+       key (str (erlang/atom_to_binary m) "/" f "/" a)
+       logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)]
+  {:key key :kind (cond
+   (contains? leaves key) :leaf
+   (and (contains? by-module m) (contains? (get table (get by-module m)) logical)) :compiled
+   (contains? stub-modules m) :excluded-namespace
+   :else :unresolved)}))
+(def remote-inventory
+ (vec (sort-by :key (distinct (keep (fn [n] (when (= :remote (:op n)) (remote-decision n)))
+                         (mapcat (fn [u] (mapcat #(all-nodes (:node %)) (:defs u))) units))))))
+(def refusals
+ (vec (concat
+  (filter #(= :unresolved (:kind %)) remote-inventory)
+  (mapcat (fn [u]
+   (keep (fn [d]
+    (try (scheme/emit (:node d) (ev/context (:ns u))) nil
+     (catch ex {:namespace (:ns u) :definition (:name d) :emitter (ex-message ex)}))) (:defs u))) units))))
+(File/write! (str out "/link-inventory.json") (json/encode {:remotes remote-inventory :refusals refusals}))
+(when (seq refusals)
+ (throw (ex-info "native export: unsupported closure (see link-inventory.json)" {:refusals refusals})))
 (def bundle
  {:schema "bl.native.source-bundle" :version 1
   :sdk-pin (:sdk-pin closure) :provider-sources (:provider-sources closure)

@@ -2,6 +2,7 @@
 ; target-emitter/host work from that immutable artifact instead of recompiling.
 (ns native.probe
  (:require [js.build :as build] [anf] [native.scheme :as scheme]
+           [native.bootstrap]
            [bl.json :as json] [clojure.string :as string]))
 
 (def roots ["research/native-seed/src"
@@ -36,9 +37,15 @@
 (defn provider-sources []
  ; Bind ALL candidate macro providers in the source roots, including providers
  ; loaded by a macro through a module edge rather than a :require declaration.
- (vec (map (fn [p] {:path p :sha256 (sha (File/read! p))})
+ (vec (map (fn [p] (let [source (File/read! p)]
+         {:path p :sha256 (sha source)
+          ; Conservative prefilter, followed by canonical AST declaration
+          ; recognition. A comment/string cannot become a macro provider.
+          :macro-provider? (and (String/contains? source "defmacro")
+                             (boolean (some build/defmacro? (build/read-forms p))))}))
        (sort (distinct (cons "priv/host/compiler_data.bl"
                     (mapcat (fn [r] (Path/wildcard (str r "/**/*.bl"))) roots)))))))
+(declare providers observed-sdk-descriptor)
 (defn compile-closure []
  (loop [todo entries active #{} done #{} order [] units {}]
   (if (empty? todo)
@@ -55,9 +62,16 @@
                         (concat (when (= ns "core") ["rt"]) (map first (:requires head)))))]
        (if (and (seq deps) (not (contains? active ns)))
         (recur (concat deps todo) (conj active ns) done order units)
-        (let [_ (println (str "NATIVE_CAPTURE " ns))
+        (let [_ (println (str "NATIVE_CLOSURE_PREPARE " ns))
               prepared (build/prepare-ns path)
-              compiled (build/compile-prepared prepared {:check-node identity})
+              unit-key (sha (erlang/term_to_binary
+                         {:sdk observed-sdk-descriptor :options options :source (:source-sha256 prepared)
+                          :macro-providers (filter :macro-provider? providers)} (list :deterministic)))
+              checkpoint (str out "/units/" ns ".etf")
+              cached (when (File/regular? checkpoint)
+                       (erlang/binary_to_term (File/read! checkpoint) (list :safe)))
+              compiled (if (= unit-key (:identity cached)) (:unit cached)
+                          (build/compile-prepared prepared {:check-node identity}))
               refs (keep (fn [n] (when (= :remote (:op n)) (module-ns (:mod n))))
                          (mapcat #(nodes (:node %)) (:defs compiled)))
               extra (vec (distinct (filter #(and (not (contains? done %))
@@ -65,7 +79,10 @@
                                                    (build/ns-path roots %)) refs)))
               unit (assoc compiled :source (:source prepared)
                      :module (BeamLisp.Link/module_for ns)
-                     :base-module (BeamLisp.Emit/base_module_for ns))]
+                     :base-module (BeamLisp.Emit/base_module_for ns))
+              _ (File/write! checkpoint (erlang/term_to_binary {:identity unit-key :unit unit} (list :deterministic)))
+              _ (println (str "NATIVE_CLOSURE_UNIT " ns " " (count (:defs unit))
+                              (if (= unit-key (:identity cached)) " checkpoint" " compiled")))]
          ; Every unit is compiled ONCE. Additional module dependencies enqueue
          ; after it; Scheme definitions are emitted before initialization.
          (recur (concat (rest todo) extra) (disj active ns) (conj done ns)
@@ -81,6 +98,7 @@
             {:namespace ns :path (:path u) :sha256 (:source-sha256 u)
              :definitions (count (:defs u)) :requires (:requires u)})) (:order closure))}))
 (File/mkdir_p! out)
+(File/mkdir_p! (str out "/units"))
 (def providers (provider-sources))
 (def pin (File/read! "research/native-seed/sdk-pin.json"))
 (def pin-data (json/decode pin))
