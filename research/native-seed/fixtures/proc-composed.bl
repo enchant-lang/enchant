@@ -1,0 +1,99 @@
+; A shared trace gate over REAL bus/registry helpers and the SAME canonical
+; lifecycle/supervisor/table policy. No fixture implements those policies.
+(ns native.proc-composed
+ (:require [proc.bus :as bus] [proc.reg :as reg]))
+(defn pc-check [name actual expected]
+ (if (host/eq actual expected) (host/write (str "PASS " name))
+  (host/raise (str "FAIL " name ": " (host/describe actual)))))
+
+(proc/defserver pc-events
+ (registry (keys :id))
+ (bus (demand 1))
+ (handle-call :ready [_from state] (reply :ready state))
+ (handle-call :summary [_from state]
+  (reply [(count (:subs state)) (count (:entries state)) (count (:waiting state))] state)))
+(defn pc-subscriber [parent b]
+ (erlang/send b [:subscribe (erlang/self)])
+ (call b :ready)
+ (reg/register b (erlang/self) {:id :member})
+ (erlang/send parent [:subscriber-ready (erlang/self)])
+ (receive :never :unexpected (after 100000 :unexpected-timeout)))
+(defn pc-publisher [parent b]
+ (erlang/send parent [:published (bus/publish b :second)]))
+(defn pc-await-summary [b wanted]
+ (loop [left 100]
+  (let [summary (call b :summary)]
+   (if (or (= summary wanted) (= left 0)) summary (recur (- left 1))))))
+(defn pc-bus-registry []
+ (let [me (rt-self) b (start pc-events nil) b-ref (rt-monitor b)
+       pair (rt-spawn-monitor pc-subscriber [me b]) subscriber (nth pair 0) sub-ref (nth pair 1)]
+  (pc-check "composed-subscriber-ready"
+   (receive [:subscriber-ready pid] pid (after 5000 :timeout)) subscriber)
+  (pc-check "composed-one-state-two-slices" (call b :summary) [1 1 0])
+  (pc-check "composed-first-publish-buffers" (bus/publish b :first) :ok)
+  (rt-spawn pc-publisher [me b])
+  (pc-check "composed-publisher-really-blocked" (pc-await-summary b [1 1 1]) [1 1 1])
+  (erlang/send b [:down (rt-new-ref) :process me :unrelated])
+  (pc-check "composed-unrelated-down-no-release" (call b :summary) [1 1 1])
+  (pc-check "composed-no-premature-publisher-reply"
+   (receive [:published answer] answer (after 0 :blocked)) :blocked)
+  (kill subscriber)
+  (pc-check "composed-subscriber-death-observed"
+   (receive [:down ref :process pid reason] :when (= ref sub-ref) reason (after 5000 :timeout)) :killed)
+  (pc-check "composed-down-releases-delayed-publisher"
+   (receive [:published answer] answer (after 5000 :timeout)) :ok)
+  (pc-check "composed-one-down-cleans-both-slices" (pc-await-summary b [0 0 0]) [0 0 0])
+  (stop b)
+  (pc-check "composed-server-clean-stop"
+   (receive [:down ref :process pid reason] :when (= ref b-ref) reason (after 5000 :timeout)) :normal)
+  (host/write "PROC_TRACE bus registry down release cleanup")))
+
+(proc/defserver pc-worker
+ (init [label] (ok label))
+ (handle-call :ping [_from state] (reply state state))
+ (handle-cast :crash [state] (erlang/exit :pc-crash)))
+(proc.super/defsupervisor pc-tree
+ (strategy :one-for-one)
+ (child :a pc-worker :a)
+ (child :b pc-worker :b))
+(defn pc-await-child [sup id old]
+ (loop [left 100]
+  (let [pid (sup-child sup id)]
+   (if (or (and pid (not= old pid)) (= left 0)) pid (recur (- left 1))))))
+(defn pc-supervision []
+ (let [s (sup-start (pc-tree)) ref (rt-monitor s)
+       first (sup-child s :a) second (sup-child s :b)]
+  (cast first :crash)
+  (let [next (pc-await-child s :a first)]
+   (pc-check "composed-supervisor-new-incarnation" (not= first next) true)
+   (pc-check "composed-supervisor-keeps-sibling" (sup-child s :b) second)
+   (pc-check "composed-supervisor-child-service-resumes" (call next :ping) :a)
+   (stop s :shutdown)
+   (pc-check "composed-supervisor-stops-tree"
+    (receive [:down r :process pid reason] :when (= r ref) reason (after 5000 :timeout)) :shutdown)
+   (pc-check "composed-supervisor-releases-both-children" [(rt-alive? next) (rt-alive? second)] [false false]))
+  (host/write "PROC_TRACE supervision restart sibling service shutdown")))
+
+(defn pc-table-owner [parent]
+ (let [tid (table-new {:mode :public :heir parent :heir-data :kept})]
+  (table-insert tid :key :value)
+  (rt-send parent [:table-created tid])
+  (receive :release :done (after 100000 :unexpected-timeout))))
+(defn pc-tables []
+ (let [pair (rt-spawn-monitor pc-table-owner [(rt-self)]) owner (nth pair 0) ref (nth pair 1)
+       tid (receive [:table-created table] table (after 5000 :timeout))]
+  (rt-send owner :release)
+  (pc-check "composed-table-heir-notification"
+   (receive [:ets-transfer table old data] [table old data] (after 5000 :timeout)) [tid owner :kept])
+  (pc-check "composed-table-owner-normal-down"
+   (receive [:down r :process pid reason] :when (= r ref) reason (after 5000 :timeout)) :normal)
+  (pc-check "composed-table-owner-is-heir" (table-owner tid) (rt-self))
+  (pc-check "composed-table-preserves-rows" (table-lookup tid :key) (list [:key :value]))
+  (pc-check "composed-table-destroy-releases-store" (table-destroy tid) true)
+  (pc-check "composed-table-no-stale-owner" (table-owner tid) nil)
+  (host/write "PROC_TRACE table transfer owner rows destroy")))
+(defn main []
+ (pc-bus-registry)
+ (pc-supervision)
+ (pc-tables)
+ (host/write "NATIVE_PROC_COMPOSED_OK"))

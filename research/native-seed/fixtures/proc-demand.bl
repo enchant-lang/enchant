@@ -12,10 +12,17 @@
 (proc/defserver pd-bus
  (bus (demand 1))
  ; A request from the subscriber is a barrier after its subscription/options.
- (handle-call :ready [_from state] (reply :ready state)))
+ (handle-call :ready [_from state] (reply :ready state))
+ (handle-call :waiting [_from state] (reply (count (:waiting state)) state)))
 
 (defn pd-publish [parent b]
  (rt-send parent [:published (bus/publish b :second)]))
+
+(defn pd-await-waiter [b]
+ (loop [left 100]
+  (let [waiting (call b :waiting)]
+   (if (= 1 waiting) waiting
+    (if (= left 0) :not-blocked (recur (- left 1)))))))
 
 (defn main []
  (let [me (rt-self) b (start pd-bus {:max-lag 1})
@@ -27,10 +34,12 @@
   (pd-check "bus-no-event-without-demand"
    (receive [:events events] events (after 0 :none)) :none)
   (rt-spawn pd-publish [me b])
-  ; The ready call is also a fair scheduling barrier: either the publisher has
-  ; queued already, or it will queue while this actor waits for its reply. The
-  ; check only requires that zero credit cannot release the blocked publisher.
+  ; Observe the actual canonical waiter queue before the negative reply probe.
+  ; A scheduler ordering accident cannot make an immediate-reply bug pass.
+  (pd-check "bus-publisher-enters-real-waiter-queue" (pd-await-waiter b) 1)
   (pd-check "bus-blocked-stays-responsive" (call b :ready) :ready)
+  (erlang/send b [:down (rt-new-ref) :process me :unrelated])
+  (pd-check "bus-unrelated-down-cannot-release-waiter" (call b :waiting) 1)
   (pd-check "bus-publisher-waits-for-credit"
    (receive [:published answer] answer (after 0 :blocked)) :blocked)
   (erlang/send b [:demand 1 me])
@@ -53,4 +62,21 @@
   (let [up (flow/from-seq [1 2 3])
         mapped (flow/map-stage up (fn [x] (* 10 x)))]
    (pd-check "flow-source-and-map-retain-bl-policy" (flow/run mapped [] conj 1) [10 20 30]))
+  (let [up (flow/from-seq [1 2])
+        expanded (flow/expand-stage up (fn [x] [x (+ 10 x)]) 1)]
+   (erlang/send expanded [:subscribe me])
+   (erlang/send expanded [:demand 1 me])
+   (pd-check "flow-expansion-meters-output-credit"
+    (receive [:events events] (vec events) (after 5000 :timeout)) [1])
+   (pd-check "flow-expansion-keeps-surplus-buffered"
+    (receive [:events events] events (after 0 :none)) :none)
+   (erlang/send expanded [:demand 3 me])
+   (loop [out []]
+    (if (>= (count out) 3)
+     (pd-check "flow-expansion-renewal-drains-surplus" out [11 2 12])
+     (recur (into out (receive [:events events] events
+                          (after 5000 (host/raise "flow expansion starved after credit renewal")))))))
+   (erlang/send expanded [:demand 1 me])
+   (pd-check "flow-expansion-exhaustion-terminates"
+    (receive [:done] :done (after 5000 :timeout)) :done))
   (host/write "NATIVE_PROC_DEMAND_OK")))

@@ -1,99 +1,29 @@
-; Complete actor policies linked to the same canonical native core prelude.
+; This delegates namespace staging, module admission and arity/link selection
+; to native.proc-link. Run under the existing frozen SDK/run transport.
 (ns native.build-runtime
- (:require [compiler :as compiler] [reader-node :as reader] [js.build :as definitions]
-           [native.proc :as proc] [native.scheme :as scheme] [native.eval :as ev]
-           [native.bootstrap :as bootstrap] [js.actor :as actor] [anf]
-           [clojure.string :as string] [bl.json :as json]))
-
+ (:require [native.proc-link :as linker] [bl.json :as json]))
+(def args (BeamLisp/argv))
 (def base "research/native-seed")
-(def runtime "priv/lib/js/actor/runtime.bl")
-(def application (or (first (BeamLisp/argv)) "research/js-actors/test.bl"))
-(def output (or (second (BeamLisp/argv)) (str base "/out/full-actors.scm")))
-(def host-paths (if (seq (drop 2 (BeamLisp/argv))) (vec (drop 2 (BeamLisp/argv)))
-                [(str base "/out/compiler-closure/prelude.scm")]))
-(def namespace "native.kernel")
-(defn read-forms [path] (BeamLisp.Ns.Reader/read (File/read! path) {:file path}))
-(defn digest [path] (Base/encode16 (crypto/hash :sha256 (File/read! path)) (list (tuple :case :lower))))
-
-(def actor-definitions (vec (definitions/definition-values (read-forms runtime))))
-(def bridge-definitions (vec (definitions/definition-values (read-forms (str base "/bridges.bl")))))
-; The baseline vocabulary is deliberately empty. A contributed clause must be
-; supplied in :vocabulary only after its actual namespaced helper closure and
-; host imports pass the native linker. Unknowns remain compilation failures.
-(def app-definitions (vec (definitions/definition-values (proc/runtime-forms (read-forms application) namespace application))))
-(def all-definitions (vec (concat actor-definitions bridge-definitions app-definitions)))
-(def all-names (mapv :name all-definitions))
-(def declaration-table (into {} (map (fn [d] [(:name d) d]) all-definitions)))
-(def links (BeamLisp.Compiler/read_data (File/read! (str base "/actor-links.edn"))))
-(when-not (= (count all-names) (count (set all-names)))
- (throw (ex-info "native actor unit has duplicate definitions; generated loop names may not shadow authored code"
-                 {:kind :native-duplicate-definition})))
-(when-not (some #(= "main" %) all-names)
- (throw (ex-info "native actor application has no main entry" {:kind :native-missing-main})))
-
-(compiler/reset-fresh!)
-(def environment (assoc (compiler/new-env namespace) :file application))
-(def compiled (mapv #(assoc % :node (compiler/compile (:form %) environment)) all-definitions))
-(defn target-name [qualified]
- (when-not (starts-with? qualified (str namespace "/"))
-  (throw (ex-info "native actor link has foreign target" {:target qualified})))
- (let [name (subs qualified (inc (count namespace)))]
-  (when-not (contains? declaration-table name)
-   (throw (ex-info "native actor link has no body" {:target qualified})))
-  name))
-(defn checked-target [qualified arity]
- (let [name (target-name qualified)
-       shape (bootstrap/declaration-arities (:form (get declaration-table name)))]
-  (when-not (or (some #(= arity %) (:fixed shape))
-                (and (:variadic shape) (>= arity (:variadic shape))))
-   (throw (ex-info "native actor link arity mismatch" {:target qualified :arity arity :shape shape})))
-  (scheme/ident name)))
-(def core-modules #{(BeamLisp.Link/module_for "core") (BeamLisp.Emit/base_module_for "core")})
-(def native-context (ev/context namespace))
-(def options
- (assoc native-context :definitions (set all-names) :namespace-qualified? false
-  :global-resolver
-   (fn [n]
-    (cond
-     (and (= namespace (:ns n)) (contains? declaration-table (:name n))) (scheme/ident (:name n))
-     (get (:global-bindings links) (str (:ns n) "/" (:name n)))
-      (scheme/ident (target-name (get (:global-bindings links) (str (:ns n) "/" (:name n)))))
-     :else ((:global-resolver native-context) n)))
-  :remote-resolver
-   (fn [n]
-    (let [f (erlang/atom_to_binary (:fun n)) arity (count (:args n))
-          target (or (get (:remote-bindings links) [(:mod n) (:fun n) arity])
-                  (when (contains? core-modules (:mod n))
-                   (get (:global-bindings links) (str "core/" f))))]
-     (cond
-      (= :host (:mod n))
-       (if (contains? actor/host-names f) (str "h-" f) (scheme/refuse n))
-      target (str "(lambda arguments (bl-invoke " (checked-target target arity) " arguments))")
-      :else ((:remote-resolver native-context) n))))))
-(defn nodes [node] (cons node (mapcat nodes (anf/executable-children node))))
-(def ir-nodes (mapcat #(nodes (:node %)) compiled))
-(def host-effects (vec (distinct (map #(select-keys % [:mod :fun :ann])
-                    (filter #(= :remote (:op %)) ir-nodes)))))
-(def emitted (mapv (fn [d]
- (str (scheme/emit-definition d options)
-      "(native-register! " (scheme/text namespace) " " (scheme/text (:name d))
-      " " (scheme/ident (:name d)) ")\n")) compiled))
-(def program
- (str (string/join "\n" (map File/read! host-paths)) "\n"
-      (string/join "" emitted)
-      "\n(bl-invoke " (scheme/ident "bl-main") " (list " (scheme/ident "main") "))\n"
-      "(if (not (null? seed-errors)) (error \"actor runtime reported errors\"))\n"
-      "(for-each (lambda (key) (if (not (= (h-map-size (bl-get seed-state (bl-key key))) 0)) (error \"actor resource leak\" key))) '(\"procs\" \"monitors\" \"tables\" \"names\" \"table-names\"))\n"
-      "(if (not (= (h-vec-size (bl-get seed-state (bl-key \"runnable\"))) 0)) (error \"runnable leak\"))\n"
-      "(display \"PASS full-runtime-cleanup\\n\")\n"))
+(def application (or (first args) (str base "/fixtures/proc-demand.bl")))
+(def output (or (second args) (str base "/out/linked-proc.scm")))
+(def prelude (or (nth args 2 nil) (str base "/out/compiler-closure/prelude.scm")))
+(def closure (or (nth args 3 nil) (str base "/out/compiler-closure/partition.json")))
+(def leaves (or (nth args 4 nil) (str base "/out/compiler-closure/leaves.json")))
+(def result (linker/build-project
+ {:application application :runtime "priv/lib/js/actor/runtime.bl" :bridges (str base "/bridges.bl")
+  :links (str base "/actor-links.edn") :sdk-pin (str base "/sdk-pin.json")
+  :host-link (str base "/host/host-proc-link.scm")
+  :prelude prelude :closure-manifest closure :leaves leaves}))
 (File/mkdir_p! (Path/dirname output))
-(File/write! output program)
-(File/write! (str output ".manifest.json")
- (json/encode {:kind :native-actor-unit :namespace namespace :output output
-               :runtime {:path runtime :sha256 (digest runtime)
-                         :definitions (mapv :name actor-definitions)}
-               :application {:path application :sha256 (digest application)}
-               :host-sources (mapv (fn [path] {:path path :sha256 (digest path)}) host-paths)
-               :compiled (count compiled) :operations (vec (sort (set (map :op ir-nodes))))
-               :host-effects host-effects :source-interpreter false})))
-(println (str "FULL_ACTOR_RUNTIME_EMITTED " (count actor-definitions) " policy definitions; " (count compiled) " total"))
+(File/write! output
+ (str (:program result)
+  "(for-each (lambda (key) (if (not (= (h-map-size (bl-get seed-state (bl-key key))) 0)) (error \"actor resource leak\" key))) '(\"procs\" \"monitors\" \"tables\" \"names\" \"table-names\"))\n"
+  "(if (not (= (h-vec-size (bl-get seed-state (bl-key \"runnable\"))) 0)) (error \"runnable leak\"))\n"
+  "(if (not (bl-is-nil (bl-get seed-state (bl-key \"input-sink\")))) (error \"input sink leak\"))\n"
+  "(if (not (= seed-critical 0)) (error \"critical section leak\"))\n"
+  "(display \"PASS full-runtime-cleanup\\n\")\n"))
+(File/write! (str output ".manifest.json") (json/encode (:manifest result)))
+(File/write! (str output ".anf.etf")
+ (erlang/term_to_binary {:schema "bl.native.anf-unit" :version 1 :definitions (:definitions result)
+                        :entry (:entry result) :link-manifest (:manifest result)} (list :deterministic)))
+(println (str "NATIVE_PROC_LINKED " (count (:definitions result)) " exact source bodies")))

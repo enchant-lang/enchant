@@ -99,10 +99,10 @@
                (reply-markers (body-form (:body parsed)) caller reference where)))]
   (if (:guarded? parsed) (list envelope :when guard body) (list envelope body))))
 
-(defn lower-server
+(defn lower-server-with
  "Source DATA -> ordinary BL definitions. Vocabulary is an explicit capability
   map, e.g. {:bus proc.bus/bus-clause}; no global registry is trusted implicitly."
- [form vocabulary]
+ [form vocabulary extra-used]
  (let [server-name (second form) clauses (vec (drop 2 form)) where (str "defserver " server-name)
        plan (server/clause-plan {:name server-name :clauses clauses
                                  :vocabulary vocabulary :native-heads server-heads})
@@ -117,8 +117,8 @@
            (when-not (contains? server-heads (name (first part)))
             (throw (ex-info (str where ": contributed clause is not implemented by native rendering")
                             {:kind :native-unsupported-injected-clause :clause part}))))
-       used (symbols-in form)
-       loop-name (symbol (str (name server-name) "__server_loop"))
+       used (into (symbols-in form) extra-used)
+       loop-name (fresh-symbol (str (name server-name) "__server_loop__native_") used)
        state (fresh-symbol "state__native_" used)
        reference (fresh-symbol "reference__native_" (conj used state))
        reason (fresh-symbol "reason__native_" (into used #{state reference}))
@@ -143,6 +143,8 @@
          [(list 'defn server-name init-params (list loop-name init-value))
           (list 'defn loop-name [state] (apply list (cons 'receive receive-parts)))]))))
 
+(defn lower-server [form vocabulary] (lower-server-with form vocabulary #{}))
+
 (defn child-spec [child]
  (let [options (:options child)]
   {:id (:id child) :kind (:kind child) :target (:target child) :args (vec (:args child))
@@ -158,6 +160,9 @@
   (when (some #(= :pool (:kind %)) (:children plan))
    (throw (ex-info "native proc: pool children need a qualified dispatcher and nested-tree owner"
                    {:kind :native-unsupported-proc-pool :tree tree})))
+  (when (some #(= :supervisor (get (:options %) :type)) (:children plan))
+   (throw (ex-info "native proc: nested supervisors need qualified subtree start/stop semantics"
+                   {:kind :native-unsupported-proc-subtree :tree tree})))
   [(list 'defn tree [] {:name (keyword (name tree)) :strategy (:strategy plan)
                          :intensity (:intensity plan) :children (vec (map child-spec (:children plan)))})]))
 
@@ -171,11 +176,17 @@
   the integrating linker after its helper closure has been admitted."
  ([forms namespace path] (runtime-forms forms namespace path {}))
  ([forms namespace path options]
+  (let [top-symbols
+        (set (keep (fn [form]
+          (when (contains? #{"def" "defn" "defn-" "defserver" "proc/defserver" "proc.server/defserver"
+                             "defsupervisor" "proc.super/defsupervisor" "proc/super/defsupervisor"} (form-head form))
+           (let [name (rn/node-form (second (rn/node-items form)))]
+            (when (= :symbol (rn/node-tag name)) name)))) forms))]
   (vec (mapcat (fn [form]
    (let [head (form-head form)
          lowered (cond
           (contains? #{"defserver" "proc/defserver" "proc.server/defserver"} head)
-           (lower-server (source-data form) (or (:vocabulary options) {}))
+           (lower-server-with (source-data form) (or (:vocabulary options) {}) top-symbols)
           (contains? #{"defsupervisor" "proc.super/defsupervisor" "proc/super/defsupervisor"} head)
            (lower-supervisor (source-data form))
           :else nil)]
@@ -183,4 +194,4 @@
      (map (fn [data]
        (let [node (BeamLisp.Ns.Reader/read_one (pr-str data)) pos (rn/node-pos form)]
         (if pos (rn/meta-node node pos) node))) lowered)
-     [form]))) forms))))
+     [form]))) forms)))))

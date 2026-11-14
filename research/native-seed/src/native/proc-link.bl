@@ -1,0 +1,302 @@
+; Actual source modules -> checked native actor units. Pure proc planners and
+; canonical namespace staging own declarations; this linker selects immutable
+; bodies and primitive contracts, never actor/bus/flow policy.
+(ns native.proc-link
+ (:require [js.build :as build] [js.actor :as actor] [reader-node :as rn]
+           [native.proc :as proc] [native.scheme :as scheme] [native.eval :as ev]
+           [native.artifact :as artifact] [system.ir :as ir] [anf]
+           [proc.bus :as bus] [proc.reg :as reg] [clojure.string :as string] [bl.json :as json]))
+
+(def kernel "native.kernel")
+(def helpers
+ {"proc.bus" {:path "priv/std/proc/bus.bl"
+               :sha256 "0f661669d8e1516a3e19f77e77d0cf75dd6b8af40495a18043f5a8747e79c62a"}
+  "proc.flow" {:path "priv/std/proc/flow.bl"
+                :sha256 "400f70bac9c937bd63d0e133808603fc6960e3b023c8f0e69c6011b0e97f2d12"}
+  "proc.reg" {:path "priv/std/proc/reg.bl"
+               :sha256 "2c72188b1e420d1c06edf43c0287c2d966039fb9418b38c60595ab4c2e26a5f1"}})
+(defn digest [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn source-identity [path] {:path path :sha256 (digest (File/read! path))})
+(defn qname [ns name] (str ns "/" name))
+(defn walk [root]
+ (loop [todo (list root) out (list)]
+  (if (erlang/== (list) todo) (lists/reverse out)
+   (let [node (erlang/hd todo)]
+    (recur (erlang/++ (anf/executable-children node) (erlang/tl todo)) (cons node out))))))
+(defn logical-name [name]
+ (if (String/ends_with? name "__bl_v") (subs name 0 (- (count name) 6)) name))
+(defn registration? [form ns]
+ ; The exact hash-qualified canonical registration belongs to compilation's
+ ; explicit vocabulary. Nothing else at top level is silently discarded.
+ (or (and (= ns "proc.bus") (= '(extend-clause! :bus bus-clause) (proc/source-data form)))
+     (and (= ns "proc.reg") (= '(extend-clause! :registry registry-clause) (proc/source-data form)))))
+(defn expansion [forms ns path]
+ (proc/runtime-forms (vec (remove #(registration? % ns) forms)) ns path
+  {:vocabulary {:bus bus/bus-clause :registry reg/registry-clause}}))
+(defn prepare [path fallback]
+ (let [prepared (build/prepare-ns path
+                  {:fallback-ns fallback :expand-top expansion
+                   :after-staging (fn [unit]
+                    ; Compile-time helpers stay available for expansion, while
+                    ; runtime references select this source unit's BL bodies.
+                    (doseq [definition (:defs unit) :when (:name definition)]
+                     (BeamLisp.Env/put_link (:ns unit) (:name definition) (tuple :erlang {} nil))))})
+       compiled (build/compile-prepared prepared {:check-node identity})]
+  (assoc compiled :source (:source prepared)
+   :module (BeamLisp.Link/module_for (:ns prepared))
+   :base-module (BeamLisp.Emit/base_module_for (:ns prepared)))))
+(defn wire-pattern [pattern admitted?]
+ (let [vector? (and (= :pstruct (:pop pattern)) (= :Elixir.BeamLisp.Vector (:mod pattern)))
+       tuple (if vector? (second (first (:fields pattern))) pattern)
+       elements (:elems tuple) first-pattern (first elements)
+       tag (when (= :plit (:pop first-pattern)) (:val first-pattern))
+       shape (get {:DOWN [:down 5] :EXIT [:exit 3]} tag)]
+  (if (and (= :ptuple (:pop tuple)) shape)
+   (do
+    (when-not (and admitted? (= (second shape) (count elements)))
+     (throw (ex-info "native proc link: raw process envelope needs an admitted protocol projection"
+                     {:tag tag :elements (count elements) :admitted admitted?})))
+    (let [tuple (assoc tuple :elems (assoc (vec elements) 0 (assoc first-pattern :val (first shape))))]
+     (if vector? (assoc pattern :fields [[(first (first (:fields pattern))) tuple]])
+      {:pop :pstruct :mod :Elixir.BeamLisp.Vector :fields [[:items tuple]]}))) pattern)))
+(defn project-protocol [unit]
+ (let [admitted? (or (contains? helpers (:ns unit))
+                    (some (fn [node]
+                      (and (= :remote (:op node))
+                       (or (and (= :erlang (:mod node)) (contains? #{:monitor :process_flag} (:fun node)))
+                           (and (= :Elixir.Process (:mod node)) (= :flag (:fun node))))))
+                     (BeamLisp.CompilerData/eager_mapcat (fn [definition] (walk (:node definition))) (:defs unit))))
+       rewrite (fn [node]
+        (if (= :recv (:op node))
+         (assoc node :clauses (mapv (fn [clause]
+            (update clause :pats (fn [patterns] (mapv #(wire-pattern % admitted?) patterns)))) (:clauses node))) node))]
+  (assoc unit :defs (mapv #(update % :node (fn [node] (ir/rewrite rewrite node))) (:defs unit))
+   :wire-protocol (if admitted? :erlang-process-envelope-to-actor-vector :canonical-actor-only))))
+(defn named-definitions [units]
+ (vec (mapcat (fn [unit]
+  (map (fn [definition]
+    (assoc definition :ns (:ns unit) :path (:path unit) :requires (:requires unit)
+     :external? (boolean (:native-external? unit)) :source-sha256 (:source-sha256 unit)
+     :shape (ir/function-shape (:node definition)))) (:defs unit))) units)))
+(defn body-table [definitions]
+ (reduce (fn [table definition]
+  (if-let [name (:name definition)]
+   (let [key (qname (:ns definition) name)]
+    (when (contains? table key)
+     (throw (ex-info "native proc link: duplicate body identity" {:binding key})))
+    (assoc table key definition)) table)) {} definitions))
+(defn target-parts [target]
+ (let [parts (string/split target #"/")]
+  (when-not (= 2 (count parts))
+   (throw (ex-info "native proc link: malformed qualified target" {:target target}))) parts))
+(defn referred-ns [namespace name bodies]
+ (loop [ns namespace seen #{}]
+  (if (or (contains? seen ns) (contains? bodies (qname ns name))) ns
+   (if-let [owner (BeamLisp.Env/refer_source ns name)]
+    (recur owner (conj seen ns)) ns))))
+(defn selected-global [definition node bodies aliases]
+ (let [requires (into {} (map (fn [[ns alias]] [alias ns]) (:requires definition)))
+       qualified (string/split (:name node) #"/")
+       [raw-ns name] (if (= 2 (count qualified)) qualified [(:ns node) (:name node)])
+       exact? (= :exact (:lookup node))
+       ns (referred-ns (if exact? raw-ns (get requires raw-ns raw-ns)) name bodies)
+       key (qname ns name) core-key (qname "core" name)
+       own (get bodies key)
+       _ (when (and (or (= ns "proc") (String/starts_with? ns "proc."))
+                    (not (contains? helpers ns)) (nil? own) (nil? (get aliases key)))
+           (throw (ex-info "native proc link: this proc runtime bundle is not admitted"
+                           {:namespace ns :name name :caller (:path definition)})))
+       target (cond
+                (get aliases key) (get aliases key)
+                own key
+                (and (not exact?) (contains? bodies (qname kernel name))) (qname kernel name)
+                (and (not exact?) (get aliases core-key)) (get aliases core-key)
+                (and (not exact?) (contains? bodies core-key)) core-key
+                :else nil)]
+  (if target
+   (let [body (get bodies target)]
+    (when-not body (throw (ex-info "native proc link: alias target has no admitted body" {:target target})))
+    (when (and (:private? body) (not= (:ns definition) (:ns body)))
+     (throw (ex-info "native proc link: private source body crossed a namespace boundary" {:target target :caller (:ns definition)})))
+    {:kind :body :target target :body body :external? (:external? body)
+     :body-source {:path (:path body) :sha256 (:source-sha256 body)}})
+   (let [seed-ns (cond
+                  (and (contains? #{"core" "cpp"} ns) (BeamLisp.Env/bound? ns name)) ns
+                  (and (not exact?) (BeamLisp.Env/bound? "core" name)) "core"
+                  :else nil)]
+    (if seed-ns {:kind :sdk-seed :target (qname seed-ns name) :namespace seed-ns :name name}
+     (throw (ex-info "native proc link: unresolved source global" {:namespace ns :name name :caller (:path definition) :ann (:ann node)})))))))
+(defn check-arity! [selection arity packed?]
+ (when (some? arity)
+  (let [shape (get-in selection [:body :shape])
+        valid (case (:kind selection)
+                :sdk-seed (BeamLisp.Ns.Rt/invocable? (BeamLisp.Env/fetch_exact! (:namespace selection) (:name selection)) arity)
+                :body (if packed? (= arity (when (:variadic-min shape) (inc (:variadic-min shape))))
+                        (ir/accepts-arity? shape arity))
+                false)]
+   (when-not valid
+    (throw (ex-info "native proc link: actual callable arity contract refused"
+                    {:target (:target selection) :arity arity :packed-rest packed? :shape shape}))))))
+(defn derived-core-remotes [aliases]
+ (reduce (fn [out [key target]]
+  (let [[ns name] (target-parts key) found (when (= ns "core") (BeamLisp.Env/link "core" name))]
+   (if (and (erlang/is_tuple found) (= :ok (elem found 0)))
+    (let [link (elem found 1) module (elem link 0) fixed (elem link 1) variadic (elem link 2)
+          out (reduce (fn [out [arity function]] (assoc out [module function arity] target)) out fixed)]
+     (if (and variadic (erlang/is_tuple variadic))
+      (assoc out [module (elem variadic 1) (inc (elem variadic 0))] target) out)) out))) {} aliases))
+(defn selected-remote [definition node bodies by-module remote-aliases leaves]
+ (let [module (:mod node) function (erlang/atom_to_binary (:fun node)) arity (count (:args node))
+       key (str (erlang/atom_to_binary module) "/" function "/" arity)
+       alias (get remote-aliases [module (:fun node) arity])
+       namespace (get by-module module) logical (logical-name function)]
+  (when (or (= module :ets)
+            (contains? #{"erlang/send_after/3" "erlang/send_after/4" "erlang/start_timer/3"
+                         "erlang/cancel_timer/1" "erlang/cancel_timer/2"
+                         "Elixir.Process/send_after/3" "Elixir.Process/cancel_timer/1"} key))
+   (throw (ex-info "native proc link: process timer/table policy has no admitted adapter"
+                   {:target key :caller (:path definition)})))
+  (when (and (= alias (qname kernel "native-send!"))
+             (= :lit (:op (first (:args node))))
+             (or (keyword? (:val (first (:args node)))) (string? (:val (first (:args node))))))
+   (throw (ex-info "native proc link: raw Erlang name-address sends are not admitted"
+                   {:target key :address (:val (first (:args node))) :caller (:path definition)})))
+  (cond
+   (= module :host)
+    (if (contains? actor/host-names function) {:kind :actor-host :target key :source (str "h-" function)}
+     (throw (ex-info "native proc link: unknown actor host leaf" {:target key})))
+   alias (let [body (get bodies alias) selection {:kind :body :target alias :body body}]
+          (when-not body (throw (ex-info "native proc link: remote alias body absent" {:target alias})))
+          (check-arity! selection arity false)
+          (assoc selection :external? (:external? body) :body-source {:path (:path body) :sha256 (:source-sha256 body)}))
+   (and namespace (contains? bodies (qname namespace logical)))
+    (let [body (get bodies (qname namespace logical))
+          selection {:kind :body :target (qname namespace logical) :body body
+                     :packed? (not= function logical) :remote-key key}]
+     (when (and (:private? body) (not= (:ns definition) namespace))
+      (throw (ex-info "native proc link: private remote body refused" {:target (:target selection)})))
+     (check-arity! selection arity (:packed? selection))
+     (assoc selection :external? (:external? body) :body-source {:path (:path body) :sha256 (:source-sha256 body)}))
+   (contains? leaves key) {:kind :leaf :target key :source (str "(native-remote " (scheme/text key) ")")}
+   :else (throw (ex-info "native proc link: unsupported source host dependency"
+                  {:target key :caller (:path definition) :ann (:ann node)})))))
+(defn inspect [definition context]
+ (let [{:keys [bodies aliases by-module remote-aliases leaves]} context]
+  (loop [todo (walk (:node definition)) out []]
+   (if (erlang/== (list) todo) out
+    (let [node (erlang/hd todo) selection (case (:op node)
+                     :global (selected-global definition node bodies aliases)
+                     :remote (selected-remote definition node bodies by-module remote-aliases leaves)
+                     :binding (throw (ex-info "native proc link: Source custody is absent" {:reference (:reference node)}))
+                     nil)
+         call (ir/call-site node)
+         callee (:callee call)]
+    (when (and callee (= :global (:op callee)))
+     (check-arity! (selected-global definition callee bodies aliases) (:arity call) false))
+     (recur (erlang/tl todo) (if selection (conj out (dissoc selection :body :source)) out)))))))
+(defn reachable [roots context]
+ (loop [todo (BeamLisp.CompilerData/eager_to_list roots) seen #{} out [] edges []]
+  (if (erlang/== (list) todo) {:definitions out :edges edges}
+   (let [definition (erlang/hd todo) key (qname (:ns definition) (:name definition))]
+    (if (contains? seen key) (recur (erlang/tl todo) seen out edges)
+     (let [references (inspect definition context)
+           dependencies (BeamLisp.CompilerData/eager_map
+                         (fn [reference] (get (:bodies context) (:target reference)))
+                         (BeamLisp.CompilerData/eager_filter
+                          (fn [reference] (and (= :body (:kind reference)) (not (:external? reference)))) references))]
+      (recur (erlang/++ (erlang/tl todo) dependencies) (conj seen key) (conj out definition)
+       (into edges (map #(assoc % :caller key) references)))))))))
+(defn value-source [selection]
+ (let [[ns name] (target-parts (:target selection))]
+  (str "(native-global-exact " (scheme/text ns) " " (scheme/text name) ")")))
+(defn options-for [definition context]
+ (let [base (ev/context (:ns definition))]
+  (assoc base :runtime-namespace kernel :namespace-qualified? (not= kernel (:ns definition))
+   :receive-source (value-source {:target (qname kernel "rt-receive")})
+   :global-resolver (fn [node] (value-source (selected-global definition node (:bodies context) (:aliases context))))
+   :remote-resolver (fn [node]
+    (let [selection (selected-remote definition node (:bodies context) (:by-module context)
+                     (:remote-aliases context) (:leaves context))]
+     (cond
+      (:source selection) (:source selection)
+      (:packed? selection)
+       (str "(lambda arguments (native-linked-packed-call " (value-source selection) " arguments))")
+      :else (str "(lambda arguments (bl-invoke " (value-source selection) " arguments))")))))))
+(defn emit-definition [definition context]
+ (let [options (options-for definition context) ns (:ns definition) name (:name definition)
+       binding (scheme/ident (if (= ns kernel) name (qname ns name))) shape (:shape definition)]
+  (str (scheme/emit-definition definition options)
+   "(native-register! " (scheme/text ns) " " (scheme/text name) " " binding ")\n"
+   "(native-intern " (scheme/text ns) " " (scheme/text name) " " binding ")\n"
+   (when shape
+    (str "(native-register-arities! " (scheme/text ns) " " (scheme/text name) " "
+      (scheme/literal (vec (sort (:arities shape)))) " " (scheme/literal (:variadic-min shape)) ")\n")))))
+(defn module-source [unit]
+ (str "(native-declare-ns " (scheme/text (:ns unit)) ")\n"
+  (string/join "" (map (fn [module]
+   (str "(set! native-module-names (bl-assoc native-module-names "
+     (scheme/text (erlang/atom_to_binary module)) " " (scheme/text (:ns unit)) "))\n"))
+   [(:module unit) (:base-module unit)]))))
+(defn build-project [request]
+ (BeamLisp.Env/isolated (fn []
+  (let [closure (artifact/read-closure (:closure-manifest request))
+        pin (json/decode (File/read! (:sdk-pin request)))
+        captured-pin (if (string? (:sdk-pin closure)) (json/decode (:sdk-pin closure)) (:sdk-pin closure))
+        _ (when-not (= captured-pin pin)
+            (throw (ex-info "native proc link: compiler closure SDK pin mismatch" {})))
+        sdk-descriptor (File/read! (str (get pin "sdk") "/artifact.json"))
+        _ (when-not (= (digest sdk-descriptor) (get pin "descriptor_sha256"))
+            (throw (ex-info "native proc link: qualified SDK descriptor changed" {})))
+        _ (doseq [[ns spec] helpers]
+            (when-not (= (:sha256 spec) (digest (File/read! (:path spec))))
+             (throw (ex-info "native proc link: admitted helper source changed" {:namespace ns :path (:path spec)}))))
+        helper-units (mapv (fn [ns] (project-protocol (prepare (:path (get helpers ns)) ns))) ["proc.bus" "proc.flow" "proc.reg"])
+        runtime-unit (project-protocol (prepare (:runtime request) kernel))
+        bridge-unit (project-protocol (prepare (:bridges request) kernel))
+        app-unit (project-protocol (prepare (:application request) kernel))
+        own-units (vec (concat [runtime-unit bridge-unit] helper-units [app-unit]))
+        own-namespaces (set (map :ns own-units))
+        prelude-units (vec (map #(assoc % :native-external? true)
+                             (remove #(contains? own-namespaces (:ns %))
+                              (map #(get (:units closure) %) (:order closure)))))
+        all (named-definitions (concat prelude-units own-units))
+        _ (doseq [definition (named-definitions own-units) :when (nil? (:name definition))]
+            (throw (ex-info "native proc link: executable top-level actor initializer has no owner"
+                            {:path (:path definition) :namespace (:ns definition)})))
+        bodies (body-table all)
+        links (BeamLisp.Compiler/read_data (File/read! (:links request)))
+        aliases (:global-bindings links)
+        remote-aliases (merge (derived-core-remotes aliases) (:remote-bindings links))
+        by-module (assoc (into {} (mapcat (fn [unit] [[(:module unit) (:ns unit)] [(:base-module unit) (:ns unit)]])
+                             (concat prelude-units own-units)))
+                    :Elixir.BeamLisp.CompilerData "host.compiler-data"
+                    :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta")
+        leaves (set (get (json/decode (File/read! (:leaves request))) "registered_leaves"))
+        context {:bodies bodies :aliases aliases :remote-aliases remote-aliases :by-module by-module :leaves leaves}
+        own-paths (set (map :path own-units))
+        roots (named-definitions [runtime-unit bridge-unit app-unit])
+        graph (reachable roots context)
+        emitted (vec (filter #(contains? own-paths (:path %)) (:definitions graph)))
+        emitted (vec (concat (filter #(= :fn (:kind %)) emitted) (remove #(= :fn (:kind %)) emitted)))
+        _ (when-not (contains? bodies (qname (:ns app-unit) "main"))
+            (throw (ex-info "native proc link: application has no main" {:path (:application request)})))
+        output (str (File/read! (:prelude request)) "\n"
+                  (File/read! (:host-link request)) "\n"
+                  (string/join "" (map module-source own-units))
+                  (string/join "" (map #(emit-definition % context) emitted))
+                  "\n(bl-invoke " (value-source {:target (qname kernel "bl-main")})
+                  " (list " (value-source {:target (qname (:ns app-unit) "main")}) "))\n"
+                  "(if (not (null? seed-errors)) (error \"native actor errors\"))\n")]
+   {:program output :definitions emitted :entry {:namespace (:ns app-unit) :name "main" :actor-runtime true}
+    :manifest {:schema "bl.native.proc-link" :version 1 :sdk-pin pin
+               :closure-manifest (source-identity (:closure-manifest request))
+               :prelude (source-identity (:prelude request)) :links (source-identity (:links request))
+               :host-link (source-identity (:host-link request))
+               :units (mapv #(select-keys % [:ns :path :source-sha256 :module :base-module :wire-protocol]) own-units)
+               :compile-time-registrations [{:namespace "proc.bus" :form '(extend-clause! :bus bus-clause)
+                                             :owner :explicit-target-vocabulary}
+                                            {:namespace "proc.reg" :form '(extend-clause! :registry registry-clause)
+                                             :owner :explicit-target-vocabulary}]
+               :runtime-definitions (count (:defs runtime-unit))
+               :emitted-bindings (mapv #(qname (:ns %) (:name %)) emitted)
+               :references (:edges graph) :source-interpreter false}}))))
