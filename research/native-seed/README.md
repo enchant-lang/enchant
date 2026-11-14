@@ -20,7 +20,9 @@ revision; do not silently replace the pinned SDK.
 
 The executable fixture covers selective receive, clause/message order, guards,
 retained unmatched messages, parking and wakeup, deadlines, exact large
-integers, closures, monitors, crash classes, dead targets and distinct PIDs.
+integers, closures, map equality/keys, operand order, monitors, language exits,
+dead targets and distinct PIDs. Its 26 shared checks also run against the
+production JavaScript actor backend; native cleanup adds a 27th check.
 Its scheduler also checks cleanup and actual bounded turns. Time is virtual.
 Maps are association maps; floats, decimals, generic structs, general exception
 handlers, native I/O, links, supervision, ETS semantics and Source custody are
@@ -28,3 +30,14 @@ outside this seed. Unsupported ANF and host calls fail during emission.
 
 `native-seed.bl.org` maps the implementation, the `proc` host boundaries,
 Jolt's relevant ideas and the staged native self-hosting gates.
+
+Render its checked cells and source cards with the installed dossier kit:
+
+```sh
+research/native-seed/run \
+  -p ~/projects/enchanted-skills/bl-org-dossier/kit \
+  -p ~/projects/enchanted-skills/codebase-review/kit \
+  run research/native-seed/review-build.bl
+node research/native-seed/browser-check.mjs
+research/native-seed/run realm stop
+```
