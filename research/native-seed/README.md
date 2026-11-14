@@ -1,6 +1,19 @@
 # A native seed for BL
 
-[Visual review](evidence/native-seed.html) · [Qualification evidence](evidence/qualification.json)
+[Live development review](https://work.tailcb5318.ts.net:18138/) · [Snapshot](evidence/native-seed.html) · [Qualification evidence](evidence/qualification.json)
+
+The managed tailnet service is `native-bl-dev`. It reads `native-seed.bl.org`
+on every request; document edits refresh automatically and authenticated review
+comments save back to that file. Host code changes need a restart:
+
+```sh
+WORK_BL="$PWD/bin/bl" work restart native-bl-dev
+WORK_BL="$PWD/bin/bl" work stop native-bl-dev
+```
+
+The service retains the pinned SDK, listens on loopback behind the tailnet
+publisher, and has a 2 GiB memory limit with swap disabled. Its owner is the
+requested development review; stop the service when that review is retired.
 
 The emitter is BL. It consumes the existing compiler's bl-ANF, emits Scheme,
 and imports actor definitions directly from `priv/lib/js/actor/runtime.bl`.
