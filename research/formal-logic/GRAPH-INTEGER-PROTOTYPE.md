@@ -18,7 +18,10 @@ It cannot supply normalized atoms, arithmetic premises, trusted inventories or
 checked flags. The checker derives every row again, checks both split branches
 and revisits shared proof nodes under each assignment context. Integer strict
 inequalities use the discrete integer complement rule. No native solver or
-oracle is required.
+oracle is required. Unlike finite word exhaustion, this rule system does not
+enumerate variable values: a valid linear refutation excludes every mathematical
+integer assignment. The coefficient/representation limits constrain the checker
+input and its work, not the logical range of those integer variables.
 
 The initial profile supports Boolean connectives and affine integer expressions
 with multiplication by constants. It deliberately excludes integer conditionals,
