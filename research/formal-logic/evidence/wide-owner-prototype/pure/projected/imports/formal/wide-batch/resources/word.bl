@@ -1,0 +1,104 @@
+(ns formal.wide-batch.resources.word (:require [formal.data-graph :as graph]))
+
+;; Pure resource forecasts. Plans never establish checked values or execution custody.
+(def profile :bl/word-preflight-preview-v1)
+(def defaults {:word-bits 4096 :intermediate-bits 8192 :work-units 16777216})
+(def ^:private binary #{:bv-add :bv-sub :bv-mul :bv-and :bv-or :bv-xor :bv-shl :bv-lshr :bv-ashr})
+(def ^:private unary #{:bv-not :bv-neg})
+(def ^:private comparisons #{:bv-ult :bv-ule :bv-slt :bv-sle :eq :distinct})
+(def ^:private extensions #{:bv-zero-extend :bv-sign-extend})
+(def operations (set (concat binary unary comparisons extensions [:bv-concat :bv-extract])))
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.resources.word: " why) {:profile profile}))))
+(defn- word? [sort]
+ (and (vector? sort) (= 2 (count sort)) (= :bv (first sort)) (int? (second sort)) (> (second sort) 0)))
+(defn limits [overrides]
+ (require! (and (map? overrides) (every? #(contains? defaults %) (keys overrides))) "unknown limit key")
+ (let [policy (merge defaults overrides)]
+  (require! (every? #(and (int? %) (>= % 0)) (vals policy)) "nonnegative integer limits required")
+  (graph/encode policy)
+  policy))
+
+(defn plan
+ "Prospective size/charge decision using declared widths only. Constructs no
+  power, mask, word result or coordinate; executes no primitive or callback.
+  Charges are a named policy convention, not a runtime/allocation theorem.
+  This function does not admit a graph, normalize values or reserve a request
+  budget. The mathematical word-envelope model is a separate obligation."
+ [op result-sort operand-sorts data overrides]
+ (require! (and (keyword? op) (vector? operand-sorts) (every? word? operand-sorts)
+                (or (= [:bool] result-sort) (word? result-sort))) "well-formed word operand and result sorts required")
+ (let [policy (limits overrides)
+       reference (graph/of {:profile profile :operation op :result-sort result-sort
+                            :operand-sorts operand-sorts :data data :limits policy})
+       supported (or (contains? binary op) (contains? unary op) (contains? comparisons op)
+                     (contains? extensions op) (contains? #{:bv-concat :bv-extract} op))
+       widths (mapv second operand-sorts)
+       base {:profile profile :operation op :request-reference reference :limits policy
+             :argument-widths widths :primitive-execution :not-run :compiler-proof-authority false}]
+  (if-not supported (assoc base :status :incomplete :forecast-execution :not-run :reason {:kind :resource-policy-unsupported})
+   (let [arity (if (= :distinct op) (count operand-sorts) (if (or (contains? unary op) (contains? extensions op) (= :bv-extract op)) 1 2))]
+    (when (= :distinct op) (require! (>= arity 2) "distinct requires two word operands"))
+    (require! (= arity (count operand-sorts)) "wrong arity")
+    (let [a (first widths) b (or (second widths) 0)
+          output (if (= [:bool] result-sort) 0 (second result-sort))]
+     (cond
+      (or (contains? binary op) (contains? comparisons op))
+       (do (require! (every? #(= (first operand-sorts) %) operand-sorts) "same-width operands required")
+           (require! (= result-sort (if (contains? comparisons op) [:bool] (first operand-sorts))) "wrong result sort")
+           (require! (nil? data) "unexpected operation data"))
+      (contains? unary op)
+       (do (require! (= result-sort (first operand-sorts)) "wrong result sort")
+           (require! (nil? data) "unexpected operation data"))
+      (= :bv-concat op)
+       (do (require! (= result-sort [:bv (+ a b)]) "wrong concatenation width")
+           (require! (nil? data) "unexpected operation data"))
+      (= :bv-extract op)
+       (do (require! (and (sequential? data) (= 2 (count data)) (every? int? data)
+                          (<= 0 (second data) (first data)) (< (first data) a)) "invalid extraction bounds")
+           (require! (= result-sort [:bv (inc (- (first data) (second data)))]) "wrong extraction width"))
+      :else
+       (do (require! (and (int? data) (>= data 0)) "nonnegative extension required")
+           (require! (= result-sort [:bv (+ a data)]) "wrong extension width")))
+     (let [largest (max a b output)]
+      (if (> largest (:word-bits policy))
+       (assoc base :status :incomplete :forecast-execution :not-run
+                   :reason {:kind :resource-limit :metric :word-bits
+                            :required largest :limit (:word-bits policy)})
+       (let [arithmetic (cond (= op :bv-mul) (* 2 a) (= op :bv-shl) (* 2 a)
+                            (= op :bv-add) (inc a) (= op :bv-not) (inc a)
+                            (= op :bv-concat) (+ a b) :else largest)
+           ;; Existing wrapping builds 1 << output before subtracting one.
+           ;; Signed views also build 1 << input-width. Count those temporaries.
+           temporary (max arithmetic (inc largest))
+           work (cond (= op :bv-mul) (+ (* a a) (* 8 (inc temporary)))
+                      (= op :distinct) (* 8 (count widths) (count widths) (inc temporary))
+                      :else (* 8 (+ a b output temporary 1)))
+           forecast {:result-bits output :intermediate-bits temporary :work-units work}
+           checks [[:intermediate-bits temporary] [:work-units work]]
+           refused (first (filter (fn [[metric amount]] (> amount (get policy metric))) checks))]
+      (assoc base :forecast forecast :forecast-execution :run :status (if refused :incomplete :ready)
+                  :reason (when refused {:kind :resource-limit :metric (first refused)
+                                         :required (second refused) :limit (get policy (first refused))}))))))))))
+
+(defn value-plan
+ "Reserve a declared word's existing input and SDK normalization/checking work.
+  No power, mask, shift or value normalization is executed here. The caller
+  must separately check the exact coordinate shape and declared sort."
+ [sort bits overrides]
+ (require! (and (word? sort) (int? bits) (>= bits 0)) "positive-width word and nonnegative integer required")
+ (let [policy (limits overrides) width (second sort)
+       base {:profile profile :operation :word-value :limits policy :width width
+             :request-reference (graph/of {:profile profile :operation :word-value :sort sort :bits bits :limits policy})
+             :primitive-execution :not-run :compiler-proof-authority false}]
+  (if (> width (:word-bits policy))
+   (assoc base :status :incomplete :forecast-execution :not-run
+               :reason {:kind :resource-limit :metric :word-bits :required width :limit (:word-bits policy)})
+   (let [input-upper-bits (* 8 (erlang/external_size bits))
+         forecast {:result-bits width :intermediate-bits (inc width)
+                   :work-units (* 8 (+ width input-upper-bits 1))}
+         refused (first (filter (fn [[metric amount]] (> amount (get policy metric)))
+                          [[:intermediate-bits (:intermediate-bits forecast)] [:work-units (:work-units forecast)]]))]
+    (assoc base :forecast forecast :forecast-execution :run :status (if refused :incomplete :ready)
+                :reason (when refused {:kind :resource-limit :metric (first refused)
+                                      :required (second refused) :limit (get policy (first refused))}))))))

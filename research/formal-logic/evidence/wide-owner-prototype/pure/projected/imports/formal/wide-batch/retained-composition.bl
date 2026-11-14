@@ -1,0 +1,49 @@
+(ns formal.wide-batch.retained-composition
+ (:require [formal.wide-batch.retained-question :as retained] [formal.data-graph :as graph]
+           [formal.wide-batch.question-graph :as qg]))
+
+;; Portable declared provenance. This profile never contains a live owner,
+;; callback, scope forest or native ID, and never authenticates execution.
+(def profile :bl/retained-question-composition-v1)
+(def ^:private fields #{:formal/retained-composition :profile :caller :assertions-graph :generation :revision})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.retained-composition: " why) {:kind :retained-composition}))))
+(defn- plain-map? [value]
+ (and (= :map (rt/kind-kind value)) (or (nil? (meta value)) (= {} (meta value)))))
+(defn- open [composition]
+ (require! (and (plain-map? composition) (= fields (set (keys composition)))
+                (int? (:formal/retained-composition composition)) (= 1 (:formal/retained-composition composition))
+                (= profile (:profile composition))
+                (every? #(and (int? %) (<= 0 %)) [(:generation composition) (:revision composition)]))
+           "closed declared composition with nonnegative integer context required")
+ (let [assertions (qg/field-graph (:caller composition) :assertions)]
+  (require! (and assertions (= "vector" (first (nth (:nodes assertions) (:root assertions)))))
+            "caller assertion vector required"))
+ ;; Encoding these nested flat graphs bounds the portable envelope; it does
+ ;; not decode or expand the term trees they describe.
+ (graph/encode composition)
+ {:composition composition
+  :question (retained/compose (:caller composition) (:assertions-graph composition) (:generation composition))})
+
+(defn prepare
+ "Record the declared inputs of retained composition, without owner authority.
+  Generation belongs to the existing question profile; revision is recorded
+  provenance. Neither is an authenticated historical execution guard."
+ [caller assertions-graph generation revision]
+ (:composition (open {:formal/retained-composition 1 :profile profile :caller caller
+                      :assertions-graph assertions-graph :generation generation :revision revision})))
+(defn check! [composition] (:composition (open composition)))
+(defn question
+ "Recompute the complete graph from declared provenance; never accept a cache."
+ [composition] (:question (open composition)))
+(defn require-subject!
+ "Require the declared composition to rebuild these exact complete bytes.
+  This checks a data connection, not who retained or executed the assumptions."
+ [composition subject]
+ (let [opened (open composition)]
+  ;; Check the wrapper too, rather than trusting a supplied :graph field.
+  (qg/field-graph subject :assertions)
+  (require! (= (graph/bytes (:graph (:question opened))) (graph/bytes (:graph subject)))
+            "declared composition differs from the complete request subject")
+  (:composition opened)))
+(defn reference [composition] (graph/of (check! composition)))
