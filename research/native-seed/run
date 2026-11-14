@@ -2,14 +2,16 @@
 set -euo pipefail
 prototype=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 root=$(CDPATH='' cd "$prototype/../.." && pwd -P)
-python3 - "$prototype/sdk-pin.json" "$root/.bl/sdks/current-sdk" <<'PY'
+pinned_sdk=$(python3 - "$prototype/sdk-pin.json" <<'PY'
 import hashlib,json,pathlib,sys
 p=json.loads(pathlib.Path(sys.argv[1]).read_text())
 b=(pathlib.Path(p['sdk'])/'artifact.json').read_bytes()
 assert hashlib.sha256(b).hexdigest()==p['descriptor_sha256'], 'SDK descriptor changed'
 assert json.loads(b)['source']==p['source'], 'SDK Source changed'
-assert pathlib.Path(sys.argv[2]).resolve()==pathlib.Path(p['sdk']), 'checkout SDK differs from prototype pin'
+assert (pathlib.Path(p['sdk'])/'bin/bl').is_file(), 'pinned SDK launcher missing'
+print(p['sdk'])
 PY
+)
 mkdir -p "$prototype/.runtime"
 if [[ -f "$prototype/.runtime/path" ]]; then
   runtime=$(cat "$prototype/.runtime/path")
@@ -17,13 +19,14 @@ else
   runtime=$(mktemp -d /tmp/bl-native-seed-XXXXXXXX)
   printf '%s\n' "$runtime" > "$prototype/.runtime/path"
 fi
-# Checkout transport retains one capped VM in this private runtime directory.
-# Stop it after a session with: research/native-seed/run realm stop
+# Snapshot qualification follows the repository sdk-preflight workflow: use
+# the exact retained artifact, independently of mutable engine/preparation edits.
+# Each bounded snapshot command exits its VM; it never prepares another SDK.
 systemd-run --user --quiet --collect --wait --pipe \
   --working-directory="$root" --property=MemoryMax=3G --property=MemorySwapMax=0 \
   --property=RuntimeMaxSec=240 --property=KillMode=control-group \
   --setenv=XDG_RUNTIME_DIR="$runtime" \
-  "$root/bin/bl" -p "$prototype/src" "$@"
+  "$pinned_sdk/bin/bl" --cold -p "$prototype/src" "$@"
 if [[ "${1:-}" = realm && "${2:-}" = stop ]]; then
   rm -rf -- "$runtime"
   rm -f -- "$prototype/.runtime/path"
