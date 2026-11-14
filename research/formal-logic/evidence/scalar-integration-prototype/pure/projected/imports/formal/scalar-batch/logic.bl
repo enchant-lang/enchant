@@ -1,0 +1,427 @@
+(ns formal.scalar-batch.logic
+ (:require [formal.term :as t] [formal.value :as v] [formal.query :as q]
+           [formal.scalar-batch.backend :as backend] [formal.scalar-batch.evaluate :as replay] [oracle]
+           [formal.question-graph :as question-graph] [formal.data-graph :as graph]
+           [formal.answer :as answer] [formal.identity :as identity]
+           [formal.scalar-batch.request :as request] [formal.scalar-batch.request-answer :as request-answer]
+           [formal.scalar-batch.request-runtime :as request-runtime] [formal.scalar-batch.point-profile :as point-profile]
+           [formal.scalar-batch.request-evidence :as request-evidence]))
+
+(def numeric-word-policy point-profile/numeric-word)
+(def numeric-word-text-policy point-profile/numeric-word-text)
+(defn checking-policy
+ "Inspect one closed language checking policy, separately from native support."
+ [overrides] (point-profile/describe overrides))
+
+(defn prepare-request
+ "A portable original subject plus a separate normalized policy and adapter."
+ ([subject] (request/prepare subject))
+ ([subject options] (request/prepare subject options)))
+(defn answer-request [original assignments] (request-answer/supply original assignments))
+(defn request-from-graph
+ ([data] (request/from-graph data))
+ ([data options] (request/from-graph data options)))
+(defn recheck-request [original response] (request-answer/recheck original response))
+(defn execute-request [original] (request-runtime/execute original))
+(defn compare-request [original] (request-runtime/compare original))
+(defn propose-evidence [original evidence] (request-evidence/propose original evidence))
+(defn recheck-evidence
+ ([original evidence] (request-evidence/recheck original evidence))
+ ([original evidence options] (request-evidence/recheck original evidence options)))
+(defn execute-evidence
+ ([original] (request-runtime/execute-evidence original))
+ ([original options] (request-runtime/execute-evidence original options)))
+(defn compare-evidence
+ ([original] (request-runtime/compare-evidence original))
+ ([original options] (request-runtime/compare-evidence original options)))
+(defn with-evidence-handler
+ ([handler action] (request-runtime/with-evidence-handler handler action))
+ ([handler dependencies action] (request-runtime/with-evidence-handler handler dependencies action)))
+(defn with-context-request
+ "Freeze a live native context into a portable complete request and a local
+  expiring execution callback. Saved native history remains recorded data."
+ ([session caller body] (request-runtime/with-context-request session caller body))
+ ([session caller options body] (request-runtime/with-context-request session caller options body)))
+(defn with-request-handler
+ ([handler action] (request-runtime/with-handler handler action))
+ ([handler dependencies action] (request-runtime/with-handler handler dependencies action)))
+
+(defn- observations [problem]
+ (let [variables (t/variables (q/roots problem))
+       watched (vec (distinct (mapcat (fn [[_ item]] (v/terms item)) (:observe problem))))]
+  {:variables variables :watched watched
+   :rows (vec (concat (mapv (fn [variable] [(str "var/" (:data variable)) variable]) variables)
+               (mapv (fn [i] [(str "watch/" i) (nth watched i)]) (range (count watched)))))}))
+
+(defn- replay-and-decode [problem rows reply assertions]
+ (let [values (:values reply)
+       assignments (into {} (map (fn [variable] [(:data variable) (get values (str "var/" (:data variable))
+                                                                      (replay/unavailable :missing-variable))]) (:variables rows)))
+       watched (into {} (map (fn [i] [(nth (:watched rows) i)
+                                      (get values (str "watch/" i) (replay/unavailable :missing-observation))])
+                              (range (count (:watched rows)))))
+       resolved (into {} (map (fn [[term native]]
+                    (let [native (replay/checked-value (t/sort-of term) native)
+                          derived (when (replay/unavailable? native)
+                                    (if (contains? #{:bool :int :real :string :bv :enum :fp} (first (t/sort-of term)))
+                                     (replay/observation term assignments) (replay/unavailable :observation-replay-sort)))
+                          replayed? (and (replay/unavailable? native) (not (replay/unavailable? derived)))]
+                     [term {:value (if replayed? derived native)
+                            :source (cond replayed? :independent-replay (replay/unavailable? native) :unavailable :else :backend)
+                            :native-availability (if (replay/unavailable? native) :unavailable :concrete)
+                            :native-reason (when (replay/unavailable? native) (:formal/unavailable native))}])) watched))
+       resolver (fn [term] (if (contains? resolved term) (get-in resolved [term :value]) (replay/observation term assignments)))
+       witness (into {} (map (fn [[name descriptor]]
+                      [name (if (v/value? descriptor) (v/decode descriptor resolver) (resolver descriptor))]) (:observe problem)))
+       provenance (into {} (map (fn [[name descriptor]]
+                     [name {:terms (mapv (fn [term]
+                                    (assoc (select-keys (get resolved term) [:source :native-availability :native-reason])
+                                           :term (t/digest [term]))) (v/terms descriptor))}]) (:observe problem)))]
+  ;; Display fallback never participates in the assertion-validation decision.
+  ;; Native model status remains in base-result; every replayed field is labelled.
+  {:assignments assignments :witness witness :witness-provenance provenance
+   :observation-basis :native-model-and-independent-replay
+   :validation (replay/validate assertions assignments)}))
+
+(defn- base-result [problem reply]
+ {:id (:id problem) :profile (:profile problem) :profiles (:profiles problem)
+  :scope (:scope problem) :mode (:mode problem) :trusted false
+  :identity (:identity reply) :backend (:backend reply)
+  :solver-status (:status reply) :model-status (:model-status reply)
+  :why (:why reply) :error (:error reply)
+  :stats (:stats reply) :wall-us (:wall-us reply)
+  :assumptions (:assumptions problem) :origin (:origin problem)
+  :context (:context problem)
+  :core {:kind (:core-kind reply) :labels (:core reply)}
+  :certificate {:status :not-checked :kind :solver-answer}})
+
+(defn- solve-native-in
+ "Execute a complete question in its native context."
+ ([session problem context] (solve-native-in session problem context nil))
+ ([session problem context graph-cache-key]
+  (let [rows (observations problem)
+        background (:assertions problem)
+        preflight (when (and (= :prove (:mode problem)) (not= :allow (:vacuity problem)))
+                    (backend/scope! session background [] [] context))]
+   (if (and preflight (or (not (:ok preflight)) (not= :sat (:status preflight))))
+    (assoc (base-result problem preflight)
+      :verdict (cond (= :unsat (:status preflight)) :vacuous
+                     (= :unsupported (:status preflight)) :unsupported
+                     (= :unknown (:status preflight)) :unknown :else :error)
+      :phase :assumption-consistency :validation {:status :not-applicable})
+    (let [assertions (vec (concat background (when (:counterexample problem) [(:counterexample problem)])))
+          reply (backend/scope! session assertions [] (:rows rows) context)
+          decoded (when (= :sat (:status reply)) (replay-and-decode problem rows reply assertions))
+          validation (get decoded :validation {:status :not-applicable})
+          verdict (cond
+                    (= :unsupported (:status reply)) :unsupported
+                    (or (not (:ok reply)) (= :error (:status reply))) :error
+                    (= :unknown (:status reply)) :unknown
+                    (= :unsat (:status reply)) (if (= :prove (:mode problem)) :proved :unsat)
+                    (= :invalid (:status validation)) :invalid-model
+                    (= :sat (:status reply))
+                      (if (= :valid (:status validation))
+                        (if (= :prove (:mode problem)) :refuted :sat)
+                        :candidate)
+                    :else :error)]
+     (merge (base-result problem reply) decoded
+       {:verdict verdict :validation validation :phase :query
+        :cache-key (or graph-cache-key (q/cache-key problem (:identity session) {:solver-ms (:solver-ms session)} :model-and-core))
+        :nodes-imported (get-in reply [:stats :nodes])
+        :preflight (when preflight (select-keys preflight [:status :stats :wall-us]))}))))))
+
+(defn with-session
+ "Run questions through one owned context. An installed oracle handler gets a
+  logical context, and the native context is owned by the default path."
+ [opts f]
+ (if (oracle/query-intercepted?)
+  (let [session {:formal/logical-session 1 :borrower (erlang/self) :options opts
+                 :state (atom {:generation 0 :assertions [] :retired false})}]
+   (try (f session) (finally (swap! (:state session) assoc :retired true))))
+  (backend/with-session opts f)))
+
+(defn- live! [session]
+ (when (or (not= (:borrower session) (erlang/self))
+           (if (= 1 (:formal/logical-session session))
+            (:retired @(:state session)) (not (Process/alive? (:pid session)))))
+  (throw (ex-info "formal.logic: a live owned question context is required" {}))))
+
+(defn- snapshot! [session]
+ (live! session)
+ (if (= 1 (:formal/logical-session session))
+  (select-keys @(:state session) [:generation :assertions])
+  (backend/context session)))
+
+(defn context
+ "Read a live owned execution guard. Native guards include an owner PID and
+  must not be treated as portable mathematical data or proof authority."
+ [session] (snapshot! session))
+
+(defn load!
+ "Retain named assumptions in a context. Intercepted contexts retain BL data."
+ [session assertions]
+ (live! session)
+ (let [question (q/validate! (q/sat {:assumptions assertions}))
+       semantic? (some #(or (v/value? %) (and (map? %) (v/value? (:term %)))) assertions)
+       normalized (if semantic?
+                    (mapv (fn [assertion]
+                             (assoc assertion :origin {:source-origin (:origin assertion)
+                               :formal/retained-domain {:scope (:scope question) :profiles (:profiles question)}})) (:assertions question))
+                    (:assertions question))]
+  (if (= 1 (:formal/logical-session session))
+   (do (swap! (:state session) update :assertions #(vec (concat % normalized))) {:ok true})
+   (backend/load! session normalized))))
+
+(defn reset! [session]
+ (live! session)
+ (if (= 1 (:formal/logical-session session))
+  (do (swap! (:state session) (fn [state] {:generation (inc (:generation state)) :assertions [] :retired false}))
+      {:ok true :generation (:generation @(:state session))})
+  (backend/reset! session)))
+
+(defn- query-error [problem error]
+ (merge (if (map? problem) (select-keys problem [:id :mode :profile :profiles :scope :context]) {})
+  {:question problem :trusted false :compiler-proof-authority false
+   :certificate {:status :not-checked :kind :frontend-error} :validation {:status :not-applicable}
+   :verdict :error :phase :frontend :solver-status :not-run :error (ex-message error)}))
+
+(defn solve-in
+ "Check a complete portable question through the oracle effect. Retained
+  assumptions and their generation are visible to custom handlers."
+ [session problem]
+ (try
+  (live! session)
+  (let [problem (q/validate! problem)
+        snapshot (snapshot! session)
+        persistent (:assertions snapshot)
+        retained (mapv (fn [i]
+                    (let [a (nth persistent i)]
+                     (assoc a :label (str "context/" i "/" (:label a))))) (range (count persistent)))
+        domains (vec (distinct (keep #(get-in % [:origin :formal/retained-domain]) retained)))
+        effective (if (empty? persistent) problem
+                    (-> problem
+                        (update :assertions #(vec (concat retained %)))
+                        (update :assumptions #(vec (concat (map (fn [a] (select-keys a [:label :origin])) retained) %)))
+                        (assoc :context {:generation (:generation snapshot)
+                                         :assertions (mapv :label retained)
+                                         :digest (t/digest (mapv :term retained))})))
+        effective (if (empty? domains) effective
+                    (assoc effective
+                      :scope (v/join-scope (mapv #(v/make (t/bool true) {:scope %})
+                                            (cons (:scope effective) (map :scope domains))))
+                      :profiles (vec (distinct (concat (:profiles effective) (mapcat :profiles domains))))))]
+   (try
+    (let [result (oracle/ask-query effective
+     (fn []
+      (live! session)
+      (when-not (= snapshot (snapshot! session))
+       (throw (ex-info "formal.logic: question context changed before fallback execution" {})))
+      (let [result (if (= 1 (:formal/logical-session session))
+                     (backend/with-session (:options session) (fn [native] (solve-native-in native effective (backend/context native))))
+                     (solve-native-in session effective snapshot))]
+       (live! session)
+       (when-not (if (= 1 (:formal/logical-session session))
+                   (= snapshot (snapshot! session)) (backend/context-matches? session snapshot))
+        (throw (ex-info "formal.logic: question context changed during fallback execution" {})))
+       result)))]
+     ;; Every exported answer carries its exact question, including retained
+     ;; context. A consumer must not infer this binding from a display, cache
+     ;; key, selected observations or the caller's current request.
+     (assoc result :question effective))
+    (catch error (query-error effective error))))
+  (catch error (query-error problem error))))
+
+(defn run [opts problem]
+ (let [failure (try (q/validate! problem) nil (catch error (query-error problem error)))]
+  (if failure failure (with-session opts (fn [session] (solve-in session problem))))))
+(defn prove [opts claim options] (run opts (q/prove claim options)))
+(defn equivalent [opts left right options] (run opts (q/equivalent left right options)))
+
+(defn compare
+ "Both backends receive the same typed question and profile. Status agreement,
+  replay quality and proof authority remain distinct facts."
+ ([problem] (compare problem {}))
+ ([problem opts]
+  (let [z3 (run (assoc opts :backend :z3) problem)
+        oxiz (run (assoc opts :backend :oxiz) problem)
+        decisive? (fn [r] (contains? #{:sat :unsat} (:solver-status r)))]
+   {:id (:id problem) :profile (:profile problem) :scope (:scope problem)
+    :reference-engine :z3 :authority :none :compiler-proof-authority false :decision z3 :candidate oxiz
+    :status-agreement (and (decisive? z3) (decisive? oxiz) (= (:solver-status z3) (:solver-status oxiz)))
+    :disagreement (and (decisive? z3) (decisive? oxiz) (not= (:solver-status z3) (:solver-status oxiz)))
+    :candidate-replayed (= :valid (get-in oxiz [:validation :status]))
+    :promotion :disabled})))
+
+(defn- graph-error
+ ([context error] (graph-error context error {:scope :provided-fallback :status :not-invoked}))
+ ([context error execution]
+  (let [invoked? (not= :not-invoked (:status execution))
+        raw {:trusted false :compiler-proof-authority false :verdict :error
+             :phase (if invoked? :query :frontend) :solver-status (if invoked? :error :not-run)
+             :error (ex-message error)}]
+   (try (assoc (answer/bind-graph context raw) :execution execution)
+        (catch _ (assoc raw :question-graph context :binding :not-established :execution execution))))))
+(defn- retained-graph [context snapshot]
+ (let [persistent (:assertions snapshot)]
+  (if (empty? persistent) context
+   (let [retained (mapv (fn [i] (let [a (nth persistent i)]
+                                  (assoc a :label (str "context/" i "/" (:label a))))) (range (count persistent)))
+         domains (vec (distinct (keep #(get-in % [:origin :formal/retained-domain]) retained)))
+         assertions (graph/concat-vectors [(graph/encode retained) (question-graph/field-graph context :assertions)])
+         old-data (question-graph/field-graph context :assumptions)
+         old-assumptions (if (or (nil? old-data) (= ["nil" nil] (nth (:nodes old-data) (:root old-data))))
+                           (graph/encode []) old-data)
+         assumptions (graph/concat-vectors
+                      [(graph/encode (mapv #(select-keys % [:label :origin]) retained)) old-assumptions])
+         patches {:assertions assertions :assumptions assumptions
+                  :context (graph/encode {:generation (:generation snapshot) :assertions (mapv :label retained)
+                                           :digest (t/digest (mapv :term retained))})}
+         patches (if (empty? domains) patches
+                  (assoc patches
+                   :scope (graph/encode
+                           (v/join-scope (mapv #(v/make (t/bool true) {:scope %})
+                                           (cons (question-graph/field-data! context :scope) (map :scope domains)))))
+                   :profiles (graph/encode (vec (distinct (concat (question-graph/field-data! context :profiles)
+                                                                  (mapcat :profiles domains)))))))]
+    (question-graph/patch context patches)))))
+(defn solve-graph-in
+ "Execute a graph-backed question in a live owned context. Retained data is
+  composed into the original graph; private native owner handles never enter it."
+ [session context]
+ (try
+  (live! session)
+  (question-graph/open! context)
+  (let [snapshot (snapshot! session) effective (retained-graph context snapshot)
+        opened (question-graph/open! effective) view (:view opened)
+        execution (atom {:scope :provided-fallback :status :not-invoked})]
+   (try
+    (oracle/ask-query-graph effective
+     (fn []
+      (live! session)
+      (when-not (= snapshot (snapshot! session))
+       (throw (ex-info "formal.logic: question context changed before fallback execution" {})))
+      ;; reset! in this namespace resets a logical session, not an atom.
+      (swap! execution (fn [_] {:scope :provided-fallback :status :attempted}))
+      (let [solve (fn [native guard]
+                    (let [cache (identity/hash [:formal/graph-question-cache (:reference opened) (:identity native)
+                                                {:solver-ms (:solver-ms native)} :model-and-core])]
+                     (solve-native-in native view guard cache)))
+            result (if (= 1 (:formal/logical-session session))
+                     (backend/with-session (:options session) (fn [native] (solve native (backend/context native))))
+                     (solve session snapshot))]
+       (swap! execution (fn [_] {:scope :provided-fallback :status :returned :reported-answer result}))
+       (live! session)
+       (when-not (if (= 1 (:formal/logical-session session))
+                   (= snapshot (snapshot! session)) (backend/context-matches? session snapshot))
+        (throw (ex-info "formal.logic: question context changed during fallback execution" {})))
+       result)))
+    (catch error (graph-error effective error @execution))))
+  (catch error (graph-error context error))))
+(defn run-graph
+ "Ask either backend the same portable graph question. This explicitly uses
+  reply version 2 and the :query-graph effect, preserving legacy query paths."
+ [opts context]
+ (try
+  (question-graph/open! context)
+  (with-session opts (fn [session] (solve-graph-in session context)))
+  (catch error (graph-error context error))))
+(defn compare-graph
+ ([context] (compare-graph context {}))
+ ([context opts]
+  (let [opened (question-graph/open! context) z3 (run-graph (assoc opts :backend :z3) context)
+        oxiz (run-graph (assoc opts :backend :oxiz) context)
+        decisive? (fn [r] (contains? #{:sat :unsat} (:solver-status r)))]
+   {:question-graph context :question-reference (:reference opened)
+    :reference-engine :z3 :authority :none :compiler-proof-authority false :decision z3 :candidate oxiz
+    :status-agreement (and (decisive? z3) (decisive? oxiz) (= (:solver-status z3) (:solver-status oxiz)))
+    :disagreement (and (decisive? z3) (decisive? oxiz) (not= (:solver-status z3) (:solver-status oxiz)))
+    :candidate-replayed (= :valid (get-in oxiz [:validation :status])) :promotion :disabled})))
+
+(defn enumerate-projection
+ "Enumerate scalar observation tuples; completeness means UNSAT after all
+  blocking clauses, never that a sample limit counted an infinite domain."
+ [opts assumptions projection limit]
+ (when-not (and (int? limit) (<= 1 limit 256) (map? projection)
+                (every? (fn [[_ term]] (and (t/term? term)
+                       (contains? #{:bool :int :real :string :bv :enum} (first (t/sort-of term))))) projection))
+  (throw (ex-info "Enumeration needs supported scalar terms and limit 1..256" {})))
+ (with-session opts
+  (fn [session]
+   (loop [blocks [] answers []]
+    (if (>= (count answers) limit)
+     {:status :bounded-sample :answers answers :limit limit :complete false}
+     (let [problem (q/sat {:id :enumeration :assumptions (vec (concat assumptions blocks)) :observe projection})
+           result (solve-in session problem)]
+      (cond
+       (= :unsat (:verdict result)) {:status :complete :answers answers :complete true}
+       (not= :sat (:verdict result)) {:status :partial :answers answers :complete false :last result}
+       (not (every? (fn [[name term]]
+                      (= :valid (:status (replay/check-value (t/sort-of term) (get (:witness result) name))))) projection))
+        {:status :partial :answers answers :complete false :reason :projection-unavailable :last result}
+       :else
+        (let [witness (:witness result)
+              equalities (mapv (fn [[name term]]
+                           (let [value (get witness name) kind (first (t/sort-of term))
+                                 literal (case kind :real (:formal/real value)
+                                               :bv (second (:formal/bv value))
+                                               :enum (second (:formal/enum value)) value)]
+                            (t/eq term (t/literal (t/sort-of term) literal)))) projection)
+              block (t/not (t/all equalities))]
+         (recur (conj blocks block) (conj answers witness))))))))))
+
+(defn optimize-finite
+ "Exact finite choice-space optimization, implemented once above both native
+  backends. Unknown/incomplete candidates prevent an optimality claim."
+ [opts assumptions objective lower upper direction]
+ (when-not (and (= t/Int (t/sort-of objective)) (int? lower) (int? upper) (<= lower upper)
+                (<= (- upper lower) 256) (contains? #{:min :max} direction))
+  (throw (ex-info "Finite optimization needs explicit integer bounds <=256" {})))
+ (with-session opts
+  (fn [session]
+   (let [candidates (if (= direction :min) (range lower (inc upper)) (reverse (range lower (inc upper))))]
+    (loop [remaining candidates tested 0]
+     (if (empty? remaining) {:status :infeasible-in-bounds :tested tested :bounds [lower upper]}
+      (let [candidate (first remaining)
+            problem (q/sat {:id :finite-optimization :assumptions (conj (vec assumptions) (t/eq objective (t/int candidate)))
+                            :observe {"objective" objective} :scope {:mode :bounded :objective [lower upper]}})
+            result (solve-in session problem)]
+       (cond
+        (= :sat (:verdict result)) {:status :optimal-in-bounds :value candidate :tested (inc tested)
+                                     :bounds [lower upper] :witness (:witness result) :evidence result}
+        (= :unsat (:verdict result)) (recur (rest remaining) (inc tested))
+        :else {:status :undecided :tested (inc tested) :bounds [lower upper] :evidence result}))))))))
+
+(defn synthesize
+ "Search a declared finite grammar of Boolean candidates. Every accepted
+  candidate is checked universally over the question's explicit domain."
+ [opts candidates options]
+ (when-not (and (vector? candidates) (<= (count candidates) 256))
+  (throw (ex-info "Synthesis needs an explicit finite grammar of at most 256 candidates" {})))
+ (with-session opts
+  (fn [session]
+   (loop [remaining (seq candidates) rejected []]
+    (if (empty? remaining) {:status :grammar-exhausted :rejected rejected :grammar-size (count candidates)}
+     (let [[name claim] (first remaining) result (solve-in session (q/prove claim (assoc options :id name)))]
+      (cond (= :proved (:verdict result)) {:status :candidate-proved :candidate name :evidence result
+                                          :grammar-size (count candidates) :rejected rejected}
+            (= :refuted (:verdict result)) (recur (rest remaining) (conj rejected {:name name :witness (:witness result)}))
+            :else {:status :undecided :candidate name :evidence result :rejected rejected})))))))
+
+(defn explain-unsat
+ "Backend-independent deletion explanation. Unknown stops qualification of
+  minimality. A derived core is never presented as a native certificate."
+ [opts assertions]
+ (when-not (and (vector? assertions) (<= (count assertions) 256))
+  (throw (ex-info "Deletion explanation needs at most 256 explicit assertions" {})))
+ (with-session opts
+  (fn [session]
+   (let [initial (solve-in session (q/sat {:assumptions assertions}))]
+    (if (not= :unsat (:verdict initial)) {:status :not-unsat :evidence initial}
+     (loop [index 0 kept (vec assertions)]
+      (if (>= index (count kept)) {:status :subset-minimal :kind :derived-deletion :assertions kept}
+       (let [trial (vec (concat (take index kept) (drop (inc index) kept)))
+             result (solve-in session (q/sat {:assumptions trial}))]
+        (cond (= :unsat (:verdict result)) (recur index trial)
+              (= :sat (:verdict result)) (recur (inc index) kept)
+              :else {:status :input-cover :kind :derived-deletion :assertions kept
+                     :minimal false :reason result})))))))))

@@ -1,0 +1,105 @@
+(ns formal.finite-word-certificate-test
+ (:require [formal.scalar-batch.finite-word-certificate :as proof] [formal.term :as t] [formal.query :as q]
+           [formal.scalar-batch.request :as request] [formal.question-graph :as qg] [formal.scalar-batch.point-profile :as policy]
+           [formal.scalar-batch.backend :as backend] [formal.data-graph :as graph] [bl.json :as json] [oracle]))
+(defn prepared [query] (request/prepare (qg/prepare query) {:policy {:profile policy/numeric-word}}))
+(defn checked [query] (let [r (prepared query)] (proof/check r (proof/candidate r))))
+(deftest every-small-word-valuation-is-derived-and-checked
+ (doseq [width (range 1 6)]
+  (let [sort [:bv width] x (t/variable "proof.x" sort)
+        one (t/literal sort 1) add (t/app :bv-add sort [x one] nil)
+        zero (t/literal sort 0) max (t/literal sort (dec (erlang/bsl 1 width)))
+        theorem (checked (q/prove (t/implies (t/eq x max) (t/eq add zero))))
+        falsehood (checked (q/prove (t/eq add zero)))]
+   (is (= :checked (:status theorem)))
+   (is (= :entails (:verdict theorem)))
+   (is (= (erlang/bsl 1 width) (:points-checked theorem)))
+   (is (= width (:domain-bits theorem)))
+   (is (= :not-established (:feasibility theorem)))
+   (is (= false (:checked-native-execution theorem) (:compiler-proof-authority theorem)))
+   (is (= :counterexample (:status falsehood)))
+   (is (= :not-established (:verdict falsehood)))))
+ (let [b (t/variable "proof.boolean" t/Bool) x (t/variable "proof.byte" [:bv 2])
+       theorem (checked (q/prove (t/eq (t/ite b x x) x)))]
+  (is (= :checked (:status theorem)))
+  (is (= 8 (:points-checked theorem))))
+ (let [x (t/variable "proof.inconsistent" [:bv 2])
+       result (checked (q/sat {:assumptions [(t/eq x (t/literal [:bv 2] 0))
+                                             (t/eq x (t/literal [:bv 2] 1))]}))]
+  (is (= :checked (:status result)))
+  (is (= :unsatisfiable (:verdict result)))
+  (is (= :not-established (:feasibility result)))))
+(deftest coverage-and-statement-cannot-be-supplied-by-a-producer
+ (let [r (prepared (q/prove (t/bool true))) c (proof/candidate r)]
+  (doseq [changed [(assoc c :valuations []) (assoc c :checked true)
+                   (assoc c :formal/finite-word-certificate 1.0)
+                   (assoc-in c [:statement :subject-reference :sha256] "forged")
+                   (assoc c :rule :sampled-valuations)]]
+   (is (= :rejected (:status (proof/check r changed)))))
+  (let [other (request/for-backend r :oxiz) a (proof/check r c) b (proof/check other c)]
+   (is (= :checked (:status a) (:status b)))
+   (is (= (:statement a) (:statement b)))
+   (is (not= (:request-reference a) (:request-reference b)))))
+ (let [x (t/variable "proof.too-wide" [:bv 6]) result (checked (q/prove (t/eq x x)))]
+  (is (= :rejected (:status result))))
+ (let [x (t/variable "proof.unbounded" t/Int) result (checked (q/prove (t/eq x x)))]
+  (is (= :rejected (:status result)))))
+(deftest checker-needs-no-solver-or-request-handler
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1)
+       pattern (tuple module :exchange! 4) calls (atom 0)
+       deny (fn [& _] (swap! calls inc) (throw :exhaustion-must-not-query))]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny}
+    (fn []
+     (let [x (t/variable "proof.no-native" [:bv 2]) result (checked (q/prove (t/eq x x)))]
+      (is (= :checked (:status result)))
+      (is (= 4 (:points-checked result))))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1) @calls))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest unused-quantification-still-belongs-to-the-admitted-grammar
+ (let [b (t/bound "proof.bound" t/Bool)
+       result (checked (q/prove (t/forall [b] (t/bool true))))]
+  (is (= :rejected (:status result)))))
+(deftest compare-real-native-claims-to-independent-exhaustion
+ (let [sort [:bv 3] x (t/variable "proof.native" sort)
+       one (t/literal sort 1) zero (t/literal sort 0) last (t/literal sort 7)
+       claim (t/implies (t/eq x last) (t/eq (t/app :bv-add sort [x one] nil) zero))
+       query (q/prove claim) subject (qg/prepare query)
+       certificate (proof/candidate (prepared query)) rows (atom [])]
+  (doseq [engine [:z3 :oxiz]]
+   (let [native (backend/with-session {:backend engine :solver-ms 500 :hard-ms 2000}
+                  (fn [session] (backend/graph-question! session subject {:profile policy/numeric-word})))
+         r (request/for-backend (prepared query) engine)
+         independent (proof/check r certificate)]
+    (is (= :unsat (:solver-status native)))
+    (is (= :solver-claim (:verdict native)))
+    (is (= :not-checked (get-in native [:certificate :status])))
+    (is (= :checked (:status independent)))
+    (is (= :entails (:verdict independent)))
+    (is (= 8 (:points-checked independent)))
+    (is (= false (:checked-native-execution independent) (:compiler-proof-authority independent)))
+    (swap! rows conj {:backend engine :identity (:identity native) :question-reference (:question-reference native)
+                     :native-status (:solver-status native) :native-verdict (:verdict native)
+                     :native-certificate (:certificate native) :independent-check independent})))
+  (when-let [output (System/get_env "WORD_EXHAUSTION_NATIVE_OUTPUT")]
+   (File/write! output (json/encode {:schema "bl.finite-word-native-comparison.v1" :rows @rows
+                                    :compiler-proof-authority false} {:pretty 2})))))
+(deftest exact-assumptions-remain-visible-and-bound
+ (let [sort [:bv 3] x (t/variable "proof.ledger.x" sort)
+       premise (t/eq x (t/literal sort 7))
+       claim (t/eq (t/app :bv-add sort [x (t/literal sort 1)] nil) (t/literal sort 0))
+       r (prepared (q/prove claim {:assumptions [(q/assertion "last-value" premise)]}))
+       certificate (proof/candidate r) result (proof/check r certificate)
+       entries (get-in result [:assumption-ledger :entries])
+       changed (prepared (q/prove claim {:assumptions [(q/assertion "different-value" (t/eq x (t/literal sort 0)))]}))]
+  (is (= :checked (:status result)))
+  (is (= (mapv :label (:assertions (qg/materialize! (:subject r)))) (mapv :label entries)))
+  (let [entry (first (filter #(= "last-value" (:label %)) entries))]
+   (is (some? entry))
+   (is (= premise (graph/decode! (graph/subgraph (get-in r [:subject :graph]) (:source-node entry))))))
+  (is (every? #(int? (:source-node %)) entries))
+  (is (= (request/subject-reference r) (get-in result [:assumption-ledger :subject-reference])))
+  (is (= :not-established (get-in result [:assumption-ledger :feasibility])))
+  (is (= :rejected (:status (proof/check changed certificate))))))
+(run-tests)

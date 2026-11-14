@@ -1,0 +1,282 @@
+(ns formal.scalar-batch.graph-terms
+ (:require [formal.data-graph :as graph] [formal.term :as t]
+           [formal.resources.rational :as rational] [formal.scalar-batch.resources.word :as word]
+           [formal.scalar-batch.resources.text :as text] [formal.scalar-batch.scalar-text-value :as text-value]))
+
+;; Fresh graph preparation. This is not managed owner admission, an accepted
+;; cached question view, a native arena handle, or an independently checked proof.
+(def profile :bl/typed-term-forest-preview-v1)
+(def limits {:typed-nodes 16384 :scope-states 131072 :scope-bindings 4096 :roots 16384})
+(def ^:private fields #{"formal/term" "op" "sort" "args" "data"})
+(def ^:private literals #{:bool :int :real :text :bv :fp-bits :rounding :enum})
+
+(defn- require! [condition reason]
+ (when-not condition
+  (throw (ex-info (str "formal.term-forest: " reason) {:kind :term-forest :profile profile}))))
+
+(defn- term-fields! [rows id]
+ (let [[kind entries] (nth rows id)]
+  (require! (and (= "map" kind) (= 5 (count entries))) "closed five-field term required")
+  (let [found (reduce (fn [out [key value]]
+                       (let [[tag name] (nth rows key)]
+                        (require! (and (= "keyword" tag) (contains? fields name)) "unknown term field")
+                        (assoc out name value))) {} entries)]
+   (require! (= fields (set (keys found))) "all canonical term fields required")
+   (require! (= ["int" 1] (nth rows (get found "formal/term"))) "version-1 term required")
+   ;; The pinned term validator compares lists/vectors as one ordered value
+   ;; family. Keep both portable representations; full graph identity still
+   ;; distinguishes their original containers.
+   (require! (contains? #{"vector" "list"} (first (nth rows (get found "args")))) "ordered argument sequence required")
+   found)))
+
+(defn- rational-admission [order records values settings]
+ (loop [pending order work 0 literal-count 0]
+  (if (empty? pending)
+   {:status :complete :reserved-work-units work :charged-work-units work :rational-literals literal-count
+    :constructor-execution :run}
+   (let [id (first pending) record (get records id)
+         op (get values (get record "op")) sort (get values (get record "sort"))
+         datum (get values (get record "data"))]
+    (if-not (and (= t/Real sort) (contains? literals op))
+     (recur (rest pending) work literal-count)
+     (do
+      (require! (and (sequential? datum) (= 2 (count datum)) (every? int? datum) (not= 0 (second datum)))
+                "rational literal requires an integer pair with nonzero denominator")
+      (let [plan (rational/plan :normalize [(vec datum)] (:rational settings))
+            required (+ work (get-in plan [:forecast :work-units]))
+            reason (cond (not= :ready (:status plan)) (:reason plan)
+                         (> required (:admission-work-units settings))
+                          {:kind :resource-limit :metric :admission-work-units :required required
+                           :limit (:admission-work-units settings)} :else nil)]
+       (if reason
+        ;; No constructor has run. Reservations for the entire fresh admission
+        ;; must fit before starting any normalization, including inactive syntax.
+        {:status :incomplete :reason reason :source-node id :reserved-work-units work
+         :charged-work-units 0 :rational-literals literal-count :constructor-execution :not-run}
+        (recur (rest pending) required (inc literal-count))))))))))
+
+(defn- word-numeric-admission [order records values sorts settings]
+ (let [wide (first (filter (fn [[_ width]] (> width (get-in settings [:word :word-bits]))) (sort-by first sorts)))]
+  (if wide
+   {:status :incomplete :source-node (first wide)
+    :reason {:kind :resource-limit :metric :word-bits :required (second wide) :limit (get-in settings [:word :word-bits])}
+    :reserved-work-units 0 :charged-work-units 0 :word-literals 0 :rational-literals 0
+    :constructor-execution :not-run}
+   (loop [pending order work 0 words 0 reals 0]
+    (if (empty? pending)
+     {:status :complete :reserved-work-units work :charged-work-units work
+      :word-literals words :rational-literals reals :word-sort-descriptors (count sorts) :constructor-execution :run}
+     (let [id (first pending) record (get records id)
+           op (get values (get record "op")) sort (get values (get record "sort"))
+           datum (get values (get record "data"))
+           real? (and (= t/Real sort) (contains? literals op))
+           word? (and (= :bv (first sort)) (contains? literals op))]
+      (if-not (or real? word?) (recur (rest pending) work words reals)
+       (let [_ (if real?
+                 (require! (and (sequential? datum) (= 2 (count datum)) (every? int? datum) (not= 0 (second datum)))
+                           "rational literal requires an integer pair with nonzero denominator")
+                 (require! (and (int? datum) (>= datum 0)) "word literal requires nonnegative integer bits"))
+             plan (if real? (rational/plan :normalize [(vec datum)] (:rational settings))
+                            (word/value-plan sort datum (:word settings)))
+             charge (get-in plan [:forecast :work-units] 0) required (+ work charge)
+             reason (cond (not= :ready (:status plan)) (:reason plan)
+                          (> required (:admission-work-units settings))
+                           {:kind :resource-limit :metric :admission-work-units :required required
+                            :limit (:admission-work-units settings)} :else nil)]
+        (if reason
+         {:status :incomplete :source-node id :reason reason :reserved-work-units work :charged-work-units 0
+          :word-literals words :rational-literals reals :constructor-execution :not-run}
+         (recur (rest pending) required (if word? (inc words) words) (if real? (inc reals) reals)))))))))))
+
+(defn- text-numeric-admission [order records values sorts settings]
+ (let [numeric (word-numeric-admission order records values sorts settings)
+       text-ids (vec (filter (fn [id]
+                              (let [r (get records id)]
+                               (and (= :text (get values (get r "op")))
+                                    (= t/String (get values (get r "sort")))))) order))]
+  (if (= :incomplete (:status numeric)) (assoc numeric :text-literals 0)
+   (loop [pending text-ids work (:reserved-work-units numeric) texts 0]
+    (if (empty? pending)
+     (do
+      ;; All literal reservations fit before decoding any text or constructing
+      ;; any term, including rational/word terms and inactive text branches.
+      (doseq [id text-ids]
+       (require! (= :valid (:status (text-value/check-value (get values (get (get records id) "data")))))
+                 "text literal outside the declared UTF-8 scalar alphabet"))
+      (assoc numeric :reserved-work-units work :charged-work-units work :text-literals texts))
+     (let [id (first pending) datum (get values (get (get records id) "data"))
+           _ (require! (string? datum) "text literal requires binary data")
+           plan (text/value-plan (erlang/byte_size datum) (:text settings))
+           required (+ work (get-in plan [:forecast :work-units] 0))
+           reason (cond (not= :ready (:status plan)) (:reason plan)
+                        (> required (:admission-work-units settings))
+                         {:kind :resource-limit :metric :admission-work-units :required required
+                          :limit (:admission-work-units settings)} :else nil)]
+      (if reason
+       (assoc numeric :status :incomplete :source-node id :reason reason :reserved-work-units work
+                      :charged-work-units 0 :text-literals texts :constructor-execution :not-run)
+       (recur (rest pending) required (inc texts)))))))))
+
+(defn- prepare-profile
+ "Compile checked public graph roots to a fresh portable native term table.
+  Argument edges stay graph references. Operation/sort/data fields are decoded
+  together and checked with the existing constructors. Scope memoization uses
+  both node and environment. The output is derived data, never query authority."
+ [data roots mode resource-settings]
+ (let [checked (graph/check! data) rows (:nodes data)
+       _ (require! (and (vector? roots) (or (nil? (meta roots)) (= {} (meta roots)))) "plain root vector required")
+       _ (require! (<= (count roots) (:roots limits)) "root capacity")
+       _ (doseq [id roots]
+           (require! (and (int? id) (<= 0 id) (< id (count rows))) "root reference"))
+       seen (atom #{}) ordered (atom []) descriptions (atom {}) word-sorts (atom {})]
+  (letfn [(scalar-sort! [id]
+           (let [[kind parts] (nth rows id)
+                 numeric? (contains? #{:numeric :numeric-word :numeric-word-text} mode)
+                 permitted (cond (= :numeric-word-text mode)
+                                  #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"] ["keyword" "string"]}
+                                 numeric? #{["keyword" "bool"] ["keyword" "int"] ["keyword" "real"]}
+                                 :else #{["keyword" "bool"] ["keyword" "int"]})
+                 scalar? (and (= "vector" kind) (= 1 (count parts))
+                              (contains? permitted (nth rows (first parts))))
+                 word? (and (contains? #{:numeric-word :numeric-word-text} mode) (= "vector" kind) (= 2 (count parts))
+                            (= ["keyword" "bv"] (nth rows (first parts))))
+                 width-row (when word? (nth rows (second parts)))]
+            (require! (or scalar? (and word? (= "int" (first width-row)) (<= 1 (second width-row) 4096)))
+                      "sort is outside the bounded scalar profile")
+            (when word? (swap! word-sorts assoc id (second width-row)))))
+          (declarations! [record]
+           ;; An unused binder has no :bound expression node. Its declared
+           ;; sort still belongs to the profile, before any constructor runs.
+           (when (contains? #{["keyword" "forall"] ["keyword" "exists"]}
+                            (nth rows (get record "op")))
+            (let [[kind binders] (nth rows (get record "data"))]
+             (require! (and (contains? #{"vector" "list"} kind) (seq binders))
+                       "ordered nonempty binder declarations required")
+             (doseq [id binders]
+              (let [[tag pair] (nth rows id)]
+               (require! (and (contains? #{"vector" "list"} tag) (= 2 (count pair)))
+                         "binder name/sort pair required")
+               (scalar-sort! (second pair)))))))
+          (visit [id]
+           (when-not (contains? @seen id)
+            (let [record (term-fields! rows id) children (second (nth rows (get record "args")))]
+             ;; Inspect the portable descriptor before SDK constructor admission.
+             ;; The bounded scalar profile must never admit an FP/container
+             ;; value merely to discover that its policy is unavailable.
+             (when (not= :all mode)
+              (scalar-sort! (get record "sort"))
+              (declarations! record))
+             (doseq [child children] (visit child))
+             (require! (< (count @seen) (:typed-nodes limits)) "typed-node capacity")
+             (swap! descriptions assoc id (assoc record :children children))
+             (swap! seen conj id) (swap! ordered conj id))))]
+   (doseq [id roots] (visit id)))
+  (let [order @ordered records @descriptions
+        selected (vec (distinct (mapcat (fn [id] (map #(get (get records id) %) ["op" "sort" "data"])) order)))
+        decoded (graph/decode-nodes! data selected)
+        values (into {} (mapv (fn [i] [(nth selected i) (nth decoded i)]) (range (count selected))))
+        nodes (atom {}) variables (atom {}) depths (atom {})
+        admission (when resource-settings
+                    (case mode
+                     :numeric-word-text (text-numeric-admission order records values @word-sorts resource-settings)
+                     :numeric-word (word-numeric-admission order records values @word-sorts resource-settings)
+                     (rational-admission order records values resource-settings)))]
+   (if (= :incomplete (:status admission))
+    {:formal/term-forest-refusal 1 :profile profile :data-reference (:reference checked)
+     :source-roots roots :admission admission
+     :checking {:typed-nodes 0 :candidate-term-nodes (count order) :argument-traversal :graph-references}
+     :compiler-proof-authority false}
+    (do
+    (doseq [id order]
+    (let [record (get records id) op (get values (get record "op")) sort (get values (get record "sort"))
+          datum (get values (get record "data")) children (:children record)
+          ;; Child sort descriptors are private products of earlier checks.
+          args (mapv (fn [child] {:formal/term 1 :sort (:sort (get @nodes child))}) children)
+          canonical (cond (= :var op) (t/variable datum sort)
+                          (= :bound op) (t/bound datum sort)
+                          (contains? literals op) (t/literal sort datum)
+                          :else (t/app op sort args datum))]
+     (require! (= canonical {:formal/term 1 :op op :sort sort :args args :data datum}) "noncanonical local term")
+     (when (= :var op)
+      (require! (or (not (contains? @variables datum)) (= sort (get @variables datum))) "conflicting free-variable sorts")
+      (swap! variables assoc datum sort))
+     (swap! nodes assoc id {:op op :sort sort :data datum :children children})
+     (swap! depths assoc id (if (seq children) (inc (apply max (map #(get @depths %) children))) 0))))
+   (let [states (atom #{}) largest-scope (atom 0) typed @nodes]
+    (letfn [(in-scope [id environment]
+             (let [key [id environment]]
+              (when-not (contains? @states key)
+               (require! (< (count @states) (:scope-states limits)) "scope-state capacity")
+               (require! (<= (count environment) (:scope-bindings limits)) "scope-binding capacity")
+               (swap! states conj key) (swap! largest-scope max (count environment))
+               (let [{:keys [op sort data children]} (get typed id)]
+                (cond
+                 (= :bound op)
+                  (require! (= sort (get environment data)) "free or wrong-sort bound variable")
+                 (contains? #{:forall :exists} op)
+                  (let [names (mapv first data)]
+                   (require! (= (count names) (count (set names))) "duplicate binder identity")
+                   (require! (not-any? #(contains? environment %) names) "nested binder shadowing requires fresh identities")
+                   (in-scope (first children) (into environment data)))
+                 :else (doseq [child children] (in-scope child environment)))))))]
+     (doseq [id roots] (in-scope id {})))
+    (let [ids (into {} (mapv (fn [i] [(nth order i) (inc i)]) (range (count order))))
+          definitions (mapv (fn [id]
+                             (let [{:keys [op sort data children]} (get typed id)]
+                              [(get ids id) (name op) sort (mapv #(get ids %) children) data])) order)]
+     (merge {:formal/term-forest 1 :profile profile :data-reference (:reference checked)
+      :source-roots roots :roots (mapv #(get ids %) roots) :nodes definitions
+      :variables @variables :limits limits
+      :checking {:typed-nodes (count order) :scope-states (count @states) :largest-scope @largest-scope
+                 :typed-depth (reduce max 0 (map #(get @depths %) roots))
+                 :materialized-components (count selected) :argument-traversal :graph-references
+                 :source-nodes (:nodes checked) :expanded-source-nodes (:expanded-nodes checked)}
+      :compiler-proof-authority false} (when resource-settings {:admission admission})))))))))
+
+(defn prepare
+ "Fresh typed graph admission under the selected SDK's existing constructors.
+  Derived output is data and is never accepted as a caller admission token."
+ [data roots] (prepare-profile data roots :all nil))
+(defn prepare-bool-int
+ "Fresh typed admission with a raw Bool/Int descriptor/declaration gate before constructors.
+  Other sorts are out-of-profile requests; no concrete evaluator is invoked."
+ [data roots] (prepare-profile data roots :bool-int nil))
+
+(defn prepare-numeric
+ "Fresh Bool/Int/Real admission, including unused binder declarations.
+  Reserve all rational literal normalizations
+  before SDK constructors run. Budget refusal returns an explicit admission
+  refusal, with no typed forest and no constructors executed."
+ [data roots overrides]
+ (require! (and (map? overrides) (every? #{:rational :admission-work-units} (keys overrides))) "known admission settings required")
+ (let [settings {:rational (rational/limits (get overrides :rational {}))
+                 :admission-work-units (get overrides :admission-work-units 1073741824)}]
+  (require! (and (int? (:admission-work-units settings)) (>= (:admission-work-units settings) 0)) "nonnegative admission allowance required")
+  (prepare-profile data roots :numeric settings)))
+
+(defn prepare-numeric-word
+ "Fresh Bool/Int/Real/word admission. All sorts and unused declarations retain
+  the fixed 1..4096 word grammar. Reserve combined literal work before any
+  constructor; resource refusal cannot authorize a partial typed forest."
+ [data roots overrides]
+ (require! (and (map? overrides) (every? #{:rational :word :admission-work-units} (keys overrides)))
+           "known numeric-word admission settings required")
+ (let [settings {:rational (rational/limits (get overrides :rational {}))
+                 :word (word/limits (get overrides :word {}))
+                 :admission-work-units (get overrides :admission-work-units 1073741824)}]
+  (require! (and (int? (:admission-work-units settings)) (>= (:admission-work-units settings) 0))
+            "nonnegative admission allowance required")
+  (prepare-profile data roots :numeric-word settings)))
+
+(defn prepare-numeric-word-text
+ "Admit the original numeric/word/scalar-text graph. Reserve every literal
+  before constructors or text decoding; all declarations retain their grammar."
+ [data roots overrides]
+ (require! (and (map? overrides) (every? #{:rational :word :text :admission-work-units} (keys overrides)))
+           "known numeric-word-text admission settings required")
+ (let [settings {:rational (rational/limits (get overrides :rational {}))
+                 :word (word/limits (get overrides :word {})) :text (text/limits (get overrides :text {}))
+                 :admission-work-units (get overrides :admission-work-units 1073741824)}]
+  (require! (and (int? (:admission-work-units settings)) (>= (:admission-work-units settings) 0))
+            "nonnegative admission allowance required")
+  (prepare-profile data roots :numeric-word-text settings)))
