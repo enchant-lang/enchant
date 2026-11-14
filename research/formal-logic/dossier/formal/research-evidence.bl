@@ -4,13 +4,26 @@
 
 (def id "word-answer-evidence")
 (def renderer "research/comparison")
-(def revision 1)
+(def revision 2)
 (def source-paths
- ["sdk-pin.json" "evidence/word-integration/qualification.json"
-  "evidence/word-integration/records-qualification.json" "evidence/word-integration/native-comparison.json"
-  "evidence/word-integration/corpus.json" "evidence/word-integration/reader-one.json"
-  "evidence/word-integration/reader-two.json" "dossier/formal/research-evidence.bl"
-  "dossier/formal/research-view.bl" "dossier/research-evidence.js"])
+ ["sdk-pin.json"
+  "evidence/scalar-integration/qualification.json"
+  "evidence/scalar-integration/records-qualification.json"
+  "evidence/scalar-integration/native-comparison.json"
+  "evidence/scalar-integration/corpus.json"
+  "evidence/scalar-integration/reader-one.json"
+  "evidence/scalar-integration/reader-two.json"
+  "evidence/scalar-integration/word-native.json"
+  "evidence/scalar-integration/evidence-packets.json"
+  "dossier/formal/research-evidence.bl"
+  "dossier/formal/research-view.bl"
+  "dossier/research-evidence.js"
+  "evidence/word-integration/qualification.json"
+  "evidence/word-integration/records-qualification.json"
+  "evidence/word-integration/native-comparison.json"
+  "evidence/word-integration/corpus.json"
+  "evidence/word-integration/reader-one.json"
+  "evidence/word-integration/reader-two.json"])
 (defn- require! [ok why]
  (when-not ok (throw (ex-info (str "formal.research-evidence: " why) {}))))
 (defn- sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
@@ -46,37 +59,56 @@
  "Read actual fixed qualification sources. This produces view data, not logical authority."
  [root]
  (let [data (sources root) pin (source data "sdk-pin.json")
-       qualification (source data "evidence/word-integration/qualification.json")
-       records (source data "evidence/word-integration/records-qualification.json")
-       native (source data "evidence/word-integration/native-comparison.json")
-       one (source data "evidence/word-integration/reader-one.json")
-       two (source data "evidence/word-integration/reader-two.json")
-       corpus (source data "evidence/word-integration/corpus.json")
+       qualification (source data "evidence/scalar-integration/qualification.json")
+       records (source data "evidence/scalar-integration/records-qualification.json")
+       native (source data "evidence/scalar-integration/native-comparison.json")
+       one (source data "evidence/scalar-integration/reader-one.json")
+       two (source data "evidence/scalar-integration/reader-two.json")
+       corpus (source data "evidence/scalar-integration/corpus.json")
+       word-proof (source data "evidence/scalar-integration/word-native.json")
+       proof-packets (source data "evidence/scalar-integration/evidence-packets.json")
        descriptor (logic/checking-policy {:profile logic/numeric-word-policy})]
   (require! (= "passed" (get qualification "status") (get records "status") (get native "status")) "qualified sources required")
   (require! (= pin (get qualification "sdk_pin") (get records "sdk_pin") (get native "sdk_pin")) "sources describe another SDK")
   (require! (= (get pin "sdk") (System/get_env "BL_SDK_PRODUCT") (get corpus "producer-sdk")) "actual selected SDK required")
-  (require! (= 12 (count (get corpus "rows")) (count (get one "rows")) (count (get two "rows"))) "complete captured cohort required")
+  (require! (= 20 (count (get corpus "rows")) (count (get one "rows")) (count (get two "rows"))) "complete captured cohort required")
   (require! (= 0 (get one "solver-exchanges") (get two "solver-exchanges")
                  (get one "oracle-calls") (get two "oracle-calls")) "solver-denied readers required")
   (require! (= false (get qualification "compiler_proof_authority") (get corpus "compiler-proof-authority")) "unprivileged evidence required")
+  (require! (= 2 (count (get word-proof "rows"))) "both actual word proof observations required")
+  (require! (= (sha (:bytes (first (filter #(= "evidence/scalar-integration/word-native.json" (:source %)) data))))
+               (get-in qualification ["focused_artifact_sha256" "word-native.json"]))
+            "word proof capture must match the qualified focused output")
+  (doseq [r (get word-proof "rows")]
+   (require! (and (= (get pin "sdk") (get-in r ["identity" "sdk"]))
+                  (= "solver-claim" (get r "native-verdict"))
+                  (= "not-checked" (get-in r ["native-certificate" "status"]))
+                  (= "checked" (get-in r ["independent-check" "status"]))
+                  (= 8 (get-in r ["independent-check" "points-checked"]))
+                  (= "not-established" (get-in r ["independent-check" "feasibility"])))
+             "native claim and independent conditional check must remain separate"))
+  (require! (and (= (get pin "sdk") (get proof-packets "sdk"))
+                 (= "passed" (get proof-packets "status")) (= 2 (get proof-packets "packets"))
+                 (= 0 (get proof-packets "native-exchanges") (get proof-packets "oracle-calls")))
+            "actual solver-denied certificate packet reader required")
   (let [recorded (get qualification "recorded_utc")
         _ (require! (and (string? recorded) (>= (erlang/byte_size recorded) 4)) "recorded qualification period required")
         year (json/decode (subs recorded 0 4))
         rows [(row "terms" "One complete question" "Width, assumptions and checking policy travel as BL data." :supported
-                   [(evidence "evidence/word-integration/corpus.json" "/rows/0/request-reference")])
+                   [(evidence "evidence/scalar-integration/corpus.json" "/rows/0/request-reference")])
               (row "native" "Z3 and OxiZ" "Both real owners were exercised; their reported result remains a claim." :supported
-                   [(evidence "evidence/word-integration/native-comparison.json" "/questions")])
-              (row "points" "A point BL can check" "Two fresh readers rechecked twelve saved word answers each, without asking a solver." :supported
-                   [(evidence "evidence/word-integration/records-qualification.json" "/fresh_sdk_only_readers")])
+                   [(evidence "evidence/scalar-integration/native-comparison.json" "/questions")])
+              (row "points" "A point BL can check" "Two fresh readers rechecked twenty saved word/text answers each, without asking a solver." :supported
+                   [(evidence "evidence/scalar-integration/records-qualification.json" "/fresh_sdk_only_readers")])
               (row "wrong-point" "An altered answer" "Wrong coordinates remain invalid after saving and re-encoding." :supported
-                   [(evidence "evidence/word-integration/reader-one.json" "/rows/1/verdict")])
+                   [(evidence "evidence/scalar-integration/reader-one.json" "/rows/1/verdict")])
               (row "ledger" "One saved record" "Selected lookup validates one payload, then freshly checks its point." :supported
-                   [(evidence "evidence/word-integration/reader-one.json" "/ledger/0/lookup-normalizer-calls")])
-              (row "proof" "A checked proof" "The SDK word profile declares that certificates are not checked. A separate proof strategy is prepared for qualification." :candidate
-                   [(evidence "evidence/word-integration/qualification.json" "/scope")])
+                   [(evidence "evidence/scalar-integration/reader-one.json" "/ledger/0/lookup-normalizer-calls")])
+              (row "proof" "A checked proof" "A separate finite checker checked the wrapping theorem over eight values. The conclusion is conditional on its listed assumptions." :supported
+                   [(evidence "evidence/scalar-integration/word-native.json" "/rows/0/independent-check/points-checked")
+                    (evidence "evidence/scalar-integration/evidence-packets.json" "/native-exchanges")])
               (row "program" "An ordinary BL program" "Source and compiler correspondence need their own evidence." :candidate
-                   [(evidence "evidence/word-integration/qualification.json" "/compiler_proof_authority")])]
+                   [(evidence "evidence/scalar-integration/qualification.json" "/compiler_proof_authority")])]
         edges (mapv (fn [r]
                       {:id (str "receipt-" (:id r)) :from "word-answer" :to (:id r)
                        :relation :recorded-evidence :from-year year :to-year year :state (:state r) :evidence (:evidence r)}) rows)
