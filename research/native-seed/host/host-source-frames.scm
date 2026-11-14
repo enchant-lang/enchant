@@ -22,6 +22,11 @@
         (parent (if entry (vector-ref entry 1) (native-logical-frames)))
         (source (if entry (vector-ref entry 0) own-frame))
         (tail? (and entry (vector-ref entry 2)))
+        ;; A non-tail BL callee gets the call site in its OWN new frame.
+        ;; Its caller resumes at the caller's previous entry site, as JS's
+        ;; srcs[caller] restoration before frames.push specifies.
+        (_ (if (and entry (not tail?) (pair? parent))
+             (set-car! parent (vector-ref entry 3))))
         (base (if (and tail? (pair? parent)) (cdr parent) parent))
         (frames (cons source base))
         (retire (native-source-tail-return)))
@@ -52,6 +57,7 @@
 (set! native-with-frame bl-with-source-frame)
 (define (bl-source-call source tail? thunk)
  (let* ((parent (native-logical-frames))
+        (caller-source (if (pair? parent) (car parent) #f))
         ;; Preserve caller source through generated actor runtime helpers,
         ;; using explicit emitter evidence exactly as JS's callSrc does.
         (source (if (and (bl-truthy (bl-get source (bl-key "internal") #f)) (pair? parent)) (car parent) source))
@@ -62,8 +68,12 @@
                  (begin (set-car! parent source) parent)
                  (list source))))
   (parameterize ((native-logical-frames active)
-                 (native-next-source-call (vector source parent tail?)))
-   (native-source-protect thunk))))
+                 (native-next-source-call (vector source parent tail? caller-source)))
+   ;; Normal non-tail completion restores the caller's entry; a raise leaves
+   ;; the current call site live for a catch in this function.
+   (let ((answer (native-source-protect thunk)))
+    (if (and (not tail?) (pair? parent)) (set-car! parent caller-source))
+    answer))))
 ;; Native leaves may synchronously invoke callbacks. Their callback is not the
 ;; callee of the pending BL call, so it must not inherit that call's tail jump.
 ;; Raw apply is an explicit forwarding boundary: preserve its call context
