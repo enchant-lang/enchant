@@ -12,8 +12,11 @@ The carrier, retained composition, native owner and original graph identity stay
 shared. Backend selection remains adapter data. A new theory is not a new
 ownership format or another native handle.
 
-The text domain is valid UTF-8 over the current SMT alphabet, codepoints 0 through
-196607. Operations count codepoints, including combining marks independently.
+The checked point domain is valid UTF-8 over codepoints 0 through 196607.
+Surrogates are excluded by UTF-8 validity. The solver-facing String sort is
+broader; domain metadata does not restrict its symbolic variables or quantified
+binders. The [domain review](SCALAR-TEXT-DOMAIN.md) retains this unestablished
+connection explicitly. Operations count codepoints, including combining marks independently.
 They do not adopt BL's grapheme positions. Keep total SMT access, Option access
 and an explicitly strict formal accessor as distinct interfaces. Preserve
 definedness, within conditions and guarded Option payloads. These constructors
