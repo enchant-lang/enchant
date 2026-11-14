@@ -5,6 +5,17 @@
            [auth.logic :as logic] [auth.contract :as contract] [auth.delegation :as delegation]
            [bl.env :as project-env] [vm.scope :as scope] [vm.service :as service]
            [auth.identity :as identity] [env]))
+(defn- configuration-value [value]
+ (cond
+  (or (nil? value) (string? value) (int? value) (boolean? value)) value
+  (keyword? value) ["keyword" (str value)]
+  (symbol? value) ["symbol" (str value)]
+  (sequential? value) ["sequence" (mapv configuration-value value)]
+  (set? value) ["set" (vec (sort-by pr-str (map configuration-value value)))]
+  (map? value) ["map" (vec (sort-by pr-str
+                            (map (fn [[key value]] [(configuration-value key) (configuration-value value)]) value)))]
+  :else (throw (ex-info "Auth environment declarations must contain data" {:kind :auth/configuration}))))
+(defn- configuration-id [value] (logic/digest (pr-str (configuration-value value))))
 (defn bind!
  "Host linker entry. Bind a finite imported surface into the current Env.
   endpoint may enter another realm or VM. Authority stays at the provider."
@@ -82,7 +93,7 @@
          broker (when (:delegation config) (delegation/broker (:delegation config)))]
     (bind! logical declaration provider (transport/endpoint (cond-> config broker (assoc :token-for broker)))))
    (let [realm (scope/current) slot (str "auth/import/" logical)
-         acquire (fn [] (service/acquire realm slot (logic/digest config)
+         acquire (fn [] (service/acquire realm slot (configuration-id config)
                           #(local-provider config) namespace/close!))
          owned (when realm (assoc (acquire) :realm realm :slot slot))
          provider (if owned (:value owned) (local-provider config))
@@ -135,7 +146,7 @@
                        (let [{:keys [config]} (declaration-for root (str logical))]
                         [config (logic/digest (File/read! (if (= :remote (:transport config))
                                                           (:interface config) (:source config))))])) names)
-       fingerprint (logic/digest [root (:auth/imports project) inputs])
+       fingerprint (configuration-id [root (:auth/imports project) inputs])
        key (tuple :auth/project-imports) previous (BeamLisp.Env/lookup_own key)]
   (when-not (and (erlang/is_tuple previous) (= fingerprint (:fingerprint (elem previous 1))))
    (close!)
