@@ -1,0 +1,227 @@
+(ns formal.wide-batch.graph-integer-certificate
+ (:require [formal.wide-batch.request :as request] [formal.wide-batch.point-profile :as policy]
+           [formal.data-graph :as graph] [formal.resources.integer :as integer]))
+
+;; Installed linear-only kernel. No native answer, supplied normalized
+;; inventory or caller-computed row is a checking premise.
+(def profile :bl/graph-linear-integer-certificate-preview-v1)
+(def limits {:typed-nodes 256 :variables 32 :atoms 32 :formulas 1024
+             :coefficient-bits 128 :proof-nodes 1024 :proof-depth 32 :proof-states 2048})
+(def defaults {:work-units 2000000})
+(def checking-policy {:profile policy/numeric :limits {:admission-work-units 100000 :request-work-units 100000}})
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.graph-integer-certificate: " why) {}))))
+(defn- plain? [x] (and (= :map (rt/kind-kind x)) (or (nil? (meta x)) (= {} (meta x)))))
+(defn- settings [options]
+ (require! (and (plain? options) (= #{:work-units} (set (keys options)))
+                (int? (:work-units options)) (<= 0 (:work-units options) 20000000)) "closed bounded work allowance required")
+ options)
+(defn- charge! [context amount]
+ (let [next (+ @(:used context) amount)]
+  (when (> next (:limit context))
+   (throw (ex-info "formal.graph-integer-certificate: checking work allowance exhausted" {:kind :resource-limit})))
+  (reset! (:used context) next)))
+(defn- small! [n]
+ (require! (and (int? n) (<= (integer/bits n) (:coefficient-bits limits))) "integer/coefficient capacity") n)
+(defn- arithmetic [context operation operands]
+ (let [plan (integer/plan operation operands {:integer-bits 128 :intermediate-bits 256 :work-units 100000})]
+  (when-not (= :ready (:status plan))
+   (throw (ex-info "formal.graph-integer-certificate: prospective integer primitive refused" {:kind :resource-limit})))
+  (charge! context (get-in plan [:forecast :work-units]))
+  (case operation :add (+ (first operands) (second operands)) :sub (- (first operands) (second operands))
+   :mul (* (first operands) (second operands)) :neg (- (first operands)))))
+(defn- coefficients [context a b scale]
+ (require! (<= (count (set (concat (keys a) (keys b)))) (:variables limits)) "variable capacity")
+ (into {} (remove (fn [[_ n]] (zero? n))
+  (reduce (fn [out [name n]]
+            (assoc out name (arithmetic context :add [(get out name 0) (arithmetic context :mul [scale n])]))) a b))))
+(defn- add [context a b scale]
+ {:coeff (coefficients context (:coeff a) (:coeff b) scale)
+  :constant (arithmetic context :add [(:constant a) (arithmetic context :mul [scale (:constant b)])])})
+(defn- scale [context a n]
+ {:coeff (coefficients context {} (:coeff a) n) :constant (arithmetic context :mul [n (:constant a)])})
+(defn statement [original]
+ (let [r (request/check! original)]
+  (require! (= policy/numeric (get-in r [:policy :profile])) "numeric semantic profile required")
+  {:subject-reference (request/subject-reference r) :semantic-profile policy/numeric}))
+(defn candidate [original proof]
+ {:formal/graph-integer-certificate 1 :profile profile :statement (statement original) :proof proof})
+(defn- prepare-inventory [r inventory context]
+ (let [forest (:forest inventory) typed (:nodes forest)
+       _ (require! (<= (count typed) (:typed-nodes limits)) "typed-node capacity")
+       ;; Check inactive literals and sorts before any coefficient operation.
+       _ (doseq [[_ op sort _ datum] typed]
+           (require! (contains? #{[:bool] [:int]} sort) "Boolean/integer sorts only")
+           (when (= "int" op) (small! datum)))
+       forms (atom []) form-ids (atom {}) atoms (atom []) atom-ids (atom {}) values (atom {})]
+  (letfn [(form [description]
+           (charge! context (+ 1 (if (vector? (second description)) (count (second description)) 0)))
+           (if (contains? @form-ids description) (get @form-ids description)
+            (let [id (count @forms)]
+             (require! (< id (:formulas limits)) "formula DAG capacity")
+             (swap! forms conj description) (swap! form-ids assoc description id) id)))
+          (atom-form [description]
+           (let [id (if (contains? @atom-ids description) (get @atom-ids description)
+                      (let [id (count @atoms)]
+                       (require! (< id (:atoms limits)) "atom capacity")
+                       (swap! atoms conj description) (swap! atom-ids assoc description id) id))]
+            (form [:atom id])))
+          (linear [row]
+           (if (empty? (:coeff row)) (form [:const (<= 0 (:bound row))])
+            (atom-form (assoc row :kind :linear))))
+          (ordered [a b strict?]
+           (let [difference (add context a b -1)]
+            (linear {:coeff (:coeff difference)
+                     :bound (arithmetic context :sub [(if strict? -1 0) (:constant difference)])})))
+          (integer-value [id] (let [n (get @values id)]
+                                (require! (= [:int] (:sort n)) "integer child required") (:linear n)))
+          (boolean-value [id] (let [n (get @values id)]
+                                (require! (= [:bool] (:sort n)) "Boolean child required") (:boolean n)))
+          (negate [id] (form [:not id]))
+          (junction [kind ids] (form [kind (vec ids)]))
+          (equivalent [a b]
+           (junction :or [(junction :and [a b]) (junction :and [(negate a) (negate b)])]))]
+   (doseq [[id op sort children datum] typed]
+    (charge! context (inc (count children)))
+    (require! (every? #(contains? @values %) children) "fresh topological forest required")
+    (let [a (first children) b (second children)
+          normalized
+          (if (= [:int] sort)
+           {:sort sort :linear
+            (case op
+             "int" {:coeff {} :constant datum}
+             "var" {:coeff {datum 1} :constant 0}
+             "add" (add context (integer-value a) (integer-value b) 1)
+             "sub" (add context (integer-value a) (integer-value b) -1)
+             "neg" (scale context (integer-value a) -1)
+             "mul" (let [left (integer-value a) right (integer-value b)]
+                     (cond (empty? (:coeff left)) (scale context right (:constant left))
+                           (empty? (:coeff right)) (scale context left (:constant right))
+                           :else (throw (ex-info "formal.graph-integer-certificate: nonlinear product" {}))))
+             (throw (ex-info "formal.graph-integer-certificate: unsupported integer operation" {:operation op})))}
+           {:sort sort :boolean
+            (case op
+             "bool" (form [:const datum])
+             "var" (atom-form {:kind :boolean :name datum})
+             "not" (negate (boolean-value a))
+             "and" (junction :and (mapv boolean-value children))
+             "or" (junction :or (mapv boolean-value children))
+             "implies" (junction :or [(negate (boolean-value a)) (boolean-value b)])
+             "xor" (let [left (boolean-value a) right (boolean-value b)]
+                     (junction :or [(junction :and [left (negate right)]) (junction :and [(negate left) right])]))
+             "ite" (let [condition (boolean-value a)]
+                     (junction :or [(junction :and [condition (boolean-value b)])
+                                    (junction :and [(negate condition) (boolean-value (nth children 2))])]))
+             "eq" (if (= [:int] (:sort (get @values a)))
+                    (junction :and [(ordered (integer-value a) (integer-value b) false)
+                                    (ordered (integer-value b) (integer-value a) false)])
+                    (equivalent (boolean-value a) (boolean-value b)))
+             "le" (ordered (integer-value a) (integer-value b) false)
+             "lt" (ordered (integer-value a) (integer-value b) true)
+             "ge" (ordered (integer-value b) (integer-value a) false)
+             "gt" (ordered (integer-value b) (integer-value a) true)
+             (throw (ex-info "formal.graph-integer-certificate: unsupported Boolean operation" {:operation op})))})]
+     (swap! values assoc id normalized)))
+   (let [source-for (zipmap (:roots forest) (:source-roots forest))
+         assumptions (:assertions inventory)
+         roots (vec (concat assumptions (when-let [c (:counterexample inventory)] [c])))]
+    {:statement (statement r) :atoms @atoms :formulas @forms :roots (mapv #(boolean-value (:term %)) roots)
+     :mode (:mode inventory) :typed-nodes (count typed)
+     :assumption-ledger {:subject-reference (request/subject-reference r) :feasibility :not-established
+                         :entries (mapv (fn [a] {:label (:label a) :source-node (get source-for (:term a))}) assumptions)}}))))
+(defn- fresh [original context consume]
+ (let [r (request/check! original)]
+  (statement r)
+  (charge! context 100000)
+  (policy/with-question (:subject r) checking-policy
+   (fn [inventory _]
+    (require! (not= 2 (:formal/question-forest-refusal inventory)) "fresh original admission required")
+    (consume r (prepare-inventory r inventory context))))))
+(defn describe
+ "Fresh diagnostic normalization. This output is never accepted as a premise."
+ [original]
+ (fresh original {:used (atom 0) :limit (:work-units defaults)} (fn [_ prepared] prepared)))
+(defn- truth-values [prepared assignment context]
+ (reduce (fn [out [kind body]]
+           (charge! context (+ 1 (if (vector? body) (count body) 0)))
+           (conj out
+            (case kind
+             :const body :atom (get assignment body)
+             :not (let [x (nth out body)] (when (some? x) (not x)))
+             :and (let [xs (mapv #(nth out %) body)]
+                    (cond (some #(= false %) xs) false (every? #(= true %) xs) true :else nil))
+             :or (let [xs (mapv #(nth out %) body)]
+                   (cond (some #(= true %) xs) true (every? #(= false %) xs) false :else nil)))))
+         [] (:formulas prepared)))
+(defn- inequality [prepared assignment id context]
+ (require! (and (int? id) (<= 0 id) (< id (count (:atoms prepared))) (contains? assignment id)) "assigned arithmetic atom required")
+ (let [row (nth (:atoms prepared) id)]
+  (require! (= :linear (:kind row)) "arithmetic premise must be linear")
+  (if (get assignment id) (select-keys row [:coeff :bound])
+   {:coeff (coefficients context {} (:coeff row) -1) :bound (arithmetic context :sub [-1 (:bound row)])})))
+(defn- check-proof [prepared proof context]
+ (require! (and (plain? proof) (= #{:root :nodes} (set (keys proof)))
+                (vector? (:nodes proof)) (<= 1 (count (:nodes proof)) (:proof-nodes limits))
+                (int? (:root proof)) (<= 0 (:root proof)) (< (:root proof) (count (:nodes proof)))) "closed finite proof DAG required")
+ (doseq [i (range (count (:nodes proof)))]
+  (charge! context 1)
+  (let [node (nth (:nodes proof) i) rule (first node)]
+   (require! (vector? node) "proof node vector required")
+   (case rule
+    :boolean (require! (= 1 (count node)) "closed Boolean leaf")
+    :linear (do
+              (require! (and (= 2 (count node)) (vector? (second node)) (<= 1 (count (second node)) (:atoms limits))) "bounded weight vector required")
+              (doseq [entry (second node)]
+               (require! (and (vector? entry) (= 2 (count entry)) (int? (first entry))
+                              (<= 0 (first entry)) (< (first entry) (count (:atoms prepared)))
+                              (int? (second entry)) (pos? (second entry))) "positive assigned weights required")
+               (small! (second entry))))
+    :split (require! (and (= 4 (count node)) (int? (second node)) (<= 0 (second node))
+                          (< (second node) (count (:atoms prepared)))
+                          (every? #(and (int? %) (<= 0 %) (< % i)) [(nth node 2) (nth node 3)])) "split children must be earlier proof nodes")
+    (throw (ex-info "formal.graph-integer-certificate: unknown proof rule" {})))))
+ (let [visited (atom 0)]
+  (letfn [(visit [id assignment depth]
+           (charge! context 1)
+           (require! (and (<= depth (:proof-depth limits)) (<= (swap! visited inc) (:proof-states limits))) "proof context capacity")
+           (let [[rule body yes no] (nth (:nodes proof) id)]
+            (case rule
+             :boolean (let [truth (truth-values prepared assignment context)]
+                        (require! (some #(= false (nth truth %)) (:roots prepared)) "no original assertion is false"))
+             :split (do (require! (not (contains? assignment body)) "repeated split atom")
+                        (visit yes (assoc assignment body true) (inc depth))
+                        (visit no (assoc assignment body false) (inc depth)))
+             :linear (let [total (reduce (fn [sum [atom weight]]
+                                          (let [row (inequality prepared assignment atom context)]
+                                           {:coeff (coefficients context (:coeff sum) (:coeff row) weight)
+                                            :bound (arithmetic context :add [(:bound sum) (arithmetic context :mul [weight (:bound row)])])}))
+                                        {:coeff {} :bound 0} body)]
+                       (require! (and (empty? (:coeff total)) (< (:bound total) 0)) "weighted rows do not contradict")))))]
+   (visit (:root proof) {} 0) @visited)))
+(defn check
+ ([original certificate] (check original certificate defaults))
+ ([original certificate options]
+  (try
+   (let [configuration (settings options) context {:used (atom 0) :limit (:work-units configuration)}]
+    (graph/encode certificate)
+    (require! (and (plain? certificate) (= #{:formal/graph-integer-certificate :profile :statement :proof} (set (keys certificate)))
+                   (int? (:formal/graph-integer-certificate certificate)) (= 1 (:formal/graph-integer-certificate certificate))
+                   (= profile (:profile certificate))) "closed graph integer certificate required")
+    (fresh original context
+     (fn [r prepared]
+      (require! (= (graph/bytes (graph/encode (:statement prepared))) (graph/bytes (graph/encode (:statement certificate))))
+                "certificate belongs to another logical subject")
+      (let [states (check-proof prepared (:proof certificate) context)]
+       {:status :checked :verdict (if (= :prove (:mode prepared)) :entails :unsatisfiable)
+        :profile profile :statement (:statement prepared) :request-reference (request/reference r)
+        :subject-reference (request/subject-reference r) :certificate-reference (graph/of certificate)
+        :checking-reference (graph/of [(:statement prepared) (graph/of certificate) configuration])
+        :assumption-ledger (:assumption-ledger prepared) :feasibility :not-established
+        :normalization {:typed-nodes (:typed-nodes prepared) :formula-nodes (count (:formulas prepared)) :atoms (count (:atoms prepared))}
+        :proof-states states :charged-work-units @(:used context) :checking-limits configuration
+        :trust [:graph-integer-certificate-checker :sdk-original-admission :exact-integer-arithmetic :bl-compiler :beam-runtime]
+        :source-connection :not-established :implementation-verification :not-established
+        :checked-native-execution false :compiler-proof-authority false}))))
+   (catch error {:status (if (= :resource-limit (:kind (ex-data error))) :incomplete :rejected)
+                 :verdict :not-established :reason (ex-message error)
+                 :checked-native-execution false :compiler-proof-authority false}))))

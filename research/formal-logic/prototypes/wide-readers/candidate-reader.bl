@@ -1,0 +1,108 @@
+(ns formal.wide-owner-candidate-reader
+ (:require [formal.wide-batch.request-evidence :as evidence]
+           [formal.wide-batch.request-answer :as answer]
+           [formal.wide-batch.request :as request]
+           [formal.wide-batch.backend :as backend]
+           [formal.wide-batch.oracle :as oracle]
+           [formal.data-graph :as graph] [bl.json :as json]))
+
+;; A separate process imports only the frozen projected library and the SDK.
+;; Corpus generators, native owners and producer result objects are absent.
+(def argv (BeamLisp/argv))
+(def checks (atom 0))
+(def calls (atom 0))
+(def results (atom []))
+(defn require! [ok why]
+ (swap! checks inc)
+ (when-not ok (throw (ex-info (str "wide candidate reader: " why) {}))))
+(defn rejected? [action] (try (action) false (catch _ true)))
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn restore [wire]
+ (require! (and (= #{"formal/data-graph" "profile" "root" "nodes"} (set (keys wire)))
+                (int? (get wire "formal/data-graph")) (= 1 (get wire "formal/data-graph"))
+                (= "bl/public-data-graph-v1" (get wire "profile"))) "closed versioned wire")
+ (let [data {:formal/data-graph 1 :profile graph/profile :root (get wire "root")
+             :nodes (mapv (fn [[tag payload]]
+                           [tag (if (contains? #{"binary" "float64"} tag) (Base/decode64! payload) payload)])
+                          (get wire "nodes"))}]
+  (graph/check! data) data))
+(defn undecided! [result expected]
+ (require! (= (get expected "reported-status") (name (get-in result [:answer-check :source :status]))) "recorded native status")
+ (require! (= :reported-native (get-in result [:answer-check :source :kind])) "recorded source only")
+ (require! (= :not-installed (get-in result [:answer-check :point-replay])) "no invented point interpreter")
+ (require! (= :not-established (get-in result [:logical-conclusion :status])) "no independently checked conclusion")
+ (require! (not= :accepted (get-in result [:conclusion :status])) "consumer must not accept native claims")
+ (require! (and (nil? (:proof-check result)) (nil? (:proof-account result))) "no implicit proof search")
+ (require! (= :not-run (get-in result [:feasibility-check :checker-invocation])) "no implicit premise search")
+ (require! (= false (:checked-native-execution result) (:compiler-proof-authority result) (:storage-authenticated result))
+           "no execution, compiler or storage authenticity")
+ result)
+(def input (json/decode (File/read! (nth argv 0))))
+(require! (= "bl.wide-owner-candidate-corpus.v1" (get input "schema")) "closed candidate corpus")
+(require! (= false (get input "producer-results")) "producer results absent")
+(require! (= false (get input "in-sdk") (get input "compiler-proof-authority")) "explicit prototype scope")
+(def directory (nth argv 1))
+(def descriptors (get input "packets"))
+(require! (contains? #{20 376} (count descriptors)) "complete smoke or full packet corpus")
+(def pattern (tuple (elem (erlang/fun_info backend/invoke :module) 1) :exchange! 4))
+(def deny (fn [& _] (swap! calls inc) (throw :wide-cold-reader-must-not-query)))
+(require! (= 1 (erlang/trace_pattern pattern true (list :local :call_count))) "actual native exchange trace installed")
+(try
+ (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+  (fn []
+   (doseq [descriptor descriptors]
+    (let [file (get descriptor "file")
+          _ (require! (and (not (String/contains? file "/")) (not (String/contains? file "\\"))
+                           (String/ends_with? file ".json")) "closed corpus filename")
+          bytes (File/read! (Path/join directory file))]
+     (require! (= (sha bytes) (get descriptor "sha256")) "exact saved candidate bytes")
+     (let [packet (restore (json/decode bytes))
+           ;; This is the first operation on packet contents. The library must
+           ;; initialize its own schemas rather than borrowing producer atoms.
+           fresh (undecided! (evidence/reopen packet) (get descriptor "expected"))]
+      (require! (= (:sha256 (graph/reference packet)) (get-in descriptor ["packet-reference" "sha256"])) "packet reference")
+      (require! (= (get-in fresh [:request-reference :sha256]) (get-in descriptor ["request-reference" "sha256"])) "complete request identity")
+      (require! (= (get-in fresh [:subject-reference :sha256]) (get-in descriptor ["subject-reference" "sha256"])) "complete subject identity")
+      (swap! results conj {:case (get descriptor "case") :backend (get descriptor "backend")
+                           :reported-status (get-in fresh [:answer-check :source :status])
+                           :answer-verdict (get-in fresh [:answer-check :verdict])
+                           :logical-status (get-in fresh [:logical-conclusion :status])
+                           :consumer-status (get-in fresh [:conclusion :status])
+                           :packet packet}))))
+   (let [packet (:packet (first @results)) decoded (graph/decode! packet)
+         r (:request decoded) e (:evidence decoded)
+         other (request/for-backend r (if (= :z3 (get-in r [:adapter :backend])) :oxiz :z3))
+         limited (evidence/reopen packet {:proof-work-units 0 :feasibility-work-units 0})
+         response (answer/restore r (:answer-graph e))
+         invented (-> response (assoc-in [:source :status] :unsat)
+                       (assoc-in [:source :phase] :query)
+                       (assoc-in [:source :identity :worker-sha256] "reader-invented-worker")
+                       (assoc-in [:source :identity :sdk] "reader-invented-sdk"))
+         forged-report (evidence/recheck r (evidence/propose r {:answer invented}))]
+    (require! (rejected? #(evidence/recheck r (assoc e :trusted true))) "producer trusted flag refused")
+    (require! (rejected? #(evidence/recheck r (assoc e :proof-check {:status :checked}))) "producer checked result refused")
+    (require! (rejected? #(evidence/recheck r (assoc e :request-reference {}))) "changed request reference refused")
+    (require! (rejected? #(evidence/recheck r (assoc e :subject-reference {}))) "changed subject reference refused")
+    (require! (rejected? #(evidence/recheck other e)) "changed backend cannot reuse envelope")
+    (require! (rejected? #(evidence/reopen (graph/encode (assoc decoded :result {:status :checked})))) "stored result refused")
+    (require! (rejected? #(answer/check! r (assoc response :trusted true))) "privileged answer refused")
+    (require! (rejected? #(evidence/recheck r (evidence/propose r {:answer (assoc response :point-present true)}))) "invented missing point refused")
+    (require! (= :not-established (get-in limited [:logical-conclusion :status])) "zero current proof/premise allowances confer no authority")
+    (require! (= :solver-claim (get-in forged-report [:answer-check :verdict])) "invented UNSAT remains only a claim")
+    (require! (= :not-established (get-in forged-report [:logical-conclusion :status])) "invented identity cannot prove mathematics")
+    (require! (= false (:storage-authenticated forged-report) (:checked-native-execution forged-report)) "identity labels authenticate no history")
+    (let [before (erlang/system_info :atom_count)]
+     (undecided! (evidence/reopen packet) (get (first descriptors) "expected"))
+     (require! (= before (erlang/system_info :atom_count)) "warmed atom count stable")))))
+ (let [exchanges (elem (erlang/trace_info pattern :call_count) 1)]
+  (require! (and (int? exchanges) (= 0 exchanges @calls)) "actual zero native and oracle calls")
+  (File/write! (nth argv 2)
+   (json/encode {:schema "bl.wide-owner-candidate-reader.v1" :status :passed
+                 :sdk (System/get_env "BL_SDK_PRODUCT") :packets (count descriptors) :checks @checks
+                 :negative-controls 8 :forged-native-report :unprivileged-claim
+                 :manual-schema-preload false :warmed-atoms-stable true
+                 :native-exchanges exchanges :oracle-calls @calls
+                 :in-sdk false :compiler-proof-authority false
+                 :rows (mapv #(dissoc % :packet) @results)} {:pretty 2}))
+  (println {:fresh-wide-reader :passed :packets (count descriptors) :checks @checks :native-exchanges exchanges}))
+ (finally (erlang/trace_pattern pattern false (list :local :call_count))))

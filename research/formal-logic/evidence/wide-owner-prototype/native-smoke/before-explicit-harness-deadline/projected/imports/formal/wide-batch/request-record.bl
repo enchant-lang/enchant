@@ -1,0 +1,61 @@
+(ns formal.wide-batch.request-record
+ (:require [formal.wide-batch.request :as request] [formal.wide-batch.request-answer :as answer]
+           [formal.data-graph :as graph] [formal.wide-batch.ledger :as ledger]
+           [formal.wide-batch.retained-composition :as composition] [formal.wide-batch.question-graph :as qg]))
+
+(def profile :bl/formal-request-record-preview-v2)
+(defn- require! [ok reason]
+ (when-not ok (throw (ex-info (str "formal.request-record: " reason) {:kind :request-record}))))
+(defn- same? [a b] (= (graph/bytes (graph/encode a)) (graph/bytes (graph/encode b))))
+
+(defn pack
+ "A versioned evidence packet, not a validity or native-execution assertion."
+ [original response]
+ (let [fresh (request/check! original)]
+  (answer/check! fresh response)
+  {:formal/request-record 2 :profile profile :request fresh :answer response
+   :request-reference (request/reference fresh) :subject-reference (request/subject-reference fresh)
+   :compiler-proof-authority false}))
+
+(defn recheck
+ "Reopen portable recorded data by fresh subject/policy/point checking.
+  No supplied record label establishes storage or native-execution authenticity."
+ [packet]
+ (require! (and (= :map (rt/kind-kind packet)) (or (nil? (meta packet)) (= {} (meta packet)))
+                (= #{:formal/request-record :profile :request :answer :request-reference :subject-reference
+                     :compiler-proof-authority} (set (keys packet)))
+                (int? (:formal/request-record packet)) (= 2 (:formal/request-record packet)) (= profile (:profile packet))
+                (= false (:compiler-proof-authority packet))) "closed unprivileged request record required")
+ (let [fresh (request/check! (:request packet))]
+  (require! (and (same? (request/reference fresh) (:request-reference packet))
+                 (same? (request/subject-reference fresh) (:subject-reference packet))) "record references differ")
+  (assoc (answer/recheck fresh (:answer packet)) :record-profile profile :storage-authenticated false)))
+
+(defn record!
+ "Store a typed request and separately graph-bound answer in the existing
+  ledger's request format. Storage integrity is separate from point validity."
+ [connection original response metadata]
+ (ledger/record-request! connection original response metadata))
+
+(defn reopen
+ "Fetch an actual ledger row, check its payload/index binding, then freshly
+  recheck the point. No stored label authenticates native execution."
+ [connection id]
+ (let [row (ledger/lookup connection id)]
+  (require! (some? row) "one actual ledger record required")
+  (require! (and (= ledger/request-format (:verdict/format row))
+                 (= :recorded-request (:verdict/modality row)) (= :recorded (:verdict/assurance row))
+                 (= false (:verdict/compiler-authority row))) "recorded request ledger envelope required")
+  {:id id :ledger-envelope :payload-checked :result (ledger/recheck-request row)
+   :checked-native-execution false :compiler-proof-authority false}))
+
+(defn pack-graph
+ "Encode the closed portable evidence packet as an original data graph."
+ [original response] (graph/encode (pack original response)))
+(defn recheck-graph
+ "Read and freshly recheck a graph packet with this SDK's closed vocabulary.
+  Only these named schema modules are initialized. Graph data never chooses
+  a module to load, creates application atoms or authenticates native history."
+ [data]
+ (let [_ [profile (answer/data-vocabulary)]]
+  (recheck (graph/decode! data))))

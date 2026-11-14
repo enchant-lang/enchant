@@ -62,7 +62,8 @@ test=checks/test_name;project(D/test_name,test)
 write('projection.json',projections)
 ceiling='1500' if phase=='pure' else ('900' if phase=='native-smoke' else '3600')
 command=['timeout','--kill-after=15',ceiling,'env','-u','BEAM_LISP_PATH','-u','ENCHANT_FORMAL_WORKER','-u','ENCHANT_Z3_LIBRARY',
- 'XDG_RUNTIME_DIR='+str(xdg),'FORMAL_WIDE_OWNER_OUTPUT='+str(E/'observations.json'),pin['sdk']+'/bin/bl','--cold',
+ 'XDG_RUNTIME_DIR='+str(xdg),'BL_TEST_TIMEOUT='+str(int(ceiling)-60),
+ 'FORMAL_WIDE_OWNER_OUTPUT='+str(E/'observations.json'),pin['sdk']+'/bin/bl','--cold',
  '-p',str(imports),'-p',str(P/'src'),'test',str(test)]
 if phase!='pure':
  pos=command.index(pin['sdk']+'/bin/bl')
