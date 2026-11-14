@@ -54,6 +54,13 @@ preserves the reference format. Twelve narrow-owner/request/effect files pass
 [eight-file batch is copied into the canonical runtime](evidence/wide-integration/runtime-install.json)
 on main. The full native corpus and immutable SDK qualification remain separate gates.
 
+The [wide chapter presentation](evidence/wide-owner-presentation/dossier-qualification.json)
+rechecks the same 94 cells and passes 62 browser checks, with all 36 phone and
+desktop frames inspected in both themes. Its request-flow diagrams now scope
+SVG markers per diagram, so hidden panes cannot suppress later arrowheads.
+The live [chapter](https://work.tailcb5318.ts.net:18100/#one-request-more-theories)
+distinguishes typed admission, native reports, independent point replay and proof.
+
 The latest [graph point-evaluation preview](TERM-FOREST-EVALUATION.md) keeps
 argument references through independent BL evaluation. It matches 6,300 root
 values across 187 questions and four deterministic point maps each. The shared
