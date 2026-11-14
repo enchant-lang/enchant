@@ -67,24 +67,34 @@
   (if-let [principal (authenticate request)]
    (identity/with-verified principal #(handler request))
    (refuse request))))
+(defn- machine-addresses [_settings]
+ (let [[out code] (System/cmd "timeout" (list "2s" "tailscale" "status" "--json"))]
+  (when (= 0 code) (set (get-in (json/decode out) ["Self" "TailscaleIPs"])))))
 (defn configured
- "Station host integration. Re-read the provider selection and identity mapping
-  on every request. Migration changes host configuration, not application code.
-  principals is host code mapping (settings, adapter) to stable known subjects."
- [{:keys [settings-file application server-port principals trusted-uids peer-uid]
-   :or {settings-file "/etc/workstation-endpoints.json" trusted-uids #{0} peer-uid socket-uid}}]
+ "Station host integration. Mesh claims become a canonical station account
+  before the app's provider-neutral account-to-principal mapping is consulted.
+  Provider selection, mappings and trust data are re-read on every request."
+ [{:keys [settings-file application server-port principal trusted-uids peer-uid machine-addresses-fn]
+   :or {settings-file "/etc/workstation-endpoints.json" trusted-uids #{0} peer-uid socket-uid
+        principal (fn [account _] account) machine-addresses-fn machine-addresses}}]
  (fn [request]
   (try
    (when (contains? trusted-uids (peer-uid request server-port))
-   (let [settings (json/decode (File/read! settings-file))
-         publication (get settings "publication" {})
-         provider (case (get publication "identityAdapter" (get publication "provider" "tailscale"))
-                    "tailscale" :tailscale "headscale" :headscale "netbird" :netbird "station" :station nil)
-         machine (when (contains? #{:tailscale :headscale} provider)
-                   (let [[out code] (System/cmd "tailscale" (list "status" "--json"))]
-                    (when (= 0 code) (set (get-in (json/decode out) ["Self" "TailscaleIPs"])))))
-         authenticate (adapter {:provider provider :application application :server-port server-port
-                                 :trusted-uids trusted-uids :subjects (principals settings provider)
-                                 :machine-addresses machine :peer-uid peer-uid})]
-    (authenticate request)))
+    (let [settings (json/decode (File/read! settings-file))
+          publication (get settings "publication" {})
+          provider (case (get publication "identityAdapter" (get publication "provider" "tailscale"))
+                     "tailscale" :tailscale "headscale" :headscale "netbird" :netbird "station" :station nil)
+          accounts (case provider
+                     :netbird (get publication "subjects" {})
+                     :station (into {} (map (fn [account] [account account]) (get settings "users" [])))
+                     (get settings "logins" {}))
+          subjects (into {} (keep (fn [[external account]]
+                                    (when-let [subject (principal account settings)]
+                                     [(if (contains? #{:tailscale :headscale} provider)
+                                        (String/downcase (String/trim external)) external) subject])) accounts))
+          machine (when (contains? #{:tailscale :headscale} provider) (machine-addresses-fn settings))
+          authenticate (adapter {:provider provider :application application :server-port server-port
+                                  :trusted-uids trusted-uids :subjects subjects
+                                  :machine-addresses machine :peer-uid peer-uid})]
+     (authenticate request)))
    (catch _ nil))))

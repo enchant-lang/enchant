@@ -1,6 +1,6 @@
 (ns auth.ingress-test
  (:require [auth.ingress :as ingress] [auth.identity :as identity]
-           [auth.interface :as namespace] [auth] [web]))
+           [auth.interface :as namespace] [auth] [web] [bl.json :as json]))
 (defn request [header value]
  (-> (Plug.Test/conn "POST" "/" "")
      (Plug.Conn/put_req_header header value)
@@ -32,6 +32,22 @@
   (is (= "person:alice" (handler (request "work-user-id" "external-subject"))))
   (is (= :denied (handler (request "work-user-id" "unknown")))))
  (is (nil? (identity/current))))
+(deftest provider-migration-does-not-change-the-application-principal-mapping
+ (let [file (str (System/tmp_dir!) "/auth-ingress-" (erlang/unique_integer (list :positive)) ".json")
+       seen (atom [])
+       handler (ingress/configured
+                 {:settings-file file :application "qa-app" :server-port 9999
+                  :trusted-uids #{0} :peer-uid (fn [_ _] 0)
+                  :machine-addresses-fn (fn [_] #{"100.64.0.1"})
+                  :principal (fn [account _] (swap! seen conj account)
+                               (when (= "alice" account) "person:alice"))})]
+  (try
+   (doseq [[provider header] ingress/ADAPTERS]
+    (File/write! file (json/encode {"publication" {"provider" (name provider) "subjects" {"external-subject" "alice"}}
+                                  "logins" {"external-subject" "alice"} "users" ["alice"]}))
+    (is (= "person:alice" (:subject (handler (request header (if (= provider :station) "alice" "external-subject")))))))
+   (is (every? #(= "alice" %) @seen))
+   (finally (File/rm! file)))))
 (deftest signed-delegation-has-audience-expiry-and-an-explicit-right-ceiling
  (let [root (auth/keypair)
        token (identity/issue root {:subject "person:alice" :application "qa-app" :kind :person
