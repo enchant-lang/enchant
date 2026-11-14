@@ -784,7 +784,33 @@
 (define (native-unit-compare a b)
  (cond ((null? a) (if (null? b) 0 -1)) ((null? b) 1)
   ((< (car a) (car b)) -1) ((> (car a) (car b)) 1) (else (native-unit-compare (cdr a) (cdr b)))))
-(set! native-compare-string (lambda (a b) (native-unit-compare (native-utf16-units a) (native-utf16-units b))))
+;; Normal Scheme strings contain Unicode scalars, so scalar indexing can
+;; compare their UTF16 order without allocating code-unit lists. Surrogate
+;; fragment wrappers retain the full unit-list path below.
+(define (native-scalar-string-compare a b)
+ (let ((a-size (string-length a)) (b-size (string-length b)))
+  (let loop ((index 0))
+   (cond ((= index a-size) (if (= index b-size) 0 -1))
+    ((= index b-size) 1)
+    (else
+     (let ((a-code (char->integer (string-ref a index)))
+           (b-code (char->integer (string-ref b index))))
+      (cond ((= a-code b-code) (loop (+ index 1)))
+       ;; Both supplementary scalars have the same ordering as their UTF16
+       ;; surrogate pairs; two BMP scalars compare directly as well.
+       ((or (and (< a-code 65536) (< b-code 65536))
+            (and (>= a-code 65536) (>= b-code 65536)))
+        (if (< a-code b-code) -1 1))
+       (else
+        (let ((a-unit (if (< a-code 65536) a-code (+ 55296 (quotient (- a-code 65536) 1024))))
+              (b-unit (if (< b-code 65536) b-code (+ 55296 (quotient (- b-code 65536) 1024)))))
+         ;; A normal BMP scalar cannot equal a high surrogate, so this
+         ;; mixed-width comparison decides at the first UTF16 unit.
+         (if (< a-unit b-unit) -1 1))))))))))
+(set! native-compare-string (lambda (a b)
+ (cond ((eq? a b) 0)
+  ((and (string? a) (string? b)) (native-scalar-string-compare a b))
+  (else (native-unit-compare (native-utf16-units a) (native-utf16-units b))))))
 (set! h-is-str native-string?)
 (set! h-str-size native-utf16-size)
 (set! h-str-cmp native-compare-string)

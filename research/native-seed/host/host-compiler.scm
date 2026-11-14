@@ -105,30 +105,85 @@
        (if variadic?
         (and (not (bl-is-nil (bl-nth info 1))) (= arity (+ 1 (bl-nth info 1))))
         (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
+;; Positive exact-MFA dispatch cache. Registry objects are persistent; an
+;; identity change retires all resolved wrappers before the next lookup.
+;; A compiled wrapper reads its LIVE slot on every invocation, so redefining
+;; a source var neither leaves a stale procedure nor grants new membership.
+(define native-remote-cache (make-table test: equal?))
+(define native-remote-cache-leaves #f)
+(define native-remote-cache-modules #f)
+(define native-remote-cache-stubs #f)
+(define native-remote-cache-arities #f)
+(define (native-refresh-remote-cache!)
+ (if (or (not (eq? native-remote-cache-leaves native-leaf-registry))
+         (not (eq? native-remote-cache-modules native-module-names))
+         (not (eq? native-remote-cache-stubs native-stub-names))
+         (not (eq? native-remote-cache-arities native-export-arities)))
+  (begin
+   (set! native-remote-cache (make-table test: equal?))
+   (set! native-remote-cache-leaves native-leaf-registry)
+   (set! native-remote-cache-modules native-module-names)
+   (set! native-remote-cache-stubs native-stub-names)
+   (set! native-remote-cache-arities native-export-arities))))
+(define (native-remote-key-parts key)
+ ;; Function names can contain '/', e.g. core// or erlang//=. The FIRST
+ ;; separator ends the module; only the LAST separator begins the arity.
+ (and (string? key)
+  (let ((size (string-length key)))
+   (let first ((i 0))
+    (cond ((>= i size) #f)
+     ((char=? (string-ref key i) #\/)
+      (and (> i 0)
+       (let last ((j (- size 1)))
+        (cond ((<= j (+ i 1)) #f)
+         ((char=? (string-ref key j) #\/)
+          (and (< j (- size 1))
+           (let digits ((k (+ j 1)))
+            (if (= k size)
+             (let* ((text (substring key (+ j 1) size)) (arity (string->number text)))
+              (and (integer? arity) (exact? arity) (>= arity 0)
+                   (string=? text (number->string arity))
+                   (vector (substring key 0 i) (substring key (+ i 1) j) arity)))
+             (let ((c (string-ref key k)))
+              (and (char>=? c #\0) (char<=? c #\9) (digits (+ k 1))))))))
+         (else (last (- j 1)))))))
+     (else (first (+ i 1))))))))
 (define (native-remote key)
- (let ((leaf (bl-get native-leaf-registry key native-missing)))
-  (if (not (eq? leaf native-missing)) leaf
-   (let* ((m+tail (native-string-split-once key #\/))
-          (f+a (and m+tail (native-string-split-once (cdr m+tail) #\/))))
-    (if (not f+a) (error "invalid native remote key" key)
-     (let* ((module (car m+tail)) (name (car f+a))
-            (ns (bl-get native-module-names module native-missing))
-            (stub (bl-get native-stub-names module native-missing))
-            (size (string-length name))
-            (variadic? (and (>= size 6) (string=? (substring name (- size 6) size) "__bl_v")))
-            (logical (if variadic? (substring name 0 (- size 6)) name)))
-      (cond
-       ((not (eq? ns native-missing))
-        (lambda arguments
-         (let ((value (bl-get native-global-registry (string-append ns "/" logical) native-missing)))
-          (if (eq? value native-missing) (error "missing compiled native export" key)
-           (if variadic?
-            (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
-             (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
-             (error "native variadic clause missing" key))
-            (bl-invoke value arguments))))))
-       ((not (eq? stub native-missing)) (lambda arguments (error "native target explicitly excludes namespace" stub key)))
-       (else (error "unimplemented native host leaf" key)))))))))
+ (native-refresh-remote-cache!)
+ (let ((cached (table-ref native-remote-cache key native-missing)))
+  (if (not (eq? cached native-missing)) cached
+   (let ((parts (native-remote-key-parts key)))
+    (if (not parts) (error "invalid native remote key" key)
+     (let ((leaf (bl-get native-leaf-registry key native-missing)))
+      (if (not (eq? leaf native-missing))
+       (begin (table-set! native-remote-cache (string-copy key) leaf) leaf)
+       (let* ((module (vector-ref parts 0)) (name (vector-ref parts 1)) (arity (vector-ref parts 2))
+              (ns (bl-get native-module-names module native-missing))
+              (stub (bl-get native-stub-names module native-missing))
+              (size (string-length name))
+              (variadic? (and (>= size 6) (string=? (substring name (- size 6) size) "__bl_v")))
+              (logical (if variadic? (substring name 0 (- size 6)) name)))
+        (cond
+         ((not (eq? ns native-missing))
+          (let* ((slot (string-append ns "/" logical))
+                 (wrapper
+                  (lambda arguments
+                   (let ((value (bl-get native-global-registry slot native-missing)))
+                    (if (eq? value native-missing) (error "missing compiled native export" key)
+                     (if variadic?
+                      (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+                       (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
+                       (error "native variadic clause missing" key))
+                      (bl-invoke value arguments)))))))
+           ;; Cache membership only when the exact existing arity ledger
+           ;; admits this MFA. Missing/stub/wrong-arity decisions stay uncached.
+           (if (native-remote-available? module name arity)
+            (table-set! native-remote-cache (string-copy key) wrapper))
+           wrapper))
+         ((not (eq? stub native-missing))
+          (lambda arguments (error "native target explicitly excludes namespace" stub key)))
+         (else (error "unimplemented native host leaf" key)))))))))))
+
 (define (native-install-bundle! metadata)
  (set! native-bundle-metadata metadata)
  (for-each

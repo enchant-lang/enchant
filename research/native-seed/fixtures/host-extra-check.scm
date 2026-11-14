@@ -112,4 +112,18 @@
  (native-extra-check "raw is_list rejects nil atom" (not (bl-invoke raw (list bl-nil))))
  (native-extra-check "proper argument validation rejects improper cons" (not (native-list? improper)))
  (native-extra-check "actor match spec list gate stays proper" (not (h-is-list improper))))
+;; Scalar fast path preserves JavaScript UTF16 order at the BMP boundary.
+(native-extra-check "UTF16 ASCII equal and prefix"
+ (and (= 0 (h-str-cmp "ascii" (string-append "as" "cii")))
+      (< (h-str-cmp "ascii" "ascii-more") 0) (> (h-str-cmp "b" "a") 0)
+      (< (h-str-cmp "" "a") 0) (> (h-str-cmp "a" "") 0)))
+(native-extra-check "UTF16 astral versus private BMP order"
+ (and (< (h-str-cmp "😀" "") 0) (> (h-str-cmp "" "😀") 0)
+      (> (h-str-cmp "😀" "퟿") 0)))
+(native-extra-check "UTF16 supplementary pair order"
+ (and (< (h-str-cmp "𐀀" "𠀀") 0) (< (h-str-cmp "😀" "😁") 0)))
+(let ((high (h-str-slice "😀" 0 1)) (low (h-str-slice "😀" 1 2)))
+ (native-extra-check "UTF16 lone-surrogate fallback preserved"
+  (and (< (h-str-cmp high "😀") 0) (> (h-str-cmp low "😀") 0)
+       (< (h-str-cmp high "") 0) (= 0 (h-str-cmp high (h-str-slice "😀" 0 1))))))
 (display "native extra checks passed") (newline)
