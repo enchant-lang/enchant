@@ -1,0 +1,110 @@
+; SDK replay only: exact captured proc-link ANF -> bounded actual C units.
+; The actor declarations/planners are NOT run a second time by this producer.
+(ns native.c-actor-produce
+ (:require [native.c-units :as units] [native.c-actor-options :as options]
+           [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.resolution :as resolution] [native.proc-link :as proc-link]
+           [bl.json :as json] [clojure.string :as string]))
+(def base "research/native-seed")
+(def args (BeamLisp/argv))
+(def original-path (or (first args) (str base "/out/original-actor-corpus/manifest.json")))
+(def out (or (second args) (str base "/out/direct-actors")))
+(def original (json/decode (File/read! original-path)))
+(when-not (and (= "bl.native.original-actor-corpus" (get original "schema"))
+                 (= 1 (get original "version")) (= "scheme" (get original "target"))
+                 (= "none" (get original "assertion-adaptation"))
+                 (= "none" (get original "source-path-adaptation"))
+                 (= "5f2ad8223fd9f053157b65266d3ee14e7fe8567b6196a78ed7ac955132b9a5c5"
+                    (get (get original "application") "sha256")))
+ (throw (ex-info "direct actor producer requires the complete unadapted original corpus capture" {})))
+(def anf-record (get original "anf"))
+(when-not anf-record (throw (ex-info "original actor artifact predates portable resolver capture" {})))
+(def artifact (artifact/read-part original-path (assoc anf-record "path" (Path/expand (get anf-record "path")))))
+(when-not (and (= "bl.native.anf-unit" (:schema artifact)) (= 1 (:version artifact))
+                 (:actor-runtime (:entry artifact)) (:link-resolutions artifact)
+                 (= 202 (:runtime-definitions (:link-manifest artifact))))
+ (throw (ex-info "direct actor producer requires every original actor runtime definition and resolver" {})))
+(doseq [record (concat [(get original "application") (get original "runtime") (get original "body")]
+                       (get original "inputs"))]
+ (when-not (= (get record "sha256") (artifact/sha (File/read! (get record "path"))))
+  (throw (ex-info "direct actor producer: original captured input changed" {:record record}))))
+(def definitions (:definitions artifact))
+(def link (:link-manifest artifact))
+(when-not (= (:emitted-bindings link) (mapv #(str (:ns %) "/" (:name %)) definitions))
+ (throw (ex-info "direct actor producer omitted or reordered a captured definition" {})))
+(when-not (= (set (keys (:definitions (:link-resolutions artifact)))) (set (:emitted-bindings link)))
+ (throw (ex-info "direct actor producer has an incomplete per-definition resolver ledger" {})))
+(def closure-path (:path (:closure-manifest link)))
+(def closure (artifact/read-closure closure-path))
+(def compiler-units (mapv #(get (:units closure) %) (:order closure)))
+(def metadata
+ {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure)
+  :resolution (resolution/build closure) :provider-sources (:provider-sources closure)
+  :options (:options closure) :stubs (:stubs closure) :core-links (:core-links closure)
+  :return-constructor-shapes (:return-constructor-shapes closure)
+  :namespace-modules (mapv (fn [unit] [(:ns unit) (:module unit) (:base-module unit)]) compiler-units)
+  :stub-modules (mapv (fn [namespace]
+    [namespace (BeamLisp.Link/module_for namespace) (BeamLisp.Emit/base_module_for namespace)]) (:stubs closure))})
+(def io {:write (fn [path text] (File/write! path text)) :digest artifact/sha})
+(File/mkdir_p! out)
+(def emitted
+ (loop [phases (list ["functions" (BeamLisp.CompilerData/eager_filter #(= :fn (:kind %)) definitions)]
+                    ["initializers" (BeamLisp.CompilerData/eager_filter #(not= :fn (:kind %)) definitions)])
+        todo (list) phase nil index 0 records [] rows []]
+  (cond
+   (not (erlang/== todo (list)))
+    (let [[group more] (units/next-group todo)
+          name (str "a" (subs (units/unit-name index) 1))
+          result (units/emit-named-group! name group phase io out (options/options (:link-resolutions artifact)))]
+     (recur phases more phase (inc index) (conj records (:record result)) (conj rows (:index result))))
+   (not (erlang/== phases (list)))
+    (let [next (erlang/hd phases)] (recur (erlang/tl phases) (second next) (first next) index records rows))
+   :else {:units records :rows rows})))
+(def host-records
+ (vec (concat [(proc-link/source-identity (str base "/direct/actor/direct-linked.scm"))
+               (proc-link/source-identity (str base "/direct/actor/direct-control-frames.scm"))]
+              [(:host-link link)] (:host-extensions link))))
+(def actor-host
+ (str (string/join "\n" (map #(File/read! (:path %)) host-records)) "\n"
+      (string/join "" (map proc-link/module-source (:units link)))))
+(File/write! (str out "/actorhost.scm") actor-host)
+(def entry-source
+ (str "(bl-invoke " (options/exact-source "native.kernel/bl-main") " (list "
+      (options/exact-source (str (:namespace (:entry artifact)) "/" (:name (:entry artifact)))) "))\n"
+      "(if (not (null? seed-errors)) (error \"native actor errors\"))\n"
+      "(if (not (and (native-c-closure? (native-global-exact \"rt\" \"invoke\")) "
+      "(native-c-closure? (native-global-exact \"native.kernel\" \"bl-main\")) "
+      "(native-c-closure? " (options/exact-source (str (:namespace (:entry artifact)) "/" (:name (:entry artifact)))) "))) "
+      "(error \"direct actor overlay did not use the actual C core/runtime/app\"))\n"
+      "(display \"DIRECT_C_CORPUS_CONTROL {\\\"steps\\\":\") (display native-c-step-count) "
+      "(display \",\\\"core_c\\\":true}\\n\")\n(native-corpus-finish)\n"))
+(File/write! (str out "/entry.scm") entry-source)
+(def source-index
+ (mapv (fn [unit]
+  {:namespace (:ns unit) :path (:path unit) :sha256 (artifact/sha (:source unit))
+   :binding-sha256 (artifact/sha (bootstrap/data [(:ns unit) (:path unit)]))}) compiler-units))
+(def manifest
+ {:schema "bl.native.direct-original-actor-plan" :version 1 :status :emitted-not-executed
+  :application (get original "application") :runtime (get original "runtime") :sdk-pin (:sdk-pin link)
+  :original-manifest (proc-link/source-identity original-path) :original-body (get original "body")
+  :original-anf anf-record :closure-manifest (:closure-manifest link)
+  :compiler-metadata-sha256 (artifact/sha (bootstrap/data metadata)) :compiler-sources source-index
+  :resolver-schema (:schema (:link-resolutions artifact))
+  :resolver-sha256 (artifact/sha (bootstrap/data (:link-resolutions artifact)))
+  :emitted-bindings (:emitted-bindings link) :runtime-definitions 202 :helper-namespaces (:helper-namespaces link)
+  :host-inputs host-records :actorhost {:path "actorhost.scm" :sha256 (artifact/sha actor-host)}
+  :entry {:path "entry.scm" :sha256 (artifact/sha entry-source)}
+  :group-size 32 :units (:units emitted)
+  :source-interpreter false :anf-interpreter false :authored-scheme-bodies false
+  :program-control :emitted-c :value-services :shared-native-host :independent-runtime false})
+(def manifest-source (bootstrap/data manifest))
+(File/write! (str out "/plan.manifest.scm") manifest-source)
+(File/write! (str out "/manifest.json") (json/encode manifest))
+(File/write! (str out "/index.tsv")
+ (str "BL_NATIVE_DIRECT_ACTORS\t1\t32\n"
+      (units/tab-row ["H" "actorhost.scm" (artifact/sha actor-host)])
+      (units/tab-row ["E" "entry.scm" (artifact/sha entry-source)])
+      (string/join "" (:rows emitted))
+      (units/tab-row ["P" "plan.manifest.scm" (artifact/sha manifest-source)])))
+(println (str "DIRECT_ORIGINAL_ACTORS_EMITTED " (count definitions) " original definitions; "
+              (count (:units emitted)) " bounded C units"))

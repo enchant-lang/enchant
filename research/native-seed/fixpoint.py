@@ -25,6 +25,7 @@ ENTRY = b"(native-main (native-command-line))\n"
 TARGET = 256 * 1024
 HARD = 1024 * 1024
 COMPILE_DEADLINE = 120
+STANDARD_BINDING_PRELUDE = "(declare (standard-bindings) (extended-bindings))"
 BUDGETS = ("default", "17", "41")
 ORIGINAL = "5f2ad8223fd9f053157b65266d3ee14e7fe8567b6196a78ed7ac955132b9a5c5"
 ZERO = {"procs": 0, "monitors": 0, "tables": 0, "names": 0, "table_names": 0,
@@ -59,9 +60,14 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--host-optimization", type=int, choices=(0, 1), default=0,
                         help="Clang optimization level for the indivisible ordinal-zero host only")
+    parser.add_argument("--standard-bindings", action="store_true",
+                        help="assert immutable stock Gambit primitive bindings during Scheme -> C only")
     parser.add_argument("--compile-stage1-only", action="store_true",
                         help="checkpoint the real native stage1 image; never qualify a fixpoint")
     args = parser.parse_args()
+    # This is a compiler declaration, not an edit to the original Source or
+    # Scheme artifact. Keep the existing separate/safe/interrupt/tail policies.
+    gsc_flags = ["-prelude", STANDARD_BINDING_PRELUDE] if args.standard_bindings else []
     args.corpus = args.corpus.resolve()
     if args.actor_body:
         args.actor_body = args.actor_body.resolve()
@@ -107,6 +113,8 @@ def main() -> None:
                             "unit_target_bytes": TARGET, "unit_hard_bytes": HARD,
                             "compile_deadline_seconds": COMPILE_DEADLINE,
                             "host_optimization": args.host_optimization,
+                            "standard_bindings": args.standard_bindings,
+                            "scheme_compiler_flags": gsc_flags,
                             "builds": builds, "runs": runs})
 
     def run(label, argv, *, cwd=out, timeout=COMPILE_DEADLINE, env=None):
@@ -173,6 +181,7 @@ def main() -> None:
         link_flags = [str(gambit / "gambit/lib/libgambit.so"), "-pthread", "-ldl", "-lm",
                       "-Wl,-rpath," + str(gambit / "gambit/lib")]
         tool_identity = {"driver": digest(here), "splitter": digest(splitter), "flags": flags,
+                         "scheme_compiler_flags": gsc_flags,
                          "link_flags": link_flags, "toolchain": tools,
                          "compiler_environment_sha256": key({name: value for name, value in os.environ.items()
                              if name.startswith(("NIX_", "GAMBIT")) or name in
@@ -282,6 +291,7 @@ def main() -> None:
             build = {"stage": name, "source_sha256": digest(source), "split_manifest": str(folder / "manifest.json"),
                      "split_manifest_sha256": digest(folder / "manifest.json"), "units": [],
                      "host_optimization": args.host_optimization,
+                     "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
                      "link_metadata_c_flags": flags, "native_link_flags": link_flags}
             builds.append(build)
             if (manifest["units"][0].get("file") != "host.scm"
@@ -303,7 +313,7 @@ def main() -> None:
                 if not scheme.is_file() or scheme.read_bytes() != raw:
                     scheme.write_bytes(raw)
                 reused_c = cached_phase(name + f"-unit-{ordinal:04d}-scheme-to-c",
-                    [gsc, "-c", "-o", cfile, scheme], directory, directory / "scheme-c.json", request, [cfile])
+                    [gsc, "-c", *gsc_flags, "-o", cfile, scheme], directory, directory / "scheme-c.json", request, [cfile])
                 object_request = {"request": request, "c_sha256": digest(cfile), "flags": object_flags}
                 reused_o = cached_phase(name + f"-unit-{ordinal:04d}-object",
                     [clang, *object_flags, "-c", cfile, "-o", obj], directory,
@@ -313,6 +323,7 @@ def main() -> None:
                 build["units"].append({"ordinal": ordinal, **row, "c": str(cfile), "c_sha256": digest(cfile),
                                        "object": str(obj), "object_sha256": digest(obj),
                                        "c_flags": object_flags,
+                                       "scheme_compiler_flags": gsc_flags,
                                        "reused_c": reused_c, "reused_object": reused_o})
                 progress()
                 print(name, f"UNIT {ordinal + 1}/{len(manifest['units'])}", "REUSED" if reused_c and reused_o else "BUILT", flush=True)
@@ -412,6 +423,7 @@ def main() -> None:
                   "stage2-sha256": h2, "stage3-sha256": h3, "stage2-stage3-byte-equal": True,
                   "stage1-stage2-source-corpus-equal": True, "stage1-stage2-original-actor-corpus-equal": True,
                   "host_optimization": args.host_optimization,
+                  "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
                   "actor_oracle_sha256": digest(args.actor_oracle), "actor_results": actor_results,
                   "inputs": inputs, "builds": builds, "runs": runs}
         save(evidence, report)

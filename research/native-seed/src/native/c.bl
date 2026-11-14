@@ -32,13 +32,15 @@
  (when-let [ann (:direct-callsite options)]
   (assoc (select-keys ann [:file :line :col :end-line :end-col])
     :fn (:source-fn options) :arity (:source-arity options)
-    :call (if tail? :tail :direct)
+    :call (if (and tail? (not= false (:source-tail-allowed? options))) :tail :direct)
     :internal (and (:file ann) (String/ends_with? (:file ann) "/actor/runtime.bl")))))
 (defn internal [source args] {:op :direct-service :service source :args (vec args) :ann {}})
 (defn value-source [source] {:op :direct-value :source source :ann {}})
 (defn lit [v] {:op :lit :val v :ann {}})
 (defn list-node [nodes] (internal "list" nodes))
-(defn thunk [body] {:op :fn :clauses [{:pats [] :guard nil :body body}] :ann (:ann body)})
+(defn thunk [body]
+ {:op :fn :clauses [{:pats [] :guard nil :body body}] :ann (:ann body)
+  :direct-control? true :direct-control-tail? false :direct-control-tick? false})
 (defn vector-node [nodes] (internal "bl-make-vec" nodes))
 (defn variable [name] {:op :var :name name :ann {}})
 (defn slot-node [i] {:op :direct-register :register i :ann {}})
@@ -124,31 +126,37 @@
        s (assoc s :slot (+ 2 (count captured))) return-slot (inc (count captured))
        [s finish] (block s (str " blc_set(m,4," (r return-slot) "); return BLC_RETURN;"))
        arity (count (:pats (first (:clauses node))))
-       body-options (assoc (dissoc options :direct-callsite) :source-fn (:direct-source-fn node) :source-arity arity)
+       control? (:direct-control? node)
+       body-options (if control?
+                      (assoc (dissoc options :direct-callsite) :source-tail-allowed? (boolean (:direct-control-tail? node)))
+                      (assoc (dissoc options :direct-callsite) :source-fn (:direct-source-fn node)
+                             :source-arity arity :source-tail-allowed? true))
        [s entry] (lower-clauses s (:clauses node) 0 inner-env return-slot finish true
                    (internal "native-c-clause-error" []) body-options)
-       [s tick] (block s (action "BLC_TICK" "___FIX(0)" 0 entry "___NUL" false))
+       [s tick] (if (or (not control?) (:direct-control-tick? node))
+                  (block s (action "BLC_TICK" "___FIX(0)" 0 entry "___NUL" false)) [s entry])
        size (:slot s)
        source-frame (assoc (select-keys (:ann node) [:file :line :col :end-line :end-col])
-                      :fn (:direct-source-fn node) :arity arity)
+                       :fn (if control? (:source-fn options) (:direct-source-fn node)) :arity arity
+                      :ns (:definition-ns options) :native-control (boolean control?))
        [s metadata] (pool s (str "(list " tick " " size " '(" (string/join " " capture-slots)
                              ") " (scalar/literal source-frame) ")"))
        [s capture-plan] (pool s (str "'(" (string/join " " captures) ")"))
        s (-> s (assoc :slot parent-slot) (update :functions conj {:entry tick :frame-size size :source source-frame}))]
   (block s (action "BLC_CLOSURE" (k metadata) destination next (k capture-plan) false))))
 
-(defn receive-node [n options id]
+(defn receive-node [n options id logical-tail?]
  (let [message (fresh-name "__native_c_receive_" n) selected (fresh-name "__native_c_selected_" n)
-       selector {:op :fn :ann (:ann n)
+       selector {:op :fn :ann (:ann n) :direct-control? true :direct-control-tail? false :direct-control-tick? false
                  :clauses [{:pats [{:pop :pvar :name message}] :guard nil
                   :body {:op :case :subj (variable message) :ann (:ann n)
                    :clauses (vec (concat
-                    (map #(assoc % :body (vector-node [(lit :match) (thunk (:body %))])) (:clauses n))
+                    (map #(assoc % :body (vector-node [(lit :match) (assoc (thunk (:body %)) :direct-control-tail? logical-tail?)])) (:clauses n))
                     [{:pats [{:pop :pvar :name (fresh-name "__native_c_unmatched_" n)}]
                       :guard nil :body (lit :nomatch)}]))}}]}
        receive-call {:op :apply :fn (if-let [source (:receive-source options)] (value-source source)
                                   {:op :global :ns (or (:runtime-namespace options) "native.kernel") :name "rt-receive"})
-                     :args [selector (thunk (or (:after n) (lit nil))) (or (:timeout n) (lit nil))] :ann (:ann n)}]
+                     :args [selector (assoc (thunk (or (:after n) (lit nil))) :direct-control-tail? logical-tail?) (or (:timeout n) (lit nil))] :ann (:ann n)}]
   {:op :let :name selected :init receive-call :ann (:ann n)
    :body {:op :apply :fn (internal "bl-nth" [(variable selected) (lit 1)]) :args [] :ann (:ann n)}}))
 
@@ -164,7 +172,7 @@
           :body (with-trace (:body clause)))) (:catch n))
        fallback {:pats [{:pop :pvar :name kind} {:pop :pvar :name reason} {:pop :pvar :name trace}]
                  :guard nil :body (internal "bl-reraise" [(variable kind) (variable reason) (variable trace)])}
-       handler {:op :fn :clauses (vec (concat catches [fallback])) :ann (:ann n)}]
+       handler {:op :fn :direct-control? true :direct-control-tail? false :direct-control-tick? false :clauses (vec (concat catches [fallback])) :ann (:ann n)}]
   (internal "native-c-try" [(thunk (:body n)) handler (if (:after n) (thunk (:after n)) (lit false))])))
 
 (defn lower-call [s callee arguments env destination next tail? options]
@@ -247,11 +255,25 @@
     (lower-function s (assoc function :direct-source-fn (:direct-source-fn node)) env destination next options)
    :else (fail function))))
 
+(defn loop-application-parts [node]
+ ; The compiler uses raw :apply(SCAFFOLD,inits) for a loop. Authored callable
+ ; invocation has its own :invoke ABI. Keep original captures/self cells and
+ ; C tail control; only make this generated function logically transparent.
+ (when (and (= :apply (:op node)) (not (:direct-loop-rendered? node)))
+  (BeamLisp.CompilerData/self_application_parts (:fn node))))
+(defn source-loop-node [node parts options tail?]
+ (let [logical-tail? (and tail? (not= false (:source-tail-allowed? options)))
+       inner (assoc (:inner parts) :direct-control? true :direct-control-tail? logical-tail? :direct-control-tick? true)
+       outer (assoc (:outer parts) :clauses [(assoc (:clause parts) :body inner)])
+       scaffold (assoc (:fn node) :init outer :direct-source-fn (:source-fn options))]
+  (assoc node :fn scaffold :direct-loop-rendered? true)))
 (defn lower [s node env destination next tail? options]
  (if-let [definition (:direct-definition node)]
   (let [base (assoc options :definition-ns (:ns definition) :fn-label (:name definition))
         scoped (if-let [resolve (:definition-options options)] (resolve definition base) base)]
    (lower s (dissoc node :direct-definition) env destination next tail? scoped))
+ (if-let [parts (loop-application-parts node)]
+  (lower s (source-loop-node node parts options tail?) env destination next tail? options)
  (if-let [target (self-constructor-target node options)]
   (lower-service s "native-c-recursion-ref" [(variable target)] env destination next tail? options)
  (if (and (= :let (:op node)) (BeamLisp.CompilerData/self_application_parts node))
@@ -304,7 +326,7 @@
                              (internal "native-c-clause-error" []) options)
               [s pack] (lower-service s "list" [(slot-node subject)] env argv clauses false options)]
           (lower s (:subj node) env subject pack false options))
-  :recv (lower s (receive-node node options (:next s)) env destination next tail? options)
+  :recv (lower s (receive-node node options (:next s) (and tail? (not= false (:source-tail-allowed? options)))) env destination next tail? options)
   :try (lower s (try-node node (:next s)) env destination next tail? options)
   :tuple (if (dispatch-value? node)
            (lower s (dispatch-node node env) env destination next tail? options)
@@ -319,7 +341,7 @@
              (fail node))
             (lower-service s "bl-struct" [(lit (:mod node)) {:op :map :pairs (:fields node) :ann (:ann node)}]
               env destination next tail? options))
-  (fail node))))))
+  (fail node)))))))
 
 (defn emit-unit
  "Return direct C and a literal/FFI wrapper. Options use the SAME checked

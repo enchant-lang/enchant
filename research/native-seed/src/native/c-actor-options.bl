@@ -1,0 +1,72 @@
+; Portable replay of proc-link's checked decisions over ORIGINAL canonical ANF.
+; No Env discovery, header lookup, alias inference or new namespace admission.
+(ns native.c-actor-options
+ (:require [native.scheme :as scalar] [native.eval :as ev] [js.actor :as actor]))
+(defn query [node]
+ (case (:op node)
+  :global [:global (:ns node) (:name node) (:lookup node)]
+  :remote [:remote (:mod node) (:fun node) (count (:args node))]
+  nil))
+(defn target-parts [target]
+ (let [offset (binary/match target "/")]
+  (when-not (and (erlang/is_tuple offset) (> (elem offset 0) 0))
+   (throw (ex-info "direct actor resolver: invalid captured binding" {:target target})))
+  (let [i (elem offset 0) parts [(binary/part target 0 i)
+                                  (binary/part target (inc i) (- (erlang/byte_size target) i 1))]]
+   (when (empty? (second parts)) (throw (ex-info "direct actor resolver: empty captured name" {}))) parts)))
+(defn exact-source [target]
+ (let [[namespace name] (target-parts target)]
+  (str "(native-global-exact " (scalar/text namespace) " " (scalar/text name) ")")))
+(defn select! [ledger definition node]
+ (let [key (str (:ns definition) "/" (:name definition)) table (get (:definitions ledger) key)
+       query (query node)]
+  (when-not (and table (contains? table query))
+   (throw (ex-info "direct actor resolver: original ANF query was not captured"
+                   {:caller key :query query :ann (:ann node)})))
+  (get table query)))
+(defn global-selection-source [selection]
+ (do
+  (when-not (contains? #{:body :sdk-seed} (:kind selection))
+   (throw (ex-info "direct actor resolver: invalid captured global selection" {:selection selection})))
+  (exact-source (:target selection))))
+(defn remote-selection-source [selection arity]
+ (do
+  (case (:kind selection)
+   :body (let [[namespace name] (target-parts (:target selection))]
+           (str "(native-c-linked " (scalar/text namespace) " " (scalar/text name) " "
+                arity " " (if (:packed? selection) "#t" "#f") ")"))
+   :leaf (str "(native-c-linked-leaf " (scalar/text (:target selection)) ")")
+   :actor-host
+    (do
+     (when-not (contains? actor/host-names (:host-name selection))
+      (throw (ex-info "direct actor resolver: captured actor host is not admitted" {:selection selection})))
+     ; These are the same named host leaves proc-link selected. Reading the
+     ; current binding also preserves source-frame and observation wrappers.
+     (str "h-" (:host-name selection)))
+   (throw (ex-info "direct actor resolver: invalid captured remote selection" {:selection selection})))))
+(defn selected-sources [ledger definition]
+ (let [key (str (:ns definition) "/" (:name definition)) table (get (:definitions ledger) key)]
+  (when-not table (throw (ex-info "direct actor resolver: definition ledger is absent" {:caller key})))
+  (reduce (fn [out [query selection]]
+    (assoc out query (case (first query)
+                      :global (global-selection-source selection)
+                      :remote (remote-selection-source selection (nth query 3))
+                      (throw (ex-info "direct actor resolver: unknown query kind" {:query query}))))) {} table)))
+(defn lookup-source! [sources caller node]
+ (let [query (query node)]
+  (if (contains? sources query) (get sources query)
+   (throw (ex-info "direct actor resolver: emitter query was not captured" {:caller caller :query query})))))
+(defn options [ledger]
+ (when-not (and (= "bl.native.proc-resolvers" (:schema ledger)) (= 1 (:version ledger))
+                 (= "native.kernel" (:runtime-namespace ledger)))
+  (throw (ex-info "direct actor resolver: unsupported captured resolver schema" {})))
+ (assoc (ev/context "user") :runtime-namespace (:runtime-namespace ledger)
+  :receive-source (exact-source (str (:runtime-namespace ledger) "/rt-receive"))
+  :definition-options (fn [definition base]
+   (let [sources (selected-sources ledger definition)
+         caller (str (:ns definition) "/" (:name definition))]
+    ; Drop the ambient all-definition callback before descending into a body.
+    ; Lazy compiler combinators must copy only this tiny string table.
+    (assoc (dissoc base :definition-options) :definition-ns (:ns definition) :fn-label (:name definition)
+     :global-resolver (fn [node] (lookup-source! sources caller node))
+     :remote-resolver (fn [node] (lookup-source! sources caller node))))))
