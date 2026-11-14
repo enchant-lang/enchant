@@ -1,0 +1,25 @@
+(ns auth.namespace-lifetime-test
+ (:require [auth.imports :as imports] [auth.identity :as identity]
+           [bl.env :as project] [vm.manager :as manager] [vm.scope :as scope] [env]))
+(deftest realm-owned-imports-serve-the-current-caller-and-close-with-the-realm
+ (let [id (str "auth-import-realm-" (erlang/unique_integer (list :positive)))
+       root (str (System/fetch_env! "BL_TEST_SOURCE_ROOT") "/examples/namespace-world")]
+  (manager/start)
+  (manager/ensure {:id id})
+  (try
+   (scope/with-vm id
+    (fn []
+     (imports/activate! (project/project root))
+     (let [provider (elem (BeamLisp.Env/lookup_own (tuple :auth/import "world.catalog")) 1)
+           pid (get-in provider [:service :pid])
+           call (BeamLisp.Env/fetch! "world.catalog" "count-in")]
+      (is (Process/alive? pid))
+      (identity/with-verified {:subject "person:alice" :application "namespace-examples" :kind :person}
+       #(is (= 1 (call "project-a"))))
+      (is (= :auth/unauthenticated (try (call "project-a") nil (catch error (:kind (ex-data error))))))
+      (manager/drain id)
+      (is (not (Process/alive? pid)))
+      (is (= :error (env/with-env (:owner provider)
+                     #(BeamLisp.Env/lookup_own (tuple "example.catalog" "services-in"))))))))
+   (finally (imports/close!) (manager/drain id)))))
+(run-tests)
