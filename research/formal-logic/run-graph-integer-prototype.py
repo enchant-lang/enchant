@@ -23,7 +23,9 @@ command=['systemd-run','--user','--quiet','--collect','--wait','--pipe','--expan
  '--setenv=XDG_RUNTIME_DIR='+str(runtime),'--setenv=FORMAL_GRAPH_INTEGER_OUTPUT='+str(E/'observations.json'),'env','-u','BEAM_LISP_PATH','-u','ENCHANT_FORMAL_WORKER','-u','ENCHANT_Z3_LIBRARY',
  pin['sdk']+'/bin/bl','--cold','-p',str(prototype),'test',str(prototype/'graph-integer-check.bl')]
 write('command.json',command);(E/'memory-before.txt').write_text(subprocess.check_output([R/'scripts/bl-mem'],text=True))
-(E/'qualification.json').unlink(missing_ok=True);started=time.monotonic()
+(E/'qualification.json').unlink(missing_ok=True)
+(E/'observations.json').unlink(missing_ok=True)
+started=time.monotonic()
 try:
  with (E/'checks.txt').open('w') as out:code=subprocess.run(command,stdout=out,stderr=subprocess.STDOUT).returncode
 finally:shutil.rmtree(runtime);shutil.rmtree(cwd)
