@@ -1,5 +1,7 @@
 # A native seed for BL
 
+[Visual review](evidence/native-seed.html) · [Qualification evidence](evidence/qualification.json)
+
 The emitter is BL. It consumes the existing compiler's bl-ANF, emits Scheme,
 and imports actor definitions directly from `priv/lib/js/actor/runtime.bl`.
 `verify.py` qualifies Scheme → Gambit C → native and C → LLVM IR → native.
