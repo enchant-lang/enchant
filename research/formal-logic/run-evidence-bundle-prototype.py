@@ -20,7 +20,7 @@ for f in files:
 write('source-pin.json',{'sdk_pin':pin,'code_commit':commit,'source_sha256':digests,
  'parent_qualification_sha256':sha(P/'evidence/word-integration/qualification.json'),
  'word_checker_qualification_sha256':sha(P/'evidence/word-exhaustion-prototype/qualification.json')})
-(E/'qualification.json').unlink(missing_ok=True);(E/'corpus.json').unlink(missing_ok=True);(E/'reader.json').unlink(missing_ok=True)
+for name in ['qualification.json','corpus.json','reader.json','corpus.json.coverage.json']:(E/name).unlink(missing_ok=True)
 def run(name,args):
  runtime=Path(tempfile.mkdtemp(prefix='formal-evidence-runtime-'));cwd=Path(tempfile.mkdtemp(prefix='formal-evidence-consumer-'))
  command=['systemd-run','--user','--quiet','--collect','--wait','--pipe','--expand-environment=no',
@@ -40,6 +40,11 @@ def run(name,args):
 log=run('producer',['test',str(prototype/'evidence-bundle-check.bl')])
 assert '1 file(s) passed, 0 failed, 0 incoherent' in log and 'not green' not in log
 counts=re.findall(r'✓\s+formal.evidence-bundle-check\s+(\d+) passed',log);assert len(counts)==1
+coverage=read(E/'corpus.json.coverage.json')
+assert set(coverage)=={'proof-and-point-results-have-separate-meanings','binding-closed-data-and-producer-flags',
+ 'reserve-the-whole-checking-strategy-before-invocation','saved-data-is-rechecked-under-the-readers-allowance',
+ 'record-both-real-native-claims-with-independent-checks'} and len(coverage)==5
+assert int(counts[0])>=47
 corpus=read(E/'corpus.json');assert len(corpus['rows'])==2
 assert {r['backend'] for r in corpus['rows']}=={'z3','oxiz'}
 for row in corpus['rows']:
@@ -50,10 +55,10 @@ reader=read(E/'reader.json')
 assert reader['status']=='passed' and reader['sdk']==pin['sdk'] and reader['packets']==2 and reader['fresh-checks']==6
 assert reader['negative-controls']==6 and reader['native-exchanges']==reader['oracle-calls']==0 and reader['warmed-atoms-stable'] is True
 assert all(sha(R/n)==d for n,d in digests.items())
-artifacts=['source-pin.json','producer-command.json','producer-checks.txt','producer-exit.json','corpus.json',
+artifacts=['source-pin.json','producer-command.json','producer-checks.txt','producer-exit.json','corpus.json','corpus.json.coverage.json',
  'reader-command.json','reader-checks.txt','reader-exit.json','reader.json']
 write('qualification.json',{'schema':'bl.evidence-bundle-prototype-qualification.v1','status':'passed','sdk_pin':pin,
- 'code_commit':commit,'source_sha256':digests,'assertions':int(counts[0]),'fresh_reader':reader,
+ 'code_commit':commit,'source_sha256':digests,'assertions':int(counts[0]),'executed_test_names':coverage,'fresh_reader':reader,
  'artifact_sha256':{n:sha(E/n) for n in artifacts},'in_sdk':False,'in_default_oracle':False,
  'compiler_proof_authority':False,'checked_native_execution':False,
  'scope':'A closed original-request-bound evidence bundle, independent axes for existing answers and a fixed finite word certificate strategy, conservative caller-controlled proof reservation, actual native comparison and fresh portable rechecking. No mechanical soundness, physical cost theorem, default effect integration or compiler authority.'})
