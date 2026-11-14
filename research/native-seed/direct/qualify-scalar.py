@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -55,7 +56,8 @@ def main() -> int:
     report_path = evidence / "qualification.json"
     # No old green evidence survives an unsuccessful new attempt.
     report_path.unlink(missing_ok=True)
-    for name in ("compile.log", "run.log"):
+    for name in ("compile.log", "run.log", "scheme-to-c.log", "clang-native.log", "native.log",
+                 "llvm-emit.log", "llvm-link.log", "llvm.log"):
         (evidence / name).unlink(missing_ok=True)
     report = {
         "status": "running", "scope": "direct C scalar ABI over shared Gambit host",
@@ -108,11 +110,23 @@ def main() -> int:
         return output
 
     try:
-        if not (1 <= args.build_timeout <= 240 and 1 <= args.run_timeout <= 120):
-            raise RuntimeError("timeouts must remain within compiler/runtime deadlines")
+        if not (1 <= args.build_timeout <= 120 and 1 <= args.run_timeout <= 30):
+            raise RuntimeError("timeouts must remain within the 120s compiler / 30s runtime deadlines")
         tools_path = base / "toolchain-pin.json"
         tools = json.loads(tools_path.read_text())
         gambit = Path(tools["gambit"])
+        clang = Path(tools["clang"]) / "bin/clang"
+        build_script = gambit / "gambit/bin/gambuild-C"
+        public_header = gambit / "gambit/include/gambit.h"
+        definitions = re.findall(r'^DEFS_DYN="([^"\n]*)"$', build_script.read_text(), re.MULTILINE)
+        if len(definitions) != 1 or "$" in definitions[0]:
+            raise RuntimeError("pinned Gambit dynamic ABI definition is not a single literal")
+        dynamic_defines = shlex.split(definitions[0])
+        expected_defines = ["-D___SINGLE_HOST", "-D___TRUST_C_TCO",
+                            "-D___CAN_IMPORT_CLIB_DYNAMICALLY",
+                            "-D___CAN_IMPORT_SETJMP_DYNAMICALLY", "-D___DYNAMIC"]
+        if dynamic_defines != expected_defines:
+            raise RuntimeError(f"pinned public dynamic ABI changed: {dynamic_defines!r}")
         sdk_pin_path = base / "sdk-pin.json"
         sdk_pin = json.loads(sdk_pin_path.read_text())
         descriptor = Path(sdk_pin["sdk"]) / "artifact.json"
@@ -147,7 +161,7 @@ def main() -> int:
             raise RuntimeError("separate C control artifact differs from its compiled FFI declaration")
         inputs = [program, control, manifest_path, host, machine, header, fixture,
                   base / "direct/scalar.bl", base / "src/native/c.bl",
-                  tools_path, sdk_pin_path, descriptor, Path(__file__).resolve()]
+                  tools_path, sdk_pin_path, descriptor, build_script, public_header, Path(__file__).resolve()]
         before.update({str(path): sha(path) for path in inputs})
         report.update({"inputs": before, "sdk": sdk_pin, "tools": tools,
                        "emission_manifest": manifest})
@@ -155,14 +169,45 @@ def main() -> int:
         compiled = out / "program.o1"
         compiled.unlink(missing_ok=True)
         generated = out / "program.c"
+        reference = out / "program.gsc-dynamic-reference.c"
+        if generated.is_file():
+            old = generated.read_text()
+            if re.findall(r'^#define ___LINKER_ID ([^\s]+)\s*$', old, re.MULTILINE) == ["___LNK_program_2e_o1"]:
+                reference.write_bytes(generated.read_bytes())
+        if reference.is_file():
+            report["observed_gsc_dynamic_startup"] = {"path": str(reference), "sha256": sha(reference),
+                                                       "symbol": "___LNK_program_2e_o1"}
         generated.unlink(missing_ok=True)
-        options = "-O0 " + shlex.quote("-I" + str(header.parent))
-        run("compile", [str(gambit / "bin/gsc"), "-dynamic", "-o", str(compiled),
-                        "-cc-options", options, "-ld-options", "-ldl", str(program)],
+        # gsc only emits C. Its bundled GCC exceeded the existing 2 GiB cap;
+        # the pinned Clang compiles the same generated C under unchanged caps.
+        run("scheme-to-c", [str(gambit / "bin/gsc"), "-c", "-o", str(generated), str(program)],
             args.build_timeout)
+        raw = generated.read_text()
+        linker = list(re.finditer(r'^#define ___LINKER_ID ([^\s]+)[ \t]*$', raw, re.MULTILINE))
+        if len(linker) != 1 or linker[0].group(1) != "___LNK_program":
+            raise RuntimeError("gsc -c did not emit the expected unique program startup symbol")
+        if raw.count(control.read_text()) != 1:
+            raise RuntimeError("gsc emitted C does not contain exactly the unchanged BL C control graph")
+        match = linker[0]
+        replacement = "#define ___LINKER_ID ___LNK_program_2e_o1"
+        adapted_text = raw[:match.start()] + replacement + raw[match.end():]
+        adapted = out / "program.dynamic.c"
+        adapted.write_text(adapted_text)
+        if adapted_text.count(control.read_text()) != 1:
+            raise RuntimeError("startup adaptation changed BL control")
+        report["startup_adapter"] = {"kind": "Gambit public dynamic loader basename encoding",
+            "from": "___LNK_program", "to": "___LNK_program_2e_o1", "replacements": 1,
+            "raw_c_sha256": sha(generated), "adapted_c_sha256": sha(adapted),
+            "bl_control_sha256": sha(control), "dynamic_defines": dynamic_defines,
+            "public_build_script": str(build_script)}
+        flags = ["-O0", "-fwrapv", "-fno-strict-aliasing", "-fno-trapping-math", "-fno-math-errno",
+                 "-fPIC", "-fno-common", *dynamic_defines,
+                 "-I" + str(public_header.parent), "-I" + str(header.parent)]
+        run("clang-native", [str(clang), *flags, "-shared", "-rdynamic", str(adapted),
+                             "-ldl", "-lm", "-o", str(compiled)], args.build_timeout)
         if not compiled.is_file():
             raise RuntimeError("compiler returned success without producing its dynamic unit")
-        transcript = run("run", [str(gambit / "bin/gsi"), str(compiled)], args.run_timeout)
+        transcript = run("native", [str(gambit / "bin/gsi"), str(compiled)], args.run_timeout)
         lines = transcript.splitlines()
         passed = [line[5:] for line in lines if line.startswith("PASS ")]
         if passed != EXPECTED_CHECKS:
@@ -181,17 +226,37 @@ def main() -> int:
             raise RuntimeError("finally happened after the try result escaped")
         if lines.count("NATIVE_DIRECT_SCALAR_OK") != 1 or lines[-1] != "NATIVE_DIRECT_SCALAR_OK":
             raise RuntimeError("scalar fixture did not finish with its completion marker")
+        # The LLVM route derives from exactly the SAME adapted C, not from a
+        # separately emitted program. Preserve the .o1 basename for its ABI id.
+        llvm_dir = out / "llvm"
+        llvm_dir.mkdir(exist_ok=True)
+        llvm_ir = llvm_dir / "program.ll"
+        llvm_unit = llvm_dir / "program.o1"
+        llvm_ir.unlink(missing_ok=True)
+        llvm_unit.unlink(missing_ok=True)
+        adapted_hash = sha(adapted)
+        run("llvm-emit", [str(clang), *flags, "-S", "-emit-llvm", "-fno-discard-value-names",
+                          str(adapted), "-o", str(llvm_ir)], args.build_timeout)
+        if sha(adapted) != adapted_hash:
+            raise RuntimeError("adapted C changed during LLVM lowering")
+        run("llvm-link", [str(clang), "-O0", "-fPIC", "-shared", "-rdynamic", str(llvm_ir),
+                          "-ldl", "-lm", "-o", str(llvm_unit)], args.build_timeout)
+        llvm_transcript = run("llvm", [str(gambit / "bin/gsi"), str(llvm_unit)], args.run_timeout)
+        if llvm_transcript != transcript:
+            raise RuntimeError("native C and LLVM scalar transcripts differ")
         unchanged()
-        artifacts = [compiled, evidence / "compile.log", evidence / "run.log"]
-        if generated.is_file():
-            artifacts.append(generated)
+        artifacts = [compiled, generated, adapted, llvm_ir, llvm_unit,
+                     *[evidence / (label + ".log") for label in
+                       ("scheme-to-c", "clang-native", "native", "llvm-emit", "llvm-link", "llvm")]]
+        if reference.is_file():
+            artifacts.append(reference)
         report.update({"status": "pass", "checks": passed,
                        "inputs_after": {name: sha(Path(name)) for name in before},
-                       "trace": order + ["SCALAR_FINALLY once"],
+                       "trace": order + ["SCALAR_FINALLY once"], "llvm_transcript_equal": True,
                        "artifacts": {str(path): {"sha256": sha(path), "bytes": path.stat().st_size}
                                      for path in artifacts}})
         write_report()
-        print("DIRECT_SCALAR_QUALIFIED 10 checks; operand order; finally once", flush=True)
+        print("DIRECT_SCALAR_QUALIFIED C=LLVM; 10 checks; operand order; finally once", flush=True)
         return 0
     except BaseException as error:
         report.update({"status": "fail", "error": str(error)})
