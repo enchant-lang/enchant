@@ -160,7 +160,7 @@ try {
    await theme(value);
    await evaluate("document.getElementById('research-word-answer-evidence').scrollIntoView({block:'center',behavior:'instant'})");
    check(size.name+': actual saved evidence is current in '+name,await evaluate("document.querySelector('[data-research-element]').dataset.researchFreshness==='current'&&document.querySelectorAll('[data-research-row]').length===7&&document.querySelector('.research-status').innerText.includes('Revision 2.')"));
-   check(size.name+': checked proof and pending program remain separate in '+name,await evaluate("document.querySelector('[data-research-row=proof]').innerText.includes('Supported')&&document.querySelector('[data-research-row=program]').innerText.includes('Still open')"));
+   check(size.name+': checked proof and pending program remain separate in '+name,await evaluate("document.querySelector('[data-research-row=proof]').innerText.includes('Located evidence')&&document.querySelector('[data-research-row=program]').innerText.includes('Still open')"));
    check(size.name+': anonymous dossier has no save action in '+name,await evaluate("!document.querySelector('[data-research-save]')"));
    await shot(size.name+'-word-saved-evidence-'+name);
   }

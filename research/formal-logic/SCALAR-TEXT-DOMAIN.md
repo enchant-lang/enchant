@@ -39,8 +39,11 @@ backend evidence. A broader native search domain alone does not establish
 equivalence for quantifiers, feasibility, synthesis or arbitrary text operations.
 The connection must be retained as part of the complete question and proof scope.
 
-The prepared cold packet reader includes concrete controls immediately before
-and after the surrogate range, raw surrogate-shaped UTF-8 bytes, the highest
-SMT codepoint and the first larger valid Unicode scalar. They run only after
-the first packet reopens, so they cannot conceal a missing cold schema load.
-Their actual observations belong in its qualification once that gate passes.
+The candidate SDK cold packet reader passed four records, four negative
+controls and 52 checks with no native or oracle exchange. Its concrete controls
+accept the scalars immediately before and after the surrogate range and the
+highest SMT codepoint; they reject raw surrogate-shaped UTF-8 bytes and the
+first larger valid Unicode scalar. These controls ran only after the first
+packet reopened, so they could not conceal a missing cold schema load. The
+actual observations are retained in `evidence/scalar-integration/text-packets.json`;
+this gate alone does not qualify or select the whole SDK.
