@@ -118,6 +118,7 @@ def actor_plan(witness, directory):
             or manifest.get('source-interpreter') is not False or manifest.get('anf-interpreter') is not False
             or manifest.get('authored-scheme-bodies') is not False
             or manifest.get('program-control') != 'emitted-c'
+            or manifest.get('backend') != 'c' or manifest.get('scheme-body-fallback') != 'forbidden'
             or manifest.get('resolver-schema') != 'bl.native.proc-resolvers'
             or manifest.get('application') != {'path': 'research/js-actors/test.bl', 'sha256': ORIGINAL}):
         raise RuntimeError('not the complete original direct actor plan')
@@ -126,6 +127,12 @@ def actor_plan(witness, directory):
                    manifest['original-body'], manifest['original-anf'], manifest['closure-manifest'],
                    *manifest['host-inputs']):
         witness.record(record)
+    guards = [r for r in manifest['host-inputs'] if r['path'].endswith('/direct/actor/direct-actor-no-fallback.scm')]
+    if len(guards) != 1:
+        raise RuntimeError('direct actor host lacks its explicit no-Scheme-fallback guard')
+    host_prefix = b'\n'.join(witness.path(r['path']).read_bytes() for r in manifest['host-inputs']) + b'\n'
+    if not (directory / 'actorhost.scm').read_bytes().startswith(host_prefix):
+        raise RuntimeError('compiled actor host does not preserve its exact component/guard order')
     original = json.loads(witness.path(manifest['original-manifest']['path']).read_text())
     link = original['link']
     if (original.get('schema') != 'bl.native.original-actor-corpus' or original.get('target') != 'scheme'
@@ -184,6 +191,10 @@ def compiler_stage(witness, directory, actor):
         witness.bind(Path(directory) / (row['name'] + '.o1'), row['sha256'])
     for name, expected_sha in build['inputs'].items():
         witness.bind(name, expected_sha)
+    route = build.get('route', 'c')
+    if route not in ('c', 'llvm'):
+        raise RuntimeError('unknown compiled parent route')
+    data['route'] = route
     if (Path(directory) / 'entry.scm').read_text() != '(native-main (native-command-line))\n':
         raise RuntimeError('parent compiler exact command-line entry changed')
     return data
