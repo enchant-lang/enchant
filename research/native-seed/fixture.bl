@@ -1,0 +1,47 @@
+; This file also compiles with the production JS actor backend.
+(defn check [label actual expected]
+ (if (host/eq actual expected)
+  (host/write (str "PASS " label))
+  (host/raise (str "FAIL " label))))
+
+(defn ping-child [parent]
+ (receive [:ping value] (rt-send parent [:pong (+ value 1)])))
+(defn busy-child [n]
+ (if (< n 600) (busy-child (+ n 1)) :done))
+(defn crash-child [] (host/raise :seed-crash))
+
+(defn main []
+ (let [me (rt-self)]
+  (check "truthy-zero" (if 0 true false) true)
+  (check "nil-false" (if nil true false) false)
+  (check "bigint" (+ 9007199254740993 1) 9007199254740994)
+  (check "closure" ((fn [x] (+ x 7)) 5) 12)
+  (rt-send me [:old 1])
+  (rt-send me [:wanted 2])
+  (check "selective-receive" (receive [:wanted x] x (after 0 :bad)) 2)
+  (check "skipped-message-retained" (receive [:old x] x (after 0 :bad)) 1)
+  (rt-send me [:second 20])
+  (rt-send me [:first 10])
+  (check "message-before-clause-order" (receive [:first x] x [:second x] x (after 0 :bad)) 20)
+  (check "remaining-order" (receive [:first x] x (after 0 :bad)) 10)
+  (rt-send me [:guard 1])
+  (rt-send me [:guard 3])
+  (check "receive-guard" (receive [:guard x] :when (> x 2) x (after 0 :bad)) 3)
+  (check "guard-rejection-retained" (receive [:guard x] x (after 0 :bad)) 1)
+  (check "after-zero" (receive [:absent] :bad (after 0 :timeout)) :timeout)
+  (let [child (rt-spawn ping-child (list me))]
+   (rt-send child [:ping 41])
+   (check "park-send-wake" (receive [:pong n] n (after 100 :bad)) 42))
+  (let [start (host/now)]
+   (check "finite-timeout" (receive [:absent] :bad (after 5 :timeout)) :timeout)
+   (check "deadline-elapsed" (>= (- (host/now) start) 5) true))
+  (let [child (rt-spawn busy-child (list 0)) ref (rt-monitor-tag child nil)]
+   (check "monitor-normal" (receive [:down r :process p reason] :when (= r ref) reason (after 1000 :bad)) :normal)
+   (check "monitor-once" (receive [:down r :process p reason] :when (= r ref) :bad (after 0 :none)) :none)
+   (check "monitor-dead" (let [deadref (rt-monitor-tag child nil)]
+     (receive [:down r :process p reason] :when (= r deadref) reason (after 0 :bad))) :noproc))
+  (let [child (rt-spawn crash-child (list)) ref (rt-monitor-tag child nil)]
+   (check "monitor-crash" (receive [:down r :process p reason] :when (= r ref) reason (after 1000 :bad)) :seed-crash))
+  (let [a (rt-spawn busy-child (list 0)) b (rt-spawn busy-child (list 0))]
+   (check "pid-incarnations" (host/eq a b) false))
+  (host/write "NATIVE_SEED_ACTORS_OK")))

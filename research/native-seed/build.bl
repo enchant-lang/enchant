@@ -1,0 +1,43 @@
+(ns native.build
+ (:require [compiler :as c] [reader-node :as rn] [js.build :as build]
+           [native.scheme :as scheme] [bl.json :as json] [clojure.string :as string]))
+
+(def imported
+ #{"rt-empty-state" "rt-proc-of" "rt-put-proc" "rt-drop-proc" "rt-vec-index"
+   "rt-set-proc-field" "rt-requeue!" "rt-spawn" "rt-self" "rt-send" "rt-drop-mailbox-msg"
+   "rt-runtime-of" "rt-make-pid" "rt-make-ref" "rt-typed?" "rt-pid?" "rt-ref?" "rt-local-pid?"
+   "rt-alloc-ref" "rt-monitor-tag" "rt-demonitor" "rt-monitors-watching"
+   "rt-monitors-without-owner" "rt-drop-monitor!" "rt-notify-monitors!"
+   "rt-receive" "rt-receive-wait" "rt-scan-from" "rt-deadline-of" "rt-deadline-passed?"
+   "rt-proc-wait!" "rt-proc-resume!" "rt-min-deadline" "rt-min-deadline-1" "rt-wake-expired"
+   "rt-run-head" "rt-run-head-pid" "rt-pop-runnable!" "rt-sched-loop" "rt-clamp"
+   "rt-resolve" "rt-deliver" "rt-deliver-quiet"})
+(def base "research/native-seed")
+(def runtime "priv/lib/js/actor/runtime.bl")
+(defn forms [path] (BeamLisp.Ns.Reader/read (File/read! path) {:file path}))
+(def definitions
+ (concat (filter #(contains? imported (:name %)) (build/definition-values (forms runtime)))
+         (build/definition-values (forms (str base "/kernel.bl")))
+         (build/definition-values (forms (str base "/fixture.bl")))))
+(def options {:ns "native.kernel" :definitions (set (map :name definitions))})
+(def env (assoc (c/new-env "native.kernel") :file "native-seed"))
+(def compiled (mapv #(assoc % :node (c/compile (:form %) env)) definitions))
+(assert (= (count imported) (count (filter #(contains? imported (:name %)) compiled))))
+(def output (str (File/read! (str base "/host.scm")) "\n"
+  (string/join "" (map #(scheme/emit-definition % options) compiled))
+  "\n(" (scheme/ident "seed-main") ")\n"
+  "(if (not (null? seed-errors)) (error \"scheduler reported errors\"))\n"
+  "(if (not (= (h-map-size (bl-get seed-state (bl-key \"procs\"))) 0)) (error \"process leak\"))\n"
+  "(if (not (= (h-map-size (bl-get seed-state (bl-key \"monitors\"))) 0)) (error \"monitor leak\"))\n"
+  "(if (not (> seed-yields 0)) (error \"no bounded turns witnessed\"))\n"
+  "(display \"PASS cleanup-and-bounded-turns\\n\")\n"))
+(File/mkdir_p! (str base "/out"))
+(File/write! (str base "/out/actors.scm") output)
+(File/write! (str base "/evidence/imports.json")
+ (json/encode {:source runtime :sha256 (Base/encode16 (crypto/hash :sha256 (File/read! runtime)) (list (tuple :case :lower)))
+               :definitions (vec (sort imported)) :compiled (count compiled)}))
+; Unsupported target operations and host effects must refuse at build time.
+(doseq [n [{:op :binding :reference {}} {:op :js :kind :global}
+            {:op :remote :mod :ets :fun :new :args []} {:op :try}]]
+ (assert (= :refused (try (scheme/emit n options) :accepted (catch e :refused)))))
+(println (str "SCHEME_EMITTED " (count compiled) " definitions; refusal gates passed"))

@@ -1,0 +1,28 @@
+; Seed-only scheduler completion. Receive, spawn, delivery, identities, monitor
+; registration and wakeup policies are imported UNCHANGED from runtime.bl.
+; Links, tables, supervisor restart, Source custody and I/O are not implemented.
+(defn rt-pump-input [] nil)
+
+(defn seed-terminate! [pid reason]
+ (host/critical-enter)
+ (let [st (host/state) mons (:monitors st)
+       refs (rt-monitors-watching mons pid (host/map-keys mons) [])
+       remaining (rt-monitors-without-owner mons pid (host/map-keys mons) (host/empty-map))]
+  (host/set-state (assoc (rt-drop-proc st pid) :monitors remaining))
+  (rt-notify-monitors! refs pid reason 0))
+ (host/critical-leave)
+ nil)
+
+(defn rt-run-pid [pid]
+ (let [proc (rt-proc-of (host/state) pid)]
+  (if (nil? proc) :gone
+   (let [r (host/run-turn (:frames proc) 200)]
+    (cond (= (:status r) :done) (seed-terminate! pid :normal)
+          (= (:status r) :error) (seed-terminate! pid (:reason r))
+          (= (:status r) :yield) (rt-requeue! pid)
+          :else nil)))))
+
+(defn seed-main []
+ (host/set-state (rt-empty-state))
+ (rt-spawn (fn [] (main)) (list))
+ (rt-sched-loop))

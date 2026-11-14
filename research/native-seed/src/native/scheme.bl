@@ -1,0 +1,120 @@
+; A deliberately closed seed backend. Input is the compiler's actual bl-ANF.
+; No source parser, ANF interpreter, or Jolt/Clojure compatibility layer.
+(ns native.scheme (:require [clojure.string :as string]))
+
+(defn ident [s]
+ (str "v" (string/join "" (map (fn [c] (str "_" c)) (unicode/characters_to_list s)))))
+(defn text [s]
+ (str "(list->string (map integer->char '("
+      (string/join " " (map str (unicode/characters_to_list s))) ")))"))
+(defn literal [v]
+ (cond (nil? v) "bl-nil" (= v true) "#t" (= v false) "#f"
+       (integer? v) (str v) (string? v) (text v)
+       (keyword? v) (str "(string->symbol " (text (str ":" (erlang/atom_to_binary v))) ")")
+       :else (throw (ex-info "native seed: unsupported literal" {:value v}))))
+(defn refuse [n]
+ (throw (ex-info "native seed: unsupported ANF or host capability"
+                {:op (:op n) :module (:mod n) :function (:fun n) :ann (:ann n)})))
+
+(declare emit)
+(defn joined [xs options] (string/join " " (map #(emit % options) xs)))
+(defn ordered
+ "The seed pins BL operand evaluation right-to-left, without trusting Scheme's
+  unspecified application operand order. The callee is captured first."
+ [callee args options]
+ (let [names (mapv #(str "a" %) (range (count args)))
+       binds (reverse (mapv (fn [name arg] (str "(" name " " (emit arg options) ")")) names args))]
+  (str "(let ((callee " callee ")) (let* (" (string/join " " binds) ") (callee "
+       (string/join " " names) ")))")))
+
+(defn pattern [p options]
+ (let [op (:pop p)]
+  (cond (= op :pvar) (str "(list 'var " (text (:name p)) ")")
+        (= op :plit) (str "(list 'lit " (literal (:val p)) ")")
+        (= op :pnil) "(list 'nil)"
+        (= op :ptuple) (str "(list 'tuple (list " (string/join " " (map #(pattern % options) (:elems p))) "))")
+        (= op :pcons) (str "(list 'cons " (pattern (:head p) options) " " (pattern (:tail p) options) ")")
+        (= op :palias) (str "(list 'alias " (pattern (:a p) options) " " (pattern (:b p) options) ")")
+        (= op :pmap) (str "(list 'map (list "
+          (string/join " " (map (fn [[k p]] (str "(list " (emit k options) " " (pattern p options) ")")) (:pairs p))) "))")
+        (and (= op :pstruct) (= :Elixir.BeamLisp.Vector (:mod p)))
+          (str "(list 'vector " (pattern (second (first (:fields p))) options) ")")
+        :else (refuse {:op op}))))
+
+(defn binders [p]
+ (case (:pop p)
+  :pvar [(:name p)]
+  :ptuple (mapcat binders (:elems p))
+  :pcons (concat (binders (:head p)) (binders (:tail p)))
+  :palias (concat (binders (:a p)) (binders (:b p)))
+  :pmap (mapcat #(binders (second %)) (:pairs p))
+  :pstruct (mapcat #(binders (second %)) (:fields p))
+  []))
+
+(defn clauses [cs argv fallback options wrap?]
+ (if (empty? cs) fallback
+  (let [cl (first cs) more (clauses (rest cs) argv fallback options wrap?)
+        names (distinct (mapcat binders (:pats cl)))
+        body (emit (:body cl) options)
+        body (if wrap? (str "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
+        body (if (:guard cl) (str "(if (bl-truthy " (emit (:guard cl) options) ") " body " " more ")") body)]
+   (str "(let ((bindings (bl-match-args (list "
+        (string/join " " (map #(pattern % options) (:pats cl))) ") " argv " '()))) "
+        "(if bindings (let (" (string/join " " (map (fn [s] (str "(" (ident s) " (cdr (assoc " (text s) " bindings)))")) names))
+        ") " body ") " more "))"))))
+
+(def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
+(def core-leaves
+ {"get" "bl-get" "assoc" "bl-assoc" "conj" "bl-conj" "nth" "bl-nth"
+  "first" "bl-first" "rest" "bl-rest" "empty?" "bl-empty" "count" "bl-count"
+  "eqv" "equal?" "=" "equal?" "not" "bl-not" "nil?" "bl-is-nil" "str" "bl-str"
+  "list" "list" "cons" "cons" "inc" "bl-inc" "dec" "bl-dec"})
+(def host-leaves
+ #{"state" "set-state" "self" "set-self" "make-frames" "run-turn"
+   "critical-enter" "critical-leave" "park-release" "now" "wait-until"
+   "empty-map" "map-remove" "map-keys" "map-size" "vec-from-list" "vec-size" "vec-el"
+   "vec-remove" "is-nil" "is-kw" "kw-name" "is-int" "is-str" "is-vec" "is-enil"
+   "eq" "lt" "arith" "write" "str-cat" "describe" "raise" "record-error" "truthy"})
+(defn remote [n options]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n))]
+  (cond (and (= m :host) (contains? host-leaves f)) (str "h-" f)
+        (and (contains? #{:Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core} m) (get core-leaves f)) (get core-leaves f)
+        (and (= m :Elixir.BeamLisp.Num) (get arithmetic (keyword f))) (get arithmetic (keyword f))
+        (and (= m :erlang) (= f "not")) "not"
+        :else (refuse n))))
+
+(defn emit [n options]
+ (case (:op n)
+  :lit (literal (:val n))
+  :var (ident (:name n))
+  :global (if (and (= (:ns options) (:ns n)) (contains? (:definitions options) (:name n)))
+            (ident (:name n))
+            (or (when (contains? #{"core" "rt"} (:ns n)) (get core-leaves (:name n))) (refuse n)))
+  :binding (refuse n)
+  :remote (ordered (remote n options) (:args n) options)
+  :arith (if-let [f (get arithmetic (:fun n))] (ordered f (:args n) options) (refuse n))
+  :apply (ordered (emit (:fn n) options) (:args n) options)
+  :invoke (ordered "bl-invoke" [(:callee n) (:arguments n)] options)
+  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) options) ")) " (emit (:body n) options) ")")
+  :if (str "(if (bl-truthy " (emit (:test n) options) ") " (emit (:then n) options) " " (emit (:else n) options) ")")
+  :do (str "(begin " (if (empty? (:stmts n)) "bl-nil" (joined (:stmts n) options)) ")")
+  :fn (str "(lambda argv (h-tick) " (clauses (:clauses n) "argv" "(error \"native seed: function clause\")" options false) ")")
+  :case (str "(let ((subject " (emit (:subj n) options) ")) "
+          (clauses (:clauses n) "(list subject)" "(error \"native seed: case clause\")" options false) ")")
+  :recv (str "(let* ((timeout " (if (:timeout n) (emit (:timeout n) options) "bl-nil") ") "
+    "(selection (" (ident "rt-receive") " (lambda (message) "
+     (clauses (:clauses n) "(list message)" "(bl-key \"nomatch\")" options true)
+     ") (lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ") timeout))) "
+     "((bl-nth selection 1)))")
+  :tuple (ordered "bl-make-tuple" (:elems n) options)
+  :map (ordered "bl-map" (mapcat identity (:pairs n)) options)
+  :cons (ordered "cons" [(:head n) (:tail n)] options)
+  :enil "'()"
+  :struct (if (and (= :Elixir.BeamLisp.Vector (:mod n)) (= 1 (count (:fields n)))
+                   (= :tuple (:op (second (first (:fields n))))))
+            (ordered "bl-make-vec" (:elems (second (first (:fields n)))) options)
+            (refuse n))
+  (refuse n)))
+
+(defn emit-definition [definition options]
+ (str "(define " (ident (:name definition)) " " (emit (:node definition) options) ")\n"))
