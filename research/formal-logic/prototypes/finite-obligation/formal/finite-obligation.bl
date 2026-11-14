@@ -1,0 +1,74 @@
+(ns formal.finite-obligation
+ (:require [formal.request :as request] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.finite-word-certificate :as finite]
+           [formal.finite-feasibility :as feasibility]))
+
+;; Isolated experiment: interpret the exact original policy independently of
+;; the current SDK graph executor's allow/report collapse. Not an SDK feature.
+(def profile :bl/finite-obligation-vacuity-prototype-v1)
+(def record-profile :bl/finite-obligation-record-prototype-v1)
+(def proof-allowance
+ (+ (get-in finite/checking-policy [:limits :admission-work-units])
+    (* (:points finite/limits) (get-in finite/checking-policy [:limits :request-work-units]))))
+(def allowance (+ proof-allowance feasibility/allowance))
+(defn- require! [ok why]
+ (when-not ok (throw (ex-info (str "formal.finite-obligation: " why) {}))))
+(defn- field-row [r field]
+ (when-let [data (qg/field-graph (:subject r) field)] (nth (:nodes data) (:root data))))
+(defn- vacuity [r]
+ (let [row (field-row r :vacuity)]
+  (cond (nil? row) :report
+        (= ["keyword" "allow"] row) :allow
+        (= ["keyword" "report"] row) :report
+        (= ["keyword" "reject"] row) :reject
+        :else (throw (ex-info "formal.finite-obligation: closed original vacuity policy required" {})))))
+(defn- judgment [policy proof background]
+ (if-not (and (= :checked (:status proof)) (= :entails (:verdict proof)))
+  {:status :incomplete :reason :conditional-entailment-not-established}
+  (let [fact (:feasibility background)]
+   (cond
+    (= :witnessed fact) {:status :accepted :reason :checked-nonvacuous-entailment}
+    (= :allow policy) {:status :accepted :reason (if (= :inconsistent fact) :explicitly-allowed-vacuity :conditional-entailment-allowed)}
+    (= :report policy) {:status :reported :reason (if (= :inconsistent fact) :vacuous-entailment :feasibility-not-established)}
+    (= :inconsistent fact) {:status :rejected :reason :vacuous-obligation}
+    :else {:status :incomplete :reason :nonvacuity-not-established}))))
+(defn check
+ "Fresh conditional proof and optional complete feasibility check, followed
+  by the exact original consumer policy. Saved statuses are never inputs."
+ ([original candidate] (check original candidate {:work-units allowance}))
+ ([original candidate options]
+  (require! (and (map? options) (= #{:work-units} (set (keys options)))
+                 (int? (:work-units options)) (<= 0 (:work-units options) (* 10 allowance)))
+            "closed bounded checking allowance required")
+  (let [r (request/check! original)
+        _ (require! (= ["keyword" "prove"] (field-row r :mode)) "proof obligation required")
+        policy (vacuity r) limit (:work-units options)
+        proof-ready? (<= proof-allowance limit)
+        feasibility-ready? (<= allowance limit)
+        account {:limit limit :proof-required proof-allowance :feasibility-required feasibility/allowance
+                 :reserved (if feasibility-ready? allowance (if proof-ready? proof-allowance 0))
+                 :proof-invocation (if proof-ready? :planned :not-run)
+                 :feasibility-invocation (if feasibility-ready? :planned :not-run)
+                 :kind :conservative-phase-reservations}
+        proof (if proof-ready? (finite/check r candidate)
+               {:status :incomplete :verdict :not-established :reason :proof-work-limit :checker-invocation :not-run})
+        background (if feasibility-ready? (feasibility/assess r)
+                    {:status :incomplete :feasibility :not-established :reason :feasibility-work-limit :checker-invocation :not-run})]
+   {:profile profile :request-reference (request/reference r) :subject-reference (request/subject-reference r)
+    :vacuity-policy policy :checking-account account :entailment-check proof :feasibility-check background
+    :policy-check (judgment policy proof background)
+    :checked-native-execution false :compiler-proof-authority false :source-connection :not-established})))
+(defn pack
+ "Save the complete request and candidate, with no producer checking result."
+ [original candidate]
+ (graph/encode {:formal/finite-obligation-record 1 :profile record-profile
+                :request (request/check! original) :certificate candidate}))
+(defn reopen
+ ([data] (reopen data {:work-units allowance}))
+ ([data options]
+  (let [_ [record-profile finite/profile] record (graph/decode! data)]
+   (require! (and (= :map (rt/kind-kind record)) (or (nil? (meta record)) (= {} (meta record)))
+                  (= #{:formal/finite-obligation-record :profile :request :certificate} (set (keys record)))
+                  (int? (:formal/finite-obligation-record record)) (= 1 (:formal/finite-obligation-record record))
+                  (= record-profile (:profile record))) "closed candidate-only obligation record required")
+   (check (:request record) (:certificate record) options))))

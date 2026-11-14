@@ -1,0 +1,66 @@
+(ns formal.finite-obligation-check
+ (:require [formal.finite-obligation :as obligation] [formal.finite-word-certificate :as finite]
+           [formal.request :as request] [formal.point-profile :as policy]
+           [formal.term :as t] [formal.query :as q] [formal.question-graph :as qg]
+           [formal.data-graph :as graph] [formal.backend :as backend] [oracle]))
+(defn original [vacuity inconsistent?]
+ (let [x (t/variable "vacuity.bit" [:bv 1]) zero (t/literal [:bv 1] 0) one (t/literal [:bv 1] 1)]
+  (request/prepare (qg/prepare (q/prove (t/eq x x)
+    {:vacuity vacuity :assumptions (if inconsistent? [(t/eq x zero) (t/eq x one)] [(t/eq x one)])}))
+   {:policy {:profile policy/numeric-word}})))
+(deftest the-nine-policy-and-feasibility-combinations-use-real-checks
+ (doseq [p [:allow :report :reject]
+         [fact inconsistent? budget expected] [[:witnessed false obligation/allowance :accepted]
+          [:inconsistent true obligation/allowance (case p :allow :accepted :report :reported :reject :rejected)]
+          [:not-established false obligation/proof-allowance (case p :allow :accepted :report :reported :reject :incomplete)]]]
+  (let [r (original p inconsistent?) result (obligation/check r (finite/candidate r) {:work-units budget})]
+   (is (= :checked (get-in result [:entailment-check :status])))
+   (is (= fact (get-in result [:feasibility-check :feasibility])))
+   (is (= expected (get-in result [:policy-check :status])))
+   (is (= p (:vacuity-policy result)))
+   (is (= (request/reference r) (:request-reference result)))
+   (is (= false (:compiler-proof-authority result) (:checked-native-execution result))))))
+(deftest proof-refusal-cannot-be-accepted-by-any-vacuity-policy
+ (doseq [p [:allow :report :reject]]
+  (let [r (original p false) candidate (assoc (finite/candidate r) :checked true)
+        result (obligation/check r candidate)]
+   (is (= :rejected (get-in result [:entailment-check :status])))
+   (is (= :incomplete (get-in result [:policy-check :status]))))))
+(deftest insufficient-proof-allowance-runs-neither-checker
+ (let [r (original :reject false) module (elem (erlang/fun_info finite/check :module) 1)
+       pattern (tuple module :check 2)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (let [result (obligation/check r (finite/candidate r) {:work-units (dec obligation/proof-allowance)})]
+    (is (= :incomplete (get-in result [:policy-check :status])))
+    (is (= 0 (get-in result [:checking-account :reserved]))))
+   (is (= 0 (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest an-original-policy-and-assumption-change-cannot-reuse-a-certificate
+ (let [r (original :allow false) candidate (finite/candidate r)]
+  (doseq [other [(original :reject false) (original :allow true)]]
+   (is (= :rejected (get-in (obligation/check other candidate) [:entailment-check :status]))))
+  (let [data (graph/patch-map (get-in r [:subject :graph]) [[(graph/encode :vacuity) (graph/encode :misspelled)]])
+        changed (request/from-graph data {:policy (:policy r) :adapter (:adapter r)})]
+   (is (thrown? (obligation/check changed (finite/candidate changed)))))))
+(deftest policy-composition-opens-no-native-or-oracle-owner
+ (let [module (elem (erlang/fun_info backend/invoke :module) 1) pattern (tuple module :exchange! 4)
+       calls (atom 0) deny (fn [& _] (swap! calls inc) (throw :must-not-call)) r (original :reject false)]
+  (is (= 1 (erlang/trace_pattern pattern true (list :local :call_count))))
+  (try
+   (oracle/with-oracle {:query deny :query-graph deny :script deny :request deny :request-evidence deny}
+    #(is (= :accepted (get-in (obligation/check r (finite/candidate r)) [:policy-check :status]))))
+   (is (= 0 @calls (elem (erlang/trace_info pattern :call_count) 1)))
+   (finally (erlang/trace_pattern pattern false (list :local :call_count))))))
+(deftest reopening-rechecks-under-the-readers-current-allowance
+ (let [r (original :reject false) packet (obligation/pack r (finite/candidate r))
+       record (graph/decode! packet) full (obligation/reopen packet)
+       limited (obligation/reopen packet {:work-units obligation/proof-allowance})]
+  (is (= :accepted (get-in full [:policy-check :status])))
+  (is (= :checked (get-in limited [:entailment-check :status])))
+  (is (= :incomplete (get-in limited [:policy-check :status])))
+  (is (= :not-established (get-in limited [:feasibility-check :feasibility])))
+  (is (not (contains? record :result)))
+  (is (thrown? (obligation/reopen (graph/encode (assoc record :result full)))))
+  (is (thrown? (obligation/reopen (graph/encode (assoc record :formal/finite-obligation-record 1.0)))))))
+(run-tests)
