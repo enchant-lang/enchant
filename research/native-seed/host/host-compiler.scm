@@ -403,5 +403,14 @@
    "erlang/term_to_binary/2" "erlang/binary_to_term/2"
    "Elixir.Code/ensure_loaded?/1" "crypto/hash/2" "Elixir.Base/encode16/1" "Elixir.Base/encode16/2"
    "Elixir.BeamLisp.Env/os_env_call/2" "erlang/monitor/2" "erlang/exit/2"))
+(define native-beam-seed-only-leaves
+ '("Elixir.BeamLisp.Supervisor/supervise/2" "Elixir.BeamLisp.Supervisor/supervise/3"
+   "Elixir.BeamLisp.Supervisor/worker/2" "Elixir.BeamLisp.Supervisor/worker/3"
+   "Elixir.BeamLisp.Server/start/1" "Elixir.BeamLisp.Server/start/2" "Elixir.BeamLisp.Server/start/3"
+   "Elixir.BeamLisp.Server/start_link/1" "Elixir.BeamLisp.Server/start_link/2" "Elixir.BeamLisp.Server/start_link/3"
+   "Elixir.BeamLisp.Server/call/2" "Elixir.BeamLisp.Server/call/3" "Elixir.BeamLisp.Server/cast/2"
+   "Elixir.BeamLisp.Server/stop/1" "Elixir.BeamLisp.Server/stop/2" "erlang/link/1"
+   "Elixir.BeamLisp.Refs/future_cancel/1"))
+(set! native-beam-only-leaves (append native-beam-only-leaves native-beam-seed-only-leaves))
 (set! native-excluded-host-leaves (append native-excluded-host-leaves native-beam-only-leaves))
 (for-each (lambda (key) (native-add-leaf! key (native-unavailable key))) native-beam-only-leaves)

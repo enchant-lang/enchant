@@ -2,6 +2,7 @@
 ;; separately; these implement host storage, finite Enum, and Erlang primitives.
 (define native-leaf-registry (bl-empty-map))
 (define (native-add-leaf! key value)
+ (native-mark-host-callable! value)
  (if (native-map-has? native-leaf-registry key) (error (string-append "duplicate native leaf: " key)))
  (if (procedure? value)
   (let find ((i (- (string-length key) 1)))
@@ -220,7 +221,7 @@
 (native-add-leaf! "Elixir.BeamLisp.Set/count/1" bl-count)
 (native-add-leaf! "Elixir.BeamLisp.Decimal/unscaled/1" (lambda (x) (bl-get x (bl-key "unscaled"))))
 (native-add-leaf! "Elixir.BeamLisp.Decimal/scale/1" (lambda (x) (bl-get x (bl-key "scale"))))
-(native-add-leaf! "Elixir.BeamLisp.Decimal/parse/1" native-decimal-parse)
+(native-add-leaf! "Elixir.BeamLisp.Decimal/parse/1" (lambda (s) (native-decimal-parse s)))
 (native-add-leaf! "Elixir.BeamLisp.Float/ratio/1" (lambda (x) (let ((r (native-ratio x))) (bl-tuple (list (numerator r) (denominator r))))))
 (native-add-leaf! "Elixir.BeamLisp.Float/to_float/1" (lambda (x) (bl-float (exact->inexact (native-ratio x)))))
 (native-add-leaf! "Elixir.Enum/map/2" (lambda (xs f) (map (lambda (x) (bl-invoke f (list x))) (native-finite-items xs))))
