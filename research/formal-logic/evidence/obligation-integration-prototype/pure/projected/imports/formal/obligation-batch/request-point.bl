@@ -1,0 +1,49 @@
+(ns formal.obligation-batch.request-point
+ (:require [formal.obligation-batch.request :as request] [formal.obligation-batch.graph-question :as question]
+           [formal.graph-replay :as replay] [formal.obligation-batch.point-profile :as profiles] [formal.data-graph :as graph] [formal.obligation-batch.evaluate :as evaluator]))
+
+(def profile :bl/formal-request-point-preview-v2)
+
+(defn- assertions [inventory]
+ (vec (concat (:assertions inventory) (when (:counterexample inventory) [(:counterexample inventory)]))))
+
+(defn replay-graph
+ "Freshly check original assertion roots at supplied coordinates.
+  There is no native callback, handler invocation or record-provided forest.
+  A valid point is evidence under this SDK policy, not a compiler/proof theorem."
+ [original assignment-data]
+ (let [fresh (request/check! original) subject (:subject fresh) configuration (:policy fresh)
+       coordinate-view (profiles/read-coordinates configuration assignment-data)
+       assignments (:assignments coordinate-view) assignment-reference (:reference coordinate-view)
+       base {:formal/request-point 2 :profile profile :request-reference (request/reference fresh)
+             :subject-reference (request/subject-reference fresh) :assignment-reference assignment-reference
+             :policy-reference (graph/of configuration) :coordinate-profile (profiles/coordinate-profile configuration)
+             :binding-reference (graph/of assignments) :checked-native-execution false
+             :compiler-proof-authority false :certificate {:status :not-checked :kind :request-point}
+             :observation-materialization :deferred}]
+  (profiles/with-question subject configuration
+   (fn [inventory admitted]
+    (if (= 2 (:formal/question-forest-refusal inventory))
+     (merge base {:verdict :incomplete :phase :admission :validation {:status :incomplete :kind :admission}
+                  :point-replay :not-run :admission (:admission inventory)})
+     ((:with-point admitted) assignments
+      (fn [operation]
+       (let [forest (:forest inventory) source-for (zipmap (:roots forest) (:source-roots forest))
+             rows (assertions inventory) roots (mapv #(get source-for (:term %)) rows)
+             checking (replay/validation operation roots rows)
+             observations (replay/observations inventory operation source-for)
+             verdict (cond (= :invalid (:status checking)) :invalid-point
+                           (= :incomplete (:status checking)) :candidate
+                           (= :prove (:mode inventory)) :refuted :else :sat)]
+        (merge base {:verdict verdict :phase :point :point-replay :run :mode (:mode inventory)
+                     :validation checking :observations observations :admission (:admission admitted)
+                     :admission-account :shared-scope :resources ((:resources operation))
+                     :checking ((:checking operation))})))))))))
+
+(defn replay
+ "Encode supplied named coordinates, then use the same graph-native reader as
+  native points and durable evidence. No coordinate normalization is trusted."
+ [original assignments]
+ (when-not (= :map (rt/kind-kind assignments))
+  (throw (ex-info "formal.request-point: coordinate map required" {:kind :point-coordinates})))
+ (replay-graph original (graph/encode assignments)))
