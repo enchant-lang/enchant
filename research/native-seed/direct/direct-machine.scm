@@ -6,7 +6,7 @@
 (define native-c-gc-between-steps? #f)
 (define native-c-forced-gc-count 0)
 (define native-c-gc-interval
- (let ((text (getenv "BL_NATIVE_C_GC_INTERVAL")))
+ (let ((text (getenv "BL_NATIVE_C_GC_INTERVAL" #f)))
   (if (not text) 0
    (let ((n (string->number text)))
     (if (not (and (integer? n) (exact? n) (> n 0)))
