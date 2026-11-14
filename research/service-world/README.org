@@ -1,196 +1,233 @@
-#+title: Enchant services: one contract across realms and VMs
+#+title: Authenticated Beam Lisp namespaces across realms and VMs
 #+date: 2026-11-14
 
-* The working slice
+* The application interface
 
-Team Machine Next's places discover Workstation services by their configured
-physical folder. Service names no longer need to share a prefix. A saved stopped
-service with an existing folder remains visible, as does a saved worker without
-a web endpoint; an unsaved listener disappears when it stops. A successful
-refresh replaces the place's observation, including removals. A failed refresh
-returns an error and does not invent an empty successful observation.
-
-The consumer is ~/projects/general/team-machine-next, not ora-hub/team-machine.
-The provider projects the actual ora-hub/workstation inventory. All domain,
-authorization and protocol code is Enchant. The existing work-endpoint command
-remains the host fact source; no second process scanner or service registry exists.
-
-Only services with a currently resolvable physical folder enter this directory.
-A listener retaining a deleted working directory has no proved folder identity;
-it is excluded rather than guessed into a place or allowed to break unrelated
-folder discovery. A failure to read the inventory itself still fails the request.
-
-The library is source-only and lives under src/. Both applications retain their
-qualified immutable SDKs. The Team Machine env.bl adds this source directory;
-Workstation's services/serve.bl accepts it with -p. No compiler or SDK rebuild is
-required. This is an integration pilot, not a new built-in language API.
-
-* The small model
-
-| Value | Meaning |
-|-------+---------|
-| world | Stable provider audience, such as workstation/othman@work |
-| scope | A consuming place, independently named in the operator grant |
-| service | A stable provider-owned id, folder and versioned contract |
-| contract | A domain name, such as workstation.service |
-| version | Explicit integer contract version, independent of SDK/OTP version |
-| operation | An explicitly exported handler, intersected with app authority |
-| observation | Bounded data with observed-at and a relative validity budget, never authority |
-
-core/local captures the provider's owning environment with Env/convey. This lets
-another realm use its endpoint without executing provider code in the consumer's
-environment. The local path serializes the same finite JSON subset as the HTTP
-path and runs the same dispatcher. No remote callback, pid, Env, module or eval
-crosses the boundary. A local endpoint is an intentionally supplied capability;
-there is no VM-wide ambient registry or automatic importing of another project.
-
-The provider supplies a current catalog callback. Its entries carry :id, :name,
-:folder, :contract, :summary and :versions, where versions maps an integer to
-{"operation" (fn [trusted-context args] result)}. A host can project its existing
-domain model directly into this shape. It does not duplicate its domain writer.
-
-* Authority
-
-A shared Unix account or tailnet grants no HTTP authority. The host authenticates
-a private bearer and supplies the app principal; identity fields on the wire are
-rejected. Grants bind world, app subject, expiry, place scope, physical folder,
-contract and operation set. Optional :service pins one service. :tree true extends
-folder scope to descendants using a path-segment boundary, never a string prefix.
-
-Grant folders must be physical absolute paths when issued. The station resolves
-all components of a requested folder; changing a symlink cannot extend a stored
-physical grant. This first provider serves its own Unix account only. It does not
-inherit the station dashboard's administrator view or delegate another user's
-folder permissions. Exporting cross-account data needs that owner's explicit
-policy and an authenticated provider for that account.
-
-Team Machine's default in-process connection grants inspect only for its owner's
-configured place folders. A member's browser cannot supply a station path,
-credential, principal or operation. The existing Team Machine place membership
-still controls who reads a place's stored projection. Linking a folder deliberately
-shares that small projection with the place; it does not grant filesystem access.
-
-Remote authority is reread on every request, so removing a token or operation
-revokes subsequent calls. Existing observations expire after at most 15 seconds;
-they are never used as permission to execute an action. The initial station
-contract exports inspect only. A provider can add actions through :actions, but
-an independent operator grant must also allow them.
-
-Discovery also carries valid-for-ms. The consumer starts that budget before
-sending the request and stores a local expiry, so network/processing time consumes
-the budget and different VM wall clocks do not extend an observation's freshness.
-Provider observed-at/expires-at values remain provenance in the provider's clock.
-
-* Wire and compatibility
-
-POST /services/v1 accepts a JSON object with protocol "enchant.services", versions
-[1], world, scope, id and op. Discover adds folder, recursive, contract and accept
-(the supported contract versions). Call adds service, contract, version, operation
-and args. Unknown top-level fields are refused. Discovery selects the highest
-common contract version. A mismatch returns protocol-mismatch or contract-mismatch
-before invoking any handler. There is no guessed compatibility or silent downgrade.
-
-Keys stay strings, including unknown inputs; decoding never creates atoms from
-network names. Requests are capped at 64 KiB, responses at 1 MiB, with depth and
-collection limits. Responses correlate world, protocol and request id. Credentials
-do not travel in descriptors or request data. The HTTP path uses the existing
-connector.transport: bounded streaming, deadlines, TLS host verification, no
-redirects and no implicit retries. HTTP without TLS is allowed only for exact
-127.0.0.1. The server listens on loopback and rejects browser Origin requests.
-
-A request id correlates a reply; it is not an exactly-once transaction promise.
-A timeout after a write is uncertain. Before exposing a real mutation, its domain
-writer must accept a durable idempotency key and return a recoverable receipt.
-The gateway does not retry, implement an in-memory deduplication fiction, or let
-a cached discovery authorize a mutation. Providers retain their own state writers.
-
-* Run the two projects
-
-Team Machine uses the local connection automatically through machine.station.
-For a separate VM, run Workstation's services/serve.bl with its qualified SDK and
-this source directory on the path. Supply PORT and STATION_SERVICE_AUTHORITY.
-The authority is private EDN (mode 0600), for example:
+Team Machine Next imports a namespace and calls ordinary functions:
 
 #+begin_src clojure
-{:world "workstation/othman@work"
- :tokens {"REPLACE-WITH-A-CRYPTOGRAPHIC-RANDOM-TOKEN-AT-LEAST-32-BYTES"
-          {:subject "team-machine-next" :world "workstation/othman@work"
-           :expires-at 1798761600000
-           :grants [{:scope "knowledger" :folder "/home/othman/projects/knowledger"
-                     :tree true :contract "workstation.service"
-                     :operations #{"inspect"}}]}}}
+(ns machine.station (:require [station.services :as station]))
+(station/services-in "knowledger")
+(station/inspect "knowledger" "some-service.othman")
 #+end_src
 
-Set MACHINE_STATION_CONFIG on Team Machine to a separate private EDN file:
+The same interface can target another Env in this VM or an authenticated endpoint
+in another VM. The application does not construct RPC, select an identity
+adapter, supply a folder, or handle a bearer token. This is a working source
+prototype under src/, using the existing qualified SDKs without a compiler or
+SDK rebuild. It is not yet a built-in loader feature.
+
+The integration targets ~/projects/general/team-machine-next and
+ora-hub/workstation, not the older Team Machine in ora-hub. Workstation projects
+its existing work-endpoint inventory; no second process registry is introduced.
+
+* The namespace owns its policy
+
+The provider uses existing namespace metadata syntax:
 
 #+begin_src clojure
-{:world "workstation/othman@work"
- :url "http://127.0.0.1:PORT/services/v1"
- :token-file "/private/path/station.token"}
+(ns ^{:auth
+      {:version 1
+       :exports
+       {services-in {:roles #{:viewer :operator}
+                     :resource {:arg 0}
+                     :effects {:read #{:catalog}}}
+        inspect {:roles #{:viewer :operator}
+                 :resource {:arg 0}
+                 :effects {:read #{:catalog}}}}
+       :grants {"team-machine-next" #{services-in inspect}}}}
+ workstation.services
+ (:require [auth.resource :as resource]))
+
+(defn services-in [project] (resource/read :catalog))
+(defn inspect [project service-id]
+ (first (filterv (fn [service] (= service-id (get service "id")))
+                 (get (resource/read :catalog) "services"))))
 #+end_src
 
-The server and client can use different SDKs. Credentials, authority and mutable
-observations belong outside tracked source. These examples do not publish an
-endpoint, modify root-owned station policy, or restart an existing service.
+Only explicitly exported functions are importable. Every export needs roles,
+a resource argument, and an effect budget; absent policy denies access. The
+application allowlist is an additional ceiling. Roles are provider-owned live
+memberships, never claims accepted from browser headers or request arguments.
+The trusted :catalog port receives only the authenticated subject and authorized
+project. The exported function sees that project's finite projection, not the
+full host inventory. A host resolver may map an object argument to its owning
+resource using :resource {:arg 0 :lookup :some-trusted-resolver}.
 
-* Why there is no consensus layer here
+Pure functions use :effects :pure. A mutation can declare
+:effects {:send #{:counter}} and call (resource/perform! :counter payload), with
+an operator role and an explicitly installed host port. The tests exercise this
+path. Workstation currently exports read operations only.
 
-The VPS and fleet spikes distinguish owner decisions from observations. This
-slice has one authoritative provider per account and one writer per application.
-Discovery is a fresh projection of that provider, not replicated desired state.
-No leader election, replicated log or distributed lock is necessary at this scale.
+* Environment bindings, without application paths
 
-If several hosts become interchangeable writers of the same desired state,
-that particular writer needs quorum agreement and fencing (the fleet spike's
-Ra/Raft direction). Gossip or a CRDT directory can later distribute expiring
-advertisements, but advertisements must never grant authority or elect a writer.
-Network partition remains visible as unavailable/uncertain; a common API cannot
-make remote failure behave like shared memory.
+Team Machine's env.bl contains the imports and placement, before its ordinary
+SDK project map:
 
-References inspected in this checkout: priv/std/vm/service.bl (realm-owned
-services), vm/core.bl (environment entry), connector/transport.bl (bounded I/O),
-research/vps_spike and research/fleet_spike/README.md (per-data consistency), and
-Veritas's finite enumeration interface. This pilot reuses those mechanisms and
-does not promote the algorithm simulations into a production consensus service.
+#+begin_src clojure
+{:auth/imports
+ {station.services {:from :workstation :namespace workstation.services
+                    :version 1 :only [services-in inspect]}}
+ :auth/realms
+ {:workstation {:root "/path/to/workstation/services" :transport :local}}}
 
-* Qualification
-
-Use one capped check at a time, from this checkout:
-
-#+begin_src sh
-systemd-run --user --collect --wait --pipe --working-directory="$PWD" \
- --property=MemoryMax=2G --property=MemorySwapMax=256M \
- ./bin/bl -p research/service-world/src test research/service-world/test/world_test.bl
+{:name "team-machine-next" :bl "/nix/store/QUALIFIED-SDK"
+ :paths ["imports" "src" "/path/to/service-world/src"]}
 #+end_src
 
-Tests cover finite folder policy through Veritas, authority and scope confusion,
-version refusal, revocation, effect admission, response correlation, private
-projection, parent symlinks and HTTP authentication. Integration qualification
-must additionally exercise two real VMs and Team Machine's persisted replacement
-behavior, using temporary data and stopping every listener it starts.
+The provider's env.bl supplies :auth/realm with :world, :source,
+:factory auth.station/open and a private :authority-file. No folder links or
+credentials are embedded in application functions. Namespace grants remain with
+the namespace; operator configuration binds identities and physical resources.
 
-Qualified on 2026-11-14: 168 assertions across the boundary, Team Machine
-connection, model and app checks; 12 further assertions across two real VMs
-using the existing h01zq... and a83cf... immutable SDK selections. A final
-66-assertion boundary/connection rerun passed after handling deleted working
-directories. Veritas exhaustively checked the 24-case finite folder policy
-table; that is not a proof over every possible filesystem path.
+These namespaced data blocks work with the existing SDK reader, which reads the
+trailing project map and rejects unknown project keys. auth.imports/project reads
+the extension blocks. auth.imports/prepare! materializes a credential-free shim
+under imports/; the checked-in station shim contains only a normal ns declaration
+and (imports/link! "station.services"). The ordinary require then loads it.
+Generic provider factories are configured host code, not a hardcoded station
+special case in the importer. Import binding generations fence retained function
+references after rebinding. Hosts close local provider scopes with imports/unlink!.
 
-The actual read-only station pass returned 112 service observations for five
-configured Team Machine places and checked every observation's folder and
-inspect-only operation scope. No production data was written, production
-services were not restarted, and all temporary listeners and authority were
-removed. Source hashes, exact SDKs, memory peaks and results are retained in
-evidence/qualification.json.
+For a separate VM, change the realm binding to :transport :remote and configure
+:world, a local interface :source, :url ending in /realms/v1, :issuer-public, and
+:token-file. A trusted host may instead supply :token-for to obtain a credential
+for the current subject and request. The app code stays the same. The example
+uses files for a narrow rehearsal; a production per-person credential broker has
+not been installed. A person's credential cannot stand in for another user.
+Application-only jobs need their own explicit identity, rights and membership.
 
-The current OTP 29.0.1 logs that connector.transport's optional max_body_size
-request setting is ignored. Successful replies still use the connector's
-stream byte accounting; this gateway bounds its own encoded replies and error
-bodies. This pilot connects configured providers. It does not claim isolation
-from arbitrary hostile HTTP implementations or provide a new OS-level sandbox.
+* Generic identity, safe ingress
 
-The existing production Team Machine process adopts these source changes on
-its next normal reload. Activation was deliberately left with that application's
-existing release workflow because both application checkouts contain unrelated
-active work. The Workstation adapter is ready to run with private configuration;
-no station endpoint or NixOS service was installed by this qualification.
+auth.identity carries a host-established subject, application and identity kind.
+auth.ingress normalizes the existing host adapters through auth.strategy:
+
+| Adapter | Verified gateway claim |
+|---------+------------------------|
+| Tailscale | tailscale-user-login |
+| Headscale with Tailscale ingress | tailscale-user-login |
+| Workstation NetBird gateway | work-user-id |
+| Workstation identity gateway | x-station-viewer |
+
+A header alone is insufficient. The IPv4 loopback adapter verifies the actual
+connecting socket UID from /proc/net/tcp against an explicit host allowlist.
+Tailscale-style ingress also requires current self addresses and a remote source;
+a local/self request is not a human. The trusted gateway must sanitize headers
+and reject tagged/shared-node human misattribution. The NetBird header is the
+existing Workstation gateway contract, not a claim that every NetBird deployment
+injects a user header. A host :verify callback can replace the header mechanism
+with another verified auth strategy while preserving the same application API.
+
+configured rereads /etc/workstation-endpoints.json on each request. The selected
+adapter maps the external identity to a canonical station account before the
+application's provider-neutral account-to-person callback runs. Switching the
+host provider or identity mapping requires no application branch. Unknown,
+ambiguous, missing, or unverifiable identities deny; no anonymous fallback or
+role inference exists. The four adapter contracts and one unchanged application
+mapping are tested with injected gateway evidence. Live Headscale/NetBird
+control-plane migration was not performed by these checks.
+
+Cross-VM calls use existing Biscuit authority and attenuation/revocation checks.
+Audience, expiry, subject, application, identity kind and exact
+[namespace operation resource] rights are checked. The provider rereads issuer
+and explicit revocation data each request, then independently checks current
+roles. Missing revocation policy denies. Wire fields cannot install an identity,
+role, proof receipt, or callback.
+
+* What the logic checks establish
+
+auth.logic reads actual source, builds a local helper call graph, lowers explicit
+resource ports into an analysis model with unconstrained finite return values,
+and invokes the existing system.analyze compiler/ANF footprint analysis. It
+infers pure, read, or effectful classifications and checks transitive ports
+against each export's budget. ^:pure is an optional assertion that is checked,
+not trusted. Ambient I/O, dynamic opaque calls, top-level effects, unsupported
+metadata/imports, and unsupported function signatures refuse publication.
+
+This initial admitted fragment supports fixed arguments, ordinary pure helpers,
+closures and supported pure core operations, plus explicit auth.resource ports.
+It does not support arbitrary existing modules, live database handles, PIDs, or
+remote closures. Unsupported analysis fails closed instead of assuming purity.
+The model, compiler, analyzer, runtime resource guards, host ports, identity
+verifiers and operator policy remain trusted components; no whole-runtime formal
+verification or OS sandbox is claimed.
+
+veritas.assurance composes structural checks and actual finite Veritas evidence.
+It preserves modality: :witnessed, :solver-claim and :unknown never become a proof.
+Veritas exhausts all 32 boolean combinations of the actual five-gate policy:
+authenticated AND application AND role AND resource AND current code. This is
+an exhaustive result for that finite gate, not a theorem about arbitrary source
+or filesystem paths. The loader recomputes evidence before evaluation; callers
+cannot present a success receipt as authority. Exact source and compiled module
+identity are checked again under a code lease at invocation.
+
+* Wire, failures and ownership
+
+Local and remote calls enter auth.interface/dispatch and use the same finite
+JSON value subset. POST /realms/v1 uses protocol enchant.namespaces version 1,
+world, namespace, explicit contract version, operation, arguments and request ID.
+Unknown request fields reject. Contract and protocol versions are independent
+of the SDK version; mismatch refuses before execution, with no guessed downgrade.
+Responses correlate protocol, world, namespace and request ID. Unknown remote
+names stay strings, never newly interned atoms. No Env, executable value or PID
+crosses the boundary. Requests are capped at 64 KiB, replies at 1 MiB, with depth
+and collection limits.
+
+The existing connector.transport provides bounded streaming, deadlines, TLS
+verification, no redirects and no implicit retries. Plain HTTP is permitted only
+for exact 127.0.0.1. The provider binds loopback and rejects browser Origin.
+The current OTP logs that its optional max_body_size request setting is ignored;
+successful response streaming and this provider's own encoded replies remain
+bounded. These checks target configured providers, not arbitrary hostile HTTP
+servers.
+
+Ordinary catch receives mapped auth errors. A remote call can still be unavailable
+or have an uncertain outcome. BEAM supervision does not remove network partitions
+or create exactly-once writes. Real mutation ports must implement domain-owned
+durable idempotency and recoverable receipts before automatic recovery is safe.
+
+The station authority binds project IDs to canonical physical folders and stable
+subjects to project roles. Aliases cannot silently widen a stored physical root.
+Only services with a currently resolvable folder enter the inventory; saved
+workers and stopped services remain visible when their folder exists. Successful
+Team Machine refresh replaces saved observations, including removals. Failure
+retains the previous observations, which expire locally after at most 15 seconds.
+Browser place membership still controls reading that deliberately shared view.
+A stored observation never grants permission to invoke a provider operation.
+
+There is one authoritative provider per account and one owner of each domain
+writer. No consensus layer is needed for this projection. The inspected VPS/fleet
+spikes place consensus and fencing at a future replicated writer, not in namespace
+lookup. Advertisements or cached observations must not grant write authority.
+
+* Qualification and activation
+
+Use one capped check at a time. Focused tests live in test/auth_logic_test.bl,
+auth_ingress_test.bl and auth_namespace_test.bl. Team Machine's station/model/app
+checks exercise its projection and persisted replacement. check_namespaces.py
+runs two real VMs using different immutable SDK selections, ordinary require and
+calls, temporary signed credentials, revocation and live role/source changes;
+it stops the provider and removes its temporary authority afterward.
+
+test/inspect_namespace_station.bl performs read-only calls through Team Machine's
+actual import against Workstation's current inventory. The private authority
+provisioner refuses to overwrite existing policy or issuer files. It creates
+only viewer membership for the five existing project roots; credentials are
+mode 0600 inside a mode 0700 directory and are never printed.
+
+Qualified on 2026-11-14: all 197 assertions in six focused suites passed,
+followed by a 14-assertion namespace lifecycle recheck (overlapping the first
+run). The independent two-SDK rehearsal passed 12 assertions. The final real
+station read returned 111 observations across five projects, with every folder
+checked against its project boundary. No production data was mutated.
+
+Results, source hashes, memory peaks and precise limitations are recorded in
+evidence/namespaces-qualification.json. evidence/qualification.json retains the
+previous folder-RPC prototype's historical results; src/service_world/core.bl's
+old dispatcher remains for compatibility experiments and is not Team Machine's
+current API. Its finite-data helpers and station inventory adapter are reused.
+
+No SDK pins changed, no SDK was built for this source prototype, no public endpoint
+or NixOS service was installed, and no production service was restarted. The
+shared source checkout remains an explicit env.bl dependency. Production
+activation follows the existing application release workflow.
