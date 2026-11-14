@@ -1,0 +1,49 @@
+; Small canonical-source -> canonical-ANF -> direct-C ABI gate. No actor
+; runtime or compiled core prelude is needed. This is NOT a milestone shortcut.
+(ns native.direct-scalar
+ (:require [compiler :as compiler] [js.build :as build] [js.actor :as actor]
+           [native.c :as c] [native.scheme :as scalar] [anf] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def host-path (or (first args) "research/native-seed/out/compiler-closure/host.scm"))
+(def output (or (second args) "research/native-seed/out/direct-scalar"))
+(def fixture (or (nth args 2 nil) "research/native-seed/direct/fixtures/scalar.bl"))
+(def leaf-path (or (nth args 3 nil) "research/native-seed/out/compiler-closure/leaves.json"))
+(def leaves (set (get (json/decode (File/read! leaf-path)) "registered_leaves")))
+(def namespace "native.scalar")
+(def forms (BeamLisp.Ns.Reader/read (File/read! fixture) {:file fixture}))
+(def definitions (vec (build/definition-values forms)))
+(def names (set (keep :name definitions)))
+(compiler/reset-fresh!)
+(def environment (assoc (compiler/new-env namespace) :file fixture))
+(def compiled (mapv #(assoc % :ns namespace :node (compiler/compile (:form %) environment)) definitions))
+(def options
+ {:unit-name "native_direct_scalar"
+  :global-resolver (fn [node]
+   (cond
+    (and (= namespace (:ns node)) (contains? names (:name node)))
+     (str "(native-global " (scalar/text namespace) " " (scalar/text (:name node)) ")")
+    (and (contains? #{namespace "core" "rt"} (:ns node)) (get scalar/core-leaves (:name node)))
+     (get scalar/core-leaves (:name node))
+    :else (scalar/refuse node)))
+  :remote-resolver (fn [node]
+   (let [name (erlang/atom_to_binary (:fun node))
+         key (str (erlang/atom_to_binary (:mod node)) "/" name "/" (count (:args node)))]
+    (if (= :host (:mod node))
+     (if (contains? actor/host-names name) (str "h-" name) (scalar/refuse node))
+     (if (contains? leaves key) (str "(native-remote " (scalar/text key) ")") (scalar/refuse node)))))
+  :arithmetic-resolver (fn [node]
+   (str "(lambda (a b) (bl-arithmetic " (scalar/literal (:fun node)) " a b))"))})
+(def emitted (c/emit-definitions compiled options))
+(File/mkdir_p! output)
+(File/write! (str output "/control.c") (:c-source emitted))
+(File/write! (str output "/program.scm")
+ (str (File/read! host-path) "\n"
+      (File/read! "research/native-seed/direct/direct-machine.scm") "\n"
+      "(define (native-c-publish-loaded! value) value)\n"
+      (:wrapper-source emitted) "\n"
+      "(bl-invoke (native-global \"native.scalar\" \"main\") '())\n"))
+(File/write! (str output "/manifest.json")
+ (json/encode (assoc (:manifest emitted) :status :emitted-not-executed :fixture fixture
+  :fixture-sha256 (Base/encode16 (crypto/hash :sha256 (File/read! fixture)) (list (tuple :case :lower)))
+  :scope :scalar-abi-smoke)))
+(println (str "DIRECT_SCALAR_EMITTED " (count compiled) " definitions")))

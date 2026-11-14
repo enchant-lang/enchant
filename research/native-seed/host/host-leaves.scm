@@ -11,7 +11,7 @@
 (define (native-badarg who) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badarg") who)) (h-logical-stack)))
 (define (native-assert-list xs) (if (native-list? xs) xs (native-badarg "proper list expected")))
 (define (native-assert-tuple t) (if (bl-tag? t 'tuple) t (native-badarg "tuple expected")))
-(define (native-assert-map m) (if (or (bl-tag? m 'map) (bl-tag? m 'vec) (bl-tag? m 'set)) (native-struct-fields m) (native-badarg "map expected")))
+(define (native-assert-map m) (if (or (bl-tag? m 'map) (bl-tag? m 'vec) (bl-tag? m 'set) (native-opaque-struct? m)) (native-struct-fields m) (native-badarg "map expected")))
 (define (native-map-fetch key m)
  (let ((v (bl-get (native-assert-map m) key native-missing)))
   (if (eq? v native-missing) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badkey") key)) (h-logical-stack)) v)))
@@ -62,6 +62,7 @@
 ;; UTF-8 binary primitives preserve BEAM byte indices independently of Scheme
 ;; strings' Unicode scalar indices. Invalid/split sequences are refused.
 (define (native-utf8-bytes text)
+ (if (not (string? text)) (native-badarg "invalid scalar string: lone UTF16 surrogate cannot become a text binary"))
  (let loop ((cs (string->list text)) (out '()))
   (if (null? cs) (reverse out) (let ((c (char->integer (car cs))))
    (cond ((< c 128) (loop (cdr cs) (cons c out)))
@@ -124,12 +125,12 @@
 (native-add-leaf! "erlang/tuple_size/1" (lambda (t) (bl-count (native-assert-tuple t))))
 (native-add-leaf! "erlang/is_tuple/1" (lambda (x) (bl-tag? x 'tuple)))
 (native-add-leaf! "erlang/is_list/1" native-list?)
-(native-add-leaf! "erlang/is_map/1" (lambda (x) (or (bl-tag? x 'map) (bl-tag? x 'vec) (bl-tag? x 'set))))
+(native-add-leaf! "erlang/is_map/1" (lambda (x) (or (bl-tag? x 'map) (bl-tag? x 'vec) (bl-tag? x 'set) (native-opaque-struct? x))))
 (native-add-leaf! "erlang/is_integer/1" h-is-int)
 (native-add-leaf! "erlang/is_float/1" h-is-float)
 
-(native-add-leaf! "erlang/is_binary/1" string?)
-(native-add-leaf! "erlang/is_bitstring/1" string?)
+(native-add-leaf! "erlang/is_binary/1" native-string?)
+(native-add-leaf! "erlang/is_bitstring/1" native-string?)
 (native-add-leaf! "erlang/is_boolean/1" boolean?)
 (native-add-leaf! "erlang/is_function/1" h-is-fn)
 (native-add-leaf! "erlang/is_atom/1" (lambda (x) (or (native-keyword? x) (boolean? x) (bl-is-nil x))))

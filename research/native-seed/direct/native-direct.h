@@ -9,7 +9,7 @@
 #include "gambit.h"
 enum { BLC_SERVICE=1, BLC_CALL=2, BLC_RETURN=3, BLC_CLOSURE=4, BLC_TICK=5 };
 static ___SCMOBJ blc_ref(___SCMOBJ x, int i) { return ___VECTORREF(x,___FIX(i)); }
-static void blc_set(___SCMOBJ x, int i, ___SCMOBJ v) { ___VECTORSET(x,___FIX(i),v) }
+static void blc_set(___SCMOBJ x, int i, ___SCMOBJ v) { ___VECTORSET(x,___FIX(i),v); }
 #define BLC_UNIT(m) blc_ref(m,0)
 #define BLC_FRAME(m) blc_ref(m,2)
 #define BLC_REG(m,r) blc_ref(BLC_FRAME(m),r)
