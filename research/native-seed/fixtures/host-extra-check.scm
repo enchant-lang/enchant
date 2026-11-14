@@ -154,4 +154,9 @@
  (native-extra-check "language callable dispatch preserved"
   (and (= 10 (bl-invoke multi '(9))) (= 10 (bl-invoke (bl-map 9 10) '(9)))
        (= 10 (bl-invoke (bl-key "x") (list (bl-map (bl-key "x") 10)))))))
+(let* ((items '(10 20 30)) (drop (native-leaf "lists/nthtail/2")))
+ (native-extra-check "nthtail takes index before list"
+  (and (eq? items (bl-invoke drop (list 0 items)))
+       (equal? '(30) (bl-invoke drop (list 2 items)))
+       (null? (bl-invoke drop (list 3 items))))))
 (display "native extra checks passed") (newline)

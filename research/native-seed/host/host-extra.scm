@@ -246,7 +246,7 @@
 (native-add-leaf! "lists/flatmap/2" (lambda (f xs) (apply append (map (lambda (x) (native-assert-list (bl-invoke f (list x)))) xs))))
 (native-add-leaf! "lists/foreach/2" (lambda (f xs) (for-each (lambda (x) (bl-invoke f (list x))) xs) (bl-key "ok")))
 (native-add-leaf! "lists/join/2" native-list-join)
-(native-add-leaf! "lists/nthtail/2" native-drop)
+(native-add-leaf! "lists/nthtail/2" (lambda (count items) (native-drop items count)))
 (native-add-leaf! "maps/map/2" native-map-map)
 (native-add-leaf! "Elixir.Atom/to_string/1" native-atom-name)
 (native-add-leaf! "Elixir.Tuple/to_list/1" bl-items)
