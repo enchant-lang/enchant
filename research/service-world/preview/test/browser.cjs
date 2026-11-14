@@ -34,6 +34,8 @@ async function noOverflow(side, view) {
 }
 async function shot(name) {
   await page.evaluate(()=>Promise.race([document.fonts.ready,new Promise(r=>setTimeout(r,2000))]));
+  await page.evaluate(()=>scrollTo({top:0,behavior:'instant'}));
+  await page.waitForTimeout(100);
   const file = name+'.png'; await page.screenshot({path:path.join(evidence,file),fullPage:true}); screenshots.push(file);
 }
 (async()=>{
