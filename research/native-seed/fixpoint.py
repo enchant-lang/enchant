@@ -54,14 +54,14 @@ def main():
     def compile_native(name):
         run(name + "-scheme-to-c", [gambit / "bin/gsc", "-c", name + ".scm"])
         run(name + "-link-unit", [gambit / "bin/gsc", "-link", name + ".c"])
-        flags = ["-O0", "-fwrapv", "-fno-strict-aliasing", "-fPIC", "-D___SINGLE_HOST",
+        flags = ["-O0", "-fwrapv", "-fno-strict-aliasing", "-fPIC", "-pthread", "-D___SINGLE_HOST",
                  "-D___TRUST_C_TCO", "-D___CAN_IMPORT_CLIB_DYNAMICALLY",
                  "-D___CAN_IMPORT_SETJMP_DYNAMICALLY", "-I" + str(gambit / "gambit/include")]
         objects = []
         for unit in (name, name + "_"):
             run(unit + "-object", [clang, *flags, "-c", unit + ".c", "-o", unit + ".o"])
             objects.append(unit + ".o")
-        run(name + "-native-link", [clang, *objects, gambit / "gambit/lib/libgambit.so", "-lm",
+        run(name + "-native-link", [clang, *objects, gambit / "gambit/lib/libgambit.so", "-pthread", "-ldl", "-lm",
                                    "-Wl,-rpath," + str(gambit / "gambit/lib"), "-o", name])
         return out / name
 

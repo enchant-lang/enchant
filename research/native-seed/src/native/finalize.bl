@@ -1,0 +1,22 @@
+; Cheap metadata/source identity finalization; deliberately no ANF traversal.
+(ns native.finalize (:require [native.artifact :as artifact] [bl.json :as json]))
+(def path (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure/partition.json"))
+(def out (Path/dirname path))
+(def closure (artifact/read-closure path))
+(def manifest (json/decode (File/read! path)))
+(def unit-rows
+ (mapv (fn [ns]
+  (let [u (get (:units closure) ns)]
+   (assert (= (:source-sha256 u) (artifact/sha (:source u))))
+   (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u)))))
+   {:namespace ns :path (:path u) :sha256 (:source-sha256 u)
+    :definitions (count (:defs u)) :requires (:requires u)})) (:order closure)))
+(assert (= (:sdk-pin closure) (File/read! "research/native-seed/sdk-pin.json")))
+(File/write! (str out "/identity.json")
+ (json/encode {:schema "bl.native.compiler-closure-identity" :version 1
+               :artifact-sha256 (get manifest "artifact_sha256")
+               :sdk-pin-sha256 (artifact/sha (:sdk-pin closure))
+               :options (:options closure) :providers (:provider-sources closure)}))
+(File/write! (str out "/units.json")
+ (json/encode {:artifact_sha256 (get manifest "artifact_sha256") :units unit-rows}))
+(println (str "NATIVE_FINALIZED " (count unit-rows) " source units; no ANF walk"))
