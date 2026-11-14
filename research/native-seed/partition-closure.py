@@ -4,6 +4,7 @@
 The closure exceeds the public per-value node limit. Every metadata field and
 namespace unit keeps that limit; no compiler data limit is increased.
 """
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -81,12 +82,15 @@ class ETF:
 
 
 def main():
-    source = OUT / "closure.etf"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", type=Path, default=OUT, help="owned closure directory (input closure.etf and output partitions)")
+    out = parser.parse_args().out.resolve()
+    source = out / "closure.etf"
     data = source.read_bytes()
     etf = ETF(data)
     assert data[1] == 116 and 1 <= etf.integer(2, 4) <= 32, "closure must be a small map"
     offset, fields, units, names = 6, [], [], set()
-    target = OUT / "partition"
+    target = out / "partition"
     target.mkdir(exist_ok=True)
 
     def write(name, raw):
@@ -121,7 +125,7 @@ def main():
     manifest = {"schema": "bl.native.partitioned-closure", "version": 1,
                 "artifact_sha256": hashlib.sha256(data).hexdigest(), "artifact_path": str(source.resolve()),
                 "metadata": metadata, "units": units}
-    (OUT / "partition.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (out / "partition.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print("NATIVE_PARTITION", len(units), "bounded units; original", manifest["artifact_sha256"])
 
 
