@@ -1,15 +1,22 @@
 ;; Lazy memo host state machine; producer/reducer algorithms stay compiled BL.
-;; A resource is #(state owner-frame edges); metadata aliases share it.
+;; A resource is #(state owner-frame edges owner-pid); aliases share it.
+(define native-live-memos (make-table test: eq? weak-keys: #t))
+(define (native-new-memo state)
+ (let ((resource (vector state #f '() bl-nil))) (table-set! native-live-memos resource #t) resource))
 (define (native-lazy? x) (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.LazySeq")))
 (define (native-lazy-resource x) (bl-get x (bl-key "resource")))
 (define (native-lazy-state x) (vector-ref (native-lazy-resource x) 0))
-(define (native-lazy-state! x state) (vector-set! (native-lazy-resource x) 0 state))
+(define (native-lazy-state! x state)
+ (let ((resource (native-lazy-resource x)))
+  (vector-set! resource 0 state)
+  (if (not (eq? (car state) 'running))
+   (begin (vector-set! resource 1 #f) (vector-set! resource 3 bl-nil)))))
 (define (native-lazy-new thunk . recipe)
  (if (not (h-is-fn thunk)) (native-badarg "lazy thunk is not callable"))
  (if (and (pair? recipe) (not (h-is-fn (car recipe)))) (native-badarg "lazy recipe is not callable"))
  (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.LazySeq")
   (bl-key "metadata") bl-nil (bl-key "resource")
-  (vector (if (null? recipe) (list 'pending thunk) (list 'pending thunk (car recipe))) #f '())))
+  (native-new-memo (if (null? recipe) (list 'pending thunk) (list 'pending thunk (car recipe))))))
 (define (native-lazy-failure reason)
  (native-raise (bl-key "error")
   (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.LazySeq.ForceError")
@@ -43,8 +50,8 @@
       (begin (native-lazy-state! x (list 'terminal (bl-key "recursive_force"))) (native-lazy-failure (bl-key "recursive_force")))))
     (else
      (let ((thunk (cadr state)))
-      (vector-set! resource 1 seed-frame)
-      (native-lazy-state! x (list 'running (list 'attempt)))
+      (vector-set! resource 1 seed-frame) (vector-set! resource 3 seed-self)
+      (native-lazy-state! x (list 'running (native-make-reference)))
       (let ((value (with-exception-catcher
        (lambda (e)
         (if (not (eq? (car (native-lazy-state x)) 'terminal))
@@ -79,14 +86,15 @@
 (define (native-lazy-memo-state x)
  (let ((s (native-lazy-state x)))
   (bl-tuple (if (eq? (car s) 'running)
-   (list (bl-key "running") bl-nil bl-nil (cadr s) '())
+   (list (bl-key "running") bl-nil (vector-ref (native-lazy-resource x) 3) (cadr s) '())
    (cons (bl-key (symbol->string (car s))) (cdr s))))))
 (define (native-lazy-claim x)
  (if (not (native-lazy? x)) bl-nil
   (let ((s (native-lazy-state x)))
    (if (not (and (eq? (car s) 'pending) (= (length s) 3))) bl-nil
-    (let ((attempt (list 'attempt)) (pending (native-lazy-memo-state x)))
+    (let ((attempt (native-make-reference)) (pending (native-lazy-memo-state x)))
      (vector-set! (native-lazy-resource x) 1 seed-frame)
+     (vector-set! (native-lazy-resource x) 3 seed-self)
      (native-lazy-state! x (list 'running attempt)) (bl-tuple (list (bl-key "claimed") attempt pending)))))))
 (define (native-lazy-owned? x attempt)
  (let ((s (native-lazy-state x))) (and (eq? (car s) 'running) (eq? (cadr s) attempt))))
@@ -152,3 +160,26 @@
 (native-add-leaf! "Elixir.BeamLisp.Deferred/force/1" native-delay-force)
 (native-add-leaf! "Elixir.BeamLisp.Deferred/realized?/1" native-delay-realized?)
 (native-add-leaf! "Elixir.BeamLisp.Deferred/delay?/1" native-delay?)
+
+;; Observe committed storage removal, after BL's canonical atomic death policy.
+;; Source owner_lost publishes this exact terminal reason; no thunk is retried.
+(define (native-storage-owner-dead! frame owner)
+ (table-for-each
+  (lambda (resource ignored)
+   (let ((state (vector-ref resource 0)))
+    (if (and (eq? (car state) 'running) (eq? frame (vector-ref resource 1)))
+     (begin
+      (vector-set! resource 0 (list 'terminal (bl-tuple (list (bl-key "force_owner_lost") owner (cadr state)))))
+      (vector-set! resource 1 #f) (vector-set! resource 3 bl-nil))))) native-live-memos)
+ bl-nil)
+(define native-set-state-without-memo-observer h-set-state)
+(set! h-set-state (lambda (state)
+ (let* ((before (bl-get seed-state (bl-key "procs"))) (after (bl-get state (bl-key "procs"))))
+  (native-set-state-without-memo-observer state)
+  ;; Canonical rt-forget! is the only process removal; other edits preserve or
+  ;; grow count, so ordinary mailbox/scheduler updates never scan live processes.
+  (if (and (bl-tag? before 'map) (bl-tag? after 'map) (< (native-map-count after) (native-map-count before)))
+   (for-each (lambda (pair)
+    (let ((pid (bl-nth pair 0))) (if (not (native-map-has? after pid))
+     (native-storage-owner-dead! (bl-get (bl-nth pair 1) (bl-key "frames")) pid)))) (native-map-pairs before)))
+  bl-nil)))

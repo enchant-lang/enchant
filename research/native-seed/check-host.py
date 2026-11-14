@@ -21,9 +21,9 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     evidence = BASE / "evidence/host.json"
     evidence.unlink(missing_ok=True)
-    sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-lazy.scm"]
+    sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-lazy.scm", "host/host-extra.scm"]
     inputs = sources + ["host/native-posix.scm", "fixtures/host-values-check.scm",
-                       "fixtures/native-posix-check.scm", "fixtures/host-lazy-check.scm", "fixtures/ffi-fixture.c",
+                       "fixtures/native-posix-check.scm", "fixtures/host-lazy-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
@@ -48,6 +48,9 @@ def main():
     (OUT / "lazy.scm").write_text(common + "\n" + (BASE / "fixtures/host-lazy-check.scm").read_text())
     lazy = run("lazy-memo", [GAMBIT / "bin/gsi", "lazy.scm"])
     assert "native lazy memo checks passed" in lazy, lazy
+    (OUT / "extra.scm").write_text(common + "\n" + (BASE / "fixtures/host-extra-check.scm").read_text())
+    extra = run("storage-and-raw-leaves", [GAMBIT / "bin/gsi", "extra.scm"])
+    assert "native extra checks passed" in extra, extra
     (OUT / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
                                     + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
     run("foreign-fixture", [CLANG, "-shared", "-fPIC", BASE / "fixtures/ffi-fixture.c", "-o", "fixture.so"])
@@ -65,7 +68,7 @@ def main():
     assert hashes == {p: digest(BASE / p) for p in inputs}, "inputs changed during qualification"
     evidence.write_text(json.dumps({"status": "pass", "scope": "host fixtures; canonical BL gates remain separate",
                                     "inputs": hashes, "tools": TOOLS, "runs": runs,
-                                    "values": values, "lazy": lazy, "posix": posix}, indent=2) + "\n")
+                                    "values": values, "lazy": lazy, "extra": extra, "posix": posix}, indent=2) + "\n")
 
 
 if __name__ == "__main__":

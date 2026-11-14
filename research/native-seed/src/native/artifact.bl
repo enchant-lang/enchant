@@ -3,6 +3,14 @@
 (ns native.artifact (:require [bl.json :as json]))
 (def limits {:max-nodes 1000000 :max-bytes 33554432 :max-depth 128})
 (defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(def validation-context
+ (let [pin (json/decode (File/read! "research/native-seed/sdk-pin.json"))
+       descriptor (File/read! ".bl/sdks/current-sdk/artifact.json")]
+  (assert (= (get pin "descriptor_sha256") (sha descriptor)))
+  (assert (= (get pin "source") (get (json/decode descriptor) "source")))
+  (assert (= descriptor (File/read! (str (get pin "sdk") "/artifact.json"))))
+  {:policy "canonical-closed-etf-and-compiler-data-v1"
+   :sdk-descriptor-sha256 (sha descriptor) :limits limits}))
 (defn part-path [manifest-path path]
  (if (= :absolute (Path/type path)) path (Path/expand path (Path/dirname manifest-path))))
 (defn read-part [manifest-path record]
@@ -11,12 +19,25 @@
    (throw (ex-info "native artifact: partition exceeds canonical byte bound" {:path path})))
   (when-not (= (sha bytes) (get record "sha256"))
    (throw (ex-info "native artifact: partition SHA mismatch" {:path path})))
-  ; Passive closed grammar BEFORE decode: no fun, pid, reference, runtime
-  ; resource, compressed term, trailing bytes or unknown ETF tag is allowed.
-  (BeamLisp.CompilerData/check_closed_etf! bytes limits)
-  (let [value (erlang/binary_to_term bytes)]
-   (BeamLisp.CompilerData/check_compiler_data! value limits)
-   value)))
+  (let [proof-key (sha (erlang/term_to_binary
+                        (assoc validation-context :partition-sha256 (sha bytes)) (list :deterministic)))
+        proof-path (str path ".validated.json")
+        proof (when (File/regular? proof-path)
+                (try (json/decode (File/read! proof-path)) (catch _ nil)))
+        proven? (and (= "bl.native.partition-shape-proof" (get proof "schema"))
+                     (= 1 (get proof "version")) (= proof-key (get proof "key")))]
+   ; A task-owned proof is written ONLY after BOTH canonical validators pass.
+   ; Same byte SHA + exact immutable SDK + validator policy can reuse it.
+   ; This grants passive shape only: no Source or execution authority.
+   (when-not proven? (BeamLisp.CompilerData/check_closed_etf! bytes limits))
+   (let [value (erlang/binary_to_term bytes)]
+    (when-not proven?
+     (BeamLisp.CompilerData/check_compiler_data! value limits)
+     (File/write! proof-path
+      (json/encode {"schema" "bl.native.partition-shape-proof" "version" 1 "key" proof-key
+                    "partition_sha256" (sha bytes) "policy" (:policy validation-context)
+                    "sdk_descriptor_sha256" (:sdk-descriptor-sha256 validation-context)})))
+   value))))
 (defn read-closure [manifest-path]
  (let [manifest (json/decode (File/read! manifest-path)) rows (get manifest "units")]
   (when-not (and (= "bl.native.partitioned-closure" (get manifest "schema"))

@@ -239,7 +239,7 @@
 (native-add-leaf! "Elixir.Process/put/2" (lambda (k v) (native-pdict-put k v bl-nil)))
 (native-add-leaf! "Elixir.System/unique_integer/1" native-unique-integer)
 (native-add-leaf! "Elixir.Integer/to_string/2" (lambda (n base) (string-upcase (number->string n base))))
-(native-add-leaf! "Elixir.Kernel/inspect/1" bl-show)
+
 (native-add-leaf! "Elixir.BeamLisp.Num/add/2" (lambda (a b) (native-num 'add a b)))
 (native-add-leaf! "Elixir.BeamLisp.Num/sub/2" (lambda (a b) (native-num 'sub a b)))
 (native-add-leaf! "Elixir.BeamLisp.Num/mul/2" (lambda (a b) (native-num 'mul a b)))
@@ -288,7 +288,7 @@
 (native-add-leaf! "erlang/binary_to_atom/2" (lambda (x encoding) (if (eq? encoding (bl-key "utf8")) (bl-key x) (native-badarg "atom encoding"))))
 (native-add-leaf! "erlang/integer_to_binary/1" number->string)
 (native-add-leaf! "erlang/integer_to_binary/2" number->string)
-(native-add-leaf! "erlang/iolist_to_binary/1" native-char-data)
+(native-add-leaf! "erlang/iolist_to_binary/1" (lambda (x) (native-iolist-binary x)))
 ;; Raw Erlang equality keeps list/vector/tuple families separate. Its numeric
 ;; coercion is limited to int/float; decimals remain ordinary struct maps.
 (define (native-erlang-number? x) (or (h-is-int x) (h-is-float x)))
