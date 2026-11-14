@@ -25,7 +25,7 @@ try{
   await call({op:'viewport',...size});
   for(const [theme,value] of [['day','light'],['night','dark']]){
    await evaluate("(()=>{try{localStorage.clear()}catch{}return true})()");
-   await call({op:'navigate',url:'file://'+join(output,'index.html')+'#a-good-place-to-start-again'});
+   await call({op:'navigate',url:'file://'+join(output,'index.html')+'?capture='+size.name+'-'+theme+'#a-good-place-to-start-again'});
    await evaluate(`document.documentElement.dataset.theme='${value}'`);
    check(size.name+' '+theme+': introduction visible',await evaluate("document.querySelector('#s-a-good-place-to-start-again').getClientRects().length>0"));
    check(size.name+' '+theme+': no document overflow',await evaluate('document.documentElement.scrollWidth<=innerWidth+2'));
