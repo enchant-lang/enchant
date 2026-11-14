@@ -24,7 +24,7 @@ parent = read(P / 'evidence/word-integration/qualification.json')
 assert parent['status'] == 'passed' and parent['sdk_pin'] == baseline
 assert sha(Path(baseline['sdk']) / 'artifact.json') == baseline['descriptor_sha256']
 prototype = {}
-for stage in ('pure', 'owners', 'legacy'):
+for stage in ('pure', 'owners', 'legacy', 'oracle'):
     path = P / 'evidence/scalar-integration-prototype' / stage / 'qualification.json'
     result = read(path)
     assert result['status'] == 'passed' and result['base_sdk_pin'] == baseline
@@ -43,6 +43,7 @@ runtime_names = ['priv/lib/formal/' + name + '.bl' for name in
                  ['coordinates', 'evaluate', 'graph-execution', 'graph-terms', 'logic', 'point-profile',
                   'request-runtime', 'finite-word-certificate', 'request-evidence', 'resources/text',
                   'scalar-text-value', 'scalar-text']]
+runtime_names += ['priv/lib/oracle.bl']
 floor_path = P / 'evidence/numeric-semantics/compiler-floor-install.json'
 floor = read(floor_path)
 assert floor['status'] == 'passed' and floor['manifest_last'] and floor['sdk_produced'] is False

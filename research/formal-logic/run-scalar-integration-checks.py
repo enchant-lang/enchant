@@ -43,7 +43,7 @@ elif stage == 'focused':
     files = ['test/bl/formal/scalar_text_graph_test.bl', 'test/bl/formal/scalar_text_resource_test.bl',
              'test/bl/formal/scalar_text_interface_test.bl', 'test/bl/formal/scalar_text_owner_test.bl',
              'test/bl/formal/finite_word_certificate_test.bl', 'test/bl/formal/request_evidence_test.bl',
-             'test/bl/formal/evidence_effect_test.bl']
+             'test/bl/formal/evidence_effect_test.bl', 'test/bl/formal/evidence_oracle_test.bl']
 elif stage == 'legacy':
     files = ['test/bl/formal/shared_evaluator_test.bl', 'test/bl/formal/graph_admission_test.bl',
              'test/bl/formal/graph_keys_test.bl', 'test/bl/formal/graph_ops_test.bl', 'test/bl/formal/graph_context_test.bl']

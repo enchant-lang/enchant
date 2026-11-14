@@ -56,6 +56,7 @@ expected = {'priv/lib/formal/' + name + '.bl' for name in
             ['coordinates', 'evaluate', 'graph-execution', 'graph-terms', 'logic', 'point-profile',
              'request-runtime', 'finite-word-certificate', 'request-evidence', 'resources/text',
              'scalar-text-value', 'scalar-text']}
+expected.add('priv/lib/oracle.bl')
 assert set(changes) == expected
 unchanged = {name: metadata[name] for name in ('platform', 'formalWorker')}
 assert all(old_metadata[name] == value for name, value in unchanged.items())
@@ -84,7 +85,7 @@ report = {'schema': 'bl.scalar-integration-sdk-build-linkage.v1', 'status': 'bou
           'compiled_namespace_units': {name: units[name] for name in namespaces},
           'operation_sha256': sha(E / 'managed-operation.json'), 'receipt_sha256': sha(E / 'managed-preparation-result.json'),
           'recorder': {'code_commit': commit, 'path': relative, 'sha256': sha(Path(__file__))},
-          'scope': 'Exact managed preparation, packaged source bytes, twelve compiled namespace units and unchanged qualified compiler floor/platform/native worker. Runtime gates and project selection remain separate.',
+          'scope': 'Exact managed preparation, packaged source bytes, thirteen compiled namespace units and unchanged qualified compiler floor/platform/native worker. Runtime gates and project selection remain separate.',
           'compiler_proof_authority': False}
 (E / 'build-linkage.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps({'status': 'bound', 'source_files': len(all_sources), 'source_changes': len(changes),

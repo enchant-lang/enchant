@@ -13,6 +13,10 @@ for stage in ['pure','owners','legacy']:
  assert q['status']=='passed' and q['base_sdk_pin']==pin
  for n,d in q['source_pin']['source_sha256'].items():assert sha(R/n)==d,n
  parents[stage]=sha(qpath)
+oracle_dir=basis/'oracle';oracle=read(oracle_dir/'qualification.json')
+assert oracle['status']=='passed' and oracle['base_sdk_pin']==pin
+for n,d in oracle['source_pin']['source_sha256'].items():assert sha(R/n)==d,n
+parents['oracle']=sha(oracle_dir/'qualification.json')
 corpus=basis/'owners/native.json';observations=read(corpus)['observations'];assert len(observations)==4
 assert {r['case'] for r in observations}=={'coordinate','codepoint-contract'}
 assert {r['backend'] for r in observations}=={'z3','oxiz'}
@@ -36,6 +40,11 @@ for row in projection:
  old=row['source'].removeprefix('priv/lib/').removesuffix('.bl').replace('/','.')
  modules[old]=str(relative).removesuffix('.bl').replace('/','.')
  copied.append({'source':str(source.relative_to(R)),'sha256':sha(source)})
+extension=read(oracle_dir/'projection.json')
+oracle_source=next(row for row in extension['new_sources'] if row['source']=='priv/lib/oracle.bl')
+source=oracle_dir/oracle_source['saved'];assert sha(source)==oracle_source['sha256']
+target=imports/'formal/scalar-batch/oracle.bl';target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
+modules['oracle']='formal.scalar-batch.oracle';copied.append({'source':str(source.relative_to(R)),'sha256':sha(source)})
 reader=(P/'scalar-packet-reader.bl').read_text()
 for old,new in sorted(modules.items(),key=lambda item:-len(item[0])):
  reader=re.sub(r'(\[)'+re.escape(old)+r'(?=\s|\])',lambda m:m.group(1)+new,reader)
