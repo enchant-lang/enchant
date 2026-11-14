@@ -1,5 +1,11 @@
 # Enchant formal logic, expressed as language terms
 
+Start a fresh implementation session with [PROJECT.bl.org](PROJECT.bl.org):
+the architecture, verified checkpoints, exact unselected SDK candidate and
+remaining work as nine Org-native workstreams. It includes bounded agent briefs,
+dependencies and a suggested first delegation wave. The long candidate gate
+chain was intentionally stopped for this handoff after its source preflight.
+
 This is the expanded OxiZ experiment: one typed, term-based BL interface with
 native Z3 and OxiZ backends. It prototypes language semantics, verification
 procedures and native theory access together. **The existing compiler/oracle
