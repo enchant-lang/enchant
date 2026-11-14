@@ -30,10 +30,10 @@ parent = read(parent_path)
 assert parent['status'] == 'passed' and parent['sdk_pin'] == pin
 browser = read(E / 'browser/audit.json')
 assert browser['passed'] is True and all(row['passed'] is True for row in browser['checks'])
-assert len(browser['checks']) >= 35 and len(browser['screenshots']) == 24
+assert len(browser['checks']) >= 35 and len(browser['screenshots']) == 36
 review = read(E / 'visual-review.json')
 assert review['status'] == 'reviewed' and review['document_sha256'] == sha(document)
-assert len(review['frames']) == 24
+assert len(review['frames']) == 36
 assert {row['file'] for row in review['frames']} == set(browser['screenshots'])
 for row in review['frames']:
     assert Path(row['file']).name == row['file']
@@ -69,16 +69,16 @@ report = {'schema': 'bl.wide-owner-dossier-qualification.v1', 'status': 'passed'
           'check_qualification_sha256': sha(E / 'check-qualification.json'),
           'browser_qualification_sha256': sha(E / 'browser-qualification.json'),
           'cell_sources_and_results_unchanged': True, 'cells': 94,
-          'browser_checks': len(browser['checks']), 'frames': 24, 'visual_review_sha256': sha(E / 'visual-review.json'),
+          'browser_checks': len(browser['checks']), 'frames': 36, 'visual_review_sha256': sha(E / 'visual-review.json'),
           'chapter_sources_sha256': sources, 'source_qualifications': receipts,
           'canonical_runtime_install_sha256': sha(P / 'evidence/wide-integration/runtime-install.json'),
           'recipe': {'code_commit': commit, 'path': own, 'sha256': sha(Path(__file__))},
           'scope': 'Narrative and source-backed evidence refresh on the selected obligation SDK and frozen qualified kit. '
                    'Original 94 cell sources/results stay exact and recheck unchanged; actual browser navigation, themes, '
-                   'source bytes and 24 inspected phone/desktop frames bind this presentation. The wider runtime source '
+                   'source bytes and 36 inspected phone/desktop frames bind this presentation. The wider runtime source '
                    'is committed on main after its separate project gates. This receipt grants no new SDK, native '
                    'theory completeness, independent wide point/proof semantics or compiler authority.',
           'compiler_proof_authority': False}
 (E / 'dossier-qualification.json').write_text(json.dumps(report, indent=2) + '\n')
-print(json.dumps({'status': 'passed', 'cells': 94, 'browser_checks': len(browser['checks']), 'frames': 24,
+print(json.dumps({'status': 'passed', 'cells': 94, 'browser_checks': len(browser['checks']), 'frames': 36,
                   'sdk_changed': False, 'wide_sdk_qualification': 'separate'}))

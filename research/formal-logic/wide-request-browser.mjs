@@ -50,6 +50,19 @@ try{
    await evaluate("document.getElementById('four-separate-promises').scrollIntoView({block:'start',behavior:'instant'})");
    check(size.name+': four judgment rows remain readable '+name,await evaluate(`(()=>{const e=document.querySelector('${section} .rosetta');return e&&e.getBoundingClientRect().width<=innerWidth&&getComputedStyle(e).fontSize!=='0px'})()`));
    await shot(size.name+'-wide-judgments-'+name);
+   await evaluate(`document.querySelector('${section} .seq').scrollIntoView({block:'start',behavior:'instant'})`);
+   check(size.name+': request flow retains its portable evidence boundary '+name,await evaluate(`document.querySelector('${section} .seq').innerText.includes('No callable, lease or stored success')`));
+   await shot(size.name+'-wide-flow-'+name);
+   if(size.mobile){
+    const summary=section+' details.seq-narrow summary';
+    if(!await evaluate(`document.querySelector('${section} details.seq-narrow').open`))await call({op:'click',selector:summary});
+    await evaluate(`document.querySelector('${section} details.seq-narrow .scrollx').scrollIntoView({block:'center',behavior:'instant'})`);
+    check('phone: full diagram opens locally '+name,await evaluate(`document.querySelector('${section} details.seq-narrow').open`));
+    await shot('phone-wide-flow-diagram-left-'+name);
+    await evaluate(`(()=>{const e=document.querySelector('${section} details.seq-narrow .scrollx');e.scrollLeft=e.scrollWidth})()`);
+    await shot('phone-wide-flow-diagram-right-'+name);
+    await call({op:'click',selector:summary});
+   }
    await evaluate("document.getElementById('what-feels-native-in-beam-lisp').scrollIntoView({block:'start',behavior:'instant'})");
    await shot(size.name+'-wide-language-'+name);
    await evaluate("document.getElementById('what-the-actual-owners-report').scrollIntoView({block:'start',behavior:'instant'})");
@@ -58,6 +71,8 @@ try{
    await shot(size.name+'-wide-native-bottom-'+name);
    await evaluate("document.getElementById('make-saved-answers-lighter').scrollIntoView({block:'start',behavior:'instant'})");
    await shot(size.name+'-wide-reference-cost-'+name);
+   await evaluate(`(()=>{const p=[...document.querySelectorAll('${section} p')].find(e=>e.textContent.includes('median reopening in this ordered diagnostic'));if(!p)throw Error('Missing observed timing');p.scrollIntoView({block:'start',behavior:'instant'})})()`);
+   await shot(size.name+'-wide-reference-measurement-'+name);
   }
   // Cross-pane navigation and direct links must work with the added chapter.
   await call({op:'click',selector:section+' .pager .next'});

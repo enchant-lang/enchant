@@ -104,7 +104,7 @@ if stage == 'check':
     assert '94 cells, 0 cell errors' in (E / 'check-checks.txt').read_text()
 else:
     audit = read(E / 'browser/audit.json')
-    assert audit['passed'] is True and len(audit['checks']) >= 35 and len(audit['screenshots']) == 24
+    assert audit['passed'] is True and len(audit['checks']) >= 35 and len(audit['screenshots']) == 36
 write(stage + '-qualification.json', {'schema': 'bl.wide-owner-dossier-refresh.v1', 'status': 'passed',
                                      'stage': stage, 'recorded_utc': datetime.now(timezone.utc).isoformat(),
                                      'source_pin': snapshot, 'scope': 'Narrative-only wide chapter; original 94 cell sources and results '
