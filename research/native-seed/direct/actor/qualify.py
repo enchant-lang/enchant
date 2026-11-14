@@ -14,7 +14,7 @@ import signal
 import subprocess
 import sys
 import time
-from artifacts import BUDGETS, ORIGINAL, ZERO, Witness, actor_plan, compiler_stage, observe, sha
+from artifacts import BUDGETS, ORIGINAL, ZERO, CLOCK_MODEL, Witness, actor_plan, compiler_stage, observe, sha
 
 
 def main():
@@ -120,6 +120,7 @@ def main():
                 or oracle.get('status') != 'complete' or set(oracle['budgets']) != set(BUDGETS)
                 or oracle['application'] != {'path': 'research/js-actors/test.bl', 'sha256': ORIGINAL}
                 or oracle['application'] != manifest['application'] or oracle['runtime'] != manifest['runtime']
+                or oracle.get('clock-model') != CLOCK_MODEL
                 or oracle['sdk-pin'] != manifest['sdk-pin'] or oracle['body'] != manifest['original-body']):
             raise RuntimeError('oracle and C actor capture differ in original Source/runtime/SDK/body')
         for path, expected in oracle['inputs'].items():

@@ -12,6 +12,24 @@ ZERO = {'procs': 0, 'monitors': 0, 'tables': 0, 'names': 0, 'table_names': 0,
         'runnable': 0, 'input_sink': None, 'critical': 0, 'errors': 0}
 
 
+CLOCK_MODEL = {"name": "virtual-turn-ms-v1", "tick-ms": 1,
+               "event": "completed-host-turn", "idle-progress": "existing-host-wait", "real-time": False}
+
+
+def validate_native_clock(witness):
+    clock = witness.get("clock", {})
+    if clock.get("model") != "virtual-turn-ms-v1" or clock.get("tick_ms") != 1:
+        raise RuntimeError("native corpus lacks its declared deterministic runnable-progress clock")
+    for name in ("completed_turns", "yield_turns", "turn_ms", "elapsed_ms"):
+        if type(clock.get(name)) is not int or clock[name] <= 0:
+            raise RuntimeError("native corpus clock lacks positive actual " + name)
+    if (clock["yield_turns"] > clock["completed_turns"]
+            or clock["turn_ms"] != clock["completed_turns"] * clock["tick_ms"]
+            or clock["elapsed_ms"] < clock["turn_ms"]):
+        raise RuntimeError("native corpus completed/yield turn time progress is inconsistent")
+    return clock
+
+
 def sha(path):
     value = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -118,6 +136,7 @@ def actor_plan(witness, directory):
             or manifest.get('source-interpreter') is not False or manifest.get('anf-interpreter') is not False
             or manifest.get('authored-scheme-bodies') is not False
             or manifest.get('program-control') != 'emitted-c'
+            or manifest.get('clock') != 'virtual-turn-ms-v1' or manifest.get('clock-model') != CLOCK_MODEL
             or manifest.get('backend') != 'c' or manifest.get('scheme-body-fallback') != 'forbidden'
             or manifest.get('resolver-schema') != 'bl.native.proc-resolvers'
             or manifest.get('application') != {'path': 'research/js-actors/test.bl', 'sha256': ORIGINAL}):
@@ -140,6 +159,7 @@ def actor_plan(witness, directory):
     if (original.get('schema') != 'bl.native.original-actor-corpus' or original.get('target') != 'scheme'
             or original.get('assertion-adaptation') != 'none' or original.get('source-path-adaptation') != 'none'
             or original['application'] != manifest['application'] or original['runtime'] != manifest['runtime']
+            or original.get('clock-model') != CLOCK_MODEL or original.get('clock') != 'virtual-turn-ms-v1'
             or link['sdk-pin'] != manifest['sdk-pin'] or link['runtime-definitions'] != 202
             or link['source-frames?'] is not True or original['anf'] != manifest['original-anf']
             or original['body'] != manifest['original-body']
@@ -216,6 +236,7 @@ def observe(text, budget):
         raise RuntimeError('direct C original corpus output is incomplete')
     witness = json.loads(final[0].split(' ', 1)[1])
     steps = json.loads(control[0].split(' ', 1)[1])
+    validate_native_clock(witness)
     if witness.get('budget') != budget or witness.get('cleanup') != ZERO:
         raise RuntimeError('direct C original corpus budget/cleanup differs')
     for key in ('samples', 'deaths', 'max_procs', 'max_monitors', 'max_tables', 'max_links'):
