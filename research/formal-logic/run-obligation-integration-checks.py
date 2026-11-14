@@ -57,7 +57,7 @@ elif stage == 'packets':
     files = ['research/formal-logic/word-packet-reader.bl']
 elif stage == 'text-packets':
     files = ['research/formal-logic/scalar-packet-reader.bl']
-elif stage == 'evidence-packets':
+elif stage in ('evidence-packets', 'legacy-evidence-packets'):
     files = ['research/formal-logic/evidence-packet-reader.bl']
 elif stage == 'native':
     project, ceiling = True, 3600
@@ -78,8 +78,8 @@ if stage == 'text-packets':
     names += [str((E / 'text-native.json').relative_to(R))]
 if stage.startswith('obligation-reader-'):
     names += [str((E / 'obligation-corpus.json').relative_to(R))]
-if stage == 'evidence-packets':
-    names += [str((E / 'bundle-corpus.json').relative_to(R))]
+if stage in ('evidence-packets', 'legacy-evidence-packets'):
+    names += [str(((P / 'evidence/scalar-integration' if stage == 'legacy-evidence-packets' else E) / 'bundle-corpus.json').relative_to(R))]
 names += (['scripts/sdk-preflight', 'scripts/sdk-preflight.bl'] if stage == 'preflight'
           else ['test/scripts/sdk_preflight.py'] if stage == 'preflight-controls' else [])
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=R, text=True).strip()
@@ -93,8 +93,8 @@ if files:
     request = [str(sdk / 'bin/bl'), '--cold'] + (['-p', str(P / 'src')] if project else [])
     if stage == 'packets':
         request += ['run', str(R / files[0]), '--', str(P / 'evidence/retained-request/corpus.json'), str(E / 'packets.json')]
-    elif stage in ('text-packets', 'evidence-packets'):
-        corpus = E / ('text-native.json' if stage == 'text-packets' else 'bundle-corpus.json')
+    elif stage in ('text-packets', 'evidence-packets', 'legacy-evidence-packets'):
+        corpus = (P / 'evidence/scalar-integration' if stage == 'legacy-evidence-packets' else E) / ('text-native.json' if stage == 'text-packets' else 'bundle-corpus.json')
         request += ['run', str(R / files[0]), '--', str(corpus), str(E / (stage + '.json'))]
     elif stage.startswith('obligation-'):
         request += ['run', str(R / files[0]), '--', str(E / 'obligation-corpus.json')]
@@ -139,7 +139,7 @@ finally:
     shutil.rmtree(cwd)
 assert all(sha(R / name) == digest for name, digest in digests.items())
 process_code, green = code, None
-if files and not stage.startswith('obligation-') and stage not in ('native', 'packets', 'text-packets', 'evidence-packets'):
+if files and not stage.startswith('obligation-') and stage not in ('native', 'packets', 'text-packets', 'evidence-packets', 'legacy-evidence-packets'):
     log = (E / (stage + '-checks.txt')).read_text()
     green = f'{len(files)} file(s) passed, 0 failed, 0 incoherent' in log and 'not green' not in log
     if not green and code == 0:
