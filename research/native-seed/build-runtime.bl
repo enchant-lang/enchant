@@ -1,15 +1,16 @@
-; Integrating driver candidate. Root must merge its checked module-link ABI and
-; host manifests with this code before running it. No reduced kernel is used.
+; Complete actor policies linked to the same canonical native core prelude.
 (ns native.build-runtime
  (:require [compiler :as compiler] [reader-node :as reader] [js.build :as definitions]
-           [native.proc :as proc] [native.scheme :as scheme] [anf]
+           [native.proc :as proc] [native.scheme :as scheme] [native.eval :as ev]
+           [native.bootstrap :as bootstrap] [js.actor :as actor] [anf]
            [clojure.string :as string] [bl.json :as json]))
 
 (def base "research/native-seed")
 (def runtime "priv/lib/js/actor/runtime.bl")
 (def application (or (first (BeamLisp/argv)) "research/js-actors/test.bl"))
 (def output (or (second (BeamLisp/argv)) (str base "/out/full-actors.scm")))
-(def host-paths (if (seq (drop 2 (BeamLisp/argv))) (vec (drop 2 (BeamLisp/argv))) [(str base "/host.scm")]))
+(def host-paths (if (seq (drop 2 (BeamLisp/argv))) (vec (drop 2 (BeamLisp/argv)))
+                [(str base "/out/compiler-closure/prelude.scm")]))
 (def namespace "native.kernel")
 (defn read-forms [path] (BeamLisp.Ns.Reader/read (File/read! path) {:file path}))
 (defn digest [path] (Base/encode16 (crypto/hash :sha256 (File/read! path)) (list (tuple :case :lower))))
@@ -22,6 +23,8 @@
 (def app-definitions (vec (definitions/definition-values (proc/runtime-forms (read-forms application) namespace application))))
 (def all-definitions (vec (concat actor-definitions bridge-definitions app-definitions)))
 (def all-names (mapv :name all-definitions))
+(def declaration-table (into {} (map (fn [d] [(:name d) d]) all-definitions)))
+(def links (BeamLisp.Compiler/read_data (File/read! (str base "/actor-links.edn"))))
 (when-not (= (count all-names) (count (set all-names)))
  (throw (ex-info "native actor unit has duplicate definitions; generated loop names may not shadow authored code"
                  {:kind :native-duplicate-definition})))
@@ -31,20 +34,54 @@
 (compiler/reset-fresh!)
 (def environment (assoc (compiler/new-env namespace) :file application))
 (def compiled (mapv #(assoc % :node (compiler/compile (:form %) environment)) all-definitions))
-(def options {:ns namespace :definitions (set all-names)
-              ; Root's native module linker must populate :resolve-global and
-              ; :resolve-remote from immutable body/arity manifests. A candidate
-              ; string alias in remotes.edn alone grants no execution authority.
-              :actor-runtime true})
+(defn target-name [qualified]
+ (when-not (starts-with? qualified (str namespace "/"))
+  (throw (ex-info "native actor link has foreign target" {:target qualified})))
+ (let [name (subs qualified (inc (count namespace)))]
+  (when-not (contains? declaration-table name)
+   (throw (ex-info "native actor link has no body" {:target qualified})))
+  name))
+(defn checked-target [qualified arity]
+ (let [name (target-name qualified)
+       shape (bootstrap/declaration-arities (:form (get declaration-table name)))]
+  (when-not (or (some #(= arity %) (:fixed shape))
+                (and (:variadic shape) (>= arity (:variadic shape))))
+   (throw (ex-info "native actor link arity mismatch" {:target qualified :arity arity :shape shape})))
+  (scheme/ident name)))
+(def core-modules #{(BeamLisp.Link/module_for "core") (BeamLisp.Emit/base_module_for "core")})
+(def native-context (ev/context namespace))
+(def options
+ (assoc native-context :definitions (set all-names) :namespace-qualified? false
+  :global-resolver
+   (fn [n]
+    (cond
+     (and (= namespace (:ns n)) (contains? declaration-table (:name n))) (scheme/ident (:name n))
+     (get (:global-bindings links) (str (:ns n) "/" (:name n)))
+      (scheme/ident (target-name (get (:global-bindings links) (str (:ns n) "/" (:name n)))))
+     :else ((:global-resolver native-context) n)))
+  :remote-resolver
+   (fn [n]
+    (let [f (erlang/atom_to_binary (:fun n)) arity (count (:args n))
+          target (or (get (:remote-bindings links) [(:mod n) (:fun n) arity])
+                  (when (contains? core-modules (:mod n))
+                   (get (:global-bindings links) (str "core/" f))))]
+     (cond
+      (= :host (:mod n))
+       (if (contains? actor/host-names f) (str "h-" f) (scheme/refuse n))
+      target (str "(lambda arguments (bl-invoke " (checked-target target arity) " arguments))")
+      :else ((:remote-resolver native-context) n))))))
 (defn nodes [node] (cons node (mapcat nodes (anf/executable-children node))))
 (def ir-nodes (mapcat #(nodes (:node %)) compiled))
 (def host-effects (vec (distinct (map #(select-keys % [:mod :fun :ann])
                     (filter #(= :remote (:op %)) ir-nodes)))))
-(def emitted (mapv #(scheme/emit-definition % options) compiled))
+(def emitted (mapv (fn [d]
+ (str (scheme/emit-definition d options)
+      "(native-register! " (scheme/text namespace) " " (scheme/text (:name d))
+      " " (scheme/ident (:name d)) ")\n")) compiled))
 (def program
  (str (string/join "\n" (map File/read! host-paths)) "\n"
       (string/join "" emitted)
-      "\n(" (scheme/ident "bl-main") " " (scheme/ident "main") ")\n"
+      "\n(bl-invoke " (scheme/ident "bl-main") " (list " (scheme/ident "main") "))\n"
       "(if (not (null? seed-errors)) (error \"actor runtime reported errors\"))\n"
       "(for-each (lambda (key) (if (not (= (h-map-size (bl-get seed-state (bl-key key))) 0)) (error \"actor resource leak\" key))) '(\"procs\" \"monitors\" \"tables\" \"names\" \"table-names\"))\n"
       "(if (not (= (h-vec-size (bl-get seed-state (bl-key \"runnable\"))) 0)) (error \"runnable leak\"))\n"
