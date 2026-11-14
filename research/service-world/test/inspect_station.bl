@@ -1,0 +1,20 @@
+;; Read-only integration against the actual account and Team Machine seed places.
+(ns service-world.inspect-station
+ (:require [machine.station :as machine] [service-world.core :as world]
+           [service-world.station :as station] [bl.json :as json] [clojure.edn :as edn]))
+(def source (System/fetch_env! "TEAM_MACHINE_SOURCE"))
+(def places
+ (vec (keep (fn [place] (when (:path place) (select-keys place [:id :path])))
+             (edn/read-string (File/read! (str source "/seed/places.edn"))))))
+(def observation (machine/discover places))
+(when (:error observation) (throw (ex-info (:error observation) {})))
+(doseq [row (:services observation)]
+ (let [place (first (filter #(= (:id %) (:place row)) places))]
+  (when-not (and place (= station/CONTRACT (:contract row)) (= 1 (:version row))
+                 (= ["inspect"] (:operations row))
+                 (world/within? (station/canonical-folder (:path place)) (:folder row) true))
+   (throw (ex-info "Actual station observation escaped its place grant" {})))))
+(println (json/encode {:result "passed" :mode "read-only" :places (count places)
+                       :services (count (:services observation))
+                       :by-place (into {} (map (fn [[place rows]] [place (count rows)])
+                                           (group-by :place (:services observation))))}))
