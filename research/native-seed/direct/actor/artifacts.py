@@ -8,6 +8,13 @@ import re
 ORIGINAL = '5f2ad8223fd9f053157b65266d3ee14e7fe8567b6196a78ed7ac955132b9a5c5'
 HEX = re.compile(r'[0-9a-f]{64}')
 BUDGETS = ('default', '17', '41')
+ORIGINAL_COMPILER_NAMES = frozenset((
+    'anf', 'clojure.core-ext', 'clojure.re', 'clojure.string', 'compiler', 'core', 'diag',
+    'host.compiler-data', 'host.form-meta', 'host.meta', 'native.bootstrap', 'native.eval',
+    'native.scheme', 'reader', 'reader-node', 'rt', 'server-clause', 'sugar'))
+DIRECT_COMPILER_ADDITIONS = (
+    'native.c', 'native.c-remote', 'native.c-eval', 'native.c-units', 'native.c-bootstrap')
+
 ZERO = {'procs': 0, 'monitors': 0, 'tables': 0, 'names': 0, 'table_names': 0,
         'runnable': 0, 'input_sink': None, 'critical': 0, 'errors': 0}
 
@@ -127,6 +134,33 @@ def index(witness, directory, actor=False):
     return {'directory': directory, 'singletons': singles, 'units': units, 'sources': sources}
 
 
+
+def compiler_partition(witness, record):
+    witness.record(record)
+    path = witness.path(record['path'])
+    manifest = json.loads(path.read_text())
+    if (manifest.get('schema') != 'bl.native.partitioned-closure' or manifest.get('version') != 1
+            or not isinstance(manifest.get('units'), list) or not 1 <= len(manifest['units']) <= 256):
+        raise RuntimeError('invalid actor compiler partition manifest')
+    def part_path(name):
+        p = Path(name)
+        return p if p.is_absolute() else path.parent / p
+    artifact = part_path(manifest['artifact_path'])
+    if artifact.stat().st_size > 33554432:
+        raise RuntimeError('actor compiler closure exceeds the canonical byte bound')
+    witness.bind(artifact, manifest['artifact_sha256'])
+    identities = {}
+    for row in [manifest['metadata'], *manifest['units']]:
+        witness.bind(part_path(row['path']), row['sha256'])
+    for row in manifest['units']:
+        name = row.get('namespace')
+        if (not isinstance(name, str) or name in identities
+                or not HEX.fullmatch(row.get('sha256', ''))):
+            raise RuntimeError('duplicate or invalid actor compiler namespace identity')
+        identities[name] = row['sha256']
+    return identities
+
+
 def actor_plan(witness, directory):
     directory = Path(directory).resolve()
     witness.bind(directory / 'manifest.json')
@@ -143,7 +177,8 @@ def actor_plan(witness, directory):
         raise RuntimeError('not the complete original direct actor plan')
     data = index(witness, directory, actor=True)
     for record in (manifest['application'], manifest['runtime'], manifest['original-manifest'],
-                   manifest['original-body'], manifest['original-anf'], manifest['closure-manifest'],
+                   manifest['original-body'], manifest['original-anf'], manifest['original-link-closure-manifest'],
+                   manifest['closure-manifest'],
                    *manifest['host-inputs']):
         witness.record(record)
     if any(r['path'].endswith('/direct-control-frames.scm') for r in manifest['host-inputs']):
@@ -163,18 +198,43 @@ def actor_plan(witness, directory):
             or link['sdk-pin'] != manifest['sdk-pin'] or link['runtime-definitions'] != 202
             or link['source-frames?'] is not True or original['anf'] != manifest['original-anf']
             or original['body'] != manifest['original-body']
+            or link['closure-manifest'] != manifest['original-link-closure-manifest']
             or link['emitted-bindings'] != manifest['emitted-bindings']):
         raise RuntimeError('C actor plan changed original Source/capture/SDK identity')
     for record in original['inputs']:
         witness.record(record)
     for record in (link['links'], link['host-link'], *link['host-extensions']):
         witness.record(record)
-    partition = json.loads(witness.path(manifest['closure-manifest']['path']).read_text())
-    for record in [partition['metadata'], *partition['units']]:
-        p = Path(record['path'])
-        if not p.is_absolute():
-            p = witness.path(manifest['closure-manifest']['path']).parent / p
-        witness.bind(p, record['sha256'])
+    original_units = compiler_partition(witness, manifest['original-link-closure-manifest'])
+    selected_units = compiler_partition(witness, manifest['closure-manifest'])
+    if (len(original_units) != 18 or set(original_units) != ORIGINAL_COMPILER_NAMES):
+        raise RuntimeError('actor original link is not its exact eighteen-namespace compiler seed')
+    profile = manifest.get('compiler-profile', {})
+    if profile.get('version') != 1:
+        raise RuntimeError('actor compiler selection lacks its finite profile admission')
+    if profile.get('name') == 'native-c-seed-v1':
+        if (len(selected_units) != 23
+                or set(selected_units) != ORIGINAL_COMPILER_NAMES | set(DIRECT_COMPILER_ADDITIONS)
+                or any(selected_units.get(name) != value for name, value in original_units.items())
+                or profile.get('added') != list(DIRECT_COMPILER_ADDITIONS)
+                or profile.get('scheme-dependencies-preserved') is not True
+                or profile.get('sdk-only-producers-excluded') is not True
+                or profile.get('parent', {}).get('sdk-pin-sha256') !=
+                    hashlib.sha256(manifest['sdk-pin'].encode()).hexdigest()):
+            raise RuntimeError('actor C profile changed original units or admitted nonfinite compiler dependencies')
+    elif profile.get('name') == 'original-scheme-seed-v1':
+        if selected_units != original_units or profile.get('added') != []:
+            raise RuntimeError('actor original compiler selection changed its captured seed')
+    else:
+        raise RuntimeError('unknown actor compiler profile')
+    source_order = [r['namespace'] for r in manifest['compiler-sources']]
+    original_order = manifest.get('compiler-original-order')
+    if (not isinstance(original_order, list) or len(original_order) != 18
+            or set(original_order) != ORIGINAL_COMPILER_NAMES
+            or len(source_order) != len(selected_units) or set(source_order) != set(selected_units)
+            or source_order[:18] != original_order
+            or source_order[18:] != profile['added']):
+        raise RuntimeError('actor Source index does not cover its complete ordered selected compiler profile')
     if len(data['units']) != len(manifest['units']):
         raise RuntimeError('actor plan/index unit counts differ')
     bindings = []

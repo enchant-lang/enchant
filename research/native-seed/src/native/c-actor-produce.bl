@@ -9,6 +9,9 @@
 (def args (BeamLisp/argv))
 (def original-path (or (first args) (str base "/out/original-actor-corpus/manifest.json")))
 (def out (or (second args) (str base "/out/direct-actors")))
+; Optional third argv selects the separate complete C compiler profile. The
+; captured original actor link/ANF/resolvers remain immutable.
+(def compiler-partition-path (nth args 2 nil))
 (def original (json/decode (File/read! original-path)))
 (when-not (and (= "bl.native.original-actor-corpus" (get original "schema"))
                  (= 1 (get original "version")) (= "scheme" (get original "target"))
@@ -34,8 +37,49 @@
  (throw (ex-info "direct actor producer omitted or reordered a captured definition" {})))
 (when-not (= (set (keys (:definitions (:link-resolutions artifact)))) (set (:emitted-bindings link)))
  (throw (ex-info "direct actor producer has an incomplete per-definition resolver ledger" {})))
-(def closure-path (:path (:closure-manifest link)))
-(def closure (artifact/read-closure closure-path))
+(def original-closure-record (:closure-manifest link))
+(def original-closure-path (:path original-closure-record))
+(when-not (= (:sha256 original-closure-record) (artifact/sha (File/read! original-closure-path)))
+ (throw (ex-info "direct actor producer: original link closure manifest changed" {})))
+(def original-closure (artifact/read-closure original-closure-path))
+(def original-partition (json/decode (File/read! original-closure-path)))
+(def original-compiler-names
+ #{"anf" "clojure.core-ext" "clojure.re" "clojure.string" "compiler" "core" "diag"
+   "host.compiler-data" "host.form-meta" "host.meta" "native.bootstrap" "native.eval"
+   "native.scheme" "reader" "reader-node" "rt" "server-clause" "sugar"})
+(def direct-compiler-additions
+ ["native.c" "native.c-remote" "native.c-eval" "native.c-units" "native.c-bootstrap"])
+(when-not (and (= 18 (count (:order original-closure)))
+               (= original-compiler-names (set (:order original-closure)))
+               (= (:sdk-pin original-closure) (:sdk-pin link)))
+ (throw (ex-info "direct actor producer: original link is not its exact eighteen-namespace compiler seed" {})))
+(def closure-path (or compiler-partition-path original-closure-path))
+(def closure-record (proc-link/source-identity closure-path))
+(def closure (if compiler-partition-path (artifact/read-closure closure-path) original-closure))
+(def selected-partition (if compiler-partition-path (json/decode (File/read! closure-path)) original-partition))
+(defn partition-identities [partition]
+ (into {} (map (fn [row] [(get row "namespace") (get row "sha256")]) (get partition "units"))))
+(def original-partition-identities (partition-identities original-partition))
+(def selected-partition-identities (partition-identities selected-partition))
+(def compiler-profile
+ (if compiler-partition-path
+  (let [profile (:profile closure)]
+   (when-not (and (= (:sdk-pin closure) (:sdk-pin original-closure))
+                  (= (:options closure) (:options original-closure))
+                  (= 23 (count (:order closure)))
+                  (= (:order original-closure) (vec (take 18 (:order closure))))
+                  (= direct-compiler-additions (vec (drop 18 (:order closure))))
+                  (every? (fn [[namespace sha256]]
+                            (= sha256 (get selected-partition-identities namespace)))
+                          original-partition-identities)
+                  (= "native-c-seed-v1" (:name profile)) (= 1 (:version profile))
+                  (= direct-compiler-additions (:added profile))
+                  (= (artifact/sha (:sdk-pin original-closure)) (:sdk-pin-sha256 (:parent profile)))
+                  (:scheme-dependencies-preserved profile) (:sdk-only-producers-excluded profile))
+    (throw (ex-info "direct actor producer: selected C profile must retain all original eighteen units unchanged and append exactly the five C compiler namespaces; refresh an old native.eval actor capture first"
+                    {:original original-closure-path :selected closure-path})))
+   profile)
+  {:name "original-scheme-seed-v1" :version 1 :added []}))
 (def compiler-units (mapv #(get (:units closure) %) (:order closure)))
 (def metadata
  {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure)
@@ -88,7 +132,9 @@
   :application (get original "application") :runtime (get original "runtime") :sdk-pin (:sdk-pin link)
   :clock (get original "clock") :clock-model (get original "clock-model")
   :original-manifest (proc-link/source-identity original-path) :original-body (get original "body")
-  :original-anf anf-record :closure-manifest (:closure-manifest link)
+  :original-anf anf-record :original-link-closure-manifest original-closure-record
+  :closure-manifest closure-record :compiler-profile compiler-profile
+  :compiler-original-order (:order original-closure)
   :compiler-metadata-sha256 (artifact/sha (bootstrap/data metadata)) :compiler-sources source-index
   :resolver-schema (:schema (:link-resolutions artifact))
   :resolver-sha256 (artifact/sha (bootstrap/data (:link-resolutions artifact)))
@@ -98,6 +144,9 @@
   :group-size 32 :units (:units emitted) :backend :c :scheme-body-fallback :forbidden
   :source-interpreter false :anf-interpreter false :authored-scheme-bodies false
   :program-control :emitted-c :value-services :shared-native-host :independent-runtime false})
+(doseq [record [original-closure-record closure-record]]
+ (when-not (= (:sha256 record) (artifact/sha (File/read! (:path record))))
+  (throw (ex-info "direct actor producer: compiler partition changed during emission" {:record record}))))
 (def manifest-source (bootstrap/data manifest))
 (File/write! (str out "/plan.manifest.scm") manifest-source)
 (File/write! (str out "/manifest.json") (json/encode manifest))
