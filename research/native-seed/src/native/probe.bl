@@ -1,0 +1,104 @@
+; Stage zero only. Run once on the qualified SDK, retain closure.etf, and do
+; target-emitter/host work from that immutable artifact instead of recompiling.
+(ns native.probe
+ (:require [js.build :as build] [anf] [native.scheme :as scheme]
+           [bl.json :as json] [clojure.string :as string]))
+
+(def roots ["research/native-seed/src"
+            "priv/boot" "priv/lib" "priv/std" "priv/compat"])
+(def entries ["core" "rt" "sugar" "clojure.core-ext" "clojure.re"
+              "host.compiler-data" "reader-node" "diag" "server-clause" "anf" "reader" "compiler"
+              "native.scheme" "native.eval" "native.bootstrap"])
+(def stubs #{"lower"})
+(def options {:target :scheme :contextual-bindings :absent
+              :stub ["lower"] :staging :canonical-js.build
+              :namespace-qualified? true})
+(def out (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure"))
+(defn sha [s] (Base/encode16 (crypto/hash :sha256 s) (list (tuple :case :lower))))
+(defn nodes [n] (cons n (mapcat nodes (anf/executable-children n))))
+(defn atom-text [a] (if (string? a) a (erlang/atom_to_binary a)))
+(defn source-path [ns]
+ (if (= ns "host.compiler-data") "priv/host/compiler_data.bl" (build/ns-path roots ns)))
+(defn header [path]
+ (let [h (BeamLisp.AOT/namespace_header (first (build/read-forms path)))
+       ns (first (Map/keys h))]
+  (when-not (= 1 (count h)) (throw (ex-info "native closure: missing namespace header" {:path path})))
+  {:ns ns :requires (mapv (fn [r] [(elem r 0) (or (elem r 1) (elem r 0))]) (:require_specs (get h ns)))}))
+(defn module-ns [m]
+ (let [s (atom-text m) prefix "Elixir.BeamLisp.Ns."]
+  (when (starts-with? s prefix)
+   (let [candidate (lower-case (subs s (count prefix)))]
+    (when (= m (BeamLisp.Link/module_for candidate)) candidate)))))
+(defn core-links []
+ (vec (sort-by first
+  (BeamLisp.Env/match
+   (tuple (tuple :link "core" :$1) :$2)))))
+(defn provider-sources []
+ ; Bind ALL candidate macro providers in the source roots, including providers
+ ; loaded by a macro through a module edge rather than a :require declaration.
+ (vec (map (fn [p] {:path p :sha256 (sha (File/read! p))})
+       (sort (distinct (cons "priv/host/compiler_data.bl"
+                    (mapcat (fn [r] (Path/wildcard (str r "/**/*.bl"))) roots)))))))
+(defn compile-closure []
+ (loop [todo entries active #{} done #{} order [] units {}]
+  (if (empty? todo)
+   {:order order :units units}
+   (let [ns (first todo)]
+    (cond
+     (contains? done ns) (recur (rest todo) active done order units)
+     (contains? stubs ns) (recur (rest todo) active (conj done ns) order units)
+     :else
+     (let [path (source-path ns)]
+      (when (nil? path) (throw (ex-info "native closure: source dependency absent" {:namespace ns})))
+      (let [head (header path)
+            deps (vec (remove #(contains? done %)
+                        (concat (when (= ns "core") ["rt"]) (map first (:requires head)))))]
+       (if (and (seq deps) (not (contains? active ns)))
+        (recur (concat deps todo) (conj active ns) done order units)
+        (let [prepared (build/prepare-ns path)
+              compiled (build/compile-prepared prepared {:check-node identity})
+              refs (keep (fn [n] (when (= :remote (:op n)) (module-ns (:mod n))))
+                         (mapcat #(nodes (:node %)) (:defs compiled)))
+              extra (vec (distinct (filter #(and (not (contains? done %))
+                                                   (not= ns %) (not (contains? stubs %))
+                                                   (build/ns-path roots %)) refs)))
+              unit (assoc compiled :source (:source prepared)
+                     :module (BeamLisp.Link/module_for ns)
+                     :base-module (BeamLisp.Emit/base_module_for ns))]
+         ; Every unit is compiled ONCE. Additional module dependencies enqueue
+         ; after it; Scheme definitions are emitted before initialization.
+         (recur (concat (rest todo) extra) (disj active ns) (conj done ns)
+                (conj order ns) (assoc units ns unit)))))))))))
+(defn inventory [closure]
+ (let [all (mapcat (fn [ns] (mapcat #(nodes (:node %)) (:defs (get (:units closure) ns)))) (:order closure))]
+  {:operations (vec (sort-by str (frequencies (map :op all))))
+   :remotes (vec (sort-by str (distinct (keep (fn [n] (when (= :remote (:op n))
+                       [(atom-text (:mod n)) (atom-text (:fun n)) (count (:args n))])) all))))
+   :globals (vec (sort-by str (distinct (keep (fn [n] (when (= :global (:op n)) [(:ns n) (:name n)])) all))))
+   :bindings (vec (distinct (keep (fn [n] (when (= :binding (:op n)) (:reference n))) all)))
+   :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
+            {:namespace ns :path (:path u) :sha256 (:source-sha256 u)
+             :definitions (count (:defs u)) :requires (:requires u)})) (:order closure))}))
+(File/mkdir_p! out)
+(def providers (provider-sources))
+(def pin (File/read! "research/native-seed/sdk-pin.json"))
+(def pin-data (json/decode pin))
+(def observed-sdk-descriptor (File/read! ".bl/sdks/current-sdk/artifact.json"))
+(assert (= (get pin-data "descriptor_sha256") (sha observed-sdk-descriptor)))
+(assert (= (get pin-data "source") (get (json/decode observed-sdk-descriptor) "source")))
+(assert (= observed-sdk-descriptor (File/read! (str (get pin-data "sdk") "/artifact.json"))))
+(def closure
+ (BeamLisp.Env/isolated
+  (fn []
+   (assoc (compile-closure) :schema "bl.native.compiler-closure" :version 1
+    :options options :roots roots :entries entries :stubs (vec (sort stubs))
+    :core-links (core-links) :return-constructor-shapes (BeamLisp.Server/return_constructor_shapes)
+    :provider-sources providers :sdk-pin pin))))
+(def artifact (erlang/term_to_binary closure (list :deterministic)))
+(File/write! (str out "/closure.etf") artifact)
+(File/write! (str out "/inventory.json") (json/encode (inventory closure)))
+(File/write! (str out "/identity.json")
+ (json/encode {:schema "bl.native.compiler-closure-identity" :version 1
+               :artifact-sha256 (sha artifact) :sdk-pin-sha256 (sha pin)
+               :options options :providers providers}))
+(println (str "NATIVE_CLOSURE " (count (:order closure)) " namespaces " (sha artifact)))

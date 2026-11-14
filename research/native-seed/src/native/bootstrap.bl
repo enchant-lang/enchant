@@ -1,0 +1,102 @@
+; This file is part of its own compiler input. The native executable reads
+; ORIGINAL BL source, expands its ORIGINAL macros, invokes compiler/compile,
+; then native.scheme/emit. The next executable repeats that pipeline.
+(ns native.bootstrap
+ (:require [compiler :as c] [reader :as rd] [reader-node :as rn]
+           [native.scheme :as scheme] [native.eval :as ev]
+           [clojure.string :as string]))
+
+(defn data [v]
+ (cond
+  (nil? v) "bl-nil" (= v true) "#t" (= v false) "#f"
+  (string? v) (scheme/text v) (number? v) (str v)
+  (keyword? v) (str "(bl-key " (scheme/text (erlang/atom_to_binary v)) ")")
+  (vector? v) (str "(bl-vec (list " (string/join " " (map data (to-list v))) "))")
+  (map? v) (str "(bl-map " (string/join " " (mapcat (fn [[k x]] [(data k) (data x)]) (sort-by (comp str first) v))) ")")
+  (erlang/is_tuple v) (str "(bl-tuple (list " (string/join " " (map data (Tuple/to_list v))) "))")
+  (set? v) (str "(bl-set (list " (string/join " " (map data (sort-by str v))) "))")
+  (list? v) (str "(list " (string/join " " (map data v)) ")")
+  :else (throw (ex-info "native bootstrap: nonportable bundle value" {:value v}))))
+
+(defn definition-values [forms ns path]
+ (let [defs
+  (keep (fn [form]
+   (let [head (ev/head-symbol form)]
+    (cond
+     (contains? #{"defn" "defn-" "def"} head)
+      (let [decl (c/declaration-source form (assoc (c/new-env ns) :file path))]
+       {:name (rn/node-name (rn/node-form (:name decl)))
+        :kind (if (= head "def") :val :fn)
+        :private? (= :private (:visibility decl))
+        :form (let [value (:value-form decl) pos (rn/node-pos form)]
+                (if pos (rn/meta-node value pos) value))})
+     (contains? #{"ns" "defmacro" "comment" "declare"} head) nil
+     :else {:name nil :kind :expr :form form}))) forms)
+       last-at (reduce (fn [m [i d]] (if (:name d) (assoc m (:name d) i) m)) {} (map-indexed vector defs))]
+  (vec (keep (fn [[i d]] (when (or (nil? (:name d)) (= i (get last-at (:name d)))) d)) (map-indexed vector defs)))))
+
+(defn prepare [unit]
+ (let [ns (:ns unit) path (:path unit) forms (rd/read-string (:source unit) path)
+       _ (BeamLisp.Env/mark_loaded ns)
+       _ (ev/eval-form (first forms))
+       defs (definition-values (rest forms) ns path)]
+  (doseq [d defs :when (and (:name d) (not (BeamLisp.Env/bound? ns (:name d))))]
+   (BeamLisp.Env/intern ns (:name d) nil))
+  ; All source helpers are already compiled members of this exact closed
+  ; bundle. Macro definitions themselves are compiled anew from BL source.
+  (doseq [form (rest forms) :when (= "defmacro" (ev/head-symbol form))]
+   (ev/eval-form form))
+  (assoc unit :defs
+   (mapv (fn [d]
+    (c/reset-fresh!)
+    (assoc d :node (c/compile (:form d) (assoc (c/new-env ns) :file path :target :js)))) defs))))
+
+(defn binding-name [ns name] (scheme/ident (str ns "/" name)))
+(defn install-source-macros! [bundle]
+ ; Same boot order as js/boot.mjs. The compiled definitions are present;
+ ; macros remain SOURCE and are compiled in the native realm before any
+ ; namespace's source is compiled. This also exercises Scheme eval directly.
+ (doseq [name ["core" "sugar"]
+         unit (:units bundle) :when (= name (:ns unit))]
+  (BeamLisp.Env/in_ns name)
+  (doseq [form (rd/read-string (:source unit) (:path unit))
+          :when (= "defmacro" (ev/head-symbol form))]
+   (ev/eval-form form)))
+ (BeamLisp.Env/in_ns "user"))
+(defn emit-definition [unit d]
+ (let [ns (:ns unit) value (scheme/emit (:node d) (ev/context ns))]
+  (if (:name d)
+   (str "(define " (binding-name ns (:name d)) " " value ")\n"
+        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " (binding-name ns (:name d)) ")\n"
+        "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
+        " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n")
+   (str value "\n"))))
+(defn emit-compiled-bundle [units bundle host-source]
+ (let [functions (mapcat (fn [u] (map #(emit-definition u %) (filter #(= :fn (:kind %)) (:defs u)))) units)
+       initializers (mapcat (fn [u]
+          (concat (when (= "core" (:ns u)) ["(bl-invoke (native-global \"rt\" \"seed-core\") '())\n"])
+                  (map #(emit-definition u %) (remove #(= :fn (:kind %)) (:defs u))))) units)]
+  (str ";; BL native compiler. Generated from canonical BL source.\n"
+       host-source "\n"
+       "(native-install-bundle! " (data (dissoc bundle :units)) ")\n"
+       (string/join "" functions) (string/join "" initializers)
+       "(native-main (native-command-line))\n")))
+
+(defn compile-bundle [bundle host-source]
+ (install-source-macros! bundle)
+ (emit-compiled-bundle (mapv prepare (:units bundle)) bundle host-source))
+
+(defn main [args]
+ (cond
+  (and (= 4 (count args)) (= "--compile" (first args)))
+   (let [bundle (host/eval-scheme (host/read-file (nth args 1)))
+         host-source (host/read-file (nth args 2))
+         output (compile-bundle bundle host-source)]
+    (host/write-file (nth args 3) output)
+    (println (str "NATIVE_SELF_COMPILE " (count (:units bundle)) " namespaces")))
+  (and (= 3 (count args)) (= "--eval" (first args)))
+   (let [bundle (host/eval-scheme (host/read-file (nth args 1)))]
+    (install-source-macros! bundle)
+    (ev/eval-string (host/read-file (nth args 2)) (nth args 2)))
+  :else
+   (throw (ex-info "usage: native-compiler --compile bundle.scm host.scm output.scm | --eval bundle.scm source.bl" {:args args})))))

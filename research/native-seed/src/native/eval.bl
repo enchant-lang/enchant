@@ -1,0 +1,41 @@
+; Canonical reader -> compiler -> Scheme emitter -> Scheme evaluation.
+; There is deliberately no source parser or ANF interpreter in this adapter.
+(ns native.eval
+ (:require [compiler :as c] [reader :as rd] [reader-node :as rn]
+           [native.scheme :as scheme]))
+
+(defn context [ns]
+ {:ns ns :namespace ns :namespace-qualified? true
+  :global-resolver
+   (fn [n] (str "(native-global " (scheme/text (:ns n)) " " (scheme/text (:name n)) ")"))
+  :remote-resolver
+   (fn [n] (str "(native-remote "
+    (scheme/text (str (erlang/atom_to_binary (:mod n)) "/"
+                      (erlang/atom_to_binary (:fun n)) "/" (count (:args n)))) ")"))
+  :binding-resolver (fn [n] (throw (ex-info "native eval: contextual Source binding requires native custody" {:reference (:reference n)})))})
+
+(defn head-symbol [form]
+ (let [node (rn/node-form form)]
+  (when (= :list (rn/node-tag node))
+   (let [head (rn/node-form (first (rn/node-items node)))]
+    (when (= :symbol (rn/node-tag head)) (rn/node-name head))))))
+
+(defn eval-form [form]
+ (let [ns (BeamLisp.Env/current_ns) head (head-symbol form)
+       env (assoc (c/new-env ns) :target :js)]
+  (c/reset-fresh!)
+  (if (contains? #{"defn" "defn-" "def"} head)
+   (let [decl (c/declaration-source form env)
+         name (rn/node-name (rn/node-form (:name decl)))
+         _ (when-not (BeamLisp.Env/bound? ns name) (BeamLisp.Env/intern ns name nil))
+         node (c/compile (:value-form decl) env)
+         value (host/eval-scheme (scheme/emit node (context ns)))]
+    (BeamLisp.Env/intern ns name value)
+    (BeamLisp.Env/put_meta ns name {:private (= :private (:visibility decl))})
+    value)
+   (host/eval-scheme (scheme/emit (c/compile form env) (context ns))))))
+
+(defn eval-string
+ ([source] (eval-string source "native-eval"))
+ ([source path]
+  (reduce (fn [_ form] (eval-form form)) nil (rd/read-string source path))))

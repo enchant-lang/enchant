@@ -1,0 +1,24 @@
+; Cheap stage-zero REPLAY: reads the one captured canonical ANF artifact.
+; This file never calls compiler/compile or starts a second closure build.
+(ns native.export
+ (:require [native.bootstrap :as bootstrap] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def artifact-path (or (nth args 0 nil) "research/native-seed/out/compiler-closure/closure.etf"))
+(def host-path (or (nth args 1 nil) "research/native-seed/out/compiler-closure/host.scm"))
+(def out (or (nth args 2 nil) "research/native-seed/out/compiler-closure"))
+(def closure (erlang/binary_to_term (File/read! artifact-path) (list :safe)))
+(when-not (and (= "bl.native.compiler-closure" (:schema closure)) (= 1 (:version closure)))
+ (throw (ex-info "native export: unsupported closure artifact" {:artifact artifact-path})))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def bundle
+ {:schema "bl.native.source-bundle" :version 1
+  :sdk-pin (:sdk-pin closure) :provider-sources (:provider-sources closure)
+  :options (:options closure) :stubs (:stubs closure) :core-links (:core-links closure)
+  :stub-modules (mapv (fn [ns] [ns (BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))
+  :return-constructor-shapes (:return-constructor-shapes closure)
+  :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)
+  :units (mapv #(select-keys % [:ns :path :source :requires :module :base-module]) units)})
+(File/mkdir_p! out)
+(File/write! (str out "/bundle.scm") (bootstrap/data bundle))
+(File/write! (str out "/stage1.scm") (bootstrap/emit-compiled-bundle units bundle (File/read! host-path)))
+(println (str "NATIVE_STAGE0_EXPORTED " (count units) " original namespaces"))
