@@ -676,3 +676,12 @@ The live dossier now includes a prose progress section for these qualified
 prototypes. Its cell sources and saved results are unchanged. The word presentation
 receipt above binds the preceding exact document revision; the expanded document's
 next execution/browser checkpoint is pending the current integration work.
+
+The [scalar-text/evidence SDK candidate](SCALAR-INTEGRATION.md) is now built:
+723 source files, thirteen changed compiled units, unchanged native components
+and the same 141-file compiler floor. It has passed 604 namespace preflight
+checks, three negative controls and 11,705 SDK assertion executions. The paired
+native audit and fresh/durable record gates are still in progress, so the
+project pin remains on the qualified word SDK. The
+[next implementation work](POST-SCALAR-ROADMAP.md) includes a graph-native entry
+for the integer certificate kernel and separately checked premise feasibility.
