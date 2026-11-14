@@ -1,0 +1,186 @@
+; Native declaration renderer. The DSL policy remains proc.server/clause-plan
+; and proc.super/supervisor-plan. This file only renders those finite plans to
+; ordinary BL functions/receives and preserves native delayed reply handles.
+(ns native.proc
+ (:require [reader-node :as rn] [server-clause :as clause]
+           [proc.server :as server] [proc.super :as supervisor]))
+
+(def server-heads #{"init" "handle-call" "handle-cast" "handle-info" "terminate"})
+
+(defn source-data [node]
+ (let [form (rn/node-form node) tag (rn/node-tag form)]
+  (case tag
+   :symbol form
+   :keyword (keyword (rn/node-name form))
+   :list (apply list (map source-data (rn/node-items form)))
+   :vector (vec (map source-data (rn/node-items form)))
+   :set (set (map source-data (rn/node-items form)))
+   :map (reduce (fn [out pair]
+          (assoc out (source-data (erlang/element 1 pair))
+                     (source-data (erlang/element 2 pair)))) {} (rn/node-items form))
+   :scalar form
+   (throw (ex-info "native proc: unsupported declaration datum" {:tag tag :position (rn/node-pos node)})))))
+
+(defn symbols-in [form]
+ (cond (symbol? form) #{form}
+       (or (list? form) (vector? form) (set? form)) (reduce #(into %1 (symbols-in %2)) #{} form)
+       (map? form) (reduce (fn [out entry] (into (into out (symbols-in (key entry))) (symbols-in (val entry)))) #{} form)
+       :else #{}))
+
+(defn fresh-symbol [base used]
+ (loop [i 0]
+  (let [candidate (symbol (str base i))]
+   (if (contains? used candidate) (recur (inc i)) candidate))))
+
+(defn map-code [f form]
+ (cond
+  (list? form) (if (contains? #{'quote 'syntax-quote} (first form)) form
+                (f (apply list (map #(map-code f %) form))))
+  (vector? form) (vec (map #(map-code f %) form))
+  (map? form) (reduce (fn [out entry] (assoc out (key entry) (map-code f (val entry)))) {} form)
+  :else form))
+
+(defn body-form [forms]
+ (cond (empty? forms) nil (= 1 (count forms)) (first forms)
+       :else (apply list (cons 'do forms))))
+
+(defn reply-markers [form caller reference where]
+ (map-code (fn [call]
+  (cond
+   (and (list? call) (= 'reply (first call)))
+    (do
+     (when (or (nil? caller) (not= 3 (count call)))
+      (throw (ex-info (str where ": reply requires a call's caller, value and next state") {:form call})))
+     (list 'do (list 'rt-reply-to caller reference (second call)) (nth call 2)))
+   (and (list? call) (= 'noreply (first call)))
+    (do
+     (when-not (= 2 (count call))
+      (throw (ex-info (str where ": noreply requires the next state") {:form call})))
+     (second call))
+   :else call)) form))
+
+(defn strip-ok [form]
+ (map-code (fn [call]
+   (if (and (list? call) (= 'ok (first call)) (= 2 (count call))) (second call) call)) form))
+
+(defn parameters! [parameters n where head]
+ (when-not (and (vector? parameters) (= n (count parameters)) (every? symbol? parameters))
+  (throw (ex-info (str where ": " head " requires " n " symbol parameters") {:parameters parameters})))
+ parameters)
+
+(defn rebind-guard [form name replacement]
+ ; Operator names and quoted forms are not variable uses. Guards do not bind.
+ (cond
+  (list? form) (if (contains? #{'quote 'syntax-quote} (first form)) form
+                (cons (first form) (map #(rebind-guard % name replacement) (rest form))))
+  (= form name) replacement
+  :else form))
+
+(defn down-pattern [pattern]
+ (if (and (vector? pattern) (seq pattern) (= :DOWN (first pattern)))
+  (assoc pattern 0 :down) pattern))
+
+(defn lower-arm [form loop-name state reference used where]
+ (let [head (name (first form)) parts (vec (rest form))
+       parsed (clause/data-tail (subvec parts 1)) call? (= head "handle-call")
+       parameters (parameters! (:params parsed) (if call? 2 1) where head)
+       from (when call? (first parameters))
+       caller (when call? (fresh-symbol "caller__native_" (into used #{state reference})))
+       state-parameter (last parameters) pattern (down-pattern (first parts))
+       envelope (case head "handle-call" [:call reference caller pattern]
+                      "handle-cast" [:cast pattern] "handle-info" pattern)
+       reply-handle (list 'tuple caller reference)
+       bindings (cond-> [state-parameter state]
+                  (and call? (not= '_ from)) (into [from reply-handle]))
+       guard (rebind-guard (:guard parsed) state-parameter state)
+       guard (if (and call? (not= '_ from))
+               (rebind-guard guard from reply-handle) guard)
+       body (list loop-name (list 'let bindings
+               (reply-markers (body-form (:body parsed)) caller reference where)))]
+  (if (:guarded? parsed) (list envelope :when guard body) (list envelope body))))
+
+(defn lower-server
+ "Source DATA -> ordinary BL definitions. Vocabulary is an explicit capability
+  map, e.g. {:bus proc.bus/bus-clause}; no global registry is trusted implicitly."
+ [form vocabulary]
+ (let [server-name (second form) clauses (vec (drop 2 form)) where (str "defserver " server-name)
+       plan (server/clause-plan {:name server-name :clauses clauses
+                                 :vocabulary vocabulary :native-heads server-heads})
+       _ (when (seq (:unknown plan))
+           (throw (ex-info (str where ": unsupported native clause " (:head (first (:unknown plan))))
+                           {:kind :native-unsupported-proc-clause :unknown (:unknown plan)})))
+       _ (when (seq (:meta plan))
+           (throw (ex-info (str where ": native clause metadata has no execution owner")
+                           {:kind :native-unsupported-proc-metadata :forms (:meta plan)})))
+       body (:body plan)
+       _ (doseq [part body]
+           (when-not (contains? server-heads (name (first part)))
+            (throw (ex-info (str where ": contributed clause is not implemented by native rendering")
+                            {:kind :native-unsupported-injected-clause :clause part}))))
+       used (symbols-in form)
+       loop-name (symbol (str (name server-name) "__server_loop"))
+       state (fresh-symbol "state__native_" used)
+       reference (fresh-symbol "reference__native_" (conj used state))
+       reason (fresh-symbol "reason__native_" (into used #{state reference}))
+       used (into used #{state reference reason loop-name})
+       init (first (filter #(= 'init (first %)) body))
+       init-params (if init (parameters! (second init) 1 where "init") ['_])
+       init-value (if init (strip-ok (body-form (drop 2 init))) {})
+       termination (filter #(= 'terminate (first %)) body)
+       stop-body (body-form
+         (concat (map (fn [part]
+            (let [parameters (parameters! (second part) 2 where "terminate")]
+             (list 'let [(first parameters) reason (second parameters) state]
+               (reply-markers (body-form (drop 2 part)) nil reference where)))) termination)
+          (list (list 'erlang/exit reason))))
+       arms (map #(lower-arm % loop-name state reference used where)
+                 (filter #(contains? #{'handle-call 'handle-cast 'handle-info} (first %)) body))
+       _ (when (empty? arms)
+           (throw (ex-info (str where ": at least one receive callback is required")
+                           {:kind :native-empty-proc-server})))
+       receive-parts (reduce into [[:stop reason] stop-body] arms)]
+  (vec (concat (:definitions plan)
+         [(list 'defn server-name init-params (list loop-name init-value))
+          (list 'defn loop-name [state] (apply list (cons 'receive receive-parts)))]))))
+
+(defn child-spec [child]
+ (let [options (:options child)]
+  {:id (:id child) :kind (:kind child) :target (:target child) :args (vec (:args child))
+   :restart (get options :restart :permanent) :shutdown (get options :shutdown 5000)
+   :type (get options :type :worker) :name (get options :name nil) :order (:order child)}))
+
+(defn lower-supervisor [form]
+ (let [tree (second form) plan (supervisor/supervisor-plan {:name tree :clauses (vec (drop 2 form))})]
+  (when (seq (:unknown plan))
+   (throw (supervisor/unknown-supervisor-clause-error tree (first (:unknown plan)))))
+  (when (seq (:errors plan))
+   (throw (supervisor/invalid-supervisor-error tree (first (:errors plan)))))
+  (when (some #(= :pool (:kind %)) (:children plan))
+   (throw (ex-info "native proc: pool children need a qualified dispatcher and nested-tree owner"
+                   {:kind :native-unsupported-proc-pool :tree tree})))
+  [(list 'defn tree [] {:name (keyword (name tree)) :strategy (:strategy plan)
+                         :intensity (:intensity plan) :children (vec (map child-spec (:children plan)))})]))
+
+(defn form-head [form]
+ (when (= :list (rn/node-tag (rn/node-form form)))
+  (let [head (first (rn/node-items form))]
+   (when (= :symbol (rn/node-tag (rn/node-form head))) (rn/node-name (rn/node-form head))))))
+
+(defn runtime-forms
+ "Pure js.build/prepare-ns expansion hook. Native vocabulary is supplied by
+  the integrating linker after its helper closure has been admitted."
+ ([forms namespace path] (runtime-forms forms namespace path {}))
+ ([forms namespace path options]
+  (vec (mapcat (fn [form]
+   (let [head (form-head form)
+         lowered (cond
+          (contains? #{"defserver" "proc/defserver" "proc.server/defserver"} head)
+           (lower-server (source-data form) (or (:vocabulary options) {}))
+          (contains? #{"defsupervisor" "proc.super/defsupervisor" "proc/super/defsupervisor"} head)
+           (lower-supervisor (source-data form))
+          :else nil)]
+    (if lowered
+     (map (fn [data]
+       (let [node (BeamLisp.Ns.Reader/read_one (pr-str data)) pos (rn/node-pos form)]
+        (if pos (rn/meta-node node pos) node))) lowered)
+     [form]))) forms))))

@@ -1,0 +1,77 @@
+; Compiled into the actor unit beside UNCHANGED runtime.bl. These are ABI
+; projections, not scheduler, mailbox, table or supervisor policy copies.
+
+(defn native-local-pid! [pid]
+ (when-not (rt-pid? pid) (erlang/error :badarg))
+ (when-not (rt-local-pid? (host/state) pid)
+  (erlang/error [:native-unsupported-remote-pid pid]))
+ pid)
+
+(defn native-send! [to message]
+ ; proc's raw transports use pids. Registered-name/port/distribution sends
+ ; require an explicitly admitted address adapter rather than rt-send's looser
+ ; target diagnostic. A dead local pid is a successful, silent send on BEAM.
+ (native-local-pid! to)
+ (rt-deliver-quiet to message)
+ message)
+
+(defn native-reply! [from value]
+ (if (and (host/is-tup from) (= 2 (host/tup-size from)))
+  (do (rt-reply-to (host/tup-el from 0) (host/tup-el from 1) value) :ok)
+  (erlang/error [:native-bad-reply-handle from])))
+
+(defn native-monitor! [kind pid]
+ (if (= :process kind) (do (native-local-pid! pid) (rt-monitor pid))
+  (erlang/error [:native-unsupported-monitor-kind kind])))
+
+(defn native-down-for? [message reference]
+ (and (host/is-vec message) (= 5 (host/vec-size message))
+      (= :down (host/vec-el message 0)) (= reference (host/vec-el message 1))))
+
+(defn native-flush-down! [reference i]
+ ; Called in the same critical section that dropped the monitor. No new DOWN
+ ; for this ref can race with the scan, and unrelated messages keep their order.
+ (let [process (rt-proc-of (host/state) (rt-self))
+       mailbox (:mailbox process)]
+  (if (or (nil? process) (>= i (host/vec-size mailbox))) nil
+   (if (native-down-for? (host/vec-el mailbox i) reference)
+    (do (rt-drop-mailbox-msg (rt-self) i) (native-flush-down! reference i))
+    (native-flush-down! reference (+ i 1))))))
+
+(defn native-demonitor-with! [reference options]
+  (when-not (rt-ref? reference) (erlang/error :badarg))
+  (when-not (and (list? options) (every? #(= :flush %) options))
+   (erlang/error [:native-unsupported-demonitor-options options]))
+  (host/critical-enter)
+  (rt-demonitor reference)
+   (when (some #(= :flush %) options) (native-flush-down! reference 0))
+   (host/critical-leave)
+   true)
+
+(defn native-demonitor!
+ ([reference] (native-demonitor-with! reference (list)))
+ ([reference options] (native-demonitor-with! reference options)))
+
+(defn native-spawn!
+ ([thunk] (rt-spawn thunk []))
+ ([thunk mode]
+  (case mode
+   :link (rt-spawn-link thunk [])
+   :monitor (rt-spawn-monitor thunk [])
+   (erlang/error [:native-unsupported-spawn-mode mode]))))
+
+(defn native-start! [entry options] (rt-spawn entry [options]))
+
+(defn native-exit! [pid reason]
+ (native-local-pid! pid)
+ (rt-exit pid reason)
+ true)
+
+(defn native-process-flag! [flag value]
+ (if (= :trap_exit flag)
+  (if (or (= true value) (= false value)) (rt-trap-exit! value) (erlang/error :badarg))
+  (erlang/error [:native-unsupported-process-flag flag])))
+
+(defn native-process-alive? [pid]
+ (native-local-pid! pid)
+ (rt-alive? pid))

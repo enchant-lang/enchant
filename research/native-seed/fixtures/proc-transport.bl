@@ -1,0 +1,66 @@
+; Shared source fixture. Compile with the SAME native.proc declaration renderer
+; on Scheme and JavaScript, plus canonical runtime.bl and bridges.bl. Running
+; production js.actor's older renderer intentionally exposes its caller-only
+; `from` bug: a delayed reply must retain BOTH caller and request reference.
+
+(defn np-check [label actual expected]
+ (if (host/eq actual expected) (host/write (str "PASS " label))
+  (host/raise (str "FAIL " label ": " (host/describe actual)))))
+
+(proc/defserver np-server
+ (init [options] (ok {:owner (:owner options) :value 0 :pending {}}))
+ (handle-call [:hold tag] [from state]
+  (do (rt-send (:owner state) [:held tag (host/is-tup from) (host/tup-size from)])
+      (noreply (assoc state :pending (assoc (:pending state) tag from)))))
+ (handle-call :value [_from state] (reply (:value state) state))
+ (handle-cast [:release tag value] [state]
+  (do (native-reply! (get (:pending state) tag) value)
+      (noreply (assoc state :pending (dissoc (:pending state) tag)))))
+ (handle-cast [:add n] [state] (noreply (assoc state :value (+ (:value state) n))))
+ (handle-info [:add n] [state] (noreply (assoc state :value (+ (:value state) n))))
+ (terminate [reason state] (rt-send (:owner state) [:terminated reason (:value state)])))
+
+(defn np-request [owner server tag]
+ (rt-send owner [:answer tag (rt-call server [:hold tag] 5000)]))
+
+(defn main []
+ (let [me (rt-self) server (rt-spawn np-server [{:owner me}])
+       monitor (rt-monitor server)]
+  (rt-spawn np-request [me server :first])
+  (rt-spawn np-request [me server :second])
+  (np-check "proc-delayed-first-from-tuple"
+   (receive [:held :first tuple? size] [tuple? size] (after 5000 :timeout)) [true 2])
+  (np-check "proc-delayed-second-from-tuple"
+   (receive [:held :second tuple? size] [tuple? size] (after 5000 :timeout)) [true 2])
+  (np-check "proc-no-premature-delayed-reply"
+   (receive [:answer tag value] [tag value] (after 0 :none)) :none)
+  (rt-cast server [:release :second 22])
+  (rt-cast server [:release :first 11])
+  (np-check "proc-delayed-reply-second-reference"
+   (receive [:answer :second value] value (after 5000 :timeout)) 22)
+  (np-check "proc-delayed-reply-first-reference"
+   (receive [:answer :first value] value (after 5000 :timeout)) 11)
+  (rt-cast server [:add 7])
+  (rt-send server [:add 3])
+  (np-check "proc-call-observes-cast-and-info" (rt-call server :value) 10)
+  (rt-stop server :normal)
+  (np-check "proc-terminate-original-parameters"
+   (receive [:terminated reason value] [reason value] (after 5000 :timeout)) [:normal 10])
+  (np-check "proc-stop-down-once"
+   (receive [:down ref :process pid reason] :when (= ref monitor)
+            [pid reason] (after 5000 :timeout)) [server :normal])
+  (np-check "proc-stop-down-no-duplicate"
+   (receive [:down ref :process pid reason] :when (= ref monitor) :duplicate (after 0 :none)) :none)
+  (let [first-ref (native-monitor! :process server)
+        second-ref (native-monitor! :process server)]
+   (rt-send me [:unrelated :kept])
+   (np-check "proc-demonitor-flush-result" (native-demonitor! first-ref (list :flush)) true)
+   (np-check "proc-demonitor-flush-dead-reference-again" (native-demonitor! first-ref) true)
+   (np-check "proc-demonitor-flush-removes-queued-down"
+    (receive [:down ref :process pid reason] :when (= ref first-ref) :stale (after 0 :none)) :none)
+   (np-check "proc-demonitor-flush-keeps-other-down"
+    (receive [:down ref :process pid reason] :when (= ref second-ref) reason (after 0 :missing)) :noproc)
+   (np-check "proc-demonitor-flush-keeps-unrelated-message"
+    (receive [:unrelated value] value (after 0 :missing)) :kept))
+  (np-check "proc-raw-send-dead-pid-result" (native-send! server [:ignored]) [:ignored])
+  (host/write "NATIVE_PROC_TRANSPORT_OK")))

@@ -1,0 +1,62 @@
+; Integrating driver candidate. Root must merge its checked module-link ABI and
+; host manifests with this code before running it. No reduced kernel is used.
+(ns native.build-runtime
+ (:require [compiler :as compiler] [reader-node :as reader] [js.build :as definitions]
+           [native.proc :as proc] [native.scheme :as scheme] [anf]
+           [clojure.string :as string] [bl.json :as json]))
+
+(def base "research/native-seed")
+(def runtime "priv/lib/js/actor/runtime.bl")
+(def application (or (first (BeamLisp/argv)) "research/js-actors/test.bl"))
+(def output (or (second (BeamLisp/argv)) (str base "/out/full-actors.scm")))
+(def host-paths (if (seq (drop 2 (BeamLisp/argv))) (vec (drop 2 (BeamLisp/argv))) [(str base "/host.scm")]))
+(def namespace "native.kernel")
+(defn read-forms [path] (BeamLisp.Ns.Reader/read (File/read! path) {:file path}))
+(defn digest [path] (Base/encode16 (crypto/hash :sha256 (File/read! path)) (list (tuple :case :lower))))
+
+(def actor-definitions (vec (definitions/definition-values (read-forms runtime))))
+(def bridge-definitions (vec (definitions/definition-values (read-forms (str base "/bridges.bl")))))
+; The baseline vocabulary is deliberately empty. A contributed clause must be
+; supplied in :vocabulary only after its actual namespaced helper closure and
+; host imports pass the native linker. Unknowns remain compilation failures.
+(def app-definitions (vec (definitions/definition-values (proc/runtime-forms (read-forms application) namespace application))))
+(def all-definitions (vec (concat actor-definitions bridge-definitions app-definitions)))
+(def all-names (mapv :name all-definitions))
+(when-not (= (count all-names) (count (set all-names)))
+ (throw (ex-info "native actor unit has duplicate definitions; generated loop names may not shadow authored code"
+                 {:kind :native-duplicate-definition})))
+(when-not (some #(= "main" %) all-names)
+ (throw (ex-info "native actor application has no main entry" {:kind :native-missing-main})))
+
+(compiler/reset-fresh!)
+(def environment (assoc (compiler/new-env namespace) :file application))
+(def compiled (mapv #(assoc % :node (compiler/compile (:form %) environment)) all-definitions))
+(def options {:ns namespace :definitions (set all-names)
+              ; Root's native module linker must populate :resolve-global and
+              ; :resolve-remote from immutable body/arity manifests. A candidate
+              ; string alias in remotes.edn alone grants no execution authority.
+              :actor-runtime true})
+(defn nodes [node] (cons node (mapcat nodes (anf/executable-children node))))
+(def ir-nodes (mapcat #(nodes (:node %)) compiled))
+(def host-effects (vec (distinct (map #(select-keys % [:mod :fun :ann])
+                    (filter #(= :remote (:op %)) ir-nodes)))))
+(def emitted (mapv #(scheme/emit-definition % options) compiled))
+(def program
+ (str (string/join "\n" (map File/read! host-paths)) "\n"
+      (string/join "" emitted)
+      "\n(" (scheme/ident "bl-main") " " (scheme/ident "main") ")\n"
+      "(if (not (null? seed-errors)) (error \"actor runtime reported errors\"))\n"
+      "(for-each (lambda (key) (if (not (= (h-map-size (bl-get seed-state (bl-key key))) 0)) (error \"actor resource leak\" key))) '(\"procs\" \"monitors\" \"tables\" \"names\" \"table-names\"))\n"
+      "(if (not (= (h-vec-size (bl-get seed-state (bl-key \"runnable\"))) 0)) (error \"runnable leak\"))\n"
+      "(display \"PASS full-runtime-cleanup\\n\")\n"))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output program)
+(File/write! (str output ".manifest.json")
+ (json/encode {:kind :native-actor-unit :namespace namespace :output output
+               :runtime {:path runtime :sha256 (digest runtime)
+                         :definitions (mapv :name actor-definitions)}
+               :application {:path application :sha256 (digest application)}
+               :host-sources (mapv (fn [path] {:path path :sha256 (digest path)}) host-paths)
+               :compiled (count compiled) :operations (vec (sort (set (map :op ir-nodes))))
+               :host-effects host-effects :source-interpreter false})))
+(println (str "FULL_ACTOR_RUNTIME_EMITTED " (count actor-definitions) " policy definitions; " (count compiled) " total"))

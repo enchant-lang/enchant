@@ -1,0 +1,56 @@
+; This is a LINKED SOURCE gate, not an alternate bus implementation. It must
+; import canonical proc.bus helper bodies and use its pure bus-clause transform
+; as an explicitly admitted :bus vocabulary entry. Missing helper/host imports
+; must reject the unit. Compilation must not substitute fixture-owned helpers.
+(ns native.proc-demand
+ (:require [proc.bus :as bus] [proc.flow :as flow]))
+
+(defn pd-check [label actual expected]
+ (if (host/eq actual expected) (host/write (str "PASS " label))
+  (host/raise (str "FAIL " label ": " (host/describe actual)))))
+
+(proc/defserver pd-bus
+ (bus (demand 1))
+ ; A request from the subscriber is a barrier after its subscription/options.
+ (handle-call :ready [_from state] (reply :ready state)))
+
+(defn pd-publish [parent b]
+ (rt-send parent [:published (bus/publish b :second)]))
+
+(defn main []
+ (let [me (rt-self) b (start pd-bus {:max-lag 1})
+       ref (rt-monitor b)]
+  (erlang/send b [:subscribe me])
+  (erlang/send b [:flow-options me :slow :block 1])
+  (pd-check "bus-subscription-barrier" (call b :ready) :ready)
+  (pd-check "bus-publish-first-buffered" (bus/publish b :first) :ok)
+  (pd-check "bus-no-event-without-demand"
+   (receive [:events events] events (after 0 :none)) :none)
+  (rt-spawn pd-publish [me b])
+  ; The ready call is also a fair scheduling barrier: either the publisher has
+  ; queued already, or it will queue while this actor waits for its reply. The
+  ; check only requires that zero credit cannot release the blocked publisher.
+  (pd-check "bus-blocked-stays-responsive" (call b :ready) :ready)
+  (pd-check "bus-publisher-waits-for-credit"
+   (receive [:published answer] answer (after 0 :blocked)) :blocked)
+  (erlang/send b [:demand 1 me])
+  (pd-check "bus-first-credit-delivers-first-event"
+   (receive [:events events] (vec events) (after 5000 :timeout)) [:first])
+  (pd-check "bus-credit-releases-delayed-publisher"
+   (receive [:published answer] answer (after 5000 :timeout)) :ok)
+  (pd-check "bus-credit-does-not-overdeliver"
+   (receive [:events events] events (after 0 :none)) :none)
+  (erlang/send b [:demand 1 me])
+  (pd-check "bus-second-credit-delivers-second-event"
+   (receive [:events events] (vec events) (after 5000 :timeout)) [:second])
+  (stop b)
+  (pd-check "bus-termination-notifies-subscriber"
+   (receive [:done] :done (after 5000 :timeout)) :done)
+  (pd-check "bus-normal-stop-cleans-monitor"
+   (receive [:down r :process pid reason] :when (= r ref) reason (after 5000 :timeout)) :normal)
+  ; This calls actual proc.flow source through the immutable module closure.
+  ; Multi-rate expansion must meter outputs against consumer credit.
+  (let [up (flow/from-seq [1 2 3])
+        mapped (flow/map-stage up (fn [x] (* 10 x)))]
+   (pd-check "flow-source-and-map-retain-bl-policy" (flow/run mapped [] conj 1) [10 20 30]))
+  (host/write "NATIVE_PROC_DEMAND_OK")))
