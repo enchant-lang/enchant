@@ -63,6 +63,7 @@
  ((:renderer captured) (vec (remove #(registration? % ns) forms)) ns path
   {:vocabulary (:vocabulary captured) :planners (:planners captured)}))
 (defn prepare [path fallback captured]
+ (println (str "NATIVE_PROC_PREPARE_BEGIN " path))
  (let [expand (fn [forms ns source-path] (expansion captured forms ns source-path))
        prepared (build/prepare-ns path
                   {:fallback-ns fallback :expand-top expand
@@ -72,6 +73,7 @@
                     (doseq [definition (:defs unit) :when (:name definition)]
                      (BeamLisp.Env/put_link (:ns unit) (:name definition) (tuple :erlang {} nil))))})
        compiled (build/compile-prepared prepared {:check-node identity})]
+  (println (str "NATIVE_PROC_PREPARE_END " path " " (count (:defs compiled))))
   (assoc compiled :source (:source prepared)
    :module (BeamLisp.Link/module_for (:ns prepared))
    :base-module (BeamLisp.Emit/base_module_for (:ns prepared)))))
@@ -318,8 +320,10 @@
                         (every? #(contains? helpers %) helper-namespaces))
            (throw (ex-info "native proc link: helper list is not an exact admitted namespace vector" {})))
        captured (capture-compiler-vocabulary helper-namespaces)]
+ (println "NATIVE_PROC_STAGE planners-captured")
  (BeamLisp.Env/isolated (fn []
   (let [closure (artifact/read-closure (:closure-manifest request))
+        _ (println "NATIVE_PROC_STAGE closure-read")
         pin (json/decode (File/read! (:sdk-pin request)))
         captured-pin (if (string? (:sdk-pin closure)) (json/decode (:sdk-pin closure)) (:sdk-pin closure))
         _ (when-not (= captured-pin pin)
@@ -343,7 +347,9 @@
         prelude-units (vec (map #(assoc % :native-external? true)
                              (remove #(contains? own-namespaces (:ns %))
                               (map #(get (:units closure) %) (:order closure)))))
+        _ (println "NATIVE_PROC_STAGE units-prepared")
         all (named-definitions (concat prelude-units own-units))
+        _ (println (str "NATIVE_PROC_STAGE bodies-indexed " (count all)))
         _ (doseq [definition (named-definitions own-units) :when (nil? (:name definition))]
             (throw (ex-info "native proc link: executable top-level actor initializer has no owner"
                             {:path (:path definition) :namespace (:ns definition)})))
@@ -360,11 +366,13 @@
                  :source-frames? (boolean (:source-frames? request))}
         own-paths (set (map :path own-units))
         roots (named-definitions [runtime-unit bridge-unit app-unit])
+        _ (println "NATIVE_PROC_STAGE inspect-references")
         graph (reachable roots context)
         emitted (vec (filter #(contains? own-paths (:path %)) (:definitions graph)))
         emitted (vec (concat (filter #(= :fn (:kind %)) emitted) (remove #(= :fn (:kind %)) emitted)))
         _ (when-not (contains? bodies (qname (:ns app-unit) "main"))
             (throw (ex-info "native proc link: application has no main" {:path (:application request)})))
+        _ (println (str "NATIVE_PROC_STAGE emit-definitions " (count emitted)))
         output (str (File/read! (:prelude request)) "\n"
                   (File/read! (:host-link request)) "\n"
                   (string/join "\n" (map (fn [path] (File/read! path)) (:host-extensions request))) "\n"
