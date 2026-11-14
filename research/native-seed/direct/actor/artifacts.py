@@ -127,6 +127,8 @@ def actor_plan(witness, directory):
                    manifest['original-body'], manifest['original-anf'], manifest['closure-manifest'],
                    *manifest['host-inputs']):
         witness.record(record)
+    if any(r['path'].endswith('/direct-control-frames.scm') for r in manifest['host-inputs']):
+        raise RuntimeError('source control frames belong to the compiled host exactly once')
     guards = [r for r in manifest['host-inputs'] if r['path'].endswith('/direct/actor/direct-actor-no-fallback.scm')]
     if len(guards) != 1:
         raise RuntimeError('direct actor host lacks its explicit no-Scheme-fallback guard')

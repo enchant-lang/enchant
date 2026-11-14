@@ -25,7 +25,8 @@ def main():
     tools = json.loads((base / 'toolchain-pin.json').read_text())
     gambit, clang = Path(tools['gambit']), Path(tools['clang'])
     paths = [('frozen-host', args.frozen_host.resolve())] + [(role, base / 'direct' / filename) for role, filename in [
-        ('direct-machine', 'direct-machine.scm'), ('shared-raw-function', 'direct-shared-raw.scm'),
+        ('direct-machine', 'direct-machine.scm'), ('source-control-frames', 'direct-control-frames.scm'),
+        ('shared-raw-function', 'direct-shared-raw.scm'),
         ('deferred-static-mfa', 'direct-remote.scm'), ('external-function-peeling', 'direct-make-fun.scm'),
         ('dynamic-loader', 'direct-loader.scm'),
         ('clang-loader', 'direct-loader-clang.scm'), ('unit-host-services', 'host-direct-units.scm'),

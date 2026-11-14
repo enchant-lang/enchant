@@ -34,12 +34,15 @@ def main():
     parser.add_argument('--build', action='store_true')
     parser.add_argument('--cache', type=Path, default=base / 'out/direct-unit-cache')
     parser.add_argument('--compile-timeout', type=int, default=120)
+    parser.add_argument('--route', choices=('c', 'llvm'), default='c')
+    parser.add_argument('--standard-bindings', action='store_true')
     args = parser.parse_args()
     out = args.plan.resolve()
     report_path = out / 'build-evidence.json'
     report_path.unlink(missing_ok=True)
     report = {'schema': 'bl.native.direct-unit-build', 'version': 1, 'status': 'running',
-              'source_parser': False, 'compiler_run': False, 'runs': [], 'objects': []}
+              'source_parser': False, 'compiler_run': False, 'runs': [], 'objects': [],
+              'route': args.route, 'standard_bindings': args.standard_bindings}
     inputs = {}
 
     def bind(path, expected=None):
@@ -84,6 +87,7 @@ def main():
             raise RuntimeError(label + ' failed: ' + output[-3000:])
 
     try:
+        bind(here)
         if not 1 <= args.compile_timeout <= 120:
             raise RuntimeError('bounded units retain the existing 120-second compiler deadline')
         index = out / 'index.tsv'
@@ -169,8 +173,10 @@ def main():
         public = gambit / 'gambit/include/gambit.h'
         header = base / 'direct/native-direct.h'
         build_script = gambit / 'gambit/bin/gambuild-C'
-        for path in (public, header, build_script):
+        compiler_tools = (gambit / 'bin/gsc', clang, public, header, build_script)
+        for path in compiler_tools:
             bind(path)
+        tool_hashes = {str(path.resolve()): sha(path) for path in compiler_tools}
         matches = re.findall(r'^DEFS_DYN="([^"\n]*)"$', build_script.read_text(), re.MULTILINE)
         if len(matches) != 1 or '$' in matches[0]:
             raise RuntimeError('nonliteral public Gambit dynamic ABI')
@@ -180,6 +186,9 @@ def main():
             raise RuntimeError('public Gambit dynamic ABI changed')
         flags = ['-O0', '-fwrapv', '-fno-strict-aliasing', '-fno-trapping-math', '-fno-math-errno',
                  '-fPIC', '-fno-common', *defines, '-I' + str(public.parent), '-I' + str(header.parent)]
+        gsc_flags = ['-prelude', '(declare (standard-bindings) (extended-bindings))'] if args.standard_bindings else []
+        llvm_object_flags = ['-O0', '-fPIC']
+        report.update(c_flags=flags, scheme_compiler_flags=gsc_flags, llvm_object_flags=llvm_object_flags)
         compiler_environment = hashlib.sha256(json.dumps({name: value for name, value in os.environ.items()
             if name.startswith(('NIX_', 'GAMBIT')) or name in
             ('PATH', 'CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'LIBRARY_PATH', 'SDKROOT')}, sort_keys=True).encode()).hexdigest()
@@ -187,20 +196,30 @@ def main():
         args.cache.mkdir(parents=True, exist_ok=True)
         for unit in [{'name': 'host', 'source': out / 'host.scm', 'control': None}, *units]:
             name = unit['name']
-            key = hashlib.sha256(json.dumps({'name': name, 'source': sha(unit['source']),
+            request = {'name': name, 'source': sha(unit['source']),
                 'control': sha(unit['control']) if unit['control'] else None,
                 'host': inputs[str((out / 'host.scm').resolve())], 'flags': flags,
+                'route': args.route, 'gsc_flags': gsc_flags, 'llvm_object_flags': llvm_object_flags,
                 'builder': sha(here), 'public_build_script': sha(build_script),
                 'compiler_environment': compiler_environment,
-                'gambit': str(gambit), 'clang': str(clang), 'public': sha(public), 'header': sha(header)}, sort_keys=True).encode()).hexdigest()
+                'gambit': str(gambit), 'clang': str(clang), 'public': sha(public), 'header': sha(header),
+                'tool_hashes': tool_hashes}
+            key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
             cache = args.cache.resolve() / key
             cache.mkdir(exist_ok=True)
             obj = cache / (name + '.o1')
+            raw, adapted = cache / (name + '.c'), cache / (name + '.dynamic.c')
             receipt = cache / 'object.json'
-            reused = receipt.is_file() and obj.is_file() and json.loads(receipt.read_text()).get('sha256') == sha(obj)
+            previous = json.loads(receipt.read_text()) if receipt.is_file() else {}
+            reused = (previous.get('request') == request and obj.is_file()
+                      and previous.get('sha256') == sha(obj) and previous.get('route') == args.route
+                      and raw.is_file() and previous.get('raw_c_sha256') == sha(raw)
+                      and adapted.is_file() and previous.get('adapted_c_sha256') == sha(adapted))
+            if reused and args.route == 'llvm':
+                reused = all(Path(r['path']).is_file() and sha(r['path']) == r['sha256']
+                             for r in previous.get('llvm_artifacts', [])) and len(previous.get('llvm_artifacts', [])) == 2
             if not reused:
-                raw, adapted = cache / (name + '.c'), cache / (name + '.dynamic.c')
-                run(name + '-scheme-to-c', [str(gambit / 'bin/gsc'), '-c', '-o', str(raw), str(unit['source'])], cache)
+                run(name + '-scheme-to-c', [str(gambit / 'bin/gsc'), '-c', *gsc_flags, '-o', str(raw), str(unit['source'])], cache)
                 text = raw.read_text()
                 startup = list(re.finditer(r'^#define ___LINKER_ID ([^\s]+)[ \t]*$', text, re.MULTILINE))
                 if len(startup) != 1 or startup[0].group(1) != '___LNK_' + name:
@@ -209,40 +228,90 @@ def main():
                     raise RuntimeError('GSC altered/duplicated direct C control')
                 match = startup[0]
                 adapted.write_text(text[:match.start()] + '#define ___LINKER_ID ___LNK_' + name + '_2e_o1' + text[match.end():])
-                run(name + '-clang', [str(clang), *flags, '-shared', '-rdynamic', str(adapted), '-ldl', '-lm', '-o', str(obj)], cache)
-                receipt.write_text(json.dumps({'sha256': sha(obj), 'raw_c_sha256': sha(raw),
+                llvm_artifacts = []
+                if args.route == 'llvm':
+                    ir, llvm_object = cache / (name + '.ll'), cache / (name + '.llvm.o')
+                    run(name + '-emit-llvm', [str(clang), *flags, '-S', '-emit-llvm', str(adapted), '-o', str(ir)], cache)
+                    run(name + '-llvm-object', [str(clang), *llvm_object_flags, '-c', str(ir), '-o', str(llvm_object)], cache)
+                    run(name + '-llvm-shared', [str(clang), '-shared', '-rdynamic', str(llvm_object), '-ldl', '-lm', '-o', str(obj)], cache)
+                    llvm_artifacts = [{'path': str(p), 'sha256': sha(p)} for p in (ir, llvm_object)]
+                else:
+                    run(name + '-clang', [str(clang), *flags, '-shared', '-rdynamic', str(adapted), '-ldl', '-lm', '-o', str(obj)], cache)
+                receipt.write_text(json.dumps({'request': request, 'sha256': sha(obj), 'raw_c_sha256': sha(raw),
                     'adapted_c_sha256': sha(adapted), 'startup_from': '___LNK_' + name,
-                    'startup_to': '___LNK_' + name + '_2e_o1', 'replacements': 1}, indent=2) + '\n')
+                    'startup_to': '___LNK_' + name + '_2e_o1', 'replacements': 1,
+                    'route': args.route, 'llvm_artifacts': llvm_artifacts}, indent=2) + '\n')
             shutil.copy2(obj, out / (name + '.o1'))
-            report['objects'].append({'name': name, 'sha256': sha(obj), 'cache_key': key, 'reused': reused})
+            details = json.loads(receipt.read_text())
+            c_artifacts = [{'path': str(p), 'sha256': bind(p)} for p in (raw, adapted)]
+            bind(obj, details['sha256'])
+            bind(receipt)
+            for artifact in details.get('llvm_artifacts', []):
+                bind(artifact['path'], artifact['sha256'])
+            report['objects'].append({'name': name, 'sha256': sha(obj), 'cache_key': key, 'reused': reused,
+                'route': args.route, 'receipt': {'path': str(receipt), 'sha256': sha(receipt)},
+                'c_artifacts': c_artifacts, 'llvm_artifacts': details.get('llvm_artifacts', [])})
             save()
         # Only this tiny load/link entry is an executable TU. Every authored
         # compiler function is already an actual C-control dynamic unit above.
         executable_flags = [value for value in flags if value != '-D___DYNAMIC'] + ['-pthread']
         runtime = gambit / 'gambit/lib/libgambit.so'
         bind(runtime)
-        executable_key = hashlib.sha256(json.dumps({'assembly': sha(out / 'assembly.scm'),
+        executable_request = {'assembly': sha(out / 'assembly.scm'),
             'objects': [{'name': row['name'], 'sha256': row['sha256']} for row in report['objects']],
             'builder': sha(here), 'flags': executable_flags,
+            'route': args.route, 'gsc_flags': gsc_flags, 'llvm_object_flags': llvm_object_flags,
             'compiler_environment': compiler_environment,
-            'runtime': sha(runtime), 'gambit': str(gambit), 'clang': str(clang)}, sort_keys=True).encode()).hexdigest()
+            'runtime': sha(runtime), 'gambit': str(gambit), 'clang': str(clang), 'tool_hashes': tool_hashes}
+        executable_key = hashlib.sha256(json.dumps(executable_request, sort_keys=True).encode()).hexdigest()
         directory = args.cache.resolve() / executable_key
         directory.mkdir(exist_ok=True)
         entry_c, entry_o = directory / 'assembly.c', directory / 'assembly.o'
         link_c, link_o = directory / 'program_.c', directory / 'program_.o'
         executable, receipt = directory / 'compiler', directory / 'executable.json'
-        reused = executable.is_file() and receipt.is_file() and json.loads(receipt.read_text()).get('sha256') == sha(executable)
+        previous = json.loads(receipt.read_text()) if receipt.is_file() else {}
+        reused = (previous.get('request') == executable_request and executable.is_file()
+                  and previous.get('sha256') == sha(executable) and previous.get('route') == args.route
+                  and len(previous.get('c_artifacts', [])) == 4
+                  and all(Path(r['path']).is_file() and sha(r['path']) == r['sha256']
+                          for r in previous.get('c_artifacts', [])))
+        if reused and args.route == 'llvm':
+            reused = all(Path(r['path']).is_file() and sha(r['path']) == r['sha256']
+                         for r in previous.get('llvm_artifacts', [])) and len(previous.get('llvm_artifacts', [])) == 4
         if not reused:
-            run('entry-scheme-to-c', [str(gambit / 'bin/gsc'), '-c', '-o', str(entry_c), str(out / 'assembly.scm')], directory)
-            run('entry-object', [str(clang), *executable_flags, '-c', str(entry_c), '-o', str(entry_o)], directory)
+            run('entry-scheme-to-c', [str(gambit / 'bin/gsc'), '-c', *gsc_flags, '-o', str(entry_c), str(out / 'assembly.scm')], directory)
+            llvm_artifacts = []
+            if args.route == 'llvm':
+                entry_ir = directory / 'assembly.ll'
+                run('entry-emit-llvm', [str(clang), *executable_flags, '-S', '-emit-llvm', str(entry_c), '-o', str(entry_ir)], directory)
+                run('entry-llvm-object', [str(clang), *llvm_object_flags, '-c', str(entry_ir), '-o', str(entry_o)], directory)
+                llvm_artifacts.extend({'path': str(p), 'sha256': sha(p)} for p in (entry_ir, entry_o))
+            else:
+                run('entry-object', [str(clang), *executable_flags, '-c', str(entry_c), '-o', str(entry_o)], directory)
             run('entry-link-unit', [str(gambit / 'bin/gsc'), '-link', '-o', str(link_c), str(entry_c)], directory)
-            run('entry-link-object', [str(clang), *executable_flags, '-c', str(link_c), '-o', str(link_o)], directory)
+            if args.route == 'llvm':
+                link_ir = directory / 'program_.ll'
+                run('link-emit-llvm', [str(clang), *executable_flags, '-S', '-emit-llvm', str(link_c), '-o', str(link_ir)], directory)
+                run('link-llvm-object', [str(clang), *llvm_object_flags, '-c', str(link_ir), '-o', str(link_o)], directory)
+                llvm_artifacts.extend({'path': str(p), 'sha256': sha(p)} for p in (link_ir, link_o))
+            else:
+                run('entry-link-object', [str(clang), *executable_flags, '-c', str(link_c), '-o', str(link_o)], directory)
             run('entry-executable', [str(clang), str(entry_o), str(link_o), str(runtime), '-pthread', '-ldl', '-lm',
                 '-Wl,-rpath,' + str(runtime.parent), '-o', str(executable)], directory)
-            receipt.write_text(json.dumps({'sha256': sha(executable)}, indent=2) + '\n')
+            receipt.write_text(json.dumps({'request': executable_request, 'sha256': sha(executable), 'route': args.route,
+                'c_artifacts': [{'path': str(p), 'sha256': sha(p)} for p in (entry_c, entry_o, link_c, link_o)],
+                'llvm_artifacts': llvm_artifacts}, indent=2) + '\n')
+        details = json.loads(receipt.read_text())
+        bind(executable, details['sha256'])
+        bind(receipt)
+        for artifact in details['c_artifacts'] + details.get('llvm_artifacts', []):
+            bind(artifact['path'], artifact['sha256'])
         shutil.copy2(executable, out / 'compiler')
         report['executable'] = {'sha256': sha(executable), 'cache_key': executable_key, 'reused': reused,
-                                'unit_root_environment': 'BL_NATIVE_C_UNIT_ROOT'}
+                                'unit_root_environment': 'BL_NATIVE_C_UNIT_ROOT', 'route': args.route,
+                                'receipt': {'path': str(receipt), 'sha256': sha(receipt)},
+                                'c_artifacts': details['c_artifacts'],
+                                'llvm_artifacts': details.get('llvm_artifacts', [])}
         unchanged()
         report['status'] = 'built-not-executed'
         print('DIRECT_UNITS_BUILT ' + str(len(units)) + '; host compiled once; no compiler program run')
