@@ -1,0 +1,212 @@
+#+title: Native BL: plant a seed, then replace it
+#+subtitle: One BL IR and actor kernel; a temporary Scheme host; a measured route to native self-hosting.
+#+kicker: Beam Lisp · native seed research · 2026-11-14
+#+status: Prototype under qualification · self-hosting proposed
+#+design: sober
+
+* Can this become native BL?
+#+begin_lede
+Yes: emit Scheme from the existing bl-ANF and retain actor policy in BL.
+Use Gambit for the first C and LLVM artifacts. Grow the native compiler
+until it reproduces itself; then replace the Scheme lowering if useful.
+#+end_lede
+
+#+begin_graph :title "The seed route"
+node source | BL source | existing reader + macros | 0,1 | you
+node anf | bl-ANF | existing compiler boundary | 1,1 | station
+node beam | BEAM | existing target | 2,0 | station
+node js | JavaScript | existing target | 2,1 | station
+node scheme | Scheme | new BL seed emitter | 2,2 | builder
+node c | C | Gambit-generated units | 3,2 | builder
+node llvm | LLVM IR | Clang-generated units | 4,2 | builder
+node native | Native process | Gambit runtime + GC | 5,2 | builder
+edge source -> anf | read · expand · resolve
+edge anf -> beam | lower.bl
+edge anf -> js | js.emit
+edge anf -> scheme | native.scheme
+edge scheme -> c | gsc -c
+edge c -> llvm | clang -S -emit-llvm
+edge llvm -> native | compile · link runtime
+#+end_graph
+
+#+begin_honest :title "What this first slice establishes"
+The emitter is BL; the compiler producing its input still runs on BEAM.
+Time is virtual and maps are association maps. Native executables retain
+Gambit's runtime and GC. This is a seed, not native compiler self-hosting.
+#+end_honest
+
+* What should we borrow from Jolt?
+#+begin_rosetta
+Route | Verified upstream capability | Consequence for BL
+Jolt → Chez | Self-hosted Clojure compiler; Scheme emitter; native compilation | Borrow the emitter/adapter split and seed fixpoint gates.
+BL → Chez | Chez compiles Scheme directly to native code | Useful native route; it does not provide a C or LLVM output stage.
+BL → Gambit → C → LLVM | Gambit has a C target; Clang emits LLVM IR from C | Chosen seed route. Generated units still require Gambit's runtime.
+BL → LLVM directly | Proposed | Needs value layout, GC roots, tail calls, suspended frames and exception ABI first.
+#+end_rosetta
+
+#+begin_decision :id use-jolt :title "Borrow the design; keep bl-ANF" :status proposed
+- [x] BL-owned Scheme emitter and explicit host ABI.
+- [ ] Translate BL into Jolt's Clojure frontend or its different IR.
+Jolt does not consume bl-ANF. Reusing its complete runtime would require a
+value/namespace/callable compatibility layer. The existing BL compiler and
+JavaScript actor kernel already define the semantics we need.
+#+end_decision
+
+[[https://github.com/jolt-lang/jolt/blob/7ed3643926f2c67d566d0bc57310a72862bc75a2/CONTRIBUTING.md][Jolt architecture and bootstrap gates]] ·
+[[https://github.com/jolt-lang/jolt/blob/7ed3643926f2c67d566d0bc57310a72862bc75a2/host/scheme-adapter/TARGET-CONTRACT.md][Jolt host adapter semantics]] ·
+[[https://jolt-lang.net/docs/scheme-backends.html][Jolt backend maturity]] ·
+[[https://www.scheme.com/csug8/intro.html][Chez compiler]] ·
+[[https://gambitscheme.org/4.9.8/manual/][Gambit targets]] ·
+[[https://clang.llvm.org/docs/Toolchain.html][Clang IR generation]]
+
+Jolt's Gambit adapter is documented as demo grade, with native compilation
+and FFI capability degradation. Gambit's own C compiler is a separate
+capability; this experiment uses it directly.
+
+* Where does actor behavior live?
+#+begin_code_graph :id actor-boundary :title "Follow the actor boundary" :start policy
+node policy | code | Actor policy stays in BL | existing
+summary Spawn, runnable queue, selective receive, deadlines, monitors, links, tables and supervision.
+current Policy lives in the JavaScript target's runtime.bl, not in its JavaScript host.
+proposed Compile the same definitions to Scheme. This seed imports a measured subset directly.
+source priv/lib/js/actor/runtime.bl:1 | js/rt-receive | BL policy over explicit host leaves.
+source priv/lib/js/actor/runtime.bl:974 | js/rt-receive | Message-major selection; fixed deadline; scan before timeout.
+source research/native-seed/build.bl:6 | native.build/imported | Exact imported definition set; source hash retained.
+edge policy -> control | suspends through
+edge policy -> values | operates on
+edge policy -> lifecycle | cleanup grows into
+node control | code | Suspended execution | prototype
+summary A process retains an opaque execution frame.
+current JavaScript drives compiled generators through call, tail, park and host-wait steps.
+proposed Scheme seed uses one-shot continuations and function-entry turn budgets.
+rule Park is forbidden inside a critical section. Resume cannot reuse a continuation.
+source priv/lib/js/actor/host.mjs:1 | runTurn | Existing control/value/host boundary.
+source research/native-seed/host.scm:93 | h-run-turn | Seed continuation adapter; virtual clock.
+check Qualification scope | Pure host operations only. OS I/O and arbitrary blocking FFI remain unqualified.
+edge control -> scheme | provides control ABI for
+node values | code | Canonical values | partial
+summary Nil, booleans, exact integers, strings, keywords, lists, vectors, tuples and maps.
+current The JavaScript target shares compiled core/rt and persistent value storage.
+proposed Extend the Scheme ABI until core/rt themselves compile; replace temporary association maps.
+rule Nil differs from false and from the empty list. Only nil and false are falsey.
+source priv/lib/js/README.md:1 | JavaScript values | Production canonical graph and exact numeric contract.
+source research/native-seed/host.scm:1 | seed value ABI | Exact integer subset and tagged values.
+check Open | Decimals, float key identity, HAMTs, lazy ownership, generic structs and callable parity.
+edge values -> compiler | needed to compile
+node lifecycle | code | Links, monitors and supervision | partial
+summary Process death must clean state and notify observers once.
+current Existing BL runtime already owns full lifecycle policy.
+proposed Seed reuses monitor policy; then import full death, link, table and supervisor closure.
+source priv/lib/js/actor/runtime.bl:589 | js/rt-terminate! | Existing atomic lifecycle cleanup.
+source research/native-seed/kernel.bl:6 | seed-terminate! | Reduced completion path; no links/tables/supervisors.
+edge lifecycle -> proc | underlies native declarations
+node scheme | code | BL-owned Scheme emitter | prototype
+summary Compile checked bl-ANF, never reinterpret ANF at runtime.
+current A closed seed vocabulary emits Scheme; unresolved bindings, JS operations and unknown host calls refuse.
+proposed Add one checked module linker and ABI manifest. Preserve selected binding identity and source annotations.
+source priv/boot/anf.bl:1 | anf | Existing backend-neutral vocabulary.
+source research/native-seed/src/native/scheme.bl:1 | native.scheme/emit | New seed backend written in BL.
+edge scheme -> compiler | seeds native compilation of
+node compiler | code | Native compiler closure | proposed
+summary Reader, expansion, namespace/linking, compiler, ANF and emitter running natively.
+current These sources are largely BL; their current host dependencies still use BEAM.
+proposed Inventory reachable host effects; implement explicit leaves; compile the closure using the BEAM seed.
+rule The seed's own emitter must compile and reproduce itself before claiming self-hosting.
+source priv/boot/compiler.bl:1 | compiler | Existing frontend and ANF producer.
+source priv/host/env.bl:128 | BeamLisp.Env | ETS, process-local state and custody are additional host work.
+edge compiler -> fixedpoint | must reproduce
+node fixedpoint | constraint | Native bootstrap fixpoint | proposed
+summary Native stage 1 builds stage 2; stage 2 builds stage 3.
+rule Stage 2 and stage 3 reproduce deterministic Scheme/module artifacts; the same differential corpus passes at every stage.
+rule Bind evidence to exact SDK, source, target toolchain and runtime identities.
+check Unverified | No native compiler self-build has been attempted in this seed.
+node proc | code | proc declarations | proposed
+summary Reuse the existing declaration planner and lower to the same actor primitives.
+source priv/std/proc/server.bl:1 | proc.server/clause-plan | Shared clause semantics and target vocabulary.
+source priv/lib/js/actor.bl:153 | js.actor/lower-defserver | Existing source lowering into ordinary BL receive loops.
+rule An unsupported contributed clause fails at compile time; it is never dropped.
+#+end_code_graph
+
+* Is proc the right place to start?
+#+begin_rosetta
+Boundary | Source evidence | Native work
+Declaration planning | proc.server/clause-plan; js.actor/lower-defserver | Reuse the plan; lower supported clauses to ordinary BL.
+Messaging and demand | proc.flow; proc.bus | Bind spawn/send/receive/monitor/timer semantics to the shared actor kernel.
+OTP lifecycle | proc.super; BeamLisp.Supervisor; Supervisor | Reuse BL supervision policy; preserve restart and shutdown contracts.
+Shared mutable tables | proc.table; ets; Process; global | Explicit storage leaves plus BL ownership, access and heir policy.
+Durable work | proc.queue-runtime; GenServer; Process; BeamLisp.Env | Separate storage, custody and execution ownership from mailbox delivery.
+Source inbox | proc.mailbox → BeamLisp.Env | Preserve bounded closed-data inbox semantics; this is not a general PID API.
+Outside proc | priv/boot/core.bl; priv/host/env.bl; priv/host/server.bl | Environment conveyance, namespace registry and code custody remain part of the native port.
+#+end_rosetta
+
+The retained Codebase index covers eight representative proc modules and the
+actor runtime. It establishes a useful boundary, not a repository-wide claim
+that most messaging calls live under proc. Macro-generated host calls require
+ANF analysis as well as the source call graph.
+
+* How does one message move?
+#+begin_sequence :title "The same BL receive policy, a different execution host"
+lanes sender · compiled BL | mailbox · BL runtime | receiver · Scheme frames | clock · virtual seed host
+receiver -> mailbox : scan queued messages in arrival order
+mailbox --> receiver : no matching message; retain scan cursor
+receiver -> clock : compute one deadline
+receiver -> mailbox : register waiting state atomically
+receiver -> receiver : park; retain one-shot continuation
+sender => mailbox : append a message; mark receiver runnable
+mailbox -> receiver : resume and scan before checking timeout
+receiver -> mailbox : remove only the selected message
+receiver -> receiver : invoke the compiled clause body
+#+end_sequence
+
+* What makes this a full-vision prototype?
+#+begin_milestones :id bootstrap :title "Each milestone has an exit test" :start seed
+milestone seed | active | Native actor seed | Seed
+step Compile actual compiler-produced bl-ANF into Scheme, C and LLVM units.
+step Import existing BL receive, identity, delivery and monitor definitions.
+check The native artifacts agree; selective receive, wakeup, timeout and cleanup checks pass.
+milestone values | proposed | Complete values and control | Native kernel
+needs seed
+step Compile canonical core/rt against explicit storage leaves; add exception classes and source frames.
+step Import full link, death, table and supervision policy; qualify turn fairness and resource bounds.
+step Bind real monotonic clocks and OS readiness. Isolate blocking foreign calls from scheduler/GC progress.
+check Differential BEAM/JS/native corpus covers numeric equality, maps, tail calls, cancellation and lifecycle races.
+milestone proc | proposed | One proc language | Process patterns
+needs values
+step Reuse proc.server/clause-plan and add a native target renderer.
+step Admit each contributed bundle only after its storage and lifecycle dependencies are implemented.
+check Identical declarations produce equivalent call/cast/info, restart, demand and table-transfer traces.
+milestone compiler | proposed | Compiler runs natively | Bootstrap
+needs values
+step Close the reachable reader, macroexpander, namespace, compiler and emitter graph.
+step Replace BEAM Env, compiler-data, file and process dependencies with bounded native capabilities.
+check Native compiler reads BL source and builds its own compiler with no BEAM process.
+milestone fixpoint | proposed | Self-hosting is witnessed | Qualification
+needs compiler
+step Stage 0 BEAM seeds native stage 1; stage 1 builds stage 2; stage 2 builds stage 3.
+check Stages 2 and 3 reproduce deterministic compiler artifacts and pass the same language/actor corpus.
+milestone direct | optional | Replace Scheme lowering | Backend
+needs fixpoint
+step Lower the same BL IR to explicit heap frames, GC roots and a documented native ABI, then C or LLVM directly.
+check Tail calls, GC stress, exceptions, scheduling, FFI ownership and compiler fixpoint remain qualified.
+#+end_milestones
+
+#+begin_honest :title "Self-hosted compiler and independent runtime are different gates"
+A BL compiler that compiles itself through Scheme is self-hosted while still
+using Scheme's compiler and GC. Removing Scheme also requires replacing its
+value layouts, allocator/GC, continuations, exception unwinding and host ABI.
+LLVM does not supply those language/runtime services.
+#+end_honest
+
+* Evidence and scope
+#+begin_src beam-lisp :id native-evidence
+(ns native.seed.dossier (:require [bl.json :as json]))
+(def report (json/decode (File/read! "research/native-seed/evidence/qualification.json")))
+(assert (= "pass" (get report "status")))
+(assert (= false (get report "self_hosted")))
+{:checks (count (get report "checks")) :scope (get report "scope") :self-hosted false}
+#+end_src
+
+Source snapshots and commands: =evidence/qualification.json=,
+=evidence/imports.json=, =evidence/codebase.json=,
+=evidence/analysis.edn=, =sdk-pin.json= and =toolchain-pin.json=.
+All claims describe the retained snapshot; rerun qualification after edits.
