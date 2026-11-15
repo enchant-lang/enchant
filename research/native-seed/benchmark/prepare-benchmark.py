@@ -120,7 +120,7 @@ def main():
                    'original_bundle_suffix_byte_equal':
                     observed.read_bytes()[len(prefix) + 1:] == original,
                    'observer': {'path': str(observed), 'sha256': digest(observed)}},
-        'beam': {'argv': [str(base / 'run'), 'run', str(here / 'beam-benchmark.bl'),
+        'beam': {'argv': [str(base / 'run'), 'run', str(here / 'beam-benchmark.bl'), '--',
                           str(fixture), str(out / 'beam.scm')],
                  'runtime_deadline_seconds': 240, 'vm_count': 1},
         'protocol': {'namespace': 'user', 'target': 'js',
