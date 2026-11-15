@@ -55,9 +55,22 @@ def main():
         bind(data[field]['path'], data[field]['sha256'])
     replacements = {'NAMESPACE': quoted(data['namespace']), 'OUTPUT': quoted(str(args.output.resolve()))}
     inventories = []
+    verification_environments = []
     for row in data['modules']:
         request = json.loads(Path(row['request']).read_text())
-        identity, _, tool_inputs, _ = transport.capture(request, base)
+        current_identity, _, tool_inputs, _ = transport.capture(request, base)
+        identity_path = Path(row['request']).with_name(Path(row['request']).name.replace('-request.json', '-result.json'))
+        bind(row['request'])
+        bind(identity_path)
+        identity = json.loads(identity_path.read_text())['identity']
+        # This is read-only artifact verification, not a new compiler run.
+        # Keep the recorded build environment in the recipe; independently
+        # compare every actual tool/Source byte and other configuration field.
+        observed_env = current_identity['tools']['compiler_environment_sha256']
+        built_env = identity['tools']['compiler_environment_sha256']
+        verification_environments.append({'mode': row['mode'], 'build': built_env, 'verification': observed_env})
+        current_identity['tools']['compiler_environment_sha256'] = built_env
+        assert identity == current_identity, 'tool or producer identity changed'
         for path, expected in tool_inputs.items():
             bind(path, expected)
         directory = Path(row['directory'])
@@ -93,6 +106,7 @@ def main():
     path.write_bytes((helper + observer + text).encode() + b'\n' + bundle.read_bytes())
     report = {'schema': 'bl.native.cutover-preparation', 'inputs': inputs, 'historical_source_bindings': historical,
               'observer': {'path': str(path.resolve()), 'sha256': sha(path)}, 'inventories': inventories,
+              'verification_environments': verification_environments,
               'argv': [str(image), '--eval', str(path.resolve()), str(bundle)],
               'original_image_reused': True, 'runtime_admission': False, 'formal_lowering_proof': False}
     (args.output / 'preparation.json').write_text(json.dumps(report, indent=2) + '\n')
