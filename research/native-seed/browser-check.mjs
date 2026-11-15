@@ -45,7 +45,12 @@ try {
  checks.phoneOverflow=await evaluate('document.documentElement.scrollWidth<=innerWidth');
  assert.ok(checks.noAuthoringErrors);assert.ok(checks.phoneOverflow);
  await writeFile(path.join(base,'evidence/phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
- await evaluate('location.hash="#all";window.graph=document.querySelector(".screen-graph[data-start=policy]");graph.scrollIntoView()');
+ await evaluate(`location.hash="#all";document.querySelector('[data-review-label="Incrementality stays in BL"]').scrollIntoView()`);
+ checks.allSectionsPhoneOverflow=await evaluate('document.documentElement.scrollWidth<=innerWidth');
+ await writeFile(path.join(base,'evidence/incremental-graph-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
+ await evaluate(`document.querySelector('[data-review-label="An edit keeps old native closures alive"]').scrollIntoView()`);
+ await writeFile(path.join(base,'evidence/incremental-closures-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
+ await evaluate('window.graph=document.querySelector(".screen-graph[data-start=policy]");graph.scrollIntoView()');
  checks.connectedNavigation=await evaluate('graph.querySelector(".sg-view:not([hidden]) [data-sg-to=control]").click();graph.querySelector(".sg-view[data-view=control]").hidden===false');
  checks.back=await evaluate('graph.querySelector("[data-sg-back]").click();graph.querySelector(".sg-view[data-view=policy]").hidden===false');
  checks.graphMode=await evaluate('graph.querySelector("[data-sg-mode]").click();graph.classList.contains("sg-graph-mode")');
