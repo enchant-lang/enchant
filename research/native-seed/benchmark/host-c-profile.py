@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recompile original ordinal-zero C at O2; reuse all17 tail objects/link metadata.
+"""Optimize original ordinal-zero C; reuse all17 tail objects/link metadata.
 
 Diagnostic only. No SDK, Source/ANF/Scheme compiler or original artifact edits.
 """
@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--baseline', type=Path, default=Path('research/native-seed/out/warm-core-baseline-v2'))
     parser.add_argument('--target-proof', type=Path, default=Path('research/native-seed/out/linked-incremental-v1/proof.json'))
     parser.add_argument('--runtime-deadline', type=int, choices=(40, 60), default=60)
+    parser.add_argument('--optimization', type=int, choices=(1, 2), default=1)
     args = parser.parse_args()
     here = Path(__file__).resolve()
     root = next(p for p in here.parents if (p / 'research/native-seed/toolchain-pin.json').is_file())
@@ -143,10 +144,10 @@ def main():
         bind(path, expected)
     if config['flags'] != units[0]['c_flags']:
         raise RuntimeError('current fixed C ABI flags differ from original ordinal-zero compilation')
-    flags = ['-O2', *units[0]['c_flags'][1:]]
+    flags = ['-O' + str(args.optimization), *units[0]['c_flags'][1:]]
     helper_path = base / 'check-self-emission.py'
     bind(helper_path)
-    spec = importlib.util.spec_from_file_location('host_o2_owned_tree', helper_path)
+    spec = importlib.util.spec_from_file_location('host_c_profile_owned_tree', helper_path)
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     preparation = data(baseline / 'preparation.json')
@@ -171,11 +172,11 @@ def main():
         bind(baseline / name)
     comparator = base / 'benchmark/compare-benchmark.py'
     bind(comparator)
-    spec = importlib.util.spec_from_file_location('host_o2_comparator', comparator)
+    spec = importlib.util.spec_from_file_location('host_c_profile_comparator', comparator)
     comparison = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(comparison)
     control_native, control_beam = (comparison.observations(baseline / name) for name in ('native.log', 'beam.log'))
-    identity = {'schema': 'bl.native.original-host-c-o2-diagnostic-identity', 'version': 1,
+    identity = {'schema': 'bl.native.original-host-c-optimization-identity', 'version': 1,
         'script_sha256': sha(here), 'original_qualification': {'path': str(qualified_path), 'sha256': sha(qualified_path)},
         'tools': tool_identity, 'original_source_sha256': stage['source_sha256'],
         'original_image_sha256': stage['executable_sha256'],
@@ -185,10 +186,10 @@ def main():
         'reused_tail_objects': [{'ordinal': row['ordinal'], 'path': row['object'], 'sha256': row['object_sha256']}
                                 for row in units[1:]]}
     out.mkdir(parents=True)
-    report = {'schema': 'bl.native.original-host-c-o2-diagnostic', 'version': 1,
+    report = {'schema': 'bl.native.original-host-c-optimization', 'version': 1,
         'status': 'building', 'qualification': False, 'executed': False,
         'identity': identity, 'inputs': inputs, 'original_frozen_input_count': len(original_inputs),
-        'jobs': [], 'compile_deadline_seconds': 120, 'runtime_deadline_seconds': args.runtime_deadline,
+        'optimization': args.optimization, 'jobs': [], 'compile_deadline_seconds': 120, 'runtime_deadline_seconds': args.runtime_deadline,
         'sdk_started': False, 'bl_source_or_anf_compiler_started': False,
         'scheme_compiler_started': False, 'C_units_recompiled': 1,
         'original_tail_objects_reused': 17, 'existing_link_metadata_reused': True}
@@ -226,14 +227,14 @@ def main():
 
     try:
         cfile = Path(units[0]['c'])
-        obj = out / 'original-host.O2.o'
-        run('original-host-c-O2', [config['clang'], *flags, '-c', cfile, '-o', obj], cwd=cfile.parent, build=True)
+        obj = out / ('original-host.O' + str(args.optimization) + '.o')
+        run('original-host-c-O' + str(args.optimization), [config['clang'], *flags, '-c', cfile, '-o', obj], cwd=cfile.parent, build=True)
         report['host_object'] = {'path': str(obj), 'sha256': sha(obj), 'c_flags': flags}
         objects = [obj, *(Path(row['object']) for row in units[1:])]
-        derived_image = out / 'stage1-host-O2'
+        derived_image = out / ('stage1-host-O' + str(args.optimization))
         report['object_order'] = [{'path': str(path), 'sha256': sha(path)} for path in objects]
         report['link_object'] = {'path': str(link_o), 'sha256': sha(link_o)}
-        run('host-O2-native-link', [config['clang'], *objects, link_o, *stage['native_link_flags'], '-o', derived_image],
+        run('optimized-host-native-link', [config['clang'], *objects, link_o, *stage['native_link_flags'], '-o', derived_image],
             cwd=link_receipt_path.parent, build=True)
         with derived_image.open('rb') as stream:
             if stream.read(4) != b'\x7fELF' or not os.access(derived_image, os.X_OK):
@@ -247,7 +248,7 @@ def main():
             'original_bundle_suffix_byte_equal': observer.read_bytes()[len(observer_prefix)+1:] == original_bundle}
         report['status'] = 'running'
         save()
-        log = run('native-host-O2-benchmark', [derived_image, '--eval', observer, bundle])
+        log = run('native-optimized-host-benchmark', [derived_image, '--eval', observer, bundle])
         (out / 'native.log').write_bytes(log.read_bytes())
         if (out / 'native.scm').read_bytes() != expected_output.read_bytes():
             raise RuntimeError('optimized host changed actual compiler/emitter output bytes')
@@ -259,13 +260,13 @@ def main():
             beam = statistics.median(control_beam[phase].values())
             report['phases'][phase] = {'seconds_per_operation': list(observations.values()),
                 'median_seconds': current, 'original_native_median_seconds': old, 'beam_median_seconds': beam,
-                'original_native_over_host_o2_ratio': old/current, 'host_o2_over_beam_ratio': current/beam}
+                'original_native_over_optimized_host_ratio': old/current, 'optimized_host_over_beam_ratio': current/beam}
         unchanged()
         report.update(status='observed-not-qualified', executed=True, scheme_byte_equal=True,
                       original_frozen_inputs_unchanged=True, protocol=preparation['protocol'])
         save()
-        print(json.dumps({phase: {'original_native_over_host_o2': row['original_native_over_host_o2_ratio'],
-                                 'host_o2_over_beam': row['host_o2_over_beam_ratio']}
+        print(json.dumps({phase: {'original_native_over_optimized_host': row['original_native_over_optimized_host_ratio'],
+                                 'optimized_host_over_beam': row['optimized_host_over_beam_ratio']}
                           for phase, row in report['phases'].items()}), flush=True)
     except BaseException as error:
         report.update(status='failed', error=str(error))
