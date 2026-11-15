@@ -9,7 +9,9 @@ def main():
     ap.add_argument('preparation',type=Path)
     args=ap.parse_args()
     data=json.loads(args.preparation.read_text())
-    for p,h in data['inputs'].items():
+    # Recheck only bytes actually loaded at execution. Preparation already
+    # verified build receipts and producer Sources; execution does not read C.
+    for p,h in data['runtime_inputs'].items():
         assert sha(p)==h, p
     assert sha(data['observer']['path'])==data['observer']['sha256']
     output=args.preparation.parent

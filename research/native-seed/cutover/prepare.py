@@ -23,7 +23,7 @@ def main():
     inputs = {}
     def bind(path, expected=None):
         path = Path(path).resolve()
-        actual = sha(path)
+        actual = inputs.get(str(path)) or sha(path)
         if expected is not None and actual != expected:
             raise RuntimeError('changed input: ' + str(path))
         inputs[str(path)] = actual
@@ -33,15 +33,14 @@ def main():
     receipt = json.loads(receipt_path.read_text())
     assert receipt['status'] == 'qualified'
     historical = []
-    for path, expected in receipt['inputs'].items():
-        path = Path(path)
-        path = path if path.is_absolute() else base / path
-        if path == base / 'src/native/scheme.bl':
-            old = here / 'frozen-emitter.source'
-            bind(old, expected)
-            historical.append({'original_path': str(path), 'frozen_bytes': str(old), 'sha256': expected})
-        else:
-            bind(path, expected)
+    # Reuse the qualified image as an artifact. Executing it does not read
+    # its historical C/object inputs. Bind its exact producer Source snapshot,
+    # executable and original bundle; do not rehash/rebuild discarded stages.
+    emitter = base / 'src/native/scheme.bl'
+    expected = receipt['inputs'][str(emitter)]
+    old = here / 'frozen-emitter.source'
+    bind(old, expected)
+    historical.append({'original_path': str(emitter), 'frozen_bytes': str(old), 'sha256': expected})
     stage = next(row for row in receipt['builds'] if row['stage'] == 'stage1')
     image = base / 'out/compiler-native-owner/stage1'
     bind(image, stage['executable_sha256'])
@@ -56,9 +55,15 @@ def main():
     replacements = {'NAMESPACE': quoted(data['namespace']), 'OUTPUT': quoted(str(args.output.resolve()))}
     inventories = []
     verification_environments = []
+    captured = {}
+    runtime_inputs = {str(image): sha(image)}
     for row in data['modules']:
         request = json.loads(Path(row['request']).read_text())
-        current_identity, _, tool_inputs, _ = transport.capture(request, base)
+        request_key = json.dumps(request, sort_keys=True)
+        if request_key not in captured:
+            captured[request_key] = transport.capture(request, base)
+        original_identity, _, tool_inputs, _ = captured[request_key]
+        current_identity = json.loads(json.dumps(original_identity))
         identity_path = Path(row['request']).with_name(Path(row['request']).name.replace('-request.json', '-result.json'))
         bind(row['request'])
         bind(identity_path)
@@ -77,6 +82,8 @@ def main():
         receipt = transport.verify_receipt(directory / 'native-module.json', row['selection-key'], identity)
         for member in receipt['artifacts'].values():
             bind(directory / member['file'], member['sha256'])
+        module_member = receipt['artifacts']['module']
+        runtime_inputs[str(directory / module_member['file'])] = module_member['sha256']
         exports_path = directory / 'exports.json'
         bind(exports_path)
         exports = json.loads(exports_path.read_text())
@@ -93,7 +100,7 @@ def main():
             replacements['GUARD_KEY'] = quoted(exports['primitive-mfas'][0])
     assert len(inventories) == 2
     bundle = base / 'out/compiler-native-owner/bundle.scm'
-    bind(bundle)
+    runtime_inputs[str(bundle)] = bind(bundle)
     helper = (base / 'linked-proof.scm.in').read_text().split('(define linked-provider @PROVIDER@)')[0]
     observer = (base / 'benchmark/native-observer.scm.in').read_text().split('(define (bench-run)\n')[0]
     observer = observer.replace('@SOURCE@', quoted((base / 'benchmark/compiler-values.bl').read_text()))
@@ -106,7 +113,7 @@ def main():
     path.write_bytes((helper + observer + text).encode() + b'\n' + bundle.read_bytes())
     report = {'schema': 'bl.native.cutover-preparation', 'inputs': inputs, 'historical_source_bindings': historical,
               'observer': {'path': str(path.resolve()), 'sha256': sha(path)}, 'inventories': inventories,
-              'verification_environments': verification_environments,
+              'verification_environments': verification_environments, 'runtime_inputs': runtime_inputs,
               'argv': [str(image), '--eval', str(path.resolve()), str(bundle)],
               'original_image_reused': True, 'runtime_admission': False, 'formal_lowering_proof': False}
     (args.output / 'preparation.json').write_text(json.dumps(report, indent=2) + '\n')
