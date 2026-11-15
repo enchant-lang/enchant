@@ -8,13 +8,18 @@
 
 (defn fail [node reason] (wire/refuse node reason))
 (def arithmetic-keys #{:add :sub :mul :div :lt :gt :le :ge :num_eq})
-(def pattern-symbols {"var" :var "lit" :lit "nil" :nil "tuple" :tuple "vector" :vector
-                      "cons" :cons "alias" :alias "map" :map "struct" :struct})
+; Private Scheme matcher symbols are NOT language keyword values: :nil is
+; BL nil, so truthiness or keyword serialization would lose the raw nil tag.
+(def pattern-symbols #{"var" "lit" "nil" "tuple" "vector" "cons" "alias" "map" "struct"})
 (defn data-text [data]
  (cond
   (contains? #{:frames :frame-ref} data) (erlang/atom_to_binary data)
   (and (keyword? data) (contains? arithmetic-keys data)) (str ":" (erlang/atom_to_binary data))
-  (and (keyword? data) (contains? (set (vals pattern-symbols)) data)) (erlang/atom_to_binary data)
+  (and (map? data) (= #{:gvm-symbol-text} (set (keys data))))
+   (let [name (:gvm-symbol-text data)]
+    (when-not (contains? pattern-symbols name)
+     (throw (ex-info "native GVM: unrecognized private serialized symbol" {:name name})))
+    name)
   (and (map? data) (= #{:gvm-number-text} (set (keys data)))) (:gvm-number-text data)
   (or (vector? data) (erlang/is_list data))
    (str "(" (string/join " " (mapv data-text data)) ")")
@@ -117,8 +122,9 @@
   :lit (if (or (nil? (:val node)) (= true (:val node)) (= false (:val node)) (string? (:val node)) (erlang/is_integer (:val node)))
          (let [[s operand] (literal s node) [p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
          (lower s p (expand/literal-node (:val node)) env destination next tail? options))
-  :gvm-symbol (if-let [symbol (get pattern-symbols (:name node))]
-                (let [[s operand] (pool s symbol)] (lower s p (host-node operand) env destination next tail? options))
+  :gvm-symbol (if (contains? pattern-symbols (:name node))
+                (let [[s operand] (pool s {:gvm-symbol-text (:name node)})]
+                 (lower s p (host-node operand) env destination next tail? options))
                 (fail node "unrecognized private pattern symbol"))
   :gvm-number (let [[s operand] (pool s {:gvm-number-text (:text node)})]
                 (lower s p (host-node operand) env destination next tail? options))
