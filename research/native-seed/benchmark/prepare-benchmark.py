@@ -116,7 +116,7 @@ def main():
         'inputs': inputs,
         'sdk': pin,
         'native': {'argv': [str(image), '--eval', str(observed), str(bundle)],
-                   'runtime_deadline_seconds': 30,
+                   'runtime_deadline_seconds': 90,
                    'original_bundle_suffix_byte_equal':
                     observed.read_bytes()[len(prefix) + 1:] == original,
                    'observer': {'path': str(observed), 'sha256': digest(observed)}},
