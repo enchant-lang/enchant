@@ -46,6 +46,12 @@ try {
  assert.ok(checks.noAuthoringErrors);assert.ok(checks.phoneOverflow);
  await writeFile(path.join(base,'evidence/phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  await evaluate('location.hash="#all";new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+ await evaluate('window.delivery=document.querySelector(\'[data-milestones="native-devtool"]\')');
+ checks.deliveryStartsAtBaseline=await evaluate('delivery.querySelector(\'[data-milestone-detail="measure"]\').hidden===false');
+ checks.deliveryNext=await evaluate('delivery.querySelector(\'[data-milestone-move="1"]\').click();delivery.querySelector(\'[data-milestone-detail="core-speed"]\').hidden===false');
+ checks.deliveryDependency=await evaluate('delivery.querySelector(\'[data-milestone-detail="core-speed"] [data-milestone-to="measure"]\').click();delivery.querySelector(\'[data-milestone-detail="measure"]\').hidden===false');
+ await evaluate('window.scrollTo(0,delivery.getBoundingClientRect().top+scrollY-110)');
+ await writeFile(path.join(base,'evidence/native-roadmap-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  await evaluate(`window.scrollTo(0,document.querySelector('[data-review-label="Incrementality stays in BL"]').getBoundingClientRect().top+scrollY-110)`);
  checks.allSectionsPhoneOverflow=await evaluate('document.documentElement.scrollWidth<=innerWidth');
  await writeFile(path.join(base,'evidence/incremental-graph-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
