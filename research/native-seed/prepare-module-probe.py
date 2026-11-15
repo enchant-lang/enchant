@@ -47,10 +47,10 @@ def main():
         inputs[str(path)] = actual
         return actual
 
-    def load_data(path):
+    def load_data(path, limit=1048576):
         path = Path(path).resolve()
         bind(path)
-        if path.stat().st_size > 1048576:
+        if path.stat().st_size > limit:
             raise RuntimeError('probe DATA exceeds its byte bound')
         return json.loads(path.read_text())
 
@@ -60,7 +60,9 @@ def main():
         raise RuntimeError('requires the two-revision BL-owned module proof handoff')
     bind(data['producer']['path'], data['producer']['sha256'])
     qualified_path = compiler / 'full-native-build.json'
-    qualified = load_data(qualified_path)
+    # The existing whole-compiler receipt includes all generated chunk facts.
+    # Tool requests and this probe handoff retain their smaller 1MiB bound.
+    qualified = load_data(qualified_path, limit=32 * 1024 * 1024)
     if (qualified.get('schema') != 'bl.native.full-bounded-build' or qualified.get('version') != 1
             or qualified.get('status') != 'qualified' or qualified.get('compile_deadline_seconds') != 120):
         raise RuntimeError('native host must retain its qualified compiler receipt')
