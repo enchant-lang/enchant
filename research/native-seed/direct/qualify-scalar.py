@@ -24,7 +24,7 @@ EXPECTED_CHECKS = [
     "direct-scalar-operand-order", "direct-scalar-call-slots", "direct-scalar-try",
     "direct-scalar-finally-value", "direct-scalar-map",
     "direct-scalar-truthy-zero", "direct-scalar-nil-list-distinct",
-    "direct-scalar-exact-int",
+    "direct-scalar-exact-int", "direct-scalar-raw-primitives",
 ]
 
 
@@ -45,6 +45,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=base / "out/direct-scalar")
     parser.add_argument("--host", type=Path, default=base / "out/compiler-closure/host.scm")
+    parser.add_argument("--assembled-host", type=Path,
+                        help="admit a prepared full host and replace only the exact original host prefix")
     parser.add_argument("--evidence", type=Path, default=base / "evidence/direct-scalar")
     parser.add_argument("--build-timeout", type=int, default=120)
     parser.add_argument("--run-timeout", type=int, default=30)
@@ -77,12 +79,16 @@ def main() -> int:
         if changed:
             raise RuntimeError("qualification inputs changed: " + ", ".join(changed))
 
-    def run(label: str, argv: list[str], timeout: int, gc_interval: int = 0) -> str:
+    def run(label: str, argv: list[str], timeout: int, gc_interval: int = 0,
+            fast_mode: bool | None = None) -> str:
         started = time.monotonic()
         environment = os.environ.copy()
         environment.pop("BL_NATIVE_C_GC_INTERVAL", None)
         if gc_interval:
             environment["BL_NATIVE_C_GC_INTERVAL"] = str(gc_interval)
+        if fast_mode is not None:
+            for name in ("BL_NATIVE_C_NOACTOR_TICK", "BL_NATIVE_C_PURE_BIFS"):
+                environment[name] = "1" if fast_mode else "0"
         process = subprocess.Popen(argv, cwd=out, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, start_new_session=True, env=environment)
@@ -115,6 +121,33 @@ def main() -> int:
         if process.returncode:
             raise RuntimeError(f"{label} exited {process.returncode}: {output[-4000:]}")
         return output
+
+    fast_witnesses = {}
+    derived_drivers = []
+
+    def run_scalar(label, unit, interval=0, enabled=True):
+        if not args.assembled_host:
+            return run(label, [str(gambit / "bin/gsi"), str(unit)], args.run_timeout, interval)
+        driver = out / (label + "-fast-path-driver.scm")
+        driver.write_text("(load " + json.dumps(str(unit)) + ")\n"
+            '(display "NATIVE_DIRECT_FAST_PATHS {\\\"ticks\\\":")\n'
+            '(display native-c-noactor-ticks-elided)\n'
+            '(display ",\\\"seen\\\":") (display native-c-pure-bif-seen)\n'
+            '(display ",\\\"steps\\\":") (display native-c-pure-bif-steps) (display "}\\n")\n')
+        derived_drivers.append(driver)
+        output = run(label, [str(gambit / "bin/gsi"), str(driver)], args.run_timeout,
+                     interval, enabled)
+        body, separator, encoded = output.rpartition("NATIVE_DIRECT_FAST_PATHS ")
+        if not separator:
+            raise RuntimeError(label + " lacks actual fast-path witnesses")
+        witness = json.loads(encoded)
+        if enabled and not interval:
+            if witness.get("ticks", 0) <= 0 or witness.get("seen") != 23 or witness.get("steps", 0) <= 0:
+                raise RuntimeError(label + " did not execute all four guarded BIFs and tick elision")
+        elif witness != {"ticks": 0, "seen": 0, "steps": 0}:
+            raise RuntimeError(label + " failed to retain the original path when disabled or under GC stress")
+        fast_witnesses[label] = witness
+        return body
 
     try:
         if not (1 <= args.build_timeout <= 120 and 1 <= args.run_timeout <= 30):
@@ -189,6 +222,58 @@ def main() -> int:
             if sha(path) != row["sha256"]:
                 raise RuntimeError("scalar capsule Source identity changed: " + str(path))
             inputs.append(path)
+        if args.assembled_host:
+            directory = args.assembled_host.resolve()
+            aggregate, preparation, ledger = (directory / name for name in
+                ("host.scm", "preparation.json", "host.components.json"))
+            prepared = json.loads(preparation.read_text())
+            components = json.loads(ledger.read_text())
+            if (prepared.get("status") != "assembled-not-executed"
+                    or prepared.get("action-abi") != 2
+                    or prepared.get("header_sha256") != sha(header)
+                    or components.get("schema") != "bl.native.direct-host"
+                    or components.get("action-abi") != 2
+                    or components.get("source_sha256") != sha(aggregate)
+                    or prepared.get("host_sha256") != sha(aggregate)):
+                raise RuntimeError("optimized scalar requires an exact assembled ABI2 host")
+            paths = {}
+            for name, digest in prepared["inputs"].items():
+                path = Path(name)
+                if sha(path) != digest:
+                    raise RuntimeError("assembled host input changed: " + name)
+                paths.setdefault(digest, path.read_bytes())
+                inputs.append(path)
+            rows = components["components"]
+            if (rows[0] != {"role": "frozen-host", "sha256": sha(host)}
+                    or rows[-1]["role"] != "pinned-compiler-configuration"
+                    or len({row["role"] for row in rows}) != len(rows)
+                    or {"role": "direct-machine", "sha256": sha(machine)} not in rows):
+                raise RuntimeError("assembled host does not retain the exact scalar value/machine host")
+            body = aggregate.read_bytes()
+            offset = 0
+            for row in rows[:-1]:
+                data = paths.get(row["sha256"])
+                if data is None or body[offset:offset + len(data) + 1] != data + b"\n":
+                    raise RuntimeError("assembled component order or bytes differ: " + row["role"])
+                offset += len(data) + 1
+            if (body[-1:] != b"\n" or hashlib.sha256(body[offset:-1]).hexdigest() != rows[-1]["sha256"]):
+                raise RuntimeError("assembled configuration identity differs")
+            # Keep the canonical emitted program immutable. Only its already
+            # verified host prefix is replaced in a separately retained file.
+            variant = out / "assembled"
+            variant.mkdir(exist_ok=True)
+            actual_program = variant / "program.scm"
+            actual_program.write_bytes(body + b"\n" + program_bytes[len(prefix):])
+            if actual_program.read_text().count(declaration) != 1:
+                raise RuntimeError("assembled scalar variant changed emitted C control")
+            inputs.extend([aggregate, preparation, ledger, actual_program,
+                           base / "direct/prepare-host.py"])
+            report["assembled_host"] = {"path": str(directory), "sha256": sha(aggregate),
+                "program_sha256": sha(actual_program), "source_anf_control_changed": False,
+                "configuration": prepared["optional_extensions"]}
+            if prepared["optional_extensions"] != {"noactor_tick_opt_in": True, "pure_bif_opt_in": True}:
+                raise RuntimeError("assembled scalar qualification requires both explicit fast-path opt-ins")
+            program = actual_program
         before.update({str(path): sha(path) for path in inputs})
         report.update({"inputs": before, "sdk": sdk_pin, "tools": tools,
                        "emission_manifest": manifest})
@@ -234,7 +319,7 @@ def main() -> int:
                              "-ldl", "-lm", "-o", str(compiled)], args.build_timeout)
         if not compiled.is_file():
             raise RuntimeError("compiler returned success without producing its dynamic unit")
-        transcript = run("native", [str(gambit / "bin/gsi"), str(compiled)], args.run_timeout)
+        transcript = run_scalar("native", compiled)
         lines = transcript.splitlines()
         passed = [line[5:] for line in lines if line.startswith("PASS ")]
         if passed != EXPECTED_CHECKS:
@@ -277,9 +362,15 @@ def main() -> int:
             raise RuntimeError("adapted C changed during LLVM lowering")
         run("llvm-link", [str(clang), "-O0", "-fPIC", "-shared", "-rdynamic", str(llvm_ir),
                           "-ldl", "-lm", "-o", str(llvm_unit)], args.build_timeout)
-        llvm_transcript = run("llvm", [str(gambit / "bin/gsi"), str(llvm_unit)], args.run_timeout)
+        llvm_transcript = run_scalar("llvm", llvm_unit)
         if llvm_transcript != transcript:
             raise RuntimeError("native C and LLVM scalar transcripts differ")
+        if args.assembled_host:
+            if fast_witnesses["native"] != fast_witnesses["llvm"]:
+                raise RuntimeError("native C and LLVM fast-path witnesses differ")
+            for label, unit in (("off-native", compiled), ("off-llvm", llvm_unit)):
+                if run_scalar(label, unit, enabled=False) != transcript:
+                    raise RuntimeError(label + " changed the canonical scalar transcript")
         gc_artifacts = []
         gc_witnesses = {}
         for label, unit in (("gc-native", compiled), ("gc-llvm", llvm_unit)) if args.gc_interval else ():
@@ -291,7 +382,7 @@ def main() -> int:
                 "(display \"NATIVE_DIRECT_GC {\\\"steps\\\":\") (display native-c-step-count)\n"
                 "(display \",\\\"collections\\\":\") (display native-c-forced-gc-count)\n"
                 "(display \",\\\"interval\\\":\") (display native-c-gc-interval) (display \"}\\n\")\n")
-            gc_output = run(label, [str(gambit / "bin/gsi"), str(driver)], args.run_timeout, args.gc_interval)
+            gc_output = run_scalar(label, driver, args.gc_interval)
             body, separator, witness = gc_output.rpartition("NATIVE_DIRECT_GC ")
             if not separator or body != transcript:
                 raise RuntimeError(label + " changed the exact scalar transcript")
@@ -304,7 +395,7 @@ def main() -> int:
         if args.gc_interval and gc_witnesses["gc-native"] != gc_witnesses["gc-llvm"]:
             raise RuntimeError("native C and LLVM GC witnesses differ")
         unchanged()
-        artifacts = [compiled, generated, adapted, llvm_ir, llvm_unit, *gc_artifacts,
+        artifacts = [compiled, generated, adapted, llvm_ir, llvm_unit, *gc_artifacts, *derived_drivers,
                      *[evidence / (label + ".log") for label in
                        ("scheme-to-c", "clang-native", "native", "llvm-emit", "llvm-link", "llvm")]]
         if reference.is_file():
@@ -314,6 +405,7 @@ def main() -> int:
                        "trace": order + call_trace + ["SCALAR_FINALLY once"], "llvm_transcript_equal": True,
                        "gc_stress": {"enabled": bool(args.gc_interval), "interval": args.gc_interval,
                                      "witnesses": gc_witnesses, "recompiled": False},
+                       "fast_path_witnesses": fast_witnesses,
                        "artifacts": {str(path): {"sha256": sha(path), "bytes": path.stat().st_size}
                                      for path in artifacts}})
         write_report()
