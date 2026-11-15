@@ -16,6 +16,7 @@ static void blc_set(___SCMOBJ x, int i, ___SCMOBJ v) { ___VECTORSET(x,___FIX(i),
  * C still makes no allocation, callback or safepoint while this state is live.
  */
 static int blc_skip_noactor_tick(___SCMOBJ m) {
+ ___SCMOBJ ___temp;
  if (___INT(___VECTORLENGTH(m)) != 15) return 0;
  ___SCMOBJ extension=blc_ref(m,14);
  if (!___VECTORP(extension) || ___INT(___VECTORLENGTH(extension)) < 5
