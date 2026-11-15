@@ -1,0 +1,63 @@
+; Canonical, bounded discovery of existing development-tool policy owners.
+; Never load the indexed namespaces or start their services.
+(ns native.devtool-inspect
+ (:require [codebase] [reader-node :as rn] [bl.json :as json]))
+
+(def specifications
+ [{:path "priv/std/reload.bl" :focus #{"stage" "commit" "apply-change"}}
+  {:path "priv/std/reload/check.bl" :focus #{"bundle-defs" "image-requires" "coherence"}}
+  {:path "priv/std/reload/generation.bl" :focus #{"plan" "project-plan" "publish!" "retire!"}}
+  {:path "priv/std/reload/execution.bl" :focus #{"cached-preparation" "prepare-captured-unit!"}}
+  {:path "priv/std/reload/reconcile-recipe.bl" :focus #{"residualize!"}}
+  {:path "priv/std/reload/reconcile-snapshot.bl" :focus #{"consumer-enabled?"}}
+  {:path "priv/std/reload/ward.bl" :focus #{"evaluate-file" "run-file" "warm-base" "run"}}
+  {:path "priv/std/reload/ward-diagnosis.bl" :focus #{"diagnose"}}
+  {:path "priv/lib/system/incr.bl" :focus #{"fn-identity" "evidence-generation" "analyze-program"}}
+  {:path "priv/lib/system/analyze.bl" :focus #{"prepare-program" "dependency-graph" "analyze-prepared"}}
+  {:path "priv/lib/lsp.bl" :focus #{"analyzed" "memo-stats" "check-document"}}
+  {:path "priv/lib/system/emission.bl" :focus #{"diagnostics-bodies"}}
+  {:path "priv/lib/system/publication.bl" :focus #{"snapshot-result" "valid?"}}
+  {:path "priv/lib/system/publication-closure.bl" :focus #{"valid?"}}
+  {:path "priv/lib/codebase/boundary.bl" :focus #{"impact"}}])
+
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn inspect-source [spec]
+ (let [path (:path spec) source (File/read! path) digest (sha source)
+       namespace (BeamLisp.Loader/declared_ns source)
+       indexed (codebase/index-source {} namespace source {:mode :calls})
+       definitions
+       (vec (keep (fn [form]
+                    (when-let [name (codebase/defn-form form)]
+                     (when (contains? (:focus spec) name)
+                      {:name name :qualified (str namespace "/" name)
+                       :position (rn/node-pos form)})))
+                  (BeamLisp.Ns.Reader/read source {:file path})))
+       found (set (map :name definitions))]
+  (assert (= (:focus spec) found))
+  (assert (= digest (sha (File/read! path))))
+  {:path path :namespace namespace :sha256 digest :bytes (erlang/byte_size source)
+   :definitions definitions :indexed-function-facts (count (:fn indexed))
+   :functions (vec (filter #(contains? found (:fn/name %)) (:fn indexed)))
+   :calls (vec (filter #(contains? found (:call/caller %)) (:calls indexed)))
+   :requires (:requires indexed) :coverage (:coverage indexed)}))
+
+(def output "research/native-seed/evidence/devtool-codebase.json")
+(def producer "research/native-seed/devtool-inspect.bl")
+(def product (System/get_env "BL_SDK_PRODUCT"))
+(assert (string? product))
+(def facts (mapv inspect-source specifications))
+(doseq [row facts] (assert (= (:sha256 row) (sha (File/read! (:path row))))))
+(File/write! output
+ (json/encode {:schema "bl.native.devtool-source-discovery" :version 1
+  :scope :targeted-codebase-source-facts :application-started false
+  :runtime-or-compiler-qualified false
+  :producer {:path producer :sha256 (sha (File/read! producer))}
+  :sdk {:product product :descriptor-sha256 (sha (File/read! (str product "/artifact.json")))
+        :compiler-key (BeamLisp.AOTCache/compiler_key)}
+  :codebase-owner {:path "priv/std/codebase.bl" :sha256 (sha (File/read! "priv/std/codebase.bl"))}
+  :inputs facts
+  :limitations ["Source calls; dynamic dispatch, execution and host custody inspected separately."
+                "No native runtime admission or performance qualification from static facts."]}))
+(println (str "NATIVE_DEVTOOL_SOURCE_DISCOVERY " (count facts) " files; "
+              (reduce + 0 (map #(count (:definitions %)) facts)) " selected definitions"))
