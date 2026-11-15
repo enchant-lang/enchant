@@ -1,14 +1,21 @@
-; Separate, finite scalar GVM lowering pilot. No qualified native profile is
-; overwritten. Canonical BL parsing/expansion/ANF happen before this compiler.
+; Canonical BL ANF -> native GVM compiler DATA. Existing shared host procedures
+; retain value, pattern, exception and Source-frame policy. Never emit authored
+; Scheme bodies or interpret Source/ANF/GVM. Qualification belongs to the runner.
 (ns native.gvm-lower
  (:require [native.gvm :as wire] [native.gvm-layout :as layout]
-           [clojure.string :as string] [anf]))
+           [native.gvm-expand :as expand] [native.gvm-control :as control]
+           [clojure.string :as string] [anf] [system.ir :as ir]))
 
 (defn fail [node reason] (wire/refuse node reason))
 (def arithmetic-keys #{:add :sub :mul :div :lt :gt :le :ge :num_eq})
+(def pattern-symbols {"var" :var "lit" :lit "nil" :nil "tuple" :tuple "vector" :vector
+                      "cons" :cons "alias" :alias "map" :map "struct" :struct})
 (defn data-text [data]
  (cond
+  (contains? #{:frames :frame-ref} data) (erlang/atom_to_binary data)
   (and (keyword? data) (contains? arithmetic-keys data)) (str ":" (erlang/atom_to_binary data))
+  (and (keyword? data) (contains? (set (vals pattern-symbols)) data)) (erlang/atom_to_binary data)
+  (and (map? data) (= #{:gvm-number-text} (set (keys data)))) (:gvm-number-text data)
   (or (vector? data) (erlang/is_list data))
    (str "(" (string/join " " (mapv data-text data)) ")")
   :else (wire/wire-text data)))
@@ -28,7 +35,7 @@
   (fail node "a literal operand was expected")))
 (defn new-procedure [id arity]
  {:id id :owner-id id :arity arity :next-home 2 :homes {"return" 1}
-  :next-label 1 :blocks [] :nested-blocks []})
+  :next-label 1 :blocks [] :nested-blocks [] :entries []})
 (defn home [p]
  (let [slot (:next-home p) name (str (:id p) "/home/" slot)]
   [(-> p (update :next-home inc) (assoc-in [:homes name] slot)) slot]))
@@ -37,18 +44,37 @@
   [(-> p (update :next-label inc) (update :blocks conj (assoc row :id id))) id]))
 (defn reserve-label [p] [(update p :next-label inc) (:next-label p)])
 (defn slot [n] [:stk n])
-(declare lower finish-function lower-function)
+(declare lower finish-function lower-function free-names)
+(defn clause-free [clauses bound]
+ (reduce (fn [out clause]
+   (let [inside (into bound (mapcat anf/pattern-vars (:pats clause)))
+         out (reduce (fn [out expression] (into out (free-names expression bound))) out
+               (mapcat anf/pattern-expressions (:pats clause)))]
+    (into (into out (when (:guard clause) (free-names (:guard clause) inside)))
+          (free-names (:body clause) inside)))) #{} clauses))
 
 (defn free-names [node bound]
  (case (:op node)
   :gvm-value #{}
+  :gvm-symbol #{}
+  :gvm-number #{}
+  :gvm-call (reduce (fn [out n] (into out (free-names n bound)))
+               (free-names (:callee node) bound) (:args node))
+  :gvm-language-call (into (free-names (:callee node) bound) (free-names (:arguments node) bound))
+  :gvm-cell-bind (free-names (:body node) (conj bound (:name node)))
+  :gvm-definition (free-names (:value node) bound)
   :var (if (contains? bound (:name node)) #{} #{(:name node)})
   :let (into (free-names (:init node) bound)
          (free-names (:body node) (conj bound (:name node))))
-  :fn (reduce (fn [out clause]
-         (let [inside (into bound (mapcat anf/pattern-vars (:pats clause)))]
-          (into (into out (when (:guard clause) (free-names (:guard clause) inside)))
-                (free-names (:body clause) inside)))) #{} (:clauses node))
+  :fn (clause-free (:clauses node) bound)
+  :case (into (free-names (:subj node) bound) (clause-free (:clauses node) bound))
+  :try (let [stack (BeamLisp.CompilerData/catch_stack_bindings)
+             caught (clause-free (:catch node) (conj (conj bound (:frames stack)) (:raw stack)))]
+         (into (into (free-names (:body node) bound) caught)
+               (when (:after node) (free-names (:after node) bound))))
+  :recv (into (into (clause-free (:clauses node) bound)
+                   (when (:timeout node) (free-names (:timeout node) bound)))
+              (when (:after node) (free-names (:after node) bound)))
   (reduce (fn [out child] (into out (free-names child bound))) #{}
     (filter some? (anf/executable-children node)))))
 
@@ -57,8 +83,6 @@
            (lower s p argument env destination next false options))
   [s p next] (reverse (mapv (fn [argument destination] [argument destination]) arguments slots))))
 (defn lower-call [s p callee arguments env destination next tail? options]
- (when (> (count arguments) 3)
-  (fail callee "first fixed scalar GVM gate admits physical arities0..3"))
  (let [[p f] (home p)
        [p slots] (reduce (fn [[p out] _] (let [[p i] (home p)] [p (conj out i)])) [p []] arguments)
        [p resume] (if tail? [p false] (reserve-label p))
@@ -78,41 +102,74 @@
   (get env (:name (:fn node)))))
 (defn lower [s p node env destination next tail? options]
  (if-let [self (self-constructor node env (:self-names options))]
-  (let [[p entry] (block p {:kind :copy :source self :destination destination :next next})]
-   [s p entry])
+  (if (contains? (:self-cells options) (:name (:fn node)))
+   (lower-call s p (host-node [:glo "native-gvm-cell-ref"]) [(host-node self)] env destination next tail? options)
+   (let [[p entry] (block p {:kind :copy :source self :destination destination :next next})] [s p entry]))
+ (if (and (= :let (:op node)) (BeamLisp.CompilerData/self_application_parts node))
+  (let [parts (BeamLisp.CompilerData/self_application_parts node)]
+   (lower s p (if (contains? (free-names (:inner parts) #{}) (:name node))
+                (expand/scaffold-node node) (:inner parts)) env destination next tail? options))
+ (if (and (= :tuple (:op node)) (not (:gvm-dispatch-container node)) (ir/blfn-value? node))
+  (lower s p (expand/dispatch-node node options) env destination next tail? options)
+ (if-let [looped (when-not (:gvm-loop-rendered node) (expand/loop-node node options tail?))]
+  (lower s p looped env destination next tail? options)
  (case (:op node)
-  :lit (let [[s operand] (literal s node) [p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
+  :lit (if (or (nil? (:val node)) (= true (:val node)) (= false (:val node)) (string? (:val node)) (erlang/is_integer (:val node)))
+         (let [[s operand] (literal s node) [p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
+         (lower s p (expand/literal-node (:val node)) env destination next tail? options))
+  :gvm-symbol (if-let [symbol (get pattern-symbols (:name node))]
+                (let [[s operand] (pool s symbol)] (lower s p (host-node operand) env destination next tail? options))
+                (fail node "unrecognized private pattern symbol"))
+  :gvm-number (let [[s operand] (pool s {:gvm-number-text (:text node)})]
+                (lower s p (host-node operand) env destination next tail? options))
   :enil (let [[s operand] (literal s node) [p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
   :gvm-value (let [[p entry] (block p {:kind :copy :source (:operand node) :destination destination :next next})] [s p entry])
   :var (if-let [operand (get env (:name node))]
          (let [[p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
          (fail node "unbound canonical ANF variable"))
   :global (if-let [operand (when-let [resolve (:global-resolver options)] (resolve node))]
-            (lower s p (host-node operand) env destination next tail? options)
-            (fail node "unresolved global capability"))
-  :remote (if-let [operand (when-let [resolve (:remote-resolver options)] (resolve node))]
-            (lower-call s p (host-node operand) (:args node) env destination next tail? options)
-            (fail node "unresolved remote capability"))
+            (lower s p (if (map? operand) operand (host-node operand)) env destination next tail? options)
+            (lower s p (expand/call (if (= :exact (:lookup node)) "native-global-exact" "native-global")
+                              [(expand/lit (:ns node)) (expand/lit (:name node))]) env destination next tail? options))
+  :binding (if-let [resolved (when-let [resolve (:binding-resolver options)] (resolve node))]
+             (lower s p (if (map? resolved) resolved (host-node resolved)) env destination next tail? options)
+             (fail node "contextual binding lacks captured authority"))
+  :remote
+   (let [resolved (when-let [resolve (:remote-resolver options)] (resolve node))
+         target (if resolved (if (map? resolved) resolved (host-node resolved))
+                  (expand/call "native-remote" [(expand/lit (str (erlang/atom_to_binary (:mod node)) "/"
+                                                         (erlang/atom_to_binary (:fun node)) "/" (count (:args node))))]))]
+    (if (and (:source-frames? options) (= :erlang (:mod node)) (= :apply (:fun node)) (= 2 (count (:args node))))
+     (lower s p (expand/language-call node (first (:args node)) (second (:args node))
+                  (assoc options :raw-apply? true) tail?) env destination next tail? options)
+     (lower s p (expand/target-call node target (:args node) options tail?) env destination next tail? options)))
   :arith (if (contains? arithmetic-keys (:fun node))
            (let [[s op] (pool s (:fun node))]
             (lower-call s p (host-node [:glo "bl-arithmetic"])
              (into [(host-node op)] (:args node)) env destination next tail? options))
            (fail node "unknown canonical arithmetic operation"))
-  :apply (lower-call s p (:fn node) (:args node) env destination next tail? options)
-  :invoke (if-let [arguments (finite-arguments (:arguments node))]
-            (lower-call s p (:callee node) arguments env destination next tail? options)
-            (fail node "computed/dotted invoke arguments are outside this first probe"))
-  :fn (lower-function s p node env destination next options)
-  :let (if-let [parts (BeamLisp.CompilerData/self_application_parts node)]
-         ; The exact inert constructor is compiler-owned. If its self binder
-         ; is unused by the inner function, no recursive cell is required.
-         ; Keep the genuine native closure and its actual free captures.
-         (if (contains? (free-names (:inner parts) #{}) (:name node))
-          (fail node "recursive lexical self requires the general GVM cell ABI")
-          (lower-function s p (:inner parts) env destination next options))
-         (let [[p bound] (home p)
-               [s p body] (lower s p (:body node) (assoc env (:name node) (slot bound)) destination next tail? options)]
-          (lower s p (:init node) env bound body false options)))
+  :gvm-call (lower-call s p (:callee node) (:args node) env destination next tail? options)
+  :gvm-language-call (lower s p (expand/language-call node (:callee node) (:arguments node) options tail?) env destination next tail? options)
+  :apply (if (or (:native-gvm-plain-call node)
+                (and (:gvm-loop-self options)
+                     (self-constructor (:fn node) env #{(:gvm-loop-self options)})))
+           (lower-call s p (:fn node) (:args node) env destination next tail? options)
+           (lower s p (expand/language-call node (:fn node) (expand/list-node (:args node)) options tail?) env destination next tail? options))
+  :invoke (lower s p (expand/language-call node (:callee node) (:arguments node) options tail?) env destination next tail? options)
+  :fn (if (or (:gvm-physical? node) (:native-gvm-control node))
+        (lower-function s p node env destination next options)
+        (lower s p (expand/source-function node options) env destination next tail? options))
+  :gvm-cell-bind
+   (let [[p cell] (home p) options (-> options (update :self-names (fn [names] (conj (or names #{}) (:name node))))
+                                                     (update :self-cells (fn [names] (conj (or names #{}) (:name node)))))
+         [s p body] (lower s p (:body node) (assoc env (:name node) (slot cell)) destination next tail? options)]
+    (lower-call s p (host-node [:glo "native-gvm-new-cell"]) [] env cell body false options))
+  :gvm-definition (lower s p (:value node) env destination next tail?
+                    (assoc options :definition-ns (:ns node) :fn-label (:name node)
+                     :export-prefix (str "native-gvm-unit/" (:unit-name options) "/export/" (:ns node) "/" (:name node))))
+  :let (let [[p bound] (home p)
+             [s p body] (lower s p (:body node) (assoc env (:name node) (slot bound)) destination next tail? options)]
+         (lower s p (:init node) env bound body false options))
   :if (let [[p tested] (home p) [p boolean] (home p)
             [s p yes] (lower s p (:then node) env destination next tail? options)
             [s p no] (lower s p (:else node) env destination next tail? options)
@@ -128,7 +185,21 @@
           (reduce (fn [[s p next] statement]
             (let [[p ignored] (home p)] (lower s p statement env ignored next false options)))
            [s p last] (reverse (butlast statements))))))
-  (fail node "ANF operation is outside the first fixed scalar GVM gate"))))
+  :case (let [name (expand/fresh node "__gvm_subject_")]
+          (lower s p (expand/bind name (:subj node)
+                       (expand/clauses-node node (:clauses node) (expand/list-node [(expand/variable name)])
+                         (expand/error-node "native seed: case clause") false tail?)) env destination next tail? options))
+  :try (lower s p (expand/try-node node options) env destination next false options)
+  :recv (lower s p (expand/receive-node node options tail?) env destination next tail? options)
+  :tuple (lower s p (expand/call "bl-make-tuple" (:elems node)) env destination next tail? options)
+  :map (lower s p (expand/call "bl-map" (BeamLisp.CompilerData/eager_mapcat (fn [[key value]] (list key value)) (:pairs node))) env destination next tail? options)
+  :cons (lower s p (expand/call "cons" [(:head node) (:tail node)]) env destination next tail? options)
+  :struct (if (and (= :Elixir.BeamLisp.Vector (:mod node)) (= 1 (count (:fields node)))
+                    (= :tuple (:op (second (first (:fields node))))))
+            (lower s p (expand/call "bl-make-vec" (:elems (second (first (:fields node))))) env destination next tail? options)
+            (lower s p (expand/call "bl-struct" [(expand/literal-node (:mod node))
+                         {:op :map :pairs (:fields node) :ann (:ann node)}]) env destination next tail? options))
+  (fail node "unknown ANF operation in native GVM")))))))
 
 (defn internal-jump [label frame]
  [:jump [:lbl label] false false false false frame])
@@ -148,10 +219,11 @@
      [(into [:block id :simple frame] (conj (:rows ret) (:jump ret)))])
    :close
     (let [closed (layout/gvm-copy-row body-state [:glo "bl-nil"] (slot destination) variable)]
-     [[:block id :simple frame
-       [:close [[(slot destination) (:entry row) (:captures row)]]
-         (layout/gvm-frame-wire (:state closed))]
-       (internal-jump (:next row) frame)]])
+     [(into [:block id :simple frame
+              [:close [[(slot destination) (:entry row) (:captures row)]]
+                (layout/gvm-frame-wire (:state closed))]]
+       (concat (when (:export-global row) [[:copy (slot destination) [:glo (:export-global row)] frame]])
+               [(internal-jump (:next row) frame)]))])
    :call
     (let [tail? (:tail row) result (str (:id p) "/call/" id "/result")
           call (layout/gvm-call-layout layout/gvm-pinned-target body-state (:callee row) (:arguments row)
@@ -163,11 +235,27 @@
                 (:row copied) (internal-jump (:next row) frame)]])))
    (throw (ex-info "native GVM: invalid compiler-owned block" {:kind (:kind row)})))))
 
+(defn pool-frame-value [state data]
+ (cond
+  (and (vector? data) (= :frame (first data)))
+   (let [key (data-text data)]
+    (if-let [id (get (:index state) key)] [state [:frame-ref id]]
+     (let [id (str "f" (count (:frames state)))]
+      [(-> state (update :frames conj [id data]) (assoc-in [:index key] id)) [:frame-ref id]])))
+  (or (vector? data) (erlang/is_list data))
+   (reduce (fn [[state out] value]
+             (let [[state value] (pool-frame-value state value)] [state (conj out value)]))
+    [state []] data)
+  :else [state data]))
+(defn pool-frames [data]
+ (let [[state data] (pool-frame-value {:frames [] :index {}} data)]
+  (conj data (into [:frames] (:frames state)))))
+
 (defn checked-clause [function]
  (let [clause (BeamLisp.CompilerData/simple_function_clause function)
        names (when clause (mapv :name (:pats clause)))]
-  (when-not (and clause (= (count names) (count (distinct names))) (<= (count names) 3))
-   (fail function "only one unguarded distinct-variable fixed clause of arity0..3 is admitted"))
+  (when-not (and clause (= (count names) (count (distinct names))))
+   (fail function "physical GVM entry requires one unguarded distinct-variable clause"))
   [clause names]))
 
 (defn finish-function [s p function capture-names options]
@@ -181,18 +269,32 @@
        binding (:self-binding options)
        env (if binding (assoc env (:name binding) (:operand binding)) env)
        [p answer] (home p) [p finish] (block p {:kind :return :source (slot answer)})
-       [s p body] (lower s p (:body clause) env answer finish true options)
+       body-options (merge options (:gvm-body-options function))
+       body-options (if (= false (:gvm-source-frames? function)) (assoc body-options :source-frames? false) body-options)
+       body-tail? (if (contains? function :gvm-body-tail?) (:gvm-body-tail? function) true)
+       [s p body] (lower s p (:body clause) env answer finish body-tail? body-options)
        initialized (layout/gvm-initialize-homes (:state entry) (:homes p) [:glo "bl-nil"])
        body-state (assoc (:state initialized) :registers {})
        [p entry-id] (reserve-label p)
-       kind (if (= (:id p) (:owner-id p)) :entry [:entry (count names) (count captures)])
+       kind (if (= (:id p) (:owner-id p)) :entry [:entry (count names) (count captures) (boolean (:gvm-rest? function))])
        prologue (into [:block entry-id kind (:entry-frame entry)]
                   (concat (:rows entry) (:rows initialized) [(internal-jump body (layout/gvm-frame-wire body-state))]))
-       blocks (vec (mapcat #(emit-block p body-state %) (sort-by :id (:blocks p))))]
+       blocks (vec (mapcat #(emit-block p body-state %) (sort-by :id (:blocks p))))
+       p (update p :entries conj {:id (:id p) :entry entry-id :arity (count names)
+                                 :logical-arity (:gvm-logical-arity function)
+                                 :global (:gvm-export-global function)
+                                 :captures (count captures) :rest (boolean (:gvm-rest? function))
+                                 :control (or (:gvm-control? function) (:native-gvm-control function))})]
   [s p entry-id (into (into [prologue] blocks) (:nested-blocks p))]))
 
 (defn lower-function [s p node env destination next options]
  (let [[_ names] (checked-clause node)
+       alias (:gvm-dispatch-self node) cell (:gvm-self-cell node)
+       env (if alias (assoc env alias (get env cell)) env)
+       self (or alias cell)
+       options (if self (-> options
+                         (update :self-names (fn [names] (conj (or names #{}) self)))
+                         (update :self-cells (fn [names] (conj (or names #{}) self)))) options)
        free (free-names node #{})
        capture-names (vec (sort (filter #(and (contains? free %) (contains? env %)) (keys env))))
        unknown (remove #(contains? env %) free)]
@@ -200,8 +302,10 @@
   (let [id (str (:id p) "/closure/" (:next-label p))
         child (assoc (new-procedure id (count names)) :owner-id (:owner-id p) :next-label (:next-label p))
         [s child entry blocks] (finish-function s child node capture-names (dissoc options :self-binding))
-        p (-> p (assoc :next-label (:next-label child)) (update :nested-blocks into blocks))
+        p (-> p (assoc :next-label (:next-label child)) (update :nested-blocks into blocks)
+                (update :entries into (:entries child)))
         [p entry] (block p {:kind :close :entry entry :captures (mapv env capture-names)
+                            :export-global (:gvm-export-global node)
                             :destination destination :next next})]
    [s p entry])))
 
@@ -215,7 +319,7 @@
        [s _ _ blocks] (finish-function s (new-procedure id (count names)) function [] options)]
   [s (into [:proc id (count names) 0] blocks)]))
 
-(defn emit-definitions [definitions options]
+(defn emit-fixed-pilot-definitions [definitions options]
  (let [definitions (vec definitions)
        ids (into {} (map-indexed (fn [i d] [(:name d) (str "p" (inc i))]) definitions))
        prefix (or (:publication-prefix options) "native-gvm-scalar/")
@@ -247,3 +351,84 @@
               :entry-tick-qualified false :authored-scheme false
               :source-interpreter false :anf-interpreter false :gvm-interpreter false
               :c-lambda-stepper false}}))
+
+(defn emit-unit
+ "Compile one finite ANF expression into a native GVM module. The private
+  module initializer publishes the computed value ONCE; transport is DATA."
+ [node options]
+ (let [module (or (:unit-name options) (:module options) "native_gvm_unit")
+       owner-global (str "native-gvm-unit/" module "/owner/p0")
+       value (expand/call "native-gvm-publish-loaded!" [node])
+       root {:op :fn :gvm-physical? true :gvm-control? true
+             :clauses [{:pats [] :guard nil :body
+                       (expand/do-node [(expand/call "native-gvm-require-runtime!" [(expand/lit 1)]) value])}] :ann {}}
+       options (assoc options :unit-name module :self-names #{} :self-cells #{} :callable-arities? true)
+       [s p _ blocks] (finish-function (new-module) (new-procedure "p0" 0) root [] options)
+       owner-frame (nth (first blocks) 3)
+       publish [:copy [:proc "p0"] [:glo owner-global] owner-frame]
+       first-block (first blocks)
+       first-block (into (conj (vec (take 4 first-block)) publish) (drop 4 first-block))
+       blocks (into [first-block] (rest blocks))
+       data [:bl-native-gvm 1 [:module module] [:entry "p0"]
+             (into [:constants] (:constants s)) [:procedures (into [:proc "p0" 0 0 false] blocks)]]
+       data (pool-frames data)]
+  {:data data :data-source (str (data-text data) "\n") :text (str (data-text data) "\n")
+   :manifest {:schema "bl.native.gvm-emission" :version 1 :status :emitted-not-executed
+              :scope :canonical-anf-native-procedures :module module :runtime-abi 1
+              :target layout/gvm-pinned-target :owner-globals [owner-global]
+              :owners [{:proc "p0" :global owner-global}] :program-control :native-gvm
+              :entries (:entries p) :entry-tick true :wrong-arity :language-matcher
+              :source-frames (boolean (:source-frames? options)) :frame-pool true
+              :authored-scheme false :source-interpreter false :anf-interpreter false
+              :gvm-interpreter false :c-lambda-stepper false}}))
+
+(defn definition-value [definition]
+ {:op :gvm-definition :ns (:ns definition) :name (:name definition)
+  :value (:node definition) :ann (:ann (:node definition))})
+(defn definition-shape [definition]
+ (when (= :fn (:kind definition))
+  (let [shape (ir/function-shape (:node definition))]
+   (when-not shape (fail (:node definition) "canonical callable arities are unknown"))
+   (when (and (contains? definition :arities)
+              (or (not= (:arities shape) (set (:arities definition)))
+                  (not= (:variadic-min shape) (:variadic-min definition))))
+    (fail (:node definition) "provided declaration arities differ from canonical function value"))
+   shape)))
+(defn definitions-node [definitions]
+ (expand/do-node
+  (mapv (fn [definition]
+    (if (:name definition)
+     (let [value (expand/fresh (:node definition) (str "__gvm_publish_value_" (:ns definition) "/" (:name definition) "/"))
+           shape (definition-shape definition)]
+      (expand/bind value (definition-value definition)
+       (expand/do-node
+        [(expand/call "native-register!" [(expand/lit (:ns definition)) (expand/lit (:name definition)) (expand/variable value)])
+         (expand/call "native-intern" [(expand/lit (:ns definition)) (expand/lit (:name definition)) (expand/variable value)])
+         (expand/call "native-put-meta" [(expand/lit (:ns definition)) (expand/lit (:name definition))
+           (expand/literal-node {:private (boolean (:private? definition))})])
+         (if shape (expand/call "native-register-arities!"
+                     [(expand/lit (:ns definition)) (expand/lit (:name definition))
+                      (expand/literal-node (vec (sort (:arities shape))))
+                      (expand/lit (:variadic-min shape))]) (expand/lit nil))
+         (expand/variable value)])))
+     (:node definition))) definitions)))
+(defn emit-definition-unit [definitions options]
+ (let [emitted (emit-unit (definitions-node definitions) options)
+       module (or (:unit-name options) (:module options) "native_gvm_unit")
+       owner (str "native-gvm-unit/" module "/owner/p0")
+       records (mapv (fn [d]
+                 (let [shape (definition-shape d)]
+                  {:ns (:ns d) :name (:name d) :global (str (:ns d) "/" (:name d))
+                   :arities (when shape (vec (sort (:arities shape))))
+                   :variadic-min (:variadic-min shape) :owner-global owner :kind (:kind d)
+                   :private (boolean (:private? d)) :path (:path d)})) (filter :name definitions))
+       exports (vec (mapcat (fn [d]
+          (when-let [shape (definition-shape d)]
+           (let [base (str "native-gvm-unit/" module "/export/" (:ns d) "/" (:name d))
+                 fixed (mapv (fn [n] {:global (str base "/a" n) :arity n :owner-global owner
+                                      :namespace (:ns d) :name (:name d) :variadic false}) (sort (:arities shape)))]
+            (if (some? (:variadic-min shape))
+             (conj fixed {:global (str base "/v" (:variadic-min shape)) :arity (inc (:variadic-min shape))
+                          :owner-global owner :namespace (:ns d) :name (:name d) :variadic true}) fixed)))) definitions))]
+  (assoc emitted :manifest (assoc (:manifest emitted) :exports exports :definitions records))))
+(defn emit-definitions [definitions options] (emit-definition-unit definitions options))

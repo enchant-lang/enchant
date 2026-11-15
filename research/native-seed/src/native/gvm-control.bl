@@ -1,0 +1,78 @@
+(ns native.gvm-control (:require [clojure.string :as string]))
+
+; Compiler-owned ANF construction helpers, to integrate in native.gvm-lower.
+; This is Source compiler code. Generated authored/control bodies are all GVM;
+; these helpers never emit/eval Scheme text. Original authored bodies are reused.
+; The emitter must recognize ONLY these explicit private flags:
+;   :native-gvm-control on GENERATED fn -> fixed entry, no entry tick/frame;
+;   :native-gvm-plain-call on GENERATED apply -> no source-call rewrapping.
+; All authored nested fn/calls keep the original source options. Do not disable
+; :source-frames? for the whole subtree of a generated control thunk.
+(defn gvm-control-value [value] {:op :lit :val value :ann {}})
+(defn gvm-control-var [name] {:op :var :name name :ann {}})
+(defn gvm-control-function [parameters body]
+ {:op :fn :ann {} :native-gvm-control true
+  :clauses [{:pats (mapv (fn [name] {:pop :pvar :name name}) parameters)
+             :guard nil :body body}]})
+(defn gvm-control-host-call [global arguments]
+ {:op :apply :ann {} :native-gvm-plain-call true
+  :fn {:op :gvm-value :operand [:glo global] :ann {}}
+  :args (vec arguments)})
+(defn gvm-function-source-frame [function options]
+ (merge {:file nil :line nil :col nil :end-line nil :end-col nil}
+  (:ann function)
+  {:ns (or (:definition-ns options) (:ns options))
+   :fn (:fn-label options)
+   :arity (count (:pats (first (:clauses function)))) :call :direct}))
+(defn gvm-call-source-frame [node options]
+ (let [ann (:ann node)]
+  {:file (:file ann) :line (:line ann) :col (:col ann)
+   :end-line (:end-line ann) :end-col (:end-col ann)
+   :ns (:source-ns options) :fn (:source-fn options) :arity (:source-arity options)
+   :call (if (:tail? options) :tail :direct)
+   :internal (and (string? (:file ann)) (string/ends-with? (:file ann) "/actor/runtime.bl"))}))
+(defn gvm-entry-form
+ "matcher-body includes the FULL clause/guard/fallback dispatch. Public rest
+  entry already placed argv in its home, so wrong arity reaches this SAME form."
+ [function matcher-body options]
+ (if (:native-gvm-control function) matcher-body
+  (let [ticked {:op :do :ann {}
+                :stmts [(gvm-control-host-call "h-tick" []) matcher-body]}]
+   (if (:source-frames? options)
+    (gvm-control-host-call "bl-with-source-frame"
+     [(gvm-control-value (gvm-function-source-frame function options))
+      (gvm-control-function [] ticked)])
+    ticked))))
+(defn gvm-register-function-form
+ "Apply when each definition or escaping closure is CREATED, before publishing
+  or returning it. Source clauses of one physical fn have one validated arity."
+ [function expression options]
+ (if (:callable-arities? options)
+  (gvm-control-host-call "bl-register-callable!"
+   [expression (gvm-control-value (count (:pats (first (:clauses function)))))])
+  expression))
+(defn gvm-clause-fallback-form []
+ ; Same raw error procedure/message as qualified native.scheme clauses.
+ (gvm-control-host-call "error" [(gvm-control-value "native seed: function clause")]))
+(defn gvm-source-call-form
+ "target-name/arguments-name are ORIGINAL already evaluated lexical homes.
+  operation is bl-invoke, or native-raw-apply for raw erlang/apply2 forwarding.
+  The inner call is DIRECT to that operation: do not bl-invoke bl-invoke."
+ [node target-name arguments-name operation options]
+ (when-not (contains? #{"bl-invoke" "native-raw-apply"} operation)
+  (throw (ex-info "native GVM: invalid Source-call forwarding operation" {:operation operation})))
+ (let [invoke (gvm-control-host-call operation
+                [(gvm-control-var target-name) (gvm-control-var arguments-name)])]
+  (if (:source-frames? options)
+   (gvm-control-host-call "bl-source-call"
+    [(gvm-control-value (gvm-call-source-frame node options))
+     (gvm-control-value (if (:tail? options) true false))
+     (gvm-control-function [] invoke)])
+   invoke)))
+(defn gvm-function-body-options [function options]
+ (assoc options
+  :source-fn (:fn-label options)
+  :source-ns (or (:definition-ns options) (:ns options))
+  :source-arity (count (:pats (first (:clauses function))))
+  :fn-label nil :tail? true :loop nil))
+(defn gvm-operand-options [options] (assoc options :tail? false))

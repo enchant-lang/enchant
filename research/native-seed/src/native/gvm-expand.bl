@@ -1,0 +1,184 @@
+; Compiler-owned ANF construction for native GVM. Every value/pattern/error/
+; exception service below is the existing qualified native host procedure.
+; No Source expression or GVM instruction is interpreted by these helpers.
+(ns native.gvm-expand
+ (:require [anf] [clojure.string :as string] [native.gvm-control :as control]
+           [system.ir :as ir]))
+(defn lit [value] {:op :lit :val value :ann {}})
+(defn variable [name] {:op :var :name name :ann {}})
+(defn host [name] {:op :gvm-value :operand [:glo name] :ann {}})
+(defn call [name arguments] {:op :gvm-call :callee (host name) :args (vec arguments) :ann {}})
+(defn raw-symbol [name] {:op :gvm-symbol :name name :ann {}})
+(defn list-node [nodes] (call "list" nodes))
+(defn bind [name value body] {:op :let :name name :init value :body body :ann {}})
+(defn invoke [function arguments] {:op :gvm-call :callee function :args (vec arguments) :ann {}})
+(defn do-node [statements] {:op :do :stmts (vec statements) :ann {}})
+(defn choose [condition yes no] {:op :if :test condition :then yes :else no :ann {}})
+(defn thunk [body]
+ {:op :fn :gvm-physical? true :gvm-control? true :clauses [{:pats [] :guard nil :body body}] :ann (:ann body)})
+(defn executable-children [node]
+ ; Private compiler forms have an explicit finite grammar. Every other node
+ ; still goes through canonical ANF, whose unknown-op refusal is preserved.
+ (case (:op node)
+  :gvm-value [] :gvm-symbol [] :gvm-number []
+  :gvm-call (into [(:callee node)] (:args node))
+  :gvm-language-call [(:callee node) (:arguments node)]
+  :gvm-cell-bind [(:body node)]
+  :gvm-definition [(:value node)]
+  (anf/executable-children node)))
+(defn names-in [node]
+ (let [own (if (and (contains? #{:var :let :gvm-cell-bind} (:op node)) (:name node)) #{(:name node)} #{})
+       clauses (concat (:clauses node) (:catch node))
+       own (into own (mapcat (fn [c] (mapcat anf/pattern-vars (:pats c))) clauses))]
+  (reduce (fn [out child] (into out (names-in child))) own (executable-children node))))
+(defn fresh [node prefix]
+ (let [used (names-in node)]
+  (loop [i 0] (let [name (str prefix i)] (if (contains? used name) (recur (inc i)) name)))))
+(defn parameter [name] {:pop :pvar :name name})
+
+(declare literal-node pattern-node clauses-node)
+(defn literal-node [value]
+ (cond
+  (or (nil? value) (= true value) (= false value) (string? value) (erlang/is_integer value)) (lit value)
+  (erlang/is_float value) (call "bl-float" [{:op :gvm-number :text (erlang/float_to_binary value (list :short))}])
+  (= (type value) :Elixir.BeamLisp.Decimal)
+   (call "bl-decimal" [(lit (BeamLisp.Decimal/unscaled value)) (lit (BeamLisp.Decimal/scale value))])
+  (keyword? value) (call "string->symbol" [(lit (str ":" (erlang/atom_to_binary value)))])
+  (vector? value) (call "bl-make-vec" (mapv literal-node value))
+  (erlang/is_list value) (list-node (mapv literal-node value))
+  (set? value) (call "bl-set-from-list" [(list-node (mapv literal-node value))])
+  (erlang/is_map value)
+   (let [module (get value :__struct__) entries (if module (dissoc value :__struct__) value)
+         fields (call "bl-map" (BeamLisp.CompilerData/eager_mapcat
+                  (fn [entry] (list (literal-node (erlang/element 1 entry))
+                                   (literal-node (erlang/element 2 entry)))) (maps/to_list entries)))]
+    (if module (call "bl-struct" [(literal-node module) fields]) fields))
+  (erlang/is_tuple value) (call "bl-make-tuple" (mapv literal-node (erlang/tuple_to_list value)))
+  :else (throw (ex-info "native GVM: unsupported portable literal" {:value value}))))
+(defn pattern-node [pattern]
+ (case (:pop pattern)
+  :pvar (list-node [(raw-symbol "var") (lit (:name pattern))])
+  :plit (list-node [(raw-symbol "lit") (literal-node (:val pattern))])
+  :pnil (list-node [(raw-symbol "nil")])
+  :ptuple (list-node [(raw-symbol "tuple") (list-node (mapv pattern-node (:elems pattern)))])
+  :pcons (list-node [(raw-symbol "cons") (pattern-node (:head pattern)) (pattern-node (:tail pattern))])
+  :palias (list-node [(raw-symbol "alias") (pattern-node (:a pattern)) (pattern-node (:b pattern))])
+  :pmap (list-node [(raw-symbol "map")
+          (list-node (mapv (fn [[key p]] (list-node [key (pattern-node p)])) (:pairs pattern)))])
+  :pstruct (if (= :Elixir.BeamLisp.Vector (:mod pattern))
+             (list-node [(raw-symbol "vector") (pattern-node (second (first (:fields pattern))))])
+             (list-node [(raw-symbol "struct") (literal-node (:mod pattern))
+               (list-node (mapv (fn [[key p]] (list-node [(literal-node key) (pattern-node p)])) (:fields pattern)))]))
+  (throw (ex-info "native GVM: unsupported canonical pattern" {:pattern pattern}))))
+(defn error-node [message] (call "error" [(lit message)]))
+(defn clauses-node [node clauses argv fallback wrap? tail?]
+ (if (empty? clauses) fallback
+  (let [clause (first clauses)
+        binding (fresh node "__gvm_bindings_") next (fresh node "__gvm_next_")
+        more (clauses-node node (rest clauses) argv fallback wrap? tail?)
+        next-call (invoke (variable next) [])
+        names (vec (distinct (mapcat anf/pattern-vars (:pats clause))))
+        body (if wrap? (call "bl-vec" [(list-node [(literal-node :match) (assoc (thunk (:body clause)) :gvm-body-tail? tail?)])]) (:body clause))
+        guarded (if (:guard clause)
+                  (choose (call "bl-guard" [(assoc (thunk (:guard clause)) :gvm-source-frames? false)]) body next-call) body)
+        body (reduce (fn [body name]
+               (bind name (call "cdr" [(call "assoc" [(lit name) (variable binding)])]) body)) guarded (reverse names))
+        arm (bind binding (call "bl-match-args" [(list-node (mapv pattern-node (:pats clause))) argv (list-node [])])
+              (choose (variable binding) body next-call))]
+   ; Exactly ONE next-clause body, shared by mismatch and guard failure.
+   (bind next (assoc (thunk more) :gvm-body-tail? tail?) arm))))
+
+(defn source-frame [node options arity]
+ (merge {:file nil :line nil :col nil :end-line nil :end-col nil} (:ann node)
+  {:ns (:definition-ns options) :fn (:fn-label options) :arity arity :call :direct}))
+(defn source-function [node options]
+ (let [argv (fresh node "__gvm_argv_") arity (count (:pats (first (:clauses node))))
+       body (clauses-node node (:clauses node) (variable argv) (error-node "native seed: function clause") false true)
+       body (control/gvm-entry-form node body options)
+       physical {:op :fn :gvm-physical? true :gvm-rest? true :gvm-logical-arity arity
+                 :gvm-self-cell (:gvm-self-cell node) :gvm-dispatch-self (:gvm-dispatch-self node)
+                 :gvm-export-global (or (:gvm-export-global node)
+                                        (when (:export-prefix options) (str (:export-prefix options) "/a" arity)))
+                 :gvm-body-options (-> (control/gvm-function-body-options node options)
+                                     (assoc :gvm-loop-self nil) (dissoc :export-prefix))
+                 :clauses [{:pats [(parameter argv)] :guard nil :body body}] :ann (:ann node)}]
+  (control/gvm-register-function-form node physical (assoc options :callable-arities? true))))
+(defn call-frame [node options tail?]
+ (let [ann (:ann node)]
+  {:file (:file ann) :line (:line ann) :col (:col ann) :end-line (:end-line ann) :end-col (:end-col ann)
+   :ns (:definition-ns options) :fn (:source-fn options) :arity (:source-arity options)
+   :call (if tail? :tail :direct)
+   :internal (and (string? (:file ann)) (string/ends-with? (:file ann) "/actor/runtime.bl"))}))
+(defn source-call [node options tail? body]
+ (if (:source-frames? options)
+  (call "bl-source-call" [(literal-node (call-frame node options tail?)) (lit tail?) (thunk body)]) body))
+(defn language-call [node function arguments options tail?]
+ (let [callee (fresh node "__gvm_actual_callee_") args (fresh node "__gvm_actual_args_")]
+  (bind callee function (bind args arguments
+   (source-call node options tail? (call (if (:raw-apply? options) "native-raw-apply" "bl-invoke") [(variable callee) (variable args)]))))))
+(defn target-call [node target arguments options tail?]
+ (let [callee (fresh node "__gvm_remote_callee_")
+       names (mapv #(str (fresh node "__gvm_remote_arg_") "/" %) (range (count arguments)))
+       body (if (:source-frames? options)
+              (source-call node options tail? (call "bl-invoke" [(variable callee) (list-node (mapv variable names))]))
+              (invoke (variable callee) (mapv variable names)))
+       body (reduce (fn [body [name arg]] (bind name arg body)) body (reverse (mapv (fn [name arg] [name arg]) names arguments)))]
+  (bind callee target body)))
+(defn try-node [node options]
+ (let [kind (fresh node "__gvm_kind_") reason (fresh node "__gvm_reason_") trace (fresh node "__gvm_trace_")
+       stack (BeamLisp.CompilerData/catch_stack_bindings)
+       handler (clauses-node node (:catch node) (list-node [(variable kind) (variable reason)])
+                  (call "bl-reraise" [(variable kind) (variable reason) (variable trace)]) false false)
+       handler (bind (:frames stack)
+                 (if (:source-frames? options) (call "bl-trace-frames" [(variable trace)]) (variable trace))
+                 (bind (:raw stack) (variable trace) handler))
+       handler {:op :fn :gvm-physical? true :gvm-control? true :gvm-body-tail? false
+                :clauses [{:pats (mapv parameter [kind reason trace]) :guard nil :body handler}] :ann (:ann node)}]
+  (call "bl-try" [(assoc (thunk (:body node)) :gvm-body-tail? false) handler
+                   (if (:after node) (assoc (thunk (:after node)) :gvm-body-tail? false) (lit false))])))
+(defn receive-node [node options tail?]
+ (let [message (fresh node "__gvm_message_") selected (fresh node "__gvm_selected_") timeout (fresh node "__gvm_timeout_")
+       scanner {:op :fn :gvm-physical? true :gvm-control? true
+                 :clauses [{:pats [(parameter message)] :guard nil
+                            :body (clauses-node node (:clauses node) (list-node [(variable message)]) (literal-node :nomatch) true tail?)}]
+                 :ann (:ann node)}
+       receive {:op :gvm-language-call :callee {:op :global :ns (:runtime-namespace options) :name "rt-receive" :ann (:ann node)}
+                 :arguments (list-node [scanner (assoc (thunk (or (:after node) (lit nil))) :gvm-body-tail? tail?) (variable timeout)])}]
+  (bind timeout (or (:timeout node) (lit nil)) (bind selected receive
+   {:op :gvm-call :callee (call "bl-nth" [(variable selected) (lit 1)]) :args []}))))
+
+(defn loop-node [node options tail?]
+ (when (= :apply (:op node))
+  (when-let [parts (BeamLisp.CompilerData/self_application_parts (:fn node))]
+   (let [self (:name (:fn node)) inner (:inner parts)
+         clause (first (:clauses inner))
+         inner (assoc inner :gvm-physical? true :gvm-control? true :gvm-body-tail? tail?
+                 :gvm-body-options (assoc options :gvm-loop-self self)
+                 :clauses [(assoc clause :body (do-node [(call "h-tick" []) (:body clause)]))])
+         outer (assoc (:outer parts) :clauses [(assoc (:clause parts) :body inner)])
+         scaffold (assoc (:fn node) :init outer)]
+    (assoc node :fn scaffold :gvm-loop-rendered true :native-gvm-plain-call true)))))
+
+(defn scaffold-node [node]
+ (let [parts (BeamLisp.CompilerData/self_application_parts node)
+       target (:name node) result (fresh node "__gvm_fixed_value_")]
+  (when-not parts (throw (ex-info "GVM scaffold requires canonical inert self evidence" {})))
+  {:op :gvm-cell-bind :name target
+   :body (bind result (assoc (:inner parts) :gvm-self-cell target)
+            (do-node [(call "native-gvm-cell-fill!" [(variable target) (variable result)]) (variable result)]))}))
+(defn dispatch-node [node options]
+ (when-not (ir/blfn-value? node) (throw (ex-info "GVM dispatch requires canonical tagged value" {})))
+ (let [[head fixed variadic] (:elems node)
+       target (fresh node "__gvm_dispatch_cell_") result (fresh node "__gvm_dispatch_value_")
+       arm (fn [value suffix]
+             (let [parts (BeamLisp.CompilerData/self_application_parts value)]
+              (when-not parts (throw (ex-info "GVM dispatch arm requires canonical self scaffold" {})))
+              (assoc (:inner parts) :gvm-dispatch-self (:name value) :gvm-self-cell target
+                 :gvm-export-global (when (:export-prefix options) (str (:export-prefix options) suffix)))))
+       fixed (assoc fixed :pairs (mapv (fn [[arity value]] [arity (arm value (str "/a" (:val arity)))]) (:pairs fixed)))
+       variadic (if (= :tuple (:op variadic))
+                  (assoc variadic :elems [(first (:elems variadic))
+                    (arm (second (:elems variadic)) (str "/v" (:val (first (:elems variadic)))))]) variadic)
+       value {:op :tuple :gvm-dispatch-container true :elems [head fixed variadic] :ann (:ann node)}]
+  {:op :gvm-cell-bind :name target
+   :body (bind result value (do-node [(call "native-gvm-cell-fill!" [(variable target) (variable result)]) (variable result)]))}))

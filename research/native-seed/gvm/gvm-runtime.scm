@@ -1,0 +1,21 @@
+;; Private recursion storage for emitted native GVM procedures. This is the
+;; heap-cell counterpart of native.scheme's compiler-owned letrec/set! knots.
+;; It never executes Source, ANF, GVM, or an authored function body.
+(define native-gvm-runtime-abi 1)
+(define (native-gvm-require-runtime! requested)
+ (if (not (eqv? requested native-gvm-runtime-abi))
+  (error "native GVM runtime ABI mismatch" requested native-gvm-runtime-abi)) bl-nil)
+(define native-gvm-cell-marker (list 'native-gvm-cell-marker))
+(define (native-gvm-new-cell) (vector native-gvm-cell-marker #f))
+(define (native-gvm-cell? value)
+ (and (vector? value) (= (vector-length value) 2)
+      (eq? (vector-ref value 0) native-gvm-cell-marker)))
+(define (native-gvm-cell-ref cell)
+ (if (not (and (native-gvm-cell? cell) (vector-ref cell 1)))
+  (error "native GVM recursive function used before initialization"))
+ (vector-ref cell 1))
+(define (native-gvm-cell-fill! cell value)
+ (if (not (and (native-gvm-cell? cell) (not (vector-ref cell 1))
+               (or (procedure? value) (native-multi-callable? value))))
+  (error "native GVM recursive function initialization contract"))
+ (vector-set! cell 1 value) value)
