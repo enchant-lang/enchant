@@ -32,9 +32,9 @@
 (defn k [i] (str "BLC_CONST(m," i ")"))
 (defn jump [next] (str " BLC_PC(m," next "); continue;"))
 (defn action [kind a destination next args tail?]
- (str " blc_set(m,11,BLC_CONST(m,0)); BLC_ACTION(m," a "," destination "," next "," args "," (if tail? 1 0) "); return " kind ";"))
+ (str " blc_set(m,11,BLC_CONST(m,0)); BLC_ACTION(m," a "," destination "," next "," args "," (if tail? 1 0) "); BLC_YIELD(m," kind ");"))
 (defn action-at [kind a destination next args tail? site]
- (str " blc_set(m,11," site "); BLC_ACTION(m," a "," destination "," next "," args "," (if tail? 1 0) "); return " kind ";"))
+ (str " blc_set(m,11," site "); BLC_ACTION(m," a "," destination "," next "," args "," (if tail? 1 0) "); BLC_YIELD(m," kind ");"))
 (defn call-site [options tail?]
  (when-let [ann (:direct-callsite options)]
   (assoc (select-keys ann [:file :line :col :end-line :end-col])
@@ -155,7 +155,7 @@
        captures (mapv env captured) capture-slots (vec (range 1 (inc (count captured))))
        inner-env (into {} (map (fn [name slot] [name slot]) captured capture-slots))
        s (assoc s :slot (+ 2 (count captured))) return-slot (inc (count captured))
-       [s finish] (block s (str " blc_set(m,4," (r return-slot) "); return BLC_RETURN;"))
+       [s finish] (block s (str " blc_set(m,4," (r return-slot) "); BLC_YIELD(m,BLC_RETURN);"))
        arity (count (:pats (first (:clauses node))))
        control? (:direct-control? node)
        body-options (if control?
@@ -407,11 +407,11 @@
   this unit under the qualified native toolchain; annotations grant no rights."
  [node options]
  (let [unit (scalar/ident (or (:unit-name options) "native_direct_unit"))
-       [s finish] (block (state) " blc_set(m,4,BLC_REG(m,1)); return BLC_RETURN;")
+       [s finish] (block (state) " blc_set(m,4,BLC_REG(m,1)); BLC_YIELD(m,BLC_RETURN);")
        [s entry] (lower s node {} 1 finish true options)
-       c-source (str "#include \"native-direct.h\"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n#error direct_C_action_ABI_mismatch\n#endif\nstatic int " unit "(___SCMOBJ m) { for (;;) { switch ((int)___INT(blc_ref(m,1))) {\n"
+       c-source (str "#include \"native-direct.h\"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n#error direct_C_action_ABI_mismatch\n#endif\n#ifndef BLC_YIELD\n#error direct_C_local_PC_contract_mismatch\n#endif\nstatic int " unit "(___SCMOBJ m) { ___WORD blc_pc=___INT(blc_ref(m,1)); for (;;) { switch ((int)blc_pc) {\n"
                   (string/join "\n" (map #(str "case " (:id %) ": {" (:code %) "}\n") (sort-by :id (:blocks s))))
-                  "default: return -1; } } }\n")
+                  "default: BLC_YIELD(m,-1); } } }\n")
        preamble (str "(native-c-require-action-abi! 2)\n(c-declare " (quote-generated-code c-source) ")\n")
        expression (str "(let ((unit (vector (c-lambda (scheme-object) int " (scalar/text unit) ")\n"
                 " (vector " (string/join " " (:constants s)) ")\n"

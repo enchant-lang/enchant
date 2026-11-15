@@ -16,7 +16,12 @@ static void blc_set(___SCMOBJ x, int i, ___SCMOBJ v) { ___VECTORSET(x,___FIX(i),
 #define BLC_REG(m,r) blc_ref(BLC_FRAME(m),r)
 #define BLC_CONST(m,k) blc_ref(blc_ref(BLC_UNIT(m),1),k)
 #define BLC_PUT(m,r,v) blc_set(BLC_FRAME(m),r,v)
-#define BLC_PC(m,p) blc_set(m,1,___FIX(p))
+/* A C step has no callback/allocation/safepoint. Keep its unboxed PC local;
+ * synchronize exactly once at EVERY step exit, before Scheme sees the machine.
+ * ___WORD preserves the full fixnum even on an invalid/default diagnostic PC.
+ */
+#define BLC_PC(m,p) do { blc_pc=(p); } while(0)
+#define BLC_YIELD(m,kind) do { blc_set(m,1,___FIX(blc_pc)); return (kind); } while(0)
 #define BLC_TRUTHY(m,v) (!___FALSEP(v) && !___EQP(v,BLC_CONST(m,0)))
 #define BLC_ACTION(m,a,d,n,p,t) do { blc_set(m,4,a); blc_set(m,5,___FIX(d)); \
  blc_set(m,6,___FIX(n)); blc_set(m,7,p); blc_set(m,8,(t)?___TRU:___FAL); } while(0)
