@@ -1,0 +1,76 @@
+; SDK-only parity of exact Source formatter forms. No native qualification.
+; Evaluate anonymous values in this namespace; do not publish native.scheme.
+(ns native.scheme-format-parity
+ (:require [reader :as rd] [reader-node :as rn] [compiler :as c]
+           [clojure.string :as string] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def before-path (first args))
+(def after-path (second args))
+(def report-path (nth args 2))
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(def before-source (File/read! before-path))
+(def after-source (File/read! after-path))
+(assert (= "e969891c64045302a119e73806cac9c9184022e268f043345cc32fe702514077" (sha before-source)))
+(assert (= "76f40ac5b9b10efd033a84e984926d46d20494322338722ba55365eebf566cab" (sha after-source)))
+(def fixture-ns "native.scheme-format-parity")
+(defn formatter-forms [source path]
+ (reduce (fn [out form]
+  (let [node (rn/node-form form)]
+   (if (= :list (rn/node-tag node))
+    (let [items (rn/node-items node) head (rn/node-form (first items))
+          name (rn/node-form (second items))]
+     (if (and (= :symbol (rn/node-tag head)) (= "defn" (rn/node-name head))
+              (= :symbol (rn/node-tag name)) (contains? #{"ident" "text"} (rn/node-name name)))
+      (let [key (rn/node-name name)
+            declaration (c/declaration-source form (assoc (c/new-env fixture-ns) :file path))
+            value-items (rn/node-items (rn/node-form (:value-form declaration)))
+            _ (assert (= "fn" (rn/node-name (rn/node-form (first value-items)))))
+            _ (assert (= key (rn/node-name (rn/node-form (second value-items)))))
+            ; Same inert anonymization as canonical js.build's staged helpers.
+            ; Preserve the exact parameter/body Reader nodes; remove only self.
+            anonymous (rn/list-node (cons (first value-items) (rest (rest value-items))))]
+       (assert (not (contains? out key)))
+       (assoc out key anonymous)) out)) out))) {} (rd/read-string source path)))
+(def old-forms (formatter-forms before-source before-path))
+(def new-forms (formatter-forms after-source after-path))
+(assert (= #{"ident" "text"} (set (keys old-forms))))
+(assert (= (set (keys old-forms)) (set (keys new-forms))))
+(defn evaluate [form path]
+ (BeamLisp.Compiler/eval_form form (assoc (c/new-env fixture-ns) :file path :target :beam)))
+(def old-functions (into {} (map (fn [[name form]] [name (evaluate form before-path)]) old-forms)))
+(def new-functions (into {} (map (fn [[name form]] [name (evaluate form after-path)]) new-forms)))
+(def ascii-cases
+ (Enum/map (lists/seq 0 127) (fn [code] (unicode/characters_to_binary (list code)))))
+(def extra-cases
+ ["" "alpha" "native.scheme/ident" "core//" "erlang/=/2" "fnself_123" "$multi/fnself_7"
+  "v_110_97_109_101" "-> [] {} () # ; : / | ! & % _" "quote\"backslash\\"
+  "λ" "é" "é" "🙂" "👩‍💻" "家族👨‍👩‍👧‍👦" (str "a\nλ\r\n\t🙂é" (unicode/characters_to_binary (list 0)) "z")
+  (unicode/characters_to_binary (lists/seq 0 127))])
+(def cases (concat ascii-cases extra-cases))
+(defn outcome [function input]
+ (try {:value (function input)}
+  (catch e {:error {:type (type e) :message (ex-message e) :data (ex-data e)}})))
+(def results
+ (vec (mapcat (fn [name]
+  (map-indexed (fn [index input]
+   (let [before (outcome (get old-functions name) input)
+         after (outcome (get new-functions name) input)]
+    ; Equal failures cannot make a valid-string case silently pass.
+    (assert (contains? before :value))
+    (assert (contains? after :value))
+    (assert (= before after))
+    {:formatter name :index index :input-sha256 (sha input)
+     :output-sha256 (sha (:value before)) :bytes (erlang/byte_size (:value before))})) cases))
+  ["ident" "text"])))
+(File/write! report-path
+ (json/encode {:schema "bl.native.formatter-source-parity" :version 1 :status :qualified
+  :target :sdk-beam :native-qualification false :scope :pure-formatters-with-canonical-core
+  :old-source-sha256 (sha before-source) :new-source-sha256 (sha after-source)
+  :exact-anonymous-reader-form-capture true :ascii-singletons 128
+  :cases-per-formatter (count cases) :byte-equal true :valid-string-errors :none
+  :forms (mapv (fn [name] {:name name
+    :old-sha256 (sha (erlang/term_to_binary (get old-forms name) (list :deterministic)))
+    :new-sha256 (sha (erlang/term_to_binary (get new-forms name) (list :deterministic)))}) ["ident" "text"])
+  :results results}))
+(println (str "NATIVE_SCHEME_FORMATTER_SOURCE_PARITY " (count results) " exact-byte cases"))
