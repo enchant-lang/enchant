@@ -89,6 +89,10 @@ def main():
     parser.add_argument('--cache', type=Path, default=base / 'out/direct-unit-cache')
     parser.add_argument('--route', choices=('c', 'llvm', 'both'), default='both')
     parser.add_argument('--standard-bindings', action='store_true')
+    parser.add_argument('--host-optimization', type=int, choices=(0, 1), default=0,
+                        help='optional host-only Clang optimization; no performance qualification implied')
+    parser.add_argument('--host-granularity', choices=('single', 'multiple'), default='single',
+                        help='optional host-only public C grouping; authored units and entry retain their recipe')
     parser.add_argument('--self-timeout', type=int, default=240)
     parser.add_argument('--run-timeout', type=int, default=120)
     parser.add_argument('--compile-timeout', type=int, default=120)
@@ -111,7 +115,9 @@ def main():
               'all_runtime_llvm': False, 'compiler_fixpoint': False,
               'c_llvm_compiler_image_parity': False,
               'deadlines': {'native_self_emission': args.self_timeout, 'native_corpus': args.run_timeout,
-                            'compiler_child': args.compile_timeout}}
+                            'compiler_child': args.compile_timeout},
+              'host_optimization': args.host_optimization, 'host_granularity': args.host_granularity,
+              'host_variant_performance_qualified': False}
 
     def bind(path, expected=None):
         path = Path(path).resolve()
@@ -238,7 +244,8 @@ def main():
 
     def build(directory, route, label):
         command = [sys.executable, args.builder, directory, '--build', '--cache', args.cache,
-                   '--compile-timeout', str(args.compile_timeout), '--route', route]
+                   '--compile-timeout', str(args.compile_timeout), '--route', route,
+                   '--host-optimization', str(args.host_optimization), '--host-granularity', args.host_granularity]
         if args.standard_bindings:
             command.append('--standard-bindings')
         # The builder enforces 120 seconds separately on EVERY sequential child;
@@ -251,11 +258,24 @@ def main():
         if (receipt.get('schema') != 'bl.native.direct-unit-build' or receipt.get('status') != 'built-not-executed'
                 or receipt.get('compiler_run') is not False or receipt.get('route') != route
                 or receipt.get('standard_bindings') != args.standard_bindings
+                or receipt.get('host_optimization') != args.host_optimization
+                or receipt.get('host_granularity') != args.host_granularity
                 or [u['name'] for u in receipt['objects']] != ['host', *[u['name'] for u in plan['units']]]):
             raise RuntimeError('not an exact built bounded direct compiler image')
         for path, expected in receipt['inputs'].items():
             bind(path, expected)
         for item in receipt['objects']:
+            expected_flags = list(receipt['c_flags'])
+            expected_llvm_flags = list(receipt['llvm_object_flags'])
+            if item['name'] == 'host':
+                expected_flags[0] = '-O' + str(args.host_optimization)
+                expected_llvm_flags[0] = '-O' + str(args.host_optimization)
+                if args.host_granularity == 'multiple':
+                    expected_flags = ['-D___MULTIPLE_HOSTS' if flag == '-D___SINGLE_HOST' else flag
+                                      for flag in expected_flags]
+            if (item.get('c_flags') != expected_flags or item.get('llvm_object_flags') != expected_llvm_flags
+                    or item.get('gsc_flags') != receipt['scheme_compiler_flags']):
+                raise RuntimeError('actual per-object host/authored compilation flags differ')
             bind(directory / (item['name'] + '.o1'), item['sha256'])
             record(item['receipt'])
             for artifact in item.get('c_artifacts', []):
