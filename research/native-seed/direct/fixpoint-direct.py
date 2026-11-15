@@ -275,6 +275,9 @@ def main():
                 or [flag for flag in receipt['llvm_object_flags'] if flag.startswith('-O')] != ['-O0']
                 or [flag for flag in receipt.get('entry_c_flags', []) if flag.startswith('-O')] != ['-O0']):
             raise RuntimeError('assembly/metadata/entry compilation must retain stock O0')
+        expected_entry_flags = [flag for flag in receipt['c_flags'] if flag != '-D___DYNAMIC'] + ['-pthread']
+        if receipt['entry_c_flags'] != expected_entry_flags:
+            raise RuntimeError('entry/metadata changed stock public ABI flags')
         for item in receipt['objects']:
             expected_flags = list(receipt['c_flags'])
             expected_llvm_flags = list(receipt['llvm_object_flags'])
@@ -294,8 +297,9 @@ def main():
             record(item['receipt'])
             physical = json.loads(Path(item['receipt']['path']).read_text())
             request = physical.get('request', {})
-            if (request.get('name') != item['name'] or request.get('route') != route
-                    or request.get('builder') != sha(args.builder)
+            if (request.get('action-abi') != 2 or request.get('header-action-abi') != 2
+                    or request.get('name') != item['name'] or request.get('route') != route
+                    or request.get('builder') != inputs[str(args.builder)]
                     or request.get('flags') != expected_flags
                     or request.get('llvm_object_flags') != expected_llvm_flags
                     or request.get('gsc_flags') != receipt['scheme_compiler_flags']
@@ -313,6 +317,15 @@ def main():
                 record(artifact)
         bind(directory / 'compiler', receipt['executable']['sha256'])
         record(receipt['executable']['receipt'])
+        entry_physical = json.loads(Path(receipt['executable']['receipt']['path']).read_text())
+        entry_request = entry_physical.get('request', {})
+        if (entry_request.get('flags') != expected_entry_flags
+                or entry_request.get('llvm_object_flags') != receipt['llvm_object_flags']
+                or entry_request.get('gsc_flags') != receipt['scheme_compiler_flags']
+                or entry_request.get('builder') != inputs[str(args.builder)]
+                or entry_request.get('route') != route
+                or entry_physical.get('sha256') != receipt['executable']['sha256']):
+            raise RuntimeError('bound executable recipe does not prove stock O0 entry/metadata')
         for artifact in receipt['executable'].get('c_artifacts', []):
             record(artifact)
         artifacts = receipt['executable'].get('llvm_artifacts', [])
@@ -445,6 +458,11 @@ def main():
                 'compared_before_stage3_build': True, 'semantic_identity': stage3['semantic_identity']}
             save()
             plans[route]['stage3'] = build(directories['stage3'], route, route + '-build-stage3')
+            results[route]['stage3'] = source_gates(directories['stage3'], route + '-stage3', proof_bundle)
+            for corpus in ('source', 'forwarding'):
+                if results[route]['stage2'][corpus]['visible_output'] != results[route]['stage3'][corpus]['visible_output']:
+                    raise RuntimeError('native stage3 differs on original Source corpus: ' + corpus)
+            save()
             actor_evidence = route_out / 'actors'
             run(route + '-stage2-stage3-original-actors', [sys.executable, args.actor_qualifier,
                 '--actors', args.actors, '--stage', 'stage2=' + str(directories['stage2']),

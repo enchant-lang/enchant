@@ -104,7 +104,13 @@ def main():
         'deadline_seconds': 120, 'timeout': timed, 'exit': process.returncode,
         'seconds': round(time.monotonic() - start, 3), 'argv': argv, 'inputs': inputs,
         'inputs_unchanged': unchanged, 'cleanup': cleanup, 'source_or_anf_interpreter': False,
-        'sdk_launched': False, 'route': build['route'], 'dynamic_witnesses': len(rows),
+        'sdk_launched': False, 'route': build['route'],
+        'compilation': {'unit_optimization': build.get('unit_optimization', 0),
+                        'host_optimization': build.get('host_optimization', 0),
+                        'host_granularity': build.get('host_granularity', 'single'),
+                        'entry_c_flags': build.get('entry_c_flags'),
+                        'c_flags_scope': build.get('c_flags_scope')},
+        'dynamic_witnesses': len(rows),
         'last_dynamic_witness': rows[-1] if rows else None, 'witness_valid': bool(witness_valid),
         'log': {'path': str(log), 'sha256': sha(log)}, 'original_bundle_suffix_byte_equal': True}
     (out / 'observation.json').write_text(json.dumps(report, indent=2) + '\n')
