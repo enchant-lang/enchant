@@ -1,0 +1,55 @@
+; SDK-only exact Source values for artifact replay. No original namespace is
+; loaded or published; compiler/runtime actors keep their captured ANF bodies.
+(ns native.artifact-capsules
+ (:require [js.build :as build] [reader-node :as rn]
+           [native.scheme :as scheme] [clojure.string :as string]))
+(defn sha [text] (Base/encode16 (crypto/hash :sha256 text) (list (tuple :case :lower))))
+(defn definitions [path]
+ (let [source (File/read! path)]
+  {:path path :sha256 (sha source)
+   :definitions (build/definition-values (BeamLisp.Ns.Reader/read source {:file path}))}))
+(defn member! [capture name kind]
+ (let [found (vec (filter #(= name (:name %)) (:definitions capture)))]
+  (when-not (and (= 1 (count found)) (= kind (:kind (first found))))
+   (throw (ex-info "native artifact capsule: exact original member is absent"
+           {:path (:path capture) :name name :kind kind})))
+  (first found)))
+(defn anonymous-value [form namespace path aliases]
+ (BeamLisp.Env/isolated
+  (fn []
+   (BeamLisp.Env/mark_loaded namespace)
+   (doseq [[alias owner] aliases] (BeamLisp.Env/add_alias namespace alias owner))
+   (BeamLisp.Compiler/eval_form form
+    (assoc (BeamLisp.Compiler/new_env namespace) :file path :target :beam)))))
+(defn capture-host-names []
+ (let [capture (definitions "priv/lib/js/actor.bl")
+       form (:form (member! capture "host-names" :val))
+       raw (rn/node-form form)]
+  ; Admit ONLY the original literal set of strings, never an initializer.
+  (when-not (and (= :set (rn/node-tag raw))
+                (every? #(string? (rn/node-form %)) (rn/node-items raw)))
+   (throw (ex-info "native artifact capsule: host-names must remain literal strings" {})))
+  (let [value (anonymous-value form "native.actor-host-constant" (:path capture) [])]
+   (when-not (and (set? value) (every? string? value))
+    (throw (ex-info "native artifact capsule: host-name value is not a string set" {})))
+   {:value value :record (assoc (select-keys capture [:path :sha256])
+      :members ["host-names"] :evaluation :canonical-literal-eval
+      :namespace-publication false :top-level-effects false)})))
+(defn capture-proc-formatters []
+ (let [capture (definitions "research/native-seed/src/native/proc-link.bl")
+       digest (:form (member! capture "digest" :fn))
+       identity (:form (member! capture "source-identity" :fn))
+       module-source (:form (member! capture "module-source" :fn))
+       bindings (rn/->tuple [:vector (list (rn/sym-node "digest") digest)])
+       values (rn/->tuple [:vector (list identity module-source)])
+       form (rn/list-node (list (rn/sym-node "let") bindings values))
+       value (anonymous-value form "native.proc-link" (:path capture)
+                [["scheme" "native.scheme"] ["string" "clojure.string"]])]
+  (when-not (and (vector? value) (= 2 (count value))
+                (every? #(erlang/is_function % 1) value))
+   (throw (ex-info "native artifact capsule: original formatter arities changed" {})))
+  {:source-identity (nth value 0) :module-source (nth value 1)
+   :record (assoc (select-keys capture [:path :sha256])
+     :members ["digest" "source-identity" "module-source"]
+     :evaluation :canonical-anonymous-eval :logical-namespace "native.proc-link"
+     :namespace-publication false :top-level-effects false)}))

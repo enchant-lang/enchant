@@ -201,6 +201,8 @@ def actor_plan(witness, directory):
             or link['closure-manifest'] != manifest['original-link-closure-manifest']
             or link['emitted-bindings'] != manifest['emitted-bindings']):
         raise RuntimeError('C actor plan changed original Source/capture/SDK identity')
+    for record in manifest.get('producer-capsules', []):
+        witness.record(record)
     for record in original['inputs']:
         witness.record(record)
     for record in (link['links'], link['host-link'], *link['host-extensions']):
