@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--compiler-dir', type=Path, required=True)
 parser.add_argument('--out', type=Path, required=True)
 parser.add_argument('--large', type=int, default=100000)
+parser.add_argument('--observer', type=Path, default=Path(__file__).with_name('check-tail.scm'))
 args = parser.parse_args()
 directory, output = args.compiler_dir.resolve(), args.out.resolve()
 if output.exists() or not 2000 < args.large <= 1000000:
@@ -28,7 +29,7 @@ if sha(host) != 'd00c0c75a33cc4afc90315620d3039c48ed31464fdc0c32e5ac2841aa9d1ab8
     raise RuntimeError('probe requires the exact original qualified host')
 if sha(source) != build['source_sha256'] or sha(image) != build['executable_sha256']:
     raise RuntimeError('qualified host compiler source/image differs from the receipt')
-template = Path(__file__).with_name('check-tail.scm')
+template = args.observer.resolve()
 prefix = template.read_text().replace('@LARGE@', str(args.large)).encode()
 original = bundle.read_bytes()
 output.parent.mkdir(parents=True, exist_ok=True)

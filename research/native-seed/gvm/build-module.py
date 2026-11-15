@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -28,7 +29,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path)
     parser.add_argument("out", type=Path)
+    parser.add_argument("--name", default="module", help="unique owned native module basename")
     args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,100}", args.name):
+        parser.error("module basename must be a bounded identifier")
     data, out = args.data.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "llvm").mkdir(exist_ok=True)
@@ -36,13 +40,14 @@ def main():
     gambit = Path(tools["gambit"])
     clang = str(Path(tools["clang"]) / "bin/clang")
     importer, reader = BASE / "gvm/import.scm", BASE / "gvm/reader-check.scm"
-    c, obj = out / "module.c", out / "module.o1"
-    ir, llvm_obj = out / "llvm/module.ll", out / "llvm/module.o1"
+    c, obj = out / (args.name + ".c"), out / (args.name + ".o1")
+    ir, llvm_obj = out / ("llvm/" + args.name + ".ll"), out / ("llvm/" + args.name + ".o1")
     receipt = {"schema": "bl.native.gvm-module-build", "version": 1,
                "status": "building", "qualification": False,
                "inputs": {str(p): digest(p) for p in
                           (Path(__file__), data, importer, reader, BASE / "toolchain-pin.json")},
                "tools": tools, "flags": FLAGS, "child_deadline_seconds": 120,
+               "module_linker_name": obj.name,
                "jobs": []}
 
     def save():
@@ -69,7 +74,7 @@ def main():
     q = json.dumps  # Paths are Scheme string literals, never shell source.
     expression = ("(with-exception-catcher (lambda(e)(display-exception e)(exit 1)) "
                   "(lambda() (load " + q(str(importer)) + ") (load " + q(str(reader)) + ") "
-                  "(gvm-import-main " + q(str(data)) + " " + q(str(c)) + ' "module.o1") (exit 0)))')
+                  "(gvm-import-main " + q(str(data)) + " " + q(str(c)) + " " + q(obj.name) + ") (exit 0)))")
     env = dict(os.environ, BL_GVM_READ_PROBE_DIR=str(out))
     try:
         run("import", [str(gambit / "bin/gsc"), "-e", expression], env)
