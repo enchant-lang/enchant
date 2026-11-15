@@ -2,7 +2,7 @@
 ; Source freshness, phase identity and reuse stay with those existing owners.
 (ns native.aot-target
  (:require [unit-store :as store] [artifact-process :as process]
-           [native.aot-scheme :as emitter] [bl.json :as json]))
+           [native.aot-scheme :as emitter] [native.specialization :as specialization] [bl.json :as json]))
 
 (defn sha [bytes]
  (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
@@ -50,7 +50,10 @@
  "Fixed Scheme emitter + object transport. The caller runs under its existing
   bounded artifact service. This creates no workspace, cache or session owner."
  [options]
- (let [prototype (Path/expand (:prototype options))
+ (let [mode (get options :emission-mode :reference)
+       _ (when-not (contains? specialization/modes mode)
+           (throw (ex-info "Unsupported native emission mode" {:mode mode})))
+       prototype (Path/expand (:prototype options))
        sdk (System/fetch_env! "BL_SDK_PRODUCT")
        options (assoc options :prototype prototype)
        request {"schema" "bl.native.scheme-tool-request" "version" 1
@@ -96,9 +99,9 @@
            (throw (ex-info "Scheme target requires the exact retained host ABI ledger" {})))
        ; This exact qualified compiler host predates the optional Source-frame
        ; addon. Keep original ANF attribution without emitting unavailable ABI.
-       emit-options {:source-frames? false :external-mfas external}
+       emit-options {:source-frames? false :external-mfas external :emission-mode mode}
        target-identity {"kind" "bl-aot-gambit-c" "version" 1 "tools" identity
-                        "source_frames" false "external_mfas" (to-list (sort external))}
+                        "source_frames" false "emission_mode" (name mode) "external_mfas" (to-list (sort external))}
        target-identity (if (seq dependencies) (assoc target-identity "dependencies" (to-list dependencies)) target-identity)]
   {:identity target-identity
    :emit! (fn [prepared directory selection]
@@ -108,7 +111,9 @@
           source (Path/join directory "unit.scm")
           exports (json/encode {:exports (:exports emitted) :initializer (:initializer emitted)
                                  :namespaces (:namespaces emitted) :unit-id (:unit-id emitted)
-                                 :provided-mfas (:provided-mfas emitted)})]
+                                 :provided-mfas (:provided-mfas emitted)
+                                 :emission-mode (:emission-mode emitted) :emission-counts (:emission-counts emitted)
+                                 :primitive-check (:primitive-check emitted) :primitive-mfas (:primitive-mfas emitted)})]
      (File/write! source (:scheme emitted))
      (File/write! (Path/join directory "exports.json") exports)
      (invoke-tool! options "build"

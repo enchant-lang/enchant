@@ -2,7 +2,7 @@
 ; AOT/unit-store own preparation, freshness, cache and runtime admission.
 (ns native.aot-scheme
  (:require [native.scheme :as scheme] [native.eval :as ev]
-           [native.bootstrap :as bootstrap] [clojure.string :as string]))
+           [native.bootstrap :as bootstrap] [native.specialization :as specialization] [clojure.string :as string]))
 
 (defn- refuse! [kind data]
  (throw (ex-info "Scheme AOT target refused an unsupported prepared unit" (assoc data :kind kind))))
@@ -85,6 +85,8 @@
 (defn- emission-context [namespace physical allowed options]
  (let [base (ev/context namespace)]
   (assoc base :source-frames? (= true (:source-frames? options))
+   :specialize-v1? (= :specialize-v1 (:emission-mode options))
+   :emission-counts (:emission-counts options)
    :remote-resolver
    (fn [node]
     (let [args (:args node) key (mfa (:mod node) (:fun node) (count args))
@@ -100,7 +102,12 @@
       (do
        (when-not (contains? allowed key)
         (refuse! :unresolved-native-mfa {:mfa key :namespace namespace :ann (:ann node)}))
-       ((:remote-resolver base) node))))))))
+       (if (and (= :specialize-v1 (:emission-mode options)) (contains? specialization/primitives key))
+        (let [alias (scheme/ident (str "aot/" (:unit-id options) "/primitive/" key))]
+         (swap! (:primitive-bindings options) assoc key alias)
+         (swap! (:emission-counts options) update :direct-primitive-calls (fnil inc 0))
+         alias)
+        ((:remote-resolver base) node)))))))))
 (defn- emit-operations [nodes context]
  (string/join "\n" (Enum/map nodes #(scheme/emit % context))))
 (defn- install-modules [unit aliases namespace-module]
@@ -124,7 +131,12 @@
   :initializer once; neither this adapter nor its artifact grants admission."
  [prepared options]
  (BeamLisp.AOT/check_prepared_unit! prepared)
- (let [id (:unit-id options) external (get options :external-mfas #{})
+ (let [mode (get options :emission-mode :reference)
+       _ (when-not (and (contains? specialization/modes mode)
+                         (not (and (= mode :specialize-v1) (:source-frames? options))))
+           (refuse! :emission-mode {:mode mode}))
+       options (assoc options :emission-mode mode :primitive-bindings (atom {}) :emission-counts (atom {}))
+       id (:unit-id options) external (get options :external-mfas #{})
        _ (when-not (and (string? id) (not (empty? id)) (<= (count id) 128)
                         (set? external) (every? string? external))
            (refuse! :target-options {:required [:unit-id :external-mfas]}))
@@ -167,11 +179,20 @@
            (publish-callables unit (nth exports-by-unit index)) "\n"
            (string/join "\n" (Enum/map (:initializers unit) #(emit-operations (:operations %) context))) "\n"
            "(native-declare-ns " (scheme/text (:namespace unit)) "))")))))
-       source (str ";; Canonical AOT Source ANF -> native.scheme; host-free compiled module.\n"
+       primitive-bindings @(:primitive-bindings options)
+       primitive-check (scheme/ident (str "aot/" id "/primitive-check"))
+       prefix (str (string/join "\n" (map (fn [[key alias]]
+                       (str "(define " alias " (native-leaf " (scheme/text key) "))")) (sort-by first primitive-bindings)))
+                "\n(define (" primitive-check ") (and #t "
+                (string/join " " (map (fn [[key alias]]
+                  (str "(and (procedure? " alias ") (eq? " alias " (native-leaf " (scheme/text key) ")))")) (sort-by first primitive-bindings))) "))\n")
+       source (str prefix ";; Canonical AOT Source ANF -> native.scheme; host-free compiled module.\n"
                 procedures "\n" (string/join "\n" (map #(str "(define " (:scheme-global %) " bl-nil)") exports))
                 "\n(define " initializer " (bl-register-callable! (lambda ()\n" bodies "\n(bl-key \"ok\")) 0))\n")]
   (BeamLisp.AOT/check_prepared_unit! prepared)
   {:schema "bl.native.aot-scheme-emission" :version 1 :scheme source :unit-id id
-   :initializer initializer :exports exports :namespaces (mapv :namespace units)
+   :initializer initializer :exports exports :emission-mode mode
+   :primitive-check primitive-check :primitive-mfas (vec (sort (keys primitive-bindings)))
+   :emission-counts @(:emission-counts options) :namespaces (mapv :namespace units)
    :provided-mfas (vec (sort provided)) :source-interpreter false :anf-interpreter false
    :runtime-admission false :initializer-invoked false}))

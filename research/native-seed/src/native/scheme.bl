@@ -105,22 +105,68 @@
   :pstruct (mapcat #(binders (second %)) (:fields p))
   []))
 
+(defn- direct-pattern? [p]
+ (case (:pop p)
+  :pvar true :plit true :pnil true
+  :ptuple (every? direct-pattern? (:elems p))
+  :pcons (and (direct-pattern? (:head p)) (direct-pattern? (:tail p)))
+  :palias (and (direct-pattern? (:a p)) (direct-pattern? (:b p)))
+  false))
+
+; A continuation carries lexical bindings at EMISSION time. No pattern data,
+; runtime binding alist, or variable-name lookup is emitted for this subset.
+(declare direct-pattern)
+(defn- direct-patterns [patterns subjects bound success failure]
+ (if (empty? patterns) (success bound)
+  (direct-pattern (first patterns) (first subjects) bound
+   (fn [next-bound] (direct-patterns (rest patterns) (rest subjects) next-bound success failure)) failure)))
+(defn- direct-pattern [p subject bound success failure]
+ (case (:pop p)
+  :pvar (let [name (:name p) local (ident name)]
+          (if (and (not= name "_") (contains? bound name))
+           (str "(if (bl-key-equal? " (get bound name) " " subject ") " (success bound) " " failure ")")
+           (str "(let ((" local " " subject ")) " (success (assoc bound name local)) ")")))
+  :plit (str "(if (bl-key-equal? " (literal (:val p)) " " subject ") " (success bound) " " failure ")")
+  :pnil (str "(if (null? " subject ") " (success bound) " " failure ")")
+  :pcons (str "(if (pair? " subject ") "
+           (direct-pattern (:head p) (str "(car " subject ")") bound
+            (fn [next-bound] (direct-pattern (:tail p) (str "(cdr " subject ")") next-bound success failure)) failure)
+           " " failure ")")
+  :palias (direct-pattern (:a p) subject bound
+            (fn [next-bound] (direct-pattern (:b p) subject next-bound success failure)) failure)
+  :ptuple (let [items (:elems p) storage (str "(vector-ref " subject " 1)")]
+            (str "(if (and (bl-tag? " subject " 'tuple) (= (vector-length " storage ") " (count items) ")) "
+             (direct-patterns items (mapv #(str "(vector-ref " storage " " % ")") (range (count items))) bound success failure)
+             " " failure ")"))))
+(defn- direct-arguments [patterns argv bound success failure]
+ (if (empty? patterns)
+  (str "(if (null? " argv ") " (success bound) " " failure ")")
+  (str "(if (pair? " argv ") "
+   (direct-pattern (first patterns) (str "(car " argv ")") bound
+    (fn [next-bound] (direct-arguments (rest patterns) (str "(cdr " argv ")") next-bound success failure)) failure)
+   " " failure ")")))
+
 (defn clauses [cs argv fallback options wrap?]
  (if (empty? cs) fallback
   (let [cl (first cs) more (clauses (rest cs) argv fallback options wrap?)
         ; Pattern and guard failure share ONE suspended suffix. Duplicating
         ; `more` at both sites grows exponentially across guarded clauses.
         ; Source locals are ident-encoded v_*; this host local cannot capture one.
-        next (if (:guard cl) "(clause-next)" more)
+        next (if (or (:specialize-v1? options) (:guard cl)) "(clause-next)" more)
         names (distinct (mapcat binders (:pats cl)))
         body (emit (:body cl) options)
         body (if wrap? (str "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
         body (if (:guard cl) (str "(if (bl-guard (lambda () " (emit (:guard cl) (assoc (operand-options options) :source-frames? false)) ")) " body " " next ")") body)
-        arm (str "(let ((bindings (bl-match-args (list "
+        direct? (and (:specialize-v1? options) (every? direct-pattern? (:pats cl)))
+        _ (when-let [counts (:emission-counts options)]
+            (swap! counts update (if direct? :compiled-pattern-clauses :generic-pattern-clauses) (fnil inc 0)))
+        arm (if direct?
+              (direct-arguments (:pats cl) argv {} (fn [_] body) next)
+              (str "(let ((bindings (bl-match-args (list "
         (string/join " " (map #(pattern % options) (:pats cl))) ") " argv " '()))) "
         "(if bindings (let (" (string/join " " (map (fn [s] (str "(" (ident s) " (cdr (assoc " (text s) " bindings)))")) names))
-        ") " body ") " next "))")]
-   (if (:guard cl) (str "(let ((clause-next (lambda () " more "))) " arm ")") arm))))
+        ") " body ") " next "))"))]
+   (if (or (:specialize-v1? options) (:guard cl)) (str "(let ((clause-next (lambda () " more "))) " arm ")") arm))))
 
 (defn- function-entry [body frame]
  (if frame
