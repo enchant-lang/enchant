@@ -44,7 +44,7 @@ def main():
                        "fixtures/c-critical-continuations-check.scm", "fixtures/c-raw-source-trace-check.scm",
                        "fixtures/c-source-tail-check.scm", "fixtures/c-tail-frame-reuse-check.scm",
                        "direct/direct-shared-raw.scm", "direct/direct-remote.scm", "direct/direct-make-fun.scm",
-                       "fixtures/c-plain-procedure-check.scm"]
+                       "fixtures/c-plain-procedure-check.scm", "fixtures/c-remote-target-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -104,11 +104,13 @@ def main():
         + (BASE / "direct/direct-shared-raw.scm").read_text() + "\n"
         + (BASE / "direct/direct-remote.scm").read_text() + "\n"
         + (BASE / "direct/direct-make-fun.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-plain-procedure-check.scm").read_text())
+        + (BASE / "fixtures/c-plain-procedure-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-remote-target-check.scm").read_text())
     control = run("direct-control-abi", [GAMBIT / "bin/gsi", "direct-control.scm"], timeout=20)
     for marker in ("NATIVE_C_CRITICAL_BOUNDARIES_PASS 10", "NATIVE_C_CRITICAL_CONTINUATIONS_PASS 18",
                    "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6", "NATIVE_C_SOURCE_TAIL_ABI_PASS 23",
-                   "NATIVE_C_TAIL_FRAME_REUSE_ABI_PASS 49", "NATIVE_C_PLAIN_PROCEDURE_ABI_PASS 39"):
+                   "NATIVE_C_TAIL_FRAME_REUSE_ABI_PASS 49", "NATIVE_C_PLAIN_PROCEDURE_ABI_PASS 39",
+                   "NATIVE_C_REMOTE_TARGET_ABI_PASS 105"):
         assert marker in control, control
     (out / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
                                     + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
