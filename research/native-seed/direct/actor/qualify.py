@@ -108,6 +108,12 @@ def main():
             witness.record(row['receipt'])
         for path, expected in build['inputs'].items():
             witness.bind(path, expected)
+        # actor_plan admitted the C-only manifest and no-Scheme guard; this
+        # builder's exact bound code supports pinned Clang C units only.
+        # Completion still requires every unchanged original Source assertion.
+        report.update(backend=actor['manifest']['backend'],
+                      authored_scheme_fallback=actor['manifest']['scheme-body-fallback'],
+                      actor_unit_route='c')
         tools_path = base / 'toolchain-pin.json'
         witness.bind(tools_path)
         tools = json.loads(tools_path.read_text())
