@@ -1,0 +1,121 @@
+; One Source packager for SDK capture and native self-emission. Program control
+; belongs to native.gvm-lower; this file orders bounded units and records bytes.
+(ns native.gvm-units
+ (:require [native.gvm-lower :as gvm] [native.gvm-eval :as eval]
+           [native.eval :as ev] [native.bootstrap :as bootstrap]
+           [native.scheme :as scalar] [clojure.string :as string]))
+(def group-size 32)
+(defn unit-name [index]
+ (when (>= index 10000) (throw (ex-info "GVM unit index exceeds the naming bound" {})))
+ (loop [digits (str index)]
+  (if (< (count digits) 4) (recur (str "0" digits)) (str "u" digits))))
+(defn unit-definitions [unit]
+ (BeamLisp.CompilerData/eager_map
+  (fn [definition]
+   (let [definition (assoc definition :ns (:ns unit) :path (:path unit))]
+    (if (= :fn (:kind definition))
+     (let [shape (bootstrap/declaration-arities (:form definition))]
+      (assoc definition :arities (:fixed shape) :variadic-min (:variadic shape)))
+     definition))) (:defs unit)))
+(defn phases [units]
+ (list
+  {:phase "functions"
+   :definitions (BeamLisp.CompilerData/eager_mapcat
+    (fn [unit] (BeamLisp.CompilerData/eager_filter #(= :fn (:kind %)) (unit-definitions unit))) units)}
+  {:phase "initializers"
+   :definitions (BeamLisp.CompilerData/eager_mapcat
+    (fn [unit]
+     (erlang/++
+      (if (= "core" (:ns unit))
+       (list {:ns "core" :path (:path unit) :name nil :kind :expr
+              :node {:op :apply :fn {:op :global :ns "rt" :name "seed-core"} :args []}})
+       (list))
+      (BeamLisp.CompilerData/eager_filter #(not= :fn (:kind %)) (unit-definitions unit)))) units)}))
+(defn next-group [definitions]
+ (loop [left group-size todo definitions out (list)]
+  (if (or (= left 0) (erlang/== todo (list))) [(lists/reverse out) todo]
+   (recur (dec left) (erlang/tl todo) (cons (erlang/hd todo) out)))))
+(defn tab-row [fields] (str (string/join "\t" fields) "\n"))
+(defn definition-record [definition]
+ {:namespace (:ns definition) :name (:name definition) :kind (:kind definition)
+  :private? (boolean (:private? definition)) :arities (:arities definition)
+  :variadic-min (:variadic-min definition)})
+(defn emit-group! [definitions phase index io out]
+ (let [name (unit-name index) module (str "native_gvm_" name)
+       emitted (gvm/emit-definitions definitions
+                 (assoc (eval/options (ev/context "user")) :unit-name module :module module))
+       manifest (:manifest emitted) source (:data-source emitted)
+       _ (when-not (and (= module (:module manifest)) (= 1 (:runtime-abi manifest)) (string? source))
+           (throw (ex-info "GVM emitter returned an incompatible native unit" {:module module})))
+       data-file (str name ".gvm-data") manifest-file (str name ".manifest.scm")
+       manifest-source (bootstrap/data manifest) digest (:digest io) write (:write io)
+       records (mapv definition-record definitions)
+       record {:name name :module module :phase phase :definition-count (count records)
+               :definitions records :data {:path data-file :sha256 (digest source)}
+               :manifest {:path manifest-file :sha256 (digest manifest-source)}
+               :object (str module ".o1") :emission manifest}]
+  (write (str out "/" data-file) source)
+  (write (str out "/" manifest-file) manifest-source)
+  {:record record
+   :index (tab-row ["U" phase name module data-file (:sha256 (:data record))
+                    manifest-file (:sha256 (:manifest record)) (str (:definition-count record))
+                    (digest (bootstrap/data records))])}))
+(defn emit-groups! [units io out]
+ (loop [phases (phases units) todo (list) phase nil index 0 records [] rows []]
+  (cond
+   (not (erlang/== todo (list)))
+    (let [[group more] (next-group todo) emitted (emit-group! group phase index io out)]
+     (recur phases more phase (inc index) (conj records (:record emitted)) (conj rows (:index emitted))))
+   (not (erlang/== phases (list)))
+    (let [next (erlang/hd phases)]
+     (recur (erlang/tl phases) (:definitions next) (:phase next) index records rows))
+   :else {:units records :rows rows})))
+(defn assembly-source [metadata-source units entry-source]
+ (str ";; Native GVM compiler: only owned metadata, loading, and command entry.\n"
+  "(define native-gvm-unit-root (getenv \"BL_NATIVE_GVM_UNIT_ROOT\" #f))\n"
+  "(if (not native-gvm-unit-root) (error \"BL_NATIVE_GVM_UNIT_ROOT is required\"))\n"
+  "(load (string-append native-gvm-unit-root \"/host.o1\"))\n"
+  "(native-gvm-require-runtime-abi! 1)\n"
+  "(native-install-bundle! " metadata-source ")\n"
+  (string/join "" (map (fn [unit]
+   (str "(native-gvm-load-unit (string-append native-gvm-unit-root "
+        (scalar/text (str "/" (:object unit))) ") " (bootstrap/data (:emission unit)) ")\n")) units))
+  entry-source))
+(defn write-plan! [units metadata-source host-source host-ledger io out entry-source]
+ (let [write (:write io) digest (:digest io)
+       _ (when-not (and (= "bl.native.gvm-host" (:schema host-ledger)) (= 1 (:version host-ledger))
+                       (= 1 (:runtime-abi host-ledger))
+                       (= (:source-sha256 host-ledger) (digest host-source)))
+           (throw (ex-info "GVM host ledger/source identity mismatch" {})))
+       _ (when-not (= entry-source "(native-main (native-command-line))\n")
+           (throw (ex-info "GVM compiler requires the exact command entry" {})))
+       _ ((:mkdir io) out)
+       _ (write (str out "/host.scm") host-source)
+       _ (write (str out "/metadata.scm") metadata-source)
+       _ (write (str out "/entry.scm") entry-source)
+       emitted (emit-groups! units io out)
+       assembly (assembly-source metadata-source (:units emitted) entry-source)
+       _ (write (str out "/assembly.scm") assembly)
+       sources (mapv (fn [unit]
+                 {:namespace (:ns unit) :path (:path unit) :sha256 (digest (:source unit))}) units)
+       core (str "BL_NATIVE_GVM_UNITS\t1\t32\nB\t1\n"
+              (tab-row ["H" "host.scm" (digest host-source) (digest (bootstrap/data host-ledger))])
+              (tab-row ["M" "metadata.scm" (digest metadata-source)])
+              (tab-row ["E" "entry.scm" (digest entry-source)])
+              (tab-row ["A" "assembly.scm" (digest assembly)])
+              (string/join "" (map-indexed (fn [index source]
+                (tab-row ["S" (str index) (:sha256 source)
+                 (digest (bootstrap/data [(:namespace source) (:path source)]))])) sources))
+              (string/join "" (:rows emitted)))
+       manifest {:schema "bl.native.gvm-compiler-units" :version 1 :runtime-abi 1
+                 :status :emitted-not-executed :group-size group-size :host host-ledger :sources sources
+                 :metadata-sha256 (digest metadata-source) :entry-source entry-source
+                 :index-core-sha256 (digest core) :assembly-sha256 (digest assembly)
+                 :load-order (vec (concat ["host.o1" "bundle-metadata-once"]
+                                   (map :object (:units emitted)) ["entry"]))
+                 :units (:units emitted) :source-interpreter false :authored-scheme-bodies false
+                 :gvm-interpreter false :c-lambda-stepper false :independent-runtime false}
+       manifest-source (bootstrap/data manifest)]
+  (write (str out "/plan.manifest.scm") manifest-source)
+  (write (str out "/index.tsv") (str core (tab-row ["P" "plan.manifest.scm" (digest manifest-source)])))
+  manifest))
