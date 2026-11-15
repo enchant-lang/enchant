@@ -1,9 +1,9 @@
-;; Load the compiled module passed as this driver's first argument.
+;; Load the explicit compiled module path from the bounded test environment.
 ;; This observer implements no authored program body or VM instruction.
 (with-exception-catcher
  (lambda (failure) (display-exception failure) (exit 1))
  (lambda ()
-  (load (car (reverse (command-line))))
+  (load (or (getenv "BL_GVM_PROBE_MODULE" #f) (error "missing explicit GVM probe module")))
   (let ((value (eval 'native-gvm-pilot/value)))
    (if (not (procedure? value)) (error "GVM export is not a native procedure"))
    (if (not (= (value) 42)) (error "GVM constant result differs"))
