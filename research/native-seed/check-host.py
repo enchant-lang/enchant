@@ -122,7 +122,7 @@ def main():
                    "NATIVE_C_TAIL_FRAME_REUSE_ABI_PASS 49", "NATIVE_C_PLAIN_PROCEDURE_ABI_PASS 39",
                    "NATIVE_C_REMOTE_TARGET_ABI_PASS 105", "NATIVE_C_LATE_HOST_SERVICE_ABI_PASS 32",
                    "NATIVE_C_CALL_SLOTS_ABI_PASS 29", "NATIVE_C_NOACTOR_TICK_ABI_PASS 54",
-                   "NATIVE_C_PURE_BIF_GUARDS_PASS 21", "NATIVE_C_FIXED_SOURCE_KEYS_PASS 20"):
+                   "NATIVE_C_PURE_BIF_GUARDS_PASS 25", "NATIVE_C_FIXED_SOURCE_KEYS_PASS 20"):
         assert marker in control, control
     (out / "native-direct.h").write_bytes((BASE / "direct/native-direct.h").read_bytes())
     (out / "posix.scm").write_text(common + "\n"

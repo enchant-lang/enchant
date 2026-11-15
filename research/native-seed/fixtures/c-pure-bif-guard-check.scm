@@ -45,7 +45,11 @@
           (list bl-is-nil (lambda (f) (set! bl-is-nil f)))
           (list bl-get (lambda (f) (set! bl-get f)))
           (list bl-key (lambda (f) (set! bl-key f)))
-          (list bl-truthy (lambda (f) (set! bl-truthy f)))))
+          (list bl-truthy (lambda (f) (set! bl-truthy f)))
+          (list native-key-intern (lambda (f) (set! native-key-intern f)))
+          (list native-scalar-keyword-intern (lambda (f) (set! native-scalar-keyword-intern f)))
+          (list native-utf16-fragment? (lambda (f) (set! native-utf16-fragment? f)))
+          (list bl-tag? (lambda (f) (set! bl-tag? f)))))
    (let ((original bl-key-compare))
     (dynamic-wind
      (lambda () (set! bl-key-compare (lambda (a b) (original a b))))
