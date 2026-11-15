@@ -51,7 +51,13 @@
  ;; Service tables contain inert references, including calls guarded by the
  ;; canonical Source's false function_exported probe. Reject excluded MFAs
  ;; only when native-c-remote-target resolves an ACTUAL invocation below.
- (if (member key native-excluded-host-leaves) (native-c-parse-remote key)
+ ;; host/ is the dynamically replaceable loader/IO/backend control plane.
+ ;; AOT service tables must retain a live descriptor even when a host leaf is
+ ;; already installed. Other existing raw BIF leaves keep their early binding.
+ (if (or (member key native-excluded-host-leaves)
+         (and (string? key) (>= (string-length key) 5)
+              (string=? (substring key 0 5) "host/")))
+  (native-c-parse-remote key)
   (let ((leaf (native-leaf key)))
    (if (eq? leaf native-missing) (native-c-parse-remote key) leaf))))
 ;; Cache only successful publication reads. Registry maps and the exclusion
