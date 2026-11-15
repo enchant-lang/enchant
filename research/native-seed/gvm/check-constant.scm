@@ -3,7 +3,7 @@
 (with-exception-catcher
  (lambda (failure) (display-exception failure) (exit 1))
  (lambda ()
-  (load (cadr (command-line)))
+  (load (car (reverse (command-line))))
   (let ((value (eval 'native-gvm-pilot/value)))
    (if (not (procedure? value)) (error "GVM export is not a native procedure"))
    (if (not (= (value) 42)) (error "GVM constant result differs"))
