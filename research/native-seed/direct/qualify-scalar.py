@@ -134,7 +134,8 @@ def main() -> int:
             '(display "NATIVE_DIRECT_FAST_PATHS {\\\"ticks\\\":")\n'
             '(display native-c-noactor-ticks-elided)\n'
             '(display ",\\\"seen\\\":") (display native-c-pure-bif-seen)\n'
-            '(display ",\\\"steps\\\":") (display native-c-pure-bif-steps) (display "}\\n")\n')
+            '(display ",\\\"steps\\\":") (display native-c-pure-bif-steps)\n'
+            '(display ",\\\"closures\\\":") (display native-c-direct-closure-hits) (display "}\\n")\n')
         derived_drivers.append(driver)
         output = run(label, [str(gambit / "bin/gsi"), str(driver)], args.run_timeout,
                      interval, enabled)
@@ -143,9 +144,10 @@ def main() -> int:
             raise RuntimeError(label + " lacks actual fast-path witnesses")
         witness = json.loads(encoded)
         if enabled and not interval:
-            if witness.get("ticks", 0) <= 0 or witness.get("seen") != 23 or witness.get("steps", 0) <= 0:
-                raise RuntimeError(label + " did not execute all four guarded BIFs and tick elision")
-        elif witness != {"ticks": 0, "seen": 0, "steps": 0}:
+            if (witness.get("ticks", 0) <= 0 or witness.get("seen") != 23
+                    or witness.get("steps", 0) <= 0 or witness.get("closures", 0) <= 0):
+                raise RuntimeError(label + " did not execute all guarded BIF, tick and C closure paths")
+        elif witness != {"ticks": 0, "seen": 0, "steps": 0, "closures": 0}:
             raise RuntimeError(label + " failed to retain the original path when disabled or under GC stress")
         fast_witnesses[label] = witness
         return body
