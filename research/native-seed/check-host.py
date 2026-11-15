@@ -27,7 +27,9 @@ def main():
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
                        "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
                        "fixtures/host-compiler-cache-check.scm", "fixtures/host-global-cache-check.scm",
-                       "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm", "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm"]
+                       "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm", "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm", "direct/direct-machine.scm",
+                       "direct/direct-control-frames.scm", "fixtures/c-critical-boundaries-check.scm",
+                       "fixtures/c-critical-continuations-check.scm", "fixtures/c-raw-source-trace-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -74,6 +76,17 @@ def main():
     assert "native compiler-cache checks: 56" in frames, frames
     assert "native global-cache checks: 32" in frames, frames
     assert "native source-frame checks passed" in frames, frames
+    (OUT / "direct-control.scm").write_text(common + "\n"
+        + (BASE / "host/host-compiler.scm").read_text() + "\n"
+        + (BASE / "direct/direct-machine.scm").read_text() + "\n"
+        + (BASE / "direct/direct-control-frames.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-critical-boundaries-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-critical-continuations-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-raw-source-trace-check.scm").read_text())
+    control = run("direct-control-abi", [GAMBIT / "bin/gsi", "direct-control.scm"], timeout=20)
+    for marker in ("NATIVE_C_CRITICAL_BOUNDARIES_PASS 10", "NATIVE_C_CRITICAL_CONTINUATIONS_PASS 18",
+                   "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6"):
+        assert marker in control, control
     (OUT / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
                                     + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
     run("foreign-fixture", [CLANG, "-shared", "-fPIC", BASE / "fixtures/ffi-fixture.c", "-o", "fixture.so"])
@@ -91,7 +104,7 @@ def main():
     assert hashes == {p: digest(BASE / p) for p in inputs}, "inputs changed during qualification"
     evidence.write_text(json.dumps({"status": "pass", "scope": "host fixtures; canonical BL gates remain separate",
                                     "inputs": hashes, "tools": TOOLS, "runs": runs,
-                                    "values": values, "lazy": lazy, "extra": extra, "source_frames": frames, "posix": posix}, indent=2) + "\n")
+                                    "values": values, "lazy": lazy, "extra": extra, "source_frames": frames, "direct_control": control, "posix": posix}, indent=2) + "\n")
 
 
 if __name__ == "__main__":

@@ -113,16 +113,41 @@
         (base (if (and tail? (pair? previous)) (cdr previous) previous))
         (frames (if (bl-is-nil source) base (cons source base))))
   (set! native-max-frames (max native-max-frames (length frames))) frames))
+;; Physical C continuations and Source function boundaries are distinct.
+;; Generated loop/try/receive controls are inline; they introduce no critical
+;; scope. A tail control keeps the owning function's scope alive until return.
+;; Machine slots 12/13 are the entry depth and ownership of its current scope.
+(define (native-c-source-boundary? closure)
+ (let ((source (vector-ref closure 6)))
+  (and (not (bl-is-nil source))
+       (not (bl-truthy (bl-get source (bl-key "native-control") #f))))))
+(define (native-c-unwind-critical! machine)
+ ;; A nested control driver may catch inside its owning Source function.
+ ;; Restore only genuine functions traversed by this unwind; an inline body
+ ;; that raises without leaving a Source function retains its current depth.
+ (if (vector-ref machine 13) (set! seed-critical (vector-ref machine 12)))
+ (for-each (lambda (caller)
+  (if (vector-ref caller 6) (set! seed-critical (vector-ref caller 5))))
+  (vector-ref machine 3)))
 (define (native-c-enter! machine callee args destination next tail?)
  (if (not tail?)
   (vector-set! machine 3
    (cons (vector (vector-ref machine 0) next (vector-ref machine 2) destination
-                  (vector-ref machine 10)) (vector-ref machine 3))))
+                  (vector-ref machine 10) (vector-ref machine 12)
+                  (vector-ref machine 13)) (vector-ref machine 3))))
+ (cond
+  ((native-c-source-boundary? callee)
+   ;; A genuine tail callee replaces the old entry base, exactly as JS cds.
+   (vector-set! machine 12 seed-critical) (vector-set! machine 13 #t))
+  ((not tail?)
+   ;; Non-tail controls return to a separately saved owning continuation.
+   (vector-set! machine 12 seed-critical) (vector-set! machine 13 #f)))
  (vector-set! machine 10 (native-c-source-stack callee (vector-ref machine 10) tail?))
  (vector-set! machine 0 (vector-ref callee 1))
  (vector-set! machine 1 (vector-ref callee 2))
  (vector-set! machine 2 (native-c-frame callee args)))
 (define (native-c-return! machine value)
+ (if (vector-ref machine 13) (set! seed-critical (vector-ref machine 12)))
  (if (null? (vector-ref machine 3))
   (begin (vector-set! machine 9 value) #t)
   (let ((caller (car (vector-ref machine 3))))
@@ -131,6 +156,8 @@
    (vector-set! machine 1 (vector-ref caller 1))
    (vector-set! machine 2 (vector-ref caller 2))
    (vector-set! machine 10 (vector-ref caller 4))
+   (vector-set! machine 12 (vector-ref caller 5))
+   (vector-set! machine 13 (vector-ref caller 6))
    (vector-set! (vector-ref caller 2) (vector-ref caller 3) value) #f)))
 (define native-c-fallback-invoke bl-invoke)
 (define (native-c-site-stack frames site)
@@ -179,8 +206,21 @@
 (define (native-c-invoke closure args)
  (let ((machine (vector (vector-ref closure 1) (vector-ref closure 2)
                  (native-c-frame closure args) '() bl-nil 0 0 '() #f bl-nil
-                 (native-c-source-stack closure (native-logical-frames) #f) bl-nil)))
-  (native-c-drive machine)))
+                 (native-c-source-stack closure (native-logical-frames) #f) bl-nil
+                 seed-critical (native-c-source-boundary? closure))))
+  ;; Suspension captures the machine and these bases unchanged. Only a real
+  ;; raise unwinds; do not use dynamic-wind, which would also run on parking.
+  (with-exception-catcher
+   (lambda (exception)
+    (native-c-unwind-critical! machine)
+    (if (native-raised? exception) (raise exception)
+     ;; Match bl-with-source-frame: attach the escaping raw host failure's
+     ;; CURRENT Source frames before this child driver's parameters unwind.
+     ;; Explicit class/reason/raw-trace envelopes are already complete above.
+     (parameterize ((native-logical-frames (vector-ref machine 10)))
+      (native-raise (native-exception-kind exception)
+                    (native-exception-reason exception) (native-capture-stack)))))
+   (lambda () (native-c-drive machine)))))
 (set! bl-invoke (lambda (callee args)
  (let* ((plan (native-c-resolve-call callee args)) (callee (car plan)) (args (cdr plan)))
   (if (native-c-closure? callee) (native-c-invoke callee args)
