@@ -1,0 +1,184 @@
+; SDK-only finite GVM profile capture. Reuse the qualified eighteen units;
+; compile only these nine explicit additions, preserving original macro Sources.
+; No tree inventory, old ANF inventory, namespace publication bypass or producer
+; namespace enters the self image. js.build owns all declaration/ANF staging.
+(ns native.extend-gvm-closure
+ (:require [native.artifact :as artifact] [js.build :as build] [anf] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def parent-path (or (first args) "research/native-seed/out/compiler-native-owner/partition.json"))
+(def out (or (second args) "research/native-seed/out/gvm-closure"))
+(def expected-options {:target :scheme :contextual-bindings :absent
+                       :stub ["lower"] :staging :canonical-js.build :namespace-qualified? true})
+(def original-names
+ #{"anf" "clojure.core-ext" "clojure.re" "clojure.string" "compiler" "core" "diag"
+   "host.compiler-data" "host.form-meta" "host.meta" "native.bootstrap" "native.eval"
+   "native.scheme" "reader" "reader-node" "rt" "server-clause" "sugar"})
+(def additions
+ [["system.ir" "/nix/store/br0d0abczvbv0rqivpr533a5a0jd1zxq-source/priv/lib/system/ir.bl"]
+  ["native.gvm" "research/native-seed/src/native/gvm.bl"]
+  ["native.gvm-layout" "research/native-seed/src/native/gvm-layout.bl"]
+  ["native.gvm-control" "research/native-seed/src/native/gvm-control.bl"]
+  ["native.gvm-expand" "research/native-seed/src/native/gvm-expand.bl"]
+  ["native.gvm-lower" "research/native-seed/src/native/gvm-lower.bl"]
+  ["native.gvm-eval" "research/native-seed/src/native/gvm-eval.bl"]
+  ["native.gvm-units" "research/native-seed/src/native/gvm-units.bl"]
+  ["native.gvm-bootstrap" "research/native-seed/src/native/gvm-bootstrap.bl"]])
+(def forbidden #{"native.gvm-produce" "native.extend-gvm-closure" "bl.json"})
+(def parent-text (File/read! parent-path))
+(def parent-manifest (json/decode parent-text))
+(def original (artifact/read-closure parent-path))
+(def pin (File/read! "research/native-seed/sdk-pin.json"))
+(assert (= "bl.native.compiler-closure" (:schema original)))
+(assert (= 1 (:version original)))
+(assert (= expected-options (:options original)))
+(assert (= pin (:sdk-pin original)))
+(assert (= ["lower"] (:stubs original)))
+(assert (= original-names (set (:order original))))
+(assert (= 18 (count (:order original))))
+(assert (= original-names (set (keys (:units original)))))
+(when (= (Path/expand out) (Path/expand (Path/dirname parent-path)))
+ (throw (ex-info "GVM profile must have a separate output directory" {:parent parent-path :output out})))
+(def parent-record
+ {:partition-sha256 (artifact/sha parent-text)
+  :artifact-sha256 (get parent-manifest "artifact_sha256")
+  :sdk-pin-sha256 (artifact/sha pin) :namespaces 18})
+(def macro-providers (vec (filter :macro-provider? (:provider-sources original))))
+(defn check-macro-providers! []
+ ; Check the finite already admitted macro ledger, not every file in roots.
+ (doseq [row macro-providers]
+  (when-not (= (:sha256 row) (artifact/sha (File/read! (:path row))))
+   (throw (ex-info "GVM profile requires its parent's unchanged macro providers"
+                   {:path (:path row)})))))
+(check-macro-providers!)
+
+(defn module-identity! [namespace old]
+ (let [module (BeamLisp.Link/module_for namespace) base (BeamLisp.Emit/base_module_for namespace)]
+  (when (and old (not (and (= module (:module old)) (= base (:base-module old)))))
+   (throw (ex-info "GVM profile physical namespace identity changed"
+                   {:namespace namespace :parent [(:module old) (:base-module old)] :current [module base]})))
+  [module base]))
+(defn header! [namespace path ready]
+ (let [source (File/read! path) forms (mapv first (build/read-forms+text path source))
+       header (BeamLisp.AOT/namespace_header (first forms))
+       metadata (get header namespace)
+       requires (when metadata (:require_specs metadata))]
+  (when-not (and (= 1 (count header)) metadata)
+   (throw (ex-info "GVM profile Source namespace header differs" {:namespace namespace :path path})))
+  (when (some build/defmacro? forms)
+   (throw (ex-info "GVM profile does not admit new macro providers" {:namespace namespace :path path})))
+  (doseq [request requires :let [dependency (elem request 0)]]
+   (when-not (contains? ready dependency)
+    (throw (ex-info "GVM profile requires an unadmitted or out-of-order namespace"
+                    {:namespace namespace :dependency dependency :path path}))))
+  {:source source :sha256 (artifact/sha source)}))
+(defn compile-unit! [namespace path old ready]
+ (let [before (header! namespace path ready)
+       _ (println (str "NATIVE_GVM_PROFILE_COMPILE " namespace))
+       prepared (build/prepare-ns path)
+       _ (when-not (and (= namespace (:ns prepared))
+                        (= (:sha256 before) (:source-sha256 prepared))
+                        (= (:source before) (:source prepared)))
+           (throw (ex-info "GVM profile Source changed while preparing" {:namespace namespace :path path})))
+       _ (doseq [[dependency _] (:requires prepared)]
+           (when-not (contains? ready dependency)
+            (throw (ex-info "GVM profile compiled dependency is outside the finite profile"
+                            {:namespace namespace :dependency dependency}))))
+       [module base] (module-identity! namespace old)
+       compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)
+       unit (assoc compiled :source (:source prepared) :module module :base-module base)
+       _ (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits)]
+  unit))
+(defn evaluation-bridge! [unit]
+ ; Walk ONLY this one small unit to witness the finite late host ABI. Its
+ ; Source header must retain the Scheme profile's dependencies; GVM namespaces
+ ; are selected by the GVM host, never required by native.eval itself.
+ (let [signatures
+       (loop [todo (to-list (map :node (:defs unit))) found []]
+        (if (erlang/== todo (list)) found
+         (let [node (erlang/hd todo)
+               found (if (and (= :remote (:op node)) (= :host (:mod node)))
+                       (conj found [(:fun node) (count (:args node))]) found)]
+          (recur (erlang/++ (anf/executable-children node) (erlang/tl todo)) found))))]
+  (when-not (and (= 2 (count (filter #(= [:eval-node 2] %) signatures)))
+                (not (some #(= :eval-scheme (first %)) signatures)))
+   (throw (ex-info "GVM profile requires native.eval's finite host/eval-node/2 bridge"
+                   {:signatures signatures}))))
+ unit)
+
+(def captured
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [ready (into original-names (set (:stubs original)))
+         checked
+         (reduce (fn [state namespace]
+          (let [unit (get (:units original) namespace)
+                actual (artifact/sha (File/read! (:path unit)))
+                _ (module-identity! namespace unit)
+                _ (doseq [[dependency _] (:requires unit)]
+                    (when-not (contains? ready dependency)
+                     (throw (ex-info "Scheme parent contains a dependency outside its exact profile"
+                                     {:namespace namespace :dependency dependency}))))]
+           (if (= actual (:source-sha256 unit))
+            (do (println (str "NATIVE_GVM_PROFILE_REUSED " namespace))
+                (update state :reused conj namespace))
+            (if (= namespace "native.eval")
+             (let [replacement (compile-unit! namespace (:path unit) unit ready)]
+              (-> state (assoc-in [:units namespace] replacement) (update :recompiled conj namespace)))
+             (throw (ex-info "refresh the Scheme parent before extending a changed unit"
+                             {:namespace namespace :path (:path unit)}))))))
+          {:units (:units original) :reused [] :recompiled []} (:order original))
+         _ (evaluation-bridge! (get (:units checked) "native.eval"))]
+    (reduce (fn [state [namespace path]]
+      (let [ready (into ready (:added state))
+            _ (when (or (contains? (:units state) namespace) (contains? forbidden namespace))
+                (throw (ex-info "GVM profile namespace is already present or forbidden" {:namespace namespace})))
+            unit (compile-unit! namespace path nil ready)]
+       (-> state (assoc-in [:units namespace] unit) (update :added conj namespace))))
+     (assoc checked :added []) additions)))))
+(check-macro-providers!)
+(def order (into (:order original) (:added captured)))
+(assert (= parent-text (File/read! parent-path)))
+(assert (= pin (File/read! "research/native-seed/sdk-pin.json")))
+(assert (= 27 (count order)))
+(assert (= (set order) (set (keys (:units captured)))))
+(assert (not-any? #(contains? forbidden %) order))
+(doseq [namespace order :let [unit (get (:units captured) namespace)]]
+ (when-not (and (= namespace (:ns unit))
+                (= (:source-sha256 unit) (artifact/sha (:source unit)))
+                (= (:source-sha256 unit) (artifact/sha (File/read! (:path unit)))))
+  (throw (ex-info "GVM profile Source changed during capture" {:namespace namespace :path (:path unit)}))))
+(def changed-paths (set (concat (map second additions)
+                        (map #(:path (get (:units captured) %)) (:recompiled captured)))))
+(def changed-providers
+ (mapv (fn [namespace]
+  (let [unit (get (:units captured) namespace)]
+   {:path (:path unit) :sha256 (:source-sha256 unit) :macro-provider? false}))
+  (concat (:recompiled captured) (:added captured))))
+(def providers
+ (vec (sort-by :path (concat (remove #(contains? changed-paths (:path %)) (:provider-sources original))
+                            changed-providers))))
+(def profile
+ {:name "native-gvm-seed-v1" :version 1 :parent parent-record
+  :added (:added captured) :recompiled (:recompiled captured) :reused (:reused captured)
+  :scheme-dependencies-preserved true :sdk-only-producers-excluded true})
+(def closure
+ (assoc original :units (:units captured) :order order :entries (into (:entries original) (:added captured))
+        :provider-sources providers :profile profile))
+(def bytes (erlang/term_to_binary closure (list :deterministic)))
+(when (> (erlang/byte_size bytes) (:max-bytes artifact/limits))
+ (throw (ex-info "GVM profile artifact exceeds the existing closed ETF byte bound" {})))
+(File/mkdir_p! out)
+(File/write! (str out "/closure.etf") bytes)
+(File/write! (str out "/identity.json")
+ (json/encode
+  {:schema "bl.native.compiler-closure-identity" :version 1
+   :artifact-sha256 (artifact/sha bytes) :sdk-pin-sha256 (artifact/sha pin)
+   :options (:options closure) :providers providers :profile profile
+   :parent (assoc parent-record :path parent-path)
+   :added (mapv (fn [namespace]
+            (let [unit (get (:units captured) namespace)]
+             {:namespace namespace :path (:path unit) :source-sha256 (:source-sha256 unit)
+              :module (:module unit) :base-module (:base-module unit) :definitions (count (:defs unit))}))
+           (:added captured))}))
+(println (str "NATIVE_GVM_PROFILE " (count (:reused captured)) " reused; "
+              (count (:recompiled captured)) " replaced; 9 added; no full inventory"))
