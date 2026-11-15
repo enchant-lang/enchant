@@ -2,6 +2,9 @@
 ;; resolution/native invocation; restore the caller entry before a successful
 ;; NONTAIL BL push and after successful NONTAIL native completion. Exceptions
 ;; retain their active site. Physical C return slots remain a separate ABI.
+;; Context = #(owning-live-slots caller-entry actual-logical-tail?). The
+;; display map may deliberately retain an authored site across internal calls;
+;; its :call field is not the current C edge's independent tail evidence.
 (define native-c-frame-call-context (make-parameter #f))
 (define (native-c-frame-snapshot frames)
  (let loop ((xs frames) (out '()))
@@ -17,7 +20,7 @@
  (let* ((own (vector-ref closure 6))
         (context (native-c-frame-call-context))
         (matching? (and context (eq? previous (vector-ref context 0))))
-        (incoming (if (pair? previous) (car previous) own)))
+        (incoming (if (and matching? (pair? previous)) (car previous) own)))
   (cond
    ;; Unit roots have no Source metadata. Delegate exactly to the existing
    ;; nil-source rule, including its physical-tail base behavior.
@@ -30,9 +33,10 @@
     previous)
    (else
     (let* ((logical-tail? (and physical-tail? (pair? previous)
-                               (eq? (bl-get incoming (bl-key "call")) (bl-key "tail"))))
+                               (if matching? (vector-ref context 2)
+                                (eq? (bl-get incoming (bl-key "call")) (bl-key "tail")))))
            (base (if logical-tail? (cdr previous) previous)))
-     (if (and matching? (not physical-tail?) (pair? previous))
+     (if (and matching? (not logical-tail?) (pair? previous))
       (set-car! previous (vector-ref context 1)))
      (let ((frames (cons incoming base)))
       (set! native-max-frames (max native-max-frames (length frames))) frames)))))))
@@ -46,17 +50,29 @@
     ;; above cannot be changed by a later call or frame restoration.
     (set-car! frames top) frames)))))
 
+;; Standalone entry comes from a host callback or a generated try/guard
+;; thunk. It is not the pending direct C callee. A genuine callback starts at
+;; its own metadata; a generated control remains transparent in source-stack.
+;; Direct C calls enter through native-c-enter!, retaining their call context.
+(define native-c-invoke-without-source-callback-fence native-c-invoke)
+(set! native-c-invoke (lambda (closure arguments)
+ (parameterize ((native-c-frame-call-context #f))
+  (native-c-invoke-without-source-callback-fence closure arguments))))
+
 (define native-c-apply-action-without-frame-slots native-c-apply-action)
 (set! native-c-apply-action (lambda (machine callee arguments)
  (let* ((frames (vector-ref machine 10))
         (site (vector-ref machine 11))
         (tail? (vector-ref machine 8))
+        (logical-tail? (and tail? (not (bl-is-nil site))
+                            (eq? (bl-get site (bl-key "call")) (bl-key "tail"))))
         (caller (if (pair? frames) (car frames) #f))
-        (context (if (and (not (bl-is-nil site)) (pair? frames)) (vector frames caller) #f)))
+        (context (if (and (not (bl-is-nil site)) (pair? frames))
+                   (vector frames caller logical-tail?) #f)))
   (parameterize ((native-c-frame-call-context context))
    (let ((answer (native-c-apply-action-without-frame-slots machine callee arguments)))
     ;; Do this only on normal completion. A C BL callee already restored its
     ;; caller slot while constructing its own Source frame above. Native leaves
     ;; restore here. Synthetic services carry no Source call site to restore.
-    (if (and context (not tail?)) (set-car! frames caller))
+    (if (and context (not logical-tail?)) (set-car! frames caller))
     answer)))))

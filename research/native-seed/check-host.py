@@ -29,7 +29,8 @@ def main():
                        "fixtures/host-compiler-cache-check.scm", "fixtures/host-global-cache-check.scm",
                        "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm", "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm", "direct/direct-machine.scm",
                        "direct/direct-control-frames.scm", "fixtures/c-critical-boundaries-check.scm",
-                       "fixtures/c-critical-continuations-check.scm", "fixtures/c-raw-source-trace-check.scm"]
+                       "fixtures/c-critical-continuations-check.scm", "fixtures/c-raw-source-trace-check.scm",
+                       "fixtures/c-source-tail-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -82,10 +83,11 @@ def main():
         + (BASE / "direct/direct-control-frames.scm").read_text() + "\n"
         + (BASE / "fixtures/c-critical-boundaries-check.scm").read_text() + "\n"
         + (BASE / "fixtures/c-critical-continuations-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-raw-source-trace-check.scm").read_text())
+        + (BASE / "fixtures/c-raw-source-trace-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-source-tail-check.scm").read_text())
     control = run("direct-control-abi", [GAMBIT / "bin/gsi", "direct-control.scm"], timeout=20)
     for marker in ("NATIVE_C_CRITICAL_BOUNDARIES_PASS 10", "NATIVE_C_CRITICAL_CONTINUATIONS_PASS 18",
-                   "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6"):
+                   "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6", "NATIVE_C_SOURCE_TAIL_ABI_PASS 23"):
         assert marker in control, control
     (OUT / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
                                     + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
