@@ -17,7 +17,14 @@
        _ (assert (= "838f57ced45ce56776c24729e7703d36f6991c16e9f86270f407161a6328a65c" (sha old)))
        _ (assert (= "5a53fbcb6a88ef939a9c62792c1898ac8b774d0d7b11301a3553ffeacd721bf4" (sha source)))
        _ (assert (= source (String/replace old "\"import * as E_ from \"" "\"import { ENV as E_ } from \"")))
-       defs (build/definition-values (build/read-forms path))
+       forms (build/read-forms path)
+       header (get (BeamLisp.AOT/namespace_header (first forms)) "js.actor")
+       aliases (mapv (fn [pair] [(elem pair 0) (elem pair 1)]) (:aliases header))
+       requires (vec (:requires header))
+       _ (assert (= 12 (count aliases) (count requires)))
+       _ (assert (empty? (:refers header))) _ (assert (empty? (:refer_alls header)))
+       outer-aliases (mapv #(BeamLisp.Env/alias_target "js.actor" (first %)) aliases)
+       defs (build/definition-values forms)
        select (fn [name]
         (let [rows (vec (filter #(= name (:name %)) defs))]
          (assert (= 1 (count rows))) (assert (= :fn (:kind (first rows)))) (:form (first rows))))
@@ -34,9 +41,26 @@
        entry (rn/list-node (cons (rn/sym-node "fn") (rn/node-items clause)))
        bindings (rn/->tuple [:vector (list (rn/sym-node "write-bundle!") writer)])
        capsule (rn/list-node (list (rn/sym-node "let") bindings entry))
-       value (BeamLisp.Env/isolated (fn []
-        (BeamLisp.Compiler/eval_form capsule
-         (assoc (BeamLisp.Compiler/new_env "js.actor") :target :beam :file path))))
+       compiled (BeamLisp.Env/isolated (fn []
+        ; Canonical header metadata supplies EVERY original alias. The SDK's
+        ; retained provider may not have replayed its aliases in this fork.
+        ; Load unchanged providers normally; never evaluate the patched ns.
+        (doseq [namespace requires] (BeamLisp.Loader/load_provider namespace))
+        (doseq [[alias target] aliases] (BeamLisp.Env/add_alias "js.actor" alias target))
+        (doseq [[alias target] aliases]
+         (assert (= target (BeamLisp.Env/alias_target "js.actor" alias))))
+        {:value (BeamLisp.Compiler/eval_form capsule
+                  (assoc (BeamLisp.Compiler/new_env "js.actor") :target :beam :file path))
+         :providers (mapv (fn [namespace]
+                      (let [loaded (BeamLisp.Loader/source_path namespace)
+                            canonical (build/ns-path
+                              (mapv #(str (get pin "source") "/" %) ["priv/boot" "priv/lib" "priv/std" "priv/compat"])
+                              namespace)]
+                       (assert canonical)
+                       (assert (= (File/read! loaded) (File/read! canonical)))
+                       {:namespace namespace :source (identity loaded) :sdk-source (identity canonical)})) requires)}))
+       value (:value compiled)
+       _ (assert (= outer-aliases (mapv #(BeamLisp.Env/alias_target "js.actor" (first %)) aliases)))
        _ (assert (erlang/is_function value 5))
        module (elem (erlang/fun_info value :module) 1)
        _ (assert (String/starts_with? (erlang/atom_to_binary module) "Elixir.BeamLisp.Eval.M"))]
@@ -44,6 +68,9 @@
     :source (identity path) :sdk-source (identity old-path) :sdk-provider (identity provider-path) :sdk-pin pin
     :members ["write-bundle!/4" "build-one/5"] :logical-namespace "js.actor"
     :evaluation :canonical-anonymous-eval :namespace-publication false
+    :alias-authority :canonical-original-namespace-header :alias-scope :private-fork
+    :aliases aliases :providers (:providers compiled) :outer-aliases-preserved true
+    :provider-loading :normal-retained-sdk
     :generated-output-adaptation :none :sole-source-delta :named-ENV-import}}))
 (defn prepare! [producer request]
  (let [app (:application request) out (:output request) parent-path (:graph-parent request)

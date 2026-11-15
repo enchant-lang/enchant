@@ -38,6 +38,21 @@ def admit(path, bind, path_for, *, application):
             or producer.get('source') != {'path': 'priv/lib/js/actor.bl', 'sha256': FIXED}
             or producer.get('sdk-source') != {'path': str(Path(pin['source']) / 'priv/lib/js/actor.bl'), 'sha256': OLD}):
         raise RuntimeError('JS producer was not the exact Source-owned private canonical capsule')
+    aliases = [['pserver', 'proc.server'], ['server-clause', 'server-clause'], ['psuper', 'proc.super'],
+               ['native', 'system.js'], ['ir', 'system.ir'], ['sync', 'js.emit'], ['rn', 'reader-node'],
+               ['jsbuild', 'js.build'], ['facade', 'bl.js'], ['json', 'bl.json'],
+               ['regex', 'clojure.re'], ['string', 'clojure.string']]
+    if (producer.get('alias-authority') != 'canonical-original-namespace-header'
+            or producer.get('alias-scope') != 'private-fork' or producer.get('aliases') != aliases
+            or producer.get('outer-aliases-preserved') is not True or producer.get('provider-loading') != 'normal-retained-sdk'
+            or [row.get('namespace') for row in producer.get('providers', [])] != [row[1] for row in aliases]):
+        raise RuntimeError('private producer did not restore every exact original namespace alias')
+    for row in producer['providers']:
+        identity(row['source'])
+        identity(row['sdk-source'])
+        if (not path_for(row['sdk-source']['path']).is_relative_to(Path(pin['source']))
+                or row['source']['sha256'] != row['sdk-source']['sha256']):
+            raise RuntimeError('capsule alias provider differs from its immutable qualified SDK Source')
     identity(producer['source'])
     identity(producer['sdk-source'])
     identity(producer['sdk-provider'])
