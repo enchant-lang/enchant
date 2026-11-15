@@ -1,0 +1,115 @@
+; Counts only, one warm read. Uses selected SDK publication metadata for MFAs.
+(ns native.beam-read-counts
+ (:require [reader :as reader] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def source-file (Path/expand (nth args 0)))
+(def output (Path/expand (nth args 1)))
+(def source (File/read! source-file))
+(def attribution "native-devtool-benchmark.bl")
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn physical-mfa [entry]
+ (when-not (and (erlang/is_tuple entry) (erlang/== 5 (erlang/tuple_size entry)))
+  (throw (ex-info "Expected selected five-field definition metadata" {})))
+ (tuple (erlang/element 5 entry) (erlang/element 3 entry)
+        (if (erlang/== :variadic (erlang/element 1 entry))
+         (erlang/+ (erlang/element 2 entry) 1) (erlang/element 2 entry))))
+(defn selected-entries [namespace name]
+ (let [selected (BeamLisp.Env/selected_ns_definitions namespace (list name))
+       entries (maps/get name selected (list))]
+  (when (erlang/== entries (list))
+   (throw (ex-info "Selected SDK lacks requested definition" {:ns namespace :name name})))
+  entries))
+(defn callable-row [namespace name]
+ (let [value (BeamLisp.Env/fetch_exact! namespace name)]
+  (when-not (erlang/is_function value)
+   (throw (ex-info "Expected a single selected SDK callable" {:ns namespace :name name})))
+  {:ns namespace :name name :value value
+   :mfa (tuple (elem (erlang/fun_info value :module) 1)
+               (elem (erlang/fun_info value :name) 1)
+               (elem (erlang/fun_info value :arity) 1))}))
+(def rt-names (list "eqv" "k-eqv" "k-compare"))
+(def rt-callables (Enum/map rt-names (fn [name] (callable-row "rt" name))))
+(def rt-rows
+ (Enum/flat_map rt-names
+  (fn [name]
+   (Enum/map (selected-entries "rt" name)
+    (fn [entry] {:kind "rt-body" :name name :mfa (physical-mfa entry)})))))
+(def reader-callable (callable-row "reader" "read-string"))
+(def reader-modules
+ (Enum/uniq (Enum/map (selected-entries "reader" "read-string")
+              (fn [entry] (erlang/element 1 (physical-mfa entry))))))
+(def reader-rows
+ (Enum/flat_map reader-modules
+  (fn [module]
+   (Enum/map (erlang/apply module :module_info (list :functions))
+    (fn [entry]
+     {:kind "reader-body" :name (erlang/atom_to_binary (erlang/element 1 entry))
+      :mfa (tuple module (erlang/element 1 entry) (erlang/element 2 entry))})))))
+(def callable-rows
+ (Enum/map (erlang/++ rt-callables (list reader-callable))
+  (fn [row] {:kind "selected-callable" :name (str (:ns row) "/" (:name row))
+             :mfa (:mfa row)})))
+(def rows (erlang/++ rt-rows (erlang/++ reader-rows callable-rows)))
+(def patterns (Enum/uniq (Enum/map rows (fn [row] (:mfa row)))))
+; This helper uses host term tests/list operations, so pausing/report collection
+; does not itself call any traced rt comparison function.
+(defn set-patterns! [remaining mode]
+ (if (erlang/== remaining (list)) :ok
+  (do
+   (erlang/trace_pattern (erlang/hd remaining) mode (list :local :call_count))
+   (set-patterns! (erlang/tl remaining) mode))))
+(defn snapshot []
+ (Enum/map rows
+  (fn [row]
+   (let [mfa (:mfa row) observed (erlang/trace_info mfa :call_count)]
+    (when-not (and (erlang/is_tuple observed) (erlang/== :call_count (elem observed 0))
+                  (erlang/is_integer (elem observed 1)))
+     (throw (ex-info "Physical call counter is unavailable" {:mfa mfa :observation observed})))
+    {:kind (:kind row) :name (:name row)
+     :module (erlang/atom_to_binary (elem mfa 0))
+     :function (erlang/atom_to_binary (elem mfa 1)) :arity (elem mfa 2)
+     :count (elem observed 1)}))))
+(defn observed [action]
+ (set-patterns! patterns true)
+ (try
+  (let [value (action)]
+   (set-patterns! patterns :pause)
+   {:value value :rows (snapshot)})
+  (finally (set-patterns! patterns false))))
+; All discovery, loading and Source IO precede warmups and counters.
+(dotimes [_ 3] (reader/read-string source attribution))
+(def metadata
+ {:sdk (System/fetch_env! "BL_SDK_PRODUCT")
+  :source {:path source-file :sha256 (sha source)}
+  :script {:path (Path/expand "research/native-seed/benchmark/beam-read-counts.bl")
+           :sha256 (sha (File/read! "research/native-seed/benchmark/beam-read-counts.bl"))}
+  :modules
+   (Enum/map (Enum/uniq (Enum/map patterns (fn [mfa] (elem mfa 0))))
+    (fn [module]
+     {:module (erlang/atom_to_binary module)
+      :md5 (Base/encode16 (erlang/apply module :module_info (list :md5)) (list (tuple :case :lower)))
+      :loaded-from (pr-str (code/which module))}))})
+(def control
+ (observed
+  (fn []
+   ; Dynamic call avoids eliminating/inlining the direct-call control itself.
+   (erlang/apply (:value (erlang/hd rt-callables)) (list 1 1))
+   (erlang/apply (:value (erlang/hd (erlang/tl rt-callables))) (list 1 1))
+   (erlang/apply (:value (erlang/hd (erlang/tl (erlang/tl rt-callables)))) (list 1 1)))))
+(def measured (observed (fn [] (reader/read-string source attribution))))
+(assert (= 6 (count (:value measured))))
+(def receipt
+ {:schema "bl.native.warm-read-beam-call-counts" :version 1 :qualification false
+  :scope "one read of the same six macro-free Source function values after three warmups"
+  :timing-claim false :metadata metadata :warmups 3 :read-operations 1
+  :control (:rows control) :read (:rows measured)
+  :limits ["counts include selected physical entries; same MFA may have body and callable labels"
+           "do not sum duplicate labels for the same MFA"
+           "local call_count is VM-wide; this private original-SDK VM performs no parallel work"
+           "zero counts indicate no physical function entries, not absence of equivalent inlined work"]})
+(File/write! output (json/encode receipt))
+(doseq [row (:rows measured)]
+ (println (str "BEAM_READ_CALL_COUNT\t" (:kind row) "\t" (:name row) "\t"
+               (:module row) "\t" (:function row) "\t" (:arity row) "\t" (:count row))))
+(println "BEAM_READ_CALL_COUNT_DONE")
