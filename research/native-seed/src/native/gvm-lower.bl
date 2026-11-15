@@ -103,11 +103,16 @@
             (lower-call s p (:callee node) arguments env destination next tail? options)
             (fail node "computed/dotted invoke arguments are outside this first probe"))
   :fn (lower-function s p node env destination next options)
-  :let (let [_ (when (BeamLisp.CompilerData/self_application_parts node)
-                 (fail node "named lexical self scaffolds are outside this closure pilot"))
-             [p bound] (home p)
-             [s p body] (lower s p (:body node) (assoc env (:name node) (slot bound)) destination next tail? options)]
-         (lower s p (:init node) env bound body false options))
+  :let (if-let [parts (BeamLisp.CompilerData/self_application_parts node)]
+         ; The exact inert constructor is compiler-owned. If its self binder
+         ; is unused by the inner function, no recursive cell is required.
+         ; Keep the genuine native closure and its actual free captures.
+         (if (contains? (free-names (:inner parts) #{}) (:name node))
+          (fail node "recursive lexical self requires the general GVM cell ABI")
+          (lower-function s p (:inner parts) env destination next options))
+         (let [[p bound] (home p)
+               [s p body] (lower s p (:body node) (assoc env (:name node) (slot bound)) destination next tail? options)]
+          (lower s p (:init node) env bound body false options)))
   :if (let [[p tested] (home p) [p boolean] (home p)
             [s p yes] (lower s p (:then node) env destination next tail? options)
             [s p no] (lower s p (:else node) env destination next tail? options)
