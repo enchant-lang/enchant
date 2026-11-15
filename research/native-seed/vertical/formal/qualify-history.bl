@@ -1,0 +1,98 @@
+; Preserve all original Source-model invariants. Their existing owner checks
+; initiation and each transition; no four-step certificate is relabelled here.
+(ns vertical.qualify-history
+ (:require [vertical.support :as s] [vertical.models :as models]
+           [vertical.scalar-recheck :as scalar-check]
+           [formal.api :as formal]))
+(def args (BeamLisp/argv))
+(def lock (s/lock! (nth args 0)))
+(def scalar-dir (Path/expand (nth args 1)))
+(def output (Path/expand (nth args 2)))
+(def prior-history-dir (nth args 3 nil))
+(assert (not (File/exists? output)))
+(File/mkdir_p! output)
+(def scalar-path (str scalar-dir "/scalar.etf"))
+(def scalar (s/read-data! scalar-path (str scalar-path ".json")))
+(def scalar-checked (scalar-check/check! lock scalar))
+(def protocols (into {} (map (fn [family] [family (models/define family)]) models/families)))
+(def search {:nodes 2048 :rows 512})
+(def rows
+ (mapv (fn [family]
+  (let [definition (get protocols family)
+        answer (formal/check {:search search :initial-state (get models/initials family)} definition)
+        object (:proof answer)
+        checking (when object (formal/check-source-protocol-proof definition object))
+        other (get protocols (if (= family "cache") "publication" "cache"))
+        borrowed (when object (formal/check-source-protocol-proof other object))
+        tampered (when object (formal/check-source-protocol-proof definition (assoc object :definition "wrong-subject")))]
+   {:family family :protocol definition :answer answer :proof object :checking checking
+    :borrowed-proof borrowed :tampered-proof tampered
+    :admitted (and (= :checked (:status answer)) (= :checked-obligations (:status checking))
+                   (= :rejected (:status borrowed)) (= :rejected (:status tampered)))})) models/families))
+(def fixtures
+ (mapv (fn [fixture]
+  (let [definition (get protocols (:family fixture))
+        replay (formal/replay-source-protocol-trace definition (get models/initials (:family fixture)) (:events fixture))]
+   (assert (= :replayed (:status replay)))
+   (assert (= :holds (:safety replay)))
+   (assert (= :valid (get-in replay [:source-replay :status])))
+   (doseq [[field expected] (:expect fixture)] (assert (= expected (get (:state replay) field))))
+   {:id (:id fixture) :family (:family fixture) :events (:events fixture) :replay replay})) models/fixtures))
+(def unsafe (formal/source-protocol (assoc-in models/cache-spec [:handlers 2 :source]
+                              "(fn [s msg] (assoc s \"hit\" true))")))
+(def unsafe-borrowed (formal/check-source-protocol-proof unsafe (:proof (first rows))))
+(assert (= :rejected (:status unsafe-borrowed)))
+(def unsafe-replay (formal/replay-source-protocol-trace unsafe models/cache-initial
+ [(models/event "edit" {"source" 2 "compiler" 1 "abi" 1}) (models/event "reuse" {})]))
+(assert (= :violated (:safety unsafe-replay)))
+(def prior-path (when prior-history-dir (str (Path/expand prior-history-dir) "/history.etf")))
+(def prior (when prior-path (s/read-data! prior-path (str prior-path ".json"))))
+(def bounded-attempt
+ (if prior
+  {:path prior-path :sha256 (s/sha (File/read! prior-path))
+   :rows (mapv (fn [row]
+           {:family (:family row) :depth (get-in row [:subject :depth])
+            :status (get-in row [:answer :status])
+            :reason (get-in row [:answer :proof :production :reason])}) (:bounded prior))
+   :classification :actual-unsupported-four-step-certificate-attempts :rerun false}
+  {:classification :not-run-in-this-request :rerun false}))
+(def history
+ {:schema "bl.native.vertical-history-induction-proofs" :version 1
+  :formal-sdk-pin (get lock "formal_sdk_pin") :protocols protocols :induction rows
+  :scalar-reference {:path scalar-path :sha256 (s/sha (File/read! scalar-path)) :checking scalar-checked}
+  :fixtures fixtures :bounded-certificate-attempt bounded-attempt
+  :unsafe-control {:borrowed unsafe-borrowed :counterexample unsafe-replay}
+  :scope :all-finite-prefixes-of-source-extracted-state-model
+  :concrete-source-traces {:count (count fixtures) :max-events 4}
+  :search search :certificate-atom-limit 32 :source-invariants-weakened false
+  :native-runtime-executed false :live-actor-connection :not-established
+  :native-retirement-observed false :compiler-proof-authority false})
+(def artifact (s/save-data! (str output "/history.etf") history))
+(def summary
+ {:schema (:schema history) :status (if (every? :admitted rows) :checked :incomplete)
+  :artifact artifact :formal-sdk-pin (get lock "formal_sdk_pin")
+  :scope (:scope history) :families
+  (mapv (fn [row] {:family (:family row) :status (get-in row [:answer :status])
+                   :checking (get-in row [:checking :status]) :admitted (:admitted row)
+                   :obligations (get-in row [:checking :obligations])
+                   :reason (get-in row [:answer :reason])}) rows)
+  :scalar-reference (:scalar-reference history) :bounded-certificate-attempt bounded-attempt
+  :concrete-source-traces (:concrete-source-traces history)
+  :search search :certificate-atom-limit 32 :source-invariants-weakened false
+  :native-backend-requested false :native-execution-connection :not-established
+  :native-retirement-observed false :compiler-proof-authority false})
+(s/json! (str output "/history-receipt.json") summary)
+(s/json! (str output "/history-handler-sources.json")
+ {:schema "bl.native.vertical-history-sources" :version 1 :initials models/initials
+  :families (mapv (fn [family] {:family family :state (get-in models/specifications [family :state])
+                              :handlers (get-in models/specifications [family :handlers])}) models/families)})
+(assert (every? :admitted rows) (pr-str (:families summary)))
+(s/json! (str output "/qualification.json")
+ {:schema "bl.native.vertical-formal-qualification" :version 2 :status :passed
+  :scope :retained-integer-translation-and-source-model-induction
+  :input-lock-sha256 (s/sha (File/read! (nth args 0)))
+  :scalar (:scalar-reference history) :history artifact
+  :model-scope (:scope history) :bounded-certificate-attempt bounded-attempt
+  :concrete-source-traces (:concrete-source-traces history)
+  :native-runtime-qualified false :native-lowering-proof false :compiler-proof-authority false})
+(println "VERTICAL_HISTORY_INDUCTION_CHECKED families=3 scalar-recheck=zero-search")

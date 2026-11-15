@@ -1,46 +1,45 @@
-; Fresh checking consumes retained objects without proof search. Optional native
-; history data is replayed separately; it never becomes native code authority.
+; Fresh independent checking; no scalar/model proof search. Optional native
+; states are compared to the same complete Source-model replay separately.
 (ns vertical.recheck-and-replay
- (:require [vertical.support :as s] [vertical.history-replay :as history]
-           [formal.api :as formal]))
+ (:require [vertical.support :as s] [vertical.scalar-recheck :as scalar-check]
+           [vertical.history-replay :as history] [formal.api :as formal]))
 (def args (BeamLisp/argv))
 (def lock (s/lock! (nth args 0)))
-(def proof-dir (Path/expand (nth args 1)))
-(def output (Path/expand (nth args 2)))
-(def observations-path (nth args 3 nil))
+(def scalar-dir (Path/expand (nth args 1)))
+(def history-dir (Path/expand (nth args 2)))
+(def output (Path/expand (nth args 3)))
+(def observations-path (nth args 4 nil))
 (assert (not (File/exists? output)))
 (File/mkdir_p! output)
-(def scalar (s/read-data! (str proof-dir "/scalar.etf") (str proof-dir "/scalar.etf.json")))
-(assert (= "bl.native.vertical-ignored-char-proof" (:schema scalar)))
-(assert (= (get lock "formal_sdk_pin") (:formal-sdk-pin scalar)))
-(def original-check (formal/check-elaboration (get-in scalar [:original :object])))
-(def candidate-check (formal/check-elaboration (get-in scalar [:candidate :object])))
-(def translation-check (formal/check-translation-proof (:translation scalar) (:proof scalar)))
-(def packet-check (formal/check-core-translation-data (:translation scalar) (:proof scalar) (:core-translation scalar)))
-(assert (= :checked (:status original-check)))
-(assert (= :checked (:status candidate-check)))
-(assert (= :checked (:status translation-check)))
-(assert (= :checked-data-connection (:status packet-check)))
-(def histories (s/read-data! (str proof-dir "/history.etf") (str proof-dir "/history.etf.json")))
-(assert (= "bl.native.vertical-history-proofs" (:schema histories)))
+(def scalar (s/read-data! (str scalar-dir "/scalar.etf") (str scalar-dir "/scalar.etf.json")))
+(def scalar-checked (scalar-check/check! lock scalar))
+(def histories (s/read-data! (str history-dir "/history.etf") (str history-dir "/history.etf.json")))
+(assert (= "bl.native.vertical-history-induction-proofs" (:schema histories)))
 (assert (= (get lock "formal_sdk_pin") (:formal-sdk-pin histories)))
-(def bounded-checks
+(def checks
  (mapv (fn [row]
-  (let [answer (formal/check-protocol-trace-proof (:subject row) (:proof row))]
-   (assert (= :checked (:status answer))) {:family (:family row) :answer answer})) (:bounded histories)))
-(def native-observations (when observations-path (s/read-json observations-path)))
-(def observed (when native-observations (history/replay histories native-observations)))
+  (let [answer (formal/check-source-protocol-proof (:protocol row) (:proof row))
+        other (get (:protocols histories) (if (= "cache" (:family row)) "publication" "cache"))
+        borrowed (formal/check-source-protocol-proof other (:proof row))
+        tampered (formal/check-source-protocol-proof (:protocol row) (assoc (:proof row) :definition "wrong-subject"))]
+   (assert (= :checked-obligations (:status answer)))
+   (assert (= :rejected (:status borrowed)))
+   (assert (= :rejected (:status tampered)))
+   {:family (:family row) :answer answer :borrowed borrowed :tampered tampered})) (:induction histories)))
+(def observations (when observations-path (s/read-json observations-path)))
+(def observed (when observations (history/replay histories observations)))
 (when observed (assert (= :conforms-to-source-model (:status observed)) (pr-str observed)))
 (def report
- {:schema "bl.native.vertical-formal-recheck" :version 1 :status :checked
-  :formal-sdk-pin (get lock "formal_sdk_pin")
-  :scalar {:original original-check :candidate candidate-check :translation translation-check :packet packet-check}
-  :histories bounded-checks :native-state-conformance observed
+ {:schema "bl.native.vertical-formal-recheck" :version 2 :status :checked
+  :formal-sdk-pin (get lock "formal_sdk_pin") :scalar scalar-checked :histories checks
+  :model-scope :all-finite-prefixes-of-source-extracted-state-model
+  :bounded-certificate-attempt (:bounded-certificate-attempt histories)
+  :concrete-source-traces (:concrete-source-traces histories) :native-state-conformance observed
   :native-observations (when observations-path {:path (Path/expand observations-path)
                       :sha256 (s/sha (File/read! observations-path))})
-  :proof-search-called false :native-backend-requested false
-  :native-runtime-executed false :compiler-proof-authority false})
+  :proof-search-called false :native-backend-requested false :native-runtime-executed false
+  :native-lowering-proof false :compiler-proof-authority false})
 (s/save-data! (str output "/recheck.etf") report)
 (s/json! (str output "/recheck.json") report)
-(println (str "VERTICAL_FORMAL_RECHECKED native-state-conformance="
+(println (str "VERTICAL_FORMAL_RECHECKED model=induction native-state-conformance="
               (if observed (name (:status observed)) "not-provided")))

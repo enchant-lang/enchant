@@ -1,7 +1,7 @@
 ; Qualified narrow formal SDK only. Independent relations and portable proof
 ; search; no native backend, selected function execution or native build.
 (ns vertical.check-formal
- (:require [vertical.support :as s] [vertical.models :as models]
+ (:require [vertical.support :as s]
            [formal.api :as formal] [formal.elaborate :as elaborate]
            [formal.core :as core] [formal.term :as t] [formal.identity :as identity]))
 (def args (BeamLisp/argv))
@@ -97,69 +97,3 @@
   :native-lowering-proof false :compiler-proof-authority false})
 (println "VERTICAL_SCALAR_FORMAL_CHECKED")
 
-; Three small independent histories instead of a cross-product controller.
-(def protocols (into {} (map (fn [family] [family (models/define family)]) models/families)))
-(defn bounded-row [family]
- (let [definition (get protocols family) subject (formal/protocol-trace definition 4)
-       result (formal/check {:search {:nodes 2048 :rows 512}} subject)
-       object (get-in result [:proof :object])
-       checked (when object (formal/check-protocol-trace-proof subject object))
-       other (formal/protocol-trace definition 3)
-       borrowed (when object (formal/check-protocol-trace-proof other object))
-       tampered (when object (formal/check-protocol-trace-proof subject (assoc object :definition "wrong-subject")))]
-  {:family family :protocol definition :subject subject :answer result :proof object :checking checked
-   :borrowed-proof borrowed :tampered-proof tampered
-   :admitted (and (= :checked (:status result)) (= :checked (:status checked))
-                  (= :rejected (:status borrowed)) (= :rejected (:status tampered)))}))
-(def bounded (mapv bounded-row models/families))
-(def replayed
- (mapv (fn [fixture]
-  (let [family (:family fixture) definition (get protocols family)
-        replay (formal/replay-source-protocol-trace definition (get models/initials family) (:events fixture))]
-   (assert (= :replayed (:status replay)) (pr-str [(:id fixture) replay]))
-   (assert (= :holds (:safety replay)))
-   (assert (= :valid (get-in replay [:source-replay :status])))
-   (doseq [[field expected] (:expect fixture)] (assert (= expected (get (:state replay) field))))
-   {:id (:id fixture) :family family :events (:events fixture) :replay replay})) models/fixtures))
-; A false reuse policy cannot borrow the safe model's proof or pass concrete replay.
-(def unsafe-spec (assoc-in models/cache-spec [:handlers 2 :source]
-                  "(fn [s msg] (assoc s \"hit\" true))"))
-(def unsafe (formal/source-protocol unsafe-spec))
-(def unsafe-subject (formal/protocol-trace unsafe 4))
-(def unsafe-borrowed (formal/check-protocol-trace-proof unsafe-subject (:proof (first bounded))))
-(assert (= :rejected (:status unsafe-borrowed)))
-(def unsafe-replay
- (formal/replay-source-protocol-trace unsafe models/cache-initial
-  [(models/event "edit" {"source" 2 "compiler" 1 "abi" 1}) (models/event "reuse" {})]))
-(assert (= :violated (:safety unsafe-replay)))
-(def history
- {:schema "bl.native.vertical-history-proofs" :version 1 :formal-sdk-pin (get lock "formal_sdk_pin")
-  :protocols protocols :bounded bounded :fixtures replayed
-  :unsafe-control {:borrowed unsafe-borrowed :counterexample unsafe-replay}
-  :scope :source-extracted-state-models :native-runtime-executed false
-  :identity-meaning :abstract-labels-for-exact-native-observations
-  :live-actor-connection :not-established :native-retirement-observed false :compiler-proof-authority false})
-(def history-artifact (s/save-data! (str output "/history.etf") history))
-(s/json! (str output "/history-receipt.json")
- {:schema (:schema history) :artifact history-artifact
-  :status (if (every? :admitted bounded) :checked :incomplete)
-  :families (mapv (fn [row] {:family (:family row) :status (get-in row [:answer :status])
-                            :depth 4 :admitted (:admitted row)}) bounded)
-  :fixture-count (count replayed) :negative-control :rejected-and-concretely-violated
-  :native-backend-requested false :native-execution-connection :not-established
-  :native-retirement-observed false :compiler-proof-authority false})
-(s/json! (str output "/history-handler-sources.json")
- {:schema "bl.native.vertical-history-sources" :version 1
-  :initials models/initials
-  :families (mapv (fn [family] {:family family :state (get-in models/specifications [family :state])
-                              :handlers (get-in models/specifications [family :handlers])}) models/families)})
-(assert (every? :admitted bounded) (pr-str (mapv #(select-keys % [:family :admitted :answer]) bounded)))
-(s/json! (str output "/qualification.json")
- {:schema "bl.native.vertical-formal-qualification" :version 1 :status :passed
-  :scope :integer-core-translation-and-source-history-models
-  :input-lock-sha256 (s/sha (File/read! (nth args 0)))
-  :scalar scalar-artifact :history history-artifact
-  :formal-sdk-pin (get lock "formal_sdk_pin") :native-sdk-pin (get lock "native_sdk_pin")
-  :depth 4 :history-families models/families :native-backend-requested false
-  :native-runtime-qualified false :native-lowering-proof false :compiler-proof-authority false})
-(println "VERTICAL_HISTORY_FORMAL_CHECKED depth=4 families=3")

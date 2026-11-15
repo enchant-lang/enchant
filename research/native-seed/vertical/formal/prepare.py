@@ -97,6 +97,10 @@ def capped(argv, runtime, unit, cwd, memory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-id', default='vertical1')
+    parser.add_argument('--reuse-scalar-dir', type=Path,
+                        help='reuse an already checked scalar artifact; fresh rechecks perform zero scalar proof search')
+    parser.add_argument('--prior-history-dir', type=Path,
+                        help='retain actual prior unsupported depth4 answers without rerunning that search')
     parser.add_argument('--runs-root', type=Path,
                         default=ROOT / '.local/native-devtool/vertical-formal-runs')
     parser.add_argument('--native-manifest', type=Path,
@@ -145,22 +149,40 @@ def main():
     lock_path = run / 'inputs.json'
     lock_path.write_text(json.dumps(lock, indent=2) + '\n')
     input_dir, proofs, recheck = run / 'input', run / 'proofs', run / 'recheck'
+    old_scalar = args.reuse_scalar_dir.resolve() if args.reuse_scalar_dir else None
+    if old_scalar:
+        for suffix in ['scalar.etf', 'scalar.etf.json', 'scalar-receipt.json']:
+            if not (old_scalar / suffix).is_file():
+                raise RuntimeError('missing retained scalar artifact: ' + suffix)
+        if read(old_scalar / 'scalar.etf.json')['sha256'] != sha(old_scalar / 'scalar.etf'):
+            raise RuntimeError('retained scalar bytes differ from their recorded digest')
+    scalar_dir = old_scalar or run / 'scalar'
+    prior_dir = args.prior_history_dir.resolve() if args.prior_history_dir else old_scalar
+    if prior_dir and not (prior_dir / 'history.etf').is_file():
+        prior_dir = None
     original = [native['sdk'] + '/bin/bl', '--cold', '-p', str(ROOT / 'research/native-seed/src'),
                 'run', str(STAGE / 'extract-helper.bl'), '--', str(lock_path), str(input_dir)]
-    # No current research prefix: missing snapshot dependencies must fail closed.
-    # All SDK runtime libraries remain owned by the immutable selected artifact.
     formal_prefix = [formal['sdk'] + '/bin/bl', '--cold', '-p', str(snapshot), '-p', str(STAGE)]
-    produce = [*formal_prefix, 'run', str(STAGE / 'check-formal.bl'), '--',
-               str(lock_path), str(input_dir), str(proofs)]
+    scalar_command = [*formal_prefix, 'run', str(STAGE / 'check-formal.bl'), '--',
+                      str(lock_path), str(input_dir), str(scalar_dir)]
+    produce = [*formal_prefix, 'run', str(STAGE / 'qualify-history.bl'), '--',
+               str(lock_path), str(scalar_dir), str(proofs)]
+    if prior_dir:
+        produce.append(str(prior_dir))
     check = [*formal_prefix, 'run', str(STAGE / 'recheck-and-replay.bl'), '--',
-             str(lock_path), str(proofs), str(recheck)]
-    commands = {'schema': 'bl.native.vertical-formal-commands', 'version': 1,
+             str(lock_path), str(scalar_dir), str(proofs), str(recheck)]
+    commands = {'schema': 'bl.native.vertical-formal-commands', 'version': 2,
                 'native_cwd': str(ROOT), 'formal_cwd': str(consumer), 'serial_only': True,
-                'extract': capped(original, private, 'bl-vertical-extract-' + args.run_id, ROOT, '3G'),
+                'serial_order': ['extract', 'scalar', 'prove', 'recheck'],
+                'extract': None if old_scalar else capped(original, private, 'bl-vertical-extract-' + args.run_id, ROOT, '3G'),
+                'scalar': None if old_scalar else capped(scalar_command, private, 'bl-vertical-scalar-' + args.run_id, consumer, '4G'),
                 'prove': capped(produce, private, 'bl-vertical-prove-' + args.run_id, consumer, '4G'),
                 'recheck': capped(check, private, 'bl-vertical-recheck-' + args.run_id, consumer, '4G'),
+                'reused_scalar_directory': str(old_scalar) if old_scalar else None,
+                'scalar_proof_directory': str(scalar_dir), 'history_proof_directory': str(proofs),
+                'prior_unsupported_history_directory': str(prior_dir) if prior_dir else None,
                 'native_replay_template': {'prefix': formal_prefix, 'script': str(STAGE / 'recheck-and-replay.bl'),
-                    'cwd': str(consumer), 'argv': [str(lock_path), str(proofs), '<NEW_OUTPUT_DIRECTORY>', '<OBSERVATIONS_JSON>']},
+                    'cwd': str(consumer), 'argv': [str(lock_path), str(scalar_dir), str(proofs), '<NEW_OUTPUT_DIRECTORY>', '<OBSERVATIONS_JSON>']},
                 'runtime_directory': str(private), 'processes_launched_by_preparer': 0,
                 'historical_git_blob_reads': 'read-only and accepted only by exact qualified SHA'}
     (run / 'commands.json').write_text(json.dumps(commands, indent=2) + '\n')
