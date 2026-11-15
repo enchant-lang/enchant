@@ -20,6 +20,26 @@
               (File/read! (str review-kit "/review.css")) "\n.tally{display:none!important}"))
 (def javascript (File/read! (str kit "/live.js")))
 (def fonts (assets/fonts))
+(defn local-links [value]
+ (cond
+  (map? value) (concat (when (string? (:href value)) [(:href value)]) (mapcat local-links (vals value)))
+  (or (vector? value) (seq? value) (list? value)) (mapcat local-links value)
+  :else []))
+(defn linked-evidence [text route]
+ ; The renderer owns link syntax. Expose only its declared research evidence
+ ; and formal references, beneath their real roots, as bounded read-only data.
+ (let [links (distinct (local-links (page/doc-h (document text))))
+       link (first (filter #(and (or (starts-with? % "evidence/") (starts-with? % "../formal-logic/"))
+                                (= route (:path (URI/merge "http://dossier/" %)))) links))]
+  (when link
+   (let [candidate (Path/expand link (Path/dirname path))
+         root (Path/expand (if (starts-with? link "evidence/") "evidence" "../formal-logic") (Path/dirname path))
+         resolved (System/cmd "realpath" (list "-e" candidate))
+         actual (when (= 0 (elem resolved 1)) (trim (elem resolved 0)))
+         info (when actual (File/stat actual))]
+    (when (and actual (starts-with? actual (str root "/")) (= :ok (first info))
+               (= :regular (:type (second info))) (<= (:size (second info)) 8388608))
+     {:path actual :type (if (ends-with? actual ".json") "application/json" "text/plain; charset=utf-8")})))))
 (defn handler [request]
  (or (comments/route request path)
   (let [route (web/path request) text (File/read! path)]
@@ -37,7 +57,9 @@
         (if (:error read) (web/json (:conn read) 413 {:error "Answer too large"})
          (let [result (feedback/submit! path (or (System/get_env "DOSSIER_HANDLE") "owner") (:body read))]
           (web/json (:conn read) (:status result) (:body result))))))
-    :else (web/text request 404 "Not found")))))
+    :else (if-let [file (when (= "get" (web/method request)) (linked-evidence text route))]
+            (web/bytes (web/resp-header request "cache-control" "no-store") (:type file) (File/read! (:path file)))
+            (web/text request 404 "Not found"))))))
 
 ; Load the render graph before the server pins callback code.
 (page/page-h (document (File/read! path)) css javascript)
