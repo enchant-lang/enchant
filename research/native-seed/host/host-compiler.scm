@@ -148,7 +148,7 @@
    "Elixir.BeamLisp.Env/check_source_invocation1!/2"
    "Elixir.BeamLisp.Env/check_source_invocation2!/3"
    "Elixir.BeamLisp.Env/assert_native_framework_execution!/0"))
-(define (native-remote-available? module function arity)
+(define (native-remote-available-uncached? module function arity)
  (let* ((module (native-module-name module)) (function (native-module-name function))
         (key (string-append module "/" function "/" (number->string arity)))
         (ns (bl-get native-module-names module native-missing)))
@@ -163,6 +163,45 @@
        (if variadic?
         (and (not (bl-is-nil (bl-nth info 1))) (= arity (+ 1 (bl-nth info 1))))
         (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
+;; Positive membership is stable only under the exact capability roots.
+;; Source function_exported/3 passes immutable atoms; nested identity tables
+;; avoid repeated MFA string construction and AVL probes for those arguments.
+;; Mutable string callers retain the complete original path and no misses stick.
+(define native-availability-cache (make-table test: eq?))
+(define native-availability-roots (vector #f #f #f #f #f))
+(define native-availability-original-module-name native-module-name)
+(define native-availability-original-atom-name native-atom-name)
+(define (native-refresh-availability-cache!)
+ (if (or (not (eq? (vector-ref native-availability-roots 0) native-leaf-registry))
+         (not (eq? (vector-ref native-availability-roots 1) native-module-names))
+         (not (eq? (vector-ref native-availability-roots 2) native-stub-names))
+         (not (eq? (vector-ref native-availability-roots 3) native-export-arities))
+         (not (eq? (vector-ref native-availability-roots 4) native-excluded-host-leaves)))
+  (begin
+   (set! native-availability-cache (make-table test: eq?))
+   (vector-set! native-availability-roots 0 native-leaf-registry)
+   (vector-set! native-availability-roots 1 native-module-names)
+   (vector-set! native-availability-roots 2 native-stub-names)
+   (vector-set! native-availability-roots 3 native-export-arities)
+   (vector-set! native-availability-roots 4 native-excluded-host-leaves))))
+(define (native-remote-available? module function arity)
+ (if (and (symbol? module) (symbol? function) (integer? arity) (exact? arity)
+          (eq? native-module-name native-availability-original-module-name)
+          (eq? native-atom-name native-availability-original-atom-name))
+  (begin
+   (native-refresh-availability-cache!)
+   (let* ((functions (table-ref native-availability-cache module #f))
+          (arities (and functions (table-ref functions function #f))))
+    (if (and arities (table-ref arities arity #f)) #t
+     (let ((available (native-remote-available-uncached? module function arity)))
+      (if available
+       (let ((functions (or functions (make-table test: eq?)))
+             (arities (or arities (make-table test: eqv?))))
+        (table-set! arities arity #t)
+        (table-set! functions function arities)
+        (table-set! native-availability-cache module functions)))
+      available))))
+  (native-remote-available-uncached? module function arity)))
 ;; Positive exact-MFA dispatch cache. Registry objects are persistent; an
 ;; identity change retires all resolved wrappers before the next lookup.
 ;; A compiled wrapper observes its LIVE registry root on every invocation, so redefining
