@@ -1,0 +1,214 @@
+; NEW SDK-only generation coordinator. Existing producers and historical
+; generations remain unchanged; actual Source/ANF policies stay canonical.
+(ns native.prepare-direct-fresh
+ (:require [native.artifact :as artifact] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(when (< (count args) 9)
+ (throw (ex-info
+  "usage: prepare-fresh.bl BASE18 DIRECT23 FROZENHOST HOSTDIR ACTORMANIFEST COMPILEROUT ACTORSOUT LOADEROUT SCALAROUT [profile|partition|compiler|actors|loader|scalar ...]" {})))
+(def base "research/native-seed")
+(def paths
+ {:base18 (nth args 0) :direct23 (nth args 1) :frozen-host (nth args 2) :host (nth args 3)
+  :actor-manifest (nth args 4) :compiler (nth args 5) :actors (nth args 6)
+  :loader (nth args 7) :scalar (nth args 8)})
+(def base-partition (str (:base18 paths) "/partition.json"))
+(def direct-partition (str (:direct23 paths) "/partition.json"))
+(def job-order ["profile" "compiler" "actors" "loader" "scalar"])
+(def requested (vec (drop 9 args)))
+(def selected (if (empty? requested) job-order (vec (distinct requested))))
+(defn require! [condition message data]
+ (when-not condition (throw (ex-info message data))))
+(defn identity [path] {:path path :sha256 (artifact/sha (File/read! path))})
+(defn same-record! [record]
+ (let [path (or (:path record) (get record "path"))
+       expected (or (:sha256 record) (get record "sha256"))]
+  (require! (= expected (artifact/sha (File/read! path)))
+   "fresh C generation: input changed" {:record record})))
+(defn overlaps? [left right]
+ (let [a (Path/expand left) b (Path/expand right)]
+  (or (= a b) (String/starts_with? a (str b "/")) (String/starts_with? b (str a "/")))))
+(def reserved
+ (mapv #(str base "/out/" %)
+  ["compiler-closure" "direct-closure" "direct-compiler" "direct-actors"
+   "direct-loader-corpus" "direct-scalar" "direct-host-current" "original-actor-corpus"]))
+(doseq [job selected]
+ (require! (contains? #{"profile" "partition" "compiler" "actors" "loader" "scalar"} job)
+  "fresh C generation: unknown selector" {:job job}))
+(require! (= (count (vals paths)) (count (distinct (map Path/expand (vals paths)))))
+ "fresh C generation: each explicit input/output location must be distinct" {})
+(doseq [key [:base18 :direct23 :compiler :actors :loader :scalar]
+        historical reserved]
+ (require! (not (overlaps? (get paths key) historical))
+  "fresh C generation: explicit paths must preserve historical generations" {:key key :historical historical}))
+(doseq [key [:direct23 :compiler :actors :loader :scalar]
+        input [(:base18 paths) (:host paths) (Path/dirname (:frozen-host paths))
+               (Path/dirname (:actor-manifest paths))]]
+ (require! (not (overlaps? (get paths key) input))
+  "fresh C generation: output overlaps a retained generation input" {:key key :input input}))
+(doseq [left [:direct23 :compiler :actors :loader :scalar]
+        right [:direct23 :compiler :actors :loader :scalar] :when (not= left right)]
+ (require! (not (overlaps? (get paths left) (get paths right)))
+  "fresh C generation: producer outputs overlap" {:left left :right right}))
+(def parent-record (identity base-partition))
+(def parent (json/decode (File/read! base-partition)))
+(def parent-metadata (artifact/read-part base-partition (get parent "metadata")))
+(def compiler-names
+ #{"anf" "clojure.core-ext" "clojure.re" "clojure.string" "compiler" "core" "diag"
+   "host.compiler-data" "host.form-meta" "host.meta" "native.bootstrap" "native.eval"
+   "native.scheme" "reader" "reader-node" "rt" "server-clause" "sugar"})
+(require! (and (= "bl.native.partitioned-closure" (get parent "schema")) (= 1 (get parent "version"))
+               (= "bl.native.compiler-closure" (:schema parent-metadata)) (= 1 (:version parent-metadata))
+               (= 18 (count (get parent "units"))) (= 18 (count (:order parent-metadata)))
+               (= compiler-names (set (:order parent-metadata)))
+               (= compiler-names (set (map #(get % "namespace") (get parent "units")))))
+ "fresh C generation: exact eighteen-unit Source parent required" {})
+(def actor (json/decode (File/read! (:actor-manifest paths))))
+(def actor-closure (get (get actor "link") "closure-manifest"))
+(require! (and (= "bl.native.original-actor-corpus" (get actor "schema"))
+               (= 1 (get actor "version")) (= "scheme" (get actor "target"))
+               (= "none" (get actor "assertion-adaptation")) (= "none" (get actor "source-path-adaptation"))
+               (= true (get (get actor "replay") "body-byte-identical"))
+               (= 405 (get (get actor "replay") "definitions"))
+               (= 202 (get (get actor "link") "runtime-definitions"))
+               (= "4f97857ad1b357fa3c962e58e497fa84b02d43c1fabef3e7a924fa5b3e902a22"
+                  (get (get actor "body") "sha256"))
+               (= (Path/expand base-partition) (Path/expand (get actor-closure "path")))
+               (= (:sha256 parent-record) (get actor-closure "sha256"))
+               (= (json/decode (:sdk-pin parent-metadata)) (get (get actor "link") "sdk-pin")))
+ "fresh C generation: actor replay must select this exact new eighteen-unit parent" {})
+(require! (= (Path/expand (str (:base18 paths) "/prelude.scm"))
+             (Path/expand (get (get (get actor "link") "prelude") "path")))
+ "fresh C generation: actor replay must use this generation's exact prelude" {})
+(same-record! (get (get actor "link") "prelude"))
+(same-record! (get actor "body"))
+(same-record! (get actor "anf"))
+(def host-ledger (json/decode (File/read! (str (:host paths) "/host.components.json"))))
+(require! (and (= "bl.native.direct-host" (get host-ledger "schema")) (= 1 (get host-ledger "version"))
+               (= "frozen-host" (get (first (get host-ledger "components")) "role"))
+               (= (artifact/sha (File/read! (:frozen-host paths)))
+                  (get (first (get host-ledger "components")) "sha256"))
+               (= (artifact/sha (File/read! (str (:host paths) "/host.scm"))) (get host-ledger "source_sha256")))
+ "fresh C generation: direct host must use the explicit exact frozen host" {})
+(def producer-paths
+ ["research/native-seed/direct/prepare-fresh.bl"
+  "research/native-seed/src/native/extend-direct-closure.bl"
+  "research/native-seed/src/native/c-produce.bl"
+  "research/native-seed/src/native/c-actor-produce.bl"
+  "research/native-seed/direct/loader-produce.bl" "research/native-seed/direct/scalar.bl"
+  "research/native-seed/src/native/artifact.bl" "research/native-seed/src/native/artifact-capsules.bl"
+  "research/native-seed/src/native/c-actor-options.bl" "research/native-seed/partition-closure.py"
+  "research/native-seed/sdk-pin.json"])
+(def input-records
+ (vec (concat (map identity producer-paths)
+  [parent-record (identity (:actor-manifest paths)) (identity (:frozen-host paths))
+   (identity (str (:base18 paths) "/leaves.json"))
+   (identity (str (:host paths) "/host.scm")) (identity (str (:host paths) "/host.components.json"))
+   (identity (str (:host paths) "/host.components.scm")) (identity (str (:host paths) "/preparation.json"))])))
+(def jobs
+ {"profile" ["research/native-seed/src/native/extend-direct-closure.bl" [base-partition (:direct23 paths)]]
+  "partition" nil
+  "compiler" ["research/native-seed/src/native/c-produce.bl"
+   [direct-partition (:compiler paths) (str (:host paths) "/host.scm") (str (:host paths) "/host.components.json")]]
+  "actors" ["research/native-seed/src/native/c-actor-produce.bl"
+   [(:actor-manifest paths) (:actors paths) direct-partition]]
+  "loader" ["research/native-seed/direct/loader-produce.bl" [(:loader paths)]]
+  "scalar" ["research/native-seed/direct/scalar.bl"
+   [(:frozen-host paths) (:scalar paths) "research/native-seed/direct/fixtures/scalar.bl"
+    (str (:base18 paths) "/leaves.json")]]})
+(def completed-markers
+ {"profile" (str (:direct23 paths) "/closure.etf")
+  "compiler" (str (:compiler paths) "/index.tsv") "actors" (str (:actors paths) "/index.tsv")
+  "loader" (str (:loader paths) "/manifest.json") "scalar" (str (:scalar paths) "/manifest.json")})
+; Validate ALL chosen outputs before the first producer writes anything.
+; A timeout resume selects only the remaining jobs; partition alone can finish
+; transport for an already captured profile without rerunning its Source work.
+(doseq [job selected :let [marker (get completed-markers job)] :when marker]
+ (require! (not (File/regular? marker))
+  "fresh C generation: selected output already completed; resume with remaining selectors"
+  {:job job :marker marker}))
+(def additions ["native.c" "native.c-remote" "native.c-eval" "native.c-units" "native.c-bootstrap"])
+(defn partition-hashes [partition]
+ (into {} (map (fn [row] [(get row "namespace") (get row "sha256")]) (get partition "units"))))
+(defn exact-prefix! []
+ (let [next (json/decode (File/read! direct-partition))
+       metadata (artifact/read-part direct-partition (get next "metadata"))
+       old (partition-hashes parent) new (partition-hashes next) profile (:profile metadata)]
+  (doseq [[manifest-path partition] [[base-partition parent] [direct-partition next]]
+          row (get partition "units")]
+   (require! (= (get row "sha256")
+                (artifact/sha (File/read! (artifact/part-path manifest-path (get row "path")))))
+    "fresh C generation: parent/direct unit file differs from its partition digest"
+    {:namespace (get row "namespace") :manifest manifest-path}))
+  (require! (and (= "bl.native.partitioned-closure" (get next "schema")) (= 1 (get next "version"))
+                 (= 23 (count (get next "units")))
+                 (= (:order metadata) (into (:order parent-metadata) additions))
+                 (= (set (keys new)) (into compiler-names additions))
+                 (= (:sdk-pin metadata) (:sdk-pin parent-metadata))
+                 (= (:options metadata) (:options parent-metadata))
+                 (= "native-c-seed-v1" (:name profile)) (= 1 (:version profile))
+                 (= additions (:added profile)) (= [] (:recompiled profile))
+                 (= (:sha256 parent-record) (:partition-sha256 (:parent profile)))
+                 (every? (fn [[namespace sha256]] (= sha256 (get new namespace))) old))
+   "fresh C generation: direct profile must preserve all eighteen parent unit bytes and append exactly five namespaces" {})
+  (same-record! parent-record)))
+(defn unchanged! [] (doseq [record input-records] (same-record! record)))
+(defn partition! []
+ (let [result (System/cmd "python3"
+               (list "research/native-seed/partition-closure.py" "--out" (:direct23 paths))
+               (list (tuple :stderr_to_stdout true)))]
+  (println (elem result 0))
+  (require! (= 0 (elem result 1)) "fresh C generation: structural partition transport failed"
+   {:exit (elem result 1) :output (elem result 0)}))
+ (exact-prefix!))
+(defn strict-eval-parent! []
+ ; Existing extension permits a finite native.eval Source refresh. Fresh
+ ; generations disable that route by proving this one unit is already exact;
+ ; the unchanged canonical extension refuses Source changes in every other
+ ; parent member. Post-partition raw hashes independently prove all18 bytes.
+ (let [rows (filter #(= "native.eval" (get % "namespace")) (get parent "units"))]
+  (require! (= 1 (count rows)) "fresh C generation: native.eval parent member is not unique" {})
+  (let [unit (artifact/read-part base-partition (first rows))]
+   (require! (= (:source-sha256 unit) (artifact/sha (File/read! (:path unit))))
+    "fresh C generation: refresh the eighteen-unit parent before extending native.eval" {}))))
+(defn output-records [job]
+ (mapv identity
+  (case job
+   "profile" [(str (:direct23 paths) "/closure.etf") (str (:direct23 paths) "/identity.json") direct-partition]
+   "partition" [direct-partition]
+   "compiler" (mapv #(str (:compiler paths) "/" %) ["index.tsv" "plan.manifest.scm" "bundle.scm"])
+   "actors" (mapv #(str (:actors paths) "/" %) ["index.tsv" "plan.manifest.scm" "manifest.json"])
+   "loader" [(str (:loader paths) "/manifest.json")]
+   "scalar" (mapv #(str (:scalar paths) "/" %) ["manifest.json" "control.c" "program.scm"]))))
+(def recipe {:paths paths :selected selected :inputs input-records})
+(def receipt-path
+ (str (:direct23 paths) "/generation-" (artifact/sha (erlang/term_to_binary recipe (list :deterministic))) ".json"))
+(defn save! [status completed]
+ (File/mkdir_p! (:direct23 paths))
+ (File/write! receipt-path
+  (json/encode {:schema "bl.native.direct-fresh-generation" :version 1 :status status
+                :recipe recipe :completed completed :sdk-pin (json/decode (:sdk-pin parent-metadata))
+                :base18 parent-record :actor-manifest (identity (:actor-manifest paths))
+                :helper (first input-records) :canonical-producers :unchanged
+                :compiler-parent-units-replaced 0 :actor-source-recompiled false
+                :native-code-executed false :builds-launched false})))
+(save! :running [])
+(loop [todo selected completed []]
+ (if (empty? todo)
+  (do (unchanged!) (save! :prepared-not-executed completed))
+  (let [job (first todo)]
+   (unchanged!)
+   (when (= job "profile") (strict-eval-parent!))
+   (when (contains? #{"compiler" "actors"} job) (exact-prefix!))
+   (println (str "DIRECT_FRESH_BEGIN " job))
+   (when-not (= job "partition")
+    (let [[path arguments] (get jobs job)]
+     (BeamLisp.Env/isolated
+      (fn [] (BeamLisp/with_argv (to-list arguments) (fn [] (BeamLisp/run_file path)))))))
+   (when (contains? #{"profile" "partition"} job) (partition!))
+   (unchanged!)
+   (let [done (conj completed {:job job :outputs (output-records job)})]
+    (save! :partial-not-executed done)
+    (println (str "DIRECT_FRESH_END " job))
+    (erlang/garbage_collect)
+    (recur (rest todo) done)))))
+(println (str "DIRECT_FRESH_PREPARED " (pr-str selected) "; exact eighteen-unit parent; receipt " receipt-path))
