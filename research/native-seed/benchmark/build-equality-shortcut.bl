@@ -1,0 +1,62 @@
+; One small BL module; existing AOT, store, Scheme/C tools and native image.
+(ns native.build-equality-shortcut
+ (:require [native.aot-target :as target] [unit-store :as store]
+           [artifact-process :as process] [bl.json :as json] [codebase]
+           [reader :as reader] [reader-node :as rn]))
+(def args (BeamLisp/argv))
+(def output (Path/expand (first args)))
+(assert (not (File/exists? output)))
+(File/mkdir_p! output)
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn file-row [path] {:path (Path/expand path) :sha256 (sha (File/read! path))})
+(def source (Path/expand "research/native-seed/benchmark/equality-shortcut.bl"))
+(def namespace 'native.equality-shortcut)
+(def observations (Path/join output "tools"))
+(def python (System/find_executable "python3"))
+(def adapter (target/adapter {:prototype "research/native-seed" :python python
+                             :observations observations :object-cache (Path/join output "objects")}))
+(def workspace (BeamLisp.AOT/open_workspace
+ {:version 2 :phase-imports (list 'core 'sugar)
+  :sources (list {:namespace namespace :file source})} {}))
+(try
+ (let [prepared (BeamLisp.AOT/prepare_unit workspace namespace)
+       _ (assert (= ["native.equality-shortcut"] (mapv :namespace (:plans prepared))))
+       directory (Path/join output "artifacts")
+       built (store/artifact-target! prepared directory nil adapter)
+       unit (Path/join directory (:key built))
+       request (first (Path/wildcard (Path/join observations "identity-*-request.json")))
+       original-pin (json/decode (File/read! "research/native-seed/sdk-pin.json"))
+       original-rt (Path/join (get original-pin "source") "priv/boot/rt.bl")
+       rt-source (File/read! original-rt)
+       indexed (codebase/index-source {} "rt" rt-source {:mode :calls})
+       forms (reader/read-syntax rt-source original-rt)
+       original (first (filter #(= "k-eqv" (codebase/defn-form %)) forms))
+       _ (assert original)
+       _ (assert (some #(= "k-eqv" (:fn/name %)) (:fn indexed)))
+       capture {:schema "bl.native.equality-shortcut-module" :version 1
+                :source (file-row source) :namespace "native.equality-shortcut"
+                :directory unit :selection-key (target/selection-key (:selection built))
+                :receipt (file-row (Path/join unit "native-module.json"))
+                :exports (file-row (Path/join unit "exports.json"))
+                :request (file-row request)
+                :original {:source (file-row original-rt) :position (rn/node-pos original)}
+                :sdk (System/get_env "BL_SDK_PRODUCT") :compiled (:compiled built)
+                :native-admission false :native-lowering-proof false}
+       _ (File/write! (Path/join output "module.json") (json/encode capture))
+       prepared-probe (process/run python
+        ["research/native-seed/benchmark/prepare-shortcut.py" "--module" (Path/join output "module.json")
+         "--preparation" (Path/expand (second args)) "--out" (Path/join output "runtime")]
+        {:timeout-ms 60000 :limit 8192})]
+  (assert (process/ok? prepared-probe) (pr-str prepared-probe))
+  (let [probe-file (Path/join output "runtime/preparation.json")
+        probe (json/decode (File/read! probe-file))
+        argv (get probe "argv")
+        result (process/run (first argv) (rest argv) {:timeout-ms 60000 :limit 16384})
+        _ (File/write! (Path/join output "runtime/native.log") (:out result))
+        passed (and (process/ok? result) (String/contains? (:out result) "EQUALITY_SHORTCUT_PASS\n"))]
+   (File/write! (Path/join output "runtime/result.json")
+    (json/encode {:passed passed :exit (:exit result) :preparation (file-row probe-file)
+                  :log (file-row (Path/join output "runtime/native.log"))}))
+   (assert passed (pr-str result))
+   (println "EQUALITY_SHORTCUT_PASS")))
+ (finally (BeamLisp.AOT/close_workspace! workspace)))
