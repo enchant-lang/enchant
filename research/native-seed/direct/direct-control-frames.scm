@@ -26,7 +26,7 @@
    ;; nil-source rule, including its physical-tail base behavior.
    ((bl-is-nil own)
     (native-c-source-stack-without-control closure previous physical-tail?))
-   ((bl-truthy (bl-get own (bl-key "native-control") #f))
+   ((bl-truthy (bl-get own (native-c-source-key "native-control") #f))
     ;; Generated loop/try/receive controls are inline Source destinations.
     ;; Undo their synthetic call site; no Source frame is pushed or popped.
     (if (and matching? (pair? previous)) (set-car! previous (vector-ref context 1)))
@@ -34,7 +34,7 @@
    (else
     (let* ((logical-tail? (and physical-tail? (pair? previous)
                                (if matching? (vector-ref context 2)
-                                (eq? (bl-get incoming (bl-key "call")) (bl-key "tail")))))
+                                (eq? (bl-get incoming (native-c-source-key "call")) (native-c-source-key "tail")))))
            (base (if logical-tail? (cdr previous) previous)))
      (if (and matching? (not logical-tail?) (pair? previous))
       (set-car! previous (vector-ref context 1)))
@@ -43,7 +43,7 @@
 
 (set! native-c-site-stack (lambda (frames site)
  (if (or (bl-is-nil site) (null? frames)) frames
-  (if (bl-truthy (bl-get site (bl-key "internal") #f)) frames
+  (if (bl-truthy (bl-get site (native-c-source-key "internal") #f)) frames
    (begin
     ;; JS runTurn assigns the complete callSrc to its live Source slot; the
     ;; Scheme ABI likewise assigns the emitted source map. Literal call maps
@@ -66,7 +66,7 @@
         (site (vector-ref machine 11))
         (tail? (vector-ref machine 8))
         (logical-tail? (and tail? (not (bl-is-nil site))
-                            (eq? (bl-get site (bl-key "call")) (bl-key "tail"))))
+                            (eq? (bl-get site (native-c-source-key "call")) (native-c-source-key "tail"))))
         (caller (if (pair? frames) (car frames) #f))
         (context (if (and (not (bl-is-nil site)) (pair? frames))
                    (vector frames caller logical-tail?) #f)))

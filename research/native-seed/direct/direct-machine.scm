@@ -48,6 +48,37 @@
 (define (native-c-refresh-pure-bifs! machine) #f)
 (define (native-c-record-pure-bifs! machine) #f)
 (define (native-c-new-extension) (vector 1 0 0 '#() 0))
+;; Five private Source-frame keys, never a replacement for public bl-key.
+;; Known-stock opt-in comes from prepare-host's exact frozen-host SHA gate.
+;; No key is interned at addon load, with features disabled, or with custom hooks.
+(define native-c-source-key-value
+ (let ((stock bl-key) (scalar native-scalar-keyword-intern)
+       (intern native-key-intern) (fragment? native-utf16-fragment?)
+       (tag? bl-tag?) (cache #f))
+  (lambda (slot name)
+   (let ((current bl-key))
+    (if (and (or native-c-noactor-tick-enabled? native-c-pure-bif-enabled?)
+             (eq? current stock) (eq? native-scalar-keyword-intern scalar)
+             (eq? native-key-intern intern) (eq? native-utf16-fragment? fragment?)
+             (eq? bl-tag? tag?))
+     (begin
+      (if (not cache) (set! cache (make-vector 5 #f)))
+      (let ((previous (vector-ref cache slot)))
+       (if previous previous
+        ;; These ASCII names are neither nil/true/false nor UTF16 fragments.
+        ;; The captured stock interner is the same pure branch of bl-key and
+        ;; cannot call a later replacement helper during lazy initialization.
+        (let ((value (intern name)))
+         (vector-set! cache slot value) value))))
+     ;; Preserve the exact callsite argument object and one current call.
+     (current name))))))
+(define-macro (native-c-source-key name)
+ (let loop ((keys '("arity" "native-control" "call" "tail" "internal")) (slot 0))
+  (cond ((null? keys) `(bl-key ,name))
+        ((and (string? name) (string=? name (car keys)))
+         `(native-c-source-key-value ,slot ,name))
+        (else (loop (cdr keys) (+ slot 1))))))
+
 (define native-c-noactor-tick-allowed?
  (let ((stock-tick h-tick) (stock-after-step native-c-after-step!)
        (stock-frames native-logical-frames))
@@ -119,7 +150,7 @@
 (define native-c-host-accepts? native-callable-accepts?)
 (set! native-callable-accepts? (lambda (f n)
  (if (native-c-closure? f)
-  (and (h-is-int n) (>= n 0) (= n (bl-get (vector-ref f 6) (bl-key "arity"))))
+  (and (h-is-int n) (>= n 0) (= n (bl-get (vector-ref f 6) (native-c-source-key "arity"))))
   (native-c-host-accepts? f n))))
 ;; C descriptors are this backend's raw function values. Preserve the original
 ;; Erlang predicates for all OTHER values, especially $blfn tuples: a language
@@ -210,7 +241,7 @@
 (define (native-c-source-boundary? closure)
  (let ((source (vector-ref closure 6)))
   (and (not (bl-is-nil source))
-       (not (bl-truthy (bl-get source (bl-key "native-control") #f))))))
+       (not (bl-truthy (bl-get source (native-c-source-key "native-control") #f))))))
 (define (native-c-unwind-critical! machine)
  ;; A nested control driver may catch inside its owning Source function.
  ;; Restore only genuine functions traversed by this unwind; an inline body
