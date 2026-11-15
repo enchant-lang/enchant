@@ -44,6 +44,7 @@ def main():
     bind(build_path)
     build = json.loads(build_path.read_text())
     if (build.get('schema') != 'bl.native.direct-unit-build' or build.get('status') != 'built-not-executed'
+            or build.get('action-abi') != 2 or build.get('header-action-abi') != 2
             or build.get('compiler_run') is not False or build.get('inputs') != build.get('inputs_after')):
         raise RuntimeError('requires an exact successful bounded compiler build')
     for path, expected in build['inputs'].items():
@@ -91,7 +92,7 @@ def main():
     witness_valid = bool(rows)
     for index, row in enumerate(rows, 1):
         witness_valid &= (row.get('backend') == 'c' and row.get('evaluations') == index
-            and row.get('required_c_exports') == 9 and row.get('scheme_data_only') is True
+            and row.get('required_c_exports') == 9 and row.get('scheme_data_only') is True and row.get('action_abi') == 2
             and all(type(row.get(name)) is int and row[name] > 0 for name in ('loaded_units', 'c_steps')))
     if rows:
         witness_valid &= rows[-1].get('retained_closures', 0) > 0 and rows[-1].get('gc_retention_checked') is True
@@ -99,7 +100,7 @@ def main():
     passed = (not timed and process.returncode == 0 and witness_valid and unchanged and not cleanup['errors']
               and output.splitlines().count('NATIVE_COMPILER_SOURCE_CORPUS_OK') == 1)
     report = {'schema': 'bl.native.direct-source-observation', 'version': 2,
-        'status': 'pass' if passed else 'failed', 'scope': 'one actual Source gate; full fixpoint remains open',
+        'action-abi': 2, 'status': 'pass' if passed else 'failed', 'scope': 'one actual Source gate; full fixpoint remains open',
         'deadline_seconds': 120, 'timeout': timed, 'exit': process.returncode,
         'seconds': round(time.monotonic() - start, 3), 'argv': argv, 'inputs': inputs,
         'inputs_unchanged': unchanged, 'cleanup': cleanup, 'source_or_anf_interpreter': False,

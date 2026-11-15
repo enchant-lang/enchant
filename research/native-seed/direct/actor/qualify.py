@@ -40,7 +40,7 @@ def main():
     evidence.mkdir(parents=True, exist_ok=True)
     report_path = evidence / 'qualification.json'
     report_path.unlink(missing_ok=True)
-    report = {'schema': 'bl.native.direct-original-actor-qualification', 'version': 1,
+    report = {'schema': 'bl.native.direct-original-actor-qualification', 'version': 1, 'action-abi': 2,
               'status': 'running', 'builds_launched': False, 'source_parser': False,
               'original_actor_corpus_qualified': False, 'compiler_fixpoint': False,
               'independent_runtime': False, 'same_core_overlay': False,
@@ -98,6 +98,7 @@ def main():
         witness.bind(args.actors / 'build-evidence.json')
         build = json.loads((args.actors / 'build-evidence.json').read_text())
         if (build.get('schema') != 'bl.native.direct-original-actor-build'
+                or build.get('action-abi') != 2 or build.get('header-action-abi') != 2
                 or build.get('status') != 'built-not-executed' or build.get('actor_run') is not False
                 or build.get('parent_core_rebuilt') is not False):
             raise RuntimeError('bounded original actor objects have not been built')

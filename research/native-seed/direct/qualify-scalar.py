@@ -21,7 +21,7 @@ import time
 
 EXPECTED_CHECKS = [
     "direct-scalar-closure", "direct-scalar-tail-frame-retention", "direct-scalar-tail", "direct-scalar-loop",
-    "direct-scalar-operand-order", "direct-scalar-try",
+    "direct-scalar-operand-order", "direct-scalar-call-slots", "direct-scalar-try",
     "direct-scalar-finally-value", "direct-scalar-map",
     "direct-scalar-truthy-zero", "direct-scalar-nil-list-distinct",
     "direct-scalar-exact-int",
@@ -148,7 +148,7 @@ def main() -> int:
         control = out / "control.c"
         manifest_path = out / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        if manifest.get("schema") != "bl.native.direct-c-unit" or manifest.get("version") != 1:
+        if manifest.get("schema") != "bl.native.direct-c-unit" or manifest.get("version") != 1 or manifest.get("action-abi") != 2:
             raise RuntimeError("not a concrete direct-C unit manifest")
         if manifest.get("scope") != "scalar-abi-smoke":
             raise RuntimeError("qualifier requires the original scalar ABI fixture artifact")
@@ -159,6 +159,13 @@ def main() -> int:
             raise RuntimeError("scalar fixture identity differs from emitted artifact")
         machine = base / "direct/direct-machine.scm"
         header = base / "direct/native-direct.h"
+        if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
+            raise RuntimeError("scalar requires the exact action ABI2 header")
+        if not control.read_text().startswith('#include "native-direct.h"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n'):
+            raise RuntimeError("scalar C control lacks its action ABI2 guard")
+        if program.read_text().splitlines().count('(native-c-require-action-abi! 2)') != 1:
+            raise RuntimeError("scalar wrapper lacks its action ABI2 guard")
+        report.update({"action-abi": 2, "header-action-abi": 2, "header_sha256": sha(header)})
         prefix = host.read_bytes() + b"\n" + machine.read_bytes() + b"\n"
         program_bytes = program.read_bytes()
         if not program_bytes.startswith(prefix):
@@ -240,6 +247,15 @@ def main() -> int:
         if not (lines.index(order[0]) < lines.index(order[1]) <
                 lines.index("PASS direct-scalar-operand-order")):
             raise RuntimeError("operand trace happened after its result was checked")
+        call_trace = [line for line in lines if line.startswith("SCALAR_CALL ")]
+        expected_call_trace = ["SCALAR_CALL " + label for label in (
+            "zero-callee", "callee", "first", "second", "third", "callee-throws",
+            "throw-callee", "before-throw", "argument-throws", "arity-callee",
+            "arity-first", "arity-second")]
+        if call_trace != expected_call_trace:
+            raise RuntimeError(f"finite-call operand/exception trace differs: {call_trace!r}")
+        if not all(lines.index(line) < lines.index("PASS direct-scalar-call-slots") for line in call_trace):
+            raise RuntimeError("finite-call effects happened after their result escaped")
         if lines.count("SCALAR_FINALLY once") != 1:
             raise RuntimeError("finally did not execute exactly once")
         if lines.index("SCALAR_FINALLY once") > lines.index("PASS direct-scalar-finally-value"):
@@ -278,7 +294,7 @@ def main() -> int:
             gc_output = run(label, [str(gambit / "bin/gsi"), str(driver)], args.run_timeout, args.gc_interval)
             body, separator, witness = gc_output.rpartition("NATIVE_DIRECT_GC ")
             if not separator or body != transcript:
-                raise RuntimeError(label + " changed the exact ten-check scalar transcript")
+                raise RuntimeError(label + " changed the exact scalar transcript")
             observation = json.loads(witness)
             if (observation.get("interval") != args.gc_interval or observation.get("collections", 0) <= 0
                     or observation["collections"] != observation["steps"] // args.gc_interval):
@@ -295,13 +311,13 @@ def main() -> int:
             artifacts.append(reference)
         report.update({"status": "pass", "checks": passed,
                        "inputs_after": {name: sha(Path(name)) for name in before},
-                       "trace": order + ["SCALAR_FINALLY once"], "llvm_transcript_equal": True,
+                       "trace": order + call_trace + ["SCALAR_FINALLY once"], "llvm_transcript_equal": True,
                        "gc_stress": {"enabled": bool(args.gc_interval), "interval": args.gc_interval,
                                      "witnesses": gc_witnesses, "recompiled": False},
                        "artifacts": {str(path): {"sha256": sha(path), "bytes": path.stat().st_size}
                                      for path in artifacts}})
         write_report()
-        print("DIRECT_SCALAR_QUALIFIED C=LLVM; 10 checks; operand order; finally once", flush=True)
+        print(f"DIRECT_SCALAR_QUALIFIED C=LLVM; {len(passed)} checks; operand order; finally once", flush=True)
         return 0
     except BaseException as error:
         report.update({"status": "fail", "error": str(error)})

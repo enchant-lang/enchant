@@ -32,7 +32,7 @@ def main():
     directory = args.plan.resolve()
     report_path = directory / ('build-evidence.json' if args.build else 'admission.json')
     report_path.unlink(missing_ok=True)
-    report = {'schema': 'bl.native.direct-original-actor-build', 'version': 1,
+    report = {'schema': 'bl.native.direct-original-actor-build', 'version': 1, 'action-abi': 2,
               'status': 'running', 'builds_requested': args.build, 'builds_launched': False, 'source_parser': False,
               'actor_run': False, 'parent_core_rebuilt': False, 'objects': [], 'runs': []}
     witness = Witness(root)
@@ -84,6 +84,9 @@ def main():
         build_script, header = gambit / 'gambit/bin/gambuild-C', base / 'direct/native-direct.h'
         for path in (gsc, clang, public, build_script, header):
             witness.bind(path)
+        if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
+            raise RuntimeError('actor builder requires action ABI2 header')
+        report.update({'header-action-abi': 2, 'header_sha256': sha(header)})
         defines = re.findall(r'^DEFS_DYN="([^"\n]*)"$', build_script.read_text(), re.MULTILINE)
         expected = ['-D___SINGLE_HOST', '-D___TRUST_C_TCO', '-D___CAN_IMPORT_CLIB_DYNAMICALLY',
                     '-D___CAN_IMPORT_SETJMP_DYNAMICALLY', '-D___DYNAMIC']
@@ -99,7 +102,7 @@ def main():
         for unit in [{'name': 'actorhost', 'scmsha': sha(directory / 'actorhost.scm'), 'csha': None}, *actor['units']]:
             name = unit['name']
             source = directory / (name + '.scm')
-            key = hashlib.sha256(json.dumps({'name': name, 'source': unit['scmsha'], 'control': unit['csha'],
+            key = hashlib.sha256(json.dumps({'action-abi': 2, 'header-action-abi': 2, 'name': name, 'source': unit['scmsha'], 'control': unit['csha'],
                 'tools': {str(p): sha(p) for p in (gsc, clang, public, build_script, header)},
                 'flags': flags, 'builder': sha(here), 'admission': sha(here.with_name('artifacts.py')),
                 'compiler_environment': environment}, sort_keys=True).encode()).hexdigest()
@@ -118,7 +121,7 @@ def main():
                 adapted.write_text(text[:match.start()] + '#define ___LINKER_ID ___LNK_' + name + '_2e_o1' + text[match.end():])
                 run(name + '-clang', [str(clang), *flags, '-shared', '-rdynamic', str(adapted),
                                      '-ldl', '-lm', '-o', str(obj)], cache)
-                receipt.write_text(json.dumps({'sha256': sha(obj), 'raw_c_sha256': sha(raw),
+                receipt.write_text(json.dumps({'action-abi': 2, 'header-action-abi': 2, 'sha256': sha(obj), 'raw_c_sha256': sha(raw),
                     'adapted_c_sha256': sha(adapted), 'startup_from': '___LNK_' + name,
                     'startup_to': '___LNK_' + name + '_2e_o1', 'replacements': 1}, indent=2) + '\n')
             shutil.copy2(obj, directory / (name + '.o1'))

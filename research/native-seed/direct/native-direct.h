@@ -1,4 +1,4 @@
-/* Direct BL-ANF ABI, v1. C steps NEVER allocate or invoke Scheme/C callbacks.
+/* Direct BL-ANF ABI, v2. C steps NEVER allocate or invoke Scheme/C callbacks.
  * Every Scheme value is owned by machine/unit/frame vectors, all roots passed
  * as the c-lambda scheme-object argument. No value is retained in C globals.
  * Allocation, language raises and scheduler suspension occur after C returns.
@@ -7,7 +7,8 @@
 #ifndef BL_NATIVE_DIRECT_H
 #define BL_NATIVE_DIRECT_H
 #include "gambit.h"
-enum { BLC_SERVICE=1, BLC_CALL=2, BLC_RETURN=3, BLC_CLOSURE=4, BLC_TICK=5 };
+#define BL_NATIVE_DIRECT_ABI 2
+enum { BLC_SERVICE=1, BLC_CALL=2, BLC_RETURN=3, BLC_CLOSURE=4, BLC_TICK=5, BLC_CALL_SLOTS=6 };
 static ___SCMOBJ blc_ref(___SCMOBJ x, int i) { return ___VECTORREF(x,___FIX(i)); }
 static void blc_set(___SCMOBJ x, int i, ___SCMOBJ v) { ___VECTORSET(x,___FIX(i),v); }
 #define BLC_UNIT(m) blc_ref(m,0)

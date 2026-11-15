@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 
@@ -34,25 +35,29 @@ def main():
     parts, components, inputs = [], [], {}
     for role, path in paths:
         data = path.read_bytes()
+        if role == 'direct-machine' and data.count(b'(define native-c-action-abi 2)') != 1:
+            raise RuntimeError('direct machine lacks action ABI2')
         if role == 'frozen-host' and b'native-raw-function?' not in data:
             raise RuntimeError('frozen host lacks the strict shared raw-function ABI')
         parts.append(data)
         components.append({'role': role, 'sha256': sha(data)})
         inputs[str(path)] = sha(data)
     header = base / 'direct/native-direct.h'
-    config = ('(native-c-configure-clang! ' + ' '.join(map(quoted, [str(gambit / 'bin/gsc'),
+    if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
+        raise RuntimeError('direct header lacks its unique action ABI2 stamp')
+    config = ('(native-c-require-action-abi! 2)\n(native-c-configure-clang! ' + ' '.join(map(quoted, [str(gambit / 'bin/gsc'),
         str(clang / 'bin/clang'), str(gambit / 'gambit/include'),
         str(gambit / 'gambit/bin/gambuild-C'), header.read_text()])) + ' 120000)\n'
         '(set! native-c-backend (bl-key "c"))\n').encode()
     parts.append(config)
     components.append({'role': 'pinned-compiler-configuration', 'sha256': sha(config)})
     host = b'\n'.join(parts) + b'\n'
-    ledger = {'schema': 'bl.native.direct-host', 'version': 1,
+    ledger = {'schema': 'bl.native.direct-host', 'version': 1, 'action-abi': 2,
               'source_sha256': sha(host), 'components': components}
     # Exactly the same owned data c-produce projects from the JSON companion.
     records = ' '.join('(bl-map (bl-key "role") ' + quoted(row['role']) +
                        ' (bl-key "sha256") ' + quoted(row['sha256']) + ')' for row in components)
-    scheme = ('(bl-map (bl-key "schema") "bl.native.direct-host" (bl-key "version") 1 '
+    scheme = ('(bl-map (bl-key "schema") "bl.native.direct-host" (bl-key "version") 1 (bl-key "action-abi") 2 '
               '(bl-key "source-sha256") ' + quoted(ledger['source_sha256']) +
               ' (bl-key "components") (bl-vec (list ' + records + ')))\n')
     args.out.mkdir(parents=True, exist_ok=True)
@@ -62,7 +67,7 @@ def main():
     # Provenance is deliberately outside emitted compiler manifests. Output
     # directory paths therefore cannot spoil stage2/stage3 byte fixpoints.
     (args.out / 'preparation.json').write_text(json.dumps({'inputs': inputs,
-        'toolchain': tools, 'header_sha256': sha(header.read_bytes()),
+        'toolchain': tools, 'action-abi': 2, 'header-action-abi': 2, 'header_sha256': sha(header.read_bytes()),
         'host_sha256': sha(host), 'status': 'assembled-not-executed'}, indent=2) + '\n')
     print('DIRECT_HOST_PREPARED ' + ledger['source_sha256'])
 

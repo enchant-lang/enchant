@@ -1,0 +1,30 @@
+; SDK-only structural admission checks. These emit finite canonical ANF but
+; deliberately do not execute it. Actual authored Source is scalar.bl's gate.
+(ns native.call-slots-shape (:require [native.c :as c] [anf :as a]))
+(defn check [label actual expected]
+ (when-not (= actual expected)
+  (throw (ex-info "C finite call-spine shape mismatch" {:case label :actual actual :expected expected}))))
+(def nil-callee (a/lit nil))
+(def empty-arguments (a/empty-list-node))
+(def one-argument (a/cons-cell (a/lit 1) empty-arguments))
+(def two-arguments (a/cons-cell (a/lit 1) (a/cons-cell (a/lit 2) empty-arguments)))
+(def rows
+ [{:name :empty :node (a/invoke nil-callee empty-arguments) :slots 1 :generic 0}
+  {:name :one :node (a/invoke nil-callee one-argument) :slots 1 :generic 0}
+  {:name :two :node (a/invoke nil-callee two-arguments) :slots 1 :generic 0}
+  {:name :apply-empty :node (a/app nil-callee []) :slots 1 :generic 0}
+  {:name :apply-two :node (a/app nil-callee [(a/lit 1) (a/lit 2)]) :slots 1 :generic 0}
+  {:name :variable :node (a/lett "argv" empty-arguments (a/invoke nil-callee (a/var "argv"))) :slots 0 :generic 1}
+  {:name :computed-tail :node (a/invoke nil-callee (a/cons-cell (a/lit 1)
+                              (a/lett "tail" empty-arguments (a/var "tail")))) :slots 0 :generic 1}
+  {:name :dotted :node (a/invoke nil-callee (a/cons-cell (a/lit 1) (a/lit 2))) :slots 0 :generic 1}
+  {:name :literal-list :node (a/invoke nil-callee (a/lit (list 1 2))) :slots 0 :generic 1}])
+(doseq [row rows]
+ (let [emitted (c/emit-unit (:node row) {:unit-name (str "shape_" (name (:name row)))})
+       manifest (:manifest emitted) source (:c-source emitted)]
+  (check [(:name row) :abi] (:action-abi manifest) 2)
+  (check [(:name row) :slots] (:slot-calls manifest) (:slots row))
+  (check [(:name row) :generic] (:generic-calls manifest) (:generic row))
+  (check [(:name row) :slot-opcode] (String/contains? source "return BLC_CALL_SLOTS;") (= 1 (:slots row)))
+  (check [(:name row) :generic-opcode] (String/contains? source "return BLC_CALL;") (= 1 (:generic row)))))
+(println "NATIVE_C_CALL_SLOTS_SHAPES_PASS 45; no emitted program executed")

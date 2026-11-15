@@ -1,6 +1,10 @@
 ;; Value/control services for direct C, not an ANF/source evaluator. The only
 ;; program decisions are C-emitted pc edges and closure entries. The driver
 ;; owns allocation/GC roots and performs an action AFTER the C stack returns.
+(define native-c-action-abi 2)
+(define (native-c-require-action-abi! requested)
+ (if (not (and (integer? requested) (exact? requested) (= requested native-c-action-abi)))
+  (error "direct C action ABI mismatch" requested native-c-action-abi)) bl-nil)
 (define native-c-closure-marker (list 'native-c-closure-marker-v1))
 (define native-c-step-count 0)
 (define native-c-gc-between-steps? #f)
@@ -216,6 +220,10 @@
                   (vector-ref (vector-ref unit 2) (vector-ref machine 4))
                   (native-c-slots (vector-ref machine 2) (vector-ref machine 7))))
            ((2) (native-c-apply-action machine (vector-ref machine 4) (vector-ref machine 7)))
+           ((6) (native-c-apply-action machine (vector-ref machine 4)
+                  ;; Every argument VALUE was rooted before this C step. The
+                  ;; one fresh list also survives a callee's tail-frame clear.
+                  (native-c-slots (vector-ref machine 2) (vector-ref machine 7))))
            ((3) (native-c-return! machine (vector-ref machine 4)))
            ((4)
             (vector-set! (vector-ref machine 2) (vector-ref machine 5)

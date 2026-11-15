@@ -29,16 +29,17 @@ def main():
     report_path = source / 'build-evidence.json'
     report = json.loads(report_path.read_text())
     if (report.get('schema') != 'bl.native.direct-unit-build'
-            or report.get('version') != 1 or report.get('status') != 'built-not-executed'
+            or report.get('version') != 1 or report.get('action-abi') != 2
+            or report.get('header-action-abi') != 2 or report.get('status') != 'built-not-executed'
             or report.get('compiler_run') is not False
             or report.get('inputs') != report.get('inputs_after')):
         raise RuntimeError('source plan lacks an unchanged successful build receipt')
     index = source / 'index.tsv'
     rows = index.read_text(encoding='ascii').splitlines()
-    if not rows or rows[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32':
+    if len(rows) < 2 or rows[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32' or rows[1] != 'B\t2':
         raise RuntimeError('unsupported source plan schema')
     files = {'index.tsv', 'bundle.scm'}
-    for line in rows[1:]:
+    for line in rows[2:]:
         fields = line.split('\t')
         if fields[0] in ('H', 'M', 'E', 'A', 'P'):
             candidates = [(fields[1], fields[2])]
@@ -71,7 +72,7 @@ def main():
     shutil.copy2(report_path, target / 'source-build-evidence.json')
     if any(digest(Path(path)) != value for path, value in before.items()):
         raise RuntimeError('source plan changed while copying')
-    receipt = {'schema': 'bl.native.direct-derived-host-plan', 'version': 1,
+    receipt = {'schema': 'bl.native.direct-derived-host-plan', 'version': 1, 'action-abi': 2,
                'status': 'copied-not-built', 'source': str(source), 'target': str(target),
                'source_build': {'path': str(report_path), 'sha256': before[str(report_path)]},
                'semantic_files': {name: digest(target / name) for name in sorted(files)},

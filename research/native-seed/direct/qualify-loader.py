@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -51,9 +52,13 @@ def main():
         tools = json.loads(tools_path.read_text())
         gsi = bind(Path(tools['gambit']) / 'bin/gsi')
         manifest = json.loads(args.manifest.read_text())
-        if manifest.get('schema') != 'bl.native.direct-loader-corpus' or manifest.get('version') != 1 or len(manifest['units']) != 3:
+        if manifest.get('schema') != 'bl.native.direct-loader-corpus' or manifest.get('version') != 1 or manifest.get('action-abi') != 2 or len(manifest['units']) != 3:
             raise RuntimeError('expected three exact original-source dynamic units')
         fixture = manifest['fixture']
+        header = bind(base / 'direct/native-direct.h')
+        if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
+            raise RuntimeError('dynamic loader requires action ABI2 header')
+        report.update({'action-abi': 2, 'header-action-abi': 2, 'header_sha256': sha(header)})
         bind(root / fixture['path'], fixture['sha256'])
         for row in manifest['inputs']:
             bind(root / row['path'], row['sha256'])
@@ -61,8 +66,20 @@ def main():
         driver = args.evidence / 'driver.scm'
         q = lambda value: json.dumps(str(value), ensure_ascii=False)
         driver.write_text('(load ' + q(host) + ')\n'
+            '(native-c-require-action-abi! 2)\n'
             '(define (loader-check ok label) (if (not ok) (error "dynamic C retention failed" label)))\n'
-            '(define one (native-c-eval-unit (native-eval-string (native-read-file ' + q(units[0]) + '))))\n'
+            '(define first-emitted (native-eval-string (native-read-file ' + q(units[0]) + ')))\n'
+            '(define wrong-abi-emitted (bl-assoc first-emitted (bl-key "manifest") '
+            '(bl-assoc (bl-get first-emitted (bl-key "manifest")) (bl-key "action-abi") 1)))\n'
+            '(define abi-probe-compile native-c-compile-dynamic) (define abi-probe-calls 0)\n'
+            '(set! native-c-compile-dynamic (lambda args (set! abi-probe-calls (+ abi-probe-calls 1)) '
+            '(error "wrong ABI reached compiler")))\n'
+            '(define abi-probe-refused (with-exception-catcher (lambda (failure) #t) '
+            '(lambda () (native-c-eval-unit wrong-abi-emitted) #f)))\n'
+            '(set! native-c-compile-dynamic abi-probe-compile)\n'
+            '(loader-check (and abi-probe-refused (= abi-probe-calls 0) '
+            '(null? native-c-loaded-artifacts)) "ABI1 refused before compile/publication")\n'
+            '(define one (native-c-eval-unit first-emitted))\n'
             '(define two (native-c-eval-unit (native-eval-string (native-read-file ' + q(units[1]) + '))))\n'
             '(loader-check (and (native-c-closure? one) (native-c-closure? two)) "actual C functions")\n'
             '(##gc)\n'
@@ -106,6 +123,7 @@ def main():
             raise RuntimeError('dynamic loader input changed')
         report.update({'status': 'pass', 'seconds': round(time.monotonic() - started, 3),
                        'actual_units_retained': 3, 'cross_unit_capture': True, 'gc_after_loads': True,
+                       'incompatible_action_abi_refused_before_compile': True,
                        'log': {'path': str(log.resolve()), 'sha256': sha(log)}})
         print(expected)
     except BaseException as error:

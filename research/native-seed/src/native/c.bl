@@ -16,7 +16,7 @@
               "\n" "\\n") "\""))
 (defn state []
  {:next 0 :slot 2 :blocks [] :constants ["bl-nil"] :constant-index {"bl-nil" 0}
-  :services [] :service-index {} :functions []})
+  :services [] :service-index {} :functions [] :slot-calls 0 :generic-calls 0})
 (defn reg [s] [(update s :slot inc) (:slot s)])
 (defn pool [s source]
  (if-let [i (get (:constant-index s) source)] [s i]
@@ -210,13 +210,35 @@
        handler {:op :fn :direct-control? true :direct-control-tail? false :direct-control-tick? false :clauses (vec (concat catches [fallback])) :ann (:ann n)}]
   (internal "native-c-try" [(thunk (:body n)) handler (if (:after n) (thunk (:after n)) (lit false))])))
 
+(defn finite-call-arguments [arguments]
+ ; Only constructor cells ending EXACTLY in :enil are transport. A variable,
+ ; computed tail, dotted list or any other expression keeps generic lowering.
+ (loop [node arguments out []]
+  (case (:op node)
+   :enil out
+   :cons (recur (:tail node) (conj out (:head node)))
+   nil)))
+(defn lower-call-slots [s callee arguments env destination next tail? options]
+ ; Root the callee FIRST, then each head left-to-right exactly once. C returns
+ ; before one native-c-slots allocation; the original planner owns the call.
+ (let [s (update s :slot-calls inc)
+       [s f] (reg s)
+       [s slots] (reduce (fn [[s out] _] (let [[s i] (reg s)] [s (conj out i)])) [s []] arguments)
+       [s plan] (pool s (str "'(" (string/join " " slots) ")"))
+       [s site] (pool s (scalar/literal (call-site options tail?)))
+       [s invoke] (block s (action-at "BLC_CALL_SLOTS" (r f) destination next (k plan) tail? (k site)))
+       inner-options (dissoc options :direct-callsite)
+       [s heads] (lower-arguments s arguments slots env invoke inner-options)]
+  (lower s callee env f heads false inner-options)))
 (defn lower-call [s callee arguments env destination next tail? options]
- (let [[s f] (reg s) [s args] (reg s)
+ (if-let [heads (finite-call-arguments arguments)]
+  (lower-call-slots s callee heads env destination next tail? options)
+  (let [s (update s :generic-calls inc) [s f] (reg s) [s args] (reg s)
        [s site] (pool s (scalar/literal (call-site options tail?)))
        [s invoke] (block s (action-at "BLC_CALL" (r f) destination next (r args) tail? (k site)))
        inner-options (dissoc options :direct-callsite)
        [s arguments] (lower s arguments env args invoke false inner-options)]
-  (lower s callee env f arguments false inner-options)))
+  (lower s callee env f arguments false inner-options))))
 
 (defn self-constructor-target [node options]
  ; Only the canonical inert (self self) constructor is elided. Authored calls
@@ -338,7 +360,7 @@
            (when-not source (fail node))
            (lower-service s source (:args node) env destination next tail? (assoc options :direct-callsite (:ann node))))
   :direct-service (lower-service s (:service node) (:args node) env destination next tail? options)
-  :apply (lower-call s (:fn node) (list-node (:args node)) env destination next tail? (assoc options :direct-callsite (:ann node)))
+  :apply (lower-call-slots s (:fn node) (:args node) env destination next tail? (assoc options :direct-callsite (:ann node)))
   :invoke (lower-call s (:callee node) (:arguments node) env destination next tail? (assoc options :direct-callsite (:ann node)))
   :let (let [[s slot] (reg s)
              [s body] (lower s (:body node) (assoc env (:name node) slot) destination next tail? options)]
@@ -387,19 +409,20 @@
  (let [unit (scalar/ident (or (:unit-name options) "native_direct_unit"))
        [s finish] (block (state) " blc_set(m,4,BLC_REG(m,1)); return BLC_RETURN;")
        [s entry] (lower s node {} 1 finish true options)
-       c-source (str "#include \"native-direct.h\"\nstatic int " unit "(___SCMOBJ m) { for (;;) { switch ((int)___INT(blc_ref(m,1))) {\n"
+       c-source (str "#include \"native-direct.h\"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n#error direct_C_action_ABI_mismatch\n#endif\nstatic int " unit "(___SCMOBJ m) { for (;;) { switch ((int)___INT(blc_ref(m,1))) {\n"
                   (string/join "\n" (map #(str "case " (:id %) ": {" (:code %) "}\n") (sort-by :id (:blocks s))))
                   "default: return -1; } } }\n")
-       preamble (str "(c-declare " (quote-generated-code c-source) ")\n")
+       preamble (str "(native-c-require-action-abi! 2)\n(c-declare " (quote-generated-code c-source) ")\n")
        expression (str "(let ((unit (vector (c-lambda (scheme-object) int " (scalar/text unit) ")\n"
                 " (vector " (string/join " " (:constants s)) ")\n"
                 " (vector " (string/join " " (:services s)) "))))\n"
                 " (native-c-invoke (native-c-new-closure unit (list " entry " " (:slot s) " '() bl-nil) '()) '()))\n")]
   {:c-source c-source :preamble-source preamble :expression-source expression
    :wrapper-source (str preamble "(native-c-publish-loaded! " expression ")\n")
-   :manifest {:schema "bl.native.direct-c-unit" :version 1 :unit-name unit
+   :manifest {:schema "bl.native.direct-c-unit" :version 1 :action-abi 2 :unit-name unit
               :blocks (count (:blocks s)) :functions (count (:functions s))
               :root-slots (:slot s) :literals (count (:constants s))
+              :slot-calls (:slot-calls s) :generic-calls (:generic-calls s)
               :primitive-services (:services s) :source-interpreter false :anf-interpreter false
               :program-control :emitted-c :value-services :shared-native-host}}))
 

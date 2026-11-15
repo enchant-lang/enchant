@@ -108,7 +108,7 @@ def main():
     report_path = out / 'qualification.json'
     report_path.unlink(missing_ok=True)
     inputs, runs, plans, results = {}, [], {}, {}
-    report = {'schema': 'bl.native.direct-bootstrap-fixpoint', 'version': 1, 'status': 'running',
+    report = {'schema': 'bl.native.direct-bootstrap-fixpoint', 'version': 1, 'action-abi': 2, 'status': 'running',
               'source_parser': False, 'anf_interpreter': False, 'beam_launched': False,
               'sdk_producer_launched': False, 'routes': routes, 'runs': runs, 'plans': plans, 'results': results,
               'independent_runtime': False, 'dynamic_macro_route': 'pinned native Clang C loader',
@@ -176,11 +176,11 @@ def main():
         index = directory / 'index.tsv'
         bind(index)
         lines = index.read_text(encoding='ascii').splitlines()
-        if not lines or lines[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32':
+        if len(lines) < 2 or lines[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32' or lines[1] != 'B\t2':
             raise RuntimeError('not the captured bounded compiler index')
         files, singles, units, sources = {'index.tsv': sha(index)}, {}, [], []
         phase = 'functions'
-        for line in lines[1:]:
+        for line in lines[2:]:
             row = line.split('\t')
             kind = row[0]
             if kind in ('H', 'M', 'E', 'A', 'P'):
@@ -256,6 +256,7 @@ def main():
         receipt = json.loads(receipt_path.read_text())
         plan = admit_plan(directory)
         if (receipt.get('schema') != 'bl.native.direct-unit-build' or receipt.get('status') != 'built-not-executed'
+                or receipt.get('action-abi') != 2 or receipt.get('header-action-abi') != 2
                 or receipt.get('compiler_run') is not False or receipt.get('route') != route
                 or receipt.get('standard_bindings') != args.standard_bindings
                 or receipt.get('host_optimization') != args.host_optimization
@@ -304,7 +305,7 @@ def main():
             raise RuntimeError('Source pass lacks actual dynamic C execution witness')
         for i, row in enumerate(rows, 1):
             if (row.get('backend') != 'c' or row.get('evaluations') != i or row.get('required_c_exports') != 9
-                    or row.get('scheme_data_only') is not True
+                    or row.get('scheme_data_only') is not True or row.get('action_abi') != 2
                     or any(not isinstance(row.get(k), int) or row[k] <= 0 for k in ('loaded_units', 'c_steps'))):
                 raise RuntimeError('Source witness permits fallback or lacks actual C execution')
             directory = Path(row['artifact_directory'])
@@ -350,9 +351,10 @@ def main():
         bind(host_json)
         bind(preparation)
         ledger, prepared = json.loads(host_json.read_text()), json.loads(preparation.read_text())
-        if (ledger.get('schema') != 'bl.native.direct-host' or ledger.get('version') != 1
+        if (ledger.get('schema') != 'bl.native.direct-host' or ledger.get('version') != 1 or ledger.get('action-abi') != 2
                 or ledger.get('source_sha256') != sha(args.host)
                 or [r['role'] for r in ledger['components']] != REQUIRED_ROLES
+                or prepared.get('action-abi') != 2 or prepared.get('header-action-abi') != 2
                 or prepared.get('status') != 'assembled-not-executed' or prepared.get('host_sha256') != sha(args.host)
                 or prepared.get('toolchain') != json.loads((base / 'toolchain-pin.json').read_text())):
             raise RuntimeError('frozen direct host lacks its exact component/toolchain provenance')

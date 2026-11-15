@@ -52,15 +52,16 @@ def main():
     receipt = json.loads(receipt_path.read_text())
     if (receipt.get('schema') != 'bl.native.direct-unit-build'
             or receipt.get('status') != 'built-not-executed'
+            or receipt.get('action-abi') != 2 or receipt.get('header-action-abi') != 2
             or receipt.get('compiler_run') is not False):
         raise RuntimeError('observer requires the actual previously built bounded C image')
     for path, expected in receipt['inputs'].items():
         bind(path, expected)
     rows = bind(plan / 'index.tsv').read_text().splitlines()
-    if not rows or rows[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32':
+    if len(rows) < 2 or rows[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32' or rows[1] != 'B\t2':
         raise RuntimeError('observer requires the exact bounded C index')
     units = []
-    for text in rows[1:]:
+    for text in rows[2:]:
         row = text.split('\t')
         if row[0] in ('H', 'M', 'E', 'A', 'P'):
             bind(plan / row[1], row[2])
@@ -78,7 +79,7 @@ def main():
     header = (';; Direct C compiler: relative link entries; unit root is explicit.\n'
               '(define native-direct-unit-root (getenv "BL_NATIVE_C_UNIT_ROOT" #f))\n'
               '(if (not native-direct-unit-root) (error "BL_NATIVE_C_UNIT_ROOT is required"))\n')
-    host_load = '(load (string-append native-direct-unit-root "/host.o1"))\n'
+    host_load = '(load (string-append native-direct-unit-root "/host.o1"))\n(native-c-require-action-abi! 2)\n'
     metadata_load = '(native-install-bundle! ' + metadata + ')\n(set! native-c-backend (bl-key "c"))\n'
     unit_load = lambda unit: '(load (string-append native-direct-unit-root "/' + unit['name'] + '.o1"))\n'
     exact = header + host_load + metadata_load + ''.join(map(unit_load, units)) + exact_entry

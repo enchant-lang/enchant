@@ -40,6 +40,8 @@
 (defn emit-named-group! [name definitions phase io out options]
  (let [write (:write io) digest (:digest io)
        emitted (c/emit-definitions definitions (assoc options :unit-name (str "direct_" name)))
+       _ (when-not (= 2 (:action-abi (:manifest emitted)))
+           (throw (ex-info "direct C emitted unit requires action ABI2" {})))
        c-file (str name ".c") ffi-file (str name ".scm")
        c-sha (digest (:c-source emitted)) ffi-sha (digest (:wrapper-source emitted))
        records (mapv #(definition-record % digest) definitions)
@@ -52,7 +54,7 @@
             :definitions-sha256 records-sha
             :c {:path c-file :sha256 c-sha} :ffi {:path ffi-file :sha256 ffi-sha}
             :emission (select-keys (:manifest emitted)
-              [:unit-name :blocks :functions :root-slots :literals :program-control :value-services])}
+              [:unit-name :action-abi :slot-calls :generic-calls :blocks :functions :root-slots :literals :program-control :value-services])}
    :index (str (tab-row ["U" phase name c-file c-sha ffi-file ffi-sha (str count) records-sha])
              (string/join "" (map-indexed (fn [ordinal record]
               (tab-row ["D" name (str ordinal) (:body-sha256 record) (:binding-sha256 record)])) records)))}))
@@ -73,6 +75,7 @@
   "(define native-direct-unit-root (getenv \"BL_NATIVE_C_UNIT_ROOT\" #f))\n"
   "(if (not native-direct-unit-root) (error \"BL_NATIVE_C_UNIT_ROOT is required\"))\n"
   "(load (string-append native-direct-unit-root \"/host.o1\"))\n"
+  "(native-c-require-action-abi! 2)\n"
   "(native-install-bundle! " metadata-source ")\n"
   "(set! native-c-backend (bl-key \"c\"))\n"
   (string/join "" (map (fn [unit]
@@ -85,6 +88,7 @@
  [units metadata-source host-source host-ledger io out entry-source]
  (let [write (:write io) digest (:digest io)
        _ (when-not (and (= "bl.native.direct-host" (:schema host-ledger)) (= 1 (:version host-ledger))
+                       (= 2 (:action-abi host-ledger))
                        (= ["frozen-host" "direct-machine" "source-control-frames" "shared-raw-function" "deferred-static-mfa"
                            "external-function-peeling" "dynamic-loader" "clang-loader" "unit-host-services" "late-compiler-router"
                            "pinned-compiler-configuration"] (mapv :role (:components host-ledger))))
@@ -103,7 +107,7 @@
        source-records (mapv (fn [unit]
         {:namespace (:ns unit) :path (:path unit) :sha256 (digest (:source unit))}) units)
        index-core
-        (str "BL_NATIVE_DIRECT_UNITS\t1\t32\n"
+        (str "BL_NATIVE_DIRECT_UNITS\t1\t32\nB\t2\n"
          (tab-row ["H" "host.scm" (digest host-source) (digest (bootstrap/data host-ledger))])
          (tab-row ["M" "metadata.scm" (digest metadata-source)])
          (tab-row ["E" "entry.scm" (digest entry-source)])
@@ -111,7 +115,7 @@
          (string/join "" (map-indexed (fn [index record]
           (tab-row ["S" (str index) (:sha256 record) (digest (bootstrap/data [(:namespace record) (:path record)]))])) source-records))
          (string/join "" (:rows emitted)))
-       manifest {:schema "bl.native.direct-compiler-units" :version 1 :status :emitted-not-executed
+       manifest {:schema "bl.native.direct-compiler-units" :version 1 :action-abi 2 :status :emitted-not-executed
                  :group-size group-size :host host-ledger :sources source-records
                  :metadata-sha256 (digest metadata-source) :entry-source entry-source
                  :index-core-sha256 (digest index-core) :assembly-sha256 (digest assembly)

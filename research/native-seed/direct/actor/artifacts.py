@@ -77,10 +77,10 @@ def index(witness, directory, actor=False):
     witness.bind(directory / 'index.tsv')
     lines = (directory / 'index.tsv').read_text(encoding='ascii').splitlines()
     expected = 'BL_NATIVE_DIRECT_ACTORS\t1\t32' if actor else 'BL_NATIVE_DIRECT_UNITS\t1\t32'
-    if not lines or lines[0] != expected:
+    if len(lines) < 2 or lines[0] != expected or lines[1] != 'B\t2':
         raise RuntimeError('unsupported bounded index: ' + str(directory))
     singles, units, sources, phase = {}, [], [], 'functions'
-    for line in lines[1:]:
+    for line in lines[2:]:
         row = line.split('\t')
         kind = row[0]
         if kind in ('H', 'M', 'E', 'A', 'P'):
@@ -112,6 +112,10 @@ def index(witness, directory, actor=False):
             witness.bind(directory / cfile, csha)
             witness.bind(directory / scmfile, scmsha)
             ctext = (directory / cfile).read_text()
+            if not ctext.startswith('#include "native-direct.h"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n'):
+                raise RuntimeError('bounded unit C lacks action ABI2 guard')
+            if not (directory / scmfile).read_text().startswith('(native-c-require-action-abi! 2)\n(c-declare '):
+                raise RuntimeError('bounded unit wrapper lacks action ABI2 guard')
             exact = '(c-declare ' + json.dumps(ctext, ensure_ascii=False) + ')'
             if (directory / scmfile).read_text().count(exact) != 1:
                 raise RuntimeError('FFI wrapper does not contain exact C control once')
@@ -165,7 +169,7 @@ def actor_plan(witness, directory):
     directory = Path(directory).resolve()
     witness.bind(directory / 'manifest.json')
     manifest = json.loads((directory / 'manifest.json').read_text())
-    if (manifest.get('schema') != 'bl.native.direct-original-actor-plan' or manifest.get('version') != 1
+    if (manifest.get('schema') != 'bl.native.direct-original-actor-plan' or manifest.get('version') != 1 or manifest.get('action-abi') != 2
             or manifest.get('runtime-definitions') != 202 or manifest.get('group-size') != 32
             or manifest.get('source-interpreter') is not False or manifest.get('anf-interpreter') is not False
             or manifest.get('authored-scheme-bodies') is not False
@@ -275,7 +279,8 @@ def compiler_stage(witness, directory, actor):
         raise RuntimeError('actor capture and compiler stage do not share exact original Source/core/metadata')
     witness.bind(Path(directory) / 'build-evidence.json')
     build = json.loads((Path(directory) / 'build-evidence.json').read_text())
-    if build.get('status') != 'built-not-executed' or build.get('compiler_run') is not False:
+    if (build.get('status') != 'built-not-executed' or build.get('compiler_run') is not False
+            or build.get('action-abi') != 2 or build.get('header-action-abi') != 2):
         raise RuntimeError('compiler stage was not admitted/built by the bounded C builder')
     expected_names = ['host', *[u['name'] for u in data['units']]]
     if [x['name'] for x in build['objects']] != expected_names:

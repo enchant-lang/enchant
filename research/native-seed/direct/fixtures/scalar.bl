@@ -8,6 +8,10 @@
  (if (= n 0) sum (erlang/apply ds-apply-tail (list (- n 1) (+ sum n)))))
 (defn ds-operand [label value]
  (host/write (str "SCALAR_ORDER " label)) value)
+(defn ds-call-mark [label value]
+ (host/write (str "SCALAR_CALL " label)) value)
+(defn ds-call-raise [label]
+ (host/write (str "SCALAR_CALL " label)) (erlang/throw label))
 (defn ds-cross-arity ([x] (ds-cross-arity x 1)) ([x y] (+ x y)))
 (defn ds-cross-variadic
  ([x] (if (< x 0) x (ds-cross-variadic x 2 3)))
@@ -82,6 +86,24 @@
   (loop [n 100 sum 0] (if (= n 0) sum (recur (- n 1) (+ sum n)))) 5050)
  (ds-check "direct-scalar-operand-order"
   ((fn [a b] [a b]) (ds-operand "first" 1) (ds-operand "second" 2)) [1 2])
+ (ds-check "direct-scalar-call-slots"
+  [((ds-call-mark "zero-callee" (fn [] :zero)))
+   ((ds-call-mark "callee" (fn [a b c] [a b c]))
+    (ds-call-mark "first" 1) (ds-call-mark "second" 2) (ds-call-mark "third" 3))
+   (try ((ds-call-raise "callee-throws") (ds-call-mark "unreached-argument" 1))
+    (catch e e))
+   (try ((ds-call-mark "throw-callee" (fn [a b c] (ds-call-mark "unreached-body" [a b c])))
+          (ds-call-mark "before-throw" 1) (ds-call-raise "argument-throws")
+          (ds-call-mark "unreached-tail" 3))
+    (catch e e))
+   (try ((ds-call-mark "arity-callee" (fn [x] (ds-call-mark "unreached-arity-body" x)))
+          (ds-call-mark "arity-first" 1) (ds-call-mark "arity-second" 2))
+    (catch-raw [kind reason stack] kind))
+   ((fn fuse-self ([x] (fuse-self x 2 3)) ([x y & more] [x y more])) 1)
+   ((let [held [:callee 7]] (fn [f value] [held (f value)]))
+     (ds-adder 70) (ds-tail 512 0))]
+  [:zero [1 2 3] "callee-throws" "argument-throws" :error
+   [1 2 (list 3)] [[:callee 7] 131398]])
  (ds-check "direct-scalar-try"
   [(try (erlang/throw :expected) (catch e e))
    (try (erlang/error :expected) (catch e (BeamLisp.ExInfo/ex_original e)))]

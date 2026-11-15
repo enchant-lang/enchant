@@ -47,7 +47,7 @@ def main():
     out = args.plan.resolve()
     report_path = out / 'build-evidence.json'
     report_path.unlink(missing_ok=True)
-    report = {'schema': 'bl.native.direct-unit-build', 'version': 1, 'status': 'running',
+    report = {'schema': 'bl.native.direct-unit-build', 'version': 1, 'action-abi': 2, 'status': 'running',
               'source_parser': False, 'compiler_run': False, 'runs': [], 'objects': [],
               'route': args.route, 'standard_bindings': args.standard_bindings,
               'host_optimization': args.host_optimization, 'host_granularity': args.host_granularity,
@@ -97,17 +97,22 @@ def main():
 
     try:
         bind(here)
+        header = base / 'direct/native-direct.h'
+        bind(header)
+        if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
+            raise RuntimeError('direct header requires action ABI2')
+        report.update({'header-action-abi': 2, 'header_sha256': sha(header)})
         if not 1 <= args.compile_timeout <= 120:
             raise RuntimeError('bounded units retain the existing 120-second compiler deadline')
         index = out / 'index.tsv'
         bind(index)
         rows = index.read_text(encoding='ascii').splitlines()
-        if not rows or rows[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32':
+        if len(rows) < 2 or rows[0] != 'BL_NATIVE_DIRECT_UNITS\t1\t32' or rows[1] != 'B\t2':
             raise RuntimeError('unsupported direct compiler index schema')
         units, singleton, definitions = [], {}, {}
         phase = 'functions'
         digest_pattern = re.compile(r'[0-9a-f]{64}')
-        for line in rows[1:]:
+        for line in rows[2:]:
             fields = line.split('\t')
             kind = fields[0]
             if kind in ('H', 'M', 'E', 'A', 'P'):
@@ -137,6 +142,10 @@ def main():
                 bind(out / cfile, csha)
                 bind(out / scmfile, scmsha)
                 control = (out / cfile).read_text()
+                if not control.startswith('#include "native-direct.h"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n'):
+                    raise RuntimeError('unit C control lacks its action ABI2 guard')
+                if not (out / scmfile).read_text().startswith('(native-c-require-action-abi! 2)\n(c-declare '):
+                    raise RuntimeError('unit FFI lacks its action ABI2 guard')
                 declaration = '(c-declare ' + json.dumps(control, ensure_ascii=False) + ')'
                 if (out / scmfile).read_text().count(declaration) != 1:
                     raise RuntimeError('unit FFI does not contain its exact C declaration once')
@@ -165,6 +174,7 @@ def main():
             '(define native-direct-unit-root (getenv "BL_NATIVE_C_UNIT_ROOT" #f))\n'
             '(if (not native-direct-unit-root) (error "BL_NATIVE_C_UNIT_ROOT is required"))\n'
             '(load (string-append native-direct-unit-root "/host.o1"))\n'
+            '(native-c-require-action-abi! 2)\n'
             '(native-install-bundle! ' + (out / 'metadata.scm').read_text() + ')\n'
             '(set! native-c-backend (bl-key "c"))\n' + ''.join(
                 '(load (string-append native-direct-unit-root "/' + u['name'] + '.o1"))\n' for u in units) + expected_entry)
@@ -264,7 +274,7 @@ def main():
             if name == 'host':
                 report['host_c_flags'] = unit_flags
                 report['host_llvm_object_flags'] = unit_llvm_flags
-            request = {'name': name, 'source': sha(unit['source']),
+            request = {'action-abi': 2, 'header-action-abi': 2, 'name': name, 'source': sha(unit['source']),
                 'control': sha(unit['control']) if unit['control'] else None,
                 'host': inputs[str((out / 'host.scm').resolve())], 'flags': unit_flags,
                 'route': args.route, 'gsc_flags': gsc_flags, 'llvm_object_flags': unit_llvm_flags,
@@ -357,7 +367,7 @@ def main():
         report['entry_c_flags'] = executable_flags
         runtime = gambit / 'gambit/lib/libgambit.so'
         bind(runtime)
-        executable_request = {'assembly': sha(out / 'assembly.scm'),
+        executable_request = {'action-abi': 2, 'header-action-abi': 2, 'assembly': sha(out / 'assembly.scm'),
             'objects': [{'name': row['name'], 'sha256': row['sha256']} for row in report['objects']],
             'builder': sha(here), 'flags': executable_flags,
             'route': args.route, 'gsc_flags': gsc_flags, 'llvm_object_flags': llvm_object_flags,
