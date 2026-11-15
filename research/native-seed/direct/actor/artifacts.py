@@ -201,7 +201,12 @@ def actor_plan(witness, directory):
             or link['closure-manifest'] != manifest['original-link-closure-manifest']
             or link['emitted-bindings'] != manifest['emitted-bindings']):
         raise RuntimeError('C actor plan changed original Source/capture/SDK identity')
-    for record in manifest.get('producer-capsules', []):
+    capsules = manifest.get('producer-capsules', [])
+    if (len(capsules) != 3 or {r['path'] for r in capsules} != {
+            'research/native-seed/src/native/proc-link.bl', 'priv/lib/js/actor.bl',
+            'research/native-seed/src/native/artifact-capsules.bl'}):
+        raise RuntimeError('actor capsule provenance omits original Source or its implementation')
+    for record in capsules:
         witness.record(record)
     for record in original['inputs']:
         witness.record(record)

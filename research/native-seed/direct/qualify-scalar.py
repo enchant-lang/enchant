@@ -171,6 +171,17 @@ def main() -> int:
         inputs = [program, control, manifest_path, host, machine, header, fixture,
                   base / "direct/scalar.bl", base / "src/native/c.bl",
                   tools_path, sdk_pin_path, descriptor, build_script, public_header, Path(__file__).resolve()]
+        capsules = manifest.get("producer-capsules", [])
+        if (len(capsules) != 2 or {row["path"] for row in capsules} != {
+                "priv/lib/js/actor.bl", "research/native-seed/src/native/artifact-capsules.bl"}):
+            raise RuntimeError("scalar capsule provenance is incomplete")
+        for row in capsules:
+            path = Path(row["path"])
+            if not path.is_absolute():
+                path = root / path
+            if sha(path) != row["sha256"]:
+                raise RuntimeError("scalar capsule Source identity changed: " + str(path))
+            inputs.append(path)
         before.update({str(path): sha(path) for path in inputs})
         report.update({"inputs": before, "sdk": sdk_pin, "tools": tools,
                        "emission_manifest": manifest})
