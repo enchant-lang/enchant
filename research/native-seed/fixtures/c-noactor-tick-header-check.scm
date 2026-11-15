@@ -6,7 +6,7 @@ static int native_tick_header_probe(___SCMOBJ machine) {
  return BLC_SKIP_NOACTOR_TICK(machine);
 }
 static int native_tick_boundary_probe(___SCMOBJ m) {
- ___WORD blc_pc=41;
+ ___WORD blc_pc=___INT(blc_ref(m,1));
  for (;;) {
   switch ((int)blc_pc) {
    case 41:
@@ -28,7 +28,8 @@ c-end
  (if (not (equal? actual expected)) (error "optional tick C boundary" label actual expected))
  (set! native-tick-header-checks (+ native-tick-header-checks 1)))
 (define (tick-header-machine extension)
- (let ((machine (make-vector 15 #f))) (vector-set! machine 14 extension) machine))
+ (let ((machine (make-vector 15 #f)))
+  (vector-set! machine 1 41) (vector-set! machine 14 extension) machine))
 (tick-header-check 'legacy14 (native-tick-header-probe (make-vector 14 #f)) 0)
 (tick-header-check 'unknown16 (native-tick-header-probe (make-vector 16 #f)) 0)
 (tick-header-check 'nonvector-extension (native-tick-header-probe (tick-header-machine 42)) 0)
@@ -48,6 +49,7 @@ c-end
  (tick-header-check 'append-compatible-extension
   (and (= (native-tick-header-probe machine) 1) (eq? (vector-ref extension 5) 'future)) #t))
 (let ((legacy (make-vector 14 #f)))
+ (vector-set! legacy 1 41)
  (tick-header-check 'legacy-boundary-action (native-tick-boundary-probe legacy) 5)
  (tick-header-check 'legacy-local-PC-synchronized (vector-ref legacy 1) 41))
 (let ((disabled (tick-header-machine (vector 1 0 0 '#() 0))))
@@ -61,5 +63,28 @@ c-end
        (= (vector-ref machine 6) 7) (null? (vector-ref machine 7))
        (eq? (vector-ref machine 8) #f) (eq? (vector-ref machine 11) #f)) #t)
  (tick-header-check 'fast-boundary-marks-one-skip (vector-ref extension 1) 2))
-(if (not (= native-tick-header-checks 20)) (error "optional C tick fixture count" native-tick-header-checks))
-(display "NATIVE_C_NOACTOR_TICK_HEADER_PASS 20") (newline)
+;; The real C step is captured once at unit4. Replace only unit0 with
+;; an actual Scheme profiling wrapper that mutates h-tick, then forwards into
+;; that SAME C function. The owned-step fence must deopt before the wrapper.
+(let* ((saved-tick h-tick) (saved-enabled native-c-noactor-tick-enabled?)
+       (before native-c-noactor-ticks-elided) (calls 0) (ticks 0) (modes '())
+       (unit (vector native-tick-boundary-probe '#() '#() 0 native-tick-boundary-probe))
+       (tick (lambda () (set! ticks (+ ticks 1)) (saved-tick)))
+       (function (native-c-new-closure unit
+        (list 41 2 '() (bl-map (bl-key "arity") 0 (bl-key "native-control") #f)) '()))
+       (answer #f))
+ (set! native-c-noactor-tick-enabled? #t)
+ (vector-set! unit 0 (lambda (machine)
+  (set! calls (+ calls 1))
+  (set! modes (cons (vector-ref (vector-ref machine 14) 1) modes))
+  (set! h-tick tick)
+  (native-tick-boundary-probe machine)))
+ (set! answer (native-c-invoke function '()))
+ (set! h-tick saved-tick) (set! native-c-noactor-tick-enabled? saved-enabled)
+ (tick-header-check 'wrapped-real-C-was-called calls 2)
+ (tick-header-check 'wrapped-real-C-never-armed modes '(0 0))
+ (tick-header-check 'wrapped-real-C-observes-new-tick ticks 1)
+ (tick-header-check 'wrapped-real-C-return-value answer 0)
+ (tick-header-check 'wrapped-real-C-no-elision native-c-noactor-ticks-elided before))
+(if (not (= native-tick-header-checks 25)) (error "optional C tick fixture count" native-tick-header-checks))
+(display "NATIVE_C_NOACTOR_TICK_HEADER_PASS 25") (newline)

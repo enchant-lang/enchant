@@ -50,10 +50,19 @@
   (let ((extension (vector-ref machine 14)))
    (and (vector? extension) (>= (vector-length extension) 5)
         (eqv? (vector-ref extension 0) 1) extension))))
+;; Emission constructs the C step ONCE, stores it live at unit0 and
+;; retains its owned identity at unit4. A profiling wrapper may change
+;; scheduler state before forwarding: it must never receive permission.
+(define (native-c-owned-step? machine)
+ (let ((unit (vector-ref machine 0)))
+  (and (vector? unit) (= (vector-length unit) 5)
+       (procedure? (vector-ref unit 0))
+       (eq? (vector-ref unit 0) (vector-ref unit 4)))))
 (define (native-c-prepare-noactor-tick! machine)
  (let ((extension (native-c-tick-extension machine)))
   (if extension
-   (vector-set! extension 1 (if (native-c-noactor-tick-allowed?) 1 0)))))
+   (vector-set! extension 1
+    (if (and (native-c-noactor-tick-allowed?) (native-c-owned-step? machine)) 1 0)))))
 (define (native-c-record-noactor-tick! machine)
  (let ((extension (native-c-tick-extension machine)))
   (if extension
