@@ -1,0 +1,96 @@
+; Extend the existing owned AOT workspace contracts. No new cache API/policy.
+(ns aot-workspace-incremental-test)
+
+(defn- temporary [action]
+ (let [directory (str (System/tmp_dir!) "/aot-workspace-incremental-"
+                      (System/unique_integer (list :positive)))]
+  (File/mkdir_p! directory)
+  (try (action directory) (finally (File/rm_rf! directory)))))
+(defn- selection [namespace file]
+ {:version 2 :phase-imports (list 'core 'sugar)
+  :sources (list {:namespace namespace :file file})})
+(defn- refusal [action]
+ (try (action) nil (catch error (:kind (ex-data error)))))
+(defn- workspace-state [workspace]
+ (Process/get (tuple :bl_artifact_workspace workspace)))
+(defn- answer [prepared]
+ (:val (:body (elem (first (Map/get (:definitions (first (:plans prepared))) "answer")) 3))))
+
+(deftest unchanged-workspace-reuses-without-restaging-or-spending-macro-fuel
+ (temporary
+  (fn [directory]
+   (let [namespace 'artifact.incremental.warm file (Path/join directory "warm.bl")
+         _ (File/write! file
+             "(ns artifact.incremental.warm) (defmacro make [] '(defn answer [] 42)) (make)")
+         workspace (BeamLisp.AOT/open_workspace (selection namespace file) {:macro-steps 1})
+         before (BeamLisp.Env/capture)
+         mfa (tuple :Elixir.BeamLisp.AOT :stage-sdk-unit! 2)]
+    (erlang/trace_pattern mfa true (list :local :call_count))
+    (try
+     (let [cold (BeamLisp.AOT/prepare_unit workspace namespace)
+           count-after-cold (elem (erlang/trace_info mfa :call_count) 1)
+           state-after-cold (workspace-state workspace)
+           warm (BeamLisp.AOT/prepare_unit workspace namespace)]
+      (is (> count-after-cold 0) "The first preparation traverses the real producer")
+      (is (= cold warm))
+      (is (= 42 (answer warm)))
+      (is (= count-after-cold (elem (erlang/trace_info mfa :call_count) 1))
+          "An unchanged repeat does not stage or compile the unit again")
+      (is (= state-after-cold (workspace-state workspace))
+          "The warm hit spends neither shared macro fuel nor constructor budget")
+      (is (= before (BeamLisp.Env/capture))))
+     (finally
+      (erlang/trace_pattern mfa false (list :local :call_count))
+      (BeamLisp.AOT/close_workspace! workspace)))))))
+
+(deftest selected-source-drift-refuses-before-returning-an-already-cached-unit
+ (temporary
+  (fn [directory]
+   (let [namespace 'artifact.incremental.changed file (Path/join directory "changed.bl")
+         source-a "(ns artifact.incremental.changed) (defn answer [] 41)"
+         source-b "(ns artifact.incremental.changed) (defn answer [] 42)"
+         _ (is (= (erlang/byte_size source-a) (erlang/byte_size source-b)))
+         _ (File/write! file source-a)
+         workspace (BeamLisp.AOT/open_workspace (selection namespace file) {})
+         before (BeamLisp.Env/capture)]
+    (try
+     (let [cached (BeamLisp.AOT/prepare_unit workspace namespace)]
+      (is (= 41 (answer cached)))
+      (File/write! file source-b)
+      (is (= :artifact-source-changed
+           (refusal #(BeamLisp.AOT/prepare_unit workspace namespace)))
+          "A warm row cannot hide changed bytes")
+      (is (= :artifact-source-changed
+           (refusal #(BeamLisp.AOT/compile_unit cached)))
+          "Retaining the old prepared value cannot emit stale code")
+      (is (= before (BeamLisp.Env/capture))))
+     (finally (BeamLisp.AOT/close_workspace! workspace)))
+    (let [fresh (BeamLisp.AOT/open_workspace (selection namespace file) {})]
+     (try
+      (is (= 42 (answer (BeamLisp.AOT/prepare_unit fresh namespace))))
+      (is (= before (BeamLisp.Env/capture)))
+      (finally (BeamLisp.AOT/close_workspace! fresh))))))))
+
+(deftest a-failed-preparation-never-caches-a-partial-unit
+ (temporary
+  (fn [directory]
+   (let [namespace 'artifact.incremental.failure file (Path/join directory "failure.bl")
+         marker (Path/join directory "must-not-exist")
+         _ (File/write! file
+             (str "(ns artifact.incremental.failure) (defn prior [] 7) "
+                  "(defmacro touch [] (File/write! " (pr-str marker) " \"bad\")) (touch)"))
+         workspace (BeamLisp.AOT/open_workspace (selection namespace file) {})
+         before (BeamLisp.Env/capture)]
+    (try
+     (is (= :constructor-machine-refused
+          (refusal #(BeamLisp.AOT/prepare_unit workspace namespace))))
+     (is (not (Map/has_key? (:units (workspace-state workspace)) "artifact.incremental.failure")))
+     (is (= false (File/exists? marker)))
+     (is (= before (BeamLisp.Env/capture)))
+     (finally (BeamLisp.AOT/close_workspace! workspace)))
+    (File/write! file "(ns artifact.incremental.failure) (defn answer [] 42)")
+    (let [fresh (BeamLisp.AOT/open_workspace (selection namespace file) {})]
+     (try
+      (is (= 42 (answer (BeamLisp.AOT/prepare_unit fresh namespace))))
+      (is (= before (BeamLisp.Env/capture)))
+      (finally (BeamLisp.AOT/close_workspace! fresh))))))))

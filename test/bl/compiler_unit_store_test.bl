@@ -173,3 +173,220 @@
                        a phase true baseline)))))
     (is (= before (BeamLisp.CompilerData/module_info :md5))))
    (finally (BeamLisp.AOT/close_workspace! handle) (File/rm_rf! directory)))))
+
+
+(deftest cached-artifact-reuse-revalidates-the-retained-prepared-source
+ (let [root (Path/join (System/tmp_dir!) (str "compiler-unit-stale-prepared-" (System/unique_integer (list :positive))))
+       file (Path/join root "fixture.bl") a (Path/join root "a") b (Path/join root "b")
+       module :Elixir.BeamLisp.CompilerCacheStalePreparedFixture
+       source-a "(ns compiler.cache.fixture) (defn answer [] 41)"
+       source-b "(ns compiler.cache.fixture) (defn answer [] 42)"]
+  (File/mkdir_p! root)
+  (try
+   (is (= (erlang/byte_size source-a) (erlang/byte_size source-b)))
+   (File/write! file source-a)
+   (prepare file module
+    (fn [prepared]
+     (let [captured (artifact! prepared a nil)]
+      (is (= true (:compiled captured)))
+      ;; Cache membership is genuine; only the current Source has changed.
+      ;; The old prepared value still names the prior bytes and address.
+      (File/write! file source-b)
+      (is (= :artifact-source-changed
+             (try (artifact! prepared b a) nil (catch error (:kind (ex-data error))))))
+      (is (= false (File/exists? b)))
+      (is (= false (erlang/module_loaded module))))))
+   (finally (File/rm_rf! root)))))
+
+; Existing unit-store owner tests. The target below writes inert fixture DATA;
+; it qualifies ownership/invalidation only, never a Scheme/native backend.
+(defn- artifact-target! [prepared directory previous target]
+ (BeamLisp.Ns.Rt/invoke (BeamLisp.Env/fetch_exact! "compiler-unit-store-under-test" "artifact-target!")
+  (list prepared directory previous target)))
+(defn- prepare-target [file imports action]
+ (let [workspace (BeamLisp.AOT/open_workspace
+                  {:version 2 :phase-imports imports
+                   :sources (list {:namespace 'compiler.cache.fixture :file file})} {})]
+  (try (action (BeamLisp.AOT/prepare_unit workspace 'compiler.cache.fixture))
+   (finally (BeamLisp.AOT/close_workspace! workspace)))))
+(defn- target-refusal [action]
+ (try (action) nil (catch error (:kind (ex-data error)))))
+(defn- inert-target [calls identity]
+ (let [bytes-for (fn [selection]
+                  (erlang/term_to_binary [:unit-store-policy-fixture selection] (list :deterministic)))
+       product-name "owned-product.data"]
+  {:identity identity
+   :emit! (fn [_ directory selection]
+            (swap! calls update :emits inc)
+            (swap! calls update :environments conj (BeamLisp.Env/capture))
+            (File/write! (Path/join directory product-name) (bytes-for selection)))
+   :verify! (fn [directory selection]
+              (swap! calls update :verifies inc)
+              (swap! calls update :environments conj (BeamLisp.Env/capture))
+              (let [members (set (File/ls! directory))
+                    bytes (File/read! (Path/join directory product-name))]
+               (when-not (and (or (= #{product-name} members)
+                                  (= #{product-name "target-artifact.term"} members))
+                              (= (bytes-for selection) bytes))
+                (throw (ex-info "Changed policy fixture product" {:kind :fixture-product-changed})))
+               {:manifest {:selection selection :members [product-name]} :bytes bytes}))}))
+(defn- fresh-target-calls [] (atom {:emits 0 :verifies 0 :environments []}))
+(defn- target-root []
+ (Path/join (System/tmp_dir!) (str "compiler-target-policy-" (System/unique_integer (list :positive)))))
+
+(deftest target-products-reuse-locally-and-from-prior-without-emission
+ (let [root (target-root) file (Path/join root "fixture.bl")
+       a (Path/join root "a") b (Path/join root "b") c (Path/join root "c")
+       calls (fresh-target-calls) target (inert-target calls {:kind :fixture :abi 1})
+       before (BeamLisp.Env/capture)]
+  (File/mkdir_p! root)
+  (try
+   (File/write! file "(ns compiler.cache.fixture) (defn answer [] 42)")
+   (prepare-target file (list 'core 'sugar)
+    (fn [prepared]
+     (let [cold (artifact-target! prepared a nil target)
+           warm (artifact-target! prepared a nil target)
+           copied (artifact-target! prepared b a target)]
+      (is (= true (:compiled cold)))
+      (is (= false (:compiled warm)))
+      (is (= false (:compiled copied)))
+      (is (= 1 (:emits @calls)) "Both warm paths emit zero products")
+      (is (= (:key cold) (:key warm) (:key copied)))
+      (is (= (get-in cold [:verified :bytes]) (get-in copied [:verified :bytes])))
+      (is (= (:selection cold) (:selection copied)))
+      (is (= (File/read! (Path/join (Path/join a (:key cold)) "target-artifact.term"))
+             (File/read! (Path/join (Path/join b (:key copied)) "target-artifact.term"))))
+      (let [independent (artifact-target! prepared c nil target)]
+       (is (= true (:compiled independent)))
+       (is (= 2 (:emits @calls)))
+       (is (= (get-in cold [:verified :bytes]) (get-in independent [:verified :bytes]))))
+      (is (every? #(= before %) (:environments @calls)))
+      (is (= before (BeamLisp.Env/capture))))))
+   (finally (File/rm_rf! root)))))
+
+(deftest target-selection-binds-source-phase-target-plans-and-file-attribution
+ (let [root (target-root) file (Path/join root "fixture.bl")
+       other (Path/join root "other.bl") source "(ns compiler.cache.fixture) (defn answer [] 42)"
+       calls (fresh-target-calls) target (inert-target calls {:kind :fixture :abi 1})
+       original (atom nil)]
+  (File/mkdir_p! root)
+  (try
+   (File/write! file source)
+   (prepare-target file (list 'core 'sugar)
+    (fn [prepared]
+     (let [cold (artifact-target! prepared (Path/join root "a") nil target)
+           abi (artifact-target! prepared (Path/join root "abi") (Path/join root "a")
+                 (assoc target :identity {:kind :fixture :abi 2}))
+           ; This private inert plan tag has no execution authority. It tests
+           ; complete plan identity independently of Source input identity.
+           changed-plans (assoc prepared :plans
+                           (cons (assoc (first (:plans prepared)) :target-policy-fixture-version 2)
+                                 (rest (:plans prepared))))
+           plan (artifact-target! changed-plans (Path/join root "plans") (Path/join root "a") target)]
+      (reset! original cold)
+      (is (= true (:compiled abi)))
+      (is (= true (:compiled plan)))
+      (is (not= (:key cold) (:key abi)))
+      (is (not= (:key cold) (:key plan))))))
+   (prepare-target file (list 'core)
+    (fn [prepared]
+     (let [phase (artifact-target! prepared (Path/join root "phase") (Path/join root "a") target)]
+      (is (= true (:compiled phase)))
+      (is (not= (:key @original) (:key phase)))
+      (is (not= (get-in @original [:selection :phase-world]) (get-in phase [:selection :phase-world]))))))
+   (File/write! other source)
+   (prepare-target other (list 'core 'sugar)
+    (fn [prepared]
+     (let [attributed (artifact-target! prepared (Path/join root "attribution") (Path/join root "a") target)]
+      (is (= true (:compiled attributed)))
+      (is (not= (:key @original) (:key attributed)))
+      (is (not= (get-in @original [:selection :inputs]) (get-in attributed [:selection :inputs]))))))
+   (File/write! file "(ns compiler.cache.fixture) (defn answer [] 43)")
+   (prepare-target file (list 'core 'sugar)
+    (fn [prepared]
+     (let [edited (artifact-target! prepared (Path/join root "edited") (Path/join root "a") target)]
+      (is (= true (:compiled edited)))
+      (is (not= (:key @original) (:key edited)))
+      (is (not= (get-in @original [:verified :bytes]) (get-in edited [:verified :bytes]))))))
+   (is (= 6 (:emits @calls)))
+   (finally (File/rm_rf! root)))))
+
+(deftest corrupted-target-product-and-marker-refuse-without-stale-fallback
+ (let [root (target-root) file (Path/join root "fixture.bl")
+       calls (fresh-target-calls) target (inert-target calls {:kind :fixture :abi 1})]
+  (File/mkdir_p! root)
+  (try
+   (File/write! file "(ns compiler.cache.fixture) (defn answer [] 42)")
+   (prepare-target file (list 'core 'sugar)
+    (fn [prepared]
+     (let [cold (artifact-target! prepared (Path/join root "a") nil target)
+           unit (Path/join (Path/join root "a") (:key cold))
+           product (Path/join unit "owned-product.data") bytes (File/read! product)
+           marker (Path/join unit "target-artifact.term") marker-bytes (File/read! marker)]
+      (File/write! product "corrupt")
+      (is (= :fixture-product-changed
+           (target-refusal #(artifact-target! prepared (Path/join root "bad-product") (Path/join root "a") target))))
+      (is (= false (File/exists? (Path/join root "bad-product"))))
+      (File/write! product bytes)
+      (File/write! marker "corrupt")
+      (let [before (:verifies @calls)]
+       (is (= :artifact-target-selection
+            (target-refusal #(artifact-target! prepared (Path/join root "bad-marker") (Path/join root "a") target))))
+       (is (= before (:verifies @calls)) "Reject wrong marker before target verifier"))
+      (is (= false (File/exists? (Path/join root "bad-marker"))))
+      (File/write! marker marker-bytes)
+      (File/write! (Path/join unit "extra.data") "unexpected")
+      (is (= :fixture-product-changed
+           (target-refusal #(artifact-target! prepared (Path/join root "extra-member") (Path/join root "a") target))))
+      (is (= 1 (:emits @calls)) "Corruption is not permission to emit a replacement"))))
+   (finally (File/rm_rf! root)))))
+
+(deftest target-failures-clean-only-newly-owned-products
+ (let [root (target-root) file (Path/join root "fixture.bl")
+       calls (fresh-target-calls) base (inert-target calls {:kind :fixture :abi 1})
+       source "(ns compiler.cache.fixture) (defn answer [] 42)"]
+  (File/mkdir_p! root)
+  (try
+   (File/write! file source)
+   (prepare-target file (list 'core 'sugar)
+    (fn [prepared]
+     (let [cold (artifact-target! prepared (Path/join root "a") nil base)
+           key (:key cold)
+           failing (assoc base :emit! (fn [value directory selection]
+                                      ((:emit! base) value directory selection)
+                                      (throw (ex-info "Fixture emission failed" {:kind :fixture-emit-failed}))))
+           fail-verify (assoc base :verify! (fn [_ _]
+                                             (throw (ex-info "Fixture verification failed" {:kind :fixture-verify-failed}))))]
+      (is (= :fixture-emit-failed
+           (target-refusal #(artifact-target! prepared (Path/join root "emit-failed") nil failing))))
+      (is (= false (File/exists? (Path/join (Path/join root "emit-failed") key))))
+      (is (= :fixture-verify-failed
+           (target-refusal #(artifact-target! prepared (Path/join root "verify-failed") nil fail-verify))))
+      (is (= false (File/exists? (Path/join (Path/join root "verify-failed") key))))
+      (let [seen (atom 0)
+            copied (Path/join (Path/join root "copied-failed") key)
+            verifier (assoc base :verify!
+                        (fn [directory selection]
+                         (let [verified ((:verify! base) directory selection)]
+                          (if (= 2 (swap! seen inc))
+                           (throw (ex-info "Fixture post-copy verification failed" {:kind :fixture-post-copy-failed}))
+                           verified))))]
+       (is (= :fixture-post-copy-failed
+            (target-refusal #(artifact-target! prepared (Path/join root "copied-failed") (Path/join root "a") verifier))))
+       (is (= false (File/exists? copied)))
+       (is (File/regular? (Path/join (Path/join (Path/join root "a") key) "target-artifact.term"))))
+      (let [partial (Path/join (Path/join root "unknown-partial") key)]
+       (File/mkdir_p! partial)
+       (File/write! (Path/join partial "unowned.data") "preserve")
+       (is (= :artifact-target-output-not-empty
+            (target-refusal #(artifact-target! prepared (Path/join root "unknown-partial") (Path/join root "a") base))))
+       (is (= "preserve" (File/read! (Path/join partial "unowned.data")))))
+      (let [changed (assoc base :emit!
+                       (fn [value directory selection]
+                        ((:emit! base) value directory selection)
+                        (File/write! file "(ns compiler.cache.fixture) (defn answer [] 43)")))]
+       (is (= :artifact-source-changed
+            (target-refusal #(artifact-target! prepared (Path/join root "changed-during-emit") nil changed))))
+       (is (= false (File/exists? (Path/join (Path/join root "changed-during-emit") key))))
+       (File/write! file source)))))
+   (finally (File/rm_rf! root)))))

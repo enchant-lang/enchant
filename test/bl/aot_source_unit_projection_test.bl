@@ -1,0 +1,66 @@
+; Source-target projection from the existing prepared AOT unit. No alternate
+; compiler/reader/initializer execution is introduced by this observer.
+(ns aot-source-unit-projection-test)
+
+(defn- nodes [value]
+ (cond
+  (erlang/is_map value) (cons value (mapcat nodes (vals value)))
+  (erlang/is_list value) (mapcat nodes value)
+  (erlang/is_tuple value) (mapcat nodes (Tuple/to_list value))
+  (vector? value) (mapcat nodes value)
+  :else (list)))
+(defn- raw-macro-value? [node]
+ (and (= :tuple (:op node))
+      (= 2 (count (:elems node)))
+      (= :lit (:op (first (:elems node))))
+      (= :$macro (:val (first (:elems node))))))
+(defn- partitioned-macro-call? [node]
+ (and (= :remote (:op node)) (erlang/is_atom (:fun node))
+      (String/starts_with? (Atom/to_string (:fun node)) "__bl_macro_value_")))
+
+(deftest source-projection-preserves-prepartition-macros-closures-actions-and-callables
+ (let [directory (Path/join (System/tmp_dir!) (str "aot-source-unit-" (System/unique_integer (list :positive))))
+       file (Path/join directory "source.bl")
+       source (str "(ns artifact.source.view)\n"
+                   "(defmacro twice [x] (list '+ x x))\n"
+                   "(defn fixed [x] (twice x))\n"
+                   "(defn many ([x] x) ([x y] (+ x y)) ([x y & more] (reduce + (+ x y) more)))\n"
+                   "(def held (fn [z] (+ z 7)))\n"
+                   "[(erlang/put :artifact-source-view-effect :ran)]\n")
+       before (BeamLisp.Env/capture)]
+  (File/mkdir_p! directory)
+  (File/write! file source)
+  (erlang/erase :artifact-source-view-effect)
+  (let [workspace (BeamLisp.AOT/open_workspace
+                   {:version 2 :phase-imports (list 'core 'sugar)
+                    :sources (list {:namespace 'artifact.source.view :file file})} {})]
+   (try
+    (let [prepared (BeamLisp.AOT/prepare_unit workspace 'artifact.source.view)
+          plan (first (:plans prepared)) view (:source-unit plan)
+          raw (nodes {:definitions (:definitions view) :initializers (:initializers view)})
+          held (first (filter #(= "held" (:name %)) (:initializers view)))
+          fixed (get (:callables view) "fixed") many (get (:callables view) "many")
+          dispatch (:elems many) rest-arm (:elems (nth dispatch 2))]
+     (is (= 1 (:version view)))
+     (is (= :source-unit (:kind view)))
+     (is (= "artifact.source.view" (:namespace view)))
+     (is (= (BeamLisp.AOT/physical_sdk_path file) (:file view)))
+     (is (= (crypto/hash :sha256 source) (:source-digest view)))
+     (is (some raw-macro-value? raw)
+         "A target receives the original tagged macro constructor, before BEAM partitioning")
+     (is (not (some partitioned-macro-call? raw)))
+     (is (some #(= :fn (:op %)) (nodes (:node held)))
+         "Initializer closures remain actual ANF rather than a generated-module replay")
+     (is (some #(nil? (:name %)) (:initializers view))
+         "Unnamed initializer actions remain ordered Source members")
+     (is (= :remote (:op fixed)))
+     (is (= :erlang (:mod fixed)))
+     (is (= :make_fun (:fun fixed)))
+     (is (= 1 (:val (last (:args fixed)))))
+     (is (= :$blfn (:val (first dispatch))))
+     (is (= #{1 2} (set (map #(get (first %) :val) (:pairs (second dispatch))))))
+     (is (= 2 (:val (first rest-arm))))
+     (is (= 3 (:val (last (:args (second rest-arm))))))
+     (is (= :undefined (erlang/get :artifact-source-view-effect)))
+     (is (= before (BeamLisp.Env/capture))))
+    (finally (BeamLisp.AOT/close_workspace! workspace) (File/rm_rf! directory))))))

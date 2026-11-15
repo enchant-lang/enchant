@@ -59,6 +59,7 @@
    world and exact host target; a cache only supplies verified emitted bytes.
    Runtime/SDK admission remains separate from this compilation cache."
   [prepared directory previous]
+  (BeamLisp.AOT/check_prepared_unit! prepared)
   (let [key (artifact-key prepared)
         prior (when previous (Path/join previous key))
         out (Path/join directory key)
@@ -77,7 +78,100 @@
     (when reusable
       (File/mkdir_p! directory)
       (File/cp_r! prior out))
+    (BeamLisp.AOT/check_prepared_unit! prepared)
     {:verified verified :compiled (not reusable) :key key}))
+
+
+(defn- target-selection [prepared target]
+ (when-not (and (erlang/is_map target)
+                (= #{:identity :emit! :verify!} (set (keys target)))
+                (erlang/is_map (:identity target))
+                (fn? (:emit! target)) (fn? (:verify! target)))
+  (throw (ex-info "Invalid compiler target adapter" {:kind :invalid-artifact-target})))
+ ;; Identity is bounded plain compiler data. A target's implementation and ABI
+ ;; belong here, never an opaque callback identity or a supplied purity token.
+ (BeamLisp.CompilerData/check_first_order! (:identity target)
+  {:max-nodes 65536 :max-bytes 1048576 :max-depth 64})
+ {:version 1 :kind :target-artifact-selection :namespace (:namespace prepared)
+  :compiler-key (:compiler-key prepared) :world (:world prepared)
+  :phase-world (:phase-world prepared) :target (:identity target)
+  :plans-sha256 (digest (erlang/term_to_binary (:plans prepared) (list :deterministic)))
+  :inputs (mapv (fn [[namespace input]]
+            {:namespace namespace :file (:file input) :selection (:selection input)
+             :content-kind (get input :content-kind :source)
+             :source-sha256 (digest (:source input))})
+           (sort-by first (:inputs prepared)))})
+
+(defn- target-verified! [prepared target directory selection]
+ (BeamLisp.AOT/check_prepared_unit! prepared)
+ (let [verified ((:verify! target) directory selection)]
+  (BeamLisp.AOT/check_prepared_unit! prepared)
+  (when-not (and (erlang/is_map verified)
+                 (= selection (get-in verified [:manifest :selection])))
+   (throw (ex-info "Compiler target artifact selection disagrees"
+            {:kind :artifact-target-selection :namespace (:namespace prepared)})))
+  verified))
+
+(defn artifact-target!
+ "Reuse the existing unit store for one explicit target's complete product.
+  Fixed adapter callbacks emit/verify physical products; they never decide
+  Source/compiler/world freshness. Every hit validates current prepared inputs.
+  Identity and actual plans are keyed; successful completion is written last."
+ [prepared directory previous target]
+ (BeamLisp.AOT/check_prepared_unit! prepared)
+ (let [selection (target-selection prepared target)
+       key (digest (erlang/term_to_binary
+             ["bl-compiler-target-unit-1" (artifact-key prepared) selection] (list :deterministic)))
+       out (Path/join directory key)
+       prior (when previous (Path/join previous key))
+       marker-name "target-artifact.term"
+       marker (erlang/term_to_binary {:version 1 :selection selection} (list :deterministic))
+       local? (File/regular? (Path/join out marker-name))
+       reusable (cond local? out
+                  (and prior (File/regular? (Path/join prior marker-name))) prior
+                  :else nil)]
+  (if reusable
+   (do
+    ;; Compare exact owned bytes without decoding executable or external data.
+    (let [file (File/open! (Path/join reusable marker-name) (list :read :binary))
+          observed (try (IO/binread file (+ 1 (erlang/byte_size marker)))
+                     (finally (File/close file)))]
+     (when-not (= marker observed)
+      (throw (ex-info "Compiler target completion record changed" {:kind :artifact-target-selection}))))
+    (let [verified (target-verified! prepared target reusable selection)
+          copied? (not= (Path/expand reusable) (Path/expand out))
+          verified (if copied?
+                     (do
+                      (when (File/exists? out)
+                       (throw (ex-info "Compiler target output is not empty" {:kind :artifact-target-output-not-empty})))
+                      (File/mkdir_p! directory)
+                      ;; This call owns only its exclusively created destination.
+                      (File/mkdir! out)
+                      (try
+                       (File/cp_r! reusable out)
+                       (let [copied (target-verified! prepared target out selection)]
+                        (BeamLisp.AOT/check_prepared_unit! prepared)
+                        copied)
+                       (catch error
+                        (File/rm_rf! out)
+                        (throw error)))) verified)]
+     (when-not copied? (BeamLisp.AOT/check_prepared_unit! prepared))
+     {:verified verified :compiled false :key key :selection selection}))
+   (do
+    (File/mkdir_p! directory)
+    ;; Exclusive creation supplies cleanup custody; an unknown existing
+    ;; partial directory is never adopted or silently overwritten.
+    (File/mkdir! out)
+    (try
+     ((:emit! target) prepared out selection)
+     (BeamLisp.AOT/check_prepared_unit! prepared)
+     (let [verified (target-verified! prepared target out selection)]
+      (File/write! (Path/join out marker-name) marker)
+      (BeamLisp.AOT/check_prepared_unit! prepared)
+      {:verified verified :compiled true :key key :selection selection})
+     (catch error
+      (File/rm_rf! out)
+      (throw error)))))))
 
 (defn- compiler-record-path [directory namespace target]
  (Path/join directory (str (digest (erlang/term_to_binary [namespace target] (list :deterministic))) ".json")))

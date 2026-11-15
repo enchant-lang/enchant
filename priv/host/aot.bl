@@ -423,16 +423,23 @@
           (Process/delete :bl_initializer_attempt))
         (artifact_close_scope! scope)))))))))
 
-(defn compile_unit
- "Compile complete prepared plans to captured bytes without loading, publishing
-  or writing an artifact. Runtime Source evaluation and artifact emission share
-  this exact producer; this record grants no SDK or execution admission."
+(defn check_prepared_unit!
+ "Revalidate existing prepared compiler DATA before any target emits or reuses
+  a product. This grants no code publication, SDK or execution admission."
  [prepared]
  (when-not (and (erlang/is_map prepared) (= 1 (:version prepared))
                 (= :prepared-artifact-unit (:kind prepared))
                 (erlang/is_list (:plans prepared)) (seq (:plans prepared)))
   (artifact_refuse :invalid-prepared-artifact-unit))
  (artifact_inputs_valid! (:inputs prepared) (:compiler-key prepared))
+ prepared)
+
+(defn compile_unit
+ "Compile complete prepared plans to captured bytes without loading, publishing
+  or writing an artifact. Runtime Source evaluation and artifact emission share
+  this exact producer; this record grants no SDK or execution admission."
+ [prepared]
+ (check_prepared_unit! prepared)
  (let [beams (Enum/flat_map (:plans prepared) (fn [plan] (compile_artifact_plan plan)))
        modules (Enum/map beams (fn [beam] (elem beam 0)))]
   (when-not (= (Enum/uniq modules) modules) (artifact_refuse :duplicate-artifact-module))
@@ -1988,6 +1995,7 @@
         descriptors (erlang/++ (erlang/++ body_descriptors (List/wrap companion_descriptor))
                                 (list namespace_init_descriptor namespace_descriptor))]
     {:version 1 :namespace ns :module mod :filename filename :definitions ns_defs
+     :source-unit (assoc (elem init_pair 4) :file filename :source-digest input_digest)
      :descriptors descriptors :generated-beams generated_beams
      :body-modules (MapSet/new body_descriptors (fn [d] (get d :name)))}))
 
@@ -4253,14 +4261,21 @@
                              :else (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :intern
                                (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name) init_node)))]
               (tuple
-                (if doc
+                {:operations
+                 (if doc
                   (list register
                         (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :put_meta
                           (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name)
                                 (BeamLisp.Emit/lit {:doc doc}))))
                   (list register))
+                 ;; The SAME canonical compilation, before generated-module or
+                 ;; BEAM macro-value partitioning. Keep declaration order and
+                 ;; positions; a target must not reconstruct these from shims.
+                 :source {:name name :doc doc :per-env? per_env?
+                          :form init_form :node compiled}}
                 (elem prepared 1)))))
-        value_ops (Enum/flat_map (elem values 0) (fn [ops] ops))
+        value_ops (Enum/flat_map (elem values 0) (fn [value] (:operations value)))
+        source_values (Enum/map (elem values 0) (fn [value] (:source value)))
         generated_beams (Enum/map (Enum/sort (Map/to_list (elem values 1)))
                           (fn [entry] (elem entry 1)))
         implicit_ops (implicit_require_ops ns ns_defs value_ops requires)
@@ -4300,7 +4315,13 @@
                  {:op :let :name "$sdk_callables"
                   :init (BeamLisp.Emit/remote (ns_body_module ns) :__bl_callable_values__ (list))
                   :body body :ann {}})))) companion_descriptor generated_beams
-      (phase_library_data ns ns_defs value_ops (Keyword/get unit_attrs :bl_unit_source_digest) value_defs ns_meta declarations))))
+      (phase_library_data ns ns_defs value_ops (Keyword/get unit_attrs :bl_unit_source_digest) value_defs ns_meta declarations)
+      {:version 1 :kind :source-unit :namespace ns :definitions ns_defs
+       ;; Reuse the compiler's exact bare-fixed/$blfn/variadic construction.
+       ;; Literal physical captures are compiler DATA, never an SDK grant.
+       :callables (Map/new ns_defs
+                    (fn [binding] (tuple (elem binding 0) (sdk_callable_value (elem binding 1) false))))
+       :initializers source_values :namespace-metadata ns_meta :declarations declarations})))
 
 ; ── the runtime-side hook and boot ──────────────────────────────────────────
 
