@@ -1,0 +1,11 @@
+;; Observations only, after canonical rt has returned from the unchanged main.
+(define (native-values-finish)
+ (if (not (null? seed-errors)) (error "values fixture recorded actor errors"))
+ (if (not (= seed-critical 0)) (error "values fixture leaked critical depth"))
+ (for-each (lambda (key)
+  (if (not (= 0 (h-map-size (bl-get seed-state (bl-key key)))))
+   (error "values fixture leaked runtime resources" key)))
+  '("procs" "monitors" "tables" "names" "table-names"))
+ (if (not (= 0 (h-vec-size (bl-get seed-state (bl-key "runnable")))))
+  (error "values fixture leaked runnable actor"))
+ (display "NATIVE_VALUES_CLEANUP_OK\n"))
