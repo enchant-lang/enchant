@@ -1,0 +1,92 @@
+; SDK-only finite snapshot transition. No directory walk/provider discovery.
+; Compile exactly native.scheme's reviewed formatter change; reuse17 units.
+(ns native.update-formatter
+ (:require [js.build :as build] [native.artifact :as artifact] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def manifest-path (first args))
+(def parity-path (second args))
+(def out (Path/dirname manifest-path))
+(def before-sha "e969891c64045302a119e73806cac9c9184022e268f043345cc32fe702514077")
+(def after-sha "76f40ac5b9b10efd033a84e984926d46d20494322338722ba55365eebf566cab")
+(def target "native.scheme")
+(def target-path "research/native-seed/src/native/scheme.bl")
+(def parity (json/decode (File/read! parity-path)))
+(assert (= "bl.native.formatter-source-parity" (get parity "schema")))
+(assert (= 1 (get parity "version")))
+(assert (= "qualified" (get parity "status")))
+(assert (= "sdk-beam" (get parity "target")))
+(assert (= before-sha (get parity "old-source-sha256")))
+(assert (= after-sha (get parity "new-source-sha256")))
+(assert (= true (get parity "exact-anonymous-reader-form-capture")))
+(assert (= true (get parity "byte-equal")))
+(assert (= 128 (get parity "ascii-singletons")))
+(assert (= 146 (get parity "cases-per-formatter")))
+(assert (= 292 (count (get parity "results"))))
+(def original (artifact/read-closure manifest-path))
+(assert (= 18 (count (:order original))))
+(assert (= 18 (count (:units original))))
+(assert (= (:sdk-pin original) (File/read! "research/native-seed/sdk-pin.json")))
+(assert (= {:target :scheme :contextual-bindings :absent :stub ["lower"]
+            :staging :canonical-js.build :namespace-qualified? true} (:options original)))
+(def old (get (:units original) target))
+(assert (= target (:ns old)))
+(assert (= target-path (:path old)))
+(assert (= before-sha (:source-sha256 old)))
+(assert (= before-sha (artifact/sha (:source old))))
+(assert (= after-sha (artifact/sha (File/read! target-path))))
+; Provider roles are the already-admitted finite ledger. New unrelated files
+; gain no authority. Every recorded macro provider must retain its exact bytes.
+; Nonmacro rows are rehashed without reparsing the tree or granting macro roles.
+(defn providers [rows]
+ (mapv (fn [row]
+  (let [sha (artifact/sha (File/read! (:path row)))]
+   (when (:macro-provider? row) (assert (= sha (:sha256 row))))
+   (when (= target-path (:path row))
+    (assert (not (:macro-provider? row))) (assert (= after-sha sha)))
+   (assoc row :sha256 sha))) rows))
+(def current-providers (providers (:provider-sources original)))
+(assert (= 1 (count (filter #(= target-path (:path %)) current-providers))))
+(doseq [ns (:order original) :when (not= target ns)]
+ (let [unit (get (:units original) ns)]
+  (assert (= (:source-sha256 unit) (artifact/sha (File/read! (:path unit)))))))
+(def unit
+ (BeamLisp.Env/isolated (fn []
+  (println "NATIVE_FORMATTER_UPDATE_COMPILE native.scheme")
+  (let [prepared (build/prepare-ns target-path)
+        _ (assert (= target (:ns prepared)))
+        _ (assert (= (:requires old) (:requires prepared)))
+        module (BeamLisp.Link/module_for target)
+        base (BeamLisp.Emit/base_module_for target)
+        _ (assert (= (:module old) module))
+        _ (assert (= (:base-module old) base))
+        compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)
+        result (assoc compiled :source (:source prepared) :module module :base-module base)]
+   (assert (= after-sha (:source-sha256 result)))
+   (BeamLisp.CompilerData/check_compiler_data! result artifact/limits)
+   result))))
+(def final-providers (providers current-providers))
+(assert (= current-providers final-providers))
+(doseq [ns (:order original) :when (not= target ns)]
+ (let [unit (get (:units original) ns)]
+  (assert (= (:source-sha256 unit) (artifact/sha (File/read! (:path unit)))))))
+(assert (= after-sha (artifact/sha (File/read! target-path))))
+(def closure (-> original (assoc-in [:units target] unit) (assoc :provider-sources final-providers)))
+; All17 unchanged compiled units are retained byte-for-byte as data. Only the
+; changed unit was compiled/validated again; original perpart node bounds stay.
+(doseq [ns (:order original) :when (not= target ns)]
+ (assert (= (get (:units original) ns) (get (:units closure) ns))))
+(def bytes (erlang/term_to_binary closure (list :deterministic)))
+(File/write! (str out "/closure.etf") bytes)
+(File/write! (str out "/identity.json")
+ (json/encode {:schema "bl.native.compiler-closure-identity" :version 1
+  :artifact-sha256 (artifact/sha bytes) :sdk-pin-sha256 (artifact/sha (:sdk-pin closure))
+  :options (:options closure) :providers final-providers}))
+(File/write! (str out "/update.json")
+ (json/encode {:schema "bl.native.closure-update" :version 1 :changed [target]
+  :reused (vec (remove #(= target %) (:order original)))
+  :artifact-sha256 (artifact/sha bytes) :finite-provider-ledger true
+  :macro-providers-unchanged true :new-provider-discovery false
+  :parity {:path parity-path :sha256 (artifact/sha (File/read! parity-path))}
+  :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
+   {:namespace ns :source-sha256 (:source-sha256 u) :definitions (count (:defs u))})) (:order closure))}))
+(println "NATIVE_FORMATTER_UPDATED 1 unit;17 reused; finite provider ledger")

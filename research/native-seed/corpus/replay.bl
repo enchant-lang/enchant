@@ -1,0 +1,232 @@
+; SDK-only replay of retained canonical ANF. No actor declarations, planners,
+; Source compilation, Env reference selection, or old artifact writes.
+(ns native.replay-original-corpus
+ (:require [native.artifact :as artifact] [native.artifact-capsules :as capsules]
+           [native.scheme :as scheme] [native.eval :as ev] [anf]
+           [bl.json :as json] [clojure.string :as string]))
+(def base "research/native-seed")
+(def args (BeamLisp/argv))
+(when-not (= 3 (count args))
+ (throw (ex-info "usage: replay.bl original-manifest new-eighteen-closure-dir fresh-output-dir" {})))
+(def original-path (first args))
+(def closure-dir (second args))
+(def out (nth args 2))
+(def partition-path (str closure-dir "/partition.json"))
+(def prelude-path (str closure-dir "/prelude.scm"))
+(def replay-path (str base "/corpus/replay.bl"))
+(def formatter-capsule (capsules/capture-proc-formatters))
+(def render-capsule (capsules/capture-proc-replay-formatter))
+(def host-capsule (capsules/capture-host-names))
+(def source-identity (:source-identity formatter-capsule))
+(def module-source (:module-source formatter-capsule))
+(def render-definition (:value render-capsule))
+(def original (json/decode (File/read! original-path)))
+(def original-record (source-identity original-path))
+(def partition-record (source-identity partition-path))
+(def prelude-record (source-identity prelude-path))
+(def prelude-source (File/read! prelude-path))
+(def replay-source-record (source-identity replay-path))
+(defn require! [condition message data]
+ (when-not condition (throw (ex-info message data))))
+(defn identity! [record]
+ (require! (= (get record "sha256") (artifact/sha (File/read! (get record "path"))))
+  "actor replay: captured input changed" {:record record}))
+(require! (and (= "bl.native.original-actor-corpus" (get original "schema"))
+               (= 1 (get original "version")) (= "scheme" (get original "target"))
+               (= "none" (get original "assertion-adaptation"))
+               (= "none" (get original "source-path-adaptation"))
+               (= "5f2ad8223fd9f053157b65266d3ee14e7fe8567b6196a78ed7ac955132b9a5c5"
+                  (get (get original "application") "sha256"))
+               (= "c946430ffc09b09267674c248393309a8aaafeb622d6615d33330c020129e601"
+                  (get (get original "anf") "sha256"))
+               (= "4f97857ad1b357fa3c962e58e497fa84b02d43c1fabef3e7a924fa5b3e902a22"
+                  (get (get original "body") "sha256")))
+ "actor replay: requires the exact unadapted qualified original capture" {})
+(doseq [record [(get original "application") (get original "runtime")
+                (get original "body") (get original "artifact")]] (identity! record))
+(require! (not= (Path/expand out) (Path/expand (Path/dirname original-path)))
+ "actor replay: output must not overwrite the original corpus directory" {})
+(require! (not (File/exists? (str out "/manifest.json")))
+ "actor replay: output manifest already exists" {:out out})
+(def original-body (File/read! (get (get original "body") "path")))
+(def original-program (File/read! (get (get original "artifact") "path")))
+(def original-prefix-size (- (erlang/byte_size original-program) (erlang/byte_size original-body) 1))
+(require! (and (> original-prefix-size 0)
+               (= (str "\n" original-body)
+                  (binary/part original-program original-prefix-size
+                   (- (erlang/byte_size original-program) original-prefix-size))))
+ "actor replay: original full program does not contain its exact body suffix" {})
+(def anf-record (get original "anf"))
+(def captured (artifact/read-part original-path
+                (assoc anf-record "path" (Path/expand (get anf-record "path")))))
+(def definitions (:definitions captured))
+(def ledger (:link-resolutions captured))
+(def link (:link-manifest captured))
+(require! (and (= "bl.native.anf-unit" (:schema captured)) (= 1 (:version captured))
+               (= 405 (count definitions)) (= 202 (:runtime-definitions link))
+               (= {:namespace "native.kernel" :name "main" :actor-runtime true} (:entry captured))
+               (= "bl.native.proc-resolvers" (:schema ledger)) (= 1 (:version ledger))
+               (= "native.kernel" (:runtime-namespace ledger))
+               (= (:emitted-bindings link) (mapv #(str (:ns %) "/" (:name %)) definitions))
+               (= (set (:emitted-bindings link)) (set (keys (:definitions ledger))))
+               (= (get original "link") (json/decode (json/encode link)))
+               (:source-frames? link) (= [] (:helper-namespaces link)))
+ "actor replay: incomplete or changed original ANF/resolver/entry metadata" {})
+(require! (= (:sha256 (:prelude link))
+             (artifact/sha (binary/part original-program 0 original-prefix-size)))
+ "actor replay: retained program prefix does not match the original prelude identity" {})
+(doseq [record (concat [(:host-link link) (:links link)] (:host-extensions link)
+                       (:compile-time-providers link))]
+ (require! (= (:sha256 record) (artifact/sha (File/read! (:path record))))
+  "actor replay: actor host/planner authority changed" {:record record}))
+(def old-partition-path (:path (:closure-manifest link)))
+(require! (= (:sha256 (:closure-manifest link)) (artifact/sha (File/read! old-partition-path)))
+ "actor replay: original eighteen-unit closure must remain retained" {})
+(def old-closure (artifact/read-closure old-partition-path))
+(def new-closure (artifact/read-closure partition-path))
+(def old-partition (json/decode (File/read! old-partition-path)))
+(def new-partition (json/decode (File/read! partition-path)))
+(defn partition-hashes [partition]
+ (into {} (map (fn [row] [(get row "namespace") (get row "sha256")]) (get partition "units"))))
+(def old-hashes (partition-hashes old-partition))
+(def new-hashes (partition-hashes new-partition))
+(def compiler-names
+ #{"anf" "clojure.core-ext" "clojure.re" "clojure.string" "compiler" "core" "diag"
+   "host.compiler-data" "host.form-meta" "host.meta" "native.bootstrap" "native.eval"
+   "native.scheme" "reader" "reader-node" "rt" "server-clause" "sugar"})
+(require! (and (= 18 (count (:order old-closure)))
+               (= compiler-names (set (:order old-closure)))
+               (= (dissoc old-closure :units :provider-sources) (dissoc new-closure :units :provider-sources))
+               (= (set (keys old-hashes)) (set (keys new-hashes)))
+               (every? (fn [[namespace sha256]]
+                         (or (= namespace "native.scheme") (= sha256 (get new-hashes namespace)))) old-hashes)
+               (not= (get old-hashes "native.scheme") (get new-hashes "native.scheme"))
+               (= (:sdk-pin link) (json/decode (:sdk-pin new-closure))))
+ "actor replay: fresh compiler must preserve seventeen units and change only native.scheme" {})
+(require! (= (vec (filter :macro-provider? (:provider-sources old-closure)))
+             (vec (filter :macro-provider? (:provider-sources new-closure))))
+ "actor replay: macro-provider Source authority changed" {})
+(doseq [provider (:provider-sources new-closure)]
+ (require! (= (:sha256 provider) (artifact/sha (File/read! (:path provider))))
+  "actor replay: refreshed provider ledger does not describe current Source" {:provider provider}))
+(def old-emitter (get (:units old-closure) "native.scheme"))
+(def new-emitter (get (:units new-closure) "native.scheme"))
+(require! (and (= (dissoc old-emitter :source :source-sha256 :defs)
+                 (dissoc new-emitter :source :source-sha256 :defs))
+               (= (mapv #(select-keys % [:name :kind :private?]) (:defs old-emitter))
+                  (mapv #(select-keys % [:name :kind :private?]) (:defs new-emitter)))
+               (= (:source-sha256 new-emitter) (artifact/sha (File/read! (:path new-emitter)))))
+ "actor replay: emitter Source/namespace/definition inventory changed outside the formatter refresh" {})
+(def replaceable-inputs #{(str base "/src/native/scheme.bl") (str base "/src/native/proc-link.bl")})
+(doseq [record (get original "inputs") :when (not (contains? replaceable-inputs (get record "path")))]
+ (identity! record))
+(defn target-source [target]
+ (let [at (binary/match target "/")]
+  (require! (and (erlang/is_tuple at) (> (elem at 0) 0)
+                 (< (inc (elem at 0)) (erlang/byte_size target)))
+   "actor replay: malformed captured target" {:target target})
+  (let [offset (elem at 0)]
+   (str "(native-global-exact " (scheme/text (binary/part target 0 offset)) " "
+    (scheme/text (binary/part target (inc offset) (- (erlang/byte_size target) offset 1))) ")"))))
+(defn selection-source [query selection]
+ (case (first query)
+  :global
+   (do (require! (contains? #{:body :sdk-seed} (:kind selection))
+        "actor replay: invalid captured global kind" {:query query :selection selection})
+    (target-source (:target selection)))
+  :remote
+   (case (:kind selection)
+    :actor-host
+     (do (require! (contains? (:value host-capsule) (:host-name selection))
+          "actor replay: captured host leaf is not admitted" {:selection selection})
+      (str "h-" (:host-name selection)))
+    :leaf (str "(native-remote " (scheme/text (:target selection)) ")")
+    :body (if (:packed? selection)
+            (str "(lambda arguments (native-linked-packed-call " (target-source (:target selection)) " arguments))")
+            (str "(lambda arguments (bl-invoke " (target-source (:target selection)) " arguments))"))
+    (throw (ex-info "actor replay: invalid captured remote kind" {:query query :selection selection})))
+  (throw (ex-info "actor replay: unknown captured query kind" {:query query}))))
+(defn query [node]
+ (case (:op node)
+  :global [:global (:ns node) (:name node) (:lookup node)]
+  :remote [:remote (:mod node) (:fun node) (count (:args node))]
+  nil))
+(defn node-queries [root]
+ (loop [todo (list root) out #{}]
+  (if (erlang/== (list) todo) out
+   (let [node (erlang/hd todo) q (query node)]
+    (require! (not= :binding (:op node)) "actor replay: unresolved Source custody" {})
+    (recur (erlang/++ (anf/executable-children node) (erlang/tl todo)) (if q (conj out q) out))))))
+(defn lookup-source! [sources caller node]
+ (let [q (query node)]
+  (require! (contains? sources q) "actor replay: emitter requested an uncaptured query" {:caller caller :query q})
+  (get sources q)))
+(defn options-for [definition]
+ (let [caller (str (:ns definition) "/" (:name definition))
+       table (get (:definitions ledger) caller)
+       _ (require! (= (set (keys table)) (node-queries (:node definition)))
+           "actor replay: resolver query set differs from canonical ANF" {:caller caller})
+       sources (reduce (fn [out [q selection]] (assoc out q (selection-source q selection))) {} table)]
+  ; Only tiny finite strings enter the emitter's callback environments.
+  (assoc (ev/context (:ns definition)) :runtime-namespace "native.kernel"
+   :namespace-qualified? (not= "native.kernel" (:ns definition)) :source-frames? true
+   :receive-source (target-source "native.kernel/rt-receive")
+   :global-resolver (fn [node] (lookup-source! sources caller node))
+   :remote-resolver (fn [node] (lookup-source! sources caller node)))))
+(def emitted
+ (BeamLisp.CompilerData/eager_map
+  (fn [definition]
+   (println (str "ORIGINAL_ACTOR_REPLAY " (:ns definition) "/" (:name definition)))
+   (render-definition definition (options-for definition))) definitions))
+(def body
+ (str (File/read! (:path (:host-link link))) "\n"
+      (string/join "\n" (map #(File/read! (:path %)) (:host-extensions link))) "\n"
+      (string/join "" (map module-source (:units link)))
+      (string/join "" emitted)
+      "\n(bl-invoke " (target-source "native.kernel/bl-main") " (list "
+      (target-source (str (:namespace (:entry captured)) "/" (:name (:entry captured)))) "))\n"
+      "(if (not (null? seed-errors)) (error \"native actor errors\"))\n\n(native-corpus-finish)\n"))
+; This check precedes ALL new corpus/manifest/ANF writes. Failed replay cannot
+; relabel changed output as the qualified original body.
+(require! (and (= original-body body)
+               (= "4f97857ad1b357fa3c962e58e497fa84b02d43c1fabef3e7a924fa5b3e902a22" (artifact/sha body)))
+ "actor replay: canonical refreshed emitter changed original actor body bytes"
+ {:expected (artifact/sha original-body) :actual (artifact/sha body)})
+(def fresh-link (assoc link :closure-manifest partition-record :prelude prelude-record))
+(def fresh-anf (assoc captured :link-manifest fresh-link))
+(def program (str prelude-source "\n" body))
+(def current-inputs
+ (mapv (fn [record]
+   (if (contains? replaceable-inputs (get record "path")) (source-identity (get record "path")) record))
+  (get original "inputs")))
+(def replay-record
+ {:kind :canonical-captured-anf-replay :version 1 :original-manifest original-record
+  :original-anf anf-record :original-body (get original "body")
+  :original-link-closure (:closure-manifest link) :new-link-closure (:closure-manifest fresh-link)
+  :changed-compiler-namespaces ["native.scheme"] :unchanged-compiler-namespaces 17
+  :provider-ledger-refreshed true :macro-provider-source-unchanged true
+  :definitions 405 :runtime-definitions 202 :body-byte-identical true
+  :definition-data-sha256 (artifact/sha (erlang/term_to_binary definitions (list :deterministic)))
+  :resolver-data-sha256 (artifact/sha (erlang/term_to_binary ledger (list :deterministic)))
+  :entry (:entry captured) :source-recompiled false :source-interpreter false :anf-interpreter false
+  :producer-capsules [(:record formatter-capsule) (:record render-capsule) (:record host-capsule)
+                      (capsules/implementation-record)]})
+(File/mkdir_p! out)
+(File/write! (str out "/program.scm") program)
+(File/write! (str out "/program.anf.etf") (erlang/term_to_binary fresh-anf (list :deterministic)))
+(def manifest
+ (assoc original "status" "prepared-not-executed" "link" fresh-link
+  "artifact" (source-identity (str out "/program.scm"))
+  "anf" (source-identity (str out "/program.anf.etf"))
+  "body" (get original "body") "replay" replay-record
+  "inputs" (vec (concat current-inputs
+   [replay-source-record (source-identity (str base "/src/native/artifact.bl"))
+    (source-identity (:path (:record host-capsule))) (capsules/implementation-record)]))))
+(doseq [record (concat [original-record (:closure-manifest link) partition-record prelude-record replay-source-record]
+                        [(:record formatter-capsule) (:record render-capsule) (:record host-capsule)
+                         (capsules/implementation-record)])]
+ (require! (= (:sha256 record) (artifact/sha (File/read! (:path record))))
+  "actor replay: original/current capture changed during emission" {:record record}))
+(doseq [record [anf-record (get original "body") (get original "artifact")]] (identity! record))
+(File/write! (str out "/manifest.json") (json/encode manifest))
+(println "ORIGINAL_ACTOR_REPLAY_IDENTICAL 405 original definitions; 202 runtime; original body retained")
