@@ -2,7 +2,7 @@
 ; Source freshness, phase identity and reuse stay with those existing owners.
 (ns native.aot-target
  (:require [unit-store :as store] [artifact-process :as process]
-           [native.aot-scheme :as emitter]))
+           [native.aot-scheme :as emitter] [bl.json :as json]))
 
 (defn sha [bytes]
  (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
@@ -31,7 +31,7 @@
        input (Path/join (:observations options) (str job "-request.json"))
        output (Path/join (:observations options) (str job "-result.json"))]
   (File/mkdir_p! (:observations options))
-  (File/write! input (Jason/encode! request))
+  (File/write! input (json/encode request))
   (let [result (process/run (:python options)
                 [(Path/join (:prototype options) "native_module.py") method input output]
                 {:timeout-ms 250000 :limit 16384})]
@@ -39,7 +39,7 @@
     (throw (ex-info "Scheme target tool failed" {:method method :result result :observation output})))
    (when (> (:size (File/stat! output)) 1048576)
     (throw (ex-info "Scheme target observation exceeds its bound" {})))
-   (let [data (Jason/decode! (File/read! output))]
+   (let [data (json/decode (File/read! output))]
     (when (= "failed" (get data "status"))
      (throw (ex-info "Scheme target tool refused" {:method method :observation output})))
     data))))
@@ -55,7 +55,7 @@
                 "toolchain" (Path/join prototype "toolchain-pin.json")
                 "standard_bindings" false "code_inputs" (code-inputs prototype sdk)}
        identity (get (invoke-tool! options "identity" request) "identity")
-       abi-ledger (Jason/decode! (File/read! (Path/join prototype "out/compiler-native-owner/leaves.json")))
+       abi-ledger (json/decode (File/read! (Path/join prototype "out/compiler-native-owner/leaves.json")))
        external (set (get abi-ledger "registered_leaves"))
        _ (when-not (and (seq external) (every? string? external))
            (throw (ex-info "Scheme target requires the exact retained host ABI ledger" {})))
@@ -67,7 +67,7 @@
     (let [key (selection-key selection)
           emitted (emitter/emit-prepared prepared (assoc emit-options :unit-id key))
           source (Path/join directory "unit.scm")
-          exports (Jason/encode! {:exports (:exports emitted) :initializer (:initializer emitted)
+          exports (json/encode {:exports (:exports emitted) :initializer (:initializer emitted)
                                  :namespaces (:namespaces emitted) :unit-id (:unit-id emitted)})]
      (File/write! source (:scheme emitted))
      (File/write! (Path/join directory "exports.json") exports)
@@ -90,7 +90,7 @@
           result (invoke-tool! options "verify"
                    (merge request {"expected_identity" identity "selection_key" key
                     "receipt" (Path/join directory "native-module.json")}))
-          receipt (Jason/decode! (File/read! (Path/join directory "native-module.json")))
+          receipt (json/decode (File/read! (Path/join directory "native-module.json")))
           members (into #{"unit.scm" "exports.json" "scheme-unit.term" "native-module.json"}
                      (map #(get % "file") (vals (get receipt "artifacts"))))
           observed (set (File/ls! directory))]
@@ -99,7 +99,7 @@
       (throw (ex-info "Scheme target product membership changed" {:kind :scheme-artifact-changed})))
      {:manifest {:selection selection :members members}
       :native-admission false :directory directory :transport result
-      :exports (Jason/decode! exports)}))}))
+      :exports (json/decode exports)}))}))
 
 (defn artifact! [prepared directory previous options]
  (store/artifact-target! prepared directory previous (adapter options)))
