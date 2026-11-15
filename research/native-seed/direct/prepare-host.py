@@ -68,7 +68,7 @@ def main():
             '(equal? (getenv "BL_NATIVE_C_PURE_BIFS" "1") "1"))\n')
     if args.elide_noactor_ticks or args.pure_bif_fast_path:
         feature_config += ('(set! native-c-symbol-remotes-enabled? '
-            '(equal? (getenv "BL_NATIVE_C_SYMBOL_MFAS" "1") "1"))\n')
+            '(equal? (getenv "BL_NATIVE_C_SYMBOL_MFAS" "0") "1"))\n')
     config = (feature_config + '(native-c-require-action-abi! 2)\n(native-c-configure-clang! ' + ' '.join(map(quoted, [str(gambit / 'bin/gsc'),
         str(clang / 'bin/clang'), str(gambit / 'gambit/include'),
         str(gambit / 'gambit/bin/gambuild-C'), header.read_text()])) + ' 120000)\n'
