@@ -47,9 +47,9 @@ try {
  await writeFile(path.join(base,'evidence/phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  await evaluate('location.hash="#all";new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
  checks.cutoverEvidence=await evaluate('document.body.innerText.includes("77")&&document.body.innerText.includes("106,443")&&document.body.innerText.includes("speed thesis is not proved")');
- await evaluate('document.querySelectorAll("h1,h2,h3").forEach(e=>{if(e.textContent.includes("One prototype, an explicit cutover decision"))e.scrollIntoView()})');
+ await evaluate('document.querySelectorAll("h1,h2,h3").forEach(e=>{if(e.textContent.includes("One prototype, an explicit cutover decision"))window.scrollTo(0,e.getBoundingClientRect().top+scrollY-110)})');
  await writeFile(path.join(base,'evidence/cutover-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
- checks.checkedReaderEvidence=await evaluate('document.body.innerText.includes("8.15×")&&document.body.innerText.includes("whole-compiler speed gate failing")&&document.querySelector("#cell-checked-reader-vertical .result").textContent.includes(":native-checks 77")');
+ checks.checkedReaderEvidence=await evaluate('document.body.innerText.includes("8.15×")&&document.body.innerText.includes("speed gate still failing")&&document.querySelector("#cell-checked-reader-vertical .result").textContent.includes(":native-checks 77")');
  assert.ok(checks.checkedReaderEvidence);
  await evaluate('window.scrollTo(0,document.querySelector(\'[data-review-label="One complete checked experiment"]\').previousElementSibling.getBoundingClientRect().top+scrollY-80)');
  await writeFile(path.join(base,'evidence/checked-reader-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
