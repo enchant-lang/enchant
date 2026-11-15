@@ -1,0 +1,204 @@
+; Original AOT/unit-store owners drive two separately emitted native modules.
+; Research linkage only: no runtime SDK admission or generation-custody claim.
+(ns native.linked-prepare
+ (:require [native.aot-target :as target] [unit-store :as store]
+           [build-plan :as plan] [bl.json :as json] [artifact-process :as process]))
+(def provider "native.linked.provider")
+(def consumer "native.linked.consumer")
+(def provider-symbol 'native.linked.provider)
+(def consumer-symbol 'native.linked.consumer)
+(def source-v1 "(ns native.linked.provider)\n(defn answer [] 42)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 0)))\n")
+(def source-v2 "(ns native.linked.provider)\n(defn answer [] 99)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 100)))\n")
+(def consumer-source "(ns native.linked.consumer (:require [native.linked.provider :as p]))\n(defn answer [] (p/answer))\n(defn capture [x] (p/adder x))\n")
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn file-row [path] {:path (Path/expand path) :sha256 (sha (File/read! path))})
+(defn key-of [sources namespace] (plan/key-for namespace #(get sources %) nil plan/memo-node))
+(defn stage-count [] (elem (erlang/trace_info (tuple :Elixir.BeamLisp.AOT :stage-sdk-unit! 2) :call_count) 1))
+(defn jobs [directory]
+ (reduce + 0 (map #(count (get (json/decode (File/read! %)) "jobs"))
+                 (Path/wildcard (Path/join directory "*-result.json")))))
+(def args (BeamLisp/argv))
+(def output (Path/expand (or (first args) "research/native-seed/out/linked-incremental")))
+(def python (or (second args) (System/find_executable "python3")))
+(def producer (or (nth args 2 nil) "research/native-seed/linked-prepare.bl"))
+(assert (not (File/exists? output)))
+(File/mkdir_p! output)
+(def source-root (Path/join output "source"))
+(def provider-file (Path/join source-root "native/linked/provider.bl"))
+(def consumer-file (Path/join source-root "native/linked/consumer.bl"))
+(File/mkdir_p! (Path/dirname provider-file))
+(File/write! provider-file source-v1)
+(File/write! consumer-file consumer-source)
+(File/write! (Path/join output "provider-v1.bl") source-v1)
+(File/write! (Path/join output "provider-v2.bl") source-v2)
+(def observations (Path/join output "observations"))
+(def options {:prototype "research/native-seed" :python python :observations observations
+              :object-cache (Path/join output "objects")})
+(def phases (atom []))
+(def emissions (atom 0))
+(def versions (atom []))
+(defn observed-target [opts]
+ (let [base (target/adapter opts)]
+  (assoc base :emit! (fn [prepared directory selection]
+                      (swap! emissions inc) ((:emit! base) prepared directory selection)))))
+(defn phase [label action]
+ (let [s (stage-count) e @emissions j (jobs observations)
+       start (erlang/monotonic_time :microsecond) value (action)
+       row {:label label :stage-calls (- (stage-count) s) :emissions (- @emissions e)
+            :compiler-jobs (- (jobs observations) j)
+            :microseconds (- (erlang/monotonic_time :microsecond) start)}]
+  (swap! phases conj row) (println (str "NATIVE_LINKED_PHASE " (json/encode row)))
+  {:value value :observed row}))
+(defn expect [row stages emitted compiled]
+ (let [o (:observed row)]
+  (if (= :positive stages) (assert (pos? (:stage-calls o))) (assert (= stages (:stage-calls o))))
+  (assert (= emitted (:emissions o))) (assert (= compiled (:compiler-jobs o)))))
+(defn open-workspace []
+ (BeamLisp.AOT/open_workspace
+  {:version 2 :phase-imports (list 'core 'sugar) :roots (list source-root)
+   :sources (list {:namespace provider-symbol :file provider-file}
+                  {:namespace consumer-symbol :file consumer-file})} {}))
+(defn artifact-row [captured directory fixture attribution]
+ (let [unit (Path/join directory (:key captured))
+       receipt (Path/join unit "native-module.json") emission (Path/join unit "exports.json")]
+  {:receipt (Path/expand receipt) :receipt_sha256 (sha (File/read! receipt))
+   :emission (Path/expand emission) :emission_sha256 (sha (File/read! emission))
+   :fixture (assoc (file-row fixture) :attribution (Path/expand attribution))
+   :unit_key (:key captured) :selection_key (target/selection-key (:selection captured))}))
+(defn dependency [captured directory]
+ {:directory (Path/join directory (:key captured)) :selection (:selection captured)})
+(defn prepared-description [prepared]
+ {:world (sha (erlang/term_to_binary (:world prepared) (list :deterministic)))
+  :inputs (vec (sort (keys (:inputs prepared))))
+  :plans (mapv :namespace (:plans prepared))})
+(def provider-adapter (observed-target options))
+(def first-root (Path/join output "v1"))
+(def second-root (Path/join output "v2"))
+(def first-prepared (atom nil))
+(def first-consumer (atom nil))
+(def first-provider (atom nil))
+(def first-description (atom nil))
+(def stale-consumer (atom nil))
+(def mfa (tuple :Elixir.BeamLisp.AOT :stage-sdk-unit! 2))
+(def saved-context (BeamLisp.Env/capture))
+(erlang/trace_pattern mfa true (list :local :call_count))
+(try
+ (let [workspace (open-workspace)]
+  (try
+   (let [p (phase "prepare-provider-v1" #(BeamLisp.AOT/prepare_unit workspace provider-symbol))
+         c (phase "prepare-consumer-v1" #(BeamLisp.AOT/prepare_unit workspace consumer-symbol))
+         pp (:value p) cp (:value c)
+         _ (assert (= [provider] (mapv :namespace (:plans pp))))
+         _ (assert (= [consumer] (mapv :namespace (:plans cp))))
+         pa (phase "emit-provider-v1" #(store/artifact-target! pp first-root nil provider-adapter))
+         consumer-adapter (observed-target (assoc options :dependencies [(dependency (:value pa) first-root)]))
+         ca (phase "emit-consumer-v1" #(store/artifact-target! cp first-root nil consumer-adapter))
+         warm (phase "unchanged-warm-workspace-and-artifacts"
+                #(let [p2 (BeamLisp.AOT/prepare_unit workspace provider-symbol)
+                       c2 (BeamLisp.AOT/prepare_unit workspace consumer-symbol)]
+                   (assert (= pp p2)) (assert (= cp c2))
+                   [(store/artifact-target! p2 first-root nil provider-adapter)
+                    (store/artifact-target! c2 first-root nil consumer-adapter)]))]
+    (expect p :positive 0 0) (expect c :positive 0 0)
+    (expect pa 0 1 2) (expect ca 0 1 2) (expect warm 0 0 0)
+    (assert (every? #(= false (:compiled %)) (:value warm)))
+    (reset! first-prepared cp) (reset! first-provider (:value pa)) (reset! first-consumer (:value ca))
+    (reset! first-description (prepared-description cp))
+    (swap! versions conj {:provider (artifact-row (:value pa) first-root (Path/join output "provider-v1.bl") provider-file)
+                          :consumer (artifact-row (:value ca) first-root consumer-file consumer-file)})
+    ; A copied export file is never accepted merely because its caller supplies
+    ; plausible MFAs. The same fixed verifier must reject before emission/jobs.
+    (let [bad (Path/join output "corrupt-provider")
+          original (dependency (:value pa) first-root)
+          _ (File/cp_r! (:directory original) bad)
+          _ (File/write! (Path/join bad "exports.json") "{}")
+          refused (phase "corrupt-dependency-refused-before-emission"
+                    #(try (observed-target (assoc options :dependencies [(assoc original :directory bad)]))
+                       :unexpected-success (catch error (:kind (ex-data error)))))]
+     (expect refused 0 0 0) (assert (= :scheme-artifact-changed (:value refused))))
+    (File/write! provider-file source-v2)
+    (let [stale (phase "old-provider-prepared-refused"
+                  #(try (store/artifact-target! pp first-root nil provider-adapter)
+                     :unexpected-success (catch error (:kind (ex-data error)))))]
+     (expect stale 0 0 0) (assert (= :artifact-source-changed (:value stale))))
+    (reset! stale-consumer
+     (try (BeamLisp.AOT/check_prepared_unit! cp) :still-current
+      (catch error (:kind (ex-data error))))))
+   (finally (BeamLisp.AOT/close_workspace! workspace))))
+ ; Every edit reopens the original workspace owner over current Source bytes.
+ (let [workspace (open-workspace)]
+  (try
+   (let [p (phase "prepare-provider-v2" #(BeamLisp.AOT/prepare_unit workspace provider-symbol))
+         c (phase "prepare-consumer-v2" #(BeamLisp.AOT/prepare_unit workspace consumer-symbol))
+         pp (:value p) cp (:value c)
+         pa (phase "emit-provider-v2" #(store/artifact-target! pp second-root first-root provider-adapter))
+         consumer-adapter (observed-target (assoc options :dependencies [(dependency (:value pa) second-root)]))
+         ca (phase "capture-consumer-v2-exact-world"
+              #(store/artifact-target! cp second-root first-root consumer-adapter))
+         unchanged-source-keys (= (key-of {provider source-v1 consumer consumer-source} consumer)
+                                  (key-of {provider source-v2 consumer consumer-source} consumer))]
+    (expect p :positive 0 0) (expect c :positive 0 0) (expect pa 0 1 2)
+    (assert unchanged-source-keys)
+    ; Exact dependency artifact selection is conservative even where the shared
+    ; graph planner has proved a body/interface edge reusable.
+    (expect ca 0 1 2)
+    (assert (not= (:key @first-consumer) (:key (:value ca))))
+    (swap! versions conj {:provider (artifact-row (:value pa) second-root (Path/join output "provider-v2.bl") provider-file)
+                          :consumer (artifact-row (:value ca) second-root consumer-file consumer-file)})
+    (let [before {provider source-v1 consumer consumer-source}
+          after {provider source-v2 consumer consumer-source}
+          selected (vec (filter #(not= (key-of before %) (key-of after %)) [provider consumer]))
+          requests (sort (Path/wildcard (Path/join observations "identity-*-request.json")))
+          sdk (System/fetch_env! "BL_SDK_PRODUCT")]
+     (assert (= [provider] selected))
+     (assert (= saved-context (BeamLisp.Env/capture)))
+     (File/write! (Path/join output "proof.json")
+      (json/encode {:schema "bl.native.linked-module-proof" :version 1 :status "prepared-not-executed"
+       :provider provider :consumer consumer :producer (file-row producer)
+       :sdk {:product sdk :descriptor (file-row (Path/join sdk "artifact.json"))}
+       :tool_request (Path/expand (first requests)) :tool_request_sha256 (sha (File/read! (first requests)))
+       :versions @versions :phases @phases
+       :planner {:owner "build-plan/key-for" :selected selected
+                 :before (into {} (map (fn [n] [n (key-of before n)]) [provider consumer]))
+                 :after (into {} (map (fn [n] [n (key-of after n)]) [provider consumer]))
+                 :consumer-source-unchanged true :consumer-plan-stable unchanged-source-keys
+                 :first-prepared @first-description :second-prepared (prepared-description cp)
+                 :stale-consumer @stale-consumer
+                 :consumer-artifact-reused false
+                 :limit "exact constructor world and verified dependency artifact identity remain conservative"}
+       :expectations {:answer [42 99] :closure-results [16 116]
+                      :old-consumer-calls-new-provider true :held-provider-capture-stays-old true}
+       :native-executed false :runtime-admission false :generation-custody false}))))
+   (finally (BeamLisp.AOT/close_workspace! workspace))))
+ (println "NATIVE_LINKED_SOURCE_AND_ARTIFACTS_PREPARED")
+ (finally (erlang/trace_pattern mfa false (list :local :call_count))))
+
+; One bounded BL invocation prepares all artifacts and runs the fixed observer.
+; A separate linked-probe.bl entry exists only for deliberate evidence replay.
+(def preparer (or (nth args 3 nil) "research/native-seed/prepare-linked-probe.py"))
+(def probe-output (Path/join output "native-observation"))
+(def prepared-probe
+ (process/run python
+  [preparer "--compiler-dir" "research/native-seed/out/compiler-native-owner"
+   "--capture" (Path/join output "proof.json") "--out" probe-output]
+  {:timeout-ms 60000 :limit 8192}))
+(when-not (process/ok? prepared-probe)
+ (throw (ex-info "Linked native observation preparation failed" prepared-probe)))
+(def preparation-path (Path/join probe-output "preparation.json"))
+(def preparation-bytes (File/read! preparation-path))
+(def preparation (json/decode preparation-bytes))
+(assert (= 20 (get preparation "runtime_deadline_seconds")))
+(def native-argv (get preparation "argv"))
+(def native-start (erlang/monotonic_time :microsecond))
+(def native-result (process/run (first native-argv) (rest native-argv) {:timeout-ms 20000 :limit 8192}))
+(def native-passed (and (process/ok? native-result)
+ (= 1 (count (filter #(= "NATIVE_LINKED_MODULE_PROOF_PASS 36" %) (String/split (:out native-result) "\n"))))))
+(File/write! (Path/join probe-output "runtime.log") (:out native-result))
+(File/write! (Path/join probe-output "runtime.json")
+ (json/encode {:schema "bl.native.linked-module-runtime-observation" :version 1
+  :preparation preparation-path :preparation_sha256 (sha preparation-bytes)
+  :seconds (/ (- (erlang/monotonic_time :microsecond) native-start) 1000000.0)
+  :exit (:exit native-result) :output_sha256 (sha (:out native-result)) :passed native-passed
+  :runtime-admission false :generation-custody false}))
+(when-not native-passed (throw (ex-info "Linked native observation failed" native-result)))
+(println "NATIVE_LINKED_MODULE_PROOF_PASS 36")

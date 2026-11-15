@@ -58,21 +58,57 @@
                 "standard_bindings" false "code_inputs" (code-inputs prototype sdk)}
        identity (get (invoke-tool! options "identity" request) "identity")
        abi-ledger (json/decode (File/read! (Path/join prototype "out/compiler-native-owner/leaves.json")))
-       external (set (get abi-ledger "registered_leaves"))
-       _ (when-not (and (seq external) (every? string? external))
+       host-external (set (get abi-ledger "registered_leaves"))
+       dependency-inputs (or (:dependencies options) [])
+       _ (when-not (and (vector? dependency-inputs) (<= (count dependency-inputs) 16))
+           (throw (ex-info "Scheme dependencies require bounded original artifact selections"
+                           {:kind :invalid-native-dependencies})))
+       ; Dependency bytes use this SAME fixed target verifier with its host-only
+       ; identity. It reads actual receipt/Source/exports membership, not caller
+       ; nominated MFAs. This first linkage slice accepts leaf dependencies only.
+       dependency-target (when (seq dependency-inputs) (adapter (dissoc options :dependencies)))
+       capture-dependencies
+       (fn []
+        (mapv
+         (fn [row]
+          (let [selection (:selection row) directory (:directory row)
+                _ (when-not (and (= #{:selection :directory} (set (keys row)))
+                                 (string? directory)
+                                 (= (:identity dependency-target) (:target selection)))
+                    (throw (ex-info "Scheme dependency target selection changed"
+                                    {:kind :invalid-native-dependency-selection})))
+                verified ((:verify! dependency-target) directory selection)
+                provided (get (:exports verified) "provided-mfas")]
+           (when-not (and (sequential? provided) (seq provided) (<= (count provided) 65536)
+                         (every? #(and (string? %) (<= (count %) 1024)) provided))
+            (throw (ex-info "Scheme dependency lacks exact emitted MFA metadata"
+                            {:kind :native-dependency-exports-required})))
+           {"selection_key" (selection-key selection)
+            "exports_sha256" (sha (File/read! (Path/join directory "exports.json")))
+            "provided_mfas" (to-list (sort provided))})) dependency-inputs))
+       dependencies (capture-dependencies)
+       external (into host-external (mapcat #(get % "provided_mfas") dependencies))
+       check-dependencies! (fn []
+                            (when-not (= dependencies (capture-dependencies))
+                             (throw (ex-info "Scheme dependency artifact changed"
+                                             {:kind :native-dependency-changed}))))
+       _ (when-not (and (seq host-external) (every? string? host-external))
            (throw (ex-info "Scheme target requires the exact retained host ABI ledger" {})))
        ; This exact qualified compiler host predates the optional Source-frame
        ; addon. Keep original ANF attribution without emitting unavailable ABI.
        emit-options {:source-frames? false :external-mfas external}
        target-identity {"kind" "bl-aot-gambit-c" "version" 1 "tools" identity
-                        "source_frames" false "external_mfas" (to-list (sort external))}]
+                        "source_frames" false "external_mfas" (to-list (sort external))}
+       target-identity (if (seq dependencies) (assoc target-identity "dependencies" (to-list dependencies)) target-identity)]
   {:identity target-identity
    :emit! (fn [prepared directory selection]
+    (check-dependencies!)
     (let [key (selection-key selection)
           emitted (emitter/emit-prepared prepared (assoc emit-options :unit-id key))
           source (Path/join directory "unit.scm")
           exports (json/encode {:exports (:exports emitted) :initializer (:initializer emitted)
-                                 :namespaces (:namespaces emitted) :unit-id (:unit-id emitted)})]
+                                 :namespaces (:namespaces emitted) :unit-id (:unit-id emitted)
+                                 :provided-mfas (:provided-mfas emitted)})]
      (File/write! source (:scheme emitted))
      (File/write! (Path/join directory "exports.json") exports)
      (invoke-tool! options "build"
@@ -83,6 +119,7 @@
       (erlang/term_to_binary {:selection selection :scheme-sha256 (sha (:scheme emitted))
                              :exports-sha256 (sha exports)} (list :deterministic)))))
    :verify! (fn [directory selection]
+    (check-dependencies!)
     (let [key (selection-key selection)
           source (File/read! (Path/join directory "unit.scm"))
           exports (File/read! (Path/join directory "exports.json"))
