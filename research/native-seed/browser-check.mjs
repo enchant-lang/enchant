@@ -45,10 +45,11 @@ try {
  checks.phoneOverflow=await evaluate('document.documentElement.scrollWidth<=innerWidth');
  assert.ok(checks.noAuthoringErrors);assert.ok(checks.phoneOverflow);
  await writeFile(path.join(base,'evidence/phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
- await evaluate(`location.hash="#all";document.querySelector('[data-review-label="Incrementality stays in BL"]').scrollIntoView()`);
+ await evaluate('location.hash="#all";new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+ await evaluate(`window.scrollTo(0,document.querySelector('[data-review-label="Incrementality stays in BL"]').getBoundingClientRect().top+scrollY-110)`);
  checks.allSectionsPhoneOverflow=await evaluate('document.documentElement.scrollWidth<=innerWidth');
  await writeFile(path.join(base,'evidence/incremental-graph-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
- await evaluate(`document.querySelector('[data-review-label="An edit keeps old native closures alive"]').scrollIntoView()`);
+ await evaluate(`window.scrollTo(0,document.querySelector('[data-review-label="An edit keeps old native closures alive"]').getBoundingClientRect().top+scrollY-110)`);
  await writeFile(path.join(base,'evidence/incremental-closures-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  await evaluate('window.graph=document.querySelector(".screen-graph[data-start=policy]");graph.scrollIntoView()');
  checks.connectedNavigation=await evaluate('graph.querySelector(".sg-view:not([hidden]) [data-sg-to=control]").click();graph.querySelector(".sg-view[data-view=control]").hidden===false');
