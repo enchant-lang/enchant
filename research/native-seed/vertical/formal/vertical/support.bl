@@ -1,0 +1,26 @@
+(ns vertical.support (:require [bl.json :as json]))
+(def limits {:max-nodes 1000000 :max-bytes 16777216 :max-depth 128})
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn term-sha [value] (sha (erlang/term_to_binary value (list :deterministic))))
+(defn read-json [path] (json/decode (File/read! path)))
+(defn lock! [path]
+ (let [record (read-json path) pin (get record "formal_sdk_pin")]
+  (assert (= (get pin "sdk") (System/get_env "BL_SDK_PRODUCT")))
+  (assert (= (get pin "descriptor_sha256") (sha (File/read! (str (get pin "sdk") "/artifact.json")))))
+  (doseq [row (concat (get record "staged_sources") (get record "qualified_research_sources"))]
+   (assert (= (get row "sha256") (sha (File/read! (get row "path")))))) record))
+(defn read-data! [path sidecar]
+ (let [bytes (File/read! path) metadata (read-json sidecar)]
+  (assert (<= (erlang/byte_size bytes) (:max-bytes limits)))
+  (assert (= (get metadata "sha256") (sha bytes)))
+  (BeamLisp.CompilerData/check_closed_etf! bytes limits)
+  (let [value (erlang/binary_to_term bytes)]
+   (BeamLisp.CompilerData/check_compiler_data! value limits) value)))
+(defn save-data! [path value]
+ (BeamLisp.CompilerData/check_compiler_data! value limits)
+ (let [bytes (erlang/term_to_binary value (list :deterministic))]
+  (assert (<= (erlang/byte_size bytes) (:max-bytes limits)))
+  (File/write! path bytes)
+  (File/write! (str path ".json") (json/encode {"sha256" (sha bytes) "bytes" (erlang/byte_size bytes)}))
+  {:path path :sha256 (sha bytes) :bytes (erlang/byte_size bytes)}))
+(defn json! [path value] (File/write! path (json/encode value)))

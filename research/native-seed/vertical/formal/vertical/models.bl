@@ -1,0 +1,92 @@
+; Research state models only. These are not a new cache/reload controller.
+; Every transition is actual closed-record BL Source, extracted by the existing
+; formal.source-protocol owner. Int stamps abstract exact observed identities.
+(ns vertical.models (:require [formal.api :as formal] [formal.term :as t]))
+(defn initial [schema values]
+ (fn [symbols]
+  (t/all (mapv (fn [[field sort]]
+                  (t/eq (get symbols field)
+                        (if (= sort t/Bool) (t/bool (get values field)) (t/int (get values field))))) schema))))
+(def cache-schema
+ {"source" t/Int "compiler" t/Int "abi" t/Int
+  "cached-source" t/Int "cached-compiler" t/Int "cached-abi" t/Int
+  "ready" t/Bool "hit" t/Bool})
+(def cache-initial
+ {"source" 1 "compiler" 1 "abi" 1 "cached-source" 1 "cached-compiler" 1 "cached-abi" 1
+  "ready" true "hit" false})
+(def stamp-inputs {"source" t/Int "compiler" t/Int "abi" t/Int})
+(def cache-handlers
+ [{:name "edit" :inputs stamp-inputs
+   :source "(fn [s msg] (assoc s \"source\" (get msg \"source\") \"compiler\" (get msg \"compiler\") \"abi\" (get msg \"abi\") \"ready\" false \"hit\" false))"}
+  {:name "complete" :inputs stamp-inputs
+   :source "(fn [s msg] (if (and (= (get s \"source\") (get msg \"source\")) (= (get s \"compiler\") (get msg \"compiler\")) (= (get s \"abi\") (get msg \"abi\"))) (assoc s \"cached-source\" (get msg \"source\") \"cached-compiler\" (get msg \"compiler\") \"cached-abi\" (get msg \"abi\") \"ready\" true \"hit\" false) s))"}
+  {:name "reuse"
+   :source "(fn [s msg] (assoc s \"hit\" (and (get s \"ready\") (= (get s \"source\") (get s \"cached-source\")) (= (get s \"compiler\") (get s \"cached-compiler\")) (= (get s \"abi\") (get s \"cached-abi\")))))"}])
+(def cache-spec
+ {:name "vertical-cache-stamps" :bindings :closed-records :state cache-schema
+  :init (initial cache-schema cache-initial)
+  :invariant (fn [s] (t/implies (get s "hit")
+   (t/all [(get s "ready") (t/eq (get s "source") (get s "cached-source"))
+           (t/eq (get s "compiler") (get s "cached-compiler")) (t/eq (get s "abi") (get s "cached-abi"))])))
+  :handlers cache-handlers})
+(def publication-schema
+ {"current" t/Int "published" t/Int "previous" t/Int "ready" t/Bool "failed" t/Bool "admitted" t/Bool})
+(def publication-initial {"current" 1 "published" 1 "previous" 1 "ready" true "failed" false "admitted" false})
+(def publication-handlers
+ [{:name "edit" :inputs {"revision" t/Int}
+   :source "(fn [s msg] (assoc s \"current\" (get msg \"revision\") \"ready\" false \"failed\" false \"admitted\" false))"}
+  {:name "complete" :inputs {"revision" t/Int}
+   :source "(fn [s msg] (if (= (get s \"current\") (get msg \"revision\")) (assoc s \"ready\" true) s))"}
+  {:name "publish" :inputs {"revision" t/Int}
+   :source "(fn [s msg] (if (and (get s \"ready\") (= (get s \"current\") (get msg \"revision\"))) (assoc s \"published\" (get msg \"revision\") \"failed\" false \"admitted\" true) s))"}
+  {:name "fail"
+   :source "(fn [s msg] (assoc s \"previous\" (get s \"published\") \"failed\" true \"ready\" false \"admitted\" false))"}])
+(def publication-spec
+ {:name "vertical-publication" :bindings :closed-records :state publication-schema
+  :init (initial publication-schema publication-initial)
+  :invariants
+  {"failure-keeps-published" (fn [s] (t/implies (get s "failed") (t/eq (get s "previous") (get s "published"))))
+   "admitted-revision-is-ready-current" (fn [s] (t/implies (get s "admitted")
+                                      (t/all [(get s "ready") (t/eq (get s "published") (get s "current"))])))}
+  :handlers publication-handlers})
+(def retirement-schema {"borrowed" t/Bool "retired" t/Bool})
+(def retirement-initial {"borrowed" false "retired" false})
+(def retirement-handlers
+ [{:name "borrow" :source "(fn [s msg] (if (get s \"retired\") s (assoc s \"borrowed\" true)))"}
+  {:name "release" :source "(fn [s msg] (assoc s \"borrowed\" false))"}
+  {:name "retire" :source "(fn [s msg] (if (get s \"borrowed\") s (assoc s \"retired\" true)))"}])
+(def retirement-spec
+ {:name "vertical-retirement" :bindings :closed-records :state retirement-schema
+  :init (initial retirement-schema retirement-initial)
+  :invariant (fn [s] (t/implies (get s "retired") (t/not (get s "borrowed"))))
+  :handlers retirement-handlers})
+(def families ["cache" "publication" "retirement"])
+(def specifications {"cache" cache-spec "publication" publication-spec "retirement" retirement-spec})
+(def initials {"cache" cache-initial "publication" publication-initial "retirement" retirement-initial})
+(defn define [family] (formal/source-protocol (get specifications family)))
+(defn event [name inputs] {:transition name :inputs inputs})
+(def fixtures
+ [{:id "unchanged-hit" :family "cache" :events [(event "reuse" {})] :expect {"hit" true}}
+  {:id "edit-complete-reuse" :family "cache"
+   :events [(event "edit" {"source" 2 "compiler" 1 "abi" 1})
+            (event "complete" {"source" 2 "compiler" 1 "abi" 1}) (event "reuse" {}) {:stutter true}]
+   :expect {"hit" true "cached-source" 2}}
+  {:id "stale-completion" :family "cache"
+   :events [(event "edit" {"source" 2 "compiler" 1 "abi" 1})
+            (event "complete" {"source" 1 "compiler" 1 "abi" 1}) (event "reuse" {}) {:stutter true}]
+   :expect {"hit" false "ready" false}}
+  {:id "compiler-abi-change" :family "cache"
+   :events [(event "edit" {"source" 1 "compiler" 2 "abi" 2}) (event "reuse" {})]
+   :expect {"hit" false "ready" false}}
+  {:id "failed-preparation-keeps-published" :family "publication"
+   :events [(event "edit" {"revision" 2}) (event "fail" {}) {:stutter true} {:stutter true}]
+   :expect {"published" 1 "failed" true}}
+  {:id "stale-publication" :family "publication"
+   :events [(event "edit" {"revision" 2}) (event "publish" {"revision" 1})]
+   :expect {"published" 1}}
+  {:id "new-publication" :family "publication"
+   :events [(event "edit" {"revision" 2}) (event "complete" {"revision" 2}) (event "publish" {"revision" 2})]
+   :expect {"published" 2}}
+  {:id "borrow-blocks-retirement" :family "retirement"
+   :events [(event "borrow" {}) (event "retire" {}) (event "release" {}) (event "retire" {})]
+   :expect {"borrowed" false "retired" true}}])

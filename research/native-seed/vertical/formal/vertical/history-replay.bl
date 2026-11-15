@@ -1,0 +1,41 @@
+; A data adapter to existing formal source trace replay. It neither authenticates
+; native observers nor owns runtime cache/publication/resource behavior.
+(ns vertical.history-replay (:require [formal.api :as formal]))
+(defn event [row]
+ (if (= true (get row "stutter"))
+  (do (assert (= #{"stutter"} (set (keys row)))) {:stutter true})
+  (do (assert (= #{"transition" "inputs"} (set (keys row))))
+      {:transition (get row "transition") :inputs (get row "inputs")})))
+(defn replay [proofs observations]
+ (assert (= "bl.native.vertical-history-observations" (get observations "schema")))
+ (assert (= 1 (get observations "version")))
+ (assert (map? (get observations "identity_mapping")))
+ (assert (map? (get observations "artifact_receipts")))
+ (let [rows (get observations "histories")]
+  (assert (and (vector? rows) (<= 1 (count rows) 32)))
+  (let [checked
+   (mapv (fn [row]
+    (let [family (get row "family") definition (get (:protocols proofs) family)
+          inputs (get row "events") observed (get row "states")]
+     (assert (some? definition))
+     (assert (and (vector? inputs) (<= 1 (count inputs) 4)))
+     (assert (and (vector? observed) (= (inc (count inputs)) (count observed))))
+     (assert (= (get row "initial") (first observed)))
+     (let [events (mapv event inputs)
+           execution (formal/replay-source-protocol-trace definition (get row "initial") events)
+           states (mapv :state (:frames execution))
+           conforms (and (= :replayed (:status execution)) (= :holds (:safety execution))
+                         (= :valid (get-in execution [:source-replay :status])) (= observed states))]
+      {:id (get row "id") :family family :conforms conforms :execution execution
+       :observed-states observed :expected-states states :projection (get row "projection")
+       :raw-events (get row "raw_events")}))) rows)
+        seen (set (map :family checked))]
+   {:status (if (every? :conforms checked) :conforms-to-source-model :disagreement)
+    :histories checked :observed-families (vec (sort seen))
+    :unobserved-families (vec (remove #(contains? seen %) (sort (keys (:protocols proofs)))))
+    :identity-mapping (get observations "identity_mapping")
+    :artifact-receipts (get observations "artifact_receipts")
+    :observer-authentication :external-native-qualification-required
+    :scope :provided-state-observations-versus-source-extracted-model
+    :native-lowering-proof false :native-retirement-observed (contains? seen "retirement")
+    :live-actor-connection :not-established :compiler-proof-authority false})))
