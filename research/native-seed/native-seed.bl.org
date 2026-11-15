@@ -33,6 +33,69 @@ BL => Program : load compiled units; preserve valid running work
 Program --> You : results, source stack or running actor service
 #+end_sequence
 
+* Fuse the work, then compile the smaller loop
+#+begin_stats
+870 | Native checks passed | Differential scan, fallback, reader and final Scheme bytes.
+1.11× | Reader speed ratio | 50.58 → 45.49 ms in one paired run.
+10.6% | Less allocation | 10.86 → 9.71 MB per parse; one allocation batch.
+21.3% | Fewer remote lookups | 106,933 → 84,184 per parse.
+#+end_stats
+
+#+begin_sequence :title "Make the expensive operation simpler by construction"
+lanes Before · generic helpers | After · guarded fused BL loop | Exit · unchanged caller
+Before -> Before : skip ignored characters, then walk that gap again for position
+After -> After : consume once; carry line, column, offset as scalar integers
+After -> After : direct named loop and 18 direct integer operations
+After --> Exit : materialize remaining input and position once
+After --> Before : unsupported input delegates to the original with original arguments
+#+end_sequence
+
+#+begin_rosetta
+Same-process comparison | Original | Fused scan
+Reader · median ms | 50.578 | 45.489
+Read → compile → emit · median ms | 119.790 | 108.520
+Allocated bytes per parse | 10,860,405 | 9,705,022
+Remote resolutions per parse | 106,933 | 84,184
+Generic matcher entries per parse | 0 | 0
+#+end_rosetta
+
+#+begin_honest :title "A useful local result; not a native compiler victory"
+This is one explicitly authored BL scan specialization, not an automatic
+interprocedural optimizer. One small module was compiled against the existing
+native image; no SDK or compiler-image rebuild. The original advance-to already
+carried scalar position fields: the new saving is fusion plus direct loop and
+integer lowering. Exact integer arithmetic retains bignums.
+
+870 checks cover short exhaustive character combinations, comments, Unicode,
+large and negative positions, unsupported-input fallback, full reader results
+and errors, emitted Scheme parity, primitive-change refusal, rollback and a
+retained closure after GC. Physical suffix sharing is checked for raw lists;
+vector fallback constructs fresh lists. This is a closed serial experiment,
+not concurrent reload custody or proof of native lowering.
+
+Five alternating timing batches suggest about 10% less reader and pipeline time
+on this shared host. This does not close the previously measured gap to warm
+BEAM. The default remains :reference; :scan-v1 is experimental.
+#+end_honest
+
+The next generalization is to propagate existing analysis facts across a small,
+connected helper region, fuse traversals, and inspect the residual loop before
+spending time in C compilation. Keep observable calls and reload dependencies
+explicit. Measure the whole pipeline; reject rewrites whose local simplification
+does not reduce end-to-end work.
+
+[[file:evidence/scan/observation.json][Paired measurements]] · [[file:evidence/scan/native.log][870 checks and timing output]] · [[file:evidence/scan/files.json][Exact artifact evidence]]
+
+#+begin_src beam-lisp :id fused-scan-evidence
+(ns native.seed.scan-dossier (:require [bl.json :as json]))
+(def scan-result (json/decode (File/read! "research/native-seed/evidence/scan/observation.json")))
+(assert (= true (get scan-result "passed")))
+(assert (= 870 (get scan-result "checks")))
+(assert (= false (get scan-result "production_cutover")))
+(assert (= 0 (get scan-result "sdk_builds")))
+(println "870 native checks; one fused loop; experimental mode; original image reused")
+#+end_src
+
 * One prototype, an explicit cutover decision
 #+begin_stats
 77 | Runtime checks passed | Same reader Source; two actual compiled modules.

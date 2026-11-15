@@ -1,0 +1,33 @@
+; No C build: bounded eligibility and fact-scope checks on compiler data.
+(ns native.scan-emission-check (:require [native.scheme :as emitter]))
+(defn L [v] {:op :lit :val v :ann {}})
+(defn V [s] {:op :var :name s :ann {}})
+(defn P [s] {:pop :pvar :name s})
+(defn F [names body] {:op :fn :ann {} :clauses (list {:pats (Enum/map names P) :guard nil :body body})})
+(defn A [f args] {:op :apply :ann {} :fn f :args args})
+(defn R [f args] {:op :remote :ann {} :mod :erlang :fun f :args args})
+(defn B [name init body] {:op :let :ann {} :name name :init init :body body})
+(defn I [test yes no] {:op :if :ann {} :test test :then yes :else no})
+(defn loop-node [body]
+ (A (B "self" (F (list "self") (F (list "x") body)) (A (V "self") (list (V "self")))) (list (L 0))))
+(defn recur-node [arg] (A (A (V "self") (list (V "self"))) (list arg)))
+(defn check [label node loops integers]
+ (let [counts (atom {})
+       result (emitter/emit node {:scan-v1? true :specialize-v1? true :emission-counts counts
+                                 :remote-resolver (fn [_] "checked-primitive")})]
+  (assert (= loops (get @counts :direct-loops 0)) (str label " loops " @counts))
+  (assert (= integers (get @counts :integer-intrinsics 0)) (str label " integers " @counts))
+  (assert (string? result))
+  (println "SCAN_EMISSION_CHECK" label)))
+(check :direct-loop (loop-node (recur-node (V "x"))) 1 0)
+(check :escaping-self (loop-node {:op :tuple :ann {} :elems (list (V "self"))}) 0 0)
+(check :non-tail (loop-node {:op :do :ann {} :stmts (list (recur-node (V "x")) (L 0))}) 0 0)
+(check :wrong-knot (loop-node (A (A (V "self") (list (L 9))) (list (V "x")))) 0 0)
+(check :let-shadow (B "x" (L 1) (B "x" (L "text") (R :+ (list (V "x") (L 1))))) 0 0)
+(check :fn-shadow (B "x" (L 1) (F (list "x") (R :+ (list (V "x") (L 1))))) 0 0)
+(check :true-only (I (R :is_integer (list (V "x"))) (R :+ (list (V "x") (L 1))) (R :+ (list (V "x") (L 1)))) 0 1)
+(check :loop-shadow (B "x" (L 1) (loop-node (R :+ (list (V "x") (L 1))))) 1 0)
+(check :loop-refinement (loop-node (I (R :is_integer (list (V "x"))) (R :+ (list (V "x") (L 1))) (L nil))) 1 1)
+(check :case-shadow (B "x" (L 1) {:op :case :ann {} :subj (L "text")
+ :clauses (list {:pats (list (P "x")) :guard nil :body (R :+ (list (V "x") (L 1)))})}) 0 0)
+(println "SCAN_EMISSION_PASS 10")

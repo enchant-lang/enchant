@@ -46,6 +46,10 @@ try {
  assert.ok(checks.noAuthoringErrors);assert.ok(checks.phoneOverflow);
  await writeFile(path.join(base,'evidence/phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  await evaluate('location.hash="#all";new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+ checks.fusedScanEvidence=await evaluate('document.body.innerText.includes("870")&&document.body.innerText.includes("84,184")&&document.querySelector("#cell-fused-scan-evidence .result").textContent.includes("original image reused")');
+ assert.ok(checks.fusedScanEvidence);
+ await evaluate('document.querySelectorAll("h1,h2,h3").forEach(e=>{if(e.textContent.includes("Fuse the work, then compile the smaller loop"))window.scrollTo(0,e.getBoundingClientRect().top+scrollY-110)})');
+ await writeFile(path.join(base,'evidence/scan-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
  checks.cutoverEvidence=await evaluate('document.body.innerText.includes("77")&&document.body.innerText.includes("106,443")&&document.body.innerText.includes("speed thesis is not proved")');
  await evaluate('document.querySelectorAll("h1,h2,h3").forEach(e=>{if(e.textContent.includes("One prototype, an explicit cutover decision"))window.scrollTo(0,e.getBoundingClientRect().top+scrollY-110)})');
  await writeFile(path.join(base,'evidence/cutover-phone.png'),Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
