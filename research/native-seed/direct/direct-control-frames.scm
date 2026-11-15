@@ -44,11 +44,12 @@
 (set! native-c-site-stack (lambda (frames site)
  (if (or (bl-is-nil site) (null? frames)) frames
   (if (bl-truthy (bl-get site (bl-key "internal") #f)) frames
-   (let ((top (car frames)))
-    (for-each (lambda (key) (set! top (bl-assoc top key (bl-get site key)))) (h-map-keys site))
-    ;; Keep the owning slot live across a caught raise. Trace snapshots copied
-    ;; above cannot be changed by a later call or frame restoration.
-    (set-car! frames top) frames)))))
+   (begin
+    ;; JS runTurn assigns the complete callSrc to its live Source slot; the
+    ;; Scheme ABI likewise assigns the emitted source map. Literal call maps
+    ;; are immutable. Control/critical ownership reads closure metadata, not
+    ;; inherited extra fields in this display slot.
+    (set-car! frames site) frames)))))
 
 ;; Standalone entry comes from a host callback or a generated try/guard
 ;; thunk. It is not the pending direct C callee. A genuine callback starts at

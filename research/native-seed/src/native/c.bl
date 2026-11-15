@@ -119,6 +119,30 @@
                        (slot-node argv) (value-source "'()")]
      env bindings choose false options))))
 
+(defn lower-simple-clause [s clause env destination next options]
+ ; CompilerData proves one unguarded all-variable clause; the caller also
+ ; checks DISTINCT names, exactly like native.scheme/function-expression.
+ ; Argv and every bound object stay in the rooted heap frame. This C prologue
+ ; allocates nothing and invokes no Scheme/C callback, so no C local survives
+ ; a park, exception, callback or GC boundary.
+ (let [names (mapv :name (:pats clause))
+       [s bindings] (reduce (fn [[s out] name]
+                        (let [[s slot] (reg s)] [s (conj out [name slot])])) [s []] names)
+       extended (reduce (fn [env [name slot]] (assoc env name slot)) env bindings)
+       [s body] (lower s (:body clause) extended destination next true options)
+       [s fallback] (lower s (internal "native-c-clause-error" []) env destination next true options)
+       count (count names)
+       check (if (= count 0)
+               (str " if (!___NULLP(blc_arguments)) { BLC_PC(m," fallback "); continue; }\n")
+               (str " int blc_argcount=0;\n"
+                    " while (___PAIRP(blc_arguments) && blc_argcount<" count ") { blc_arguments=___CDR(blc_arguments); ++blc_argcount; }\n"
+                    " if (blc_argcount!=" count " || !___NULLP(blc_arguments)) { BLC_PC(m," fallback "); continue; }\n"
+                    " blc_arguments=BLC_REG(m,0);\n"))
+       bind (string/join "" (map (fn [[_ slot]]
+                      (str " BLC_PUT(m," slot ",___CAR(blc_arguments)); blc_arguments=___CDR(blc_arguments);\n")) bindings))]
+  (block s (str " /* canonical fixed entry: exact arity, rooted arguments */\n"
+                " ___SCMOBJ blc_arguments=BLC_REG(m,0);\n" check bind (jump body)))))
+
 (defn lower-function [s node env destination next options]
  (let [parent-slot (:slot s) captured (vec (sort (keys env)))
        captures (mapv env captured) capture-slots (vec (range 1 (inc (count captured))))
@@ -131,8 +155,12 @@
                       (assoc (dissoc options :direct-callsite) :source-tail-allowed? (boolean (:direct-control-tail? node)))
                       (assoc (dissoc options :direct-callsite) :source-fn (:direct-source-fn node)
                              :source-arity arity :source-tail-allowed? true))
-       [s entry] (lower-clauses s (:clauses node) 0 inner-env return-slot finish true
-                   (internal "native-c-clause-error" []) body-options)
+       clause (BeamLisp.CompilerData/simple_function_clause node)
+       names (when clause (mapv :name (:pats clause)))
+       [s entry] (if (and clause (= (count names) (count (distinct names))))
+                   (lower-simple-clause s clause inner-env return-slot finish body-options)
+                   (lower-clauses s (:clauses node) 0 inner-env return-slot finish true
+                    (internal "native-c-clause-error" []) body-options))
        [s tick] (if (or (not control?) (:direct-control-tick? node))
                   (block s (action "BLC_TICK" "___FIX(0)" 0 entry "___NUL" false)) [s entry])
        size (:slot s)

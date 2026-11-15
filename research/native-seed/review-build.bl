@@ -1,8 +1,48 @@
-; One compiler request for Codebase/system evidence, document execution and
-; static dossier rendering. Uses the same runner as `bl doc run --check`.
+; Reuse exact retained canonical Source facts while their inputs are unchanged.
+; Execute the live document cells with the real bl.doc writer/checker, then
+; render the existing dossier kit. This does not initialize a Codebase store.
 (ns native.review-build (:require [bl.doc :as doc] [bl.json :as json]))
-(BeamLisp/run_file "research/native-seed/inspect.bl")
-(BeamLisp.Env/in_ns "native.review-build")
+(defn review-sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn review-identity [path] {:path path :sha256 (review-sha (File/read! path))})
+(def pin-bytes (File/read! "research/native-seed/sdk-pin.json"))
+(assert (= "0a2953393c175935226e69b12502009001bf6adaaeeeea5e3bade915eb3a9f46" (review-sha pin-bytes)))
+(def pin (json/decode pin-bytes))
+(def descriptor (File/read! (str (System/get_env "BL_SDK_PRODUCT") "/artifact.json")))
+(assert (= (get pin "descriptor_sha256") (review-sha descriptor)))
+(assert (= descriptor (File/read! (str (get pin "sdk") "/artifact.json"))))
+; These exact artifacts and producer were retained together at b38f73e34878.
+; No fact is recomputed, relabelled fresh, or allowed to survive changed Source.
+(def index-path "research/native-seed/evidence/codebase.json")
+(def analysis-path "research/native-seed/evidence/analysis.edn")
+(def index-bytes (File/read! index-path))
+(def analysis-bytes (File/read! analysis-path))
+(assert (= "4d52b45b721f3e8ddcd12a53dcf9ce6093bfb5c1aae8ec895d925f59df42d37a" (review-sha index-bytes)))
+(assert (= "c3a444f375e334dd8f00f83c7feea0750a9cab4de59edf15471faca86c6b3308" (review-sha analysis-bytes)))
+(assert (= "3c9b5dc13048a8409ca6a211031ccf7c788a97e71775b5da093b3a135276a85d"
+           (review-sha (File/read! "research/native-seed/inspect.bl"))))
+(def indexed-files
+ ["priv/std/proc/server.bl" "priv/std/proc/super.bl" "priv/std/proc/bus.bl"
+  "priv/std/proc/flow.bl" "priv/std/proc/reg.bl" "priv/std/proc/table.bl"
+  "priv/std/proc/queue-runtime.bl" "priv/std/proc/mailbox.bl" "priv/lib/js/actor/runtime.bl"])
+(def index-facts (json/decode index-bytes))
+(assert (= indexed-files (mapv #(get % "path") index-facts)))
+(doseq [row index-facts]
+ (assert (= (get row "sha256") (review-sha (File/read! (get row "path"))))))
+(def analysis-facts (BeamLisp.Compiler/read_data analysis-bytes))
+(assert (= :actual-source-summaries (:scope analysis-facts)))
+(assert (= "priv/std/proc/mailbox.bl" (:source analysis-facts)))
+(assert (= (:sha256 analysis-facts) (review-sha (File/read! (:source analysis-facts)))))
+(def canonical-tools ["priv/std/codebase.bl" "priv/lib/system/analyze.bl" "priv/boot/compiler.bl"])
+(doseq [path canonical-tools]
+ (assert (= (File/read! path) (File/read! (str (get pin "source") "/" path)))))
+(File/write! "research/native-seed/evidence/review-source-cache.json"
+ (json/encode {:schema "bl.native.review-source-cache" :version 1 :status :checked-reused
+  :source-facts-refreshed false :source-inputs-unchanged true :sdk-pin pin
+  :retained-commit "b38f73e348789c23c64a395f74018aa73f22c176"
+  :artifacts (mapv review-identity [index-path analysis-path "research/native-seed/inspect.bl"])
+  :inputs (mapv review-identity (concat indexed-files canonical-tools))}))
+(println "NATIVE_REVIEW_SOURCE_CACHE_CHECKED 9 unchanged canonical Source inputs")
 (def document "research/native-seed/native-seed.bl.org")
 (def written (doc/run-and-write! document))
 (assert (nil? (:error written)))
