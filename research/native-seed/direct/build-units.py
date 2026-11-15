@@ -27,7 +27,7 @@ def sha(path):
 
 # One-time exact migration from the immediately preceding reviewed builder.
 # Every other request field and every generated-C/object hash must still match.
-REVIEWED_PREVIOUS_BUILDERS = ("3d446258377ffebe5e20e4602c9d2f9b0b02025b2533d9fecd500ea3df1bd455",)
+REVIEWED_PREVIOUS_BUILDERS = ("cb8422c9fa4f11a225aeaa8bdf84438f9042d123103646215cfca6554f3556df", "3d446258377ffebe5e20e4602c9d2f9b0b02025b2533d9fecd500ea3df1bd455",)
 
 
 def main():
@@ -42,6 +42,8 @@ def main():
     parser.add_argument('--route', choices=('c', 'llvm'), default='c')
     parser.add_argument('--standard-bindings', action='store_true')
     parser.add_argument('--host-optimization', type=int, choices=(0, 1), default=0)
+    parser.add_argument('--unit-optimization', type=int, choices=(0, 1), default=0,
+                        help='indexed authored C units only; assembly/metadata/entry remain stock O0')
     parser.add_argument('--host-granularity', choices=('single', 'multiple'), default='single')
     args = parser.parse_args()
     out = args.plan.resolve()
@@ -51,6 +53,8 @@ def main():
               'source_parser': False, 'compiler_run': False, 'runs': [], 'objects': [],
               'route': args.route, 'standard_bindings': args.standard_bindings,
               'host_optimization': args.host_optimization, 'host_granularity': args.host_granularity,
+              'unit_optimization': args.unit_optimization,
+              'unit_optimization_scope': 'indexed-authored-units; assembly/metadata/entry remain O0',
               'derived_host_variant': args.host_optimization != 0 or args.host_granularity != 'single'}
     inputs = {}
 
@@ -207,7 +211,11 @@ def main():
                  '-fPIC', '-fno-common', *defines, '-I' + str(public.parent), '-I' + str(header.parent)]
         gsc_flags = ['-prelude', '(declare (standard-bindings) (extended-bindings))'] if args.standard_bindings else []
         llvm_object_flags = ['-O0', '-fPIC']
-        report.update(c_flags=flags, c_flags_scope='default-authored-units-and-entry',
+        authored_flags, authored_llvm_flags = list(flags), list(llvm_object_flags)
+        authored_flags[0] = '-O' + str(args.unit_optimization)
+        authored_llvm_flags[0] = '-O' + str(args.unit_optimization)
+        report.update(c_flags=flags, c_flags_scope='stock-O0-assembly-metadata-entry-and-cache-baseline',
+                      authored_c_flags=authored_flags, authored_llvm_object_flags=authored_llvm_flags,
                       scheme_compiler_flags=gsc_flags, llvm_object_flags=llvm_object_flags)
         compiler_environment = hashlib.sha256(json.dumps({name: value for name, value in os.environ.items()
             if name.startswith(('NIX_', 'GAMBIT')) or name in
@@ -271,6 +279,8 @@ def main():
                 unit_llvm_flags[0] = '-O' + str(args.host_optimization)
                 if args.host_granularity == 'multiple':
                     unit_flags = ['-D___MULTIPLE_HOSTS' if x == '-D___SINGLE_HOST' else x for x in unit_flags]
+            else:
+                unit_flags, unit_llvm_flags = list(authored_flags), list(authored_llvm_flags)
             if name == 'host':
                 report['host_c_flags'] = unit_flags
                 report['host_llvm_object_flags'] = unit_llvm_flags
@@ -298,13 +308,19 @@ def main():
                 candidates = []
                 for builder in (sha(here), *REVIEWED_PREVIOUS_BUILDERS):
                     for route in dict.fromkeys((args.route, 'c')):
-                        prior_request = dict(request, builder=builder, route=route,
-                                             flags=flags, llvm_object_flags=llvm_object_flags)
-                        prior = args.cache.resolve() / request_key(prior_request)
-                        if prior != cache:
-                            hit = cached_outputs(prior, prior_request, unit)
-                            if hit and not any(x['directory'] == prior for x in candidates):
-                                candidates.append(hit)
+                        # First retain an unchanged object at its EXACT flags,
+                        # including an already qualified O1/MULTIPLE host. The
+                        # known stock O0 recipe can also lend its identical GSC
+                        # translation to a C-only flag variant; never its object.
+                        for prior_flags, prior_llvm_flags in (
+                                (unit_flags, unit_llvm_flags), (flags, llvm_object_flags)):
+                            prior_request = dict(request, builder=builder, route=route,
+                                                 flags=prior_flags, llvm_object_flags=prior_llvm_flags)
+                            prior = args.cache.resolve() / request_key(prior_request)
+                            if prior != cache:
+                                hit = cached_outputs(prior, prior_request, unit)
+                                if hit and not any(x['directory'] == prior for x in candidates):
+                                    candidates.append(hit)
                 same_object = next((x for x in candidates
                     if x['details']['request'] == dict(request, builder=x['details']['request']['builder'])), None)
                 raw_origin = same_object or (candidates[0] if candidates else None)
