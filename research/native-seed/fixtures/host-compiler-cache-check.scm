@@ -306,4 +306,56 @@
    (set! native-stub-names saved-stubs) (set! native-export-arities saved-arities)
    (set! native-excluded-host-leaves saved-excluded)
    (native-refresh-remote-cache!) (native-refresh-availability-cache!))))
+;; False export membership is epoch-local too. Hooks must bypass either
+;; cached Boolean, and later admission/exclusion changes retire old negatives.
+(let ((saved-leaves native-leaf-registry) (saved-excluded native-excluded-host-leaves)
+      (held native-remote-available?)
+      (module (bl-key "Elixir.NativeNegative")) (function (bl-key "probe")))
+ (dynamic-wind
+  (lambda () #f)
+  (lambda ()
+   (native-add-leaf! "Elixir.NativeNegativeAlternate/probe/0" (lambda () 3))
+   (native-cache-check "negative membership starts absent" (not (held module function 0)))
+   (native-cache-check "repeated negative membership remains false" (not (held module function 0)))
+   (let ((original native-module-name))
+    (dynamic-wind
+     (lambda () (set! native-module-name
+       (lambda (value) (if (eq? value module) "Elixir.NativeNegativeAlternate" (original value)))))
+     (lambda () (native-cache-check "cached false observes module normalizer hook" (held module function 0)))
+     (lambda () (set! native-module-name original))))
+   (let ((original native-atom-name))
+    (dynamic-wind
+     (lambda () (set! native-atom-name
+       (lambda (value) (if (eq? value module) "Elixir.NativeNegativeAlternate" (original value)))))
+     (lambda () (native-cache-check "cached false observes atom normalizer hook" (held module function 0)))
+     (lambda () (set! native-atom-name original))))
+   (native-cache-check "normalizer restoration preserves original negative" (not (held module function 0)))
+   (let ((original native-module-name) (calls 0) (caught '()) (marker (list 'negative-hook-error)))
+    (dynamic-wind
+     (lambda () (set! native-module-name (lambda (value)
+       (if (eq? value module) (begin (set! calls (+ calls 1)) (raise marker)) (original value)))))
+     (lambda ()
+      (with-exception-catcher (lambda (error) (set! caught (cons error caught))) (lambda () (held module function 0)))
+      (with-exception-catcher (lambda (error) (set! caught (cons error caught))) (lambda () (held module function 0)))
+      (native-cache-check "normalizer exceptions are never memoized"
+       (and (= calls 2) (= (length caught) 2) (eq? (car caught) marker) (eq? (cadr caught) marker))))
+     (lambda () (set! native-module-name original))))
+   (native-add-leaf! "Elixir.NativeNegative/probe/0" (lambda () 4))
+   (native-cache-check "cached false expires at raw admission" (held module function 0))
+   (set! native-excluded-host-leaves (cons "Elixir.NativeNegative/probe/0" native-excluded-host-leaves))
+   (native-cache-check "exclusion produces false membership" (not (held module function 0)))
+   (native-cache-check "repeated excluded membership stays false" (not (held module function 0)))
+   (set! native-excluded-host-leaves saved-excluded)
+   (native-cache-check "cached excluded false expires at restoration" (held module function 0))
+   (let ((original native-keyword?) (refused #f))
+    (dynamic-wind
+     (lambda () (set! native-keyword? (lambda (value) (if (eq? value module) #f (original value)))))
+     (lambda ()
+      (with-exception-catcher (lambda (error) (set! refused #t)) (lambda () (held module function 0)))
+      (native-cache-check "cached result observes changed keyword normalizer" refused))
+     (lambda () (set! native-keyword? original))))
+   (native-cache-check "keyword normalizer restoration preserves admission" (held module function 0)))
+  (lambda ()
+   (set! native-leaf-registry saved-leaves) (set! native-excluded-host-leaves saved-excluded)
+   (native-refresh-remote-cache!) (native-refresh-availability-cache!))))
 (display "native compiler-cache checks: ") (display native-cache-checks) (newline)

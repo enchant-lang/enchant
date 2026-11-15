@@ -163,14 +163,17 @@
        (if variadic?
         (and (not (bl-is-nil (bl-nth info 1))) (= arity (+ 1 (bl-nth info 1))))
         (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
-;; Positive membership is stable only under the exact capability roots.
+;; Boolean membership is stable only under the exact capability roots.
 ;; Source function_exported/3 passes immutable atoms; nested identity tables
 ;; avoid repeated MFA string construction and AVL probes for those arguments.
-;; Mutable string callers retain the complete original path and no misses stick.
+;; Mutable strings retain the original path. False is valid only within this
+;; exact epoch; exceptions never enter the cache. This is finite export
+;; membership, not an absent-Source-binding or namespace-authority cache.
 (define native-availability-cache (make-table test: eq?))
 (define native-availability-roots (vector #f #f #f #f #f))
 (define native-availability-original-module-name native-module-name)
 (define native-availability-original-atom-name native-atom-name)
+(define native-availability-original-keyword? native-keyword?)
 (define (native-refresh-availability-cache!)
  (if (or (not (eq? (vector-ref native-availability-roots 0) native-leaf-registry))
          (not (eq? (vector-ref native-availability-roots 1) native-module-names))
@@ -187,17 +190,20 @@
 (define (native-remote-available? module function arity)
  (if (and (symbol? module) (symbol? function) (integer? arity) (exact? arity)
           (eq? native-module-name native-availability-original-module-name)
-          (eq? native-atom-name native-availability-original-atom-name))
+          (eq? native-atom-name native-availability-original-atom-name)
+          (eq? native-keyword? native-availability-original-keyword?))
   (begin
    (native-refresh-availability-cache!)
    (let* ((functions (table-ref native-availability-cache module #f))
-          (arities (and functions (table-ref functions function #f))))
-    (if (and arities (table-ref arities arity #f)) #t
+          (arities (and functions (table-ref functions function #f)))
+          (cached (if arities (table-ref arities arity native-missing) native-missing)))
+    (if (not (eq? cached native-missing)) cached
      (let ((available (native-remote-available-uncached? module function arity)))
-      (if available
+      ;; Evaluate first: an exception cannot create a result entry.
+      (if (boolean? available)
        (let ((functions (or functions (make-table test: eq?)))
              (arities (or arities (make-table test: eqv?))))
-        (table-set! arities arity #t)
+        (table-set! arities arity available)
         (table-set! functions function arities)
         (table-set! native-availability-cache module functions)))
       available))))
