@@ -20,6 +20,47 @@
  (if (or native-c-gc-between-steps?
          (and (> native-c-gc-interval 0) (= (modulo native-c-step-count native-c-gc-interval) 0)))
   (begin (##gc) (set! native-c-forced-gc-count (+ native-c-forced-gc-count 1)))))
+;; Disabled for an arbitrary host. Only a producer that has admitted the exact
+;; frozen stock host may opt in after assembling the complete addon stack.
+(define native-c-noactor-tick-enabled? #f)
+(define native-c-noactor-ticks-elided 0)
+;; The late, independently guarded primitive installer owns these hooks.
+(define native-c-pure-bif-enabled? #f)
+(define (native-c-refresh-pure-bifs! machine) #f)
+(define (native-c-record-pure-bifs! machine) #f)
+(define (native-c-new-extension) (vector 1 0 0 '#() 0))
+(define native-c-noactor-tick-allowed?
+ (let ((stock-tick h-tick) (stock-after-step native-c-after-step!)
+       (stock-frames native-logical-frames))
+  (lambda ()
+   (and native-c-noactor-tick-enabled?
+        (not seed-frame)
+        (eq? h-tick stock-tick)
+        (eq? native-c-after-step! stock-after-step)
+        (eq? native-logical-frames stock-frames)
+        (not native-c-gc-between-steps?)
+        (eqv? native-c-gc-interval 0)))))
+
+;; Optional machine extension V1: field0=version, field1=tick state.
+;; The other fields belong to independently gated direct-machine services.
+(define (native-c-tick-extension machine)
+ (and (= (vector-length machine) 15)
+  (let ((extension (vector-ref machine 14)))
+   (and (vector? extension) (>= (vector-length extension) 5)
+        (eqv? (vector-ref extension 0) 1) extension))))
+(define (native-c-prepare-noactor-tick! machine)
+ (let ((extension (native-c-tick-extension machine)))
+  (if extension
+   (vector-set! extension 1 (if (native-c-noactor-tick-allowed?) 1 0)))))
+(define (native-c-record-noactor-tick! machine)
+ (let ((extension (native-c-tick-extension machine)))
+  (if extension
+   (let ((skipped? (eqv? (vector-ref extension 1) 2)))
+    ;; No eligibility is retained across an arbitrary Scheme callback/hook.
+    (vector-set! extension 1 0)
+    (if skipped?
+     (set! native-c-noactor-ticks-elided (+ native-c-noactor-ticks-elided 1)))))))
+
 (define (native-c-caught-frames trace)
  ;; The compiler's normalized __STACKTRACE__ list is distinct from the raw
  ;; {(),frames} envelope passed verbatim to an explicit re-raise.
@@ -211,8 +252,12 @@
  (let loop ()
   ;; The C function returns before any allocation, Scheme callback, park or
   ;; exception happens. No foreign continuation is captured across a C frame.
-  (let* ((unit (vector-ref machine 0))
+  (let* ((_ (native-c-refresh-pure-bifs! machine))
+         (_ (native-c-prepare-noactor-tick! machine))
+         (unit (vector-ref machine 0))
          (action ((vector-ref unit 0) machine))
+         (_ (native-c-record-noactor-tick! machine))
+         (_ (native-c-record-pure-bifs! machine))
          (_ (native-c-after-step!))
          (done?
           (case action
@@ -239,7 +284,8 @@
  (let ((machine (vector (vector-ref closure 1) (vector-ref closure 2)
                  (native-c-frame closure args) '() bl-nil 0 0 '() #f bl-nil
                  (native-c-source-stack closure (native-logical-frames) #f) bl-nil
-                 seed-critical (native-c-source-boundary? closure))))
+                 seed-critical (native-c-source-boundary? closure)
+                 (native-c-new-extension))))
   ;; Suspension captures the machine and these bases unchanged. Only a real
   ;; raise unwinds; do not use dynamic-wind, which would also run on parking.
   (with-exception-catcher

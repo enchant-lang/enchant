@@ -7,6 +7,13 @@ import re
 from pathlib import Path
 
 
+# Stock h-tick provenance: this exact retained host defines it once and never
+# replaces it before the immediately appended direct-machine component.
+QUALIFIED_STOCK_TICK_HOSTS = frozenset({
+    'd00c0c75a33cc4afc90315620d3039c48ed31464fdc0c32e5ac2841aa9d1ab8a',
+})
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -22,6 +29,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--frozen-host', type=Path, default=base / 'out/compiler-closure/host.scm')
     parser.add_argument('--out', type=Path, default=base / 'out/direct-host')
+    parser.add_argument('--elide-noactor-ticks', action='store_true',
+                        help='opt in only for a reviewed stock frozen host; environment0 disables at runtime')
+    parser.add_argument('--pure-bif-fast-path', action='store_true',
+                        help='opt in to independently guarded pure BIFs for the same reviewed stock host')
     args = parser.parse_args()
     tools = json.loads((base / 'toolchain-pin.json').read_text())
     gambit, clang = Path(tools['gambit']), Path(tools['clang'])
@@ -35,6 +46,9 @@ def main():
     parts, components, inputs = [], [], {}
     for role, path in paths:
         data = path.read_bytes()
+        if (role == 'frozen-host' and (args.elide_noactor_ticks or args.pure_bif_fast_path)
+                and sha(data) not in QUALIFIED_STOCK_TICK_HOSTS):
+            raise RuntimeError('optional direct fast paths require an exact reviewed stock frozen host')
         if role == 'direct-machine' and data.count(b'(define native-c-action-abi 2)') != 1:
             raise RuntimeError('direct machine lacks action ABI2')
         if role == 'frozen-host' and b'native-raw-function?' not in data:
@@ -45,7 +59,14 @@ def main():
     header = base / 'direct/native-direct.h'
     if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
         raise RuntimeError('direct header lacks its unique action ABI2 stamp')
-    config = ('(native-c-require-action-abi! 2)\n(native-c-configure-clang! ' + ' '.join(map(quoted, [str(gambit / 'bin/gsc'),
+    feature_config = ''
+    if args.elide_noactor_ticks:
+        feature_config += ('(set! native-c-noactor-tick-enabled? '
+            '(equal? (getenv "BL_NATIVE_C_NOACTOR_TICK" "1") "1"))\n')
+    if args.pure_bif_fast_path:
+        feature_config += ('(set! native-c-pure-bif-enabled? '
+            '(equal? (getenv "BL_NATIVE_C_PURE_BIFS" "1") "1"))\n')
+    config = (feature_config + '(native-c-require-action-abi! 2)\n(native-c-configure-clang! ' + ' '.join(map(quoted, [str(gambit / 'bin/gsc'),
         str(clang / 'bin/clang'), str(gambit / 'gambit/include'),
         str(gambit / 'gambit/bin/gambuild-C'), header.read_text()])) + ' 120000)\n'
         '(set! native-c-backend (bl-key "c"))\n').encode()
@@ -68,6 +89,9 @@ def main():
     # directory paths therefore cannot spoil stage2/stage3 byte fixpoints.
     (args.out / 'preparation.json').write_text(json.dumps({'inputs': inputs,
         'toolchain': tools, 'action-abi': 2, 'header-action-abi': 2, 'header_sha256': sha(header.read_bytes()),
+        'optional_extension_version': 1,
+        'optional_extensions': {'noactor_tick_opt_in': args.elide_noactor_ticks,
+                                'pure_bif_opt_in': args.pure_bif_fast_path},
         'host_sha256': sha(host), 'status': 'assembled-not-executed'}, indent=2) + '\n')
     print('DIRECT_HOST_PREPARED ' + ledger['source_sha256'])
 

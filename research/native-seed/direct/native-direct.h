@@ -11,6 +11,20 @@
 enum { BLC_SERVICE=1, BLC_CALL=2, BLC_RETURN=3, BLC_CLOSURE=4, BLC_TICK=5, BLC_CALL_SLOTS=6 };
 static ___SCMOBJ blc_ref(___SCMOBJ x, int i) { return ___VECTORREF(x,___FIX(i)); }
 static void blc_set(___SCMOBJ x, int i, ___SCMOBJ v) { ___VECTORSET(x,___FIX(i),v); }
+/* An OPTIONAL extension: a legacy 14-slot ABI2 machine always takes the old
+ * tick path. One skip is permitted per returned C step; 2 means observed skip.
+ * C still makes no allocation, callback or safepoint while this state is live.
+ */
+static int blc_skip_noactor_tick(___SCMOBJ m) {
+ if (___INT(___VECTORLENGTH(m)) != 15) return 0;
+ ___SCMOBJ extension=blc_ref(m,14);
+ if (!___VECTORP(extension) || ___INT(___VECTORLENGTH(extension)) < 5
+     || !___EQP(blc_ref(extension,0),___FIX(1))
+     || !___EQP(blc_ref(extension,1),___FIX(1))) return 0;
+ blc_set(extension,1,___FIX(2));
+ return 1;
+}
+#define BLC_SKIP_NOACTOR_TICK(m) blc_skip_noactor_tick(m)
 #define BLC_UNIT(m) blc_ref(m,0)
 #define BLC_FRAME(m) blc_ref(m,2)
 #define BLC_REG(m,r) blc_ref(BLC_FRAME(m),r)
