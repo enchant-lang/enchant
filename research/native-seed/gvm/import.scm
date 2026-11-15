@@ -141,7 +141,7 @@
           (and value
            (if (eq? capability c#proc-obj-test)
             (and (vector? spec) (= (vector-length spec) 3) (procedure? (vector-ref spec 1)))
-            (procedure? spec))))
+            (procedure? spec)))
           "GVM primitive does not support requested operation" name) value))
        (for-each (lambda (block)
         (gvm-import-check (and (list? block) (>= (length block) 5) (eq? (car block) 'block))
