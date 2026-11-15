@@ -4147,6 +4147,23 @@
                 :declarations (Map/get declarations namespace {})
                 :callable-kinds (get-in declarations [:callable-kinds namespace] {})}}))
 
+(defn- initializer_operations [ns name doc per_env? node]
+ ;; One publication builder for every target. The node is already compiled;
+ ;; targets retain the raw node while the BEAM path may prepare generated code.
+ (let [register (cond
+                 (nil? name) node
+                 per_env? (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :define_per_env
+                   (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name)
+                         (BeamLisp.Emit/closure node)))
+                 :else (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :intern
+                   (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name) node)))]
+  (if doc
+   (list register
+     (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :put_meta
+       (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name)
+             (BeamLisp.Emit/lit {:doc doc}))))
+   (list register))))
+
 (defn- build_init_ast
   "`__bl_init__/0`'s clause and its value-initializer companion descriptor, as
    bl-ANF data."
@@ -4252,27 +4269,15 @@
                   ;; It replays in source order without inventing a var binding.
                   compiled (if (nil? name) init_form (compile_initializer init_form compiler_env))
                   prepared (prepare_generated_modules compiled ns name unit_attrs generated)
-                  init_node (elem prepared 0)
-                  register (cond
-                             (nil? name) init_node
-                             per_env? (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :define_per_env
-                               (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name)
-                                     (BeamLisp.Emit/closure init_node)))
-                             :else (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :intern
-                               (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name) init_node)))]
+                  init_node (elem prepared 0)]
               (tuple
-                {:operations
-                 (if doc
-                  (list register
-                        (BeamLisp.Emit/remote :Elixir.BeamLisp.Env :put_meta
-                          (list (BeamLisp.Emit/lit ns) (BeamLisp.Emit/lit name)
-                                (BeamLisp.Emit/lit {:doc doc}))))
-                  (list register))
+                {:operations (initializer_operations ns name doc per_env? init_node)
                  ;; The SAME canonical compilation, before generated-module or
                  ;; BEAM macro-value partitioning. Keep declaration order and
                  ;; positions; a target must not reconstruct these from shims.
                  :source {:name name :doc doc :per-env? per_env?
-                          :form init_form :node compiled}}
+                          :form init_form :node compiled
+                          :operations (initializer_operations ns name doc per_env? compiled)}}
                 (elem prepared 1)))))
         value_ops (Enum/flat_map (elem values 0) (fn [value] (:operations value)))
         source_values (Enum/map (elem values 0) (fn [value] (:source value)))
@@ -4321,6 +4326,8 @@
        ;; Literal physical captures are compiler DATA, never an SDK grant.
        :callables (Map/new ns_defs
                     (fn [binding] (tuple (elem binding 0) (sdk_callable_value (elem binding 1) false))))
+       :namespace-operations (erlang/++ ns_ops implicit_ops)
+       :function-operations fn_ops :native-operations native_ops
        :initializers source_values :namespace-metadata ns_meta :declarations declarations})))
 
 ; ── the runtime-side hook and boot ──────────────────────────────────────────
