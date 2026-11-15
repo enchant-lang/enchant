@@ -56,6 +56,14 @@
                (map-indexed (fn [i v] [v (+ 2 i)]) (concat parameters captures)))]
   {:entry-frame (gvm-frame-wire entry) :rows (:rows spilled)
    :state (:state spilled) :homes homes}))
+; Match pinned GSC extend-slots2 exactly: copy-source false is a DEAD slot
+; declaration. It grows the abstract frame and discharges backward stack need;
+; it emits no C store and introduces no variable/live pointer for padding.
+(defn gvm-grow-dead [state required]
+ (reduce (fn [{:keys [state rows]} index]
+           (let [state (assoc state :size index)]
+            {:state state :rows (conj rows [:copy false [:stk index] (gvm-frame-wire state)])}))
+  {:state state :rows []} (range (inc (:size state)) (inc (max (:size state) required)))))
 (defn gvm-call-layout
  "Arguments/callee are ALREADY evaluated ANF operands. Unique call-id owns
   temporary variable IDs. Returns call rows/jump frame and optional resume frame."
@@ -89,11 +97,15 @@
        outgoing-registers (into {4 target-var}
                            (map (fn [i] [(- i f) (nth arg-vars (dec i))]) (range (inc f) (inc n))))
        outgoing-registers (if tail? (assoc outgoing-registers 0 "return") outgoing-registers)
+       ; Calls can require alignment/reserve slots above all operand snapshots.
+       ; Every extension must have an explicit dead-copy row, as GSC's own
+       ; frontend requires for setup-slots-needed! before this block's label.
+       grown (gvm-grow-dead (:state installed) (+ start f))
        outgoing {:size (+ start f) :slots outgoing-slots
                  :registers outgoing-registers :closed (:closed state)}
        resumed (when-not tail?
                  (assoc state :size start :registers {1 result-variable}))]
-  {:rows (into (:rows snap) (:rows installed))
+  {:rows (into (into (:rows snap) (:rows installed)) (:rows grown))
    :jump [:jump [:reg 4] return-label n true true (gvm-frame-wire outgoing)]
    :return-frame (if tail? false (gvm-frame-wire resumed))
    :state resumed :result-operand [:reg 1]}))
