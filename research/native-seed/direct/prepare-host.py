@@ -66,6 +66,9 @@ def main():
     if args.pure_bif_fast_path:
         feature_config += ('(set! native-c-pure-bif-enabled? '
             '(equal? (getenv "BL_NATIVE_C_PURE_BIFS" "1") "1"))\n')
+    if args.elide_noactor_ticks or args.pure_bif_fast_path:
+        feature_config += ('(set! native-c-symbol-remotes-enabled? '
+            '(equal? (getenv "BL_NATIVE_C_SYMBOL_MFAS" "1") "1"))\n')
     config = (feature_config + '(native-c-require-action-abi! 2)\n(native-c-configure-clang! ' + ' '.join(map(quoted, [str(gambit / 'bin/gsc'),
         str(clang / 'bin/clang'), str(gambit / 'gambit/include'),
         str(gambit / 'gambit/bin/gambuild-C'), header.read_text()])) + ' 120000)\n'
@@ -91,7 +94,8 @@ def main():
         'toolchain': tools, 'action-abi': 2, 'header-action-abi': 2, 'header_sha256': sha(header.read_bytes()),
         'optional_extension_version': 1,
         'optional_extensions': {'noactor_tick_opt_in': args.elide_noactor_ticks,
-                                'pure_bif_opt_in': args.pure_bif_fast_path},
+                                'pure_bif_opt_in': args.pure_bif_fast_path,
+                                'symbol_mfa_opt_in': args.elide_noactor_ticks or args.pure_bif_fast_path},
         'host_sha256': sha(host), 'status': 'assembled-not-executed'}, indent=2) + '\n')
     print('DIRECT_HOST_PREPARED ' + ledger['source_sha256'])
 

@@ -11,7 +11,7 @@
     (table-set! native-c-external-funs forwarder (vector module function arity)) forwarder)) 3))
 (define native-c-resolve-without-external-funs native-c-resolve-call)
 (set! native-c-resolve-call (lambda (callee arguments)
- (let peel ((plan (native-c-resolve-without-external-funs callee arguments)) (seen '()))
+ (let peel ((plan (native-c-resolve-without-external-funs (native-c-dispatch-view callee) arguments)) (seen '()))
   (let* ((target (car plan)) (args (cdr plan))
          (raw-apply? (or (eq? target native-c-raw-apply2) (eq? target native-raw-apply)))
          (raw-forwarder
@@ -33,7 +33,7 @@
         ;; private static-MFA descriptors never become the Source fun value.
         ;; Resolve language dispatch and raw-apply selection to a final callee;
         ;; this loop invokes no forwarding body and never starts a C machine.
-        (peel (native-c-resolve-without-external-funs (native-c-remote key) args)
+        (peel (native-c-resolve-without-external-funs (native-c-dispatch-view (native-c-remote key)) args)
               (cons target seen)))))))))))
 
 ;; Ordinary procedures need no dispatcher/MFA/external-fun transport. Install
@@ -179,3 +179,19 @@
       (if (and (exact-integer? seen) (> seen 0))
        (begin (set! native-c-pure-bif-seen (bitwise-ior native-c-pure-bif-seen seen))
               (set! native-c-pure-bif-steps (+ native-c-pure-bif-steps 1))))))))))
+
+;; Seal only after the complete planner, procedure/C guards and BIF installer.
+;; An affected custom hook receives the retained legacy descriptor BEFORE it
+;; runs; this capture never blesses an arbitrary replacement as stock.
+(set! native-c-symbol-complete-hooks-current?
+ (let ((planner native-c-resolve-call)
+       (external native-c-resolve-without-external-funs)
+       (base native-resolve-call) (multi native-multi-callable?)
+       (direct native-c-direct-procedure?) (closure native-c-direct-closure?)
+       (invoker bl-invoke) (frames native-logical-frames))
+  (lambda ()
+   (and (eq? native-c-resolve-call planner)
+        (eq? native-c-resolve-without-external-funs external)
+        (eq? native-resolve-call base) (eq? native-multi-callable? multi)
+        (eq? native-c-direct-procedure? direct) (eq? native-c-direct-closure? closure)
+        (eq? bl-invoke invoker) (eq? native-logical-frames frames)))))
