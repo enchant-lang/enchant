@@ -5,6 +5,8 @@
 (define (native-c-require-action-abi! requested)
  (if (not (and (integer? requested) (exact? requested) (= requested native-c-action-abi)))
   (error "direct C action ABI mismatch" requested native-c-action-abi)) bl-nil)
+(define (native-c-require-pure-bif-abi! requested)
+ (if (not (eqv? requested 1)) (error "direct C pure BIF feature mismatch" requested)) bl-nil)
 (define native-c-closure-marker (list 'native-c-closure-marker-v1))
 (define native-c-step-count 0)
 (define native-c-gc-between-steps? #f)

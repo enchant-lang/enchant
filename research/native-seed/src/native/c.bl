@@ -16,7 +16,7 @@
               "\n" "\\n") "\""))
 (defn state []
  {:next 0 :slot 2 :blocks [] :constants ["bl-nil"] :constant-index {"bl-nil" 0}
-  :services [] :service-index {} :functions [] :slot-calls 0 :generic-calls 0})
+  :services [] :service-index {} :functions [] :slot-calls 0 :generic-calls 0 :pure-bifs {}})
 (defn reg [s] [(update s :slot inc) (:slot s)])
 (defn pool [s source]
  (if-let [i (get (:constant-index s) source)] [s i]
@@ -75,13 +75,28 @@
            (lower s (first pair) env (second pair) next false options))
   [s continuation] (reverse (map (fn [argument slot] [argument slot]) arguments slots))))
 
+(def pure-bif-specs
+ {"is_list" {:id 0 :arity 1 :request 1}
+  "is_integer" {:id 1 :arity 1 :request 2}
+  "==" {:id 2 :arity 2 :request 4}
+  "=:=" {:id 3 :arity 2 :request 16}})
+(defn pure-bif-spec [node tail?]
+ (when (and (not tail?) (= :erlang (:mod node)))
+  (let [spec (get pure-bif-specs (erlang/atom_to_binary (:fun node)))]
+   (when (and spec (= (:arity spec) (count (:args node)))) spec))))
 (defn lower-service [s source arguments env destination next tail? options]
  (let [[s index] (service s source)
        [s slots] (reduce (fn [[s out] _] (let [[s i] (reg s)] [s (conj out i)])) [s []] arguments)
        [s plan] (pool s (str "'(" (string/join " " slots) ")"))
        [s site] (pool s (scalar/literal (call-site options tail?)))
-       [s call] (block s (action-at "BLC_SERVICE" (str "___FIX(" index ")") destination next (k plan) tail? (k site))) ]
-  (lower-arguments s arguments slots env call (dissoc options :direct-callsite))))
+       spec (when (not tail?) (:direct-pure-bif options))
+       s (if spec (assoc-in s [:pure-bifs (:id spec)] (:request spec)) s)
+       fast (if spec
+        (str " ___SCMOBJ blc_pure_result; if (blc_try_pure_bif(m," index "," (:id spec) "," (count slots) ","
+             (r (first slots)) "," (if (= 2 (count slots)) (r (second slots)) "___FAL") ",&blc_pure_result)) {"
+             " BLC_PUT(m," destination ",blc_pure_result);" (jump next) " }\n") "")
+       [s call] (block s (str fast (action-at "BLC_SERVICE" (str "___FIX(" index ")") destination next (k plan) tail? (k site))))]
+  (lower-arguments s arguments slots env call (dissoc (dissoc options :direct-callsite) :direct-pure-bif))))
 
 (defn pattern-node [p]
  (case (:pop p)
@@ -357,7 +372,7 @@
               (when-not value (fail node))
               (lower-service s (str "(lambda () " value ")") [] env destination next tail? options)) (fail node))
   :remote (lower-service s (scalar/remote node options) (:args node) env destination next tail?
-             (assoc options :direct-callsite (:ann node)))
+             (assoc options :direct-callsite (:ann node) :direct-pure-bif (pure-bif-spec node tail?)))
   :arith (let [source (or (when-let [resolver (:arithmetic-resolver options)] (resolver node))
                        (get scalar/arithmetic (:fun node)))]
            (when-not source (fail node))
@@ -412,17 +427,18 @@
  (let [unit (scalar/ident (or (:unit-name options) "native_direct_unit"))
        [s finish] (block (state) " blc_set(m,4,BLC_REG(m,1)); BLC_YIELD(m,BLC_RETURN);")
        [s entry] (lower s node {} 1 finish true options)
-       c-source (str "#include \"native-direct.h\"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n#error direct_C_action_ABI_mismatch\n#endif\n#ifndef BLC_YIELD\n#error direct_C_local_PC_contract_mismatch\n#endif\n#ifndef BLC_SKIP_NOACTOR_TICK\n#error direct_C_optional_tick_contract_mismatch\n#endif\nstatic int " unit "(___SCMOBJ m) { ___WORD blc_pc=___INT(blc_ref(m,1)); for (;;) { switch ((int)blc_pc) {\n"
+       pure-bif-mask (reduce (fn [mask pair] (+ mask (second pair))) 0 (:pure-bifs s))
+       c-source (str "#include \"native-direct.h\"\n#if !defined(BL_NATIVE_DIRECT_ABI) || BL_NATIVE_DIRECT_ABI != 2\n#error direct_C_action_ABI_mismatch\n#endif\n#ifndef BLC_YIELD\n#error direct_C_local_PC_contract_mismatch\n#endif\n#ifndef BLC_SKIP_NOACTOR_TICK\n#error direct_C_optional_tick_contract_mismatch\n#endif\n#ifndef BLC_PURE_BIF_V1\n#error direct_C_pure_BIF_contract_mismatch\n#endif\nstatic int " unit "(___SCMOBJ m) { ___WORD blc_pc=___INT(blc_ref(m,1)); for (;;) { switch ((int)blc_pc) {\n"
                   (string/join "\n" (map #(str "case " (:id %) ": {" (:code %) "}\n") (sort-by :id (:blocks s))))
                   "default: BLC_YIELD(m,-1); } } }\n")
        preamble (str "(native-c-require-action-abi! 2)\n(c-declare " (quote-generated-code c-source) ")\n")
-       expression (str "(let ((unit (vector (c-lambda (scheme-object) int " (scalar/text unit) ")\n"
+       expression (str "(begin (native-c-require-pure-bif-abi! 1)\n(let ((step (c-lambda (scheme-object) int " (scalar/text unit) ")))\n(let ((unit (vector step\n"
                 " (vector " (string/join " " (:constants s)) ")\n"
-                " (vector " (string/join " " (:services s)) "))))\n"
-                " (native-c-invoke (native-c-new-closure unit (list " entry " " (:slot s) " '() bl-nil) '()) '()))\n")]
+                " (vector " (string/join " " (:services s)) ") " pure-bif-mask " step)))\n"
+                " (native-c-invoke (native-c-new-closure unit (list " entry " " (:slot s) " '() bl-nil) '()) '()))))\n")]
   {:c-source c-source :preamble-source preamble :expression-source expression
    :wrapper-source (str preamble "(native-c-publish-loaded! " expression ")\n")
-   :manifest {:schema "bl.native.direct-c-unit" :version 1 :action-abi 2 :unit-name unit
+   :manifest {:schema "bl.native.direct-c-unit" :version 1 :action-abi 2 :pure-bif-abi 1 :pure-bif-mask pure-bif-mask :unit-name unit
               :blocks (count (:blocks s)) :functions (count (:functions s))
               :root-slots (:slot s) :literals (count (:constants s))
               :slot-calls (:slot-calls s) :generic-calls (:generic-calls s)
