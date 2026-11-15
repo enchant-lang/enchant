@@ -123,6 +123,7 @@ def main() -> int:
         return output
 
     fast_witnesses = {}
+    report["fast_path_witnesses"] = fast_witnesses
     derived_drivers = []
 
     def run_scalar(label, unit, interval=0, enabled=True):
@@ -398,6 +399,8 @@ def main() -> int:
         artifacts = [compiled, generated, adapted, llvm_ir, llvm_unit, *gc_artifacts, *derived_drivers,
                      *[evidence / (label + ".log") for label in
                        ("scheme-to-c", "clang-native", "native", "llvm-emit", "llvm-link", "llvm")]]
+        if args.assembled_host:
+            artifacts.extend(evidence / (label + ".log") for label in ("off-native", "off-llvm"))
         if reference.is_file():
             artifacts.append(reference)
         report.update({"status": "pass", "checks": passed,
