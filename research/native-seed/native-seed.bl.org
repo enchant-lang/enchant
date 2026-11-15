@@ -1,7 +1,7 @@
 #+title: BL for daily native development
 #+subtitle: A fast native edit → diagnose → test → run loop.
 #+kicker: Beam Lisp · native development roadmap · 2026-11-15
-#+status: Existing owners mapped · linked calls checked · native speed gate failing
+#+status: Checked reader prototype runs · whole-compiler speed gate failing
 #+design: sober
 
 * The destination
@@ -74,6 +74,77 @@ Host helper partition | Build succeeds; completed read phase regresses to 260.87
 #+end_rosetta
 
 [[file:evidence/warm-core/observation.json][Matched warm-core ledger]] · [[file:evidence/warm-core-counts/observation.json][Actual operation counters]] · [[file:evidence/reader-o2/observation.json][Reader-only C optimization]] · [[file:evidence/reader-optimizer/analysis.json][Existing optimizer evidence]]
+
+#+begin_stats
+8.15× | Faster native helper | Checked Int branch; canonical fallback.
+~0% | Whole-reader improvement | 47.35 → 46.93 ms; noise-sized change.
+77 | Native checks pass | Real code, edits, refusals, live lookup and old closures through GC.
+0 | Compilation jobs on unchanged input | Verification still costs 4.23 s; the daily latency gate fails.
+#+end_stats
+
+#+begin_sequence :title "One complete checked experiment"
+lanes Source · retained reader ANF | Check · existing formal owners | Native · existing AOT + Gambit
+Source -> Check : reader/ignored-char? and candidate Int branch
+Check --> Source : checked elaborations and equivalence; five negative controls
+Source -> Native : two separately compiled namespaces, two provider revisions
+Native -> Native : run reference/candidate; edit, refuse stale code, publish, retain old closure through GC
+Native --> Check : exact Source / image / kernel receipts and observed histories
+Check --> Source : check model invariants and independently replay projected observations
+#+end_sequence
+
+#+begin_rosetta
+The same checked change | Reference | Candidate | What it establishes
+Native helper · 10,000 calls | 84.113 ms | 10.317 ms | 8.15× within this backend.
+Native whole reader · one read | 47.352 ms | 46.931 ms | Essentially unchanged; this helper cannot explain the compiler gap.
+BEAM private-AOT reader · one read | 1.634 ms | 1.615 ms | Essentially unchanged; its owned Env entry differs from the earlier global SDK baseline.
+Source models | 13 inductive obligations | 8 concrete traces | Cache stamps, publication safety and retirement policy; native retirement is unobserved.
+#+end_rosetta
+
+Five interleaved batches per variant, three complete reads per reader batch.
+Compilation, proof search and loading are outside timing. Helper observer loops
+differ between backends: compare their reference/candidate ratios within each
+backend. The original matched whole-compiler baseline above remains the speed
+gate. No SDK or original compiler image was rebuilt for this experiment.
+
+#+begin_honest :title "What the formal evidence covers"
+The scalar theorem covers Int inputs under the reviewed RT.eqv intrinsic
+meaning. Canonical fallback, guards and actual native execution have separate
+observations. The model proofs cover Source-extracted state transitions;
+observed cache and failed-publication histories are explicit projections.
+Neither proves Gambit/C lowering or native generation custody. The broad
+four-step certificate attempts exceeded the existing 32-atom bound; their
+unsupported answers remain retained. The successful inductive checks keep
+every original invariant and the same checking limits.
+#+end_honest
+
+[[file:evidence/vertical-reader/observation.json][Complete scoped evidence packet]] · [[file:evidence/vertical-reader/comparison.json][Actual reader timings]] · [[file:evidence/vertical-reader/native/native-observation/runtime.log][77 native checks and publication events]] · [[file:evidence/vertical-reader/history/recheck.json][Independent check and observed-history replay]]
+
+#+begin_src beam-lisp :id checked-reader-vertical
+(ns native.seed.checked-reader-dossier (:require [bl.json :as json]))
+(def packet-root "research/native-seed/evidence/vertical-reader/")
+(def packet (json/decode (File/read! (str packet-root "observation.json"))))
+(defn packet-sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(def packet-files (File/read! (str packet-root "files.json")))
+(assert (= (get-in packet ["file_manifest" "sha256"]) (packet-sha packet-files)))
+(doseq [row (vals (json/decode packet-files))]
+ (assert (= (get row "sha256") (packet-sha (File/read! (get row "path"))))))
+(def timings (json/decode (File/read! (str packet-root "comparison.json"))))
+(def rechecked (json/decode (File/read! (str packet-root "history/recheck.json"))))
+(assert (= "passed-scoped-vertical" (get packet "status")))
+(assert (= 77 (get packet "native_checks")))
+(assert (= 13 (get packet "source_model_obligations")))
+(assert (= 5 (get packet "scalar_negative_controls")))
+(assert (= 0 (get packet "new_sdk_builds")))
+(assert (= false (get rechecked "proof-search-called")))
+(assert (= "conforms-to-source-model" (get-in rechecked ["native-state-conformance" "status"])))
+(assert (= ["retirement"] (get-in rechecked ["native-state-conformance" "unobserved-families"])))
+(assert (< 8 (get-in timings ["reference_over_candidate" "native" "helper"])))
+(assert (< (get-in timings ["reference_over_candidate" "native" "read"]) 1.02))
+(assert (= "still-failing" (get packet "whole_compiler_speed_gate")))
+{:native-checks 77 :model-obligations 13 :observed-histories 3
+ :helper :faster :whole-reader :unchanged :whole-compiler-speed-gate :failing}
+#+end_src
 
 #+begin_rosetta
 Metric | Working target — provisional | Measurement contract
@@ -151,16 +222,16 @@ is explicitly disabled; a recipe producer is not a completed reload path.
 #+begin_milestones :id native-devtool :title "Five complete prototypes toward a daily tool" :start measure
 milestone foundation | done | Checked native foundation | Retained baseline
 check Native self-hosting, original actors and values, exact Source worlds, and two linked native namespaces have scoped evidence below.
-milestone measure | active | P1 · A checked scalar edit loop | Current vertical prototype
+milestone measure | done | P1 · A checked scalar edit loop | Scoped prototype checked
 needs foundation
 step Start with the actual hot reader/ignored-char? helper and its captured ANF. Check the Int branch with the existing Source/Core elaboration and translation owners; preserve canonical fallback.
 step Compile the checked candidate through existing AOT, Scheme, Gambit and C; execute real native procedures and compare outputs with the reference.
 step Exercise unchanged reuse, Source edits, stale/corrupt candidates, late provider lookup and retained old closures through GC. Replay observed histories against the existing bounded Source protocol model.
 check One inspectable packet binds Source, proof scope, backend and generations; includes actual native behavior and matched warm BEAM/native helper and reader timings. Model proofs and lowering observations stay separate.
-milestone core-speed | proposed | P2 · Fast owned compiler bindings | Broader compiler vertical
+milestone core-speed | active | P2 · Fast owned compiler bindings | Current performance work
 needs measure
 step Admit a private compiler/kernel binding context through the existing AOT and reload.execution owners. Establish stable ABI, callable and domain assumptions at compilation/publication boundaries.
-step Execute compiler work through those owned references, reducing repeated hot-path checks while retaining live development lookup where required. Apply measured specializations and preserve host.optimize's direct-call result.
+step Execute compiler work through those owned references, reducing repeated hot-path checks while retaining live development lookup where required. Preserve host.optimize's direct-call result. Measure unequal-Int equality pairs before trying an early rt/k-eqv rejection; the scalar reader experiment changed whole-read time by only about 0.9%.
 step Repeat Source → check → native run → edit/reuse/reload on representative reader, macro, ANF and emitter workloads; test binding/ABI/compiler changes and old in-flight work.
 check The matched whole-compiler speed gate passes on representative Source, with actual invalidation, diagnostics, resources and failure behavior intact. A helper-only speedup does not pass this gate.
 milestone daily-loop | proposed | P3 · Use the tool on a real project | Daily preview vertical
