@@ -215,6 +215,9 @@
 (define native-remote-original-invoke bl-invoke)
 (define native-remote-original-resolve native-resolve-call)
 (define native-remote-cache (make-table test: equal?))
+;; Key OBJECTS can be mutable strings. Every identity hit must also match an
+;; owned content snapshot; no string immutability or Source-only shortcut.
+(define native-remote-identity-cache (make-table test: eq? weak-keys: #t))
 (define native-remote-cache-leaves #f)
 (define native-remote-cache-modules #f)
 (define native-remote-cache-stubs #f)
@@ -226,6 +229,7 @@
          (not (eq? native-remote-cache-arities native-export-arities)))
   (begin
    (set! native-remote-cache (make-table test: equal?))
+   (set! native-remote-identity-cache (make-table test: eq? weak-keys: #t))
    (set! native-remote-cache-leaves native-leaf-registry)
    (set! native-remote-cache-modules native-module-names)
    (set! native-remote-cache-stubs native-stub-names)
@@ -253,7 +257,7 @@
               (and (char>=? c #\0) (char<=? c #\9) (digits (+ k 1))))))))
          (else (last (- j 1)))))))
      (else (first (+ i 1))))))))
-(define (native-remote key)
+(define (native-remote-resolve-key key)
  (native-refresh-remote-cache!)
  (let ((cached (table-ref native-remote-cache key native-missing)))
   (if (not (eq? cached native-missing)) cached
@@ -303,6 +307,21 @@
          ((not (eq? stub native-missing))
           (lambda arguments (error "native target explicitly excludes namespace" stub key)))
          (else (error "unimplemented native host leaf" key)))))))))))
+
+;; The structural cache remains authoritative. Repeated compiled literal
+;; objects use an identity front lookup plus ONE exact content comparison,
+;; avoiding repeated equal?-hash/bucket scans observed in native self-emission.
+;; Only an already positive structural entry can enter this front cache.
+(define (native-remote key)
+ (native-refresh-remote-cache!)
+ (if (not (string? key)) (native-remote-resolve-key key)
+  (let ((entry (table-ref native-remote-identity-cache key native-missing)))
+   (if (and (not (eq? entry native-missing)) (string=? key (vector-ref entry 0)))
+    (vector-ref entry 1)
+    (let ((value (native-remote-resolve-key key)))
+     (if (eq? value (table-ref native-remote-cache key native-missing))
+      (table-set! native-remote-identity-cache key (vector (string-copy key) value)))
+     value)))))
 
 (define (native-install-bundle! metadata)
  (set! native-bundle-metadata metadata)
