@@ -115,7 +115,50 @@
           (string-copy (vector-ref descriptor 2)) (vector-ref descriptor 3)
           (vector-ref descriptor 4) (string-copy (vector-ref descriptor 5))
           metadata value)))
+;; A single fixed C body is already the physical target. Inspect its ENTIRE
+;; live one-element arity storage instead of allocating bl-items and selecting
+;; a dispatcher that this raw closure cannot be. Other shapes use the original
+;; selector; the physical-arity operation remains live in BOTH paths.
+(define native-c-single-fixed-target-hits 0)
+(define native-c-single-fixed-published?
+ (let ((tag? bl-tag?) (nth bl-nth) (items bl-items)
+       (multi? native-multi-callable?) (closure? native-c-closure?)
+       (count native-vector-count) (ref native-vector-ref)
+       (storage? native-vector-storage?) (at native-vector-at))
+  (lambda (arity packed? metadata value)
+   (and (or native-c-noactor-tick-enabled? native-c-pure-bif-enabled?)
+        (not packed?)
+        (vector? value) (= (vector-length value) 7)
+        (eq? (vector-ref value 0) native-c-closure-marker)
+        ;; These stock operations would otherwise run before the live accepts?
+        ;; call. A replacement owns its effects, including mutations/errors.
+        (eq? bl-tag? tag?) (eq? bl-nth nth) (eq? bl-items items)
+        (eq? native-multi-callable? multi?) (eq? native-c-closure? closure?)
+        (eq? native-vector-count count) (eq? native-vector-ref ref)
+        (eq? native-vector-storage? storage?) (eq? native-vector-at at)
+        (vector? metadata) (= (vector-length metadata) 2)
+        (eq? (vector-ref metadata 0) 'tuple)
+        (let ((fields (vector-ref metadata 1)))
+         (and (vector? fields) (= (vector-length fields) 2)
+          (let ((fixed (vector-ref fields 0)))
+           (and (vector? fixed) (= (vector-length fixed) 2)
+                (eq? (vector-ref fixed 0) 'vec)
+                (let ((store (vector-ref fixed 1)))
+                 (and (vector? store)
+                      (or (= (vector-length store) 4) (= (vector-length store) 5))
+                      (eq? (vector-ref store 0) 'pvec-v1)
+                      (eqv? (vector-ref store 1) 1)
+                      (eqv? (vector-ref store 2) 1)
+                      (eqv? (vector-ref store 3) arity)))))))))))
 (define (native-c-select-published-target arity packed? key metadata value)
+ (if (native-c-single-fixed-published? arity packed? metadata value)
+  (begin
+   ;; Never cache this result: C source[6] and its arity map remain mutable,
+   ;; and native-callable-accepts? can be replaced by an effectful host hook.
+   (if (not (native-callable-accepts? value arity))
+    (error "direct C MFA selected an invalid physical function" key))
+   (set! native-c-single-fixed-target-hits (+ native-c-single-fixed-target-hits 1))
+   value)
  (let ()
   (if (not (if packed?
             (and (not (bl-is-nil (bl-nth metadata 1))) (= arity (+ 1 (bl-nth metadata 1))))
@@ -131,7 +174,7 @@
            value))))
    (if (not (and (or (native-c-closure? target) (procedure? target))
                  (native-callable-accepts? target arity)))
-    (error "direct C MFA selected an invalid physical function" key)) target)))
+    (error "direct C MFA selected an invalid physical function" key)) target))))
 (define (native-c-remote-target-uncached descriptor remember?)
  (let* ((module (vector-ref descriptor 1)) (logical (vector-ref descriptor 2))
         (arity (vector-ref descriptor 3)) (packed? (vector-ref descriptor 4))
