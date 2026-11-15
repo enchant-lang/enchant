@@ -6,7 +6,7 @@
   (load (or (getenv "BL_GVM_PROBE_MODULE" #f) (error "missing explicit GVM module")))
   ;; Resolve one export symbol; no program body is evaluated here.
   (let ((tail (eval 'native-gvm-scalar/ds-tail (interaction-environment))))
-   (if (not (procedure? tail)) (error "GVM ds-tail export is not a procedure"))
+   (if (not (procedure? tail)) (error "GVM ds-tail export is not a procedure" tail))
    (if (##interp-procedure? tail) (error "GVM ds-tail export is interpreted"))
    (if (not (= (bl-arithmetic ':add 17 25) 42)) (error "original native arithmetic bridge differs"))
    (let ((small (tail 2000 0)))
