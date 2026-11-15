@@ -13,6 +13,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('modules', type=Path)
     ap.add_argument('output', type=Path)
+    ap.add_argument('--scan', action='store_true')
     args = ap.parse_args()
     here = Path(__file__).resolve().parent
     base = here.parent
@@ -45,10 +46,17 @@ def main():
     image = base / 'out/compiler-native-owner/stage1'
     bind(image, stage['executable_sha256'])
     bind(base / 'src/native/scheme.bl')
-    for path in [Path(__file__), args.modules, here / 'observer.scm.in', base / 'linked-proof.scm.in',
+    template = base / 'scan/observer.scm.in' if args.scan else here / 'observer.scm.in'
+    for path in [Path(__file__), args.modules, template, base / 'linked-proof.scm.in',
                  base / 'benchmark/native-observer.scm.in', base / 'benchmark/compiler-values.bl']:
         bind(path)
     data = json.loads(args.modules.read_text())
+    if args.scan:
+        assert data['schema'] == 'bl.native.scan-module'
+        original = data
+        data = {'schema': 'bl.native.cutover-modules', 'namespace': original['namespace'],
+                'source': original['original'], 'derived': original['source'],
+                'modules': [{**original, 'mode': 'scan-v1'}]}
     assert data['schema'] == 'bl.native.cutover-modules'
     for field in ['source', 'derived']:
         bind(data[field]['path'], data[field]['sha256'])
@@ -95,16 +103,20 @@ def main():
         inventories.append({'mode': row['mode'], 'counts': exports['emission-counts'],
                             'primitive_mfas': exports['primitive-mfas'], 'exports': len(exports['exports'])})
         if label == 'CANDIDATE':
-            assert exports['emission-counts']['compiled-pattern-clauses'] > 0
+            if args.scan:
+                assert exports['emission-counts']['direct-loops'] > 0
+                assert exports['emission-counts']['integer-intrinsics'] >= 15
+            else:
+                assert exports['emission-counts']['compiled-pattern-clauses'] > 0
             assert exports['emission-counts']['direct-primitive-calls'] > 0
             replacements['GUARD_KEY'] = quoted(exports['primitive-mfas'][0])
-    assert len(inventories) == 2
+    assert len(inventories) == (1 if args.scan else 2)
     bundle = base / 'out/compiler-native-owner/bundle.scm'
     runtime_inputs[str(bundle)] = bind(bundle)
     helper = (base / 'linked-proof.scm.in').read_text().split('(define linked-provider @PROVIDER@)')[0]
     observer = (base / 'benchmark/native-observer.scm.in').read_text().split('(define (bench-run)\n')[0]
     observer = observer.replace('@SOURCE@', quoted((base / 'benchmark/compiler-values.bl').read_text()))
-    text = (here / 'observer.scm.in').read_text()
+    text = template.read_text()
     for key, value in replacements.items():
         text = text.replace('@' + key + '@', value)
     assert not args.output.exists()
