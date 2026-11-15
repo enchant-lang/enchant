@@ -35,3 +35,34 @@
         ;; this loop invokes no forwarding body and never starts a C machine.
         (peel (native-c-resolve-without-external-funs (native-c-remote key) args)
               (cons target seen)))))))))))
+
+;; Ordinary procedures need no dispatcher/MFA/external-fun transport. Install
+;; ONLY after the declared complete planner stack; retain every dynamic hook.
+;; These lexical proof identities cannot be retargeted by changing an alias.
+(let ((base-invoker native-remote-original-invoke)
+      (base-resolver native-invoke-original-resolve)
+      (multi-predicate native-multi-callable?)
+      (remote-predicate native-c-remote?)
+      (planner native-c-resolve-call)
+      (external-base native-c-resolve-without-external-funs)
+      (remote-base native-c-resolve-without-remote)
+      (old-invoker bl-invoke))
+ (letrec
+  ((direct? (lambda (callee)
+    (and (procedure? callee)
+         (eq? native-c-fallback-invoke base-invoker)
+         (eq? native-resolve-call base-resolver)
+         (eq? native-multi-callable? multi-predicate)
+         (eq? native-c-remote? remote-predicate)
+         (eq? native-c-resolve-call planner)
+         (eq? native-c-resolve-without-external-funs external-base)
+         (eq? native-c-resolve-without-remote remote-base)
+         (eq? bl-invoke invoke)
+         (not (eq? callee native-c-raw-apply2))
+         (not (eq? callee native-raw-apply))
+         (not (table-ref native-c-external-funs callee #f)))))
+   (invoke (lambda (callee arguments)
+    (if (direct? callee) (apply callee arguments)
+     (old-invoker callee arguments)))))
+  (set! native-c-direct-procedure? direct?)
+  (set! bl-invoke invoke)))

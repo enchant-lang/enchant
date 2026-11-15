@@ -20,7 +20,7 @@ import time
 
 
 EXPECTED_CHECKS = [
-    "direct-scalar-closure", "direct-scalar-tail", "direct-scalar-loop",
+    "direct-scalar-closure", "direct-scalar-tail-frame-retention", "direct-scalar-tail", "direct-scalar-loop",
     "direct-scalar-operand-order", "direct-scalar-try",
     "direct-scalar-finally-value", "direct-scalar-map",
     "direct-scalar-truthy-zero", "direct-scalar-nil-list-distinct",

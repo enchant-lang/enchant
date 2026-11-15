@@ -102,12 +102,29 @@
  (vector native-c-closure-marker unit (car metadata) (cadr metadata)
          captures (caddr metadata) (cadddr metadata)))
 (define (native-c-slots frame slots) (map (lambda (i) (vector-ref frame i)) slots))
+;; A frame is private rooted storage. Closure captures are VALUE lists made by
+;; native-c-slots, not a reference to this vector. Snapshot the descriptor
+;; fields before clearing; the argument/capture/destination spines cannot alias
+;; the frame through the opaque C ABI.
+(define (native-c-fill-frame! frame arguments destinations captures)
+ (vector-set! frame 0 arguments)
+ (for-each (lambda (destination value) (vector-set! frame destination value))
+           destinations captures)
+ frame)
 (define (native-c-frame closure args)
- (let ((frame (make-vector (vector-ref closure 3) bl-nil)))
-  (vector-set! frame 0 args)
-  (for-each (lambda (destination value) (vector-set! frame destination value))
-            (vector-ref closure 5) (vector-ref closure 4))
-  frame))
+ (native-c-fill-frame! (make-vector (vector-ref closure 3) bl-nil) args
+                      (vector-ref closure 5) (vector-ref closure 4)))
+(define (native-c-tail-frame frame closure arguments)
+ (let ((required (vector-ref closure 3))
+       (destinations (vector-ref closure 5))
+       (captures (vector-ref closure 4)))
+  (if (< (vector-length frame) required)
+   (native-c-frame closure arguments)
+   (begin
+    ;; Clear the FULL old capacity, including slots beyond the new function's
+    ;; declared size: unused old roots must not retain previous activations.
+    (vector-fill! frame bl-nil)
+    (native-c-fill-frame! frame arguments destinations captures)))))
 (define (native-c-source-stack closure previous tail?)
  (let* ((source (vector-ref closure 6))
         (base (if (and tail? (pair? previous)) (cdr previous) previous))
@@ -145,7 +162,9 @@
  (vector-set! machine 10 (native-c-source-stack callee (vector-ref machine 10) tail?))
  (vector-set! machine 0 (vector-ref callee 1))
  (vector-set! machine 1 (vector-ref callee 2))
- (vector-set! machine 2 (native-c-frame callee args)))
+ (vector-set! machine 2
+  (if tail? (native-c-tail-frame (vector-ref machine 2) callee args)
+   (native-c-frame callee args))))
 (define (native-c-return! machine value)
  (if (vector-ref machine 13) (set! seed-critical (vector-ref machine 12)))
  (if (null? (vector-ref machine 3))
@@ -165,17 +184,22 @@
   (let ((top (car frames)))
    (for-each (lambda (key) (set! top (bl-assoc top key (bl-get site key)))) (h-map-keys site))
    (cons top (cdr frames)))))
+;; Remains disabled until the complete standard planner stack is installed.
+;; The late guard proves that a genuine procedure's target/args are unchanged.
+(define native-c-direct-procedure? (lambda (callee) #f))
 (define (native-c-apply-action machine callee args)
  (let* ((frames (native-c-site-stack (vector-ref machine 10) (vector-ref machine 11)))
-        (plan (parameterize ((native-logical-frames frames)) (native-c-resolve-call callee args)))
-        (callee (car plan)) (args (cdr plan))
+        (direct? (native-c-direct-procedure? callee))
+        (plan (if direct? #f
+               (parameterize ((native-logical-frames frames)) (native-c-resolve-call callee args))))
+        (callee (if direct? callee (car plan))) (args (if direct? args (cdr plan)))
         (destination (vector-ref machine 5)) (next (vector-ref machine 6))
         (tail? (vector-ref machine 8)))
   (vector-set! machine 10 frames)
   (if (native-c-closure? callee)
    (begin (native-c-enter! machine callee args destination next tail?) #f)
    (let ((value (parameterize ((native-logical-frames (vector-ref machine 10)))
-                 (native-c-fallback-invoke callee args))))
+                 (if direct? (apply callee args) (native-c-fallback-invoke callee args)))))
     (if tail? (native-c-return! machine value)
      (begin (vector-set! (vector-ref machine 2) destination value)
             (vector-set! machine 1 next) #f))))))

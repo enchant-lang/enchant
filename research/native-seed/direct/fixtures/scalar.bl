@@ -16,6 +16,36 @@
  ([x] ((fn inner-cross ([y] (inner-cross y 1))
           ([y z] (ds-nested-cross (+ y z) 2))) x))
  ([x y] (+ x y)))
+; Retain different captured VALUES while every defining activation is retired
+; by a tail edge. The scalar qualifier also reruns this exact Source under
+; BL_NATIVE_C_GC_INTERVAL on both C and LLVM.
+(defn ds-retain-frames [left saved]
+ (if (= left 0) saved
+  (let [captured left]
+   (ds-retain-frames (- left 1) (cons (fn [delta] (+ captured delta)) saved)))))
+(defn ds-check-retained-frames [saved expected]
+ (if (empty? saved) expected
+  (let [closure (first saved)]
+   (if (= (closure 1000) (+ expected 1000))
+    (ds-check-retained-frames (rest saved) (+ expected 1))
+    (host/raise "retired tail frame changed a retained closure")))))
+(declare ds-grow-frame)
+(defn ds-shrink-frame [left saved]
+ (if (= left 0) saved
+  (ds-grow-frame (- left 1) saved left (+ left 10) [:payload left] (fn [] left))))
+(defn ds-grow-frame [left saved a b payload held]
+ (let [captured (fn [] [a b payload (held)])]
+  (ds-shrink-frame left (cons captured saved))))
+(defn ds-check-grown-frames [saved expected]
+ (if (empty? saved) expected
+  (if (= ((first saved)) [expected (+ expected 10) [:payload expected] expected])
+   (ds-check-grown-frames (rest saved) (+ expected 1))
+   (host/raise "cross-arity tail frame changed captured values"))))
+(defn ds-protected-frame-parent [value]
+ (let [marker [:caller value] held (fn [] marker)
+       children (ds-shrink-frame 16 (list))]
+  [marker (held) (count children)]))
+
 (defn main []
  (let [f (ds-adder 7)]
   (ds-check "direct-scalar-closure"
@@ -40,6 +70,12 @@
       (inner 5) (((inner :outer) 9) 5)])]
    [16 16 true true false [:error :badfun] [:error :badarity] [:error :badarg] 6 7 -8 8
     [true true] [true true false 12 14]]))
+ (let [saved (ds-retain-frames 128 (list))
+       grown (ds-shrink-frame 64 (list))]
+  (ds-check "direct-scalar-tail-frame-retention"
+   [(count saved) ((first saved) 7) (ds-check-retained-frames saved 1)
+    (count grown) (ds-check-grown-frames grown 1) (ds-protected-frame-parent 9)]
+   [128 8 129 64 65 [[:caller 9] [:caller 9] 16]]))
  (ds-check "direct-scalar-tail"
   [(ds-tail 2000 0) (ds-apply-tail 512 0) (< (host/max-frames) 32)] [2001000 131328 true])
  (ds-check "direct-scalar-loop"
