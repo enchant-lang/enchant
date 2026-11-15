@@ -45,7 +45,9 @@ def main():
                        "fixtures/c-source-tail-check.scm", "fixtures/c-tail-frame-reuse-check.scm",
                        "direct/direct-shared-raw.scm", "direct/direct-remote.scm", "direct/direct-make-fun.scm",
                        "fixtures/c-plain-procedure-check.scm", "fixtures/c-remote-target-check.scm",
-                       "fixtures/c-host-service-check.scm", "fixtures/c-call-slots-check.scm"]
+                       "fixtures/c-host-service-check.scm", "fixtures/c-call-slots-check.scm",
+                       "fixtures/c-noactor-tick-check.scm", "fixtures/c-noactor-tick-header-check.scm",
+                       "direct/native-direct.h"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -108,16 +110,19 @@ def main():
         + (BASE / "fixtures/c-plain-procedure-check.scm").read_text() + "\n"
         + (BASE / "fixtures/c-remote-target-check.scm").read_text() + "\n"
         + (BASE / "fixtures/c-host-service-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-call-slots-check.scm").read_text())
+        + (BASE / "fixtures/c-call-slots-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-noactor-tick-check.scm").read_text())
     control = run("direct-control-abi", [GAMBIT / "bin/gsi", "direct-control.scm"], timeout=20)
     for marker in ("NATIVE_C_CRITICAL_BOUNDARIES_PASS 10", "NATIVE_C_CRITICAL_CONTINUATIONS_PASS 18",
                    "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6", "NATIVE_C_SOURCE_TAIL_ABI_PASS 23",
                    "NATIVE_C_TAIL_FRAME_REUSE_ABI_PASS 49", "NATIVE_C_PLAIN_PROCEDURE_ABI_PASS 39",
                    "NATIVE_C_REMOTE_TARGET_ABI_PASS 105", "NATIVE_C_LATE_HOST_SERVICE_ABI_PASS 32",
-                   "NATIVE_C_CALL_SLOTS_ABI_PASS 29"):
+                   "NATIVE_C_CALL_SLOTS_ABI_PASS 29", "NATIVE_C_NOACTOR_TICK_ABI_PASS 45"):
         assert marker in control, control
+    (out / "native-direct.h").write_bytes((BASE / "direct/native-direct.h").read_bytes())
     (out / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
-                                    + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
+                                    + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text()
+                                    + "\n" + (BASE / "fixtures/c-noactor-tick-header-check.scm").read_text())
     run("foreign-fixture", [CLANG, "-shared", "-fPIC", BASE / "fixtures/ffi-fixture.c", "-o", "fixture.so"])
     run("posix-to-c", [GAMBIT / "bin/gsc", "-c", "posix.scm"])
     run("posix-link-unit", [GAMBIT / "bin/gsc", "-link", "posix.c"])
@@ -130,6 +135,7 @@ def main():
                        "-pthread", "-ldl", "-lm", "-Wl,-rpath," + str(GAMBIT / "gambit/lib"), "-o", "posix"])
     posix = run("posix-clock-readiness-worker", [out / "posix", out / "fixture.so"], timeout=10)
     assert "native POSIX clock/readiness/worker check passed" in posix, posix
+    assert "NATIVE_C_NOACTOR_TICK_HEADER_PASS 20" in posix, posix
     assert hashes == {p: digest(BASE / p) for p in inputs}, "inputs changed during qualification"
     evidence.write_text(json.dumps({"status": "pass", "output": str(out), "scope": "host fixtures; canonical BL gates remain separate",
                                     "inputs": hashes, "tools": TOOLS, "runs": runs,
