@@ -1,0 +1,119 @@
+; SDK-only exact Source-form formatter comparison. No native build or run.
+; The Source18 formatter is captured unchanged; native.c is never published.
+(ns native.generated-c-quote-parity
+ (:require [reader :as rd] [reader-node :as rn] [compiler :as compiler]
+           [bl.json :as json]))
+(def args (BeamLisp/argv))
+(assert (= 5 (count args)))
+(def scalar-path (nth args 0))
+(def c-path (nth args 1))
+(def compiler-plan (nth args 2))
+(def actor-plan (nth args 3))
+(def report-path (nth args 4))
+(when (File/regular? report-path) (File/rm! report-path))
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn identity [path] {:path path :sha256 (sha (File/read! path))})
+(def scalar-source (File/read! scalar-path))
+(def c-source (File/read! c-path))
+(assert (= "76f40ac5b9b10efd033a84e984926d46d20494322338722ba55365eebf566cab" (sha scalar-source)))
+(assert (= "e38e825c9a4b90940a77e8bfd9f86458f9afba0f2f8666ea486b759103d6a883" (sha c-source)))
+(def fixture-ns "native.generated-c-quote-parity")
+(def fixture-record (identity "research/native-seed/direct/generated-c-quote-check.bl"))
+(defn formatter-form [source path wanted]
+ (let [forms
+       (reduce (fn [out form]
+        (let [node (rn/node-form form)]
+         (if (= :list (rn/node-tag node))
+          (let [items (rn/node-items node) head (rn/node-form (first items)) name (rn/node-form (second items))]
+           (if (and (= :symbol (rn/node-tag head)) (contains? #{"defn" "defn-"} (rn/node-name head))
+                     (= :symbol (rn/node-tag name)) (= wanted (rn/node-name name)))
+            (let [decl (compiler/declaration-source form (assoc (compiler/new-env fixture-ns) :file path))
+                  fn-items (rn/node-items (rn/node-form (:value-form decl)))]
+             (assert (= "fn" (rn/node-name (rn/node-form (first fn-items)))))
+             (assert (= wanted (rn/node-name (rn/node-form (second fn-items)))))
+             ; Remove only the named self parameter. All parameter/body Reader
+             ; nodes, including their original Source positions, stay exact.
+             (conj out (rn/list-node (cons (first fn-items) (rest (rest fn-items)))))) out)) out)))
+        [] (rd/read-string source path))]
+  (assert (= 1 (count forms))) (first forms)))
+(def old-form (formatter-form scalar-source scalar-path "text"))
+(def new-form (formatter-form c-source c-path "quote-generated-code"))
+(def old-quote (BeamLisp.Compiler/eval_form old-form (assoc (compiler/new-env fixture-ns) :file scalar-path :target :beam)))
+(def new-quote (BeamLisp.Compiler/eval_form new-form (assoc (compiler/new-env fixture-ns) :file c-path :target :beam)))
+(def alphabet (cons 10 (lists/seq 32 126)))
+(def singletons (Enum/map alphabet #(unicode/characters_to_binary (list %))))
+(def pairs
+ (Enum/flat_map alphabet
+  (fn [a] (Enum/map alphabet (fn [b] (unicode/characters_to_binary (list a b)))))))
+(def alphabet-string (unicode/characters_to_binary alphabet))
+(def extra
+ ["" alphabet-string
+  (str alphabet-string alphabet-string alphabet-string)
+  "\\\"\n\\n\n\"\\\"\n" "#include \"native-direct.h\"\n"
+  "/* backslash\\ then quote\" then LF\n */\n"
+  "\\\\\\\"\"\"\n\n\n" " C:\\name\\quote\"\\n\n"])
+(defn compare! [input]
+ (let [old (old-quote input) new (new-quote input)]
+  (assert (string? old)) (assert (string? new))
+  (assert (= old new))
+  {:input-sha256 (sha input) :input-bytes (erlang/byte_size input)
+   :output-sha256 (sha old) :output-bytes (erlang/byte_size old)}))
+(def cases (erlang/++ singletons (erlang/++ pairs (to-list extra))))
+(def small-results (mapv compare! cases))
+(defn indexed-units [directory schema expected-count prefix]
+ (let [index-path (str directory "/index.tsv") lines (String/split (File/read! index-path) "\n")
+       rows (Enum/map (Enum/filter (rest lines) #(String/starts_with? % "U\t")) #(String/split % "\t"))]
+  (assert (= schema (first lines)))
+  (assert (= expected-count (count rows)))
+  (assert (= expected-count (count (distinct (map #(nth % 2) rows)))))
+  (mapv (fn [row]
+   (assert (= 9 (count row)))
+   (let [name (nth row 2) cfile (nth row 3) csha (nth row 4) scmfile (nth row 5) scmsha (nth row 6)]
+    (assert (String/starts_with? name prefix))
+    (assert (= cfile (str name ".c"))) (assert (= cfile (Path/basename cfile)))
+    (assert (= scmfile (str name ".scm")))
+    {:directory directory :name name :c-path (str directory "/" cfile) :c-sha256 csha
+     :wrapper-path (str directory "/" scmfile) :wrapper-sha256 scmsha :index (identity index-path)})) rows)))
+(def actual-units
+ (vec (erlang/++
+  (to-list (indexed-units compiler-plan "BL_NATIVE_DIRECT_UNITS\t1\t32" 46 "u"))
+  (to-list (indexed-units actor-plan "BL_NATIVE_DIRECT_ACTORS\t1\t32" 13 "a")))))
+(defn check-unit! [record]
+ (let [text (File/read! (:c-path record)) wrapper (File/read! (:wrapper-path record))
+       _ (assert (= (:c-sha256 record) (sha text)))
+       _ (assert (= (:wrapper-sha256 record) (sha wrapper)))
+       _ (assert (Enum/all? (unicode/characters_to_list text)
+                   (fn [code] (or (= code 10) (and (>= code 32) (<= code 126))))))
+       old (old-quote text) new (new-quote text)
+       old-preamble (str "(c-declare " old ")\n") new-preamble (str "(c-declare " new ")\n")]
+  (assert (= old new))
+  (assert (= old-preamble new-preamble))
+  (assert (String/starts_with? wrapper old-preamble))
+  (let [offset (erlang/byte_size old-preamble)
+        rebuilt (str new-preamble (binary/part wrapper offset (- (erlang/byte_size wrapper) offset)))]
+   (assert (= wrapper rebuilt)))
+  (let [result (assoc record :bytes (erlang/byte_size text) :quoted-sha256 (sha old)
+                :quoted-bytes (erlang/byte_size old) :alphabet :printable-ascii-and-lf :wrapper-byte-identical true)]
+   (println (str "GENERATED_C_QUOTE_PARITY_UNIT " (:name record) " " (:bytes result)))
+   (erlang/garbage_collect) result)))
+(def actual-results (mapv check-unit! actual-units))
+(def source-records [{:path scalar-path :sha256 (sha scalar-source)} {:path c-path :sha256 (sha c-source)} fixture-record])
+(doseq [record source-records] (assert (= (:sha256 record) (sha (File/read! (:path record))))))
+(doseq [record (distinct (map :index actual-results))]
+ (assert (= (:sha256 record) (sha (File/read! (:path record))))))
+(doseq [record actual-results]
+ (assert (= (:c-sha256 record) (sha (File/read! (:c-path record)))))
+ (assert (= (:wrapper-sha256 record) (sha (File/read! (:wrapper-path record)))))
+(File/write! report-path
+ (json/encode
+  {:schema "bl.native.generated-c-quote-parity" :version 1 :status :qualified-formatter-only
+   :target :sdk-beam :native-qualification false :compiler-fixpoint false
+   :scope :owned-generated-c-quoting :ordinary-scalar-text-unchanged true
+   :sources source-records :exact-anonymous-reader-form-capture true
+   :old-form-sha256 (sha (erlang/term_to_binary old-form (list :deterministic)))
+   :new-form-sha256 (sha (erlang/term_to_binary new-form (list :deterministic)))
+   :alphabet {:printable-ascii 95 :lf 1 :singletons 96 :ordered-pairs 9216}
+   :small-cases (count small-results) :small-results small-results
+   :compiler-units 46 :actor-units 13 :actual-results actual-results
+   :quoted-bytes-identical true :ffi-wrapper-bytes-identical true :valid-input-errors :none}))
+(println (str "NATIVE_GENERATED_C_QUOTE_PARITY " (count small-results) " small cases; 46 compiler + 13 actor C units; exact FFI bytes"))
