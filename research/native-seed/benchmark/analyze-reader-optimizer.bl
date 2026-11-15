@@ -1,0 +1,166 @@
+; Analyze retained reader ANF only. No Source parsing/compilation/native execution.
+; Run once on original immutable SDK, with research/native-seed/src in search path.
+(ns native.reader-optimizer-analysis
+ (:require [native.artifact :as artifact] [native.scheme :as scheme]
+           [native.eval :as ev] [anf :as a] [bl.json :as json]
+           [clojure.string :as string]))
+
+(def arguments (BeamLisp/argv))
+(def manifest-path (Path/expand (or (nth arguments 0 nil)
+ "research/native-seed/out/compiler-native-owner/partition.json")))
+(def output (Path/expand (or (nth arguments 1 nil)
+ ".local/native-devtool/reader-optimizer-analysis")))
+(def options {:enabled? true :report? true :max-nodes 100000 :module-identity? false})
+(def instrument-limit 1000000)
+(defn sha [bytes] (artifact/sha bytes))
+(defn term-sha [value] (sha (erlang/term_to_binary value (list :deterministic))))
+(defn read-json [path] (json/decode (File/read! path)))
+(defn count-text [text needle] (dec (count (String/split text needle))))
+(defn count-rules [rows]
+ (reduce (fn [out row] (update out (name (:rule row)) (fn [n] (inc (or n 0))))) {} rows))
+(defn count-refusals [rows]
+ (reduce (fn [out row]
+  (let [key (str (name (:rule row)) "/" (name (:reason row)))]
+   (update out key (fn [n] (inc (or n 0)))))) {} rows))
+(defn observations [definitions]
+ ; Instrumentation only: use ANF's own executable-child contract, bounded work.
+ (loop [todo (BeamLisp.CompilerData/eager_map :node definitions)
+        nodes 0 operations {} remotes {}]
+  (if (erlang/== todo (list))
+   {:nodes nodes :operations operations :remotes remotes}
+   (do
+    (assert (< nodes instrument-limit))
+    (let [node (erlang/hd todo) op (:op node)
+          remote (when (= :remote op)
+                   (str (erlang/atom_to_binary (:mod node)) "/"
+                        (erlang/atom_to_binary (:fun node)) "/" (count (:args node))))]
+     (recur (lists/append (a/executable-children node) (erlang/tl todo))
+      (inc nodes) (update operations (name op) (fn [n] (inc (or n 0))))
+      (if remote (update remotes remote (fn [n] (inc (or n 0)))) remotes)))))))
+(defn packing [text]
+ {:bytes (erlang/byte_size text) :sha256 (sha text)
+  :generic-invoke-bindings (count-text text "(callee bl-invoke)")
+  :cons-bindings (count-text text "(callee cons)")
+  :source-call-wrappers (count-text text "(bl-source-call ")})
+
+(assert (not (File/exists? output)))
+(def pin (read-json "research/native-seed/sdk-pin.json"))
+(def sdk-source (get pin "source"))
+(def optimizer-path (str sdk-source "/priv/host/optimize.bl"))
+(def optimizer-source-sha (sha (File/read! optimizer-path)))
+(assert (= optimizer-source-sha (sha (File/read! "priv/host/optimize.bl"))))
+(def manifest-bytes (File/read! manifest-path))
+(def manifest (json/decode manifest-bytes))
+(assert (= "bl.native.partitioned-closure" (get manifest "schema")))
+(assert (= 1 (get manifest "version")))
+(assert (= 18 (count (get manifest "units"))))
+(def matching (vec (filter #(= "reader" (get % "namespace")) (get manifest "units"))))
+(assert (= 1 (count matching)))
+(def row (first matching))
+(def original-part (artifact/part-path manifest-path (get row "path")))
+(def original-bytes (File/read! original-part))
+(assert (<= (erlang/byte_size original-bytes) (:max-bytes artifact/limits)))
+(assert (= (sha original-bytes) (get row "sha256")))
+
+; Copy only this partition/proof into the owned output, so artifact/read-part
+; cannot update the retained generation's sidecars. The existing owner performs
+; exact-byte + SDK-bound shape validation; no new ETF decoder is introduced.
+(File/mkdir_p! output)
+(def copied-part (str output "/input-reader.etf"))
+(File/write! copied-part original-bytes)
+(when (File/regular? (str original-part ".validated.json"))
+ (File/write! (str copied-part ".validated.json")
+              (File/read! (str original-part ".validated.json"))))
+(def unit (artifact/read-part (str output "/input.json")
+            {"path" "input-reader.etf" "sha256" (get row "sha256")}))
+(assert (= "reader" (:ns unit)))
+(assert (= (:source-sha256 unit) (sha (:source unit))))
+(assert (vector? (:defs unit)))
+(assert (<= 1 (count (:defs unit)) 512))
+(def definitions (:defs unit))
+(def before (observations definitions))
+
+; One synthetic descriptor shares ONE optimizer budget across all expressions.
+; No synthetic module identity is permitted to flow into a closure rewrite.
+(def descriptor
+ (a/module :Elixir.NativeReaderOptimizerAnalysis
+  (list {:op :defn-clause :fname :probe :params (list) :guard nil
+         :body (a/doo (BeamLisp.CompilerData/eager_map :node definitions)) :ann {}})
+  (list [:probe 0]) (list)))
+(def started (erlang/monotonic_time :microsecond))
+(def result (BeamLisp.Optimize/run descriptor options))
+(def elapsed (- (erlang/monotonic_time :microsecond) started))
+(def optimized-nodes (:stmts (:body (first (:clauses (:descriptor result))))))
+(assert (= (count definitions) (count optimized-nodes)))
+(def transformed
+ (mapv (fn [index] (assoc (nth definitions index) :node (nth optimized-nodes index)))
+       (range (count definitions))))
+(def derived (assoc unit :defs transformed))
+(assert (= (dissoc unit :defs) (dissoc derived :defs)))
+(assert (= (mapv #(dissoc % :node) definitions) (mapv #(dissoc % :node) transformed)))
+(def after (observations transformed))
+(def changes
+ (mapv (fn [index]
+  (let [old (nth definitions index) new (nth transformed index)
+        prior (term-sha (:node old)) next (term-sha (:node new))]
+   {:index index :name (:name old) :kind (:kind old) :changed (not= prior next)
+    :before-sha256 prior :after-sha256 next})) (range (count definitions))))
+
+; Existing emitter only. Reuse exact unchanged definition emissions; this is
+; a structural observation, never native execution or a new call-lowering path.
+(def context (ev/context "reader"))
+(def emissions
+ (mapv (fn [index]
+  (let [old (nth definitions index) new (nth transformed index)
+        old-text (scheme/emit (:node old) context)
+        changed (:changed (nth changes index))
+        new-text (if changed (scheme/emit (:node new) context) old-text)]
+   {:before old-text :after new-text :reused (not changed)}))
+  (range (count definitions))))
+(def original-scheme (string/join "\n" (map :before emissions)))
+(def optimized-scheme (string/join "\n" (map :after emissions)))
+(assert (<= (erlang/byte_size original-scheme) 16777216))
+(assert (<= (erlang/byte_size optimized-scheme) 16777216))
+(File/write! (str output "/before-expressions.scm") original-scheme)
+(File/write! (str output "/after-expressions.scm") optimized-scheme)
+(def derived-bytes (erlang/term_to_binary derived (list :deterministic)))
+(BeamLisp.CompilerData/check_compiler_data! derived artifact/limits)
+(File/write! (str output "/derived-reader.etf") derived-bytes)
+(assert (= (sha original-bytes) (sha (File/read! original-part))))
+(assert (= (sha manifest-bytes) (sha (File/read! manifest-path))))
+
+(def report
+ {:schema "bl.native.reader-optimizer-analysis" :version 1 :status :analyzed-only
+  :source-compiled false :native-built false :native-executed false
+  :producer {:path "research/native-seed/benchmark/analyze-reader-optimizer.bl"
+             :sha256 (sha (File/read! "research/native-seed/benchmark/analyze-reader-optimizer.bl"))}
+  :input {:manifest manifest-path :manifest-sha256 (sha manifest-bytes)
+          :aggregate-artifact-sha256 (get manifest "artifact_sha256")
+          :scope :reader-partition-only :partition original-part :partition-sha256 (sha original-bytes)
+          :source-sha256 (:source-sha256 unit) :definitions (count definitions)
+          :definition-payload-sha256 (term-sha definitions) :descriptor-sha256 (term-sha descriptor)}
+  :optimizer {:version (:version result) :source optimizer-path :source-sha256 optimizer-source-sha
+              :options options :sdk-pin pin :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+              :elapsed-microseconds elapsed :stats (:stats result)}
+  :before before :after after
+  :rule-counts (count-rules (:evidence result))
+  :refusal-counts (count-refusals (:refusals result))
+  :evidence (vec (:evidence result)) :refusals (vec (:refusals result))
+  :definitions changes
+  :derived {:path (str output "/derived-reader.etf") :sha256 (sha derived-bytes)
+            :definition-payload-sha256 (term-sha transformed) :descriptor-sha256 (term-sha (:descriptor result))
+            :shape-and-order-preserved true :runtime-admission false}
+  :emission {:before (packing original-scheme) :after (packing optimized-scheme)
+             :unchanged-definitions-reused (count (filter :reused emissions))
+             :emitter-sha256 (sha (File/read! "research/native-seed/src/native/scheme.bl"))
+             :context-sha256 (sha (File/read! "research/native-seed/src/native/eval.bl"))
+             :apply-path :repacked-generic-language-invocation}
+  :limitations ["Only the selected partition is decoded; aggregate closure SHA is recorded from its manifest."
+                "Synthetic module identity disabled; lexical facts derive only from existing executable ANF."
+                "Operation counts include control scaffold apply nodes; they are not runtime call counts."
+                "Scheme text counts describe emitted shape; they establish no speedup or runtime equivalence."]})
+(File/write! (str output "/analysis.json") (json/encode report))
+(println (str "NATIVE_READER_OPTIMIZER_ANALYSIS " (json/encode
+ {:output output :stats (:stats result) :rules (count-rules (:evidence result))
+  :before (:operations before) :after (:operations after)
+  :before-packing (packing original-scheme) :after-packing (packing optimized-scheme)})))
