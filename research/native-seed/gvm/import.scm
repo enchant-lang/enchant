@@ -135,8 +135,13 @@
         (gvm-import-check (and (integer? value) (exact? value) (memv value labels))
          "unknown GVM local label" value) value)
        (define (primitive name capability)
-        (let ((value (c#target.prim-info (c#string->canonical-symbol (gvm-import-name name)))))
-         (gvm-import-check (and value (procedure? (capability value)))
+        (let* ((value (c#target.prim-info (c#string->canonical-symbol (gvm-import-name name))))
+               (spec (and value (capability value))))
+         (gvm-import-check
+          (and value
+           (if (eq? capability c#proc-obj-test)
+            (and (vector? spec) (= (vector-length spec) 3) (procedure? (vector-ref spec 1)))
+            (procedure? spec))))
           "GVM primitive does not support requested operation" name) value))
        (for-each (lambda (block)
         (gvm-import-check (and (list? block) (>= (length block) 5) (eq? (car block) 'block))
