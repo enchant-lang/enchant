@@ -2,7 +2,7 @@
 ; overwritten. Canonical BL parsing/expansion/ANF happen before this compiler.
 (ns native.gvm-lower
  (:require [native.gvm :as wire] [native.gvm-layout :as layout]
-           [clojure.string :as string]))
+           [clojure.string :as string] [anf]))
 
 (defn fail [node reason] (wire/refuse node reason))
 (def arithmetic-keys #{:add :sub :mul :div :lt :gt :le :ge :num_eq})
@@ -27,7 +27,8 @@
          :else (fail node "fixed scalar GVM literal is unsupported")))
   (fail node "a literal operand was expected")))
 (defn new-procedure [id arity]
- {:id id :arity arity :next-home 2 :homes {"return" 1} :next-label 1 :blocks []})
+ {:id id :owner-id id :arity arity :next-home 2 :homes {"return" 1}
+  :next-label 1 :blocks [] :nested-blocks []})
 (defn home [p]
  (let [slot (:next-home p) name (str (:id p) "/home/" slot)]
   [(-> p (update :next-home inc) (assoc-in [:homes name] slot)) slot]))
@@ -36,7 +37,20 @@
   [(-> p (update :next-label inc) (update :blocks conj (assoc row :id id))) id]))
 (defn reserve-label [p] [(update p :next-label inc) (:next-label p)])
 (defn slot [n] [:stk n])
-(declare lower)
+(declare lower finish-function lower-function)
+
+(defn free-names [node bound]
+ (case (:op node)
+  :gvm-value #{}
+  :var (if (contains? bound (:name node)) #{} #{(:name node)})
+  :let (into (free-names (:init node) bound)
+         (free-names (:body node) (conj bound (:name node))))
+  :fn (reduce (fn [out clause]
+         (let [inside (into bound (mapcat anf/pattern-vars (:pats clause)))]
+          (into (into out (when (:guard clause) (free-names (:guard clause) inside)))
+                (free-names (:body clause) inside)))) #{} (:clauses node))
+  (reduce (fn [out child] (into out (free-names child bound))) #{}
+    (filter some? (anf/executable-children node)))))
 
 (defn lower-arguments [s p arguments slots env next options]
  (reduce (fn [[s p next] [argument destination]]
@@ -56,14 +70,14 @@
 (defn finite-arguments [node]
  (loop [n node out []]
   (case (:op n) :enil out :cons (recur (:tail n) (conj out (:head n))) nil)))
-(defn self-constructor [node env self-name]
- (when (and self-name (= :apply (:op node)) (= :var (:op (:fn node)))
-            (= self-name (:name (:fn node))) (= 1 (count (:args node)))
+(defn self-constructor [node env self-names]
+ (when (and (= :apply (:op node)) (= :var (:op (:fn node)))
+            (contains? self-names (:name (:fn node))) (= 1 (count (:args node)))
             (= :var (:op (first (:args node))))
-            (= self-name (:name (first (:args node)))))
-  (get env self-name)))
+            (= (:name (:fn node)) (:name (first (:args node)))))
+  (get env (:name (:fn node)))))
 (defn lower [s p node env destination next tail? options]
- (if-let [self (self-constructor node env (:self-name options))]
+ (if-let [self (self-constructor node env (:self-names options))]
   (let [[p entry] (block p {:kind :copy :source self :destination destination :next next})]
    [s p entry])
  (case (:op node)
@@ -88,7 +102,10 @@
   :invoke (if-let [arguments (finite-arguments (:arguments node))]
             (lower-call s p (:callee node) arguments env destination next tail? options)
             (fail node "computed/dotted invoke arguments are outside this first probe"))
-  :let (let [[p bound] (home p)
+  :fn (lower-function s p node env destination next options)
+  :let (let [_ (when (BeamLisp.CompilerData/self_application_parts node)
+                 (fail node "named lexical self scaffolds are outside this closure pilot"))
+             [p bound] (home p)
              [s p body] (lower s p (:body node) (assoc env (:name node) (slot bound)) destination next tail? options)]
          (lower s p (:init node) env bound body false options))
   :if (let [[p tested] (home p) [p boolean] (home p)
@@ -124,6 +141,12 @@
    :return
     (let [ret (layout/gvm-return-layout body-state (:source row) (str (:id p) "/result"))]
      [(into [:block id :simple frame] (conj (:rows ret) (:jump ret)))])
+   :close
+    (let [closed (layout/gvm-copy-row body-state [:glo "bl-nil"] (slot destination) variable)]
+     [[:block id :simple frame
+       [:close [[(slot destination) (:entry row) (:captures row)]]
+         (layout/gvm-frame-wire (:state closed))]
+       (internal-jump (:next row) frame)]])
    :call
     (let [tail? (:tail row) result (str (:id p) "/call/" id "/result")
           call (layout/gvm-call-layout layout/gvm-pinned-target body-state (:callee row) (:arguments row)
@@ -135,29 +158,57 @@
                 (:row copied) (internal-jump (:next row) frame)]])))
    (throw (ex-info "native GVM: invalid compiler-owned block" {:kind (:kind row)})))))
 
+(defn checked-clause [function]
+ (let [clause (BeamLisp.CompilerData/simple_function_clause function)
+       names (when clause (mapv :name (:pats clause)))]
+  (when-not (and clause (= (count names) (count (distinct names))) (<= (count names) 3))
+   (fail function "only one unguarded distinct-variable fixed clause of arity0..3 is admitted"))
+  [clause names]))
+
+(defn finish-function [s p function capture-names options]
+ (let [[clause names] (checked-clause function)
+       parameters (mapv #(str (:id p) "/parameter/" %) (range (count names)))
+       captures (mapv #(str (:id p) "/capture/" %) (range (count capture-names)))
+       entry (layout/gvm-entry-layout layout/gvm-pinned-target parameters captures)
+       p (assoc p :homes (:homes entry) :next-home (+ 2 (count names) (count captures)))
+       env (into {} (mapv (fn [name parameter] [name (slot (get (:homes entry) parameter))])
+                      (into names capture-names) (into parameters captures)))
+       binding (:self-binding options)
+       env (if binding (assoc env (:name binding) (:operand binding)) env)
+       [p answer] (home p) [p finish] (block p {:kind :return :source (slot answer)})
+       [s p body] (lower s p (:body clause) env answer finish true options)
+       initialized (layout/gvm-initialize-homes (:state entry) (:homes p) [:glo "bl-nil"])
+       body-state (assoc (:state initialized) :registers {})
+       [p entry-id] (reserve-label p)
+       kind (if (= (:id p) (:owner-id p)) :entry [:entry (count names) (count captures)])
+       prologue (into [:block entry-id kind (:entry-frame entry)]
+                  (concat (:rows entry) (:rows initialized) [(internal-jump body (layout/gvm-frame-wire body-state))]))
+       blocks (vec (mapcat #(emit-block p body-state %) (sort-by :id (:blocks p))))]
+  [s p entry-id (into (into [prologue] blocks) (:nested-blocks p))]))
+
+(defn lower-function [s p node env destination next options]
+ (let [[_ names] (checked-clause node)
+       free (free-names node #{})
+       capture-names (vec (sort (filter #(and (contains? free %) (contains? env %)) (keys env))))
+       unknown (remove #(contains? env %) free)]
+  (when (seq unknown) (fail node "unbound lexical capture"))
+  (let [id (str (:id p) "/closure/" (:next-label p))
+        child (assoc (new-procedure id (count names)) :owner-id (:owner-id p) :next-label (:next-label p))
+        [s child entry blocks] (finish-function s child node capture-names (dissoc options :self-binding))
+        p (-> p (assoc :next-label (:next-label child)) (update :nested-blocks into blocks))
+        [p entry] (block p {:kind :close :entry entry :captures (mapv env capture-names)
+                            :destination destination :next next})]
+   [s p entry])))
+
 (defn emit-fixed-definition [s definition id options]
  (let [node (:node definition) parts (BeamLisp.CompilerData/self_application_parts node)
        function (if parts (:inner parts) node)
-       clause (BeamLisp.CompilerData/simple_function_clause function)
-       names (when clause (mapv :name (:pats clause)))]
-  (when-not (and clause (= (count names) (count (distinct names))) (<= (count names) 3))
-   (fail node "only one unguarded distinct-variable fixed clause of arity0..3 is admitted"))
-  (let [p (new-procedure id (count names))
-        parameters (mapv #(str id "/parameter/" %) (range (count names)))
-        entry (layout/gvm-entry-layout layout/gvm-pinned-target parameters [])
-        p (assoc p :homes (:homes entry) :next-home (+ 2 (count names)))
-        env (into {} (mapv (fn [name parameter] [name (slot (get (:homes entry) parameter))]) names parameters))
-        self-name (when parts (:name node))
-        env (if self-name (assoc env self-name [:proc id]) env)
-        [p answer] (home p) [p finish] (block p {:kind :return :source (slot answer)})
-        [s p body] (lower s p (:body clause) env answer finish true (assoc options :self-name self-name))
-        initialized (layout/gvm-initialize-homes (:state entry) (:homes p) [:glo "bl-nil"])
-        body-state (assoc (:state initialized) :registers {})
-        entry-id (:next-label p)
-        prologue (into [:block entry-id :entry (:entry-frame entry)]
-                   (concat (:rows entry) (:rows initialized) [(internal-jump body (layout/gvm-frame-wire body-state))]))
-        blocks (vec (mapcat #(emit-block p body-state %) (sort-by :id (:blocks p))))]
-   [s (into [:proc id (count names) 0 prologue] blocks)])))
+       [_ names] (checked-clause function)
+       self-name (when parts (:name node))
+       options (assoc options :self-names (if self-name #{self-name} #{}))
+       options (if self-name (assoc options :self-binding {:name self-name :operand [:proc id]}) options)
+       [s _ _ blocks] (finish-function s (new-procedure id (count names)) function [] options)]
+  [s (into [:proc id (count names) 0] blocks)]))
 
 (defn emit-definitions [definitions options]
  (let [definitions (vec definitions)
@@ -185,7 +236,7 @@
              (into [:procedures main] procedures)]]
   {:data data :text (str (data-text data) "\n")
    :manifest {:schema "bl.native.gvm-emission" :version 1 :status :emitted-not-executed
-              :scope :fixed-scalar-abi-pilot :functions (count definitions)
+              :scope :captured-scalar-abi-pilot :functions (count definitions)
               :publication-prefix prefix :target layout/gvm-pinned-target
               :source-frames-qualified false :wrong-arity-qualified false
               :entry-tick-qualified false :authored-scheme false
