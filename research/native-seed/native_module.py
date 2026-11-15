@@ -199,10 +199,10 @@ def build_module(folder, source, selection_key, config, *, cache, report, bind, 
         raise RuntimeError('Scheme module requires the BL owner selection key')
     folder = Path(folder).resolve()
     folder.mkdir(parents=True, exist_ok=True)
-    source_sha = hashlib.sha256(source).hexnative_elf.digest()
+    source_sha = hashlib.sha256(source).hexdigest()
     # Alphanumeric names avoid target-name escaping. New versions have distinct
     # Gambit module identities even when retained closures outlive their caller.
-    name = 'bl' + hashlib.sha256((selection_key + '\0' + source_sha).encode()).hexnative_elf.digest()
+    name = 'bl' + hashlib.sha256((selection_key + '\0' + source_sha).encode()).hexdigest()
     flags = [*config['flags'], '-D___DYNAMIC']
     request = {'kind': 'gambit-dynamic-module', 'source_sha256': source_sha,
                'selection_key': selection_key, 'module_name': name,
