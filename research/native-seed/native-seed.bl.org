@@ -1,7 +1,7 @@
 #+title: BL for daily native development
 #+subtitle: A fast native edit → diagnose → test → run loop.
 #+kicker: Beam Lisp · native development roadmap · 2026-11-15
-#+status: Checked reader prototype runs · whole-compiler speed gate failing
+#+status: Reversible cutover prototype passes · speed gate still failing
 #+design: sober
 
 * The destination
@@ -32,6 +32,71 @@ You -> BL : run the relevant tests
 BL => Program : load compiled units; preserve valid running work
 Program --> You : results, source stack or running actor service
 #+end_sequence
+
+* One prototype, an explicit cutover decision
+#+begin_stats
+77 | Runtime checks passed | Same reader Source; two actual compiled modules.
+0 | Jobs on unchanged reuse | Existing AOT and unit store select both artifacts.
+0.99× | Reader speed ratio | 50.57 → 50.96 ms; no demonstrated gain.
+98% | Remote calls remain | Shared runtime traffic survives reader-only specialization.
+#+end_stats
+
+#+begin_sequence :title "Cutover stays one backend option"
+lanes Source · existing AOT owner | Artifact · Scheme / Gambit / C | Request · serial prototype
+Source -> Artifact : prepare one private Reader Source once
+Artifact -> Artifact : :reference or :specialize-v1; identity includes the mode
+Artifact --> Request : compiled patterns + captured pinned primitives
+Request -> Request : verify primitive bindings before selecting the artifact
+Request => Request : switch; run; retain old closure; reject changed primitive; roll back
+#+end_sequence
+
+#+begin_rosetta
+Same-process comparison | Reference | Specialized
+Reader · median ms | 50.569 | 50.963
+Read → compile → emit · median ms | 120.071 | 115.559
+Allocated bytes per parse · one five-parse batch | 10,758,822 | 10,784,701
+Remote resolutions per parse | 108,936 | 106,443
+Generic matcher entries per parse | 0 | 0
+Unchanged-artifact build jobs | 0 | 0
+#+end_rosetta
+
+#+begin_honest :title "Behavior passes; the speed thesis is not proved"
+The one-switch prototype preserves reader results and diagnostics, final Scheme
+bytes, live calls, captured closures through GC, refusal before publication and
+rollback. It compiles 12 pattern clauses and captures 172 primitive call sites.
+But this parse never runs the general matcher. Only 2,493 remote resolutions
+vanish; shared runtime code retains the other 106,443. Allocation does not fall.
+The 4% pipeline movement is insufficient to establish a useful gain on this
+shared host. Keep :reference as the default. A broad cutover is not justified.
+#+end_honest
+
+The mode belongs to the existing native AOT adapter, not a new compiler path.
+Opt in with =:emission-mode :specialize-v1=; the serial runtime boundary checks
+the artifact's exported =primitive-check= before activation and requests.
+Production generation custody, concurrent publication and all pattern/actor
+shapes remain outside this prototype's qualification.
+
+Reproduce with =python3 research/native-seed/cutover/run.py research/native-seed/out/cutover-fresh=.
+The command reuses the pinned SDK and compiler image. Retained artifacts can
+be remeasured without compilation by passing their existing output directory.
+
+[[file:evidence/cutover/observation.json][Measured result and limits]] · [[file:evidence/cutover/native.log][Native output, allocation and checks]] · [[file:evidence/cutover/files.json][Exact artifact evidence]]
+
+#+begin_src beam-lisp :id cutover-evidence
+(ns native.seed.cutover-dossier (:require [bl.json :as json]))
+(def cut-root "research/native-seed/evidence/cutover/")
+(def cut-result (json/decode (File/read! (str cut-root "observation.json"))))
+(assert (= true (get cut-result "passed")))
+(assert (= 77 (get cut-result "checks")))
+(assert (= false (get cut-result "production_cutover")))
+(assert (= 0 (get-in cut-result ["counts" "reference" "matcher_entries"])))
+(assert (= 106443 (get-in cut-result ["counts" "candidate" "remote_calls"])))
+(assert (every? zero? (vals (get cut-result "reuse_build_jobs"))))
+(doseq [[path row] (json/decode (File/read! (str cut-root "files.json")))]
+ (assert (= (get row "sha256")
+  (Base/encode16 (crypto/hash :sha256 (File/read! (str cut-root path))) (list (tuple :case :lower))))))
+(println "77 native checks; zero rebuilds on reuse; speed cutover remains blocked")
+#+end_src
 
 * What will count as faster?
 #+begin_honest :title "The seed has not earned the speed gate"

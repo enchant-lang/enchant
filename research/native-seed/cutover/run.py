@@ -47,7 +47,8 @@ def main():
     if not (output/'modules.json').exists():
         run([BASE/'run','--sdk-pin',BASE/'incremental-sdk-pin.json','run',HERE/'build.bl','--',output,
              *(['resume'] if output.exists() else [])],timeout=260)
-    runtime=output/'runtime'
+    observer_key=hashlib.sha256((HERE/'prepare.py').read_bytes()+(HERE/'observer.scm.in').read_bytes()).hexdigest()[:12]
+    runtime=output/('runtime-'+observer_key)
     if not (runtime/'preparation.json').exists():
         run([sys.executable,HERE/'prepare.py',output/'modules.json',runtime],timeout=180)
     run([sys.executable,HERE/'measure.py',runtime/'preparation.json'],timeout=130)

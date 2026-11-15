@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the verified cutover observer with a bounded process tree; summarize evidence."""
-import argparse, hashlib, json, statistics, subprocess
+import argparse, hashlib, json, re, statistics, subprocess
 from pathlib import Path
 
 def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
@@ -35,10 +35,15 @@ def main():
         if all(group.values()):
             medians[phase]={v:statistics.median(xs) for v,xs in group.items()}
             medians[phase]['speedup']=medians[phase]['reference']/medians[phase]['candidate']
+    allocations = {}
+    for label, block in re.findall(r'CUTOVER_ALLOCATION (reference|candidate)\n(.*?)(?=CUTOVER_|$)', log, re.S):
+        found = re.search(r'(\d+) bytes allocated', block)
+        if found:
+            allocations[label] = {'repetitions': 5, 'bytes': int(found.group(1)), 'bytes_per_parse': int(found.group(1))/5}
     passed=result.returncode==0 and 'CUTOVER_PASS\n' in log and len(rows)==20
     checks=next((int(x.split()[1]) for x in log.splitlines() if x.startswith('CUTOVER_CHECKS ')),0)
     report={'schema':'bl.native.cutover-observation','passed':passed,'exit':result.returncode,'checks':checks,
-            'medians_ms':medians,'samples':rows,'counts':counts,'inventories':data['inventories'],
+            'medians_ms':medians,'allocations':allocations,'samples':rows,'counts':counts,'inventories':data['inventories'],
             'preparation_sha256':sha(args.preparation),'native_log_sha256':sha(output/'native.log'),
             'qualification':'closed serial reader prototype','production_cutover':False,'native_runtime_admission':False,
             'formal_lowering_proof':False,'sdk_builds':0}
