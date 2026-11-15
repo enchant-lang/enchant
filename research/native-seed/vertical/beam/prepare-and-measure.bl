@@ -1,0 +1,269 @@
+; Two private ordinary AOT Source namespaces, compiled once outside timings.
+; Uses existing compile_source / Env scope / physical lease/publication owners.
+; This is a compiler experiment; it makes no contextual-factory admission claim.
+(ns native.vertical-beam
+ (:require [reader :as reader] [reader-node :as rn] [codebase]
+           [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def output (Path/expand (first args)))
+(def corpus-file (Path/expand (or (second args) "research/native-seed/benchmark/compiler-values.bl")))
+(def candidate-file (Path/expand (or (nth args 2 nil) "research/native-seed/vertical/formal/candidate.source")))
+(def attribution "native-devtool-benchmark.bl")
+(def scopes (atom []))
+(def products (atom []))
+(def cleanup (atom []))
+(def timing-rows (atom []))
+(def setup-rows (atom []))
+(def stage (atom :selection))
+(def before-context (BeamLisp.Env/capture))
+(def compile-pattern (tuple :Elixir.BeamLisp.AOT :compile_source 2))
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn count-compiles [] (elem (erlang/trace_info compile-pattern :call_count) 1))
+(defn codepoint-slice [source start end]
+ (unicode/characters_to_binary
+  (lists/sublist (lists/nthtail start (unicode/characters_to_list source)) (- end start))))
+(defn replace-span [source edit]
+ (let [chars (unicode/characters_to_list source)]
+  (unicode/characters_to_binary
+   (list (lists/sublist chars (:start edit)) (:text edit) (lists/nthtail (:end edit) chars)))))
+(defn apply-edits [source edits]
+ (reduce replace-span source (sort-by (fn [edit] (- (:start edit))) edits)))
+(defn positioned [node]
+ (let [pos (rn/node-pos node)]
+  (assert (and (erlang/is_integer (:offset pos)) (erlang/is_integer (:end-offset pos)))) pos))
+(defn only-one [values label]
+ (assert (= 1 (count values)) label) (first values))
+(defn named [form]
+ (let [items (rn/node-items (rn/node-form form))]
+  (when (= :symbol (rn/node-tag (rn/node-form (first items))))
+   (rn/node-name (rn/node-form (first items))))))
+(defn capture-function [namespace name arity]
+ (let [value (BeamLisp.Env/fetch_exact! namespace name)]
+  (assert (erlang/is_function value arity)) value))
+(defn function-row [value]
+ (let [module (elem (erlang/fun_info value :module) 1)]
+  {:module (erlang/atom_to_binary module) :name (erlang/atom_to_binary (elem (erlang/fun_info value :name) 1))
+   :arity (elem (erlang/fun_info value :arity) 1)
+   :md5 (Base/encode16 (erlang/apply module :module_info (list :md5)) (list (tuple :case :lower)))}))
+(defn kernel-snapshot []
+ (Enum/map [["reader" "read-string" 2] ["rt" "eqv" 2] ["rt" "k-eqv" 2] ["rt" "k-compare" 2]]
+  (fn [[namespace name arity]]
+   (let [value (capture-function namespace name arity)]
+    {:namespace namespace :name name :arity arity :value value :physical (function-row value)}))))
+(defn same-kernel! [before]
+ (doseq [row before]
+  (let [value (capture-function (:namespace row) (:name row) (:arity row))]
+   (assert (erlang/=:= value (:value row)))
+   (assert (= (:physical row) (function-row value))))))
+(defn compile-private! [label namespace source file]
+ (reset! stage (keyword (str "compile-" label)))
+ (File/write! file source)
+ (let [scope (BeamLisp.Env/fork :global)
+       _ (swap! scopes conj scope)
+       before (set (Enum/map (code/all_loaded) #(elem % 0)))
+       started (erlang/monotonic_time :microsecond)
+       compiled
+       (BeamLisp.Env/with_env scope
+        (fn []
+         (let [written (BeamLisp.AOT/compile_source source
+                         (list (tuple :file file) (tuple :output_dir (Path/join output label))
+                               (tuple :mark_loaded? true)))
+               modules (Enum/map written #(elem % 0))]
+          ;; Fresh unrelated namespaces must not adopt or retire any preexisting
+          ;; runtime module. Publication/materialization remain AOT-owned.
+          (assert (every? #(not (contains? before %)) modules))
+          (swap! products conj {:scope scope :namespace namespace :modules modules :lease nil})
+          (let [lease (BeamLisp.Env/retain_code! modules)]
+           (swap! products
+            (fn [rows] (mapv #(if (= namespace (:namespace %)) (assoc % :lease lease) %) rows)))
+           {:scope scope :namespace namespace :modules modules :lease lease
+            :helper (capture-function namespace "ignored-char?" 1)
+            :reader (capture-function namespace "read-string" 2)
+            :members (Enum/map written
+                       (fn [[module path]] {:module (erlang/atom_to_binary module)
+                                          :path path :sha256 (sha (File/read! path))}))}))))
+       elapsed (- (erlang/monotonic_time :microsecond) started)]
+  (swap! setup-rows conj {:label label :source {:path file :sha256 (sha source)}
+                         :compile-source-calls 1 :microseconds elapsed
+                         :namespace namespace :scope (pr-str scope)
+                         :helper (function-row (:helper compiled))
+                         :reader (function-row (:reader compiled)) :members (:members compiled)})
+  compiled))
+(defn request [product action]
+ ;; AOT materializes each exact callable once in its own private environment.
+ ;; This keeps its captured scope; no lookup/rebinding changes SDK Reader code.
+ (BeamLisp.Env/with_env (:scope product) #(action product)))
+(defn helper-request [product characters]
+ (request product
+  (fn [owned]
+   (dotimes [_ 1000]
+    (doseq [c characters] (erlang/apply (:helper owned) (list c)))))))
+(defn read-request [product corpus]
+ (request product #(erlang/apply (:reader %) (list corpus attribution))))
+(defn measure! [label revision batch repetitions action]
+ (let [before (count-compiles) started (erlang/monotonic_time :nanosecond)]
+  (dotimes [_ repetitions] (action))
+  (let [elapsed (- (erlang/monotonic_time :nanosecond) started)
+        after (count-compiles)
+        row {:phase label :revision revision :batch batch :repetitions repetitions
+             :helper-calls (when (String/starts_with? label "helper-") 10000)
+             :seconds (/ elapsed 1000000000.0) :compile-source-calls (- after before)}]
+   (assert (= before after))
+   (swap! timing-rows conj row)
+   (println (str "VERTICAL_BEAM_TIMING\t" label "\t" revision "\t" batch "\t"
+                 repetitions "\t" (:seconds row))))))
+
+(assert (and (string? output) (not (File/exists? output))))
+(File/mkdir_p! output)
+(erlang/trace_pattern compile-pattern true (list :local :call_count))
+(try
+ (let [old-pin (json/decode (File/read! "research/native-seed/sdk-pin.json"))
+       selected-pin (json/decode (File/read! "research/native-seed/incremental-sdk-pin.json"))
+       selected (System/fetch_env! "BL_SDK_PRODUCT")
+       _ (assert (= selected (get selected-pin "sdk")))
+       _ (assert (= (get old-pin "descriptor_sha256") (sha (File/read! (Path/join (get old-pin "sdk") "artifact.json")))))
+       _ (assert (= (get selected-pin "descriptor_sha256") (sha (File/read! (Path/join selected "artifact.json")))))
+       original-root (get old-pin "source")
+       selected-root (get selected-pin "source")
+       relevant ["priv/boot/reader.bl" "priv/boot/reader-node.bl" "priv/boot/rt.bl"
+                 "priv/boot/compiler.bl" "priv/boot/anf.bl" "priv/boot/core.bl"
+                 "priv/boot/sugar.bl" "priv/boot/diag.bl" "priv/host/compiler_data.bl"
+                 "priv/host/form_meta.bl" "priv/host/meta.bl"]
+       sources
+       (mapv (fn [path]
+               (let [original (File/read! (Path/join original-root path))
+                     current (File/read! (Path/join selected-root path))]
+                (assert (erlang/=:= original current))
+                {:path path :sha256 (sha original) :original (Path/join original-root path)
+                 :selected (Path/join selected-root path)})) relevant)
+       source-file (Path/join original-root "priv/boot/reader.bl")
+       original (File/read! source-file)
+       scalar-file (Path/expand (nth args 3))
+       scalar-bytes (File/read! scalar-file)
+       scalar-receipt (json/decode scalar-bytes)
+       _ (assert (= "bl.native.vertical-ignored-char-proof" (get scalar-receipt "schema")))
+       _ (assert (= "checked" (get scalar-receipt "status")))
+       _ (assert (= "integer-only" (get scalar-receipt "domain")))
+       _ (assert (= (sha original) (get scalar-receipt "source-sha256")))
+       _ (assert (= false (get scalar-receipt "native-lowering-proof")))
+       _ (assert (= false (get scalar-receipt "compiler-proof-authority")))
+       forms (reader/read-syntax original source-file)
+       facts (codebase/index-forms {} "reader" forms nil {:mode :calls})
+       helper (only-one (filter #(= "ignored-char?" (codebase/defn-form %)) forms) "original helper")
+       _ (assert (some #(= "ignored-char?" (:fn/name %)) (:fn facts)))
+       header (only-one (filter #(= "ns" (named %)) forms) "original namespace")
+       name-node (second (rn/node-items header))
+       _ (assert (= "reader" (rn/node-name (rn/node-form name-node))))
+       name-pos (positioned name-node)
+       helper-body (last (rn/node-items helper))
+       body-pos (positioned helper-body)
+       original-body (codepoint-slice original (:offset body-pos) (:end-offset body-pos))
+       candidate-source (File/read! candidate-file)
+       _ (assert (= (sha candidate-source) (get scalar-receipt "candidate-source-sha256")))
+       candidate-form (only-one (reader/read-syntax candidate-source candidate-file) "formal candidate")
+       _ (assert (= "fn" (named candidate-form)))
+       candidate-items (rn/node-items candidate-form)
+       _ (assert (= ["c"] (mapv #(rn/node-name (rn/node-form %)) (rn/node-items (second candidate-items)))))
+       candidate-body (last candidate-items)
+       candidate-pos (positioned candidate-body)
+       branch (codepoint-slice candidate-source (:offset candidate-pos) (:end-offset candidate-pos))
+       guarded (str "(if (erlang/is_integer c) " branch " " original-body ")")
+       suffix (str (erlang/unique_integer (list :positive)))
+       ref-namespace (str "native.vertical.beam-reference" suffix)
+       fast-namespace (str "native.vertical.beam-candidate" suffix)
+       header-edit {:start (:offset name-pos) :end (:end-offset name-pos) :text ref-namespace}
+       ref-source (apply-edits original [header-edit])
+       fast-source (apply-edits original [(assoc header-edit :text fast-namespace)
+                                          {:start (:offset body-pos) :end (:end-offset body-pos) :text guarded}])
+       corpus (File/read! corpus-file)
+       kernel (kernel-snapshot)
+       _ (File/write! (Path/join output "source-facts.json")
+          (json/encode {:original {:path source-file :sha256 (sha original)}
+                        :helper {:name "ignored-char?" :position (rn/node-pos helper)
+                                 :body-position body-pos :body-sha256 (sha original-body)}
+                        :namespace-position name-pos :candidate {:path candidate-file :sha256 (sha candidate-source)
+                          :body-position candidate-pos :branch-sha256 (sha branch)
+                          :canonical-branch-sha256 (sha (erlang/term_to_binary (codebase/node-data candidate-body) (list :deterministic)))}
+                        :edits {:reference [header-edit] :candidate [(assoc header-edit :text fast-namespace)
+                                 {:start (:offset body-pos) :end (:end-offset body-pos) :text guarded}]}
+                        :all-other-source-segments-copied-verbatim true :sources sources}))
+       reference (compile-private! "reference" ref-namespace ref-source (Path/join output "reference.bl"))
+       candidate (compile-private! "candidate" fast-namespace fast-source (Path/join output "candidate.bl"))
+       setup-compiles (count-compiles)
+       _ (assert (= 2 setup-compiles))
+       _ (same-kernel! kernel)
+       original-forms (reader/read-string corpus attribution)
+       chars (list 0 9 10 13 44 32 65 955 -1 1114111)
+       cases (list -10000000000000000000000000000000000000000000000000 -1 0 8 9 10 13 32 44 65
+                   955 1114111 1114112 10000000000000000000000000000000000000000000000000
+                   nil false true " " "32" "λ" 32.0 9.0 1.5 32M [32] {:value 32} (with-meta [32] {:tag "original"}))]
+  (assert (= 6 (count original-forms)))
+  (reset! stage :differential)
+  (doseq [value cases]
+   (assert (erlang/=:=
+            (request reference #(erlang/apply (:helper %) (list value)))
+            (request candidate #(erlang/apply (:helper %) (list value))))))
+  (assert (erlang/=:= original-forms (read-request reference corpus)))
+  (assert (erlang/=:= original-forms (read-request candidate corpus)))
+  (dotimes [_ 3] (read-request reference corpus) (read-request candidate corpus))
+  (reset! stage :measurement)
+  (dotimes [batch 5]
+   (same-kernel! kernel)
+   (let [old-helper #(helper-request reference chars)
+         fast-helper #(helper-request candidate chars)
+         old-read #(read-request reference corpus)
+         fast-read #(read-request candidate corpus)]
+    (if (even? batch)
+     (do (measure! "helper-original" 0 batch 1 old-helper)
+         (measure! "helper-candidate" 1 batch 1 fast-helper)
+         (measure! "read-original" 0 batch 3 old-read)
+         (measure! "read-candidate" 1 batch 3 fast-read))
+     (do (measure! "helper-candidate" 1 batch 1 fast-helper)
+         (measure! "helper-original" 0 batch 1 old-helper)
+         (measure! "read-candidate" 1 batch 3 fast-read)
+         (measure! "read-original" 0 batch 3 old-read))))
+   (same-kernel! kernel))
+  (assert (= setup-compiles (count-compiles)))
+  (assert (erlang/=:= original-forms (read-request reference corpus)))
+  (assert (erlang/=:= original-forms (read-request candidate corpus)))
+  (same-kernel! kernel)
+  (assert (= before-context (BeamLisp.Env/capture)))
+  (File/write! (Path/join output "receipt.json")
+   (json/encode {:schema "bl.native.vertical-beam-reader-observation" :version 1 :qualification false
+    :scope "two privately compiled derived Reader namespaces; same original Source except namespace/helper Int guard"
+    :sdk {:original old-pin :selected selected-pin} :corpus {:path corpus-file :sha256 (sha corpus) :attribution attribution}
+    :same-original-reader-source-as-native true :differential-cases (count cases) :reader-forms-equal true
+    :scalar-proof {:path scalar-file :sha256 (sha scalar-bytes) :candidate-source-sha256 (sha candidate-source)
+                   :scope "Int branch evidence; wrapper/fallback/BEAM lowering observed separately"
+                   :compiler-proof-authority false}
+    :setup @setup-rows :setup-compile-source-calls setup-compiles :timings @timing-rows
+    :kernel (mapv #(dissoc % :value) kernel)
+    :owner "BeamLisp.AOT/compile_source; private Env fork; retained physical code; no contextual factory-v4 claim"
+    :limits ["closed serial experiment; no SDK mutation or arbitrary callback admission"
+             "helper batch outer repetition1 contains10000actual helper calls; whole-reader row has3reads"
+             "source compilation and loading excluded from timing; scope entry included symmetrically"
+             "raw helper prototype does not establish whole-compiler/native35x deficit solved"]}))
+  (println "VERTICAL_BEAM_READER_PASS"))
+ (catch error
+  (File/write! (Path/join output "blocker.json")
+   (json/encode {:schema "bl.native.vertical-beam-reader-blocker" :version 1
+     :stage (name @stage) :kind (str (or (:kind (ex-data error)) (:original error) :unknown))
+     :error (str error) :sdk (System/get_env "BL_SDK_PRODUCT")
+     :scope "existing ordinary AOT/private-env owner; no fallback publication or policy change attempted"}))
+  (throw error))
+ (finally
+  (erlang/trace_pattern compile-pattern false (list :local :call_count))
+  (doseq [product (reverse @products)]
+   (try (when (:lease product) (BeamLisp.Env/release_code! (:lease product)))
+    (catch error (swap! cleanup conj {:kind :lease-release-failed :error (str error)}))))
+  (doseq [scope (reverse @scopes)]
+   (try (BeamLisp.Env/destroy scope)
+    (catch error (swap! cleanup conj {:kind :scope-destroy-failed :error (str error)}))))
+  (doseq [product (reverse @products)]
+   (try (swap! cleanup conj {:namespace (:namespace product)
+                            :modules (mapv #(erlang/atom_to_binary %) (:modules product))
+                            :retired (BeamLisp.Env/retire_modules! (:modules product))})
+    (catch error (swap! cleanup conj {:kind :module-retirement-failed :error (str error)}))))
+  (File/write! (Path/join output "cleanup.json")
+   (json/encode {:context-restored (= before-context (BeamLisp.Env/capture)) :results @cleanup}))))
