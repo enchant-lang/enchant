@@ -1,0 +1,91 @@
+; SDK-only capture of the production actor producer after its ENV import fix.
+; No namespace publication or replacement, graph build, runtime/policy copy,
+; generated-output edit, or alternative emitter. Inner forms stay original.
+(ns native.js-producer
+ (:require [js.actor :as actor] [js.build :as build] [reader-node :as rn] [bl.json :as json]))
+(defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn identity [path] {:path path :sha256 (sha (File/read! path))})
+(defn activate []
+ (let [pin (json/decode (File/read! "research/native-seed/sdk-pin.json"))
+       descriptor (File/read! (str (System/get_env "BL_SDK_PRODUCT") "/artifact.json"))
+       _ (assert (= (get pin "descriptor_sha256") (sha descriptor)))
+       _ (assert (= descriptor (File/read! (str (get pin "sdk") "/artifact.json"))))
+       path "priv/lib/js/actor.bl" old-path (str (get pin "source") "/" path)
+       old (File/read! old-path) source (File/read! path)
+       provider-path (BeamLisp.Loader/source_path "js.actor")
+       _ (assert (= old (File/read! provider-path)))
+       _ (assert (= "838f57ced45ce56776c24729e7703d36f6991c16e9f86270f407161a6328a65c" (sha old)))
+       _ (assert (= "5a53fbcb6a88ef939a9c62792c1898ac8b774d0d7b11301a3553ffeacd721bf4" (sha source)))
+       _ (assert (= source (String/replace old "\"import * as E_ from \"" "\"import { ENV as E_ } from \"")))
+       defs (build/definition-values (build/read-forms path))
+       select (fn [name]
+        (let [rows (vec (filter #(= name (:name %)) defs))]
+         (assert (= 1 (count rows))) (assert (= :fn (:kind (first rows)))) (:form (first rows))))
+       writer (select "write-bundle!") staged-build (select "build-one")
+       fn-items (rn/node-items (rn/node-form staged-build))
+       _ (assert (= "fn" (rn/node-name (rn/node-form (first fn-items)))))
+       _ (assert (= "build-one" (rn/node-name (rn/node-form (second fn-items)))))
+       clauses (vec (filter (fn [clause]
+                    (= 5 (count (rn/node-items (first (rn/node-items clause)))))) (rest (rest fn-items))))
+       _ (assert (= 1 (count clauses))) clause (first clauses)
+       _ (assert (= ["dir" "app" "output" "extras" "opts"]
+          (mapv #(rn/node-name (rn/node-form %)) (rn/node-items (first (rn/node-items clause))))))
+       ; The original public /5 body; /3 and /4 are default-argument wrappers.
+       entry (rn/list-node (cons (rn/sym-node "fn") (rn/node-items clause)))
+       bindings (rn/->tuple [:vector (list (rn/sym-node "write-bundle!") writer)])
+       capsule (rn/list-node (list (rn/sym-node "let") bindings entry))
+       value (BeamLisp.Env/isolated (fn []
+        (BeamLisp.Compiler/eval_form capsule
+         (assoc (BeamLisp.Compiler/new_env "js.actor") :target :beam :file path))))
+       _ (assert (erlang/is_function value 5))
+       module (elem (erlang/fun_info value :module) 1)
+       _ (assert (String/starts_with? (erlang/atom_to_binary module) "Elixir.BeamLisp.Eval.M"))]
+  {:value value :record {:schema "bl.native.production-js-capsule" :version 1
+    :source (identity path) :sdk-source (identity old-path) :sdk-provider (identity provider-path) :sdk-pin pin
+    :members ["write-bundle!/4" "build-one/5"] :logical-namespace "js.actor"
+    :evaluation :canonical-anonymous-eval :namespace-publication false
+    :generated-output-adaptation :none :sole-source-delta :named-ENV-import}}))
+(defn prepare! [producer request]
+ (let [app (:application request) out (:output request) parent-path (:graph-parent request)
+       parent (json/decode (File/read! parent-path))
+       proof-path "research/native-seed/evidence/original-actor-corpus/qualification.json"
+       proof (json/decode (File/read! proof-path))
+       pin (get-in producer [:record :sdk-pin])
+       _ (assert (= "bl.native.original-actor-corpus" (get parent "schema")))
+       _ (assert (= "javascript" (get parent "target"))) _ (assert (= pin (get parent "sdk-pin")))
+       _ (assert (= "pass" (get proof "status"))) _ (assert (= pin (get proof "sdk")))
+       _ (assert (= (sha (File/read! parent-path)) (get (get proof "inputs") (Path/expand parent-path))))
+       graph (Path/expand (str (Path/dirname parent-path) "/canonical"))
+       dependencies-path (str graph "/dependencies.json")
+       dependencies (json/decode (File/read! dependencies-path))
+       _ (assert (= "bl.js.dependencies" (get dependencies "schema")))
+       _ (assert (= "core" (get dependencies "entry")))
+       inputs (mapv (fn [[namespace spec]]
+                (let [row (identity (get spec "path"))]
+                 (assert (= (:sha256 row) (get spec "source-sha256"))) row)) (get dependencies "namespaces"))
+       ; Only immutable graph assets, not the historical actor bundle/producer.
+       assets (vec (filter #(String/starts_with? (Path/expand (get % "path")) (str graph "/")) (get parent "assets")))
+       _ (assert (= 21 (count assets)))
+       _ (doseq [row assets]
+           (assert (= (get row "sha256") (sha (File/read! (get row "path")))))
+           (assert (= (get row "sha256") (get (get proof "inputs") (Path/expand (get row "path"))))))
+       _ (doseq [relative ["priv/lib/js/actor/runtime.bl" "priv/lib/js/actor/host.mjs"
+                           "priv/lib/js/actor/module.mjs" "priv/lib/js/actor/native.mjs"
+                           "priv/lib/js/native-values.mjs" "priv/lib/js/build.bl" "priv/lib/js/emit.bl"]]
+           (assert (= (File/read! relative) (File/read! (str (get pin "source") "/" relative)))))
+       _ (actor/write-runtime! out (str graph "/rt.mjs"))
+       _ ((:value producer) out (Path/basename app) "bundle.mjs" []
+           {:source-root (Path/dirname app) :native-manifest (str graph "/native-modules.json") :native-base graph})
+       generated (vec (sort (Path/wildcard (str out "/**/*.mjs"))))
+       manifest {:schema "bl.native.original-actor-corpus" :version 1 :target :javascript
+        :status :prepared-not-executed :application (identity app) :runtime (identity "priv/lib/js/actor/runtime.bl")
+        :assertion-adaptation :none :source-path-adaptation :none :sdk-pin pin :producer (:record producer)
+        :graph-parent (identity parent-path) :graph-qualification (identity proof-path) :graph-assets assets
+        :inputs (vec (concat inputs (mapv identity
+          [app "priv/lib/js/actor/runtime.bl" "priv/lib/js/actor/host.mjs" "priv/lib/js/actor/module.mjs"
+           "priv/lib/js/emit.bl" "priv/lib/js/build.bl" "priv/lib/js/actor.bl"
+           "research/native-seed/src/native/js-producer.bl" "research/native-seed/sdk-pin.json"
+           dependencies-path (str graph "/native-modules.json")])))
+        :assets (mapv identity generated) :artifact (identity (str out "/out/bundle.mjs"))
+        :host (identity (str out "/host.mjs"))}]
+  (File/write! (str out "/manifest.json") (json/encode manifest)) manifest))

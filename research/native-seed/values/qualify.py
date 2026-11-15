@@ -23,6 +23,8 @@ ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'research/native
 BASE = ROOT / 'research/native-seed'
 sys.path.insert(0, str(BASE))
 from native_elf import configuration, build_native, digest, HARD, DEADLINE
+sys.path.insert(0, str(BASE / 'corpus'))
+from js_admission import admit as admit_javascript
 
 APPLICATION = {'path': 'research/native-seed/fixtures/values-parity.bl',
                'sha256': 'f073dfeee16d6078bc4c50bcdd23b7c98d1432153df56c6d9bec049f6e0e3e7a'}
@@ -91,7 +93,7 @@ def check_rows(rows):
 
 
 
-def validate_actor_oracles(manifest, beam, pin, identity, path_for, report):
+def validate_actor_oracles(manifest, beam, pin, identity, path_for, report, fresh_oracle_path):
     """Fresh original OTP snippets against six already-qualified raw logs.
 
     Protocol projection is the original verifiers' rule/trace boundary. The
@@ -224,6 +226,38 @@ def validate_actor_oracles(manifest, beam, pin, identity, path_for, report):
             differences = sorted(key for key in set(actual) | set(beam_projection) if actual.get(key) != beam_projection.get(key))
             raise RuntimeError(role + '/' + budget + ' differs from fresh native BEAM: ' + str(differences))
         results[role + '/' + budget] = {'original_assertions': 461, 'protocol_observations': 52, 'same_as_beam': True}
+    # Independently refreshed JS-only evidence; historical full/native evidence
+    # remains intact. No mutable native compiler/host path enters this oracle.
+    identity(manifest['original-javascript'])
+    fresh_oracle_path = path_for(fresh_oracle_path)
+    fresh = json.loads(fresh_oracle_path.read_text())
+    identity({'path': str(fresh_oracle_path), 'sha256': digest(fresh_oracle_path)})
+    if (fresh.get('schema') != 'bl.native.original-actor-oracle' or fresh.get('status') != 'complete'
+            or fresh.get('target') != 'javascript' or fresh.get('native-execution') is not False
+            or fresh.get('application') != ACTOR_APPLICATION or fresh.get('runtime') != oracle['runtime']
+            or fresh.get('sdk-pin') != pin or set(fresh.get('budgets', {})) != {'default', '17', '41'}
+            or fresh['inputs'].get(str(path_for(manifest['original-javascript']['path']))) != manifest['original-javascript']['sha256']):
+        raise RuntimeError('current production writer lacks its exact original461 JS-only qualification')
+    for name, expected in fresh['inputs'].items():
+        identity({'path': name, 'sha256': expected})
+    identity(fresh['js-qualification'])
+    qualified = json.loads(path_for(fresh['js-qualification']['path']).read_text())
+    if (qualified.get('schema') != 'bl.native.original-js-qualification' or qualified.get('status') != 'pass'
+            or qualified.get('native_qualification') is not False or qualified.get('native_execution') is not False
+            or qualified.get('checks_per_budget') != 461 or qualified.get('results') != fresh['budgets']):
+        raise RuntimeError('current original JS corpus lacks a complete scope-specific receipt')
+    for budget in ('default', '17', '41'):
+        prior = parent['results'][budget]['native']
+        actual = fresh['budgets'][budget]
+        if actual['labels'] != prior['labels'] or actual['traces'] != prior['traces']:
+            raise RuntimeError('refreshed JS diverges from the retained original native corpus')
+        runs = [run for run in qualified['runs'] if run.get('budget') == budget]
+        if len(runs) != 1 or runs[0].get('exit') != 0 or runs[0].get('timed_out') is not False:
+            raise RuntimeError('refreshed original JS budget was not executed successfully')
+        identity(runs[0]['log'])
+        if projection(path_for(runs[0]['log']['path']).read_text(), expected_counts) != beam_projection:
+            raise RuntimeError('refreshed JS protocol differs from the fresh original BEAM oracles')
+    report['fresh_original_javascript_qualified'] = True
     report['lifecycle_beam_parity'] = True
     report['original_actor_beam_oracles'] = {'status': 'pass', 'sdk_vm_pid': oracle['vm-pid'],
         'code': 'four exact original Elixir literals', 'fresh_beam_protocol_observations': 52,
@@ -240,6 +274,7 @@ def main():
     parser.add_argument('--cache', type=Path, default=BASE / 'out/proc-unit-cache')
     parser.add_argument('--standard-bindings', action='store_true')
     parser.add_argument('--node', type=Path, default=shutil.which('node'))
+    parser.add_argument('--javascript-oracle', type=Path, default=BASE / 'evidence/original-actor-js-only/oracle.json')
     args = parser.parse_args()
     folder = args.plan.resolve()
     manifest_path = folder / 'manifest.json'
@@ -333,24 +368,13 @@ def main():
                 or beam.get('observation-count') != 377 or not isinstance(beam.get('otp'), str)):
             raise RuntimeError('missing fresh qualified-SDK BEAM execution receipt')
         check_rows(beam['rows'])
-        validate_actor_oracles(manifest, beam, pin, identity, path_for, report)
+        validate_actor_oracles(manifest, beam, pin, identity, path_for, report, args.javascript_oracle)
         javascript, native = manifest['javascript'], manifest['native']
-        for row in [javascript['parent'], javascript['qualification'], javascript['artifact'], *javascript['assets'], *native.values()]:
+        for row in [javascript['manifest'], javascript['artifact'], *javascript['assets'], *native.values()]:
             identity(row)
-        parent = json.loads(path_for(javascript['parent']['path']).read_text())
-        if (parent.get('schema') != 'bl.native.original-actor-corpus' or parent.get('version') != 1
-                or parent.get('target') != 'javascript' or parent.get('sdk-pin') != pin
-                or parent.get('assertion-adaptation') != 'none' or parent.get('source-path-adaptation') != 'none'):
-            raise RuntimeError('production JS graph lacks its matching Source/SDK admission')
-        proof = json.loads(path_for(javascript['qualification']['path']).read_text())
-        if (proof.get('schema') != 'bl.native.original-actor-qualification' or proof.get('status') != 'pass'
-                or proof.get('sdk') != pin or proof.get('original_actor_corpus_qualified') is not True
-                or proof.get('inputs', {}).get(str(path_for(javascript['parent']['path']))) != javascript['parent']['sha256']):
-            raise RuntimeError('reused production JS graph lacks its actual prior qualification')
-        for row in [*parent['inputs'], *parent['assets']]:
-            identity(row)
-            if proof['inputs'].get(str(path_for(row['path']))) != row['sha256']:
-                raise RuntimeError('production JS input was not in its prior qualification: ' + row['path'])
+        captured_js = admit_javascript(path_for(javascript['manifest']['path']), bind, path_for, application=APPLICATION)
+        if captured_js['sdk-pin'] != pin or captured_js['artifact'] != javascript['artifact'] or captured_js['assets'] != javascript['assets']:
+            raise RuntimeError('values JS program differs from its current canonical producer capture')
         link = json.loads(path_for(native['link']['path']).read_text())
         if (link.get('schema') != 'bl.native.proc-link' or link.get('version') != 1
                 or link.get('sdk-pin') != pin or link.get('runtime-definitions') != 202

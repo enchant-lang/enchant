@@ -2,7 +2,7 @@
 ; checked compiler closure, and already-qualified production JS graph.
 (ns native.prepare-values-parity
  (:require [native.proc-link :as linker] [native.artifact :as artifact]
-           [js.actor :as actor] [bl.json :as json]))
+           [native.js-producer :as producer] [bl.json :as json]))
 (def base "research/native-seed")
 (def args (BeamLisp/argv))
 (def closure (or (first args) (str base "/out/compiler-closure")))
@@ -106,18 +106,18 @@
   :cancellation-scope [:explicit-and-linked-process-kill :bounded-GenServer.call-exit]
   :standalone-timer-cancellation-oracle false}))
 
-(assert (= "bl.native.original-actor-corpus" (get parent "schema")))
-(assert (= "javascript" (get parent "target")))
-(assert (= pin (get parent "sdk-pin")))
-(doseq [row (concat (get parent "inputs") (get parent "assets"))]
- (assert (= (get row "sha256") (linker/digest (File/read! (get row "path"))))))
-(def graph (Path/expand (str (Path/dirname js-parent) "/canonical")))
+(def production-producer (producer/activate))
+(def original-source-manifest (json/decode (File/read! (str base "/out/original-actor-corpus/manifest.json"))))
+(def original-js-out (str out "/original-javascript"))
+(def original-js (producer/prepare! production-producer
+ {:application "research/js-actors/test.bl" :output original-js-out :graph-parent js-parent}))
+(File/write! (str original-js-out "/manifest.json")
+ (json/encode (assoc original-js :original-body (get original-source-manifest "body")
+   :clock-model (get original-source-manifest "clock-model") :javascript-clock :node-real-millisecond
+   :preparer (linker/source-identity (str base "/values/prepare.bl")))))
 (def js-out (str out "/javascript"))
-(actor/write-runtime! js-out (str graph "/rt.mjs"))
-(actor/build-one js-out "values-parity.bl" "bundle.mjs" []
- {:source-root (str base "/fixtures") :native-manifest (str graph "/native-modules.json")
-  :native-base graph})
-(def js-assets (vec (sort (Path/wildcard (str js-out "/**/*.mjs")))))
+(def values-js (producer/prepare! production-producer
+ {:application app :output js-out :graph-parent js-parent}))
 (def result (linker/build-project
  {:application app :runtime "priv/lib/js/actor/runtime.bl"
   :bridges (str base "/bridges.bl") :links (str base "/actor-links.edn")
@@ -143,10 +143,9 @@
   :assertion-adaptation :none :source-path-adaptation :none :source-interpreter false
   :beam (linker/source-identity (str out "/beam.json"))
   :actor-oracles (linker/source-identity (str out "/actor-oracles.json"))
-  :javascript {:parent (linker/source-identity js-parent)
-               :qualification (linker/source-identity parent-proof-path)
-               :artifact (linker/source-identity (str js-out "/out/bundle.mjs"))
-               :assets (mapv linker/source-identity js-assets)}
+  :javascript {:manifest (linker/source-identity (str js-out "/manifest.json"))
+               :artifact (:artifact values-js) :assets (:assets values-js)}
+  :original-javascript (linker/source-identity (str original-js-out "/manifest.json"))
   :native {:program (linker/source-identity (str out "/program.scm"))
            :host (linker/source-identity host) :prelude (linker/source-identity (str closure "/prelude.scm"))
            :link (linker/source-identity (str out "/link.json"))}
@@ -155,6 +154,7 @@
     (str base "/sdk-pin.json") (str base "/toolchain-pin.json")
     (str base "/src/native/proc-link.bl") (str base "/src/native/proc.bl")
     (str base "/src/native/artifact.bl") (str base "/src/native/scheme.bl")
+    (str base "/src/native/js-producer.bl") (str base "/corpus/js_admission.py")
     "priv/lib/js/actor.bl" "priv/lib/js/actor/host.mjs" "priv/lib/js/actor/module.mjs"
     "priv/lib/js/emit.bl" "priv/boot/core.bl" "priv/boot/rt.bl"
     "test/bl/numeric_equality_test.bl" "research/js-actors/numeric-values.bl"])}))

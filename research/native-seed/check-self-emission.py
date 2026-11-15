@@ -118,11 +118,122 @@ class OwnedTree:
         return {"tracked_processes": len(self.members), "errors": errors}
 
 
+def admit_host_parts(receipt_path, bind, path_for, base, out, stage, build_path, prefix):
+    """Admit a derived image without modifying the original whole-host receipt."""
+    bind(receipt_path)
+    receipt = json.loads(receipt_path.read_text())
+    require(receipt.get("schema") == "bl.native.host-parts-build" and receipt.get("version") == 1
+            and receipt.get("status") == "built-not-executed" and receipt.get("executed") is False
+            and receipt.get("source_interpreter") is False and receipt.get("anf_interpreter") is False
+            and receipt.get("compile_deadline_seconds") == 120
+            and receipt.get("component_byte_limit") == 65536
+            and receipt.get("exact_host_concatenation") is True,
+            "derived host image lacks its exact bounded ABI partition admission")
+    require(receipt["parent_build"] == {"path": str(build_path), "sha256": digest(build_path)}
+            and receipt["original_source"] == {"path": str(out / "stage1.scm"), "sha256": stage["source_sha256"]}
+            and receipt["original_image"] == {"path": str(out / "stage1"), "sha256": stage["executable_sha256"]}
+            and receipt["frozen_host"]["sha256"] == digest(out / "host.scm")
+            and receipt["frozen_host"]["whole_unit_sha256"] == stage["units"][0]["sha256"],
+            "derived host image selects another original compiler/host checkpoint")
+    for name, expected in receipt["inputs"].items():
+        bind(path_for(name), expected)
+    builder = (base / "build-host-parts.py").resolve()
+    require(receipt["inputs"].get(str(builder)) == digest(builder)
+            and receipt["sdk_pin"] == json.loads((base / "sdk-pin.json").read_text()),
+            "derived host builder or SDK pin changed")
+    tools = receipt["tool_identity"]
+    require(tools["driver_sha256"] == digest(builder), "derived host recipe driver changed")
+    no_inline = receipt.get("no_inline_functions")
+    require(type(no_inline) is bool, "derived host optimization choice is ambiguous")
+    declaration = "(declare (separate) (safe) (interrupts-enabled)"
+    if stage["standard_bindings"]:
+        declaration += " (standard-bindings) (extended-bindings)"
+    expected_gsc = ["-prelude", declaration + ")"]
+    require(receipt["scheme_compiler_flags"] == expected_gsc and tools["gsc_flags"] == expected_gsc,
+            "derived host changed separate/safe/interrupt/primitive-binding declarations")
+    original_flags = stage["units"][0]["c_flags"]
+    roles = ("seed", "values", "leaves", "lazy", "extra", "compiler", "text-ffi")
+    names = (*HOST_SOURCES, "host/native-text.scm")
+    parts = receipt["host_parts"]
+    require(len(parts) == 7, "derived host must retain all seven exact ABI components")
+    c_order, object_order, segments = [], [], []
+    def record(row):
+        path = path_for(row["path"])
+        bind(path, row["sha256"])
+        return path
+    for ordinal, (part, role, name) in enumerate(zip(parts, roles, names)):
+        source = base / name
+        require(part["ordinal"] == ordinal and part["role"] == role
+                and path_for(part["source"]["path"]) == source,
+                "derived host component was omitted or reordered")
+        record(part["source"])
+        expected = (HEADER if ordinal == 0 else b"") + source.read_bytes() + b"\n"
+        segment = record(part["segment"])
+        require(segment.read_bytes() == expected and part["bytes"] == len(expected) <= 65536,
+                "derived host component changed its exact Source bytes")
+        segments.append(expected)
+        flags = ["-O0" if role == "text-ffi" else "-O1", *original_flags[1:]]
+        if role != "text-ffi" and no_inline:
+            flags.append("-fno-inline-functions")
+        require(part["c_flags"] == flags, "derived host changed its exact C/ABI flags")
+        cfile, obj = record(part["c"]), record(part["object"])
+        translation = json.loads(record(part["translation_receipt"]).read_text())
+        object_receipt = json.loads(record(part["object_receipt"]).read_text())
+        require(translation["request"] == {"role": role, "source_sha256": part["segment"]["sha256"], "tools": tools}
+                and translation["outputs"] == {str(cfile): part["c"]["sha256"]}
+                and object_receipt["request"] == {"translation": translation["request"],
+                    "c_sha256": part["c"]["sha256"], "c_flags": flags}
+                and object_receipt["outputs"] == {str(obj): part["object"]["sha256"]},
+                "derived host component proof does not bind its exact source/tool/flags/output")
+        c_order.append(str(cfile))
+        object_order.append(str(obj))
+    require(b"".join(segments) == prefix, "derived host changed top-level initialization bytes/order")
+    tails = receipt["reused_tails"]
+    require(len(tails) == len(stage["units"]) - 1, "derived host did not reuse every exact original tail")
+    for ordinal, (tail, original) in enumerate(zip(tails, stage["units"][1:]), 1):
+        require(tail == {"original_ordinal": ordinal, "source_sha256": original["sha256"],
+            "c": {"path": original["c"], "sha256": original["c_sha256"]},
+            "object": {"path": original["object"], "sha256": original["object_sha256"]},
+            "c_flags": original["c_flags"], "scheme_compiler_flags": original["scheme_compiler_flags"]},
+            "derived host changed an original tail ordinal, module name, flags or object")
+        c_order.append(str(record(tail["c"])))
+        object_order.append(str(record(tail["object"])))
+    require(receipt["link_order"] == c_order and receipt["object_order"] == object_order
+            and receipt["native_link_flags"] == stage["native_link_flags"]
+            and receipt["link_metadata_c_flags"] == original_flags,
+            "derived host link/initialization order or native ABI flags differ")
+    link_c, link_o = record(receipt["link_metadata"]), record(receipt["link_object"])
+    link_translation = json.loads(record(receipt["link_metadata_receipt"]).read_text())
+    link_object = json.loads(record(receipt["link_object_receipt"]).read_text())
+    native_link = json.loads(record(receipt["native_link_receipt"]).read_text())
+    link_request = {"tools": tools, "ordered_c_units": [{"path": name, "sha256": digest(Path(name))} for name in c_order]}
+    image = record(receipt["image"])
+    require(link_translation["request"] == link_request
+            and link_translation["outputs"] == {str(link_c): receipt["link_metadata"]["sha256"]}
+            and link_object["request"] == {"link": link_request,
+                "c_sha256": receipt["link_metadata"]["sha256"], "c_flags": original_flags}
+            and link_object["outputs"] == {str(link_o): receipt["link_object"]["sha256"]}
+            and native_link["request"] == {"link": link_request,
+                "link_object_sha256": receipt["link_object"]["sha256"],
+                "ordered_objects": [{"path": name, "sha256": digest(Path(name))} for name in object_order],
+                "link_flags": stage["native_link_flags"]}
+            and native_link["outputs"] == {str(image): receipt["image"]["sha256"]},
+            "derived host link receipts changed the exact object/order/flags/image recipe")
+    with image.open("rb") as stream:
+        require(stream.read(4) == b"\x7fELF" and os.access(image, os.X_OK), "derived host image is not an executable ELF")
+    return image, {"receipt": {"path": str(receipt_path), "sha256": digest(receipt_path)},
+        "image": receipt["image"], "host_component_c_flags": [p["c_flags"] for p in parts],
+        "host_source_bytes_and_order_equal": True, "tail_objects_reused": len(tails),
+        "fixpoint_qualified": False}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--out", type=Path, default=Path("research/native-seed/out/compiler-closure"))
     parser.add_argument("--evidence", type=Path, default=Path("research/native-seed/evidence/self-emission.json"))
+    parser.add_argument("--host-parts-receipt", type=Path,
+                        help="admit an explicit same-Source seven-component optimized host image")
     args = parser.parse_args()
     root = args.root.resolve()
     out = (root / args.out).resolve()
@@ -229,6 +340,10 @@ def main() -> int:
             "scheme_compiler_flags": stage["scheme_compiler_flags"],
             "later_gate_failure_does_not_disqualify_the_hash_admitted_stage1": build["status"] == "failed"}
         report["sdk_pin"] = pin
+        if args.host_parts_receipt:
+            image, derived = admit_host_parts(path_for(args.host_parts_receipt), bind, path_for,
+                                              base, out, stage, build_path, prefix)
+            report["derived_native_image"] = derived
         require(not candidate.is_symlink(), "self-emission candidate must not be a symlink")
         require(not candidate.exists() or candidate.is_file(), "self-emission candidate is not a regular file")
         require(str(candidate.resolve()) not in inputs, "self-emission candidate aliases an admitted input")
