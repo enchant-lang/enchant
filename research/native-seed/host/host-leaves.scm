@@ -149,6 +149,21 @@
  (if (or (not (h-is-int a)) (not (h-is-int b)) (< b (- a 1))) (native-badarg "invalid seq range")
   (let loop ((i b) (out '())) (if (< i a) out (loop (- i 1) (cons i out))))))
 
+;; OTP-29.0.1 lists.erl:2866-2880: is_list is a cell tag check. Consume
+;; only the requested prefix; the residual term may be an improper tail.
+;; Reader/take-token calls this on the whole remaining Source every token.
+;; A full proper-list/length preflight here makes that linear Reader quadratic.
+(define (native-lists-split count items)
+ (define (fail reason)
+  (native-raise (bl-key "error") (bl-key reason) (native-capture-stack)))
+ (if (not (and (h-is-int count) (>= count 0) (or (null? items) (pair? items))))
+  (fail "badarg")
+  (let loop ((remaining count) (tail items) (prefix '()))
+   (cond ((= remaining 0) (bl-tuple (list (reverse prefix) tail)))
+    ((pair? tail) (loop (- remaining 1) (cdr tail) (cons (car tail) prefix)))
+    ((null? tail) (fail "badarg"))
+    (else (fail "function_clause"))))))
+
 ;; Generated registration table; names are exact module/function/arity keys.
 (native-add-leaf! "erlang/element/2" (lambda (i t) (native-assert-tuple t) (if (or (< i 1) (> i (bl-count t))) (native-badarg "tuple index") (bl-nth t (- i 1)))))
 (native-add-leaf! "erlang/tuple_size/1" (lambda (t) (bl-count (native-assert-tuple t))))
@@ -213,7 +228,7 @@
 (native-add-leaf! "lists/append/1" (lambda (xss) (apply append (native-assert-list xss))))
 (native-add-leaf! "lists/last/1" (lambda (xs) (if (null? xs) (native-badarg "last") (car (reverse (native-assert-list xs))))))
 (native-add-leaf! "lists/member/2" (lambda (x xs) (let loop ((xs (native-assert-list xs))) (and (pair? xs) (or (bl-key-equal? x (car xs)) (loop (cdr xs)))))))
-(native-add-leaf! "lists/split/2" (lambda (n xs) (if (or (< n 0) (> n (length (native-assert-list xs)))) (native-badarg "split") (bl-tuple (list (native-take xs n) (native-drop xs n))))))
+(native-add-leaf! "lists/split/2" native-lists-split)
 (native-add-leaf! "lists/splitwith/2" native-split-with)
 (native-add-leaf! "lists/sublist/2" (lambda (xs n) (native-take xs (min (length xs) n))))
 (native-add-leaf! "lists/sublist/3" (lambda (xs start n) (let ((tail (native-drop xs (min (length xs) (- start 1))))) (native-take tail (min (length tail) n)))))
