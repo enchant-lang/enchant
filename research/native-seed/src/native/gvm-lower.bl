@@ -1,0 +1,193 @@
+; Separate, finite scalar GVM lowering pilot. No qualified native profile is
+; overwritten. Canonical BL parsing/expansion/ANF happen before this compiler.
+(ns native.gvm-lower
+ (:require [native.gvm :as wire] [native.gvm-layout :as layout]
+           [clojure.string :as string]))
+
+(defn fail [node reason] (wire/refuse node reason))
+(def arithmetic-keys #{:add :sub :mul :div :lt :gt :le :ge :num_eq})
+(defn data-text [data]
+ (cond
+  (and (keyword? data) (contains? arithmetic-keys data)) (str ":" (erlang/atom_to_binary data))
+  (or (vector? data) (erlang/is_list data))
+   (str "(" (string/join " " (mapv data-text data)) ")")
+  :else (wire/wire-text data)))
+(defn new-module [] {:constants [] :constant-index {} :procedures []})
+(defn pool [s value]
+ (let [key (data-text value)]
+  (if-let [id (get (:constant-index s) key)] [s [:obj id]]
+   (let [id (str "k" (count (:constants s)))]
+    [(-> s (update :constants conj [id value]) (assoc-in [:constant-index key] id)) [:obj id]]))))
+(defn literal [s node]
+ (case (:op node)
+  :enil (pool s [])
+  :lit (let [v (:val node)]
+   (cond (nil? v) [s [:glo "bl-nil"]]
+         (or (= true v) (= false v) (string? v) (erlang/is_integer v)) (pool s v)
+         :else (fail node "fixed scalar GVM literal is unsupported")))
+  (fail node "a literal operand was expected")))
+(defn new-procedure [id arity]
+ {:id id :arity arity :next-home 2 :homes {"return" 1} :next-label 1 :blocks []})
+(defn home [p]
+ (let [slot (:next-home p) name (str (:id p) "/home/" slot)]
+  [(-> p (update :next-home inc) (assoc-in [:homes name] slot)) slot]))
+(defn block [p row]
+ (let [id (:next-label p)]
+  [(-> p (update :next-label inc) (update :blocks conj (assoc row :id id))) id]))
+(defn reserve-label [p] [(update p :next-label inc) (:next-label p)])
+(defn slot [n] [:stk n])
+(declare lower)
+
+(defn lower-arguments [s p arguments slots env next options]
+ (reduce (fn [[s p next] [argument destination]]
+           (lower s p argument env destination next false options))
+  [s p next] (reverse (mapv (fn [argument destination] [argument destination]) arguments slots))))
+(defn lower-call [s p callee arguments env destination next tail? options]
+ (when (> (count arguments) 3)
+  (fail callee "first fixed scalar GVM gate admits physical arities0..3"))
+ (let [[p f] (home p)
+       [p slots] (reduce (fn [[p out] _] (let [[p i] (home p)] [p (conj out i)])) [p []] arguments)
+       [p resume] (if tail? [p false] (reserve-label p))
+       [p invoke] (block p {:kind :call :callee (slot f) :arguments (mapv slot slots)
+                           :destination destination :next next :tail tail? :resume resume})
+       [s p heads] (lower-arguments s p arguments slots env invoke options)]
+  (lower s p callee env f heads false options)))
+(defn host-node [operand] {:op :gvm-value :operand operand})
+(defn finite-arguments [node]
+ (loop [n node out []]
+  (case (:op n) :enil out :cons (recur (:tail n) (conj out (:head n))) nil)))
+(defn self-constructor [node env self-name]
+ (when (and self-name (= :apply (:op node)) (= :var (:op (:fn node)))
+            (= self-name (:name (:fn node))) (= 1 (count (:args node)))
+            (= :var (:op (first (:args node))))
+            (= self-name (:name (first (:args node)))))
+  (get env self-name)))
+(defn lower [s p node env destination next tail? options]
+ (if-let [self (self-constructor node env (:self-name options))]
+  (let [[p entry] (block p {:kind :copy :source self :destination destination :next next})]
+   [s p entry])
+ (case (:op node)
+  :lit (let [[s operand] (literal s node) [p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
+  :enil (let [[s operand] (literal s node) [p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
+  :gvm-value (let [[p entry] (block p {:kind :copy :source (:operand node) :destination destination :next next})] [s p entry])
+  :var (if-let [operand (get env (:name node))]
+         (let [[p entry] (block p {:kind :copy :source operand :destination destination :next next})] [s p entry])
+         (fail node "unbound canonical ANF variable"))
+  :global (if-let [operand (when-let [resolve (:global-resolver options)] (resolve node))]
+            (lower s p (host-node operand) env destination next tail? options)
+            (fail node "unresolved global capability"))
+  :remote (if-let [operand (when-let [resolve (:remote-resolver options)] (resolve node))]
+            (lower-call s p (host-node operand) (:args node) env destination next tail? options)
+            (fail node "unresolved remote capability"))
+  :arith (if (contains? arithmetic-keys (:fun node))
+           (let [[s op] (pool s (:fun node))]
+            (lower-call s p (host-node [:glo "bl-arithmetic"])
+             (into [(host-node op)] (:args node)) env destination next tail? options))
+           (fail node "unknown canonical arithmetic operation"))
+  :apply (lower-call s p (:fn node) (:args node) env destination next tail? options)
+  :invoke (if-let [arguments (finite-arguments (:arguments node))]
+            (lower-call s p (:callee node) arguments env destination next tail? options)
+            (fail node "computed/dotted invoke arguments are outside this first probe"))
+  :let (let [[p bound] (home p)
+             [s p body] (lower s p (:body node) (assoc env (:name node) (slot bound)) destination next tail? options)]
+         (lower s p (:init node) env bound body false options))
+  :if (let [[p tested] (home p) [p boolean] (home p)
+            [s p yes] (lower s p (:then node) env destination next tail? options)
+            [s p no] (lower s p (:else node) env destination next tail? options)
+            [p choose] (block p {:kind :branch :condition (slot boolean) :yes yes :no no})
+            [p resume] (reserve-label p)
+            [p truthy] (block p {:kind :call :callee [:glo "bl-truthy"] :arguments [(slot tested)]
+                                 :destination boolean :next choose :tail false :resume resume})]
+        (lower s p (:test node) env tested truthy false options))
+  :do (let [statements (:stmts node)]
+        (if (empty? statements)
+         (lower s p {:op :lit :val nil} env destination next tail? options)
+         (let [[s p last] (lower s p (last statements) env destination next tail? options)]
+          (reduce (fn [[s p next] statement]
+            (let [[p ignored] (home p)] (lower s p statement env ignored next false options)))
+           [s p last] (reverse (butlast statements))))))
+  (fail node "ANF operation is outside the first fixed scalar GVM gate"))))
+
+(defn internal-jump [label frame]
+ [:jump [:lbl label] false false false false frame])
+(defn emit-block [p body-state row]
+ (let [frame (layout/gvm-frame-wire body-state) id (:id row)
+       destination (:destination row)
+       variable (when destination (str (:id p) "/home/" destination))]
+  (case (:kind row)
+   :copy
+    (let [copied (layout/gvm-copy-row body-state (:source row) (slot destination) variable)]
+     [[:block id :simple frame (:row copied) (internal-jump (:next row) frame)]])
+   :branch
+    [[:block id :simple frame
+      (layout/gvm-branch-row body-state (:condition row) (:yes row) (:no row))]]
+   :return
+    (let [ret (layout/gvm-return-layout body-state (:source row) (str (:id p) "/result"))]
+     [(into [:block id :simple frame] (conj (:rows ret) (:jump ret)))])
+   :call
+    (let [tail? (:tail row) result (str (:id p) "/call/" id "/result")
+          call (layout/gvm-call-layout layout/gvm-pinned-target body-state (:callee row) (:arguments row)
+                  (str (:id p) "/call/" id) (:resume row) result tail?)
+          invoke (into [:block id :simple frame] (conj (:rows call) (:jump call)))]
+     (if tail? [invoke]
+      (let [copied (layout/gvm-copy-row (:state call) [:reg 1] (slot destination) variable)]
+       [invoke [:block (:resume row) :return (:return-frame call)
+                (:row copied) (internal-jump (:next row) frame)]])))
+   (throw (ex-info "native GVM: invalid compiler-owned block" {:kind (:kind row)})))))
+
+(defn emit-fixed-definition [s definition id options]
+ (let [node (:node definition) parts (BeamLisp.CompilerData/self_application_parts node)
+       function (if parts (:inner parts) node)
+       clause (BeamLisp.CompilerData/simple_function_clause function)
+       names (when clause (mapv :name (:pats clause)))]
+  (when-not (and clause (= (count names) (count (distinct names))) (<= (count names) 3))
+   (fail node "only one unguarded distinct-variable fixed clause of arity0..3 is admitted"))
+  (let [p (new-procedure id (count names))
+        parameters (mapv #(str id "/parameter/" %) (range (count names)))
+        entry (layout/gvm-entry-layout layout/gvm-pinned-target parameters [])
+        p (assoc p :homes (:homes entry) :next-home (+ 2 (count names)))
+        env (into {} (mapv (fn [name parameter] [name (slot (get (:homes entry) parameter))]) names parameters))
+        self-name (when parts (:name node))
+        env (if self-name (assoc env self-name [:proc id]) env)
+        [p answer] (home p) [p finish] (block p {:kind :return :source (slot answer)})
+        [s p body] (lower s p (:body clause) env answer finish true (assoc options :self-name self-name))
+        initialized (layout/gvm-initialize-homes (:state entry) (:homes p) [:glo "bl-nil"])
+        body-state (assoc (:state initialized) :registers {})
+        entry-id (:next-label p)
+        prologue (into [:block entry-id :entry (:entry-frame entry)]
+                   (concat (:rows entry) (:rows initialized) [(internal-jump body (layout/gvm-frame-wire body-state))]))
+        blocks (vec (mapcat #(emit-block p body-state %) (sort-by :id (:blocks p))))]
+   [s (into [:proc id (count names) 0 prologue] blocks)])))
+
+(defn emit-definitions [definitions options]
+ (let [definitions (vec definitions)
+       ids (into {} (map-indexed (fn [i d] [(:name d) (str "p" (inc i))]) definitions))
+       prefix (or (:publication-prefix options) "native-gvm-scalar/")
+       scoped (assoc options :global-resolver
+                (fn [node]
+                 (if-let [id (and (= (:namespace options) (:ns node)) (get ids (:name node)))]
+                  [:proc id]
+                  (when-let [resolve (:global-resolver options)] (resolve node)))))
+       [s procedures]
+       (reduce (fn [[s out] d]
+        (let [[s procedure] (emit-fixed-definition s d (get ids (:name d)) scoped)]
+         [s (conj out procedure)])) [(new-module) []] definitions)
+       entry (wire/entry-frame) result (wire/result-frame)
+       [s nil-operand] (literal s {:op :lit :val nil})
+       publications (mapv (fn [d] [:copy [:proc (get ids (:name d))]
+                                   [:glo (str prefix (:name d))] entry]) definitions)
+       main [:proc "p0" 0 0
+             (into [:block 1 :entry entry]
+              (concat publications [[:copy nil-operand [:reg 1] result]
+                [:jump [:reg 0] false false false false result]]))]
+       data [:bl-native-gvm 1 [:module (or (:module options) "native_gvm_scalar")]
+             [:entry "p0"] (into [:constants] (:constants s))
+             (into [:procedures main] procedures)]]
+  {:data data :text (str (data-text data) "\n")
+   :manifest {:schema "bl.native.gvm-emission" :version 1 :status :emitted-not-executed
+              :scope :fixed-scalar-abi-pilot :functions (count definitions)
+              :publication-prefix prefix :target layout/gvm-pinned-target
+              :source-frames-qualified false :wrong-arity-qualified false
+              :entry-tick-qualified false :authored-scheme false
+              :source-interpreter false :anf-interpreter false :gvm-interpreter false
+              :c-lambda-stepper false}}))

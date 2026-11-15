@@ -1,0 +1,117 @@
+(ns native.gvm-layout)
+
+; Pure Source compiler layout helpers for native.gvm-lower. No GVM/ANF eval.
+; Operand/row tags match the pinned DATA importer. Slot maps below are low->high;
+; only frame-wire reverses them. Target values MUST be checked by the importer
+; against target.label-info/jump-info and its actual C target constraints.
+(def gvm-pinned-target
+ {:registers 5 :argument-registers 3 :frame-reserve 3 :frame-alignment 4})
+(defn gvm-assert-target [target]
+ (when-not (= target gvm-pinned-target)
+  (throw (ex-info "native GVM: unsupported pinned target layout" {:target target})))
+ target)
+(defn gvm-frame-wire [state]
+ [:frame (:size state)
+  (mapv #(get (:slots state) % false) (reverse (range 1 (inc (:size state)))))
+  (mapv #(get (:registers state) % false) (range 5))
+  (vec (:closed state))
+  (vec (distinct (concat (vals (:slots state)) (vals (:registers state)))))])
+(defn gvm-drop-var [state variable]
+ (-> state
+  (update :slots #(into {} (remove (fn [[_ v]] (= variable v)) %)))
+  (update :registers #(into {} (remove (fn [[_ v]] (= variable v)) %)))))
+(defn gvm-copy-row [state source destination variable]
+ (let [[space index] destination
+       state (if (= variable "return") (gvm-drop-var state variable) state)
+       state (case space
+              :stk (-> state (assoc-in [:slots index] variable) (update :size max index))
+              :reg (assoc-in state [:registers index] variable)
+              (throw (ex-info "native GVM: copy destination must be a location" {:destination destination})))]
+  {:state state :row [:copy source destination (gvm-frame-wire state)]}))
+(defn gvm-copy-rows [state moves]
+ (reduce (fn [{:keys [state rows]} [source destination variable]]
+          (let [step (gvm-copy-row state source destination variable)]
+           {:state (:state step) :rows (conj rows (:row step))}))
+  {:state state :rows []} moves))
+(defn gvm-live-top [state]
+ (reduce max 0 (keys (:slots state))))
+(defn gvm-align [number alignment]
+ (* alignment (erlang/div (+ number (dec alignment)) alignment)))
+(defn gvm-entry-layout [target parameters captures]
+ (gvm-assert-target target)
+ (let [n (count parameters) f (max 0 (- n (:argument-registers target)))
+       slots (into {} (map (fn [i] [i (nth parameters (dec i))]) (range 1 (inc f))))
+       registers (into {0 "return"}
+                   (map (fn [i] [(- i f) (nth parameters (dec i))]) (range (inc f) (inc n))))
+       registers (if (seq captures) (assoc registers 4 "closure-env") registers)
+       entry {:size f :slots slots :registers registers :closed (vec captures)}
+       ; Shift incoming stacked args up ONE slot, highest first, BEFORE slot1
+       ; receives return. This also works when arity exceeds three.
+       stacked (map (fn [i] [[:stk i] [:stk (inc i)] (nth parameters (dec i))]) (reverse (range 1 (inc f))))
+       registered (map (fn [i] [[:reg (- i f)] [:stk (inc i)] (nth parameters (dec i))])
+                    (range (inc f) (inc n)))
+       captured (map-indexed (fn [i v] [[:clo [:reg 4] (inc i)] [:stk (+ n 2 i)] v]) captures)
+       spilled (gvm-copy-rows entry (concat stacked [[[:reg 0] [:stk 1] "return"]] registered captured))
+       homes (into {"return" 1}
+               (map-indexed (fn [i v] [v (+ 2 i)]) (concat parameters captures)))]
+  {:entry-frame (gvm-frame-wire entry) :rows (:rows spilled)
+   :state (:state spilled) :homes homes}))
+(defn gvm-call-layout
+ "Arguments/callee are ALREADY evaluated ANF operands. Unique call-id owns
+  temporary variable IDs. Returns call rows/jump frame and optional resume frame."
+ [target state callee arguments call-id return-label result-variable tail?]
+ (gvm-assert-target target)
+ (when-not (= "return" (get (:slots state) 1))
+  (throw (ex-info "native GVM: caller return must be rooted in slot1" {})))
+ (when-not (if tail? (= false return-label) (and (erlang/is_integer return-label) (> return-label 0)))
+  (throw (ex-info "native GVM: invalid call continuation" {:tail tail? :return return-label})))
+ (let [n (count arguments) a (:argument-registers target) f (max 0 (- n a))
+       h (gvm-live-top state)
+       start (if tail? 0 (gvm-align (+ h (:frame-reserve target)) (:frame-alignment target)))
+       target-var (str call-id "/target")
+       arg-vars (mapv #(str call-id "/arg/" %) (range n))
+       ; Snapshot every operand before stack overlap or register installation.
+       ; This is deliberately conservative and can be reduced after proof.
+       snapshots (concat [[callee [:stk (inc h)] target-var]]
+                   (map-indexed (fn [i operand] [operand [:stk (+ h 2 i)] (nth arg-vars i)]) arguments))
+       snap (gvm-copy-rows state snapshots)
+       registered (map (fn [i] [[:stk (+ h 1 i)] [:reg (- i f)] (nth arg-vars (dec i))])
+                    (range (inc f) (inc n)))
+       ; Nontail output is above input: memmove BACKWARDS. Tail output is
+       ; below the scratch area: memmove FORWARDS. Register args are read first.
+       stacked-indices (if tail? (range 1 (inc f)) (reverse (range 1 (inc f))))
+       stacked (map (fn [i] [[:stk (+ h 1 i)] [:stk (+ start i)] (nth arg-vars (dec i))]) stacked-indices)
+       return-move (if tail? [[[:stk 1] [:reg 0] "return"]] [])
+       installed (gvm-copy-rows (:state snap)
+                   (concat [[[:stk (inc h)] [:reg 4] target-var]] registered return-move stacked))
+       outgoing-slots (into (if tail? {} (:slots state))
+                        (map (fn [i] [(+ start i) (nth arg-vars (dec i))]) (range 1 (inc f))))
+       outgoing-registers (into {4 target-var}
+                           (map (fn [i] [(- i f) (nth arg-vars (dec i))]) (range (inc f) (inc n))))
+       outgoing-registers (if tail? (assoc outgoing-registers 0 "return") outgoing-registers)
+       outgoing {:size (+ start f) :slots outgoing-slots
+                 :registers outgoing-registers :closed (:closed state)}
+       resumed (when-not tail?
+                 (assoc state :size start :registers {1 result-variable}))]
+  {:rows (into (:rows snap) (:rows installed))
+   :jump [:jump [:reg 4] return-label n true true (gvm-frame-wire outgoing)]
+   :return-frame (if tail? false (gvm-frame-wire resumed))
+   :state resumed :result-operand [:reg 1]}))
+(defn gvm-return-layout [state operand result-variable]
+ (let [copied (gvm-copy-rows state
+                [[operand [:reg 1] result-variable] [[:stk 1] [:reg 0] "return"]])
+       outgoing (assoc (:state copied) :size 0 :slots {} :registers {0 "return" 1 result-variable})]
+  {:rows (:rows copied)
+   :jump [:jump [:reg 0] false false true false (gvm-frame-wire outgoing)]}))
+; Optional final-function home initialization. future-homes is the emitter's
+; complete varID->slot map; all other slots/reserve remain empty/dead. The
+; initializer operand is one existing host value (normally [:glo "bl-nil"]).
+(defn gvm-initialize-homes [state future-homes initializer]
+ (gvm-copy-rows state
+  (map (fn [[variable slot]] [initializer [:stk slot] variable])
+   (sort-by second (remove (fn [[_ slot]] (contains? (:slots state) slot)) future-homes)))))
+(defn gvm-branch-row
+ "boolean-operand must be the result of the existing bl-truthy host procedure;
+  raw BL nil is not Scheme false. The importer resolves ##not as a GSC primitive."
+ [state boolean-operand true-label false-label]
+ [:ifjump "##not" [boolean-operand] false-label true-label true (gvm-frame-wire state)])

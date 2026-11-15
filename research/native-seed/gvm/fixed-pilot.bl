@@ -1,0 +1,42 @@
+; SDK-only finite pilot using the ORIGINAL selected scalar definition.
+(ns native.gvm-fixed-pilot
+ (:require [compiler :as compiler] [js.build :as build]
+           [native.gvm-lower :as gvm] [native.scheme :as scalar]
+           [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def fixture (or (first args) "research/native-seed/direct/fixtures/scalar.bl"))
+(def output (or (second args) "research/native-seed/out/gvm-fixed-pilot"))
+(def wanted #{"ds-tail"})
+(def source (File/read! fixture))
+(def forms (BeamLisp.Ns.Reader/read source {:file fixture}))
+(def definitions (vec (filter #(contains? wanted (:name %)) (build/definition-values forms))))
+(when-not (= wanted (set (mapv :name definitions)))
+ (throw (ex-info "GVM fixed pilot could not select the exact original scalar definitions" {})))
+(def namespace "native.gvm.fixed-scalar")
+(def compiled
+ (mapv (fn [definition]
+   (compiler/reset-fresh!)
+   (assoc definition :ns namespace
+    :node (compiler/compile (:form definition) (assoc (compiler/new-env namespace) :file fixture))))
+  definitions))
+(def options
+ {:module "native_gvm_fixed_scalar" :namespace namespace
+  :publication-prefix "native-gvm-scalar/"
+  :global-resolver
+   (fn [node]
+    (when (contains? #{namespace "core" "rt"} (:ns node))
+     (when-let [leaf (get scalar/core-leaves (:name node))] [:glo leaf])))
+  :remote-resolver
+   (fn [node]
+    (let [module (:mod node) name (erlang/atom_to_binary (:fun node))]
+     (when (contains? #{:Elixir.BeamLisp.Ns.Core :Elixir.BeamLisp.Ns.Rt} module)
+      (when-let [leaf (get scalar/core-leaves name)] [:glo leaf]))))})
+(def emitted (gvm/emit-definitions compiled options))
+(File/mkdir_p! output)
+(File/write! (str output "/module.gvm-data") (:text emitted))
+(File/write! (str output "/manifest.json")
+ (json/encode (assoc (:manifest emitted) :fixture fixture :definitions (mapv :name definitions)
+  :fixture-sha256 (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))
+  :definition-anf-sha256 (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary compiled)) (list (tuple :case :lower)))
+  :wire-sha256 (Base/encode16 (crypto/hash :sha256 (:text emitted)) (list (tuple :case :lower))))))
+(println (str "GVM_FIXED_DATA_EMITTED " (count compiled) " original definitions"))
