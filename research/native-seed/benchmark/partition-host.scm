@@ -74,7 +74,16 @@
   ((head? f 'for-each)
    (if (not (and (pair? (cdr f)) (head? (cadr f) 'lambda))) (error "unknown eager callback" f))
    (for-each eager (cddr (cadr f))) (for-each eager (cddr f)))
-  ((memq (car f) '(apply map call-with-values call/cc with-exception-catcher))
+  ;; This fixed host also constructs its five immutable reference-class names
+  ;; with bl-key. Its checked body only appends ':' and interns the symbol.
+  ;; Keep every other eager map/callback outside the admitted grammar.
+  ((head? f 'map)
+   (if (or (memq 'bl-key reflected)
+           (not (equal? f '(map bl-key '("Elixir.BeamLisp.Atom" "Elixir.BeamLisp.Volatile"
+                                        "Elixir.BeamLisp.Promise" "Elixir.BeamLisp.Future"
+                                        "Elixir.BeamLisp.Reduced")))))
+    (error "unreviewed eager map" f)))
+  ((memq (car f) '(apply call-with-values call/cc with-exception-catcher))
    (error "unreviewed eager higher-order operation" (car f)))
   (else (for-each eager f))))
 (for-each (lambda (f)
