@@ -205,7 +205,7 @@
               ((copy)
                (gvm-import-shape instruction 'copy 4)
                (c#bb-put-non-branch! bb
-                (c#make-copy (operand (cadr instruction)) (location (caddr instruction))
+                (c#make-copy (and (cadr instruction) (operand (cadr instruction))) (location (caddr instruction))
                  (frame (cadddr instruction)) #f))
                (loop (cdr todo)))
               ((apply)
