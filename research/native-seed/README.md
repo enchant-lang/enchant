@@ -22,10 +22,42 @@ Gambit supplies the native runtime, collector and continuations.
 | Real clock + readiness + blocking FFI | [14 actor checks × 3 budgets](evidence/real-actors/qualification.json) |
 | Native self-hosting | [Stage 2 = stage 3; all three executables qualified](evidence/scheme-fixpoint/qualification.json) |
 
-Active work reuses BL's existing build-plan keys, guarded Reader reuse, AOT
-workspaces and warm realm replay for native Scheme compilation. The target
-adapter must preserve those invalidation and ownership contracts; new native
-warm/edit speed results remain unqualified.
+Native incrementality uses BL's existing owners:
+
+```text
+build-plan / Source interfaces → AOT workspace → original Source ANF
+                                                     ↓
+unit-store/artifact-target! ← Scheme → Gambit C → loadable native module
+```
+
+`native.aot-scheme` emits the existing constructor's plans and publication
+operations before BEAM rewriting. `native.aot-target` connects it to the
+existing unit store; `native_module.py` transports Scheme bytes to C/native
+objects. Namespace products retain exact Source, phase, emitter, ABI and tool
+identities. The existing session/realm transport keeps the compiler warm.
+No Chez dependency or additional incremental compiler policy is introduced.
+
+`aot-prepare.bl` checks cold/warm/copy/edit behavior and independent native
+bytes. `aot-probe.bl` uses the existing artifact process owner for native
+ownership, replacement and retained-closure/GC checks. The
+[qualified prototype](evidence/incremental-aot/qualification.json) passes
+154 focused owner assertions and 18 native checks. Cold native emission takes
+3.752 s; warm verification takes 1.570 s with zero staging/emission/compiler
+jobs. Independent native products match byte for byte.
+The cross-namespace planner check is separate from this one-namespace native
+prototype; incremental rebuilding of the complete self-hosted compiler remains
+future work.
+
+Reproduce the namespace prototype with the separately qualified AOT SDK pin
+(both output directories must be fresh):
+
+```sh
+research/native-seed/run --sdk-pin research/native-seed/incremental-sdk-pin.json \
+  run research/native-seed/aot-prepare.bl -- research/native-seed/out/my-aot
+research/native-seed/run --sdk-pin research/native-seed/incremental-sdk-pin.json \
+  run research/native-seed/aot-probe.bl -- \
+  research/native-seed/out/my-aot/proof.json research/native-seed/out/my-probe
+```
 
 `native.chunks` caches checked ANF / resolution emission chunks;
 `native_elf.py` caches exact Gambit C and native objects. Both preserve Source,
@@ -52,7 +84,8 @@ The service uses the pinned SDK, listens on loopback behind the tailnet
 publisher, and has a 2 GiB memory limit with swap disabled. Stop it when the
 requested development review is retired.
 
-`run` verifies `sdk-pin.json` and invokes that retained SDK directly. It does
+`run` verifies `sdk-pin.json` and invokes that retained SDK directly. Its
+`--sdk-pin FILE` option selects another explicit immutable SDK receipt. It does
 not build another SDK when unrelated integration edits change the checkout's
 selection. Each bounded snapshot command exits its VM. `toolchain-pin.json`
 records the immutable Gambit and Clang products.
