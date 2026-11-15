@@ -30,6 +30,7 @@ def main():
     parser.add_argument("data", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--name", default="module", help="unique owned native module basename")
+    parser.add_argument("--route", choices=("c", "llvm", "both"), default="both")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,100}", args.name):
         parser.error("module basename must be a bounded identifier")
@@ -48,6 +49,7 @@ def main():
                           (Path(__file__), data, importer, reader, BASE / "toolchain-pin.json")},
                "tools": tools, "flags": FLAGS, "child_deadline_seconds": 120,
                "module_linker_name": obj.name,
+               "route": args.route,
                "jobs": []}
 
     def save():
@@ -79,14 +81,20 @@ def main():
     try:
         run("import", [str(gambit / "bin/gsc"), "-e", expression], env)
         common = [clang, *FLAGS, "-I" + str(gambit / "gambit/include")]
-        run("c", [*common, "-shared", "-rdynamic", str(c), "-ldl", "-lm", "-o", str(obj)])
-        run("llvm-ir", [*common, "-S", "-emit-llvm", str(c), "-o", str(ir)])
-        run("llvm-link", [clang, "-O1", "-fPIC", "-shared", "-rdynamic", str(ir),
-                          "-ldl", "-lm", "-o", str(llvm_obj)])
+        artifacts = [c]
+        if args.route in ("c", "both"):
+            run("c", [*common, "-shared", "-rdynamic", str(c), "-ldl", "-lm", "-o", str(obj)])
+            artifacts.append(obj)
+        if args.route in ("llvm", "both"):
+            run("llvm-ir", [*common, "-S", "-emit-llvm", str(c), "-o", str(ir)])
+            run("llvm-link", [clang, "-O1", "-fPIC", "-shared", "-rdynamic", str(ir),
+                              "-ldl", "-lm", "-o", str(llvm_obj)])
+            artifacts.extend((ir, llvm_obj))
         receipt["artifacts"] = {str(p): {"sha256": digest(p), "bytes": p.stat().st_size}
-                                for p in (c, obj, ir, llvm_obj)}
+                                for p in artifacts}
         receipt["status"] = "compiled-not-qualified"
-        print("NATIVE_GVM_MODULE_C_AND_LLVM_COMPILED", flush=True)
+        marker = {"both": "C_AND_LLVM", "c": "C", "llvm": "LLVM"}[args.route]
+        print("NATIVE_GVM_MODULE_" + marker + "_COMPILED", flush=True)
     except BaseException as error:
         receipt.update(status="failed", error=str(error))
         raise
