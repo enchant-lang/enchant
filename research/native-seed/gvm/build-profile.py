@@ -91,6 +91,15 @@ def admit(directory):
         raise ValueError('incomplete GVM compiler plan')
     if len(unit_rows) != len(plan['units']) or len(source_rows) != len(plan['sources']):
         raise ValueError('manifest/index unit or Source count differs')
+    core = ('\n'.join(lines[:-1]) + '\n').encode('ascii')
+    if (hashlib.sha256(core).hexdigest() != plan['index-core-sha256']
+            or files['assembly.scm'] != plan['assembly-sha256']
+            or files['metadata.scm'] != plan['metadata-sha256']
+            or files['host.scm'] != plan['host']['source-sha256']):
+        raise ValueError('declared compiler assembly/metadata/host identity differs')
+    for row, item in zip(source_rows, plan['sources']):
+        if row[2] != item['sha256']:
+            raise ValueError('declared Source identity differs')
     for row, unit in zip(unit_rows, plan['units']):
         expected = ['U', unit['phase'], unit['name'], unit['module'], unit['data']['path'],
                     unit['data']['sha256'], unit['manifest']['path'], unit['manifest']['sha256'],
@@ -202,7 +211,8 @@ def build_profile(source, out, cache, plan, report, tools, gambit, clang, gsc,
             data = source / unit['data']['path']
             request = {'data': sha(data), 'name': unit['module'], 'tools': tools,
                        'environment': environment, 'builder': sha(BASE / 'gvm/build-module.py'),
-                       'importer': sha(BASE / 'gvm/import.scm'), 'route': 'both', 'flags': FLAGS}
+                       'importer': sha(BASE / 'gvm/import.scm'),
+                       'reader-check': sha(BASE / 'gvm/reader-check.scm'), 'route': 'both', 'flags': FLAGS}
             directory = cache / 'units' / key(request)
             value = cached(directory, request)
             reused = value is not None
@@ -298,7 +308,7 @@ def compile_entry(source, directory, gambit, clang, gsc, runtime, run):
             artifacts.append(obj)
             objects.append(str(obj))
         executable = selected / 'compiler'
-        run('entry-' + route + '-elf', [clang, *objects, str(runtime), '-pthread', '-ldl', '-lm',
+        run('entry-' + route + '-elf', [clang, *objects, str(runtime), '-pthread', '-rdynamic', '-ldl', '-lm',
              '-Wl,-rpath,' + str(runtime.parent), '-o', str(executable)], directory)
         artifacts.append(executable)
     return artifacts
