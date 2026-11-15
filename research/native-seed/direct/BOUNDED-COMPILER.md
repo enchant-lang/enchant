@@ -11,14 +11,13 @@ flowchart LR
  Order --> Next[Next compiler emits same bounded plan]
 ```
 
-Integrate `c-units.bl`, rewritten `c-bootstrap.bl`/`c-produce.bl`, `c-remote.bl`
-and the host/helper files. Closed compiler entries add `native.c`,
+The separate checked C profile reuses the 18 Scheme compiler namespaces and adds `native.c`,
 `native.c-remote`, `native.c-units`, `native.c-bootstrap`, and selected C eval
 adapter. **Do not add SDK-only `native.c-produce` to the image:** its JSON/
 resolution dependencies stay on the SDK. The self-image adds no JSON codec,
 Rust NIF or replacement Source parser.
 
-The host order is frozen host → C machine → shared raw-function predicate →
+The host order is frozen host → C machine → Source frames → shared raw-function predicate →
 static MFAs → external-function weak peeler → dynamic loader → Clang loader →
 official Gambit `_digest`/mkdir → late compiler router → pinned configuration.
 All components and the aggregate have explicit hashes. Compile the whole host
@@ -30,7 +29,7 @@ hook before `rt/seed-core`; Scheme targets during seeding remain callable.
 python3 research/native-seed/direct/prepare-host.py \
   --frozen-host research/native-seed/out/compiler-closure/host.scm
 research/native-seed/run run research/native-seed/src/native/c-produce.bl \
-  research/native-seed/out/compiler-closure/partition.json \
+  research/native-seed/out/direct-closure/partition.json \
   research/native-seed/out/direct-compiler \
   research/native-seed/out/direct-host/host.scm \
   research/native-seed/out/direct-host/host.components.json
@@ -70,9 +69,10 @@ BL_NATIVE_C_UNIT_ROOT=/ABS/out/direct-compiler \
 
 Keep the existing 240-second self-emission deadline. The host routes this
 flag through native-global `native.c-bootstrap/main`; no bootstrap dependency
-cycle is added. Full direct self-hosting also requires dynamic macro Source
-evaluation to select the C eval adapter. The old Scheme eval path is not proof
-that macros executed in C.
+cycle is added. The finite `host/eval-node/2` boundary selects the actual compiled C eval adapter.
+The C host rejects missing C bodies or loaders; it has no Scheme evaluation fallback
+for authored code. The qualification wrapper permits Scheme evaluation of owned
+bundle/ledger data only and records actual C loads, steps and retained closures.
 
 Required gates: original Source compiler corpus, byte fixpoint, original actor
 corpus at default/17/41, and `fixtures/core-forwarding.bl` through the C backend.
@@ -95,5 +95,6 @@ Publication is exactly once per load. The host keeps its three existing
 120-second loader deadlines, plus 30 seconds execution/cleanup. A single-load
 result cannot qualify this seam.
 
-This worker ran no VM/compiler/test. Independent allocator/collector/
-continuation replacement and captured actor resolvers remain separate gates.
+Use `fixpoint-direct.py --help` for the complete C/LLVM qualification driver.
+Full direct compiler execution and fixpoint are separate from the qualified
+Scheme actor gates. The value host still uses Gambit allocation and collection.

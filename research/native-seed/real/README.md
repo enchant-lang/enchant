@@ -11,8 +11,8 @@ flowchart LR
   Receive --> Close[Source closes jobs/library/producer]
 ```
 
-Integrate the sibling `host/`, `fixtures/`, and this `real/` directory under
-`research/native-seed/`. No tracked file is changed by this staged contribution.
+The retained qualification is in `../evidence/real-actors/qualification.json`: 14 checks
+at each of the default, 17 and 41 turn budgets, including complete cleanup.
 
 One producer under the qualified SDK:
 
@@ -58,4 +58,4 @@ registered eventfd fails explicitly.
 This gate establishes canonical BL actor progress with real clock/FFI and
 readiness on the Gambit native path. It does not establish direct-ANF-C,
 compiler fixpoint, or an independent collector/runtime; those remain separate
-gates. This staged version has only received static source review.
+gates.
