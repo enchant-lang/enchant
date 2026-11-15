@@ -215,10 +215,10 @@
 
 (defn internal-jump [label frame]
  [:jump [:lbl label] false false false false frame])
-(defn emit-block [p body-state row]
+(defn emit-block [prefix body-state row]
  (let [frame (layout/gvm-frame-wire body-state) id (:id row)
        destination (:destination row)
-       variable (when destination (str (:id p) "/home/" destination))]
+       variable (when destination (str prefix "/home/" destination))]
   (case (:kind row)
    :copy
     (let [copied (layout/gvm-copy-row body-state (:source row) (slot destination) variable)]
@@ -227,7 +227,7 @@
     [[:block id :simple frame
       (layout/gvm-branch-row body-state (:condition row) (:yes row) (:no row))]]
    :return
-    (let [ret (layout/gvm-return-layout body-state (:source row) (str (:id p) "/result"))]
+    (let [ret (layout/gvm-return-layout body-state (:source row) (str prefix "/result"))]
      [(into [:block id :simple frame] (conj (:rows ret) (:jump ret)))])
    :close
     (let [closed (layout/gvm-copy-row body-state [:glo "bl-nil"] (slot destination) variable)]
@@ -237,9 +237,9 @@
        (concat (when (:export-global row) [[:copy (slot destination) [:glo (:export-global row)] frame]])
                [(internal-jump (:next row) frame)]))])
    :call
-    (let [tail? (:tail row) result (str (:id p) "/call/" id "/result")
+    (let [tail? (:tail row) result (str prefix "/call/" id "/result")
           call (layout/gvm-call-layout layout/gvm-pinned-target body-state (:callee row) (:arguments row)
-                  (str (:id p) "/call/" id) (:resume row) result tail?)
+                  (str prefix "/call/" id) (:resume row) result tail?)
           invoke (into [:block id :simple frame] (conj (:rows call) (:jump call)))]
      (if tail? [invoke]
       (let [copied (layout/gvm-copy-row (:state call) [:reg 1] (slot destination) variable)]
@@ -294,7 +294,12 @@
        kind (if (= (:id p) (:owner-id p)) :entry [:entry (count names) (count captures) (boolean (:gvm-rest? function))])
        prologue (into [:block entry-id kind (:entry-frame entry)]
                   (concat (:rows entry) (:rows initialized) [(internal-jump body (layout/gvm-frame-wire body-state))]))
-       blocks (vec (mapcat #(emit-block p body-state %) (sort-by :id (:blocks p))))
+       ; The formatter needs only this short ID, never the entire owner p
+       ; containing every block/nested body. Keep callback custody finite and
+       ; force this one traversal eagerly before returning the owned unit.
+       prefix (:id p)
+       blocks (vec (BeamLisp.CompilerData/eager_mapcat
+                     (fn [row] (emit-block prefix body-state row)) (sort-by :id (:blocks p))))
        p (update p :entries conj {:id (:id p) :entry entry-id :arity (count names)
                                  :logical-arity (:gvm-logical-arity function)
                                  :global (:gvm-export-global function)
