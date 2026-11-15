@@ -1,0 +1,43 @@
+; Stage-zero replay of exact captured compiler ANF into the SAME GVM formatter
+; used by native.gvm-bootstrap. No compiler/compile or alternate Source reader.
+(ns native.gvm-produce
+ (:require [native.gvm-units :as units] [native.bootstrap :as bootstrap]
+           [native.artifact :as artifact] [native.resolution :as resolution] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def input (or (first args) "research/native-seed/out/gvm-closure/partition.json"))
+(def output (or (second args) "research/native-seed/out/gvm-compiler"))
+(def host-path (nth args 2 nil))
+(def ledger-path (nth args 3 nil))
+(when-not (and host-path ledger-path)
+ (throw (ex-info "GVM compiler producer needs exact assembled host and host.components.json paths" {})))
+(def closure (artifact/read-closure input))
+(when-not (and (= "bl.native.compiler-closure" (:schema closure)) (= 1 (:version closure)))
+ (throw (ex-info "bounded GVM producer admits only the closed compiler; actor source-link resolver remains deferred" {})))
+(def prepared (mapv #(get (:units closure) %) (:order closure)))
+(def metadata
+ {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure)
+  :resolution (resolution/build closure) :provider-sources (:provider-sources closure)
+  :options (:options closure) :stubs (:stubs closure) :core-links (:core-links closure)
+  :return-constructor-shapes (:return-constructor-shapes closure)
+  :namespace-modules (mapv (fn [unit] [(:ns unit) (:module unit) (:base-module unit)]) prepared)
+  :stub-modules (mapv (fn [namespace]
+    [namespace (BeamLisp.Link/module_for namespace) (BeamLisp.Emit/base_module_for namespace)]) (:stubs closure))})
+(def raw-ledger (json/decode (File/read! ledger-path)))
+(def ledger
+ {:schema (get raw-ledger "schema") :version (get raw-ledger "version")
+  :runtime-abi (get raw-ledger "runtime-abi")
+  :source-sha256 (get raw-ledger "source_sha256")
+  :components (mapv (fn [row]
+   {:role (get row "role") :sha256 (get row "sha256")}) (get raw-ledger "components"))})
+(def plan (units/write-plan! prepared (bootstrap/data metadata) (File/read! host-path) ledger
+ {:write (fn [path text] (File/write! path text)) :mkdir (fn [path] (File/mkdir_p! path))
+  :digest artifact/sha}
+ output "(native-main (native-command-line))\n"))
+; Reuse this exact metadata and ORIGINAL selected Source for native --eval
+; and --compile-gvm. These are owned data constructors, never emitted BL bodies.
+; SDK-only producers remain outside the selected closed compiler profile.
+(File/write! (str output "/bundle.scm")
+ (bootstrap/data (assoc metadata :units
+  (mapv #(select-keys % [:ns :path :source :requires :module :base-module]) prepared))))
+(File/write! (str output "/plan.json") (json/encode plan))
+(println (str "GVM_COMPILER_EMITTED " (count (:units plan)) " units of at most 32 definitions"))
