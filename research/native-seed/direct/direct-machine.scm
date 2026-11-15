@@ -42,6 +42,7 @@
 ;; Disabled for an arbitrary host. Only a producer that has admitted the exact
 ;; frozen stock host may opt in after assembling the complete addon stack.
 (define native-c-noactor-tick-enabled? #f)
+(define native-c-initial-logical-frames native-logical-frames)
 (define native-c-noactor-ticks-elided 0)
 ;; The late, independently guarded primitive installer owns these hooks.
 (define native-c-pure-bif-enabled? #f)
@@ -291,17 +292,23 @@
 ;; Remains disabled until the complete standard planner stack is installed.
 ;; The late guard proves that a genuine procedure's target/args are unchanged.
 (define native-c-direct-procedure? (lambda (callee) #f))
+(define native-c-direct-closure? (lambda (callee) #f))
+(define native-c-direct-closure-hits 0)
 (define (native-c-apply-action machine callee args)
  (let* ((frames (native-c-site-stack (native-c-machine-ref machine 10) (native-c-machine-ref machine 11)))
         (direct? (native-c-direct-procedure? callee))
-        (plan (if direct? #f
+        (direct-closure? (and (not direct?) (native-c-direct-closure? callee)))
+        (unplanned? (or direct? direct-closure?))
+        (plan (if unplanned? #f
                (parameterize ((native-logical-frames frames)) (native-c-resolve-call callee args))))
-        (callee (if direct? callee (car plan))) (args (if direct? args (cdr plan)))
+        (callee (if unplanned? callee (car plan))) (args (if unplanned? args (cdr plan)))
         (destination (native-c-machine-ref machine 5)) (next (native-c-machine-ref machine 6))
         (tail? (native-c-machine-ref machine 8)))
   (native-c-machine-set! machine 10 frames)
   (if (native-c-closure? callee)
-   (begin (native-c-enter! machine callee args destination next tail?) #f)
+   (begin
+    (if direct-closure? (set! native-c-direct-closure-hits (+ native-c-direct-closure-hits 1)))
+    (native-c-enter! machine callee args destination next tail?) #f)
    (let ((value (parameterize ((native-logical-frames (native-c-machine-ref machine 10)))
                  (if direct? (apply callee args) (native-c-fallback-invoke callee args)))))
     (if tail? (native-c-return! machine value)

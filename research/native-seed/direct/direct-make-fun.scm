@@ -67,6 +67,40 @@
   (set! native-c-direct-procedure? direct?)
   (set! bl-invoke invoke)))
 
+;; Separate from the Scheme-procedure predicate: a C descriptor must still
+;; enter the existing C frame/source/critical path, never Scheme apply.
+;; Existing opt-ins prove the frozen host's initial parameter has no converter.
+(let ((closure? native-c-closure?)
+      (base-invoker native-remote-original-invoke)
+      (base-resolver native-invoke-original-resolve)
+      (multi? native-multi-callable?) (remote? native-c-remote?)
+      (tag? bl-tag?) (invoker bl-invoke)
+      (direct-procedure? native-c-direct-procedure?)
+      (planner native-c-resolve-call)
+      (external-base native-c-resolve-without-external-funs)
+      (remote-base native-c-resolve-without-remote)
+      (logical-frames native-c-initial-logical-frames)
+      (external-ledger native-c-external-funs))
+ (set! native-c-direct-closure?
+  (lambda (callee)
+   (and (or native-c-noactor-tick-enabled? native-c-pure-bif-enabled?)
+        (closure? callee)
+        (not native-c-gc-between-steps?) (eqv? native-c-gc-interval 0)
+        (eq? native-c-closure? closure?)
+        (eq? native-c-fallback-invoke base-invoker)
+        (eq? native-resolve-call base-resolver)
+        (eq? native-multi-callable? multi?) (eq? native-c-remote? remote?)
+        (eq? bl-tag? tag?) (eq? bl-invoke invoker)
+        (eq? native-c-direct-procedure? direct-procedure?)
+        (eq? native-c-resolve-call planner)
+        (eq? native-c-resolve-without-external-funs external-base)
+        (eq? native-c-resolve-without-remote remote-base)
+        (eq? native-logical-frames logical-frames)
+        (eq? native-c-external-funs external-ledger)
+        (not (eq? callee native-c-raw-apply2))
+        (not (eq? callee native-raw-apply))
+        (not (table-ref external-ledger callee #f))))))
+
 ;; Optional four-BIF installer. The complete planner and Source-slot stack
 ;; must be installed above. Captured identities are private lexical proof data.
 (define native-c-pure-bif-seen 0)
