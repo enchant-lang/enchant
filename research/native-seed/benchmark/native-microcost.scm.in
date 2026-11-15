@@ -1,0 +1,51 @@
+;; Existing bridge only. No checks, roots, lookup policy or caches are replaced.
+;; Interpreted observation-loop overhead is exposed by the empty control.
+(define (micro-observe key mode action)
+ (let loop ((batch 0))
+  (if (< batch 5)
+   (begin
+    (##get-monotonic-time! bench-clock 1)
+    (bench-repeat 10000 action)
+    (##get-monotonic-time! bench-clock 2)
+    (let ((seconds
+           (exact->inexact
+            (/ (- (u64vector-ref bench-clock 2) (u64vector-ref bench-clock 1))
+               bench-clock-frequency))))
+     (display "BL_NATIVE_MICROCOST\t") (display key) (display "\t")
+     (display mode) (display "\t") (write batch) (display "\t10000\t")
+     (write seconds) (newline) (force-output))
+    (loop (+ batch 1))))))
+(define (micro-key key arity)
+ ;; This exact key object goes through the existing positive structural cache
+ ;; and its guarded identity front lookup. Retain its content checks unchanged.
+ (bench-repeat 3 (lambda () (native-remote key)))
+ (let* ((resolved (native-remote key))
+        (invoke-resolved
+         (if (= arity 1) (lambda () (resolved 7)) (lambda () (resolved 7 7))))
+        (lookup-invoke
+         (if (= arity 1) (lambda () ((native-remote key) 7))
+                        (lambda () ((native-remote key) 7 7)))))
+  (bench-check-native resolved)
+  (if (not (and (eq? (invoke-resolved) #t) (eq? (lookup-invoke) #t)))
+   (error "native bridge microcost control differs" key))
+  (micro-observe key "lookup" (lambda () (native-remote key)))
+  (micro-observe key "resolved-call" invoke-resolved)
+  (micro-observe key "lookup-and-call" lookup-invoke)))
+(define (micro-run)
+ (native-mark-host-callable! bench-no-eval)
+ (bl-register-callable! bench-no-eval 1)
+ (set! native-leaf-registry
+  (bl-assoc native-leaf-registry "host/eval-scheme/1" bench-no-eval))
+ (set! native-eval-string bench-no-eval)
+ (micro-observe "observer" "empty" (lambda () #t))
+ (micro-key "erlang/is_integer/1" 1)
+ (micro-key "erlang/==/2" 2)
+ ;; Resolve the actual selected module from the installed original bundle,
+ ;; rather than adding a shorthand alias or guessing a physical module name.
+ (bench-check-native (native-global-exact "rt" "k-eqv"))
+ (micro-key
+  (string-append
+   (native-module-name (bl-get native-namespace-modules "rt")) "/k-eqv/2") 2)
+ (display "BL_NATIVE_MICROCOST_DONE\n") (force-output) (exit 0))
+(with-exception-catcher
+ (lambda (failure) (display-exception failure) (newline) (exit 1)) micro-run)
