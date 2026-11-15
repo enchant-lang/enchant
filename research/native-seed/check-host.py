@@ -88,7 +88,7 @@ def main():
         + (BASE / "fixtures/host-source-frames-check.scm").read_text())
     frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
     assert "native compiler-cache checks: 96" in frames, frames
-    assert "native global-cache checks: 32" in frames, frames
+    assert "native global-cache checks: 48" in frames, frames
     assert "native source-frame checks passed" in frames, frames
     (out / "direct-control.scm").write_text(common + "\n"
         + (BASE / "host/host-compiler.scm").read_text() + "\n"

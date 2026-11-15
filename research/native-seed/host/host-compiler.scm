@@ -118,10 +118,26 @@
    (reverse (bl-invoke (native-global-exact "rt" "lazy-fold-source")
              (list native-cursor-list-step '() value)))
    (bl-invoke (native-global-exact "rt" "k-to-list") (list value)))))
+(define (native-local-var? ns name)
+ ;; A present nil/false value is a binding too. Compiled definitions and live
+ ;; interns share local_var?'s Source-visible value domain.
+ (or (native-map-has? native-env-rows (native-row ns name))
+     (native-map-has? native-global-registry (string-append ns "/" name))))
 (define (native-env-link ns name owner?)
- (let ((row (native-resolve-row (native-candidates ns name) (bl-key "link") #f)))
-  (if (eq? row native-missing) (bl-key "error")
-   (bl-tuple (if owner? (list (bl-key "ok") (car row) (cdr row)) (list (bl-key "ok") (cdr row)))))))
+ (if owner?
+  ;; Canonical Env.link_owner stops at a local VALUE without link metadata:
+  ;; baking a later core link would change the Source call's identity.
+  (let loop ((candidates (native-candidates ns name)))
+   (if (null? candidates) (bl-key "error")
+    (let* ((candidate (car candidates)) (owner (car candidate)) (member (cdr candidate))
+           (info (native-env-value (native-row (bl-key "link") owner member))))
+     (cond ((not (eq? info native-missing)) (bl-tuple (list (bl-key "ok") owner info)))
+           ((native-local-var? owner member) (bl-key "error"))
+           (else (loop (cdr candidates)))))))
+  ;; Plain Env.link deliberately keeps its canonical links-only fallback.
+  (let ((row (native-resolve-row (native-candidates ns name) (bl-key "link") #f)))
+   (if (eq? row native-missing) (bl-key "error")
+    (bl-tuple (list (bl-key "ok") (cdr row)))))))
 (define (native-intern ns name value)
  (native-env-put! (native-row ns name) value) value)
 (define (native-declare-ns ns) (native-env-put! (native-row (bl-key "ns") ns) #t))
@@ -388,9 +404,7 @@
 (native-env-leaf! "fetch_exact" 2 (lambda (ns name) (native-fetch ns name #t)))
 (native-env-leaf! "fetch_exact!" 2 (lambda (ns name) (native-fetch! ns name #t)))
 (native-env-leaf! "bound?" 2 (lambda (ns name) (not (eq? (native-fetch ns name) (bl-key "error")))))
-(native-env-leaf! "local_var?" 2 (lambda (ns name)
- (or (native-map-has? native-env-rows (native-row ns name))
-     (native-map-has? native-global-registry (string-append ns "/" name)))))
+(native-env-leaf! "local_var?" 2 native-local-var?)
 (native-env-leaf! "link" 2 (lambda (ns name) (native-env-link ns name #f)))
 (native-env-leaf! "link_owner" 2 (lambda (ns name) (native-env-link ns name #t)))
 (native-env-leaf! "put_link" 3 (lambda (ns name info) (native-env-put! (native-row (bl-key "link") ns name) info)))
