@@ -268,6 +268,9 @@
            (descriptor (vector (vector (string->symbol module-name)) '#() '() 1 main #f)))
      (gvm-import-check (and (= (caddr (cdr main-source)) 0) (= (cadddr (cdr main-source)) 0))
       "GVM module entry must be0arity/0capture")
+     ;; The backend expects purified BBS order: each procedure's first block
+     ;; must be its entry, including when ANF lowering allocated it last.
+     (c#purify-procs all)
      (let ((result (c#target.dump all output (c#make-c-intf '() '() '() '()) descriptor linker-name)))
       (gvm-import-check (procedure? result) "GVM C backend did not produce loader-compatible output")
       (display "GVM_NATIVE_C_EMITTED ") (write output) (newline) (force-output)
