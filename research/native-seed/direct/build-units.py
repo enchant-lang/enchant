@@ -27,7 +27,7 @@ def sha(path):
 
 # One-time exact migration from the immediately preceding reviewed builder.
 # Every other request field and every generated-C/object hash must still match.
-REVIEWED_PREVIOUS_BUILDERS = ("cb8422c9fa4f11a225aeaa8bdf84438f9042d123103646215cfca6554f3556df", "3d446258377ffebe5e20e4602c9d2f9b0b02025b2533d9fecd500ea3df1bd455",)
+REVIEWED_PREVIOUS_BUILDERS = ("24983fb56dabfb8f65585535a799f34f449cf93b6759d0148e08f3910b92ef03", "cb8422c9fa4f11a225aeaa8bdf84438f9042d123103646215cfca6554f3556df", "3d446258377ffebe5e20e4602c9d2f9b0b02025b2533d9fecd500ea3df1bd455",)
 
 
 def main():
@@ -38,6 +38,8 @@ def main():
     parser.add_argument('plan', type=Path)
     parser.add_argument('--build', action='store_true')
     parser.add_argument('--cache', type=Path, default=base / 'out/direct-unit-cache')
+    parser.add_argument('--reuse-build', type=Path,
+                        help='one exact successful old build receipt for reviewed host-key migration; never scanned')
     parser.add_argument('--compile-timeout', type=int, default=120)
     parser.add_argument('--route', choices=('c', 'llvm'), default='c')
     parser.add_argument('--standard-bindings', action='store_true')
@@ -48,6 +50,8 @@ def main():
     args = parser.parse_args()
     out = args.plan.resolve()
     report_path = out / 'build-evidence.json'
+    if args.reuse_build and args.reuse_build.resolve() == report_path:
+        parser.error('reuse receipt must remain immutable; use a fresh output directory')
     report_path.unlink(missing_ok=True)
     report = {'schema': 'bl.native.direct-unit-build', 'version': 1, 'action-abi': 2, 'status': 'running',
               'source_parser': False, 'compiler_run': False, 'runs': [], 'objects': [],
@@ -55,7 +59,9 @@ def main():
               'host_optimization': args.host_optimization, 'host_granularity': args.host_granularity,
               'unit_optimization': args.unit_optimization,
               'unit_optimization_scope': 'indexed-authored-units; assembly/metadata/entry remain O0',
-              'derived_host_variant': args.host_optimization != 0 or args.host_granularity != 'single'}
+              'derived_host_variant': args.host_optimization != 0 or args.host_granularity != 'single',
+              'authored_object_host_binding': 'runtime-interface; exact wrapper/header ABI2+feature1',
+              'host_object_host_binding': 'exact host source'}
     inputs = {}
 
     def bind(path, expected=None):
@@ -105,7 +111,9 @@ def main():
         bind(header)
         if re.findall(r'^#define BL_NATIVE_DIRECT_ABI ([0-9]+)$', header.read_text(), re.MULTILINE) != ['2']:
             raise RuntimeError('direct header requires action ABI2')
-        report.update({'header-action-abi': 2, 'header_sha256': sha(header)})
+        if re.findall(r'^#define BLC_PURE_BIF_V1 ([0-9]+)$', header.read_text(), re.MULTILINE) != ['1']:
+            raise RuntimeError('direct header requires pure BIF feature1')
+        report.update({'header-action-abi': 2, 'pure-bif-abi': 1, 'header_sha256': sha(header)})
         if not 1 <= args.compile_timeout <= 120:
             raise RuntimeError('bounded units retain the existing 120-second compiler deadline')
         index = out / 'index.tsv'
@@ -151,8 +159,17 @@ def main():
                 if not (out / scmfile).read_text().startswith('(native-c-require-action-abi! 2)\n(c-declare '):
                     raise RuntimeError('unit FFI lacks its action ABI2 guard')
                 declaration = '(c-declare ' + json.dumps(control, ensure_ascii=False) + ')'
-                if (out / scmfile).read_text().count(declaration) != 1:
+                ffi = (out / scmfile).read_text()
+                if ffi.count(declaration) != 1:
                     raise RuntimeError('unit FFI does not contain its exact C declaration once')
+                # Check the ACTUAL post-c-declare unit expression, not a guard
+                # string that the self-compiled emitter can carry as data.
+                prefix = '(native-c-require-action-abi! 2)\n'
+                feature_entry = '\n(native-c-publish-loaded! (begin (native-c-require-pure-bif-abi! 1)\n'
+                if (not ffi.startswith(prefix + declaration)
+                        or not ffi[len(prefix) + len(declaration):].startswith(feature_entry)
+                        or '\n#ifndef BLC_PURE_BIF_V1\n' not in control):
+                    raise RuntimeError('unit load must require action ABI2 and pure BIF feature1')
                 units.append({'name': name, 'phase': phase, 'source': out / scmfile,
                               'control': out / cfile, 'count': int(count)})
                 definitions[name] = []
@@ -226,6 +243,39 @@ def main():
         def request_key(request):
             return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
 
+        reuse_objects = {}
+        if args.reuse_build:
+            reuse_path = args.reuse_build.resolve()
+            bind(reuse_path)
+            old_build = json.loads(reuse_path.read_text())
+            if (old_build.get('schema') != 'bl.native.direct-unit-build'
+                    or old_build.get('version') != 1 or old_build.get('status') != 'built-not-executed'
+                    or old_build.get('action-abi') != 2 or old_build.get('header-action-abi') != 2
+                    or old_build.get('compiler_run') is not False
+                    or old_build.get('inputs') != old_build.get('inputs_after')):
+                raise RuntimeError('host-key migration requires an unchanged successful owned build receipt')
+            for row in old_build.get('objects', []):
+                name = row.get('name')
+                if name == 'host':
+                    continue  # A changed host NEVER imports an old implementation.
+                if not isinstance(name, str) or not re.fullmatch(r'u[0-9]{4}', name) or name in reuse_objects:
+                    raise RuntimeError('duplicate/invalid migration object name')
+                reuse_objects[name] = row
+            report['host_key_migration_source'] = {'path': str(reuse_path), 'sha256': sha(reuse_path)}
+
+        # This one reviewed builder is the immediately preceding full-host-key
+        # implementation. No other historical code receives relaxed equality.
+        normalizable_legacy_builder = '24983fb56dabfb8f65585535a799f34f449cf93b6759d0148e08f3910b92ef03'
+
+        def same_object_request(prior, expected):
+            candidate = dict(prior)
+            if expected['name'] != 'host' and prior.get('builder') == normalizable_legacy_builder:
+                if not re.fullmatch(r'[0-9a-f]{64}', str(prior.get('host', ''))):
+                    return False
+                candidate['host'] = None
+            candidate['builder'] = expected['builder']
+            return candidate == expected
+
         def cached_outputs(directory, expected_request, unit):
             receipt = directory / 'object.json'
             if not receipt.is_file():
@@ -286,7 +336,10 @@ def main():
                 report['host_llvm_object_flags'] = unit_llvm_flags
             request = {'action-abi': 2, 'header-action-abi': 2, 'name': name, 'source': sha(unit['source']),
                 'control': sha(unit['control']) if unit['control'] else None,
-                'host': inputs[str((out / 'host.scm').resolve())], 'flags': unit_flags,
+                # Authored wrappers/control are compiled independently; their
+                # imported globals resolve against the current host at load.
+                'host': inputs[str((out / 'host.scm').resolve())] if name == 'host' else None,
+                'flags': unit_flags,
                 'route': args.route, 'gsc_flags': gsc_flags, 'llvm_object_flags': unit_llvm_flags,
                 'builder': sha(here), 'public_build_script': sha(build_script),
                 'compiler_environment': compiler_environment,
@@ -316,13 +369,40 @@ def main():
                                 (unit_flags, unit_llvm_flags), (flags, llvm_object_flags)):
                             prior_request = dict(request, builder=builder, route=route,
                                                  flags=prior_flags, llvm_object_flags=prior_llvm_flags)
+                            # Legacy direct lookup is only for this SAME host.
+                            # Cross-host import needs the explicit receipt below.
+                            if name != 'host' and builder == normalizable_legacy_builder:
+                                prior_request['host'] = inputs[str((out / 'host.scm').resolve())]
                             prior = args.cache.resolve() / request_key(prior_request)
                             if prior != cache:
                                 hit = cached_outputs(prior, prior_request, unit)
                                 if hit and not any(x['directory'] == prior for x in candidates):
                                     candidates.append(hit)
+                # One explicit receipt points to content-addressed owned cache
+                # entries. Relax ONLY host+the exact reviewed builder fingerprint;
+                # source/control/header/public ABI/flags/tools/env all stay equal.
+                if name != 'host' and name in reuse_objects:
+                    row = reuse_objects[name]
+                    old_receipt = Path(row['receipt']['path']).resolve()
+                    bind(old_receipt, row['receipt']['sha256'])
+                    old = json.loads(old_receipt.read_text())
+                    old_request = old.get('request', {})
+                    if (old_request.get('builder') == normalizable_legacy_builder
+                            and same_object_request(old_request, request)):
+                        if (old_receipt.name != 'object.json'
+                                or old_receipt.parent.name != request_key(old_request)):
+                            raise RuntimeError('migration receipt is not its exact content-addressed recipe')
+                        hit = cached_outputs(old_receipt.parent, old_request, unit)
+                        if (not hit or old.get('sha256') != row['sha256']
+                                or row.get('route') != request['route']
+                                or row.get('c_flags') != request['flags']
+                                or row.get('gsc_flags') != request['gsc_flags']
+                                or row.get('llvm_object_flags') != request['llvm_object_flags']):
+                            raise RuntimeError('matched legacy object lacks exact retained bytes/flags')
+                        if not any(x['directory'] == hit['directory'] for x in candidates):
+                            candidates.insert(0, hit)
                 same_object = next((x for x in candidates
-                    if x['details']['request'] == dict(request, builder=x['details']['request']['builder'])), None)
+                    if same_object_request(x['details']['request'], request)), None)
                 raw_origin = same_object or (candidates[0] if candidates else None)
                 if raw_origin:
                     origin_record = bind_origin(raw_origin)
