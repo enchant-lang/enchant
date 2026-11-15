@@ -87,7 +87,7 @@ def main() -> int:
         if gc_interval:
             environment["BL_NATIVE_C_GC_INTERVAL"] = str(gc_interval)
         if fast_mode is not None:
-            for name in ("BL_NATIVE_C_NOACTOR_TICK", "BL_NATIVE_C_PURE_BIFS"):
+            for name in ("BL_NATIVE_C_NOACTOR_TICK", "BL_NATIVE_C_PURE_BIFS", "BL_NATIVE_C_SYMBOL_MFAS"):
                 environment[name] = "1" if fast_mode else "0"
         process = subprocess.Popen(argv, cwd=out, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -274,7 +274,8 @@ def main() -> int:
             report["assembled_host"] = {"path": str(directory), "sha256": sha(aggregate),
                 "program_sha256": sha(actual_program), "source_anf_control_changed": False,
                 "configuration": prepared["optional_extensions"]}
-            if prepared["optional_extensions"] != {"noactor_tick_opt_in": True, "pure_bif_opt_in": True}:
+            if prepared["optional_extensions"] != {"noactor_tick_opt_in": True, "pure_bif_opt_in": True,
+                                                   "symbol_mfa_opt_in": True}:
                 raise RuntimeError("assembled scalar qualification requires both explicit fast-path opt-ins")
             program = actual_program
         before.update({str(path): sha(path) for path in inputs})
