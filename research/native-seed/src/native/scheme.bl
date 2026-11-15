@@ -251,12 +251,71 @@
   (and (= :apply (:op n)) (= :var (:op f))
        (contains? (or (:selves options) {}) (:name f))
        (= 1 (count args)) (= :var (:op (first args))) (= (:name f) (:name (first args))))))
+(defn- scan-loop-safe? [value self arity tail? fuel]
+ (and (pos? @fuel)
+  (do
+   (swap! fuel dec)
+   (cond
+    (erlang/is_map value)
+    (let [op (:op value)]
+     (cond
+      (= op :lit) true
+      (= op :var) (not= self (:name value))
+      (recur-node? value self)
+      (and tail? (= arity (count (:args value)))
+           (= 1 (count (:args (:fn value))))
+           (= :var (:op (first (:args (:fn value)))))
+           (= self (:name (first (:args (:fn value)))))
+           (every? #(scan-loop-safe? % self arity false fuel) (:args value)))
+      (= op :let) (and (not= self (:name value))
+                       (scan-loop-safe? (:init value) self arity false fuel)
+                       (scan-loop-safe? (:body value) self arity tail? fuel))
+      (= op :if) (and (scan-loop-safe? (:test value) self arity false fuel)
+                      (scan-loop-safe? (:then value) self arity tail? fuel)
+                      (scan-loop-safe? (:else value) self arity tail? fuel))
+      (= op :do) (and (every? #(scan-loop-safe? % self arity false fuel) (butlast (:stmts value)))
+                      (scan-loop-safe? (last (:stmts value)) self arity tail? fuel))
+      :else (every? #(scan-loop-safe? % self arity false fuel) (vals (dissoc value :ann)))))
+    (sequential? value) (every? #(scan-loop-safe? % self arity false fuel) value)
+    :else true))))
+(defn- scan-loop-parts [n]
+ (when-let [parts (loop-parts n)]
+  (let [inner (:inner (self-parts (:fn n)))
+        clause (BeamLisp.CompilerData/simple_function_clause inner)
+        names (:vars parts) fuel (atom 10000)]
+   (when (and clause (= (count names) (count (distinct names)))
+              (= (count names) (count (:inits parts)))
+              (not (some #(= (:self parts) %) names))
+              (every? #(scan-loop-safe? % (:self parts) (count names) false fuel) (:inits parts))
+              (scan-loop-safe? (:body parts) (:self parts) (count names) true fuel)) parts))))
+
+(defn- integer-operand? [n options]
+ (or (and (= :lit (:op n)) (erlang/is_integer (:val n)))
+     (and (= :var (:op n)) (contains? (or (:integer-facts options) #{}) (:name n)))))
+(defn- integer-binding [options name value]
+ (assoc options :integer-facts
+  ((if (integer-operand? value options) conj disj) (or (:integer-facts options) #{}) name)))
+(defn- integer-branch [options test]
+ (if (and (:scan-v1? options) (= :remote (:op test)) (= :erlang (:mod test))
+          (= :is_integer (:fun test)) (= 1 (count (:args test))) (= :var (:op (first (:args test)))))
+  (update options :integer-facts (fn [facts] (conj (or facts #{}) (:name (first (:args test)))))) options))
+(defn- integer-intrinsic [node options]
+ (when (and (:scan-v1? options) (= :erlang (:mod node)) (= 2 (count (:args node)))
+            (every? #(integer-operand? % options) (:args node)))
+  (get {:+ "+" :- "-" :* "*" :== "=" :=:= "=" :< "<" :=< "<=" :> ">" :>= ">="} (:fun node))))
+
 (defn- emit-source-loop [n parts options]
- (let [variables (:vars parts)
+ (let [_ (when (and (:scan-v1? options) (:emission-counts options))
+           (swap! (:emission-counts options) update :direct-loops (fnil inc 0)))
+       variables (:vars parts)
        loop-name (ident (str "$loop/" (:self parts)))
        names (mapv #(str "loop-initial-" %) (range (count (:inits parts))))
        bindings (mapv (fn [name initial] (str "(" name " " (emit initial (operand-options options)) ")")) names (:inits parts))
        parameters (mapv (fn [variable initial] (str "(" (ident variable) " " initial ")")) variables names)
+       ; A loop's initial value does not establish an inductive type fact.
+       ; Remove parameter facts; explicit guards inside its body refine them.
+       options (if (:scan-v1? options)
+                 (update options :integer-facts (fn [facts] (reduce disj (or facts #{}) variables))) options)
        body (emit (:body parts) (assoc options :loop {:self (:self parts) :name loop-name}))]
   (str "(let* (" (string/join " " bindings) ") (let " loop-name " (" (string/join " " parameters)
        ") (h-tick) " body "))")))
@@ -321,8 +380,9 @@
 (defn emit [n options]
  (if-let [layout (multi-layout n)] (emit-multi layout options)
  (cond
+  (and (:scan-v1? options) (scan-loop-parts n)) (emit-source-loop n (scan-loop-parts n) options)
   (and (:source-frames? options) (loop-parts n)) (emit-source-loop n (loop-parts n) options)
-  (and (:source-frames? options) (:loop options) (recur-node? n (:self (:loop options))))
+  (and (or (:source-frames? options) (:scan-v1? options)) (:loop options) (recur-node? n (:self (:loop options))))
    (ordered (:name (:loop options)) (:args n) (operand-options options))
   (self-knot? n options) (get (:selves options) (:name (:fn n)))
   (and (= :let (:op n)) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
@@ -338,21 +398,29 @@
   :remote (if (and (:source-frames? options) (= :erlang (:mod n))
                     (= :apply (:fun n)) (= 2 (count (:args n))))
             (ordered-target-call n (first (:args n)) (second (:args n)) "native-raw-apply" options)
-            (ordered-call n (remote n options) (:args n) options))
+            (let [callee (remote n options) intrinsic (integer-intrinsic n options)]
+             ; Resolve first so the exact pinned primitive remains in the
+             ; artifact's activation check even when its call is eliminated.
+             (when (and intrinsic (:emission-counts options))
+              (swap! (:emission-counts options) update :integer-intrinsics (fnil inc 0)))
+             (ordered-call n (or intrinsic callee) (:args n) options)))
   :arith (if-let [f (or (when-let [resolver (:arithmetic-resolver options)] (resolver n))
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
   :apply (ordered-language-call n (:fn n) (argument-list (:args n)) options)
   :invoke (ordered-language-call n (:callee n) (:arguments n) options)
-  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) options) ")")
-  :if (str "(if (bl-truthy " (emit (:test n) (operand-options options)) ") " (emit (:then n) options) " " (emit (:else n) options) ")")
+  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) (if (:scan-v1? options) (integer-binding options (:name n) (:init n)) options)) ")")
+  :if (str "(if (bl-truthy " (emit (:test n) (operand-options options)) ") " (emit (:then n) (integer-branch options (:test n))) " " (emit (:else n) options) ")")
   :do (let [statements (:stmts n)]
         (str "(begin " (if (empty? statements) "bl-nil"
           (str (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
-  :fn (if (:source-frames? options) (emit-source-function n options)
+  :fn (let [options (if (:scan-v1? options)
+              (update options :integer-facts (fn [facts]
+                (reduce disj (or facts #{}) (mapcat #(mapcat binders (:pats %)) (:clauses n))))) options)]
+       (if (:source-frames? options) (emit-source-function n options)
        (let [function (function-expression n options nil)]
         (if (:callable-arities? options)
          (str "(bl-register-callable! " function " " (count (:pats (first (:clauses n)))) ")")
-         function)))
+         function))))
   :case (str "(let ((subject " (emit (:subj n) (operand-options options)) ")) "
           (clauses (:clauses n) "(list subject)" "(error \"native seed: case clause\")" options false) ")")
   :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")
