@@ -56,9 +56,24 @@
        prototype (Path/expand (:prototype options))
        sdk (System/fetch_env! "BL_SDK_PRODUCT")
        options (assoc options :prototype prototype)
+       image-ledger-file (Path/join prototype "out/cutover-image/exports.json")
+       image-ledger (when (:compiler-image? options) (json/decode (File/read! image-ledger-file)))
+       image-inputs
+       (when image-ledger
+        (let [qualification (json/decode (File/read! (Path/join prototype "out/compiler-native-owner/full-native-build.json")))
+              stage (first (filter #(= "stage1" (get % "stage")) (get qualification "builds")))]
+         (when-not (and (= "bl.native.observed-image-exports" (get image-ledger "schema"))
+                        (= (get stage "executable_sha256") (get-in image-ledger ["image" "sha256"])))
+          (throw (ex-info "Compiler image export inventory differs" {})))
+         (doseq [field ["image" "observer" "producer" "log"]]
+          (let [row (get image-ledger field)]
+           (when-not (= (get row "sha256") (sha (File/read! (get row "path"))))
+            (throw (ex-info "Compiler image export observation changed" {:field field})))))
+         (concat [(identity-row "host-abi/compiler-exports" image-ledger-file)]
+           (map #(identity-row (str "host-abi/compiler-" %) (get-in image-ledger [% "path"])) ["image" "observer" "producer" "log"]))))
        request {"schema" "bl.native.scheme-tool-request" "version" 1
                 "toolchain" (Path/join prototype "toolchain-pin.json")
-                "standard_bindings" false "code_inputs" (code-inputs prototype sdk)}
+                "standard_bindings" false "code_inputs" (vec (concat (code-inputs prototype sdk) image-inputs))}
        identity (get (invoke-tool! options "identity" request) "identity")
        abi-ledger (json/decode (File/read! (Path/join prototype "out/compiler-native-owner/leaves.json")))
        host-external (set (get abi-ledger "registered_leaves"))
@@ -90,7 +105,7 @@
             "exports_sha256" (sha (File/read! (Path/join directory "exports.json")))
             "provided_mfas" (to-list (sort provided))})) dependency-inputs))
        dependencies (capture-dependencies)
-       external (into host-external (mapcat #(get % "provided_mfas") dependencies))
+       external (into (into host-external (or (get image-ledger "exports") [])) (mapcat #(get % "provided_mfas") dependencies))
        check-dependencies! (fn []
                             (when-not (= dependencies (capture-dependencies))
                              (throw (ex-info "Scheme dependency artifact changed"

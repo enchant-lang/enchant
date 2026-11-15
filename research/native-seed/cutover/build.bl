@@ -3,7 +3,8 @@
  (:require [native.aot-target :as target] [unit-store :as store]
            [bl.json :as json] [reader :as reader] [reader-node :as rn] [codebase]))
 (def output (Path/expand (first (BeamLisp/argv))))
-(assert (not (File/exists? output)))
+(def resume? (= "resume" (second (BeamLisp/argv))))
+(assert (or resume? (not (File/exists? output))))
 (File/mkdir_p! output)
 (def pin (json/decode (File/read! "research/native-seed/sdk-pin.json")))
 (def source-file (Path/join (get pin "source") "priv/boot/reader.bl"))
@@ -33,13 +34,13 @@
         (let [base (Path/join output (name mode))
               observations (Path/join base "tools")
               adapter (target/adapter {:prototype "research/native-seed" :python (System/find_executable "python3")
-                        :observations observations :object-cache (Path/join output "objects") :emission-mode mode})
+                        :compiler-image? true :observations observations :object-cache (Path/join output "objects") :emission-mode mode})
               built (store/artifact-target! prepared (Path/join base "artifacts") nil adapter)
               unit (Path/join (Path/join base "artifacts") (:key built))
               before (count (Path/wildcard (Path/join observations "build-*-request.json")))
-              reused (store/artifact-target! prepared (Path/join base "artifacts") (:selection built) adapter)
+              reused (store/artifact-target! prepared (Path/join base "artifacts") nil adapter)
               after (count (Path/wildcard (Path/join observations "build-*-request.json")))]
-         (assert (:compiled built)) (assert (not (:compiled reused))) (assert (= before after))
+         (assert (not (:compiled reused))) (assert (= before after))
          {:mode (name mode) :directory unit :selection-key (target/selection-key (:selection built))
           :request (first (Path/wildcard (Path/join observations "identity-*-request.json")))
           :compiled (:compiled built) :reuse-compiled (:compiled reused) :reuse-build-jobs (- after before)}))
@@ -49,4 +50,5 @@
     :source {:path source-file :sha256 (target/sha original) :namespace-position position}
     :derived {:path derived :sha256 (target/sha source)} :modules rows}))
   (println "CUTOVER_MODULES_BUILT"))
+ (catch error (println "CUTOVER_ERROR_DATA" (pr-str (ex-data error))) (throw error))
  (finally (BeamLisp.AOT/close_workspace! workspace)))
