@@ -1,0 +1,89 @@
+;; Observation wrapper only. Selected algorithms remain qualified native BL.
+(define (bench-check-native value)
+ (cond
+  ((procedure? value)
+   (if (##interp-procedure? value) (error "benchmark algorithm is interpreted")))
+  ((native-multi-callable? value)
+   (for-each (lambda (row) (bench-check-native (bl-nth row 1)))
+             (native-map-pairs (bl-nth value 1)))
+   (if (not (bl-is-nil (bl-nth value 2)))
+    (bench-check-native (bl-nth (bl-nth value 2) 1))))
+  (else (error "benchmark algorithm is not a callable"))))
+(define (bench-select ns name)
+ (let ((value (native-global-exact ns name)))
+  (bench-check-native value) value))
+(define bench-reader (bench-select "reader" "read-string"))
+(define bench-compile (bench-select "compiler" "compile"))
+(define bench-env (bench-select "compiler" "new-env"))
+(define bench-reset (bench-select "compiler" "reset-fresh!"))
+(define bench-emitter (bench-select "native.scheme" "emit"))
+(define bench-source @SOURCE@)
+(define bench-attribution "native-devtool-benchmark.bl")
+(define bench-options
+ (bl-map (bl-key "ns") "user" (bl-key "namespace") "user"
+         (bl-key "namespace-qualified?") #t (bl-key "callable-arities?") #t))
+(define bench-clock (make-u64vector 3 0))
+;; Gambit 4.9.5 _kernel.scm:4427,4442 writes native monotonic ticks and
+;; ticks-per-second into caller-owned u64vector slots. It does not consult the
+;; frozen actor host's virtual h-now clock. Exact tick subtraction precedes
+;; conversion to seconds, avoiding loss of precision from large clock origins.
+(##get-monotonic-time-frequency! bench-clock 0)
+(define bench-clock-frequency (u64vector-ref bench-clock 0))
+(if (<= bench-clock-frequency 0) (error "native monotonic clock is unavailable"))
+(define (bench-repeat n action)
+ (let loop ((remaining n))
+  (if (> remaining 0) (begin (action) (loop (- remaining 1))))))
+(define (bench-parse)
+ (bl-invoke bench-reader (list bench-source bench-attribution)))
+(define (bench-compile-forms forms)
+ (map (lambda (form)
+       (bl-invoke bench-reset '())
+       (bl-invoke bench-compile
+        (list form (bl-assoc
+                    (bl-assoc (bl-invoke bench-env (list "user"))
+                              (bl-key "target") (bl-key "js"))
+                    (bl-key "file") bench-attribution)))) forms))
+(define (bench-emit-nodes nodes)
+ (map (lambda (node) (bl-invoke bench-emitter (list node bench-options))) nodes))
+(define (bench-observe phase action)
+ (bench-repeat 3 action)
+ (let loop ((sample 0))
+  (if (< sample 9)
+   (begin
+    (##get-monotonic-time! bench-clock 1)
+    (bench-repeat 20 action)
+    (##get-monotonic-time! bench-clock 2)
+    (let ((elapsed
+           (exact->inexact
+            (/ (- (u64vector-ref bench-clock 2) (u64vector-ref bench-clock 1))
+               bench-clock-frequency))))
+     (display "BL_COMPILER_BENCHMARK ") (display phase) (display " ")
+     (write sample) (display " 20 ") (write elapsed) (newline) (force-output))
+    (loop (+ sample 1))))))
+(define (bench-no-eval . arguments)
+ (error "authored Scheme evaluation forbidden during compiler microbenchmark"))
+(define (bench-run)
+ ;; No macro bootstrap is needed by the macro-free corpus. Stop any accidental
+ ;; fallback to newly interpreted authored bodies during timed algorithms.
+ (native-mark-host-callable! bench-no-eval)
+ (bl-register-callable! bench-no-eval 1)
+ (set! native-leaf-registry
+  (bl-assoc native-leaf-registry "host/eval-scheme/1" bench-no-eval))
+ (set! native-eval-string bench-no-eval)
+ (let* ((forms (bench-parse)) (nodes (bench-compile-forms forms)))
+  (if (not (= 6 (length forms))) (error "benchmark corpus changed shape"))
+  (bench-observe "read" bench-parse)
+  (bench-observe "compile" (lambda () (bench-compile-forms forms)))
+  (bench-observe "emit" (lambda () (bench-emit-nodes nodes)))
+  (bench-observe "pipeline"
+   (lambda () (bench-emit-nodes (bench-compile-forms (bench-parse)))))
+  (let ((texts (bench-emit-nodes nodes)))
+   (native-write-file @OUTPUT@
+    (let loop ((remaining texts))
+     (if (null? remaining) ""
+      (if (null? (cdr remaining)) (car remaining)
+       (string-append (car remaining) "\n" (loop (cdr remaining)))))))))
+ (display "BL_COMPILER_BENCHMARK_DONE\n") (force-output) (exit 0))
+(with-exception-catcher
+ (lambda (failure) (display-exception failure) (newline) (exit 1)) bench-run)
+;; Exit above precedes the byte-identical owned original bundle DATA suffix.

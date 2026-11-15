@@ -1,0 +1,36 @@
+; One warm BEAM process. Native observer uses the same Source, file attribution,
+; namespace, :js frontend target, fresh-name reset and emitter options.
+(ns native.devtool-benchmark
+ (:require [reader :as reader] [compiler :as compiler]
+           [native.scheme :as scheme]))
+(def argv (BeamLisp/argv))
+(def source (File/read! (nth argv 0)))
+(def output (nth argv 1))
+(def repetitions 20)
+(def samples 9)
+(def attribution "native-devtool-benchmark.bl")
+(def options {:ns "user" :namespace "user"
+              :namespace-qualified? true :callable-arities? true})
+(defn parse [] (reader/read-string source attribution))
+(def forms (parse))
+(assert (= 6 (count forms)))
+(defn compile-forms [forms]
+ (Enum/map forms (fn [form]
+          (compiler/reset-fresh!)
+          (compiler/compile form
+            (assoc (compiler/new-env "user") :target :js :file attribution)))))
+(def nodes (compile-forms forms))
+(defn emit-nodes [nodes] (Enum/map nodes (fn [node] (scheme/emit node options))))
+(defn observe [phase action]
+ (dotimes [_ 3] (action))
+ (dotimes [sample samples]
+  (let [started (erlang/monotonic_time :nanosecond)]
+   (dotimes [_ repetitions] (action))
+   (println (str "BL_COMPILER_BENCHMARK " phase " " sample " " repetitions " "
+                 (/ (- (erlang/monotonic_time :nanosecond) started) 1000000000.0))))))
+(observe "read" parse)
+(observe "compile" (fn [] (compile-forms forms)))
+(observe "emit" (fn [] (emit-nodes nodes)))
+(observe "pipeline" (fn [] (emit-nodes (compile-forms (parse)))))
+(File/write! output (clojure.string/join "\n" (emit-nodes nodes)))
+(println "BL_COMPILER_BENCHMARK_DONE")
