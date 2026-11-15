@@ -1,0 +1,33 @@
+; Run the fixed native observer through the existing artifact process owner.
+; Its closed environment is the SAME one that selected/built these objects.
+(ns native.aot-probe (:require [artifact-process :as process] [bl.json :as json]))
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(def args (BeamLisp/argv))
+(def capture (Path/expand (first args)))
+(def output (Path/expand (second args)))
+(def python (System/find_executable "python3"))
+(def prepared (process/run python
+ ["research/native-seed/prepare-module-probe.py"
+  "--compiler-dir" "research/native-seed/out/compiler-native-owner"
+  "--capture" capture "--out" output] {:timeout-ms 60000 :limit 8192}))
+(when-not (process/ok? prepared)
+ (throw (ex-info "Native module observation preparation failed" prepared)))
+(def preparation-path (Path/join output "preparation.json"))
+(def preparation-bytes (File/read! preparation-path))
+(def preparation (json/decode preparation-bytes))
+(assert (= 20 (get preparation "runtime_deadline_seconds")))
+(def argv (get preparation "argv"))
+(def started (erlang/monotonic_time :microsecond))
+(def result (process/run (first argv) (rest argv) {:timeout-ms 20000 :limit 8192}))
+(def passed (and (process/ok? result)
+                (= 1 (count (filter #(= "NATIVE_SCHEME_MODULE_PROOF_PASS 18" %)
+                              (String/split (:out result) "\n"))))))
+(File/write! (Path/join output "runtime.log") (:out result))
+(File/write! (Path/join output "runtime.json")
+ (json/encode {:schema "bl.native.scheme-module-runtime-observation"
+  :preparation preparation-path :preparation_sha256 (sha preparation-bytes)
+  :seconds (/ (- (erlang/monotonic_time :microsecond) started) 1000000.0)
+  :exit (:exit result) :output_sha256 (sha (:out result)) :passed passed}))
+(when-not passed (throw (ex-info "Native module runtime observation failed" result)))
+(println "NATIVE_SCHEME_MODULE_PROOF_PASS 18")
