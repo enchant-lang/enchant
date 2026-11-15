@@ -105,6 +105,8 @@ def main():
         'seconds': round(time.monotonic() - start, 3), 'argv': argv, 'inputs': inputs,
         'inputs_unchanged': unchanged, 'cleanup': cleanup, 'source_or_anf_interpreter': False,
         'sdk_launched': False, 'route': build['route'],
+        'runtime_feature_environment': {name: env.get(name, 'host-default') for name in
+            ('BL_NATIVE_C_NOACTOR_TICK', 'BL_NATIVE_C_PURE_BIFS', 'BL_NATIVE_C_SYMBOL_MFAS')},
         'compilation': {'unit_optimization': build.get('unit_optimization', 0),
                         'host_optimization': build.get('host_optimization', 0),
                         'host_granularity': build.get('host_granularity', 'single'),
