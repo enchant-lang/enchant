@@ -59,12 +59,7 @@ def main():
         run('c-object-'+name, [CLANG, *flags, '-c', name+'.c', '-o', name+'.o'])
     run('c-link', [CLANG, 'actors.o', 'actors_.o', *libs, '-o', 'actors-native'])
     native = run('native', [OUT/'actors-native'])
-    for name in units:
-        run('llvm-emit-'+name, [CLANG, *flags, '-fno-discard-value-names', '-S', '-emit-llvm', name+'.c', '-o', name+'.ll'])
-        run('llvm-object-'+name, [CLANG, '-c', name+'.ll', '-o', name+'-llvm.o'])
-    run('llvm-link', [CLANG, 'actors-llvm.o', 'actors_-llvm.o', *libs, '-o', 'actors-llvm'])
-    llvm = run('llvm-native', [OUT/'actors-llvm'])
-    assert scheme == native == llvm, 'Scheme, C and LLVM programs disagree'
+    assert scheme == native, 'Scheme and native C programs disagree'
     expected = [line for line in native.splitlines() if line.startswith('PASS ')]
     assert len(expected) == 27 and len(set(expected)) == 27 and 'NATIVE_SEED_ACTORS_OK' in native, native
     assert 'FAIL' not in native
@@ -78,7 +73,7 @@ def main():
     assert 'NATIVE_SEED_ACTORS_OK' in javascript and 'FAIL' not in javascript
     assert all(digest(ROOT/p) == h for p,h in hashes.items()), 'inputs changed during qualification'
     artifacts = {p.name: {'bytes': p.stat().st_size, 'sha256': digest(p)}
-                 for p in OUT.iterdir() if p.suffix in {'.scm', '.c', '.ll'} or p.name in {'actors-native','actors-llvm'}}
+                 for p in OUT.iterdir() if p.suffix in {'.scm', '.c'} or p.name == 'actors-native'}
     report = {'status': 'pass', 'scope': 'seed actor subset; virtual time; prebuilt Gambit GC/runtime',
               'self_hosted': False, 'checks': expected, 'javascript_shared_checks': shared,
               'inputs': hashes, 'artifacts': artifacts,

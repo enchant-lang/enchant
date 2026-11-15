@@ -55,8 +55,8 @@ def main():
                       gvm / 'reader-check.scm', tools_path]
     for path in backend_inputs:
         inputs[str(path)] = sha(path.read_bytes())
-    if '--route' not in (gvm / 'build-module.py').read_text():
-        raise ValueError('dynamic GVM loading requires the explicit C-only builder route')
+    if (gvm / 'build-module.py').read_text().count('ROUTE = "c"') != 1:
+        raise ValueError('dynamic GVM loading requires the fixed native C builder')
     expected = '(list ' + ' '.join('(cons ' + quoted(str(path)) + ' ' +
                 quoted(inputs[str(path)]) + ')' for path in backend_inputs) + ')'
     config = ('(native-gvm-require-runtime-abi! 1)\n'

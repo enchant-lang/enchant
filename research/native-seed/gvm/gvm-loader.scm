@@ -42,7 +42,7 @@ static int blgvm_build(char *python,char *driver,char *input,char *directory,cha
   if (setrlimit(RLIMIT_AS,&memory)||setrlimit(RLIMIT_CPU,&cpu)) _exit(125);
   if (dup2(log,STDOUT_FILENO)<0 || dup2(log,STDERR_FILENO)<0) _exit(125);
   close(log);
-  char *args[]={python,driver,input,directory,"--name",name,"--route","c",NULL};
+  char *args[]={python,driver,input,directory,"--name",name,NULL};
   execv(python,args);_exit(127);
  }
  close(log);setpgid(pid,pid);

@@ -2,7 +2,7 @@
 set -euo pipefail
 prototype=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 root=$(CDPATH='' cd "$prototype/../.." && pwd -P)
-pinned_sdk=$(python3 - "$prototype/sdk-pin.json" <<'PY'
+pin_selection=$(python3 - "$prototype/sdk-pin.json" <<'PY'
 import hashlib,json,pathlib,sys
 p=json.loads(pathlib.Path(sys.argv[1]).read_text())
 b=(pathlib.Path(p['sdk'])/'artifact.json').read_bytes()
@@ -10,8 +10,11 @@ assert hashlib.sha256(b).hexdigest()==p['descriptor_sha256'], 'SDK descriptor ch
 assert json.loads(b)['source']==p['source'], 'SDK Source changed'
 assert (pathlib.Path(p['sdk'])/'bin/bl').is_file(), 'pinned SDK launcher missing'
 print(p['sdk'])
+print(p['source'])
 PY
 )
+pinned_sdk=${pin_selection%%$'\n'*}
+pinned_source=${pin_selection#*$'\n'}
 mkdir -p "$prototype/.runtime"
 if [[ -f "$prototype/.runtime/path" ]]; then
   runtime=$(cat "$prototype/.runtime/path")
@@ -26,7 +29,9 @@ systemd-run --user --quiet --collect --wait --pipe \
   --working-directory="$root" --property=MemoryMax=3G --property=MemorySwapMax=0 \
   --property=RuntimeMaxSec=240 --property=KillMode=control-group \
   --setenv=XDG_RUNTIME_DIR="$runtime" \
-  "$pinned_sdk/bin/bl" --cold -p "$prototype/src" "$@"
+  "$pinned_sdk/bin/bl" --cold -p "$prototype/src" \
+  -p "$pinned_source/priv/lib" -p "$pinned_source/priv/std" \
+  -p "$pinned_source/priv/compat" -p "$pinned_source/priv/boot" "$@"
 if [[ "${1:-}" = realm && "${2:-}" = stop ]]; then
   rm -rf -- "$runtime"
   rm -f -- "$prototype/.runtime/path"

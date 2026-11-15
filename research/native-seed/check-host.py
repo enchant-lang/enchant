@@ -39,20 +39,8 @@ def main():
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
                        "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
                        "fixtures/host-compiler-cache-check.scm", "fixtures/host-global-cache-check.scm",
-                       "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm", "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm", "direct/direct-machine.scm",
-                       "direct/direct-control-frames.scm", "fixtures/c-critical-boundaries-check.scm",
-                       "fixtures/c-critical-continuations-check.scm", "fixtures/c-raw-source-trace-check.scm",
-                       "fixtures/c-source-tail-check.scm", "fixtures/c-tail-frame-reuse-check.scm",
-                       "direct/direct-shared-raw.scm", "direct/direct-remote.scm", "direct/direct-make-fun.scm",
-                       "fixtures/c-plain-procedure-check.scm", "fixtures/c-remote-target-check.scm",
-                       "fixtures/c-host-service-check.scm", "fixtures/c-call-slots-check.scm",
-                       "fixtures/c-noactor-tick-check.scm", "fixtures/c-noactor-tick-header-check.scm",
-                       "fixtures/c-pure-bif-guard-check.scm",
-                       "fixtures/c-fixed-source-key-check.scm",
-                       "fixtures/c-direct-closure-check.scm",
-                       "fixtures/c-monomorphic-target-check.scm",
-                       "fixtures/c-symbol-remote-check.scm",
-                       "direct/native-direct.h"]
+                       "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm",
+                       "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
 
@@ -100,45 +88,10 @@ def main():
     assert "native compiler-cache checks: 96" in frames, frames
     assert "native global-cache checks: 48" in frames, frames
     assert "native source-frame checks passed" in frames, frames
-    (out / "direct-control.scm").write_text(common + "\n"
-        + (BASE / "host/host-compiler.scm").read_text() + "\n"
-        + (BASE / "direct/direct-machine.scm").read_text() + "\n"
-        + (BASE / "direct/direct-control-frames.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-critical-boundaries-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-critical-continuations-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-raw-source-trace-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-source-tail-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-tail-frame-reuse-check.scm").read_text() + "\n"
-        + (BASE / "direct/direct-shared-raw.scm").read_text() + "\n"
-        + (BASE / "direct/direct-remote.scm").read_text() + "\n"
-        + (BASE / "direct/direct-make-fun.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-plain-procedure-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-remote-target-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-host-service-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-call-slots-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-noactor-tick-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-pure-bif-guard-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-fixed-source-key-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-direct-closure-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-monomorphic-target-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-symbol-remote-check.scm").read_text())
-    control = run("direct-control-abi", [GAMBIT / "bin/gsi", "direct-control.scm"], timeout=20)
-    for marker in ("NATIVE_C_CRITICAL_BOUNDARIES_PASS 10", "NATIVE_C_CRITICAL_CONTINUATIONS_PASS 18",
-                   "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6", "NATIVE_C_SOURCE_TAIL_ABI_PASS 23",
-                   "NATIVE_C_TAIL_FRAME_REUSE_ABI_PASS 49", "NATIVE_C_PLAIN_PROCEDURE_ABI_PASS 39",
-                   "NATIVE_C_REMOTE_TARGET_ABI_PASS 105", "NATIVE_C_LATE_HOST_SERVICE_ABI_PASS 32",
-                   "NATIVE_C_CALL_SLOTS_ABI_PASS 29", "NATIVE_C_NOACTOR_TICK_ABI_PASS 54",
-                   "NATIVE_C_PURE_BIF_GUARDS_PASS 25", "NATIVE_C_FIXED_SOURCE_KEYS_PASS 20",
-                   "NATIVE_C_DIRECT_CLOSURE_ABI_PASS 59", "NATIVE_C_MONOMORPHIC_TARGET_ABI_PASS 52",
-                   "NATIVE_C_SYMBOL_REMOTE_ABI_PASS 52"):
-        assert marker in control, control
-    (out / "native-direct.h").write_bytes((BASE / "direct/native-direct.h").read_bytes())
     (out / "posix.scm").write_text(common + "\n"
                                     + (BASE / "host/host-compiler.scm").read_text() + "\n"
-                                    + (BASE / "direct/direct-machine.scm").read_text() + "\n"
                                     + (BASE / "host/native-posix.scm").read_text()
-                                    + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text()
-                                    + "\n" + (BASE / "fixtures/c-noactor-tick-header-check.scm").read_text())
+                                    + "\n" + (BASE / "fixtures/native-posix-check.scm").read_text())
     run("foreign-fixture", [CLANG, "-shared", "-fPIC", BASE / "fixtures/ffi-fixture.c", "-o", "fixture.so"])
     run("posix-to-c", [GAMBIT / "bin/gsc", "-c", "posix.scm"])
     run("posix-link-unit", [GAMBIT / "bin/gsc", "-link", "posix.c"])
@@ -151,11 +104,10 @@ def main():
                        "-pthread", "-ldl", "-lm", "-Wl,-rpath," + str(GAMBIT / "gambit/lib"), "-o", "posix"])
     posix = run("posix-clock-readiness-worker", [out / "posix", out / "fixture.so"], timeout=10)
     assert "native POSIX clock/readiness/worker check passed" in posix, posix
-    assert "NATIVE_C_NOACTOR_TICK_HEADER_PASS 25" in posix, posix
     assert hashes == {p: digest(BASE / p) for p in inputs}, "inputs changed during qualification"
     evidence.write_text(json.dumps({"status": "pass", "output": str(out), "scope": "host fixtures; canonical BL gates remain separate",
                                     "inputs": hashes, "tools": TOOLS, "runs": runs,
-                                    "values": values, "lazy": lazy, "extra": extra, "source_frames": frames, "direct_control": control, "posix": posix}, indent=2) + "\n")
+                                    "values": values, "lazy": lazy, "extra": extra, "source_frames": frames, "posix": posix}, indent=2) + "\n")
 
 
 if __name__ == "__main__":

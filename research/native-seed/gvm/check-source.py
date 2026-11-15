@@ -39,7 +39,6 @@ def main():
     parser.add_argument('--plan', type=Path, required=True, help='captured GVM compiler plan')
     parser.add_argument('--build', type=Path, required=True, help='build-profile.py output')
     parser.add_argument('--host-ledger', type=Path, required=True, help='exact host.components.scm')
-    parser.add_argument('--route', choices=('c', 'llvm'), default='c')
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     plan, built, ledger, out = (p.resolve() for p in
@@ -88,7 +87,7 @@ def main():
     if (build.get('schema') != 'bl.native.gvm-profile-build' or build.get('version') != 1
             or build.get('status') != 'compiled-not-qualified' or build.get('qualification') is not False
             or Path(build['plan']).resolve() != plan
-            or build.get('child_deadline_seconds') != 120):
+            or build.get('child_deadline_seconds') != 120 or build.get('route') != 'c'):
         raise RuntimeError('requires the exact completed GVM native profile build')
     for path, expected in build['inputs'].items():
         bind(path, expected)
@@ -125,9 +124,9 @@ def main():
     hrows = [line.decode().split('\t') for line in index.splitlines() if line.startswith(b'H\t')]
     if len(hrows) != 1 or hrows[0][3] != sha(ledger):
         raise RuntimeError('host ledger is not the canonical Source data projection')
-    for name in ('source', 'c', 'llvm', 'receipt'):
+    for name in ('source', 'c', 'receipt'):
         record(build['host'][name])
-    for route in ('c', 'llvm'):
+    for route in ('c',):
         if Path(build['host'][route]['path']).resolve() != built / route / 'host.o1':
             raise RuntimeError('host native module is outside the selected runtime root')
     cache_receipt(build['host']['receipt'])
@@ -139,9 +138,7 @@ def main():
             raise RuntimeError('GVM module order differs')
         if Path(module['native']['path']).resolve() != built / 'c' / unit['object']:
             raise RuntimeError('C module is outside the selected runtime root')
-        if Path(module['llvm']['path']).resolve() != built / 'llvm' / unit['object']:
-            raise RuntimeError('LLVM module is outside the selected runtime root')
-        for name in ('data', 'emission', 'build', 'receipt', 'c', 'native', 'llvm'):
+        for name in ('data', 'emission', 'build', 'receipt', 'c', 'native'):
             record(module[name])
         cache_receipt(module['receipt'])
         if sha(plan / unit['data']['path']) != unit['data']['sha256']:
@@ -156,11 +153,11 @@ def main():
         module_build = json.loads(Path(module['build']['path']).read_text())
         if (module_build.get('schema') != 'bl.native.gvm-module-build'
                 or module_build.get('status') != 'compiled-not-qualified'
-                or module_build.get('route') != 'both'
+                or module_build.get('route') != 'c'
                 or module_build.get('module_linker_name') != unit['object']
-                or [j['name'] for j in module_build['jobs']] != ['import', 'c', 'llvm-ir', 'llvm-link']
+                or [j['name'] for j in module_build['jobs']] != ['import', 'c']
                 or any(j.get('returncode') != 0 for j in module_build['jobs'])):
-            raise RuntimeError('GVM module lacks both successful native routes')
+            raise RuntimeError('GVM module lacks its successful native C build')
         for path, expected in module_build['inputs'].items():
             bind(path, expected)
         for path, expected in module_build['artifacts'].items():
@@ -179,8 +176,8 @@ def main():
                 ('native.gvm-units', 'write-plan!'), ('native.gvm-bootstrap', 'main')}
     if not required.issubset({(row['namespace'], row['name']) for row in exports}):
         raise RuntimeError('the nine actual Source/compiler/GVM exports are absent')
-    image = record(build['executables'][args.route])
-    if (image != built / args.route / 'compiler' or not elf(image)
+    image = record(build['executables']['c'])
+    if (image != built / 'c' / 'compiler' or not elf(image)
             or not os.access(image, os.X_OK)):
         raise RuntimeError('selected GVM compiler is not the exact executable ELF')
     cache_receipt(build['entry']['receipt'])
@@ -212,7 +209,7 @@ def main():
     proof.write_bytes(prefix + b'\n' + original_bundle)
     bind(proof)
     env = os.environ.copy()
-    env['BL_NATIVE_GVM_UNIT_ROOT'] = str(built / args.route)
+    env['BL_NATIVE_GVM_UNIT_ROOT'] = str(built / 'c')
     for key in list(env):
         if key.startswith('BL_NATIVE_C_') or key in ('BL_NATIVE_TRACE', 'BL_NATIVE_GVM_GC_INTERVAL'):
             env.pop(key)
@@ -285,8 +282,8 @@ def main():
         'scope': 'one actual original Source gate; full actor/self/fixpoint remains open',
         'deadline_seconds': 120, 'timeout': timed, 'exit': process.returncode,
         'seconds': round(time.monotonic() - start, 3), 'argv': argv, 'inputs': inputs,
-        'inputs_unchanged': unchanged, 'cleanup': cleanup, 'route': args.route,
-        'route_scope': 'selected route for startup host/compiler units; dynamic macro modules use C',
+        'inputs_unchanged': unchanged, 'cleanup': cleanup, 'route': 'c',
+        'route_scope': 'native C for startup host/compiler units and dynamic macro modules',
         'dynamic_route': 'c', 'source_fixture_sha256': SOURCE_FIXTURE_SHA256,
         'runtime_unit_root': env['BL_NATIVE_GVM_UNIT_ROOT'],
         'source_or_anf_interpreter': False, 'gvm_interpreter': False, 'authored_scheme_bodies': False,

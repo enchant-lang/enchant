@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build/reuse the exact GVM host cache, then check its C and LLVM host ABI.
+"""Build/reuse the exact GVM host cache, then check its native C host ABI.
 
 Run inside a cgroup capped at 3GiB. Jobs are serial and each keeps 120s.
 No Source profile, producer, Source evaluator or GVM program is admitted here.
@@ -107,7 +107,7 @@ def main():
     report = {'schema': 'bl.native.gvm-host-check', 'version': 1, 'status': 'building',
               'scope': 'shared native host loader ABI only; no Source/GVM program qualification',
               'source_profile_admitted': False, 'sdk_launched': False,
-              'runtime-abi': 1, 'memory': memory, 'child_deadline_seconds': 120,
+              'runtime-abi': 1, 'route': 'c', 'memory': memory, 'child_deadline_seconds': 120,
               'inputs': inputs, 'tools': tools, 'host_request': request,
               'host_cache': str(directory), 'jobs': [], 'routes': {}}
 
@@ -160,7 +160,7 @@ def main():
         report['receipt'] = builder.record(receipt_path)
         report['host_artifacts'] = receipt['artifacts']
         save()
-        # Release the build lock before read-only host execution. Both objects
+        # Release the build lock before read-only host execution. The object
         # and their sealed receipt are independently verified before/after.
     except BaseException as error:
         report.update(status='failed', error=str(error))
@@ -170,7 +170,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
     try:
-        for route, selected in (('c', directory / 'host.o1'), ('llvm', directory / 'llvm/host.o1')):
+        for route, selected in (('c', directory / 'host.o1'),):
             target = out / route / 'host.o1'
             target.parent.mkdir()
             shutil.copy2(selected, target)
@@ -195,7 +195,7 @@ def main():
         if not unchanged or not artifacts_unchanged:
             raise RuntimeError('host build/check input or sealed artifact changed')
         report['status'] = 'host-abi-pass'
-        print('GVM_HOST_C_AND_LLVM_LOADER_ABI_PASS 27', flush=True)
+        print('GVM_HOST_C_LOADER_ABI_PASS 27', flush=True)
     except BaseException as error:
         report.update(status='failed', error=str(error))
         raise
