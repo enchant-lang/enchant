@@ -1,0 +1,29 @@
+; SDK-only capture of one real BL form. Later native Source compilation reuses
+; native.gvm itself; this first gate proves the backend boundary, not fixpoint.
+(ns native.gvm-pilot
+ (:require [compiler :as compiler] [js.build :as build]
+           [native.gvm :as gvm] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def fixture (or (first args) "research/native-seed/gvm/constant.bl"))
+(def output (or (second args) "research/native-seed/out/gvm-pilot"))
+(def source (File/read! fixture))
+(def forms (BeamLisp.Ns.Reader/read source {:file fixture}))
+(def definitions (vec (build/definition-values forms)))
+(when-not (and (= 1 (count definitions)) (= "pilot-value" (:name (first definitions))))
+ (throw (ex-info "GVM constant pilot requires exactly the original pilot-value definition" {})))
+(compiler/reset-fresh!)
+(def definition (assoc (first definitions) :ns "native.gvm-pilot.module"
+ :node (compiler/compile (:form (first definitions))
+         (assoc (compiler/new-env "native.gvm-pilot.module") :file fixture))))
+(def emitted (gvm/emit-constant-definition definition {}))
+(File/mkdir_p! output)
+(File/write! (str output "/module.gvm-data") (:text emitted))
+(File/write! (str output "/manifest.json")
+ (json/encode (assoc (:manifest emitted)
+  :fixture fixture
+  :fixture-sha256 (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))
+  :emitter-source "research/native-seed/src/native/gvm.bl"
+  :emitter-sha256 (Base/encode16
+    (crypto/hash :sha256 (File/read! "research/native-seed/src/native/gvm.bl"))
+    (list (tuple :case :lower))))))
+(println "GVM_CONSTANT_DATA_EMITTED 1 definition")

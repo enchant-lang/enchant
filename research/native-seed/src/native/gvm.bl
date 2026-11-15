@@ -1,0 +1,82 @@
+; Finite BL-ANF -> GVM DATA pilot. This serializes compiler objects, never
+; Scheme function bodies. The pinned importer owns only GSC object assembly.
+(ns native.gvm
+ (:require [native.scheme :as scalar] [clojure.string :as string]))
+
+(defn refuse [node reason]
+ (throw (ex-info (str "native GVM pilot: " reason)
+   (select-keys node [:op :pop :name :ns :mod :fun :ann]))))
+
+(def wire-tags
+ #{:bl-native-gvm :module :entry :constants :procedures :proc :block
+   :frame :reg :stk :lbl :glo :clo :obj :copy :apply :jump :close :ifjump
+   :switch :simple :return :task-entry :task-return})
+(defn wire-text [data]
+ (cond
+  (= true data) "#t"
+  (= false data) "#f"
+  (string? data) (scalar/text data)
+  (erlang/is_integer data) (str data)
+  (and (keyword? data) (contains? wire-tags data)) (erlang/atom_to_binary data)
+  (or (vector? data) (erlang/is_list data))
+   (str "(" (string/join " " (mapv wire-text data)) ")")
+  :else (throw (ex-info "native GVM: only finite owned wire DATA is serializable"
+               {:value data}))))
+
+(defn frame [size slots registers closed live]
+ [:frame size (vec slots) (vec registers) (vec closed) (vec live)])
+(defn entry-frame []
+ (frame 0 [] ["return" false false false false] [] ["return"]))
+(defn result-frame []
+ (frame 0 [] ["return" "result" false false false] [] ["return" "result"]))
+
+(defn literal-operand [node]
+ (case (:op node)
+  :enil {:operand [:obj "value"] :constants [["value" []]]}
+  :lit
+   (let [value (:val node)]
+    (cond
+     (nil? value) {:operand [:glo "bl-nil"] :constants []}
+     (or (= value true) (= value false) (string? value) (erlang/is_integer value))
+      {:operand [:obj "value"] :constants [["value" value]]}
+     :else (refuse node "literal representation is outside the first native-procedure probe")))
+  (refuse node "a literal function body is required by the first probe")))
+
+(defn constant-function
+ "Accept only an already compiled, canonical zero-argument literal fn.
+  A validated inert named-function scaffold may surround that exact fn."
+ [node]
+ (let [parts (BeamLisp.CompilerData/self_application_parts node)
+       function (if parts (:inner parts) node)
+       clause (BeamLisp.CompilerData/simple_function_clause function)]
+  (when-not (and clause (= 0 (count (:pats clause))))
+   (refuse node "the first probe supports one unguarded zero-argument clause"))
+  (literal-operand (:body clause))))
+
+(defn emit-constant-definition
+ "Return finite GVM data plus data text. Module initialization publishes one
+  genuine native GVM procedure; no authored Source body goes through Scheme."
+ [definition options]
+ (let [module (or (:module options) "native_gvm_pilot")
+       global (or (:global options) "native-gvm-pilot/value")
+       value (constant-function (:node definition))
+       entry (entry-frame) result (result-frame)
+       answer (:operand value)
+       procedure [:proc "p1" 0 0
+                  [:block 1 :entry entry
+                   [:copy answer [:reg 1] result]
+                   [:jump [:reg 0] false false false false result]]]
+       main [:proc "p0" 0 0
+             [:block 1 :entry entry
+              [:copy [:proc "p1"] [:glo global] entry]
+              [:copy answer [:reg 1] result]
+              [:jump [:reg 0] false false false false result]]]
+       data [:bl-native-gvm 1 [:module module] [:entry "p0"]
+             (into [:constants] (:constants value))
+             [:procedures main procedure]]]
+  {:data data :text (str (wire-text data) "\n")
+   :manifest {:schema "bl.native.gvm-emission" :version 1
+              :status :emitted-not-executed :scope :constant-native-procedure-pilot
+              :module module :global global :functions 1 :module-entry "p0"
+              :authored-scheme false :source-interpreter false :anf-interpreter false
+              :gvm-interpreter false :c-lambda-stepper false}}))
