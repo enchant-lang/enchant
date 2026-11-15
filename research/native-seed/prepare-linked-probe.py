@@ -59,7 +59,13 @@ def main():
             or not all(isinstance(data.get(name), str) for name in ('provider', 'consumer'))
             or len(data.get('versions', [])) != 2):
         raise RuntimeError('requires the two-linked-module BL owner handoff')
+    prototype = data.get('prototype')
+    if prototype not in (None, 'reader-ignored-char-v1'):
+        raise RuntimeError('unsupported closed linked prototype')
+    reader_vertical = prototype == 'reader-ignored-char-v1'
     bind(data['producer']['path'], data['producer']['sha256'])
+    if reader_vertical:
+        bind(data['fixture-config']['path'], data['fixture-config']['sha256'])
     qualified = load_data(compiler / 'full-native-build.json', limit=32 * 1024 * 1024)
     if (qualified.get('schema') != 'bl.native.full-bounded-build' or qualified.get('version') != 1
             or qualified.get('status') != 'qualified' or qualified.get('compile_deadline_seconds') != 120):
@@ -125,8 +131,10 @@ def main():
     versions = []
     for row in data['versions']:
         versions.append({
-            'provider': module(row['provider'], data['provider'], [('answer', 0), ('adder', 1)]),
-            'consumer': module(row['consumer'], data['consumer'], [('answer', 0), ('capture', 1)]),
+            'provider': module(row['provider'], data['provider'],
+                [('make-helper', 1), ('make-tagged', 1)] if reader_vertical else [('answer', 0), ('adder', 1)]),
+            'consumer': module(row['consumer'], data['consumer'],
+                [('make-helper', 1), ('make-tagged', 1)] if reader_vertical else [('answer', 0), ('capture', 1)]),
         })
     if len({entry['module_name'] for row in versions for entry in row.values()}) != 4:
         raise RuntimeError('requires separately emitted distinct provider and consumer revisions')
@@ -136,10 +144,39 @@ def main():
             or planner['before'][data['provider']] == planner['after'][data['provider']]
             or planner.get('consumer-artifact-reused') is not False):
         raise RuntimeError('requires explicit shared planner vs exact artifact distinction')
-    template = here.with_name('linked-proof.scm.in')
+    template = here.parent / 'vertical/reader-proof.scm.in' if reader_vertical else here.with_name('linked-proof.scm.in')
     bind(template)
     bind(here)
-    text = template.read_text().replace('@PROVIDER@', scheme_string(data['provider']))
+    text = template.read_text()
+    vertical_identity = None
+    if reader_vertical:
+        # Existing native procedure/physical owner checks, no alternate loader.
+        helpers = here.with_name('linked-proof.scm.in')
+        bind(helpers)
+        text = helpers.read_text().split('(define linked-provider @PROVIDER@)')[0] + text
+        theorem = data['scalar-gate']
+        for field in ('receipt', 'candidate', 'proof-artifact', 'original-source', 'partition', 'manifest'):
+            bind(theorem[field]['path'], theorem[field]['sha256'])
+        corpus = base / 'benchmark/compiler-values.bl'
+        bind(corpus)
+        original_pin = load_data(base / 'sdk-pin.json')
+        kernel = Path(original_pin['source']) / 'priv/boot/rt.bl'
+        reader = Path(original_pin['source']) / 'priv/boot/reader.bl'
+        kernel_sha, reader_sha = bind(kernel), bind(reader)
+        text = text.replace('@CORPUS_SOURCE@', scheme_string(corpus.read_text()))
+        text = text.replace('@IMAGE_SHA@', scheme_string(stage['executable_sha256']))
+        text = text.replace('@KERNEL_SHA@', scheme_string(kernel_sha))
+        for label, row in zip(('FIRST', 'SECOND'), versions):
+            text = text.replace('@' + label + '_PROVIDER_STAMP@', scheme_string(row['provider']['selection_key']))
+        vertical_identity = {'image': stage['executable_sha256'],
+            'kernel_source': {'path': str(kernel), 'sha256': kernel_sha},
+            'reader_source': {'path': str(reader), 'sha256': reader_sha},
+            'corpus': {'path': str(corpus), 'sha256': sha(corpus)},
+            'provider_revision_labels': {str(i + 1): row['provider']['selection_key'] for i, row in enumerate(versions)},
+            'request_scope': 'closed serial Source read only; no arbitrary callbacks/concurrent publication',
+            'image_admission': 'original complete receipt; per-request actual compiled binding/parent checks',
+            'native_retirement_claimed': False}
+    text = text.replace('@PROVIDER@', scheme_string(data['provider']))
     text = text.replace('@CONSUMER@', scheme_string(data['consumer']))
     out.mkdir(parents=True)
     invalid = out / 'invalid-module.o1'
@@ -165,10 +202,11 @@ def main():
               'inputs': inputs, 'output': {'path': str(observer), 'sha256': sha(observer)},
               'invalid_module': {'path': str(invalid), 'sha256': sha(invalid)},
               'original_bundle_suffix_byte_equal': observer.read_bytes()[len(prefix) + 1:] == original,
-              'checks': 36, 'argv': [str(image), '--eval', str(observer), str(bundle)],
-              'runtime_deadline_seconds': 20,
+              'checks': None if reader_vertical else 36, 'argv': [str(image), '--eval', str(observer), str(bundle)],
+              'runtime_deadline_seconds': 60 if reader_vertical else 20,
               'native_module_names': [entry['module_name'] for row in versions for entry in row.values()],
-              'sdk_or_runtime_launched_by_preparer': False, 'generation_custody': False}
+              'sdk_or_runtime_launched_by_preparer': False, 'generation_custody': False,
+              'vertical_identity': vertical_identity}
     (out / 'preparation.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result['argv']), flush=True)
 

@@ -2,31 +2,106 @@
 ; Research linkage only: no runtime SDK admission or generation-custody claim.
 (ns native.linked-prepare
  (:require [native.aot-target :as target] [unit-store :as store]
-           [build-plan :as plan] [bl.json :as json] [artifact-process :as process]))
-(def provider "native.linked.provider")
-(def consumer "native.linked.consumer")
-(def provider-symbol 'native.linked.provider)
-(def consumer-symbol 'native.linked.consumer)
-(def source-v1 "(ns native.linked.provider)\n(defn answer [] 42)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 0)))\n")
-(def source-v2 "(ns native.linked.provider)\n(defn answer [] 99)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 100)))\n")
-(def consumer-source "(ns native.linked.consumer (:require [native.linked.provider :as p]))\n(defn answer [] (p/answer))\n(defn capture [x] (p/adder x))\n")
+           [build-plan :as plan] [bl.json :as json] [artifact-process :as process]
+           [reader :as reader] [reader-node :as rn] [codebase]))
+(def args (BeamLisp/argv))
+(def fixture-config (if (nth args 4 nil) (json/decode (File/read! (nth args 4))) {}))
+(def provider (get fixture-config "provider" "native.linked.provider"))
+(def consumer (get fixture-config "consumer" "native.linked.consumer"))
+(def provider-symbol (symbol provider))
+(def consumer-symbol (symbol consumer))
+(def source-v1 (get fixture-config "source-v1" "(ns native.linked.provider)\n(defn answer [] 42)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 0)))\n"))
+(def source-v2 (get fixture-config "source-v2" "(ns native.linked.provider)\n(defn answer [] 99)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 100)))\n"))
+(def consumer-source (get fixture-config "consumer-source" "(ns native.linked.consumer (:require [native.linked.provider :as p]))\n(defn answer [] (p/answer))\n(defn capture [x] (p/adder x))\n"))
 (defn sha [bytes] (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
 (defn file-row [path] {:path (Path/expand path) :sha256 (sha (File/read! path))})
+
+(defn one! [xs] (assert (= 1 (count xs))) (first xs))
+(defn node-items [form] (rn/node-items (rn/node-form form)))
+(defn node-symbol [form] (rn/node-name (rn/node-form form)))
+(defn canonical-node [form] (codebase/node-data form))
+(defn scalar-gate! []
+ (when (= "reader-ignored-char-v1" (get fixture-config "prototype"))
+  (let [receipt-file (Path/expand (or (nth args 5 nil) (get fixture-config "scalar-receipt")))
+        candidate-file (Path/expand (or (nth args 6 nil) (get fixture-config "candidate-file")))
+        receipt (json/decode (File/read! receipt-file))
+        pin (json/decode (File/read! "research/native-seed/sdk-pin.json"))
+        original-file (Path/join (get pin "source") "priv/boot/reader.bl")
+        source (File/read! original-file) candidate-source (File/read! candidate-file)
+        candidate-form (one! (reader/read-syntax candidate-source candidate-file))
+        candidate-items (node-items candidate-form)
+        candidate-body (last candidate-items)
+        _ (assert (= "bl.native.vertical-ignored-char-proof" (get receipt "schema")))
+        _ (assert (= "checked" (get receipt "status")))
+        _ (assert (= "ignored-char?" (get receipt "helper")))
+        _ (assert (= "integer-only" (get receipt "domain")))
+        _ (assert (= false (get receipt "native-lowering-proof")))
+        _ (assert (= false (get receipt "compiler-proof-authority")))
+        _ (assert (= pin (get receipt "original-native-sdk")))
+        _ (assert (= (sha source) (get receipt "source-sha256")))
+        _ (assert (= (sha candidate-source) (get receipt "candidate-source-sha256")))
+        _ (assert (= "fn" (node-symbol (first candidate-items))))
+        _ (assert (= ["c"] (mapv node-symbol (node-items (second candidate-items)))))
+        artifact (get receipt "artifact")
+        _ (assert (= (get artifact "sha256") (sha (File/read! (get artifact "path")))))
+        manifest-file "research/native-seed/out/compiler-native-owner/partition.json"
+        manifest (json/decode (File/read! manifest-file))
+        row (one! (filter #(= "reader" (get % "namespace")) (get manifest "units")))
+        part-file (Path/expand (get row "path") (Path/dirname manifest-file))
+        part-bytes (File/read! part-file)
+        limits {:max-nodes 1000000 :max-bytes 33554432 :max-depth 128}
+        _ (assert (= (get row "sha256") (sha part-bytes)))
+        _ (BeamLisp.CompilerData/check_closed_etf! part-bytes limits)
+        unit (erlang/binary_to_term part-bytes)
+        _ (BeamLisp.CompilerData/check_compiler_data! unit limits)
+        original-helper (one! (filter #(= "ignored-char?" (:name %)) (:defs unit)))
+        _ (assert (= (:source unit) source))
+        _ (assert (= :fn (:kind original-helper)))
+        actual-anf-sha (sha (erlang/term_to_binary (:node original-helper) (list :deterministic)))
+        _ (assert (= actual-anf-sha (get receipt "original-anf-sha256")))
+        branches
+        (mapv
+         (fn [text]
+          (let [forms (reader/read-syntax text "vertical-provider-source")
+                declaration (one! (filter #(= "make-helper" (codebase/defn-form %)) forms))
+                items (node-items declaration) returned (last items)
+                fn-items (node-items returned) decision (last fn-items)
+                if-items (node-items decision) guard-items (node-items (second if-items))
+                fallback-items (node-items (nth if-items 3))]
+           (assert (= ["fallback"] (mapv node-symbol (node-items (nth items 2)))))
+           (assert (= "fn" (node-symbol (first fn-items))))
+           (assert (= ["c"] (mapv node-symbol (node-items (second fn-items)))))
+           (assert (= 4 (count if-items))) (assert (= "if" (node-symbol (first if-items))))
+           (assert (= ["erlang/is_integer" "c"] (mapv node-symbol guard-items)))
+           (assert (= ["fallback" "c"] (mapv node-symbol fallback-items)))
+           (assert (= (canonical-node candidate-body) (canonical-node (nth if-items 2))))
+           {:source-sha256 (sha text) :position (rn/node-pos declaration)
+            :branch-sha256 (sha (erlang/term_to_binary (canonical-node (nth if-items 2)) (list :deterministic)))}))
+         [source-v1 source-v2])]
+   {:receipt (file-row receipt-file) :candidate (file-row candidate-file)
+    :proof-artifact (file-row (get artifact "path"))
+    :original-source (file-row original-file) :partition (file-row part-file)
+    :manifest (file-row manifest-file) :original-anf-sha256 actual-anf-sha :provider-branches branches
+    :scope "checked Int branch evidence; guard/fallback/ABI/native lowering independently observed"
+    :native-authority false :native-lowering-proof false :compiler-proof-authority false})))
+; Require exact Source/ANF/branch correspondence BEFORE the first AOT preparation.
+(def scalar-gate (scalar-gate!))
+
 (defn key-of [sources namespace] (plan/key-for namespace #(get sources %) nil plan/memo-node))
 (defn stage-count [] (elem (erlang/trace_info (tuple :Elixir.BeamLisp.AOT :stage-sdk-unit! 2) :call_count) 1))
 (defn jobs [directory]
  (reduce + 0 (map #(count (get (json/decode (File/read! %)) "jobs"))
                  (Path/wildcard (Path/join directory "*-result.json")))))
-(def args (BeamLisp/argv))
 (def output (Path/expand (or (first args) "research/native-seed/out/linked-incremental")))
 (def python (or (second args) (System/find_executable "python3")))
 (def producer (or (nth args 2 nil) "research/native-seed/linked-prepare.bl"))
 (assert (not (File/exists? output)))
 (File/mkdir_p! output)
 (def source-root (Path/join output "source"))
-(def provider-file (Path/join source-root "native/linked/provider.bl"))
-(def consumer-file (Path/join source-root "native/linked/consumer.bl"))
+(def provider-file (Path/join source-root (str (String/replace provider "." "/") ".bl")))
+(def consumer-file (Path/join source-root (str (String/replace consumer "." "/") ".bl")))
 (File/mkdir_p! (Path/dirname provider-file))
+(File/mkdir_p! (Path/dirname consumer-file))
 (File/write! provider-file source-v1)
 (File/write! consumer-file consumer-source)
 (File/write! (Path/join output "provider-v1.bl") source-v1)
@@ -143,6 +218,15 @@
     ; graph planner has proved a body/interface edge reusable.
     (expect ca 0 1 2)
     (assert (not= (:key @first-consumer) (:key (:value ca))))
+    (when (= "reader-ignored-char-v1" (get fixture-config "prototype"))
+     (let [warm2 (phase "unchanged-v2-warm-workspace-and-artifacts"
+                   #(let [p2 (BeamLisp.AOT/prepare_unit workspace provider-symbol)
+                          c2 (BeamLisp.AOT/prepare_unit workspace consumer-symbol)]
+                      (assert (= pp p2)) (assert (= cp c2))
+                      [(store/artifact-target! p2 second-root nil provider-adapter)
+                       (store/artifact-target! c2 second-root nil consumer-adapter)]))]
+      (expect warm2 0 0 0)
+      (assert (every? #(= false (:compiled %)) (:value warm2)))))
     (swap! versions conj {:provider (artifact-row (:value pa) second-root (Path/join output "provider-v2.bl") provider-file)
                           :consumer (artifact-row (:value ca) second-root consumer-file consumer-file)})
     (let [before {provider source-v1 consumer consumer-source}
@@ -154,6 +238,8 @@
      (assert (= saved-context (BeamLisp.Env/capture)))
      (File/write! (Path/join output "proof.json")
       (json/encode {:schema "bl.native.linked-module-proof" :version 1 :status "prepared-not-executed"
+       :prototype (get fixture-config "prototype") :scalar-gate scalar-gate
+       :fixture-config (when (nth args 4 nil) (file-row (nth args 4)))
        :provider provider :consumer consumer :producer (file-row producer)
        :sdk {:product sdk :descriptor (file-row (Path/join sdk "artifact.json"))}
        :tool_request (Path/expand (first requests)) :tool_request_sha256 (sha (File/read! (first requests)))
@@ -166,8 +252,9 @@
                  :stale-consumer @stale-consumer
                  :consumer-artifact-reused false
                  :limit "exact constructor world and verified dependency artifact identity remain conservative"}
-       :expectations {:answer [42 99] :closure-results [16 116]
-                      :old-consumer-calls-new-provider true :held-provider-capture-stays-old true}
+       :expectations (get fixture-config "expectations"
+                      {:answer [42 99] :closure-results [16 116]
+                       :old-consumer-calls-new-provider true :held-provider-capture-stays-old true})
        :native-executed false :runtime-admission false :generation-custody false}))))
    (finally (BeamLisp.AOT/close_workspace! workspace))))
  (println "NATIVE_LINKED_SOURCE_AND_ARTIFACTS_PREPARED")
@@ -187,12 +274,14 @@
 (def preparation-path (Path/join probe-output "preparation.json"))
 (def preparation-bytes (File/read! preparation-path))
 (def preparation (json/decode preparation-bytes))
-(assert (= 20 (get preparation "runtime_deadline_seconds")))
+(def runtime-deadline (get fixture-config "runtime-deadline-seconds" 20))
+(def success-marker (get fixture-config "marker" "NATIVE_LINKED_MODULE_PROOF_PASS 36"))
+(assert (= runtime-deadline (get preparation "runtime_deadline_seconds")))
 (def native-argv (get preparation "argv"))
 (def native-start (erlang/monotonic_time :microsecond))
-(def native-result (process/run (first native-argv) (rest native-argv) {:timeout-ms 20000 :limit 8192}))
+(def native-result (process/run (first native-argv) (rest native-argv) {:timeout-ms (* 1000 runtime-deadline) :limit 65536}))
 (def native-passed (and (process/ok? native-result)
- (= 1 (count (filter #(= "NATIVE_LINKED_MODULE_PROOF_PASS 36" %) (String/split (:out native-result) "\n"))))))
+ (= 1 (count (filter #(= success-marker %) (String/split (:out native-result) "\n"))))))
 (File/write! (Path/join probe-output "runtime.log") (:out native-result))
 (File/write! (Path/join probe-output "runtime.json")
  (json/encode {:schema "bl.native.linked-module-runtime-observation" :version 1
@@ -201,4 +290,4 @@
   :exit (:exit native-result) :output_sha256 (sha (:out native-result)) :passed native-passed
   :runtime-admission false :generation-custody false}))
 (when-not native-passed (throw (ex-info "Linked native observation failed" native-result)))
-(println "NATIVE_LINKED_MODULE_PROOF_PASS 36")
+(println success-marker)

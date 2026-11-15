@@ -1,0 +1,232 @@
+;; Closed serial experiment. Authored candidate functions are actual .o1 code.
+;; No native unloading/retirement, concurrent publication or arbitrary callbacks.
+(define vr-checks 0)
+(define vr-events '())
+(define vr-provider @PROVIDER@)
+(define vr-consumer @CONSUMER@)
+(define vr-source @CORPUS_SOURCE@)
+(define vr-image @IMAGE_SHA@)
+(define vr-kernel @KERNEL_SHA@)
+(define vr-reference (native-global-exact "reader" "ignored-char?"))
+(define vr-reader (native-global-exact "reader" "read-string"))
+(define vr-reference-parent (linked-proof-parent vr-reference))
+(define vr-reader-parent (linked-proof-parent vr-reader))
+(define vr-invoke bl-invoke)
+(define vr-resolve native-resolve-call)
+(define vr-remote native-remote)
+(define vr-get bl-get)
+(define vr-assoc bl-assoc)
+(define vr-equal bl-equal?)
+(define vr-integer (native-leaf "erlang/is_integer/1"))
+(define vr-integer-equal (native-leaf "erlang/==/2"))
+(define vr-bindings
+ (cons (list "core" "=" (native-global-exact "core" "="))
+  (map (lambda (name) (list "rt" name (native-global-exact "rt" name)))
+       '("eqv" "k-eqv" "k-compare"))))
+(define vr-admitted '())
+(define linked-refuse-eval (lambda arguments (error "authored Scheme eval is forbidden in vertical probe")))
+(define vr-clock (make-u64vector 3 0))
+(##get-monotonic-time-frequency! vr-clock 0)
+(define vr-frequency (u64vector-ref vr-clock 0))
+(if (<= vr-frequency 0) (error "native monotonic clock unavailable"))
+(define (vr-check label value)
+ (if (not value) (error "vertical reader observation failed" label))
+ (set! vr-checks (+ vr-checks 1)))
+(define (vr-event event revision selection)
+ (set! vr-events (cons (list event revision selection) vr-events)))
+(define (vr-kernel-current?)
+ (and (eq? bl-invoke vr-invoke) (eq? native-resolve-call vr-resolve)
+      (eq? native-remote vr-remote)
+      (eq? bl-get vr-get) (eq? bl-assoc vr-assoc) (eq? bl-equal? vr-equal)
+      (eq? (native-leaf "erlang/is_integer/1") vr-integer)
+      (eq? (native-leaf "erlang/==/2") vr-integer-equal)
+      (eq? (native-global-exact "reader" "read-string") vr-reader)
+      (eq? (linked-proof-parent vr-reader) vr-reader-parent)
+      (eq? (linked-proof-parent vr-reference) vr-reference-parent)
+      (let loop ((rows vr-bindings))
+       (or (null? rows)
+        (and (eq? (native-global-exact (caar rows) (cadar rows)) (caddar rows))
+             (loop (cdr rows)))))))
+(define (vr-request proposed revision selection action)
+ ;; The image/Source hashes were admitted by the original Python verifier.
+ ;; Each closed request rechecks actual relevant compiled bindings/parents.
+ ;; This is a serial observation boundary, not general runtime authority.
+ (let* ((current (native-global-exact "reader" "ignored-char?"))
+        (accepted (and (vr-kernel-current?) (eq? current vr-reference)
+                       (or (eq? proposed vr-reference) (memq proposed vr-admitted))))
+        (selected (if accepted proposed vr-reference)))
+  (vr-event (if accepted "request-accepted" "request-reference-fallback") revision selection)
+  (dynamic-wind
+   (lambda () (native-register! "reader" "ignored-char?" selected))
+   (lambda ()
+    (let ((value (action selected)))
+     (if accepted
+      (vr-check 'request-bindings-retained
+       (and (vr-kernel-current?)
+            (eq? selected (native-global-exact "reader" "ignored-char?")))))
+     value))
+   (lambda () (native-register! "reader" "ignored-char?" vr-reference)))))
+(define (vr-repeat count action)
+ (let loop ((left count)) (if (> left 0) (begin (action) (loop (- left 1))))))
+(define (vr-read helper revision selection)
+ (vr-request helper revision selection
+  (lambda (selected) (bl-invoke vr-reader (list vr-source "native-devtool-benchmark.bl")))))
+(define (vr-differential helper)
+ (for-each
+  (lambda (value)
+   (vr-check 'original-helper-differential
+    (eq? (bl-invoke vr-reference (list value)) (bl-invoke helper (list value)))))
+  (list -10000000000000000000000000000000000000000000000000 -1 0 8 9 10 13 32 44 65
+        955 1114111 1114112 10000000000000000000000000000000000000000000000000
+        bl-nil #f #t " " "32" "λ" (bl-float 32.0) (bl-float 9.0)
+        (bl-float 1.5) (bl-decimal 32 0) (bl-vec (list 32)) (bl-map (bl-key "value") 32)
+        (native-vector-with-meta (bl-vec (list 32)) (bl-map (bl-key "tag") "original")))))
+(define (vr-timed phase revision batch repetitions action)
+ (##get-monotonic-time! vr-clock 1)
+ (vr-repeat repetitions action)
+ (##get-monotonic-time! vr-clock 2)
+ (display "VERTICAL_READER_TIMING\t") (display phase) (display "\t")
+ (write revision) (display "\t") (write batch) (display "\t")
+ (write repetitions) (display "\t")
+ (write (exact->inexact
+  (/ (- (u64vector-ref vr-clock 2) (u64vector-ref vr-clock 1)) vr-frequency)))
+ (newline) (force-output))
+(define (vr-measure helper revision selection)
+ (let ((characters '(0 9 10 13 44 32 65 955 -1 1114111)))
+  (define (helper-action selected)
+   (vr-repeat 1000
+    (lambda () (for-each (lambda (c) (bl-invoke selected (list c))) characters))))
+  (define (read-action selected)
+   (bl-invoke vr-reader (list vr-source "native-devtool-benchmark.bl")))
+  (define (steady-valid? selected)
+   (and (vr-kernel-current?)
+        (eq? selected (native-global-exact "reader" "ignored-char?"))
+        (or (eq? selected vr-reference) (memq selected vr-admitted))))
+  (define (phase label selected rev batch repetitions action)
+   ;; Publication changes registry epochs and lookup caches. Switch once,
+   ;; warm AFTER that switch, and preserve the root throughout timed repeats.
+   ;; This is steady closed request work, not publication/request-loop timing.
+   (dynamic-wind
+    (lambda () (native-register! "reader" "ignored-char?" selected))
+    (lambda ()
+     (vr-repeat 3 (lambda ()
+       (if (not (steady-valid? selected)) (error "steady reader guard changed"))
+       (read-action selected)))
+     (vr-timed label rev batch repetitions
+      (lambda ()
+       (if (not (steady-valid? selected)) (error "steady reader guard changed"))
+       (let ((value (action selected)))
+        (if (not (steady-valid? selected)) (error "steady reader guard changed"))
+        value))))
+    (lambda () (native-register! "reader" "ignored-char?" vr-reference))))
+  (let loop ((batch 0))
+   (if (< batch 5)
+    (begin
+     ;; Alternate order; helper rows represent 10000 actual helper calls each.
+     (if (even? batch)
+      (begin
+       (phase "helper-original" vr-reference 0 batch 1 helper-action)
+       (phase "helper-candidate" helper revision batch 1 helper-action)
+       (phase "read-original" vr-reference 0 batch 3 read-action)
+       (phase "read-candidate" helper revision batch 3 read-action))
+      (begin
+       (phase "helper-candidate" helper revision batch 1 helper-action)
+       (phase "helper-original" vr-reference 0 batch 1 helper-action)
+       (phase "read-candidate" helper revision batch 3 read-action)
+       (phase "read-original" vr-reference 0 batch 3 read-action)))
+     (loop (+ batch 1)))))))
+(define (vr-initialize name)
+ (vr-check 'initializer-compiled (linked-proof-native? (linked-proof-binding name)))
+ (bl-invoke (linked-proof-binding name) '()))
+(define (vr-run)
+ (native-mark-host-callable! linked-refuse-eval)
+ (bl-register-callable! linked-refuse-eval 1)
+ (set! native-leaf-registry
+  (bl-assoc native-leaf-registry "host/eval-scheme/1" linked-refuse-eval))
+ (set! native-eval-string linked-refuse-eval)
+ (load @FIRST_PROVIDER_MODULE@) (vr-initialize @FIRST_PROVIDER_INITIALIZER@)
+ (load @FIRST_CONSUMER_MODULE@) (vr-initialize @FIRST_CONSUMER_INITIALIZER@)
+ (vr-event "publish" 1 @FIRST_PROVIDER_STAMP@)
+ (let* ((consumer-factory (native-global-exact vr-consumer "make-helper"))
+        (consumer-tagged (native-global-exact vr-consumer "make-tagged"))
+        (helper-first (bl-invoke consumer-factory (list vr-reference)))
+        (held (bl-invoke consumer-tagged (list vr-reference)))
+        (held-parent (linked-proof-parent held))
+        (provider-parents
+         (linked-proof-parents '@FIRST_PROVIDER_MAKE-HELPER_PHYSICAL@ linked-proof-existing-parents)))
+  (vr-check 'helper-owned-by-emitted-provider
+   (memq (linked-proof-parent helper-first) provider-parents))
+  (set! vr-admitted (list helper-first))
+  (vr-differential helper-first)
+  (let ((before (bl-invoke vr-reader (list vr-source "native-devtool-benchmark.bl"))))
+   (vr-check 'actual-reader-source-forms-equal
+    (bl-equal? before (vr-read helper-first 1 @FIRST_PROVIDER_STAMP@))))
+  (vr-measure helper-first 1 @FIRST_PROVIDER_STAMP@)
+  ;; A semantically equivalent but distinct canonical binding is still stale.
+  (let* ((saved (native-global-exact "rt" "eqv"))
+         (other (native-global-exact "rt" "k-eqv")))
+   (dynamic-wind
+    (lambda () (native-register! "rt" "eqv" other))
+    (lambda ()
+     (vr-check 'changed-kernel-rejects-specialization (not (vr-kernel-current?)))
+     (vr-check 'changed-kernel-reference-fallback
+      (vr-request helper-first 1 @FIRST_PROVIDER_STAMP@
+       (lambda (selected) (eq? selected vr-reference)))))
+    (lambda () (native-register! "rt" "eqv" saved))))
+  (native-register! "reader" "ignored-char?" helper-first)
+  (vr-check 'stale-serving-binding-falls-back
+   (vr-request helper-first 1 @FIRST_PROVIDER_STAMP@
+    (lambda (selected) (eq? selected vr-reference))))
+  (vr-event "candidate-request" 2 @SECOND_PROVIDER_STAMP@)
+  (let* ((before native-global-registry)
+        (failed (with-exception-catcher (lambda (failure) #t)
+                 (lambda () (load @INVALID_MODULE@) #f))))
+   (vr-check 'corrupt-module-refused failed)
+   (vr-check 'failed-load-keeps-serving-root (eq? before native-global-registry))
+   (vr-event "fail" 2 @SECOND_PROVIDER_STAMP@))
+  (load @SECOND_PROVIDER_MODULE@) (vr-initialize @SECOND_PROVIDER_INITIALIZER@)
+  (vr-event "publish" 2 @SECOND_PROVIDER_STAMP@)
+  (let* ((helper-second (bl-invoke consumer-factory (list vr-reference)))
+         (fresh (bl-invoke consumer-tagged (list vr-reference)))
+         (second-parents
+          (linked-proof-parents '@SECOND_PROVIDER_MAKE-HELPER_PHYSICAL@
+                                (append linked-proof-existing-parents provider-parents))))
+   (vr-check 'second-helper-owned-by-emitted-provider
+    (memq (linked-proof-parent helper-second) second-parents))
+   (vr-check 'old-consumer-uses-new-provider
+    (= (bl-nth (bl-invoke fresh (list 32)) 0) 2))
+   (vr-check 'held-provider-closure-stays-old
+    (= (bl-nth (bl-invoke held (list 32)) 0) 1))
+   (set! vr-admitted (list helper-first helper-second))
+   (vr-differential helper-second)
+   (##gc)
+   (vr-check 'held-old-closure-after-gc
+    (and (eq? held-parent (linked-proof-parent held))
+         (= (bl-nth (bl-invoke held (list 9)) 0) 1)))
+   (vr-check 'fresh-closure-after-gc (= (bl-nth (bl-invoke fresh (list 9)) 0) 2))
+   (vr-check 'revised-reader-forms-equal
+    (bl-equal? (vr-read vr-reference 0 @SECOND_PROVIDER_STAMP@)
+               (vr-read helper-second 2 @SECOND_PROVIDER_STAMP@)))
+   (load @SECOND_CONSUMER_MODULE@) (vr-initialize @SECOND_CONSUMER_INITIALIZER@)
+   (vr-check 'new-consumer-still-makes-version-two
+    (= (bl-nth (bl-invoke
+                (bl-invoke (native-global-exact vr-consumer "make-tagged") (list vr-reference))
+                (list 32)) 0) 2))
+   (vr-event "held-old-after-gc" 1 @FIRST_PROVIDER_STAMP@)))
+ (vr-check 'canonical-kernel-restored (vr-kernel-current?))
+ (vr-check 'canonical-reader-helper-restored
+  (eq? vr-reference (native-global-exact "reader" "ignored-char?")))
+ (for-each
+  (lambda (row)
+   (display "VERTICAL_NATIVE_EVENT {\"event\":\"") (display (car row))
+   (display "\",\"revision\":") (write (cadr row))
+   (display ",\"selection\":\"") (display (caddr row))
+   (display "\",\"image\":\"") (display vr-image)
+   (display "\",\"kernel\":\"") (display vr-kernel) (display "\"}\n"))
+  (reverse vr-events))
+ (display "VERTICAL_READER_CHECKS ") (write vr-checks) (newline)
+ (display "NATIVE_VERTICAL_READER_PASS\n") (force-output) (exit 0))
+(with-exception-catcher
+ (lambda (failure)
+  (native-register! "reader" "ignored-char?" vr-reference)
+  (display-exception failure) (newline) (exit 1)) vr-run)
