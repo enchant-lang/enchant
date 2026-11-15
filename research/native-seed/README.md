@@ -2,6 +2,18 @@
 
 [Live development review](https://work.tailcb5318.ts.net:18138/) · [Snapshot](evidence/native-seed.html) · [Complete compiler fixpoint](evidence/scheme-fixpoint/qualification.json)
 
+The agreed wider direction is a **native BL development tool first** for the
+compiler and proc/actor work: edit, diagnose, test, run and reload in one warm
+native host, with deployment following the same pipeline. Ordinary use should
+require no BEAM. Speed must be established against equivalent warm BEAM work;
+the current native prototype does not establish that comparison.
+
+The dossier separates the checked bootstrap from the next delivery work:
+fair baselines, measured frontend optimization, a usable native project loop,
+incremental native self-emission, then a packaged daily tool. Initial targets
+(3× frontend throughput over warm BEAM, <100ms unchanged requests, <1s small
+edit-to-test) are provisional engineering goals to ratify against the baseline.
+
 ```text
 BL Source → existing reader / macros / bl-ANF → BL-owned Scheme emitter
                                                    ↓
