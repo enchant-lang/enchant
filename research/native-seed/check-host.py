@@ -47,6 +47,7 @@ def main():
                        "fixtures/c-plain-procedure-check.scm", "fixtures/c-remote-target-check.scm",
                        "fixtures/c-host-service-check.scm", "fixtures/c-call-slots-check.scm",
                        "fixtures/c-noactor-tick-check.scm", "fixtures/c-noactor-tick-header-check.scm",
+                       "fixtures/c-pure-bif-guard-check.scm",
                        "direct/native-direct.h"]
     hashes = {p: digest(BASE / p) for p in inputs}
     runs = []
@@ -111,13 +112,15 @@ def main():
         + (BASE / "fixtures/c-remote-target-check.scm").read_text() + "\n"
         + (BASE / "fixtures/c-host-service-check.scm").read_text() + "\n"
         + (BASE / "fixtures/c-call-slots-check.scm").read_text() + "\n"
-        + (BASE / "fixtures/c-noactor-tick-check.scm").read_text())
+        + (BASE / "fixtures/c-noactor-tick-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/c-pure-bif-guard-check.scm").read_text())
     control = run("direct-control-abi", [GAMBIT / "bin/gsi", "direct-control.scm"], timeout=20)
     for marker in ("NATIVE_C_CRITICAL_BOUNDARIES_PASS 10", "NATIVE_C_CRITICAL_CONTINUATIONS_PASS 18",
                    "NATIVE_C_RAW_SOURCE_TRACE_ABI_PASS 6", "NATIVE_C_SOURCE_TAIL_ABI_PASS 23",
                    "NATIVE_C_TAIL_FRAME_REUSE_ABI_PASS 49", "NATIVE_C_PLAIN_PROCEDURE_ABI_PASS 39",
                    "NATIVE_C_REMOTE_TARGET_ABI_PASS 105", "NATIVE_C_LATE_HOST_SERVICE_ABI_PASS 32",
-                   "NATIVE_C_CALL_SLOTS_ABI_PASS 29", "NATIVE_C_NOACTOR_TICK_ABI_PASS 45"):
+                   "NATIVE_C_CALL_SLOTS_ABI_PASS 29", "NATIVE_C_NOACTOR_TICK_ABI_PASS 45",
+                   "NATIVE_C_PURE_BIF_GUARDS_PASS 21"):
         assert marker in control, control
     (out / "native-direct.h").write_bytes((BASE / "direct/native-direct.h").read_bytes())
     (out / "posix.scm").write_text(common + "\n" + (BASE / "host/native-posix.scm").read_text()
