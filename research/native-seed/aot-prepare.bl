@@ -1,0 +1,185 @@
+; Real Source -> existing AOT workspace/unit-store -> Scheme/Gambit C module.
+; This producer does not load native modules. Proc's fixed observer does that.
+(ns native.aot-integration
+ (:require [native.aot-target :as target] [unit-store :as store]
+           [build-plan :as plan] [bl.json :as json]))
+
+(def fixture-namespace "native.aot.fixture")
+(def fixture-symbol 'native.aot.fixture)
+(def source-v1
+ "(ns native.aot.fixture)\n(defn answer [] 42)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 0)))\n")
+(def source-v2
+ "(ns native.aot.fixture)\n(defn answer [] 99)\n(defn adder [x] (fn [y] (erlang/+ (erlang/+ x y) 100)))\n")
+(def client-source
+ "(ns native.aot.client (:require [native.aot.fixture :as f]))\n(defn answer [] (f/answer))\n")
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn file-row [path] {:path (Path/expand path) :sha256 (sha (File/read! path))})
+(defn open-workspace [file]
+ (BeamLisp.AOT/open_workspace
+  {:version 2 :phase-imports (list 'core 'sugar)
+   :sources (list {:namespace fixture-symbol :file file})} {}))
+(defn stage-count []
+ (elem (erlang/trace_info (tuple :Elixir.BeamLisp.AOT :stage-sdk-unit! 2) :call_count) 1))
+(defn compiler-jobs [observations]
+ (vec (mapcat (fn [path]
+               (let [report (json/decode (File/read! path))]
+                (assert (= "bl.native.scheme-tool-result" (get report "schema")))
+                (get report "jobs")))
+              (sort (Path/wildcard (Path/join observations "*-result.json"))))))
+(defn observed-target [options counts]
+ (let [base (target/adapter options)]
+  (assoc base :emit! (fn [prepared directory selection]
+                       (swap! counts inc)
+                       ((:emit! base) prepared directory selection)))))
+(defn phase [label observations emissions action]
+ (let [stages (stage-count) emitted @emissions jobs (count (compiler-jobs observations))
+       start (erlang/monotonic_time :microsecond)
+       value (action)
+       observed {:label label :stage-calls (- (stage-count) stages)
+                 :emissions (- @emissions emitted)
+                 :compiler-jobs (- (count (compiler-jobs observations)) jobs)
+                 :microseconds (- (erlang/monotonic_time :microsecond) start)}]
+  (println (str "NATIVE_AOT_PHASE " (json/encode observed)))
+  {:value value :observed observed}))
+(defn expect-phase [row stages emissions jobs]
+ (let [observed (:observed row)]
+  (if (= stages :positive) (assert (> (:stage-calls observed) 0))
+   (assert (= stages (:stage-calls observed))))
+  (assert (= emissions (:emissions observed)))
+  (assert (= jobs (:compiler-jobs observed)))))
+(defn artifact-row [captured directory snapshot attribution]
+ (let [unit (Path/join directory (:key captured))
+       receipt (Path/join unit "native-module.json")
+       emission (Path/join unit "exports.json")]
+  {:receipt (Path/expand receipt) :receipt_sha256 (sha (File/read! receipt))
+   :emission (Path/expand emission) :emission_sha256 (sha (File/read! emission))
+   :fixture (assoc (file-row snapshot) :attribution (Path/expand attribution))
+   :unit_key (:key captured) :selection_key (target/selection-key (:selection captured))}))
+(defn artifact-digests [row]
+ (let [receipt (json/decode (File/read! (:receipt row)))]
+  (into {} (map (fn [[role artifact]] [role (get artifact "sha256")]) (get receipt "artifacts")))))
+(defn key-of [sources root]
+ (plan/key-for root (fn [namespace] (get sources namespace)) nil plan/memo-node))
+
+(def arguments (BeamLisp/argv))
+(def output (Path/expand (or (first arguments) "research/native-seed/out/aot-native-integration")))
+(def python (or (second arguments) (System/find_executable "python3")))
+(assert (string? python))
+(assert (not (File/exists? output)))
+(File/mkdir_p! output)
+(def file (Path/join output "source/native/aot/fixture.bl"))
+(def snapshot-v1 (Path/join output "source-v1.bl"))
+(def snapshot-v2 (Path/join output "source-v2.bl"))
+(File/mkdir_p! (Path/dirname file))
+(File/write! file source-v1)
+(File/write! snapshot-v1 source-v1)
+(File/write! snapshot-v2 source-v2)
+(def observations (Path/join output "observations"))
+(def options {:prototype "research/native-seed" :python python :observations observations
+              :object-cache (Path/join output "objects")})
+(def emissions (atom 0))
+(def adapter (observed-target options emissions))
+(def cold-root (Path/join output "cold-v1"))
+(def copied-root (Path/join output "copy-v1"))
+(def independent-root (Path/join output "independent-v1"))
+(def edited-root (Path/join output "edited-v2"))
+(def mfa (tuple :Elixir.BeamLisp.AOT :stage-sdk-unit! 2))
+(def saved-context (BeamLisp.Env/capture))
+(def records (atom []))
+(def versions (atom []))
+(def independent (atom nil))
+(erlang/trace_pattern mfa true (list :local :call_count))
+(try
+ (let [workspace (open-workspace file)]
+  (try
+   (let [prepared-row (phase "cold-prepare-v1" observations emissions
+                        #(BeamLisp.AOT/prepare_unit workspace fixture-symbol))
+         prepared (:value prepared-row)
+         warm-prepare (phase "warm-prepare-v1" observations emissions
+                        #(BeamLisp.AOT/prepare_unit workspace fixture-symbol))
+         cold (phase "cold-native-v1" observations emissions
+                #(store/artifact-target! prepared cold-root nil adapter))
+         warm (phase "warm-native-v1" observations emissions
+                #(store/artifact-target! prepared cold-root nil adapter))
+         copied (phase "copy-native-v1" observations emissions
+                  #(store/artifact-target! prepared copied-root cold-root adapter))]
+    (expect-phase prepared-row :positive 0 0)
+    (expect-phase warm-prepare 0 0 0)
+    (assert (= prepared (:value warm-prepare)))
+    (expect-phase cold 0 1 2)
+    (expect-phase warm 0 0 0)
+    (expect-phase copied 0 0 0)
+    (assert (= true (:compiled (:value cold))))
+    (assert (= false (:compiled (:value warm))))
+    (assert (= false (:compiled (:value copied))))
+    (assert (= (:key (:value cold)) (:key (:value warm)) (:key (:value copied))))
+    (swap! records into (mapv :observed [prepared-row warm-prepare cold warm copied]))
+    (let [cold-row (artifact-row (:value cold) cold-root snapshot-v1 file)
+          copy-row (artifact-row (:value copied) copied-root snapshot-v1 file)
+          independent-adapter (observed-target
+                                (assoc options :object-cache (Path/join output "independent-objects")) emissions)
+          emitted (phase "independent-native-v1" observations emissions
+                    #(store/artifact-target! prepared independent-root nil independent-adapter))
+          independent-row (artifact-row (:value emitted) independent-root snapshot-v1 file)]
+     (expect-phase emitted 0 1 2)
+     (assert (= true (:compiled (:value emitted))))
+     (assert (= (:key (:value cold)) (:key (:value emitted))))
+     (assert (= (artifact-digests cold-row) (artifact-digests copy-row) (artifact-digests independent-row)))
+     (swap! versions conj cold-row)
+     (reset! independent independent-row)
+     (swap! records conj (:observed emitted)))
+    (File/write! file source-v2)
+    (let [stale (phase "old-prepared-refused" observations emissions
+                  #(try (store/artifact-target! prepared cold-root nil adapter) :unexpected-success
+                     (catch error (:kind (ex-data error)))))]
+     (expect-phase stale 0 0 0)
+     (assert (= :artifact-source-changed (:value stale)))
+     (swap! records conj (:observed stale))))
+   (finally (BeamLisp.AOT/close_workspace! workspace))))
+ (let [workspace (open-workspace file)]
+  (try
+   (let [prepared-row (phase "cold-prepare-v2" observations emissions
+                        #(BeamLisp.AOT/prepare_unit workspace fixture-symbol))
+         prepared (:value prepared-row)
+         emitted (phase "edited-native-v2" observations emissions
+                   #(store/artifact-target! prepared edited-root cold-root adapter))
+         row (artifact-row (:value emitted) edited-root snapshot-v2 file)]
+    (expect-phase prepared-row :positive 0 0)
+    (expect-phase emitted 0 1 2)
+    (assert (= true (:compiled (:value emitted))))
+    (assert (not= (:unit_key (first @versions)) (:unit_key row)))
+    (swap! versions conj row)
+    (swap! records into (mapv :observed [prepared-row emitted])))
+   (finally (BeamLisp.AOT/close_workspace! workspace))))
+ (assert (= saved-context (BeamLisp.Env/capture)))
+ (let [before {fixture-namespace source-v1 "native.aot.client" client-source}
+       after {fixture-namespace source-v2 "native.aot.client" client-source}
+       provider-before (key-of before fixture-namespace)
+       provider-after (key-of after fixture-namespace)
+       client-before (key-of before "native.aot.client")
+       client-after (key-of after "native.aot.client")
+       requests (sort (Path/wildcard (Path/join observations "identity-*-request.json")))
+       producer "research/native-seed/aot-prepare.bl"
+       sdk (System/fetch_env! "BL_SDK_PRODUCT")]
+  (assert (not= provider-before provider-after))
+  (assert (= client-before client-after))
+  (assert (= 2 (count requests)))
+  (assert (= (json/decode (File/read! (first requests))) (json/decode (File/read! (second requests)))))
+  (File/write! (Path/join output "client-source.bl") client-source)
+  (File/write! (Path/join output "proof.json")
+   (json/encode {:schema "bl.native.scheme-module-proof" :version 1 :status "prepared-not-executed"
+    :namespace fixture-namespace :tool_request (Path/expand (first requests))
+    :tool_request_sha256 (sha (File/read! (first requests)))
+    :producer (file-row producer)
+    :sdk {:product sdk :descriptor (file-row (Path/join sdk "artifact.json"))}
+    :versions @versions :independent @independent :phases @records
+    :planner {:owner "build-plan/key-for" :client-source (file-row (Path/join output "client-source.bl"))
+              :provider-before provider-before :provider-after provider-after
+              :client-before client-before :client-after client-after
+              :native-client-compiled false :scope "existing planner body/interface contract only"}
+    :expectations {:answer [42 99] :captured-arguments [7 9] :closure-results [16 116]
+                   :retain-v1-closure-through-v2-and-gc true}
+    :native-executed false})))
+ (println "NATIVE_AOT_SOURCE_AND_REUSE_PREPARED")
+ (finally (erlang/trace_pattern mfa false (list :local :call_count))))

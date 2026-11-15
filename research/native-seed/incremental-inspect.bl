@@ -1,0 +1,83 @@
+; Targeted canonical Source discovery. Reads and indexes only; never loads the
+; indexed namespaces or starts a session/realm/application.
+(ns native.incremental-inspect
+ (:require [codebase] [reader-node :as rn] [bl.json :as json]))
+
+(def specifications
+ [{:path "priv/host/aot.bl"
+   :focus #{"open_workspace" "prepare_unit" "prepare_isolated_unit" "check_prepared_unit!"
+            "compile_unit" "emit_unit" "constructor_read_forms" "with_source_snapshot"
+            "describe_module" "build_init_ast"}}
+  {:path "priv/build/unit-store.bl"
+   :focus #{"artifact-key" "artifact!" "artifact-target!" "target-selection" "target-verified!"
+            "restore-compiler-unit!" "record-compiler-unit!" "produce!"}}
+  {:path "priv/build/build-plan.bl"
+   :focus #{"plan" "key-for" "memo-node" "parts-for" "prime-source!" "node-from"}}
+  {:path "priv/host/build_plan.bl"
+   :focus #{"plan" "key_for" "build-content-parts" "node-from" "node-signature" "key_from_nodes"}}
+  {:path "priv/build/source-graph.bl"
+   :focus #{"closure-hash" "hash-lines" "references-forms" "header*-forms" "closure"}}
+  {:path "priv/host/source_graph.bl"
+   :focus #{"closure-hash" "hash-lines" "references-forms" "header*-nodes" "closure"}}
+  {:path "priv/build/ns-interface.bl"
+   :focus #{"hash-forms" "names-forms" "lines-forms"}}
+  {:path "priv/host/ns_interface.bl"
+   :focus #{"hash-forms" "names-forms" "lines-forms"}}
+  {:path "priv/std/vm/session.bl"
+   :focus #{"start" "dispatch-command" "request-handler" "run-command" "drain-session!" "stop"}}
+  {:path "priv/std/vm/realm.bl"
+   :focus #{"open" "close" "start-services!" "describe"}}
+  {:path "priv/std/vm/manager.bl"
+   :focus #{"start" "open" "observe-sources" "run" "drain" "ensure"}}])
+
+(defn sha [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+(defn inspect-source [spec]
+ (let [path (:path spec) source (File/read! path) digest (sha source)
+       namespace (BeamLisp.Loader/declared_ns source)
+       _ (assert (string? namespace))
+       indexed (codebase/index-source {} namespace source {:mode :calls})
+       definitions
+       (vec (keep (fn [form]
+                    (when-let [name (codebase/defn-form form)]
+                     (when (contains? (:focus spec) name)
+                      {:name name :qualified (str namespace "/" name)
+                       :position (rn/node-pos form)
+                       :annotations (into {} (map (fn [[key value]] [key (codebase/node-data value)])
+                                                (or (codebase/name-annotation
+                                                      (second (rn/node-items form))) {})))})))
+                  (BeamLisp.Ns.Reader/read source {:file path})))
+       found (set (map :name definitions))]
+  (assert (= (:focus spec) found))
+  (assert (= digest (sha (File/read! path))))
+  {:path path :namespace namespace :sha256 digest :bytes (erlang/byte_size source)
+   :scope :selected-source-definitions :definitions definitions
+   :indexed-function-facts (count (:fn indexed))
+   :functions (vec (filter #(contains? found (:fn/name %)) (:fn indexed)))
+   :calls (vec (filter #(contains? found (:call/caller %)) (:calls indexed)))
+   :requires (:requires indexed) :coverage (:coverage indexed)}))
+
+(def args (BeamLisp/argv))
+(def output (or (first args) "research/native-seed/evidence/incremental-codebase.json"))
+(def producer "research/native-seed/incremental-inspect.bl")
+(def product (System/get_env "BL_SDK_PRODUCT"))
+(assert (string? product))
+(def descriptor (str product "/artifact.json"))
+(def facts (mapv inspect-source specifications))
+; Recheck the complete selected set after discovery, so a mixed Source epoch
+; cannot become one retained receipt.
+(doseq [row facts] (assert (= (:sha256 row) (sha (File/read! (:path row))))))
+(File/mkdir_p! (Path/dirname output))
+(File/write! output
+ (json/encode {:schema "bl.native.incremental-source-discovery" :version 1
+  :scope :targeted-codebase-source-facts :application-started false
+  :runtime-or-compiler-qualified false
+  :producer {:path producer :sha256 (sha (File/read! producer))}
+  :sdk {:product product :descriptor-sha256 (sha (File/read! descriptor))
+        :compiler-key (BeamLisp.AOTCache/compiler_key)}
+  :codebase-owner {:path "priv/std/codebase.bl" :sha256 (sha (File/read! "priv/std/codebase.bl"))}
+  :inputs facts
+  :limitations ["Source call facts; dynamic dispatch and host custody need separate inspection."
+                "No reachability absence or runtime/native qualification claim."]}))
+(println (str "NATIVE_INCREMENTAL_SOURCE_DISCOVERY " (count facts) " files; "
+              (reduce + 0 (map #(count (:definitions %)) facts)) " selected definitions"))

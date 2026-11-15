@@ -1,0 +1,177 @@
+; Target adapter only: validated AOT Source plans -> the existing Scheme emitter.
+; AOT/unit-store own preparation, freshness, cache and runtime admission.
+(ns native.aot-scheme
+ (:require [native.scheme :as scheme] [native.eval :as ev]
+           [native.bootstrap :as bootstrap] [clojure.string :as string]))
+
+(defn- refuse! [kind data]
+ (throw (ex-info "Scheme AOT target refused an unsupported prepared unit" (assoc data :kind kind))))
+(defn- atom-text [value]
+ (if (string? value) value (erlang/atom_to_binary value)))
+(defn- mfa [module function arity]
+ (str (atom-text module) "/" (atom-text function) "/" arity))
+(defn- physical-name [id module function arity]
+ (scheme/ident (str "aot/" id "/physical/" (mfa module function arity))))
+(defn- logical-name [id ns name]
+ (scheme/ident (str "aot/" id "/logical/" ns "/" name)))
+(defn- registry-namespace [ns] (str "@aot/" ns))
+(defn- zip [xs ys]
+ (when-not (= (count xs) (count ys)) (refuse! :projection-lengths {}))
+ (mapv (fn [index] [(nth xs index) (nth ys index)]) (range (count xs))))
+(defn- proper-list! [value field]
+ (when-not (erlang/is_list value) (refuse! :finite-source-projection {:field field}))
+ (BeamLisp.CompilerData/eager_to_list value))
+(defn- source-unit [plan]
+ (let [unit (:source-unit plan)]
+  (when-not (and (= 1 (:version unit)) (= :source-unit (:kind unit))
+                 (string? (:namespace unit)) (string? (:file unit))
+                 (erlang/is_map (:definitions unit)) (erlang/is_map (:callables unit))
+                 (= (set (keys (:definitions unit))) (set (keys (:callables unit)))))
+   (refuse! :source-projection-required {:namespace (:namespace plan)}))
+  (doseq [field [:initializers :namespace-operations :function-operations :native-operations]]
+   (proper-list! (get unit field) field))
+  (when (seq (:native-operations unit))
+   (refuse! :native-declaration-requires-runtime-owner {:namespace (:namespace unit)}))
+  (doseq [row (:initializers unit)]
+   (when (:per-env? row)
+    (refuse! :per-environment-initializer-requires-runtime-owner {:namespace (:namespace unit) :name (:name row)}))
+   (proper-list! (:operations row) :initializer-operations))
+  unit))
+
+(defn- definitions [unit]
+ (vec (mapcat
+  (fn [[name entries]]
+   (map (fn [entry]
+    (when-not (and (erlang/is_tuple entry) (= 5 (erlang/tuple_size entry))
+                   (contains? #{:fixed :variadic} (elem entry 0))
+                   (integer? (elem entry 1)) (>= (elem entry 1) 0)
+                   (= :defn-clause (:op (elem entry 3))))
+     (refuse! :invalid-function-projection {:namespace (:namespace unit) :name name}))
+    (let [clause (elem entry 3) arity (count (proper-list! (:params clause) :parameters))
+          expected (if (= :fixed (elem entry 0)) (elem entry 1) (inc (elem entry 1)))]
+     (when-not (and (= arity expected) (= (elem entry 2) (:fname clause))
+                    (= (atom-text (elem entry 2)) (str name (when (= :variadic (elem entry 0)) "__bl_v"))))
+      (refuse! :physical-function-shape {:namespace (:namespace unit) :name name}))
+     {:namespace (:namespace unit) :name name :kind (elem entry 0) :minimum (elem entry 1)
+      :module (elem entry 4) :function (elem entry 2) :arity arity :clause clause}))
+    (proper-list! entries :function-entries)))
+  (sort-by first (:definitions unit)))))
+(defn- group-definitions [rows]
+ (reduce (fn [groups row]
+  (let [key (mfa (:module row) (:function row) (:arity row))]
+   (if-let [old (get groups key)]
+    (do
+     (when-not (= (select-keys old [:namespace :name :kind :minimum])
+                  (select-keys row [:namespace :name :kind :minimum]))
+      (refuse! :ambiguous-physical-function {:mfa key}))
+     (assoc groups key (update old :clauses conj (:clause row))))
+    (assoc groups key (assoc (dissoc row :clause) :clauses [(:clause row)]))))) {} rows))
+(defn- module-aliases [plan rows]
+ (vec (sort-by atom-text (set (cons (:module plan) (map :module rows))))))
+(defn- export-rows [id unit rows]
+ (mapv (fn [[name _]]
+  (let [selected (filter #(= name (:name %)) rows)
+        kinds (get-in unit [:declarations :callable-kinds (:namespace unit)])]
+   {:namespace (:namespace unit) :name name
+    :scheme-global (logical-name id (:namespace unit) name)
+    :kind (get kinds name) :private? (= :private (get-in unit [:declarations (:namespace unit) name]))
+    :fixed (vec (sort (distinct (map :minimum (filter #(= :fixed (:kind %)) selected)))))
+    :variadic (some #(when (= :variadic (:kind %)) (:minimum %)) selected)
+    :physical (vec (distinct (map (fn [row]
+                 {:module (atom-text (:module row)) :function (atom-text (:function row)) :arity (:arity row)
+                  :scheme-global (physical-name id (:module row) (:function row) (:arity row))}) selected)))}))
+  (sort-by first (:definitions unit))))
+
+(defn- emission-context [namespace physical allowed options]
+ (let [base (ev/context namespace)]
+  (assoc base :source-frames? (= true (:source-frames? options))
+   :remote-resolver
+   (fn [node]
+    (let [args (:args node) key (mfa (:mod node) (:fun node) (count args))
+          capture (when (and (= :erlang (:mod node)) (= :make_fun (:fun node)) (= 3 (count args))
+                              (every? #(= :lit (:op %)) args)
+                              (erlang/is_atom (:val (first args))) (erlang/is_atom (:val (second args)))
+                              (integer? (:val (nth args 2))) (>= (:val (nth args 2)) 0))
+                    (get physical (mfa (:val (first args)) (:val (second args)) (:val (nth args 2)))))]
+     (if capture
+      ; Keep canonical argument evaluation/physical arity. Only the exact
+      ; owner-produced literal capture selects an emitted native procedure.
+      (str "(lambda (module function arity) " capture ")")
+      (do
+       (when-not (contains? allowed key)
+        (refuse! :unresolved-native-mfa {:mfa key :namespace namespace :ann (:ann node)}))
+       ((:remote-resolver base) node))))))))
+(defn- emit-operations [nodes context]
+ (string/join "\n" (Enum/map nodes #(scheme/emit % context))))
+(defn- install-modules [unit aliases namespace-module]
+ (str "(native-declare-ns " (scheme/text (:namespace unit)) ")\n"
+  "(set! native-namespace-modules (bl-assoc native-namespace-modules "
+  (scheme/text (:namespace unit)) " " (scheme/literal namespace-module) "))\n"
+  (string/join "\n" (map (fn [module]
+   (str "(set! native-module-names (bl-assoc native-module-names " (scheme/text (atom-text module)) " "
+        (scheme/text (registry-namespace (:namespace unit))) "))")) aliases))))
+(defn- publish-callables [unit exports]
+ (string/join "\n" (map (fn [row]
+  (let [ns (:namespace row) name (:name row) global (:scheme-global row)]
+   (str "(set! " global " (bl-get " (scheme/ident "$sdk_callables") " " (scheme/text name) "))\n"
+    "(native-register! " (scheme/text (registry-namespace ns)) " " (scheme/text name) " " global ")\n"
+    "(native-register-arities! " (scheme/text (registry-namespace ns)) " " (scheme/text name) " "
+       (bootstrap/data (:fixed row)) " " (bootstrap/data (:variadic row)) ")"))) exports)))
+
+(defn emit-prepared
+ "Emit the complete canonical Source projection as one host-free Scheme unit.
+  Loading defines native functions only. Its runtime owner explicitly invokes
+  :initializer once; neither this adapter nor its artifact grants admission."
+ [prepared options]
+ (BeamLisp.AOT/check_prepared_unit! prepared)
+ (let [id (:unit-id options) external (get options :external-mfas #{})
+       _ (when-not (and (string? id) (not (empty? id)) (<= (count id) 128)
+                        (set? external) (every? string? external))
+           (refuse! :target-options {:required [:unit-id :external-mfas]}))
+       plans (vec (:plans prepared)) units (mapv source-unit plans)
+       rows-by-unit (mapv definitions units) rows (vec (apply concat rows-by-unit))
+       groups (group-definitions rows)
+       physical (into {} (map (fn [[key row]] [key (physical-name id (:module row) (:function row) (:arity row))]) groups))
+       aliases (mapv (fn [[plan rs]] (module-aliases plan rs)) (zip plans rows-by-unit))
+       exports-by-unit (mapv (fn [[unit rs]] (export-rows id unit rs)) (zip units rows-by-unit))
+       exports (vec (apply concat exports-by-unit))
+       provided (set (mapcat (fn [[modules rs]]
+                       (mapcat (fn [module] (map #(mfa module (:function %) (:arity %)) rs)) modules))
+                     (zip aliases rows-by-unit)))
+       allowed (into external provided)
+       physical-aliases (reduce (fn [table [modules rs]]
+                          (reduce (fn [table module]
+                            (reduce (fn [table row]
+                              (assoc table (mfa module (:function row) (:arity row))
+                                (physical-name id (:module row) (:function row) (:arity row)))) table rs)) table modules))
+                         physical (zip aliases rows-by-unit))
+       procedures
+       (string/join "\n" (Enum/map (sort-by first groups) (fn [[key row]]
+        (let [clause (first (:clauses row))
+              node {:op :fn :ann (:ann clause)
+                    :clauses (BeamLisp.CompilerData/eager_map
+                               (fn [c] {:pats (:params c) :guard (:guard c) :body (:body c)}) (:clauses row))}]
+         (scheme/emit-definition {:ns (:namespace row) :name (:name row) :node node :scheme-name (get physical key)}
+          (emission-context (:namespace row) physical-aliases allowed options))))))
+       initializer (scheme/ident (str "aot/" id "/initialize"))
+       bodies
+       (string/join "\n" (Enum/map (range (count units)) (fn [index]
+        (let [unit (nth units index) context (emission-context (:namespace unit) physical-aliases allowed options)
+              callable-node {:op :map :ann {} :pairs (BeamLisp.CompilerData/eager_map
+                                (fn [[name node]] (list {:op :lit :val name :ann {}} node))
+                                (sort-by first (:callables unit)))}]
+         (str (install-modules unit (nth aliases index) (:module (nth plans index))) "\n"
+          "(let ((" (scheme/ident "$sdk_callables") " " (scheme/emit callable-node context) "))\n"
+           (emit-operations (:namespace-operations unit) context) "\n"
+           (emit-operations (:function-operations unit) context) "\n"
+           (publish-callables unit (nth exports-by-unit index)) "\n"
+           (string/join "\n" (Enum/map (:initializers unit) #(emit-operations (:operations %) context))) "\n"
+           "(native-declare-ns " (scheme/text (:namespace unit)) "))")))))
+       source (str ";; Canonical AOT Source ANF -> native.scheme; host-free compiled module.\n"
+                procedures "\n" (string/join "\n" (map #(str "(define " (:scheme-global %) " bl-nil)") exports))
+                "\n(define " initializer " (bl-register-callable! (lambda ()\n" bodies "\n(bl-key \"ok\")) 0))\n")]
+  (BeamLisp.AOT/check_prepared_unit! prepared)
+  {:schema "bl.native.aot-scheme-emission" :version 1 :scheme source :unit-id id
+   :initializer initializer :exports exports :namespaces (mapv :namespace units)
+   :provided-mfas (vec (sort provided)) :source-interpreter false :anf-interpreter false
+   :runtime-admission false :initializer-invoked false}))
