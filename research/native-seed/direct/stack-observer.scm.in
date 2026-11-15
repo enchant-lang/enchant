@@ -25,11 +25,15 @@
    (let ((port (open-output-string)))
     (##display-locat locat #f port) (get-output-string port)))))
 (define (c-stack-row creator cont)
- (or (table-ref c-stack-rows creator #f)
-  (let ((row (vector c-stack-next-id creator (##procedure-name creator)
-               (c-stack-location cont) 0 0)))
-   (set! c-stack-next-id (+ c-stack-next-id 1))
-   (table-set! c-stack-rows creator row) row)))
+ ;; creator collapses all lexical lambdas to host#. The saved return code
+ ;; preserves the exact compiled subprocedure, including its return label.
+ (let ((ret (##continuation-ret cont)))
+  (or (table-ref c-stack-rows ret #f)
+   (let ((row (vector c-stack-next-id creator (##procedure-name creator)
+                (c-stack-location cont) 0 0 ret
+                (##subprocedure-parent-name ret) (##subprocedure-id ret))))
+    (set! c-stack-next-id (+ c-stack-next-id 1))
+    (table-set! c-stack-rows ret row) row))))
 (define (c-stack-interrupt-frame? name)
  ;; Reported counts explicitly omit the capture/RPC plumbing from leaf
  ;; attribution. Inclusive attribution still retains every interesting frame.
@@ -51,11 +55,11 @@
       (if (procedure? creator)
        (let* ((row (c-stack-row creator cont)) (name (vector-ref row 2))
               (count-leaf? (and leaf? (not (c-stack-interrupt-frame? name)))))
-        (if (not (memq creator seen))
+        (if (not (memq (vector-ref row 6) seen))
          (vector-set! row 4 (+ (vector-ref row 4) 1)))
         (if count-leaf? (vector-set! row 5 (+ (vector-ref row 5) 1)))
         (loop (##continuation-next-frame cont #f) (- remaining 1)
-              (cons creator seen) (and leaf? (not count-leaf?))
+              (cons (vector-ref row 6) seen) (and leaf? (not count-leaf?))
               (cons (vector-ref row 0) example)))
        (loop (##continuation-next-frame cont #f) (- remaining 1) seen leaf? example))))))))
 (define (c-stack-insert row rows)
@@ -79,10 +83,31 @@
    (c-stack-line "DIRECT_C_STACK_PROCEDURE"
     (list (cons 'id (vector-ref row 0))
           (cons 'name (or (vector-ref row 2) (c-stack-text (vector-ref row 1))))
+          (cons 'return-parent (vector-ref row 7))
+          (cons 'return-subprocedure-id (vector-ref row 8))
           (cons 'representative-location (vector-ref row 3))
           (cons 'inclusive-samples (vector-ref row 4))
           (cons 'leaf-samples (vector-ref row 5))))) rows)
-  (c-stack-line "DIRECT_C_STACK_EXAMPLES" (reverse c-stack-examples))))
+  (c-stack-line "DIRECT_C_STACK_EXAMPLES" (reverse c-stack-examples))
+  ;; Live global closure entry IDs are exact identity facts, not a guess that
+  ;; a nearby numeric return ID belongs to that binding. C labels resolve it.
+  (for-each (lambda (binding)
+   (let* ((value (cdr binding))
+          (code (if (##closure? value) (##closure-code value) value)))
+    (c-stack-line "DIRECT_C_STACK_GLOBAL_CODE"
+     (list (cons 'binding (car binding))
+           (cons 'code-parent (##subprocedure-parent-name code))
+           (cons 'entry-subprocedure-id (##subprocedure-id code))))))
+   (list (cons 'bl-get bl-get) (cons 'bl-assoc bl-assoc)
+         (cons 'bl-key bl-key) (cons 'bl-truthy bl-truthy)
+         (cons 'bl-invoke bl-invoke) (cons 'native-resolve-call native-resolve-call)
+         (cons 'native-c-resolve-call native-c-resolve-call)
+         (cons 'native-c-site-stack native-c-site-stack)
+         (cons 'native-c-source-stack native-c-source-stack)
+         (cons 'native-c-apply-action native-c-apply-action)
+         (cons 'native-c-refresh-pure-bifs! native-c-refresh-pure-bifs!)
+         (cons 'native-c-record-pure-bifs! native-c-record-pure-bifs!)
+         (cons 'native-c-noactor-tick-allowed? native-c-noactor-tick-allowed?)))))
 (c-stack-line "DIRECT_C_STACK_PROFILE_START"
  (list (cons 'delay-seconds c-stack-delay) (cons 'interval-seconds c-stack-interval)
        (cons 'duration-seconds c-stack-duration)
