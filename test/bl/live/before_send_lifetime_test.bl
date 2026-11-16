@@ -1,5 +1,5 @@
 (ns live.before-send-lifetime-test
- (:require [web] [reload.generation :as generation]))
+ (:require [web] [reload] [reload.generation :as generation]))
 
 (defn- graph []
  (let [root (str (System/get_env "HOME") "/tmp/before-send-lifetime-"
@@ -42,3 +42,31 @@
    (is (nil? (generation/current)))
    (is (= :retired (:status (generation/retire! graph))))
    (finally (generation/retire! graph)))))
+
+(deftest a-raised-http-handler-releases-its-abandoned-response-callback
+ (let [graph (graph) slot (generation/slot) listener (atom nil)
+       previous (reload/reload-enabled?)]
+  (try
+   (reload/set-enabled! true) (generation/publish! slot nil graph)
+   (let [started (web/serve
+                  {:port 0 :ip (tuple 127 0 0 1) :log :off
+                   :plug (fn [request]
+                           (generation/with-selected! slot
+                            (fn []
+                             (web/before-send request (fn [response] response))
+                             (throw (ex-info "Controlled abandoned response" {})))))})]
+    (reset! listener (elem started 1)))
+   (Application/ensure_all_started :inets)
+   (let [port (elem (elem (erlang/apply :Elixir.ThousandIsland :listener_info (list @listener)) 1) 1)
+         response (httpc/request :get (tuple (String/to_charlist (str "http://127.0.0.1:" port "/")) (list))
+                    (list (tuple :timeout 3000)) (list (tuple :body_format :binary)))]
+    (is (= :ok (elem response 0)))
+    (is (= 500 (elem (elem (elem response 1) 0) 1))))
+   (generation/close! slot (generation/selected slot))
+   ;; The connection/listener are still alive. A failed request must not keep
+   ;; its Source graph pinned until an unrelated keepalive timeout or OS stop.
+   (is (= :retired (:status (generation/retire! graph))))
+   (finally
+    (when @listener (Supervisor/stop @listener :normal 5000))
+    (generation/close! slot (generation/selected slot))
+    (generation/retire! graph) (reload/set-enabled! previous)))))
