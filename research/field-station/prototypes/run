@@ -3,8 +3,8 @@ set -euo pipefail
 prototype_source=$(cd -- "$(dirname -- "$0")" && pwd)
 enchant_source=$(cd -- "$prototype_source/../../.." && pwd)
 prototype_action=${1:-core}
-if [[ "$prototype_action" != core ]]; then
-  echo 'Usage: ./run core' >&2
+if [[ "$prototype_action" != core && "$prototype_action" != foundry ]]; then
+  echo 'Usage: ./run core|foundry' >&2
   exit 2
 fi
 mkdir -p "$HOME/tmp"
@@ -14,11 +14,26 @@ prototype_unit="station-prototypes-$(date +%s)-$$"
 trap 'systemctl --user stop "$prototype_unit.service" >/dev/null 2>&1 || true' EXIT
 echo "Prototype evidence: $prototype_state"
 cd "$enchant_source"
+prototype_program="$prototype_source/check.bl"
+prototype_paths=(-p "$prototype_source/src")
+if [[ "$prototype_action" == foundry ]]; then
+  foundry_source=${FOUNDRY_SOURCE:-/home/othman/code/undefine/foundry}
+  foundry_revision=456739adb8879238664c317f399c35c99f89553a
+  mkdir "$prototype_state/foundry-source"
+  git -C "$foundry_source" archive "$foundry_revision" > "$prototype_state/foundry-source.tar"
+  tar -xf "$prototype_state/foundry-source.tar" -C "$prototype_state/foundry-source"
+  printf '%s\n' "$foundry_revision" > "$prototype_state/foundry-revision"
+  sha256sum "$prototype_state/foundry-source.tar" > "$prototype_state/foundry-source.sha256"
+  for directory in src src/foundry/engine src/foundry/operations src/foundry/release src/foundry/host src/foundry/providers src/foundry/credentials src/foundry/interfaces src/foundry/support; do
+    prototype_paths+=(-p "$prototype_state/foundry-source/$directory")
+  done
+  prototype_program="$prototype_source/foundry_check.bl"
+fi
 systemd-run --user --quiet --collect --wait --pipe --unit="$prototype_unit" \
   --working-directory="$enchant_source" \
   --property=MemoryMax=3G --property=MemorySwapMax=512M \
   --property=RuntimeMaxSec=900 --property=TimeoutStopSec=15 \
   --setenv="STATION_PROTOTYPE_SOURCE=$prototype_source" \
   --setenv="STATION_PROTOTYPE_STATE=$prototype_state" \
-  "$enchant_source/bin/bl" --cold -p "$prototype_source/src" run "$prototype_source/check.bl" \
-  2>&1 | tee "$prototype_state/core.log"
+  "$enchant_source/bin/bl" --cold "${prototype_paths[@]}" run "$prototype_program" \
+  2>&1 | tee "$prototype_state/$prototype_action.log"

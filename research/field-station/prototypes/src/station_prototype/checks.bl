@@ -3,7 +3,8 @@
            [station-prototype.import-edn :as importer] [station-prototype.provider :as provider]
            [station-prototype.unix :as unix] [station-prototype.reconciliation :as reconciliation]
            [datom.offline.fs :as fs] [auth.interface :as interface] [auth.identity :as identity]
-           [auth.logic :as logic] [veritas.model :as model] [veritas.ledger :as ledger]
+           [auth.logic :as logic] [auth.imports :as imports] [auth.transport :as transport]
+           [veritas.model :as model] [veritas.ledger :as ledger]
            [veritas.assurance :as assurance] [bl.json :as json]))
 (def results (atom []))
 (defn check! [label value]
@@ -44,6 +45,12 @@
        call (fn [operation args] (interface/invoke! opened operation args))]
   (try
    (check! "checked namespace declaration admitted" (= :checked (:status (logic/prepare (File/read! (str source "/src/station_prototype/messages.bl"))))))
+   (imports/bind! "field.messages"
+    {:namespace "station-prototype.messages" :version 1 :only ['inbox 'claim!]}
+    opened (interface/endpoint opened))
+   (check! "ordinary require calls the linked authenticated service namespace"
+    (= [["legacy-1" 100 "First preserved message"]]
+       (as-person "alice" #(BeamLisp/run_file (str source "/consumer.bl")))))
    (check! "principal-scoped inbox cannot enumerate another recipient"
     (= [["legacy-1" 100 "First preserved message"]] (as-person "alice" #(call "inbox" ["ora"]))))
    (check! "unauthenticated namespace call refuses" (= :auth/unauthenticated (refused #(call "inbox" ["ora"]))))
@@ -70,7 +77,7 @@
      (finally (watch/unwatch subscription))))
    (let [rows (d/q '[:find ?tx :where [?tx :audit/operation :claim]] (d/db conn))]
     (check! "only successful unique command committed an audit transaction" (= 1 (count rows))))
-   (finally (interface/close! opened) (d/close! conn)))))
+   (finally (imports/unlink! "field.messages") (interface/close! opened) (d/close! conn)))))
 (defn unix-checks! [root]
  (let [result (unix/roundtrip! (str root "/peer.sock") {"uid" 0 "subject" "forged-root"})
        actual (erlang/binary_to_integer (String/trim (first (System/cmd (System/find_executable "id") (list "-u")))))]

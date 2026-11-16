@@ -1,0 +1,96 @@
+(ns station-prototype.deployment
+ (:require [station-prototype.release :as release] [station-prototype.checks :as checks]
+           [foundry.upgrade.lifecycle :as lifecycle] [foundry.upgrade.application :as application]
+           [datom :as d] [datom.conn :as conn] [reload.generation :as generation]
+           [auth] [reload] [bl.json :as json]))
+(defn get! [port]
+ (Application/ensure_all_started :inets)
+ (let [response (httpc/request :get
+                 (tuple (String/to_charlist (str "http://127.0.0.1:" port "/health/ready")) (list))
+                 (list (tuple :timeout 3000) (tuple :connect_timeout 1000))
+                 (list (tuple :body_format :binary)))]
+  (when-not (and (= :ok (elem response 0)) (= 200 (elem (elem (elem response 1) 0) 1)))
+   (throw (ex-info "Prototype readiness request failed" {})))
+  (json/decode (elem (elem response 1) 2))))
+(defn complete! [owner]
+ (let [deadline (+ (System/monotonic_time :millisecond) 90000)]
+  (loop []
+   (let [status (lifecycle/status owner) operation (last (:operations status))]
+    (cond (= "completed" (get operation "state")) status
+          (contains? #{"failed" "rolled-back" "refused"} (get operation "state"))
+          (throw (ex-info "Foundry publication did not complete" {:operation operation}))
+          (>= (System/monotonic_time :millisecond) deadline)
+          (throw (ex-info "Foundry publication deadline exceeded" {:operation operation}))
+          :else (do (Process/sleep 20) (recur)))))))
+(defn websocket! [port]
+ (let [r (gen_tcp/connect (tuple 127 0 0 1) port (list :binary (tuple :active false)) 3000)]
+  (when-not (= :ok (elem r 0)) (throw (ex-info "WebSocket client failed" {})))
+  (let [socket (elem r 1)]
+   (try
+    (gen_tcp/send socket (str "GET /ws/ HTTP/1.1\r\nHost: 127.0.0.1:" port
+                          "\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                          "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"))
+    (let [reply (gen_tcp/recv socket 0 5000)]
+     (when-not (and (= :ok (elem reply 0)) (String/contains? (elem reply 1) "101 Switching Protocols"))
+      (throw (ex-info "WebSocket upgrade failed" {:reply reply}))) socket)
+    (catch error (gen_tcp/close socket) (throw error))))))
+(defn run! [source root]
+ (reset! checks/results [])
+ (File/mkdir_p! (str root "/data"))
+ (let [old (release/artifact! source root "prototype-old") fresh (release/artifact! source root "prototype-new")
+       key (auth/keypair) opts (release/options root old key)
+       previous (reload/reload-enabled?) _ (reload/set-enabled! true)
+       owned (atom nil) traffic (atom nil) socket (atom nil) stopped (atom false) samples (atom [])]
+  (try
+   (reset! owned (lifecycle/start! opts))
+   (let [before (lifecycle/status @owned) port (:port before)
+         store (conn/registered-at (str root "/data/messages.fjall"))]
+    (checks/check! "Foundry starts a real managed live.app factory" (= "prototype-old" (get (get! port) "version")))
+    (d/transact! store [{:db/id -1 :prototype/message "accepted-before-publication"}])
+    (reset! socket (websocket! port))
+    (reset! traffic (spawn-monitor
+     (fn []
+      (loop []
+       (when-not @stopped
+        (swap! samples conj (try (get! port) (catch _ :error)))
+        (Process/sleep 10) (recur))))))
+    (lifecycle/admit! @owned {"operation" "prototype-publication" "candidate" (:id fresh)
+                             "expectedGeneration" (:generation before) "idempotencyKey" "prototype-source-update"})
+    (checks/check! "candidate serves new requests while the old WebSocket remains open"
+     (checks/eventually #(= "prototype-new" (get (get! port) "version")) 90000))
+    (gen_tcp/send @socket (Base/decode16! "898000000000"))
+    (checks/check! "old WebSocket connection still responds after publication"
+     (= :ok (elem (gen_tcp/recv @socket 0 5000) 0)))
+    (gen_tcp/close @socket) (reset! socket nil)
+    (let [after (complete! @owned) ready (get! port)]
+     (checks/check! "online publication keeps the stable lifecycle owner" (= (:owner before) (:owner after)))
+     (checks/check! "online publication keeps the same HTTP listener port" (= port (:port after)))
+     (checks/check! "readiness proves the actually selected new generation"
+      (and (= "prototype-new" (get ready "version")) (= (:generation after) (get ready "generation"))))
+     (checks/check! "published application retains the actual pre-publication write" (= 1 (get ready "messages")))
+     (d/transact! store [{:db/id -1 :prototype/message "accepted-after-publication"}])
+     (checks/check! "existing native connection remains writable after publication" (= 2 (get (get! port) "messages"))))
+    (reset! stopped true)
+    (checks/eventually #(not (Process/alive? (elem @traffic 0))) 5000)
+    (checks/check! "real concurrent HTTP observations contain no failed requests"
+     (and (pos? (count @samples)) (not-any? #(= :error %) @samples)))
+    )
+   (lifecycle/stop! @owned) (reset! owned nil)
+   ;; Corrupt the disposable pointer deliberately: the journal remains authority.
+   (File/rm! (str root "/current")) (File/ln_s! (:root old) (str root "/current"))
+   (reset! owned (lifecycle/start! opts))
+   (let [restarted (lifecycle/status @owned) ready (get! (:port restarted))]
+    (checks/check! "restart selects the durable journal over a stale artifact pointer"
+     (and (= (:id fresh) (:candidate restarted)) (= "prototype-new" (get ready "version"))))
+    (checks/check! "restart preserves both acknowledged writes" (= 2 (get ready "messages"))))
+   {:format 1 :kind :field-station-foundry-prototype :passed (count @checks/results) :checks @checks/results
+    :http-observations (count @samples) :old (:id old) :candidate (:id fresh)
+    :scope "Real native same-VM Foundry lifecycle, Fjall and HTTP. Sandbox runtime identity fixture; no portable package or production rollout."}
+   (finally
+    (reset! stopped true)
+    (when @socket (gen_tcp/close @socket))
+    (when @traffic
+     (let [pid (elem @traffic 0)] (when (Process/alive? pid) (erlang/exit pid :kill)))
+     (Process/demonitor (elem @traffic 1) (list :flush)))
+    (when @owned (lifecycle/stop! @owned))
+    (reload/set-enabled! previous)))))

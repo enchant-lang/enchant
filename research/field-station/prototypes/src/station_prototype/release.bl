@@ -1,0 +1,40 @@
+;; Same-VM integration artifact builder. This is not a portable runtime packager.
+(ns station-prototype.release
+ (:require [foundry.definition :as definition] [release-verify :as seal]
+           [foundry.upgrade.bootstrap :as bootstrap] [auth]))
+(defn declaration []
+ {:version 1 :application {:version 1 :requirements ["datom" "live.app"]
+                          :entrypoints {:main "src/field_station/main.bl"} :data-version 1}
+  :release {:entrypoints {"main.bl" "src/field_station/main.bl"} :aot-sources []
+            :include-dirs ["src/"] :include-files [] :required-assets []}
+  :checks [{:id "native-stores" :kind "datom/stores"}]
+  :evolution {:version 1 :strategy "online" :entrypoint "field-station.live/app"
+              :bootstrap {:version 1 :framework "live.app" :initialize "field-station.live/initialize!"
+                          :borrow {"messages" "messages"}}
+              :stores [{:id "messages" :path "messages.fjall" :version 1 :journal true}]
+              :migrations [] :interval-ms 5}})
+(defn artifact! [source root version]
+ (let [app-source (String/replace (File/read! (str source "/fixtures/live.bl")) "prototype-old" version)
+       ;; Sandbox fixture identity is explicit. The actual VM is the checkout
+       ;; SDK executing these tests; no portable-runtime qualification is claimed.
+       files {"runtime/bl" "field-station same-VM sandbox identity; never execute this file"
+              "app/src/field_station/live.bl" app-source
+              "app/src/field_station/main.bl" "(throw (ex-info \"Use the Foundry lifecycle owner\" {}))"}
+       policy (definition/define (declaration))
+       manifest {"version" 1 "runtimeSha256" (seal/sha256-hex (get files "runtime/bl"))
+                 "definition" {"definition" policy}
+                 "files" (mapv (fn [[path text]] {"path" path "size" (erlang/byte_size text)
+                                               "sha256" (seal/sha256-hex text)}) files)}
+       manifest (assoc manifest "releaseId" (seal/release-id manifest))
+       id (get manifest "releaseId") destination (str root "/releases/" id)]
+  (doseq [[path text] files]
+   (File/mkdir_p! (Path/dirname (str destination "/" path)))
+   (File/write! (str destination "/" path) text))
+  (File/write! (str destination "/manifest.json") (seal/canonical-json manifest))
+  {:id id :root destination :runtime (get manifest "runtimeSha256")}))
+(defn options [root artifact key]
+ (bootstrap/config! {"version" 1 "application" "field-station" "environment" "sandbox"
+                    "dataRoot" (str root "/data") "releaseRoot" root "initialCandidate" (:id artifact)
+                    "runtimeSha256" (:runtime artifact) "runtimePath" (str (:root artifact) "/runtime/bl")
+                    "port" 0 "controlPort" 0 "publicKey" (Base/encode64 (auth/public key))
+                    "artifacts" {(:id artifact) (:root artifact)} "configuration" {}}))
