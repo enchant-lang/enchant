@@ -2,6 +2,7 @@
  (:require [station-prototype.release :as release] [station-prototype.checks :as checks]
            [foundry.upgrade.lifecycle :as lifecycle] [foundry.upgrade.application :as application]
            [foundry.definition :as definition]
+           [deployment-exec :as command] [proc.flow :as flow]
            [datom :as d] [datom.conn :as conn] [reload.generation :as generation]
            [auth] [reload] [bl.json :as json]))
 (defn get! [port]
@@ -35,6 +36,29 @@
      (when-not (and (= :ok (elem reply 0)) (String/contains? (elem reply 1) "101 Switching Protocols"))
       (throw (ex-info "WebSocket upgrade failed" {:reply reply}))) socket)
     (catch error (gen_tcp/close socket) (throw error))))))
+(defn command-checks! [root]
+ (let [print-program (command/tool "printf") sleep-program (command/tool "sleep")
+       result (command/run print-program ["%s\n" "{\"component\":\"backup\",\"ready\":true}"
+                                           "{\"component\":\"messages\",\"ready\":true}"]
+                {:timeout-ms 3000 :limit 4096})
+       rows (filter #(not= "" %) (String/split (:out result) "\n"))
+       upstream (flow/map-stage (flow/from-seq rows) json/decode)
+       observations (flow/run upstream [] (fn [all row] (conj all row)) 1)
+       conn (d/connect-with (datom.store-fjall/open (str root "/command-observations.fjall"))
+              [{:db/ident :observation/component :db/valueType :db.type/string :db/unique :db.unique/identity}
+               {:db/ident :observation/ready :db/valueType :db.type/boolean}])]
+  (try
+   (checks/check! "bounded argv subprocess returns actual structured observations" (= :exited (:status result)))
+   (d/transact! conn (mapv (fn [i]
+                            {:db/id (- -1 i) :observation/component (get (nth observations i) "component")
+                             :observation/ready (get (nth observations i) "ready")}) (range (count observations))))
+   (checks/check! "proc demand stream feeds queryable Datom observations"
+    (= 2 (count (d/q '[:find ?e :where [?e :observation/ready true]] (d/db conn)))))
+   (let [limited (command/run print-program ["%s" (join "" (repeat 1000 "x"))] {:timeout-ms 3000 :limit 32})
+         timed (command/run sleep-program ["2"] {:timeout-ms 20 :limit 128})]
+    (checks/check! "subprocess capture drains excess output and marks truncation" (:truncated limited))
+    (checks/check! "subprocess deadline reports timeout rather than success" (= :timed-out (:status timed))))
+   (finally (d/close! conn)))))
 (defn run! [source root]
  (reset! checks/results [])
  (File/mkdir_p! (str root "/data"))
@@ -91,6 +115,7 @@
     (checks/check! "restart selects the durable journal over a stale artifact pointer"
      (and (= (:id fresh) (:candidate restarted)) (= "prototype-new" (get ready "version"))))
     (checks/check! "restart preserves both acknowledged writes" (= 2 (get ready "messages"))))
+   (command-checks! root)
    {:format 1 :kind :field-station-foundry-prototype :passed (count @checks/results) :checks @checks/results
     :http-observations (count @samples) :old (:id old) :candidate (:id fresh)
     :scope "Real native same-VM Foundry lifecycle, Fjall and HTTP. Sandbox runtime identity fixture; no portable package or production rollout."}
