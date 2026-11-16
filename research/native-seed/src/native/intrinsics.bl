@@ -1,38 +1,40 @@
-; Native kernel boundary for AOT linking (workstream K).
+; Native BIF templates for AOT linking (workstreams K and KERNEL).
 ; Required ONLY by BEAM-side drivers (native.chunks). It is deliberately not in
-; the 18-namespace compiler closure: native.scheme / native.eval must not
-; require it (update-closure refuses added dependencies).
+; the compiler closure: native.scheme / native.eval must not require it
+; (update-closure refuses added dependencies).
 ;
-; Contract (fixed before fan-out; see research/native-seed/speed/CONTRACT.md):
+; Contract (research/native-seed/speed/CONTRACT.md, CONTRACT2.md):
 ;   (remote-template node) -> nil | (fn [operands] scheme-expression-string)
 ;     node is an ANF :remote node; operands is a vector of Scheme variable
 ;     names ALREADY bound to the evaluated arguments in source order.
 ;     The expression must have exactly the semantics of the registered leaf
-;     or compiled target for that module/function/arity on the native value
-;     representation, including raised errors.
-;   (kernel-override ns name original) -> nil | scheme-expression-string
-;     A native host implementation that REPLACES the published value of the
-;     compiled definition ns/name (e.g. rt/k-eqv). `original` is the Scheme
-;     binding name under which the linker ALSO defines the unchanged compiled
-;     BL body, so the override can take native fast paths and delegate every
-;     other case to it. Must be observationally identical to the BL definition
-;     in priv/boot/rt.bl for every native value.
+;     for that module/function/arity on the native value representation,
+;     including raised errors.
 ;
-; Every expression produced here names procedures from host/host-kernel.scm
-; (loaded after host-compiler.scm). Each template answers inline only where the
-; fixed native representation decides the registered leaf's answer and
-; otherwise calls that exact leaf procedure (captured by host-kernel.scm at
-; load). Each override's `kernel-rt-…` fast path returns `kernel-miss` when it
-; cannot prove the answer; the wrapper then calls `original` unchanged.
+; These are Erlang BIFs (CONTRACT2 category b): they have no BL source. There
+; is no rt.bl replica here; the runtime's own functions are compiled from
+; priv/boot/rt.bl, and they are fast because the BIFs they are written in
+; become the inline tests below.
+;
+; Every expression names only standard Gambit procedures and procedures from
+; host/host-kernel.scm (loaded after host-compiler.scm). A template answers
+; inline only where the fixed native representation decides the leaf's answer;
+; otherwise it calls that exact leaf procedure, captured by host-kernel.scm.
+;
+; Literal operands. When an equality BIF compares against a literal whose
+; equality is decided by identity on the native representation, the template
+; reads the literal from the node and emits `eq?`/`eqv?`/`null?`. The literal
+; operand variable is still bound by the caller; Gambit folds the binding
+; (`string->symbol` of a constant is a compile-time symbol under
+; standard-bindings).
 (ns native.intrinsics (:require [clojure.string :as string]))
 
 (defn- call [f operands] (str "(" f " " (string/join " " operands) ")"))
 (defn- helper [f] (fn [operands] (call f operands)))
 (defn- negated [f] (fn [operands] (str "(not " (call f operands) ")")))
-(defn- tagged [tag]
- (fn [operands]
-  (let [x (nth operands 0)]
-   (str "(and (vector? " x ") (eq? (vector-length " x ") 2) (eq? (vector-ref " x " 0) '" tag "))"))))
+(defn- tagged-test [x tag]
+ (str "(and (vector? " x ") (eq? (vector-length " x ") 2) (eq? (vector-ref " x " 0) '" tag "))"))
+(defn- tagged [tag] (fn [operands] (tagged-test (nth operands 0) tag)))
 (defn- fixnum-binary
  "Both operands fixnums: the leaf's answer is the Scheme fixnum operation;
   anything else is the registered leaf itself."
@@ -45,6 +47,37 @@
   (let [x (nth operands 0)]
    (str "(if (pair? " x ") (" op " " x ") (" leaf " " x "))"))))
 
+; erlang:is_atom/1 = (or (native-keyword? x) (boolean? x) (bl-is-nil x)).
+; A keyword is a colon symbol or a 2-slot 'utf16-keyword vector.
+(defn- is-atom [operands]
+ (let [x (nth operands 0)]
+  (str "(if (symbol? " x ") (kernel-colon-symbol? " x ") (or (boolean? " x ") (and (vector? " x ") (or (eq? " x " bl-nil) "
+       "(and (eq? (vector-length " x ") 2) (eq? (vector-ref " x " 0) 'utf16-keyword))))))")))
+; erlang:is_map/1: 'map/'vec/'set, or an opaque registered struct. host-kernel
+; guarantees opaque structs are vectors longer than 2.
+(defn- is-map [operands]
+ (let [x (nth operands 0)]
+  (str "(and (vector? " x ") (if (eq? (vector-length " x ") 2) (let ((kernel-tag (vector-ref " x " 0))) "
+       "(or (eq? kernel-tag 'map) (eq? kernel-tag 'vec) (eq? kernel-tag 'set))) (kernel-leaf-is-map " x ")))")))
+; erlang:is_binary/1 = native-string?: a scalar string or a 'utf16-string fragment.
+(defn- is-binary [operands]
+ (let [x (nth operands 0)]
+  (str "(or (string? " x ") " (tagged-test x "utf16-string") ")")))
+; erlang:element/2 on a tuple with a fixnum index in range.
+(defn- element [operands]
+ (let [i (nth operands 0) t (nth operands 1)]
+  (str "(if (and (fixnum? " i ") " (tagged-test t "tuple") ") (let ((kernel-items (vector-ref " t " 1))) "
+       "(if (and (fx>= " i " 1) (fx<= " i " (vector-length kernel-items))) (vector-ref kernel-items (fx- " i " 1)) "
+       "(kernel-leaf-element " i " " t "))) (kernel-leaf-element " i " " t "))")))
+(defn- tuple-size [operands]
+ (let [t (nth operands 0)]
+  (str "(if " (tagged-test t "tuple") " (vector-length (vector-ref " t " 1)) (kernel-leaf-tuple-size " t "))")))
+; erlang:++/2 is Scheme `append`; a one-element left list is one cons.
+(defn- plus-plus [operands]
+ (let [a (nth operands 0) b (nth operands 1)]
+  (str "(if (pair? " a ") (if (null? (cdr " a ")) (cons (car " a ") " b ") (kernel-leaf-++ " a " " b ")) "
+       "(if (null? " a ") " b " (kernel-leaf-++ " a " " b ")))")))
+
 (def ^:private templates
  {"erlang/is_list/1" (fn [operands] (let [x (nth operands 0)] (str "(or (null? " x ") (pair? " x "))")))
   "erlang/is_tuple/1" (tagged "tuple")
@@ -52,10 +85,10 @@
   "erlang/is_integer/1" (helper "exact-integer?")
   "erlang/is_boolean/1" (helper "boolean?")
   "erlang/is_function/1" (helper "procedure?")
-  "erlang/is_atom/1" (helper "kernel-is-atom?")
-  "erlang/is_map/1" (helper "kernel-is-map?")
-  "erlang/is_binary/1" (fn [operands] (let [x (nth operands 0)] (str "(or (string? " x ") (kernel-leaf-is-binary " x "))")))
-  "erlang/is_bitstring/1" (fn [operands] (let [x (nth operands 0)] (str "(or (string? " x ") (kernel-leaf-is-bitstring " x "))")))
+  "erlang/is_atom/1" is-atom
+  "erlang/is_map/1" is-map
+  "erlang/is_binary/1" is-binary
+  "erlang/is_bitstring/1" is-binary
   "erlang/==/2" (helper "kernel-erlang-equal?")
   "erlang//=/2" (negated "kernel-erlang-equal?")
   "erlang/=:=/2" (helper "kernel-exact-equal?")
@@ -70,18 +103,20 @@
   "erlang/hd/1" (pair-access "car" "kernel-leaf-hd")
   "erlang/tl/1" (pair-access "cdr" "kernel-leaf-tl")
   "erlang/not/1" (fn [operands] (let [x (nth operands 0)] (str "(if (boolean? " x ") (not " x ") (kernel-leaf-not " x "))")))
-  "erlang/element/2" (helper "kernel-element")
-  "erlang/tuple_size/1" (helper "kernel-tuple-size")
+  "erlang/element/2" element
+  "erlang/tuple_size/1" tuple-size
   "erlang/tuple_to_list/1" (helper "kernel-tuple-to-list")
   "erlang/setelement/3" (helper "kernel-setelement")
   "erlang/make_tuple/2" (helper "kernel-make-tuple")
   "erlang/list_to_tuple/1" (helper "kernel-list-to-tuple")
   "erlang/length/1" (helper "kernel-length")
+  "erlang/++/2" plus-plus
   "erlang/function_exported/3" (helper "kernel-leaf-function-exported")
   "erlang/is_function/2" (helper "kernel-leaf-is-function2")
   "erlang/apply/3" (helper "kernel-leaf-apply3")
   "erlang/integer_to_binary/1" (helper "kernel-leaf-integer-to-binary")
   "erlang/iolist_to_binary/1" (helper "kernel-leaf-iolist-to-binary")
+  "erlang/atom_to_binary/2" (helper "kernel-leaf-atom-to-binary2")
   "erlang/map_get/2" (helper "kernel-leaf-map-get")
   "erlang/map_size/1" (helper "kernel-leaf-map-size")
   "erlang/is_map_key/2" (helper "kernel-leaf-is-map-key")
@@ -96,65 +131,50 @@
 
 (defn template-keys [] (sort (keys templates)))
 
+;; ── equality against a literal ─────────────────────────────────────────────
+; `exact?` is =:= (bl-key-equal?), otherwise == (native-erlang-equal?). Both
+; decide a non-number literal by atom name / content, so:
+;   * `()`                              -> (null? x)
+;   * a keyword other than nil/true/false -> (eq? x LIT): only the same interned
+;     colon symbol has that atom name (BEAM atoms are UTF-8, never a
+;     'utf16-keyword fragment; nil/true/false share a name with bl-nil, #t, #f);
+;   * nil / true / false                -> the scalar or the same-named symbol;
+;   * an integer                        -> eqv? for =:=; for == an integer
+;     decides by eqv? and anything else (a float) is the leaf.
+; (The kind names avoid :nil/:true/:false, which ARE nil/true/false in BL.)
+(defn- literal-kind [node]
+ (case (:op node)
+  :enil :empty
+  :lit (let [v (:val node)]
+        (cond (nil? v) :nil-literal (= v true) :true-literal (= v false) :false-literal
+              (keyword? v) :keyword
+              (integer? v) :integer
+              :else nil))
+  nil))
+(defn- literal-equal [kind exact? x lit leaf]
+ (case kind
+  :empty (str "(null? " x ")")
+  :nil-literal (str "(or (eq? " x " bl-nil) (eq? " x " kernel-symbol-nil))")
+  :true-literal (str "(or (eq? " x " #t) (eq? " x " kernel-symbol-true))")
+  :false-literal (str "(or (eq? " x " #f) (eq? " x " kernel-symbol-false))")
+  :keyword (str "(eq? " x " " lit ")")
+  :integer (if exact? (str "(eqv? " x " " lit ")")
+            (str "(if (exact-integer? " x ") (eqv? " x " " lit ") (" leaf " " x " " lit "))"))))
+(def ^:private equality-bifs
+ {"erlang/==/2" [false false "kernel-leaf-=="] "erlang//=/2" [false true "kernel-leaf-=="]
+  "erlang/=:=/2" [true false "kernel-leaf-=:="] "erlang/=/=/2" [true true "kernel-leaf-=:="]})
+(defn- literal-template [key args]
+ (when-let [[exact? negate? leaf] (get equality-bifs key)]
+  (let [k0 (literal-kind (nth args 0)) k1 (literal-kind (nth args 1))
+        side (cond k1 1 k0 0 :else nil)]
+   (when side
+    (fn [operands]
+     (let [x (nth operands (- 1 side)) lit (nth operands side)
+           test (literal-equal (if (= side 1) k1 k0) exact? x lit leaf)]
+      (if negate? (str "(not " test ")") test)))))))
+
 (defn remote-template [node]
  (let [mod (:mod node) fun (:fun node) args (:args node)]
   (when (and (keyword? mod) (keyword? fun) (sequential? args))
-   (get templates (str (erlang/atom_to_binary mod) "/" (erlang/atom_to_binary fun) "/" (count args))))))
-
-; :mode :partial  fast path may return kernel-miss; tick only on a fast answer
-;       :total    fast path always answers (raw constructors)
-;       :gate     reads mutable registry state: tick FIRST, as the body does
-(def ^:private rt-overrides
- {"kind-kind" ["kernel-rt-kind-kind" 1 :partial]
-  "k-compare" ["kernel-rt-k-compare" 2 :partial]
-  "compare" ["kernel-rt-k-compare" 2 :partial]
-  "k-eqv" ["kernel-rt-k-eqv" 2 :partial]
-  "eqv" ["kernel-rt-k-eqv" 2 :partial]
-  "call-identical?" ["kernel-rt-call-identical?" 2 :total]
-  "identical?" ["kernel-rt-call-identical?" 2 :total]
-  "call-not-" ["kernel-rt-call-not-" 1 :partial]
-  "not_" ["kernel-rt-call-not-" 1 :partial]
-  "struct-of?" ["kernel-rt-struct-of?" 2 :partial]
-  "reduce-reduced?" ["kernel-rt-reduce-reduced?" 1 :partial]
-  "k-first" ["kernel-rt-k-first" 1 :partial]
-  "first" ["kernel-rt-k-first" 1 :partial]
-  "k-rest" ["kernel-rt-k-rest" 1 :partial]
-  "rest" ["kernel-rt-k-rest" 1 :partial]
-  "k-empty?" ["kernel-rt-k-empty?" 1 :partial]
-  "empty?" ["kernel-rt-k-empty?" 1 :partial]
-  "empty-list?" ["kernel-rt-empty-list?" 1 :total]
-  "k-cons" ["kernel-rt-k-cons" 2 :partial]
-  "cons" ["kernel-rt-k-cons" 2 :partial]
-  "hash-hash-key" ["kernel-rt-hash-hash-key" 1 :partial]
-  "hash_key" ["kernel-rt-hash-hash-key" 1 :partial]
-  "to-str" ["kernel-rt-to-str" 1 :partial]
-  "source-callable!" ["kernel-rt-source-callable!" 1 :gate]
-  "source-invocation!" ["kernel-rt-source-invocation!" 2 :gate]
-  "source-invocation1!" ["kernel-rt-source-invocation1!" 2 :gate]
-  "source-invocation2!" ["kernel-rt-source-invocation2!" 3 :gate]
-  "raw-cons" ["kernel-rt-raw-cons" 2 :total]
-  "seq-one" ["kernel-rt-seq-one" 1 :total]
-  "seq-two" ["kernel-rt-seq-two" 2 :total]
-  "reduce-one" ["kernel-rt-seq-one" 1 :total]
-  "reduce-two" ["kernel-rt-seq-two" 2 :total]
-  "tuple2" ["kernel-rt-tuple2" 2 :total]
-  "tuple3" ["kernel-rt-tuple3" 3 :total]})
-
-(defn override-names [ns] (if (= ns "rt") (sort (keys rt-overrides)) []))
-
-(defn- fixed-clause [proc arity mode original]
- (let [params (mapv #(str "kernel-p" %) (range arity))
-       formals (str "(" (string/join " " params) ")")
-       fast (call proc params)
-       slow (call original params)]
-  (str "(" formals " "
-   (cond
-    (= mode :total) (str "(h-tick) " fast)
-    (= mode :gate) (str "(h-tick) (let ((kernel-result " fast ")) (if (eq? kernel-result kernel-miss) " slow " kernel-result))")
-    :else (str "(let ((kernel-result " fast ")) (if (eq? kernel-result kernel-miss) " slow " (begin (h-tick) kernel-result)))"))
-   ")")))
-
-(defn kernel-override [ns name original]
- (when-let [[proc arity mode] (when (= ns "rt") (get rt-overrides name))]
-  (str "(bl-register-callable! (case-lambda " (fixed-clause proc arity mode original)
-       " (kernel-arguments (apply " original " kernel-arguments))) " arity ")")))
+   (let [key (str (erlang/atom_to_binary mod) "/" (erlang/atom_to_binary fun) "/" (count args))]
+    (or (literal-template key (vec args)) (get templates key))))))

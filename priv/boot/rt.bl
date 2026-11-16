@@ -34,19 +34,17 @@
 ; WHAT THE BEAM GIVES (measured, not assumed):
 ;   * `()` — the empty list is a READER literal, so it needs no constructor;
 ;   * `'(a b c)` — a quoted list compiles to a literal list, likewise free;
-;   * a 2-word TUPLE built by `make_tuple`/`setelement` is NOT a cons cell —
-;     `is_list({1, []})` is false — so a cons must be produced by something the
-;     list type allows;
-;   * `tuple_to_list({x})` yields the one-element list `[x]`, and
-;     `lists:append([[x], xs])` copies that first sublist and shares the rest,
-;     which makes it a cons (`lists:append/1` is the one list builder that
-;     needs nothing but its argument).
+;   * a syntax-quoted list of unquotes, `` `(~a ~b) ``, is compiled by the
+;     reader/compiler to literal cons cells (`anf/cons-cell`) onto `()`: no
+;     prelude call, a fresh proper list;
+;   * `erlang:'++'/2` with a one-element left operand is one cons in front of
+;     its right operand, shared, whatever that operand is. The BEAM compiler
+;     folds `[x] ++ xs` to `[x|xs]`; the native template does the same.
 ;
-; This is a real cost — five BIF calls per cons — and it is deliberately the
-; first thing P5 replaces (a generated raw-constructor module, or a compiler
-; form that lowers straight to a cons cell, as `anf/cons-cell` already does for
-; the generated modules). Until then the runtime states its intent here, once,
-; instead of at every construction site.
+; So a cons is `(erlang/++ `(~x) xs)` and a tuple is `list_to_tuple` of a
+; syntax-quoted list: one construction each, and the same text on both
+; backends. (This used to be a five-BIF dance through make_tuple, setelement,
+; tuple_to_list and lists:append/1.)
 
 
 
@@ -56,17 +54,10 @@
   ())
 
 (defn raw-cons
-  "The cons cell `[x|xs]`. Builds `[x]` from a one-tuple and appends it in
-   front of `xs`; `lists:append/1` copies only its first sublist, so the spine
-   of `xs` is shared."
+  "The cons cell `[x|xs]`: `[x]` appended in front of `xs`, whose spine is
+   shared. `xs` need not be a list, exactly as for `[x|xs]`."
   [x xs]
-  (erlang/apply :lists :append
-    (erlang/tuple_to_list
-      (erlang/setelement 2
-        (erlang/setelement 1
-          (erlang/make_tuple 2 nil)
-          (erlang/tuple_to_list (erlang/make_tuple 1 x)))
-        xs))))
+  (erlang/++ `(~x) xs))
 
 (defn raise-argument
   "Raise `%ArgumentError{message: msg}` — the exception the runtime's refusals
@@ -76,14 +67,12 @@
   (erlang/error (Elixir.ArgumentError/exception msg)))
 
 (defn tuple2
-  "A 2-tuple. Unlike a cons this needs no dance: `make_tuple` builds tuples."
+  "A 2-tuple, from a fresh two-element list."
   [a b]
-  (erlang/setelement 2 (erlang/setelement 1 (erlang/make_tuple 2 nil) a) b))
+  (erlang/list_to_tuple `(~a ~b)))
 
 (defn tuple3 [a b c]
-  (erlang/setelement 3
-    (erlang/setelement 2 (erlang/setelement 1 (erlang/make_tuple 3 nil) a) b)
-    c))
+  (erlang/list_to_tuple `(~a ~b ~c)))
 
 (defn list-of
   "A list of the given items, built left to right. Convenience for the small
@@ -1015,16 +1004,15 @@
 ; lookups. Measured on the comparison path, that difference alone was 405 -> 42
 ; ns per element.
 
-(defn- seq-one [x] (raw-cons x ()))
-(defn- seq-two [a b] (raw-cons a (raw-cons b ())))
+(defn- seq-one [x] `(~x))
+(defn- seq-two [a b] `(~a ~b))
 
 (defn- empty-list?
-  "O(1): a list is empty exactly when it IS the empty list. `erlang/==` is a
-   term compare, so a cons cell answers from its type tag without walking."
+  "O(1): a list is empty exactly when it IS the empty list. `=:=` against the
+   `()` literal is one tag test on both backends; nothing that is not a list
+   is `()`. Hot callers write the test inline instead of calling this."
   [xs]
-  (cond
-    (erlang/is_list xs) (erlang/== xs ())
-    :else false))
+  (erlang/=:= xs ()))
 
 (defn k-empty-list [] ())
 
@@ -1036,8 +1024,8 @@
    FunctionClauseError in RT, and still is."
   [x xs]
   (cond
-    (erlang/== xs nil) (raw-cons x ())
-    (erlang/is_list xs) (raw-cons x xs)
+    (erlang/is_list xs) (erlang/++ `(~x) xs)
+    (erlang/== xs nil) `(~x)
     (struct-of? xs :"Elixir.BeamLisp.Vector") (raw-cons x (BeamLisp.Vector/to_list xs))
     (struct-of? xs :"Elixir.BeamLisp.LazySeq") (raw-cons x xs)
     :else (erlang/error (Elixir.FunctionClauseError/exception
@@ -1100,8 +1088,11 @@
   ; through the one classifier, which is what keeps a struct from being read as
   ; a map.
   (cond
-    (erlang/is_list x) (cond (empty-list? x) nil :else (erlang/hd x))
-    (struct-of? x :"Elixir.BeamLisp.Vector") (BeamLisp.Vector/first x)
+    (erlang/is_list x) (cond (erlang/=:= x ()) nil :else (erlang/hd x))
+    (erlang/== x nil) nil
+    ; `(struct-of? x Vector)`, written with the literal module: one identity test.
+    (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector"))
+    (BeamLisp.Vector/first x)
     :else
     (let [kd (kind-kind x)]
       (cond
@@ -1126,7 +1117,8 @@
   "The tail as a sequence; empty (never nil) for a non-collection."
   [x]
   (cond
-    (erlang/is_list x) (cond (empty-list? x) () :else (erlang/tl x))
+    (erlang/is_list x) (cond (erlang/=:= x ()) () :else (erlang/tl x))
+    (erlang/== x nil) ()
     :else (k-rest-classified x)))
 
 (defn- k-rest-classified [x]
@@ -1318,8 +1310,10 @@
 
 (defn k-empty? [x]
   (cond
-    (erlang/is_list x) (empty-list? x)
-    (struct-of? x :"Elixir.BeamLisp.Vector") (erlang/== 0 (BeamLisp.Vector/count x))
+    (erlang/is_list x) (erlang/=:= x ())
+    (erlang/== x nil) true
+    (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector"))
+    (erlang/== 0 (BeamLisp.Vector/count x))
     :else (k-empty-classified x)))
 
 (defn- k-empty-classified [x]
@@ -2017,8 +2011,15 @@
    vector struct's `:meta` is a different carrier: its kind stays `:vector` and
    the field never reaches the walk.)"
   [x]
+  ; Exactly `(erlang/== (kind-kind x) :meta)`: a non-empty tuple whose first
+  ; element is `:meta` (the reserved tags are distinct atoms), tested in
+  ; place instead of classifying the whole value.
   (cond
-    (erlang/== (kind-kind x) :meta) (unwrap-meta (erlang/element 2 x))
+    (erlang/is_tuple x)
+    (cond
+      (erlang/== 0 (erlang/tuple_size x)) x
+      (erlang/== :meta (erlang/element 1 x)) (unwrap-meta (erlang/element 2 x))
+      :else x)
     :else x))
 
 (defn k-compare
@@ -2047,21 +2048,37 @@
     ;
     ; Deferring, not approximating: every clause below is an exact correspondence
     ; (integers order by value, binaries by term order, floats by value), and a
-    ; pair that is not covered falls through to the full comparison. Atoms are
-    ; deliberately NOT here — `nil` and the booleans are atoms too, and they sit
-    ; in different FAMILIES from a keyword, so the term order would answer a
-    ; cross-family question that `family-rank` owns.
+    ; pair that is not covered falls through to the full comparison. Atoms need
+    ; care — `nil` and the booleans are atoms too, and they sit in different
+    ; FAMILIES from a keyword, so the term order would answer a cross-family
+    ; question that `family-rank` owns; the atom clause below excludes them.
     (and (erlang/is_integer a) (erlang/is_integer b))
     (cond (erlang/< a b) -1 :else 1)
     (and (erlang/is_binary a) (erlang/is_binary b))
     (cond (erlang/< a b) -1 :else 1)
     (and (erlang/is_float a) (erlang/is_float b) (erlang/< a b)) -1
     (and (erlang/is_float a) (erlang/is_float b) (erlang/< b a)) 1
+    ; Two keywords (atoms other than nil and the booleans, which sit in their
+    ; own families) are one family, ordered by the term order: `same-family`'s
+    ; `:atom` row, answered without classifying either side.
+    (and (erlang/is_atom a) (erlang/is_atom b)
+         (erlang/=/= a nil) (erlang/=/= b nil)
+         (erlang/== false (erlang/is_boolean a)) (erlang/== false (erlang/is_boolean b)))
+    (cond (erlang/< a b) -1 :else 1)
 
     :else
+    ; Each family is `(kind-family (kind-kind v))`, with the scalar kinds
+    ; answered in place in `kind-kind`'s order: an atom that is not nil or a
+    ; boolean is `:atom`, an integer `:number`, a binary `:text`, a list
+    ; `:sequential`. Everything else is classified.
     (let [a (unwrap-meta a)
           b (unwrap-meta b)
-          fa (kind-family (kind-kind a)) fb (kind-family (kind-kind b))]
+          fa (cond (erlang/== a nil) :nil (erlang/is_boolean a) :bool (erlang/is_atom a) :atom
+                   (erlang/is_integer a) :number (erlang/is_binary a) :text (erlang/is_list a) :sequential
+                   :else (kind-family (kind-kind a)))
+          fb (cond (erlang/== b nil) :nil (erlang/is_boolean b) :bool (erlang/is_atom b) :atom
+                   (erlang/is_integer b) :number (erlang/is_binary b) :text (erlang/is_list b) :sequential
+                   :else (kind-family (kind-kind b)))]
       (cond
         (erlang/== fa fb) (same-family fa a b)
         (erlang/< (family-rank fa) (family-rank fb)) -1
@@ -2085,9 +2102,19 @@
     ;     list or map shares an atom's family — so an atom against anything
     ;     but a TUPLE is decided here, and the tuple case (a possible wrapper)
     ;     defers to the full comparison.
+    ;   * an integer or a binary is never equal to an integer, a binary or a
+    ;     list it is not identical to (k-compare orders such a pair by value or
+    ;     by family), so those pairs are decided here too; a float, a decimal
+    ;     or a `{:meta …}` wrapper on the other side defers.
     (erlang/=:= a b) true
     (erlang/is_atom a) (cond (erlang/is_tuple b) (erlang/== 0 (k-compare a b)) :else false)
     (erlang/is_atom b) (cond (erlang/is_tuple a) (erlang/== 0 (k-compare a b)) :else false)
+    (erlang/is_integer a)
+    (cond (erlang/is_integer b) false (erlang/is_binary b) false (erlang/is_list b) false
+          :else (erlang/== 0 (k-compare a b)))
+    (erlang/is_binary a)
+    (cond (erlang/is_binary b) false (erlang/is_integer b) false (erlang/is_list b) false
+          :else (erlang/== 0 (k-compare a b)))
     :else (erlang/== 0 (k-compare a b))))
 
 
@@ -3670,21 +3697,31 @@
    A collection or tuple falls back to the printer, so `(str {:a 1})` is
    \"{:a 1}\" rather than a String.Chars crash — maps, vectors, lists and lazy
    seqs have no String.Chars impl on the BEAM, and `print-str` is exactly the
-   printer that knows their syntax."
+   printer that knows their syntax.
+
+   The scalar kinds are answered before classifying, in `kind-kind`'s order;
+   each clause is that kind's row below."
   [x]
-  (let [kd (kind-kind x)]
-    (cond
-      (erlang/== kd :nil) ""
-      (erlang/== kd :decimal) (BeamLisp.Decimal/to_plain_string x)
-      (erlang/== kd :text) x
-      (erlang/== kd :atom) (erlang/atom_to_binary x :utf8)
-      (erlang/== kd :bool) (cond (erlang/== x true) "true" :else "false")
-      (erlang/== kd :symbol) (erlang/element 2 x)
-      (and (erlang/== kd :meta) (erlang/== 3 (erlang/tuple_size x)))
-      (to-str (erlang/element 2 x))
-      (erlang/== kd :int) (erlang/integer_to_binary x)
-      (erlang/== kd :float) (erlang/float_to_binary x `(~:short))
-      :else (print-print-str x))))
+  (cond
+    (erlang/is_binary x) x
+    (erlang/== x nil) ""
+    (erlang/is_boolean x) (cond (erlang/== x true) "true" :else "false")
+    (erlang/is_atom x) (erlang/atom_to_binary x :utf8)
+    (erlang/is_integer x) (erlang/integer_to_binary x)
+    :else
+    (let [kd (kind-kind x)]
+      (cond
+        (erlang/== kd :nil) ""
+        (erlang/== kd :decimal) (BeamLisp.Decimal/to_plain_string x)
+        (erlang/== kd :text) x
+        (erlang/== kd :atom) (erlang/atom_to_binary x :utf8)
+        (erlang/== kd :bool) (cond (erlang/== x true) "true" :else "false")
+        (erlang/== kd :symbol) (erlang/element 2 x)
+        (and (erlang/== kd :meta) (erlang/== 3 (erlang/tuple_size x)))
+        (to-str (erlang/element 2 x))
+        (erlang/== kd :int) (erlang/integer_to_binary x)
+        (erlang/== kd :float) (erlang/float_to_binary x `(~:short))
+        :else (print-print-str x)))))
 
 (defn str-0
   "RT's `str/0`.
