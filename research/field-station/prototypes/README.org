@@ -6,8 +6,8 @@ Executable experiments for a Datom/proc-native workstation. State is private,
 disposable, and separate from production. No production database is opened;
 there is no SQLite runtime adapter and no remote deployment.
 
-The initial implementation is awaiting native acceptance. APIs here are
-prototype composition over existing Enchant namespaces, not new stdlib promises.
+APIs here are prototype composition over existing Enchant namespaces, not new
+stdlib promises. Acceptance receipts and exact scope are recorded in =evidence/=.
 The native filesystem operation is descriptor-based file publication, not a
 claim that the complete POSIX ACL service has been ported. The Unix test proves
 SO_PEERCRED and framing within this OS process; it is not a cross-user isolation
@@ -15,7 +15,8 @@ rehearsal. Authorization identities in namespace tests use explicit TEST ingress
 
 * Run
 
-From this directory: =./run core=. The launcher caps one cold VM and preserves
+From this directory: =./run core= or =./run foundry=. Run them sequentially.
+The launcher caps one cold VM and preserves
 the log and JSON receipt in a private directory below =$HOME/tmp=. It stops its
 owned service on exit. It never stops unrelated VMs.
 
@@ -32,7 +33,84 @@ owned service on exit. It never stops unrelated VMs.
 5. Veritas generated histories over real stores, with a durable verdict ledger
    and explicit refusal to promote sampled evidence into proof authority.
 
-Foundry/Nix generation integration is the next connected prototype set.
+6. Pinned Foundry online lifecycle: real HTTP and WebSocket clients, shared
+   journalled store, generation-specific readiness, concurrent traffic and
+   restart selection from the durable journal despite a stale artifact pointer.
+7. Existing bounded argv executor and proc demand stream turn structured command
+   observations into Datom facts, including truncation and timeout checks.
+8. NixOS module evaluation separates stable controller/host binding from candidate
+   catalogue and closure roots. Adding a candidate leaves restart triggers stable.
+
+The Foundry source is pinned to =456739adb8879238664c317f399c35c99f89553a=.
+The launcher exports that commit into a retained immutable Nix store path.
+Set =STATION_PROTOTYPE_RUNTIME=/nix/store/...-beam-lisp-sdk-selection/bin/bl=
+to reuse an already built SDK. Its =artifact.json= is copied beside the receipt.
+The retained SDK used for acceptance is identified in =evidence/acceptance.org=.
+
+* Native API examples
+
+Consumers use an ordinary namespace import. The host links the name to a checked
+interface; identity comes from trusted ingress, not function arguments:
+
+#+begin_src clojure
+(ns station-prototype.consumer
+  (:require [field.messages :as messages]))
+(messages/inbox "ora")
+(messages/claim! "ora" {"id" "legacy-1" "request/id" "claim-42"})
+#+end_src
+
+The service declares its checked surface using the existing auth grammar:
+
+#+begin_src clojure
+(ns ^{:auth {:version 1
+             :exports {inbox {:roles #{:member} :resource {:arg 0}
+                              :effects {:read #{:inbox}}}}
+             :grants {"prototype-client" #{inbox}}}}
+  station-prototype.messages
+  (:require [auth.resource :as resource]))
+(defn inbox [workspace] (resource/read :inbox))
+#+end_src
+
+The writer is authoritative: =[:db/fn claim-tx ...]= rechecks membership,
+lease and request digest at the transaction basis, and commits reply plus audit
+with the state change. Datom query subscriptions include membership facts, so
+revocation removes visible rows rather than leaving a cached inbox behind.
+
+Desired-state services compose existing projection and process facilities:
+
+#+begin_src clojure
+(projection/defprojection published-file :prototype/published-file
+  "A durable desired revision converges to one pinned native directory."
+  {:member '[[?src :desired/scope ?scope]]
+   :revision '[[?src :desired/revision ?rev]]})
+(proc/defserver publisher
+  (reconcile {:projection published-file
+              :conn-fn (fn [_] (:conn @owned)) :scope-fn scopes
+              :apply apply-file! :retire (fn [_ _] nil)
+              :level [1 :second] :watch? true}))
+#+end_src
+
+=src/station_prototype/reconciliation.bl= supplies the concrete queue policy,
+pinned directory capability and idempotent recovery after an actual lost reply.
+These are executable examples, not a second actor or database framework.
+
+The project =.foundry.bl= returns a checked definition with an online entrypoint,
+borrowed =messages= store and journal. Nix owns identity, directories, controller
+and catalogue; Foundry owns candidate admission, publication, drain and recovery.
+Both must observe the selected generation before declaring success.
+
+#+begin_src nix
+services.field-station.instances.messages = {
+  controller = stationController;
+  port = 18891;
+  bootstrapCandidate = initialReleaseId;
+  candidates = { ${initialReleaseId} = initialArtifact; };
+};
+#+end_src
+
+=nix/module.nix= is the actual evaluated module. Its controller package is an
+interface contract; the evaluation uses an inert fixture, not a packaged daemon.
+There is no booted NixOS or host activation claim.
 
 * Important bounds
 
@@ -43,3 +121,10 @@ production triage migration require additional application-specific checks.
 Inbox results are fixture-sized: production indexed pagination and query work
 budgets are not claimed by this prototype. Model checking samples sequential
 histories; independent concurrent and OS crash tests remain separate evidence.
+
+The native lifecycle fixture runs in the retained SDK and inventories its source
+artifacts. Its =runtime/bl= is an explicit, never-executed sandbox identity marker;
+this does not qualify a portable release package. Production rollout still needs
+the packaged controller, real service ports and protocols, cross-user Unix tests,
+full migration verification, interruption/rollback tests and a host boot rehearsal.
+No production service was replaced by these experiments.
