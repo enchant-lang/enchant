@@ -10,3 +10,8 @@ belong in client packages; portable Org codecs belong to Omega. The prototype
 checkout is a historical reference. Runtime third-party notices accompany the
 built host under assets/runtime. The host build manifest records input and
 artifact hashes; tooling/editor-host owns the reproducible adapter build.
+
+The matching opaque Live region protocol is also graduated into canonical
+`live.diff`, `live.hiccup` and the browser client. Ordinary Live trees retain
+their existing behavior. Region descendants have one registered owner, including
+reconnect restoration; changed region identity replaces that owner.

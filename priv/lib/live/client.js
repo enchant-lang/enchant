@@ -323,6 +323,10 @@
     for (var el of root.querySelectorAll("input,textarea,select")) syncInput(el);
   }
   function setAttr(el, k, v) {
+    if (k === "live/region") {
+      el.setAttribute("data-live-region", evJson(v));
+      return;
+    }
     if (k === "key") {
       el.setAttribute("data-key", String(v));
       return;
@@ -340,6 +344,63 @@
   // (a patch value), anything else is a live term to stringify (a render value)
   function evJson(v) {
     return typeof v === "string" ? v : JSON.stringify(v);
+  }
+
+  // Region drivers own browser interaction under a declared projection root.
+  // The differ emits one semantic update; descendants have one renderer.
+  const regionFactories = new Map(), regionInstances = new Map();
+  function regionSpec(el) {
+    try { return JSON.parse(el.getAttribute("data-live-region")); }
+    catch (_) { return null; }
+  }
+  function regionNodes(root) {
+    return [...(root.matches?.("[data-live-region]") ? [root] : []),
+            ...root.querySelectorAll("[data-live-region]")];
+  }
+  function disposeRegion(el) {
+    const instance = regionInstances.get(el);
+    if (instance) { regionInstances.delete(el); instance.driver?.dispose?.(); }
+  }
+  function syncRegions(root) {
+    for (const [el, instance] of regionInstances)
+      if (!el.isConnected || !regionFactories.has(instance.kind)) disposeRegion(el);
+    for (const el of regionNodes(root)) {
+      const spec = regionSpec(el), factory = spec && regionFactories.get(spec.kind);
+      if (!factory || regionInstances.has(el)) continue;
+      const owner = root.closest?.("#live-root") || root;
+      const instance = {kind: spec.kind, id: spec.id, factory};
+      regionInstances.set(el, instance);
+      try {
+        instance.driver = factory(el, spec.model, {
+          dispatch(term, data) { owner.__liveRegionSend?.(term, data || {}); },
+          render,
+        });
+      } catch (error) { regionInstances.delete(el); throw error; }
+    }
+  }
+  function registerRegion(kind, factory) {
+    if (typeof kind !== "string" || typeof factory !== "function") throw Error("Invalid Live region driver");
+    if (regionFactories.has(kind)) throw Error("Live region driver already registered: " + kind);
+    regionFactories.set(kind, factory);
+    if (Live.root) syncRegions(Live.root);
+    let active = true;
+    return function () {
+      if (!active) return; active = false;
+      regionFactories.delete(kind);
+      for (const [el, instance] of regionInstances) if (instance.factory === factory) disposeRegion(el);
+    };
+  }
+  function restoreRegions(root, kept) {
+    for (const fresh of regionNodes(root)) {
+      const spec = regionSpec(fresh);
+      const previous = kept.find(([el, instance]) => instance.kind === spec?.kind && instance.id === spec?.id && el.tagName === fresh.tagName);
+      if (!previous) continue;
+      const [el, instance] = previous;
+      el.setAttribute("data-live-region", fresh.getAttribute("data-live-region"));
+      fresh.replaceWith(el);
+      instance.driver?.update?.(spec.model);
+    }
+    syncRegions(root);
   }
 
   // ── apply one op ──────────────────────────────────────────────────────
@@ -377,6 +438,7 @@
     for (const p of paths) for (const op of byPath.get(p)) run(op);
     for (const op of deep) run(op);
     syncInputs(root);
+    syncRegions(root);
     return failed;
   }
 
@@ -407,6 +469,15 @@
         parent.replaceChild(document.createTextNode(String(op[2])), node);
       } else {
         parent.appendChild(document.createTextNode(String(op[2])));
+      }
+    } else if (kind === "region") {
+      const el = at(root, path), tree = op[2], attrs = isPlainObject(tree[1]) ? tree[1] : {};
+      const spec = attrs["live/region"], instance = regionInstances.get(el);
+      if (instance && spec && instance.kind === spec.kind && instance.id === spec.id) {
+        for (const [key, value] of Object.entries(attrs)) setAttr(el, key, value);
+        instance.driver?.update?.(spec.model);
+      } else {
+        const next = render(tree); el.replaceWith(next); syncRegions(root);
       }
     } else if (kind === "replace") {
       const parent = at(root, path.slice(0, -1));
@@ -650,11 +721,13 @@
           // field bound to the server re-sends its value so the session's
           // state agrees with what the reader sees.
           const kept = keepFields(root);
+          const keptRegions = [...regionInstances].filter(([el]) => root.contains(el));
           remountAsked = false;
           discardInputs();
           root.__liveInputAck = !!(b && b["input-ack"]);
           root.innerHTML = a;
           hydrateText(root, b && b["text-layout"]);
+          restoreRegions(root, keptRegions);
           syncInputs(root);
           restoreFields(root, kept);
           // a waitable mark (an event can fire before a test starts waiting)
@@ -735,6 +808,10 @@
     });
     openSocket();
     Live.root = root;
+    root.__liveRegionSend = function (term, data) {
+      sendFrame(JSON.stringify(["event", term, data]));
+    };
+    syncRegions(root);
 
     // relay() delegates to this to mark+persist a durable gesture before send.
     // A node marked data-live-durable mints an idempotency id, injects it into
@@ -1108,6 +1185,8 @@
   }
 
   window.Live = { copy: copy, connect: connect, applyOp: applyOp, render: render, hydrateText: hydrateText,
+                  registerRegion, syncRegions,
+                  disposeRegions(root) { for (const [el] of regionInstances) if (el === root || root.contains(el)) disposeRegion(el); },
                   at: at, pathOf: pathOf, ws: null, root: null };
   var Live = window.Live;
 })();
