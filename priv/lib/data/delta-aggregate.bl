@@ -80,7 +80,7 @@
     (data/check! delta {:max-nodes 8192 :max-bytes (:max-bytes options) :max-depth 32})
     (when-not (and (map? delta) (every? #{:sequence :now :upsert :remove} (keys delta))
                    (int? (:sequence delta)) (pos? (:sequence delta))
-                   (int? (:now delta)) (<= (:now state) (:now delta))
+                   (int? (:now delta)) (<= 0 (:now delta))
                    (vector? (:upsert delta [])) (vector? (:remove delta []))
                    (<= (+ (count (:upsert delta [])) (count (:remove delta []))) (:max-delta options)))
       (refuse :invalid-aggregate-delta))
@@ -91,7 +91,8 @@
         (= n (:cursor state)) (if (= digest (:digest state)) state (refuse :aggregate-checkpoint-conflict))
         (not= n (inc (:cursor state))) (refuse :aggregate-checkpoint-gap)
         :else
-          (let [removed (reduce remove-row state (:remove delta []))
+          (let [_ (when (< (:now delta) (:now state)) (refuse :aggregate-clock-regression))
+                removed (reduce remove-row state (:remove delta []))
                 after (reduce (fn [s row] (put-row s row (:now delta))) removed (:upsert delta []))]
             (bounded! (assoc after :cursor n :version (inc (:version state)) :now (:now delta) :digest digest
                              :work {:changed (+ (count (:remove delta [])) (count (:upsert delta []))) :expired 0})))))))

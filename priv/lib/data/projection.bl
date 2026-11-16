@@ -74,7 +74,7 @@
                       (throw (ex-info "Projection output is oversized" {:kind :oversized})))
                     (transition! (assoc s :candidate {:bytes bytes :status :ready
                                                       :work (:work (:aggregate s))})
-                      {:op :finish :ticket (:ticket effect) :status :ready :charge (cache/footprint bytes)}))))
+                      {:op :finish :ticket (:ticket effect) :status :ready :charge (cache/footprint bytes)})))))
              (catch error (transition! s {:op :finish :ticket (:ticket effect)
                                          :status (or (:kind (ex-data error)) :failed)})))
           (let [parent (erlang/self) tag (:completion s) ticket (:ticket effect)
@@ -113,6 +113,9 @@
 
 (defn- response [state]
   (let [view (policy/observe (:policy state))
+        expired? (when-let [a (:aggregate state)]
+                   (when-let [at (aggregate/next-expiry a)] (<= at (erlang/system_time :millisecond))))
+        view (if expired? (assoc view :status :stale :reason :expired) view)
         view (if (:dirty? state) (assoc view :status :stale :reason :unobserved-source) view)]
     (if (and (= :ready (:status view)) (:retained state))
       (assoc view :value (erlang/binary_to_term (get-in state [:retained :bytes]) (list :safe))
@@ -274,7 +277,9 @@
 (defn refresh! [handle] (call (:owner handle) [:control (:control handle) :refresh]))
 (defn retry! [handle] (call (:owner handle) [:control (:control handle) :retry]))
 (defn evict! [handle] (call (:owner handle) [:control (:control handle) :evict]))
-(defn delta! [handle delta] (call (:owner handle) [:delta (:control handle) delta]))
+(defn delta! [handle delta]
+  (data/check! delta {:max-nodes 8192 :max-bytes 4194304 :max-depth 32})
+  (call (:owner handle) [:delta (:control handle) delta]))
 (defn stop! [handle]
   (when (and handle (Process/alive? (:owner handle)))
     (let [result (call (:owner handle) [:control (:control handle) :close])]

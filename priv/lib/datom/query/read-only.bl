@@ -59,6 +59,17 @@
    (data/check! (d/q query (native-database! (native-connection! connection)))
                 {:max-nodes 32768 :max-bytes 1048576 :max-depth 64}))))
 
+(defn- managed-plan! [query]
+  (let [planned (plan! query) parsed (parse/parse query)]
+    ;; Physical page credits cannot account for an engine cartesian product.
+    ;; Keep managed plans to one stored pattern until intermediate-binding
+    ;; admission is implemented in the engine. The ordinary reader is unchanged.
+    (when-not (and (= 1 (count (:where parsed)))
+                   (parse/pattern-clause? (first (:where parsed))))
+      (throw (ex-info "Managed queries require one bounded stored pattern"
+                      {:kind :unbounded-projection-plan})))
+    planned))
+
 (defn revision!
   "Read fixed source evidence without executing a query. Includes complete
    stored-attribute and compiler/provider provenance, normalized without
@@ -66,7 +77,7 @@
   [query connection]
   (functions/with-only {}
     (fn []
-      (let [planned (plan! query) database (native-database! (native-connection! connection))
+      (let [planned (managed-plan! query) database (native-database! (native-connection! connection))
             revision (validity/read-stamp database (:attributes planned))
             normalized (when revision (cache/key-data revision 0))]
         (when-not normalized
@@ -81,7 +92,7 @@
   [query connection expected token max-output-bytes]
   (functions/with-only {}
     (fn []
-      (let [planned (plan! query) database (native-database! (native-connection! connection))
+      (let [planned (managed-plan! query) database (native-database! (native-connection! connection))
             revision (some-> (validity/read-stamp database (:attributes planned)) (cache/key-data 0))]
         (when-not (and revision (= expected revision))
           (throw (ex-info "Projection source changed before execution" {:kind :superseded-projection})))

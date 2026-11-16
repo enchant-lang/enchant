@@ -95,14 +95,19 @@
  (handle-info [:work-progress id value] [state]
   (noreply (if (and (observation/active? (get-in state [:jobs id])) (number? value))
             (assoc-in state [:jobs id :progress] value) state)))
- (handle-info [:work-finished id status] [state] (noreply (finished state id status)))
+ ;; A callback result is not resource release: its finally/transfer cleanup
+ ;; can still be running. Only actual worker death releases the active slot.
+ (handle-info [:work-finished id status] [state]
+  (noreply (if (observation/active? (get-in state [:jobs id]))
+             (assoc-in state [:jobs id :outcome] status) state)))
  (handle-info [:work-force-cancel id] [state]
   (let [job (get-in state [:jobs id])]
    (when (= :cancelling (:status job)) (erlang/exit (:pid job) :kill))
    (noreply state)))
- (handle-info [:DOWN ref :process _pid _reason] [state]
+ (handle-info [:DOWN ref :process pid _reason] [state]
   (if (= ref (:owner-ref state)) (stop :normal state)
-   (noreply (reduce (fn [s [id job]] (if (= ref (:ref job)) (finished s id :failed) s)) state (:jobs state)))))
+   (noreply (reduce (fn [s [id job]] (if (and (= ref (:ref job)) (= pid (:pid job)) (not (Process/alive? pid)))
+          (finished s id (:outcome job :failed)) s)) state (:jobs state)))))
  (handle-info _ [state] (noreply state))
  (terminate [_reason state]
   (doseq [job (vals (:jobs state))]
