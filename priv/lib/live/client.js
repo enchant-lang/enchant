@@ -840,7 +840,7 @@
       // never preventDefault'd into silence. This is what makes EVERY
       // screen-to-screen move live without wiring a single link by hand.
       var a = e.target.closest && e.target.closest("a[href]");
-      if (a && !e.defaultPrevented && !e.metaKey && !e.ctrlKey &&
+      if (a && !a.closest('[data-live-await-region]') && !e.defaultPrevented && !e.metaKey && !e.ctrlKey &&
           !e.shiftKey && !e.altKey && (a.getAttribute("target") || "") === "") {
         var href = a.getAttribute("href") || "";
         if (href.indexOf("/") === 0 && href.indexOf("//") !== 0 &&
