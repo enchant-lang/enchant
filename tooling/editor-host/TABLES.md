@@ -31,3 +31,5 @@ Table keyboard behavior follows Org's next-field/next-row conventions. Escape
 moves after the table. Cell boundary deletion navigates rather than merging the
 row/cell structure. Rectangular clipboard operations and cross-cell input still
 require separate qualification; this initial package does not claim those paths.
+
+Native source conventions are documented in the [Org table editor manual](https://orgmode.org/manual/Built_002din-Table-Editor.html) and [column alignment manual](https://orgmode.org/manual/Column-Width-and-Alignment.html). In particular, a literal vertical bar is written with `\vert` (or `\vert{}` within a word); backslash-pipe is not the documented escape. Native alignment uses `<l>`, `<c>` and `<r>` cookies.
