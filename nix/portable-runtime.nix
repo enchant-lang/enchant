@@ -11,8 +11,7 @@ let
     install -Dm444 ${release}/artifact.json "$out/share/beam-lisp/artifact.json"
   '';
   libraries = pkgs.lib.makeLibraryPath (with pkgs; [ stdenv.cc.cc.lib zlib ncurses openssl brotli zstd ]);
-in
-(pkgs.writeShellApplication {
+  runtime = (pkgs.writeShellApplication {
   name = "bl";
   text = ''
     export NIX_LD=${pkgs.glibc}/lib/ld-linux-x86-64.so.2
@@ -20,4 +19,8 @@ in
     export ELIXIR_ERL_OPTIONS="''${ELIXIR_ERL_OPTIONS:-+S 2:2 +SDcpu 1:1 +SDio 1}"
     exec ${executable}/bin/bl "$@"
   '';
-}) // { releaseArtifact = executable; }
+  }) // {
+    releaseArtifact = executable;
+    packageApplication = args: import ./application-package.nix (args // { inherit pkgs runtime; });
+  };
+in runtime
