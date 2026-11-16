@@ -20,7 +20,7 @@
                 {"service" "messages" "owner" (str (:owner status))
                  "selectedGeneration" (:generation status) "port" (:port status)})]
   (when-not (= public @seen) (reset! seen public) (println (str "DEPLOY " (json/encode public))))
-  (when (contains? #{"blocked" "failed" "rolled-back" "refused"} (get operation "state"))
+  (when (contains? #{"blocked" "failed" "recovering" "rolled-back" "refused"} (get operation "state"))
    (throw (ex-info (str "Foundry publication stopped: " (get operation "state") " " (pr-str (get operation "error")))
             {:operation operation}))) operation))
 (defn published! [owner port]
@@ -65,6 +65,14 @@
           (let [reply (gen_tcp/recv socket 0 (max 1 (- deadline (System/monotonic_time :millisecond))))]
            (if (= :ok (elem reply 0))
             (recur (erlang/iolist_to_binary (list bytes (elem reply 1)))) false))))))
+(defn diagnostics! []
+ (when (= "1" (System/get_env "STATION_PROTOTYPE_DIAGNOSTICS"))
+  (loop [n 0]
+   (when (< n 40)
+    (receive event
+     (if (and (tuple? event) (>= (erlang/tuple_size event) 3) (= :exception_from (elem event 2)))
+      (do (println (pr-str event)) (recur (inc n))) (recur n))
+     (after 100 nil))))))
 (defn command-checks! [root]
  (let [print-program (command/tool "printf") sleep-program (command/tool "sleep")
        result (command/run print-program ["%s\n" "{\"component\":\"backup\",\"ready\":true}"
@@ -117,7 +125,11 @@
                      (BeamLisp.Env/fetch! "foundry.upgrade.lifecycle" "admission!"))]
       (erlang/trace_pattern (tuple module :_ :_)
        (list (tuple :_ (list) (list (tuple :exception_trace)))) (list :local)))
-     (erlang/trace (:owner @owned) true (list :call)))
+     (doseq [module (BeamLisp.Env/callback_modules
+                     (BeamLisp.Env/fetch! "foundry.upgrade.application" "compatibility!"))]
+      (erlang/trace_pattern (tuple module :compatibility! :_)
+       (list (tuple :_ (list) (list (tuple :exception_trace)))) (list :local)))
+     (erlang/trace (:owner @owned) true (list :call :set_on_spawn)))
     ;; This cold, contended sandbox gets an explicit bounded admission budget.
     ;; A timeout is never retried as a fresh operation; the same journal wins.
     (let [reply (GenServer/call (:owner @owned)
@@ -127,12 +139,7 @@
      (when (:admission-error reply)
       (when (= "1" (System/get_env "STATION_PROTOTYPE_DIAGNOSTICS"))
        (erlang/trace (:owner @owned) false (list :call))
-       (loop [n 0]
-        (when (< n 40)
-         (receive event
-          (if (and (tuple? event) (>= (erlang/tuple_size event) 3) (= :exception_from (elem event 2)))
-           (do (println (pr-str event)) (recur (inc n))) (recur n))
-          (after 100 nil)))))
+       (diagnostics!))
       (throw (ex-info (str "Native admission refused: " (:admission-error reply)) reply))))
     (checks/check! "candidate serves new requests while the old WebSocket remains open"
      (published! @owned port))
@@ -165,6 +172,9 @@
     :http-observations (count @samples) :old (:id old) :candidate (:id fresh)
     :scope "Real native same-VM Foundry lifecycle, Fjall and HTTP. Sandbox runtime identity fixture; no portable package or production rollout."}
    (finally
+    (when (and @owned (= "1" (System/get_env "STATION_PROTOTYPE_DIAGNOSTICS")))
+     (erlang/trace (:owner @owned) false (list :call :set_on_spawn))
+     (diagnostics!))
     (reset! stopped true)
     (when @socket (gen_tcp/close @socket))
     (when @traffic
