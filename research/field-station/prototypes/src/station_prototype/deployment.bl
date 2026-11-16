@@ -2,6 +2,7 @@
  (:require [station-prototype.release :as release] [station-prototype.checks :as checks]
            [foundry.upgrade.lifecycle :as lifecycle] [foundry.upgrade.application :as application]
            [foundry.upgrade.admission :as admission]
+           [foundry.upgrade.bootstrap :as bootstrap]
            [foundry.definition :as definition]
            [deployment-exec :as command] [proc.flow :as flow]
            [datom :as d] [datom.conn :as conn] [reload.generation :as generation]
@@ -19,7 +20,7 @@
 (defn observe! [status seen]
  (let [operation (or (last (:operations status)) (:preparation status))
        public (merge (select-keys operation ["state" "phase" "substep" "candidate" "generation" "error"])
-                (when-let [drain (get operation "drain")]
+                (when-let [drain (when (= "drain" (get operation "phase")) (get operation "drain"))]
                  {"drain" (select-keys drain ["jobs" "leases" "producers" "retainedHandlers"])})
                 {"service" "messages" "owner" (str (:owner status))
                  "selectedGeneration" (:generation status) "port" (:port status)})
@@ -52,6 +53,16 @@
           (>= (System/monotonic_time :millisecond) deadline)
           (throw (ex-info "Foundry publication deadline exceeded" {:operation operation}))
           :else (do (Process/sleep 20) (recur seen)))))))
+(defn stop-owned! [owner]
+ (let [deadline (+ (System/monotonic_time :millisecond) 35000)]
+  (loop []
+   (let [result (lifecycle/stop! owner 5000)]
+    (cond (= :ok result) :ok
+          (and (= :waiting (:status result)) (Process/alive? (:owner owner))
+               (< (System/monotonic_time :millisecond) deadline))
+           (do (Process/sleep 25) (recur))
+          :else (throw (ex-info (str "Controlled owner stop did not complete: " (:kind result))
+                         {:kind :prototype-stop-incomplete :result result})))))))
 (defn websocket! [port]
  (let [r (gen_tcp/connect (tuple 127 0 0 1) port (list :binary (tuple :active false)) 3000)]
   (when-not (= :ok (elem r 0)) (throw (ex-info "WebSocket client failed" {})))
@@ -128,7 +139,8 @@
  (checks/check! "project .foundry.bl returns the validated online lifecycle declaration"
   (= (definition/define (release/declaration)) (BeamLisp/run_file (str source "/.foundry.bl"))))
  (let [old (release/artifact! source root "prototype-old") fresh (release/artifact! source root "prototype-new")
-       key (auth/keypair) opts (assoc-in (release/options root old key) [:artifacts (:id fresh)] (:root fresh))
+       key (auth/keypair) host (assoc-in (release/host-contract root old key) ["artifacts" (:id fresh)] (:root fresh))
+       opts (bootstrap/config! host)
        previous (reload/reload-enabled?) _ (reload/set-enabled! true)
        owned (atom nil) traffic (atom nil) socket (atom nil) stopped (atom false) samples (atom [])
        acknowledged (atom false)]
@@ -189,18 +201,20 @@
     (checks/check! "real concurrent HTTP observations contain no failed requests"
      (and (pos? (count @samples)) (not-any? #(= :error %) @samples)))
     )
-   (lifecycle/stop! @owned) (reset! owned nil)
+   (stop-owned! @owned)
+   (checks/check! "controlled shutdown acknowledges the actual owner has stopped"
+    (not (Process/alive? (:owner @owned))))
+   (reset! owned nil)
    ;; Corrupt the disposable pointer deliberately: the journal remains authority.
    (File/rm! (str root "/current")) (File/ln_s! (:root old) (str root "/current"))
-   (reset! owned (lifecycle/start! opts))
-   (let [restarted (lifecycle/status @owned) ready (get! (:port restarted))]
-    (checks/check! "restart selects the durable journal over a stale artifact pointer"
-     (and (= (:id fresh) (:candidate restarted)) (= "prototype-new" (get ready "version"))))
-    (checks/check! "restart preserves both acknowledged writes" (= 2 (get ready "messages"))))
-   (command-checks! root)
-   {:format 1 :kind :field-station-foundry-prototype :passed (count @checks/results) :checks @checks/results
-    :http-observations (count @samples) :old (:id old) :candidate (:id fresh)
-    :scope "Real native same-VM Foundry lifecycle, Fjall and HTTP. Sandbox runtime identity fixture; no portable package or production rollout."}
+   (let [receipt {:format 1 :kind :field-station-foundry-prototype :status :awaiting-restart
+                  :passed (count @checks/results) :checks @checks/results
+                  :http-observations (count @samples) :old (:id old) :candidate (:id fresh)}
+         checkpoint {"version" 1 "host" host "expectedCandidate" (:id fresh)
+                     "previousOSProcess" (System/pid) "liveReceipt" receipt}]
+    (File/write! (str root "/restart.json") (json/encode checkpoint))
+    (File/chmod! (str root "/restart.json") 384)
+    receipt)
    (catch error
     (when (and @owned @acknowledged)
      (try
@@ -221,4 +235,33 @@
      (let [pid (elem @traffic 0)] (when (Process/alive? pid) (erlang/exit pid :kill)))
      (Process/demonitor (elem @traffic 1) (list :flush)))
     (when @owned (lifecycle/stop! @owned))
+    (reload/set-enabled! previous)))))
+
+(defn restart! [root]
+ (let [checkpoint (json/decode (File/read! (str root "/restart.json")))
+       _ (when-not (= 1 (get checkpoint "version")) (throw (ex-info "Invalid prototype restart checkpoint" {})))
+       live (get checkpoint "liveReceipt") opts (bootstrap/config! (get checkpoint "host"))
+       previous (reload/reload-enabled?) owned (atom nil)]
+  (reset! checks/results (get live "checks"))
+  (reload/set-enabled! true)
+  (try
+   (checks/check! "journal recovery executes in a fresh OS process"
+    (not= (get checkpoint "previousOSProcess") (System/pid)))
+   (reset! owned (lifecycle/start! opts))
+   (let [status (lifecycle/status @owned) ready (get! (:port status))
+         store (conn/registered-at (str root "/data/messages.fjall"))]
+    (checks/check! "restart selects the durable journal over a stale artifact pointer"
+     (and (= (get checkpoint "expectedCandidate") (:candidate status))
+          (= "prototype-new" (get ready "version")) (= (:generation status) (get ready "generation"))))
+    (checks/check! "restart preserves both acknowledged writes"
+     (and (= 2 (get ready "messages"))
+          (= #{["accepted-before-publication"] ["accepted-after-publication"]}
+             (set (d/q '[:find ?body :where [?e :prototype/message ?body]] (d/db store)))))))
+   (command-checks! root)
+   {:format 1 :kind :field-station-foundry-prototype :status :passed
+    :passed (count @checks/results) :checks @checks/results
+    :http-observations (get live "http-observations") :old (get live "old") :candidate (get live "candidate")
+    :scope "Real Foundry publication and journal recovery in two cold SDK VMs, Fjall, HTTP and WebSocket. Sandbox runtime marker; no portable package or production rollout."}
+   (finally
+    (when @owned (stop-owned! @owned))
     (reload/set-enabled! previous)))))
