@@ -6,10 +6,12 @@ let
   selected = builtins.fromJSON (builtins.unsafeDiscardStringContext
     (builtins.readFile (builtins.storePath sdk + "/artifact.json")));
   image = builtins.storePath selected.image;
-  # Installed producers carry this receipt beside nix/. In a checkout, use
-  # the selected SDK's producer receipt rather than rebuilding current tools.
-  toolsReceipt = if builtins.pathExists ../portable-tools.json then ../portable-tools.json
-    else builtins.storePath selected.platform + "/artifact-platform/portable-tools.json";
+  # The selected SDK owns its producer tools, including when this recipe is
+  # called by a different installed producer. Legacy selectors without a
+  # platform field retain their installed producer's adjacent receipt.
+  toolsReceipt = if selected ? platform then
+    builtins.storePath selected.platform + "/artifact-platform/portable-tools.json"
+    else ../portable-tools.json;
   tools = builtins.storePath (builtins.fromJSON (builtins.unsafeDiscardStringContext
     (builtins.readFile toolsReceipt))).tools;
 in
