@@ -1,0 +1,44 @@
+(ns live.before-send-lifetime-test
+ (:require [web] [reload.generation :as generation]))
+
+(defn- graph []
+ (let [root (str (System/get_env "HOME") "/tmp/before-send-lifetime-"
+                 (erlang/unique_integer (list :positive))) file (str root "/response/sample.bl")]
+  (try
+   (File/mkdir_p! (Path/dirname file))
+   (File/write! file "(ns response.sample) (defn value [] \"admitted-response\")")
+   (BeamLisp.Loader/with_load_path root
+    #(generation/prepare! (generation/project-plan
+      {:application-id "before-send" :entrypoint "response.sample/value"
+       :fixed-runtime true :native-modules #{"erlang"}})))
+   (finally (File/rm_rf! root)))))
+
+(deftest a-late-response-retains-its-source-graph-until-the-one-shot-callback-finishes
+ (let [graph (graph) original (Plug.Test/conn :get "/")
+       request (generation/with! graph
+        #(web/before-send original
+          (fn [response]
+           (web/resp-header response "x-response-generation"
+            (generation/invoke! (generation/current) "response.sample/value" [])))))]
+  (try
+   (is (= :waiting (:status (generation/retire! graph))))
+   ;; Sending happens after the original Source admission returned. The native
+   ;; response registration must restore the actual old graph and release it.
+   (let [response (web/text request "body")]
+    (is (= 200 (:status response)))
+    (is (= ["admitted-response"] (vec (Plug.Conn/get_resp_header response "x-response-generation"))))
+    (is (nil? (generation/current))))
+   (is (= :retired (:status (generation/retire! graph))))
+   (finally (generation/retire! graph)))))
+
+(deftest a-raised-response-callback-releases-registration-and-restores-the-caller
+ (let [graph (graph) original (Plug.Test/conn :get "/")
+       request (generation/with! graph
+        #(web/before-send original
+          (fn [_] (throw (ex-info "Controlled response failure" {:kind :response-failed})))))]
+  (try
+   (is (= :response-failed
+        (try (web/text request "body") nil (catch error (:kind (ex-data error))))))
+   (is (nil? (generation/current)))
+   (is (= :retired (:status (generation/retire! graph))))
+   (finally (generation/retire! graph)))))
