@@ -2,6 +2,16 @@
 ;; The prototype caps a snapshot at 8 MiB; an unbounded EDN stream is not claimed.
 (ns station-prototype.import-edn
  (:require [clojure.edn :as edn] [datom :as d] [station-prototype.store :as store]))
+(defn- read-snapshot! [path]
+ (let [opened (file/open (String/to_charlist path) (list :read :raw :binary))]
+  (when-not (= :ok (elem opened 0)) (store/refuse! :export-unreadable))
+  (let [reader (elem opened 1)]
+   (try
+    (let [result (file/read reader 8388609)]
+     (when-not (= :ok (elem result 0)) (store/refuse! :invalid-export))
+     (let [bytes (elem result 1)]
+      (when (> (erlang/byte_size bytes) 8388608) (store/refuse! :export-too-large)) bytes))
+    (finally (file/close reader))))))
 (defn- record [db id]
  (when-let [eid (first (first (d/q '[:find ?e :in $ ?id :where [?e :import/id ?id]] db id)))] (d/entity db eid)))
 (defn- validate! [snapshot]
@@ -31,8 +41,7 @@
 (defn import! [conn {:keys [file id batch-size interrupt-after]}]
  (when-not (and (int? batch-size) (<= 1 batch-size 1000) (string? id) (<= 1 (count id) 128))
   (store/refuse! :invalid-import-options))
- (let [bytes (File/read! file)
-       _ (when (> (erlang/byte_size bytes) 8388608) (store/refuse! :export-too-large))
+ (let [bytes (read-snapshot! file)
        snapshot (validate! (edn/read-string bytes))
        records (:records snapshot) hash (store/digest [:field-station-import-v1 store/schema bytes])
        existing (record (d/db conn) id)]
