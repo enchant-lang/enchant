@@ -1,0 +1,26 @@
+; Disposable presentation of the existing durable Foundry job observation.
+; No argv, nonce, error payload, environment or second completion ledger.
+(ns artifact.preparation-progress)
+(def states #{"queued" "running" "cancelling" "reconciling" "succeeded" "failed" "cancelled" "interrupted"})
+(defn frame! [status]
+ (when-not (and (map? status) (= "artifact-prepare" (get status "kind"))
+                (string? (get status "id")) (Regex/match? #"^job_[0-9a-f]{16}$" (get status "id"))
+                (contains? states (get status "status"))
+                (every? #(contains? #{true false} (get status %))
+                        ["workerAlive" "needsRecovery" "cancelRequested"]))
+  (throw (ex-info "Invalid preparation progress observation" {:kind :invalid-preparation-progress})))
+ (assoc (select-keys status ["id" "kind" "status" "workerAlive" "needsRecovery" "cancelRequested"])
+        "version" 1 "event" "artifact-preparation"))
+(defn write! [frame] (IO/puts :stderr (str "PREPARE " (Jason/encode! frame))))
+(defn observe!
+ "Coalesce unchanged observations; heartbeat every 30 seconds. Sink failures
+  cannot cancel or replay an accepted job. The caller still verifies its receipt."
+ ([previous status now] (observe! previous status now write!))
+ ([previous status now writer]
+  (try
+   (let [frame (frame! status) changed (not= frame (:frame previous))]
+    (if (or changed (>= (- now (:at previous now)) 30000))
+     (do (try (writer (assoc frame "heartbeat" (not changed))) (catch _ nil))
+         {:frame frame :at now})
+     previous))
+   (catch _ previous))))

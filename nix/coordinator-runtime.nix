@@ -45,6 +45,8 @@ in pkgs.runCommand "beam-lisp-foundry-coordinator-runtime" {} ''
   cp ${../priv/build/build-environment.bl} "$out/foundry/src/build-environment.bl"
   cp ${./preparation-jobs.bl} "$out/foundry/bin/jobs.bl"
   cp ${./preparation-operation.bl} "$out/foundry/bin/preparation-operation.bl"
+  mkdir -p "$out/foundry/bin/artifact"
+  cp ${./artifact/preparation-progress.bl} "$out/foundry/bin/artifact/preparation-progress.bl"
   cat > "$out/foundry/env.bl" <<'PROJECT'
   {:name "foundry-artifact-coordinator"
    :paths ["src" "src/foundry/operations" "src/foundry/support" "src/foundry/credentials"]}

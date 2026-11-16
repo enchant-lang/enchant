@@ -3,7 +3,7 @@
 ;; The operation/receipt JSON is data, never a language execution grant.
 (ns artifact.preparation-operation
   (:require [deployment-runner :as runner] [artifact-process :as process]
-            [build-environment :as environment]))
+            [build-environment :as environment] [artifact.preparation-progress :as progress]))
 
 (def terminal #{"succeeded" "failed" "cancelled" "interrupted"})
 (def machine-limit 16777216)
@@ -468,8 +468,9 @@
   (when-not (and (int? milliseconds) (<= 1000 milliseconds 3600000))
     (refuse! "Await deadline must be between one second and one hour"))
   (let [until (+ (System/monotonic_time :millisecond) milliseconds)]
-    (loop []
-      (let [status (status! directory) state (get status "status")]
+    (loop [previous-progress nil]
+      (let [status (status! directory) state (get status "status")
+            observed (progress/observe! previous-progress status (System/monotonic_time :millisecond))]
         (cond
           (= state "succeeded")
             (let [handle (handle! directory) receipt (owned-json! (Path/join directory "result.json") machine-limit)]
@@ -481,7 +482,7 @@
           (get status "needsRecovery") (refuse! "Preparation needs recovery; worker ownership is not established")
           (>= (System/monotonic_time :millisecond) until)
             (refuse! "Await deadline expired; durable preparation continues")
-          :else (do (Process/sleep 250) (recur)))))))
+          :else (do (Process/sleep 250) (recur observed)))))))
 
 (defn- prepare! [directory milliseconds]
   ;; The synchronous path shares one VM for admission, queued-only recovery and
