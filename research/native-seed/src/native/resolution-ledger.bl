@@ -1,0 +1,102 @@
+; Closed source-derived namespace/seed ledger. Inert Reader projection only:
+; no source evaluation, ambient Env admission, or ANF interpretation.
+; BEAM-side only (BeamLisp.AOT/namespace_header has no native leaf): the
+; ledger is computed once by the driver and travels in the bundle metadata
+; (:resolution), so the native self-emission reads the SAME decisions data.
+; The decision functions over it live in the closure member native.resolution.
+(ns native.resolution-ledger
+ (:require [reader :as rd] [reader-node :as rn]))
+(defn symbol? [node name]
+ (let [n (rn/node-form node)] (and (= :symbol (rn/node-tag n)) (= name (rn/node-name n)))))
+(defn definition [closure name]
+ (or (first (filter #(= name (:name %)) (:defs (get (:units closure) "rt"))))
+     (throw (ex-info "native resolution: missing original rt seed declaration" {:name name}))))
+(defn function-body [d]
+ (let [items (rn/node-items (:form d))]
+  (when-not (and (symbol? (first items) "fn") (symbol? (second items) (:name d))
+                 (= :vector (rn/node-tag (rn/node-form (nth items 2))))
+                 (empty? (rn/node-items (nth items 2))) (= 4 (count items)))
+   (throw (ex-info "native resolution: seed declaration changed shape" {:name (:name d)})))
+  (nth items 3)))
+(defn quoted-seed-rows [closure name]
+ (let [declaration (definition closure name)
+       body (function-body declaration) items (rn/node-items body)]
+  (when-not (and (= :list (rn/node-tag (rn/node-form body))) (= 2 (count items))
+                 (symbol? (first items) "quote"))
+   (throw (ex-info "native resolution: seed rows must remain original inert quote data" {:name name})))
+  ; The checked compiler has already produced this quote's inert literal.
+  ; Project only the exact zero-argument literal-return function shape; no
+  ; expression evaluation or private compiler helper participates here.
+  (let [node (:node declaration)
+        function (if (= :fn (:op node)) node
+                    (:inner (BeamLisp.CompilerData/self_application_parts node)))
+        clauses (:clauses function)
+        clause (when (and (erlang/is_list clauses) (= 1 (count clauses))) (first clauses))
+        literal (:body clause)]
+   (when-not (and (= :fn (:op function)) (some? clause) (nil? (:guard clause))
+                  (erlang/is_list (:pats clause)) (empty? (:pats clause)) (= :lit (:op literal)))
+    (throw (ex-info "native resolution: seed is not one unguarded zero-parameter literal function" {:name name})))
+   (let [rows (:val literal)]
+    (when-not (erlang/is_list rows) (throw (ex-info "native resolution: seed literal is not a proper list" {:name name})))
+    (doseq [row rows] (when-not (and (erlang/is_list row) (string? (first row)))
+                    (throw (ex-info "native resolution: invalid literal seed row" {:name name}))))
+    rows))))
+(defn seed-closure-names [closure]
+ (let [body (function-body (definition closure "seed-closures")) items (rn/node-items body)
+       bindings (rn/node-items (second items))]
+  (when-not (and (symbol? (first items) "let") (= 2 (count bindings)) (symbol? (first bindings) "put"))
+   (throw (ex-info "native resolution: seed-closure publisher changed" {})))
+  ; Verify the publisher is exactly the original core Env/intern closure.
+  (let [publisher (rn/node-items (second bindings)) call (rn/node-items (nth publisher 2))]
+   (when-not (and (symbol? (first publisher) "fn")
+                  (symbol? (first call) "BeamLisp.Env/intern") (= "core" (rn/node-form (second call))))
+    (throw (ex-info "native resolution: seed-closure owner is not core" {}))))
+  (mapv (fn [form]
+   (let [call (rn/node-items form) name (rn/node-form (second call))]
+    (when-not (and (symbol? (first call) "put") (string? name))
+     (throw (ex-info "native resolution: nonliteral seed closure name" {}))) name)) (drop 2 items))))
+(defn source-header [u]
+ ; Read exactly ONE form. Large compiler/rt source bodies are not reparsed.
+ (let [read (rd/read-next (rd/stream (:source u) (:path u)))]
+  (when-not (= :ok (first read)) (throw (ex-info "native resolution: missing namespace header" {:namespace (:ns u)})))
+  (let [header (BeamLisp.AOT/namespace_header (second read))]
+   (or (get header (:ns u)) (throw (ex-info "native resolution: namespace header mismatch" {:namespace (:ns u)}))))))
+(defn build [closure]
+ (let [core (set (concat (map first (:core-links closure))
+                        (map first (quoted-seed-rows closure "seed-rows"))
+                        (seed-closure-names closure)))
+       cpp (set (map first (quoted-seed-rows closure "seed-cpp-rows")))
+       seeds {"core" (vec (sort core)) "cpp" (vec (sort cpp))}
+       public (reduce (fn [m ns]
+                 (assoc m ns (set (concat (get seeds ns [])
+                   (keep (fn [d] (when (and (:name d) (not (:private? d))) (:name d)))
+                         (:defs (get (:units closure) ns)))))))
+                {"core" core "cpp" cpp} (:order closure))
+       headers
+       (into {} (map (fn [ns]
+        (let [raw (source-header (get (:units closure) ns))
+              replay (reduce (fn [state request]
+                       (let [target (elem request 0) alias (elem request 1) refers (elem request 2)
+                             names (if (= :all refers) (get public target #{}) refers)
+                             _ (when-not (or (contains? (:units closure) target)
+                                              (contains? (set (:stubs closure)) target) (contains? seeds target))
+                                 (throw (ex-info "native resolution: dependency absent from closure" {:namespace ns :target target})))
+                             state (if alias (assoc-in state [:aliases alias] target) state)]
+                        (reduce (fn [s name] (assoc-in s [:refers name] target)) state names)))
+                      {:aliases {} :refers {}} (reverse (:require_specs raw)))]
+         [ns (assoc replay :refer-alls (vec (:refer_alls raw))
+                    :core-excludes (vec (:core-excludes raw)) :require-specs (vec (:require_specs raw)))])) (:order closure)))]
+  {:version 1 :seed-names seeds :headers headers}))
+(defn bundle-metadata
+ "The bundle metadata every emission of this closure links against. The AOT
+  driver (native.chunks) and the native self-emission (native.bootstrap, which
+  reads it back from bundle.scm) build their link plan from this one value."
+ [closure leaves]
+ (let [units (mapv #(get (:units closure) %) (:order closure))]
+  {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure) :resolution (build closure)
+   :provider-sources (:provider-sources closure) :options (:options closure) :stubs (:stubs closure)
+   :core-links (:core-links closure) :return-constructor-shapes (:return-constructor-shapes closure)
+   :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)
+   :host-modules (vec (:host-modules closure))
+   :leaves (vec (sort leaves))
+   :stub-modules (mapv (fn [ns] [ns (BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))}))

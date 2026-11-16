@@ -1,0 +1,54 @@
+; P parity on the pinned SDK (BEAM): the AOT driver path (chunk files written
+; by `chunks.bl emit-unit`) against the native self-emission path
+; (native.bootstrap/emit-functions + emit-initializers over a link plan built
+; from the bundle value, exactly what bootstrap --compile does with bundle.scm).
+;
+;   research/native-seed/run run research/native-seed/speed/closure/parity.bl -- \
+;     DIR/partition.json CHUNKS-OUT LEAVES.json ns,ns,...
+(ns closure.parity
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.resolution-ledger :as ledger] [bl.json :as json] [clojure.string :as string]))
+(def args (BeamLisp/argv))
+(def closure (artifact/read-closure (nth args 0)))
+(def out (nth args 1))
+(def leaves (get (json/decode (File/read! (nth args 2))) "registered_leaves"))
+(def namespaces (string/split (nth args 3) #","))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+; The bundle bootstrap --compile reads: metadata + source units (no ANF).
+(def bundle (assoc (ledger/bundle-metadata closure leaves)
+                   :units (mapv #(select-keys % [:ns :path :source :requires :module :base-module]) units)))
+; Self-emission: plan from the bundle's metadata and the units' definitions.
+(def plan (bootstrap/link-plan (dissoc bundle :units) units))
+(def reports
+ (keep (fn [path]
+  (let [report (json/decode (File/read! path))]
+   (when (get report "emission_record") (assoc report "path" path))))
+  (Path/wildcard (str out "/chunks/*.json"))))
+(def results
+ (mapv (fn [ns]
+  (let [u (get (:units closure) ns)
+        rows (sort-by #(get-in % ["emission_record" "row" "offset"])
+                      (filter #(= ns (get-in % ["emission_record" "row" "namespace"])) reports))
+        _ (when (empty? rows) (throw (ex-info "parity: no driver chunks for namespace" {:namespace ns})))
+        _ (assert (= (count (:defs u)) (reduce + (map #(get-in % ["emission_record" "row" "count"]) rows))))
+        chunk-text (fn [row ext] (File/read! (str out "/chunks/" (get row "key") "." ext)))
+        driver-f (string/join "" (map #(chunk-text % "functions.scm") rows))
+        driver-i (string/join "" (map #(chunk-text % "initializers.scm") rows))
+        self-f (bootstrap/emit-functions plan u (:defs u))
+        self-i (bootstrap/emit-initializers plan u (:defs u) true)
+        equal? (and (= driver-f self-f) (= driver-i self-i))]
+   (File/write! (str out "/self-" ns ".functions.scm") self-f)
+   (File/write! (str out "/self-" ns ".initializers.scm") self-i)
+   (println (str "PARITY " ns " " (if equal? "BYTE-EQUAL" "DIFFERENT")
+                 " functions=" (count self-f) "B sha=" (artifact/sha self-f)
+                 " initializers=" (count self-i) "B sha=" (artifact/sha self-i)
+                 " chunks=" (count rows)))
+   {"namespace" ns "byte_equal" equal? "functions_sha256" (artifact/sha self-f)
+    "driver_functions_sha256" (artifact/sha driver-f) "initializers_sha256" (artifact/sha self-i)
+    "driver_initializers_sha256" (artifact/sha driver-i)
+    "linked_cells" (count (re-seq #"v_[A-Za-z0-9_]+\$[0-9vg]" self-f))
+    "dynamic_remotes" (count (re-seq #"\(native-remote " self-f))
+    "dynamic_globals" (count (re-seq #"\(native-global " self-f))}))
+  namespaces))
+(File/write! (str out "/parity.json") (json/encode {"schema" "closure.parity" "version" 1 "results" results}))
+(println (str "PARITY_DONE " (count (filter #(get % "byte_equal") results)) "/" (count results) " byte-equal"))
