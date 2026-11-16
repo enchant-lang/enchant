@@ -1,0 +1,42 @@
+;; Regression: a real HTTP upgrade runs init AFTER the router's lease returns.
+(ns live.websocket-generation-test
+ (:require [reload.generation :as g] [reload] [live.app :as app]
+           [live.lifecycle :as lifecycle] [web] [datom :as d]))
+(defn- await [predicate]
+ (loop [n 0]
+  (cond (predicate) true (>= n 500) false
+        :else (do (Process/sleep 10) (recur (inc n))))))
+(deftest real-websocket-callback-retains-native-generation-entry-authority
+ (let [graph (g/prepare!
+              {:application-id (str "websocket-origin-" (erlang/unique_integer (list :positive)))
+               :sources {"websocket.origin"
+                "(ns websocket.origin (:require [reload.generation :as g])) (defn app [] {:principal (fn [_] \"fixture\") :worlds (fn [_ _] {}) :shared-conn (g/runtime-resource :store) :routes [[\"/\" (fn [_] [:main \"native-generation\"])]]})"}})
+       connection (d/connect []) slot (g/slot) previous (reload/reload-enabled?)
+       _ (g/with! graph #(g/bind-runtime! {:store connection}))
+       _ (reload/set-enabled! true) _ (g/publish! slot nil graph)
+       listener (web/serve {:port 0 :ip (tuple 127 0 0 1) :log :off
+                           :plug (fn [request] (lifecycle/route! slot "websocket.origin/app" request))})
+       pid (elem listener 1)
+       port (elem (elem (ThousandIsland/listener_info pid) 1) 1)
+       socket (elem (gen_tcp/connect (tuple 127 0 0 1) port (list :binary (tuple :active false)) 3000) 1)
+       session (atom nil) registry (atom nil)]
+  (try
+   (gen_tcp/send socket (str "GET /ws/?live-sid=origin-regression HTTP/1.1\r\nHost: localhost:"
+                         port "\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                         "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"))
+   (let [response (gen_tcp/recv socket 0 5000)]
+    (is (= :ok (elem response 0)))
+    (is (String/contains? (elem response 1) "101 Switching Protocols")))
+   (is (await (fn []
+         (let [found (g/with! graph #(app/session-of "origin-regression"))]
+          (when found (reset! session found)) (some? found))))
+       "real WebSock init can create its managed native session")
+   (is (and @session (Process/alive? @session)))
+   (gen_tcp/send socket (Base/decode16! "898000000000"))
+   (is (= :ok (elem (gen_tcp/recv socket 0 5000) 0)))
+   (finally
+    (gen_tcp/close socket)
+    (Supervisor/stop pid :normal 5000)
+    (when @session (stop @session))
+    (g/close! slot (g/selected slot))
+    (g/retire! graph) (d/close! connection) (reload/set-enabled! previous)))))

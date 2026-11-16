@@ -30,7 +30,7 @@
 ;    :handle-info (fn [msg state] …)}     ; an Erlang message to this socket
 ; each returning a defserver-style result: [:ok s] · [:push msgs s] · [:stop r s].
 
-(ns web)
+(ns web (:require [proc.callback :as callback]))
 
 ;; ── the Elixir modules we lean on (loaded once) ───────────────────────
 (def ^:private Bandit (erlang/binary_to_atom "Elixir.Bandit"))
@@ -377,7 +377,17 @@
               (fn [thunk]
                 (BeamLisp/with_cwd cwd (fn [] (BeamLisp/with_argv argv thunk)))))]
     (into {} (map (fn [[k f]]
-                    [k (if (fn? f) (fn [& args] (run (fn [] (apply f args)))) f)])
+                    [k (if (fn? f)
+                         ;; Env conveyance restores public context, but only
+                         ;; native invocation admission restores its original
+                         ;; execution authority after the HTTP lease ends.
+                         ;; WebSock callbacks run in this connection process;
+                         ;; its native owner lifetime releases registrations.
+                         (let [registration (callback/register!
+                                              (fn [& args] (run (fn [] (apply f args))))
+                                              (BeamLisp.Env/callback_modules f))]
+                           (fn [& args] (callback/invoke! registration (vec args))))
+                         f)])
                   handlers))))
 
 (defn upgrade

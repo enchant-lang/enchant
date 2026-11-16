@@ -54,8 +54,13 @@
        (when-not @stopped
         (swap! samples conj (try (get! port) (catch _ :error)))
         (Process/sleep 10) (recur))))))
-    (lifecycle/admit! @owned {"operation" "prototype-publication" "candidate" (:id fresh)
-                             "expectedGeneration" (:generation before) "idempotencyKey" "prototype-source-update"})
+    ;; This cold, contended sandbox gets an explicit bounded admission budget.
+    ;; A timeout is never retried as a fresh operation; the same journal wins.
+    (let [reply (GenServer/call (:owner @owned)
+                 [:admit {"operation" "prototype-publication" "candidate" (:id fresh)
+                          "expectedGeneration" (:generation before) "idempotencyKey" "prototype-source-update"}]
+                 60000)]
+     (when (:admission-error reply) (throw (ex-info "Native admission refused" reply))))
     (checks/check! "candidate serves new requests while the old WebSocket remains open"
      (checks/eventually #(= "prototype-new" (get (get! port) "version")) 90000))
     (gen_tcp/send @socket (Base/decode16! "898000000000"))
