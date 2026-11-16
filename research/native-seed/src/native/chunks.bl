@@ -3,7 +3,8 @@
 (ns native.chunks
  (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
            [native.eval :as ev] [native.scheme :as scheme]
-           [bl.json :as json] [clojure.string :as string] [anf] [native.resolution :as resolution]))
+           [bl.json :as json] [clojure.string :as string] [anf] [native.resolution :as resolution]
+           [native.intrinsics :as intrinsics]))
 (def args (BeamLisp/argv))
 (def mode (or (nth args 0 nil) "plan"))
 (def artifact-path (or (nth args 1 nil) "research/native-seed/out/compiler-closure/partition.json"))
@@ -31,11 +32,28 @@
   "bootstrap_sha256" (artifact/sha (File/read! "research/native-seed/src/native/bootstrap.bl"))
   "driver_sha256" (artifact/sha (File/read! "research/native-seed/src/native/chunks.bl"))
   "resolution_sha256" (artifact/sha (File/read! "research/native-seed/src/native/resolution.bl"))
+  "intrinsics_sha256" (artifact/sha (File/read! "research/native-seed/src/native/intrinsics.bl"))
   "options_sha256" (artifact/sha (erlang/term_to_binary (:options closure) (list :deterministic)))})
 (def emission-input
  (assoc (select-keys key-input ["sdk_descriptor_sha256" "emitter_sha256" "eval_sha256"
-                              "bootstrap_sha256" "options_sha256" "driver_sha256" "resolution_sha256"])
-        "resolver_policy" "native-exact-late-lookup-v2"))
+                              "bootstrap_sha256" "options_sha256" "driver_sha256" "resolution_sha256"
+                              "intrinsics_sha256"])
+        "resolver_policy" "native-aot-link-v1"))
+; Static link facts of every compiled definition. A call site's emitted shape
+; depends on its TARGET's kind and declared arities, so the decision recorded
+; in each chunk key carries that shape (see remote-link-shape).
+(def definitions
+ (into {} (mapcat (fn [u] (keep (fn [d] (when (:name d) [[(:ns u) (:name d)] d])) (:defs u))) units)))
+(def definition-arities
+ (into {} (keep (fn [[slot d]] (when (= :fn (:kind d)) [slot (bootstrap/declaration-arities (:form d))]))
+                definitions)))
+(defn remote-link-shape [ns logical mode arity]
+ (let [d (get definitions [ns logical]) arities (get definition-arities [ns logical])]
+  (cond
+   (= mode "rest-list-clause") (if (some? (:variadic arities)) "variadic" "dynamic")
+   (contains? (set (:fixed arities)) arity) "arity"
+   (some? d) "generic"
+   :else "dynamic")))
 (defn remote-decision [n]
  (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
        logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
@@ -43,7 +61,8 @@
   (cond
    (contains? leaves key) ["leaf" key]
    (and (contains? by-module m) (contains? (get table (get by-module m)) logical))
-    ["compiled" key (get by-module m) logical (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
+    (let [ns (get by-module m) mode (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
+     ["compiled" key ns logical mode (remote-link-shape ns logical mode a)])
    (contains? stub-modules m) ["excluded-namespace" key]
    :else (throw (ex-info (str "native V2 cache: unresolved remote signature " key) {:remote key})))))
 (defn global-decision [n] (resolution/global-decision resolution-ledger table n))
@@ -66,9 +85,38 @@
    "decisions" (decisions-for defs)}))
 (defn key-from-record [record]
  (artifact/sha (erlang/term_to_binary [emission-input record] (list :deterministic))))
+(defn- direct-call [target]
+ {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- generic-call [target]
+ ; A non-:fn definition or an undeclared arity: the live slot value decides.
+ {:inline? true
+  :call (fn [operands]
+         (let [spread (string/join "" (map #(str " " %) operands))]
+          (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
+               ") (bl-invoke linked (list" spread "))))")))})
+(defn remote-link [n]
+ ; nil keeps the dynamic (native-remote KEY) path: excluded namespaces and
+ ; rest-list calls to a definition without a variadic arm raise there.
+ (if-let [template (intrinsics/remote-template n)]
+  {:inline? false :call template}
+  (let [decision (remote-decision n)]
+   (case (first decision)
+    "leaf" (direct-call (bootstrap/leaf-binding-name (second decision)))
+    "compiled"
+     (let [[_ _ ns logical _ shape] decision]
+      (case shape
+       "arity" (direct-call (bootstrap/arity-binding-name ns logical (count (:args n))))
+       "variadic" (direct-call (bootstrap/variadic-binding-name ns logical))
+       "generic" (generic-call (bootstrap/binding-name ns logical))
+       nil))
+     nil))))
 (defn checked-context [ns]
+ ; The AOT context. Every statically decided remote/global is linked to a
+ ; Scheme top-level cell maintained by native-link!/native-add-leaf!; see
+ ; research/native-seed/speed/link/RESULT.md.
  (let [base (ev/context ns)]
   (assoc base
+   :aot-link {:remote remote-link}
    :remote-resolver
    (fn [n]
     (let [m (:mod n) f (erlang/atom_to_binary (:fun n))
@@ -80,19 +128,47 @@
      ((:remote-resolver base) n)))
    :global-resolver
    (fn [n]
-    (global-decision n)
-    ((:global-resolver base) n)))))
+    (let [[_ _ _ _ _ sel-ns sel-name] (global-decision n)]
+     (bootstrap/global-binding-name sel-ns sel-name))))))
+(defn link-definition [ns name kind arities]
+ ; One setter per linked slot (compiled view, including arity entries) and
+ ; one for its global view; native-link! initializes both immediately.
+ (let [binding (bootstrap/binding-name ns name) global (bootstrap/global-binding-name ns name)
+       fixed (if (= :fn kind) (:fixed arities) [])
+       variadic? (and (= :fn kind) (some? (:variadic arities)))
+       cells (concat (map #(bootstrap/arity-binding-name ns name %) fixed)
+                     (when variadic? [(bootstrap/variadic-binding-name ns name)]) [global])]
+  (str (string/join "" (map #(str "(define " % " #f)\n") cells))
+       "(native-link! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " binding " value)"
+       (string/join "" (map #(str " (set! " (bootstrap/arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
+       (if variadic? (str " (set! " (bootstrap/variadic-binding-name ns name) " (native-variadic-entry value "
+                          (scheme/text (str ns "/" name)) "))") "")
+       ") (lambda (value) (set! " global " value)))\n")))
+(defn seed-links []
+ ; Seeds are interned by rt/seed-core; only their global view is linked.
+ (string/join ""
+  (for [[ns names] (sort-by first (:seed-names resolution-ledger)) name (sort names)
+        :when (not (contains? (get table ns #{}) name))]
+   (let [global (bootstrap/global-binding-name ns name)]
+    (str "(define " global " (native-unlinked " (scheme/text ns) " " (scheme/text name) "))\n"
+         "(native-link-global! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " global " value)))\n")))))
 (defn emit-definition [u d]
  (let [ns (:ns u) value (scheme/emit (:node d) (checked-context ns))]
   (if (:name d)
-   (str "(define " (bootstrap/binding-name ns (:name d)) " " value ")\n"
-        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " (bootstrap/binding-name ns (:name d)) ")\n"
+   (let [binding (bootstrap/binding-name ns (:name d))
+         override (intrinsics/kernel-override ns (:name d) (bootstrap/original-binding-name ns (:name d)))
+         arities (when (= :fn (:kind d)) (bootstrap/declaration-arities (:form d)))]
+    (str (if override
+          (str "(define " (bootstrap/original-binding-name ns (:name d)) " " value ")\n"
+               "(define " binding " " override ")\n")
+          (str "(define " binding " " value ")\n"))
+        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
-        (when (= :fn (:kind d))
-         (let [arities (bootstrap/declaration-arities (:form d))]
-          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
-               (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))))
+        (when arities
+         (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+              (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))
+        (link-definition ns (:name d) (:kind d) arities)))
    (str value "\n"))))
 (defn bundle-metadata []
  {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure) :resolution resolution-ledger
@@ -142,7 +218,8 @@
        _ (assert (= key (key-from-record (get row "emission_record"))))
        defs (subvec (:defs u) offset (+ offset count*))
        functions (string/join "" (map #(emit-definition u %) (filter #(= :fn (:kind %)) defs)))
-       initializers (str (when (and (= "core" (:ns u)) (= offset 0)) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n")
+       initializers (str (when (and (= "core" (:ns u)) (= offset 0))
+                          (str (seed-links) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n"))
                          (string/join "" (map #(emit-definition u %) (remove #(= :fn (:kind %)) defs))))
        source-unit (when (= offset 0) (bootstrap/data (select-keys u [:ns :path :source :requires :module :base-module])))
        report {"key" key "emission_inputs" emission-input "emission_record" (get row "emission_record")
@@ -229,6 +306,20 @@
       (println (str "NATIVE_CHUNKS_YIELD next=" index " built=" built " reused=" reused))
      :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused)))))
  (= mode "assemble") (assemble! (read-plan))
+ ; Focused inspection: emit only the named definitions ("ns/name,...") and
+ ; the seed links to OUT/inspect.scm. No plan, chunk or bundle is written.
+ (= mode "inspect")
+  (let [wanted (string/split (nth args 5) #",")
+        text (string/join ""
+              (for [slot wanted]
+               (let [at (string/index-of slot "/") ns (subs slot 0 at) name (subs slot (inc at))
+                     d (or (get definitions [ns name])
+                           (throw (ex-info "native chunks: inspect target absent" {:slot slot})))]
+                (emit-definition (get (:units closure) ns) d))))]
+   (File/mkdir_p! out)
+   (File/write! (str out "/inspect.scm") text)
+   (File/write! (str out "/seed-links.scm") (seed-links))
+   (println (str "NATIVE_CHUNKS_INSPECT " (count wanted))))
  (= mode "build-next")
   (let [plan (ensure-plan!) progress (emit-window! plan)]
    (if (:complete? progress)

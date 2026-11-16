@@ -19,6 +19,7 @@
  (if native-macro-trace-enabled? (time->seconds (current-time)) #f))
 (define (native-env-put! key value)
  (set! native-env-rows (bl-assoc native-env-rows key value))
+ (native-env-row-changed! key)
  (if (and native-macro-trace-enabled?
           (bl-tag? value 'tuple) (= (bl-count value) 2)
           (eq? (bl-nth value 0) (bl-key "$macro"))
@@ -157,6 +158,7 @@
 (define (native-register-arities! ns name fixed variadic)
  (set! native-export-arities
   (bl-assoc native-export-arities (native-row ns name) (bl-tuple (list fixed variadic))))
+ (set! native-availability-cache (make-table test: equal?))
  (bl-key "ok"))
 (define native-excluded-host-leaves
  '("Elixir.BeamLisp.Env/check_source_callable!/1"
@@ -164,6 +166,15 @@
    "Elixir.BeamLisp.Env/check_source_invocation1!/2"
    "Elixir.BeamLisp.Env/check_source_invocation2!/3"
    "Elixir.BeamLisp.Env/assert_native_framework_execution!/0"))
+;; Dynamic link state changes only through explicit publication points:
+;; native-add-leaf!/native-replace-leaf!, native-install-bundle! and
+;; native-register-arities!. Each one retires the memo tables below.
+(define native-availability-cache (make-table test: equal?))
+(define native-remote-table (make-table test: equal?))
+(set! native-link-changed!
+ (lambda ()
+  (set! native-availability-cache (make-table test: equal?))
+  (set! native-remote-table (make-table test: equal?))))
 (define (native-remote-available-uncached? module function arity)
  (let* ((module (native-module-name module)) (function (native-module-name function))
         (key (string-append module "/" function "/" (number->string arity)))
@@ -179,77 +190,17 @@
        (if variadic?
         (and (not (bl-is-nil (bl-nth info 1))) (= arity (+ 1 (bl-nth info 1))))
         (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
-;; Boolean membership is stable only under the exact capability roots.
-;; Source function_exported/3 passes immutable atoms; nested identity tables
-;; avoid repeated MFA string construction and AVL probes for those arguments.
-;; Mutable strings retain the original path. False is valid only within this
-;; exact epoch; exceptions never enter the cache. This is finite export
-;; membership, not an absent-Source-binding or namespace-authority cache.
-(define native-availability-cache (make-table test: eq?))
-(define native-availability-roots (vector #f #f #f #f #f))
-(define native-availability-original-module-name native-module-name)
-(define native-availability-original-atom-name native-atom-name)
-(define native-availability-original-keyword? native-keyword?)
-(define (native-refresh-availability-cache!)
- (if (or (not (eq? (vector-ref native-availability-roots 0) native-leaf-registry))
-         (not (eq? (vector-ref native-availability-roots 1) native-module-names))
-         (not (eq? (vector-ref native-availability-roots 2) native-stub-names))
-         (not (eq? (vector-ref native-availability-roots 3) native-export-arities))
-         (not (eq? (vector-ref native-availability-roots 4) native-excluded-host-leaves)))
-  (begin
-   (set! native-availability-cache (make-table test: eq?))
-   (vector-set! native-availability-roots 0 native-leaf-registry)
-   (vector-set! native-availability-roots 1 native-module-names)
-   (vector-set! native-availability-roots 2 native-stub-names)
-   (vector-set! native-availability-roots 3 native-export-arities)
-   (vector-set! native-availability-roots 4 native-excluded-host-leaves))))
+;; Source function_exported/3 passes immutable atoms: memoize those exact
+;; booleans. Mutable strings and exceptions never enter the memo.
 (define (native-remote-available? module function arity)
- (if (and (symbol? module) (symbol? function) (integer? arity) (exact? arity)
-          (eq? native-module-name native-availability-original-module-name)
-          (eq? native-atom-name native-availability-original-atom-name)
-          (eq? native-keyword? native-availability-original-keyword?))
-  (begin
-   (native-refresh-availability-cache!)
-   (let* ((functions (table-ref native-availability-cache module #f))
-          (arities (and functions (table-ref functions function #f)))
-          (cached (if arities (table-ref arities arity native-missing) native-missing)))
-    (if (not (eq? cached native-missing)) cached
-     (let ((available (native-remote-available-uncached? module function arity)))
-      ;; Evaluate first: an exception cannot create a result entry.
-      (if (boolean? available)
-       (let ((functions (or functions (make-table test: eq?)))
-             (arities (or arities (make-table test: eqv?))))
-        (table-set! arities arity available)
-        (table-set! functions function arities)
-        (table-set! native-availability-cache module functions)))
-      available))))
+ (if (and (symbol? module) (symbol? function) (integer? arity) (exact? arity))
+  (let* ((key (vector module function arity))
+         (cached (table-ref native-availability-cache key native-missing)))
+   (if (not (eq? cached native-missing)) cached
+    (let ((available (native-remote-available-uncached? module function arity)))
+     (if (boolean? available) (table-set! native-availability-cache key available))
+     available)))
   (native-remote-available-uncached? module function arity)))
-;; Positive exact-MFA dispatch cache. Registry objects are persistent; an
-;; identity change retires all resolved wrappers before the next lookup.
-;; A compiled wrapper observes its LIVE registry root on every invocation, so redefining
-;; a source var neither leaves a stale procedure nor grants new membership.
-(define native-remote-original-invoke bl-invoke)
-(define native-remote-original-resolve native-resolve-call)
-(define native-remote-cache (make-table test: equal?))
-;; Key OBJECTS can be mutable strings. Every identity hit must also match an
-;; owned content snapshot; no string immutability or Source-only shortcut.
-(define native-remote-identity-cache (make-table test: eq? weak-keys: #t))
-(define native-remote-cache-leaves #f)
-(define native-remote-cache-modules #f)
-(define native-remote-cache-stubs #f)
-(define native-remote-cache-arities #f)
-(define (native-refresh-remote-cache!)
- (if (or (not (eq? native-remote-cache-leaves native-leaf-registry))
-         (not (eq? native-remote-cache-modules native-module-names))
-         (not (eq? native-remote-cache-stubs native-stub-names))
-         (not (eq? native-remote-cache-arities native-export-arities)))
-  (begin
-   (set! native-remote-cache (make-table test: equal?))
-   (set! native-remote-identity-cache (make-table test: eq? weak-keys: #t))
-   (set! native-remote-cache-leaves native-leaf-registry)
-   (set! native-remote-cache-modules native-module-names)
-   (set! native-remote-cache-stubs native-stub-names)
-   (set! native-remote-cache-arities native-export-arities))))
 (define (native-remote-key-parts key)
  ;; Function names can contain '/', e.g. core// or erlang//=. The FIRST
  ;; separator ends the module; only the LAST separator begins the arity.
@@ -273,71 +224,105 @@
               (and (char>=? c #\0) (char<=? c #\9) (digits (+ k 1))))))))
          (else (last (- j 1)))))))
      (else (first (+ i 1))))))))
-(define (native-remote-resolve-key key)
- (native-refresh-remote-cache!)
- (let ((cached (table-ref native-remote-cache key native-missing)))
-  (if (not (eq? cached native-missing)) cached
-   (let ((parts (native-remote-key-parts key)))
-    (if (not parts) (error "invalid native remote key" key)
-     (let ((leaf (bl-get native-leaf-registry key native-missing)))
-      (if (not (eq? leaf native-missing))
-       (begin (table-set! native-remote-cache (string-copy key) leaf) leaf)
-       (let* ((module (vector-ref parts 0)) (name (vector-ref parts 1)) (arity (vector-ref parts 2))
-              (ns (bl-get native-module-names module native-missing))
-              (stub (bl-get native-stub-names module native-missing))
-              (size (string-length name))
-              (variadic? (and (>= size 6) (string=? (substring name (- size 6) size) "__bl_v")))
-              (logical (if variadic? (substring name 0 (- size 6)) name)))
-        (cond
-         ((not (eq? ns native-missing))
-          (let* ((slot (string-append ns "/" logical))
-                 ;; A persistent registry root is a complete value epoch.
-                 ;; Source redefinition/removal/readdition changes that root;
-                 ;; otherwise this exact slot cannot have changed in place.
-                 (slot-root #f) (slot-value native-missing)
-                 (wrapper
-                  (lambda arguments
-                   (if (not (eq? slot-root native-global-registry))
-                    (begin
-                     (set! slot-value (bl-get native-global-registry slot native-missing))
-                     (set! slot-root native-global-registry)))
-                   (let ((value slot-value))
-                    (if (eq? value native-missing) (error "missing compiled native export" key)
-                     (if variadic?
-                      (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
-                       (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
-                       (error "native variadic clause missing" key))
-                      ;; The base Scheme invoker only applies plain procedures.
-                      ;; Later Source-frame/C/custom invokers OR planners own
-                      ;; their contexts/peeling; preserve their complete path.
-                      (if (and (eq? bl-invoke native-remote-original-invoke)
-                               (eq? native-resolve-call native-remote-original-resolve)
-                               (procedure? value)
-                               (not (table-ref native-host-callables value #f)))
-                       (apply value arguments) (bl-invoke value arguments))))))))
-           ;; Cache membership only when the exact existing arity ledger
-           ;; admits this MFA. Missing/stub/wrong-arity decisions stay uncached.
-           (if (native-remote-available? module name arity)
-            (table-set! native-remote-cache (string-copy key) wrapper))
-           wrapper))
-         ((not (eq? stub native-missing))
-          (lambda arguments (error "native target explicitly excludes namespace" stub key)))
-         (else (error "unimplemented native host leaf" key)))))))))))
 
-;; The structural cache remains authoritative. Repeated compiled literal
-;; objects use an identity front lookup plus ONE exact content comparison,
-;; avoiding repeated equal?-hash/bucket scans observed in native self-emission.
-;; Only an already positive structural entry can enter this front cache.
+;; ---- AOT link cells ------------------------------------------------------
+;; AOT-emitted code (native.chunks) calls Scheme top-level cells directly:
+;;   v_<slot>      compiled value      v_<slot>$<n>  fixed arity-n entry
+;;   v_<slot>$v    variadic arm        v_<slot>$g    global view, macro-unwrapped
+;;   lv_<key>      host leaf (native-add-leaf!)
+;; Each linked definition registers its setters here; every later publication
+;; of that slot (native-register!, an env row put/delete) runs them, so a
+;; redefinition is observed exactly as the former live lookup observed it.
+(define (native-unmacro value)
+ (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
+  (bl-nth value 1) value))
+(define (native-arity-entry value arity)
+ (cond ((procedure? value) value)
+  ((native-multi-callable? value)
+   (let ((fixed (bl-get (bl-nth value 1) arity native-missing)))
+    (if (procedure? fixed) fixed (lambda arguments (bl-invoke value arguments)))))
+  (else (lambda arguments (bl-invoke value arguments)))))
+(define (native-variadic-entry value key)
+ (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+  (let ((arm (bl-nth (bl-nth value 2) 1)))
+   (if (procedure? arm) arm (lambda arguments (bl-invoke arm arguments))))
+  (lambda arguments (error "native variadic clause missing" key))))
+(define (native-unlinked ns name)
+ (lambda arguments (error "undefined native var" ns name)))
+;; The global view of ns/name: its env row when present, else the compiled value.
+(define (native-global-view ns name record)
+ (let ((row (native-env-value (native-row ns name))))
+  (if (eq? row native-missing) (vector-ref record 0) row)))
+(set! native-publish-global!
+ (lambda (ns name record)
+  (let ((setter (vector-ref record 2)))
+   (if setter
+    (let ((value (native-global-view ns name record)))
+     (if (not (eq? value native-missing)) (setter (native-unmacro value))))))))
+(define (native-link! ns name slot-setter global-setter)
+ (let ((record (native-link-record (string-append ns "/" name))))
+  (vector-set! record 1 slot-setter)
+  (vector-set! record 2 global-setter)
+  (if (not (eq? (vector-ref record 0) native-missing)) (slot-setter (vector-ref record 0)))
+  (native-publish-global! ns name record)
+  (bl-key "ok")))
+(define (native-link-global! ns name global-setter)
+ (let ((record (native-link-record (string-append ns "/" name))))
+  (vector-set! record 2 global-setter)
+  (native-publish-global! ns name record)
+  (bl-key "ok")))
+(define (native-env-row-changed! key)
+ (if (and (bl-tag? key 'tuple) (= (bl-count key) 2) (string? (bl-nth key 0)) (string? (bl-nth key 1)))
+  (let ((record (table-ref native-link-records (string-append (bl-nth key 0) "/" (bl-nth key 1)) #f)))
+   (if record (native-publish-global! (bl-nth key 0) (bl-nth key 1) record)))))
+
+;; ---- Dynamic MFA lookup ----------------------------------------------------
+;; Only runtime-evaluated code (native.eval/context, bootstrap --compile
+;; output), erlang/apply/3, make_fun/3 and explicit host calls reach this.
+;; A compiled target reads its link record's value on every call.
+(define (native-remote-resolve key)
+ (let ((parts (native-remote-key-parts key)))
+  (if (not parts) (error "invalid native remote key" key)
+   (let ((leaf (bl-get native-leaf-registry key native-missing)))
+    (if (not (eq? leaf native-missing))
+     (begin (table-set! native-remote-table (string-copy key) leaf) leaf)
+     (let* ((module (vector-ref parts 0)) (name (vector-ref parts 1))
+            (ns (bl-get native-module-names module native-missing))
+            (stub (bl-get native-stub-names module native-missing))
+            (size (string-length name))
+            (variadic? (and (>= size 6) (string=? (substring name (- size 6) size) "__bl_v")))
+            (logical (if variadic? (substring name 0 (- size 6)) name)))
+      (cond
+       ((not (eq? ns native-missing))
+        (let* ((record (native-link-record (string-append ns "/" logical)))
+               (wrapper
+                (lambda arguments
+                 (let ((value (vector-ref record 0)))
+                  (cond ((eq? value native-missing) (error "missing compiled native export" key))
+                   (variadic?
+                    (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+                     (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
+                     (error "native variadic clause missing" key)))
+                   (else (bl-invoke value arguments)))))))
+         (table-set! native-remote-table (string-copy key) wrapper)
+         wrapper))
+       ((not (eq? stub native-missing))
+        (lambda arguments (error "native target explicitly excludes namespace" stub key)))
+       (else (error "unimplemented native host leaf" key)))))))))
 (define (native-remote key)
- (native-refresh-remote-cache!)
- (if (not (string? key)) (native-remote-resolve-key key)
-  (let ((entry (table-ref native-remote-identity-cache key native-missing)))
-   (if (and (not (eq? entry native-missing)) (string=? key (vector-ref entry 0)))
-    (vector-ref entry 1)
-    (let ((value (native-remote-resolve-key key)))
-     (if (eq? value (table-ref native-remote-cache key native-missing))
-      (table-set! native-remote-identity-cache key (vector (string-copy key) value)))
-     value)))))
+ (let ((hit (table-ref native-remote-table key #f)))
+  (or hit (native-remote-resolve key))))
+
+;; Named arithmetic for native.eval's :arithmetic-resolver (no per-operation closure).
+(define (native-arith-add a b) (native-num 'add a b))
+(define (native-arith-sub a b) (native-num 'sub a b))
+(define (native-arith-mul a b) (native-num 'mul a b))
+(define (native-arith-div a b) (native-num 'div a b))
+(define (native-arith-lt a b) (native-num 'lt a b))
+(define (native-arith-gt a b) (native-num 'gt a b))
+(define (native-arith-le a b) (native-num 'le a b))
+(define (native-arith-ge a b) (native-num 'ge a b))
+(define (native-arith-num-eq a b) (native-num 'num_eq a b))
 
 (define (native-install-bundle! metadata)
  (set! native-bundle-metadata metadata)
@@ -363,6 +348,7 @@
    (native-env-put! (native-row (bl-key "link") "core" (bl-nth row 0)) (bl-nth row 1)))
   (bl-items (bl-get metadata (bl-key "core-links"))))
  (native-install-resolution! (bl-get metadata (bl-key "resolution")))
+ (native-link-changed!)
  (bl-key "ok"))
 (define (native-install-resolution! ledger)
  (if (not (bl-is-nil ledger))
@@ -396,7 +382,8 @@
  (native-add-leaf! (string-append "Elixir.BeamLisp.Env/" name "/" (number->string arity)) procedure))
 (native-env-leaf! "lookup" 1 native-lookup)
 (native-env-leaf! "put_key" 2 native-env-put!)
-(native-env-leaf! "delete_key" 1 (lambda (key) (set! native-env-rows (native-map-remove native-env-rows key)) (bl-key "ok")))
+(native-env-leaf! "delete_key" 1 (lambda (key)
+ (set! native-env-rows (native-map-remove native-env-rows key)) (native-env-row-changed! key) (bl-key "ok")))
 (native-env-leaf! "intern" 3 native-intern)
 (native-env-leaf! "fetch" 2 native-fetch)
 (native-env-leaf! "fetch!" 2 native-fetch!)

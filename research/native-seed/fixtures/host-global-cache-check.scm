@@ -1,4 +1,4 @@
-;; Same pure-host/compiler process as host-compiler-cache-check.scm. These
+;; Same pure-host/compiler process as host-link-check.scm. These
 ;; checks exercise public selection behavior; registry state is restored.
 (define native-global-cache-checks 0)
 (define (native-global-cache-check label ok)

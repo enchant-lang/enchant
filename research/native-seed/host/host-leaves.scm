@@ -1,13 +1,30 @@
 ;; Raw host/module leaves. Canonical core/rt/compiler definitions are linked
 ;; separately; these implement host storage, finite Enum, and Erlang primitives.
 (define native-leaf-registry (bl-empty-map))
+;; Every leaf also has a stable named top-level binding, the exact spelling of
+;; native.bootstrap/leaf-binding-name ("l" + scheme/ident), which AOT code
+;; calls directly. The registry stays the runtime lookup authority.
+(define (native-leaf-binding-name key)
+ (string-append "lv"
+  (apply string-append
+   (map (lambda (c) (string-append "_" (number->string (char->integer c)))) (string->list key)))))
+(define native-link-changed! (lambda () #f))
+(define (native-bind-leaf! key value)
+ (##global-var-set! (##make-global-var (string->symbol (native-leaf-binding-name key))) value)
+ (set! native-leaf-registry (bl-assoc native-leaf-registry key value))
+ (native-link-changed!))
 (define (native-add-leaf! key value)
  (native-mark-host-callable! value)
  (if (native-map-has? native-leaf-registry key) (error (string-append "duplicate native leaf: " key)))
  (if (procedure? value)
   (let find ((i (- (string-length key) 1)))
    (if (char=? (string-ref key i) #\/) (bl-register-callable! value (string->number (substring key (+ i 1) (string-length key)))) (find (- i 1)))))
- (set! native-leaf-registry (bl-assoc native-leaf-registry key value)) value)
+ (native-bind-leaf! key value) value)
+;; Replace an EXISTING leaf (source-frame transport rebinding): registry,
+;; named binding and dynamic lookups change together.
+(define (native-replace-leaf! key value)
+ (if (not (native-map-has? native-leaf-registry key)) (error "native leaf replacement expected an existing leaf" key))
+ (native-bind-leaf! key value) value)
 (define (native-leaf key) (bl-get native-leaf-registry key native-missing))
 (define (native-badarg who) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badarg") who)) (native-capture-stack)))
 (define (native-assert-list xs) (if (native-list? xs) xs (native-badarg "proper list expected")))
