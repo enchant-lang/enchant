@@ -567,26 +567,9 @@
 
 ;; Target exception representation is the same tagged data exposed to BL.
 ;; Raise/class/trace transport is supplied by host-values.scm.
-(define (native-ex-info message data)
- (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.ExInfo")
-         (bl-key "__exception__") #t (bl-key "message") message (bl-key "data") data))
 (define (native-exception-value? x)
  (and (bl-tag? x 'map) (native-keyword? (bl-get x (bl-key "__struct__")))
       (native-map-has? x (bl-key "__exception__"))))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_info/2" native-ex-info)
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_data/1"
- (lambda (x) (if (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.ExInfo")) (bl-get x (bl-key "data")) bl-nil)))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_message/1"
- (lambda (x) (if (native-exception-value? x) (bl-get x (bl-key "message")) (bl-show x))))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_original/1"
- (lambda (x) (if (eq? (native-struct-module x) (bl-key "Elixir.ErlangError")) (bl-get x (bl-key "original")) bl-nil)))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/raise_payload/1"
- (lambda (x)
-  (native-raise (bl-key "error")
-   (cond ((native-exception-value? x) x)
-         ((bl-tag? x 'map) (native-ex-info (bl-invoke (native-global "rt" "print_str") (list x)) x))
-         (else (native-ex-info (bl-show x) bl-nil)))
-   (native-capture-stack))))
 
 ;; Closed record registry; declaration/publication APIs require the BEAM's
 ;; Source custody and remain explicit exclusions, just as in the JS target.

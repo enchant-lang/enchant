@@ -1,0 +1,116 @@
+; BEAM oracle for the DATA workstream: every deleted leaf's signature, called
+; on BEAM through its pinned host module over a small corpus.
+; Usage: research/native-seed/run run research/native-seed/speed/data/oracle.bl -- OUT-DIR
+; Writes OUT-DIR/oracle-cases.sexp, one datum per line:
+;   ("Module/f/a" (ARG-EXPR ...) ok VALUE-EXPR)
+;   ("Module/f/a" (ARG-EXPR ...) raised "Elixir.Exception.Module" MESSAGE-OR-#f)
+; Values are encoded with native.scheme/literal; tuples, improper lists and
+; plain structs (sorted collections, exceptions) explicitly.
+(ns data.oracle (:require [native.scheme :as scheme] [clojure.string :as string]))
+
+(def out-dir (first (BeamLisp/argv)))
+
+(defn proper? [xs]
+ (cond (erlang/=:= xs ()) true (erlang/is_list xs) (proper? (erlang/tl xs)) :else false))
+(declare enc)
+(defn plain-struct? [v]
+ (and (erlang/is_map v) (erlang/is_map_key :__struct__ v)
+      (not (contains? #{:Elixir.BeamLisp.Vector :Elixir.BeamLisp.Set :Elixir.BeamLisp.Decimal}
+                      (erlang/map_get :__struct__ v)))))
+(defn enc [v]
+ (cond
+  (and (erlang/is_list v) (not (proper? v)))
+  (str "(cons " (enc (erlang/hd v)) " " (enc (erlang/tl v)) ")")
+  (erlang/is_list v) (str "(list " (string/join " " (map enc v)) ")")
+  (erlang/is_tuple v) (str "(bl-make-tuple " (string/join " " (map enc (erlang/tuple_to_list v))) ")")
+  (plain-struct? v)
+  (str "(bl-struct " (scheme/literal (erlang/map_get :__struct__ v)) " (bl-map "
+       (string/join " " (mapcat (fn [p] [(enc (erlang/element 1 p)) (enc (erlang/element 2 p))])
+                                (maps/to_list (maps/remove :__struct__ v)))) "))")
+  (and (erlang/is_map v) (not (erlang/is_map_key :__struct__ v)))
+  (str "(bl-map " (string/join " " (mapcat (fn [p] [(enc (erlang/element 1 p)) (enc (erlang/element 2 p))])
+                                           (maps/to_list v))) ")")
+  :else (scheme/literal v)))
+
+(defn outcome [m f args]
+ (let [r (try {:ok (erlang/apply m f (apply list args))}
+              (catch e {:raised (if (and (erlang/is_map e) (erlang/is_map_key :__struct__ e))
+                                  (erlang/map_get :__struct__ e) :unknown)
+                        :message (try (Elixir.Exception/message e) (catch _ nil))}))]
+  (if (contains? r :raised)
+   (str "raised " (scheme/text (erlang/atom_to_binary (:raised r))) " "
+        (if (string? (:message r)) (scheme/text (:message r)) "#f"))
+   (try (str "ok " (enc (:ok r))) (catch e "unencodable")))))
+(def skipped (atom 0))
+(defn row [m f args]
+ (let [key (str (erlang/atom_to_binary m) "/" (erlang/atom_to_binary f) "/" (count args))
+       encoded (try (string/join " " (doall (map enc args)))
+                    (catch e (swap! skipped inc) (println "DATA_ORACLE_SKIP" key (Kernel/inspect args)) nil))]
+  (if encoded (str "(" (scheme/text key) " (" encoded ") " (outcome m f args) ")\n") "")))
+
+; ── corpora ──────────────────────────────────────────────────────────────
+(def numbers [0 1 -1 2 3 42 1180591620717411303424 1.0 0.0 -0.0 2.5 -3.75 1.5M 1.50M 0M -2.25M 10M])
+(def others ["a" :a nil (list 1) (tuple 1 2)])
+(def values (vec (concat numbers others)))
+(def num :Elixir.BeamLisp.Num)
+(def num-rows
+ (concat
+  (for [f [:add :sub :mul :div :lt :gt :le :ge :num_eq :cmp] a values b values] (row num f [a b]))
+  (for [f [:neg :number? :zero? :pos? :neg?] a values] (row num f [a]))))
+
+(def decimal :Elixir.BeamLisp.Decimal)
+(def decimal-values [0M 1.5M 1.50M -2.25M 10M 0.001M -0.000M 123456789012345678901234567890.5M 1 1.5 "1" nil {:a 1}])
+(def decimal-texts ["1.5" "-0.00" "12" "1.50" "abc" "" "1e3" "+3.2" " 1" "1_000" "-.5" "5." "0012.3400" "1.5M"])
+(def decimal-rows
+ (concat
+  (for [f [:signum :to_literal :to_plain_string :unscaled :scale] d decimal-values] (row decimal f [d]))
+  (for [t (concat decimal-texts [nil 12 :a])] (row decimal :parse [t]))))
+
+(def ex-info-mod :Elixir.BeamLisp.ExInfo)
+(def errors
+ [(ex-info "boom" {:a 1}) (ex-info "x" nil) (Elixir.RuntimeError/exception "rt")
+  (Elixir.ErlangError/exception (list (tuple :original :badarg))) (Elixir.ErlangError/exception (list (tuple :original (tuple :terminated 1))))
+  (Elixir.ArgumentError/exception "arg") {:a 1} {} :kw "text" 12 nil (list 1 2) (tuple :x)
+  {:__struct__ :Elixir.Foo :a 1} {:__struct__ :Elixir.Foo :__exception__ true :message "m"}])
+(def ex-info-rows
+ (concat
+  (for [m ["msg" "" nil :a] d [{} {:k 1} nil (list 1)]] (row ex-info-mod :ex_info [m d]))
+  (for [f [:ex_data :ex_message :ex_original :raise_payload] e errors] (row ex-info-mod f [e]))))
+
+(def compile-error :Elixir.BeamLisp.CompileError)
+(def compile-error-rows
+ (for [opts ["plain message" (list (tuple :message "m"))
+             (list (tuple :message "m") (tuple :file "a.bl") (tuple :line 3))
+             (list (tuple :message "m") (tuple :line 3)) (list (tuple :message "m") (tuple :file "f"))
+             (list (tuple :message :atom-message) (tuple :form (list 1 2)))
+             (list (tuple :file "a.bl")) () 12 nil]]
+  (row compile-error :exception [opts])))
+
+(def sorted :Elixir.BeamLisp.Sorted)
+(def keys* [1 2 2.0 -5 "a" "b" :a :b nil true [1 2] (list 1 2) [] (tuple :symbol "s") 1.5M])
+(def pair-lists
+ [() (list (tuple 1 :one) (tuple 2 :two)) (list (tuple "b" 1) (tuple "a" 2) (tuple "b" 3))
+  (apply list (map (fn [i] (tuple (- 20 i) i)) (range 40))) (list (tuple 1 1) (tuple 1.0 2))
+  (list 1 2) (list (tuple 1 2 3))])
+(def set-lists [() (list 3 1 2 1) (apply list (map (fn [i] (rem (* i 7) 23)) (range 30))) [[1] [] [1 2]] (list nil false true)])
+(def smaps (mapv #(BeamLisp.Sorted/map_new %) (take 5 pair-lists)))
+(def ssets (mapv #(BeamLisp.Sorted/set_new %) set-lists))
+(def sorted-rows
+ (concat
+  (for [p pair-lists] (row sorted :map_new [p]))
+  (for [s (concat set-lists [[1 2]])] (row sorted :set_new [s]))
+  (for [m smaps k keys*] (row sorted :map_put [m k :v]))
+  (for [m smaps k keys*] (row sorted :map_delete [m k]))
+  (for [m smaps k keys*] (row sorted :map_get [m k :default]))
+  (for [m smaps k keys*] (row sorted :map_has_key? [m k]))
+  (for [s ssets k keys*] (row sorted :set_del [s k]))
+  (for [s ssets k keys*] (row sorted :set_member? [s k]))
+  (for [s ssets k keys*] (row sorted :set_add [s k]))
+  (for [f [:map_count :map_to_list :last_entry :last_key] m (concat smaps ssets [{} nil])] (row sorted f [m]))
+  (for [f [:set_count :set_to_list] s (concat ssets smaps [nil])] (row sorted f [s]))))
+
+; Num and Decimal stay residual this round (see RESULT.md); their rows are not run.
+(def rows (doall (concat ex-info-rows compile-error-rows sorted-rows)))
+(File/mkdir_p! out-dir)
+(File/write! (Path/join out-dir "oracle-cases.sexp") (apply str rows))
+(println "DATA_ORACLE_WRITTEN" (count rows) "skipped" @skipped)
