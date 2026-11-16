@@ -163,10 +163,13 @@
    (let [start (shape (assoc-in context [:selection :head :block] anchor)) end (shape context)]
     (assoc end :from-row (min (:row start) (:row end)) :to-row (max (:row start) (:row end))
                :from-column (min (:column start) (:column end)) :to-column (max (:column start) (:column end)))))))
-(defn- grid-cell [value seed]
+(defn- grid-cell [value seed functions]
  (let [cell (assoc (d/block seed "table-cell" (:text value) {}) :marks (:marks value []))]
   (when-not (and (d/block? cell) (empty? (:wraps value)) (not (:parent value)))
    (r/fail "Paste plain text or supported inline content into table cells."))
+  (doseq [mark (:marks cell)]
+   (let [call (:call mark) installed (r/application functions (:id call) (:function call) (:args call) "inline")]
+    (when-not (= (:version call) (:version installed)) (r/fail "function-contract-changed"))))
   (update cell :marks
    (fn [marks]
     (let [ids (zipmap (distinct (map #(get-in % [:call :id]) marks)) (range (count marks)))]
@@ -199,7 +202,7 @@
                        :parent (:id table) :slot "rows" :blocks values}) new-rows))
        replacements (vec (mapcat (fn [r]
                            (mapv (fn [c]
-                             (let [value (grid-cell (get-in grid [r c]) (str seed "/v" r "/" c))
+                             (let [value (grid-cell (get-in grid [r c]) (str seed "/v" r "/" c) (:functions context))
                                    target (get-in expanded [(+ row r) (+ column c)])]
                               {:op "text/replace" :block (:id target) :from 0 :to (d/length (:text target))
                                :expected (:text target) :text (:text value) :styles [] :restore (:marks value)})) (range width))) (range height)))
@@ -226,8 +229,9 @@
    {:blocks blocks :text (join "\n" (map #(join "\t" (map (comp quote-tsv :text) %)) grid))
     :cells (mapv :id (mapcat identity grid)) :cut {:ops clear :selection (selection (:id (first (first grid))) 0)}})))
 (defn clipboard-paste [context payload]
- (when (inside? context)
-  (let [_ (when-not (cell? context) (r/fail "Place the caret in a table cell before pasting."))
+ (when (or (inside? context) (ancestor (:document context) (get-in context [:selection :anchor :block]) "table"))
+  (let [_ (rectangle context)
+        _ (when-not (cell? context) (r/fail "Place the caret in a table cell before pasting."))
         blocks (:blocks payload) table (first blocks)
         grid (if (= "table" (:type table))
                (let [document (d/document "clipboard" blocks) _ (d/validate document)
@@ -243,7 +247,7 @@
                                 {:text (str (:text result) (when (pos? i) "\n") (:text block))
                                  :marks (into (:marks result) (mapv #(-> % (update :from + offset) (update :to + offset)) (:marks block)))}))
                              {:text "" :marks []} (map-indexed vector blocks))
-               value (grid-cell value (:seed context))
+               value (grid-cell value (:seed context) (:functions context))
                [a z] (d/ordered-range (:document context) (get-in context [:selection :anchor]) (get-in context [:selection :head]))
                end (+ (:offset a) (d/length (:text value)))]
           {:ops [{:op "text/replace" :block (:block a) :from (:offset a) :to (:offset z) :text (:text value) :styles [] :restore (:marks value)}]
