@@ -2,7 +2,7 @@
 #+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
-#+status: Four workstreams in flight · integration and final BEAM-vs-native numbers by the main thread
+#+status: L, K, V, C integrated · native within 2.8× of warm BEAM on the pipeline (was 35×)
 #+author: Claude for Othman
 
 * In one breath
@@ -187,7 +187,7 @@ step Closure tier for edits; per-function C; table-based source frames.
 Workstreams L, K, V and C run in parallel now. F, E, G, B2 and V2 are the next
 round, ordered by expected effect.
 
-** TODO L · Link once
+** DONE L · Link once
 :PROPERTIES:
 :AREA: linking
 :OWNER: agent
@@ -210,7 +210,7 @@ and the fixtures that asserted them.
 captured closure; a gsi program for direct calls, arity entries, the variadic
 arm, redefinition, macro unwrap and the invoke fast path.
 
-** TODO K · Native kernel
+** DONE K · Native kernel
 :PROPERTIES:
 :AREA: kernel
 :OWNER: agent
@@ -229,7 +229,7 @@ covered operation over a value corpus and emits expected outcomes with
 =native.scheme/literal=; gsi asserts the fast paths match and the other inputs
 delegate.
 
-** TODO V · Value fast paths
+** DONE V · Value fast paths
 :PROPERTIES:
 :AREA: values
 :OWNER: agent
@@ -245,7 +245,7 @@ bindings so Gambit may inline primitives.
 *Checks* the existing host suites plus differential fixtures of old against
 new implementations.
 
-** TODO C · Compiled control
+** DONE C · Compiled control
 :PROPERTIES:
 :AREA: control
 :OWNER: agent
@@ -260,7 +260,7 @@ default. One shared failure continuation per clause chain.
 *Checks* a BEAM-vs-native differential corpus covering every pattern kind,
 guards, =case=, =try=, wrong arity, loops and bignum overflow, run in gsi.
 
-** TODO I · Integration and final numbers
+** DONE I · Integration and final numbers
 :PROPERTIES:
 :AREA: integration
 :OWNER: main thread
@@ -270,6 +270,28 @@ Merge L, K, V, C. Add the new host files to the source lists. Refresh the
 closure's changed units, emit the 18-namespace compiler, compile stage 1 with
 the chosen Gambit declarations. Gates: Source corpus, byte-equal emitted
 Scheme, then the warm-core benchmark: final native against final BEAM.
+
+** TODO C2 · Restore emitter throughput
+:PROPERTIES:
+:AREA: control
+:PRIORITY: A
+:END:
+The new control-flow emitter doubles BEAM emit time on the benchmark fixture
+(5.7 → 11.2 ms) and the emitter is itself part of the measured compiler.
+Profile =total?=, =loop-plan= and the integer-fact threading on the six forms;
+memoise or fuse the walks so emission is linear in the tree again. Gate: BEAM
+emit at or below the previous emitter's time, unchanged bytes.
+
+** TODO A · Attribute the remaining front-end gap
+:PROPERTIES:
+:AREA: measurement
+:PRIORITY: A
+:END:
+Read is still 15.5× and compile 12.2×. Re-instrument the linked image at
+the cell level (calls per linked target, kernel fast-path hit rate, map and
+compare counts) and rank what is left. The likely candidates are V2
+(representation), F (ticks) and the uncovered multi-arity rt functions
+(=k-nth=, =nth=, =coll-get=).
 
 ** TODO B2 · BL kernel in rt.bl
 :PROPERTIES:
@@ -338,11 +360,68 @@ closure explicitly with =native.intrinsics= and move the linking context into
 =native.eval=.
 
 * Final numbers
-#+begin_note :title "Pending consolidation"
-Filled in by the main thread after the integrated stage-1 image passes its
-gates. Same protocol as =benchmark/prepare-benchmark.py=: same Source and
-emitter on both sides, 3 warm-ups, 9 samples × 20 repetitions, median.
-#+end_note
+Integrated stage-1 image =57b8bdbd…= (L + K + V + C, =(standard-bindings)
+(extended-bindings)=, qualified C flags). Same protocol as
+=benchmark/prepare-benchmark.py=: same Source and the same emitter on both
+sides, 3 warm-ups, 9 samples × 20 repetitions, median, run one after the
+other on the same host. Emitted Scheme is byte-identical between native and
+BEAM.
+
+#+begin_stats
+2.8× | native / BEAM, full pipeline | 44.5 ms vs 15.8 ms
+15.5× | read | 13.46 ms vs 0.87 ms
+12.2× | compile | 10.36 ms vs 0.85 ms
+1.9× | emit | 20.83 ms vs 11.19 ms
+#+end_stats
+
+#+begin_src beam-lisp :id final
+;; speed/final/evidence/comparison.json (medians, ms) and
+;; speed/final/evidence/beam-previous-emitter.log (BEAM, previous emitter).
+(def native {:read 13.458 :compile 10.359 :emit 20.832 :pipeline 44.507})
+(def beam {:read 0.870 :compile 0.848 :emit 11.190 :pipeline 15.806})
+(def beam-previous-emitter {:read 0.744 :compile 0.868 :emit 5.697 :pipeline 8.895})
+(defn ratio [a b k] (Float/round (/ (get a k) (get b k)) 2))
+(def ratios (into {} (map (fn [k] [k (ratio native beam k)]) [:read :compile :emit :pipeline])))
+;; Front-end phases do not depend on the emitter; they are the clean comparison.
+(assert (< (:read ratios) 20))
+(assert (< (:compile ratios) 20))
+(assert (< (:pipeline ratios) 3))
+{:native-over-beam ratios
+ :pipeline-vs-previous-emitter-on-beam (ratio native beam-previous-emitter :pipeline)
+ :new-emitter-cost-on-beam (ratio beam beam-previous-emitter :emit)}
+#+end_src
+#+RESULTS: final
+: {:native-over-beam {:compile 12.22, :read 15.47, :pipeline 2.82, :emit 1.86}, :pipeline-vs-previous-emitter-on-beam 5.0, :new-emitter-cost-on-beam 1.96}
+
+
+#+begin_honest :title "Read these numbers with three facts"
+The host was heavily loaded during the run (15 GB RAM, ~16 GB swap in use by
+other sessions). BEAM measured about 2× slower than in the original ledger,
+so absolute milliseconds are not comparable across days; the ratios were
+taken back to back.
+
+The new control-flow emitter (C) is about 2× slower on BEAM for this
+fixture's emit phase, and both sides run it, so the emit and pipeline ratios
+are partly flattered. Against BEAM running the previous emitter, the native
+pipeline is 5.0×. Read and compile do not depend on the emitter: 15.5× and
+12.2×.
+
+The remaining front-end gap has not been attributed yet: the linked image no
+longer routes calls through the counting hooks, so the old counters cannot
+see it. Before the next round, re-instrument at the cell level.
+#+end_honest
+
+#+begin_rosetta
+| Gate | Result | Evidence |
+| Host suites | all pass, combined tree | =check-host.py= |
+| Value differential | 145,790 checks, 0 failures | =speed/values= |
+| Kernel differential | 54,196 template = leaf; 18,188 override = BEAM; 0 raises | =speed/kernel= |
+| Control differential | 768 checks, 0 failures | =speed/control= |
+| Source corpus | =NATIVE_COMPILER_SOURCE_CORPUS_OK=, 0 FAIL, identical to the original qualified log; 5.3 s | =speed/final/evidence/source-corpus.log= |
+| Emitted Scheme | byte-identical native and BEAM | =speed/final/evidence/comparison.json= |
+| Dynamic call sites left | 4 =native-remote= sites in a 4.9 MB prelude | =speed/final/evidence/build.json= |
+| Not run | actor corpus at three budgets; stage 2 = stage 3 fixpoint (stage 2 is still late-bound, see P) | — |
+#+end_rosetta
 
 * Decisions
 #+begin_decision :id D1 :title "Keep the value representation fixed during the fan-out" :status proposed
