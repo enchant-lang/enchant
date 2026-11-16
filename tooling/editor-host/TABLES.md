@@ -1,0 +1,33 @@
+# Structured packages
+
+The standard package includes typed `table`, `table-row` and `table-cell` blocks.
+A table owns the `rows` slot; each row owns `cells`. Cells contain editable text
+and inline functions. The package plans semantic reducer operations and keeps
+row/column edits in the same journal and undo system as other document edits.
+Source codecs must validate and serialize this structure explicitly.
+
+Custom commands receive the stable command `:seed` in their context, suitable
+for naming a new subtree. A plan can return `:selection` without `:ops`; that
+moves the caret without creating a proposal or content revision.
+
+`:menu "insert"` includes a custom command in the insertion menu while retaining
+its custom planner. A custom `:shortcut` such as `"Tab"` or `"Shift-Tab"` takes
+precedence when its `:when` predicate enables it. `:input-type` can bind a native
+beforeinput intent such as `"insertParagraph"`; the same command receives the
+input text as `:text`. Composition and read-only admission remain host-owned.
+
+Packages can provide `:editor/command-policy`, a pure function of context and
+catalogue item. It can restrict `:enabled` and supply a refusal `:reason`; it
+cannot enable an otherwise unavailable command or change its semantic identity.
+Tables use this to keep generic turn/indent/delete actions from splitting their
+structure. Direct source writers must independently validate proposed structure.
+
+Pure projections can emit buttons with `data-edit-command` and
+`data-edit-command-target`. The host bookmarks that typed block and invokes the
+shared planner; no package DOM handler is needed. Authoring-only groups carry
+`data-edit-controls`, which immutable rich readers remove as a whole.
+
+Table keyboard behavior follows Org's next-field/next-row conventions. Escape
+moves after the table. Cell boundary deletion navigates rather than merging the
+row/cell structure. Rectangular clipboard operations and cross-cell input still
+require separate qualification; this initial package does not claim those paths.
