@@ -66,7 +66,7 @@ export class CodeAdapter {
   syncService(){
     const provider=this.editor.model['code-service'];
     const enabled=provider&&this.language===(provider.language||'beam-lisp');
-    const key=enabled?JSON.stringify(provider):null;if(key===this.serviceKey)return;
+    const key=enabled?JSON.stringify(provider):null;if(key===this.serviceKey){if(this.service)this.view.dom.after(this.service.status);return;}
     this.serviceKey=key;this.service?.dispose();this.service=enabled?new CodeService(this,provider):null;
     this.view.dispatch({effects:this.serviceSlot.reconfigure(this.service?.extensions()||[])});
     if(this.service)this.view.dom.after(this.service.status);
