@@ -268,6 +268,36 @@
   [conn name value]
   (erlang/apply Conn :put_resp_header (list conn name value)))
 
+(defn without-resp-header
+  "Remove a response header before sending the response."
+  [conn name]
+  (erlang/apply Conn :delete_resp_header (list conn name)))
+
+(def ^:private BEFORE-SEND :bl_web_before_send)
+
+(defn before-send
+  "One response callback with its captured serving context and native code
+   custody. It releases after invocation; a refused registration releases too.
+   The request owner releases callbacks abandoned by a raised handler."
+  [conn action]
+  (let [cwd (BeamLisp/cwd) argv (BeamLisp/argv)
+        run (BeamLisp.Env/convey
+              (fn [response]
+                (BeamLisp/with_cwd cwd
+                  (fn [] (BeamLisp/with_argv argv (fn [] (action response)))))))
+        registration (callback/register! run (BeamLisp.Env/callback_modules action))]
+    (try
+      (let [bound (fn [response]
+                    (try (callback/invoke! registration [response])
+                      (finally (callback/unregister! registration))))
+            result (erlang/apply Conn :register_before_send (list conn bound))]
+        (when-let [pending (Process/get BEFORE-SEND)]
+          (Process/put BEFORE-SEND (conj pending registration)))
+        result)
+      (catch error
+        (try (callback/unregister! registration) (catch _ nil))
+        (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__)))))
+
 ;; ── Server-Sent Events (chunked streaming) ──────────────────────────
 ;; The transport an MCP server uses to PUSH notifications to a client over
 ;; one long-lived HTTP response (Content-Type: text/event-stream). A caller
@@ -647,14 +677,25 @@
                  (fn [conn]
                 (BeamLisp.Env/with_code_lease modules
                   (fn []
-                    (let [t0 (erlang/monotonic_time :microsecond)]
+                    (let [t0 (erlang/monotonic_time :microsecond)
+                          previous-before-send (Process/get BEFORE-SEND)]
+                      (Process/put BEFORE-SEND [])
                       (try
                         (let [c (plug-fn conn)]
                           (access! sink pretty? conn (status c) t0 nil)
                           c)
                         (catch e
+                          ;; A raised handler publishes no returned response.
+                          ;; Release only this request's before-send owners;
+                          ;; WebSocket registrations retain their own lifetime.
+                          (doseq [registration (Process/get BEFORE-SEND [])]
+                            (try (callback/unregister! registration) (catch _ nil)))
                           (access! sink pretty? conn nil t0 e)
-                          (throw e))))))))
+                          (erlang/raise __EXCEPTION_KIND__ e __STACKTRACE__))
+                        (finally
+                          (if previous-before-send
+                            (Process/put BEFORE-SEND previous-before-send)
+                            (Process/delete BEFORE-SEND)))))))))
         request-ref (atom request)
         plug2 (shared-request-plug request-ref cwd argv)
         bopts (list (erlang/list_to_tuple (list :plug plug2))
