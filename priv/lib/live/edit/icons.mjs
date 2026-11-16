@@ -1,5 +1,8 @@
 // Small native SVG vocabulary. Geometry stays independent of editor policy.
 const paths = {
+  table:'M3 4h18v16H3zM3 10h18M9 4v16M15 4v16',
+  columns:'M3 4h18v16H3zM12 4v16',
+  'align-left':'M4 5h16M4 10h10M4 15h16M4 20h10',
   plus: 'M12 5v14M5 12h14', minus: 'M5 12h14', close: 'm6 6 12 12M18 6 6 18',
   check: 'm5 12 4 4L19 6', 'check-square': 'M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h10',
   text: 'M4 6h16M12 6v14M8 20h8', heading: 'M5 4v16M19 4v16M5 12h14',

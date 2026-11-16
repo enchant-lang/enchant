@@ -241,7 +241,7 @@ class DefaultUI {
   menuRow(item,action){
     const row=item.href?element('a','ed-menu-row'):button(item.label,item.icon||'function',action,'ed-menu-row');
     if(item.href){row.href=item.href;row.setAttribute('aria-label',item.label);if(item.download)row.download=item.download===true?'':item.download;row.addEventListener('click',action);}
-    row.append(element('span','ed-menu-row-label',item.label));
+    if(item.id)row.dataset.command=item.id;row.append(element('span','ed-menu-row-label',item.label));
     if(item.description)row.append(element('span','ed-menu-row-description',item.description));
     if(item.shortcut)row.append(element('kbd','',item.shortcut.replace('Mod-','⌘ ').replace('Shift-','⇧ ')));
     row.disabled=item.enabled===false;row.tabIndex=-1;if(row.disabled)row.title=item.reason||item.label;return row;
@@ -297,9 +297,14 @@ class DefaultUI {
     else this.blockMenu(id,action);
   }
   blockMenu(id,anchor){
-    const token=this.panelTarget(),content=element('div','ed-block-menu');content.append(element('div','ed-menu-label','THIS BLOCK'));
-    for(const item of this.editor.query({target:token}).filter(item=>item.kind==='turn'||item.kind==='block'))content.append(this.menuRow(item,()=>{
-      const selection=this.editor.session.resolve(token);this.panel.hide('choose');if(selection)this.editor.select(selection,{focus:false});this.editor.run(item.id);this.editor.geometry.restore(this.editor.state.selection,{focus:true});
+    const token=this.panelTarget(),content=element('div','ed-block-menu'),type=this.editor.node(id)?.type||'block';
+    content.append(element('div','ed-menu-label',type.replaceAll('-',' ').toUpperCase()));
+    const items=this.editor.query({target:token}),custom=items.filter(item=>item.menu==='block'&&item.enabled);
+    const ordinary=items.filter(item=>(item.kind==='turn'||item.kind==='block')&&(!custom.length||item.enabled));
+    for(const item of [...custom,...ordinary])content.append(this.menuRow(item,()=>{
+      const selection=this.editor.session.resolve(token);this.panel.hide('choose');if(selection)this.editor.select(selection,{focus:false});
+      if(item.params&&Object.keys(item.params).length)this.functionPanel(item.id);
+      else{this.editor.run(item.id);this.editor.geometry.restore(this.editor.state.selection,{focus:true});}
     }));this.openPanel(content,token,anchor);this.keyboardMenu(content);
   }
   iconPicker(id=null){

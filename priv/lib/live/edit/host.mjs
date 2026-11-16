@@ -323,6 +323,10 @@ export class Editor {
       if(event.key==='/'&&!mod&&this.state.selection&&this.ordered()[0].offset===0){event.preventDefault();this.ui?.slash();}
       if(event.altKey&&event.key==='ArrowUp'){event.preventDefault();this.run('block/up');}
       if(event.altKey&&event.key==='ArrowDown'){event.preventDefault();this.run('block/down');}
+      if(event.key==='ContextMenu'||(event.key==='F10'&&event.shiftKey&&!mod&&!event.altKey)){
+        this.rememberSelection();const id=this.state.selection?.head.block;
+        if(id&&this.ui){event.preventDefault();this.ui.blockMenu(id,this.nodes.get(id));}
+      }
       if(event.key==='F10'&&event.altKey){event.preventDefault();this.ui?.focusToolbar();}
     });
     this.listen(this.canvas,'copy',event=>this.copy(event,false));this.listen(this.canvas,'cut',event=>this.copy(event,true));
@@ -338,7 +342,7 @@ export class Editor {
       event.preventDefault();const id=event.dataTransfer.getData('application/x-enchant-block');if(!id)return;
       const target=event.target.closest('[data-edit-block]')?.dataset.editBlock;if(target&&target!==id){const node=this.node(target);this.transaction({op:'node/move',block:id,after:target,parent:node.parent,slot:node.slot});}
     });
-    this.listen(this.canvas,'dragstart',event=>{const grip=event.target.closest('[data-node-menu]');if(grip){event.dataTransfer.setData('application/x-enchant-block',grip.dataset.nodeMenu);event.dataTransfer.effectAllowed='move';}});
+    this.listen(this.canvas,'dragstart',event=>{const grip=event.target.closest('[data-node-menu]');if(grip&&grip.draggable){event.dataTransfer.setData('application/x-enchant-block',grip.dataset.nodeMenu);event.dataTransfer.effectAllowed='move';}});
     this.listen(document,'focusin',event=>{if(this.root.contains(event.target))this.focused=event.target;else if(this.root.isConnected)this.focused=null;});
     this.listen(document,'selectionchange',()=>{
       if(this.selectionFrame||this.composing)return;this.selectionFrame=requestAnimationFrame(()=>{this.selectionFrame=null;if(!this.disposed)this.rememberSelection();});
