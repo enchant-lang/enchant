@@ -57,3 +57,13 @@ For socket-local changes, provide `:locals {:changes path :basis path}` on a
 recovered form. Recovery then uses ordinary leaf `:assign` terms, preserving the
 same keyword-path semantics as native controls. Nested event payload maps remain
 application data; the SDK does not change their keys or Live's wire contract.
+
+Checkpoint-backed rich recovery retains unreadable pointer/checkpoint data for
+explicit download; it never overwrites that record during normal mounting.
+The host catches invalid cached replicas and keeps the current server snapshot
+available. `DraftStore.remove()` clears an active editor's cache without stopping
+future recovery. `discard()` also seals the retiring instance: late updates and
+DOM disposal cannot recreate the pointer after a reload choice. Failed deletion
+is reported before navigation. Checkpoint references stay inside their resource
+scope. The storage tests exercise interruption, corruption, scope boundaries and
+late disposal alongside the text/form/code-request checks.

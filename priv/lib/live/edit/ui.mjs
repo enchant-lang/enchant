@@ -148,7 +148,10 @@ class DefaultUI {
       const download=button('Download retained draft','download',()=>this.editor.download());download.append(element('span','','Download draft'));
       const reload=!!this.editor.recoveryFailure||state.conflicts.some(item=>/outdated/.test(item.reason));
       const label=reload?'Reload with current tools':'Use saved version';
-      const confirmed=button(label,null,()=>{this.editor.drafts.remove();this.editor.recoveryFailure=null;this.editor.message='';
+      const confirmed=button(label,null,()=>{
+        const removed=reload?this.editor.drafts.discard():this.editor.drafts.remove();
+        if(!removed){this.editor.report(Error('The saved draft could not be cleared. Keep the download and try again.'));return;}
+        this.editor.recoveryFailure=null;this.editor.message='';
         if(reload)location.reload();else this.editor.run('use-confirmed');});confirmed.append(element('span','',label));
       const actions=element('div','ed-conflict-actions');actions.append(download,confirmed);content.append(actions);this.conflict.append(content);
     }else if(!conflict){this.conflict.hidden=true;this.conflictShown=false;}

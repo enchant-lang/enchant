@@ -25,11 +25,11 @@ export class Editor {
     this.sent=null;this.focused=null;this.message='';this.metrics={projected:0,textPatches:0,transactions:0,lastTransactionMs:0};
     this.drafts=new DraftStore(model.resource||`${location.pathname}:${model.snapshot.document.id}`,options.drafts||{});
     const cached=this.drafts.read(),pending=cached?.recovery?.pending?.length||cached?.recovery?.draft;
-    const base=pending?cached.checkpoint:model.snapshot;
-    this.session=api.create(base);this.checkpoint=base;
     let restored=false;
-    if(pending)try{this.session.restore(cached.recovery);this.session.receive(model.snapshot);restored=true;}
-      catch(error){this.recoveryFailure=cached;this.message='A previous draft is retained. Download it before choosing the current document.';}
+    if(pending)try{this.session=api.create(cached.checkpoint);this.session.restore(cached.recovery);this.session.receive(model.snapshot);restored=true;}
+      catch(error){this.session?.dispose?.();this.session=api.create(model.snapshot);this.recoveryFailure=cached;this.message='A previous draft is retained. Download it before choosing the current document.';}
+    else this.session=api.create(model.snapshot);
+    if(this.drafts.corrupt){this.recoveryFailure=this.drafts.corrupt;this.message='A previous draft could not be opened. Download it before choosing the current document.';}
     this.checkpoint=model.snapshot;this.state=this.session.read();this.catalog=this.session.catalog();
     this.current=new Map(model.snapshot.document.blocks.map(b=>[b.id,b]));
     this.layout=this.session.layout();this.order=this.layout.map(b=>b.id);
