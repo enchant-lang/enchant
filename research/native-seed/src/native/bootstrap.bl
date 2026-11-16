@@ -106,6 +106,7 @@
    ; the definitions of its closure namespace, so a :remote to it links there.
    :by-module (into {} (concat (mapcat (fn [[ns module base]] [[module ns] [base ns]]) (:namespace-modules metadata))
                                (map (fn [[ns module]] [module ns]) (:host-modules metadata))))
+   :module-of (into {} (map (fn [[ns module]] [ns module]) (:host-modules metadata)))
    :stub-modules (set (mapcat (fn [[_ module base]] [module base]) (:stub-modules metadata)))
    :ledger (:resolution metadata)}))
 (defn remote-key [n]
@@ -143,9 +144,26 @@
          (let [spread (string/join "" (map #(str " " %) operands))]
           (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
                ") (bl-invoke linked (list" spread "))))")))})
-(defn remote-link [plan n]
+(defn- self-module
+ "A pinned host module names itself with `(erlang/fun_info (fn …) :module)`.
+  On BEAM a fun literal written in that module belongs to it, so the answer
+  is a link-time constant: {:module M} for the namespace being linked. Any
+  other fun_info stays unresolved and fails loudly."
+ [plan ns n]
+ (let [[f k] (:args n) module (get (:module-of plan) ns)]
+  (when (and module (= :erlang (:mod n)) (= :fun_info (:fun n)) (= 2 (count (:args n)))
+             (or (= :fn (:op f)) (some? (BeamLisp.CompilerData/self_application_parts f)))
+             (= :lit (:op k)) (= :module (:val k)))
+   module)))
+(defn remote-link
  ; nil keeps the dynamic (native-remote KEY) path: excluded namespaces and
  ; rest-list calls to a definition without a variadic arm raise there.
+ ([plan n] (remote-link plan nil n))
+ ([plan ns n]
+ (if-let [module (self-module plan ns n)]
+  {:inline? true
+   :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
+                      (scheme/text (erlang/atom_to_binary module)) "))"))}
  (if-let [template (intrinsics/remote-template n)]
   {:inline? false :call template}
   (let [decision (remote-decision plan n)]
@@ -158,15 +176,16 @@
        "variadic" (direct-call (variadic-binding-name ns logical))
        "generic" (generic-call (binding-name ns logical))
        nil))
-     nil))))
+     nil))))))
 (defn link-context [plan ns]
  ; native.eval/context plus :aot-link. Every remote must have an exact
  ; capability (remote-decision raises otherwise); the dynamic resolver stays
  ; for the shapes remote-link leaves unlinked.
  (let [base (ev/context ns)]
   (assoc base
-   :aot-link {:remote (fn [n] (remote-link plan n))}
-   :remote-resolver (fn [n] (remote-decision plan n) ((:remote-resolver base) n))
+   :aot-link {:remote (fn [n] (remote-link plan ns n))}
+   :remote-resolver (fn [n] (when-not (self-module plan ns n) (remote-decision plan n))
+                      ((:remote-resolver base) n))
    :global-resolver
    (fn [n]
     (let [[_ _ _ _ _ sel-ns sel-name] (global-decision plan n)]
