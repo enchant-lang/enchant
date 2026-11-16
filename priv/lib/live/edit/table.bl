@@ -150,6 +150,120 @@
  {"table" {:label "Table" :icon "table" :slots ["rows"] :insertable false :render table-view}
   "table-row" {:label "Table row" :slots ["cells"] :insertable false :render row-view}
   "table-cell" {:label "Table cell" :slots [] :insertable false :render cell-view :actions-label "Cell actions" :draggable false}})
+;; Clipboard data is finite, source-independent and uses the ordinary journal.
+(defn rectangle [context]
+ (let [document (:document context) anchor (get-in context [:selection :anchor :block])
+       head (get-in context [:selection :head :block])
+       a (ancestor document anchor "table") z (ancestor document head "table")]
+  (when (and (or a z) (not= anchor head))
+   (when-not (and a z (= (:id a) (:id z))
+                   (= "table-cell" (:type (d/find-block document anchor)))
+                   (= "table-cell" (:type (d/find-block document head))))
+    (r/fail "Select cells within one table, or copy the whole table as a block."))
+   (let [start (shape (assoc-in context [:selection :head :block] anchor)) end (shape context)]
+    (assoc end :from-row (min (:row start) (:row end)) :to-row (max (:row start) (:row end))
+               :from-column (min (:column start) (:column end)) :to-column (max (:column start) (:column end)))))))
+(defn- grid-cell [value seed]
+ (let [cell (assoc (d/block seed "table-cell" (:text value) {}) :marks (:marks value []))]
+  (when-not (and (d/block? cell) (empty? (:wraps value)) (not (:parent value)))
+   (r/fail "Paste plain text or supported inline content into table cells."))
+  (update cell :marks
+   (fn [marks]
+    (let [ids (zipmap (distinct (map #(get-in % [:call :id]) marks)) (range (count marks)))]
+     (mapv #(assoc-in % [:call :id] (str seed "/m" (get ids (get-in % [:call :id])))) marks))))))
+(defn paste-grid [context grid]
+ (when-not (and (vector? grid) (<= 1 (count grid) max-rows)
+                (vector? (first grid)) (<= 1 (count (first grid)) max-columns)
+                (every? #(and (vector? %) (= (count (first grid)) (count %))) grid))
+  (r/fail "Paste a rectangular grid with at most 256 rows and 32 columns."))
+ (let [rect (rectangle context) {:keys [table rows cells row column]} (shape context)
+       row (get rect :from-row row) column (get rect :from-column column)
+       height (count grid) width (count (first grid))
+       total-rows (max (count rows) (+ row height)) total-columns (max (count (first cells)) (+ column width))
+       _ (when-not (and (<= total-rows max-rows) (<= total-columns max-columns))
+           (r/fail "This paste would exceed the table's row or column limit."))
+       seed (:seed context) old-columns (count (first cells))
+       alignments (mapv #(get-in % [:attrs :align] "left") (first cells))
+       new-rows (mapv #(row-blocks (str seed "/r" %) (:id table) total-columns false alignments)
+                     (range (count rows) total-rows))
+       new-columns (mapv (fn [r]
+                           (mapv #(cell (str seed "/r" r "/c" %) (:id (nth rows r))
+                                        (and (zero? r) (get-in table [:attrs :header])) "left")
+                                 (range old-columns total-columns))) (range (count rows)))
+       expanded (into (mapv #(into (nth cells %) (nth new-columns %)) (range (count rows)))
+                      (mapv #(subvec % 1) new-rows))
+       inserts (into (vec (keep-indexed (fn [r values]
+                              (when (seq values) {:op "node/insert" :after (:id (last (nth cells r)))
+                               :parent (:id (nth rows r)) :slot "cells" :blocks values})) new-columns))
+                     (map-indexed (fn [r values] {:op "node/insert" :after (if (zero? r) (:id (last rows)) (:id (first (nth new-rows (dec r)))))
+                       :parent (:id table) :slot "rows" :blocks values}) new-rows))
+       replacements (vec (mapcat (fn [r]
+                           (mapv (fn [c]
+                             (let [value (grid-cell (get-in grid [r c]) (str seed "/v" r "/" c))
+                                   target (get-in expanded [(+ row r) (+ column c)])]
+                              {:op "text/replace" :block (:id target) :from 0 :to (d/length (:text target))
+                               :expected (:text target) :text (:text value) :styles [] :restore (:marks value)})) (range width))) (range height)))
+       ops (into (conj inserts (set-attrs table {:rows total-rows :columns total-columns})) replacements)
+       _ (when (> (count ops) 4096) (r/fail "Paste a smaller table section at a time."))
+       first-cell (get-in expanded [row column])]
+  {:ops ops :selection (selection (:id first-cell) 0)}))
+(defn- quote-tsv [text]
+ (if (or (includes? text "\t") (includes? text "\n") (includes? text "\r") (includes? text "\""))
+  (str "\"" (String/replace text "\"" "\"\"") "\"") text))
+(defn clipboard-copy [context _]
+ (when-let [rect (rectangle context)]
+  (let [{:keys [cells from-row to-row from-column to-column table]} rect
+        grid (mapv (fn [r] (subvec (nth cells r) from-column (inc to-column))) (range from-row (inc to-row)))
+        root (assoc table :parent nil :slot "body" :attrs {:header (and (zero? from-row) (get-in table [:attrs :header]))
+                   :rows (count grid) :columns (count (first grid))})
+        blocks (into [root] (mapcat (fn [r]
+                                  (let [row-id (str (:id root) "/copy" r) header (and (zero? r) (get-in root [:attrs :header]))]
+                                   (into [(assoc (d/block row-id "table-row" "" {:header header}) :parent (:id root) :slot "rows")]
+                                    (mapv #(-> % (assoc :parent row-id :slot "cells") (assoc-in [:attrs :header] header)) (nth grid r))))) (range (count grid))))
+        clear (mapv (fn [cell] {:op "text/replace" :block (:id cell) :from 0 :to (d/length (:text cell))
+                                :expected (:text cell) :text "" :styles [] :restore []}) (vec (mapcat identity grid)))]
+   (when (> (count clear) 4096) (r/fail "Copy a smaller table section at a time."))
+   {:blocks blocks :text (join "\n" (map #(join "\t" (map (comp quote-tsv :text) %)) grid))
+    :cells (mapv :id (mapcat identity grid)) :cut {:ops clear :selection (selection (:id (first (first grid))) 0)}})))
+(defn clipboard-paste [context payload]
+ (when (inside? context)
+  (let [_ (when-not (cell? context) (r/fail "Place the caret in a table cell before pasting."))
+        blocks (:blocks payload) table (first blocks)
+        grid (if (= "table" (:type table))
+               (let [document (d/document "clipboard" blocks) _ (d/validate document)
+                     shaped (shape {:document document :selection (selection (:id table) 0)})]
+                (mapv #(mapv (fn [cell] (select-keys cell [:text :marks])) %) (:cells shaped))) (:grid payload))]
+   (cond grid (paste-grid context grid)
+         (rectangle context) (paste-grid context [[{:text (:text payload "") :marks []}]])
+         (seq blocks)
+         (let [_ (when-not (every? #(and (nil? (:parent %)) (contains? #{"paragraph" "heading" "quote"} (:type %)) (empty? (:wraps %))) blocks)
+                   (r/fail "Paste text, inline formatting or one rectangular table into a cell."))
+               value (reduce (fn [result entry]
+                               (let [[i block] entry offset (+ (d/length (:text result)) (if (zero? i) 0 1))]
+                                {:text (str (:text result) (when (pos? i) "\n") (:text block))
+                                 :marks (into (:marks result) (mapv #(-> % (update :from + offset) (update :to + offset)) (:marks block)))}))
+                             {:text "" :marks []} (map-indexed vector blocks))
+               value (grid-cell value (:seed context))
+               [a z] (d/ordered-range (:document context) (get-in context [:selection :anchor]) (get-in context [:selection :head]))
+               end (+ (:offset a) (d/length (:text value)))]
+          {:ops [{:op "text/replace" :block (:block a) :from (:offset a) :to (:offset z) :text (:text value) :styles [] :restore (:marks value)}]
+           :selection (selection (:block a) end)})
+         :else nil))))
+
+(defn clipboard-selection [context _]
+ (when-let [rect (rectangle context)]
+  {:cells (vec (mapcat (fn [row] (mapv :id (subvec (nth (:cells rect) row) (:from-column rect) (inc (:to-column rect)))))
+                  (range (:from-row rect) (inc (:to-row rect)))))}))
+(defn clipboard-cut [context payload] (:cut (clipboard-copy context payload)))
+
+(defn- across-cells? [context]
+ (and (not= (get-in context [:selection :anchor :block]) (get-in context [:selection :head :block]))
+      (or (inside? context) (ancestor (:document context) (get-in context [:selection :anchor :block]) "table"))))
+(defn replace-rectangle [context args]
+ (let [copied (clipboard-copy context {}) plan (:cut copied) first-cell (get-in plan [:selection :head :block]) text (:text args "")]
+  (when-not copied (r/fail "Choose a rectangle of table cells."))
+  (assoc plan :ops (mapv #(if (= first-cell (:block %)) (assoc % :text text) %) (:ops plan))
+              :selection (selection first-cell (d/length text)))))
 (def commands
  {"table/insert" {:label "Table" :description "Organize a few related facts" :icon "table" :menu "insert" :run insert}
   "table/add-row" {:menu "block" :label "Add row" :icon "plus" :when inside? :run add-row}
@@ -161,6 +275,10 @@
   "table/next-cell" {:label "Next cell" :shortcut "Tab" :when cell? :run next-cell}
   "table/previous-cell" {:label "Previous cell" :shortcut "Shift-Tab" :when cell? :run previous-cell}
   "table/leave" {:label "Leave table" :shortcut "Escape" :when cell? :run leave}
+  "table/replace-rectangle" {:label "Replace selected cells" :input-type "insertText" :when across-cells? :run replace-rectangle}
+  "table/delete-rectangle-back" {:label "Clear selected cells" :input-type "deleteContentBackward" :when across-cells? :run replace-rectangle}
+  "table/delete-rectangle-forward" {:label "Clear selected cells" :input-type "deleteContentForward" :when across-cells? :run replace-rectangle}
   "table/next-row" {:label "Next row" :input-type "insertParagraph" :when cell? :run next-row}
   "table/boundary-back" {:label "Previous cell boundary" :input-type "deleteContentBackward" :when #(boundary? % true) :run boundary-back}
   "table/boundary-forward" {:label "Next cell boundary" :input-type "deleteContentForward" :when #(boundary? % false) :run boundary-forward}})
+

@@ -26,13 +26,27 @@ export function importHTML(html){
     const tag=element.tagName;
     if(['SCRIPT','STYLE','NOSCRIPT','IFRAME','OBJECT','TEMPLATE'].includes(tag))return;
     if(tag==='UL'||tag==='OL'){for(const child of element.children)emit(child,parent,tag==='OL'?'ordered':'bullet');return;}
+    if(tag==='TABLE'){
+      if(element.querySelector('table'))throw Error('Nested tables cannot be pasted as editable cells.');
+      const rows=[...element.rows];if(!rows.length||rows.length>256)throw Error('Paste a table with 1 to 256 rows.');
+      const width=Math.max(...rows.map(row=>row.cells.length));if(!width||width>32)throw Error('Paste at most 32 columns.');
+      if(rows.some(row=>row.cells.length!==width||[...row.cells].some(cell=>cell.rowSpan!==1||cell.colSpan!==1)))
+        throw Error('Paste a rectangular table without merged cells.');
+      const header=[...rows[0].cells].every(cell=>cell.tagName==='TH'),table=base(identity(),'table','',{rows:rows.length,columns:width,header},parent);
+      blocks.push(table);
+      rows.forEach((row,r)=>{const id=identity(),isHeader=header&&r===0;
+        blocks.push({...base(id,'table-row','',{header:isHeader},table.id),slot:'rows'});
+        for(const cell of row.cells){const content=inline(cell.childNodes),align=cell.style.textAlign||cell.getAttribute('align');
+          blocks.push({...base(identity(),'table-cell','',{header:isHeader,align:['left','center','right'].includes(align)?align:'left'},id),slot:'cells',...content});}
+      });return;
+    }
     if(tag==='IMG'){
       const src=safeUrl(element.getAttribute('src'));if(src)blocks.push(base(identity(),'image','',{src,alt:element.getAttribute('alt')||''},parent));return;
     }
     if(tag==='HR'){blocks.push(base(identity(),'divider','',{},parent));return;}
     if(tag==='PRE'){blocks.push(base(identity(),'code',element.textContent,{language:'text'},parent));return;}
     const known=/^(P|H[1-3]|LI|BLOCKQUOTE|ASIDE)$/.test(tag);
-    if(!known&&element.querySelector('p,h1,h2,h3,ul,ol,pre,blockquote,aside,hr,img')){for(const child of element.children)emit(child,parent);return;}
+    if(!known&&element.querySelector('p,h1,h2,h3,ul,ol,pre,blockquote,aside,hr,img,table')){for(const child of element.children)emit(child,parent);return;}
     const kind=type||({H1:'heading',H2:'heading',H3:'heading',BLOCKQUOTE:'quote',ASIDE:'callout'})[tag]||'paragraph';
     const attrs=kind==='heading'?{level:Number(tag[1])}:kind==='callout'?{icon:'lightbulb',tone:'amber'}:{};
     const id=identity(),content=inline(element.childNodes),block={...base(id,kind,'',attrs,parent),...content};
@@ -56,13 +70,18 @@ export function fragmentHTML(blocks){
       }html+=text;
     }return html.replaceAll('\n','<br>');
   }
-  return blocks.map(b=>{
+  const children=new Map();for(const block of blocks){const list=children.get(block.parent)||[];list.push(block);children.set(block.parent,list);}
+  function render(b){
+    if(b.type==='table')return '<table>'+ (children.get(b.id)||[]).map(render).join('')+'</table>';
+    if(b.type==='table-row')return '<tr>'+(children.get(b.id)||[]).map(render).join('')+'</tr>';
+    if(b.type==='table-cell'){const tag=b.attrs.header?'th':'td',align=['left','center','right'].includes(b.attrs.align)?b.attrs.align:'left';return `<${tag} style="text-align:${align}">${inline(b)}</${tag}>`;}
     if(b.type==='code')return `<pre><code>${escapes(b.text)}</code></pre>`;
     if(b.type==='divider')return '<hr>';
     if(b.type==='image')return `<img src="${escapes(safeUrl(b.attrs.src))}" alt="${escapes(b.attrs.alt||'')}">`;
     const tag=b.type==='heading'?'h'+Math.max(1,Math.min(3,b.attrs.level||2)):b.type==='quote'?'blockquote':b.type==='callout'?'aside':'p';
     return `<${tag}>${inline(b)}</${tag}>`;
-  }).join('');
+  }
+  return blocks.filter(b=>!['table-row','table-cell'].includes(b.type)).map(render).join('');
 }
 export function markdown(document){
   return document.blocks.map(b=>{
@@ -71,4 +90,27 @@ export function markdown(document){
     if(b.type==='divider')return '---';if(b.type==='image')return '!['+(b.attrs.alt||'')+']('+b.attrs.src+')';
     return (b.parent?'  ':'')+prefix+text;
   }).join('\n\n')+'\n';
+}
+
+// Spreadsheet text: quotes protect tabs/newlines and doubled quotes are literal.
+export function parseTSV(text){
+  if(text.length>1024*1024)throw Error('Paste a smaller section at a time.');
+  if(!/[\t\r\n]/.test(text))return null;
+  const rows=[];let row=[],cell='',quoted=false,afterQuote=false;
+  const field=()=>{row.push({text:cell,marks:[]});cell='';afterQuote=false;if(row.length>8192)throw Error('Paste a smaller section at a time.');};
+  const line=()=>{field();rows.push(row);row=[];if(rows.length>8192)throw Error('Paste a smaller section at a time.');};
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    if(quoted){if(ch==='"'){if(text[i+1]==='"'){cell+='"';i++;}else{quoted=false;afterQuote=true;}}else cell+=ch;continue;}
+    if(ch==='"'&&!cell&&!afterQuote){quoted=true;continue;}
+    if(ch==='\t'){field();continue;}
+    if(ch==='\r'||ch==='\n'){line();if(ch==='\r'&&text[i+1]==='\n')i++;continue;}
+    if(afterQuote)throw Error('A quoted table field must end before the next field.');
+    cell+=ch;
+  }
+  if(quoted)throw Error('This table field has an unclosed quote.');
+  if(cell||row.length||afterQuote||!rows.length)line();
+  const width=Math.max(...rows.map(r=>r.length));
+  for(const row of rows)while(row.length<width)row.push({text:'',marks:[]});
+  return rows;
 }

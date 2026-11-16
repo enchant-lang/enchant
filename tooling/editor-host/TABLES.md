@@ -33,3 +33,14 @@ row/cell structure. Rectangular clipboard operations and cross-cell input still
 require separate qualification; this initial package does not claim those paths.
 
 Native source conventions are documented in the [Org table editor manual](https://orgmode.org/manual/Built_002din-Table-Editor.html) and [column alignment manual](https://orgmode.org/manual/Column-Width-and-Alignment.html). In particular, a literal vertical bar is written with `\vert` (or `\vert{}` within a word); backslash-pipe is not the documented escape. Native alignment uses `<l>`, `<c>` and `<r>` cookies.
+
+Clipboard work (qualification pending): packages can provide
+`:editor/clipboard` handlers for `:selection`, `:copy`, `:cut` and `:paste`.
+The persistent session owns hooks and executes returned plans through the normal
+journal. The native host only reads/writes trusted clipboard formats. Table
+cross-cell endpoints define a highlighted rectangle; cut clears its cells and
+keeps the table. Paste can grow bounded rows/columns and restores inline ranges
+with fresh application IDs. TSV quotes preserve tabs/newlines; HTML uses real
+table/row/cell elements and refuses merged/nested tables. Unsupported cell
+structures refuse before a proposal. A large grid is limited by the reducer's
+4096-operation batch budget; paste a smaller section when needed.

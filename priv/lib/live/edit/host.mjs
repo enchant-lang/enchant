@@ -6,7 +6,7 @@ import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';
 import {CodeAdapter} from './code.mjs';
 import {projectionParts} from './projection-parts.mjs';
 import {DraftStore} from './drafts.mjs';
-import {FRAGMENT_MIME,importHTML,fragmentHTML,markdown} from './clipboard.mjs';
+import {FRAGMENT_MIME,importHTML,fragmentHTML,markdown,parseTSV} from './clipboard.mjs';
 import {hydrateIcons} from './icons.mjs';
 import {createDefaultUI,SurfaceHost} from './ui.mjs';
 
@@ -51,7 +51,14 @@ export class Editor {
   rememberSelection(){
     const active=document.activeElement;
     const selection=(active===this.canvas||this.canvas.contains(active))?this.geometry.read():null;
-    if(selection)this.session.selection(selection);return selection||this.state.selection;
+    if(selection)this.session.selection(selection);
+    const current=selection||this.state.selection;this.paintClipboardSelection(current);return current;
+  }
+  paintClipboardSelection(selection){
+    let cells=[];
+    if(selection)try{cells=this.session.clipboard('selection',{},selection)?.cells||[];}catch{}
+    const selected=new Set(cells);this.canvas.classList.toggle('ed-grid-selection',!!cells.length);
+    for(const [id,node] of this.nodes)node.classList.toggle('ed-cell-selected',selected.has(id));
   }
   select(selection,{focus=true}={}){this.session.selection(selection);this.geometry.restore(selection,{focus});this.ui?.update?.(this.state);}
   node(id){return this.current.get(id)||this.session.node(id);}
@@ -332,10 +339,16 @@ export class Editor {
     this.listen(this.canvas,'copy',event=>this.copy(event,false));this.listen(this.canvas,'cut',event=>this.copy(event,true));
     this.listen(this.canvas,'paste',event=>{
       if(this.composing||event.target.closest('.cm-editor'))return;event.preventDefault();
+      if(this.model.readonly||this.recoveryFailure){this.report(Error('This document cannot be edited.'));return;}
       try{
-        const custom=event.clipboardData.getData(FRAGMENT_MIME);if(custom&&custom.length<=1024*1024){const payload=JSON.parse(custom);if(payload.schema==='enchant.fragment/2'||payload.schema==='enchant.fragment/1'){this.replace('',payload.blocks);return;}}
-        const html=event.clipboardData.getData('text/html');if(html){this.replace('',importHTML(html));return;}
-        const plain=event.clipboardData.getData('text/plain');if(plain)this.replace(plain);
+        const selection=this.rememberSelection(),text=event.clipboardData.getData('text/plain');
+        let blocks=null;const custom=event.clipboardData.getData(FRAGMENT_MIME);
+        if(custom){if(custom.length>1024*1024)throw Error('Paste a smaller section at a time.');
+          const payload=JSON.parse(custom);if(payload.schema==='enchant.fragment/2'||payload.schema==='enchant.fragment/1')blocks=payload.blocks;}
+        const html=event.clipboardData.getData('text/html');if(!blocks&&html)blocks=importHTML(html);
+        if(this.session.clipboard('paste',{blocks,text,grid:blocks?null:parseTSV(text)},selection)){
+          this.geometry.restore(this.state.selection,{focus:true});return;}
+        if(blocks){this.replace('',blocks,selection);return;}if(text)this.replace(text,null,selection);
       }catch(error){this.report(error);}
     });
     this.listen(this.canvas,'drop',event=>{
@@ -356,9 +369,11 @@ export class Editor {
   }
   copy(event,cut){
     if(this.composing||event.target.closest?.('.cm-editor'))return;
-    try{const selection=this.geometry.read();if(!selection)return;const blocks=this.session.fragment(selection);event.preventDefault();
-      event.clipboardData.setData('text/plain',blocks.map(b=>b.text).join('\n'));event.clipboardData.setData('text/html',fragmentHTML(blocks));
-      event.clipboardData.setData(FRAGMENT_MIME,JSON.stringify({schema:'enchant.fragment/2',blocks}));if(cut)this.replace('',null,selection);
+    try{const selection=this.geometry.read();if(!selection)return;const prepared=this.session.clipboard('copy',{},selection);
+      const blocks=prepared?.blocks||this.session.fragment(selection);event.preventDefault();
+      event.clipboardData.setData('text/plain',prepared?.text??blocks.map(b=>b.text).join('\n'));event.clipboardData.setData('text/html',fragmentHTML(blocks));
+      event.clipboardData.setData(FRAGMENT_MIME,JSON.stringify({schema:'enchant.fragment/2',blocks}));if(cut){if(this.model.readonly||this.recoveryFailure)throw Error('This document cannot be edited.');
+        if(!this.session.clipboard('cut',{},selection))this.replace('',null,selection);}
     }catch(error){this.report(error);}
   }
   download(format='json'){

@@ -78,3 +78,46 @@
   (is (not (includes? rendered "Table tools")))
   (is (not (includes? rendered "Cell tools")))
   (is (not (includes? rendered "data-edit-command")))))
+(deftest clipboard-rectangles-preserve-inline-data-and-clear-without-flattening
+ (let [written (:document (d/apply-op (:functions registry) inserted {:op "text/replace" :block "table/r1/c0" :from 0 :to 0 :text "a\t\"b\"\n🌱"}))
+       marked (:document (d/apply-op (:functions registry) written {:op "style/set" :block "table/r1/c0" :from 0 :to 1 :function "text/bold" :id "bold" :args {} :enabled true}))
+       ctx (assoc (context marked "table/r2/c1") :seed "clipboard" :selection {:anchor {:block "table/r1/c0" :offset 1} :head {:block "table/r2/c1" :offset 0}})
+       copied (table/clipboard-copy ctx {}) cleared (apply-plan marked (:cut copied))
+       cells (filterv #(= "table-cell" (:type %)) (:blocks cleared))]
+  (is (= "\"a\t\"\"b\"\"\n🌱\"\t\n\t" (:text copied)))
+  (is (= ["table/r1/c0" "table/r1/c1" "table/r2/c0" "table/r2/c1"] (:cells copied)))
+  (is (= 7 (count (:blocks (d/document "copied" (:blocks copied))))))
+  (is (= "text/bold" (get-in (nth (:blocks copied) 2) [:marks 0 :call :function])))
+  (is (= 6 (count cells)))
+  (is (every? #(= "" (:text %)) cells))
+  (is (d/valid? cleared))
+  (is (thrown? (table/rectangle (assoc ctx :selection {:anchor {:block "intro" :offset 0} :head {:block "table/r1/c0" :offset 0}}))))))
+(deftest pasted-grids-grow-with-one-undoable-plan
+ (let [ctx (assoc (context inserted "table/r2/c1") :seed "paste")
+       grid [[{:text "🌱" :marks [{:from 0 :to 1 :call {:id "old" :function "text/bold" :version 1 :args {}}}]} {:text "B"}]
+             [{:text "C"} {:text "D"}]]
+       plan (table/paste-grid ctx grid) edited (apply-plan inserted plan)
+       shape (table/shape (context edited "table/r2/c1"))
+       authority (protocol/authority registry inserted)
+       client (protocol/enqueue registry (protocol/replica authority) "paste-grid" {:op "batch" :ops (:ops plan)})
+       decision (protocol/decide registry authority (protocol/outbound client))
+       confirmed (protocol/receive-reply registry client (:reply decision))]
+  (is (= 4 (count (:rows shape)))) (is (= [3 3 3 3] (mapv count (:cells shape))))
+  (is (= [["🌱" "B"] ["C" "D"]] (mapv #(mapv :text (subvec % 1)) (subvec (:cells shape) 2))))
+  (is (= "paste/v0/0/m0" (get-in (d/find-block edited "table/r2/c1") [:marks 0 :call :id])))
+  (is (= edited (:visible confirmed)))
+  (is (= inserted (:visible (protocol/undo registry confirmed "undo-paste"))))
+  (is (thrown? (table/paste-grid ctx [[{:text "A"}] [{:text "B"} {:text "C"}]])))
+  (is (thrown? (table/paste-grid ctx [(vec (repeat 32 {:text "A"}))])))))
+(deftest inline-paste-and-cross-cell-typing-keep-table-shape
+ (let [ctx (assoc (context inserted "table/r1/c0") :seed "inline")
+       paragraph (assoc (d/block "p" "Hello 🌱") :marks [{:from 6 :to 7 :call {:id "old" :function "text/bold" :version 1 :args {}}}])
+       edited (apply-plan inserted (table/clipboard-paste ctx {:blocks [paragraph]}))
+       cross (assoc (context edited "table/r2/c1") :seed "typing" :selection {:anchor {:block "table/r1/c0" :offset 2} :head {:block "table/r2/c1" :offset 0}})
+       replaced (apply-plan edited (commands/plan registry cross "table/replace-rectangle" {:text "New"} "typing"))]
+  (is (= "Hello 🌱" (:text (d/find-block edited "table/r1/c0"))))
+  (is (= "text/bold" (get-in (d/find-block edited "table/r1/c0") [:marks 0 :call :function])))
+  (is (= "New" (:text (d/find-block replaced "table/r1/c0"))))
+  (is (= 11 (count (:blocks replaced))))
+  (is (= "table-cell" (:type (d/find-block replaced "table/r1/c0"))))
+  (is (thrown? (table/clipboard-paste ctx {:blocks [(d/block "image" "image" "" {:src "/x"})]})))))
