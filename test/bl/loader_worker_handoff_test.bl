@@ -1,4 +1,5 @@
-(ns loader.worker-handoff-test)
+(ns loader.worker-handoff-test
+ (:require [reload.generation :as g] [reload.execution :as execution]))
 
 (def ^:private probe :Elixir.BeamLisp.LoaderHandoffProbe)
 (defn- call [name & args] (erlang/apply probe name (to-list args)))
@@ -25,6 +26,21 @@
       :else (do (Process/sleep 1) (recur (dec remaining))))))
 (defn- agent-call [agent f]
   (call :worker_call (fn [delegate] (Agent/get_and_update agent (delegate f) 2000))))
+
+(deftest managed-probe-handoff-retains-actual-native-admission
+ (let [dir (setup) graph (g/prepare! {:sources {"probe.managed" "(ns probe.managed) (defn value [] 31)"}})
+       caller (erlang/self)]
+  (try
+   (g/with! graph
+    (fn []
+     (let [result (call :run (fn [] [(:digest (g/current)) (execution/owned?) (erlang/self)]))]
+      (is (= (:digest graph) (nth result 0)))
+      (is (= true (nth result 1)))
+      (is (not= caller (nth result 2))))
+     (is (execution/owned?))))
+   (is (nil? (call :run g/current)))
+   (is (= 0 (:registrations (g/evidence graph))))
+   (finally (cleanup dir []) (g/retire! graph)))))
 
 (deftest causal-loads-run-in-the-real-loader-and-preserve-partial-state
   (let [dir (setup) agent (elem (Agent/start (fn [] :state)) 1)]
