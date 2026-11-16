@@ -1,0 +1,77 @@
+;; A disposable service domain over real Datom transactions and Fjall.
+(ns station-prototype.store
+ (:require [datom :as d] [datom.store-fjall :as fjall]))
+
+(def schema
+ [{:db/ident :workspace/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+  {:db/ident :workspace/member :db/valueType :db.type/string :db/cardinality :db.cardinality/many :db/index true}
+  {:db/ident :message/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+  {:db/ident :message/workspace :db/valueType :db.type/ref :db/index true}
+  {:db/ident :message/recipient :db/valueType :db.type/string :db/cardinality :db.cardinality/many :db/index true}
+  {:db/ident :message/body :db/valueType :db.type/string}
+  {:db/ident :message/sent-at :db/valueType :db.type/long}
+  {:db/ident :message/import :db/valueType :db.type/string :db/index true}
+  {:db/ident :claim/owner :db/valueType :db.type/string}
+  {:db/ident :claim/until :db/valueType :db.type/long}
+  {:db/ident :request/id :db/valueType :db.type/term :db/unique :db.unique/identity}
+  {:db/ident :request/digest :db/valueType :db.type/string}
+  {:db/ident :request/result :db/valueType :db.type/term}
+  {:db/ident :import/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+  {:db/ident :import/digest :db/valueType :db.type/string}
+  {:db/ident :import/next :db/valueType :db.type/long}
+  {:db/ident :import/complete :db/valueType :db.type/boolean}
+  {:db/ident :audit/subject :db/valueType :db.type/string}
+  {:db/ident :audit/resource :db/valueType :db.type/string}
+  {:db/ident :audit/operation :db/valueType :db.type/keyword}])
+
+(defn open! [path] (d/connect-with (fjall/open path) schema))
+(defn digest [value]
+ (String/downcase (Base/encode16 (crypto/hash :sha256 (erlang/term_to_binary value (list :deterministic))))))
+(defn refuse! [kind] (throw (ex-info "Prototype command refused" {:kind kind})))
+(defn workspace [db id]
+ (first (first (d/q '[:find ?w :in $ ?id :where [?w :workspace/id ?id]] db id))))
+(defn member? [db subject resource]
+ (boolean (seq (d/q '[:find ?w :in $ ?subject ?id :where
+                      [?w :workspace/id ?id] [?w :workspace/member ?subject]] db subject resource))))
+(defn seed! [conn]
+ (d/transact! conn [{:db/id -1 :workspace/id "ora" :workspace/member ["alice" "bob"]}
+                    {:db/id -2 :workspace/id "private" :workspace/member ["carol"]}]))
+(def inbox-query
+ '[:find ?id ?sent ?body :in $ ?person ?workspace :where
+   [?w :workspace/id ?workspace] [?w :workspace/member ?person]
+   [?m :message/workspace ?w] [?m :message/recipient ?person]
+   [?m :message/id ?id] [?m :message/sent-at ?sent] [?m :message/body ?body]])
+(defn inbox [db subject resource]
+ (when-not (member? db subject resource) (refuse! :denied))
+ (vec (sort-by first (d/q inbox-query db subject resource))))
+(defn message [db id]
+ (first (first (d/q '[:find ?m :in $ ?id :where [?m :message/id ?id]] db id))))
+(defn request-record [db key]
+ (when-let [eid (first (first (d/q '[:find ?e :in $ ?key :where [?e :request/id ?key]] db key)))]
+  (d/entity db eid)))
+(defn claim-tx [db subject resource request now]
+ ;; Authorization and claim ownership are decided at the SAME writer basis.
+ (when-not (member? db subject resource) (refuse! :denied))
+ (when-not (and (= #{"id" "request/id"} (set (keys request)))
+                (every? #(and (string? %) (<= 1 (count %) 128)) (vals request)))
+  (refuse! :invalid-request))
+ (let [key [subject resource :claim (get request "request/id")]
+       hash (digest request) previous (request-record db key)]
+  (if previous
+   (do (when-not (= hash (:request/digest previous)) (refuse! :idempotency-conflict)) [])
+   (let [eid (message db (get request "id")) row (when eid (d/entity db eid))
+         expected (workspace db resource)]
+    (when-not (and row (= expected (:message/workspace row))) (refuse! :unavailable-message))
+    (when (and (> (:claim/until row 0) now) (not= subject (:claim/owner row))) (refuse! :claimed))
+    [{:db/id eid :claim/owner subject :claim/until (+ now 1000)}
+     {:db/id -1 :request/id key :request/digest hash
+      :request/result {"owner" subject "id" (get request "id") "until" (+ now 1000)}}
+     {:db/id :db/current-tx :audit/subject subject :audit/resource resource :audit/operation :claim}]))))
+(defn claim! [conn subject resource request now]
+ (d/transact! conn [[:db/fn claim-tx subject resource request now]])
+ (:request/result (request-record (d/db conn) [subject resource :claim (get request "request/id")])) )
+(defn add-message! [conn id resource recipients body sent]
+ (d/transact! conn [{:db/id -1 :message/id id :message/workspace (workspace (d/db conn) resource)
+                    :message/recipient recipients :message/body body :message/sent-at sent}]))
+(defn revoke! [conn resource subject]
+ (d/transact! conn [[:db/retract (workspace (d/db conn) resource) :workspace/member subject]]))

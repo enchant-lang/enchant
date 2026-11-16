@@ -1,0 +1,144 @@
+(ns station-prototype.checks
+ (:require [datom :as d] [datom.watch :as watch] [station-prototype.store :as store]
+           [station-prototype.import-edn :as importer] [station-prototype.provider :as provider]
+           [station-prototype.unix :as unix] [station-prototype.reconciliation :as reconciliation]
+           [datom.offline.fs :as fs] [auth.interface :as interface] [auth.identity :as identity]
+           [auth.logic :as logic] [veritas.model :as model] [veritas.ledger :as ledger]
+           [veritas.assurance :as assurance] [bl.json :as json]))
+(def results (atom []))
+(defn check! [label value]
+ (when-not value (throw (ex-info (str "Prototype check failed: " label) {:check label})))
+ (swap! results conj label) (println (str "PASS " label)) true)
+(defn refused [action]
+ (try (action) nil (catch error (:kind (ex-data error)))))
+(defn eventually [pred budget]
+ (let [deadline (+ (System/monotonic_time :millisecond) budget)]
+  (loop []
+   (cond (pred) true (>= (System/monotonic_time :millisecond) deadline) false
+         :else (do (Process/sleep 10) (recur))))))
+(defn as-person [subject action]
+ ;; Explicit trusted TEST ingress. No exported operation can call this API.
+ (identity/with-verified {:subject subject :application "prototype-client" :kind :person} action))
+(defn import-checks! [root source]
+ (let [path (str root "/messages.fjall") conn (store/open! path)
+       options {:file (str source "/fixtures/messages.edn") :id "sqlite-export-1" :batch-size 2}]
+  (try
+   (store/seed! conn)
+   (check! "EDN import interruption occurs after a committed batch"
+     (= :injected-import-interruption (refused #(importer/import! conn (assoc options :interrupt-after 1)))))
+   (check! "partial import preserves exactly two messages"
+     (= 2 (count (d/q '[:find ?m :where [?m :message/id _]] (d/db conn)))))
+   (finally (d/close! conn)))
+  (let [reopened (store/open! path)]
+   (try
+    (let [receipt (importer/import! reopened options)]
+     (check! "Fjall reopen resumes and verifies original message identities" (= 3 (:records receipt)))
+     (check! "same import is a verified no-op" (= 0 (:batches (importer/import! reopened options)))))
+    (let [changed (str root "/changed.edn")]
+     (File/write! changed (String/replace (File/read! (:file options)) "First preserved" "Altered preserved"))
+     (check! "changed export refuses after resume" (= :export-changed (refused #(importer/import! reopened (assoc options :file changed))))))
+    (finally (d/close! reopened)))) path))
+(defn namespace-checks! [root source path]
+ (let [conn (store/open! path) now (atom 1000)
+       opened (provider/open! (str source "/src/station_prototype/messages.bl") conn #(deref now))
+       call (fn [operation args] (interface/invoke! opened operation args))]
+  (try
+   (check! "checked namespace declaration admitted" (= :checked (:status (logic/prepare (File/read! (str source "/src/station_prototype/messages.bl"))))))
+   (check! "principal-scoped inbox cannot enumerate another recipient"
+    (= [["legacy-1" 100 "First preserved message"]] (as-person "alice" #(call "inbox" ["ora"]))))
+   (check! "unauthenticated namespace call refuses" (= :auth/unauthenticated (refused #(call "inbox" ["ora"]))))
+   (check! "cross-workspace call refuses" (= :auth/denied (as-person "alice" #(refused (fn [] (call "inbox" ["private"]))))))
+   (let [request {"id" "legacy-1" "request/id" "alice-claim"}
+         reply (as-person "alice" #(call "claim!" ["ora" request]))]
+    (reset! now 1100)
+    (check! "duplicate command returns the original receipt" (= reply (as-person "alice" #(call "claim!" ["ora" request]))))
+    (check! "another claimant refuses during lease"
+     (= :claimed (refused #(store/claim! conn "bob" "ora" {"id" "legacy-1" "request/id" "bob-claim"} @now))))
+    (check! "changed payload cannot reuse request identity"
+     (= :idempotency-conflict (refused #(store/claim! conn "alice" "ora" (assoc request "id" "legacy-2") @now))))
+    (check! "caller cannot forge identity fields"
+     (= :invalid-request (refused #(store/claim! conn "alice" "ora" (assoc request "subject" "bob") @now)))))
+   (store/revoke! conn "ora" "alice")
+   (check! "revocation is rechecked by the live provider" (= :auth/denied (as-person "alice" #(refused (fn [] (call "inbox" ["ora"]))))))
+   (check! "writer transaction independently rechecks membership"
+    (= :denied (refused #(store/claim! conn "alice" "ora" {"id" "legacy-1" "request/id" "after-revoke"} @now))))
+   (store/seed! conn)
+   (let [events (atom []) subscription (watch/watch conn store/inbox-query ["alice" "ora"] #(swap! events conj %))]
+    (try
+     (store/add-message! conn "live-message" "ora" ["alice"] "Live delta" 400)
+     (check! "query watch receives a relevant committed inbox change" (eventually #(seq @events) 5000))
+     (finally (watch/unwatch subscription))))
+   (let [rows (d/q '[:find ?tx :where [?tx :audit/operation :claim]] (d/db conn))]
+    (check! "only successful unique command committed an audit transaction" (= 1 (count rows))))
+   (finally (interface/close! opened) (d/close! conn)))))
+(defn unix-checks! [root]
+ (let [result (unix/roundtrip! (str root "/peer.sock") {"uid" 0 "subject" "forged-root"})
+       actual (erlang/binary_to_integer (String/trim (first (System/cmd (System/find_executable "id") (list "-u")))))]
+  (check! "Unix RPC identity comes from SO_PEERCRED rather than payload"
+   (and (= actual (get-in result [:reply "uid"])) (= actual (get-in result [:kernel :uid]))))))
+(defn reconciliation-checks! [root]
+ (let [conn (store/open! (str root "/reconcile.fjall")) output (str root "/native-files")]
+  (try
+   (reconciliation/prepare! conn output)
+   (reset! (:fail-after-write @reconciliation/owned) true)
+   (let [failed (reconciliation/drain!)]
+    (check! "lost reply after native write leaves work owed" (= 1 (:failed failed)))
+    (check! "native filesystem effect really happened" (= "{:ready true :generation 1}" (File/read! (str output "/status.edn")))))
+   (check! "reconciliation recovers the actual effect without duplicated domain intent" (= 1 (:applied (reconciliation/drain!))))
+   (check! "settled desired state produces no further work" (= 0 (:applied (reconciliation/drain!))))
+   (let [pid (reconciliation/start!)]
+    (try
+     (reconciliation/desired! conn 2 "{:ready true :generation 2}")
+     (check! "proc reconciler publishes a changed Datom revision"
+      (eventually #(= "{:ready true :generation 2}" (File/read! (str output "/status.edn"))) 10000))
+     (finally (reconciliation/stop! pid))))
+   (check! "native directory capability rejects parent traversal"
+    (= :offline-filesystem-refused
+       (refused #(fs/put! (:directory @reconciliation/owned) "../escaped" nil "denied"))))
+   (finally (reconciliation/close!) (d/close! conn)))))
+(defn model-checks! [root]
+ (let [sequence (atom 0)
+       m (model/model "durable-message-claims"
+          {:state {:owner nil}
+           :init (fn []
+                   (let [path (str root "/model-" (swap! sequence inc) ".fjall") c (store/open! path)]
+                    (store/seed! c) (store/add-message! c "model-message" "ora" ["alice" "bob"] "body" 1)
+                    {:path path :conn (atom c) :attempt (atom 0)}))
+           :cleanup (fn [sys] (d/close! @(:conn sys)))
+           :commands
+           {:claim {:args (model/one-of ["alice" "bob"])
+                    :next (fn [state subject] (if (:owner state) state {:owner subject}))
+                    :run (fn [sys subject]
+                           (try (store/claim! @(:conn sys) subject "ora"
+                                  {"id" "model-message" "request/id" (str "model-" (swap! (:attempt sys) inc))} 0)
+                                (catch _ nil)))}
+            :restart {:run (fn [sys _]
+                             (d/close! @(:conn sys)) (reset! (:conn sys) (store/open! (:path sys))))}}
+           :invariants
+           {:same-owner (fn [state sys]
+                          (let [db (d/db @(:conn sys)) eid (store/message db "model-message")]
+                           (= (:owner state) (:claim/owner (d/entity db eid)))))}})
+       verdict (model/check m {:seed 42 :histories 12 :max-len 8})
+       evidence (ledger/open (str root "/evidence.fjall"))]
+  (try
+   (check! "Veritas exercises real Fjall claim/restart histories" (= :witnessed (:modality verdict)))
+   (check! "Veritas reports coverage for claim and restart" (empty? (:unexercised verdict)))
+   (ledger/record! evidence verdict {:claim "Message claims survive generated restart histories"
+                                    :about ["station-prototype.store/claim-tx"] :replay "./run core"})
+   (check! "evidence ledger stores a verdict without granting proof authority"
+    (every? #(= false (:verdict/compiler-authority %)) (ledger/all evidence)))
+   (check! "assurance does not promote a sampled history into an admission proof"
+    (= :unsupported (:status (assurance/combine :prototype [verdict]))))
+   verdict
+   (finally (d/close! evidence)))))
+(defn run! [source root]
+ (reset! results [])
+ (File/mkdir_p! root)
+ (let [path (import-checks! root source)]
+  (namespace-checks! root source path)
+  (unix-checks! root)
+  (reconciliation-checks! root)
+  (let [verdict (model-checks! root)]
+   {:format 1 :kind :field-station-core-prototypes :passed (count @results) :checks @results
+    :model (select-keys verdict [:modality :tried :seed :coverage :unexercised])
+    :scope "Disposable Fjall, native Unix sockets/filesystem, checked namespace, real proc reconciliation. No production state."})))

@@ -1,0 +1,47 @@
+;; Linux transport experiment: kernel peer evidence, no identity in payloads.
+;; One bounded connection is exercised per test; this is not a production acceptor.
+(ns station-prototype.unix (:require [bl.json :as json]))
+(defn- le32 [bytes offset]
+ (binary/decode_unsigned (binary/part bytes offset 4) :little))
+(defn peer [socket]
+ (let [result (inet/getopts socket (list (tuple :raw 1 17 12)))]
+  (when-not (= :ok (elem result 0)) (throw (ex-info "Kernel peer unavailable" {})))
+  (let [bytes (elem (first (elem result 1)) 3)]
+   (when-not (= 12 (erlang/byte_size bytes)) (throw (ex-info "Kernel peer unavailable" {})))
+   {:pid (le32 bytes 0) :uid (le32 bytes 4) :gid (le32 bytes 8)})))
+(defn roundtrip! [path payload]
+ (let [opened (gen_tcp/listen 0 (list :binary (tuple :active false) (tuple :packet 4)
+                              (tuple :packet_size 65536)
+                              (tuple :ifaddr (tuple :local (String/to_charlist path)))))
+       _ (when-not (= :ok (elem opened 0)) (throw (ex-info "Unix listener failed" {})))
+       listener (elem opened 1) parent (erlang/self)
+       worker (spawn-monitor
+        (fn []
+         (let [accepted (gen_tcp/accept listener 3000)]
+          (when (= :ok (elem accepted 0))
+           (let [socket (elem accepted 1)]
+            (try
+             (let [evidence (peer socket) request (gen_tcp/recv socket 0 3000)]
+              (when-not (= :ok (elem request 0)) (throw (ex-info "Unix framing failed" {})))
+              (json/decode (elem request 1))
+              (gen_tcp/send socket (json/encode {:uid (:uid evidence) :pid (:pid evidence)}))
+              (erlang/send parent [:prototype/unix evidence]))
+             (finally (gen_tcp/close socket))))))))]
+  (try
+   (File/chmod! path 384)
+   (let [connected (gen_tcp/connect (tuple :local (String/to_charlist path)) 0
+                    (list :binary (tuple :active false) (tuple :packet 4) (tuple :packet_size 65536)) 3000)]
+    (when-not (= :ok (elem connected 0)) (throw (ex-info "Unix client failed" {})))
+    (let [socket (elem connected 1)]
+     (try
+      (gen_tcp/send socket (json/encode payload))
+      (let [response (gen_tcp/recv socket 0 3000)]
+       (when-not (= :ok (elem response 0)) (throw (ex-info "Unix reply failed" {})))
+       (let [value (json/decode (elem response 1)) evidence (receive [:prototype/unix value] value (after 3000 nil))]
+        {:reply value :kernel evidence}))
+      (finally (gen_tcp/close socket)))))
+   (finally
+    (gen_tcp/close listener)
+    (let [pid (elem worker 0)] (when (Process/alive? pid) (erlang/exit pid :kill)))
+    (Process/demonitor (elem worker 1) (list :flush))
+    (File/rm path)))))

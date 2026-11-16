@@ -1,0 +1,56 @@
+(ns station-prototype.reconciliation
+ (:require [proc :as proc] [proc.reconcile :as reconcile] [proc.queue :as queue]
+           [datom :as d] [datom.projection :as projection] [datom.reconcile :as executor]
+           [datom.offline.fs :as fs]))
+(def schema
+ (into [{:db/ident :conn/key :db/valueType :db.type/term :db/unique :db.unique/identity}
+        {:db/ident :desired/scope :db/valueType :db.type/ref}
+        {:db/ident :desired/revision :db/valueType :db.type/long}
+        {:db/ident :desired/content :db/valueType :db.type/string}]
+       projection/schema))
+(projection/defprojection published-file :prototype/published-file
+ "A durable desired revision converges to one pinned native directory."
+ {:member '[[?src :desired/scope ?scope]] :revision '[[?src :desired/revision ?rev]]})
+(def owned (atom nil))
+(defn- scopes [db _]
+ (vec (d/q '[:find ?scope ?key :where [?scope :conn/key ?key] [(= ?key :prototype/files)]] db)))
+(defn- apply-file! [row _previous]
+ (let [{:keys [conn directory root fail-after-write]} @owned
+       desired (d/entity (d/db conn) (:src row))
+       bytes (:desired/content desired) path (str root "/status.edn")
+       previous (when (File/regular? path) (File/read! path))]
+  ;; Native descriptor/CAS publication; unchanged bytes reconcile a lost reply.
+  (when-not (= previous bytes) (fs/put! directory "status.edn" previous bytes))
+  (when @fail-after-write
+   (reset! fail-after-write false)
+   (throw (ex-info "Injected result loss after actual filesystem publication" {})))
+  {:target {:bytes bytes :revision (:rev row)}}))
+(proc/defserver publisher
+ (reconcile {:projection published-file
+             :conn-fn (fn [_] (:conn @owned)) :scope-fn scopes
+             :apply apply-file! :retire (fn [_ _] nil)
+             :level [1 :second] :watch? true
+             :queue {:retry {:max 3 :base 20 :max-delay 60 :backoff :exponential :jitter 0}}}))
+(defn prepare! [conn root]
+ (d/install-schema! conn schema)
+ (d/transact! conn [{:db/id -1 :conn/key :prototype/files}
+                    {:db/id -2 :conn/key :prototype/status-file :desired/scope -1
+                     :desired/revision 1 :desired/content "{:ready true :generation 1}"}])
+ (let [directory (fs/claim! root {:create true})]
+  (reset! owned {:conn conn :directory directory :root root :fail-after-write (atom false)}) @owned))
+(defn scope [conn]
+ (first (first (d/q '[:find ?e :where [?e :conn/key :prototype/files]] (d/db conn)))))
+(defn drain! []
+ (let [conn (:conn @owned)]
+  (executor/drain! conn published-file (scope conn)
+   {:scope-key :prototype/files :apply apply-file! :retire (fn [_ _] nil) :concurrency 1})))
+(defn desired! [conn revision content]
+ (let [eid (first (first (d/q '[:find ?e :where [?e :conn/key :prototype/status-file]] (d/db conn))))]
+  (d/transact! conn [{:db/id eid :desired/revision revision :desired/content content}])))
+(defn start! [] (start publisher nil {}))
+(defn stop! [pid]
+ (stop pid)
+ (reconcile/unwatch-all! :publisher))
+(defn close! []
+ (when-let [directory (:directory @owned)] (fs/close! directory))
+ (reset! owned nil))

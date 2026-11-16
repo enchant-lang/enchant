@@ -1,0 +1,54 @@
+;; Bounded one-time EDN snapshot importer. No SQLite/runtime compatibility path.
+;; The prototype caps a snapshot at 8 MiB; an unbounded EDN stream is not claimed.
+(ns station-prototype.import-edn
+ (:require [clojure.edn :as edn] [datom :as d] [station-prototype.store :as store]))
+(defn- record [db id]
+ (when-let [eid (first (first (d/q '[:find ?e :in $ ?id :where [?e :import/id ?id]] db id)))] (d/entity db eid)))
+(defn- validate! [snapshot]
+ (when-not (and (= #{:version :records} (set (keys snapshot))) (= 1 (:version snapshot))
+                (vector? (:records snapshot)) (<= (count (:records snapshot)) 10000))
+  (store/refuse! :invalid-export))
+ (let [records (:records snapshot)]
+  (when-not (= (count records) (count (set (map :id records)))) (store/refuse! :duplicate-source-id))
+  (doseq [row records]
+   (when-not (and (= #{:id :workspace :recipients :body :sent-at} (set (keys row)))
+                  (every? string? [(:id row) (:workspace row) (:body row)])
+                  (vector? (:recipients row)) (every? string? (:recipients row)) (int? (:sent-at row)))
+    (store/refuse! :invalid-export))) snapshot))
+(defn- batch-tx [db id hash offset rows total]
+ (let [prior (record db id)]
+  (when-not (and prior (= hash (:import/digest prior)) (= offset (:import/next prior)))
+   (store/refuse! :import-basis-changed))
+  (into
+   (mapv (fn [i]
+           (let [row (nth rows i) workspace (store/workspace db (:workspace row))]
+            (when-not workspace (store/refuse! :unknown-workspace))
+            (when (store/message db (:id row)) (store/refuse! :destination-conflict))
+            {:db/id (- -1 i) :message/id (:id row) :message/workspace workspace
+             :message/recipient (:recipients row) :message/body (:body row)
+             :message/sent-at (:sent-at row) :message/import id})) (range (count rows)))
+   [{:db/id (:db/id prior) :import/next (+ offset (count rows)) :import/complete (= total (+ offset (count rows)))}])))
+(defn import! [conn {:keys [file id batch-size interrupt-after]}]
+ (when-not (and (int? batch-size) (<= 1 batch-size 1000) (string? id) (<= 1 (count id) 128))
+  (store/refuse! :invalid-import-options))
+ (let [bytes (File/read! file)
+       _ (when (> (erlang/byte_size bytes) 8388608) (store/refuse! :export-too-large))
+       snapshot (validate! (edn/read-string bytes))
+       records (:records snapshot) hash (store/digest [:field-station-import-v1 store/schema bytes])
+       existing (record (d/db conn) id)]
+  (when (and existing (not= hash (:import/digest existing))) (store/refuse! :export-changed))
+  (when-not existing
+   (d/transact! conn [{:db/id -1 :import/id id :import/digest hash :import/next 0 :import/complete (empty? records)}]))
+  (loop [batches 0]
+   (let [progress (record (d/db conn) id) offset (:import/next progress)]
+    (if (:import/complete progress)
+     (let [actual (d/q '[:find ?id ?body ?sent :in $ ?import :where
+                         [?m :message/import ?import] [?m :message/id ?id]
+                         [?m :message/body ?body] [?m :message/sent-at ?sent]] (d/db conn) id)
+           expected (set (map (fn [row] [(:id row) (:body row) (:sent-at row)]) records))]
+      (when-not (= expected (set actual)) (store/refuse! :import-verification-failed))
+      {:status :verified :records (count actual) :digest hash :batches batches})
+     (let [rows (subvec records offset (min (count records) (+ offset batch-size)))]
+      (d/transact! conn [[:db/fn batch-tx id hash offset rows (count records)]])
+      (when (= interrupt-after (inc batches)) (store/refuse! :injected-import-interruption))
+      (recur (inc batches))))))))
