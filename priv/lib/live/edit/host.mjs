@@ -246,7 +246,9 @@ export class Editor {
     if(!this.catalog.some(item=>item['input-type']===inputType))return false;
     const item=this.query().find(item=>item['input-type']===inputType&&item.enabled);
     if(!item)return false;
-    this.run(item.id,args);this.geometry.restore(this.state.selection,{focus:true});return true;
+    const target=this.session.bookmark();
+    try{this.run(item.id,args,{target});this.geometry.restore(this.state.selection,{focus:true});}
+    finally{this.session.release(target);}return true;
   }
   installInput(){
     this.listen(this.canvas,'pointerdown',event=>{if(event.target.closest?.('[data-edit-command]'))event.preventDefault();});

@@ -259,7 +259,7 @@ class DefaultUI {
     const searchLine=element('div','ed-search-line');searchLine.append(icon('search'));const search=element('input','ed-menu-search');search.type='search';search.placeholder=mode==='insert'?'What would you like to add?':'Search actions…';search.setAttribute('aria-label',mode==='insert'?'Search blocks':'Search actions');searchLine.append(search);
     const list=element('div','ed-menu-results');content.append(searchLine,list,element('div','ed-menu-help','↑↓ Navigate   ↵ Choose   esc Close'));
     const render=()=>{
-      const query=search.value.toLowerCase(),items=this.editor.query({target:token}).filter(item=>mode!=='insert'||(item.kind==='insert'||item.menu==='insert')); 
+      const query=search.value.toLowerCase(),items=this.editor.query({target:token}).filter(item=>mode!=='insert'||(item.kind==='insert'||item.menu==='insert'));
       const score=item=>{const text=(item.label+' '+(item.description||'')+' '+item.id).toLowerCase();if(!query)return 1;if(text.includes(query))return 100-text.indexOf(query);let at=0;for(const c of text)if(c===query[at])at++;return at===query.length?1:0;};
       const results=items.map(item=>({item,score:score(item)})).filter(row=>row.score>0).sort((a,b)=>b.score-a.score).slice(0,30);list.replaceChildren();
       for(const {item}of results)list.append(this.menuRow(item,()=>{
