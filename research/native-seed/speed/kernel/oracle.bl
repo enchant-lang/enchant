@@ -1,0 +1,131 @@
+; BEAM oracle for the native kernel (workstream K).
+; Usage: research/native-seed/run run research/native-seed/speed/kernel/oracle.bl -- OUT-DIR
+; Writes OUT-DIR/oracle.scm: the value corpus, the template/override
+; expressions produced by native.intrinsics, and BEAM outcomes of every covered
+; BIF and rt function over that corpus (value | raised). Values are encoded by
+; native.scheme/literal; improper lists by an explicit cons.
+(ns kernel.oracle (:require [native.scheme :as scheme] [native.intrinsics :as intrinsics]
+                            [clojure.string :as string]))
+
+(def out-dir (first (BeamLisp/argv)))
+
+(defn proper? [xs]
+ (cond (erlang/=:= xs ()) true (erlang/is_list xs) (proper? (erlang/tl xs)) :else false))
+(declare enc)
+(defn plain-struct? [v]
+ (and (erlang/is_map v) (erlang/is_map_key :__struct__ v)
+      (not (contains? #{:Elixir.BeamLisp.Vector :Elixir.BeamLisp.Set :Elixir.BeamLisp.Decimal}
+                      (erlang/map_get :__struct__ v)))))
+(defn enc [v]
+ (cond
+  (and (erlang/is_list v) (not (proper? v)))
+  (str "(cons " (enc (erlang/hd v)) " " (enc (erlang/tl v)) ")")
+  (erlang/is_list v) (str "(list " (string/join " " (map enc v)) ")")
+  (erlang/is_tuple v) (str "(bl-make-tuple " (string/join " " (map enc (erlang/tuple_to_list v))) ")")
+  (plain-struct? v)
+  (str "(bl-struct " (scheme/literal (erlang/map_get :__struct__ v)) " (bl-map "
+       (string/join " " (mapcat (fn [p] [(enc (erlang/element 1 p)) (enc (erlang/element 2 p))])
+                                (maps/to_list (maps/remove :__struct__ v)))) "))")
+  :else (scheme/literal v)))
+
+(def big-map (into {} (map (fn [i] [(keyword (str "k" i)) i]) (range 20))))
+(def corpus
+ [nil true false :a :b :meta :symbol :__struct__ :"Elixir.BeamLisp.Vector" :"$blfn"
+  0 1 -1 2 3 42 1180591620717411303424 -1180591620717411303424
+  1.0 0.0 -0.0 2.5 -3.75 1.5M 1.50M
+  "" "a" "abc" "b" "é" "😀"
+  () (list 1) (list 1 2 3) (list :a) (list nil) (lists/append (list 1) 2)
+  (tuple) (tuple 1) (tuple 1 2) (tuple :a 1 2) (tuple 1 2 3) (tuple "s" 1 2)
+  (tuple :meta :x {}) (tuple :meta 1 {:line 1}) (tuple :symbol "foo") (tuple :"$blfn" {} nil)
+  {} {:a 1} {:a 1 :b 2} {1 :x} {"k" 1} big-map
+  {:__struct__ :Elixir.Foo :a 1} {:__struct__ :"Elixir.BeamLisp.Reduced" :value 1}
+  [] [1 2] [nil] [:a] #{} #{1 2}])
+(def n (count corpus))
+; Binary operations range over this prefix-free index subset.
+(def pair-indices
+ (vec (filter (fn [i] (not (contains? #{6 7 17 22 24 29 30 35 41 44 46 50 57 58 59} i))) (range n))))
+
+(defn outcome [thunk]
+ (let [r (try {:ok (thunk)} (catch e {:raised true}))]
+  (if (:raised r) "raised"
+   (try (str "ok " (enc (:ok r))) (catch e "unencodable")))))
+; One datum per line: ("m/f/a" (corpus-indices…) raised|unencodable|ok EXPR)
+(defn row [key indices thunk]
+ (str "(" (scheme/text key) " (" (string/join " " indices) ") " (outcome thunk) ")\n"))
+
+(defn bif [m f arity] (str (erlang/atom_to_binary m) "/" (erlang/atom_to_binary f) "/" arity))
+(def unary-bifs
+ [[:erlang :is_list] [:erlang :is_tuple] [:erlang :is_float] [:erlang :is_integer] [:erlang :is_boolean]
+  [:erlang :is_function] [:erlang :is_atom] [:erlang :is_map] [:erlang :is_binary] [:erlang :is_bitstring]
+  [:erlang :hd] [:erlang :tl] [:erlang :not] [:erlang :tuple_size] [:erlang :tuple_to_list]
+  [:erlang :list_to_tuple] [:erlang :length] [:erlang :integer_to_binary] [:erlang :iolist_to_binary]
+  [:erlang :map_size] [:lists :reverse] [:maps :size]])
+(defn op [s] (keyword s))
+(def binary-bifs
+ [[:erlang (op "==")] [:erlang (op "/=")] [:erlang (op "=:=")] [:erlang (op "=/=")] [:erlang (op "<")]
+  [:erlang (op ">")] [:erlang (op "=<")] [:erlang (op ">=")]
+  [:erlang (op "+")] [:erlang (op "-")] [:erlang (op "*")] [:erlang :element] [:erlang :make_tuple] [:erlang :map_get]
+  [:erlang :is_map_key] [:lists :append] [:maps :get] [:maps :is_key] [:maps :find]])
+(def ternary-bifs [[:erlang :setelement] [:maps :get] [:maps :put]])
+(def ternary-thirds [0 3])
+
+(def rt :Elixir.BeamLisp.Ns.Rt)
+(def unary-rt ["kind-kind" "call-not-" "not_" "reduce-reduced?" "k-first" "first" "k-rest" "rest"
+               "k-empty?" "empty?" "hash-hash-key" "hash_key" "to-str"])
+(def binary-rt ["k-compare" "compare" "k-eqv" "eqv" "call-identical?" "identical?" "k-cons" "cons"
+                "raw-cons" "tuple2"])
+; Private rt definitions are not BEAM exports: their bodies, verbatim.
+(def private-rt
+ {"struct-of?" (fn [x mod] (and (erlang/is_map x) (erlang/=:= mod (maps/get :__struct__ x nil))))
+  "empty-list?" (fn [xs] (cond (erlang/is_list xs) (erlang/== xs ()) :else false))})
+
+(defn rt-call [name args]
+ (if-let [f (get private-rt name)] (apply f args) (erlang/apply rt (keyword name) (apply list args))))
+
+(defn template-row [key arity]
+ (let [ops (mapv #(str "a" %) (range arity))
+       parts (string/split key "/")
+       node {:op :remote :mod (keyword (first parts)) :fun (keyword (string/join "/" (butlast (rest parts))))
+             :args (vec (repeat arity {:op :lit :val nil}))}
+       t (intrinsics/remote-template node)]
+  (when-not t (throw (ex-info "missing template" {:key key})))
+  (str "(cons " (scheme/text key) " (lambda (" (string/join " " ops) ") " (t ops) "))\n")))
+
+(def override-names (intrinsics/override-names "rt"))
+(defn override-row [i name]
+ (let [original (str "oracle-original-" i)]
+  (str "(define " original " (lambda args (set! oracle-delegated #t) oracle-sentinel))\n"
+       "(set! oracle-overrides (cons (cons " (scheme/text name) " "
+       (intrinsics/kernel-override "rt" name original) ") oracle-overrides))\n")))
+
+(def text
+ (str
+  ";; generated by speed/kernel/oracle.bl on BEAM\n"
+  "(define oracle-corpus (vector\n" (string/join "\n" (map enc corpus)) "))\n"
+  "(define oracle-templates (list\n"
+  (apply str (map (fn [k] (template-row k (erlang/binary_to_integer (last (string/split k "/")))))
+                  (intrinsics/template-keys)))
+  "))\n"
+  "(define oracle-delegated #f)\n(define oracle-sentinel (list 'oracle-sentinel))\n(define oracle-overrides '())\n"
+  (apply str (map override-row (range (count override-names)) override-names))))
+(def cases
+ (str
+  (apply str (for [[m f] unary-bifs i (range n)]
+              (row (bif m f 1) [i] (fn [] (erlang/apply m f (list (nth corpus i)))))))
+  (apply str (for [[m f] binary-bifs i pair-indices j pair-indices]
+              (row (bif m f 2) [i j] (fn [] (erlang/apply m f (list (nth corpus i) (nth corpus j)))))))
+  (apply str (for [[m f] ternary-bifs i pair-indices j pair-indices k ternary-thirds]
+              (row (bif m f 3) [i j k] (fn [] (erlang/apply m f (list (nth corpus i) (nth corpus j) (nth corpus k)))))))
+  (apply str (for [name unary-rt i (range n)]
+              (row (str "rt/" name) [i] (fn [] (rt-call name [(nth corpus i)])))))
+  (apply str (for [name (concat binary-rt ["struct-of?"]) i pair-indices j pair-indices]
+              (row (str "rt/" name) [i j] (fn [] (rt-call name [(nth corpus i) (nth corpus j)])))))
+  (apply str (for [i (range n)] (row "rt/empty-list?" [i] (fn [] (rt-call "empty-list?" [(nth corpus i)])))))
+  (apply str (for [i (range 6) j (range 6) k (range 6)]
+              (row "rt/tuple3" [i j k] (fn [] (rt-call "tuple3" [(nth corpus i) (nth corpus j) (nth corpus k)])))))
+))
+
+(File/mkdir_p! out-dir)
+(File/write! (Path/join out-dir "oracle.scm") text)
+(File/write! (Path/join out-dir "oracle-cases.sexp") cases)
+(println "KERNEL_ORACLE_WRITTEN" (count corpus) (count (string/split cases "\n")))
