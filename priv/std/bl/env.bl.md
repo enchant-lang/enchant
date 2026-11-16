@@ -26,8 +26,7 @@ as data. A broken `env.bl` degrades what the tree can do — its tasks, its port
 ```beam-lisp silent
 (ns bl.env
   (:require [bl.util :as u] [bl.loading-policy :as loading]
-            [bl.native-declarations :as native-declarations]
-            [bl.source-imports :as source-imports]))
+            [bl.native-declarations :as native-declarations]))
 ```
 
 ## Discovery
@@ -74,6 +73,15 @@ way from anywhere inside it.
                  (and (map? provider) (string? (:source provider)) (string? (:world provider))
                       (or (nil? (:factory provider)) (symbol? (:factory provider)))))
     ["invalid :auth/realm: source and world required"])))))
+
+(defn source-import-errors [imports]
+ (if (or (nil? imports)
+         (and (map? imports) (<= (count imports) 64)
+              (every? (fn [[name spec]]
+                (and (keyword? name) (map? spec) (= #{:file :hash} (set (keys spec)))
+                     (string? (:file spec)) (not (blank? (:file spec)))
+                     (string? (:hash spec)) (Regex/match? #"^sha256:[0-9a-f]{64}$" (:hash spec)))) imports)))
+  [] ["invalid :source/imports: map of names to {:file bundle :hash sha256:<64 lowercase hex>} required"]))
 
 (def file-name "env.bl")
 
@@ -965,7 +973,7 @@ shape, whatever the file said.
      :browser brw
      :catalog cat
      :android andr
-     :errors (concat (source-imports/errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
+     :errors (concat (source-import-errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
                      fnderr brerr cerr lerr anderr
                      (map (fn [k] (str "unknown key " k)) (unknown-keys m known-keys)))}))
 

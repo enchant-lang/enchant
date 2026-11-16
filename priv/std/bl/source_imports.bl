@@ -1,6 +1,6 @@
 ;; File-referenced source libraries, loaded into the consumer's ordinary realm.
 ;; Reading a bundle never evaluates its contents or adopts provider env settings.
-(ns bl.source-imports (:require [clojure.edn :as edn] [source-graph :as graph]))
+(ns bl.source-imports (:require [bl.env :as project] [clojure.edn :as edn] [source-graph :as graph]))
 (def FORMAT "enchant.source-bundle/1")
 (def MAX-SOURCES 256)
 (def MAX-BYTES 8388608)
@@ -10,15 +10,7 @@
  (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower))))
 (defn- namespace? [name]
  (and (string? name) (Regex/match? #"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*)*$" name)))
-(defn- hash? [value]
- (and (string? value) (Regex/match? #"^sha256:[0-9a-f]{64}$" value)))
-(defn errors [imports]
- (if (or (nil? imports)
-         (and (map? imports) (<= (count imports) 64)
-              (every? (fn [[name spec]]
-                (and (keyword? name) (map? spec) (= #{:file :hash} (set (keys spec)))
-                     (string? (:file spec)) (not (blank? (:file spec))) (hash? (:hash spec)))) imports)))
-  [] ["invalid :source/imports: map of names to {:file bundle :hash sha256:<64 lowercase hex>} required"]))
+(defn errors [imports] (project/source-import-errors imports))
 (defn- source-file [root relative]
  (when-not (and (string? relative) (not (blank? relative))
                 (= :relative (Path/type relative))
@@ -45,7 +37,11 @@
        sources (mapv (fn [[name relative]]
                  (when-not (namespace? name) (fail :namespace {:namespace name}))
                  (let [path (source-file (Path/dirname file) relative)
-                       raw (File/read! path) source (BeamLisp.Loader/read_source path)]
+                       raw (File/read! path)
+                       source (case (Path/extname path)
+                                ".org" (BeamLisp.Loader/doc_source raw :org)
+                                ".md" (BeamLisp.Loader/doc_source raw :md)
+                                raw)]
                   (when-not (= name (BeamLisp.Loader/declared_ns source))
                    (fail :namespace-mismatch {:namespace name :file path}))
                   {:namespace name :file path :source source :requires (vec (second (graph/header source)))
