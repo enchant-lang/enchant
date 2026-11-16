@@ -64,6 +64,45 @@ The keys a project may declare:
   live in `bl.lock`, not here, so the declaration cannot disagree with itself.
 - `:browser` — how the tree reaches a browser provider. See
   [Talking to a browser](#talking-to-a-browser).
+- `:source/imports` — content-pinned, file-referenced namespace bundles. Source
+  libraries load in the consumer's ordinary realm; they do not adopt the
+  provider's environment, tasks, grants or running world.
+
+## Importing a source library
+
+Declare a finite bundle in its owning repository, as data:
+
+```clojure
+;; editor.bundle.bl
+{:format "enchant.source-bundle/1"
+ :sources {"omega.editor" "src/omega/editor.bl"
+           "omega.document-source" "src/omega/document_source.bl"
+           "buffer.merge" "spikes/workspace/buffer/merge.bl"}}
+```
+
+Reference that file from the consumer's `env.bl`:
+
+```clojure
+{:source/imports
+ {:omega {:file "../omega/editor.bundle.bl" :hash "sha256:<64 lowercase hex>"}}}
+```
+
+Compute the pin with `bl.source-imports/fingerprint`. It binds the manifest
+and every listed file's exact bytes. An intentional library change requires
+updating the consumer pin. Dependencies must be listed in the selected bundles
+or supplied by the selected SDK. Bundles are read as EDN, never evaluated.
+Absolute paths, parent traversal and symlinks within a bundle are refused.
+
+Before compilation, the runtime verifies the pins and materializes only the
+listed namespaces beneath `.bl/source-imports/<hash>/`. This is generated
+dependency storage, not vendored source. Ordinary `:require` and existing source
+packagers then use these files. The receipt retains original file locations
+and hashes. Local namespace collisions and SDK replacements are refused.
+
+The same activation happens for CLI commands and directly opened VM realms.
+Different consumers retain their own realm namespace ownership. This mechanism
+imports code; `:auth/imports` separately imports a checked application API with
+provider-owned authority. Neither declaration implies the other.
 
 Anything else is reported as an unknown key. A typo that silently does nothing
 is the worst kind of configuration bug, so it is not allowed to be silent:

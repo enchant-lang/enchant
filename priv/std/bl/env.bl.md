@@ -26,7 +26,8 @@ as data. A broken `env.bl` degrades what the tree can do — its tasks, its port
 ```beam-lisp silent
 (ns bl.env
   (:require [bl.util :as u] [bl.loading-policy :as loading]
-            [bl.native-declarations :as native-declarations]))
+            [bl.native-declarations :as native-declarations]
+            [bl.source-imports :as source-imports]))
 ```
 
 ## Discovery
@@ -235,7 +236,7 @@ problems reports all three in one pass.
 ```beam-lisp silent
 (def known-keys [:name :instance :bl :warm :vm :realm :shadow :uses :paths :tasks :ports
                  :schedules :env :loading :doc :app :build :release :deps :browser :catalog :foundry :android
-                 :auth/imports :auth/realms :auth/realm])
+                 :auth/imports :auth/realms :auth/realm :source/imports])
 
 ;; How `bl` reaches a warm VM for this tree. The LAUNCHER reads this key (it must
 ;; decide before any VM exists), so the vocabulary lives in
@@ -936,7 +937,8 @@ shape, whatever the file said.
         [brw brerr]    (norm-browser (:browser m))
         [cat cerr]     (norm-catalog (:catalog m) root)
         [andr anderr]  (norm-android (:android m))]
-    {:auth/imports (:auth/imports m)
+    {:source/imports (:source/imports m)
+     :auth/imports (:auth/imports m)
      :auth/realms (:auth/realms m)
      :auth/realm (:auth/realm m)
      :path path
@@ -963,7 +965,7 @@ shape, whatever the file said.
      :browser brw
      :catalog cat
      :android andr
-     :errors (concat (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
+     :errors (concat (source-imports/errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
                      fnderr brerr cerr lerr anderr
                      (map (fn [k] (str "unknown key " k)) (unknown-keys m known-keys)))}))
 

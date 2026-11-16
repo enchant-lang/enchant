@@ -1,0 +1,97 @@
+;; File-referenced source libraries, loaded into the consumer's ordinary realm.
+;; Reading a bundle never evaluates its contents or adopts provider env settings.
+(ns bl.source-imports (:require [clojure.edn :as edn] [source-graph :as graph]))
+(def FORMAT "enchant.source-bundle/1")
+(def MAX-SOURCES 256)
+(def MAX-BYTES 8388608)
+(defn- fail [reason data]
+ (throw (ex-info "Source import refused" (assoc data :kind :source-import :reason reason))))
+(defn- digest [source]
+ (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower))))
+(defn- namespace? [name]
+ (and (string? name) (Regex/match? #"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*)*$" name)))
+(defn- hash? [value]
+ (and (string? value) (Regex/match? #"^sha256:[0-9a-f]{64}$" value)))
+(defn errors [imports]
+ (if (or (nil? imports)
+         (and (map? imports) (<= (count imports) 64)
+              (every? (fn [[name spec]]
+                (and (keyword? name) (map? spec) (= #{:file :hash} (set (keys spec)))
+                     (string? (:file spec)) (not (blank? (:file spec))) (hash? (:hash spec)))) imports)))
+  [] ["invalid :source/imports: map of names to {:file bundle :hash sha256:<64 lowercase hex>} required"]))
+(defn- source-file [root relative]
+ (when-not (and (string? relative) (not (blank? relative))
+                (= :relative (Path/type relative))
+                (not (includes? relative "\\"))
+                (every? #(not (contains? #{"" "." ".."} %)) (String/split relative "/")))
+  (fail :source-path {:file relative}))
+ (loop [directory root parts (String/split relative "/")]
+  (let [path (Path/join directory (first parts)) kind (:type (File/lstat! path))]
+   (when-not (= kind (if (seq (rest parts)) :directory :regular))
+    (fail :source-path {:file relative}))
+   (if (seq (rest parts)) (recur path (rest parts)) path))))
+(defn inspect
+ "Capture a finite source bundle as data. Its hash binds manifest and exact
+  file bytes; source paths and digests remain available for provenance."
+ [file]
+ (let [file (Path/expand file) raw (File/read! file)
+       _ (when (> (erlang/byte_size raw) 65536) (fail :manifest-bound {:file file}))
+       forms (edn/read-string-all raw) manifest (first forms)
+       _ (when-not (and (= 1 (count forms)) (map? manifest)
+                         (= FORMAT (:format manifest))
+                         (= #{:format :sources} (set (keys manifest)))
+                         (map? (:sources manifest)) (<= 1 (count (:sources manifest)) MAX-SOURCES))
+           (fail :manifest {:file file}))
+       sources (mapv (fn [[name relative]]
+                 (when-not (namespace? name) (fail :namespace {:namespace name}))
+                 (let [path (source-file (Path/dirname file) relative)
+                       raw (File/read! path) source (BeamLisp.Loader/read_source path)]
+                  (when-not (= name (BeamLisp.Loader/declared_ns source))
+                   (fail :namespace-mismatch {:namespace name :file path}))
+                  {:namespace name :file path :source source :requires (vec (second (graph/header source)))
+                   :hash (digest raw)}))
+                (sort-by first (:sources manifest)))
+       bytes (reduce + (erlang/byte_size raw) (map #(erlang/byte_size (:source %)) sources))]
+  (when (> bytes MAX-BYTES) (fail :source-bound {:file file}))
+  {:file file :sources sources
+   :hash (str "sha256:" (digest (pr-str [FORMAT (digest raw) (mapv #(vector (:namespace %) (:hash %)) sources)])))}))
+(defn fingerprint [file] (:hash (inspect file)))
+(defn- relative-source [namespace]
+ (str (String/replace (String/replace namespace "." "/") "-" "_") ".bl"))
+(defn- materialize! [root bundle]
+ (let [directory (Path/join root (str ".bl/source-imports/" (subs (:hash bundle) 7)))
+       receipt (Path/join directory "source.edn")]
+  (doseq [{:keys [namespace source]} (:sources bundle)]
+   (when (BeamLisp.AOT/sdk_library_unit? namespace)
+    (fail :sdk-namespace {:namespace namespace}))
+   (let [file (Path/join directory (relative-source namespace))]
+    (File/mkdir_p! (Path/dirname file))
+    (when (and (File/exists? file) (not= source (File/read! file)))
+     (fail :snapshot-changed {:namespace namespace :file file}))
+    (when-not (File/exists? file) (File/write! file source))))
+  (File/write! receipt (pr-str (update bundle :sources #(mapv (fn [source] (dissoc source :source)) %))))
+  directory))
+(defn prepare!
+ "Verify every pin and namespace collision before materializing dependency
+  roots. No provider namespace, task, grant or initializer is executed."
+ [project]
+ (let [imports (:source/imports project)]
+  (when (seq (errors imports)) (fail :configuration {:errors (errors imports)}))
+  (let [bundles (mapv (fn [[name spec]]
+                   (let [bundle (inspect (Path/expand (:file spec) (:root project)))]
+                    (when-not (= (:hash spec) (:hash bundle))
+                     (fail :hash-mismatch {:import name :expected (:hash spec) :actual (:hash bundle)}))
+                    bundle)) (sort-by first imports))
+        names (mapcat #(map :namespace (:sources %)) bundles)]
+   (when-not (= (count names) (count (set names))) (fail :duplicate-namespace {}))
+   (doseq [bundle bundles source (:sources bundle) dependency (:requires source)]
+    (when-not (or (contains? (set names) dependency) (BeamLisp.AOT/sdk_library_unit? dependency))
+     (fail :missing-dependency {:namespace (:namespace source) :dependency dependency})))
+   (doseq [name names root (:paths project)
+           :let [path (Path/join root (relative-source name))]
+           :when (File/regular? path)]
+    (fail :namespace-collision {:namespace name :file path}))
+   (mapv #(materialize! (:root project) %) bundles))))
+(defn activate! [project]
+ (doseq [path (prepare! project)] (BeamLisp.Env/add_search_path path))
+ :ok)

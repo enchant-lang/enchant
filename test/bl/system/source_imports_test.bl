@@ -1,0 +1,65 @@
+(ns system.source-imports-test
+ (:require [bl.source-imports :as imports] [bl.env :as project] [vm.spec :as spec]
+           [vm.core :as vm] [env]))
+(defn scratch [f]
+ (let [root (str (System/tmp_dir!) "/source-import-" (erlang/unique_integer (list :positive)))]
+  (File/mkdir_p! root)
+  (try (f root) (finally (File/rm_rf! root)))))
+(defn write! [root name source]
+ (let [path (Path/join root name)] (File/mkdir_p! (Path/dirname path)) (File/write! path source) path))
+(defn fixture [root]
+ (write! root "provider/src/example/library.bl" "(ns example.library) (defn value [] 42)")
+ (write! root "provider/library.bl" (pr-str {:format imports/FORMAT :sources {"example.library" "src/example/library.bl"}})))
+(defn config [root file]
+ {:root root :paths [] :source/imports {:library {:file file :hash (imports/fingerprint file)}}})
+(defn reason [f] (try (f) nil (catch e (:reason (ex-data e)))))
+(deftest declarations-are-data-and-bind-exact-file-bytes
+ (scratch (fn [root]
+  (let [file (fixture root) p (config root file) hash (imports/fingerprint file)
+        normalized (project/normalize (dissoc p :root) root nil)]
+   (is (empty? (:errors normalized)))
+   (is (= (:source/imports p) (:source/imports normalized)))
+   (is (= hash (imports/fingerprint file)))
+   (let [directory (first (imports/prepare! p))]
+    (is (= "(ns example.library) (defn value [] 42)" (File/read! (str directory "/example/library.bl"))))
+    (is (File/regular? (str directory "/source.edn"))))
+   (write! root "provider/src/example/library.bl" "(ns example.library) (defn value [] 43)")
+   (is (= :hash-mismatch (reason #(imports/prepare! p))))
+   (is (not= hash (imports/fingerprint file)))))))
+(deftest bundles-do-not-evaluate-source-and-are-closed-over-project-dependencies
+ (scratch (fn [root]
+  (let [file (fixture root)]
+   (write! root "provider/src/example/library.bl"
+     "(ns example.library (:require [example.missing])) (File/write! \"must-not-exist\" \"bad\")")
+   (is (string? (imports/fingerprint file)))
+   (is (= :missing-dependency (reason #(imports/prepare! (config root file)))))
+   (is (not (File/exists? (str root "/must-not-exist"))))))))
+(deftest stale-copies-and-namespace-collisions-refuse
+ (scratch (fn [root]
+  (let [file (fixture root) p (config root file) directory (first (imports/prepare! p))]
+   (write! directory "example/library.bl" "tampered")
+   (is (= :snapshot-changed (reason #(imports/prepare! p))))
+   (write! root "src/example/library.bl" "(ns example.library)")
+   (is (= :namespace-collision (reason #(imports/prepare! (assoc p :paths [(str root "/src")])))))
+   (is (= :duplicate-namespace (reason #(imports/prepare! (assoc-in p [:source/imports :other] (get-in p [:source/imports :library]))))))))))
+(deftest source-paths-and-namespace-identities-are-explicit
+ (scratch (fn [root]
+  (let [file (fixture root)]
+   (doseq [path ["../outside.bl" "/outside.bl" "src/../outside.bl"]]
+    (write! root "provider/library.bl" (pr-str {:format imports/FORMAT :sources {"example.library" path}}))
+    (is (= :source-path (reason #(imports/inspect file)))))
+   (fixture root)
+   (write! root "provider/src/example/library.bl" "(ns another.library)")
+   (is (= :namespace-mismatch (reason #(imports/inspect file))))))))
+(deftest imported-code-belongs-to-the-consumer-realm-and-the-pin-is-in-its-spec
+ (scratch (fn [root]
+  (let [file (fixture root) declaration (dissoc (config root file) :root :paths)
+        _ (write! root "env.bl" (pr-str (assoc declaration :name "source-consumer")))
+        s (spec/read root) instance (vm/spawn-vm s)]
+   (try
+    (is (= (:source/imports declaration) (:source-imports s)))
+    (is (= 42 (env/with-env (:env instance)
+                #(do (BeamLisp.Loader/ensure_loaded "example.library")
+                     ((BeamLisp.Env/fetch! "example.library" "value"))))))
+    (is (= :error (BeamLisp.Env/peek "example.library" "value")))
+    (finally (vm/drain instance)))))))
