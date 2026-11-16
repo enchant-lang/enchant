@@ -81,6 +81,14 @@
        (when-not @stopped
         (swap! samples conj (try (get! port) (catch _ :error)))
         (Process/sleep 10) (recur))))))
+    ;; Opt-in local diagnostics for the disposable fixture only. Public Foundry
+    ;; refusal categories deliberately do not expose host exception details.
+    (when (= "1" (System/get_env "STATION_PROTOTYPE_DIAGNOSTICS"))
+     (doseq [module (BeamLisp.Env/callback_modules
+                     (BeamLisp.Env/fetch! "foundry.upgrade.lifecycle" "admission!"))]
+      (erlang/trace_pattern (tuple module :_ :_)
+       (list (tuple :_ (list) (list (tuple :exception_trace)))) (list :local)))
+     (erlang/trace (:owner @owned) true (list :call)))
     ;; This cold, contended sandbox gets an explicit bounded admission budget.
     ;; A timeout is never retried as a fresh operation; the same journal wins.
     (let [reply (GenServer/call (:owner @owned)
@@ -88,6 +96,10 @@
                           "expectedGeneration" (:generation before) "idempotencyKey" "prototype-source-update"}]
                  60000)]
      (when (:admission-error reply)
+      (when (= "1" (System/get_env "STATION_PROTOTYPE_DIAGNOSTICS"))
+       (loop [n 0]
+        (when (< n 40)
+         (receive event (do (println (inspect event)) (recur (inc n))) (after 100 nil)))))
       (throw (ex-info (str "Native admission refused: " (:admission-error reply)) reply))))
     (checks/check! "candidate serves new requests while the old WebSocket remains open"
      (checks/eventually #(= "prototype-new" (get (get! port) "version")) 90000))
