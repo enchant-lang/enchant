@@ -6,7 +6,12 @@ let
   selected = builtins.fromJSON (builtins.unsafeDiscardStringContext
     (builtins.readFile (builtins.storePath sdk + "/artifact.json")));
   image = builtins.storePath selected.image;
-  tools = builtins.storePath (builtins.fromJSON (builtins.unsafeDiscardStringContext (builtins.readFile ../portable-tools.json))).tools;
+  # Installed producers carry this receipt beside nix/. In a checkout, use
+  # the selected SDK's producer receipt rather than rebuilding current tools.
+  toolsReceipt = if builtins.pathExists ../portable-tools.json then ../portable-tools.json
+    else builtins.storePath selected.platform + "/artifact-platform/portable-tools.json";
+  tools = builtins.storePath (builtins.fromJSON (builtins.unsafeDiscardStringContext
+    (builtins.readFile toolsReceipt))).tools;
 in
 assert builtins.match "/nix/store/[0-9a-z]{32}-[^/]+" sdk != null;
 assert selected.version == 1 && selected.kind == "sdk";
