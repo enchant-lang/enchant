@@ -56,9 +56,7 @@
                         (t2 :exchange_version 4) (t2 :exchange_version 5)
                         (t2 :put 2) (t2 :seen 0) (t2 :seen_admit 2)
                         (t2 :collect_cycles 0) (t2 :collector_status 0)
-                        (t2 :dependencies 1) (t2 :deps_scalar? 1)
-                        (t2 :deps_lazy_node? 1) (t2 :deps_scalar_list? 1)
-                        (t2 :deps_walk 6) (t2 :cursor 1)
+                        (t2 :cursor 1)
                         (t2 :cursor_dirty_chunks? 1) (t2 :cursor_chunk 1)
                         (t2 :cursor_chunk 2) (t2 :estimate_bytes 1)
                         (t2 :admit! 0) (t2 :new 3) (t2 :read 1)
@@ -73,6 +71,10 @@
                   (catch e (BeamLisp.ExInfo/ex_original e))))
           "the unbound stub refuses without touching the production NIF")
       (is (not (erlang/function_exported probe :__info__ 1)))
+      (is (every? (fn [entry] (not (erlang/function_exported probe (elem entry 0) (elem entry 1))))
+                  (list (t2 :dependencies 1) (t2 :deps_walk 6) (t2 :deps_env 3)
+                        (t2 :deps_clean_hit? 2) (t2 :plain! 1)))
+          "big-O item M: no dependency walk and no clean-value memo remain")
       (is (File/exists? path)))
     (File/rm_rf! dir)))
 
@@ -86,32 +88,17 @@
     (File/rm_rf! a)
     (File/rm_rf! b)))
 
-; ── the pure dependency predicates answer with no native cell ─────────────
+; ── sizing is pure ──────────────────────────────────────────────────────
 ;
-; `deps_scalar?`/`deps_scalar_list?`/`deps_lazy_node?` gate the memo graph's
-; walk: a scalar — or a flat list of scalars — can hold no resource, so it is
-; answered WITHOUT touching the native cell. On a probe atom the NIF is
-; deliberately unbound, so a predicate that reached for it would raise
-; `:nif_not_loaded` instead of answering; these must be pure. PORTED from
-; perf/lazy-engine 5340975e `test/bl/host_lazy_test.bl` (`memo-pinned-surface`);
-; the facade/stub surface it also held is already covered above.
-(deftest the-pure-dependency-predicates-answer-without-the-nif
+; `estimate_bytes/1` answers without the native cell: on a probe atom the NIF is
+; deliberately unbound, so reaching for it would raise `:nif_not_loaded`.
+(deftest estimate-bytes-answers-without-the-nif
   (let [dir (str (System/tmp_dir!) "/bl_lazy_host_" (erlang/unique_integer (list :positive)))
         _ (compile-probe dir)]
-    (testing "scalars, flat scalar lists and a lazy node, judged without the NIF"
-      (is (erlang/apply probe :deps_scalar? (list 42)))
-      (is (not (erlang/apply probe :deps_scalar? (list [1]))))
-      (is (erlang/apply probe :deps_scalar_list? (list (list 1 2 3))))
-      (is (not (erlang/apply probe :deps_scalar_list? (list (list 1 (fn [] 1))))))
-      (is (erlang/apply probe :deps_lazy_node?
-            (list (BeamLisp.LazySeq/new (fn [] 1)))))
-      (is (not (erlang/apply probe :deps_lazy_node? (list 42))))
-      ; `estimate_bytes/1` is pure too, and agrees with the live module.
-      (is (= (erlang/apply :Elixir.BeamLisp.LazyMemo :estimate_bytes (list (list 1 2 3)))
-             (erlang/apply probe :estimate_bytes (list (list 1 2 3))))))
+    (is (= (erlang/apply :Elixir.BeamLisp.LazyMemo :estimate_bytes (list (list 1 2 3)))
+           (erlang/apply probe :estimate_bytes (list (list 1 2 3)))))
+    (is (= 64 (erlang/apply probe :estimate_bytes (list (tuple :running (erlang/self) 1 ())))))
     (File/rm_rf! dir)))
-
-
 
 (deftest filesystem-lock-loads-before-any-language-module-is-available
  (let [root (Path/join (System/tmp_dir!) (str "bl-memo-preboot-" (erlang/unique_integer (list :positive))))

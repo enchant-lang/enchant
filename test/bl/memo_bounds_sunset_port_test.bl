@@ -27,13 +27,13 @@
 ;   "CAS compares exactly and notifies only a committed transition"
 ;       → cas-compares-exactly-and-notifies-only-a-committed-transition
 ;   "bare handles are tracked and cycles do not change the cell"
-;       → bare-handles-are-tracked-and-cycles-do-not-change-the-cell
+;       → the-nif-still-refuses-explicit-cyclic-edges-and-the-host-passes-none
 ;   "metadata dependencies cannot conceal a cycle"
-;       → metadata-dependencies-cannot-conceal-a-cycle
+;       → a-published-value-may-embed-its-own-node
 ;   "a result that refers to its evaluator is rejected on the first force"
 ;       → a-result-that-refers-to-its-evaluator-is-rejected-on-the-first-force
 ;   "failure diagnostics cannot retain their own memo"
-;       → failure-diagnostics-cannot-retain-their-own-memo
+;       → a-failure-diagnostic-may-retain-its-own-memo
 ;   "an attached waiter sees its failed attempt after owner exit and a successful retry"
 ;       → an-attached-waiter-sees-its-failed-attempt-after-owner-exit-and-a-retry
 ;   "a small-element cursor pulls chunks on the fast lane and preserves order"
@@ -62,7 +62,9 @@
 ;       → native-library-repeatedly-unloads-after-reclamation-without-a-stray-thread
 ;
 ; Every `assert`/`refute`/`assert_raise`/`assert_receive`/`refute_received`
-; becomes one `is`, so the assertion count is unchanged (71).
+; becomes one `is`. Big-O item M replaced the three retained-cycle cases
+; (bare handles, metadata, failure diagnostics) with the contract that replaced
+; them: no host edges, alias and force cycles detected at force time.
 ;
 ; ── ADAPTATIONS, and why each one is not a weakening ──────────────────────
 ;
@@ -194,23 +196,28 @@
     (flush-message! tag)
     (is (= :right (BeamLisp.LazyMemo/read resource)))))
 
-(deftest bare-handles-are-tracked-and-cycles-do-not-change-the-cell
+; Big-O item M: the host feeds the NIF no edges, so a retained data cycle is
+; ordinary data (the cycle collector reclaims it). The NIF's edge API itself is
+; unchanged, and still refuses an explicit cyclic edge set.
+(deftest the-nif-still-refuses-explicit-cyclic-edges-and-the-host-passes-none
   (let [a (BeamLisp.LazyMemo/create :pending)
-        b (BeamLisp.LazyMemo/create (tuple :child a))]
-    (is (= (list b) (BeamLisp.LazyMemo/dependencies (tuple b (erlang/make_ref)))))
-    (is (= :cycle (BeamLisp.LazyMemo/exchange a :pending (tuple :child b))))
-    (is (= :pending (BeamLisp.LazyMemo/read a)) "a refused CAS leaves the cell alone")))
+        b (BeamLisp.LazyMemo/new (tuple :child a) (list a) 64)]
+    (is (= :cycle (BeamLisp.LazyMemo/compare_exchange a :pending (tuple :child b) (list b) 64)))
+    (is (= :pending (BeamLisp.LazyMemo/read a)) "a refused CAS leaves the cell alone")
+    (let [c (BeamLisp.LazyMemo/create (tuple :child a))]
+      (is (= :ok (BeamLisp.LazyMemo/exchange a :pending (tuple :child c)))
+          "the host door adds no edge, so a data cycle is accepted")
+      (is (= (tuple :child c) (BeamLisp.LazyMemo/read a))))))
 
-(deftest metadata-dependencies-cannot-conceal-a-cycle
+(deftest a-published-value-may-embed-its-own-node
   (let [root (BeamLisp.LazySeq/new (fn [] :root))
         other (BeamLisp.LazySeq/new (fn [] :other))
         wrapped (maps/put :metadata {:root root} other)
         resource (erlang/map_get :resource root)]
-    (is (= :cycle
+    (is (= :ok
            (BeamLisp.LazyMemo/exchange resource
              (BeamLisp.LazyMemo/read resource) (tuple :completed wrapped))))
-    (let [st (BeamLisp.LazyMemo/read resource)]
-      (is (and (erlang/is_tuple st) (erlang/== :pending (erlang/element 1 st)))))))
+    (is (erlang/=:= wrapped (BeamLisp.LazySeq/force root)))))
 
 (deftest a-result-that-refers-to-its-evaluator-is-rejected-on-the-first-force
   (let [holder (erlang/apply :ets :new (list :cyclic_result_fixture (list :public)))
@@ -223,16 +230,19 @@
     (is (= (tuple :terminal :cyclic_memo) (BeamLisp.LazySeq/memo_state lazy)))
     (erlang/apply :ets :delete (list holder))))
 
-(deftest failure-diagnostics-cannot-retain-their-own-memo
+(deftest a-failure-diagnostic-may-retain-its-own-memo
+  ;; Not a force cycle: the failure is recorded and replayed bit for bit, and
+  ;; the cell stays retryable.
   (let [holder (erlang/apply :ets :new (list :cyclic_error_fixture (list :public)))
         lazy (BeamLisp.LazySeq/new
                (fn [] (erlang/throw
                         (erlang/element 2
                           (first (erlang/apply :ets :lookup (list holder :value)))))))]
     (erlang/apply :ets :insert (list holder (tuple :value lazy)))
-    (is (includes? (force-error lazy) "cyclic_memo")
-        "a failure diagnostic that retains its own memo refuses as cyclic_memo")
-    (is (= (tuple :terminal :cyclic_memo) (BeamLisp.LazySeq/memo_state lazy)))
+    (is (= [:throw true]
+           (try (BeamLisp.LazySeq/force lazy) [:no-throw false]
+                (catch-raw [kind reason _stack] [kind (erlang/=:= reason lazy)]))))
+    (is (= :failed (erlang/element 1 (BeamLisp.LazySeq/memo_state lazy))))
     (erlang/apply :ets :delete (list holder))))
 
 (deftest an-attached-waiter-sees-its-failed-attempt-after-owner-exit-and-a-retry
