@@ -5,7 +5,7 @@ let
   executable = pkgs.runCommand "beam-lisp-portable-executable" {
     nativeBuildInputs = [ pkgs.jq pkgs.coreutils ];
   } ''
-    test "$(jq -er '.version == 1 and .kind == "release" and .packaging == "portable-shell-v1" and .file == "bl.drop"' ${release}/artifact.json)" = true
+    test "$(jq -er '.version == 1 and .kind == "release" and .packaging == "portable-shell-v1" and .target == "x86_64-linux" and .file == "bl.drop"' ${release}/artifact.json)" = true
     test "$(sha256sum ${release}/bl.drop | cut -d' ' -f1)" = "$(jq -er .sha256 ${release}/artifact.json)"
     install -Dm555 ${release}/bl.drop "$out/bin/bl"
     install -Dm444 ${release}/artifact.json "$out/share/beam-lisp/artifact.json"
