@@ -73,10 +73,43 @@
  (str "(let* ((actual-callee " (emit function (operand-options options)) ") "
       "(actual-arguments " (emit arguments (operand-options options)) ")) "
       (source-call node (str "(" operation " actual-callee actual-arguments)") options) ")"))
+(defn- linked-operands
+ "Bind operands in source order to fresh a<i> variables. With :inline?, a
+  variable or literal operand (no effect, no order) is passed in place."
+ [inline? args options]
+ (let [parts (map-indexed (fn [i arg]
+               (let [value (emit arg (operand-options options))]
+                (if (and inline? (contains? #{:var :lit} (:op arg))) [nil value]
+                 [(str "(a" i " " value ")") (str "a" i)]))) args)]
+  [(vec (keep first parts)) (mapv second parts)]))
+(defn- linked-call
+ "An AOT-linked remote: {:call (fn [operands] expression) :inline? bool}.
+  The target cell is read after its operands, as the live wrapper did."
+ [node link args options]
+ (let [[binds operands] (linked-operands (:inline? link) args options)
+       call (source-call node ((:call link) operands) options)]
+  (if (empty? binds) call (str "(let* (" (string/join " " binds) ") " call ")"))))
+(defn- static-arguments [n]
+ (loop [n n items []]
+  (case (:op n) :enil items :cons (recur (:tail n) (conj items (:head n))) nil)))
+(defn- linked-language-call
+ "AOT invoke fast path: a procedure is applied directly; every other callee
+  takes bl-invoke. Callee first, then arguments, in source order."
+ [function arguments options]
+ (let [callee (emit function (operand-options options)) items (static-arguments arguments)]
+  (if items
+   (let [[binds operands] (linked-operands true items options)
+         spread (string/join "" (map #(str " " %) operands))
+         call (str "(if (procedure? callee) (callee" spread ") (bl-invoke callee (list" spread ")))")]
+    (str "(let ((callee " callee ")) "
+         (if (empty? binds) call (str "(let* (" (string/join " " binds) ") " call ")")) ")"))
+   (str "(let* ((callee " callee ") (arguments " (emit arguments (operand-options options)) ")) "
+        "(if (procedure? callee) (apply callee arguments) (bl-invoke callee arguments)))"))))
 (defn- ordered-language-call [node function arguments options]
- (if (:source-frames? options)
-  (ordered-target-call node function arguments "bl-invoke" options)
-  (ordered "bl-invoke" [function arguments] options)))
+ (cond
+  (:source-frames? options) (ordered-target-call node function arguments "bl-invoke" options)
+  (:aot-link options) (linked-language-call function arguments options)
+  :else (ordered "bl-invoke" [function arguments] options)))
 
 (defn pattern [p options]
  (let [op (:pop p)]
@@ -400,12 +433,14 @@
   :remote (if (and (:source-frames? options) (= :erlang (:mod n))
                     (= :apply (:fun n)) (= 2 (count (:args n))))
             (ordered-target-call n (first (:args n)) (second (:args n)) "native-raw-apply" options)
+            (if-let [link (when-let [aot (:aot-link options)] ((:remote aot) n))]
+             (linked-call n link (:args n) options)
             (let [callee (remote n options) intrinsic (integer-intrinsic n options)]
              ; Resolve first so the exact pinned primitive remains in the
              ; artifact's activation check even when its call is eliminated.
              (when (and intrinsic (:emission-counts options))
               (swap! (:emission-counts options) update :integer-intrinsics (fnil inc 0)))
-             (ordered-call n (or intrinsic callee) (:args n) options)))
+             (ordered-call n (or intrinsic callee) (:args n) options))))
   :arith (if-let [f (or (when-let [resolver (:arithmetic-resolver options)] (resolver n))
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
   :apply (ordered-language-call n (:fn n) (argument-list (:args n)) options)

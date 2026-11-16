@@ -38,7 +38,7 @@ def main():
                        "fixtures/native-posix-check.scm", "fixtures/host-lazy-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
                        "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
-                       "fixtures/host-compiler-cache-check.scm", "fixtures/host-global-cache-check.scm",
+                       "fixtures/host-link-check.scm", "fixtures/host-global-cache-check.scm",
                        "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm",
                        "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
@@ -80,12 +80,12 @@ def main():
     assert "NATIVE_OPTIONAL_INPUT_DEADLINE_ABI_PASS 18" in extra, extra
     (out / "source-frames.scm").write_text(common + "\n"
         + (BASE / "host/host-compiler.scm").read_text() + "\n"
-        + (BASE / "fixtures/host-compiler-cache-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/host-link-check.scm").read_text() + "\n"
         + (BASE / "fixtures/host-global-cache-check.scm").read_text() + "\n"
         + (BASE / "host/host-source-frames.scm").read_text() + "\n"
         + (BASE / "fixtures/host-source-frames-check.scm").read_text())
     frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
-    assert "native compiler-cache checks: 96" in frames, frames
+    assert "native link checks: 56" in frames, frames
     assert "native global-cache checks: 48" in frames, frames
     assert "native source-frame checks passed" in frames, frames
     (out / "posix.scm").write_text(common + "\n"
