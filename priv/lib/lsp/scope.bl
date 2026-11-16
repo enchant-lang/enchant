@@ -1,0 +1,89 @@
+;; Completion scope over the compiler-owned contextual Reader, never evaluation.
+(ns lsp.scope (:require [syntax :as syntax] [typed]))
+(defn- label [node]
+ (case (:tag node) :symbol (elem (:value node) 1) :keyword (:value node) nil))
+(defn- children [node]
+ (if (contains? #{:map :record} (:tag node)) (mapcat identity (:children node)) (:children node [])))
+(defn- inside? [node line col]
+ (let [p (:origin node) sl (:line p) sc (:col p) el (:end-line p) ec (:end-col p)]
+  (and (integer? sl) (integer? el)
+       (or (> line sl) (and (= line sl) (>= col sc)))
+       (or (< line el) (and (= line el) (< col ec))))))
+(defn- before? [node line col]
+ (let [p (:origin node)]
+  (and (integer? (:line p)) (or (< line (:line p)) (and (= line (:line p)) (< col (:col p)))))))
+(defn- names [pattern]
+ (vec (remove #{"&" "_"} (keys (typed/bind-pattern {} (syntax/to-reader pattern) nil)))))
+(defn- bind [locals pattern kind]
+ (reduce #(assoc %1 %2 {:label %2 :kind kind :detail (if (= kind :parameter) "Lexical parameter" "Lexical binding")})
+         locals (names pattern)))
+(declare walk)
+(defn- walk-body [body line col locals]
+ (if-let [node (first (filter #(inside? % line col) body))] (walk node line col locals) locals))
+(defn- bindings-at
+ "Sequential binders expose only earlier names inside an initializer."
+ [pairs line col locals]
+ (loop [pairs pairs locals locals]
+  (if-let [[pattern expression] (first pairs)]
+   (cond
+    (or (inside? pattern line col) (before? pattern line col)) {:at locals}
+    (= "let" (label pattern))
+    (let [result (bindings-at (partition 2 (:children expression)) line col locals)]
+     (cond (contains? result :at) result
+           (inside? expression line col) {:at (:locals result)}
+           :else (recur (rest pairs) (:locals result))))
+    (inside? expression line col) {:at (walk expression line col locals)}
+    (before? expression line col) {:at locals}
+    (contains? #{"when" "while"} (label pattern)) (recur (rest pairs) locals)
+    :else (recur (rest pairs) (bind locals pattern :variable)))
+   {:locals locals})))
+(defn- function-at [tail line col locals self]
+ (let [tail (drop-while #(not (contains? #{:vector :list} (:tag %))) tail)
+       clauses (if (= :vector (:tag (first tail))) [{:params (first tail) :body (rest tail)}]
+                 (mapv (fn [clause] {:params (first (:children clause)) :body (rest (:children clause)) :node clause}) tail))
+       clause (if (= 1 (count clauses)) (first clauses) (first (filter #(inside? (:node %) line col) clauses)))
+       locals (if self (assoc locals self {:label self :kind :function :detail "Lexical function"}) locals)]
+  (if clause (walk-body (:body clause) line col (bind locals (:params clause) :parameter)) locals)))
+(defn- walk [node line col locals]
+ (if (not= :list (:tag node)) (walk-body (children node) line col locals)
+  (let [items (vec (:children node)) head (label (first items)) tail (subvec items 1)]
+   (cond
+    (contains? #{"quote" "syntax-quote"} head) locals
+    (contains? #{"defn" "defn-" "defmacro" "defmacro-"} head)
+    (function-at (rest tail) line col locals nil)
+    (contains? #{"fn" "fn*"} head)
+    (let [named? (= :symbol (:tag (first tail)))]
+     (function-at (if named? (rest tail) tail) line col locals (when named? (label (first tail)))))
+    (contains? #{"let" "let*" "loop" "loop*" "for" "doseq"} head)
+    (let [result (bindings-at (partition 2 (:children (first tail))) line col locals)]
+     (if (contains? result :at) (:at result) (walk-body (rest tail) line col (:locals result))))
+    (contains? #{"when-let" "when-some" "if-let" "if-some"} head)
+    (let [binding (first tail) pattern (first (:children binding)) expression (second (:children binding))
+          else (when (contains? #{"if-let" "if-some"} head) (nth tail 2 nil))]
+     (cond (inside? expression line col) (walk expression line col locals)
+           (or (inside? pattern line col) (before? expression line col)) locals
+           (and else (inside? else line col)) (walk else line col locals)
+           :else (walk-body (rest tail) line col (bind locals pattern :variable))))
+    (= "letfn" head)
+    (let [definitions (:children (first tail))
+          extended (reduce (fn [scope definition]
+                     (let [name (label (first (:children definition)))]
+                      (assoc scope name {:label name :kind :function :detail "Lexical function"}))) locals definitions)]
+     (if-let [definition (first (filter #(inside? % line col) definitions))]
+      (function-at (rest (:children definition)) line col extended (label (first (:children definition))))
+      (walk-body (rest tail) line col extended)))
+    (= "catch" head) (walk-body (rest tail) line col (bind locals (first tail) :variable))
+    :else (walk-body tail line col locals)))))
+(defn visible
+ "Locals at a 1-based Unicode source position. No source or imports execute."
+ [source line col]
+ (let [forms (syntax/read source nil {:world (crypto/hash :sha256 source)
+                                     :namespace 'lsp.scope.program :space 'value :scopes {}})
+       node (first (filter #(inside? % line col) forms))]
+  (if node (vec (sort-by :label (vals (walk node line col {})))) [])))
+(defn imports
+ "Authored import metadata. Capturing a header initializes no provider."
+ [forms]
+ (if-let [form (first forms)]
+  (try (or (second (first (BeamLisp.AOT/namespace_header form))) {})
+       (catch _ {})) {}))

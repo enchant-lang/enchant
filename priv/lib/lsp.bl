@@ -19,7 +19,8 @@
 ; footprint, "prove this invariant", and whole-program impact.
 
 (ns lsp
-  (:require [system.ir :as ir]
+  (:require [lsp.scope :as scope] [env]
+            [system.ir :as ir]
             [system.analyze :as analyze]
             [system.summary :as summary]
             [system.typecheck :as tc]
@@ -876,21 +877,38 @@
 ; ── the rest of the core surface (completion / signature / inlay / …) ─────
 
 (defn completion
-  "textDocument/completion — the names in scope at a point, ranked. Every
-   top-level fn is a candidate; each carries its proven summary so the editor
-   can show `double : (:int) → (:int), pure, terminates` beside the name. A
-   real impl adds lexical locals from the enclosing fn's params; the whole
-   -program names come from the summary table for free."
-  [src _line _col]
-  (let [a (analyzed src)]
-    (map (fn [[name s]]
-           {:label name
-            :detail (str "→ " (tagset-str (:returns s))
-                         (if (empty? (:footprint s)) " · pure" " · effects")
-                         (if (:terminates s) " ↓" " ⟳?"))
-            :kind :function})
-         (filter (fn [[name _s]] (not= analyze/top-name name))
-                 (into [] (:summaries a))))))
+  "Names at a source point: lexical bindings shadow source functions, declared
+   imports and implicit core names. Import discovery never initializes a
+   provider. Hosts may supply static exports for namespaces not loaded here."
+  ([src line col] (completion src line col {}))
+  ([src line col options]
+   (let [a (try (analyzed src) (catch _ {:summaries {} :forms []}))
+         header (scope/imports (:forms a))
+         exports (fn [namespace]
+                   (get-in options [:exports namespace] (BeamLisp.Env/public_names namespace)))
+         implicit (mapv (fn [name] {:label name :kind :variable :detail "Core binding"})
+                    (remove (set (:core-excludes header)) (env/implicit-names)))
+         imported (concat
+                    (mapcat (fn [pair]
+                      (let [alias (elem pair 0) namespace (elem pair 1)]
+                       (mapv (fn [name] {:label (str alias "/" name) :kind :reference :detail (str "From " namespace)}) (exports namespace))))
+                     (:aliases header))
+                    (mapv (fn [pair] {:label (elem pair 0) :kind :reference :detail (str "Declared import from " (elem pair 1))}) (:refers header))
+                    (mapcat (fn [namespace]
+                      (mapv (fn [name] {:label name :kind :reference :detail (str "From " namespace)}) (exports namespace))) (:refer_alls header)))
+         source-bindings (mapv (fn [name] {:label name :kind :variable :detail "Source binding"})
+                           (typed/ordinary-bound-names (:forms a)))
+         functions (mapv (fn [[name s]]
+                       {:label name :detail (str "→ " (tagset-str (:returns s))
+                                          (if (empty? (:footprint s)) " · pure" " · effects")
+                                          (if (:terminates s) " ↓" " ⟳?"))
+                        :kind :function})
+                      (remove #(= analyze/top-name (first %)) (into [] (:summaries a))))
+         locals (try (scope/visible src line col) (catch _ []))
+         entries (reduce (fn [out item] (assoc out (:label item) item)) {}
+                         (concat implicit imported source-bindings functions locals))
+         local-kinds (into {} (map (fn [item] [(:label item) (:kind item)]) locals))]
+    (vec (sort-by (fn [item] [(get {:variable 0 :parameter 1 :function 2} (get local-kinds (:label item)) 3) (:label item)]) (vals entries))))))
 
 (defn- invoke-argc
   "The canonical call's known argument count, or nil for a computed tail."

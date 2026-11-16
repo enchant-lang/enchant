@@ -1,0 +1,34 @@
+(ns system.lsp-completion-scope-test (:require [lsp] [lsp.scope :as scope]))
+(defn labels [source line col] (set (map :label (scope/visible source line col))))
+
+(deftest lexical-completion-is-positioned-and-sequential
+ (let [source "(defn f [outer]\n  (let [first outer\n        second (+ first 1)]\n    (+ first second outer)))\n(defn g [unrelated] unrelated)\n"]
+  (doseq [[line col expected] [[2 15 #{"outer"}] [3 20 #{"outer" "first"}]
+                              [4 10 #{"outer" "first" "second"}] [5 22 #{"unrelated"}]]]
+   (is (= expected (labels source line col))))))
+
+(deftest destructuring-multiple-clauses-and-branch-scope
+ (let [source "(defn f\n  ([x] (+ x 1))\n  ([{:keys [name age] :as person} [first & rest]]\n    (let [{:keys [label] :or {label \"default\"}} person]\n      [name age person first rest label])))"]
+  (is (= #{"x"} (labels source 2 12)))
+  (is (= #{"name" "age" "person" "first" "rest" "label"} (labels source 5 20))))
+ (let [source "(defn f [value]\n (if-let [found value]\n   (identity found)\n   (identity value)))"]
+  (is (contains? (labels source 3 12) "found"))
+  (is (not (contains? (labels source 4 12) "found")))))
+
+(deftest functions-and-comprehensions-retain-lexical-boundaries
+ (let [source "(defn f [values]\n (for [item values :let [named item suffix named] :when named]\n   ((fn local [argument] [item named suffix argument]) item)))"]
+  (is (contains? (labels source 2 44) "named"))
+  (is (not (contains? (labels source 2 44) "suffix")))
+  (is (= #{"values" "item" "named" "suffix" "local" "argument"} (labels source 3 38)))))
+
+(deftest completion-merges-imports-core-and-proof-with-local-shadowing
+ (let [source "(ns completion.example (:require [clojure.string :as text :refer [trim]]))\n(defn map [x] x)\n(defn f [map]\n  (let [local map] (identity local)))"
+       items (lsp/completion source 4 30 {:exports {"clojure.string" ["trim" "upper-case"]}})
+       by-name (into {} (map (fn [item] [(:label item) item]) items))]
+  (is (= :parameter (:kind (get by-name "map"))))
+  (is (= :variable (:kind (get by-name "local"))))
+  (is (contains? by-name "text/upper-case"))
+  (is (contains? by-name "trim"))
+  (is (contains? by-name "reduce"))
+  (is (= "local" (:label (first items)))))
+ (is (seq (lsp/completion "(defn unfinished [x] (" 1 23))))
