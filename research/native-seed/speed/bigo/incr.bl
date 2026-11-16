@@ -1,0 +1,24 @@
+; Does system.incr's alpha-normalized body identity give an O(change) key for
+; the native unit cache? Analyze native/scheme.bl, then a comment-only edit and
+; a one-function edit, and count which definitions keep their identity.
+(ns bigo.incr (:require [compiler] [system.incr :as incr] [clojure.string :as string]))
+(def src (File/read! "research/native-seed/src/native/scheme.bl"))
+(defn timed [label f]
+  (let [t0 (erlang/monotonic_time :millisecond) r (f)]
+    (println label (- (erlang/monotonic_time :millisecond) t0) "ms") r))
+(defn identities [s]
+  (when (= "reset" (first (BeamLisp/argv))) (compiler/reset-fresh!))
+  (into {} (map (fn [[name d]] [name (incr/fn-identity d)]) (system.analyze/fn-bodies s))))
+(def base (timed "identities(base)" (fn [] (identities src))))
+(println "definitions" (count base))
+(def comment-edit (string/replace src "(defn ident [s]" ";; a comment\n(defn ident [s]\n "))
+(def body-edit (string/replace src "(str \"v\" (Enum/join" "(str \"w\" (Enum/join"))
+(doseq [[label s] [["same source" src] ["comment+reindent" comment-edit] ["one body" body-edit]]]
+  (let [ids (timed (str "identities(" label ")") (fn [] (identities s)))
+        changed (sort (filter (fn [k] (not= (get ids k) (get base k))) (keys ids)))]
+    (println label "changed" (count changed) "of" (count ids) (pr-str changed))))
+(let [a (pr-str (get base "literal-items")) b (pr-str (get (identities src) "literal-items"))
+      i (loop [i 0] (if (and (< i (count a)) (< i (count b)) (= (String/at a i) (String/at b i))) (recur (inc i)) i))]
+  (println "first difference at" i "of" (count a))
+  (println "A:" (String/slice a (max 0 (- i 160)) 320))
+  (println "B:" (String/slice b (max 0 (- i 160)) 320)))
