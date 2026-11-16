@@ -1,0 +1,81 @@
+(ns live.routing-admission-test
+ (:require [live.lifecycle :as lifecycle] [reload.generation :as generation]
+           [reload] [datom :as d] [proc.task :as task]))
+
+(defn- graph [version control calls]
+ (let [root (str (System/get_env "HOME") "/tmp/live-routing-admission-"
+                 (erlang/unique_integer (list :positive)))
+       file (str root "/admitted/sample.bl")]
+  (try
+   (File/mkdir_p! (Path/dirname file))
+   (File/write! file
+    (str "(ns admitted.sample (:require [reload.generation :as g]))\n"
+         "(defn app [] (swap! (g/runtime-resource :calls) inc)\n"
+         " {:principal (fn [_] :principal) :worlds (fn [_ _] {})\n"
+         "  :shared-conn (g/runtime-resource :control)\n"
+         "  :routes [[\"/\" (fn [_] [:p \"" version "\"])]]})"))
+   (let [prepared (BeamLisp.Loader/with_load_path root
+                   #(generation/prepare! (generation/project-plan
+                     {:application-id "routing-admission" :entrypoint "admitted.sample/app"
+                      :fixed-runtime true :native-modules #{"erlang"}})))]
+    (generation/with! prepared #(generation/bind-runtime! {:control control :calls calls}))
+    prepared)
+   (finally (File/rm_rf! root)))))
+
+(defn- await! [cell]
+ (let [deadline (+ (System/monotonic_time :millisecond) 5000)]
+  (loop []
+   (when-not @cell
+    (when (>= (System/monotonic_time :millisecond) deadline)
+     (throw (ex-info "Controlled publication did not finish" {})))
+    (Process/sleep 1) (recur)))))
+
+(deftest ingress-metadata-and-factory-share-the-generation-admitted-before-publication
+ (let [control (d/connect []) calls (atom 0) old (graph "old" control calls)
+       next (graph "new" control calls) slot (generation/slot)
+       entered (atom false) published (atom false) stop (atom false)
+       hook-calls (atom 0) previous (reload/reload-enabled?) worker (atom nil)]
+  (try
+   (reload/set-enabled! true)
+   (generation/publish! slot nil old)
+   ;; This publisher has its own native framework context. The request pauses
+   ;; only after admission, so publication is guaranteed to race its factory.
+   (reset! worker (task/async-nolink
+    (fn []
+     (loop []
+      (when-not (or @entered @stop) (Process/sleep 1) (recur)))
+     (when @entered
+      (let [result (generation/publish! slot (:digest old) next)]
+       (reset! published true) result)))))
+   (let [response (lifecycle/route! slot "admitted.sample/app" (Plug.Test/conn :get "/")
+                    (fn [request]
+                     (swap! hook-calls inc)
+                     (let [digest (:digest (generation/current))]
+                      (reset! entered true) (await! published)
+                      (Plug.Conn/put_resp_header request "x-admitted-generation" digest))))]
+    (is (= :applied (:status (task/await @worker 5000))))
+    (is (= 1 @hook-calls))
+    (is (= 1 @calls))
+    (is (= (:digest next) (generation/selected slot)))
+    (is (= [(:digest old)] (vec (Plug.Conn/get_resp_header response "x-admitted-generation"))))
+    (is (= 200 (:status response)))
+    (is (String/contains? (:resp_body response) "old"))
+    (is (nil? (generation/current))))
+   ;; A refused ingress hook cannot invoke the factory or leak its admission.
+   (is (= :hook-refused
+        (try (lifecycle/route! slot "admitted.sample/app" (Plug.Test/conn :get "/")
+               (fn [_] (throw (ex-info "Controlled ingress refusal" {:kind :hook-refused}))))
+             nil (catch error (:kind (ex-data error))))))
+   (is (= 1 @calls))
+   (is (nil? (generation/current)))
+   (let [response (lifecycle/route! slot "admitted.sample/app" (Plug.Test/conn :get "/"))]
+    (is (= 200 (:status response)))
+    (is (String/contains? (:resp_body response) "new")))
+   (is (= 2 @calls))
+   (is (= :retired (:status (generation/retire! old))))
+   (finally
+    (reset! stop true)
+    (when @worker (task/await @worker 5000))
+    (generation/close! slot (generation/selected slot))
+    (generation/retire! old) (generation/retire! next)
+    (d/close! control) (reload/set-enabled! previous)))))
