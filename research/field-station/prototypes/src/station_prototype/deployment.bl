@@ -6,6 +6,7 @@
            [deployment-exec :as command] [proc.flow :as flow]
            [datom :as d] [datom.conn :as conn] [reload.generation :as generation]
            [auth] [reload] [bl.json :as json]))
+(def observed (atom nil))
 (defn get! [port]
  (Application/ensure_all_started :inets)
  (let [response (httpc/request :get
@@ -20,6 +21,7 @@
        public (merge (select-keys operation ["state" "phase" "substep" "candidate" "generation" "error"])
                 {"service" "messages" "owner" (str (:owner status))
                  "selectedGeneration" (:generation status) "port" (:port status)})]
+  (reset! observed public)
   (when-not (= public @seen) (reset! seen public) (println (str "DEPLOY " (json/encode public))))
   (when (contains? #{"blocked" "failed" "recovering" "rolled-back" "refused"} (get operation "state"))
    (throw (ex-info (str "Foundry publication stopped: " (get operation "state") " " (pr-str (get operation "error")))
@@ -112,19 +114,22 @@
    (finally (d/close! conn)))))
 (defn run! [source root]
  (reset! checks/results [])
+ (reset! observed nil)
  (File/mkdir_p! (str root "/data"))
  (checks/check! "project .foundry.bl returns the validated online lifecycle declaration"
   (= (definition/define (release/declaration)) (BeamLisp/run_file (str source "/.foundry.bl"))))
  (let [old (release/artifact! source root "prototype-old") fresh (release/artifact! source root "prototype-new")
        key (auth/keypair) opts (assoc-in (release/options root old key) [:artifacts (:id fresh)] (:root fresh))
        previous (reload/reload-enabled?) _ (reload/set-enabled! true)
-       owned (atom nil) traffic (atom nil) socket (atom nil) stopped (atom false) samples (atom [])]
+       owned (atom nil) traffic (atom nil) socket (atom nil) stopped (atom false) samples (atom [])
+       acknowledged (atom false)]
   (try
    (reset! owned (lifecycle/start! opts))
    (let [before (lifecycle/status @owned) port (:port before)
          store (conn/registered-at (str root "/data/messages.fjall"))]
     (checks/check! "Foundry starts a real managed live.app factory" (= "prototype-old" (get (get! port) "version")))
     (d/transact! store [{:db/id -1 :prototype/message "accepted-before-publication"}])
+    (reset! acknowledged true)
     (reset! socket (websocket! port))
     (reset! traffic (spawn-monitor
      (fn []
@@ -187,6 +192,16 @@
    {:format 1 :kind :field-station-foundry-prototype :passed (count @checks/results) :checks @checks/results
     :http-observations (count @samples) :old (:id old) :candidate (:id fresh)
     :scope "Real native same-VM Foundry lifecycle, Fjall and HTTP. Sandbox runtime identity fixture; no portable package or production rollout."}
+   (catch error
+    (when (and @owned @acknowledged)
+     (try
+      (let [status (lifecycle/status @owned) ready (get! (:port status))]
+       (checks/check! "failed experiment still serves the actually selected generation"
+        (= (:generation status) (get ready "generation")))
+       (checks/check! "failed experiment preserves the acknowledged application write"
+        (>= (get ready "messages") 1)))
+      (catch _ (println "FAIL serving/data retention could not be verified after the experiment failed"))))
+    (throw error))
    (finally
     (when (and @owned (= "1" (System/get_env "STATION_PROTOTYPE_DIAGNOSTICS")))
      (erlang/trace (:owner @owned) false (list :call :set_on_spawn))
