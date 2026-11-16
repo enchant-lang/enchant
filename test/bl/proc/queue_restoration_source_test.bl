@@ -1,0 +1,52 @@
+; A native restore stage must remain a lifetime pin when Source starts its owner.
+; Real Root/Fjall custody, Source initializer, queue actor and completed job.
+(ns proc.queue-restoration-source-test
+ (:require [proc.queue-runtime :as runtime] [proc.queue :as queue]
+           [proc.queue-family-root :as root] [reload.generation :as g]
+           [datom :as d] [datom.store-fjall :as fjall]))
+(def SOURCE
+ "(ns queue.restoration.fixture
+   (:require [proc.queue-runtime :as runtime] [proc.queue :as q] [reload.generation :as g]))
+  (defn handler []
+   (runtime/prepare :imports
+    {:declaration {:of :restoration/work :protocol 1 :unique [:test/id]}
+     :perform (fn [job] {:id (:test/id job) :value @(g/runtime-resource :fixture/value)})}))
+  (defn boot [c]
+   (g/bind-runtime! {:fixture/value (atom :ready)})
+   (q/attach-store! :imports c)
+   (runtime/start! (handler)))
+  (defn submit [] (q/enqueue! :imports {:test/id \"restored\"}))")
+(defn- finished [c id]
+ (loop [left 1500]
+  (let [job (d/entity (d/db c) id)]
+   (if (or (contains? #{:done :failed} (:job/state job)) (zero? left)) job
+    (do (Process/sleep 5) (recur (dec left)))))))
+(deftest staged-native-restoration-preserves-the-source-initializer-context
+ (let [path (str (System/get_env "HOME") "/tmp/source-queue-restoration-" (System/unique_integer (list :positive)))
+       _ (File/mkdir_p! path) c (d/connect-with (fjall/open (str path "/journal.fjall")))
+       app (str "source-restore-" (System/unique_integer (list :positive)))
+       graph (g/prepare! {:application-id app :protocols {:imports 1}
+         :stable-namespaces #{"proc.queue-runtime" "proc.queue" "reload.generation"}
+         :resources {:data-root path :managed-root-journal "journal.fjall"
+                     :managed-root-journal-id "journal" :managed-root-store-paths {"journal" "journal.fjall"}}
+         :sources {"queue.restoration.fixture" SOURCE}})
+       handler (g/invoke! graph "queue.restoration.fixture/handler" [])
+       stage (atom nil) owner (atom nil)]
+  (try
+   (is (= :enrolled (root/enroll! graph c {"journal" c})))
+   (is (= :entered (root/enter-initializer! graph)))
+   (reset! stage (g/with! graph #(runtime/restore! (:server handler) (:digest graph) [handler])))
+   (reset! owner (g/invoke! graph "queue.restoration.fixture/boot" [c]))
+   (is (Process/alive? @owner))
+   (is (runtime/ready? (:server handler)))
+   (is (= :ready (root/ready! graph)))
+   (let [job (g/invoke! graph "queue.restoration.fixture/submit" [])
+         done (finished c (:db/id job))]
+    (is (= :done (:job/state done)))
+    (is (= {:id "restored" :value :ready} (:job/result done))))
+   (finally
+    (when @owner (runtime/stop! (:server handler)))
+    (when @stage (runtime/release-restoration! @stage))
+    (let [retired (g/retire! graph)]
+     (when (contains? #{:retired :already-retired} (:status retired))
+      (d/close! c) (File/rm_rf! path)))))))
