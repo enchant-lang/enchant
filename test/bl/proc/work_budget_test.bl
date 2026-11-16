@@ -1,0 +1,25 @@
+(ns proc.work-budget-test (:require [proc.work-budget :as budget]))
+
+(deftest work-refuses-before-the-first-excess-operation
+  (let [initial (budget/initial 2 64 10)
+        one (budget/charge initial 1 10 0)
+        two (budget/charge one 1 54 9)]
+    (is (= 2 (:steps two)))
+    (is (= 64 (:bytes two)))
+    (is (= :work-steps (try (budget/charge two 1 0 9) nil (catch e (:kind (ex-data e))))))
+    (is (= :work-bytes (try (budget/charge two 0 1 9) nil (catch e (:kind (ex-data e))))))
+    (is (= :work-deadline (try (budget/charge initial 0 0 10) nil (catch e (:kind (ex-data e))))))
+    (is (= {:max-steps 2 :max-bytes 64 :deadline 10 :steps 0 :bytes 0} initial))))
+
+(deftest invalid-and-negative-charges-cannot-create-credit
+  (doseq [charge [[-1 0] [0 -1] [1.5 0] [0 nil]]]
+    (is (= :invalid-work-charge
+      (try (budget/charge (budget/initial 2 64 10) (first charge) (second charge) 0) nil
+           (catch e (:kind (ex-data e))))))))
+
+(deftest a-worker-cannot-lend-its-budget-to-another-process
+  (let [token (budget/open! 2 64 5000) parent (erlang/self)]
+    (spawn (fn [] (erlang/send parent
+      [:foreign-budget (try (budget/spend! token 1 0) nil (catch e (:kind (ex-data e))))])))
+    (is (= :foreign-work-budget (receive [:foreign-budget result] result (after 5000 :missing))))
+    (is (= 0 (:steps (budget/snapshot token))))))

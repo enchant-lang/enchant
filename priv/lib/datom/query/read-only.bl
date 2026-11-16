@@ -3,7 +3,9 @@
 (ns datom.query.read-only
  (:require [datom :as d] [datom.conn :as conn] [datom.query.parse :as parse]
            [datom.query.read-plan :as plan] [datom.query.functions :as functions]
-           [data.first-order :as data]))
+           [data.first-order :as data] [data.bounded-cache :as cache]
+           [datom.cache-validity :as validity] [datom.query.work-store :as work-store]
+           [proc.work-budget :as budget]))
 (defn plan!
  "Validate the complete stored-attribute read fragment. This is data analysis,
   never connection ownership or permission to run a supplied callback."
@@ -56,3 +58,36 @@
    (plan! query)
    (data/check! (d/q query (native-database! (native-connection! connection)))
                 {:max-nodes 32768 :max-bytes 1048576 :max-depth 64}))))
+
+(defn revision!
+  "Read fixed source evidence without executing a query. Includes complete
+   stored-attribute and compiler/provider provenance, normalized without
+   retaining an Env resource. Unknown evidence refuses instead of sharing."
+  [query connection]
+  (functions/with-only {}
+    (fn []
+      (let [planned (plan! query) database (native-database! (native-connection! connection))
+            revision (validity/read-stamp database (:attributes planned))
+            normalized (when revision (cache/key-data revision 0))]
+        (when-not normalized
+          (throw (ex-info "Projection source revision is not certified" {:kind :unproved-projection-revision})))
+        {:basis (:basis-t database) :revision normalized :attributes (:attributes planned)}))))
+
+(defn read-budgeted!
+  "Execute only the existing closed stored-data engine on an actual native
+   connection. A changed source refuses before query execution. Physical reads
+   have step/byte budgets and no whole-range fallback; result data is bounded.
+   No function, provider, store adapter or claimed purity receipt is accepted."
+  [query connection expected token max-output-bytes]
+  (functions/with-only {}
+    (fn []
+      (let [planned (plan! query) database (native-database! (native-connection! connection))
+            revision (some-> (validity/read-stamp database (:attributes planned)) (cache/key-data 0))]
+        (when-not (and revision (= expected revision))
+          (throw (ex-info "Projection source changed before execution" {:kind :superseded-projection})))
+        (budget/spend! token 1 0)
+        (let [view (assoc database :store (work-store/wrap! (:store database) token))
+              value (data/check! (d/q query view)
+                       {:max-nodes 32768 :max-bytes max-output-bytes :max-depth 64})]
+          {:value value :basis (:basis-t database) :revision revision
+           :work (select-keys (budget/snapshot token) [:steps :bytes])})))))

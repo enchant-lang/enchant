@@ -1,0 +1,43 @@
+;; A private worker's deterministic work/byte budget. No ambient global quota,
+;; arbitrary clock callback or caller-supplied executable enters the token.
+(ns proc.work-budget)
+
+(defn charge
+  "Pure admission before an operation. Refusal leaves the previous counters
+   unchanged. Explicit time makes boundary tests independent of host speed."
+  [state steps bytes now]
+  (when-not (and (int? steps) (<= 0 steps) (int? bytes) (<= 0 bytes))
+    (throw (ex-info "Work charges must be nonnegative integers" {:kind :invalid-work-charge})))
+  (when (>= now (:deadline state))
+    (throw (ex-info "Private work deadline exhausted" {:kind :work-deadline})))
+  (let [used (+ (:steps state) steps) retained (+ (:bytes state) bytes)]
+    (when (> used (:max-steps state))
+      (throw (ex-info "Private work step budget exhausted" {:kind :work-steps})))
+    (when (> retained (:max-bytes state))
+      (throw (ex-info "Private work byte budget exhausted" {:kind :work-bytes})))
+    (assoc state :steps used :bytes retained)))
+
+(defn initial [steps bytes deadline]
+  (when-not (and (int? steps) (<= 1 steps 1000000)
+                (int? bytes) (<= 1 bytes 8388608) (int? deadline))
+    (throw (ex-info "Invalid private work budget" {:kind :invalid-work-budget})))
+  {:max-steps steps :max-bytes bytes :deadline deadline :steps 0 :bytes 0})
+
+(defn open! [steps bytes duration-ms]
+  (when-not (and (int? duration-ms) (<= 1 duration-ms 60000))
+    (throw (ex-info "Private work duration must be between 1 and 60000 ms" {:kind :invalid-work-budget})))
+  {:owner (erlang/self)
+   :state (atom (initial steps bytes (+ (erlang/monotonic_time :millisecond) duration-ms)))})
+
+(defn snapshot [token]
+  (when-not (= (erlang/self) (:owner token))
+    (throw (ex-info "A work budget belongs to its actual worker" {:kind :foreign-work-budget})))
+  @(:state token))
+
+(defn spend! [token steps bytes]
+  (snapshot token)
+  (swap! (:state token) charge steps bytes (erlang/monotonic_time :millisecond)))
+
+(defn remaining [token]
+  (let [s (snapshot token)]
+    {:steps (- (:max-steps s) (:steps s)) :bytes (- (:max-bytes s) (:bytes s))}))

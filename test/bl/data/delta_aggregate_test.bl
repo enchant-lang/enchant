@@ -1,0 +1,55 @@
+(ns data.delta-aggregate-test (:require [data.delta-aggregate :as a]))
+(defn- fresh [& opts]
+  (a/initial (merge {:source-id "fixture" :group-by [:user :route] :sum [:tokens] :window-ms 10}
+                   (or (first opts) {}))))
+(defn- row [id user tokens at] {:id id :user user :route "model" :tokens tokens :at at})
+
+(deftest only-changed-events-are-visited-and-replay-is-inert
+  (let [first (a/apply-delta (fresh) {:sequence 1 :now 1 :upsert [(row 1 "alice" 3 1) (row 2 "bob" 5 1)]})
+        event {:sequence 2 :now 2 :upsert [(row 1 "alice" 7 2)] :remove [2]}
+        second (a/apply-delta first event)]
+    (is (= 2 (get-in second [:work :changed])))
+    (is (= { ["alice" "model"] {:count 1 :sums {:tokens 7}}} (:groups (a/view second))))
+    (is (= second (a/apply-delta second event)))
+    (is (= first (a/apply-delta first {:sequence 1 :now 9 :upsert [(row 1 "alice" 3 1) (row 2 "bob" 5 1)]}))))))
+
+(deftest expiry-touches-only-due-ids-and-does-not-need-a-source-write
+  (let [s (a/apply-delta (fresh) {:sequence 1 :now 5 :upsert [(row 1 "alice" 3 0) (row 2 "bob" 5 5)]})
+        after (a/expire s 10)]
+    (is (= 1 (get-in after [:work :expired])))
+    (is (= 1 (:cursor after)))
+    (is (= { ["bob" "model"] {:count 1 :sums {:tokens 5}}} (:groups (a/view after))))
+    (is (= 15 (a/next-expiry after)))
+    (is (= 0 (get-in (a/expire after 14) [:work :expired])))))
+
+(deftest large-expiry-backlogs-have-bounded-turns-and-explicit-pending-status
+  (let [s (a/apply-delta (fresh {:max-delta 2}) {:sequence 1 :now 0 :upsert [(row 1 "alice" 1 0) (row 2 "alice" 2 0)]})
+        s (a/apply-delta s {:sequence 2 :now 0 :upsert [(row 3 "bob" 3 0)]})
+        one (a/expire s 10) two (a/expire one 10)]
+    (is (= 2 (get-in one [:work :expired])))
+    (is (= :pending (:status (a/view one))))
+    (is (= 1 (get-in two [:work :expired])))
+    (is (= {:status :ready :cursor 2 :groups {}} (a/view two)))
+    (is (= 0 (:bytes two)))))
+
+(deftest checkpoint-gaps-conflicts-and-capacity-refuse-without-partial-state
+  (let [s (a/apply-delta (fresh {:max-events 1}) {:sequence 1 :now 0 :upsert [(row 1 "alice" 1 0)]})]
+    (doseq [[event reason]
+            [[{:sequence 3 :now 1 :upsert []} :aggregate-checkpoint-gap]
+             [{:sequence 1 :now 1 :upsert [(row 1 "alice" 2 0)]} :aggregate-checkpoint-conflict]
+             [{:sequence 2 :now 1 :upsert [(row 2 "bob" 2 1)]} :aggregate-events]]]
+      (is (= reason (try (a/apply-delta s event) nil (catch e (:kind (ex-data e)))))))
+    (is (= 1 (count (:events s))))
+    (is (= 1 (get-in (a/view s) [:groups ["alice" "model"] :sums :tokens])))))
+
+(deftest missing-meters-are-unknown-and-retractions-remove-their-contributions
+  (let [s (a/apply-delta (fresh) {:sequence 1 :now 1 :upsert [(row 1 "alice" nil 1) (row 2 "alice" 0 1)]})
+        only-unknown (a/apply-delta s {:sequence 2 :now 1 :remove [2]})]
+    (is (= 0 (get-in (a/view s) [:groups ["alice" "model"] :sums :tokens])))
+    (is (nil? (get-in (a/view only-unknown) [:groups ["alice" "model"] :sums :tokens])))
+    (is (= 1 (get-in (a/view only-unknown) [:groups ["alice" "model"] :count])))))
+
+(deftest an-executable-selector-is-not-a-projection-plan
+  (let [calls (atom 0)]
+    (is (= :refused (try (fresh {:group-by [(fn [_] (swap! calls inc))]}) :wrong (catch _ :refused))))
+    (is (= 0 @calls))))

@@ -1,0 +1,103 @@
+(ns data.projection-test
+  (:require [data.projection :as projection] [datom :as d] [datom.store-ets :as ets-store]
+            [proc.instance :as instance] [datom.query.relation :as relation]))
+
+(def QUERY '[:find ?e ?v :where [?e :projection/value ?v]])
+(defn- source []
+  (let [c (d/connect-with (ets-store/open)
+            [{:db/ident :projection/value :db/valueType :db.type/long}
+             {:db/ident :projection/other :db/valueType :db.type/long}])]
+    (d/transact! c [{:db/id -1 :projection/value 10}]) c))
+(defn- settled [h]
+  ;; The deadline only detects a stuck protocol; assertions use exact work
+  ;; counts. No assertion depends on completing within a performance ratio.
+  (let [until (+ 10000 (erlang/monotonic_time :millisecond))]
+    (loop []
+      (let [r (projection/read h)]
+        (if (or (contains? #{:ready :blocked} (:status r))
+                (> (erlang/monotonic_time :millisecond) until)) r
+          (do (Process/sleep 1) (recur)))))))
+
+(deftest reads-do-not-admit-work-and-reader-handles-cannot-refresh
+  (let [c (source) h (projection/start! :projection/no-demand c QUERY) r (projection/reader h)]
+    (try
+      (doseq [_ (range 100)] (projection/read r))
+      (is (= 0 (get-in (projection/read r) [:counts :started])))
+      (is (= :projection-controller (:reason (projection/retry! r))))
+      (is (= :projection-controller (:reason (projection/refresh! r))))
+      (projection/subscribe! r)
+      (let [answer (settled r)]
+        (is (= :ready (:status answer)) (pr-str answer))
+        (is (= 1 (get-in answer [:counts :started])))
+        (is (= #{10} (set (map second (:value answer))))))
+      (finally (projection/stop! h) (d/close! c)))))
+
+(deftest concurrent-readers-share-the-same-retained-projection
+  (let [c (source) h (projection/start! :projection/shared c QUERY) r (projection/reader h)
+        parent (erlang/self)]
+    (try
+      (projection/subscribe! r)
+      (is (= :ready (:status (settled r))))
+      (doseq [_ (range 16)]
+        (spawn (fn [] (erlang/send parent [:projection-read (projection/read r)]))))
+      (doseq [_ (range 16)]
+        (let [answer (receive [:projection-read v] v (after 5000 nil))]
+          (is (= :ready (:status answer)))
+          (is (= 1 (get-in answer [:counts :started])))))
+      (projection/evict! h)
+      (doseq [_ (range 100)] (projection/read r))
+      (is (= :blocked (:status (projection/read r))))
+      (is (= :evicted (:reason (projection/read r))))
+      (is (= 1 (get-in (projection/read r) [:counts :started])))
+      (finally (projection/stop! h) (d/close! c)))))
+
+(deftest unrelated-attributes-preserve-the-answer-and-related-commits-invalidate
+  (let [c (source) h (projection/start! :projection/revisions c QUERY)]
+    (try
+      (projection/subscribe! h)
+      (is (= :ready (:status (settled h))))
+      (d/transact! c [{:db/id -1 :projection/other 20}])
+      (projection/refresh! h)
+      (is (= 1 (get-in (projection/read h) [:counts :started])))
+      (d/transact! c [{:db/id -1 :projection/value 30}])
+      (projection/refresh! h)
+      (let [answer (settled h)]
+        (is (= :ready (:status answer)) (pr-str answer))
+        (is (= 2 (get-in answer [:counts :started])))
+        (is (= #{10 30} (set (map second (:value answer))))))
+      (finally (projection/stop! h) (d/close! c)))))
+
+(deftest exhausted-work-remains-blocked-without-a-hidden-fallback
+  (let [c (source) h (projection/start! :projection/budget c QUERY {:max-steps 4})]
+    (try
+      (projection/subscribe! h)
+      (is (= :blocked (:status (settled h))))
+      (doseq [_ (range 100)] (projection/read h))
+      (is (= 1 (get-in (projection/read h) [:counts :started])))
+      (is (nil? (:value (projection/read h))))
+      (finally (projection/stop! h) (d/close! c)))))
+
+(deftest executable-query-input-is-refused-before-owner-allocation
+  (let [c (source) effects (atom 0)]
+    (try
+      (is (= :refused
+        (try (projection/start! :projection/unsafe c
+               [:find '?e :where [(fn [] (swap! effects inc))]])
+             :wrong (catch _ :refused))))
+      (is (= 0 @effects))
+      (is (nil? (instance/whereis :projection/unsafe)))
+      (finally (d/close! c)))))
+
+(deftest computed-providers-are-refused-before-execution
+  (let [c (source) effects (atom 0)]
+    (try
+      (relation/register-relation! :projection/unsafe-provider
+        {:arity 2 :modes #{:ff} :provider (fn [_ _ _ _] (swap! effects inc) [[999 999]])})
+      (is (= :refused (try (projection/start! :projection/provider c
+                             '[:find ?e ?v :where [?e :projection/unsafe-provider ?v]])
+                           :wrong (catch _ :refused))))
+      (is (= 0 @effects))
+      (finally
+        (when-let [registry (Process/whereis relation/REGISTRY)]
+          (Agent/update registry (fn [m] (dissoc m :projection/unsafe-provider))))
+        (d/close! c)))))

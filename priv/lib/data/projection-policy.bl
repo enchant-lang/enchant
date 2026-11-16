@@ -1,0 +1,102 @@
+;; Pure admission protocol for one bounded, demand-driven projection. Readers
+;; observe data only; source publication and retry are explicit owner actions.
+(ns data.projection-policy)
+
+(defn initial [max-charge]
+  (when-not (and (int? max-charge) (pos? max-charge))
+    (throw (ex-info "Projection requires a positive retained-data budget" {:kind :invalid-projection-budget})))
+  {:max-charge max-charge :demand 0 :epoch 0 :wanted nil :running nil
+   :status :idle :result nil :reason nil
+   :counts {:started 0 :coalesced 0 :discarded 0 :blocked 0}})
+
+(defn observe [state]
+  (select-keys state [:status :reason :wanted :result :counts]))
+
+(defn- kick [state effects]
+  (if (and (pos? (:demand state)) (:wanted state) (nil? (:running state))
+           (= :pending (:status state)))
+    (let [ticket (inc (:epoch state))
+          run (assoc (:wanted state) :ticket ticket)]
+      [(-> state (assoc :epoch ticket :running run :status :running)
+                 (update-in [:counts :started] inc))
+       (conj effects (assoc run :effect :run))])
+    [state effects]))
+
+(defn- blocked [state reason]
+  (-> state (assoc :status :blocked :reason reason :result nil)
+            (update-in [:counts :blocked] inc)))
+
+(defn step
+  "Return [state effects]. At most one run is admitted; a newer revision
+   replaces only the pending intent. Matching completion releases the slot.
+   Refusal, eviction and failure stay blocked until source change or explicit
+   retry. A read/tick never grants execution. Tickets fence late completions."
+  [state event]
+  (let [op (:op event)]
+    (cond
+      (= :closed (:status state)) [state []]
+      (contains? #{:read :tick} op) [state []]
+
+      (= :demand op)
+        (let [n (:count event)]
+          (when-not (and (int? n) (<= 0 n 128))
+            (throw (ex-info "Projection demand must be between zero and 128" {:kind :invalid-projection-demand})))
+          (kick (assoc state :demand n) []))
+
+      (= :source op)
+        (let [basis (:basis event) revision (:revision event) before (:wanted state)]
+          (when-not (and (int? basis) (<= 0 basis) (some? revision))
+            (throw (ex-info "Projection source requires a basis and exact revision" {:kind :invalid-projection-source})))
+          (cond
+            (and before (< basis (:basis before))) [state []]
+            (and before (= basis (:basis before)) (not= revision (:revision before)))
+              (throw (ex-info "One source basis cannot name two revisions" {:kind :projection-revision-conflict}))
+            (= revision (:revision before)) [(assoc state :wanted {:basis basis :revision revision}) []]
+            :else
+              (let [after (-> state
+                              (assoc :wanted {:basis basis :revision revision}
+                                     :status (if (:running state) :running :pending)
+                                     :reason nil :result nil))
+                    after (if (:running state) (update-in after [:counts :coalesced] inc) after)]
+                (kick after (if (:result state) [{:effect :drop}] [])))))
+
+      (= :finish op)
+        (let [run (:running state)]
+          (if (or (nil? run) (not= (:ticket event) (:ticket run)))
+            [state []]
+            (let [after (assoc state :running nil)
+                  current? (= (:revision run) (get-in state [:wanted :revision]))
+                  status (if (:cancelled? run) :cancelled (:status event))
+                  charge (:charge event)]
+              (if-not current?
+                (kick (-> after (assoc :status :pending)
+                                (update-in [:counts :discarded] inc))
+                      [{:effect :drop-candidate :ticket (:ticket run)}])
+                (if (and (= :ready status) (int? charge) (<= 1 charge (:max-charge state)))
+                  [(assoc after :status :ready :reason nil
+                                :result (assoc run :charge charge))
+                   [{:effect :publish :ticket (:ticket run)}]]
+                  [(blocked after (if (= :ready status) :oversized status))
+                   [{:effect :drop-candidate :ticket (:ticket run)}]])))))
+
+      (= :timeout op)
+        (let [run (:running state)]
+          (if (and run (= (:ticket run) (:ticket event)) (not (:cancelled? run)))
+            [(assoc-in state [:running :cancelled?] true)
+             [{:effect :cancel :ticket (:ticket run)}]]
+            [state []]))
+
+      (= :evict op)
+        (if (= :ready (:status state))
+          [(blocked state :evicted) [{:effect :drop}]] [state []])
+
+      (= :retry op)
+        (if (= :blocked (:status state))
+          (kick (assoc state :status :pending :reason nil) []) [state []])
+
+      (= :close op)
+        [(assoc state :status :closed :result nil :reason nil)
+         (cond-> [{:effect :drop}]
+           (:running state) (conj {:effect :cancel :ticket (get-in state [:running :ticket])}))]
+
+      :else (throw (ex-info "Unknown projection event" {:kind :invalid-projection-event})))))

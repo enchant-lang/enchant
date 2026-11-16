@@ -1,0 +1,60 @@
+;; A denial-only decorator for the closed stored-data query worker. Every
+;; physical scan uses the substrate's bounded page primitive. No range fallback,
+;; writes, computed providers or caller-supplied protocol implementation runs.
+(ns datom.query.work-store (:require [datom.store :as store] [proc.work-budget :as budget]))
+
+(defn- refuse [kind]
+  (throw (ex-info "Closed projection read refused" {:kind kind})))
+
+(defn- page! [inner token lo after hi requested direction max-bytes]
+  (let [left (budget/remaining token)
+        limit (min requested 128 (dec (:steps left)))
+        bytes (min max-bytes (:bytes left))]
+    (when (or (< limit 1) (< bytes 1)) (refuse :work-steps))
+    ;; Reserve the maximum possible physical row visits BEFORE native entry.
+    ;; Empty/short pages retain that conservative charge; no refund authority
+    ;; or caller-reported work counter can mint additional budget.
+    (budget/spend! token (inc limit) 0)
+    (let [result (store/ordered-page inner lo after hi limit direction bytes)]
+      (when (:refused result) (refuse (:refused result)))
+      (when (and (empty? (:datoms result)) (not (:end? result))) (refuse :work-bytes))
+      (budget/spend! token 0 (:bytes result 0))
+      result)))
+
+(defn- scan! [inner token lo hi]
+  (loop [after nil out []]
+    (let [page (page! inner token lo after hi 128 :asc 8388608)
+          next (into out (:datoms page))]
+      (if (:end? page) next
+        (do
+          (when (or (nil? (:last page)) (= after (:last page))) (refuse :nonadvancing-work-page))
+          (recur (:last page) next))))))
+
+(defrecord WorkStore [inner token]
+  store/Store
+  (-get [s key]
+    (budget/spend! (:token s) 1 0)
+    (store/-get (:inner s) key))
+  (-range [_ _ _] (refuse :unbounded-work-range))
+  (-put [_ _ _] (refuse :projection-write))
+  (-delete [_ _] (refuse :projection-write))
+  (-update [_ _ _] (refuse :projection-write))
+  (-commit [_ _] (refuse :projection-write)))
+
+(extend-protocol store/Underlying
+  WorkStore (-underlying [s] (store/identity-of (:inner s))))
+(extend-protocol store/Scan
+  WorkStore (-scan-datoms [s lo hi] (scan! (:inner s) (:token s) lo hi)))
+(extend-protocol store/MultiScan
+  WorkStore (-scan-prefixes [s bounds]
+    (reduce (fn [rows [lo hi]] (into rows (scan! (:inner s) (:token s) lo hi))) [] bounds)))
+(extend-protocol store/PageScan
+  WorkStore (-scan-datoms-page [s lo after hi limit]
+    (page! (:inner s) (:token s) lo after hi limit :asc 8388608)))
+(extend-protocol store/OrderedPageScan
+  WorkStore (-ordered-page [s lo after hi limit direction bytes]
+    (page! (:inner s) (:token s) lo after hi limit direction bytes)))
+
+(defn wrap! [inner token]
+  (when-not (store/ordered-page-capable? inner) (refuse :unbounded-work-substrate))
+  (->WorkStore inner token))

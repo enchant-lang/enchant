@@ -1,0 +1,71 @@
+(ns data.projection-policy-test (:require [data.projection-policy :as p]))
+
+(defn- advance [s event] (first (p/step s event)))
+(defn- ready-to-run []
+  (advance (advance (p/initial 64) {:op :source :basis 1 :revision :one})
+           {:op :demand :count 1}))
+
+(deftest reads-and-clocks-cannot-start-a-producer
+  (let [s (advance (p/initial 64) {:op :source :basis 1 :revision :one})]
+    (doseq [op [:read :tick] _ (range 100)]
+      (is (= [s []] (p/step s {:op op}))))
+    (is (= 0 (get-in s [:counts :started])))
+    (is (= 1 (get-in (ready-to-run) [:counts :started])))))
+
+(deftest notifications-coalesce-behind-one-running-attempt
+  (let [s (reduce (fn [s n] (advance s {:op :source :basis n :revision n}))
+                   (ready-to-run) (range 2 102))
+        [after effects] (p/step s {:op :finish :ticket 1 :status :ready :charge 10})]
+    (is (= 1 (get-in s [:counts :started])))
+    (is (= 100 (get-in s [:counts :coalesced])))
+    (is (= 101 (get-in s [:wanted :basis])))
+    (is (= 2 (get-in after [:counts :started])))
+    (is (= 101 (get-in after [:running :revision])))
+    (is (= 1 (count (filter #(= :run (:effect %)) effects))))))
+
+(deftest refused-publication-never-becomes-an-implicit-retry-loop
+  (doseq [status [:ready :failed :cancelled]]
+    (let [[s effects] (p/step (ready-to-run) {:op :finish :ticket 1 :status status :charge 65})
+          after (reduce (fn [s _] (advance (advance s {:op :read}) {:op :tick})) s (range 100))]
+      (is (= :blocked (:status s)))
+      (is (= s after))
+      (is (= 1 (get-in after [:counts :started])))
+      (is (= 0 (count (filter #(= :run (:effect %)) effects)))))))
+
+(deftest ready-values-and-evicted-values-never-call-the-producer-on-read
+  (let [s (advance (ready-to-run) {:op :finish :ticket 1 :status :ready :charge 64})
+        evicted (advance s {:op :evict})]
+    (is (= :ready (:status s)))
+    (is (= [s []] (p/step s {:op :read})))
+    (is (= :blocked (:status evicted)))
+    (is (= :evicted (:reason evicted)))
+    (is (= [evicted []] (p/step evicted {:op :read})))
+    (is (= 2 (get-in (advance evicted {:op :retry}) [:counts :started])))))
+
+(deftest cancellation-does-not-release-capacity-before-completion
+  (let [[s effects] (p/step (ready-to-run) {:op :timeout :ticket 1})
+        newer (advance s {:op :source :basis 2 :revision :two})]
+    (is (= [{:effect :cancel :ticket 1}] effects))
+    (is (= 1 (get-in newer [:counts :started])))
+    (is (= [newer []] (p/step newer {:op :timeout :ticket 1})))
+    (let [next (advance newer {:op :finish :ticket 1 :status :ready :charge 10})]
+      (is (= 2 (get-in next [:counts :started])))
+      (is (= :two (get-in next [:running :revision])))
+      (is (= [next []] (p/step next {:op :finish :ticket 1 :status :ready :charge 10}))))))
+
+(deftest unrelated-source-commits-and-stale-notifications-do-not-invalidate
+  (let [s (advance (ready-to-run) {:op :finish :ticket 1 :status :ready :charge 10})
+        same (advance s {:op :source :basis 10 :revision :one})]
+    (is (= :ready (:status same)))
+    (is (= 1 (get-in same [:counts :started])))
+    (is (= [same []] (p/step same {:op :source :basis 2 :revision :old})))
+    (is (= :projection-revision-conflict
+           (try (p/step same {:op :source :basis 10 :revision :forged}) nil
+                (catch e (:kind (ex-data e))))))))
+
+(deftest closed-projections-have-no-executable-transitions
+  (let [closed (advance (ready-to-run) {:op :close})]
+    (doseq [event [{:op :read} {:op :tick} {:op :retry} {:op :demand :count 1}
+                  {:op :source :basis 2 :revision :two}
+                  {:op :finish :ticket 1 :status :ready :charge 10}]]
+      (is (= [closed []] (p/step closed event))))))

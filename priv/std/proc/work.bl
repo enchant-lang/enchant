@@ -39,6 +39,9 @@
    (do
     (close-job! job)
     (when (:cancel-timer job) (erlang/cancel_timer (:cancel-timer job)))
+    (when-let [tag (:completion-tag state)]
+      (erlang/send (:lifetime-owner state) [tag :work-finished id
+        (if (= :cancelling (:status job)) :cancelled status)]))
     (assoc-in state [:jobs id]
     (assoc (dissoc job :cancel-timer :source-registration :target-registration) :status (if (= :cancelling (:status job)) :cancelled status)
                :finished (now) :cancel-ms (when (:cancel-at job) (- (now) (:cancel-at job)))))) state) state))
@@ -46,7 +49,10 @@
  (let [active (:max-active opts 4) history (:history opts 32)]
   (when-not (and (int? active) (<= 1 active 128) (int? history) (<= active history 128))
    (throw (ex-info "Work limits require 1 <= active <= history <= 128" {})))
+  (when (and (:completion-tag opts) (not (erlang/is_reference (:completion-tag opts))))
+   (throw (ex-info "Private work completion requires a reference tag" {:kind :invalid-work-completion-tag})))
   {:jobs {} :max-active active :history history :realm (:realm opts)
+   :completion-tag (:completion-tag opts) :lifetime-owner (:lifetime-owner opts)
    :owner-ref (erlang/monitor :process (:lifetime-owner opts))}))
 (proc.server/defserver work-owner
  (init [opts] (Process/flag :trap_exit true) (ok (initial-state opts)))

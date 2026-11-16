@@ -1,0 +1,208 @@
+;; Managed expensive reads over the existing closed Datom query boundary.
+;; Readers carry no producer closure, query, source or retry authority.
+(ns data.projection
+  (:require [proc.server] [proc.work :as work] [proc.instance :as instance] [proc.framework :as framework]
+            [proc.work-budget :as budget] [data.projection-policy :as policy]
+            [data.first-order :as data] [data.cache-pool :as pool]
+            [data.bounded-cache :as cache] [datom]
+            [datom.query.read-only :as closed]))
+
+(def DEFAULTS
+  {:max-output-bytes 65536 :max-read-bytes 1048576 :max-steps 32768
+   :timeout-ms 5000 :max-heap-words 1048576})
+
+(defn- options! [options]
+  (data/check! options {:max-nodes 64 :max-bytes 4096 :max-depth 4})
+  (when-not (and (map? options) (every? (set (keys DEFAULTS)) (keys options)))
+    (throw (ex-info "Unknown managed projection options" {:kind :invalid-projection-options})))
+  (let [o (merge DEFAULTS options)]
+    (when-not (and (int? (:max-output-bytes o)) (<= 64 (:max-output-bytes o) 1048576)
+                   (int? (:max-read-bytes o)) (<= 64 (:max-read-bytes o) 8388608)
+                   (int? (:max-steps o)) (<= 4 (:max-steps o) 1000000)
+                   (int? (:timeout-ms o)) (<= 1 (:timeout-ms o) 60000)
+                   (int? (:max-heap-words o)) (<= 65536 (:max-heap-words o) 8388608))
+      (throw (ex-info "Managed projection limits are outside their bounds" {:kind :invalid-projection-options})))
+    o))
+
+(defn- authorized? [state token role] (= token (get state role)))
+(defn- refused [reason] {:status :refused :reason reason})
+
+(defn- produce [parent tag ticket query source revision options context]
+  ;; Only this fixed SDK adapter can execute. Supplied query data cannot call
+  ;; Process/flag or substitute a function, custom store or computed provider.
+  (Process/flag :max_heap_size {:size (:max-heap-words options) :kill true :error_logger false})
+  (try
+    ((:checkpoint context))
+    (let [token (budget/open! (:max-steps options) (:max-read-bytes options) (:timeout-ms options))
+          result (closed/read-budgeted! query source revision token (:max-output-bytes options))
+          bytes (erlang/term_to_binary (:value result))]
+      (when (> (erlang/byte_size bytes) (:max-output-bytes options))
+        (throw (ex-info "Projection result exceeds its retained byte limit" {:kind :oversized})))
+      (erlang/send parent [tag :candidate ticket
+        {:status :ready :bytes bytes :charge (cache/footprint bytes)
+         :basis (:basis result) :work (:work result)}]))
+    (catch error
+      (erlang/send parent [tag :candidate ticket
+        {:status (or (:kind (ex-data error)) :failed)}]))))
+
+(declare effects!)
+(defn- transition! [state event]
+  (let [[after effects] (policy/step (:policy state) event)]
+    (effects! (assoc state :policy after) effects)))
+
+(defn- effects! [state effects]
+  (reduce
+    (fn [s effect]
+      (case (:effect effect)
+        :drop (assoc s :retained nil)
+        :drop-candidate (assoc s :candidate nil)
+        :publish (assoc s :retained (:candidate s) :candidate nil)
+        :cancel (do (when (:job s) (work/cancel! (:workers s) (:job s))) s)
+        :run
+          (let [parent (erlang/self) tag (:completion s) ticket (:ticket effect)
+                query (:query s) source (:source s) revision (:revision effect) options (:options s)
+                job (work/submit! (:workers s) {:title "Managed stored-data projection"}
+                      (fn [context] (produce parent tag ticket query source revision options context)))]
+            (if (:id job)
+              (assoc s :job (:id job) :candidate nil :terminal nil
+                       :timer (erlang/send_after (:timeout-ms options) parent [tag :timeout ticket]))
+              (transition! s {:op :finish :ticket ticket :status :work-admission-refused})))
+        s)) state effects))
+
+(defn- refresh-source! [state]
+  (let [evidence (closed/revision! (:query state) (:source state))]
+    (transition! (assoc state :dirty? false)
+      {:op :source :basis (:basis evidence) :revision (:revision evidence)})))
+
+(defn- response [state]
+  (let [view (policy/observe (:policy state))
+        view (if (:dirty? state) (assoc view :status :stale :reason :unobserved-source) view)]
+    (if (and (= :ready (:status view)) (:retained state))
+      (assoc view :value (erlang/binary_to_term (get-in state [:retained :bytes]) (list :safe))
+                  :work (get-in state [:retained :work]))
+      view)))
+
+(defn- subscribe-state! [state pid]
+  (if (contains? (:subscribers state) pid)
+    state
+    (if (>= (count (:subscribers state)) 128)
+      state
+      (let [after (assoc-in state [:subscribers pid] (erlang/monitor :process pid))
+            fresh (refresh-source! after)]
+        (transition! fresh {:op :demand :count (count (:subscribers fresh))})))))
+
+(defn- initial! [opts]
+  (let [options (:options opts) charge (+ 4096 (* 4 (:max-output-bytes options)))
+        reservation (erlang/make_ref) tag (erlang/make_ref)]
+    (when-not (and (pool/register! (erlang/self)) (pool/reserve! (erlang/self) reservation charge))
+      (throw (ex-info "Managed projection retention capacity exhausted" {:kind :projection-capacity})))
+    (pool/retain! (erlang/self) reservation)
+    (let [workers (work/start! {:max-active 1 :history 1 :completion-tag tag})
+          evidence (:evidence opts)
+          state {:source (:source opts) :query (:query opts) :options options
+                 :framework (framework/adopt! (:creator opts))
+                 :read-token (:read-token opts) :control-token (:control-token opts)
+                 :creator (erlang/monitor :process (:creator opts))
+                 :reservation reservation :completion tag :workers workers
+                 :subscribers {} :retained nil :candidate nil :job nil :timer nil :terminal nil
+                 :policy (policy/initial (+ 256 (* 2 (:max-output-bytes options)))) :dirty? false}]
+      (datom/listen! (:source state) {:attrs (set (:attributes evidence)) :payload :basis})
+      (transition! state {:op :source :basis (:basis evidence) :revision (:revision evidence)}))))
+
+(defn- finish! [state id status]
+  (if-not (= id (:job state)) state
+    (let [ticket (get-in state [:policy :running :ticket])
+          candidate (:candidate state)
+          outcome (if (= :done status) (:status candidate :failed) status)]
+      (when (:timer state) (erlang/cancel_timer (:timer state)))
+      (transition! (assoc state :job nil :timer nil :terminal nil)
+        {:op :finish :ticket ticket :status outcome :charge (:charge candidate)}))))
+
+(defn- settle! [state]
+  ;; Candidate and terminal notification have different senders. Join both
+  ;; acknowledgements; never assume inter-sender mailbox ordering.
+  (if (and (:terminal state)
+           (or (:candidate state) (not= :done (:terminal state))))
+    (finish! state (:job state) (:terminal state)) state))
+
+(proc.server/defserver projection-owner
+  (init [opts] (ok (initial! opts)))
+  (handle-call [:read token] [_from state]
+    (reply (if (authorized? state token :read-token) (response state) (refused :projection-reader)) state))
+  (handle-call [:subscribe token] [from state]
+    (if (authorized? state token :read-token)
+      (let [after (subscribe-state! state (elem from 0))] (reply (response after) after))
+      (reply (refused :projection-reader) state)))
+  (handle-call [:unsubscribe token] [from state]
+    (if (authorized? state token :read-token)
+      (let [pid (elem from 0) monitor (get-in state [:subscribers pid])]
+        (when monitor (erlang/demonitor monitor (list :flush)))
+        (let [after (update state :subscribers dissoc pid)
+              next (transition! after {:op :demand :count (count (:subscribers after))})]
+          (reply (response next) next)))
+      (reply (refused :projection-reader) state)))
+  (handle-call [:control token command] [_from state]
+    (if-not (authorized? state token :control-token)
+      (reply (refused :projection-controller) state)
+      (let [after (case command
+                    :refresh (refresh-source! state)
+                    :retry (transition! (refresh-source! state) {:op :retry})
+                    :evict (transition! state {:op :evict})
+                    :close (transition! state {:op :close})
+                    state)]
+        (reply (response after) after))))
+  (handle-info [tag :candidate ticket candidate] [state]
+    (noreply (if (and (= tag (:completion state)) (= ticket (get-in state [:policy :running :ticket])))
+               (settle! (assoc state :candidate candidate)) state)))
+  (handle-info [tag :work-finished id status] [state]
+    (noreply (if (and (= tag (:completion state)) (= id (:job state)))
+               (settle! (assoc state :terminal status)) state)))
+  (handle-info [tag :timeout ticket] [state]
+    (noreply (if (= tag (:completion state))
+      (let [after (transition! state {:op :timeout :ticket ticket})]
+        (if (:terminal after) (finish! after (:job after) (:terminal after)) after)) state)))
+  (handle-info [:datom/changed _basis _attrs] [state]
+    (noreply (if (zero? (get-in state [:policy :demand]))
+               (assoc state :dirty? true) (refresh-source! state))))
+  (handle-info [:DOWN monitor :process pid _reason] [state]
+    (if (and (= monitor (:creator state)) (not (Process/alive? pid))) (stop :normal state)
+      (if (and (= monitor (get-in state [:subscribers pid])) (not (Process/alive? pid)))
+        (let [after (update state :subscribers dissoc pid)]
+          (noreply (transition! after {:op :demand :count (count (:subscribers after))})))
+        (noreply state))))
+  (handle-info _ [state] (noreply state))
+  (terminate [_reason state]
+    (when (:timer state) (erlang/cancel_timer (:timer state)))
+    (try (datom/unlisten! (:source state)) (catch _ nil)
+      (finally (try (work/stop! (:workers state))
+        (finally (try (framework/close! (:framework state))
+          (finally (pool/release! (erlang/self) (:reservation state)))))))) :ok))
+
+(defn start!
+  "Declare one named projection in this application instance. Only a closed
+   stored-data query on a native connection is admitted. Startup observes
+   source metadata but never runs the query. Duplicate names refuse. The
+   creator owns lifetime; reader handles confer no refresh/retry authority."
+  ([name source query] (start! name source query {}))
+  ([name source query options]
+   (when-not (keyword? name)
+     (throw (ex-info "A managed projection requires a logical name" {:kind :invalid-projection-name})))
+   (let [options (options! options) evidence (closed/revision! query source)
+         read-token (erlang/make_ref) control-token (erlang/make_ref)
+         pid (core/start projection-owner
+               {:source source :query query :evidence evidence :options options
+                :creator (erlang/self) :read-token read-token :control-token control-token}
+               {:name (instance/name name)})]
+     {:owner pid :read read-token :control control-token})))
+
+(defn reader [handle] (select-keys handle [:owner :read]))
+(defn read [handle] (call (:owner handle) [:read (:read handle)]))
+(defn subscribe! [handle] (call (:owner handle) [:subscribe (:read handle)]))
+(defn unsubscribe! [handle] (call (:owner handle) [:unsubscribe (:read handle)]))
+(defn refresh! [handle] (call (:owner handle) [:control (:control handle) :refresh]))
+(defn retry! [handle] (call (:owner handle) [:control (:control handle) :retry]))
+(defn evict! [handle] (call (:owner handle) [:control (:control handle) :evict]))
+(defn stop! [handle]
+  (when (and handle (Process/alive? (:owner handle)))
+    (let [result (call (:owner handle) [:control (:control handle) :close])]
+      (when (= :closed (:status result)) (core/stop (:owner handle))))) :ok)

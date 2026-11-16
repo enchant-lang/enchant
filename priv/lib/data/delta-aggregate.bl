@@ -1,0 +1,127 @@
+;; Bounded first-order count/sum maintenance. Only supplied changes and expired
+;; IDs are visited. There is no callback, provider, historical scan or read-time
+;; rebuild. Source checkpoints and grouped values are one immutable state.
+(ns data.delta-aggregate (:require [data.first-order :as data] [data.bounded-cache :as cache]))
+
+(def DEFAULTS {:group-by [] :sum [] :window-ms 86400000 :max-events 128
+              :max-groups 64 :max-delta 32 :max-bytes 262144})
+(defn- refuse [kind] (throw (ex-info "Incremental projection refused" {:kind kind})))
+(defn initial [options]
+  (data/check! options {:max-nodes 128 :max-bytes 4096 :max-depth 8})
+  (when-not (and (map? options) (every? (conj (set (keys DEFAULTS)) :source-id) (keys options)))
+    (refuse :invalid-aggregate-options))
+  (let [o (merge DEFAULTS options)]
+    (when-not (and (string? (:source-id o)) (<= 1 (count (:source-id o)) 128)
+                   (vector? (:group-by o)) (<= (count (:group-by o)) 8) (every? keyword? (:group-by o))
+                   (vector? (:sum o)) (<= (count (:sum o)) 8) (every? keyword? (:sum o))
+                   (= (count (:sum o)) (count (distinct (:sum o))))
+                   (int? (:window-ms o)) (<= 1 (:window-ms o) 2678400000)
+                   (int? (:max-events o)) (<= 1 (:max-events o) 4096)
+                   (int? (:max-groups o)) (<= 1 (:max-groups o) 1024)
+                   (int? (:max-delta o)) (<= 1 (:max-delta o) 128)
+                   (int? (:max-bytes o)) (<= 4096 (:max-bytes o) 4194304))
+      (refuse :invalid-aggregate-options))
+    {:options o :cursor 0 :version 0 :now 0 :digest nil :events {} :groups {}
+     :expiry (gb_trees/empty) :bytes 0 :work {:changed 0 :expired 0}}))
+
+(defn- adjust [state group row direction]
+  (let [before (get-in state [:groups group])
+        count (+ (:count before 0) direction)
+        sums (reduce (fn [out field]
+                       (let [n (get row field)]
+                         (if (nil? n) out
+                           (-> out (update-in [:sums field] (fn [old] (+ (or old 0) (* direction n))))
+                                   (update-in [:known field] (fn [old] (+ (or old 0) direction)))))))
+                     {:sums (:sums before {}) :known (:known before {})} (get-in state [:options :sum]))
+        entry (assoc sums :count count)
+        charge (if (zero? count) 0 (+ 256 (cache/footprint [group entry])))]
+    (-> state
+        (update :bytes + (- charge (:charge before 0)))
+        (update :groups (fn [groups]
+                         (if (zero? count) (dissoc groups group)
+                           (assoc groups group (assoc entry :charge charge))))))))
+
+(defn- remove-row [state id]
+  (if-let [entry (get-in state [:events id])]
+    (-> (adjust state (:group entry) (:row entry) -1)
+        (update :events dissoc id)
+        (update :bytes - (:charge entry))
+        (update :expiry (fn [tree] (gb_trees/delete_any (tuple (:expiry entry) id) tree)))) state))
+
+(defn- put-row [state row now]
+  (let [options (:options state) id (:id row) at (:at row)]
+    (when-not (and (or (int? id) (and (string? id) (<= 1 (count id) 256)))
+                   (int? at) (<= 0 at now)
+                   (every? (fn [field] (let [n (get row field)] (or (nil? n) (and (int? n) (<= 0 n)))))
+                           (:sum options)))
+      (refuse :invalid-aggregate-row))
+    (let [row (select-keys row (concat [:id :at] (:group-by options) (:sum options)))
+          expiry (+ at (:window-ms options)) state (remove-row state id)]
+      (if (<= expiry now) state
+        (let [group (mapv #(get row %) (:group-by options))
+              charge (+ 512 (* 2 (cache/footprint [row group expiry id])))]
+          (-> (adjust state group row 1)
+              (assoc-in [:events id] {:row row :group group :expiry expiry :charge charge})
+              (update :bytes + charge)
+              (update :expiry (fn [tree] (gb_trees/enter (tuple expiry id) id tree)))))))))
+
+(defn- bounded! [state]
+  (when (> (count (:events state)) (get-in state [:options :max-events])) (refuse :aggregate-events))
+  (when (> (count (:groups state)) (get-in state [:options :max-groups])) (refuse :aggregate-groups))
+  (when (> (:bytes state) (get-in state [:options :max-bytes])) (refuse :aggregate-bytes))
+  state)
+
+(defn apply-delta
+  "Apply the next exact source checkpoint. Duplicate delivery is inert; gaps
+   and conflicting same-checkpoint data refuse. Failure publishes no partial
+   state. Charges inspect changed rows/groups only, never retained history."
+  [state delta]
+  (let [options (:options state)]
+    (data/check! delta {:max-nodes 8192 :max-bytes (:max-bytes options) :max-depth 32})
+    (when-not (and (map? delta) (every? #{:sequence :now :upsert :remove} (keys delta))
+                   (int? (:sequence delta)) (pos? (:sequence delta))
+                   (int? (:now delta)) (<= (:now state) (:now delta))
+                   (vector? (:upsert delta [])) (vector? (:remove delta []))
+                   (<= (+ (count (:upsert delta [])) (count (:remove delta []))) (:max-delta options)))
+      (refuse :invalid-aggregate-delta))
+    (let [digest (crypto/hash :sha256 (erlang/term_to_binary (dissoc delta :now)))
+          n (:sequence delta)]
+      (cond
+        (< n (:cursor state)) state
+        (= n (:cursor state)) (if (= digest (:digest state)) state (refuse :aggregate-checkpoint-conflict))
+        (not= n (inc (:cursor state))) (refuse :aggregate-checkpoint-gap)
+        :else
+          (let [removed (reduce remove-row state (:remove delta []))
+                after (reduce (fn [s row] (put-row s row (:now delta))) removed (:upsert delta []))]
+            (bounded! (assoc after :cursor n :version (inc (:version state)) :now (:now delta) :digest digest
+                             :work {:changed (+ (count (:remove delta [])) (count (:upsert delta []))) :expired 0})))))))
+
+(defn next-expiry [state]
+  (when-not (gb_trees/is_empty (:expiry state)) (elem (elem (gb_trees/smallest (:expiry state)) 0) 0)))
+
+(defn expire
+  "One bounded expiry turn. A due heap entry names its row directly. Callers
+   schedule another owned turn when :more? is true; reads never drain work."
+  [state now]
+  (when-not (and (int? now) (<= (:now state) now)) (refuse :aggregate-clock-regression))
+  (loop [s state n 0]
+    (let [next (next-expiry s) due? (and next (<= next now))]
+      (if (and due? (< n (get-in s [:options :max-delta])))
+        (let [[_ id] (gb_trees/smallest (:expiry s))]
+          (recur (remove-row s id) (inc n)))
+        (assoc s :now now :version (+ (:version state) (if (pos? n) 1 0))
+                 :more? (boolean due?) :work {:changed 0 :expired n})))))
+
+(defn view
+  "Render bounded groups only. Expiry backlog is explicit; no stale totals
+   are presented as a completed window. Unknown sums remain unknown."
+  [state]
+  (let [due (next-expiry state)]
+    (if (and due (<= due (:now state)))
+      {:status :pending :cursor (:cursor state)}
+      {:status :ready :cursor (:cursor state)
+       :groups (into {} (map (fn [[key group]]
+          [key {:count (:count group)
+                :sums (into {} (map (fn [field]
+                         [field (when (pos? (get-in group [:known field] 0)) (get-in group [:sums field]))])
+                         (get-in state [:options :sum])))}]) (:groups state)))})))
