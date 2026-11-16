@@ -1,0 +1,64 @@
+; Empirical complexity of the compiler's three phases on BEAM: the same BL code
+; the native image runs. Each family grows one shape (width or depth); the
+; printed slope is d log(time) / d log(n) between neighbouring sizes.
+(ns bigo.scaling
+ (:require [reader :as reader] [compiler :as compiler] [native.scheme :as scheme]
+           [clojure.string :as string]))
+
+(def attribution "bigo.bl")
+(def options {:ns "user" :namespace "user" :namespace-qualified? true :callable-arities? true})
+(def SIZES (let [a (BeamLisp/argv)] (if (seq a) (mapv (fn [s] (erlang/binary_to_integer s)) a) [32 64 128 256 512 1024])))
+
+(defn now [] (erlang/monotonic_time :microsecond))
+(defn per-call
+  "Microseconds per call: repeat until 40 ms have passed, at least once."
+  [f]
+  (f)
+  (let [t0 (now)]
+    (loop [k 1]
+      (f)
+      (let [dt (- (now) t0)]
+        (if (or (>= dt 40000) (>= k 200)) (/ (* 1.0 dt) (inc k)) (recur (inc k)))))))
+
+(defn rng [n] (range n))
+(defn sp [xs] (string/join " " xs))
+(def FAMILIES
+  [["read-vector"   :read (fn [n] (str "[" (sp (map str (rng n))) "]"))]
+   ["read-forms"    :read (fn [n] (string/join "\n" (repeat n "(fn [v] (if v 42 0))")))]
+   ["read-string"   :read (fn [n] (str "\"" (apply str (repeat n "a")) "\""))]
+   ["read-deep"     :read (fn [n] (str (apply str (repeat n "(f ")) "1" (apply str (repeat n ")"))))]
+   ["wide-let"      :all  (fn [n] (str "(fn [v] (let [" (sp (map (fn [i] (str "a" i " " i)) (rng n))) "] [" (sp (map (fn [i] (str "a" i)) (rng n))) "]))"))]
+   ["deep-if"       :all  (fn [n] (str "(fn [v] " (apply str (repeat n "(if v 1 ")) "0" (apply str (repeat n ")")) ")"))]
+   ["deep-let"      :all  (fn [n] (str "(fn [v] " (apply str (map (fn [i] (str "(let [a" i " v] ")) (rng n))) "v" (apply str (repeat n ")")) ")"))]
+   ["wide-call"     :all  (fn [n] (str "(fn [v] [" (sp (repeat n "(if v 1 2)")) "])"))]
+   ["deep-fn"       :all  (fn [n] (str (apply str (repeat n "(fn [v] ")) "v" (apply str (repeat n ")"))))]])
+
+(defn compile1 [form]
+  (compiler/reset-fresh!)
+  (compiler/compile form (assoc (compiler/new-env "user") :target :js :file attribution)))
+
+(defn slope [a b na nb] (/ (math/log (/ b a)) (math/log (/ nb na))))
+
+(def budget-us 150000000)
+(def started (now))
+
+(doseq [[name kind gen] FAMILIES]
+  (loop [sizes SIZES prev nil]
+    (when (and (seq sizes) (< (- (now) started) budget-us))
+      (let [n (first sizes)
+            src (gen n)
+            r (per-call (fn [] (reader/read-string src attribution)))
+            forms (reader/read-string src attribution)
+            c (when (= kind :all) (per-call (fn [] (compile1 (first forms)))))
+            node (when (= kind :all) (compile1 (first forms)))
+            e (when (= kind :all) (per-call (fn [] (scheme/emit node options))))
+            out (when (= kind :all) (count (scheme/emit node options)))
+            fmt (fn [x px] (if (and x px) (str (erlang/round (* 100 (slope px x (first prev) n))) "%") "-"))]
+        (println (str "BIGO " name " n=" n " bytes=" (count src)
+                      " read=" (erlang/round r) "us(" (fmt r (nth prev 1 nil)) ")"
+                      (if c (str " compile=" (erlang/round c) "us(" (fmt c (nth prev 2 nil)) ")"
+                                 " emit=" (erlang/round e) "us(" (fmt e (nth prev 3 nil)) ") out=" out) "")))
+        (if (> (+ r (or c 0) (or e 0)) 3000000)
+          (println "BIGO" name "stopped: over 3 s per call")
+          (recur (rest sizes) [n r c e]))))))
+(println "BIGO_DONE" (/ (- (now) started) 1000000.0) "s")

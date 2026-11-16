@@ -2,7 +2,7 @@
 #+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
-#+status: L, K, V, C integrated · native within 2.8× of warm BEAM on the pipeline (was 35×)
+#+status: L, K, V, C integrated · native within 2.8× of warm BEAM on the pipeline (was 35×) · big-O study adds M, D, R, U, T
 #+author: Claude for Othman
 
 * In one breath
@@ -183,9 +183,179 @@ needs M2
 step Closure tier for edits; per-function C; table-based source frames.
 #+end_milestones
 
+* Where the big-O changes are
+The seven step changes remove per-operation tolls. This section asks a
+different question of the whole pipeline: where does cost grow faster than
+the input, and where is a constant so large that a different algorithm is
+orders of magnitude away? It was answered in three passes. The =codebase=
+fact store, over all 20 sources stage 1 runs, proposed candidates. Scaling
+runs on BEAM measured the exponents. =eprof= and =system.incr= named the
+causes.
+
+#+begin_stats
+2.0 | slope of emit on nested functions | quadratic: 1,024 levels emit in 7.9 s, compile in 20 ms
+~83% | of that emit inside the lazy-cell walk | =BeamLisp.LazyMemo.deps_walk=, 20.9 M calls at 256 levels
+~250 | function calls per source byte, reader | 2.9 M calls for 11.4 KB; ≈1.3 µs per byte on BEAM
+12 of 67 | definitions whose identity changes on an unchanged re-analysis | =native.scheme=, via =system.incr/fn-identity=
+#+end_stats
+
+** M · A lazy cell walks everything it captures
+Every lazy-sequence cell runs a walk proportional to the values its thunk
+captures. On BEAM, =priv/host/lazy_memo.bl= walks the closure environment at
+create time and the value at publish time. On native,
+=native-lazy-publish= in =host/host-lazy.scm= walks every published value. In
+both cases the purpose is the memo graph's =would_cycle= edges.
+
+An ANF node has fewer than eight keys, so the clean-value memo never
+remembers one. Each nesting level that builds a lazy sequence therefore walks
+its whole subtree again. Emit on nested functions has a slope of 1.95–2.06,
+and the walk with its predicates and map folds is ~83% of that emit. On
+real, shallow definitions from =reader.bl= it is ~20% of emit.
+
+Both runtimes already blackhole a running cell: a re-entrant force fails with
+=recursive_force=. Detecting cycles at force time, and between processes only
+when a force blocks, makes the edges unnecessary.
+- Per-cell cost goes from O(captured) to O(1), and emit goes from
+  O(size × depth) to O(size), for every BL program, not only the compiler.
+- Deleted with it: the dependency walk, the bounded identity memo of clean
+  values, the NIF's edge union and cycle check, and the publication walk.
+  That is a second, approximate model of reachability which must otherwise
+  stay in agreement with the real one.
+
+** D · Compiled code depends on what the VM has loaded
+=system.incr/fn-identity= over =src/native/scheme.bl= gives a new identity to
+12 of 67 definitions when the unchanged source is analyzed a second time.
+A comment-only edit changes the same 12, and a one-body edit changes those 12
+plus the edited one. All 12 call through the =string/= alias. Before
+=clojure.string= is loaded, such a call compiles to an exact =:invoke=; after,
+it compiles to =(do (Loader/ensure_ready "clojure.string") …)=.
+=reset-fresh!= does not change this.
+
+The fix is to resolve aliases from the namespace header's declared
+requirements, never from VM state, and to make readiness a link-time fact.
+Compilation then becomes a function of the source and its declared
+interfaces. That removes the "same source, different artifact" class of bug,
+and it is the precondition for U: a body's identity becomes a sound cache key
+for the unit store, the chunk store and incremental analysis.
+
+** R · The reader spends ~250 calls per byte
+The reader is linear but slow: about 1.3 µs per byte on BEAM, and native read
+is a further 15.5× slower. The read cone's static fan-in is led by equality (151
+sites), =first= (69), =rest= (50) and =empty?= (43). =eprof= agrees: 116 k
+=eqv=, 104 k =compare= and 86 k =empty-list?= calls for 11.4 KB.
+
+The source is an Erlang charlist. Each character is classified by a chain of
+generic equality tests, each going through =rt='s kind dispatch, and a
+four-field position tuple is rebuilt per token.
+
+The replacement is a byte-class automaton over the UTF-8 binary:
+- one 256-slot class table, so dispatch is a small-integer =case= (a jump
+  table on both backends);
+- tokens are binary slices;
+- the position is an offset plus a line counter, with columns derived only
+  when a diagnostic asks for them.
+
+The estimate is 20–50 ns per byte, 25–60× on BEAM. It is not measured yet.
+On native it also removes most of the generic-equality traffic that K
+currently absorbs.
+
+** U · A one-definition edit rebuilds most of stage 1
+The full stage-1 build breaks down as:
+
+| Step | Time |
+|---|---|
+| Emitting 55 chunks (content-addressed, so unchanged chunks are reused) | ~30 s |
+| Splitting =stage1.scm= | ~35 s |
+| Twenty gsc → C → object units | ~2 min |
+
+The split greedily packs consecutive top-level forms into 256 KB units:
+=split-stage1.log= shows 19 cuts between 228 and 262 KB. Any size change in
+one form moves every later boundary, so on average half the units recompile.
+
+The fix is to cut units by content (one unit per namespace chunk, or
+content-defined cut points) and key each unit by its own bytes, with the link
+table separate. Rebuild cost becomes proportional to the change: one edit
+recompiles one unit, about 6 s. With G's closure tier on top, the edit loop
+is milliseconds, two to four orders of magnitude.
+
+** T · BEAM pays its own invocation toll
+In every compile profile, the top self-time entries are =Env.source_head=,
+=function_exported/3=, =ets:whereis=, =ets:lookup= and =persistent_term:get=.
+Each runs about once per higher-order invocation, through =call-invoke= and
+=check_source_invocation!=, and together they are ~20% of compile. This is
+the BEAM twin of the =native-remote= toll that L removed, and link-time
+resolution removes it the same way. It is a constant factor, about 1.25×,
+not an order of magnitude.
+
+#+begin_src beam-lisp :id bigo
+;; speed/bigo/scaling.txt: BEAM microseconds per call, one shape grown per family.
+(def emit-rows {:deep-fn [[64 30641] [256 455906] [1024 7930886]]
+           :deep-if [[64 2028] [256 5775] [1024 20726] [2048 42185]]
+           :wide-call [[64 3376] [256 9986] [1024 31672] [2048 55023]]})
+(def compile-rows {:wide-let [[64 866] [2048 20419]] :deep-if [[64 288] [2048 8778]]})
+(def read-forms [[1343 2921] [43007 53016]]) ; [bytes us]
+(defn slope [[n0 t0] [n1 t1]] (Float/round (/ (math/log (/ t1 t0)) (math/log (/ n1 n0))) 2))
+(defn slopes [rows] (mapv slope rows (rest rows)))
+(def emit-slopes (into {} (map (fn [[k rows]] [k (slopes rows)]) emit-rows)))
+(def compile-slopes (into {} (map (fn [[k rows]] [k (slopes rows)]) compile-rows)))
+(assert (every? #(> % 1.8) (:deep-fn emit-slopes)))
+(assert (every? #(< % 1.2) (concat (:deep-if emit-slopes) (:wide-call emit-slopes))))
+(assert (every? #(< % 1.2) (mapcat val compile-slopes)))
+{:emit emit-slopes :compile compile-slopes
+ :read-us-per-byte (Float/round (/ (second (last read-forms)) (first (last read-forms))) 2)}
+#+end_src
+#+RESULTS: bigo
+: {:compile {:deep-if [0.99], :wide-let [0.91]}, :emit {:deep-fn [1.95 2.06], :deep-if [0.75 0.92 1.03], :wide-call [0.78 0.83 0.8]}, :read-us-per-byte 1.23}
+
+
+#+begin_honest :title "What the static facts did and did not find"
+The =codebase= store over-reports. It lists 145 calls to linear-cost
+operations inside per-element loops and 1,059 inside recursive functions in
+the three hot cones. None of the shapes they suggest grows faster than linear
+up to n = 2048: wide =let=, deep =let=, deep =if= and wide calls all stay at
+slopes of 0.6–1.25. None of them is a big-O problem today.
+
+The quadratic came from a runtime the facts cannot see: =LazyMemo= is host
+code below the language. The facts were most useful for scoping the work:
+- the size of each cone (read 103, compile 324, emit 69 functions);
+- the fan-in that pointed at the reader's character dispatch;
+- the recursion ranking that put =native.scheme/emit= and =anf/node-ok?= first.
+
+Also checked and fine:
+- Native maps are flat and sorted up to 16 keys, then AVL, so O(log n).
+- The require graph has 31 edges and no cycles.
+- Nested =str= emission copies O(size × depth) bytes but stays under 10% at
+  depth 2048.
+#+end_honest
+
+#+begin_rosetta
+| Question | Query or probe | Answer | Helped |
+| What can each phase reach? | =codebase/reachable-qualified= from =reader/read-string=, =compiler/compile=, =native.scheme/emit= | 103 / 324 / 69 functions | scoped every later query |
+| Which call sites sit in loops? | =[:find ?c ?caller ?callee ?line ?d :where [?c :call/caller-qualified ?caller] [?c :call/callee ?callee] [?c :call/line ?line] [?c :call/loop-depth ?d]]= plus =:call/effective-loop-depth= | 15,937 rows | input to the next two |
+| Linear operation inside a per-element loop | rows above filtered by a LINEAR callee set and depth ≥ 1, inside a hot cone | 145 sites | candidates only; none measured super-linear |
+| Linear operation inside recursion | =[:find ?caller :where [?c :call/cost-coverage "recursive"] [?c :call/caller-qualified ?caller]]= joined with the LINEAR rows | 1,059 sites; =anf/node-ok?= 65, =native.scheme/emit= 25 | pointed profiling at emit |
+| Static fan-in per cone | =frequencies= of callees within each cone | read: equality 151, =first= 69; emit: equality 152, =str= 119 | led to R |
+| Is the build order a DAG? | =codebase/require-cycles= over =[?e :ns/requires ?d]= | 0 cycles, 31 edges | safe to cut units per namespace (U) |
+| What does each phase cost as input grows? | =speed/bigo/scaling.bl=: nine shapes, n = 32…2048 | emit on nested functions slope 2.0; everything else ≤ 1.25 | found M |
+| Where does that time go? | =speed/bigo/profile.bl= (=eprof=) | =deps_walk= 20.9 M calls, ~83% | named M |
+| Is a body's identity stable? | =speed/bigo/incr.bl=: =system.incr/fn-identity= before and after an edit | 12 of 67 unstable on unchanged source | found D |
+#+end_rosetta
+
+#+begin_honest :title "Limits of the logic layer met on the way"
+Indexing the 20 sources (about 18 k lines, 1,387 functions) took about two
+minutes, roughly 6.6 ms per line. One 5 k-call transaction exceeded the 30 s
+writer call, so the index is transacted in batches of 1,000. The walker
+crashes on =core.bl='s own macro definitions, so that file is indexed one
+form at a time. =loop=/=recur= is not a loop head, and =:call/cost-coverage
+"recursive"= marks 675 functions, too coarse to rank by. These are the next
+things to fix if the fact store is to answer cost questions alone.
+#+end_honest
+
 * Workstream roster
-Workstreams L, K, V and C run in parallel now. F, E, G, B2 and V2 are the next
-round, ordered by expected effect.
+Workstreams L, K, V and C are integrated. M and D are the next round's first
+two items: one is a runtime big-O change for every BL program, the other a
+correctness precondition for incremental builds. C2 should be re-measured
+after M lands, because the new emitter builds more lazy sequences per node.
 
 ** DONE L · Link once
 :PROPERTIES:
@@ -358,6 +528,65 @@ closure needs no new namespace. For stage 2 = stage 3 the native compiler's
 own self-emission path must adopt the same linking context: extend the
 closure explicitly with =native.intrinsics= and move the linking context into
 =native.eval=.
+
+** TODO M · Lazy cells without a capture walk
+:PROPERTIES:
+:AREA: runtime
+:PRIORITY: A
+:END:
+*Owns* =priv/host/lazy_memo.bl=, the =native/lazy_memo= NIF's edge set and
+=host/host-lazy.scm='s publication walk.
+*Approach.* Detect cycles where they happen: a re-entrant force of a running
+cell by its owner raises, as both runtimes already do. A force that blocks on
+another process follows wait-for edges at that moment only. Delete the
+create, capture and publish walks, the clean-value memo and the edge union.
+*Checks* the existing lazy-memo suites (cyclic definitions, cross-process
+waits, failure replay), plus emit on 1,024 nested functions: slope ≤ 1.2 and
+unchanged bytes.
+
+** TODO D · Compile is a function of source
+:PROPERTIES:
+:AREA: compiler
+:PRIORITY: A
+:END:
+*Owns* alias resolution in =priv/boot/compiler.bl=.
+*Approach.* Resolve a qualified call from the namespace header's declared
+requirements, never from loaded state, and turn =Loader/ensure_ready= into a
+link-time fact.
+*Checks* =speed/bigo/incr.bl=: zero changed identities on an unchanged
+re-analysis, and exactly one on a one-body edit.
+
+** TODO R · Byte-class reader
+:PROPERTIES:
+:AREA: reader
+:PRIORITY: B
+:END:
+*Approach.* A table-driven automaton over the UTF-8 binary: a 256-slot class
+table, small-integer dispatch, tokens as binary slices, and an offset plus a
+line counter for positions. The reader's diagnostics and span events stay
+byte-identical.
+*Checks* the reader answer key and span tests, plus =scaling.bl= read rows
+under 50 ns per byte on BEAM.
+
+** TODO U · Content-addressed units
+:PROPERTIES:
+:AREA: build
+:PRIORITY: B
+:END:
+*Approach.* Cut stage-1 units at chunk boundaries or at content-defined cut
+points, key each unit by its bytes, and keep the link table apart. This
+depends on D for stable keys and composes with G's closure tier.
+*Checks* a one-definition edit rebuilds exactly one unit, and an unchanged
+rebuild rebuilds none.
+
+** TODO T · Link-time invocation on BEAM
+:PROPERTIES:
+:AREA: linking
+:HORIZON: later
+:END:
+Resolve the source-invocation gate (=call-invoke=, =check_source_invocation!=,
+=source_head=) at link time, as L did for native remotes. Expect about 1.25×
+on BEAM compile.
 
 * Final numbers
 Integrated stage-1 image =57b8bdbd…= (L + K + V + C, =(standard-bindings)
