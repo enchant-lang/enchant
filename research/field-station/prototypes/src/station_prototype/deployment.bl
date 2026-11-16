@@ -19,10 +19,14 @@
 (defn observe! [status seen]
  (let [operation (or (last (:operations status)) (:preparation status))
        public (merge (select-keys operation ["state" "phase" "substep" "candidate" "generation" "error"])
+                (when-let [drain (get operation "drain")]
+                 {"drain" (select-keys drain ["jobs" "leases" "producers" "retainedHandlers"])})
                 {"service" "messages" "owner" (str (:owner status))
-                 "selectedGeneration" (:generation status) "port" (:port status)})]
+                 "selectedGeneration" (:generation status) "port" (:port status)})
+       key (if (contains? #{"pending" "running" "waiting"} (get public "state"))
+             (assoc public "state" "active") public)]
   (reset! observed public)
-  (when-not (= public @seen) (reset! seen public) (println (str "DEPLOY " (json/encode public))))
+  (when-not (= key @seen) (reset! seen key) (println (str "DEPLOY " (json/encode public))))
   (when (contains? #{"blocked" "failed" "recovering" "rolled-back" "refused"} (get operation "state"))
    (throw (ex-info (str "Foundry publication stopped: " (get operation "state") " " (pr-str (get operation "error")))
             {:operation operation}))) operation))
@@ -37,7 +41,9 @@
          (>= (System/monotonic_time :millisecond) deadline) false
          :else (do (Process/sleep 50) (recur))))))
 (defn complete! [owner]
- (let [deadline (+ (System/monotonic_time :millisecond) 90000)]
+ ;; live.socket's default reconnect grace is 120s. Preserve that real policy;
+ ;; completion must wait for it rather than force-stop an accepted old session.
+ (let [deadline (+ (System/monotonic_time :millisecond) 180000)]
   (loop [seen (atom nil)]
    (let [status (lifecycle/status owner) operation (observe! status seen)]
     (cond (= "completed" (get operation "state")) status
@@ -51,7 +57,7 @@
   (when-not (= :ok (elem r 0)) (throw (ex-info "WebSocket client failed" {})))
   (let [socket (elem r 1)]
    (try
-    (gen_tcp/send socket (str "GET /ws/ HTTP/1.1\r\nHost: 127.0.0.1:" port
+    (gen_tcp/send socket (str "GET /ws/?live-sid=prototype-publication HTTP/1.1\r\nHost: 127.0.0.1:" port
                           "\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
                           "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"))
     (let [reply (gen_tcp/recv socket 0 5000)]
