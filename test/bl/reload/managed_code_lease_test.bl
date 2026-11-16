@@ -1,0 +1,29 @@
+(ns reload.managed-code-lease-test
+ (:require [reload.generation :as g] [reload.execution :as execution] [env]))
+(deftest nested-framework-code-lease-preserves-native-graph-admission
+ (let [graph (g/prepare! {:sources {"lease.fixture" "(ns lease.fixture) (defn value [] 17)"}})]
+  (try
+   (g/with! graph
+    (fn []
+     (is (= (:digest graph)
+            (BeamLisp.Env/with_code_lease (list :Elixir.BeamLisp.Loader)
+             (fn [] (is (execution/owned?)) (:digest (g/current)))))))
+     (is (= :caught
+            (try (BeamLisp.Env/with_code_lease (list :Elixir.BeamLisp.Loader)
+                   (fn [] (throw :lease-fixture)))
+                 (catch _ :caught))))
+     (is (execution/owned?))
+     (is (= 17 (g/invoke! graph "lease.fixture/value" [])))))
+   (is (= 0 (:registrations (g/evidence graph))))
+   (is (nil? (g/current)))
+   (finally (g/retire! graph)))))
+(deftest conveyed-identity-cannot-acquire-a-managed-framework-lease
+ (let [graph (g/prepare! {:sources {"lease.forged" "(ns lease.forged) (defn value [] 19)"}})
+       captured (g/with! graph env/capture) previous (env/capture) entered (atom false)]
+  (try
+   (env/bind captured)
+   (is (= :refused
+          (try (BeamLisp.Env/with_code_lease (list :Elixir.BeamLisp.Loader)
+                 (fn [] (reset! entered true))) :unexpected (catch _ :refused))))
+   (is (= false @entered))
+   (finally (env/bind previous) (g/retire! graph)))))
