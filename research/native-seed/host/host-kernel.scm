@@ -1,19 +1,17 @@
-;; Native kernel (workstream K). Loaded AFTER host-compiler.scm.
+;; Native kernel: BIF template helpers (CONTRACT2 category b). Loaded AFTER
+;; host-compiler.scm and host-match.scm.
 ;;
-;; Two products, both selected at AOT link time by native.intrinsics:
-;;  * BIF helpers used by inline remote templates (`kernel-…` procedures);
-;;  * `kernel-rt-…` fast paths for hot rt dispatch functions. Each returns
-;;    `kernel-miss` whenever it cannot PROVE the answer; the linker-emitted
-;;    wrapper then calls the unchanged compiled BL body (the "original").
+;; native.intrinsics/remote-template inlines the hottest Erlang BIFs at AOT link
+;; time. Its expressions call the `kernel-…` procedures below; every case the
+;; fixed native representation does not decide goes to the REGISTERED LEAF
+;; procedure itself, captured once here (`kernel-leaf-…`), so the answer is the
+;; leaf's by construction, including raised errors. Helpers never raise on
+;; their own, never allocate observable identity differences and never touch
+;; scheduler state.
 ;;
-;; Exactness rule: every fast path below answers only for the fixed native
-;; representation (CONTRACT.md) and only where the answer of the registered leaf
-;; (or of the compiled rt body over those leaves) is decided by that
-;; representation. Every other input reaches the captured registered leaf or the
-;; original body. Fast paths never raise, never allocate observable identity
-;; differences, and never touch scheduler state.
+;; Nothing here re-implements priv/boot/rt.bl. The runtime's functions are
+;; compiled from that source by the native compiler (workstream KERNEL).
 
-(define kernel-miss (list 'kernel-miss))
 (define (kernel-leaf key)
  (let ((value (native-leaf key)))
   (if (eq? value native-missing) (error "native kernel: missing registered leaf" key) value)))
@@ -58,13 +56,13 @@
 (define kernel-leaf-maps-put (kernel-leaf "maps/put/3"))
 (define kernel-leaf-maps-find (kernel-leaf "maps/find/2"))
 (define kernel-leaf-maps-size (kernel-leaf "maps/size/1"))
-(define kernel-leaf-vector-first (kernel-leaf "Elixir.BeamLisp.Vector/first/1"))
-(define kernel-leaf-vector-count (kernel-leaf "Elixir.BeamLisp.Vector/count/1"))
-(define kernel-leaf-vector-to-list (kernel-leaf "Elixir.BeamLisp.Vector/to_list/1"))
+(define kernel-leaf-++ (kernel-leaf "erlang/++/2"))
+(define kernel-leaf-atom-to-binary2 (kernel-leaf "erlang/atom_to_binary/2"))
 
-;; Opaque host structs are length-7 marker vectors (native-ref-new). The fast
-;; paths below rely on "no non-vector and no 2-slot tagged vector is an opaque
-;; struct"; enforce it at the single registration point instead of assuming it.
+;; Opaque host structs are length-7 marker vectors (native-ref-new). The
+;; erlang/is_map/1 template relies on "no non-vector and no 2-slot tagged vector
+;; is an opaque struct"; enforce it at the single registration point instead of
+;; assuming it.
 (define kernel-register-struct-without-shape-check native-register-struct!)
 (set! native-register-struct! (lambda (value module fields-reader)
  (if (not (and (vector? value) (> (vector-length value) 2)))
@@ -73,32 +71,15 @@
 
 ;; ── representation tests ────────────────────────────────────────────────
 (define (kernel-tagged? x tag) (and (vector? x) (eq? (vector-length x) 2) (eq? (vector-ref x 0) tag)))
-(define (kernel-tuple? x) (kernel-tagged? x 'tuple))
 ;; Interned symbol whose name begins with ':' — the scalar keyword spelling.
 (define (kernel-colon-symbol? x)
  (and (symbol? x)
   (let ((s (symbol->string x))) (and (fx> (string-length s) 0) (char=? (string-ref s 0) #\:)))))
+;; The keyword spellings that share an atom name with bl-nil, #t and #f; the
+;; equality-against-a-literal templates compare against them by identity.
 (define kernel-symbol-nil (string->symbol ":nil"))
 (define kernel-symbol-true (string->symbol ":true"))
 (define kernel-symbol-false (string->symbol ":false"))
-;; A keyword whose name cannot collide with nil/true/false (whose BL atom
-;; names they share; erlang:== treats them as the same atom).
-(define (kernel-plain-keyword? x)
- (and (kernel-colon-symbol? x) (not (eq? x kernel-symbol-nil))
-      (not (eq? x kernel-symbol-true)) (not (eq? x kernel-symbol-false))))
-
-;; ── BIF helpers (templates) ─────────────────────────────────────────────
-(define (kernel-is-atom? x)
- (cond ((symbol? x) (kernel-colon-symbol? x))
-       ((or (boolean? x) (eq? x bl-nil)) #t)
-       ((vector? x) (kernel-leaf-is-atom x))
-       (else #f)))
-(define (kernel-is-map? x)
- (if (vector? x)
-  (if (and (eq? (vector-length x) 2)
-           (let ((tag (vector-ref x 0))) (or (eq? tag 'map) (eq? tag 'vec) (eq? tag 'set))))
-   #t (kernel-leaf-is-map x))
-  #f))
 ;; Simple value classes whose raw term equality is decided by representation.
 ;; 0 fixnum, 1 symbol, 2 scalar string, 3 pair, 4 (), 5 nil/boolean; #f other.
 (define (kernel-simple-class x)
@@ -119,17 +100,10 @@
          (else #f)))))
 (define (kernel-erlang-equal? a b) (kernel-simple-equal a b kernel-leaf-==))
 (define (kernel-exact-equal? a b) (kernel-simple-equal a b kernel-leaf-=:=))
-(define (kernel-element i t)
- (if (and (fixnum? i) (kernel-tuple? t))
-  (let ((items (vector-ref t 1)))
-   (if (and (fx>= i 1) (fx<= i (vector-length items))) (vector-ref items (fx- i 1)) (kernel-leaf-element i t)))
-  (kernel-leaf-element i t)))
-(define (kernel-tuple-size t)
- (if (kernel-tuple? t) (vector-length (vector-ref t 1)) (kernel-leaf-tuple-size t)))
 (define (kernel-tuple-to-list t)
- (if (kernel-tuple? t) (vector->list (vector-ref t 1)) (kernel-leaf-tuple-to-list t)))
+ (if (kernel-tagged? t 'tuple) (vector->list (vector-ref t 1)) (kernel-leaf-tuple-to-list t)))
 (define (kernel-setelement i t v)
- (if (and (fixnum? i) (kernel-tuple? t) (fx>= i 1) (fx<= i (vector-length (vector-ref t 1))))
+ (if (and (fixnum? i) (kernel-tagged? t 'tuple) (fx>= i 1) (fx<= i (vector-length (vector-ref t 1))))
   (let ((items (vector-copy (vector-ref t 1)))) (vector-set! items (fx- i 1) v) (vector 'tuple items))
   (kernel-leaf-setelement i t v)))
 (define (kernel-make-tuple n x)
@@ -145,231 +119,3 @@
 (define (kernel-length xs)
  (let loop ((p xs) (n 0))
   (cond ((null? p) n) ((pair? p) (loop (cdr p) (fx+ n 1))) (else (kernel-leaf-length xs)))))
-(define (kernel-lt a b)
- (cond ((and (fixnum? a) (fixnum? b)) (fx< a b)) (else (kernel-leaf-< a b))))
-
-;; ── rt classification (fast subset of rt/kind-kind) ─────────────────────
-(define kernel-kind-nil (bl-key "nil"))
-(define kernel-kind-bool (bl-key "bool"))
-(define kernel-kind-atom (bl-key "atom"))
-(define kernel-kind-int (bl-key "int"))
-(define kernel-kind-float (bl-key "float"))
-(define kernel-kind-text (bl-key "text"))
-(define kernel-kind-map (bl-key "map"))
-(define kernel-kind-list (bl-key "list"))
-(define kernel-kind-tuple (bl-key "tuple"))
-(define kernel-kind-vector (bl-key "vector"))
-(define kernel-kind-set (bl-key "set"))
-(define kernel-key-struct (bl-key "__struct__"))
-(define kernel-key-meta (bl-key "meta"))
-(define kernel-module-vector (bl-key "Elixir.BeamLisp.Vector"))
-(define kernel-module-set (bl-key "Elixir.BeamLisp.Set"))
-(define kernel-module-reduced (bl-key "Elixir.BeamLisp.Reduced"))
-(define kernel-module-env (bl-key "Elixir.BeamLisp.Env"))
-;; rt/literal-struct-kind, for module atoms IDENTICAL to its literals.
-(define kernel-struct-kinds
- (map (lambda (row) (cons (bl-key (car row)) (bl-key (cdr row))))
-  '(("Elixir.BeamLisp.Vector" . "vector") ("Elixir.BeamLisp.LazySeq" . "lazy")
-    ("Elixir.BeamLisp.Set" . "set") ("Elixir.BeamLisp.Sorted.SortedSet" . "sorted-set")
-    ("Elixir.BeamLisp.Sorted.SortedMap" . "sorted-map") ("Elixir.BeamLisp.Decimal" . "decimal")
-    ("Elixir.BeamLisp.Reduced" . "reduced") ("Elixir.BeamLisp.Atom" . "ref-cell")
-    ("Elixir.BeamLisp.Volatile" . "ref-cell") ("Elixir.BeamLisp.Promise" . "ref-cell")
-    ("Elixir.BeamLisp.Future" . "ref-cell"))))
-;; rt/tuple-kind's reserved first elements, in its order.
-(define kernel-tuple-tags
- (map (lambda (row) (cons (bl-key (car row)) (bl-key (cdr row))))
-  '(("$blfn" . "blfn") ("$remote" . "remote") ("$macro" . "macro") ("$protocol" . "protocol")
-    ("$transient" . "transient") ("symbol" . "symbol") ("meta" . "meta")
-    ("bl_deftype" . "deftype") ("bl_reify" . "reify") ("bl_vec" . "opaque"))))
-;; A first tuple element whose erlang:== against every reserved tag atom is
-;; decided by representation: any interned symbol (distinct names), or a
-;; value of another key rank. Anything else (UTF16 keywords …) defers.
-(define (kernel-decided-head? h)
- (or (symbol? h) (fixnum? h) (string? h) (pair? h) (null? h) (boolean? h) (eq? h bl-nil)))
-(define (kernel-tuple-kind x)
- (let ((items (vector-ref x 1)))
-  (if (eq? (vector-length items) 0) kernel-kind-tuple
-   (let ((h (vector-ref items 0)))
-    (if (not (kernel-decided-head? h)) #f
-     (let ((hit (and (symbol? h) (assq h kernel-tuple-tags))))
-      (if hit (cdr hit) kernel-kind-tuple)))))))
-;; Exactly rt/kind-kind's answer, or #f when not decided here.
-(define (kernel-kind x)
- (cond ((eq? x bl-nil) kernel-kind-nil)
-       ((boolean? x) kernel-kind-bool)
-       ((fixnum? x) kernel-kind-int)
-       ((pair? x) kernel-kind-list)
-       ((null? x) kernel-kind-list)
-       ((string? x) kernel-kind-text)
-       ((symbol? x) (if (and (kernel-colon-symbol? x) (not (eq? x kernel-symbol-nil))) kernel-kind-atom #f))
-       ((vector? x)
-        (if (eq? (vector-length x) 2)
-         (let ((tag (vector-ref x 0)))
-          (cond ((eq? tag 'tuple) (kernel-tuple-kind x))
-                ((eq? tag 'map)
-                 (let ((mod (bl-get x kernel-key-struct native-missing)))
-                  (if (eq? mod native-missing) kernel-kind-map
-                   (let ((hit (assq mod kernel-struct-kinds))) (if hit (cdr hit) #f)))))
-                ((eq? tag 'vec) kernel-kind-vector)
-                ((eq? tag 'set) kernel-kind-set)
-                ((eq? tag 'float) kernel-kind-float)
-                (else #f)))
-         #f))
-       ((exact-integer? x) kernel-kind-int)
-       (else #f)))
-(define kernel-reserved-tuple-kinds (map cdr kernel-tuple-tags))
-
-;; rt/family-rank of rt/kind-family for values whose family is decided by
-;; representation alone, or #f. Struct maps, reserved tuples, floats-vs-ints
-;; inside a family etc. are handled by the callers or deferred.
-(define (kernel-family-rank x)
- (let ((kind (kernel-kind x)))
-  (cond ((not kind) #f)
-        ((eq? kind kernel-kind-nil) (if (eq? x bl-nil) 0 #f))
-        ((eq? kind kernel-kind-bool) 1)
-        ((or (eq? kind kernel-kind-int) (eq? kind kernel-kind-float)) 2)
-        ((eq? kind kernel-kind-text) 3)
-        ((eq? kind kernel-kind-atom) (if (kernel-plain-keyword? x) 5 #f))
-        ((or (eq? kind kernel-kind-list) (eq? kind kernel-kind-vector)) 6)
-        ((eq? kind kernel-kind-set) 7)
-        ((eq? kind kernel-kind-map) 8)
-        ((eq? kind kernel-kind-tuple) 12)
-        (else #f))))
-
-;; ── rt fast paths: each returns a value or kernel-miss ──────────────────
-(define (kernel-rt-kind-kind x)
- (or (kernel-kind x) kernel-miss))
-
-(define (kernel-rt-k-compare a b)
- (cond ((eq? a b) 0)
-       ((and (exact-integer? a) (exact-integer? b)) (cond ((< a b) -1) ((= a b) 0) (else 1)))
-       ((and (string? a) (string? b)) (cond ((string=? a b) 0) ((string<? a b) -1) (else 1)))
-       (else
-        (let ((ra (kernel-family-rank a)) (rb (kernel-family-rank b)))
-         (cond ((or (not ra) (not rb)) kernel-miss)
-               ((not (eq? ra rb)) (if (fx< ra rb) -1 1))
-               ((eq? ra 1) (if (eq? a #t) 1 -1))
-               ((eq? ra 5) (if (kernel-leaf-< a b) -1 1))
-               ((and (eq? ra 2) (kernel-tagged? a 'float) (kernel-tagged? b 'float))
-                (let ((x (vector-ref a 1)) (y (vector-ref b 1)))
-                 (cond ((< x y) -1) ((< y x) 1) (else kernel-miss))))
-               (else kernel-miss))))))
-
-(define (kernel-rt-k-eqv a b)
- (cond ((eq? a b) #t)
-       ((and (exact-integer? a) (exact-integer? b)) (= a b))
-       ((and (string? a) (string? b)) (string=? a b))
-       (else
-        (let ((ra (kernel-family-rank a)) (rb (kernel-family-rank b)))
-         (cond ((or (not ra) (not rb)) kernel-miss)
-               ((not (eq? ra rb)) #f)
-               ;; distinct nil/booleans/plain keywords are distinct atoms
-               ((or (eq? ra 1) (eq? ra 5)) #f)
-               ((and (eq? ra 2) (kernel-tagged? a 'float) (kernel-tagged? b 'float))
-                (= (vector-ref a 1) (vector-ref b 1)))
-               (else kernel-miss))))))
-
-(define (kernel-rt-call-identical? a b) (kernel-exact-equal? a b))
-
-;; (or (erlang/== x false) (erlang/== x nil))
-(define (kernel-rt-call-not- x)
- (cond ((or (eq? x #f) (eq? x bl-nil)) #t)
-       ((or (eq? x #t) (fixnum? x) (string? x) (pair? x) (null? x) (kernel-plain-keyword? x)) #f)
-       (else kernel-miss)))
-
-(define (kernel-plain-non-map? x)
- (or (fixnum? x) (symbol? x) (string? x) (boolean? x) (eq? x bl-nil) (pair? x) (null? x)
-     (kernel-tagged? x 'tuple) (kernel-tagged? x 'float)))
-;; (and (erlang/is_map x) (erlang/=:= mod (maps/get :__struct__ x nil)))
-(define (kernel-rt-struct-of? x mod)
- (cond ((kernel-tagged? x 'map) (kernel-exact-equal? mod (bl-get x kernel-key-struct bl-nil)))
-       ((kernel-tagged? x 'vec) (kernel-exact-equal? mod kernel-module-vector))
-       ((kernel-tagged? x 'set) (kernel-exact-equal? mod kernel-module-set))
-       ((kernel-plain-non-map? x) #f)
-       (else kernel-miss)))
-;; (and (erlang/is_map x) (erlang/== (maps/get :__struct__ x nil) :Elixir.BeamLisp.Reduced))
-(define (kernel-rt-reduce-reduced? x)
- (cond ((kernel-tagged? x 'map) (kernel-erlang-equal? (bl-get x kernel-key-struct bl-nil) kernel-module-reduced))
-       ((or (kernel-tagged? x 'vec) (kernel-tagged? x 'set)) #f)
-       ((kernel-plain-non-map? x) #f)
-       (else kernel-miss)))
-
-(define (kernel-rt-k-first x)
- (cond ((pair? x) (car x))
-       ((or (null? x) (eq? x bl-nil)) bl-nil)
-       ((kernel-tagged? x 'vec) (kernel-leaf-vector-first x))
-       ((kernel-tagged? x 'tuple)
-        (let ((kind (kernel-tuple-kind x)))
-         (cond ((eq? kind kernel-kind-tuple)
-                (let ((items (vector-ref x 1))) (if (eq? (vector-length items) 0) bl-nil (vector-ref items 0))))
-               ((memq kind kernel-reserved-tuple-kinds) bl-nil)
-               (else kernel-miss))))
-       ((or (fixnum? x) (boolean? x) (kernel-tagged? x 'float) (kernel-plain-keyword? x)) bl-nil)
-       (else kernel-miss)))
-
-(define (kernel-rt-k-rest x)
- (cond ((pair? x) (cdr x))
-       ((or (null? x) (eq? x bl-nil)) '())
-       ((kernel-tagged? x 'vec) (let ((items (kernel-leaf-vector-to-list x))) (if (pair? items) (cdr items) '())))
-       ((kernel-tagged? x 'tuple)
-        (let ((kind (kernel-tuple-kind x)))
-         (cond ((eq? kind kernel-kind-tuple)
-                (let ((items (vector->list (vector-ref x 1)))) (if (pair? items) (cdr items) '())))
-               ((memq kind kernel-reserved-tuple-kinds) '())
-               (else kernel-miss))))
-       ((or (fixnum? x) (boolean? x) (kernel-tagged? x 'float) (kernel-plain-keyword? x)) '())
-       (else kernel-miss)))
-
-(define (kernel-rt-k-empty? x)
- (cond ((pair? x) #f)
-       ((or (null? x) (eq? x bl-nil)) #t)
-       ((kernel-tagged? x 'vec) (eqv? 0 (kernel-leaf-vector-count x)))
-       (else kernel-miss)))
-(define (kernel-rt-empty-list? x) (null? x))
-
-(define (kernel-rt-k-cons x xs)
- (cond ((or (pair? xs) (null? xs)) (cons x xs))
-       ((eq? xs bl-nil) (cons x '()))
-       ((kernel-tagged? xs 'vec) (cons x (kernel-leaf-vector-to-list xs)))
-       (else kernel-miss)))
-
-(define (kernel-rt-hash-hash-key x)
- (cond ((or (fixnum? x) (symbol? x) (string? x) (boolean? x) (eq? x bl-nil) (null? x)
-            (kernel-tagged? x 'float)) x)
-       ((kernel-tuple? x)
-        (let ((items (vector-ref x 1)))
-         (if (not (eq? (vector-length items) 3)) x
-          (let ((h (vector-ref items 0)))
-           (if (or (fixnum? h) (string? h) (and (symbol? h) (not (eq? h kernel-key-meta)))) x kernel-miss)))))
-       (else kernel-miss)))
-
-(define (kernel-rt-to-str x)
- (cond ((eq? x bl-nil) "")
-       ((string? x) x)
-       ((eq? x #t) "true")
-       ((eq? x #f) "false")
-       ((exact-integer? x) (number->string x))
-       ((and (kernel-colon-symbol? x) (not (eq? x kernel-symbol-nil))) (native-atom-name x))
-       (else kernel-miss)))
-
-;; Source admission gates: identity when no Env gate export exists.
-(define kernel-check-source-callable (bl-key "check_source_callable!"))
-(define kernel-check-source-invocation (bl-key "check_source_invocation!"))
-(define kernel-check-source-invocation1 (bl-key "check_source_invocation1!"))
-(define kernel-check-source-invocation2 (bl-key "check_source_invocation2!"))
-(define (kernel-env-gate? name arity) (kernel-leaf-function-exported kernel-module-env name arity))
-(define (kernel-rt-source-callable! f)
- (if (kernel-env-gate? kernel-check-source-callable 1) kernel-miss f))
-(define (kernel-rt-source-invocation! f args)
- (if (or (kernel-env-gate? kernel-check-source-invocation 2) (kernel-env-gate? kernel-check-source-callable 1)) kernel-miss f))
-(define (kernel-rt-source-invocation1! f x)
- (if (or (kernel-env-gate? kernel-check-source-invocation1 2) (kernel-env-gate? kernel-check-source-callable 1)) kernel-miss f))
-(define (kernel-rt-source-invocation2! f a b)
- (if (or (kernel-env-gate? kernel-check-source-invocation2 3) (kernel-env-gate? kernel-check-source-callable 1)) kernel-miss f))
-
-;; Raw constructors (rt.raw): their BIF dances denote these values exactly.
-(define (kernel-rt-raw-cons x xs) (cons x xs))
-(define (kernel-rt-seq-one x) (list x))
-(define (kernel-rt-seq-two a b) (list a b))
-(define (kernel-rt-tuple2 a b) (vector 'tuple (vector a b)))
-(define (kernel-rt-tuple3 a b c) (vector 'tuple (vector a b c)))
