@@ -170,21 +170,30 @@
            {:definitions 32 :payload-bytes 512 :first-root-bytes (first @sizes)
             :last-root-bytes (last @sizes) :remaining-definition-rows 31})))
 
-(deftest expanded-definition-receipts-do-not-dominate-registry-storage
- ;; Model the real retained receipt: nested ANF maps and execution edge data,
- ;; rather than a binary (which ETS already stores by reference).
- (let [key (tuple :emitted_definition "publication.storage" "fixture")
-       clause {:op :remote :mod :erlang :fun :is_integer
-               :args (list {:op :var :name "value" :ann {}}) :ann {}}
-       receipt {:version 2 :entries (apply list (repeat 4096 clause))
-                :bodies {} :execution {:version 1 :status :unavailable :entries (list)}}
-       before (ets/info :beam_lisp_vars :memory)]
-  (try
-   (BeamLisp.Env/put_key key receipt)
-   (let [retained (* 8 (- (ets/info :beam_lisp_vars :memory) before))
-         expanded (* 8 (erts_debug/flat_size (tuple (BeamLisp.Env/key key) receipt)))]
-    (is (erlang/=:= receipt (elem (BeamLisp.Env/lookup key) 1)))
-    (is (erlang/=:= receipt (elem (BeamLisp.Env/lookup_own key) 1)))
-    (is (< retained (quot expanded 4)))
-    (println "definition-storage-bytes" {:expanded expanded :retained retained}))
-   (finally (BeamLisp.Env/delete_key key)))))
+(deftest cold-receipts-are-compact-without-compressing-hot-registry-values
+ (let [ns (str "publication.storage.p" (erlang/unique_integer (list :positive)))
+       _ (env/eval (str "(ns " ns ") (defn fixture [x] [" (String/duplicate "x " 1024) "])"))
+       key (tuple :emitted_definition ns "fixture") stored (elem (BeamLisp.Env/lookup key) 1)
+       data (BeamLisp.Env/emitted_definition_data stored)]
+  (is (= false (ets/info :beam_lisp_vars :compressed)))
+  (is (= 3 (:version stored)))
+  (is (= 2 (:version data)))
+  (let [retained (+ (* 8 (erts_debug/flat_size stored)) (erlang/byte_size (:data stored)))
+        expanded (* 8 (erts_debug/flat_size data))]
+   (is (< retained (quot expanded 4)))
+   (println "cold-definition-storage-bytes" {:expanded expanded :retained retained}))
+  (is (some? (publication/snapshot ns "fixture")))
+  (is (erlang/=:= stored (:receipt (publication/snapshot ns "fixture"))))
+  (let [before (publication/snapshot ns "fixture")]
+   (try
+    (BeamLisp.Env/put_key key (assoc stored :data (erlang/list_to_binary (list 131 80 255 255 255 255))))
+    (is (nil? (publication/snapshot ns "fixture")))
+    (is (not (publication/valid? before)))
+    (finally (BeamLisp.Env/put_key key stored))))
+  (is (some? (publication/snapshot ns "fixture")))))
+
+(deftest invalid-compact-storage-refuses-before-unbounded-materialization
+ (doseq [data [nil "" (erlang/list_to_binary (list 131 80))
+               (erlang/list_to_binary (list 131 80 255 255 255 255))]]
+  (is (thrown? (BeamLisp.Env/emitted_definition_data {:version 3 :data data}))))
+ (is (thrown? (BeamLisp.Env/emitted_definition_data {:version 3 :data (erlang/term_to_binary {}) :extra true}))))
