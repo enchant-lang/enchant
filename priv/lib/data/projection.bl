@@ -224,9 +224,13 @@
   (handle-info [tag :expire ticket] [state]
     (noreply (if (and (= tag (:completion state)) (= ticket (:expiry-ticket state)))
                (schedule-expiry! (expire-state! state)) state)))
-  (handle-info [:datom/changed _basis _attrs] [state]
-    (noreply (if (zero? (get-in state [:policy :demand]))
-               (assoc state :dirty? true) (refresh-source! state))))
+  (handle-info [:datom/changed basis _attrs] [state]
+    ;; Refresh observes the current DB, which may already include an entire
+    ;; queued transaction burst. Older basis notifications need no new stamp.
+    (noreply (cond
+      (zero? (get-in state [:policy :demand])) (assoc state :dirty? true)
+      (and (int? basis) (<= basis (get-in state [:policy :wanted :basis] -1))) state
+      :else (refresh-source! state))))
   (handle-info [:DOWN monitor :process pid _reason] [state]
     (if (and (= monitor (:creator state)) (not (Process/alive? pid))) (stop :normal state)
       (if (and (= monitor (get-in state [:subscribers pid])) (not (Process/alive? pid)))
