@@ -1,0 +1,20 @@
+;; Focused candidate source execution; the selected SDK is never replaced.
+(BeamLisp.Env/add_search_path (System/fetch_env! "BL_TEST_SOURCE_ROOT"))
+(ns tooling.projection-preflight
+  (:require [test.support.projection-candidate :as candidate] [reload.ward :as ward] [bl.json :as json]))
+
+(candidate/with-candidate
+  (fn [entries]
+    (let [result (ward/run entries)
+          files (mapv (fn [file]
+            (println "projection-source-preflight" (:path file) (:status file) (:totals file))
+            (doseq [report (:reports file)]
+              (when (contains? #{:fail :error} (:type report)) (println (pr-str report))))
+            (doseq [error (:errors file)] (println "projection-preflight-error" (pr-str error)))
+            {:file (:path file) :status (str (:status file)) :totals (:totals file)}) (:files result))
+          passed (and (:ok? result) (= (count candidate/TESTS) (count files))
+                      (every? #(pos? (get-in % [:totals :pass] 0)) files))]
+      (File/write! (System/fetch_env! "PROJECTION_PREFLIGHT_OUTPUT")
+        (json/encode {:status (if passed "passed" "failed") :files files
+                      :scope "current-source-private-namespace-preflight"}))
+      (when-not passed (System/halt 1)))))
