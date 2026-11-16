@@ -1,0 +1,100 @@
+; Differential check: the pinned SDK's `reader` (the cut-over-from source,
+; byte-identical to priv/boot/reader.bl at the fan-out base) against `reader2`
+; (priv/boot/reader.bl of this checkout, renamed by diff.sh), over a file
+; list shard and an error corpus. Every entry's answer — value or raised
+; diagnostic — must be EXACTLY equal (`=:=`).
+;
+;   research/native-seed/run run -p DIR-WITH-reader2.bl \
+;     research/native-seed/speed/reader/diff.bl -- LIST SHARD SHARDS [CORPUS]
+; diff.sh builds reader2.bl and runs the error corpus and every shard.
+(ns reader-diff (:require [reader :as old] [reader2 :as new] [clojure.string :as string]))
+
+(defn- outcome
+  "{:ok value} or {:error raised}: the raised value is the runtime wrapper's
+   `:original` when there is one, so diagnostics compare as data."
+  [f]
+  (try {:ok (f)}
+       (catch e
+         (let [o (when (map? e) (:original e))]
+           {:error (if (some? o) o (pr-str e))}))))
+
+(defn- drain [next-fn st]
+  (loop [st st acc []]
+    (let [r (next-fn st)]
+      (if (= :ok (first r)) (recur (last r) (conj acc (vec (butlast r)))) [acc (last r)]))))
+
+(defn- entries [src file]
+  {:read-string [(fn [] (old/read-string src file)) (fn [] (new/read-string src file))]
+   :read-all [(fn [] (old/read-all src)) (fn [] (new/read-all src))]
+   :read-collect [(fn [] (old/read src {:file file :diagnostics :collect})) (fn [] (new/read src {:file file :diagnostics :collect}))]
+   :read-source-spans [(fn [] (old/read-source-spans src file)) (fn [] (new/read-source-spans src file))]
+   :read-syntax [(fn [] (old/read-syntax src file)) (fn [] (new/read-syntax src file))]
+   :read-next [(fn [] (drain old/read-next (old/stream src file))) (fn [] (drain new/read-next (new/stream src file)))]
+   :read-next-string [(fn [] (drain old/read-next-string (old/stream src file))) (fn [] (drain new/read-next-string (new/stream src file)))]
+   :read-one [(fn [] (old/read_one src)) (fn [] (new/read_one src))]})
+
+(defn- stat [k] (let [v (erlang/get k)] (if (erlang/is_integer v) v 0)))
+(defn- bump! [k n] (erlang/put k (+ n (stat k))))
+
+(defn- clip [s] (if (> (count s) 600) (str (subs s 0 600) "…") s))
+
+(defn- check-case [label src file kinds]
+  (bump! :cases 1)
+  (bump! :bytes (erlang/byte_size src))
+  (let [es (entries src file)]
+    (doseq [k kinds]
+      (let [[fo fn2] (get es k)
+            a (outcome fo)
+            b (outcome fn2)]
+        (bump! :checks 1)
+        (when (contains? a :error) (bump! :errors 1))
+        (when-not (erlang/=:= a b)
+          (bump! :mismatches 1)
+          (println "MISMATCH" label k)
+          (println "  old:" (clip (pr-str a)))
+          (println "  new:" (clip (pr-str b))))))))
+
+(def full-kinds [:read-string :read-all :read-source-spans :read-syntax :read-next-string])
+(def all-kinds [:read-string :read-all :read-collect :read-source-spans :read-syntax :read-next :read-next-string :read-one])
+
+(def argv (BeamLisp/argv))
+(def list-file (nth argv 0))
+(def shard (erlang/binary_to_integer (nth argv 1)))
+(def shards (erlang/binary_to_integer (nth argv 2)))
+(def corpus (nth argv 3 nil))
+
+(def paths (->> (string/split (File/read! list-file) #"\n")
+                (remove string/blank?)
+                (map-indexed (fn [i x] [i x]))
+                (filter (fn [[i _]] (= shard (rem i shards))))
+                (map second)))
+
+(doseq [path paths]
+  (let [src (File/read! path)]
+    (check-case path src path full-kinds)
+    ; Truncations: every cut is a prefix that usually ends inside a form, so the
+    ; diagnostics (unterminated collections and strings, their openers) get
+    ; compared at positions spread through real files.
+    (let [n (count src)]
+      (doseq [frac [3 7]]
+        (let [cut (String/slice src 0 (quot (* n frac) 10))]
+          (check-case (str path "@" frac "/10") cut path [:read-string :read-source-spans]))))))
+
+(when corpus
+  (let [cases (remove string/blank? (string/split (File/read! corpus) #"\n-----\n"))]
+    (doseq [[i src] (map-indexed (fn [i x] [i x]) cases)]
+      (check-case (str "corpus#" i) src "corpus.bl" all-kinds)
+      ; and each line on its own, so one error does not mask the next
+      (doseq [[j line] (map-indexed (fn [i x] [i x]) (string/split src #"\n"))]
+        (when-not (string/blank? line)
+          (check-case (str "corpus#" i ":" j) line nil all-kinds))))))
+
+(when corpus
+  ; cases whose bytes are awkward in a text file: CR, CRLF, NUL-free controls
+  (doseq [[i src] (map-indexed (fn [i x] [i x])
+                    ["(a\r\nb)\r\n\"x\r\ny\" c" "a\rb" "(f\r" "\"\\\r\"" "#\"\r\" x" "#|\r\n| y"
+                     "(a\u000bb)" "[ x]" "x y" ";c\r\n(z)" "\t\t(a\tb)\n\t[c]"])]
+    (check-case (str "synthetic#" i) src "synthetic.bl" all-kinds)))
+
+(println "DIFF shard" shard "/" shards "files" (count paths) "cases" (stat :cases) "checks" (stat :checks)
+         "raised" (stat :errors) "bytes" (stat :bytes) "mismatches" (stat :mismatches))
