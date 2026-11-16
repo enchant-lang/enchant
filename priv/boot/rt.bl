@@ -537,27 +537,46 @@
                     (raw-cons (lists/nthtail mn args) ())))
           :else (bad-call f arity))))))
 
+;; THE INVOCATION GATE (T). Its guarantee: inside an admitted Source extent of
+;; THIS process (a row of Env's protected `beam_lisp_source_extent_heads` table
+;; keyed by the pid), every invoked callable and its actual arguments pass Env's
+;; capture/target policy. Outside every extent it is a no-op. Env counts its
+;; pid-keyed head rows in one atomics cell, published at its persistent_term
+;; key when the table is created, and maintains the count in the table owner
+;; (the only writer), so a zero count proves no process has an extent and the
+;; gate costs one persistent_term read and one atomics read, with no ETS
+;; lookup and no `function_exported`. A nonzero count, or no published cell
+;; (early recovery, a Gambit host without Env custody), takes the full check
+;; below, unchanged.
 (defn- source-callable! [f]
  ;; Early recovery has no managed G preparation. New G refuses to prepare unless
  ;; this native gate exists, so the preboot compatibility edge grants no Source.
- (when (erlang/function_exported :Elixir.BeamLisp.Env :check_source_callable! 1)
-  (BeamLisp.Env/check_source_callable! f)) f)
+ (let [live (persistent_term/get :bl_source_extent_heads_live nil)]
+  (when (or (erlang/== nil live) (erlang/=/= 0 (atomics/get live 1)))
+   (when (erlang/function_exported :Elixir.BeamLisp.Env :check_source_callable! 1)
+    (BeamLisp.Env/check_source_callable! f)))) f)
 
 (defn- source-invocation! [f args]
  ;; One full callable+actual-arguments check. Old native recovery has no managed
  ;; Source admission; current prepare! requires every invocation-gate export.
- (if (erlang/function_exported :Elixir.BeamLisp.Env :check_source_invocation! 2)
-  (BeamLisp.Env/check_source_invocation! f args)
-  (source-callable! f)) f)
+ (let [live (persistent_term/get :bl_source_extent_heads_live nil)]
+  (when (or (erlang/== nil live) (erlang/=/= 0 (atomics/get live 1)))
+   (if (erlang/function_exported :Elixir.BeamLisp.Env :check_source_invocation! 2)
+    (BeamLisp.Env/check_source_invocation! f args)
+    (source-callable! f)))) f)
 (defn- source-invocation1! [f x]
  ;; Env guards its private Source head BEFORE building any argument list.
- (if (erlang/function_exported :Elixir.BeamLisp.Env :check_source_invocation1! 2)
-  (BeamLisp.Env/check_source_invocation1! f x)
-  (source-callable! f)) f)
+ (let [live (persistent_term/get :bl_source_extent_heads_live nil)]
+  (when (or (erlang/== nil live) (erlang/=/= 0 (atomics/get live 1)))
+   (if (erlang/function_exported :Elixir.BeamLisp.Env :check_source_invocation1! 2)
+    (BeamLisp.Env/check_source_invocation1! f x)
+    (source-callable! f)))) f)
 (defn- source-invocation2! [f a b]
- (if (erlang/function_exported :Elixir.BeamLisp.Env :check_source_invocation2! 3)
-  (BeamLisp.Env/check_source_invocation2! f a b)
-  (source-callable! f)) f)
+ (let [live (persistent_term/get :bl_source_extent_heads_live nil)]
+  (when (or (erlang/== nil live) (erlang/=/= 0 (atomics/get live 1)))
+   (if (erlang/function_exported :Elixir.BeamLisp.Env :check_source_invocation2! 3)
+    (BeamLisp.Env/check_source_invocation2! f a b)
+    (source-callable! f)))) f)
 
 (defn call-invoke
   "Call `f` with the argument LIST `args`.
