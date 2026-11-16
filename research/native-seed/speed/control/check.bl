@@ -1,0 +1,200 @@
+; Workstream C focused differential check. No compiler image, no benchmark.
+; 1. Source corpus (control.corpus): BEAM outcomes vs the new emitter's
+;    Scheme, and vs the frozen reference emitter (old generic matcher).
+; 2. Hand-built ANF covering every pattern kind (repeated variables, aliases,
+;    cons/nil, int/string/keyword map keys, generic structs, vectors, a
+;    non-literal key, raising guards): new vs reference on many subjects.
+; 3. The benchmark's six forms emit without refusal under its own options.
+; Writes OUT/program.scm (gsi: host sources + definitions + assertions).
+(ns control.check
+ (:require [reader :as reader] [reader-node :as rn] [compiler :as compiler]
+           [native.scheme :as scheme] [native.eval :as ev]
+           [control.reference :as reference] [control.corpus :as corpus]
+           [clojure.string :as string]))
+(def argv (BeamLisp/argv))
+(def out (nth argv 0))
+(def root "research/native-seed")
+(def corpus-path (str root "/speed/control/corpus.bl"))
+
+; ---- source corpus forms ------------------------------------------------------
+(defn- items [form] (rn/node-items (rn/node-form form)))
+(defn- cases-forms []
+ (let [forms (reader/read-string (File/read! corpus-path) corpus-path)
+       def-form (first (filter (fn [f]
+                  (let [xs (items f)]
+                   (and (= :list (rn/node-tag (rn/node-form f)))
+                        (= "def" (rn/node-name (rn/node-form (first xs))))
+                        (= "cases" (rn/node-name (rn/node-form (second xs))))))) forms))]
+  (mapv (fn [entry] (nth (items entry) 2)) (items (nth (items def-form) 2)))))
+(defn- compile-form [form]
+ (compiler/reset-fresh!)
+ (compiler/compile form (assoc (compiler/new-env "user") :target :js :file corpus-path)))
+
+; A receive becomes a case on the enclosing parameter, with its after body
+; as the final catch-all clause (gsi has no actor mailbox).
+(defn- recv->case [n param]
+ (cond
+  (vector? n) (mapv #(recv->case % param) n)
+  (erlang/is_list n) (apply list (map #(recv->case % param) n))
+  (and (erlang/is_map n) (= :recv (:op n)))
+   {:op :case :ann {} :subj {:op :var :name param :ann {}}
+    :clauses (apply list (concat (map #(recv->case % param) (:clauses n))
+                                 [{:pats (list {:pop :pvar :name "_"}) :guard nil :body (:after n)}]))}
+  (and (erlang/is_map n) (= :fn (:op n)))
+   (assoc n :clauses (apply list (map (fn [cl]
+     (let [p (first (:pats cl)) inner (if (= :pvar (:pop p)) (:name p) param)]
+      (assoc cl :body (recv->case (:body cl) inner)))) (:clauses n))))
+  (and (erlang/is_map n) (:op n) (not= :lit (:op n)))
+   (into {} (map (fn [k] [k (if (= k :ann) (get n k) (recv->case (get n k) param))]) (keys n)))
+  (and (erlang/is_map n) (contains? n :pats))
+   (assoc n :body (recv->case (:body n) param) :guard (recv->case (:guard n) param))
+  :else n))
+
+(defn- outcome [thunk]
+ (try {:ok (thunk)} (catch e {:raised true})))
+(defn- flush-mailbox [] (receive _ (flush-mailbox) (after 0 nil)))
+(defn- beam-outcome [kind f args]
+ (if (= kind :recv)
+  (do (erlang/send (erlang/self) args) (let [r (outcome #(f args))] (flush-mailbox) r))
+  (outcome #(apply f args))))
+(defn- expected [o] (if (contains? o :ok) (str "(vector 'ok " (scheme/literal (:ok o)) ")") "(vector 'raised)"))
+(defn- call-args [kind args]
+ (str "(list " (string/join " " (map scheme/literal (if (= kind :recv) [args] args))) ")"))
+
+(def context (ev/context "user"))
+(def lines (atom []))
+(defn- emit! [s] (swap! lines conj s))
+(def counts (atom {}))
+(def framed (atom 0))
+
+(defn source-corpus []
+ (let [forms (cases-forms)]
+  (assert (= (count forms) (count corpus/cases)))
+  (doseq [[i form entry] (map (fn [i f e] [i f e]) (range (count forms)) forms corpus/cases)]
+   (let [[label kind f calls] entry
+         node (compile-form form)
+         node (if (= kind :recv) (recv->case node nil) node)
+         fresh (scheme/emit node (assoc context :emission-counts counts))
+         ; Actor-runtime emission (source frames) must still emit every case.
+         _ (swap! framed + (erlang/byte_size (scheme/emit node (assoc context :source-frames? true))))
+         old (reference/emit node context)
+         new-name (str "control-new-" i) old-name (str "control-old-" i)]
+    (emit! (str "(define " new-name " " fresh ")"))
+    (emit! (str "(define " old-name " " old ")"))
+    (doseq [[j args] (map-indexed (fn [j x] [j x]) calls)]
+     (let [o (beam-outcome kind f args) a (call-args kind args)]
+      (emit! (str "(control-beam " (scheme/text (str label "/" j)) " " (expected o)
+                  " (lambda () (bl-invoke " new-name " " a ")) (lambda () (bl-invoke " old-name " " a ")))"))))))))
+
+; ---- hand-built ANF: every pattern kind ----------------------------------------
+(defn L [v] {:op :lit :val v :ann {}})
+(defn V [s] {:op :var :name s :ann {}})
+(defn P [s] {:pop :pvar :name s})
+(defn PL [v] {:pop :plit :val v})
+(defn PT [& xs] {:pop :ptuple :elems (apply list xs)})
+(defn PC [h t] {:pop :pcons :head h :tail t})
+(def PN {:pop :pnil})
+(defn PA [a b] {:pop :palias :a a :b b})
+(defn PM [& kvs] {:pop :pmap :pairs (apply list (map vec (partition 2 kvs)))})
+(defn PS [mod & kvs] {:pop :pstruct :mod mod :fields (apply list (map vec (partition 2 kvs)))})
+(defn PV [inner] {:pop :pstruct :mod :Elixir.BeamLisp.Vector :fields (list [:items inner])})
+(defn T [& xs] {:op :tuple :ann {} :elems (apply list xs)})
+(defn R [f & args] {:op :remote :ann {} :mod :erlang :fun f :args (apply list args)})
+(defn C [pats guard body] {:pats (apply list pats) :guard guard :body body})
+(defn F [params clauses] {:op :fn :ann {} :clauses (list (C (map P params) nil {:op :case :ann {} :subj (V (first params)) :clauses (apply list clauses)}))})
+(defn FM [clauses] {:op :fn :ann {} :clauses (apply list clauses)})
+(def shapes
+ [["tuple-repeat" (F ["s"] [(C [(PT (P "x") (P "x"))] nil (T (L :same) (V "x")))
+                            (C [(PT (P "x") (P "y"))] nil (T (L :diff) (V "x") (V "y")))
+                            (C [(PT (P "_") (P "_") (P "_"))] nil (L :triple))])]
+  ["list-cons-nil" (F ["s"] [(C [PN] nil (L :empty))
+                             (C [(PC (P "h") PN)] nil (T (L :one) (V "h")))
+                             (C [(PC (P "h") (PC (P "h") (P "t")))] nil (T (L :twin) (V "h") (V "t")))
+                             (C [(PC (PL 1) (P "t"))] nil (T (L :starts-1) (V "t")))
+                             (C [(PC (P "h") (P "t"))] nil (T (L :cons) (V "h") (V "t")))])]
+  ["alias" (F ["s"] [(C [(PA (P "whole") (PT (PL :a) (P "y")))] nil (T (V "whole") (V "y")))
+                     (C [(PA (PT (P "p") (P "q")) (PT (P "q") (P "p")))] nil (T (L :sym) (V "p")))])]
+  ["map-keys" (F ["s"] [(C [(PM (L 1) (P "one") (L "two") (P "two"))] nil (T (L :int-str) (V "one") (V "two")))
+                        (C [(PM (L :k) (PM (L :inner) (P "i")))] nil (T (L :nested) (V "i")))
+                        (C [(PM (L nil) (P "n"))] nil (T (L :nil-key) (V "n")))
+                        (C [(PM (L :k) (P "v") (L :w) (P "v"))] nil (T (L :repeat) (V "v")))
+                        (C [(PM)] nil (L :any-map))])]
+  ["struct" (F ["s"] [(C [(PS :Elixir.Foo :a (P "a"))] nil (T (L :foo) (V "a")))
+                      (C [(PS :Elixir.Bar)] nil (L :bar))
+                      (C [(PS :Elixir.BeamLisp.Set :members (P "m"))] nil (L :set))])]
+  ["vector" (F ["s"] [(C [(PV (PT (P "a") (P "b")))] nil (T (L :pair) (V "a") (V "b")))
+                      (C [(PV (P "items"))] nil (T (L :items) (V "items")))
+                      (C [(PT (P "a") (P "b"))] nil (L :tuple-pair))])]
+  ["literals" (F ["s"] [(C [(PL :a)] nil (L 1)) (C [(PL 1)] nil (L 2)) (C [(PL "s")] nil (L 3))
+                        (C [(PL 1.5)] nil (L 4)) (C [(PL true)] nil (L 5)) (C [(PL nil)] nil (L 6))
+                        (C [(PL false)] nil (L 7)) (C [(PL 4611686018427387904)] nil (L 8)) (C [(P "_")] nil (L 0))])]
+  ["key-capture" {:op :fn :ann {} :clauses (list (C [(P "s") (P "k")] nil
+                  {:op :case :ann {} :subj (V "s")
+                   :clauses (list (C [(PT (P "k") (PM (V "k") (P "v")))] nil (T (L :outer-key) (V "k") (V "v")))
+                                  (C [(P "_")] nil (L :none)))}))}]
+  ["guards" (F ["s"] [(C [(PT (P "x") (P "y"))] (R :> (V "x") (V "y")) (L :gt))
+                      (C [(P "x")] (R :=:= (R :element (L 1) (V "x")) (L :t)) (L :tagged))
+                      (C [(P "x")] (R :not (R :is_integer (V "x"))) (L :not-int))
+                      (C [(P "x")] {:op :if :ann {} :test (R :is_integer (V "x")) :then (R :< (V "x") (L 0)) :else (L false)} (L :neg))
+                      (C [(P "x")] nil (L :rest))])]
+  ["fn-clauses" (FM [(C [(PT (P "a") (P "b")) (P "a")] nil (L :tuple-first))
+                     (C [(PC (P "h") (P "t")) (P "_")] nil (T (L :list) (V "h")))
+                     (C [(P "x") (P "x")] nil (L :same))
+                     (C [(PL :k) (P "_")] (R :is_atom (L :k)) (L :k))])]
+  ["fn-mixed-width" (FM [(C [(P "a")] nil (T (L :one) (V "a"))) (C [(P "a") (P "b")] nil (T (L :two) (V "a") (V "b")))])]])
+(def subjects
+ [nil true false 0 1 -1 1.5 4611686018427387904 :a :k :t "s" "" (list) (list 1) (list 1 1) (list 1 2 3) (list 2 3)
+  (tuple) (tuple 1 1) (tuple 1 2) (tuple 2 1) (tuple :a 1) (tuple :t 2) (tuple 1 1 1) (tuple (tuple 1 2) (tuple 2 1))
+  [1 2] [:a 1] [] [1 2 3] {1 :x "two" :y} {:k {:inner 3}} {:k {:other 3}} {nil 5} {:k 2 :w 2} {:k 2 :w 3} {}
+  {:__struct__ :Elixir.Foo :a 9} {:__struct__ :Elixir.Foo :b 9} {:__struct__ :Elixir.Bar} #{1 2}
+  (tuple :k {:k 7}) (tuple :j {:k 7})])
+(defn shape-checks []
+ (doseq [[i [label node]] (map-indexed (fn [i x] [i x]) shapes)]
+  (let [fresh (scheme/emit node (assoc context :emission-counts counts))
+        old (reference/emit node context)
+        n (str "control-shape-new-" i) o (str "control-shape-old-" i)
+        arity (count (:pats (first (:clauses node))))]
+   (emit! (str "(define " n " " fresh ")"))
+   (emit! (str "(define " o " " old ")"))
+   (doseq [[j a] (map-indexed (fn [j x] [j x]) subjects)]
+    (doseq [[k args] (map-indexed (fn [k x] [k x])
+                  (cond (= label "key-capture") [(str "(list " (scheme/literal a) " (string->symbol \":k\"))")]
+                        (= label "fn-mixed-width") [(str "(list " (scheme/literal a) ")") (str "(list " (scheme/literal a) " 1)")]
+                        (= arity 2) [(str "(list " (scheme/literal a) " " (scheme/literal a) ")")
+                                     (str "(list " (scheme/literal a) " 1)") (str "(list " (scheme/literal a) ")")]
+                        :else [(str "(list " (scheme/literal a) ")")]))]
+     (emit! (str "(control-same " (scheme/text (str label "/" j "/" k)) " (lambda () (bl-invoke " n " " args
+                 ")) (lambda () (bl-invoke " o " " args ")))")))))))
+
+; ---- benchmark forms ------------------------------------------------------------
+(defn benchmark-forms []
+ (let [path (str root "/benchmark/compiler-values.bl")
+       options {:ns "user" :namespace "user" :namespace-qualified? true :callable-arities? true}
+       forms (reader/read-string (File/read! path) "native-devtool-benchmark.bl")
+       nodes (mapv (fn [f] (compiler/reset-fresh!)
+                     (compiler/compile f (assoc (compiler/new-env "user") :target :js :file "native-devtool-benchmark.bl"))) forms)
+       fresh (mapv #(scheme/emit % options) nodes)
+       old (mapv #(reference/emit % options) nodes)]
+  (assert (= 6 (count fresh)))
+  (doseq [[i f o] (map (fn [i f o] [i f o]) (range 6) fresh old)]
+   (emit! (str "(define control-bench-new-" i " " f ")"))
+   (emit! (str "(define control-bench-old-" i " " o ")"))
+   (doseq [args ["(list 1)" "(list bl-nil)" "(list #f)" "(list 1 2)"]]
+    (emit! (str "(control-same " (scheme/text (str "benchmark/" i "/" args)) " (lambda () (bl-invoke control-bench-new-" i " " args
+                ")) (lambda () (bl-invoke control-bench-old-" i " " args ")))"))))
+  (println "CONTROL_BENCHMARK_FORMS" (count fresh) "new-bytes" (reduce + (map erlang/byte_size fresh))
+           "old-bytes" (reduce + (map erlang/byte_size old)))
+  (File/write! (str out "/benchmark-forms.scm") (string/join "\n" fresh))))
+
+(source-corpus)
+(shape-checks)
+(benchmark-forms)
+(def host ["host.scm" "host/host-values.scm" "host/host-leaves.scm" "host/host-lazy.scm"
+           "host/host-extra.scm" "host/host-compiler.scm" "host/host-match.scm"])
+(File/write! (str out "/program.scm")
+ (str (string/join "\n" (map #(str "(load " (scheme/text (str (File/cwd!) "/" root "/" %)) ")") host)) "\n"
+      (File/read! (str root "/speed/control/harness.scm")) "\n"
+      (string/join "\n" @lines) "\n(control-report)\n"))
+(println "CONTROL_EMISSION_COUNTS" (pr-str @counts))
+(println "CONTROL_SOURCE_FRAMES_BYTES" @framed)
+(println "CONTROL_PROGRAM" (count @lines) "lines")

@@ -111,23 +111,6 @@
   (:aot-link options) (linked-language-call function arguments options)
   :else (ordered "bl-invoke" [function arguments] options)))
 
-(defn pattern [p options]
- (let [op (:pop p)]
-  (cond (= op :pvar) (str "(list 'var " (text (:name p)) ")")
-        (= op :plit) (str "(list 'lit " (literal (:val p)) ")")
-        (= op :pnil) "(list 'nil)"
-        (= op :ptuple) (str "(list 'tuple (list " (string/join " " (map #(pattern % options) (:elems p))) "))")
-        (= op :pcons) (str "(list 'cons " (pattern (:head p) options) " " (pattern (:tail p) options) ")")
-        (= op :palias) (str "(list 'alias " (pattern (:a p) options) " " (pattern (:b p) options) ")")
-        (= op :pmap) (str "(list 'map (list "
-          (string/join " " (map (fn [[k p]] (str "(list " (emit k (assoc (operand-options options) :source-frames? false)) " " (pattern p options) ")")) (:pairs p))) "))")
-        (and (= op :pstruct) (= :Elixir.BeamLisp.Vector (:mod p)))
-          (str "(list 'vector " (pattern (second (first (:fields p))) options) ")")
-        (= op :pstruct)
-          (str "(list 'struct " (literal (:mod p)) " (list "
-           (string/join " " (map (fn [[k p]] (str "(list " (literal k) " " (pattern p options) ")")) (:fields p))) "))")
-        :else (refuse {:op op}))))
-
 (defn binders [p]
  (case (:pop p)
   :pvar [(:name p)]
@@ -138,94 +121,237 @@
   :pstruct (mapcat #(binders (second %)) (:fields p))
   []))
 
-(defn- direct-pattern? [p]
- (case (:pop p)
-  :pvar true :plit true :pnil true
-  :ptuple (every? direct-pattern? (:elems p))
-  :pcons (and (direct-pattern? (:head p)) (direct-pattern? (:tail p)))
-  :palias (and (direct-pattern? (:a p)) (direct-pattern? (:b p)))
-  false))
+; Integer facts name Source variables proven to hold exact integers. Every
+; Scheme binder of a Source name forgets that name's fact.
+(defn- forget-facts [options names]
+ (let [facts (:integer-facts options)]
+  (if (and (seq facts) (some #(contains? facts %) names))
+   (assoc options :integer-facts (reduce disj facts names)) options)))
 
-; A continuation carries lexical bindings at EMISSION time. No pattern data,
-; runtime binding alist, or variable-name lookup is emitted for this subset.
-(declare direct-pattern)
-(defn- direct-patterns [patterns subjects bound success failure]
- (if (empty? patterns) (success bound)
-  (direct-pattern (first patterns) (first subjects) bound
-   (fn [next-bound] (direct-patterns (rest patterns) (rest subjects) next-bound success failure)) failure)))
-(defn- direct-pattern [p subject bound success failure]
+; Patterns compile to decision code on the subject. A continuation carries the
+; lexical bindings at EMISSION time: no pattern data, runtime binding alist or
+; variable-name lookup is emitted. Semantics are host bl-match's (host-values):
+; bl-key-equal? literals and repeated variables, `_` never unifies, map keys
+; must be present, struct module/fields through bl-match-struct-fields.
+; Host temporaries are named by pattern path (pm/pv/pe/pf/pk + path); Source
+; locals are ident-encoded v_*, so neither can capture the other.
+(defn- pattern-child [path component] (str path "_" component))
+(defn- vector-items-pattern [p]
+ (or (second (first (:fields p))) (refuse {:op (:pop p)})))
+(defn- vector-pattern? [p] (and (= :pstruct (:pop p)) (= :Elixir.BeamLisp.Vector (:mod p))))
+(defn- map-key-bindings
+ "Non-literal map-pattern keys with their paths, left to right. They are
+  evaluated once per clause attempt, before matching, in the clause's scope."
+ [p path]
  (case (:pop p)
-  :pvar (let [name (:name p) local (ident name)]
-          (if (and (not= name "_") (contains? bound name))
-           (str "(if (bl-key-equal? " (get bound name) " " subject ") " (success bound) " " failure ")")
-           (str "(let ((" local " " subject ")) " (success (assoc bound name local)) ")")))
-  :plit (str "(if (bl-key-equal? " (literal (:val p)) " " subject ") " (success bound) " " failure ")")
+  :ptuple (apply concat (map-indexed (fn [i x] (map-key-bindings x (pattern-child path i))) (:elems p)))
+  :pcons (concat (map-key-bindings (:head p) (pattern-child path "h")) (map-key-bindings (:tail p) (pattern-child path "t")))
+  :palias (concat (map-key-bindings (:a p) (pattern-child path "a")) (map-key-bindings (:b p) (pattern-child path "b")))
+  :pmap (apply concat (map-indexed (fn [i pair]
+          (concat (when-not (= :lit (:op (first pair))) [[(pattern-child path (str "k" i)) (first pair)]])
+                  (map-key-bindings (second pair) (pattern-child path (str "m" i))))) (:pairs p)))
+  :pstruct (if (vector-pattern? p)
+             (map-key-bindings (vector-items-pattern p) (pattern-child path "v"))
+             (apply concat (map-indexed (fn [i field] (map-key-bindings (second field) (pattern-child path (str "m" i)))) (:fields p))))
+  []))
+(defn- tag-test [subject tag]
+ (str "(and (vector? " subject ") (= (vector-length " subject ") 2) (eq? (vector-ref " subject " 0) '" tag "))"))
+(defn- literal-test [v subject]
+ ; bl-key-equal? against a non-boolean keyword or an exact integer is eq?/eqv?.
+ (cond (and (keyword? v) (not (contains? #{"true" "false" "nil"} (erlang/atom_to_binary v))))
+        (str "(eq? " subject " " (literal v) ")")
+       (integer? v) (str "(eqv? " subject " " v ")")
+       :else (str "(bl-key-equal? " (literal v) " " subject ")")))
+(defn- with-subject [subject path k]
+ (if (string/starts-with? subject "(")
+  (let [local (str "pm" path)] (str "(let ((" local " " subject ")) " (k local) ")"))
+  (k subject)))
+(declare match-pattern)
+(defn- match-each [items bound keys success failure]
+ (if (empty? items) (success bound)
+  (let [item (first items)]
+   (match-pattern (nth item 0) (nth item 1) (nth item 2) bound keys
+    (fn [next-bound] (match-each (rest items) next-bound keys success failure)) failure))))
+(defn- match-entries [entries fields bound keys success failure]
+ (if (empty? entries) (success bound)
+  (let [entry (first entries) child (nth entry 2) local (str "pe" child)]
+   (str "(let ((" local " (bl-match-entry " fields " " (nth entry 0) "))) (if " local " "
+        (match-pattern (nth entry 1) (str "(cdr " local ")") child bound keys
+         (fn [next-bound] (match-entries (rest entries) fields next-bound keys success failure)) failure)
+        " " failure "))"))))
+(defn- match-indexed [patterns accessor path bound keys success failure]
+ (match-each (map-indexed (fn [i x] [x (accessor i) (pattern-child path i)]) patterns) bound keys success failure))
+(defn- match-pattern [p subject path bound keys success failure]
+ (case (:pop p)
+  :pvar (let [name (:name p)]
+          (cond (= name "_") (success bound)
+                (contains? bound name)
+                 (str "(if (bl-key-equal? " (get bound name) " " subject ") " (success bound) " " failure ")")
+                :else (let [local (ident name)]
+                       (str "(let ((" local " " subject ")) " (success (assoc bound name local)) ")"))))
+  :plit (str "(if " (literal-test (:val p) subject) " " (success bound) " " failure ")")
   :pnil (str "(if (null? " subject ") " (success bound) " " failure ")")
-  :pcons (str "(if (pair? " subject ") "
-           (direct-pattern (:head p) (str "(car " subject ")") bound
-            (fn [next-bound] (direct-pattern (:tail p) (str "(cdr " subject ")") next-bound success failure)) failure)
+  :pcons (with-subject subject path (fn [s]
+           (str "(if (pair? " s ") "
+            (match-each [[(:head p) (str "(car " s ")") (pattern-child path "h")]
+                         [(:tail p) (str "(cdr " s ")") (pattern-child path "t")]] bound keys success failure)
+            " " failure ")")))
+  :palias (with-subject subject path (fn [s]
+            (match-each [[(:a p) s (pattern-child path "a")] [(:b p) s (pattern-child path "b")]] bound keys success failure)))
+  :ptuple (with-subject subject path (fn [s]
+            (let [items (:elems p) storage (str "pv" path)]
+             (str "(if (and " (tag-test s "tuple") " (= (vector-length (vector-ref " s " 1)) " (count items) ")) "
+              (if (empty? items) (success bound)
+               (str "(let ((" storage " (vector-ref " s " 1))) "
+                (match-indexed items #(str "(vector-ref " storage " " % ")") path bound keys success failure) ")"))
+              " " failure ")"))))
+  :pmap (with-subject subject path (fn [s]
+          (str "(if " (tag-test s "map") " "
+           (match-entries (map-indexed (fn [i pair]
+             (let [k (first pair)]
+              [(if (= :lit (:op k)) (literal (:val k)) (get keys (pattern-child path (str "k" i))))
+               (second pair) (pattern-child path (str "m" i))])) (:pairs p)) s bound keys success failure)
+           " " failure ")")))
+  :pstruct
+  (if (vector-pattern? p)
+   ; Host bl-match matches a vector's items as a tuple of its elements.
+   (let [inner (vector-items-pattern p) inner-path (pattern-child path "v")]
+    (with-subject subject path (fn [s]
+     (if (= :ptuple (:pop inner))
+      (str "(if (and " (tag-test s "vec") " (= (bl-match-vector-count " s ") " (count (:elems inner)) ")) "
+           (match-indexed (:elems inner) #(str "(bl-match-vector-ref " s " " % ")") inner-path bound keys success failure)
            " " failure ")")
-  :palias (direct-pattern (:a p) subject bound
-            (fn [next-bound] (direct-pattern (:b p) subject next-bound success failure)) failure)
-  :ptuple (let [items (:elems p) storage (str "(vector-ref " subject " 1)")]
-            (str "(if (and (bl-tag? " subject " 'tuple) (= (vector-length " storage ") " (count items) ")) "
-             (direct-patterns items (mapv #(str "(vector-ref " storage " " % ")") (range (count items))) bound success failure)
-             " " failure ")"))))
-(defn- direct-arguments [patterns argv bound success failure]
+      (str "(if " (tag-test s "vec") " "
+           (match-pattern inner (str "(bl-match-vector-items " s ")") inner-path bound keys success failure)
+           " " failure ")")))))
+   (with-subject subject path (fn [s]
+    (let [fields (str "pf" path)]
+     (str "(let ((" fields " (bl-match-struct-fields " s " " (literal (:mod p)) "))) (if " fields " "
+      (match-entries (map-indexed (fn [i field] [(literal (first field)) (second field) (pattern-child path (str "m" i))])
+                      (:fields p)) fields bound keys success failure)
+      " " failure "))")))))
+  (refuse {:op (:pop p)})))
+(defn- match-arguments [patterns argv index bound keys success failure]
  (if (empty? patterns)
   (str "(if (null? " argv ") " (success bound) " " failure ")")
   (str "(if (pair? " argv ") "
-   (direct-pattern (first patterns) (str "(car " argv ")") bound
-    (fn [next-bound] (direct-arguments (rest patterns) (str "(cdr " argv ")") next-bound success failure)) failure)
+   (match-pattern (first patterns) (str "(car " argv ")") (str index) bound keys
+    (fn [next-bound] (match-arguments (rest patterns) (str "(cdr " argv ")") (inc index) next-bound keys success failure)) failure)
    " " failure ")")))
 
-(defn clauses [cs argv fallback options wrap?]
+; Guards that provably cannot raise skip bl-guard's exception catcher. Total:
+; literals, variables, if-chains of total parts, unary erlang type tests,
+; equality against a non-text atomic literal, integer intrinsics on integer
+; facts, and `not` of a boolean test. Anything else keeps bl-guard semantics.
+(def ^:private type-tests
+ #{:is_integer :is_float :is_number :is_binary :is_bitstring :is_boolean :is_atom
+   :is_tuple :is_list :is_map :is_function :is_pid :is_port :is_reference})
+(def ^:private equalities #{:== :=:= :/= :=/=})
+(def ^:private comparisons #{:== :=:= :/= :=/= :< :> :=< :>=})
+(defn- boolean-test?
+ "An erlang BIF whose result is always true or false (never nil)."
+ [n]
+ (and (= :remote (:op n)) (= :erlang (:mod n))
+      (let [arity (count (:args n)) f (:fun n)]
+       (or (and (= 1 arity) (or (contains? type-tests f) (= :not f)))
+           (and (= 2 arity) (contains? comparisons f))))))
+(defn- atomic-literal? [n]
+ (and (= :lit (:op n))
+      (let [v (:val n)] (or (nil? v) (= v true) (= v false) (keyword? v) (integer? v) (erlang/is_float v)))))
+(declare integer-intrinsic integer-branch)
+(defn- total? [n options]
+ (case (:op n)
+  :lit true
+  :var true
+  :if (and (total? (:test n) options) (total? (:then n) (integer-branch options (:test n)))
+           (total? (:else n) options))
+  :remote (let [args (:args n) f (:fun n) arity (count args)]
+           (and (= :erlang (:mod n)) (every? #(total? % options) args)
+                (or (some? (integer-intrinsic n options))
+                    (and (= 1 arity) (contains? type-tests f))
+                    (and (= 2 arity) (contains? equalities f) (some atomic-literal? args))
+                    (and (= 1 arity) (= :not f)
+                         (or (boolean-test? (first args))
+                             (and (= :lit (:op (first args))) (contains? #{true false} (:val (first args)))))))))
+  false))
+(defn- branch
+ "Inline BL truthiness: everything except false and nil is true. The host
+  local `t` cannot capture an ident-encoded Source local."
+ [test-node test then else]
+ (if (boolean-test? test-node) (str "(if " test " " then " " else ")")
+  (str "(let ((t " test ")) (if (or (eq? t #f) (eq? t bl-nil)) " else " " then "))")))
+
+(defn- irrefutable? [cl]
+ (and (nil? (:guard cl)) (every? #(= :pvar (:pop %)) (:pats cl))
+      (let [names (remove #(= "_" %) (map :name (:pats cl)))] (= (count names) (count (distinct names))))))
+(defn clauses
+ "Compile a clause chain. `subjects` is a vector of host locals (one per
+  pattern; a clause of another width never matches) or, for a mixed-width
+  function, the Scheme name of its argument list. Pattern and guard failure
+  share ONE suspended suffix: duplicating it at every failure site grows
+  exponentially across clauses. Only the constant `fallback` is inlined."
+ [cs subjects fallback options wrap?]
  (if (empty? cs) fallback
-  (let [cl (first cs) more (clauses (rest cs) argv fallback options wrap?)
-        ; Pattern and guard failure share ONE suspended suffix. Duplicating
-        ; `more` at both sites grows exponentially across guarded clauses.
-        ; Source locals are ident-encoded v_*; this host local cannot capture one.
-        next (if (or (:specialize-v1? options) (:guard cl)) "(clause-next)" more)
-        names (distinct (mapcat binders (:pats cl)))
-        options (if (:scan-v1? options)
-                  (update options :integer-facts (fn [facts] (reduce disj (or facts #{}) names))) options)
-        body (emit (:body cl) options)
-        body (if wrap? (str "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
-        body (if (:guard cl) (str "(if (bl-guard (lambda () " (emit (:guard cl) (assoc (operand-options options) :source-frames? false)) ")) " body " " next ")") body)
-        direct? (and (:specialize-v1? options) (every? direct-pattern? (:pats cl)))
-        _ (when-let [counts (:emission-counts options)]
-            (swap! counts update (if direct? :compiled-pattern-clauses :generic-pattern-clauses) (fnil inc 0)))
-        arm (if direct?
-              (direct-arguments (:pats cl) argv {} (fn [_] body) next)
-              (str "(let ((bindings (bl-match-args (list "
-        (string/join " " (map #(pattern % options) (:pats cl))) ") " argv " '()))) "
-        "(if bindings (let (" (string/join " " (map (fn [s] (str "(" (ident s) " (cdr (assoc " (text s) " bindings)))")) names))
-        ") " body ") " next "))"))]
-   (if (or (:specialize-v1? options) (:guard cl)) (str "(let ((clause-next (lambda () " more "))) " arm ")") arm))))
+  (let [cl (first cs) pats (:pats cl)
+        argv (when (string? subjects) subjects)
+        fits? (or (some? argv) (= (count pats) (count subjects)))
+        final? (empty? (rest cs))
+        ; Later clauses are unreachable behind a clause that cannot fail.
+        exhaustive? (and fits? (nil? argv) (irrefutable? cl))
+        more (when-not (or final? exhaustive?) (clauses (rest cs) subjects fallback options wrap?))]
+   (if-not fits? (or more fallback)
+    (let [next (if final? fallback "(clause-next)")
+          options (forget-facts options (distinct (mapcat binders pats)))
+          body (emit (:body cl) options)
+          body (if wrap? (str "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
+          guard (:guard cl)
+          guard-options (assoc (operand-options options) :source-frames? false)
+          body (cond (nil? guard) body
+                     (total? guard guard-options) (branch guard (emit guard guard-options) body next)
+                     :else (str "(if (bl-guard (lambda () " (emit guard guard-options) ")) " body " " next ")"))
+          _ (when-let [counts (:emission-counts options)]
+              (swap! counts update :compiled-pattern-clauses (fnil inc 0)))
+          key-bindings (apply concat (map-indexed (fn [i p] (map-key-bindings p (str i))) pats))
+          keys (into {} (map (fn [binding] [(first binding) (str "pk" (first binding))]) key-bindings))
+          arm (if argv
+                (match-arguments pats argv 0 {} keys (fn [_] body) next)
+                (match-each (map-indexed (fn [i p] [p (nth subjects i) (str i)]) pats) {} keys (fn [_] body) next))
+          arm (if (empty? key-bindings) arm
+                (str "(let* (" (string/join " " (map (fn [binding]
+                  (str "(pk" (first binding) " " (emit (second binding) guard-options) ")")) key-bindings)) ") " arm ")"))]
+     (if more (str "(let ((clause-next (lambda () " more "))) " arm ")") arm))))))
 
 (defn- function-entry [body frame]
  (if frame
   (str "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
   (str "(h-tick) " body)))
 
+(defn- fixed-function [formals body fallback frame]
+ ; Gambit's case-lambda keeps wrong-arity calls on the original entry tick,
+ ; frame and function-clause path. Gambit 4.9.5's macro needs an optional
+ ; position when a rest arm is present: a one-required rest fallback covers
+ ; every nonzero arity of a zero-parameter function without capturing a
+ ; Source variable.
+ (str "(case-lambda ((" (string/join " " formals) ") " (function-entry body frame) ") ("
+      (if (empty? formals) "(extra . argv)" "argv") " " (function-entry fallback frame) "))"))
 (defn- function-expression
- "Use fixed Scheme formals only for one unguarded DISTINCT-variable clause.
-  Gambit's case-lambda keeps wrong-arity calls on the original entry tick,
-  frame and function-clause path. All other patterns keep the full matcher."
+ "One unguarded DISTINCT-variable clause binds its Source names as Scheme
+  formals. Other same-width clause chains match fixed formals directly; only
+  a mixed-width chain destructures its argument list."
  [n options frame]
  (let [fallback "(error \"native seed: function clause\")"
        clause (BeamLisp.CompilerData/simple_function_clause n)
-       names (when clause (mapv :name (:pats clause)))]
-  (if (and clause (= (count names) (count (distinct names))))
-   (str "(case-lambda ((" (string/join " " (map ident names)) ") "
-        (function-entry (emit (:body clause) options) frame) ") ("
-        ; Gambit 4.9.5's macro needs an optional position when a rest arm is
-        ; present. A one-required rest fallback covers every nonzero arity
-        ; of a zero-parameter function without capturing a Source variable.
-        (if (empty? names) "(extra . argv)" "argv") " "
-        (function-entry fallback frame) "))")
-   (str "(lambda argv "
-        (function-entry (clauses (:clauses n) "argv" fallback options false) frame) ")"))))
+       names (when clause (mapv :name (:pats clause)))
+       cs (:clauses n)
+       widths (distinct (map #(count (:pats %)) cs))]
+  (cond
+   (and clause (= (count names) (count (distinct names))))
+    (fixed-function (map ident names) (emit (:body clause) options) fallback frame)
+   (= 1 (count widths))
+    (let [formals (mapv #(str "fa" %) (range (first widths)))]
+     (fixed-function formals (clauses cs formals fallback options false) fallback frame))
+   :else
+    (str "(lambda argv " (function-entry (clauses cs "argv" fallback options false) frame) ")"))))
 
 (def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
 (def core-leaves
@@ -262,8 +388,9 @@
  ; the try expression is in function tail position. Preserve its live handler.
  (let [options (operand-options options)
        stack (BeamLisp.CompilerData/catch_stack_bindings)
-       handler (clauses (:catch n) "(list caught-kind caught-reason)"
-                   "(bl-reraise caught-kind caught-reason caught-trace)" options false)]
+       handler (clauses (:catch n) ["caught-kind" "caught-reason"]
+                   "(bl-reraise caught-kind caught-reason caught-trace)"
+                   (forget-facts options [(:frames stack) (:raw stack)]) false)]
   (str "(bl-try (lambda () " (emit (:body n) options) ") "
    "(lambda (caught-kind caught-reason caught-trace) (let ((" (ident (:frames stack)) " " (if (:source-frames? options) "(bl-trace-frames caught-trace)" "caught-trace") ") ("
    (ident (:raw stack)) " caught-trace)) " handler ")) "
@@ -286,61 +413,108 @@
   (and (= :apply (:op n)) (= :var (:op f))
        (contains? (or (:selves options) {}) (:name f))
        (= 1 (count args)) (= :var (:op (first args))) (= (:name f) (:name (first args))))))
-(defn- scan-loop-safe? [value self arity tail? fuel]
- (and (pos? @fuel)
-  (do
-   (swap! fuel dec)
-   (cond
-    (sequential? value) (every? #(scan-loop-safe? % self arity false fuel) value)
-    (erlang/is_map value)
-    (let [op (:op value)]
-     (cond
-      (= op :lit) true
-      (= op :var) (not= self (:name value))
-      (recur-node? value self)
-      (and tail? (= arity (count (:args value)))
-           (= 1 (count (:args (:fn value))))
-           (= :var (:op (first (:args (:fn value)))))
-           (= self (:name (first (:args (:fn value)))))
-           (every? #(scan-loop-safe? % self arity false fuel) (:args value)))
-      (= op :let) (and (not= self (:name value))
-                       (scan-loop-safe? (:init value) self arity false fuel)
-                       (scan-loop-safe? (:body value) self arity tail? fuel))
-      (= op :if) (and (scan-loop-safe? (:test value) self arity false fuel)
-                      (scan-loop-safe? (:then value) self arity tail? fuel)
-                      (scan-loop-safe? (:else value) self arity tail? fuel))
-      (= op :do) (and (every? #(scan-loop-safe? % self arity false fuel) (butlast (:stmts value)))
-                      (scan-loop-safe? (last (:stmts value)) self arity tail? fuel))
-      :else (every? #(scan-loop-safe? % self arity false fuel) (vals (dissoc value :ann)))))
-    :else true))))
-(defn- scan-loop-parts [n]
+; Loop safety: a checked self-recursive loop becomes a named let when its
+; self is used ONLY as `((self self) args...)` with its own arity, in tail
+; position of its body, and no let rebinds it. One walk over the outermost
+; candidate's region decides every loop nested in it; the verdicts travel in
+; options, so no subtree is walked twice.
+(defn- structural-loop-parts [n]
  (when-let [parts (loop-parts n)]
-  (let [inner (:inner (self-parts (:fn n)))
-        clause (BeamLisp.CompilerData/simple_function_clause inner)
-        names (:vars parts) fuel (atom 10000)]
+  (let [clause (BeamLisp.CompilerData/simple_function_clause (:inner (self-parts (:fn n))))
+        names (:vars parts)]
    (when (and clause (= (count names) (count (distinct names)))
               (= (count names) (count (:inits parts)))
-              (not (some #(= (:self parts) %) names))
-              (every? #(scan-loop-safe? % (:self parts) (count names) false fuel) (:inits parts))
-              (scan-loop-safe? (:body parts) (:self parts) (count names) true fuel)) parts))))
+              (not (some #(= (:self parts) %) names))) parts))))
+(declare loop-walk loop-walk-clauses)
+(defn- loop-unsafe! [state self] (swap! state update :unsafe conj self))
+(defn- loop-walk-all [values active state]
+ (doseq [value values] (loop-walk value nil active state)))
+(defn- loop-walk
+ "`tail` is the loop whose tail position this is (nil otherwise); `active`
+  maps each enclosing loop's self to its arity."
+ [value tail active state]
+ (cond
+  (sequential? value) (loop-walk-all value active state)
+  (erlang/is_map value)
+  (let [op (:op value)]
+   (cond
+    (= op :lit) nil
+    (= op :var) (when (contains? active (:name value)) (loop-unsafe! state (:name value)))
+    (= op :apply)
+    (let [g (:fn value)
+          self (when (and (= :apply (:op g)) (= :var (:op (:fn g)))) (:name (:fn g)))]
+     (if (and self (contains? active self))
+      (do (when-not (and (= tail self) (= (get active self) (count (:args value)))
+                         (= 1 (count (:args g))) (= :var (:op (first (:args g))))
+                         (= self (:name (first (:args g)))))
+           (loop-unsafe! state self))
+          (loop-walk-all (:args value) active state))
+      (if-let [parts (structural-loop-parts value)]
+       (let [self (:self parts) inside (assoc active self (count (:vars parts)))]
+        (swap! state update :candidates conj self)
+        (loop-walk-all (:inits parts) inside state)
+        (loop-walk (:body parts) self inside state))
+       (do (loop-walk g nil active state) (loop-walk-all (:args value) active state)))))
+    (= op :let) (do (when (contains? active (:name value)) (loop-unsafe! state (:name value)))
+                    (loop-walk (:init value) nil active state)
+                    (loop-walk (:body value) tail active state))
+    (= op :if) (do (loop-walk (:test value) nil active state)
+                   (loop-walk (:then value) tail active state)
+                   (loop-walk (:else value) tail active state))
+    (= op :do) (let [statements (:stmts value)]
+                (loop-walk-all (butlast statements) active state)
+                (loop-walk (last statements) tail active state))
+    (contains? #{:remote :arith} op) (loop-walk-all (:args value) active state)
+    (= op :invoke) (do (loop-walk (:callee value) nil active state) (loop-walk (:arguments value) nil active state))
+    (= op :cons) (do (loop-walk (:head value) nil active state) (loop-walk (:tail value) nil active state))
+    (= op :tuple) (loop-walk-all (:elems value) active state)
+    (contains? #{:global :binding :enil} op) nil
+    (= op :fn) (loop-walk-clauses (:clauses value) active state)
+    (= op :case) (do (loop-walk (:subj value) nil active state) (loop-walk-clauses (:clauses value) active state))
+    (contains? #{:map :struct} op) (doseq [pair (if (= op :map) (:pairs value) (:fields value))]
+                                    (loop-walk (first pair) nil active state) (loop-walk (second pair) nil active state))
+    ; Any other node walks every non-annotation value.
+    :else (loop-walk-all (vals (dissoc value :ann)) active state)))
+  :else nil))
+(defn- loop-walk-clauses [clauses active state]
+ (doseq [clause clauses]
+  ; Patterns hold Source expressions only as map-pattern keys.
+  (doseq [p (:pats clause)] (when-not (= :pvar (:pop p)) (loop-walk-all (vals p) active state)))
+  (loop-walk (:guard clause) nil active state)
+  (loop-walk (:body clause) nil active state)))
+(defn- loop-verdicts [n]
+ (let [state (atom {:candidates #{} :unsafe #{}})]
+  (loop-walk n nil {} state)
+  (reduce disj (:candidates @state) (:unsafe @state))))
+(defn- loop-plan
+ "nil, or {:verdicts set [:parts loop-parts]} for a self-application node.
+  Without :parts the node is emitted ordinarily, with the verdicts known."
+ [n options]
+ (when-let [parts (loop-parts n)]
+  (let [known (:loop-verdicts options) verdicts (or known (loop-verdicts n))]
+   (cond (or (contains? verdicts (:self parts)) (:source-frames? options)) {:parts parts :verdicts verdicts}
+         (nil? known) {:verdicts verdicts}
+         :else nil))))
 
 (defn- integer-operand? [n options]
  (or (and (= :lit (:op n)) (erlang/is_integer (:val n)))
      (and (= :var (:op n)) (contains? (or (:integer-facts options) #{}) (:name n)))))
 (defn- integer-binding [options name value]
- (assoc options :integer-facts
-  ((if (integer-operand? value options) conj disj) (or (:integer-facts options) #{}) name)))
+ (let [facts (or (:integer-facts options) #{})]
+  (cond (integer-operand? value options) (assoc options :integer-facts (conj facts name))
+        (contains? facts name) (assoc options :integer-facts (disj facts name))
+        :else options)))
 (defn- integer-branch [options test]
- (if (and (:scan-v1? options) (= :remote (:op test)) (= :erlang (:mod test))
+ (if (and (= :remote (:op test)) (= :erlang (:mod test))
           (= :is_integer (:fun test)) (= 1 (count (:args test))) (= :var (:op (first (:args test)))))
   (update options :integer-facts (fn [facts] (conj (or facts #{}) (:name (first (:args test)))))) options))
 (defn- integer-intrinsic [node options]
- (when (and (:scan-v1? options) (= :erlang (:mod node)) (= 2 (count (:args node)))
+ (when (and (= :erlang (:mod node)) (= 2 (count (:args node)))
             (every? #(integer-operand? % options) (:args node)))
   (get {:+ "+" :- "-" :* "*" :== "=" :=:= "=" :< "<" :=< "<=" :> ">" :>= ">="} (:fun node))))
 
 (defn- emit-source-loop [n parts options]
- (let [_ (when (and (:scan-v1? options) (:emission-counts options))
+ (let [_ (when (:emission-counts options)
            (swap! (:emission-counts options) update :direct-loops (fnil inc 0)))
        variables (vec (:vars parts))
        loop-name (ident (str "$loop/" (:self parts)))
@@ -349,8 +523,7 @@
        parameters (mapv (fn [variable initial] (str "(" (ident variable) " " initial ")")) variables names)
        ; A loop's initial value does not establish an inductive type fact.
        ; Remove parameter facts; explicit guards inside its body refine them.
-       options (if (:scan-v1? options)
-                 (update options :integer-facts (fn [facts] (reduce disj (or facts #{}) variables))) options)
+       options (forget-facts options variables)
        body (emit (:body parts) (assoc options :loop {:self (:self parts) :name loop-name}))]
   (str "(let* (" (string/join " " bindings) ") (let " loop-name " (" (string/join " " parameters)
        ") (h-tick) " body "))")))
@@ -365,7 +538,7 @@
   (if (:callable-arities? options) (str "(bl-register-callable! " function " " arity ")") function)))
 (defn- emit-source-scaffold [n parts options]
  (let [self (:name n) local (ident self)
-       body (emit (:inner parts) (assoc options :selves (assoc (or (:selves options) {}) self local)))]
+       body (emit (:inner parts) (assoc (forget-facts options [self]) :selves (assoc (or (:selves options) {}) self local)))]
   (str "(letrec ((" local " " body ")) " local ")")))
 
 (defn- multi-layout [n]
@@ -414,10 +587,13 @@
 
 (defn emit [n options]
  (if-let [layout (multi-layout n)] (emit-multi layout options)
+ ; Checked self-recursive loops always become named lets. Source-frame
+ ; emission keeps its unchecked loop lowering for the actor runtime.
+ (if-let [plan (loop-plan n options)]
+  (let [options (assoc options :loop-verdicts (:verdicts plan))]
+   (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit n options)))
  (cond
-  (and (:scan-v1? options) (scan-loop-parts n)) (emit-source-loop n (scan-loop-parts n) options)
-  (and (:source-frames? options) (loop-parts n)) (emit-source-loop n (loop-parts n) options)
-  (and (or (:source-frames? options) (:scan-v1? options)) (:loop options) (recur-node? n (:self (:loop options))))
+  (and (:loop options) (recur-node? n (:self (:loop options))))
    (ordered (:name (:loop options)) (:args n) (operand-options options))
   (self-knot? n options) (get (:selves options) (:name (:fn n)))
   (and (= :let (:op n)) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
@@ -445,24 +621,23 @@
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
   :apply (ordered-language-call n (:fn n) (argument-list (:args n)) options)
   :invoke (ordered-language-call n (:callee n) (:arguments n) options)
-  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) (if (:scan-v1? options) (integer-binding options (:name n) (:init n)) options)) ")")
-  :if (str "(if (bl-truthy " (emit (:test n) (operand-options options)) ") " (emit (:then n) (integer-branch options (:test n))) " " (emit (:else n) options) ")")
+  :let (str "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) (integer-binding options (:name n) (:init n))) ")")
+  :if (branch (:test n) (emit (:test n) (operand-options options))
+              (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options))
   :do (let [statements (:stmts n)]
         (str "(begin " (if (empty? statements) "bl-nil"
           (str (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
-  :fn (let [options (if (:scan-v1? options)
-              (update options :integer-facts (fn [facts]
-                (reduce disj (or facts #{}) (mapcat #(mapcat binders (:pats %)) (:clauses n))))) options)]
+  :fn (let [options (forget-facts options (mapcat #(mapcat binders (:pats %)) (:clauses n)))]
        (if (:source-frames? options) (emit-source-function n options)
        (let [function (function-expression n options nil)]
         (if (:callable-arities? options)
          (str "(bl-register-callable! " function " " (count (:pats (first (:clauses n)))) ")")
          function))))
   :case (str "(let ((subject " (emit (:subj n) (operand-options options)) ")) "
-          (clauses (:clauses n) "(list subject)" "(error \"native seed: case clause\")" options false) ")")
+          (clauses (:clauses n) ["subject"] "(error \"native seed: case clause\")" options false) ")")
   :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")
               scan (str "(lambda (message) "
-                    (clauses (:clauses n) "(list message)" "(bl-key \"nomatch\")" options true) ")")
+                    (clauses (:clauses n) ["message"] "(bl-key \"nomatch\")" options true) ")")
               after (str "(lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ")")
               receive (source-call n (str "(" (ident "rt-receive") " " scan " " after " timeout)")
                          (operand-options options))]
@@ -478,7 +653,7 @@
             (ordered "bl-make-vec" (:elems (second (first (:fields n)))) options)
             (str "(bl-struct " (literal (:mod n)) " "
               (ordered "bl-map" (mapcat identity (:fields n)) options) ")"))
-  (refuse n)))))
+  (refuse n))))))
 
 (defn emit-definition [definition options]
  (try
