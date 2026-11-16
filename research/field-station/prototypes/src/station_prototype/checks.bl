@@ -79,9 +79,29 @@
     (try
      (store/add-message! conn "live-message" "ora" ["alice"] "Live delta" 400)
      (check! "query watch receives a relevant committed inbox change" (eventually #(seq @events) 5000))
+     (reset! events [])
+     (store/revoke! conn "ora" "alice")
+     (check! "membership revocation invalidates the live query and removes visible rows"
+      (eventually #(some (fn [delta] (seq (:removed delta))) @events) 5000))
      (finally (watch/unwatch subscription))))
    (let [rows (d/q '[:find ?tx :where [?tx :audit/operation :claim]] (d/db conn))]
     (check! "only successful unique command committed an audit transaction" (= 1 (count rows))))
+   (store/seed! conn)
+   (let [parent (erlang/self)
+         workers (mapv (fn [subject]
+                         (spawn-monitor
+                          (fn []
+                           (receive :go
+                            (let [result (try
+                                          (store/claim! conn subject "ora"
+                                           {"id" "legacy-1" "request/id" (str "race-" subject)} 3000)
+                                          (catch error (:kind (ex-data error))))]
+                             (erlang/send parent [:prototype/claim-race result])))))) ["alice" "bob"])]
+    (doseq [worker workers] (erlang/send (elem worker 0) :go))
+    (let [outcomes (mapv (fn [_] (receive [:prototype/claim-race result] result (after 10000 :timeout))) workers)]
+     (check! "concurrent native claimants have exactly one committed winner"
+      (and (= 1 (count (filter map? outcomes))) (= 1 (count (filter #(= :claimed %) outcomes)))))
+    (doseq [worker workers] (Process/demonitor (elem worker 1) (list :flush))))
    (finally (imports/unlink! "field.messages") (interface/close! opened) (d/close! conn)))))
 (defn unix-checks! [root]
  (let [result (unix/roundtrip! (str root "/peer.sock") {"uid" 0 "subject" "forged-root"})
