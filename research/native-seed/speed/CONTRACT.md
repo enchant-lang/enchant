@@ -54,6 +54,16 @@ V only edits bodies. Keep hunks small.
   `src/native/intrinsics.bl`). L calls them from the AOT context in
   `chunks.bl`; K implements them. Templates may reference host procedures
   defined in `host/host-kernel.scm` (loaded after `host-compiler.scm`).
+  For an overridden definition L emits the compiled body under
+  `(native.bootstrap/original-binding-name ns name)` (= binding name + `$bl`)
+  and publishes the override expression under the normal binding name, so
+  every direct caller and every registry lookup sees the override.
+- Control (C) may add host helpers only in a new `host/host-match.scm`.
+- New host files are appended to the host source list by the main thread at
+  integration (`prepare-host.py`, `check-host.py`, `check-compiler.py`);
+  agents concatenate them themselves in their focused checks.
+- `host-values.scm` registry section (`native-global-registry`,
+  `native-register!` and its neighbours near line 775) belongs to L.
 - The AOT emission context passes an explicit option `:aot-link {…}` (owned by
   L) into `native.scheme/emit`. Any new emission behaviour that depends on
   linking is keyed on it. The benchmark's own emission (no resolvers, options
