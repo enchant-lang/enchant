@@ -27,3 +27,13 @@ with source admission checks. Recovery retains the original basis through reload
 and remote edits; stale echoes never replace in-memory typing. The UI offers
 exact text download and explicit discard, also when writing is no longer allowed.
 `node --test tooling/editor-host/text-draft.test.mjs` checks recovery boundaries.
+
+`:code-service` on `live.edit.app/editor` is an optional data descriptor with a
+same-origin `:url`, language (default beam-lisp) and application `:context`.
+The input POSTs `{operation,text,offset,context}` for completion, diagnostics and
+hover. Offsets in requests/replies are Unicode code points. Replies use
+`{from,options}`, `{diagnostics:[{from,to,message,severity}]}` or `{from,to,text}`.
+The application owns authentication, source analysis and policy; the generic host
+owns CodeMirror. Late answers are dropped after text changes and outstanding
+requests abort on disposal. Failure keeps writing available. The already locked
+CM autocomplete/lint versions are now explicit dependencies, with no upgrades.

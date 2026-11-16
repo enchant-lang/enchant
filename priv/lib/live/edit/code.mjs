@@ -7,6 +7,7 @@ import {javascript} from '@codemirror/lang-javascript';
 import {markdown} from '@codemirror/lang-markdown';
 import {tags} from '@lezer/highlight';
 import {cpOffset,unitOffset} from './geometry.mjs';
+import {CodeService} from './code-service.mjs';
 
 const lisp=StreamLanguage.define({
   startState:()=>({string:false}),
@@ -36,9 +37,10 @@ export class CodeAdapter {
   }
   constructor(editor,block,container){
     this.editor=editor;this.id=block.id;this.text=block.text;this.language=block.attrs?.language||'text';
-    this.internal=false;this.languageSlot=new Compartment();this.readonly=new Compartment();
+    this.internal=false;this.languageSlot=new Compartment();this.readonly=new Compartment();this.serviceSlot=new Compartment();
+    this.service=null;
     this.view=new EditorView({parent:container,state:EditorState.create({doc:block.text,extensions:[
-      this.languageSlot.of(language(this.language)),this.readonly.of(EditorState.readOnly.of(false)),
+      this.languageSlot.of(language(this.language)),this.readonly.of(EditorState.readOnly.of(false)),this.serviceSlot.of([]),
       syntaxHighlighting(highlight),bracketMatching(),indentOnInput(),drawSelection(),highlightSpecialChars(),
       EditorView.contentAttributes.of({'aria-label':'Code block'}),
       EditorView.theme({'&':{fontSize:'13px'},'.cm-content':{fontFamily:'"IBM Plex Mono",monospace',padding:'16px 20px',lineHeight:'1.8'},
@@ -59,7 +61,15 @@ export class CodeAdapter {
       }),
     ]})});
     this.view.scrollDOM.tabIndex=0;this.view.scrollDOM.setAttribute('role','region');this.view.scrollDOM.setAttribute('aria-label','Scrollable code block');
-    container.querySelector('.ed-code-fallback')?.remove();
+    container.querySelector('.ed-code-fallback')?.remove();this.syncService();
+  }
+  syncService(){
+    const provider=this.editor.model['code-service'];
+    const enabled=provider&&this.language===(provider.language||'beam-lisp');
+    const key=enabled?JSON.stringify(provider):null;if(key===this.serviceKey)return;
+    this.serviceKey=key;this.service?.dispose();this.service=enabled?new CodeService(this,provider):null;
+    this.view.dispatch({effects:this.serviceSlot.reconfigure(this.service?.extensions()||[])});
+    if(this.service)this.view.dom.after(this.service.status);
   }
   selection(){const s=this.view.state.selection.main,text=this.view.state.doc.toString();return {anchor:{block:this.id,offset:cpOffset(text,s.anchor),affinity:'right'},head:{block:this.id,offset:cpOffset(text,s.head),affinity:'right'}};}
   select(anchor,head=anchor,focus=true){
@@ -78,6 +88,6 @@ export class CodeAdapter {
     this.text=block.text;
     const name=block.attrs?.language||'text';if(name!==this.language){this.language=name;this.view.dispatch({effects:this.languageSlot.reconfigure(language(name))});}
   }
-  setReadonly(value){if(value===!!this.isReadonly)return;this.isReadonly=value;this.view.dispatch({effects:this.readonly.reconfigure(EditorState.readOnly.of(value))});}
-  dispose(){this.view.destroy();}
+  setReadonly(value){this.syncService();if(value===!!this.isReadonly)return;this.isReadonly=value;this.view.dispatch({effects:this.readonly.reconfigure(EditorState.readOnly.of(value))});}
+  dispose(){this.service?.dispose();this.view.destroy();}
 }
