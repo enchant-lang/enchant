@@ -6,7 +6,7 @@ import {syntaxHighlighting,bracketMatching} from '@codemirror/language';
 import {language,highlight} from './code.mjs';
 import {TextDraft,TextDraftStore} from './text-draft.mjs';
 export function mountSourceInput(root,model,services){
-  let current=model,disposed=false,internal=false;
+  let current=model,disposed=false,internal=false,isReadonly=!!model.readonly;
   // Access to storage itself can throw in a restricted browsing context.
   let store;try{store=new TextDraftStore(model.resource);}catch(error){store={warning:error,read:()=>null,write:()=>false,remove:()=>{}};}
   const draft=new TextDraft(model,store),readonly=new Compartment();
@@ -20,7 +20,7 @@ export function mountSourceInput(root,model,services){
   const paint=()=>{
     root.dataset.dirty=String(draft.dirty);root.dataset.stale=String(draft.stale);
     status.textContent=store.warning?'Recovery storage is unavailable. Download your draft before leaving.':draft.stale?'Source changed. Your draft is kept; compare before saving.':draft.dirty?(draft.restored?'Recovered source draft':'Unsaved source draft'):'Saved source';
-    download.hidden=!draft.dirty&&!store.warning;discard.hidden=!draft.dirty;
+    download.hidden=!draft.dirty&&!store.warning;discard.hidden=!draft.dirty&&!store.warning;
   };
   const view=new EditorView({parent:container,state:EditorState.create({doc:draft.value,extensions:[
     language(model.language),syntaxHighlighting(highlight),lineNumbers(),drawSelection(),highlightSpecialChars(),bracketMatching(),history(),
@@ -45,7 +45,7 @@ export function mountSourceInput(root,model,services){
   draft.persist();paint();if(draft.dirty)queueMicrotask(notify);
   return {update(next){
     const before=draft.value,basis=draft.basis;current=next;draft.receive(next);
-    view.dispatch({effects:readonly.reconfigure([EditorState.readOnly.of(!!next.readonly),EditorView.editable.of(!next.readonly)])});
+    if(isReadonly!==!!next.readonly){isReadonly=!!next.readonly;view.dispatch({effects:readonly.reconfigure([EditorState.readOnly.of(isReadonly),EditorView.editable.of(!isReadonly)])});}
     replace();paint();if(before!==draft.value||basis!==draft.basis)queueMicrotask(notify);
   },dispose(){disposed=true;draft.persist();download.onclick=discard.onclick=null;view.destroy();delete root.sourceInput;}};
 }
