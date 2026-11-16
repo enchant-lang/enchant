@@ -34,6 +34,6 @@ export function recoveryMessage(reason){
     'source-serialization':'This edit could not be written in the document format. Your draft is retained.',
     'client-outdated':'New editing tools are available. Download your draft before reloading.',
   };
-  return known[reason]|| (typeof reason==='string'&& !/^[a-z][a-z0-9-]*$/.test(reason)
+  return Object.hasOwn(known,reason)?known[reason]:(typeof reason==='string'&& !/^[a-z][a-z0-9-]*$/.test(reason)
     ?reason:'This edit could not be saved. Keep a copy, or return to the saved version.');
 }

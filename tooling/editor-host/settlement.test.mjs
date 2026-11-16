@@ -36,5 +36,6 @@ test('recovery explains prose refusals and gives human fallbacks for protocol co
  assert.match(recoveryMessage('edit-denied'),/cannot edit/);
  assert.match(recoveryMessage('client-outdated'),/New editing tools/);
  assert.equal(recoveryMessage('unrecognized-code'),recoveryMessage(null));
+ assert.equal(recoveryMessage('constructor'),recoveryMessage(null));
  assert.match(recoveryMessage(null),/could not be saved/);
 });
