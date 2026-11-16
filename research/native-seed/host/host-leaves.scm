@@ -472,3 +472,16 @@
   (else (bl-key-compare a b)))))
 (native-add-leaf! "erlang/==/2" native-erlang-equal?)
 (native-add-leaf! "erlang//=/2" (lambda (a b) (not (native-erlang-equal? a b))))
+;; persistent_term and atomics (category b: ERTS BIFs, no BL source).
+;; The native image has one process-global term table; an atomics ref is a
+;; vector of exact integers, 1-indexed as in ERTS.
+(define native-persistent-terms (make-table))
+(native-add-leaf! "persistent_term/get/2"
+ (lambda (key default) (table-ref native-persistent-terms key default)))
+(native-add-leaf! "persistent_term/put/2"
+ (lambda (key value) (table-set! native-persistent-terms key value) (bl-key "ok")))
+(native-add-leaf! "atomics/get/2" (lambda (ref i) (vector-ref ref (- i 1))))
+;; rt.bl's invocation gate reads Env's live Source-extent count here. Native Env
+;; exports no check_source_* gate, so no Source extent is ever live natively:
+;; the count is the constant zero, exactly what the old native gate decided.
+(table-set! native-persistent-terms (bl-key "bl_source_extent_heads_live") (vector 0))
