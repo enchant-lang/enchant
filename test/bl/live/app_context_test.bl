@@ -85,3 +85,25 @@
     (is (some (fn [op] (= :remove (first op))) ops))
     (is (some (fn [op] (= :insert (first op))) ops))
     (is (= (diff/normalize new) (diff/apply-ops ops old)))))
+
+(deftest app-wire-settlement-forces-the-latest-local-projection-before-ack
+ (let [conn (datom/connect []) basis (datom/basis-t (datom/db conn))
+       started (start app/app-socket {:view (fn [_ _ locals] [:p (:draft locals "empty")])
+          :shared conn :sink (erlang/self) :locals {}})
+       pid (if (map? started) (:pid started) started)
+       handle (get app/ws-handlers :handle-in)]
+  (try
+   (flush-frames)
+   (handle [:text "[\"event\",[\"assign\",\"draft\",\"first\"]]"] {:srv pid})
+   (handle [:text "[\"event\",[\"assign\",\"draft\",\"final\"]]"] {:srv pid})
+   (handle [:text "[\"settle\",\"app-barrier\"]"] {:srv pid})
+   (let [frames (loop [frames []]
+                  (let [frame (receive [:patch ops] [:patch ops] [:settled id] [:settled id] (after 2000 :timeout))]
+                   (if (or (= frame :timeout) (= frame [:settled "app-barrier"])) (conj frames frame)
+                    (recur (conj frames frame)))))]
+    (is (= [:settled "app-barrier"] (last frames)))
+    (is (some #(and (= :patch (first %)) (includes? (pr-str %) "final")) (filter vector? frames)))
+    (is (Process/alive? pid))
+    (is (= {:draft "final"} (:locals (call pid [:state]))))
+    (is (= basis (datom/basis-t (datom/db conn)))))
+   (finally (when (Process/alive? pid) (stop pid)) (datom/close! conn) (flush-frames)))))
