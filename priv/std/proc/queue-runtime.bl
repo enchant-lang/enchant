@@ -472,7 +472,9 @@
                             (contains? by-generation target)) (refuse :invalid-restoration-inventory))
           _ (when-not (apply = (map #(fixed-shape (:decl %)) handlers)) (refuse :queue-identity-migration-required))
           lease (BeamLisp.Env/retain_code! (to-list (distinct (mapcat :modules handlers))))
-          token {:server srv :target target :handlers by-generation :lease lease
+          metadata (try (BeamLisp.Env/register_code_metadata! lease nil)
+                     (catch error (BeamLisp.Env/release_code! lease) (throw error)))
+          token {:server srv :target target :handlers by-generation :lease lease :metadata metadata
                  :owner (erlang/self) :ticket (erlang/make_ref)}]
      (erlang/apply :persistent_term :put (list (restoration-key srv) token))
      token)))))
@@ -513,8 +515,17 @@
       (if staged
        (do
         (when-not (= (:target staged) (get-in handler [:decl :generation])) (refuse :restoration-target-mismatch))
-        (let [pid (BeamLisp.Env/run_code! (:lease staged) start-owner)]
-         (when (= :cancelled pid) (refuse :expired-restoration-lease))
+        ;; The stage is a physical lifetime pin, not a new execution context.
+        ;; A raw run_code! here replaces the active lease under an enclosing
+        ;; Source initializer. Borrow through the existing native metadata
+        ;; carrier; selected/retained handlers acquire their own exact contexts
+        ;; and independent callback leases before the stage is consumed.
+        (let [pid (try
+                    (BeamLisp.Env/with_code_metadata! (:lease staged) (:metadata staged)
+                     (fn [_] (start-owner)))
+                    (catch error
+                     (if (= :cancelled_code_metadata (BeamLisp.ExInfo/ex_original error))
+                      (refuse :expired-restoration-lease) (throw error))))]
          (release-restoration! staged)
          pid))
        (start-owner))))))))
