@@ -944,8 +944,24 @@
  (if native-output-sink (native-output-sink topic value) (h-raise "no native output sink is registered")))
 (define native-global-registry (bl-empty-map))
 (define (h-ref ns name) (bl-get native-global-registry (string-append ns "/" name)))
+;; AOT link records, one per "ns/name" slot: #(compiled-value slot-setter
+;; global-setter). AOT code reads Scheme cells that these setters maintain
+;; (native-link! in host-compiler.scm); the dynamic native-remote path reads
+;; the record's value. Publication is the only way a slot changes.
+(define native-link-records (make-table test: equal?))
+(define (native-link-record key)
+ (or (table-ref native-link-records key #f)
+  (let ((record (vector native-missing #f #f)))
+   (table-set! native-link-records (string-copy key) record) record)))
+;; Installed by host-compiler.scm: publishes the global view of a slot.
+(define native-publish-global! (lambda (ns name record) #f))
 (define (native-register! ns name value)
- (set! native-global-registry (bl-assoc native-global-registry (string-append ns "/" name) value)) value)
+ (let* ((key (string-append ns "/" name)) (record (native-link-record key)))
+  (set! native-global-registry (bl-assoc native-global-registry key value))
+  (vector-set! record 0 value)
+  (if (vector-ref record 1) ((vector-ref record 1) value))
+  (native-publish-global! ns name record)
+  value))
 
 ;; File and evaluation leaves used by the native bootstrap driver.
 (define (native-eval-string text)

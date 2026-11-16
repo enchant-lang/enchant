@@ -112,7 +112,7 @@
 (define (native-rebind-transport-leaf! key callable arity)
  (if (not (native-map-has? native-leaf-registry key)) (error "source ABI expected an existing transport leaf" key))
  (native-mark-host-callable! callable) (bl-register-callable! callable arity)
- (set! native-leaf-registry (bl-assoc native-leaf-registry key callable)))
+ (native-replace-leaf! key callable))
 (native-rebind-transport-leaf! "erlang/exit/1" h-exit 1)
 (native-rebind-transport-leaf! "erlang/throw/1" native-throw 1)
 (native-rebind-transport-leaf! "erlang/error/1"
