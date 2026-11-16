@@ -39,6 +39,17 @@ export class FormDraft {
     }
     return changes;
   }
+  assignments(locals){
+    // Assign leaves through the normal Live path vocabulary. Event payload maps
+    // are application data and intentionally keep their string keys on the wire.
+    const terms=[['assign',locals.changes,{}],['assign',locals.basis,this.basis]];
+    for(const field of this.model.fields){
+      if(!Object.hasOwn(this.values,field.key))continue;
+      if(!field.path?.length||field.path.some(k=>['__proto__','prototype','constructor'].includes(k)))throw Error('Invalid draft field path');
+      terms.push(['assign',[...locals.changes,...field.path],this.values[field.key]]);
+    }
+    return terms;
+  }
   discard(){this.values={};this.basis=this.model['confirmed-basis'];this.restored=false;this.store.remove(true);}
   persist(){if(this.dirty)this.store.write(JSON.stringify(this.values),this.basis);else this.store.remove();}
 }

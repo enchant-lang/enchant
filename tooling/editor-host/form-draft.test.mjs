@@ -35,3 +35,11 @@ test('descriptor paths reject prototype traversal; failed storage retains attemp
  store.storage.setItem=()=>{throw Error('quota');};draft.edit('EMAIL','important@test');
  assert.equal(draft.values.EMAIL,'important@test');assert.equal(store.warning.message,'quota');
 });
+
+test('native local assignments restore keyword paths without treating nested payload maps as vocabulary',()=>{
+ const draft=new FormDraft(model(),storage());draft.edit('EMAIL','mine@test');draft.edit('title','Mine');
+ assert.deepEqual(draft.assignments({changes:['form','changes'],basis:['form','basis']}),[
+  ['assign',['form','changes'],{}],['assign',['form','basis'],'b1'],
+  ['assign',['form','changes','title'],'Mine'],['assign',['form','changes','properties','EMAIL'],'mine@test'],
+ ]);
+});

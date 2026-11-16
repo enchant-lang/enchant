@@ -9,7 +9,10 @@ export function mountFormRecovery(root,model,services){
   const status=document.createElement('p'),download=document.createElement('button'),discard=document.createElement('button');
   status.setAttribute('role','status');status.setAttribute('aria-live','polite');download.type=discard.type='button';
   download.textContent='Download property draft';discard.textContent='Use current values';root.replaceChildren(status,download,discard);
-  const notify=()=>{if(!disposed&&!current.readonly)services.dispatch(current.event,{changes:draft.changes(),basis:draft.basis});};
+  const notify=()=>{if(!disposed&&!current.readonly){
+    if(current.locals)services.dispatch(draft.assignments(current.locals),{});
+    else services.dispatch(current.event,{changes:draft.changes(),basis:draft.basis});
+  }};
   const paint=()=>{
     root.dataset.dirty=String(draft.dirty);root.dataset.stale=String(draft.stale);
     status.textContent=store.warning?'Recovery storage is unavailable. Download this draft before leaving.':draft.orphaned?'Some fields changed. Your draft is retained for comparison.':draft.stale?'Source changed. Your property draft is kept.':draft.dirty?(draft.restored?'Recovered property draft':'Property draft on this device'):'Properties match saved source';

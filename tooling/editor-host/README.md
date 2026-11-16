@@ -52,3 +52,8 @@ application locals. Scope by actor/document/object. Optional accepted field valu
 acknowledge authoritative normalization. Storage failure leaves attempted values
 in memory with a plain-text property draft download. No database write occurs
 until the application's guarded save command.
+
+For socket-local changes, provide `:locals {:changes path :basis path}` on a
+recovered form. Recovery then uses ordinary leaf `:assign` terms, preserving the
+same keyword-path semantics as native controls. Nested event payload maps remain
+application data; the SDK does not change their keys or Live's wire contract.
