@@ -1,0 +1,23 @@
+(ns datom.work-store-test
+  (:require [datom :as d] [datom.store :as store] [datom.store-ets :as ets]
+            [datom.index :as index] [datom.query.work-store :as bounded]
+            [proc.work-budget :as budget]))
+(deftest physical-pages-reserve-before-entry-and-have-no-range-fallback
+  (let [inner (ets/open)
+        c (d/connect-with inner [{:db/ident :work/value :db/valueType :db.type/long}])
+        token (budget/open! 2 65536 5000) s (bounded/wrap! inner token)
+        lo (index/key-prefix :aevt :work/value) hi (index/prefix-end lo)]
+    (try
+      (d/transact! c [{:db/id -1 :work/value 1} {:db/id -2 :work/value 2}])
+      (let [page (store/ordered-page s lo nil hi 128 :asc 65536)]
+        (is (= 1 (count (:datoms page))))
+        (is (= false (:end? page)))
+        (is (= 2 (:steps (budget/snapshot token))))
+        (is (pos? (:bytes (budget/snapshot token))))
+        (is (= :work-steps
+               (try (store/ordered-page s lo (:last page) hi 128 :asc 65536)
+                    nil (catch e (:kind (ex-data e))))))
+        (is (= 2 (:steps (budget/snapshot token)))))
+      (is (= :unbounded-work-range (try (store/-range s lo hi) nil (catch e (:kind (ex-data e))))))
+      (is (= :projection-write (try (store/-put s lo []) nil (catch e (:kind (ex-data e))))))
+      (finally (d/close! c)))))

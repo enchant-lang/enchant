@@ -9,3 +9,21 @@
         (is (= :done (:status (first (work/snapshot owner)))))
         (is (= :none (receive [t :work-finished _ _] t (after 0 :none)))))
       (finally (work/stop! owner)))))
+
+(deftest a-result-message-cannot-release-a-live-worker-slot
+  (let [tag (erlang/make_ref) parent (erlang/self)
+        owner (work/start! {:max-active 1 :history 1 :completion-tag tag})]
+    (try
+      (let [job (work/submit! owner {} (fn [_]
+                  (erlang/send parent [:held-worker (erlang/self)]) (receive :release :done)))
+            worker (receive [:held-worker pid] pid (after 5000 nil))]
+        (is (some? worker))
+        (erlang/send owner [:work-finished (:id job) :done])
+        (is (= :running (:status (first (work/snapshot owner)))))
+        (is (= false (:ok (work/submit! owner {} (fn [_] :should-not-run)))))
+        (is (= :none (receive [t :work-finished _ _] t (after 0 :none))))
+        (erlang/send worker :release)
+        (is (= [tag (:id job) :done]
+               (receive [t :work-finished id status] [t id status] (after 5000 nil))))
+        (is (not (Process/alive? worker))))
+      (finally (work/stop! owner)))))

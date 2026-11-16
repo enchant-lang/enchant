@@ -125,7 +125,7 @@
       (is (= :aggregate-checkpoint-gap
              (:reason (projection/delta! h {:sequence 3 :now now :upsert []}))))
       (is (= 1 (get-in (projection/read r) [:value :cursor])))
-      (projection/delta! h {:sequence 2 :now now :upsert [{:id 1 :at now :user "bob" :tokens nil}]})
+      (projection/delta! h {:sequence 2 :now (erlang/system_time :millisecond) :upsert [{:id 1 :at now :user "bob" :tokens nil}]})
       (is (= {["bob"] {:count 1 :sums {:tokens nil}}} (get-in (projection/read r) [:value :groups])))
       (is (= 2 (get-in (projection/read r) [:counts :started])))
       (projection/evict! h)
@@ -147,4 +147,32 @@
       (doseq [_ (range 100)] (projection/read h))
       (is (= 1 (get-in (projection/read h) [:counts :started])))
       (is (Process/alive? (:owner h)))
+      (finally (projection/stop! h)))))
+
+(deftest joins-require-intermediate-work-admission-and-are-refused
+  (let [c (source)]
+    (try
+      (is (= :unbounded-projection-plan
+             (try (projection/start! :projection/cartesian c
+                    '[:find ?e ?f :where [?e :projection/value ?v] [?f :projection/value ?w]])
+                  nil (catch e (:kind (ex-data e))))))
+      (is (nil? (instance/whereis :projection/cartesian)))
+      (finally (d/close! c)))))
+
+(deftest idle-expiry-observation-never-drains-the-reducer
+  (let [now (- (erlang/system_time :millisecond) 1000)
+        h (projection/start-incremental! :projection/idle-expiry
+            {:source-id "expiry/v1" :group-by [:user] :window-ms 1})]
+    (try
+      (projection/delta! h {:sequence 1 :now now :upsert [{:id 1 :at now :user "alice"}]})
+      (doseq [_ (range 100)]
+        (let [r (projection/read h)]
+          (is (= :stale (:status r)))
+          (is (= 0 (get-in r [:counts :started])))))
+      (projection/subscribe! h)
+      (let [answer (projection/read h)]
+        (is (= :ready (:status answer)))
+        (is (= {} (get-in answer [:value :groups])))
+        (is (= 1 (get-in answer [:work :expired])))
+        (is (= 1 (get-in answer [:counts :started]))))
       (finally (projection/stop! h)))))
