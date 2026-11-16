@@ -25,8 +25,8 @@ import time
 DEADLINE = 120
 MAX_PART = 65536
 PARTS = (("seed", "host.scm"), ("values", "host/host-values.scm"),
-         ("leaves", "host/host-leaves.scm"), ("lazy", "host/host-lazy.scm"),
-         ("extra", "host/host-extra.scm"), ("compiler", "host/host-compiler.scm"),
+         ("leaves", "host/host-leaves.scm"),
+         ("extra", "host/host-extra.scm"), ("compiler", "host/host-compiler.scm"), ("memo", "host/native-memo.scm"),
          ("text-ffi", "host/native-text.scm"))
 STANDARD_PRELUDE = "(declare (standard-bindings) (extended-bindings))"
 

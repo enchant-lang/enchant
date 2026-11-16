@@ -1,0 +1,160 @@
+; Native emission of the lazy host modules, for the gsi differential (LAZY).
+; Usage (pinned SDK, cwd = repository root):
+;   research/native-seed/run run research/native-seed/speed/lazy/emit.bl -- MAIN-OUT OUT
+; MAIN-OUT is the read-only `research/native-seed/out` of the integration
+; checkout (speed-closure/partition.json, speed-build/leaves.json). Compiles
+; every namespace in speed/lazy/closure-additions.edn with native.bootstrap's
+; own per-definition path, adds them to the closure's link table, and emits
+; each definition exactly as native.chunks/emit-definition does under the AOT
+; context. Writes OUT/lazy.scm, and OUT/gaps.txt: every remote the emitted
+; code needs that is neither a leaf, a compiled closure member nor excluded.
+(ns lazy.emit
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.eval :as ev] [native.scheme :as scheme] [native.resolution :as resolution]
+           [native.intrinsics :as intrinsics] [bl.json :as json] [clojure.string :as string] [anf]
+           [compiler :as c] [reader :as rd]))
+
+(def args (BeamLisp/argv))
+(def main-out (nth args 0))
+(def out (nth args 1))
+(def closure0 (artifact/read-closure (str main-out "/speed-closure/partition.json")))
+(def additions (read-data (File/read! "research/native-seed/speed/lazy/closure-additions.edn")))
+; Leaves the cutover deletes: the lazy replicas. Anything left in host Scheme
+; under these modules would shadow the compiled BL.
+(def replica-modules #{"Elixir.BeamLisp.LazySeq" "Elixir.BeamLisp.SeqCursor" "Elixir.BeamLisp.Deferred"
+                       "Elixir.BeamLisp.LazyMemo" "Elixir.BeamLisp.Delay" "Elixir.BeamLisp.LazySeq.ForceError"})
+(defn leaf-module [key] (subs key 0 (string/index-of key "/")))
+(def all-leaves (set (get (json/decode (File/read! (str main-out "/speed-build/leaves.json"))) "registered_leaves")))
+(def extra-leaves (set (string/split-lines (string/trim (File/read! "research/native-seed/speed/lazy/leaves.txt")))))
+(def leaves (into (set (remove #(contains? replica-modules (leaf-module %)) all-leaves)) extra-leaves))
+
+; native.bootstrap/prepare evaluates the ns form through the NATIVE host
+; (host/eval-node). These host files require nothing and define no macro, so
+; on BEAM the header needs no evaluation: intern the names, then compile each
+; definition exactly as prepare does.
+(defn prepare [a]
+ (let [ns (:ns a) path (:path a) source (File/read! path) forms (rd/read-string source path)
+       _ (BeamLisp.Env/mark_loaded ns)
+       defs (bootstrap/definition-values (rest forms) ns path)]
+  (doseq [d defs :when (and (:name d) (not (BeamLisp.Env/bound? ns (:name d))))]
+   (BeamLisp.Env/intern ns (:name d) nil))
+  {:ns ns :path path :source source :requires [] :module (:module a) :base-module (:module a)
+   :defs (mapv (fn [d]
+           (c/reset-fresh!)
+           (assoc d :node (c/compile (:form d) (assoc (c/new-env ns) :file path :target :js)))) defs)}))
+(def compiled (BeamLisp.Env/isolated (fn [] (mapv prepare additions))))
+(def closure
+ (reduce (fn [c u] (-> c (assoc-in [:units (:ns u)] u) (update :order conj (:ns u)))) closure0 compiled))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def table (into {} (map (fn [u] [(:ns u) (set (keep :name (:defs u)))]) units)))
+(def ledger (resolution/build closure))
+(def by-module (assoc (into {} (mapcat (fn [u] [[(:module u) (:ns u)] [(:base-module u) (:ns u)]]) units))
+                      :Elixir.BeamLisp.CompilerData "host.compiler-data"
+                      :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta"))
+(def stub-modules (set (mapcat (fn [ns] [(BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))))
+(def definitions
+ (into {} (mapcat (fn [u] (keep (fn [d] (when (:name d) [[(:ns u) (:name d)] d])) (:defs u))) units)))
+(def definition-arities
+ (into {} (keep (fn [[slot d]] (when (= :fn (:kind d)) [slot (bootstrap/declaration-arities (:form d))])) definitions)))
+(def gaps (atom #{}))
+(defn remote-decision [n]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
+       logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
+       key (str (erlang/atom_to_binary m) "/" f "/" a)]
+  (cond
+   (contains? leaves key) ["leaf" key]
+   (and (contains? by-module m) (contains? (get table (get by-module m)) logical))
+    (let [ns (get by-module m) mode (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")
+          arities (get definition-arities [ns logical])
+          shape (cond (= mode "rest-list-clause") (if (some? (:variadic arities)) "variadic" "dynamic")
+                      (contains? (set (:fixed arities)) a) "arity"
+                      (some? (get definitions [ns logical])) "generic" :else "dynamic")]
+     ["compiled" key ns logical mode shape])
+   (contains? stub-modules m) ["excluded-namespace" key]
+   :else (do (swap! gaps conj key) ["gap" key]))))
+(defn- direct-call [target]
+ {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- generic-call [target]
+ {:inline? true
+  :call (fn [operands]
+         (let [spread (string/join "" (map #(str " " %) operands))]
+          (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
+               ") (bl-invoke linked (list" spread "))))")))})
+(defn remote-link* [n]
+ (if-let [template (intrinsics/remote-template n)]
+  {:inline? false :call template}
+  (let [decision (remote-decision n)]
+   (case (first decision)
+    "leaf" (direct-call (bootstrap/leaf-binding-name (second decision)))
+    "compiled"
+     (let [[_ _ ns logical _ shape] decision]
+      (case shape
+       "arity" (direct-call (bootstrap/arity-binding-name ns logical (count (:args n))))
+       "variadic" (direct-call (bootstrap/variadic-binding-name ns logical))
+       "generic" (generic-call (bootstrap/binding-name ns logical))
+       nil))
+     nil))))
+(def ns-modules (into {} (map (fn [a] [(:ns a) (:module a)]) additions)))
+(defn self-module-read? [n]
+ ; `(erlang/fun_info (fn ...) :module)`: the module a fun literal of THIS unit
+ ; was compiled into is a link-time fact, the unit's :module.
+ (let [args (:args n)]
+  (and (= :erlang (:mod n)) (= :fun_info (:fun n)) (= 2 (count args))
+       ; a fun expression built at this site (`:fn`, or its named `fnself`
+       ; form), never a variable holding a fun from elsewhere
+       (not (contains? #{:var :lit :global :local} (:op (first args))))
+       (= :lit (:op (second args))) (= :module (:val (second args))))))
+(def module-reads (atom 0))
+(defn remote-link [ns n]
+ (if (and (self-module-read? n) (contains? ns-modules ns))
+  (do (swap! module-reads inc)
+  {:inline? false
+   :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
+                      (scheme/text (erlang/atom_to_binary (get ns-modules ns))) "))"))})
+  (do (when (and (= :erlang (:mod n)) (= :fun_info (:fun n)))
+        (println "LAZY_FUN_INFO_DYNAMIC" ns (mapv :op (:args n))))
+      (remote-link* n))))
+(defn context [ns]
+ (assoc (ev/context ns)
+  :aot-link {:remote (fn [n] (remote-link ns n))}
+  :global-resolver
+  (fn [n] (let [[_ _ _ _ _ sel-ns sel-name] (resolution/global-decision ledger table n)]
+           (bootstrap/global-binding-name sel-ns sel-name)))))
+(defn link-definition [ns name kind arities]
+ (let [binding (bootstrap/binding-name ns name) global (bootstrap/global-binding-name ns name)
+       fixed (if (= :fn kind) (:fixed arities) [])
+       variadic? (and (= :fn kind) (some? (:variadic arities)))
+       cells (concat (map #(bootstrap/arity-binding-name ns name %) fixed)
+                     (when variadic? [(bootstrap/variadic-binding-name ns name)]) [global])]
+  (str (string/join "" (map #(str "(define " % " #f)\n") cells))
+       "(native-link! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " binding " value)"
+       (string/join "" (map #(str " (set! " (bootstrap/arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
+       (if variadic? (str " (set! " (bootstrap/variadic-binding-name ns name) " (native-variadic-entry value "
+                          (scheme/text (str ns "/" name)) "))") "")
+       ") (lambda (value) (set! " global " value)))\n")))
+(defn emit-definition [u d]
+ (let [ns (:ns u) value (scheme/emit (:node d) (context ns))]
+  (if (:name d)
+   (let [binding (bootstrap/binding-name ns (:name d))
+         arities (when (= :fn (:kind d)) (bootstrap/declaration-arities (:form d)))]
+    (str "(define " binding " " value ")\n"
+         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
+         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
+         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
+         (when arities
+          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+               (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))
+         (link-definition ns (:name d) (:kind d) arities)))
+   (str value "\n"))))
+; Functions first (every cell exists before any initializer runs), as chunks.
+(def text
+ (str (string/join "" (for [u compiled d (:defs u) :when (= :fn (:kind d))] (emit-definition u d)))
+      (string/join "" (for [u compiled d (:defs u) :when (not= :fn (:kind d))] (emit-definition u d)))))
+(File/mkdir_p! out)
+(File/write! (str out "/lazy.scm") text)
+(File/write! (str out "/namespace-modules.scm")
+ (str "(bl-vec (list " (string/join " " (map (fn [u] (bootstrap/data [(:ns u) (:module u) (:base-module u)])) compiled)) "))\n"))
+(File/write! (str out "/gaps.txt") (str (string/join "\n" (sort @gaps)) "\n"))
+(println "LAZY_MODULE_READS" @module-reads)
+(println "LAZY_EMIT" (count text) "bytes;" (count (mapcat :defs compiled)) "definitions;" (count @gaps) "gaps")
+(doseq [g (sort @gaps)] (println "LAZY_GAP" g))

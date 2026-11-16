@@ -26,8 +26,8 @@ def main():
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.unlink(missing_ok=True)
     sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm",
-               "host/host-lazy.scm", "host/host-extra.scm", "host/host-compiler.scm",
-               "host/host-match.scm", "host/host-kernel.scm"]
+               "host/host-extra.scm", "host/host-compiler.scm",
+               "host/host-match.scm", "host/host-kernel.scm", "host/native-memo.scm"]
     inputs = sources + ["host/native-text.scm", "fixtures/native-text-check.scm", "toolchain-pin.json"]
     hashes = {p: hashlib.sha256((BASE / p).read_bytes()).hexdigest() for p in inputs}
     host = "\n".join((BASE / p).read_text() for p in sources)

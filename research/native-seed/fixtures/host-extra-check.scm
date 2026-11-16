@@ -184,14 +184,18 @@
   (for-each (lambda (right)
    (native-extra-check "tuple order preserves previous list projection relation"
     (= (bl-key-compare left right) (native-compare-lists (bl-items left) (bl-items right))))) cases)) cases))
-;; A storage-only host has no authority to replace canonical lazy walking.
-(let ((forced #f) (refused #f))
- (let ((value (native-lazy-new (lambda () (set! forced #t) '("hidden")))))
+;; A storage-only host has no authority to replace canonical lazy walking. The
+;; values are the compiled lazy modules' own struct shapes (host/native-memo.scm
+;; holds only the cell, so no thunk can run here).
+(let ((refused #f))
+ (let ((value (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.LazySeq")
+                      (bl-key "resource") (native-make-reference) (bl-key "metadata") bl-nil)))
   (with-exception-catcher (lambda (e) (set! refused #t)) (lambda () (native-finite-items value))))
- (native-extra-check "Enum LazySeq requires compiled runtime before forcing" (and refused (not forced))))
+ (native-extra-check "Enum LazySeq requires compiled runtime before forcing" refused))
 (let ((refused #f))
  (with-exception-catcher (lambda (e) (set! refused #t))
-  (lambda () (native-finite-items (native-cursor-new '("hidden")))))
+  (lambda () (native-finite-items (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.SeqCursor")
+                                          (bl-key "chunk") '("hidden") (bl-key "tail") bl-nil (bl-key "dirty") #f))))
  (native-extra-check "Enum cursor cannot leak struct fields without runtime" refused))
 ;; Contracts read from host/vector.bl and pinned String.Chars implementations.
 (let* ((value (native-vector-with-meta (bl-vec '(10 20)) (bl-map (bl-key "note") "kept")))
