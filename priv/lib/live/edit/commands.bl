@@ -29,7 +29,7 @@
      {:id "block/outdent" :label "Outdent" :icon "outdent" :kind "block"}
      {:id "block/up" :label "Move up" :icon "arrow-up" :kind "block"}
      {:id "block/down" :label "Move down" :icon "arrow-down" :kind "block"}]
-    (map (fn [[id spec]] (assoc spec :id id :kind "custom")) (:commands extensions)))))
+    (map (fn [[id spec]] (assoc spec :id id :kind "custom")) (sort-by first (:commands extensions))))))
 (defn- coverage [doc selection fid]
   (if (or (nil? selection) (collapsed? selection)) "off"
     (let [[a z] (d/ordered-range doc (:anchor selection) (:head selection))
@@ -63,10 +63,14 @@
                          (if (collapsed? selection)
                            (if (some #(= id (:function %)) (:pending-styles context)) "on" "off")
                            (coverage doc selection id)) :else "off")]
-        (assoc (dissoc item :run :when :active) :enabled (boolean enabled) :active active
+        (reduce (fn [result policy]
+                  (let [decision (policy context result)]
+                    (assoc result :enabled (boolean (and (:enabled result) (:enabled decision)))
+                                  :reason (or (:reason decision) (:reason result)))))
+         (assoc (dissoc item :run :when :active) :enabled (boolean enabled) :active active
                :reason (when-not enabled (cond (:conflict context) "Resolve the retained draft first."
                   (and code? (= "wrap" kind) (= "inline" (:scope item))) "Code blocks keep plain source. Select text outside the code block to format it."
-                  :else "Choose a target in the document.")))))
+                  :else "Choose a target in the document."))) (:policies extensions))))
       (catalogue extensions))))
 (defn plan [extensions context id args seed]
   (let [item (first (filter #(= id (:id %)) (query extensions context)))
@@ -75,7 +79,7 @@
         doc (:document context) [a z] (target context) b (d/find-block doc (:block a))
         kind (:kind item) spec (get (:functions extensions) id)]
     (cond
-      (= "custom" kind) ((get-in extensions [:commands id :run]) context args)
+      (= "custom" kind) ((get-in extensions [:commands id :run]) (assoc context :seed seed) args)
       (and (= "wrap" kind) (= "inline" (:scope item)) (collapsed? (:selection context)))
       (let [old (filterv #(not= id (:function %)) (:pending-styles context))]
         {:pending-styles (if (= "on" (:active item)) old

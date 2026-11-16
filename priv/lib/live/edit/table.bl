@@ -1,0 +1,172 @@
+;; Generic structured tables. Source formats belong to their own packages.
+(ns ^:js live.edit.table
+ (:require [live.edit.document :as d] [live.edit.capabilities :as r]))
+(def max-rows 256)
+(def max-columns 32)
+(defn- point [id offset] {:block id :offset offset :affinity "right"})
+(defn- selection [id offset] {:anchor (point id offset) :head (point id offset)})
+(defn- ancestor [document id type]
+ (loop [block (d/find-block document id) depth 0]
+  (cond (nil? block) nil (= type (:type block)) block
+        (>= depth 32) nil :else (recur (d/find-block document (:parent block)) (inc depth)))))
+(defn inside? [context]
+ (some? (ancestor (:document context) (get-in context [:selection :head :block]) "table")))
+(defn- cell? [context]
+ (= "table-cell" (:type (d/find-block (:document context) (get-in context [:selection :head :block])))))
+(defn shape [context]
+ (let [document (:document context) id (get-in context [:selection :head :block])
+       table (ancestor document id "table") grouped (group-by :parent (:blocks document))
+       rows (get grouped (:id table) []) cells (mapv #(get grouped (:id %) []) rows)
+       row (ancestor document id "table-row")
+       row-index (or (first (keep-indexed #(when (= (:id row) (:id %2)) %1) rows)) (dec (count rows)))
+       column-index (or (first (keep-indexed #(when (= id (:id %2)) %1) (get cells row-index [])))
+                        (dec (count (first cells))))]
+  (when-not (and table (<= 1 (count rows) max-rows)
+                (<= 1 (count (first cells)) max-columns)
+                (every? #(and (= "table-row" (:type %)) (= "rows" (:slot %))) rows)
+                (every? #(and (= (count (first cells)) (count %))
+                              (every? (fn [cell] (and (= "table-cell" (:type cell)) (= "cells" (:slot cell))
+                                                     (empty? (get grouped (:id cell))))) %)) cells))
+   (r/fail "Choose a rectangular table with editable cells."))
+  {:table table :rows rows :cells cells :row row-index :column column-index}))
+(defn- cell [id parent header alignment]
+ (assoc (d/block id "table-cell" "" {:header header :align alignment}) :parent parent :slot "cells"))
+(defn- row-blocks [seed table columns header alignments]
+ (let [row (assoc (d/block seed "table-row" "" {:header header}) :parent table :slot "rows")]
+  (into [row] (mapv #(cell (str seed "/c" %) seed header (get alignments % "left")) (range columns)))))
+(defn- set-attrs [block values]
+ {:op "node/set" :block (:id block) :patch {:attrs (merge (:attrs block) values)}})
+(defn insert [context _]
+ (let [document (:document context) selected (d/find-block document (get-in context [:selection :head :block]))
+       outer (or (ancestor document (:id selected) "table") selected)
+       seed (:seed context) table (d/block seed "table" "" {:header true :rows 3 :columns 2})
+       blocks (into [table] (mapcat #(row-blocks (str seed "/r" %) seed 2 (zero? %) ["left" "left"]) (range 3)))]
+  {:ops [{:op "node/insert" :after (:id outer) :parent (:parent outer) :slot (:slot outer) :blocks blocks}]
+   :selection (selection (str seed "/r0/c0") 0)}))
+(defn add-row [context _]
+ (let [{:keys [table rows cells row]} (shape context) n (count rows)
+       columns (count (first cells)) seed (:seed context)]
+  (when (>= n max-rows) (r/fail "This table has reached its row limit."))
+  {:ops [{:op "node/insert" :after (:id (nth rows row)) :parent (:id table) :slot "rows"
+          :blocks (row-blocks seed (:id table) columns false (mapv #(get-in % [:attrs :align] "left") (first cells)))}
+         (set-attrs table {:rows (inc n) :columns columns})]
+   :selection (selection (str seed "/c0") 0)}))
+(defn add-column [context _]
+ (let [{:keys [table rows cells row column]} (shape context) n (count (first cells)) seed (:seed context)]
+  (when (>= n max-columns) (r/fail "This table has reached its column limit."))
+  {:ops (conj (mapv (fn [i]
+                     {:op "node/insert" :after (:id (get-in cells [i column])) :parent (:id (nth rows i)) :slot "cells"
+                      :node (cell (str seed "/r" i) (:id (nth rows i))
+                                  (and (zero? i) (get-in table [:attrs :header] true)) "left")}) (range (count rows)))
+               (set-attrs table {:rows (count rows) :columns (inc n)}))
+   :selection (selection (str seed "/r" row) 0)}))
+(defn- header-ops [rows cells enabled]
+ (into [(set-attrs (first rows) {:header enabled})]
+       (mapv #(set-attrs % {:header enabled}) (first cells))))
+(defn remove-row [context _]
+ (let [{:keys [table rows cells row column]} (shape context) n (count rows) next-row (if (= row (dec n)) (dec row) (inc row))]
+  (when (= n 1) (r/fail "Keep at least one row in this table."))
+  {:ops (into [{:op "node/delete" :block (:id (nth rows row))} (set-attrs table {:rows (dec n)})]
+               (when (zero? row) (header-ops (subvec rows 1) (subvec cells 1) (get-in table [:attrs :header] true))))
+   :selection (selection (:id (get-in cells [next-row column])) 0)}))
+(defn remove-column [context _]
+ (let [{:keys [table rows cells row column]} (shape context) n (count (first cells))
+       next-column (if (= column (dec n)) (dec column) (inc column))]
+  (when (= n 1) (r/fail "Keep at least one column in this table."))
+  {:ops (conj (mapv #(hash-map :op "node/delete" :block (:id (nth % column))) cells)
+               (set-attrs table {:columns (dec n)}))
+   :selection (selection (:id (get-in cells [row next-column])) 0)}))
+(defn toggle-header [context _]
+ (let [{:keys [table rows cells]} (shape context) enabled (not (get-in table [:attrs :header] true))]
+  {:ops (into [(set-attrs table {:header enabled})] (header-ops rows cells enabled))}))
+(defn align-column [context _]
+ (let [{:keys [cells column]} (shape context)
+       alignment (get {"left" "center" "center" "right" "right" "left"} (get-in cells [0 column :attrs :align] "left") "left")]
+  {:ops (mapv #(set-attrs (nth % column) {:align alignment}) cells)}))
+(defn- navigate [context delta]
+ (let [{:keys [cells row column]} (shape context) columns (count (first cells))
+       flat (vec (mapcat identity cells)) at (+ (* row columns) column) next (+ at delta)]
+  (cond
+   (< next 0) {:selection (selection (:id (first flat)) 0)}
+   (< next (count flat)) {:selection (selection (:id (nth flat next)) 0)}
+   :else (let [plan (add-row (assoc-in context [:selection :head :block] (:id (last flat))) {})]
+           plan))))
+(defn next-cell [context _] (navigate context 1))
+(defn previous-cell [context _] (navigate context -1))
+(defn next-row [context _]
+ (let [{:keys [cells row column]} (shape context) columns (count (first cells))]
+  (if (< (inc row) (count cells)) {:selection (selection (:id (get-in cells [(inc row) column])) 0)}
+   (let [plan (add-row context {}) id (str (:seed context) "/c" column)]
+    (assoc plan :selection (selection id 0))))))
+(defn leave [context _]
+ (let [{:keys [table]} (shape context) document (:document context)
+       end (+ (d/block-index document (:id table)) (count (d/subtree document (:id table))))
+       following (first (filter #(and (not (contains? #{"table" "table-row" "table-cell" "org-retained" "divider" "image" "embed"} (:type %)))
+                                      (= (:parent table) (:parent %))) (subvec (:blocks document) end)))
+       seed (:seed context)]
+  (if following {:selection (selection (:id following) 0)}
+   {:ops [{:op "node/insert" :after (:id table) :parent (:parent table) :slot (:slot table) :node (d/block seed "")}]
+    :selection (selection seed 0)})))
+(defn- boundary? [context backward]
+ (let [a (get-in context [:selection :anchor]) h (get-in context [:selection :head])
+       block (d/find-block (:document context) (:block h))]
+  (and (= "table-cell" (:type block)) (= (:block a) (:block h)) (= (:offset a) (:offset h))
+       (= (:offset h) (if backward 0 (d/length (:text block)))))))
+(defn boundary-back [context _]
+ (let [{:keys [cells row column]} (shape context) flat (vec (mapcat identity cells))
+       at (+ (* row (count (first cells))) column) cell (nth flat (max 0 (dec at)))]
+  {:selection (selection (:id cell) (if (zero? at) 0 (d/length (:text cell))))}))
+(defn boundary-forward [context _]
+ (let [{:keys [cells row column]} (shape context) flat (vec (mapcat identity cells))
+       at (+ (* row (count (first cells))) column) cell (nth flat (min (dec (count flat)) (inc at)))]
+  {:selection (selection (:id cell) (if (= at (dec (count flat))) (d/length (:text cell)) 0))}))
+(defn command-policy [context item]
+ (if-not (inside? context) item
+  (let [id (:id item) root? (= "table" (:type (d/find-block (:document context) (get-in context [:selection :head :block]))))
+        structural (or (starts-with? id "turn/") (starts-with? id "insert/") (starts-with? id "block/"))
+        allowed (or (not structural) (and root? (contains? #{"block/delete" "block/duplicate" "block/up" "block/down"} id)))
+        allowed (and allowed (or (cell? context) (not (contains? #{"wrap" "transform"} (:kind item)))))
+        allowed (and allowed (not (and (= "wrap" (:kind item)) (= "block" (:scope item)))))]
+   (if allowed item (assoc item :enabled false :reason "Use the table controls to keep its rows and columns together.")))))
+(defn- control [command target label icon]
+ [:button {:type "button" :contenteditable "false" :data-edit-command command :data-edit-command-target target
+           :aria-label label :title label} [:span {:data-icon icon}]])
+(defn table-view [block context]
+ [:section {:class "ed-table" :style (str "--ed-table-columns:" (let [n (get-in block [:attrs :columns] 2)] (if (and (integer? n) (<= 1 n max-columns)) n 2)))}
+  [:div {:class "ed-table-toolbar" :role "toolbar" :aria-label "Table tools" :contenteditable "false" :data-edit-controls true}
+   (control "table/add-row" (:id block) "Add row" "plus")
+   (control "table/add-column" (:id block) "Add column" "columns")
+   (control "table/toggle-header" (:id block) "Toggle header row" "heading")]
+  [:div {:class "ed-table-scroll" :role "table" :aria-label "Editable table"}
+   (get-in context [:slots "rows"])]] )
+(defn row-view [block context]
+ [:div {:class "ed-table-row" :role "row" :data-header (str (boolean (get-in block [:attrs :header])))}
+  (get-in context [:slots "cells"])])
+(defn cell-view [block context]
+ [:div {:class "ed-table-cell" :role (if (get-in block [:attrs :header]) "columnheader" "cell")
+        :data-align (get-in block [:attrs :align] "left")}
+  (:text context)
+  [:div {:class "ed-table-cell-tools" :contenteditable "false" :role "toolbar" :aria-label "Cell tools" :data-edit-controls true}
+   (control "table/add-row" (:id block) "Add row below" "plus")
+   (control "table/add-column" (:id block) "Add column after" "columns")
+   (control "table/align-column" (:id block) "Align column" "align-left")
+   (control "table/remove-row" (:id block) "Remove row" "trash")
+   (control "table/remove-column" (:id block) "Remove column" "trash")]])
+(def block-types
+ {"table" {:label "Table" :icon "table" :slots ["rows"] :insertable false :render table-view}
+  "table-row" {:label "Table row" :slots ["cells"] :insertable false :render row-view}
+  "table-cell" {:label "Table cell" :slots [] :insertable false :render cell-view}})
+(def commands
+ {"table/insert" {:label "Table" :description "Organize a few related facts" :icon "table" :menu "insert" :run insert}
+  "table/add-row" {:label "Add row" :icon "plus" :when inside? :run add-row}
+  "table/add-column" {:label "Add column" :icon "columns" :when inside? :run add-column}
+  "table/remove-row" {:label "Remove row" :icon "trash" :when inside? :run remove-row}
+  "table/remove-column" {:label "Remove column" :icon "trash" :when inside? :run remove-column}
+  "table/toggle-header" {:label "Header row" :icon "heading" :when inside? :run toggle-header}
+  "table/align-column" {:label "Align column" :icon "align-left" :when cell? :run align-column}
+  "table/next-cell" {:label "Next cell" :shortcut "Tab" :when cell? :run next-cell}
+  "table/previous-cell" {:label "Previous cell" :shortcut "Shift-Tab" :when cell? :run previous-cell}
+  "table/leave" {:label "Leave table" :shortcut "Escape" :when cell? :run leave}
+  "table/next-row" {:label "Next row" :input-type "insertParagraph" :when cell? :run next-row}
+  "table/boundary-back" {:label "Previous cell boundary" :input-type "deleteContentBackward" :when #(boundary? % true) :run boundary-back}
+  "table/boundary-forward" {:label "Next cell boundary" :input-type "deleteContentForward" :when #(boundary? % false) :run boundary-forward}})

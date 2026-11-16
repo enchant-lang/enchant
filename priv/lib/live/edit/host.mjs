@@ -242,7 +242,24 @@ export class Editor {
     const at=this.order.indexOf(id),next=this.order[at+direction];if(!next)return false;
     const block=this.node(next);this.select({anchor:{block:next,offset:direction<0?codepoints(block.text).length:0},head:{block:next,offset:direction<0?codepoints(block.text).length:0}});return true;
   }
+  packageInput(inputType,args={}){
+    if(!this.catalog.some(item=>item['input-type']===inputType))return false;
+    const item=this.query().find(item=>item['input-type']===inputType&&item.enabled);
+    if(!item)return false;
+    this.run(item.id,args);this.geometry.restore(this.state.selection,{focus:true});return true;
+  }
   installInput(){
+    this.listen(this.canvas,'pointerdown',event=>{if(event.target.closest?.('[data-edit-command]'))event.preventDefault();});
+    this.listen(this.canvas,'click',event=>{
+      const control=event.target.closest?.('[data-edit-command]');if(!control||!this.canvas.contains(control))return;
+      event.preventDefault();event.stopPropagation();
+      const id=control.dataset.editCommandTarget;if(!this.node(id))return;
+      if(this.model.readonly){this.report(Error('This document is read only.'));return;}
+      this.session.selection({anchor:{block:id,offset:0},head:{block:id,offset:0}});
+      const target=this.session.bookmark();
+      try{this.run(control.dataset.editCommand,{}, {target});this.geometry.restore(this.state.selection,{focus:true});}
+      finally{this.session.release(target);}
+    });
     this.listen(this.canvas,'compositionstart',()=>{this.composing=true;this.root.dataset.editComposing='true';this.ui?.hideSelection?.();});
     this.listen(this.canvas,'compositionend',event=>{
       queueMicrotask(()=>{if(this.disposed)return;this.composing=false;this.root.dataset.editComposing='false';
@@ -257,6 +274,7 @@ export class Editor {
       try{
         const selection=this.geometry.targetRanges(event)||this.geometry.read()||this.state.selection;
         if(!selection){event.preventDefault();return;}this.session.selection(selection);
+        if(this.packageInput(event.inputType,{text:event.data||''})){event.preventDefault();return;}
         const [from,to]=this.ordered(selection),sameBlock=from.block===to.block,collapsed=sameBlock&&from.offset===to.offset;
         const formats={formatBold:'text/bold',formatItalic:'text/emphasis',formatUnderline:'text/underline',formatStrikeThrough:'text/strike'};
         if(event.inputType==='historyUndo'||event.inputType==='historyRedo'){event.preventDefault();this.run(event.inputType==='historyUndo'?'undo':'redo');}
@@ -289,6 +307,11 @@ export class Editor {
     this.listen(this.canvas,'keydown',event=>{
       if(this.composing||event.isComposing||event.target.closest('.cm-editor'))return;
       const mod=event.ctrlKey||event.metaKey,key=event.key.toLowerCase();
+      const shortcut=(mod?'Mod-':'')+(event.altKey?'Alt-':'')+(event.shiftKey?'Shift-':'')+event.key;
+      if(this.catalog.some(item=>item.kind==='custom'&&item.shortcut===shortcut)){
+        this.rememberSelection();const item=this.query().find(item=>item.kind==='custom'&&item.shortcut===shortcut&&item.enabled);
+        if(item){event.preventDefault();this.run(item.id);this.geometry.restore(this.state.selection,{focus:true});return;}
+      }
       if(mod&&key==='z'){event.preventDefault();this.run(event.shiftKey?'redo':'undo');return;}
       if(mod&&['b','i','u','e','k'].includes(key)){
         event.preventDefault();const id={b:'text/bold',i:'text/emphasis',u:'text/underline',e:'text/code',k:'text/link'}[key];

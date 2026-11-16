@@ -1,0 +1,80 @@
+(ns live.edit.table-test
+ (:require [live.edit.table :as table] [live.edit.commands :as commands] [live.edit.document :as d]
+           [live.edit.extensions :as extensions] [live.edit.standard :as standard]
+           [live.edit.protocol :as protocol] [live.edit.projection :as view] [live.hiccup :as html]))
+(def registry (extensions/build [standard/package]))
+(def initial (d/prepare (d/document "tables" [(d/block "intro" "A notebook.")])))
+(defn context [document block] {:document (d/prepare document) :selection {:anchor {:block block :offset 0} :head {:block block :offset 0}}})
+(defn plan [document block command seed] (commands/plan registry (context document block) command {} seed))
+(defn apply-plan [document plan]
+ (reduce (fn [doc op] (:document (d/apply-op (:functions registry) doc op))) document (:ops plan)))
+(def inserted (apply-plan initial (plan initial "intro" "table/insert" "table")))
+(deftest inserted-tables-are-real-typed-subtrees
+ (is (= 11 (count (:blocks inserted))))
+ (is (d/valid? inserted))
+ (is (= ["table" "table-row" "table-cell" "table-cell"] (mapv :type (subvec (:blocks inserted) 1 5))))
+ (is (= "table/r0/c0" (get-in (plan initial "intro" "table/insert" "table") [:selection :head :block])))
+ (let [item (first (filter #(= "table/insert" (:id %)) (commands/query registry (context initial "intro"))))]
+  (is (= "custom" (:kind item))) (is (= "insert" (:menu item)))))
+(deftest row-and-column-operations-preserve-existing-cell-data
+ (let [written (:document (d/apply-op (:functions registry) inserted {:op "text/replace" :block "table/r1/c1" :from 0 :to 0 :text "مرحبا 🌱"}))
+       row-plan (plan written "table/r1/c1" "table/add-row" "new-row")
+       with-row (apply-plan written row-plan)
+       column-plan (plan with-row "table/r1/c1" "table/add-column" "new-column")
+       with-column (apply-plan with-row column-plan)
+       shape (table/shape (context with-column "new-column/r1"))]
+  (is (= 4 (count (:rows shape))))
+  (is (= [3 3 3 3] (mapv count (:cells shape))))
+  (is (= "مرحبا 🌱" (:text (d/find-block with-column "table/r1/c1"))))
+  (is (= "new-row/c0" (get-in row-plan [:selection :head :block])))
+  (is (= "new-column/r1" (get-in column-plan [:selection :head :block])))
+  (let [without-column (apply-plan with-column (plan with-column "new-column/r1" "table/remove-column" "remove-column"))
+        without-row (apply-plan without-column (plan without-column "new-row/c0" "table/remove-row" "remove-row"))]
+   (is (= written without-row)))))
+(deftest header-alignment-and-removal-maintain-a-rectangular-table
+ (let [no-header (apply-plan inserted (plan inserted "table" "table/toggle-header" "header"))
+       aligned (apply-plan no-header (plan no-header "table/r1/c1" "table/align-column" "align"))
+       without-first (apply-plan aligned (plan aligned "table/r0/c0" "table/remove-row" "remove"))
+       shape (table/shape (context without-first "table/r1/c1"))]
+  (is (false? (get-in (d/find-block no-header "table") [:attrs :header])))
+  (is (every? #(false? (get-in % [:attrs :header])) (first (:cells (table/shape (context no-header "table"))))))
+  (is (every? #(= "center" (get-in (nth % 1) [:attrs :align])) (:cells shape)))
+  (is (= 2 (count (:rows shape))))
+  (is (d/valid? without-first))))
+(deftest navigation-does-not-need-a-content-operation
+ (is (= {:selection {:anchor {:block "table/r0/c1" :offset 0 :affinity "right"}
+                     :head {:block "table/r0/c1" :offset 0 :affinity "right"}}}
+        (plan inserted "table/r0/c0" "table/next-cell" "nav")))
+ (is (= "table/r1/c0" (get-in (plan inserted "table/r0/c0" "table/next-row" "nav") [:selection :head :block])))
+ (let [last-plan (plan inserted "table/r2/c1" "table/next-cell" "last")
+       doc (apply-plan inserted last-plan)]
+  (is (= 4 (count (:rows (table/shape (context doc "last/c0"))))))
+  (is (= "last/c0" (get-in last-plan [:selection :head :block]))))
+ (let [leave (plan inserted "table/r0/c0" "table/leave" "after")]
+  (is (= "after" (get-in leave [:selection :head :block])))
+  (is (= "paragraph" (:type (last (:blocks (apply-plan inserted leave))))))))
+(deftest table-policies-block-destructive-generic-structure-actions
+ (let [items (commands/query registry (context inserted "table/r1/c1"))
+       item (fn [id] (first (filter #(= id (:id %)) items)))]
+  (is (false? (:enabled (item "block/outdent")))))
+  (is (false? (:enabled (item "turn/heading")))))
+  (is (false? (:enabled (item "block/delete")))))
+  (is (true? (:enabled (item "text/bold")))))
+  (is (thrown? (plan inserted "table/r1/c1" "block/outdent" "bad")))))
+(deftest structural-plans-use-the-authority-journal-and-undo
+ (let [authority (protocol/authority registry inserted)
+       p (plan inserted "table/r0/c0" "table/add-column" "column")
+       client (protocol/enqueue registry (protocol/replica authority) "insert-column" {:op "batch" :ops (:ops p)})
+       decision (protocol/decide registry authority (protocol/outbound client))
+       confirmed (protocol/receive-reply registry client (:reply decision))
+       undone (protocol/undo registry confirmed "undo-column")]
+  (is (true? (get-in decision [:reply :ok])))
+  (is (= (:visible confirmed) (get-in decision [:state :document])))
+  (is (= inserted (:visible undone)))))
+(deftest immutable-readers-have-table-semantics-and-no-authoring-controls
+ (let [rendered (html/hiccup->html (view/reader registry inserted {}))]
+  (is (includes? rendered "role=\"table\""))
+  (is (includes? rendered "role=\"columnheader\""))
+  (is (not (includes? rendered "Table tools"))))
+  (is (not (includes? rendered "Cell tools"))))
+  (is (not (includes? rendered "data-edit-command"))))))
