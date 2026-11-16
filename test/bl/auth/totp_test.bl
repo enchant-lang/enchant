@@ -1,0 +1,26 @@
+(ns auth.totp-test (:require [auth.totp :as totp] [auth.password :as password]))
+(deftest rfc4226-and-rfc6238-vectors
+ (let [secret (Base/encode32 "12345678901234567890" (list (tuple :padding false)))]
+  (is (= ["755224" "287082" "359152" "969429" "338314" "254676" "287922" "162583" "399871" "520489"]
+         (mapv #(totp/code secret %) (range 10))))
+  (doseq [[time expected] [[59 "94287082"] [1111111109 "07081804"] [1111111111 "14050471"]
+                         [1234567890 "89005924"] [2000000000 "69279037"] [20000000000 "65353130"]]]
+   (is (= expected (totp/code secret (quot time 30) 8)))
+   (is (= (quot time 30) (totp/matching-counter secret expected time {:digits 8 :window 0}))))
+  (is (= 1 (totp/matching-counter secret "287082" 59 {:window 0})))
+  (is (nil? (totp/matching-counter secret "287082" 120)))
+  (is (nil? (totp/matching-counter secret "0000000" 59)))
+  (is (nil? (totp/matching-counter "invalid" "123456" 59)))
+  (is (nil? (totp/matching-counter secret "287082" 59 {:window 100})))
+  (is (= 32 (count (totp/secret))))))
+(deftest password-cost-upgrade-and-format-validation
+ (let [plain "legacy-credential-test" salt "0123456789abcdef"
+       hash (crypto/pbkdf2_hmac :sha256 plain salt 210000 32)
+       old (str "pbkdf2$sha256$210000$" (Base/encode64 salt) "$" (Base/encode64 hash))
+       fresh (password/hash-password plain)]
+  (is (password/verify-password plain old))
+  (is (password/needs-rehash? old))
+  (is (not (password/needs-rehash? fresh)))
+  (is (password/verify-password plain fresh))
+  (is (not (password/verify-password plain (String/replace old "$sha256$" "$sha512$"))))
+  (is (not (password/verify-password plain (String/replace old "$210000$" "$99999999999$"))))))

@@ -1,0 +1,34 @@
+;; RFC 4226/6238 authenticators. The caller stores secrets encrypted and commits
+;; the returned counter with its authenticated action to prevent code replay.
+(ns auth.totp)
+(defn secret [] (Base/encode32 (crypto/strong_rand_bytes 20) (list (tuple :padding false))))
+(defn code
+  ([secret counter] (code secret counter 6))
+  ([secret counter digits]
+   (when-not (and (int? counter) (<= 0 counter 9223372036854775807) (contains? #{6 8} digits))
+    (throw (ex-info "Invalid authenticator counter or digits" {})))
+   (let [key (Base/decode32! secret (list (tuple :padding false) (tuple :case :mixed)))
+         _ (when (< (byte_size key) 20) (throw (ex-info "Authenticator secret is too short" {})))
+         bytes (erlang/list_to_binary (to-list (map #(erlang/band (erlang/bsr counter %) 255) [56 48 40 32 24 16 8 0])))
+         hash (crypto/mac :hmac :sha key bytes) offset (erlang/band (binary/at hash 19) 15)
+         truncated (erlang/band (binary/decode_unsigned (binary/part hash offset 4)) 2147483647)
+         value (str (rem truncated (if (= digits 8) 100000000 1000000)))]
+    (String/pad_leading value digits "0"))))
+(defn matching-counter
+  "Return the matching time counter, or nil. Persist it and reject counters
+   <= the last accepted counter. time is Unix seconds; window is bounded to 1."
+  ([secret presented time] (matching-counter secret presented time {}))
+  ([secret presented time options]
+   (try
+    (let [digits (:digits options 6) period (:period options 30) window (:window options 1)
+          _ (when-not (and (int? time) (>= time 0) (= period 30) (contains? #{0 1} window)
+                           (contains? #{6 8} digits) (string? presented)
+                           (= digits (count presented)) (Regex/match? #"^[0-9]+$" presented))
+              (throw (ex-info "Invalid authenticator input" {})))
+          counter (quot time period)]
+     (first (filter #(and (>= % 0) (crypto/hash_equals presented (code secret % digits)))
+                    (range (- counter window) (+ counter window 1)))))
+    (catch _ nil))))
+(defn uri [secret issuer account]
+ (str "otpauth://totp/" (URI/encode_www_form (str issuer ":" account))
+      "?secret=" secret "&issuer=" (URI/encode_www_form issuer) "&algorithm=SHA1&digits=6&period=30"))
