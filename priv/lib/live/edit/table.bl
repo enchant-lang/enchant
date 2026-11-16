@@ -213,7 +213,7 @@
 (defn- quote-tsv [text]
  (if (or (includes? text "\t") (includes? text "\n") (includes? text "\r") (includes? text "\""))
   (str "\"" (String/replace text "\"" "\"\"") "\"") text))
-(defn clipboard-copy [context _]
+(defn- clipboard-rectangle-copy [context _]
  (when-let [rect (rectangle context)]
   (let [{:keys [cells from-row to-row from-column to-column table]} rect
         grid (mapv (fn [r] (subvec (nth cells r) from-column (inc to-column))) (range from-row (inc to-row)))
@@ -258,6 +258,16 @@
  (when-let [rect (rectangle context)]
   {:cells (vec (mapcat (fn [row] (mapv :id (subvec (nth (:cells rect) row) (:from-column rect) (inc (:to-column rect)))))
                   (range (:from-row rect) (inc (:to-row rect)))))}))
+(defn clipboard-copy [context payload]
+ (or (clipboard-rectangle-copy context payload)
+  (when (cell? context)
+   (let [[a z] (d/ordered-range (:document context) (get-in context [:selection :anchor]) (get-in context [:selection :head]))
+         block (first (d/fragment (:document context) a z))
+         fragment (assoc block :type "paragraph" :parent nil :slot "body" :attrs {} :wraps [])]
+    {:blocks [fragment] :text (:text fragment)
+     :cut {:ops [{:op "text/replace" :block (:block a) :from (:offset a) :to (:offset z)
+                  :expected (:text fragment) :text "" :styles [] :restore []}]
+           :selection (selection (:block a) (:offset a))}}))))
 (defn clipboard-cut [context payload] (:cut (clipboard-copy context payload)))
 
 (defn- across-cells? [context]
@@ -282,7 +292,12 @@
   "table/replace-rectangle" {:label "Replace selected cells" :input-type "insertText" :when across-cells? :run replace-rectangle}
   "table/delete-rectangle-back" {:label "Clear selected cells" :input-type "deleteContentBackward" :when across-cells? :run replace-rectangle}
   "table/delete-rectangle-forward" {:label "Clear selected cells" :input-type "deleteContentForward" :when across-cells? :run replace-rectangle}
-  "table/next-row" {:label "Next row" :input-type "insertParagraph" :when cell? :run next-row}
+  "table/paragraph-rectangle" {:label "Clear selected cells" :input-type "insertParagraph" :when across-cells? :run replace-rectangle}
+  "table/line-rectangle" {:label "Clear selected cells" :input-type "insertLineBreak" :when across-cells? :run replace-rectangle}
+  "table/replacement-rectangle" {:label "Replace selected cells" :input-type "insertReplacementText" :when across-cells? :run replace-rectangle}
+  "table/word-back-rectangle" {:label "Clear selected cells" :input-type "deleteWordBackward" :when across-cells? :run replace-rectangle}
+  "table/word-forward-rectangle" {:label "Clear selected cells" :input-type "deleteWordForward" :when across-cells? :run replace-rectangle}
+  "table/next-row" {:label "Next row" :input-type "insertParagraph" :when #(and (cell? %) (not (across-cells? %))) :run next-row}
   "table/boundary-back" {:label "Previous cell boundary" :input-type "deleteContentBackward" :when #(boundary? % true) :run boundary-back}
   "table/boundary-forward" {:label "Next cell boundary" :input-type "deleteContentForward" :when #(boundary? % false) :run boundary-forward}})
 
