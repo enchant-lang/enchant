@@ -1075,10 +1075,39 @@
   }
 
   // relay the JSON term stored in attribute `attr` of `el` to the server
-  function relay(el, attr, ws, data) {
+  const settlingActions = new WeakSet();
+  function relay(el, attr, ws, data, settled, onRelayed) {
+    const scope = el.closest?.('[data-live-await-region]');
+    if (!settled && scope && ['data-ev-click','data-ev-submit','data-ev-keydown.enter'].includes(attr)) {
+      if (settlingActions.has(scope) || el.matches?.(':disabled') || el.getAttribute('aria-disabled') === 'true') return false;
+      const id = scope.getAttribute('data-live-await-region');
+      const matches = [...regionInstances].filter(([node, instance]) => node.isConnected && instance.id === id);
+      const [region, instance] = matches.length === 1 ? matches[0] : [];
+      const blocked = error => {
+        instance?.driver?.report?.(error);
+        if (el.isConnected) { el.setAttribute('aria-description',error.message); el.title=error.message; }
+        el.dispatchEvent(new CustomEvent('live:action-blocked',{bubbles:true,detail:{reason:error.message}}));
+      };
+      if (!instance?.driver?.settle) { blocked(Error('The writing surface changed. Reopen the current page before sharing.')); return false; }
+      if (!ws || ws.readyState !== WebSocket.OPEN) { blocked(Error('You are offline. Reconnect before sharing your writing.')); return false; }
+      settlingActions.add(scope); scope.setAttribute('aria-busy','true');
+      Promise.resolve().then(() => instance.driver.settle()).then(() => {
+        if (!el.isConnected || !scope.isConnected || el.closest('[data-live-await-region]') !== scope ||
+            scope.getAttribute('data-live-await-region') !== id || regionInstances.get(region) !== instance)
+          throw Error('The writing surface changed. Reopen the current page before sharing.');
+        if (el.matches?.(':disabled') || el.getAttribute('aria-disabled') === 'true')
+          throw Error('This action is no longer available. Your writing is retained.');
+        if (ws.readyState !== WebSocket.OPEN) throw Error('You are offline. Reconnect before sharing your writing.');
+        // Acknowledgements may replace action guards. Read the current term only
+        // after the region settles and the complete patch has landed.
+        relay(el,attr,ws,data,true,onRelayed);
+      }).catch(blocked).finally(() => { settlingActions.delete(scope); scope.removeAttribute('aria-busy'); });
+      return true;
+    }
     var raw = el.getAttribute(attr);
     var term = null;
     try { term = raw ? JSON.parse(raw) : null; } catch (e) { term = null; }
+    if (settled && term === null) throw Error('This action is no longer available. Your writing is retained.');
     // a navigate term also moves the URL bar (pushState), so the address
     // reflects the live route — a bookmarkable SPA over one socket. The
     // server still gets the SAME event and re-routes; this only syncs the URL.
@@ -1103,6 +1132,7 @@
     // __send guards readyState (buffer while CONNECTING, drop when CLOSED) so a
     // fire before the handshake or after a drop never throws.
     (ws.__send || ws.send.bind(ws))(JSON.stringify(["event", term, d]));
+    onRelayed?.();
     return true;
   }
 
@@ -1112,13 +1142,13 @@
     // the event TERM travels as a JSON attribute (data-ev-EVENT='<json>').
     // Send it back verbatim so the server performs exactly what the view
     // declared — the client never invents an intent, it only relays one.
-    relay(el, el.__evAttr, ws, data);
-    // clear a composer input after a click-send
-    if (evName === "click") {
+    const clearComposer = () => {
       var box = target.closest("div,footer,form,section");
       var input = box && box.querySelector("input");
       if (input && input.__clear) { input.value = ""; input.__clear = false; }
-    }
+    };
+    // Clear only after relaying: a blocked publication retains attempted input.
+    relay(el, el.__evAttr, ws, data, false, evName === "click" ? clearComposer : null);
     return true;
   }
 

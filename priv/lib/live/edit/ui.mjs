@@ -1,5 +1,6 @@
 import {computePosition,autoUpdate,offset,flip,shift,inline} from '@floating-ui/dom';
 import {icon,iconNames} from './icons.mjs';
+import {recoveryMessage} from './settlement.mjs';
 
 const element=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!=null)node.textContent=text;if(tag==='kbd')node.setAttribute('aria-hidden','true');return node;};
 const button=(label,glyph,action,className='')=>{
@@ -144,7 +145,8 @@ class DefaultUI {
     if(this.documentIcon.dataset.value!==state.meta.icon){this.documentIcon.replaceChildren(icon(state.meta.icon||'sparkles'));this.documentIcon.dataset.value=state.meta.icon;}
     if(conflict&&!this.conflictShown){
       this.conflictShown=true;this.conflict.hidden=false;this.conflict.replaceChildren(element('div','ed-conflict-symbol','!'));
-      const content=element('div');content.append(element('strong','','Your draft is safe.'),element('p','','The document changed while you were editing. Keep a copy, or return to the saved version.'));
+      const explanation=this.editor.recoveryFailure?'A previous draft could not be restored. Download it before choosing the current document.':recoveryMessage(state.conflicts[0]?.reason);
+      const content=element('div');content.append(element('strong','','Your draft is safe.'),element('p','',explanation));
       const download=button('Download retained draft','download',()=>this.editor.download());download.append(element('span','','Download draft'));
       const reload=!!this.editor.recoveryFailure||state.conflicts.some(item=>/outdated/.test(item.reason));
       const label=reload?'Reload with current tools':'Use saved version';

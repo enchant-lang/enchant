@@ -1,4 +1,5 @@
 export {mountFormRecovery} from './form-recovery.mjs';
+import {waitForSettlement} from './settlement.mjs';
 export {mountSourceInput} from './source-input.mjs';
 // Owned DOM/input adapter. Semantic policy and persistent session state are BL.
 import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';
@@ -13,7 +14,7 @@ const identity=()=>crypto.randomUUID();
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 export function mount(root,model,services,api,options={}) {
   const editor=new Editor(root,model,services,api,options);
-  return {update:next=>editor.update(next),dispose:()=>editor.dispose()};
+  return {update:next=>editor.update(next),settle:()=>editor.settle(),report:error=>editor.report(error),dispose:()=>editor.dispose()};
 }
 export class Editor {
   constructor(root,model,services,api,options={}){
@@ -70,12 +71,23 @@ export class Editor {
       export:()=>this.session.export(),serialize:()=>JSON.stringify(this.session.export(),null,2)+'\n',
       import:document=>this.transaction({op:'document/replace',document,expected:this.session.export()}),
       metrics:()=>({...this.metrics}),dispose:()=>this.dispose(),
+      settle:()=>this.settle(),
     });
   }
   subscribe(selector,listener,{equals=Object.is,immediate=true}={}){
     let previous=selector(this.state);if(immediate)listener(previous,this.public);
     const update=()=>{const value=selector(this.state);if(!equals(value,previous)){const old=previous;previous=value;listener(value,this.public,old);}};
     this.listeners.add(update);return ()=>this.listeners.delete(update);
+  }
+  settle(){
+    if(!this.composing)for(const code of this.code.values())code.flush();
+    this.send();
+    return waitForSettlement(()=>({pending:this.state.pending,conflict:this.state.conflicts.length||!!this.recoveryFailure,
+      readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
+      composing:this.composing,preview:this.state.preview}),check=>{
+        this.listeners.add(check);document.addEventListener('live:state',check);this.root.addEventListener('compositionstart',check);
+        return ()=>{this.listeners.delete(check);document.removeEventListener('live:state',check);this.root.removeEventListener('compositionstart',check);};
+      },{signal:this.signal}).catch(error=>{if(!this.disposed)this.report(error);throw error;});
   }
   query(options={}){const items=this.session.query(options);return this.model.readonly?items.map(item=>({...item,enabled:false,reason:'This document is read only.'})):items;}
   changed(change){
@@ -166,7 +178,7 @@ export class Editor {
       const before=this.session.outbound()?.id;this.session.receive(model.snapshot);
       if(model.refusal?.id)this.session.refuse({ok:false,...model.refusal,snapshot:model.snapshot});
       if(before!==this.session.outbound()?.id)this.sent=null;
-      this.persist();this.send();
+      this.persist();this.send();for(const listener of this.listeners)listener();
     }catch(error){this.report(error);}
   }
   transaction(op,options={}){

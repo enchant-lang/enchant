@@ -67,3 +67,13 @@ DOM disposal cannot recreate the pointer after a reload choice. Failed deletion
 is reported before navigation. Checkpoint references stay inside their resource
 scope. The storage tests exercise interruption, corruption, scope boundaries and
 late disposal alongside the text/form/code-request checks.
+
+Rich region drivers and the public editor expose `settle()`: flush code inputs
+and wait for every pending authoring proposal to be confirmed. Offline, conflict,
+composition, preview, read-only state, disposal and timeout reject with retained
+writing. Live actions opt in using `data-live-await-region="<region id>"` on a
+button or enclosing action form. The client waits, then reads the current action
+term and its updated guards. Replaced targets, disabled actions and lost sockets
+do not dispatch. This is a browser publication barrier; application writers must
+still enforce current grants and exact source/editor guards. It never grants
+publication authority or acknowledges an unsaved local proposal.
