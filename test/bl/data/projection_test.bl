@@ -68,7 +68,9 @@
       (finally (projection/stop! h) (d/close! c)))))
 
 (deftest exhausted-work-remains-blocked-without-a-hidden-fallback
-  (let [c (source) h (projection/start! :projection/budget c QUERY {:max-steps 4})]
+  (let [c (source)
+        _ (d/transact! c (mapv (fn [n] {:db/id (- (+ n 2)) :projection/value n}) (range 20)))
+        h (projection/start! :projection/budget c QUERY {:max-steps 4})]
     (try
       (projection/subscribe! h)
       (is (= :blocked (:status (settled h))))
@@ -101,3 +103,48 @@
         (when-let [registry (Process/whereis relation/REGISTRY)]
           (Agent/update registry (fn [m] (dissoc m :projection/unsafe-provider))))
         (d/close! c)))))
+
+(deftest incremental-publication-is-owned-and-reads-never-replay-deltas
+  (let [now (erlang/system_time :millisecond)
+        h (projection/start-incremental! :projection/incremental
+            {:source-id "events/v1" :group-by [:user] :sum [:tokens] :max-events 2})
+        r (projection/reader h)
+        delta {:sequence 1 :now now :upsert [{:id 1 :at now :user "alice" :tokens 7}]}]
+    (try
+      (is (= :projection-controller (:reason (projection/delta! r delta))))
+      (projection/delta! h delta)
+      (doseq [_ (range 100)] (projection/read r))
+      (is (= 0 (get-in (projection/read r) [:counts :started])))
+      (projection/subscribe! r)
+      (let [answer (projection/read r)]
+        (is (= :ready (:status answer)) (pr-str answer))
+        (is (= {:count 1 :sums {:tokens 7}} (get-in answer [:value :groups ["alice"]])))
+        (is (= 1 (get-in answer [:counts :started]))))
+      (projection/delta! h delta)
+      (is (= 1 (get-in (projection/read r) [:counts :started])))
+      (is (= :aggregate-checkpoint-gap
+             (:reason (projection/delta! h {:sequence 3 :now now :upsert []}))))
+      (is (= 1 (get-in (projection/read r) [:value :cursor])))
+      (projection/delta! h {:sequence 2 :now now :upsert [{:id 1 :at now :user "bob" :tokens nil}]})
+      (is (= {["bob"] {:count 1 :sums {:tokens nil}}} (get-in (projection/read r) [:value :groups])))
+      (is (= 2 (get-in (projection/read r) [:counts :started])))
+      (projection/evict! h)
+      (doseq [_ (range 100)] (projection/read r))
+      (is (= :evicted (:reason (projection/read r))))
+      (is (= 2 (get-in (projection/read r) [:counts :started])))
+      (finally (projection/stop! h)))))
+
+(deftest incremental-output-budget-failure-is-sticky-and-controller-survives
+  (let [now (erlang/system_time :millisecond)
+        h (projection/start-incremental! :projection/incremental-budget
+            {:source-id "events/v1" :group-by [:user]} {:max-steps 4})]
+    (try
+      (projection/delta! h {:sequence 1 :now now
+        :upsert (mapv (fn [n] {:id n :at now :user n}) (range 5))})
+      (projection/subscribe! h)
+      (is (= :blocked (:status (projection/read h))))
+      (is (= :work-steps (:reason (projection/read h))))
+      (doseq [_ (range 100)] (projection/read h))
+      (is (= 1 (get-in (projection/read h) [:counts :started])))
+      (is (Process/alive? (:owner h)))
+      (finally (projection/stop! h)))))

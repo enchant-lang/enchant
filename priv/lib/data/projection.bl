@@ -3,7 +3,7 @@
 (ns data.projection
   (:require [proc.server] [proc.work :as work] [proc.instance :as instance] [proc.framework :as framework]
             [proc.work-budget :as budget] [data.projection-policy :as policy]
-            [data.first-order :as data] [data.cache-pool :as pool]
+            [data.first-order :as data] [data.cache-pool :as pool] [data.delta-aggregate :as aggregate]
             [data.bounded-cache :as cache] [datom]
             [datom.query.read-only :as closed]))
 
@@ -46,6 +46,7 @@
         {:status (or (:kind (ex-data error)) :failed)}]))))
 
 (declare effects!)
+(declare schedule-expiry!)
 (defn- transition! [state event]
   (let [[after effects] (policy/step (:policy state) event)]
     (effects! (assoc state :policy after) effects)))
@@ -59,6 +60,23 @@
         :publish (assoc s :retained (:candidate s) :candidate nil)
         :cancel (do (when (:job s) (work/cancel! (:workers s) (:job s))) s)
         :run
+          (if (:aggregate s)
+            (try
+             (let [options (:options s) token (budget/open! (:max-steps options) (:max-read-bytes options) (:timeout-ms options))
+                  _ (budget/spend! token (inc (count (get-in s [:aggregate :groups]))) 0)
+                  value (aggregate/view (:aggregate s))]
+              (if-not (= :ready (:status value))
+                (transition! s {:op :finish :ticket (:ticket effect) :status :expiry-pending})
+                (do
+                  (data/check! value {:max-nodes 32768 :max-bytes (:max-output-bytes options) :max-depth 64})
+                  (let [bytes (erlang/term_to_binary value)]
+                    (when (> (erlang/byte_size bytes) (:max-output-bytes options))
+                      (throw (ex-info "Projection output is oversized" {:kind :oversized})))
+                    (transition! (assoc s :candidate {:bytes bytes :status :ready
+                                                      :work (:work (:aggregate s))})
+                      {:op :finish :ticket (:ticket effect) :status :ready :charge (cache/footprint bytes)}))))
+             (catch error (transition! s {:op :finish :ticket (:ticket effect)
+                                         :status (or (:kind (ex-data error)) :failed)})))
           (let [parent (erlang/self) tag (:completion s) ticket (:ticket effect)
                 query (:query s) source (:source s) revision (:revision effect) options (:options s)
                 job (work/submit! (:workers s) {:title "Managed stored-data projection"}
@@ -66,13 +84,32 @@
             (if (:id job)
               (assoc s :job (:id job) :candidate nil :terminal nil
                        :timer (erlang/send_after (:timeout-ms options) parent [tag :timeout ticket]))
-              (transition! s {:op :finish :ticket ticket :status :work-admission-refused})))
+              (transition! s {:op :finish :ticket ticket :status :work-admission-refused}))))
         s)) state effects))
 
 (defn- refresh-source! [state]
+  (if-let [a (:aggregate state)]
+    (transition! state {:op :source :basis (:version a)
+                       :revision [(get-in a [:options :source-id]) (:version a)]})
   (let [evidence (closed/revision! (:query state) (:source state))]
     (transition! (assoc state :dirty? false)
-      {:op :source :basis (:basis evidence) :revision (:revision evidence)})))
+      {:op :source :basis (:basis evidence) :revision (:revision evidence)}))))
+
+(defn- expire-state! [state]
+  (if-let [a (:aggregate state)]
+    (refresh-source! (assoc state :aggregate
+      (aggregate/expire a (max (:now a) (erlang/system_time :millisecond))))) state))
+
+(defn- schedule-expiry! [state]
+  (when (:expiry-timer state) (erlang/cancel_timer (:expiry-timer state)))
+  (let [after (assoc state :expiry-timer nil :expiry-ticket nil)
+        at (when (:aggregate after) (aggregate/next-expiry (:aggregate after)))]
+    (if (and at (pos? (get-in after [:policy :demand])) (not= :closed (get-in after [:policy :status])))
+      (let [ticket (erlang/make_ref)
+            delay (max 1 (min 2678400000 (- at (erlang/system_time :millisecond))))]
+        (assoc after :expiry-ticket ticket
+          :expiry-timer (erlang/send_after delay (erlang/self) [(:completion after) :expire ticket])))
+      after)))
 
 (defn- response [state]
   (let [view (policy/observe (:policy state))
@@ -88,11 +125,12 @@
     (if (>= (count (:subscribers state)) 128)
       state
       (let [after (assoc-in state [:subscribers pid] (erlang/monitor :process pid))
-            fresh (refresh-source! after)]
-        (transition! fresh {:op :demand :count (count (:subscribers fresh))})))))
+            fresh (refresh-source! (expire-state! after))]
+        (schedule-expiry! (transition! fresh {:op :demand :count (count (:subscribers fresh))}))))))
 
 (defn- initial! [opts]
-  (let [options (:options opts) charge (+ 4096 (* 4 (:max-output-bytes options)))
+  (let [options (:options opts) charge (+ 4096 (* 4 (:max-output-bytes options))
+                                         (get-in opts [:aggregate :options :max-bytes] 0))
         reservation (erlang/make_ref) tag (erlang/make_ref)]
     (when-not (and (pool/register! (erlang/self)) (pool/reserve! (erlang/self) reservation charge))
       (throw (ex-info "Managed projection retention capacity exhausted" {:kind :projection-capacity})))
@@ -100,14 +138,16 @@
     (let [workers (work/start! {:max-active 1 :history 1 :completion-tag tag})
           evidence (:evidence opts)
           state {:source (:source opts) :query (:query opts) :options options
-                 :framework (framework/adopt! (:creator opts))
+                 :framework (framework/adopt! (:creator opts)) :aggregate (:aggregate opts)
                  :read-token (:read-token opts) :control-token (:control-token opts)
                  :creator (erlang/monitor :process (:creator opts))
                  :reservation reservation :completion tag :workers workers
                  :subscribers {} :retained nil :candidate nil :job nil :timer nil :terminal nil
+                 :expiry-timer nil :expiry-ticket nil
                  :policy (policy/initial (+ 256 (* 2 (:max-output-bytes options)))) :dirty? false}]
-      (datom/listen! (:source state) {:attrs (set (:attributes evidence)) :payload :basis})
-      (transition! state {:op :source :basis (:basis evidence) :revision (:revision evidence)}))))
+      (if (:aggregate state) (refresh-source! state)
+        (do (datom/listen! (:source state) {:attrs (set (:attributes evidence)) :payload :basis})
+            (transition! state {:op :source :basis (:basis evidence) :revision (:revision evidence)}))))))
 
 (defn- finish! [state id status]
   (if-not (= id (:job state)) state
@@ -139,18 +179,29 @@
         (when monitor (erlang/demonitor monitor (list :flush)))
         (let [after (update state :subscribers dissoc pid)
               next (transition! after {:op :demand :count (count (:subscribers after))})]
-          (reply (response next) next)))
+          (let [next (schedule-expiry! next)] (reply (response next) next))))
       (reply (refused :projection-reader) state)))
   (handle-call [:control token command] [_from state]
     (if-not (authorized? state token :control-token)
       (reply (refused :projection-controller) state)
       (let [after (case command
-                    :refresh (refresh-source! state)
+                    :refresh (refresh-source! (expire-state! state))
                     :retry (transition! (refresh-source! state) {:op :retry})
                     :evict (transition! state {:op :evict})
                     :close (transition! state {:op :close})
                     state)]
-        (reply (response after) after))))
+        (let [after (schedule-expiry! after)] (reply (response after) after)))))
+  (handle-call [:delta token delta] [_from state]
+    (cond
+      (not (authorized? state token :control-token)) (reply (refused :projection-controller) state)
+      (nil? (:aggregate state)) (reply (refused :not-incremental-projection) state)
+      (= :closed (get-in state [:policy :status])) (reply (refused :projection-closed) state)
+      :else
+        (try
+          (let [after (schedule-expiry!
+                        (refresh-source! (assoc state :aggregate (aggregate/apply-delta (:aggregate state) delta))))]
+            (reply (response after) after))
+          (catch error (reply (refused (or (:kind (ex-data error)) :invalid-projection-delta)) state)))))
   (handle-info [tag :candidate ticket candidate] [state]
     (noreply (if (and (= tag (:completion state)) (= ticket (get-in state [:policy :running :ticket])))
                (settle! (assoc state :candidate candidate)) state)))
@@ -161,6 +212,9 @@
     (noreply (if (= tag (:completion state))
       (let [after (transition! state {:op :timeout :ticket ticket})]
         (if (:terminal after) (finish! after (:job after) (:terminal after)) after)) state)))
+  (handle-info [tag :expire ticket] [state]
+    (noreply (if (and (= tag (:completion state)) (= ticket (:expiry-ticket state)))
+               (schedule-expiry! (expire-state! state)) state)))
   (handle-info [:datom/changed _basis _attrs] [state]
     (noreply (if (zero? (get-in state [:policy :demand]))
                (assoc state :dirty? true) (refresh-source! state))))
@@ -168,12 +222,13 @@
     (if (and (= monitor (:creator state)) (not (Process/alive? pid))) (stop :normal state)
       (if (and (= monitor (get-in state [:subscribers pid])) (not (Process/alive? pid)))
         (let [after (update state :subscribers dissoc pid)]
-          (noreply (transition! after {:op :demand :count (count (:subscribers after))})))
+          (noreply (schedule-expiry! (transition! after {:op :demand :count (count (:subscribers after))}))))
         (noreply state))))
   (handle-info _ [state] (noreply state))
   (terminate [_reason state]
     (when (:timer state) (erlang/cancel_timer (:timer state)))
-    (try (datom/unlisten! (:source state)) (catch _ nil)
+    (when (:expiry-timer state) (erlang/cancel_timer (:expiry-timer state)))
+    (try (when (:source state) (datom/unlisten! (:source state))) (catch _ nil)
       (finally (try (work/stop! (:workers state))
         (finally (try (framework/close! (:framework state))
           (finally (pool/release! (erlang/self) (:reservation state)))))))) :ok))
@@ -195,6 +250,23 @@
                {:name (instance/name name)})]
      {:owner pid :read read-token :control control-token})))
 
+(defn start-incremental!
+  "Declare a fixed first-order count/sum reducer. The controller supplies exact
+   source deltas; reads cannot drain/replay them. Retained rows/groups/bytes
+   are bounded, expiry uses owned timers only while demanded, and checkpoint
+   gaps refuse. No source callback or user-defined reducer is accepted."
+  ([name declaration] (start-incremental! name declaration {}))
+  ([name declaration options]
+   (when-not (keyword? name)
+     (throw (ex-info "A managed projection requires a logical name" {:kind :invalid-projection-name})))
+   (let [options (options! options) a (aggregate/initial declaration)
+         read-token (erlang/make_ref) control-token (erlang/make_ref)
+         pid (core/start projection-owner
+               {:aggregate a :options options :creator (erlang/self)
+                :read-token read-token :control-token control-token}
+               {:name (instance/name name)})]
+     {:owner pid :read read-token :control control-token})))
+
 (defn reader [handle] (select-keys handle [:owner :read]))
 (defn read [handle] (call (:owner handle) [:read (:read handle)]))
 (defn subscribe! [handle] (call (:owner handle) [:subscribe (:read handle)]))
@@ -202,6 +274,7 @@
 (defn refresh! [handle] (call (:owner handle) [:control (:control handle) :refresh]))
 (defn retry! [handle] (call (:owner handle) [:control (:control handle) :retry]))
 (defn evict! [handle] (call (:owner handle) [:control (:control handle) :evict]))
+(defn delta! [handle delta] (call (:owner handle) [:delta (:control handle) delta]))
 (defn stop! [handle]
   (when (and handle (Process/alive? (:owner handle)))
     (let [result (call (:owner handle) [:control (:control handle) :close])]
