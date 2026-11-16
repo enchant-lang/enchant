@@ -3,6 +3,15 @@ set -euo pipefail
 prototype_source=$(cd -- "$(dirname -- "$0")" && pwd)
 enchant_source=$(cd -- "$prototype_source/../../.." && pwd)
 prototype_action=${1:-core}
+prototype_runtime=${STATION_PROTOTYPE_RUNTIME:-$enchant_source/bin/bl}
+if [[ "$prototype_runtime" != "$enchant_source/bin/bl" ]]; then
+  prototype_runtime=$(readlink -f "$prototype_runtime")
+  prototype_sdk=$(dirname "$(dirname "$prototype_runtime")")
+  [[ "$prototype_runtime" == /nix/store/*/bin/bl && -f "$prototype_sdk/artifact.json" ]] || {
+    echo 'STATION_PROTOTYPE_RUNTIME must be a retained immutable SDK executable' >&2
+    exit 2
+  }
+fi
 if [[ "$prototype_action" != core && "$prototype_action" != foundry ]]; then
   echo 'Usage: ./run core|foundry' >&2
   exit 2
@@ -13,6 +22,10 @@ chmod 700 "$prototype_state"
 prototype_unit="station-prototypes-$(date +%s)-$$"
 trap 'systemctl --user stop "$prototype_unit.service" >/dev/null 2>&1 || true' EXIT
 echo "Prototype evidence: $prototype_state"
+git -C "$enchant_source" rev-parse HEAD > "$prototype_state/source-revision"
+if [[ -n "${prototype_sdk:-}" ]]; then
+  cp "$prototype_sdk/artifact.json" "$prototype_state/runtime-artifact.json"
+fi
 cd "$enchant_source"
 prototype_program="$prototype_source/check.bl"
 prototype_paths=(-p "$prototype_source/src")
@@ -35,5 +48,5 @@ systemd-run --user --quiet --collect --wait --pipe --unit="$prototype_unit" \
   --property=RuntimeMaxSec=900 --property=TimeoutStopSec=15 \
   --setenv="STATION_PROTOTYPE_SOURCE=$prototype_source" \
   --setenv="STATION_PROTOTYPE_STATE=$prototype_state" \
-  "$enchant_source/bin/bl" --cold "${prototype_paths[@]}" run "$prototype_program" \
+  "$prototype_runtime" --cold "${prototype_paths[@]}" run "$prototype_program" \
   2>&1 | tee "$prototype_state/$prototype_action.log"
