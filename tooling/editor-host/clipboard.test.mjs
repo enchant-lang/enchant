@@ -6,6 +6,9 @@ test('TSV respects spreadsheet quotes, Unicode, terminal rows and empty cells',(
  assert.deepEqual(parseTSV('a\tb\r\nc\t\r\n').map(row=>row.map(cell=>cell.text)),[['a','b'],['c','']]);
  assert.deepEqual(parseTSV('a\tb\nc').map(row=>row.map(cell=>cell.text)),[['a','b'],['c','']]);
  assert.equal(parseTSV('one cell'),null);
+ assert.throws(()=>parseTSV('x\t'.repeat(33)));
+ assert.throws(()=>parseTSV('x\n'.repeat(257)));
+ assert.throws(()=>parseTSV('x\t'.repeat(33)+'\n'+'y\n'.repeat(257))); 
  assert.throws(()=>parseTSV('"unclosed\n'));
  assert.throws(()=>parseTSV('"closed"bad\tfield'));
  assert.throws(()=>parseTSV('x'.repeat(1024*1024+1)));

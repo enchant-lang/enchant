@@ -97,8 +97,8 @@ export function parseTSV(text){
   if(text.length>1024*1024)throw Error('Paste a smaller section at a time.');
   if(!/[\t\r\n]/.test(text))return null;
   const rows=[];let row=[],cell='',quoted=false,afterQuote=false;
-  const field=()=>{row.push({text:cell,marks:[]});cell='';afterQuote=false;if(row.length>8192)throw Error('Paste a smaller section at a time.');};
-  const line=()=>{field();rows.push(row);row=[];if(rows.length>8192)throw Error('Paste a smaller section at a time.');};
+  const field=()=>{row.push({text:cell,marks:[]});cell='';afterQuote=false;if(row.length>32)throw Error('Paste at most 32 columns.');};
+  const line=()=>{field();rows.push(row);row=[];if(rows.length>256)throw Error('Paste at most 256 rows.');};
   for(let i=0;i<text.length;i++){
     const ch=text[i];
     if(quoted){if(ch==='"'){if(text[i+1]==='"'){cell+='"';i++;}else{quoted=false;afterQuote=true;}}else cell+=ch;continue;}

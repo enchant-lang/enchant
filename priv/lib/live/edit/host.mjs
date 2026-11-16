@@ -346,7 +346,8 @@ export class Editor {
         if(custom){if(custom.length>1024*1024)throw Error('Paste a smaller section at a time.');
           const payload=JSON.parse(custom);if(payload.schema==='enchant.fragment/2'||payload.schema==='enchant.fragment/1')blocks=payload.blocks;}
         const html=event.clipboardData.getData('text/html');if(!blocks&&html)blocks=importHTML(html);
-        if(this.session.clipboard('paste',{blocks,text,grid:blocks?null:parseTSV(text)},selection)){
+        const formats=this.session.clipboard('formats',{},selection);
+        if(this.session.clipboard('paste',{blocks,text,grid:blocks||!formats?.grid?null:parseTSV(text)},selection)){
           this.geometry.restore(this.state.selection,{focus:true});return;}
         if(blocks){this.replace('',blocks,selection);return;}if(text)this.replace(text,null,selection);
       }catch(error){this.report(error);}
