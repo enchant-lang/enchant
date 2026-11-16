@@ -2,7 +2,7 @@
 // the latest remote source. The host must still use its authoritative writer.
 export class TextDraftStore {
   constructor(resource, storage=globalThis.localStorage, tabs=globalThis.sessionStorage){
-    this.storage=storage;this.key=null;this.warning=null;
+    this.storage=storage;this.key=null;this.warning=null;this.unreadable=false;
     try {
       let tab=tabs.getItem('enchant.edit.tab');
       if(!tab){tab=crypto.randomUUID();tabs.setItem('enchant.edit.tab',tab);}
@@ -16,16 +16,16 @@ export class TextDraftStore {
       const item=JSON.parse(raw);
       if(item.schema!==1||typeof item.value!=='string'||typeof item.basis!=='string')throw Error('Unrecognized text recovery');
       return item;
-    }catch(error){this.warning=error;return null;}
+    }catch(error){this.warning=error;this.unreadable=true;return null;}
   }
   write(value,basis){
-    if(!this.key)return false;
+    if(!this.key||this.unreadable)return false;
     try{this.storage.setItem(this.key,JSON.stringify({schema:1,value,basis,updated:Date.now()}));this.warning=null;return true;}
     catch(error){this.warning=error;return false;}
   }
-  remove(){
-    if(!this.key)return;
-    try{this.storage.removeItem(this.key);this.warning=null;}catch(error){this.warning=error;}
+  remove(force=false){
+    if(!this.key||(this.unreadable&&!force))return;
+    try{this.storage.removeItem(this.key);this.warning=null;this.unreadable=false;}catch(error){this.warning=error;}
   }
 }
 export class TextDraft {
@@ -46,6 +46,6 @@ export class TextDraft {
     if(clean){this.value=this.confirmed;this.basis=this.confirmedBasis;}
     this.normalize();this.persist();
   }
-  discard(){this.value=this.confirmed;this.basis=this.confirmedBasis;this.restored=false;this.store.remove();}
+  discard(){this.value=this.confirmed;this.basis=this.confirmedBasis;this.restored=false;this.store.remove(true);}
   persist(){if(this.dirty)this.store.write(this.value,this.basis);else this.store.remove();}
 }

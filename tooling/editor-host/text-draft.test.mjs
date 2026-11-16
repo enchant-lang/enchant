@@ -28,5 +28,7 @@ test('corrupt recovery is retained and surfaced, without changing authoritative 
  const storage=memory(),tabs=memory();tabs.setItem('enchant.edit.tab','tab');
  const store=new TextDraftStore('alice/doc',storage,tabs);storage.setItem(store.key,'{broken');
  const draft=new TextDraft(model(),store);assert.equal(draft.value,'one');assert.ok(store.warning);
- assert.equal(storage.getItem(store.key),'{broken');
+ draft.persist();assert.equal(storage.getItem(store.key),'{broken');
+ draft.edit('new words');assert.equal(storage.getItem(store.key),'{broken');
+ draft.discard();assert.equal(store.read(),null);assert.equal(store.warning,null);
 });
