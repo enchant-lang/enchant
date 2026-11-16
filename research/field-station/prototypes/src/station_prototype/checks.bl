@@ -60,20 +60,20 @@
     (= [["legacy-1" 100 "First preserved message"]] (as-person "alice" #(call "inbox" ["ora"]))))
    (check! "unauthenticated namespace call refuses" (= :auth/unauthenticated (refused #(call "inbox" ["ora"]))))
    (check! "cross-workspace call refuses" (= :auth/denied (as-person "alice" #(refused (fn [] (call "inbox" ["private"]))))))
-   (let [request {"id" "legacy-1" "request/id" "alice-claim"}
-         reply (as-person "alice" #(call "claim!" ["ora" request]))]
+   (let [request {:message/id "legacy-1" :request/id "alice-claim"}
+         reply (as-person "alice" #(call "claim!" ["ora" (:message/id request) (:request/id request)]))]
     (reset! now 1100)
-    (check! "duplicate command returns the original receipt" (= reply (as-person "alice" #(call "claim!" ["ora" request]))))
+    (check! "duplicate command returns the original receipt" (= reply (as-person "alice" #(call "claim!" ["ora" (:message/id request) (:request/id request)]))))
     (check! "another claimant refuses during lease"
-     (= :claimed (refused #(store/claim! conn "bob" "ora" {"id" "legacy-1" "request/id" "bob-claim"} @now))))
+     (= :claimed (refused #(store/claim! conn "bob" "ora" {:message/id "legacy-1" :request/id "bob-claim"} @now))))
     (check! "changed payload cannot reuse request identity"
-     (= :idempotency-conflict (refused #(store/claim! conn "alice" "ora" (assoc request "id" "legacy-2") @now))))
+     (= :idempotency-conflict (refused #(store/claim! conn "alice" "ora" (assoc request :message/id "legacy-2") @now))))
     (check! "caller cannot forge identity fields"
-     (= :invalid-request (refused #(store/claim! conn "alice" "ora" (assoc request "subject" "bob") @now)))))
+     (= :invalid-request (refused #(store/claim! conn "alice" "ora" (assoc request :subject "bob") @now)))))
    (store/revoke! conn "ora" "alice")
    (check! "revocation is rechecked by the live provider" (= :auth/denied (as-person "alice" #(refused (fn [] (call "inbox" ["ora"]))))))
    (check! "writer transaction independently rechecks membership"
-    (= :denied (refused #(store/claim! conn "alice" "ora" {"id" "legacy-1" "request/id" "after-revoke"} @now))))
+    (= :denied (refused #(store/claim! conn "alice" "ora" {:message/id "legacy-1" :request/id "after-revoke"} @now))))
    (store/seed! conn)
    (let [events (atom []) subscription (watch/watch conn store/inbox-query ["alice" "ora"] #(swap! events conj %))]
     (try
@@ -94,7 +94,7 @@
                            (receive :go
                             (let [result (try
                                           (store/claim! conn subject "ora"
-                                           {"id" "legacy-1" "request/id" (str "race-" subject)} 3000)
+                                           {:message/id "legacy-1" :request/id (str "race-" subject)} 3000)
                                           (catch error (:kind (ex-data error))))]
                              (erlang/send parent [:prototype/claim-race result])))))) ["alice" "bob"])]
     (doseq [worker workers] (erlang/send (elem worker 0) :go))
@@ -142,7 +142,7 @@
                     :next (fn [state subject] (if (:owner state) state {:owner subject}))
                     :run (fn [sys subject]
                            (try (store/claim! @(:conn sys) subject "ora"
-                                  {"id" "model-message" "request/id" (str "model-" (swap! (:attempt sys) inc))} 0)
+                                  {:message/id "model-message" :request/id (str "model-" (swap! (:attempt sys) inc))} 0)
                                 (catch _ nil)))}
             :restart {:run (fn [sys _]
                              (d/close! @(:conn sys)) (reset! (:conn sys) (store/open! (:path sys))))}}
