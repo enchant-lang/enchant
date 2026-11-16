@@ -30,13 +30,15 @@ let
   changedPort = evaluate (base // { messages = base.messages // { port = 18892; }; });
   invalid = evaluate (base // { messages = base.messages // { stateDirectory = "../foreign"; }; });
   service = c: c.systemd.services.field-station-messages;
-  instanceAssertions = c: builtins.filter (a: lib.hasPrefix "Field Station instance" a.message) c.assertions;
+  # NixOS assertion messages are intentionally lazy and may reference fields
+  # that exist only on failure. Never force messages for successful assertions.
+  invalidInstance = c: lib.any (a: !a.assertion && lib.hasPrefix "Field Station instance" a.message) c.assertions;
 in
 assert (service baseline).serviceConfig.ExecStart == (service appended).serviceConfig.ExecStart;
 assert (service baseline).restartTriggers == (service appended).restartTriggers;
 assert (service baseline).restartTriggers != (service changedPort).restartTriggers;
-assert lib.all (a: a.assertion) (instanceAssertions baseline);
-assert !(lib.all (a: a.assertion) (instanceAssertions invalid));
+assert !(invalidInstance baseline);
+assert invalidInstance invalid;
 assert baseline.environment.etc."field-station/messages/candidates.json".text
   != appended.environment.etc."field-station/messages/candidates.json".text;
 assert builtins.elem candidateB appended.system.extraDependencies;
