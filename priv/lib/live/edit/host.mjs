@@ -1,3 +1,4 @@
+export {mountSourceInput} from './source-input.mjs';
 // Owned DOM/input adapter. Semantic policy and persistent session state are BL.
 import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';
 import {CodeAdapter} from './code.mjs';

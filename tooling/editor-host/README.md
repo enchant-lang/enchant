@@ -18,3 +18,12 @@ the generic editor retains its default export/source actions.
 offset from actual input geometry, or null outside the canvas. Code inputs use
 CodeMirror's coordinate mapping, prose uses native caret geometry. Consumers
 must still validate the source/revision before offering an edit.
+
+`live.edit.app/source-input` provides a source CodeMirror region through the same
+bundle. The application supplies actor/document `:resource`, current `:confirmed`
+text and `:confirmed-basis`, local `:value`/`:basis`, and a Live `:event` accepting
+`:from :value` and `:from :basis`. Saving remains an explicit application command
+with source admission checks. Recovery retains the original basis through reload
+and remote edits; stale echoes never replace in-memory typing. The UI offers
+exact text download and explicit discard, also when writing is no longer allowed.
+`node --test tooling/editor-host/text-draft.test.mjs` checks recovery boundaries.

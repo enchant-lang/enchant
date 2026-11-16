@@ -22,12 +22,12 @@ const lisp=StreamLanguage.define({
     stream.next();return 'punctuation';
   },languageData:{commentTokens:{line:';'},closeBrackets:{brackets:['(','[','{','"']}}
 });
-const highlight=HighlightStyle.define([
+export const highlight=HighlightStyle.define([
   {tag:tags.keyword,color:'var(--ed-code-keyword)'},{tag:tags.atom,color:'var(--ed-code-atom)'},{tag:tags.string,color:'var(--ed-code-string)'},
   {tag:tags.number,color:'var(--ed-code-atom)'},{tag:tags.comment,color:'var(--ed-code-comment)',fontStyle:'italic'},
   {tag:tags.variableName,color:'var(--ed-code-variable)'},{tag:tags.punctuation,color:'var(--ed-code-punctuation)'},
 ]);
-const language=name=>name==='javascript'?javascript():name==='markdown'?markdown():name==='beam-lisp'?lisp:[];
+export const language=name=>name==='javascript'?javascript():name==='markdown'?markdown():name==='beam-lisp'?lisp:[];
 
 export class CodeAdapter {
   point(x,y){

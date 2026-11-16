@@ -1,0 +1,51 @@
+// Exact text recovery. The admission basis travels with the draft, never with
+// the latest remote source. The host must still use its authoritative writer.
+export class TextDraftStore {
+  constructor(resource, storage=globalThis.localStorage, tabs=globalThis.sessionStorage){
+    this.storage=storage;this.key=null;this.warning=null;
+    try {
+      let tab=tabs.getItem('enchant.edit.tab');
+      if(!tab){tab=crypto.randomUUID();tabs.setItem('enchant.edit.tab',tab);}
+      if(resource)this.key='enchant.text.v1:'+encodeURIComponent(resource)+':'+tab;
+    }catch(error){this.warning=error;}
+  }
+  read(){
+    if(!this.key)return null;
+    try {
+      const raw=this.storage.getItem(this.key);if(!raw)return null;
+      const item=JSON.parse(raw);
+      if(item.schema!==1||typeof item.value!=='string'||typeof item.basis!=='string')throw Error('Unrecognized text recovery');
+      return item;
+    }catch(error){this.warning=error;return null;}
+  }
+  write(value,basis){
+    if(!this.key)return false;
+    try{this.storage.setItem(this.key,JSON.stringify({schema:1,value,basis,updated:Date.now()}));this.warning=null;return true;}
+    catch(error){this.warning=error;return false;}
+  }
+  remove(){
+    if(!this.key)return;
+    try{this.storage.removeItem(this.key);this.warning=null;}catch(error){this.warning=error;}
+  }
+}
+export class TextDraft {
+  constructor(model,store){
+    this.store=store;this.confirmed=model.confirmed;this.confirmedBasis=model['confirmed-basis'];
+    const cached=store.read();
+    this.value=cached?.value??model.value??this.confirmed;
+    this.basis=cached?.basis??model.basis??this.confirmedBasis;
+    this.restored=!!cached;this.normalize();
+  }
+  get dirty(){return this.value!==this.confirmed;}
+  get stale(){return this.dirty&&this.basis!==this.confirmedBasis;}
+  normalize(){if(!this.dirty)this.basis=this.confirmedBasis;}
+  edit(value){this.value=value;this.normalize();this.persist();}
+  receive(model){
+    const clean=!this.dirty;
+    this.confirmed=model.confirmed;this.confirmedBasis=model['confirmed-basis'];
+    if(clean){this.value=this.confirmed;this.basis=this.confirmedBasis;}
+    this.normalize();this.persist();
+  }
+  discard(){this.value=this.confirmed;this.basis=this.confirmedBasis;this.restored=false;this.store.remove();}
+  persist(){if(this.dirty)this.store.write(this.value,this.basis);else this.store.remove();}
+}
