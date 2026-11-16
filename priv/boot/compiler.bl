@@ -1245,10 +1245,14 @@
               ;; exist yet, and the bare form fell through to core's function of the
               ;; same name: `(owner/count id)` answered the length of the id string
               ;; (BUG-111). Not found now means the fetched global, resolved at run time.
+              ;; A provider that has not initialized has no row yet; its
+              ;; declared interface gives the same triple (D), so the call is
+              ;; the same artifact before and after the provider loads.
               (let [link (BeamLisp.Env/link (:ns env) (core-qualified (rn/node-name head)))
-                    direct (if (= link :error)
-                             nil
-                             (linked-call (second (erlang/tuple_to_list link)) arg-nodes env))]
+                    info (if (= link :error)
+                           (declared-link env tns tvar)
+                           (second (erlang/tuple_to_list link)))
+                    direct (if (nil? info) nil (linked-call info arg-nodes env))]
                 (if (some? direct)
                   (ready-guard tns direct env)
                   (anf-invoke (a/global-exact tns tvar) arg-nodes))))))
@@ -1303,6 +1307,9 @@
             (let [_ (when (:contextual-bindings env)
                       (compile-error env "Unlinked call in contextual compilation" (first items)))
                   lo (BeamLisp.Env/link_owner (:ns env) (core-qualified name))
+                  ;; A refer from a provider with no rows yet: its declared
+                  ;; interface, so loading it later cannot change this call (D).
+                  lo (if (erlang/== :error lo) (declared-refer-link env name) lo)
                   direct (if (erlang/== :error lo)
                            nil
                            (linked-call (erlang/element 3 lo) arg-nodes env))]
@@ -4315,6 +4322,118 @@
     (if (or (empty? after-attr) (erlang/is_binary (rn/node-form (first after-attr))))
       nil
       (parse-fn-clauses after-attr env))))
+
+;; ── A foreign call's link from the provider's DECLARED interface ────────────
+;;
+;; A direct call into another namespace bakes `{module, arity→fname, variadic}`.
+;; That triple used to come only from the provider's registry row, which exists
+;; once the provider is INITIALIZED. So the same source compiled to an exact
+;; `:invoke` before `clojure.string` loaded and to a guarded direct call after:
+;; compiled code depended on what the VM had loaded (D). The triple is a fact of
+;; the provider's SOURCE: `Link.defvar` and AOT's prelink both derive it from
+;; the clause shapes (`prelink-info`). When the provider is not initialized,
+;; read those shapes from its source without evaluating anything, exactly as
+;; `Loader/source_decls` reads macro/privacy facts. A name the scan cannot
+;; account for (a definition another macro produced, a sourceless provider)
+;; stays the fetched global, as before.
+
+(defn- provider-source
+  "The source text the deferred `provider` will initialize from, or nil: the
+   first of the search dirs its `:require` was declared under (its ORIGINAL
+   context, as `Loader/ensure_deferred` loads it) that holds it. Never loads."
+  [provider dirs]
+  (try
+    (reduce (fn [found dir]
+              (if (erlang/is_binary found) found
+                (BeamLisp.Loader/with_search_dir dir (fn [] (BeamLisp.Loader/source_content provider)))))
+            nil dirs)
+    (catch _ nil)))
+
+(defn- scan-declared-links
+  "`{name → link triple}` for every top-level `defn`/`defn-` that `content`
+   declares inside `(ns provider)`: the triple `prelink-info` computes, which is
+   the one `Link.defvar` installs when the provider initializes."
+  [provider content]
+  (let [forms (try (BeamLisp.Ns.Reader/read_all content) (catch _ nil))
+        mod (BeamLisp.Link/module_for provider)
+        env (new-env provider)
+        head-of (fn [items]
+                  (when (and (not (empty? items)) (= :symbol (rn/node-tag (rn/node-form (first items)))))
+                    (rn/node-name (rn/node-form (first items)))))
+        named (fn [items]
+                (when (and (not (empty? (rest items))) (= :symbol (rn/node-tag (rn/node-form (second items)))))
+                  (rn/node-name (rn/node-form (second items)))))]
+    (if-not (erlang/is_list forms) {}
+      (second
+        (reduce
+          (fn [state form]
+            (let [f (rn/node-form form)
+                  items (when (= :list (rn/node-tag f)) (rn/node-items f))
+                  head (when items (head-of items))
+                  current (first state)]
+              (cond
+                (= "ns" head) [(named items) (second state)]
+                (= "in-ns" head) [nil (second state)]
+                (and (= provider current) (contains? #{"defn" "defn-"} head) (some? (named items)))
+                  (let [name (named items)
+                        clauses (try (defn-clauses-of (rest items) env) (catch _ nil))]
+                    (if (nil? clauses) state
+                      [current (assoc (second state) name (prelink-info mod name clauses))]))
+                :else state)))
+          [nil {}] forms)))))
+
+(defn- declared-links
+  "`scan-declared-links` of `provider`'s current source, memoized per process by
+   the exact bytes (never by name or mtime alone), or nil without a source."
+  [provider dirs]
+  (let [content (provider-source provider dirs)]
+    (when (erlang/is_binary content)
+      (let [k (tuple :"$bl_declared_links" provider)
+            digest (erlang/md5 content)
+            hit (Process/get k nil)]
+        (if (and (erlang/is_tuple hit) (= digest (erlang/element 1 hit)))
+          (erlang/element 2 hit)
+          (let [links (try (scan-declared-links provider content) (catch _ {}))]
+            (Process/put k (tuple digest links))
+            links))))))
+
+(defn- declared-link
+  "The link triple a call to `provider/member` must bake when the provider's
+   registry has no link row yet, or nil (the call stays a fetched global).
+
+   Consulted only for a provider the header DECLARED as a deferred requirement
+   that is foreign, outside the boot tier and not initialized, and whose
+   `member` is not yet a var at all. Once the provider has run, its own link
+   rows (put from the same clause shapes) answer, and a var without a link row
+   is a value, never a direct call. Either way the answer is a function of the
+   provider's source, not of what has loaded. The emitted readiness guard
+   initializes the provider before the direct call, as `ensure_deferred` would
+   on the fetch path.
+
+   Not for a managed generation compile (`:managed-source`): its admission
+   (`reload.generation/check-anf!`) accepts a direct call only into a module of
+   an already-analyzed namespace inventory, so there an unloaded provider stays
+   the fetched global it always was."
+  [env provider member]
+  (when (and (not (:managed-source env))
+             (erlang/is_binary provider) (not= provider (:ns env))
+             (not (boot-ns? provider))
+             (not (BeamLisp.Env/loaded_ns? provider)))
+    (let [dirs (BeamLisp.Env/deferred_dirs provider)]
+      (when (and (erlang/is_list dirs)
+                 (= :error (BeamLisp.Env/lookup (tuple provider member))))
+        (let [links (declared-links provider dirs)]
+          (when (erlang/is_map links) (get links member)))))))
+
+(defn- declared-refer-link
+  "`link_owner`'s `{:ok provider info}` for a bare `name` the current namespace
+   `:refer`s from a provider whose link rows do not exist yet, or :error."
+  [env name]
+  (let [src (BeamLisp.Env/refer_source (:ns env) name)
+        info (when (and (erlang/is_binary src) (not (contains? #{"core" "sugar"} src))
+                        (= :error (BeamLisp.Env/lookup (tuple (:ns env) name))))
+               (declared-link env src name))]
+    (if (nil? info) :error (tuple :ok src info))))
 
 (defn prelink-type
   "Install compiler-owned type metadata, never a runtime var/module/registry.
