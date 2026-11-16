@@ -14,16 +14,32 @@
   (when-not (and (= :ok (elem response 0)) (= 200 (elem (elem (elem response 1) 0) 1)))
    (throw (ex-info "Prototype readiness request failed" {})))
   (json/decode (elem (elem response 1) 2))))
+(defn observe! [status seen]
+ (let [operation (or (last (:operations status)) (:preparation status))
+       public (merge (select-keys operation ["state" "phase" "substep" "candidate" "generation" "error"])
+                {"service" "messages" "owner" (str (:owner status))
+                 "selectedGeneration" (:generation status) "port" (:port status)})]
+  (when-not (= public @seen) (reset! seen public) (println (str "DEPLOY " (json/encode public))))
+  (when (contains? #{"blocked" "failed" "rolled-back" "refused"} (get operation "state"))
+   (throw (ex-info (str "Foundry publication stopped: " (get operation "state") " " (pr-str (get operation "error")))
+            {:operation operation}))) operation))
+(defn published! [owner port]
+ (let [seen (atom nil) deadline (+ (System/monotonic_time :millisecond) 90000)]
+  (loop []
+   (observe! (lifecycle/status owner) seen)
+   (cond (= "prototype-new" (get (get! port) "version")) true
+         (>= (System/monotonic_time :millisecond) deadline) false
+         :else (do (Process/sleep 50) (recur))))))
 (defn complete! [owner]
  (let [deadline (+ (System/monotonic_time :millisecond) 90000)]
-  (loop []
-   (let [status (lifecycle/status owner) operation (last (:operations status))]
+  (loop [seen (atom nil)]
+   (let [status (lifecycle/status owner) operation (observe! status seen)]
     (cond (= "completed" (get operation "state")) status
           (contains? #{"failed" "rolled-back" "refused"} (get operation "state"))
           (throw (ex-info "Foundry publication did not complete" {:operation operation}))
           (>= (System/monotonic_time :millisecond) deadline)
           (throw (ex-info "Foundry publication deadline exceeded" {:operation operation}))
-          :else (do (Process/sleep 20) (recur)))))))
+          :else (do (Process/sleep 20) (recur seen)))))))
 (defn websocket! [port]
  (let [r (gen_tcp/connect (tuple 127 0 0 1) port (list :binary (tuple :active false)) 3000)]
   (when-not (= :ok (elem r 0)) (throw (ex-info "WebSocket client failed" {})))
@@ -119,7 +135,7 @@
           (after 100 nil)))))
       (throw (ex-info (str "Native admission refused: " (:admission-error reply)) reply))))
     (checks/check! "candidate serves new requests while the old WebSocket remains open"
-     (checks/eventually #(= "prototype-new" (get (get! port) "version")) 90000))
+     (published! @owned port))
     (checks/check! "old WebSocket connection still responds after publication"
      (pong! @socket))
     (gen_tcp/close @socket) (reset! socket nil)
