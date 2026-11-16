@@ -18,6 +18,40 @@
            (receive (after 1 (do (reset! observed true) {:marker :last})))))
     (is @observed)))
 
+(deftest an-expired-budget-cannot-accept-an-already-queued-response
+ (Application/ensure_all_started :inets)
+ (let [id (erlang/make_ref)
+       receive-response (BeamLisp.Env/fetch! "connector.transport" "receive-response")]
+  ;; Exercise the HTTP receive protocol directly: a queued terminal message
+  ;; used to beat the timeout branch even after the absolute budget expired.
+  (erlang/send (erlang/self) (tuple :http (tuple id :stream_end (list))))
+  (try
+   (let [result (BeamLisp.Ns.Rt/invoke receive-response
+                  (list id 1024 :bytes (- (erlang/monotonic_time :millisecond) 1)
+                        [] 0 {} nil))]
+    (is (= 0 (:status result)))
+    (is (= :timeout (:error result)))
+    (is (= :uncertain (:outcome result))))
+   (finally
+    (receive [:http [rid :stream_end _]] :when (= rid id) :removed
+             (after 0 nil))))))
+
+(deftest zero-budget-does-not-dispatch-a-health-request
+ (let [entered (atom 0)
+       server (vm/serve (vm/model "No late probe admission"
+                         {:state {} :commands
+                          {:ready {:request [:get "/ready"]
+                                   :response (fn [_ _]
+                                               (swap! entered inc)
+                                               {:body {"ready" true}})}}}))]
+  (try
+   (let [result (transport/request! {:url (str (:url server) "/ready") :timeout-ms 0})]
+    (is (= 0 (:status result)))
+    (is (= :timeout (:error result)))
+    (is (= :uncertain (:outcome result)))
+    (is (zero? @entered)))
+   (finally ((:stop server))))))
+
 (deftest actual-http-deadlines-always-return-bounded-uncertain-maps
   (let [entered (atom 0) completed (atom 0)
         model (vm/model "Owned HTTP deadline oracle"
