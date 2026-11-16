@@ -30,6 +30,8 @@ pkgs.runCommand "beam-lisp-artifact-platform" {} ''
   cp ${./engine-inputs.json} "$out/nix/engine-inputs.json"
   cp ${./portable-artifact.nix} "$out/nix/portable-artifact.nix"
   cp ${./portable-product.nix} "$out/nix/portable-product.nix"
+  cp ${./portable-runtime.nix} "$out/nix/portable-runtime.nix"
+  cp ${./application-package.nix} "$out/nix/application-package.nix"
   printf '%s\n' '${builtins.toJSON { tools = toString commandExecutor; }}' > "$out/portable-tools.json"
   cp ${./sdk-artifact.nix} "$out/nix/sdk-artifact.nix"
   cp ${./native-source.nix} "$out/nix/native-source.nix"
