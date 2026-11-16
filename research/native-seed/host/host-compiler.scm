@@ -335,10 +335,11 @@
       (set! native-module-names (bl-assoc native-module-names (native-module-name module) ns)))
      (list (bl-nth row 1) (bl-nth row 2)))))
   (bl-items (bl-get metadata (bl-key "namespace-modules"))))
- ; CompilerData's exact host implementation is already written in BL.
- (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.CompilerData" "host.compiler-data"))
- (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.FormMeta" "host.form-meta"))
- (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.Meta" "host.meta"))
+ ; Pinned BL host modules (`Elixir.BeamLisp.X` = closure namespace host.x),
+ ; declared by the closure update: the same table the AOT link plan uses.
+ (for-each (lambda (row)
+   (set! native-module-names (bl-assoc native-module-names (native-module-name (bl-nth row 1)) (bl-nth row 0))))
+  (bl-items (bl-get metadata (bl-key "host-modules") (bl-vec '()))))
  (for-each (lambda (row)
    (for-each (lambda (module)
      (set! native-stub-names (bl-assoc native-stub-names (native-module-name module) (bl-nth row 0))))
