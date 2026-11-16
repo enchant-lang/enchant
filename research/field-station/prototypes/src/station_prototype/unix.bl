@@ -9,7 +9,7 @@
   (let [bytes (elem (first (elem result 1)) 3)]
    (when-not (= 12 (erlang/byte_size bytes)) (throw (ex-info "Kernel peer unavailable" {})))
    {:pid (le32 bytes 0) :uid (le32 bytes 4) :gid (le32 bytes 8)})))
-(defn roundtrip! [path payload]
+(defn exchange! [path payload handle]
  (let [opened (gen_tcp/listen 0 (list :binary (tuple :active false) (tuple :packet 4)
                               (tuple :packet_size 65536)
                               (tuple :ifaddr (tuple :local (String/to_charlist path)))))
@@ -23,8 +23,8 @@
             (try
              (let [evidence (peer socket) request (gen_tcp/recv socket 0 3000)]
               (when-not (= :ok (elem request 0)) (throw (ex-info "Unix framing failed" {})))
-              (json/decode (elem request 1))
-              (gen_tcp/send socket (json/encode {:uid (:uid evidence) :pid (:pid evidence)}))
+              (gen_tcp/send socket (json/encode {:uid (:uid evidence) :pid (:pid evidence)
+                                                :result (handle evidence (json/decode (elem request 1)))}))
               (erlang/send parent [:prototype/unix evidence]))
              (finally (gen_tcp/close socket))))))))]
   (try
@@ -45,3 +45,5 @@
     (let [pid (elem worker 0)] (when (Process/alive? pid) (erlang/exit pid :kill)))
     (Process/demonitor (elem worker 1) (list :flush))
     (File/rm path)))))
+(defn roundtrip! [path payload]
+ (exchange! path payload (fn [_ _] nil)))
