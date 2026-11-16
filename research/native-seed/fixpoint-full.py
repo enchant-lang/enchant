@@ -74,7 +74,7 @@ def save(path: Path, value) -> None:
 def compiler_recipe_identity(source_path: Path) -> dict:
     # Hash actual compiler code independently from orchestration/reporting.
     # Whole-driver bytes remain a bound input/provenance record.
-    names = ("digest", "key", "save", "run", "split_source", "cached_phase", "compile_native")
+    names = ("digest", "key", "save", "run", "split_source", "unit_cache_request", "cached_phase", "compile_native")
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
     functions = []
     for name in names:
@@ -112,6 +112,81 @@ def compiler_recipe_identity(source_path: Path) -> dict:
             "object_flag_selector": {"normalization": "host-O1-no-inline-only-v1",
                 "actual_flags_bound_in_object_request": True,
                 "full_driver_bound_in_report": True}}
+
+
+def split_source(source: Path, *, host_unit: bytes, host_scheme: Path, gsi: Path, splitter: Path,
+                 out: Path, run):
+    """Split one emitted stage into the frozen host unit plus content-cut form
+    units (split-top-level.scm). Each unit is keyed later by its own bytes."""
+    body = source.read_bytes()
+    if not body.startswith(host_unit):
+        raise RuntimeError("native stage does not begin with the exact frozen host source")
+    request = {"source_sha256": digest(source), "host_sha256": digest(host_scheme),
+               "reader_sha256": digest(gsi), "splitter_sha256": digest(splitter),
+               "target": TARGET, "hard": HARD}
+    folder = out / "native-split" / key(request)
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest = folder / "manifest.json"
+    if manifest.is_file():
+        old = json.loads(manifest.read_text())
+        rows = old.get("units", [])
+        if (old.get("schema") == "bl.native.scheme-units" and old.get("version") == 1
+                and old.get("request") == request and len(rows) >= 2
+                and rows[0].get("file") == "host.scm"
+                and rows[0].get("sha256") == hashlib.sha256(host_unit).hexdigest()
+                and [r.get("file") for r in rows[1:]] == [f"forms-{i}.scm" for i in range(len(rows) - 1)]
+                and all((folder / row["file"]).is_file()
+                        and 0 < (folder / row["file"]).stat().st_size == row["bytes"] <= HARD
+                        and digest(folder / row["file"]) == row["sha256"]
+                        and (row["bytes"] <= TARGET or row.get("indivisible_ffi_host")
+                             or (row.get("forms") == 1 and row.get("oversized_single_form"))) for row in rows)):
+            return folder, old
+    host_path, tail = folder / "host.scm", folder / "tail.scm"
+    host_path.write_bytes(host_unit)
+    tail.write_bytes(body[len(host_unit):])
+    job = folder / "split.scm"
+    job.write_text("(define split-input " + json.dumps(str(tail)) + ")\n"
+        + "(define split-output " + json.dumps(str(folder)) + ")\n"
+        + f"(define split-target {TARGET})\n(define split-hard {HARD})\n"
+        + splitter.read_text())
+    # Old partially split outputs are local generated files only.
+    for path in folder.glob("forms-*.scm"):
+        path.unlink()
+    output = run("split-" + source.stem, [gsi, job])
+    units = [{"file": "host.scm", "bytes": len(host_unit), "forms": None,
+              "indivisible_ffi_host": True, "oversized_single_form": False,
+              "sha256": digest(host_path)}]
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 5 or fields[0] != "CHUNK":
+            raise RuntimeError("unexpected top-level splitter output: " + line)
+        _, filename, forms, size, oversized = fields
+        path = folder / filename
+        size, forms, oversized = int(size), int(forms), int(oversized)
+        if (path.parent != folder or not filename.startswith("forms-")
+                or path.stat().st_size != size or not 0 < size <= HARD or forms <= 0
+                or oversized not in (0, 1) or (size > TARGET and (forms != 1 or not oversized))):
+            raise RuntimeError("invalid bounded Scheme unit record: " + line)
+        units.append({"file": filename, "bytes": size, "forms": forms,
+                      "indivisible_ffi_host": False, "oversized_single_form": bool(oversized),
+                      "sha256": digest(path)})
+    if len(units) < 2:
+        raise RuntimeError("splitter omitted compiler bodies and entry")
+    result = {"schema": "bl.native.scheme-units", "version": 1, "request": request,
+              "transport": "Gambit read/write; forms never evaluated; original top-level order",
+              "units": units}
+    save(manifest, result)
+    return folder, result
+
+
+def unit_cache_request(row: dict, ordinal: int, tool_identity: dict) -> dict:
+    """A unit's Scheme -> C identity is its own bytes, its role and the tools.
+    The ordinal and the neighbours are not part of it: a changed unit never
+    perturbs another's key. Gambit's module name comes from the stem, which is
+    derived from this key, and the link table (gsc -link) is built separately
+    from the ordered C units."""
+    return {"source_sha256": row["sha256"], "role": "host" if ordinal == 0 else "forms",
+            "tools": tool_identity}
 
 
 def main() -> None:
@@ -363,67 +438,6 @@ def main() -> None:
                         or baseline["labels"] != expected["labels"] or baseline["traces"] != expected["traces"]):
                     raise RuntimeError("actor oracle projection differs from its retained JS witness")
 
-        def split_source(source: Path):
-            body = source.read_bytes()
-            if not body.startswith(host_unit):
-                raise RuntimeError("native stage does not begin with the exact frozen host source")
-            request = {"source_sha256": digest(source), "host_sha256": digest(out / "host.scm"),
-                       "reader_sha256": digest(gsi), "splitter_sha256": digest(splitter),
-                       "target": TARGET, "hard": HARD}
-            folder = out / "native-split" / key(request)
-            folder.mkdir(parents=True, exist_ok=True)
-            manifest = folder / "manifest.json"
-            if manifest.is_file():
-                old = json.loads(manifest.read_text())
-                rows = old.get("units", [])
-                if (old.get("schema") == "bl.native.scheme-units" and old.get("version") == 1
-                        and old.get("request") == request and len(rows) >= 2
-                        and rows[0].get("file") == "host.scm"
-                        and rows[0].get("sha256") == hashlib.sha256(host_unit).hexdigest()
-                        and [r.get("file") for r in rows[1:]] == [f"forms-{i}.scm" for i in range(len(rows) - 1)]
-                        and all((folder / row["file"]).is_file()
-                                and 0 < (folder / row["file"]).stat().st_size == row["bytes"] <= HARD
-                                and digest(folder / row["file"]) == row["sha256"]
-                                and (row["bytes"] <= TARGET or row.get("indivisible_ffi_host")
-                                     or (row.get("forms") == 1 and row.get("oversized_single_form"))) for row in rows)):
-                    return folder, old
-            host_path, tail = folder / "host.scm", folder / "tail.scm"
-            host_path.write_bytes(host_unit)
-            tail.write_bytes(body[len(host_unit):])
-            job = folder / "split.scm"
-            job.write_text("(define split-input " + json.dumps(str(tail)) + ")\n"
-                + "(define split-output " + json.dumps(str(folder)) + ")\n"
-                + f"(define split-target {TARGET})\n(define split-hard {HARD})\n"
-                + splitter.read_text())
-            # Old partially split outputs are local generated files only.
-            for path in folder.glob("forms-*.scm"):
-                path.unlink()
-            output = run("split-" + source.stem, [gsi, job])
-            units = [{"file": "host.scm", "bytes": len(host_unit), "forms": None,
-                      "indivisible_ffi_host": True, "oversized_single_form": False,
-                      "sha256": digest(host_path)}]
-            for line in output.splitlines():
-                fields = line.split("\t")
-                if len(fields) != 5 or fields[0] != "CHUNK":
-                    raise RuntimeError("unexpected top-level splitter output: " + line)
-                _, filename, forms, size, oversized = fields
-                path = folder / filename
-                size, forms, oversized = int(size), int(forms), int(oversized)
-                if (path.parent != folder or not filename.startswith("forms-")
-                        or path.stat().st_size != size or not 0 < size <= HARD or forms <= 0
-                        or oversized not in (0, 1) or (size > TARGET and (forms != 1 or not oversized))):
-                    raise RuntimeError("invalid bounded Scheme unit record: " + line)
-                units.append({"file": filename, "bytes": size, "forms": forms,
-                              "indivisible_ffi_host": False, "oversized_single_form": bool(oversized),
-                              "sha256": digest(path)})
-            if len(units) < 2:
-                raise RuntimeError("splitter omitted compiler bodies and entry")
-            result = {"schema": "bl.native.scheme-units", "version": 1, "request": request,
-                      "transport": "Gambit read/write; forms never evaluated; original top-level order",
-                      "units": units}
-            save(manifest, result)
-            return folder, result
-
         def cached_phase(label, argv, directory, proof, request, outputs):
             if proof.is_file():
                 previous = json.loads(proof.read_text())
@@ -437,7 +451,8 @@ def main() -> None:
 
         def compile_native(name):
             source = out / (name + ".scm")
-            folder, manifest = split_source(source)
+            folder, manifest = split_source(source, host_unit=host_unit, host_scheme=out / "host.scm",
+                                            gsi=gsi, splitter=splitter, out=out, run=run)
             build = {"stage": name, "source_sha256": digest(source), "split_manifest": str(folder / "manifest.json"),
                      "split_manifest_sha256": digest(folder / "manifest.json"), "units": [],
                      "host_optimization": args.host_optimization,
@@ -447,14 +462,17 @@ def main() -> None:
             if (manifest["units"][0].get("file") != "host.scm"
                     or manifest["units"][0].get("indivisible_ffi_host") is not True):
                 raise RuntimeError("ordinal zero must be the frozen indivisible FFI host")
-            c_units, objects = [], []
+            c_units, objects, stems = [], [], set()
             for ordinal, row in enumerate(manifest["units"]):
                 # This request intentionally excludes the runtime option:
                 # Scheme -> C is identical at host -O0 and host -O1.
-                request = {"source_sha256": row["sha256"], "ordinal": ordinal, "tools": tool_identity}
+                request = unit_cache_request(row, ordinal, tool_identity)
                 directory = out / "native-unit-cache" / key(request)
                 directory.mkdir(parents=True, exist_ok=True)
-                stem = f"unit_{ordinal:04d}_{key(request)[:16]}"
+                stem = f"unit_{key(request)[:16]}"
+                if stem in stems:
+                    raise RuntimeError("two units share one content key: " + row["file"])
+                stems.add(stem)
                 scheme, cfile = (directory / (stem + suffix) for suffix in (".scm", ".c"))
                 optimization = args.host_optimization if ordinal == 0 else 0
                 object_flags = ["-O" + str(optimization), *flags[1:]]
