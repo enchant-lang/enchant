@@ -6,6 +6,7 @@ import {syntaxHighlighting,bracketMatching} from '@codemirror/language';
 import {language,highlight} from './code.mjs';
 import {TextDraft,TextDraftStore} from './text-draft.mjs';
 import {settleAssignments,settlementError} from './settlement.mjs';
+import {applySourceChanges,normalizeSource} from './source-changes.mjs';
 export function mountSourceInput(root,model,services){
   let current=model,disposed=false,internal=false,isReadonly=!!model.readonly,acknowledged=null,publicationMessage='';
   const lifetime=new AbortController();
@@ -35,10 +36,11 @@ export function mountSourceInput(root,model,services){
       '&.cm-focused':{outline:'2px solid var(--ed-accent)'},'.cm-cursor':{borderLeftColor:'var(--ed-ink)'},'.cm-selectionBackground':{background:'var(--ed-code-selection)!important'}}),
     EditorView.updateListener.of(update=>{
       if(internal||!update.docChanged)return;
-      publicationMessage='';draft.edit(update.state.doc.toString());paint();notify();
+      const changes=[];update.changes.iterChanges((from,to,_fromB,_toB,text)=>changes.push({from,to,text:text.toString()}));
+      publicationMessage='';draft.edit(applySourceChanges(draft.value,changes));paint();notify();
     }),
   ]})});
-  const replace=()=>{if(view.state.doc.toString()===draft.value)return;internal=true;try{view.dispatch({changes:{from:0,to:view.state.doc.length,insert:draft.value},annotations:Transaction.addToHistory.of(false)});}finally{internal=false;}};
+  const replace=()=>{if(view.state.doc.toString()===normalizeSource(draft.value))return;internal=true;try{view.dispatch({changes:{from:0,to:view.state.doc.length,insert:draft.value},annotations:Transaction.addToHistory.of(false)});}finally{internal=false;}};
   download.onclick=()=>{
     const body=store.corrupt?JSON.stringify({...store.corrupt,current:{value:draft.value,basis:draft.basis}},null,2)+'\n':draft.value;
     const url=URL.createObjectURL(new Blob([body],{type:store.corrupt?'application/json':'text/plain;charset=utf-8'})),a=document.createElement('a');
