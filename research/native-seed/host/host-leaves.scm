@@ -432,19 +432,25 @@
   ((and (native-erlang-number? a) (native-erlang-number? b)) (= (native-number-compare a b) 0))
   ((and (pair? a) (pair? b)) (and (native-erlang-equal? (car a) (car b)) (native-erlang-equal? (cdr a) (cdr b))))
   ((and (bl-tag? a 'tuple) (bl-tag? b 'tuple))
-   (let loop ((a (bl-items a)) (b (bl-items b)))
-    (cond ((null? a) (null? b)) ((null? b) #f)
-     (else (and (native-erlang-equal? (car a) (car b)) (loop (cdr a) (cdr b)))))))
+   ;; Common prefix elementwise, then sizes: the former list walk's order.
+   (let* ((a (vector-ref a 1)) (b (vector-ref b 1))
+          (n (vector-length a)) (m (vector-length b)) (k (fxmin n m)))
+    (let loop ((i 0))
+     (if (fx= i k) (fx= n m)
+      (and (native-erlang-equal? (vector-ref a i) (vector-ref b i)) (loop (fx+ i 1)))))))
   ((and (bl-tag? a 'map) (bl-tag? b 'map))
    (and (= (native-map-count a) (native-map-count b))
-    (let loop ((ps (native-map-pairs a)))
-     (or (null? ps) (let* ((p (car ps)) (v (bl-get b (bl-nth p 0) native-missing)))
-      (and (not (eq? v native-missing)) (native-erlang-equal? (bl-nth p 1) v) (loop (cdr ps))))))))
+    (native-map-every?
+     (lambda (k va) (let ((v (native-map-ref b k native-missing)))
+      (and (not (eq? v native-missing)) (native-erlang-equal? va v)))) a)))
   (else (bl-key-equal? a b))))
 (set! native-term-compare (lambda (a b)
  (cond ((and (native-erlang-number? a) (native-erlang-number? b)) (native-number-compare a b))
   ;; Erlang text-binary order is codepoint/UTF8 order, independent of the
   ;; actor's explicitly JS-shaped UTF16 str-cmp operation.
+  ;; Scalar strings hold no lone surrogates, so their codepoint lists are
+  ;; exactly their characters: compare those in place.
+  ((and (string? a) (string? b)) (native-codepoint-string-compare a b))
   ((and (native-string? a) (native-string? b)) (native-unit-compare (h-str-codepoints a) (h-str-codepoints b)))
   (else (bl-key-compare a b)))))
 (native-add-leaf! "erlang/==/2" native-erlang-equal?)
