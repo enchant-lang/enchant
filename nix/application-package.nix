@@ -27,5 +27,4 @@ in worker (pkgs.runCommand "beam-lisp-application-package" {
     ${pkgs.coreutils}/bin/env \
     LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath (with pkgs; [ stdenv.cc.cc.lib zlib ncurses openssl brotli zstd ])} \
     ${runtime}/bin/bl --cold ${pkgs.lib.concatMapStringsSep " " (path: "-p ${pkgs.lib.escapeShellArg (toString path)}") searchPaths} run ${produce}
-  rm "$out/library.package.lock"
 '')
