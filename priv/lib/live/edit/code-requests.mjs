@@ -1,6 +1,6 @@
 // One request lifetime per input. Text and provider identity guard late answers.
 export class CodeRequests {
-  constructor(read,provider,fetcher=globalThis.fetch){this.read=read;this.provider=provider;this.fetcher=fetcher;this.pending=new Set();this.disposed=false;}
+  constructor(read,provider,fetcher=globalThis.fetch){this.read=read;this.provider=provider;this.fetcher=fetcher.bind(globalThis);this.pending=new Set();this.disposed=false;}
   async request(operation,offset){
     const text=this.read(),provider=this.provider;
     if(this.disposed||!provider?.url)return null;

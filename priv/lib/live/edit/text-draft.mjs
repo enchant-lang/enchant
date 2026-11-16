@@ -43,7 +43,10 @@ export class TextDraft {
   receive(model){
     const clean=!this.dirty;
     this.confirmed=model.confirmed;this.confirmedBasis=model['confirmed-basis'];
-    if(clean){this.value=this.confirmed;this.basis=this.confirmedBasis;}
+    const accepted=model.accepted;
+    if(clean||(accepted&&accepted.basis===this.confirmedBasis&&accepted.value===this.value)){
+      this.value=this.confirmed;this.basis=this.confirmedBasis;
+    }
     this.normalize();this.persist();
   }
   discard(){this.value=this.confirmed;this.basis=this.confirmedBasis;this.restored=false;this.store.remove(true);}

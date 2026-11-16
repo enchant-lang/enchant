@@ -32,3 +32,16 @@ test('corrupt recovery is retained and surfaced, without changing authoritative 
  draft.edit('new words');assert.equal(storage.getItem(store.key),'{broken');
  draft.discard();assert.equal(store.read(),null);assert.equal(store.warning,null);
 });
+
+test('canonical normalization is adopted only for an exact acknowledged draft and current basis',()=>{
+ const storage=memory(),tabs=memory();tabs.setItem('enchant.edit.tab','tab');
+ const draft=new TextDraft(model(),new TextDraftStore('alice/doc',storage,tabs));
+ draft.edit('* New task');
+ draft.receive({...model('* New task\n:ID: assigned','b2'),accepted:{value:'* New task',basis:'old'}});
+ assert.equal(draft.value,'* New task');assert.equal(draft.dirty,true);
+ draft.edit('* Newer typing');
+ draft.receive({...model('* New task\n:ID: assigned','b2'),accepted:{value:'* New task',basis:'b2'}});
+ assert.equal(draft.value,'* Newer typing');
+ draft.receive({...model('* Newer typing\n:ID: assigned','b3'),accepted:{value:'* Newer typing',basis:'b3'}});
+ assert.equal(draft.value,'* Newer typing\n:ID: assigned');assert.equal(draft.dirty,false);
+});

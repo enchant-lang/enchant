@@ -15,3 +15,11 @@ test('working text and code-point position are sent only to the current origin',
  const external=new CodeRequests(()=>'',{url:'https://other.test/collect'},()=>{throw Error('must not fetch');});
  await assert.rejects(external.request('completion',0),/current origin/);
 });
+
+test('browser fetch retains its global receiver',async()=>{
+ const requests=new CodeRequests(()=>'(str 1)',{url:'/language'},function(){
+   assert.equal(this,globalThis,'Window.fetch rejects an arbitrary receiver');
+   return Promise.resolve({ok:true,json:async()=>({diagnostics:[]})});
+ });
+ assert.deepEqual(await requests.request('diagnostics',0),{diagnostics:[]});
+});

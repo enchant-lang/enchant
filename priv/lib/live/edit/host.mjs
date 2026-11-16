@@ -1,3 +1,4 @@
+export {mountFormRecovery} from './form-recovery.mjs';
 export {mountSourceInput} from './source-input.mjs';
 // Owned DOM/input adapter. Semantic policy and persistent session state are BL.
 import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';

@@ -37,3 +37,18 @@ The application owns authentication, source analysis and policy; the generic hos
 owns CodeMirror. Late answers are dropped after text changes and outstanding
 requests abort on disposal. Failure keeps writing available. The already locked
 CM autocomplete/lint versions are now explicit dependencies, with no upgrades.
+
+Source inputs accept optional `:accepted {:value original-input :basis current}`
+when an authoritative writer normalizes text. Exact draft value and current basis
+must both match before the input adopts canonical bytes, preserving newer typing.
+
+`live.edit.app/recovered-form` adds an effect-only recovery footer to an ordinary
+Live element (a vector with attributes). Live retains native fields, input events,
+focus and patch ownership. Descriptors declare flat keys, control IDs, server
+changes paths and labels. Only attempted fields are cached; unrelated source
+values never become edits. Original basis survives reload; removed fields remain
+retained for download. `:event` assigns `:from :changes` and `:from :basis` into
+application locals. Scope by actor/document/object. Optional accepted field values
+acknowledge authoritative normalization. Storage failure leaves attempted values
+in memory with a plain-text property draft download. No database write occurs
+until the application's guarded save command.
