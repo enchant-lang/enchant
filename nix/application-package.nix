@@ -8,7 +8,7 @@ let
   };
   produce = pkgs.writeText "produce-application-package.bl" ''
     (ns produce-application-package (:require [application.package :as package]))
-    (let [result (package/build! "${entry}" (str (System/fetch_env! "out") "/library") [])]
+    (let [result (package/build! ${builtins.toJSON (toString entry)} (str (System/fetch_env! "out") "/library") [])]
       (println (pr-str (select-keys result [:built :artifacts :source-fallback]))))
     (System/halt 0)
   '';
