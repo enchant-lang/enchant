@@ -66,6 +66,28 @@
                          (throw (ex-info "Already published" {:intent/outcome {:status :noop}}))
                          [[:db/add (entity database id) :editable/published (raw-state database id :editable/state)]])))]])
         (catch error (when-not (= :noop (get-in (ex-data error) [:intent/outcome :status])) (throw error)))))))
+(defn initialization-plan
+  "Prepare finite authority storage without writing. Compose this plan inside
+   the caller's final guarded Datom writer with initialization-transaction."
+  [registry document]
+  (assoc (encoded (sync/authority registry document)) :id (:id document)))
+(defn initialization-transaction
+  "Append a prepared initialization to concrete transaction data. All supplied
+   temporary IDs are reserved, including nested values; generated chunk/entity
+   IDs cannot alias the caller's rows. Do not pass unexpanded db/fn forms.
+   Existing identical initialization is idempotent; a conflicting ID refuses."
+  [database plan prior]
+  (when-not (and (vector? prior) (string? (:id plan)) (string? (:value plan)) (vector? (:rows plan)))
+    (r/fail "invalid-editor-initialization"))
+  (let [values (tree-seq coll? seq prior)]
+    (when (some fn? values) (r/fail "initialization-needs-concrete-transaction-data"))
+    (if (entity database (:id plan))
+      (if (= (:value plan) (raw-state database (:id plan) :editable/state)) prior
+        (r/fail "editor-initialization-id-collision"))
+      (let [start (dec (reduce min 0 (filter #(and (integer? %) (neg? %)) values)))
+            rows (mapv (fn [i row] (assoc row :db/id (- start i))) (range (count (:rows plan))) (:rows plan))]
+        (conj (into prior rows) {:db/id (- start (count rows)) :editable/id (:id plan)
+          :editable/state (:value plan) :editable/published (:value plan)})))))
 (defn initialize! [conn registry document]
   (datom/transact! conn
     [[:db/fn (fn [database]

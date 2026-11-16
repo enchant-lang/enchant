@@ -50,3 +50,26 @@
     (let [conn (datom/connect-with (fjall/open path) a/schema)]
       (try (is (starts-with? (get-in (a/read-state (datom/db conn) "large") [:document :blocks 0 :text]) "!"))
         (finally (datom/close! conn) (File/rm_rf! path))))))
+(deftest prepared-authorities-compose-with-the-final-writer-without-tempid-collisions
+ (let [path (str (System/tmp_dir!) "/edit-planned-" (erlang/unique_integer (list :positive)))
+       conn (datom/connect-with (fjall/open path) (into a/schema [{:db/ident :fixture/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+                                                              {:db/ident :fixture/value :db/valueType :db.type/long}]))
+       plan (a/initialization-plan ext source)]
+  (try
+   (is (nil? (a/entity (datom/db conn) "notes")))
+   (is (thrown? (datom/transact! conn [[:db/fn (fn [database]
+                 (a/initialization-transaction database plan [{:db/id -1 :fixture/id "refused"}])
+                 (throw (ex-info "Final guard refused" {})))]])))
+   (is (nil? (a/entity (datom/db conn) "notes")))
+   (is (nil? (datom/entity (datom/db conn) [:fixture/id "refused"])))
+   (datom/transact! conn [[:db/fn (fn [database]
+     (a/initialization-transaction database plan [{:db/id -1 :fixture/id "outer" :fixture/value -2000}
+                                                {:db/id -1000 :fixture/id "other"}]))]])
+   (is (= "outer" (:fixture/id (datom/entity (datom/db conn) [:fixture/id "outer"]))))
+   (is (= -2000 (:fixture/value (datom/entity (datom/db conn) [:fixture/id "outer"]))))
+   (is (= "other" (:fixture/id (datom/entity (datom/db conn) [:fixture/id "other"]))))
+   (is (= source (:document (a/read-state (datom/db conn) "notes"))))
+   (is (= [] (a/initialization-transaction (datom/db conn) plan [])))
+   (is (thrown? (a/initialization-transaction (datom/db conn) (a/initialization-plan ext (assoc-in source [:meta :title] "Different")) [])))
+   (is (thrown? (a/initialization-transaction (datom/db conn) plan [[:db/fn (fn [_] [])]])))
+   (finally (datom/close! conn) (File/rm_rf! path)))))
