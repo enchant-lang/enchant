@@ -107,3 +107,45 @@
   (if (nil? s)
     []
     (vec (map realize (BeamLisp.Reader/read_all s)))))
+
+
+;; Persistence must not use the diagnostic printer: its host string inspection
+;; can abbreviate text and emits host interpolation escapes. Keep a data-only
+;; writer here beside the non-evaluating reader, with explicit refusal instead
+;; of ellipses, opaque host forms or sampling a possibly infinite sequence.
+(defn- quote-string [value]
+  (when-not (String/valid? value)
+    (throw (ex-info "EDN strings must contain valid UTF-8." {:format :edn})))
+  (str "\"" (-> value
+    (String/replace "\\" "\\\\") (String/replace "\"" "\\\"")
+    (String/replace "\n" "\\n") (String/replace "\r" "\\r")
+    (String/replace "\t" "\\t") (String/replace "\b" "\\b")
+    (String/replace "\f" "\\f") (String/replace "\0" "\\u0000")) "\""))
+
+(defn- write-value [value depth]
+  (when (> depth 256)
+    (throw (ex-info "EDN data exceeds the supported nesting depth." {:format :edn :limit 256})))
+  (let [nested (fn [v] (write-value v (inc depth)))
+        items (fn [xs] (join " " (mapv nested xs)))]
+    (cond
+      (nil? value) "nil"
+      (= true value) "true"
+      (= false value) "false"
+      (string? value) (quote-string value)
+      (or (number? value) (keyword? value) (symbol? value)) (pr-str value)
+      (vector? value) (str "[" (items value) "]")
+      (list? value) (str "(" (items value) ")")
+      (set? value) (str "#{" (join " " (sort (mapv nested value))) "}")
+      (and (map? value) (not (struct? value)))
+      (str "{" (join ", " (sort (mapv (fn [[k v]] (str (nested k) " " (nested v))) value))) "}")
+      :else (throw (ex-info "EDN persistence accepts finite data, not executable, lazy or host values."
+                    {:format :edn :reason :unsupported-value})))))
+
+(defn write-string
+  "Serialize finite EDN data completely, including long Unicode strings. Never
+   abbreviates. Maps and sets have deterministic ordering. Rejects executable,
+   lazy and opaque host values and nesting beyond 256 rather than writing data
+   that cannot be read back. This is the persistence counterpart to read-string;
+   pr-str remains a diagnostic printer."
+  [value]
+  (write-value value 0))
