@@ -70,6 +70,11 @@
                       {:kind :unbounded-projection-plan})))
     planned))
 
+(defn- normalized-revision! [database attributes]
+  (when-let [stamp (validity/read-stamp database attributes)]
+    (when-let [normalized (cache/key-data stamp 0)]
+      (data/check! normalized {:max-nodes 8192 :max-bytes 65536 :max-depth 64}))))
+
 (defn revision!
   "Read fixed source evidence without executing a query. Includes complete
    stored-attribute and compiler/provider provenance, normalized without
@@ -78,8 +83,7 @@
   (functions/with-only {}
     (fn []
       (let [planned (managed-plan! query) database (native-database! (native-connection! connection))
-            revision (validity/read-stamp database (:attributes planned))
-            normalized (when revision (cache/key-data revision 0))]
+            normalized (normalized-revision! database (:attributes planned))]
         (when-not normalized
           (throw (ex-info "Projection source revision is not certified" {:kind :unproved-projection-revision})))
         {:basis (:basis-t database) :revision normalized :attributes (:attributes planned)}))))
@@ -93,7 +97,7 @@
   (functions/with-only {}
     (fn []
       (let [planned (managed-plan! query) database (native-database! (native-connection! connection))
-            revision (some-> (validity/read-stamp database (:attributes planned)) (cache/key-data 0))]
+            revision (normalized-revision! database (:attributes planned))]
         (when-not (and revision (= expected revision))
           (throw (ex-info "Projection source changed before execution" {:kind :superseded-projection})))
         (budget/spend! token 1 0)

@@ -176,3 +176,16 @@
         (is (= 1 (get-in answer [:work :expired])))
         (is (= 1 (get-in answer [:counts :started]))))
       (finally (projection/stop! h)))))
+
+(deftest oversized-results-stay-blocked-instead-of-being-recomputed-by-readers
+  (let [c (source)
+        _ (d/transact! c (mapv (fn [n] {:db/id (- (+ n 2)) :projection/value n}) (range 20)))
+        h (projection/start! :projection/oversized c QUERY {:max-output-bytes 64})]
+    (try
+      (projection/subscribe! h)
+      (is (= :blocked (:status (settled h))))
+      (doseq [_ (range 100)] (projection/read h))
+      (is (= :blocked (:status (projection/read h))))
+      (is (nil? (:value (projection/read h))))
+      (is (= 1 (get-in (projection/read h) [:counts :started])))
+      (finally (projection/stop! h) (d/close! c)))))
