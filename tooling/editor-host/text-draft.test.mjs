@@ -45,3 +45,19 @@ test('canonical normalization is adopted only for an exact acknowledged draft an
  draft.receive({...model('* Newer typing\n:ID: assigned','b3'),accepted:{value:'* Newer typing',basis:'b3'}});
  assert.equal(draft.value,'* Newer typing\n:ID: assigned');assert.equal(draft.dirty,false);
 });
+test('unreadable exact text remains exportable without touching another resource',()=>{
+ const storage=memory(),tabs=memory();tabs.setItem('enchant.edit.tab','tab');
+ const store=new TextDraftStore('alice/doc',storage,tabs),other=new TextDraftStore('bob/doc',storage,tabs);
+ const raw='{unreadable 🌿\r\n';storage.setItem(store.key,raw);other.write('Private other draft','other-basis');
+ const draft=new TextDraft(model(),store);assert.equal(store.corrupt.raw,raw);assert.equal(store.unreadable,true);
+ draft.edit('New local words');assert.equal(storage.getItem(store.key),raw);assert.equal(other.read().value,'Private other draft');
+ assert.equal(draft.discard(),true);assert.equal(store.corrupt,null);assert.equal(storage.getItem(store.key),null);
+ assert.equal(other.read().value,'Private other draft');
+});
+test('failed deletion keeps the current exact draft and recovery until an explicit retry succeeds',()=>{
+ const storage=memory(),tabs=memory();tabs.setItem('enchant.edit.tab','tab');const store=new TextDraftStore('actor/doc',storage,tabs),draft=new TextDraft(model(),store);
+ draft.edit('Do not lose this');const raw=storage.getItem(store.key),remove=storage.removeItem;
+ storage.removeItem=()=>{throw Error('remove denied');};assert.equal(draft.discard(),false);
+ assert.equal(draft.value,'Do not lose this');assert.equal(storage.getItem(store.key),raw);
+ storage.removeItem=remove;assert.equal(draft.discard(),true);assert.equal(draft.value,'one');assert.equal(storage.getItem(store.key),null);
+});

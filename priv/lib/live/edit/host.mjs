@@ -1,5 +1,5 @@
 export {mountFormRecovery} from './form-recovery.mjs';
-import {waitForSettlement} from './settlement.mjs';
+import {waitForSettlement,settlementError} from './settlement.mjs';
 export {mountSourceInput} from './source-input.mjs';
 // Owned DOM/input adapter. Semantic policy and persistent session state are BL.
 import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';
@@ -14,7 +14,8 @@ const identity=()=>crypto.randomUUID();
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 export function mount(root,model,services,api,options={}) {
   const editor=new Editor(root,model,services,api,options);
-  return {update:next=>editor.update(next),settle:()=>editor.settle(),report:error=>editor.report(error),dispose:()=>editor.dispose()};
+  return {update:next=>editor.update(next),settle:options=>editor.settle(options),ready:()=>editor.ready(),
+    report:error=>editor.reportPublication(error),dispose:()=>editor.dispose()};
 }
 export class Editor {
   constructor(root,model,services,api,options={}){
@@ -56,6 +57,10 @@ export class Editor {
   node(id){return this.current.get(id)||this.session.node(id);}
   capture(){this.rememberSelection();return this.session.bookmark();}
   report(error){this.message=error?.message||String(error);this.paintStatus();this.ui?.report?.(this.message);return false;}
+  reportPublication(error){this.publicationMessage=error?.message||String(error);return this.report(error);}
+  clearPublicationError(){
+    if(this.message===this.publicationMessage){this.message='';this.publicationMessage=null;this.paintStatus();this.ui?.update?.(this.state);}
+  }
   publicAPI(){
     return Object.freeze({
       id:this.model.snapshot.document.id,
@@ -71,7 +76,7 @@ export class Editor {
       export:()=>this.session.export(),serialize:()=>JSON.stringify(this.session.export(),null,2)+'\n',
       import:document=>this.transaction({op:'document/replace',document,expected:this.session.export()}),
       metrics:()=>({...this.metrics}),dispose:()=>this.dispose(),
-      settle:()=>this.settle(),
+      settle:options=>this.settle(options),ready:()=>this.ready(),
     });
   }
   subscribe(selector,listener,{equals=Object.is,immediate=true}={}){
@@ -79,15 +84,21 @@ export class Editor {
     const update=()=>{const value=selector(this.state);if(!equals(value,previous)){const old=previous;previous=value;listener(value,this.public,old);}};
     this.listeners.add(update);return ()=>this.listeners.delete(update);
   }
-  settle(){
+  settlementState(){
+    return {pending:this.state.pending,conflict:this.state.conflicts.length||!!this.recoveryFailure,
+      readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
+      composing:this.composing||[...this.code.values()].some(code=>code.view.composing),preview:this.state.preview};
+  }
+  ready(){const state=this.settlementState();return !settlementError(state)&&!state.pending;}
+  settle(options={}){
+    this.clearPublicationError();
     if(!this.composing)for(const code of this.code.values())code.flush();
     this.send();
-    return waitForSettlement(()=>({pending:this.state.pending,conflict:this.state.conflicts.length||!!this.recoveryFailure,
-      readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
-      composing:this.composing,preview:this.state.preview}),check=>{
+    return waitForSettlement(()=>this.settlementState(),check=>{
         this.listeners.add(check);document.addEventListener('live:state',check);this.root.addEventListener('compositionstart',check);
         return ()=>{this.listeners.delete(check);document.removeEventListener('live:state',check);this.root.removeEventListener('compositionstart',check);};
-      },{signal:this.signal}).catch(error=>{if(!this.disposed)this.report(error);throw error;});
+      },{signal:options.signal?AbortSignal.any([this.signal,options.signal]):this.signal})
+      .catch(error=>{if(!this.disposed&&!options.signal?.aborted)this.reportPublication(error);throw error;});
   }
   query(options={}){const items=this.session.query(options);return this.model.readonly?items.map(item=>({...item,enabled:false,reason:'This document is read only.'})):items;}
   changed(change){
@@ -307,7 +318,7 @@ export class Editor {
     this.listen(document,'selectionchange',()=>{
       if(this.selectionFrame||this.composing)return;this.selectionFrame=requestAnimationFrame(()=>{this.selectionFrame=null;if(!this.disposed)this.rememberSelection();});
     });
-    this.listen(document,'live:state',event=>{if(event.detail.up){this.sent=null;this.send();}this.paintStatus();this.ui?.update?.(this.state);});
+    this.listen(document,'live:state',event=>{if(event.detail.up){this.clearPublicationError();this.sent=null;this.send();}this.paintStatus();this.ui?.update?.(this.state);});
     this.listen(document,'live:mount',()=>{
       if(this.focused?.isConnected){this.focused.focus({preventScroll:true});if(this.canvas.contains(this.focused))this.geometry.restore(this.state.selection);}
       this.sent=null;this.send();this.ui?.update?.(this.state);

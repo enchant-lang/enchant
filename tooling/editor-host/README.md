@@ -77,3 +77,23 @@ term and its updated guards. Replaced targets, disabled actions and lost sockets
 do not dispatch. This is a browser publication barrier; application writers must
 still enforce current grants and exact source/editor guards. It never grants
 publication authority or acknowledges an unsaved local proposal.
+
+`data-live-await-regions` accepts a JSON array when publication depends on rich
+writing and recovered fields. Drivers expose `ready()` as well as `settle()`;
+Live rechecks all regions collectively and then confirms ordinary field events
+through the ordered session mailbox before reading the latest action term.
+The advertised `settlement` capability uses `settle`/`settled` frames, not a
+dummy application command or database write. Disconnect, disposal and timeout
+reject outstanding confirmations. Property and source recovery notify their
+current values before waiting, including drafts restored at mount time.
+
+Unreadable text/form caches expose their original scoped storage record for
+download. Failed explicit deletion keeps attempted values in memory and can be
+retried. Ordinary quota errors still permit durable publication of current
+writing; unreadable drafts require an explicit recovery choice.
+
+`live.edit.app/reader` renders an immutable typed document through the same
+registry. It creates no region or authoring authority, strips Live handlers and
+editing hooks, keeps accessible read-only task status and code fallback, and
+accepts a pure `:icon` renderer with an optional `:label`. The caller still owns
+current source/parent authorization and any bounded derived snapshot cache.

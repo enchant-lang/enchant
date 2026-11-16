@@ -1,0 +1,47 @@
+(ns live.edit.reader-test
+ (:require [live.edit.projection :as projection] [live.edit.document :as document]
+           [live.edit.extensions :as extensions] [live.edit.standard :as standard] [live.hiccup :as html]))
+(defn interactive [_ _]
+ [:form {:on-submit [:intent :write] :action "/write" :live/region {:kind "unsafe-test" :id "nested" :model {}}}
+  [:button {:on-click [:intent :write] :data-ev-click "write"} "A package action"]
+  [:input {:value "Shared input" :contenteditable "true" :on-change [:intent :write]}]])
+(def registry (extensions/build [standard/package
+ {:name "reader-example" :provides {:editor/blocks {"interactive" {:label "Interactive" :slots [] :render interactive}}}}]))
+(def doc (document/document "immutable"
+ [(document/block "heading" "heading" "A shared heading" {:level 2})
+  (assoc (document/block "paragraph" "abcdef") :marks
+   [{:from 1 :to 4 :call {:id "bold" :function "text/bold" :version 1 :args {}}}
+    {:from 0 :to 6 :call {:id "link" :function "text/link" :version 1 :args {:href "/documents/source"}}}])
+  (document/block "task" "task" "Already done" {:checked true})
+  (document/block "code" "code" "<script>Source text only.</script>" {:language "beam-lisp"})
+  (document/block "callout" "callout" "A useful note" {:icon "lightbulb"})
+  (document/block "custom" "interactive" "" {})]))
+(deftest immutable-rich-reading-retains-formatting-without-an-authoring-region
+ (let [tree (projection/reader registry doc {:label "Published comment" :icon (fn [glyph] [:svg {:data-reader-icon glyph}])})
+       rendered (html/hiccup->html tree)]
+  (is (includes? rendered "<strong>"))
+  (is (includes? rendered "bcd"))
+  (is (includes? rendered "href=\"/documents/source\""))
+  (is (includes? rendered "role=\"document\""))
+  (is (includes? rendered "aria-label=\"Published comment\""))
+  (is (includes? rendered "aria-checked=\"true\""))
+  (is (includes? rendered "aria-readonly=\"true\""))
+  (is (includes? rendered "data-reader-icon=\"code\""))
+  (is (includes? rendered "data-node-type=\"task\""))
+  (is (includes? rendered "&lt;script&gt;"))
+  (is (not (includes? rendered "<script>")))
+  (is (not (includes? rendered "<button")))
+  (is (not (includes? rendered "<form")))
+  (is (not (includes? rendered "data-live-region")))
+  (is (not (includes? rendered "data-ev-")))
+  (is (not (includes? rendered "data-edit-")))
+  (is (not (includes? rendered "ed-node-gutter")))
+  (is (not (includes? rendered "contenteditable=\"true\"")))
+  (is (includes? rendered "disabled"))))
+(deftest reading-does-not-rewrite-the-typed-document-or-change-editor-controls
+ (let [before (html/hiccup->html (projection/editor registry {:document doc} [:intent :write] nil nil))]
+  (projection/reader registry doc {})
+  (is (= before (html/hiccup->html (projection/editor registry {:document doc} [:intent :write] nil nil))))
+  (is (includes? before "<button"))
+  (is (includes? before "ed-node-gutter"))
+  (is (includes? before "data-edit-text"))))

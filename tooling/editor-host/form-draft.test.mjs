@@ -5,6 +5,17 @@ import {TextDraftStore} from '../../priv/lib/live/edit/text-draft.mjs';
 const memory=()=>{const values=new Map();return {getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};};
 const model=(basis='b1',confirmed={title:'Original',EMAIL:'old@test'})=>({basis,'confirmed-basis':basis,confirmed,values:{},fields:[{key:'title',path:['title']},{key:'EMAIL',path:['properties','EMAIL']}]});
 const storage=()=>{const data=memory(),tabs=memory();tabs.setItem('enchant.edit.tab','tab');return new TextDraftStore('actor/doc/object/form',data,tabs);};
+test('a corrupt field cache retains its original envelope and cannot overwrite it with current fields',()=>{
+ const store=storage(),raw=JSON.stringify({schema:1,value:'{broken fields 🌿',basis:'old'});store.storage.setItem(store.key,raw);
+ const draft=new FormDraft(model(),store);assert.equal(store.unreadable,true);assert.equal(store.corrupt.raw,raw);
+ draft.edit('title','New attempted title');assert.equal(store.storage.getItem(store.key),raw);
+ assert.equal(draft.values.title,'New attempted title');assert.equal(draft.discard(),true);assert.equal(store.corrupt,null);
+});
+test('failed field-cache deletion retains attempted fields for download and retry',()=>{
+ const store=storage(),draft=new FormDraft(model(),store);draft.edit('title','Keep my title');const raw=store.storage.getItem(store.key),remove=store.storage.removeItem;
+ store.storage.removeItem=()=>{throw Error('remove denied');};assert.equal(draft.discard(),false);assert.equal(draft.values.title,'Keep my title');assert.equal(store.storage.getItem(store.key),raw);
+ store.storage.removeItem=remove;assert.equal(draft.discard(),true);assert.equal(draft.dirty,false);
+});
 test('only attempted fields are restored; unrelated source values never become edits',()=>{
  const draft=new FormDraft(model(),storage());draft.edit('title','Mine');
  assert.deepEqual(draft.changes(),{title:'Mine'});

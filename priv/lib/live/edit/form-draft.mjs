@@ -7,7 +7,7 @@ export class FormDraft {
       const values=JSON.parse(cached.value);
       if(!values||Array.isArray(values)||typeof values!=='object'||Object.values(values).some(v=>!['string','boolean','number'].includes(typeof v)&&v!==null))throw Error('Unrecognized property draft');
       this.values=values;this.basis=cached.basis;this.restored=true;
-    }catch(error){store.warning=error;store.unreadable=true;}
+    }catch(error){if(store.retainUnreadable)store.retainUnreadable(error);else{store.warning=error;store.unreadable=true;}}
     this.receive(model);
   }
   get dirty(){return Object.keys(this.values).length>0;}
@@ -50,6 +50,6 @@ export class FormDraft {
     }
     return terms;
   }
-  discard(){this.values={};this.basis=this.model['confirmed-basis'];this.restored=false;this.store.remove(true);}
+  discard(){if(this.store.remove(true)===false)return false;this.values={};this.basis=this.model['confirmed-basis'];this.restored=false;return true;}
   persist(){if(this.dirty)this.store.write(JSON.stringify(this.values),this.basis);else this.store.remove();}
 }

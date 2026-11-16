@@ -79,6 +79,40 @@
 (defn body [extensions doc]
   (let [grouped (group-by :parent (:blocks doc))]
     (mapv #(project-tree extensions grouped %) (get grouped nil []))))
+(defn- reading-tree [tree icon]
+ (cond
+  (vector? tree)
+  (let [tag (first tree) attrs (when (map? (second tree)) (second tree)) start (if attrs 2 1)
+        checkbox? (and (= tag :button) (= "checkbox" (:role attrs)))
+        inert? (or (= tag :button) (= tag :form))
+        cleaned (into {} (remove (fn [[key _]]
+          (let [attribute (if (keyword? key) (name key) (str key))]
+           (or (= key :live/region) (starts-with? (lower-case attribute) "on")
+               (starts-with? attribute "data-ev-") (starts-with? attribute "data-edit-")
+               (and (starts-with? attribute "data-node-") (not= attribute "data-node-type"))
+               (contains? #{:contenteditable :draggable :tabindex :data-placeholder} key)
+               (and inert? (contains? #{:type :action :method :enctype :aria-label :aria-pressed} key))))) attrs))
+        cleaned (cond
+                  checkbox? (assoc cleaned :aria-label "Task status" :aria-readonly "true")
+                  (and (= tag :button) (:data-node-icon attrs)) (assoc cleaned :aria-hidden "true")
+                  (contains? #{:input :textarea :select} tag) (assoc cleaned :disabled true :readonly true :tabindex -1)
+                  :else cleaned)]
+   (cond
+    (= "ed-node-gutter" (:class attrs)) nil
+    (:data-icon attrs) (if icon (icon (:data-icon attrs))
+                       [:span {:class "ed-read-icon" :aria-hidden "true"} (if (= "check" (:data-icon attrs)) "✓" "•")])
+    (and (= tag :button) (:data-node-media attrs)) [:span {:class "ed-readonly-placeholder"} "Media unavailable"]
+    :else (into [(cond (= tag :button) :span (= tag :form) :div :else tag) cleaned]
+            (keep #(reading-tree % icon) (subvec tree start)))))
+  (sequential? tree) (keep #(reading-tree % icon) tree)
+  :else tree))
+(defn reader
+ "The same rich projection without an editing host, handlers or authoring
+  controls. Optional :icon is a pure host renderer; :label names the document."
+ [extensions document options]
+ [:section {:key (:id document) :class "enchanted-document ed-reader" :data-editor-reader true}
+  (into [:div {:class "ed-canvas" :role "document" :aria-label (:label options "Document") :contenteditable "false"}]
+        (keep #(reading-tree % (:icon options)) (body extensions document)))])
 (defn editor [extensions snapshot event stamp refusal]
   (let [doc (:document snapshot)]
     [:section {:key (:id doc) :class "enchanted-document"

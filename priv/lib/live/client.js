@@ -373,6 +373,9 @@
       try {
         instance.driver = factory(el, spec.model, {
           dispatch(term, data) { owner.__liveRegionSend?.(term, data || {}); },
+          settle(options) {
+            return owner.__liveSettle ? owner.__liveSettle(options) : Promise.reject(Error('Current Live tools are required before sharing.'));
+          },
           render,
         });
       } catch (error) { regionInstances.delete(el); throw error; }
@@ -565,6 +568,27 @@
     var ws = null;
     var pending = [];
     var inputFrames = new Map();
+    const settlements = new Map();
+    function settleConnection({signal,timeout=30000}={}) {
+      if (!root.__liveSettlement || !ws || ws.readyState !== WebSocket.OPEN)
+        return Promise.reject(Error('Reconnect with current Live tools before sharing.'));
+      if (signal?.aborted) return Promise.reject(Error('The writing surface closed before confirmation.'));
+      const id=mintId('settle'),socket=ws;
+      return new Promise((resolve,reject)=>{
+        const finish=error=>{
+          const entry=settlements.get(id);if(!entry)return;
+          settlements.delete(id);clearTimeout(entry.timer);signal?.removeEventListener('abort',aborted);
+          if(error)reject(error);else resolve();
+        };
+        const aborted=()=>finish(Error('The writing surface closed before confirmation.'));
+        settlements.set(id,{socket,finish,timer:setTimeout(()=>finish(Error('Confirmation is still pending. Keep this page open and try again.')),timeout)});
+        signal?.addEventListener('abort',aborted,{once:true});
+        try{socket.send(JSON.stringify(['settle',id]));}catch(error){finish(error);}
+      });
+    }
+    function rejectSettlements(message) {
+      for(const entry of [...settlements.values()])entry.finish(Error(message));
+    }
     function trackInput(el, data) {
       if (!root.__liveInputAck || !ws ||
           (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) return data;
@@ -698,6 +722,7 @@
       ws.onclose = function () {
         if (sock !== ws) return;
         discardInputs();
+        rejectSettlements('Connection lost before confirmation. Your writing is retained.');
         if (beat) { clearInterval(beat); beat = null; }
         setLive(false);
         if (reconnect && !suspended && reconnectTimer === null) {
@@ -725,6 +750,7 @@
           remountAsked = false;
           discardInputs();
           root.__liveInputAck = !!(b && b["input-ack"]);
+          root.__liveSettlement = !!(b && b.settlement);
           root.innerHTML = a;
           hydrateText(root, b && b["text-layout"]);
           restoreRegions(root, keptRegions);
@@ -778,6 +804,8 @@
           announce("live:denied", { why: a });
         } else if (kind === "ack") {
           if (outbox) { outbox.ack(a); setLive(true); }   // the gesture landed — drop it
+        } else if (kind === "settled") {
+          const entry=settlements.get(a);if(entry?.socket===sock)entry.finish();
         } else if (kind === "input-ack") {
           acknowledgeInput(a);
         }
@@ -796,6 +824,7 @@
       if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       if (beat) { clearInterval(beat); beat = null; }
       discardInputs();
+      rejectSettlements('The page closed before confirmation. Your writing is retained.');
       setLive(false);
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close(1000, "pagehide");
@@ -811,6 +840,7 @@
     root.__liveRegionSend = function (term, data) {
       sendFrame(JSON.stringify(["event", term, data]));
     };
+    root.__liveSettle = settleConnection;
     syncRegions(root);
 
     // relay() delegates to this to mark+persist a durable gesture before send.
@@ -840,7 +870,7 @@
       // never preventDefault'd into silence. This is what makes EVERY
       // screen-to-screen move live without wiring a single link by hand.
       var a = e.target.closest && e.target.closest("a[href]");
-      if (a && !a.closest('[data-live-await-region]') && !e.defaultPrevented && !e.metaKey && !e.ctrlKey &&
+      if (a && !a.closest('[data-live-await-region],[data-live-await-regions]') && !e.defaultPrevented && !e.metaKey && !e.ctrlKey &&
           !e.shiftKey && !e.altKey && (a.getAttribute("target") || "") === "") {
         var href = a.getAttribute("href") || "";
         if (href.indexOf("/") === 0 && href.indexOf("//") !== 0 &&
@@ -1075,33 +1105,64 @@
   }
 
   // relay the JSON term stored in attribute `attr` of `el` to the server
-  const settlingActions = new WeakSet();
+  const settlingActions = new WeakSet(), actionWarnings = new WeakMap();
+  const awaitSelector = '[data-live-await-region],[data-live-await-regions]';
+  function clearActionWarning(el) {
+    const warning=actionWarnings.get(el);if(!warning)return;
+    for(const [name,value] of [['title',warning.title],['aria-description',warning.description]])
+      if(el.getAttribute(name)===warning.message){if(value===null)el.removeAttribute(name);else el.setAttribute(name,value);}
+    actionWarnings.delete(el);
+  }
   function relay(el, attr, ws, data, settled, onRelayed) {
-    const scope = el.closest?.('[data-live-await-region]');
+    const scope = el.closest?.(awaitSelector);
     if (!settled && scope && ['data-ev-click','data-ev-submit','data-ev-keydown.enter'].includes(attr)) {
       if (settlingActions.has(scope) || el.matches?.(':disabled') || el.getAttribute('aria-disabled') === 'true') return false;
-      const id = scope.getAttribute('data-live-await-region');
-      const matches = [...regionInstances].filter(([node, instance]) => node.isConnected && instance.id === id);
-      const [region, instance] = matches.length === 1 ? matches[0] : [];
+      const raw=scope.getAttribute('data-live-await-regions'),single=scope.getAttribute('data-live-await-region');
+      let ids,regions=[];
       const blocked = error => {
-        instance?.driver?.report?.(error);
-        if (el.isConnected) { el.setAttribute('aria-description',error.message); el.title=error.message; }
-        el.dispatchEvent(new CustomEvent('live:action-blocked',{bubbles:true,detail:{reason:error.message}}));
+        const message=error?.message||String(error);regions[0]?.[1]?.driver?.report?.(Error(message));
+        if(el.isConnected){
+          if(!actionWarnings.has(el))actionWarnings.set(el,{title:el.getAttribute('title'),description:el.getAttribute('aria-description')});
+          actionWarnings.get(el).message=message;el.setAttribute('aria-description',message);el.title=message;
+        }
+        el.dispatchEvent(new CustomEvent('live:action-blocked',{bubbles:true,detail:{reason:message}}));
       };
-      if (!instance?.driver?.settle) { blocked(Error('The writing surface changed. Reopen the current page before sharing.')); return false; }
+      try {
+        ids=raw===null?[single]:JSON.parse(raw);
+        if(!Array.isArray(ids)||!ids.length||ids.length>16||ids.some(id=>typeof id!=='string'||!id.length||id.length>1024))throw Error('Invalid writing surface declaration.');
+        regions=[...new Set(ids)].map(id=>{
+          const matches=[...regionInstances].filter(([node,instance])=>node.isConnected&&instance.id===id);
+          if(matches.length!==1||!matches[0][1].driver?.settle)throw Error('The writing surface changed. Reopen the current page before sharing.');
+          return matches[0];
+        });
+      }catch(error){blocked(error);return false;}
       if (!ws || ws.readyState !== WebSocket.OPEN) { blocked(Error('You are offline. Reconnect before sharing your writing.')); return false; }
-      settlingActions.add(scope); scope.setAttribute('aria-busy','true');
-      Promise.resolve().then(() => instance.driver.settle()).then(() => {
-        if (!el.isConnected || !scope.isConnected || el.closest('[data-live-await-region]') !== scope ||
-            scope.getAttribute('data-live-await-region') !== id || regionInstances.get(region) !== instance)
+      const owner=regions[0][0].closest('#live-root')||Live.root,controller=new AbortController();
+      const valid=()=>{
+        if(!el.isConnected||!scope.isConnected||el.closest(awaitSelector)!==scope||
+           scope.getAttribute('data-live-await-regions')!==raw||scope.getAttribute('data-live-await-region')!==single||
+           regions.some(([node,instance])=>regionInstances.get(node)!==instance))
           throw Error('The writing surface changed. Reopen the current page before sharing.');
-        if (el.matches?.(':disabled') || el.getAttribute('aria-disabled') === 'true')
-          throw Error('This action is no longer available. Your writing is retained.');
-        if (ws.readyState !== WebSocket.OPEN) throw Error('You are offline. Reconnect before sharing your writing.');
-        // Acknowledgements may replace action guards. Read the current term only
-        // after the region settles and the complete patch has landed.
+        if(el.matches?.(':disabled')||el.getAttribute('aria-disabled')==='true')throw Error('This action is no longer available. Your writing is retained.');
+        if(ws.readyState!==WebSocket.OPEN)throw Error('You are offline. Reconnect before sharing your writing.');
+      };
+      settlingActions.add(scope);scope.setAttribute('aria-busy','true');
+      const timer=setTimeout(()=>controller.abort(Error('Confirmation is still pending. Keep this page open and try again.')),30000);
+      Promise.resolve().then(async()=>{
+        for(;;){
+          valid();
+          await Promise.all(regions.map(([,instance])=>instance.driver.settle({signal:controller.signal})));
+          // Ordinary native fields share the same ordered actor mailbox. Their
+          // assignments and resulting guard patches must also precede dispatch.
+          if(!owner?.__liveSettle)throw Error('Current Live tools are required before sharing.');
+          await owner.__liveSettle({signal:controller.signal});valid();
+          if(regions.every(([,instance])=>!instance.driver.ready||instance.driver.ready()))break;
+        }
+        clearActionWarning(el);
+        // Read the current term after the complete patch and collective recheck.
         relay(el,attr,ws,data,true,onRelayed);
-      }).catch(blocked).finally(() => { settlingActions.delete(scope); scope.removeAttribute('aria-busy'); });
+      }).catch(error=>blocked(controller.signal.aborted?controller.signal.reason:error))
+        .finally(()=>{clearTimeout(timer);controller.abort();settlingActions.delete(scope);scope.removeAttribute('aria-busy');});
       return true;
     }
     var raw = el.getAttribute(attr);

@@ -4,9 +4,23 @@ export function settlementError(state){
   if(state.readonly)return 'This document is shared for reading. Your draft is retained.';
   if(state.offline)return 'You are offline. Reconnect before sharing your writing.';
   if(state.conflict)return 'Resolve the retained draft before sharing your writing.';
+  if(state.orphaned)return 'Some fields changed. Keep the draft and choose current values before sharing.';
+  if(state.stale)return 'The source changed. Your draft is retained for comparison.';
   if(state.composing)return 'Finish entering the current character before sharing.';
   if(state.preview)return 'Apply or cancel the current preview before sharing.';
   return null;
+}
+export async function settleAssignments(read,publish,confirm,{signal,timeout=30000}={}){
+  const deadline=Date.now()+timeout;
+  const check=()=>{
+    if(signal?.aborted)throw signal.reason||Error('The writing surface closed before confirmation.');
+    if(Date.now()>=deadline)throw Error('Confirmation is still pending. Keep this page open and try again.');
+    const state=read(),error=settlementError(state);if(error)throw Error(error);return state;
+  };
+  for(;;){
+    const before=check();publish();await confirm({signal});const after=check();
+    if(before.token===after.token)return after.token;
+  }
 }
 export function waitForSettlement(read,subscribe,{signal,timeout=30000}={}){
   return new Promise((resolve,reject)=>{

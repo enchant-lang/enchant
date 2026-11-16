@@ -171,6 +171,22 @@
       (timer/sleep 100)
       (flush-mailbox))))
 
+(deftest settlement-projects-all-prior-local-events-before-acknowledgement
+ (flush-mailbox)
+ (let [conn (fresh-conn) sock (start-link board-socket {:shared conn :sink (erlang/self)})]
+  (try
+   (drain-all)
+   (cast sock [:event [:assign :draft "first"]])
+   (cast sock [:event [:assign :draft "final"]])
+   (cast sock [:live/settle "barrier"])
+   (let [frames (loop [frames []]
+                 (let [frame (drain 1000)]
+                  (if (or (= :none frame) (= [:settled "barrier"] frame)) (conj frames frame) (recur (conj frames frame)))))
+         patches (filter #(= :patch (first %)) frames)]
+    (is (= [:settled "barrier"] (last frames)))
+    (is (some #(includes? (pr-str %) "final") patches)))
+   (finally (stop sock) (timer/sleep 100) (flush-mailbox)))))
+
 (deftest an-assign-to-another-path-still-renders
   ; The other half of the property: only the SAME path is superseded. An assign
   ; to a different key may change what the view shows — a flag, a filter, an
