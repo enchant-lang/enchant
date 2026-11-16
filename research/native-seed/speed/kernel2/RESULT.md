@@ -105,7 +105,7 @@ python3 research/native-seed/speed/kernel2/check.py
 ```
 
 Each command ran under `work run --memory 3G` (the first two under 4G, before the rules
-changed).
+changed). `differences.py` lists the rt rows that differ from BEAM, with both outcomes.
 
 - `oracle.bl` (BEAM, pinned SDK) evaluates the covered BIFs, the literal-equality cases and the
   checked rt functions over a 73-value corpus. That is round 1's 61 values plus `{:meta}`, nested
@@ -171,7 +171,31 @@ scripts before they ran. "Compiles to inline tests" is shown above by reading th
 
 ### BEAM
 
-BEAM_PLACEHOLDER
+One batch, at the end, as the updated rules allow. The toolchain was prepared through the
+configured Nix backend.
+
+```
+work run --memory 4G --timeout 7200 -- ./bin/bl --cold test \
+  test/bl/{numeric_equality,wave18_rt_port,host_test_rt,compiler_kernel_values,callable_kernel,wave19_str,host_meta,sorted,host_vector,host_set,reduce_kernel_cutover,wave27_prims_port,java_oracle_port,decimal_oracle_port,clojure_source_port}_test.bl
+./bin/bl realm stop
+```
+
+Result: **14 of 15 files pass**: numeric equality 2 479 assertions, rt port 90, host rt 58,
+kernel values 124, callable kernel 40, str 10, meta 46, sorted 93, vector 186, set 64, reduce
+kernel cutover 451, prims 53, decimal oracle 2, clojure source port 88.
+
+The one failure is `java_oracle_port_test`, row 9: `(.equals 1.0M 1.00M)`. The JVM says false;
+bl says true. I believe this failure was already there before my change, but I could not check
+it on the unmodified tree, because the rules allow only one test batch:
+- The `java.manifest` row maps `equals` to `(= a b)`. `=` on decimals compares exact values by
+  design (`k-eqv`'s docstring: `(= 1.5M 1.50M)` is true), and BigDecimal scale equality is
+  `decimal/same-representation?`.
+- For two decimals, the rewritten `k-eqv` takes none of the new clauses (it checks atom, integer
+  and binary first, and a decimal is a map). It reaches `k-compare`'s general path as before.
+  That path still classifies a map with `kind-family (kind-kind …)` and gives `:number`, then
+  `eq-num-cmp`.
+
+Treat it as unconfirmed at integration.
 
 No BEAM microbench was run (same rule). The `[x] ++ xs` → `[x|xs]` fold is the claim of the
 BEAM compiler's `sys_core_fold` for a literal-headed `++`. It is not measured here.
