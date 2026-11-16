@@ -322,8 +322,7 @@
         ;; ownership; registered Env/project/osenv/diagnostics scopes convey.
         (let [admission (Process/get :bl_admission)
               modules (list (erlang/element 2 (erlang/fun_info fun :module)))
-              action (BeamLisp.Env/convey
-                (fn [_]
+              perform (fn []
                   (if (or (erlang/== nil admission)
                           (and (erlang/is_map admission)
                                (erlang/is_pid (Map/get admission :owner))
@@ -333,19 +332,36 @@
                                (erlang/< (erlang/monotonic_time :millisecond) (Map/get admission :deadline-ms))))
                     ;; Accepted shared effects drain. Nested requires must not
                     ;; inherit a budget that can expire halfway through init.
-                    (BeamLisp.Env/with_code_lease modules
-                      (fn [] (Process/delete :bl_admission)
-                             (erlang/apply fun (list))))
-                    :cancelled)))
-              reply (BeamLisp.Env/with_code_lease modules
+                    (do (Process/delete :bl_admission)
+                        (erlang/apply fun (list)))
+                    :cancelled))
+              ;; Bootstrap probes have no execution registry. Managed callers
+              ;; must instead mint an actual native handoff before queueing:
+              ;; ordinary context conveyance cannot give this worker admission.
+              registration (when (and (not= :undefined (ets/whereis :beam_lisp_vars))
+                                       (not= :undefined (ets/whereis :beam_lisp_code_leases))
+                                       (BeamLisp.Env/assert_execution_context!))
+                             (BeamLisp.Execution/register! perform modules))
+              action (when-not registration
+                       (BeamLisp.Env/convey
+                        (fn [_] (BeamLisp.Env/with_code_lease modules perform))))
+              reply (try (BeamLisp.Env/with_code_lease modules
                       (fn []
                         (let [session (Process/get :bl_loader_dependency)
-                              run_action (fn [] (erlang/apply action (list nil)))]
+                              run_action (fn []
+                               (if registration
+                                (let [result (BeamLisp.Execution/invoke! registration (list))]
+                                 (case (:status result)
+                                  :completed (:value result)
+                                  :cancelled :cancelled
+                                  :busy (erlang/error :code_lease_capacity)))
+                                (erlang/apply action (list nil))))]
                           (if session
                             ;; dependency_call unwraps for the worker; retain
                             ;; run/1's ordinary reply classification below.
                             (outcome (fn [] (dependency_call session run_action)))
-                            (GenServer/call own (tuple :run run_action) :infinity)))))]
+                            (GenServer/call own (tuple :run run_action) :infinity)))))
+                       (finally (when registration (BeamLisp.Execution/close! registration))))]
           (cond
             (and (erlang/is_tuple reply)
                  (erlang/== 2 (erlang/tuple_size reply))

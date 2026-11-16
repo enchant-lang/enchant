@@ -1,0 +1,21 @@
+(ns reload.managed-loader-handoff-test
+ (:require [reload.generation :as g] [reload.execution :as execution]))
+(deftest loader-mailbox-retains-original-native-admission-and-restores-caller
+ (let [graph (g/prepare! {:sources {"loader.handoff" "(ns loader.handoff) (defn value [] 23)"}})
+       caller (erlang/self)]
+  (try
+   (g/with! graph
+    (fn []
+     (let [result (BeamLisp.Loader.Server/run
+                   (fn [] [(:digest (g/current)) (execution/owned?) (erlang/self)]))]
+      (is (= (:digest graph) (nth result 0)))
+      (is (= true (nth result 1)))
+      (is (not= caller (nth result 2))))
+     (is (= :caught
+            (try (BeamLisp.Loader.Server/run (fn [] (throw :managed-loader-fixture)))
+                 (catch _ :caught))))
+     (is (execution/owned?))
+     (is (= 23 (g/invoke! graph "loader.handoff/value" [])))))
+   (is (= 0 (:registrations (g/evidence graph))))
+   (is (nil? (g/current)))
+   (finally (g/retire! graph)))))
