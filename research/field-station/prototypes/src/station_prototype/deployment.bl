@@ -101,16 +101,19 @@
               [{:db/ident :observation/component :db/valueType :db.type/string :db/unique :db.unique/identity}
                {:db/ident :observation/ready :db/valueType :db.type/boolean}])]
   (try
-   (checks/check! "bounded argv subprocess returns actual structured observations" (= :exited (:status result)))
+   (checks/check! "bounded argv subprocess returns actual structured observations" (command/ok? result))
    (d/transact! conn (mapv (fn [i]
                             {:db/id (- -1 i) :observation/component (get (nth observations i) "component")
                              :observation/ready (get (nth observations i) "ready")}) (range (count observations))))
    (checks/check! "proc demand stream feeds queryable Datom observations"
     (= 2 (count (d/q '[:find ?e :where [?e :observation/ready true]] (d/db conn)))))
    (let [limited (command/run print-program ["%s" (join "" (repeat 1000 "x"))] {:timeout-ms 3000 :limit 32})
-         timed (command/run sleep-program ["2"] {:timeout-ms 20 :limit 128})]
+         timed (command/run sleep-program ["2"] {:timeout-ms 20 :limit 128})
+         failed (command/run (command/tool "false") [] {:timeout-ms 3000 :limit 128})]
     (checks/check! "subprocess capture drains excess output and marks truncation" (:truncated limited))
-    (checks/check! "subprocess deadline reports timeout rather than success" (= :timed-out (:status timed))))
+    (checks/check! "subprocess deadline reports timeout rather than success" (= :timed-out (:status timed)))
+    (checks/check! "a completed nonzero subprocess is still a failed command"
+     (and (= :exited (:status failed)) (= 1 (:exit failed)) (not (command/ok? failed)))))
    (finally (d/close! conn)))))
 (defn run! [source root]
  (reset! checks/results [])
