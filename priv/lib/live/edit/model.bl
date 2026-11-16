@@ -1,0 +1,264 @@
+; Portable source and edits. All text coordinates are Unicode codepoints.
+(ns live.edit.model (:require [live.edit.registry :as r]))
+
+(defn points [s] (vec (unicode/characters_to_list s)))
+(defn length [s] (count (points s)))
+(defn slice [s from to]
+  (unicode/characters_to_binary (to-list (subvec (points s) from to))))
+(defn identifier? [id]
+  (and (string? id) (<= 1 (length id) 128) (some? (re-matches #"[A-Za-z0-9_./:-]+" id))))
+(defn- fields? [m ks] (and (map? m) (= (set (keys m)) (set ks))))
+(defn- json-data? [v depth]
+  (and (< depth 16)
+       (or (nil? v) (boolean? v) (string? v) (and (int? v) (<= -9007199254740991 v 9007199254740991))
+           (and (vector? v) (<= (count v) 512) (every? #(json-data? % (inc depth)) v))
+           (and (map? v) (<= (count v) 64)
+                (every? (fn [[k x]] (and (keyword? k) (json-data? x (inc depth)))) v)))))
+(defn call? [call]
+  (and (fields? call [:id :function :version :args]) (identifier? (:id call))
+       (identifier? (:function call)) (int? (:version call)) (pos? (:version call))
+       (map? (:args call)) (json-data? (:args call) 0)))
+(defn block? [b]
+  (and (fields? b [:id :text :marks :wraps]) (identifier? (:id b))
+       (string? (:text b)) (<= (length (:text b)) 65536)
+       (vector? (:marks b)) (<= (count (:marks b)) 512)
+       (every? (fn [m] (and (fields? m [:call :from :to]) (call? (:call m))
+                            (int? (:from m)) (int? (:to m))
+                            (<= 0 (:from m)) (< (:from m) (:to m))
+                            (<= (:to m) (length (:text b))))) (:marks b))
+       (vector? (:wraps b)) (<= (count (:wraps b)) 16) (every? call? (:wraps b))))
+(defn valid? [doc]
+  (and (fields? doc [:schema :id :blocks]) (= 1 (:schema doc)) (identifier? (:id doc))
+       (vector? (:blocks doc)) (<= 1 (count (:blocks doc)) 256)
+       (= (count (:blocks doc)) (count (set (map :id (:blocks doc)))))
+       (every? block? (:blocks doc))))
+(defn validate [doc] (when-not (valid? doc) (r/fail "invalid-document")) doc)
+(defn block [id text] {:id id :text text :marks [] :wraps []})
+(defn document [id blocks] (validate {:schema 1 :id id :blocks blocks}))
+(defn block-index [doc id]
+  (first (keep-indexed (fn [i b] (when (= id (:id b)) i)) (:blocks doc))))
+(defn find-block [doc id]
+  (when-let [i (block-index doc id)] (nth (:blocks doc) i)))
+(defn- require-block [doc id]
+  (or (find-block doc id) (r/fail "missing-block")))
+(defn- bounds! [b from to]
+  (when-not (and (int? from) (int? to) (<= 0 from to (length (:text b)))) (r/fail "invalid-range")))
+
+(defn map-point [point mapping]
+  (reduce
+    (fn [p m]
+      (let [id (:block p) at (:offset p) right? (not= "left" (:affinity p))]
+        (cond
+          (and (= "range" (:kind m)) (some #{id} (:blocks m)))
+          (cond
+            (and (= id (:first m)) (or (< at (:from m)) (and (= at (:from m)) (not right?)))) p
+            (and (= id (:last m)) (>= at (:to m)))
+            (assoc p :block (get-in m [:end :block]) :offset (+ (get-in m [:end :offset]) (- at (:to m))))
+            :else (assoc p :block (get-in m [:end :block]) :offset (get-in m [:end :offset])))
+          (and (= "replace" (:kind m)) (= id (:block m)))
+          (assoc p :offset
+            (cond (< at (:from m)) at
+                  (> at (:to m)) (+ at (- (:inserted m) (- (:to m) (:from m))))
+                  (and (= at (:to m)) (not= (:from m) (:to m))) (+ (:from m) (:inserted m))
+                  :else (+ (:from m) (if right? (:inserted m) 0))))
+          (and (= "split" (:kind m)) (= id (:block m))
+               (or (> at (:at m)) (and (= at (:at m)) right?)))
+          (assoc p :block (:new m) :offset (- at (:at m)))
+          (and (= "join" (:kind m)) (= id (:right m)))
+          (assoc p :block (:left m) :offset (+ (:at m) at))
+          :else p))) point mapping))
+(defn map-selection [selection mapping]
+  (when selection (assoc selection :anchor (map-point (:anchor selection) mapping)
+                                  :head (map-point (:head selection) mapping))))
+
+(defn- replace-blocks [doc from to blocks]
+  (assoc doc :blocks (into (into (subvec (:blocks doc) 0 from) blocks)
+                          (subvec (:blocks doc) to))))
+(defn- result [doc from to next mapping]
+  (let [old (subvec (:blocks doc) from to)
+        changed (validate (replace-blocks doc from to next))]
+    {:document changed :mapping mapping
+     :inverse {:op "blocks/restore" :ids (mapv :id next) :expected next :blocks old}}))
+(defn- mapped-marks [marks mapping]
+  (filterv (fn [m] (< (:from m) (:to m)))
+    (mapv (fn [m]
+            (let [base {:block (:block (first mapping))}
+                  start (map-point (assoc base :offset (:from m) :affinity "left") mapping)
+                  end (map-point (assoc base :offset (:to m) :affinity "right") mapping)]
+              (assoc m :from (:offset start) :to (:offset end)))) marks)))
+(defn- replace-text [doc op]
+  (let [b (require-block doc (:block op)) i (block-index doc (:block op))
+        from (:from op) to (:to op) text (:text op)]
+    (bounds! b from to)
+    (when-not (and (string? text) (<= (length text) 65536)) (r/fail "invalid-text"))
+    (when (and (contains? op :expected) (not= (:expected op) (slice (:text b) from to)))
+      (r/fail "changed-source"))
+    (let [mapping [{:kind "replace" :block (:id b) :from from :to to :inserted (length text)}]
+          next (assoc b :text (str (slice (:text b) 0 from) text (slice (:text b) to (length (:text b))))
+                        :marks (mapped-marks (:marks b) mapping))]
+      (result doc i (inc i) [next] mapping))))
+
+(defn- calls [b] (into (:wraps b) (mapv :call (:marks b))))
+(defn call-ids [doc] (set (mapcat (fn [b] (map :id (calls b))) (:blocks doc))))
+(defn- new-call! [doc id]
+  (when-not (and (identifier? id) (not (contains? (call-ids doc) id))) (r/fail "duplicate-application")))
+(defn- apply-inline [registry doc op]
+  (let [b (require-block doc (:block op)) i (block-index doc (:block op))]
+    (bounds! b (:from op) (:to op))
+    (when (= (:from op) (:to op)) (r/fail "empty-selection"))
+    (new-call! doc (:id op))
+    (let [call (r/application registry (:id op) (:function op) (get op :args {}) "inline")]
+      (result doc i (inc i) [(update b :marks conj {:from (:from op) :to (:to op) :call call})] []))))
+(defn- apply-block [registry doc op]
+  (let [b (require-block doc (:block op)) i (block-index doc (:block op))]
+    (new-call! doc (:id op))
+    (result doc i (inc i)
+      [(update b :wraps conj (r/application registry (:id op) (:function op) (get op :args {}) "block"))] [])))
+
+(defn- change-call [registry doc op]
+  (let [id (:id op) touched (keep-indexed (fn [i b] (when (some #(= id (:id %)) (calls b)) i)) (:blocks doc))]
+    (when (empty? touched) (r/fail "missing-application"))
+    (let [from (first touched) to (inc (last touched))
+          change (fn [call]
+                   (if (= id (:id call))
+                     (if (= "call/remove" (:op op)) nil
+                       (let [spec (get registry (:function call))]
+                         (when-not (and spec (= (:version spec) (:version call))) (r/fail "function-contract-changed"))
+                         (when (and (contains? op :expected) (not= (:expected op) (:args call))) (r/fail "changed-arguments"))
+                         (assoc call :args (r/arguments spec (:args op))))) call))
+          next (mapv (fn [b]
+                       (assoc b :wraps (filterv some? (mapv change (:wraps b)))
+                                :marks (filterv #(some? (:call %))
+                                         (mapv #(assoc % :call (change (:call %))) (:marks b)))))
+                     (subvec (:blocks doc) from to))]
+      (result doc from to next []))))
+
+(defn- split-block [doc op]
+  (let [b (require-block doc (:block op)) at (:at op) i (block-index doc (:block op)) id (:new op)]
+    (bounds! b at at)
+    (when-not (and (identifier? id) (nil? (find-block doc id))) (r/fail "duplicate-block"))
+    (let [left (assoc b :text (slice (:text b) 0 at)
+                       :marks (filterv #(< (:from %) (:to %))
+                                (mapv #(assoc % :to (min at (:to %))) (:marks b))))
+          right (assoc b :id id :text (slice (:text b) at (length (:text b)))
+                        :marks (filterv #(< (:from %) (:to %))
+                                 (mapv #(assoc % :from (max 0 (- (:from %) at)) :to (- (:to %) at)) (:marks b))))]
+      (result doc i (inc i) [left right] [{:kind "split" :block (:id b) :new id :at at}]))))
+(defn- join-blocks [doc op]
+  (let [left (require-block doc (:left op)) right (require-block doc (:right op))
+        i (block-index doc (:left op)) at (length (:text left))]
+    (when-not (= (inc i) (block-index doc (:right op))) (r/fail "nonadjacent-blocks"))
+    (when-not (= (:wraps left) (:wraps right)) (r/fail "incompatible-wrappers"))
+    (let [next (assoc left :text (str (:text left) (:text right))
+                          :marks (into (:marks left) (mapv #(assoc % :from (+ at (:from %)) :to (+ at (:to %))) (:marks right))))]
+      (result doc i (+ i 2) [next] [{:kind "join" :left (:id left) :right (:id right) :at at}]))))
+(defn- restore-blocks [doc op]
+  (let [ids (:ids op) i (block-index doc (first ids)) n (count ids)]
+    (when-not (and (vector? ids) (pos? n) (int? i) (<= (+ i n) (count (:blocks doc)))
+                   (= ids (mapv :id (subvec (:blocks doc) i (+ i n))))
+                   (= (:expected op) (subvec (:blocks doc) i (+ i n)))
+                   (vector? (:blocks op)) (seq (:blocks op))) (r/fail "undo-conflict"))
+    (let [before (:expected op) after (:blocks op)
+          mapping (cond
+                    (and (= 1 n) (= 2 (count after)))
+                    [{:kind "split" :block (:id (first before)) :new (:id (second after)) :at (length (:text (first after)))}]
+                    (and (= 2 n) (= 1 (count after)))
+                    [{:kind "join" :left (:id (first before)) :right (:id (second before)) :at (length (:text (first before)))}]
+                    (not= (mapv :id before) (mapv :id after))
+                    [{:kind "range" :blocks (mapv :id before) :first (:id (first before)) :last (:id (last before))
+                      :from 0 :to (length (:text (last before)))
+                      :end {:block (:id (last after)) :offset (length (:text (last after)))}}]
+                    :else (vec (keep (fn [old]
+                                      (when-let [next (first (filter #(= (:id old) (:id %)) after))]
+                                        (when (not= (:text old) (:text next))
+                                          {:kind "replace" :block (:id old) :from 0 :to (length (:text old))
+                                           :inserted (length (:text next))}))) before)))]
+      (result doc i (+ i n) after mapping))))
+
+(defn ordered-range [doc anchor head]
+  (let [a (block-index doc (:block anchor)) b (block-index doc (:block head))]
+    (when-not (and (int? a) (int? b)) (r/fail "missing-block"))
+    (if (or (< a b) (and (= a b) (<= (:offset anchor) (:offset head)))) [anchor head] [head anchor])))
+(defn- clipped [block from to]
+  (bounds! block from to)
+  (assoc block :text (slice (:text block) from to)
+               :marks (filterv #(< (:from %) (:to %))
+                        (mapv #(assoc % :from (max 0 (- (:from %) from))
+                                       :to (- (min to (:to %)) from)) (:marks block)))))
+(defn fragment [doc anchor head]
+  (let [[a b] (ordered-range doc anchor head) ai (block-index doc (:block a)) bi (block-index doc (:block b))]
+    (mapv (fn [i] (let [block (nth (:blocks doc) i)]
+                    (clipped block (if (= ai i) (:offset a) 0)
+                                   (if (= bi i) (:offset b) (length (:text block)))))) (range ai (inc bi)))))
+(defn- shifted [marks by]
+  (mapv #(assoc % :from (+ by (:from %)) :to (+ by (:to %))) marks))
+(defn- replacement-fragment [doc op]
+  (let [seed (:seed op)]
+    (when-not (identifier? seed) (r/fail "invalid-paste-id"))
+    (let [fragments (if (contains? op :fragment) (:fragment op)
+                      (mapv #(block "fragment" %) (split (replace-str (replace-str (:text op) "\r\n" "\n") "\r" "\n") "\n")))]
+      (when-not (and (vector? fragments) (<= 1 (count fragments) 128) (every? block? fragments)) (r/fail "invalid-fragment"))
+      (let [ids (vec (distinct (mapcat (fn [b] (map :id (calls b))) fragments)))
+            rename (into {} (map-indexed (fn [i id] [id (str seed "/a/" i)]) ids))
+            rename-call (fn [c] (assoc c :id (get rename (:id c))))]
+        (when (some (call-ids doc) (vals rename)) (r/fail "duplicate-application"))
+        (mapv (fn [b] (assoc b :wraps (mapv rename-call (:wraps b))
+                               :marks (mapv #(assoc % :call (rename-call (:call %))) (:marks b)))) fragments)))))
+(defn- replace-range [doc op]
+  (let [[a b] (ordered-range doc (:from op) (:to op))
+        ai (block-index doc (:block a)) bi (block-index doc (:block b))
+        first-block (nth (:blocks doc) ai) last-block (nth (:blocks doc) bi)
+        prefix (clipped first-block 0 (:offset a))
+        suffix (clipped last-block (:offset b) (length (:text last-block)))
+        fragments (replacement-fragment doc op) n (count fragments)
+        prefix-size (length (:text prefix))
+        next (mapv (fn [i]
+                     (let [piece (nth fragments i)
+                           id (if (zero? i) (:id first-block) (str (:seed op) "/b/" i))
+                           before (if (zero? i) (:text prefix) "")
+                           after (if (= i (dec n)) (:text suffix) "")
+                           before-size (length before)
+                           marks (into (if (zero? i) (:marks prefix) []) (shifted (:marks piece) before-size))
+                           marks (if (= i (dec n)) (into marks (shifted (:marks suffix) (+ before-size (length (:text piece))))) marks)]
+                       (when (and (pos? i) (find-block doc id)) (r/fail "duplicate-block"))
+                       (assoc piece :id id :text (str before (:text piece) after) :marks marks
+                         :wraps (cond (zero? i) (:wraps first-block)
+                                      (= i (dec n)) (:wraps last-block) :else (:wraps piece))))) (range n))
+        end {:block (:id (last next)) :offset (+ (if (= 1 n) prefix-size 0) (length (:text (last fragments))))}
+        mapping [{:kind "range" :blocks (mapv :id (subvec (:blocks doc) ai (inc bi)))
+                  :first (:block a) :last (:block b) :from (:offset a) :to (:offset b) :end end}]]
+    (when (and (= 1 n) (not= (:wraps first-block) (:wraps last-block))) (r/fail "incompatible-wrappers"))
+    (result doc ai (inc bi) next mapping)))
+
+(declare apply-op)
+(defn- apply-batch [registry doc ops]
+  (when-not (and (vector? ops) (<= 1 (count ops) 256) (every? #(not= "batch" (:op %)) ops)) (r/fail "invalid-batch"))
+  (reduce (fn [out op]
+            (let [next (apply-op registry (:document out) op)]
+              {:document (:document next) :mapping (into (:mapping out) (:mapping next))
+               :inverse {:op "batch" :ops (into [(:inverse next)] (get-in out [:inverse :ops]))}}))
+          {:document doc :mapping [] :inverse {:op "batch" :ops []}} ops))
+(defn apply-op [registry doc op]
+  (validate doc)
+  (when-not (map? op) (r/fail "invalid-operation"))
+  (cond
+    (= "text/replace" (:op op)) (replace-text doc op)
+    (= "text/apply" (:op op)) (apply-inline registry doc op)
+    (= "block/apply" (:op op)) (apply-block registry doc op)
+    (contains? #{"call/remove" "call/args"} (:op op)) (change-call registry doc op)
+    (= "block/split" (:op op)) (split-block doc op)
+    (= "block/join" (:op op)) (join-blocks doc op)
+    (= "blocks/restore" (:op op)) (restore-blocks doc op)
+    (= "range/replace" (:op op)) (replace-range doc op)
+    (= "batch" (:op op)) (apply-batch registry doc (:ops op))
+    (= "text/transform" (:op op))
+    (let [spec (get registry (:function op)) b (require-block doc (:block op))]
+      (when-not (and spec (= "transform" (:kind spec))) (r/fail "unknown-transform"))
+      (bounds! b (:from op) (:to op))
+      (replace-text doc (assoc op :op "text/replace"
+        :text ((:run spec) (slice (:text b) (:from op) (:to op)) (r/arguments spec (get op :args {}))))))
+    :else (r/fail "unknown-operation")))
+
+(defn attempt [registry doc op]
+  (try (assoc (apply-op registry doc op) :ok true)
+       (catch error {:ok false :reason (get (ex-data error) :edit/error "edit-failed")})))

@@ -1,0 +1,87 @@
+(ns live.edit.sync-test (:require [live.edit.model :as m] [live.edit.sync :as s]
+                                [live.edit.registry :as r] [live.edit.tools :as tools]))
+(def registry (r/functions [tools/package]))
+(def doc (m/document "notes" [(m/block "p1" "abcdef") (m/block "p2" "مرحبا 🍌")]))
+(def initial (s/authority registry doc))
+(defn insert [block at text] {:op "text/replace" :block block :from at :to at :text text})
+(defn settle [authority replica]
+  (let [decision (s/decide registry authority (s/outbound replica))]
+    [(:state decision) (s/receive-reply registry replica (:reply decision))]))
+
+(deftest immediate-prediction-and-late-ack-retain-later-typing
+  (let [a (s/enqueue registry (s/replica initial) "a1" (insert "p1" 0 "A"))
+        a2 (s/enqueue registry a "a2" (insert "p1" 1 "B"))
+        [server client] (settle initial a2)
+        [server2 client2] (settle server client)]
+    (is (= "ABabcdef" (get-in client [:visible :blocks 0 :text])))
+    (is (= 1 (count (:pending client))))
+    (is (= (:document server2) (:visible client2)))
+    (is (empty? (:pending client2)))))
+
+(deftest proposals-refuse-forged-contracts-and-reused-identities
+  (let [client (s/enqueue registry (s/replica initial) "a1" (insert "p1" 0 "A"))
+        p (s/outbound client) accepted (s/decide registry initial p)
+        duplicate (s/decide registry (:state accepted) p)]
+    (is (= true (get-in duplicate [:reply :duplicate])))
+    (is (= 1 (get-in duplicate [:state :revision])))
+    (is (= "operation-id-reused" (get-in (s/decide registry (:state accepted) (assoc p :op (insert "p1" 0 "X"))) [:reply :reason])))
+    (is (= "client-outdated" (get-in (s/decide registry initial (assoc p :digest "wrong")) [:reply :reason])))
+    (is (= "invalid-proposal" (get-in (s/decide registry initial (assoc p :actor "admin")) [:reply :reason])))))
+
+(deftest stale-nonoverlapping-edits-rebase-on-authority-and-browser
+  (let [a (s/enqueue registry (s/replica initial) "a1" (insert "p1" 0 "A"))
+        b (s/enqueue registry (s/replica initial) "b1" (insert "p1" 6 "B"))
+        [server _] (settle initial a)
+        moved (s/adopt registry b (s/snapshot server))
+        [final client] (settle server moved)
+        direct (s/decide registry server (s/outbound b))]
+    (is (= 7 (get-in moved [:pending 0 :op :from])))
+    (is (= "AabcdefB" (get-in final [:document :blocks 0 :text])))
+    (is (= (:document final) (:visible client)))
+    (is (= (:document final) (get-in direct [:state :document])))))
+
+(deftest pending-sequences-rebase-with-their-own-coordinate-history
+  (let [a (s/enqueue registry (s/replica initial) "a1" (insert "p1" 0 "A"))
+        b (->> (s/replica initial)
+               (#(s/enqueue registry % "b1" (insert "p1" 6 "B")))
+               (#(s/enqueue registry % "b2" (insert "p1" 7 "C"))))
+        [server _] (settle initial a)
+        b1 (s/adopt registry b server)
+        [server2 b2] (settle server b1)
+        [server3 b3] (settle server2 b2)]
+    (is (= "AabcdefBC" (get-in b1 [:visible :blocks 0 :text])))
+    (is (= (:document server3) (:visible b3)))
+    (is (empty? (:conflicts b3)))))
+
+(deftest overlap-retains-the-local-draft
+  (let [op {:op "text/replace" :block "p1" :from 1 :to 4 :text "X"}
+        a (s/enqueue registry (s/replica initial) "a1" op)
+        b (s/enqueue registry (s/replica initial) "b1" (assoc op :text "Y"))
+        [server _] (settle initial a)
+        result (s/adopt registry b server)]
+    (is (= "aYef" (get-in result [:visible :blocks 0 :text])))
+    (is (= "aXef" (get-in result [:confirmed :blocks 0 :text])))
+    (is (= "concurrent-text-conflict" (get-in result [:conflicts 0 :reason])))
+    (is (nil? (s/outbound result)))
+    (is (= (:document server) (:visible (s/use-confirmed result))))))
+
+(deftest undo-is-a-new-commit-and-preserves-another-users-block
+  (let [a (s/enqueue registry (s/replica initial) "a1" (insert "p1" 0 "A"))
+        [server a1] (settle initial a)
+        b (s/enqueue registry (s/replica server) "b1" (insert "p2" 0 "B"))
+        [server2 _] (settle server b)
+        a2 (s/adopt registry a1 server2)
+        [server3 a3] (settle server2 (s/undo registry a2 "a2"))
+        [server4 a4] (settle server3 (s/redo registry a3 "a3"))]
+    (is (= 3 (:revision server3)))
+    (is (= "abcdef" (get-in server3 [:document :blocks 0 :text])))
+    (is (= "Bمرحبا 🍌" (get-in server3 [:document :blocks 1 :text])))
+    (is (= "Aabcdef" (get-in server4 [:document :blocks 0 :text])))
+    (is (= (:document server4) (:visible a4)))))
+
+(deftest unknown-journal-bases-retain-a-recoverable-draft
+  (let [a (s/enqueue registry (s/replica initial) "a1" (insert "p1" 0 "A"))
+        remote (assoc initial :revision 5 :journal [])
+        result (s/adopt registry a remote)]
+    (is (= "revision-history-unavailable" (get-in result [:conflicts 0 :reason])))
+    (is (= (:visible a) (:draft result)))))

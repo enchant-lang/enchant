@@ -1,0 +1,20 @@
+# Native editor host build
+
+`npm ci --ignore-scripts --no-audit --no-fund` followed by
+`node tooling/editor-host/build-host.mjs` from the repository root rebuilds
+the host asset and its input/artifact digests and third-party notices.
+The lock is preserved from editable-projections commit
+`a007273ca8d1dd009212d84cdc2acaf8d514f41a`, SHA-256
+`62c4772968658211edb3dcbe9dddc604c2c33d25bc433e848fb1b9e5e465ea9f`.
+No dependency upgrade was required for graduation. Package dev dependencies
+are retained for provenance; this build uses esbuild and the runtime adapters.
+
+Product packages can provide `:document-actions` through `live.edit.app/editor`.
+Each data descriptor has label/icon and an ordinary href with optional download;
+the product keeps its navigation and canonical export format. Absent this option,
+the generic editor retains its default export/source actions.
+
+`editor.geometry.hit({x,y})` returns a stable block ID and Unicode code-point
+offset from actual input geometry, or null outside the canvas. Code inputs use
+CodeMirror's coordinate mapping, prose uses native caret geometry. Consumers
+must still validate the source/revision before offering an edit.

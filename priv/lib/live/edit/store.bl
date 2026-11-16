@@ -1,0 +1,60 @@
+; Live's Datom writer is the authority: validate and publish in one transaction.
+(ns live.edit.store
+  (:require [live.edit.sync :as sync] [live.edit.registry :as r]
+            [datom] [datom.db :as db] [datom.store :as substrate] [bl.json :as json]))
+(def schema [{:db/ident :editable/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+             {:db/ident :editable/state :db/valueType :db.type/string}
+             {:db/ident :editable/published :db/valueType :db.type/string}])
+(defn entity [database id]
+  (first (first (datom/q '[:find ?e :in $ ?id :where [?e :editable/id ?id]] database id))))
+(defn read-authority [database id]
+  (when-let [e (entity database id)] (json/decode (db/attr-value database e :editable/state) {:keys :keyword})))
+(defn read-state [database id]
+  (when-let [e (entity database id)] (json/decode (db/attr-value database e :editable/published) {:keys :keyword})))
+(defn- sync! [conn]
+  (when (substrate/durable? (:store conn)) (substrate/sync! (:store conn))))
+(defn publish! [conn id]
+  (let [state (read-authority (datom/db conn) id)]
+    ;; First persist authority content and operation identities. Only then may
+    ;; any Live observer see this revision as confirmed. The publication row
+    ;; is a rebuildable projection; startup repeats this procedure.
+    (sync! conn)
+    (when (< (:revision (read-state (datom/db conn) id)) (:revision state))
+      (try
+        (datom/transact! conn
+          [[:db/fn (fn [database]
+                     (let [published (read-state database id)]
+                       (if (>= (:revision published) (:revision state))
+                         (throw (ex-info "Already published" {:intent/outcome {:status :noop}}))
+                         [[:db/add (entity database id) :editable/published (json/encode state)]])))]])
+        (catch error (when-not (= :noop (get-in (ex-data error) [:intent/outcome :status])) (throw error)))))))
+(defn initialize! [conn registry document]
+  (datom/transact! conn
+    [[:db/fn (fn [database]
+               (if (entity database (:id document)) []
+                 (let [initial (json/encode (sync/authority registry document))]
+                   [{:db/id -1 :editable/id (:id document)
+                     :editable/state initial :editable/published initial}])))]])
+  (publish! conn (:id document)))
+(defn transaction [database registry id proposal]
+  (let [state (read-authority database id)]
+    (when-not state (r/fail "missing-document"))
+    (let [decision (sync/decide registry state proposal) reply (:reply decision)]
+      (cond
+        (not (:ok reply))
+        (throw (ex-info "Edit refused" {:intent/outcome {:status :refused
+                              :why (json/encode (select-keys reply [:id :reason]))}}))
+        (= state (:state decision)) (throw (ex-info "Edit already committed" {:intent/outcome {:status :noop}}))
+        :else [[:db/add (entity database id) :editable/state (json/encode (:state decision))]]))))
+(defn performer [registry id]
+  (fn [conn payload _principal]
+    (let [proposal (json/decode (json/encode (:proposal payload)) {:keys :keyword})]
+      (try
+        (datom/transact! conn [[:db/fn (fn [database] (transaction database registry id proposal))]])
+        (catch error (when-not (= :noop (get-in (ex-data error) [:intent/outcome :status])) (throw error))))
+      (publish! conn id)
+      nil)))
+(defn refusal [outcome]
+  (when (= :denied (:status outcome))
+    (try (json/decode (:why outcome) {:keys :keyword})
+         (catch _ {:reason "edit-denied"}))))

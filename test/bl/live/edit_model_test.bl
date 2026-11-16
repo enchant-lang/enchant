@@ -1,0 +1,94 @@
+(ns live.edit.model-test
+  (:require [live.edit.model :as m] [live.edit.registry :as r] [live.edit.tools :as tools]))
+(def registry (r/functions [tools/package]))
+(def source (m/document "notes" [(m/block "p1" "Ship carefully 🍌.") (m/block "p2" "مرحبا é")]))
+(def highlight {:op "text/apply" :block "p1" :from 5 :to 14 :id "a1" :function "text/highlight" :args {}})
+(defn doc-after [doc op] (:document (m/apply-op registry doc op)))
+(defn roundtrip [doc op]
+  (let [changed (m/apply-op registry doc op)]
+    (= doc (doc-after (:document changed) (:inverse changed)))))
+
+(deftest unicode-coordinates-are-explicit
+  (is (= 1 (m/length "🍌")))
+  (is (= 2 (m/length "é")))
+  (is (= "🍌" (m/slice "a🍌b" 1 2)))
+  (is (= "مرحبا" (m/slice "مرحبا é" 0 5))))
+
+(deftest malformed-documents-and-operations-refuse
+  (is (not (m/valid? (assoc source :blocks []))))
+  (is (not (m/valid? (assoc source :blocks [(m/block "same" "a") (m/block "same" "b")]))))
+  (is (= "invalid-range" (:reason (m/attempt registry source {:op "text/replace" :block "p1" :from -1 :to 1 :text "x"}))))
+  (is (= "unknown-operation" (:reason (m/attempt registry source {:op "eval" :code "(exit)"})))))
+
+(deftest applications-preserve-source-and-retain-default-arguments
+  (let [doc (doc-after source highlight) call (get-in doc [:blocks 0 :marks 0 :call])]
+    (is (= "Ship carefully 🍌." (get-in doc [:blocks 0 :text])))
+    (is (= {:tone "amber"} (:args call)))
+    (is (roundtrip source highlight))
+    (is (roundtrip doc {:op "call/args" :id "a1" :args {:tone "mint"}}))
+    (is (roundtrip doc {:op "call/remove" :id "a1"}))
+    (is (= "duplicate-application" (:reason (m/attempt registry doc highlight))))))
+
+(deftest text-edits-map-overlapping-annotations-and-selection
+  (let [doc (doc-after source highlight)
+        changed (m/apply-op registry doc {:op "text/replace" :block "p1" :from 9 :to 9 :text "very "})
+        selection {:anchor {:block "p1" :offset 14} :head {:block "p2" :offset 2}}]
+    (is (= 19 (get-in changed [:document :blocks 0 :marks 0 :to])))
+    (is (= 19 (get-in (m/map-selection selection (:mapping changed)) [:anchor :offset])))
+    (is (= {:block "p2" :offset 2} (:head (m/map-selection selection (:mapping changed)))))
+    (is (= doc (doc-after (:document changed) (:inverse changed))))))
+
+(deftest split-and-join-map-identities-and-undo
+  (let [doc (doc-after source highlight)
+        split (m/apply-op registry doc {:op "block/split" :block "p1" :at 10 :new "p3"})
+        right (m/map-point {:block "p1" :offset 12} (:mapping split))]
+    (is (= {:block "p3" :offset 2} right))
+    (is (= 3 (count (get-in split [:document :blocks]))))
+    (is (= doc (doc-after (:document split) (:inverse split))))
+    (is (roundtrip (:document split) {:op "block/join" :left "p1" :right "p3"}))))
+
+(deftest compensating-undo-preserves-other-blocks-and-refuses-changed-targets
+  (let [edit (m/apply-op registry source {:op "text/replace" :block "p1" :from 0 :to 0 :text "Please "})
+        peer (doc-after (:document edit) {:op "text/replace" :block "p2" :from 0 :to 0 :text "Peer "})
+        undone (doc-after peer (:inverse edit))
+        conflict (doc-after (:document edit) {:op "text/replace" :block "p1" :from 0 :to 0 :text "Peer "})]
+    (is (= (:text (first (:blocks source))) (:text (first (:blocks undone)))))
+    (is (= "Peer مرحبا é" (get-in undone [:blocks 1 :text])))
+    (is (= "undo-conflict" (:reason (m/attempt registry conflict (:inverse edit)))))))
+
+(deftest block-wrappers-and-transformations-use-the-same-algebra
+  (is (roundtrip source {:op "block/apply" :block "p1" :id "c1" :function "text/callout" :args {}}))
+  (is (roundtrip source {:op "text/transform" :block "p1" :from 0 :to 4 :function "text/uppercase"}))
+  (is (= "SHIP carefully 🍌." (get-in (doc-after source {:op "text/transform" :block "p1" :from 0 :to 4 :function "text/uppercase"}) [:blocks 0 :text]))))
+
+(deftest registry-layers-and-editable-shells
+  (let [packages (r/use [] tools/package) call (r/application registry "a" "text/highlight" {} "inline")]
+    (is (= [:mark {:data-tone "amber"} "text"] (r/present registry call "inline" "text")))
+    (is (= {} (r/functions (r/unuse packages "standard"))))
+    (is (= "text" (last (r/present {} call "inline" "text")))))
+  (is (= "invalid-arguments" (:reason (m/attempt registry source (assoc highlight :args {:tone "purple"}))))))
+
+(deftest a-batch-is-atomic-and-has-one-compensation
+  (is (roundtrip source {:op "batch" :ops [highlight {:op "text/replace" :block "p2" :from 0 :to 0 :text "Hi "}]}))
+  (is (= false (:ok (m/attempt registry source {:op "batch" :ops [highlight {:op "unknown"}]})))))
+
+(deftest multiline-and-cross-block-replacement-preserve-a-reversible-source
+  (let [op {:op "range/replace" :from {:block "p1" :offset 5} :to {:block "p2" :offset 5}
+            :text "one\ntwo\n" :seed "paste1"}
+        edit (m/apply-op registry source op)]
+    (is (= ["Ship one" "two" " é"] (mapv :text (get-in edit [:document :blocks]))))
+    (is (= ["p1" "paste1/b/1" "paste1/b/2"] (mapv :id (get-in edit [:document :blocks]))))
+    (is (= source (doc-after (:document edit) (:inverse edit))))
+    (is (= {:block "paste1/b/2" :offset 0}
+           (m/map-point {:block "p1" :offset 8} (:mapping edit))))))
+
+(deftest rich-fragments-preserve-formatting-and-clone-application-identities
+  (let [doc (doc-after source highlight)
+        fragment (m/fragment doc {:block "p1" :offset 5} {:block "p1" :offset 14})
+        op {:op "range/replace" :from {:block "p2" :offset 0} :to {:block "p2" :offset 0}
+            :fragment fragment :seed "copy1"}
+        edit (m/apply-op registry doc op)]
+    (is (= "carefullyمرحبا é" (get-in edit [:document :blocks 1 :text])))
+    (is (= "copy1/a/0" (get-in edit [:document :blocks 1 :marks 0 :call :id])))
+    (is (= "a1" (get-in edit [:document :blocks 0 :marks 0 :call :id])))
+    (is (roundtrip doc op))))

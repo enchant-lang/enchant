@@ -1,0 +1,38 @@
+(ns live.edit.commands-test
+  (:require [live.edit.commands :as c] [live.edit.document :as d]
+            [live.edit.extensions :as e] [live.edit.standard :as standard]))
+(def ext (e/build [standard/package]))
+(def doc (d/prepare (d/document "notes" [(d/block "a" "hello") (d/block "b" "world")])))
+(def context {:document doc :selection {:anchor {:block "a" :offset 0} :head {:block "a" :offset 5}}})
+(deftest one-catalogue-describes-every-surface
+  (let [items (c/query ext context) bold (first (filter #(= "text/bold" (:id %)) items))]
+    (is (= true (:enabled bold))) (is (= "bold" (:icon bold)))
+    (is (= "Mod-b" (:shortcut bold))) (is (= "off" (:active bold)))
+    (is (some #(= "insert/code" (:id %)) items))))
+(deftest a-selection-produces-semantic-operations
+  (let [plan (c/plan ext context "text/bold" {} "call")
+        changed (d/apply-op (:functions ext) doc (first (:ops plan)))
+        next (assoc context :document (:document changed))
+        item (first (filter #(= "text/bold" (:id %)) (c/query ext next)))]
+    (is (= "style/set" (:op (first (:ops plan)))))
+    (is (= "on" (:active item)))
+    (is (= false (:enabled (first (:ops (c/plan ext next "text/bold" {} "call2"))))))))
+(deftest a-caret-command-sets-future-typing-style
+  (let [caret (assoc-in context [:selection :head :offset] 0)
+        plan (c/plan ext caret "text/bold" {} "call")]
+    (is (= [{:id "call" :function "text/bold" :version 1 :args {}}] (:pending-styles plan)))
+    (is (nil? (:ops plan)))))
+(deftest custom-commands-use-the-same-context-and-contract
+  (let [custom {:name "custom" :provides {:editor/commands
+                {"notes/title" {:label "Title" :run (fn [_ args] {:ops [{:op "document/meta" :patch {:title (:text args)}}]})}}}}
+        ext (e/build [standard/package custom])
+        plan (c/plan ext context "notes/title" {:text "Field notes"} "call")]
+    (is (= "Field notes" (get-in plan [:ops 0 :patch :title])))))
+(deftest code-blocks-expose-transforms-and-shared-history-without-hidden-rich-formatting
+  (let [doc (d/document "code" [(d/block "c" "code" "(+ 1 2)" {})])
+        context {:document doc :selection {:anchor {:block "c" :offset 0} :head {:block "c" :offset 7}}}
+        commands (c/query ext context)
+        bold (first (filter #(= "text/bold" (:id %)) commands))
+        transform (first (filter #(= "text/uppercase" (:id %)) commands))]
+    (is (= false (:enabled bold)))
+    (is (= true (:enabled transform)))))

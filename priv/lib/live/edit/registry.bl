@@ -1,0 +1,82 @@
+; Installed functions are values. Documents contain references and arguments.
+(ns live.edit.registry)
+
+(def content [:live.edit/content])
+
+(defn fail [reason] (throw (ex-info reason {:edit/error reason})))
+(defn key-name [value]
+  (if (keyword? value) (str value) value))
+
+(defn functions [packages]
+  (reduce (fn [out package]
+            (reduce (fn [m [id spec]]
+                      (let [id (key-name id)]
+                        (when-not (and (string? id) (string? (:label spec))
+                                       (contains? #{"wrap" "transform"} (:kind spec))
+                                       (contains? #{"inline" "block" "text"} (:scope spec))
+                                       (fn? (get spec (if (= "wrap" (:kind spec)) :render :run))))
+                          (fail "invalid-function"))
+                        (assoc m id (assoc spec :id id :version (get spec :version 1)
+                                               :package (:name package)))))
+                    out (get-in package [:provides :editor/functions] {})))
+          {} packages))
+
+(defn use [packages package]
+  (let [next (conj (filterv (fn [p] (not= (:name p) (:name package))) packages) package)]
+    (functions next)
+    next))
+(defn unuse [packages name] (filterv (fn [p] (not= name (:name p))) packages))
+
+(defn arguments [spec args]
+  (let [params (get spec :params {})]
+    (when-not (and (map? args) (every? (fn [k] (contains? params k)) (keys args)))
+      (fail "invalid-arguments"))
+    (reduce
+      (fn [out [k p]]
+        (let [value (get args k (:default p))
+              valid (cond
+                      (= "enum" (:type p)) (some (fn [v] (= v value)) (:values p))
+                      (= "text" (:type p)) (and (string? value) (<= (count value) 1024))
+                      (= "boolean" (:type p)) (boolean? value)
+                      (= "integer" (:type p)) (and (int? value) (<= (get p :min -1000000) value (get p :max 1000000)))
+                      :else false)]
+          (when-not valid (fail "invalid-arguments"))
+          (assoc out k value))) {} params)))
+
+(defn application [registry id function args scope]
+  (let [spec (get registry function)]
+    (when-not spec (fail "unknown-function"))
+    (when-not (and (= "wrap" (:kind spec)) (= scope (:scope spec))) (fail "wrong-function-scope"))
+    {:id id :function function :version (:version spec) :args (arguments spec args)}))
+
+(defn catalog [registry]
+  (mapv (fn [[id spec]] (select-keys spec [:id :label :kind :scope :version :params :package]))
+        (sort-by first registry)))
+
+(defn- shell? [node scope]
+  (if (= content node) true
+    (and (vector? node) (keyword? (first node))
+         (contains? (if (= scope "inline")
+                      #{:span :mark :strong :em :u :s :code :sub :sup :small :a}
+                      #{:div :aside :blockquote :section :article}) (first node))
+         (or (and (= 2 (count node)) (shell? (second node) scope))
+             (and (= 3 (count node)) (map? (second node)) (shell? (nth node 2) scope))))))
+
+(defn- fill [node body]
+  (if (= content node) body
+    (conj (pop node) (fill (last node) body))))
+
+(defn present [registry call scope body]
+  (let [spec (get registry (:function call))]
+    (if (nil? spec)
+      [(if (= scope "inline") :span :div)
+       {:class "edit-unavailable" :title (str "Unavailable function: " (:function call))} body]
+      (try
+        (when-not (and (= scope (:scope spec)) (= "wrap" (:kind spec))
+                        (= (:version spec) (:version call))) (fail "function-contract-changed"))
+        (let [shell ((:render spec) (arguments spec (:args call)) content)]
+          (when-not (shell? shell scope) (fail "invalid-editable-shell"))
+          (fill shell body))
+        (catch error
+          [(if (= scope "inline") :span :div)
+           {:class "edit-function-error" :title (str error)} body])))))

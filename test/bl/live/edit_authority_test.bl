@@ -1,0 +1,52 @@
+(ns live.edit.authority-test
+  (:require [live.edit.authority :as a] [live.edit.document :as d] [live.edit.protocol :as p]
+            [live.edit.extensions :as e] [live.edit.standard :as standard]
+            [datom] [datom.store-fjall :as fjall]))
+(def ext (e/build [standard/package]))
+(def source (d/document "notes" [(d/block "a" "first") (d/block "b" "second")]))
+(deftest writer-authorization-durability-reopen-and-package-removal
+  (let [path (str (System/tmp_dir!) "/edit-authority-" (erlang/unique_integer (list :positive)))
+        conn (datom/connect-with (fjall/open path) a/schema)
+        proposal {:id "a1" :basis 0 :digest (p/digest ext) :op {:op "text/apply" :block "a" :from 0 :to 5 :id "mark" :function "text/bold" :args {}}}
+        payload {:proposal proposal}]
+    (try
+      (a/initialize! conn ext source)
+      (is (thrown? ((a/performer ext "notes" (fn [_ _] false)) conn payload "visitor")))
+      (is (= 0 (:revision (a/read-state (datom/db conn) "notes"))))
+      ((a/performer ext "notes" (fn [principal _] (= "author" principal))) conn payload "author")
+      (is (= 1 (:revision (a/read-state (datom/db conn) "notes"))))
+      ((a/performer ext "notes" (fn [_ _] true)) conn payload "author")
+      (is (= 1 (:revision (a/read-state (datom/db conn) "notes"))))
+      (finally (datom/close! conn)))
+    (let [reopened (datom/connect-with (fjall/open path) a/schema)]
+      (try
+        (let [saved (a/read-authority (datom/db reopened) "notes")]
+          (is (= 1 (:revision saved)))
+          (is (= "mark" (get-in saved [:document :blocks 0 :marks 0 :call :id])))
+          ((a/performer ext "notes" (fn [_ _] true)) reopened payload "author")
+          (is (= 1 (:revision (a/read-state (datom/db reopened) "notes"))))
+          (a/upgrade! reopened (e/build []) "notes")
+          (let [upgraded (a/read-state (datom/db reopened) "notes")]
+            (is (= (:document saved) (:document upgraded)))
+            (is (= 2 (:revision upgraded)))
+            (is (= "client-outdated" (get-in (p/decide (e/build []) upgraded proposal) [:reply :reason])))))
+        (finally (datom/close! reopened) (File/rm_rf! path))))))
+(deftest large-values-use-bounded-immutable-parts-and-publish-after-sync
+  (let [path (str (System/tmp_dir!) "/edit-large-" (erlang/unique_integer (list :positive)))
+        source (d/document "large" (mapv (fn [i] (d/block (str "b" i) (Base/encode64 (crypto/strong_rand_bytes 30000)))) (range 3)))
+        conn (datom/connect-with (fjall/open path) a/schema)
+        initial (p/authority ext source)
+        proposal {:id "large-edit" :basis 0 :digest (:digest initial) :op {:op "text/replace" :block "b0" :from 0 :to 0 :text "!"}}]
+    (try
+      (a/initialize! conn ext source)
+      (is (= source (:document (a/read-state (datom/db conn) "large"))))
+      (is (> (count (datom/q '[:find ?e :where [?e :editable/chunk-key _]] (datom/db conn))) 1))
+      (datom/transact! conn [[:db/fn (fn [database] (a/transaction database ext "large" proposal))]])
+      (is (= source (:document (a/read-state (datom/db conn) "large"))))
+      (is (= 1 (:revision (a/read-authority (datom/db conn) "large"))))
+      (a/publish! conn "large")
+      (is (= 1 (:revision (a/read-state (datom/db conn) "large"))))
+      (finally (datom/close! conn)))
+    (let [conn (datom/connect-with (fjall/open path) a/schema)]
+      (try (is (starts-with? (get-in (a/read-state (datom/db conn) "large") [:document :blocks 0 :text]) "!"))
+        (finally (datom/close! conn) (File/rm_rf! path))))))

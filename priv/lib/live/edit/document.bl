@@ -1,0 +1,480 @@
+; Versioned typed documents. Positions are Unicode codepoints; trusted transitions
+; validate changed content, while external snapshots validate the whole document.
+(ns live.edit.document (:require [live.edit.capabilities :as r]))
+
+(defn points [s] (vec (unicode/characters_to_list s)))
+(defn ascii? [s] (some? (re-matches #"[\x00-\x7F]*" s)))
+(defn length [s]
+  (if (ascii? s) (erlang/byte_size s) (erlang/length (unicode/characters_to_list s))))
+(defn slice [s from to]
+  (when-not (<= 0 from to (length s)) (r/fail "invalid-range"))
+  (if (ascii? s) (String/slice s from (- to from))
+    (unicode/characters_to_binary (to-list (subvec (points s) from to)))))
+(defn identifier? [id]
+  (and (string? id) (<= 1 (length id) 128) (some? (re-matches #"[A-Za-z0-9_./:-]+" id))))
+(defn- fields? [m ks] (and (map? m) (= (set (keys m)) (set ks))))
+(defn json-data? [v depth]
+  (and (< depth 16)
+       (or (nil? v) (boolean? v) (string? v) (and (int? v) (<= -9007199254740991 v 9007199254740991))
+           (and (vector? v) (<= (count v) 512) (every? #(json-data? % (inc depth)) v))
+           (and (map? v) (<= (count v) 64)
+                (every? (fn [[k x]] (and (keyword? k) (json-data? x (inc depth)))) v)))))
+(defn call? [call]
+  (and (fields? call [:id :function :version :args]) (identifier? (:id call))
+       (identifier? (:function call)) (int? (:version call)) (pos? (:version call))
+       (map? (:args call)) (json-data? (:args call) 0)))
+(defn block? [b]
+  (and (map? b) (every? #(contains? #{:id :text :marks :wraps :type :attrs :parent :slot} %) (keys b))
+       (identifier? (:id b)) (identifier? (get b :type "paragraph"))
+       (map? (get b :attrs {})) (json-data? (get b :attrs {}) 0)
+       (or (nil? (:parent b)) (identifier? (:parent b)))
+       (identifier? (get b :slot "body"))
+       (string? (:text b)) (<= (length (:text b)) 65536)
+       (vector? (:marks b)) (<= (count (:marks b)) 512)
+       (every? (fn [m] (and (fields? m [:call :from :to]) (call? (:call m))
+                            (int? (:from m)) (int? (:to m))
+                            (<= 0 (:from m)) (< (:from m) (:to m))
+                            (<= (:to m) (length (:text b))))) (:marks b))
+       (vector? (:wraps b)) (<= (count (:wraps b)) 16) (every? call? (:wraps b))))
+(defn- tree-valid? [blocks]
+  (loop [rows blocks seen #{} path []]
+    (if (empty? rows) true
+      (let [b (first rows) parent (:parent b)
+            at (when parent (first (keep-indexed #(when (= %2 parent) %1) path)))]
+        (and (not (contains? seen (:id b)))
+             (or (nil? parent) (and (int? at) (< at 31)))
+             (recur (rest rows) (conj seen (:id b))
+                    (conj (if parent (subvec path 0 (inc at)) []) (:id b))))))))
+(defn valid? [doc]
+  (and (map? doc) (contains? #{1 2} (:schema doc)) (identifier? (:id doc))
+       (every? #(contains? #{:schema :id :blocks :meta} %) (keys doc))
+       (map? (get doc :meta {})) (json-data? (get doc :meta {}) 0)
+       (vector? (:blocks doc)) (<= 1 (count (:blocks doc)) 10000)
+       (every? block? (:blocks doc)) (tree-valid? (:blocks doc))))
+(defn validate [doc] (when-not (valid? doc) (r/fail "invalid-document")) doc)
+(defn block
+  ([id text] (block id "paragraph" text {}))
+  ([id type text attrs] {:id id :type type :attrs attrs :parent nil :slot "body" :text text :marks [] :wraps []}))
+(defn document [id blocks] (validate {:schema 2 :id id :meta {:title "Untitled" :icon "sparkles"} :blocks blocks}))
+(defn migrate [doc]
+  (validate doc)
+  (assoc doc :schema 2 :meta (get doc :meta {:title "Untitled" :icon "sparkles"})
+    :blocks (mapv #(merge (block (:id %) (:text %)) %) (:blocks doc))))
+(defn prepare [doc]
+  (assoc doc :blocks (with-meta (:blocks doc)
+    {:edit/index (into {} (map-indexed (fn [i b] [(:id b) i]) (:blocks doc)))})))
+(defn block-index [doc id]
+  (if-let [index (:edit/index (meta (:blocks doc)))] (get index id)
+    (first (keep-indexed (fn [i b] (when (= id (:id b)) i)) (:blocks doc)))))
+(defn find-block [doc id]
+  (when-let [i (block-index doc id)] (nth (:blocks doc) i)))
+(defn- require-block [doc id]
+  (or (find-block doc id) (r/fail "missing-block")))
+(defn- bounds! [b from to]
+  (when-not (and (int? from) (int? to) (<= 0 from to (length (:text b)))) (r/fail "invalid-range")))
+
+(defn map-point [point mapping]
+  (reduce
+    (fn [p m]
+      (let [id (:block p) at (:offset p) right? (not= "left" (:affinity p))]
+        (cond
+          (and (= "delete" (:kind m)) (some #{id} (:ids m)))
+          (assoc p :deleted true)
+          (and (= "range" (:kind m)) (some #{id} (:blocks m)))
+          (cond
+            (and (= id (:first m)) (or (< at (:from m)) (and (= at (:from m)) (not right?)))) p
+            (and (= id (:last m)) (>= at (:to m)))
+            (assoc p :block (get-in m [:end :block]) :offset (+ (get-in m [:end :offset]) (- at (:to m))))
+            :else (assoc p :block (get-in m [:end :block]) :offset (get-in m [:end :offset])))
+          (and (= "replace" (:kind m)) (= id (:block m)))
+          (assoc p :offset
+            (cond (< at (:from m)) at
+                  (> at (:to m)) (+ at (- (:inserted m) (- (:to m) (:from m))))
+                  (and (= at (:to m)) (not= (:from m) (:to m))) (+ (:from m) (:inserted m))
+                  :else (+ (:from m) (if right? (:inserted m) 0))))
+          (and (= "split" (:kind m)) (= id (:block m))
+               (or (> at (:at m)) (and (= at (:at m)) right?)))
+          (assoc p :block (:new m) :offset (- at (:at m)))
+          (and (= "join" (:kind m)) (= id (:right m)))
+          (assoc p :block (:left m) :offset (+ (:at m) at))
+          :else p))) point mapping))
+(defn map-selection [selection mapping]
+  (when selection (assoc selection :anchor (map-point (:anchor selection) mapping)
+                                  :head (map-point (:head selection) mapping))))
+
+(defn- replace-blocks [doc from to blocks]
+  (if (and (= (inc from) to) (= 1 (count blocks)))
+    (assoc doc :blocks (assoc (:blocks doc) from (first blocks)))
+    (assoc doc :blocks (into (into (subvec (:blocks doc) 0 from) blocks)
+                            (subvec (:blocks doc) to)))))
+(defn- result [doc from to next mapping]
+  (let [old (subvec (:blocks doc) from to)
+        _ (when-not (and (every? block? next) (<= 1 (+ (- (count (:blocks doc)) (- to from)) (count next)) 10000))
+            (r/fail "invalid-document"))
+        changed (replace-blocks doc from to next)
+        structural (not= (mapv :id old) (mapv :id next))
+        _ (when (and structural (not (tree-valid? (:blocks changed)))) (r/fail "invalid-tree"))
+        changed (if (not structural)
+                  (assoc changed :blocks (with-meta (:blocks changed) (meta (:blocks doc))))
+                  (prepare changed))]
+    {:document changed :mapping mapping :changed (vec (distinct (concat (map :id old) (map :id next))))
+     :structural structural
+     :inverse {:op "blocks/restore" :ids (mapv :id next) :expected next :blocks old}}))
+(defn- mapped-marks [marks mapping]
+  (filterv (fn [m] (< (:from m) (:to m)))
+    (mapv (fn [m]
+            (let [base {:block (:block (first mapping))}
+                  start (map-point (assoc base :offset (:from m) :affinity "left") mapping)
+                  end (map-point (assoc base :offset (:to m) :affinity "right") mapping)]
+              (assoc m :from (:offset start) :to (:offset end)))) marks)))
+(defn- merge-marks [marks]
+  (reduce (fn [out mark]
+    (loop [m mark rows out]
+      (let [matching (filterv #(and (= (:call %) (:call m))
+                                   (<= (:from %) (:to m)) (<= (:from m) (:to %))) rows)]
+        (if (empty? matching) (conj rows m)
+          (recur (assoc m :from (reduce min (:from m) (map :from matching))
+                           :to (reduce max (:to m) (map :to matching)))
+                 (filterv (fn [row] (not (some (fn [other] (= row other)) matching))) rows)))))) [] marks))
+(defn- outside [marks from to]
+  (vec (mapcat (fn [m]
+    (if (or (<= (:to m) from) (<= to (:from m))) [m]
+      (concat (when (< (:from m) from) [(assoc m :to from)])
+              (when (< to (:to m)) [(assoc m :from to)])))) marks)))
+(defn- replace-text [registry doc op]
+  (let [b (require-block doc (:block op)) i (block-index doc (:block op))
+        from (:from op) to (:to op) text (:text op)]
+    (bounds! b from to)
+    (when-not (and (string? text) (<= (length text) 65536)) (r/fail "invalid-text"))
+    (when (and (contains? op :expected) (not= (:expected op) (slice (:text b) from to)))
+      (r/fail "changed-source"))
+    (let [mapping [{:kind "replace" :block (:id b) :from from :to to :inserted (length text)}]
+          restored (mapv #(assoc % :from (+ from (:from %)) :to (+ from (:to %))) (get op :restore []))
+          end (+ from (length text))
+          mapped (mapped-marks (:marks b) mapping)
+          mapped (if (or (contains? op :styles) (contains? op :restore)) (outside mapped from end) mapped)
+          styles (when (seq text)
+                   (mapv (fn [call]
+                     (let [installed (r/application registry (:id call) (:function call) (:args call) "inline")]
+                       (when-not (= (:version call) (:version installed)) (r/fail "function-contract-changed"))
+                       {:from from :to end :call installed})) (get op :styles [])))
+          next (assoc b :text (str (slice (:text b) 0 from) text (slice (:text b) to (length (:text b))))
+                        :marks (merge-marks (into (into mapped styles) restored)))]
+      (assoc (result doc i (inc i) [next] mapping)
+        :inverse {:op "text/replace" :block (:id b) :from from :to (+ from (length text))
+                  :expected text :text (slice (:text b) from to) :styles []
+                  :restore (vec (keep (fn [mark]
+                    (let [a (max from (:from mark)) z (min to (:to mark))]
+                      (when (< a z) (assoc mark :from (- a from) :to (- z from))))) (:marks b)))}))))
+
+(defn- calls [b] (into (:wraps b) (mapv :call (:marks b))))
+(defn call-ids [doc] (set (mapcat (fn [b] (map :id (calls b))) (:blocks doc))))
+(defn- new-call! [doc id]
+  (when-not (and (identifier? id) (not (contains? (call-ids doc) id))) (r/fail "duplicate-application")))
+(defn- apply-inline [registry doc op]
+  (let [b (require-block doc (:block op)) i (block-index doc (:block op))]
+    (bounds! b (:from op) (:to op))
+    (when (= (:from op) (:to op)) (r/fail "empty-selection"))
+    (new-call! doc (:id op))
+    (let [call (r/application registry (:id op) (:function op) (get op :args {}) "inline")]
+      (assoc (result doc i (inc i) [(update b :marks conj {:from (:from op) :to (:to op) :call call})] [])
+        :inverse {:op "call/remove" :id (:id op)}))))
+(defn- apply-block [registry doc op]
+  (let [b (require-block doc (:block op)) i (block-index doc (:block op))]
+    (new-call! doc (:id op))
+    (assoc (result doc i (inc i)
+      [(update b :wraps conj (r/application registry (:id op) (:function op) (get op :args {}) "block"))] [])
+      :inverse {:op "call/remove" :id (:id op)})))
+
+(defn- change-call [registry doc op]
+  (let [id (:id op) touched (keep-indexed (fn [i b] (when (some #(= id (:id %)) (calls b)) i)) (:blocks doc))]
+    (when (empty? touched) (r/fail "missing-application"))
+    (let [from (first touched) to (inc (last touched))
+          change (fn [call]
+                   (if (= id (:id call))
+                     (if (= "call/remove" (:op op)) nil
+                       (let [spec (get registry (:function call))]
+                         (when-not (and spec (= (:version spec) (:version call))) (r/fail "function-contract-changed"))
+                         (when (and (contains? op :expected) (not= (:expected op) (:args call))) (r/fail "changed-arguments"))
+                         (assoc call :args (r/arguments spec (:args op))))) call))
+          next (mapv (fn [b]
+                       (assoc b :wraps (filterv some? (mapv change (:wraps b)))
+                                :marks (filterv #(some? (:call %))
+                                         (mapv #(assoc % :call (change (:call %))) (:marks b)))))
+                     (subvec (:blocks doc) from to))]
+      (assoc (result doc from to next [])
+        :inverse (if (= "call/args" (:op op))
+                   {:op "call/args" :id id :args (:args (first (filter #(= id (:id %)) (calls (nth (:blocks doc) from)))))
+                    :expected (:args op)}
+                   {:op "calls/restore" :entries
+                    (vec (mapcat (fn [b]
+                      (concat (keep #(when (= id (get-in % [:call :id])) {:block (:id b) :mark %}) (:marks b))
+                              (keep-indexed #(when (= id (:id %2)) {:block (:id b) :wrap %2 :index %1}) (:wraps b))))
+                      (subvec (:blocks doc) from to)))})))))
+(defn- restore-calls [doc op]
+  (let [entries (:entries op)]
+    (when-not (and (vector? entries) (<= 1 (count entries) 512)) (r/fail "invalid-applications"))
+    (let [ids (set (map #(get-in % (if (:mark %) [:mark :call :id] [:wrap :id])) entries))
+          _ (when (some (call-ids doc) ids) (r/fail "duplicate-application"))
+          grouped (group-by :block entries)
+          positions (map #(block-index doc %) (keys grouped))
+          _ (when (some nil? positions) (r/fail "missing-block"))
+          from (reduce min positions) to (inc (reduce max positions))
+          next (mapv (fn [b]
+            (reduce (fn [b entry]
+              (if-let [mark (:mark entry)] (update b :marks #(merge-marks (conj % mark)))
+                (update b :wraps #(let [i (min (:index entry) (count %))]
+                  (into (conj (subvec % 0 i) (:wrap entry)) (subvec % i)))))) b (get grouped (:id b))))
+            (subvec (:blocks doc) from to))]
+      (assoc (result doc from to next [])
+        :inverse (if (= 1 (count ids)) {:op "call/remove" :id (first ids)}
+                   {:op "batch" :ops (mapv (fn [id] {:op "call/remove" :id id}) ids)})))))
+
+(declare subtree)
+(defn- split-block [doc op]
+  (let [b (require-block doc (:block op)) at (:at op) i (block-index doc (:block op)) id (:new op)
+        children (subvec (subtree doc (:id b)) 1)]
+    (bounds! b at at)
+    (when-not (and (identifier? id) (nil? (find-block doc id))) (r/fail "duplicate-block"))
+    (when-not (every? #{:type :attrs :wraps} (keys (:rightMeta op))) (r/fail "invalid-node-fields"))
+    (let [left (assoc b :text (slice (:text b) 0 at)
+                       :marks (filterv #(< (:from %) (:to %))
+                                (mapv #(assoc % :to (min at (:to %))) (:marks b))))
+          right (merge (assoc b :id id :text (slice (:text b) at (length (:text b)))
+                        :marks (filterv #(< (:from %) (:to %))
+                                 (mapv #(assoc % :from (max 0 (- (:from %) at)) :to (- (:to %) at)) (:marks b))))
+                       (:rightMeta op))]
+      (assoc (result doc i (+ i 1 (count children)) (conj (into [left] children) right)
+               [{:kind "split" :block (:id b) :new id :at at}])
+        :inverse {:op "block/join" :left (:id b) :right id :rightExpected (select-keys right [:type :attrs :wraps])}))))
+(defn- join-blocks [doc op]
+  (let [left (require-block doc (:left op)) right (require-block doc (:right op))
+        i (block-index doc (:left op)) at (length (:text left))
+        left-tree (subtree doc (:id left)) right-tree (subtree doc (:id right))]
+    (when-not (= (+ i (count left-tree)) (block-index doc (:right op))) (r/fail "nonadjacent-blocks"))
+    (when (and (:rightExpected op) (not= (:rightExpected op) (select-keys right [:type :attrs :wraps])))
+      (r/fail "changed-node"))
+    (when-not (and (= (:wraps left) (:wraps right)) (= (:parent left) (:parent right)) (= (:slot left) (:slot right)))
+      (r/fail "incompatible-wrappers"))
+    (let [next (assoc left :text (str (:text left) (:text right))
+                          :marks (merge-marks (into (:marks left) (mapv #(assoc % :from (+ at (:from %)) :to (+ at (:to %))) (:marks right)))))
+          children (into (subvec left-tree 1)
+                     (mapv #(if (= (:parent %) (:id right)) (assoc % :parent (:id left)) %) (subvec right-tree 1)))
+          edit (result doc i (+ i (count left-tree) (count right-tree)) (into [next] children)
+                 [{:kind "join" :left (:id left) :right (:id right) :at at}])]
+      (if (= 1 (count right-tree))
+        (assoc edit :inverse {:op "block/split" :block (:id left) :at at :new (:id right)
+                             :rightMeta (select-keys right [:type :attrs :wraps])}) edit))))
+(defn- restore-blocks [doc op]
+  (let [ids (:ids op) i (block-index doc (first ids)) n (count ids)]
+    (when-not (and (vector? ids) (pos? n) (int? i) (<= (+ i n) (count (:blocks doc)))
+                   (= ids (mapv :id (subvec (:blocks doc) i (+ i n))))
+                   (= (:expected op) (subvec (:blocks doc) i (+ i n)))
+                   (vector? (:blocks op)) (seq (:blocks op))) (r/fail "undo-conflict"))
+    (let [before (:expected op) after (:blocks op)
+          mapping (cond
+                    (and (= 1 n) (= 2 (count after)))
+                    [{:kind "split" :block (:id (first before)) :new (:id (second after)) :at (length (:text (first after)))}]
+                    (and (= 2 n) (= 1 (count after)))
+                    [{:kind "join" :left (:id (first before)) :right (:id (second before)) :at (length (:text (first before)))}]
+                    (not= (mapv :id before) (mapv :id after))
+                    [{:kind "range" :blocks (mapv :id before) :first (:id (first before)) :last (:id (last before))
+                      :from 0 :to (length (:text (last before)))
+                      :end {:block (:id (last after)) :offset (length (:text (last after)))}}]
+                    :else (vec (keep (fn [old]
+                                      (when-let [next (first (filter #(= (:id old) (:id %)) after))]
+                                        (when (not= (:text old) (:text next))
+                                          {:kind "replace" :block (:id old) :from 0 :to (length (:text old))
+                                           :inserted (length (:text next))}))) before)))]
+      (result doc i (+ i n) after mapping))))
+
+(defn ordered-range [doc anchor head]
+  (let [a (block-index doc (:block anchor)) b (block-index doc (:block head))]
+    (when-not (and (int? a) (int? b)) (r/fail "missing-block"))
+    (if (or (< a b) (and (= a b) (<= (:offset anchor) (:offset head)))) [anchor head] [head anchor])))
+(defn- clipped [block from to]
+  (bounds! block from to)
+  (assoc block :text (slice (:text block) from to)
+               :marks (filterv #(< (:from %) (:to %))
+                        (mapv #(assoc % :from (max 0 (- (:from %) from))
+                                       :to (- (min to (:to %)) from)) (:marks block)))))
+(defn fragment [doc anchor head]
+  (let [[a b] (ordered-range doc anchor head) ai (block-index doc (:block a)) bi (block-index doc (:block b))]
+    (mapv (fn [i] (let [block (nth (:blocks doc) i)]
+                    (clipped block (if (= ai i) (:offset a) 0)
+                                   (if (= bi i) (:offset b) (length (:text block)))))) (range ai (inc bi)))))
+(defn- shifted [marks by]
+  (mapv #(assoc % :from (+ by (:from %)) :to (+ by (:to %))) marks))
+(defn- replacement-fragment [doc op]
+  (let [seed (:seed op)]
+    (when-not (identifier? seed) (r/fail "invalid-paste-id"))
+    (let [fragments (if (contains? op :fragment) (:fragment op)
+                      (mapv #(block "fragment" %) (split (replace-str (replace-str (:text op) "\r\n" "\n") "\r" "\n") "\n")))]
+      (when-not (and (vector? fragments) (<= 1 (count fragments) 128) (every? block? fragments)) (r/fail "invalid-fragment"))
+      (let [ids (vec (distinct (mapcat (fn [b] (map :id (calls b))) fragments)))
+            rename (into {} (map-indexed (fn [i id] [id (str seed "/a/" i)]) ids))
+            rename-call (fn [c] (assoc c :id (get rename (:id c))))]
+        (when (some (call-ids doc) (vals rename)) (r/fail "duplicate-application"))
+        (mapv (fn [b] (assoc b :wraps (mapv rename-call (:wraps b))
+                               :marks (mapv #(assoc % :call (rename-call (:call %))) (:marks b)))) fragments)))))
+(defn- replace-range [doc op]
+  (let [[a b] (ordered-range doc (:from op) (:to op))
+        ai (block-index doc (:block a)) bi (block-index doc (:block b))
+        first-block (nth (:blocks doc) ai) last-block (nth (:blocks doc) bi)
+        prefix (clipped first-block 0 (:offset a))
+        suffix (clipped last-block (:offset b) (length (:text last-block)))
+        fragments (replacement-fragment doc op) n (count fragments)
+        renamed (into {} (map-indexed (fn [i piece] [(:id piece) (if (zero? i) (:id first-block) (str (:seed op) "/b/" i))]) fragments))
+        prefix-size (length (:text prefix))
+        next (mapv (fn [i]
+                     (let [piece (nth fragments i)
+                           id (if (zero? i) (:id first-block) (str (:seed op) "/b/" i))
+                           before (if (zero? i) (:text prefix) "")
+                           after (if (= i (dec n)) (:text suffix) "")
+                           before-size (length before)
+                           marks (into (if (zero? i) (:marks prefix) []) (shifted (:marks piece) before-size))
+                           marks (if (= i (dec n)) (into marks (shifted (:marks suffix) (+ before-size (length (:text piece))))) marks)]
+                       (when (and (pos? i) (find-block doc id)) (r/fail "duplicate-block"))
+                       (assoc piece :id id :text (str before (:text piece) after) :marks marks
+                         :parent (get renamed (:parent piece) (:parent first-block))
+                         :slot (if (contains? renamed (:parent piece)) (:slot piece) (:slot first-block))
+                         :type (if (and (zero? i) (seq (:text first-block))) (:type first-block) (:type piece))
+                         :attrs (if (and (zero? i) (seq (:text first-block))) (:attrs first-block) (:attrs piece))
+                         :wraps (cond (zero? i) (:wraps first-block)
+                                      (= i (dec n)) (:wraps last-block) :else (:wraps piece))))) (range n))
+        end {:block (:id (last next)) :offset (+ (if (= 1 n) prefix-size 0) (length (:text (last fragments))))}
+        mapping [{:kind "range" :blocks (mapv :id (subvec (:blocks doc) ai (inc bi)))
+                  :first (:block a) :last (:block b) :from (:offset a) :to (:offset b) :end end}]]
+    (when (and (= 1 n) (not= (:wraps first-block) (:wraps last-block))) (r/fail "incompatible-wrappers"))
+    (result doc ai (inc bi) next mapping)))
+
+(defn subtree [doc id]
+  (let [i (block-index doc id)]
+    (when-not (int? i) (r/fail "missing-block"))
+    (loop [j (inc i) ids #{id}]
+      (if (and (< j (count (:blocks doc))) (contains? ids (:parent (nth (:blocks doc) j))))
+        (recur (inc j) (conj ids (:id (nth (:blocks doc) j))))
+        (subvec (:blocks doc) i j)))))
+(defn previous-sibling [doc b]
+  (:id (last (filter #(and (= (:parent %) (:parent b)) (= (:slot %) (:slot b)))
+                     (subvec (:blocks doc) 0 (block-index doc (:id b)))))))
+(defn- insert-nodes [doc op]
+  (let [blocks (or (:blocks op) [(:node op)]) ids (mapv :id blocks)
+        parent (:parent op) after (:after op)
+        ref (when after (require-block doc after))
+        _ (when parent (require-block doc parent))
+        _ (when-not (and (vector? blocks) (seq blocks) (every? block? blocks)
+                        (= (count ids) (count (set ids)))
+                        (not-any? #(some? (find-block doc %)) ids)
+                        (or (nil? ref) (= parent (:parent ref)))) (r/fail "invalid-insert"))
+        at (cond ref (+ (block-index doc after) (count (subtree doc after)))
+                 parent (inc (block-index doc parent)) :else 0)
+        blocks (assoc blocks 0 (assoc (first blocks) :parent parent :slot (get op :slot "body")))
+        edit (result doc at at blocks [])]
+    (when-not (tree-valid? (:blocks (:document edit))) (r/fail "invalid-tree"))
+    (assoc edit :inverse {:op "node/delete" :block (:id (first blocks)) :expected blocks})))
+(defn- delete-node [doc op]
+  (let [b (require-block doc (:block op)) blocks (subtree doc (:id b))
+        i (block-index doc (:id b)) n (count blocks)]
+    (when (and (:expected op) (not= (:expected op) blocks)) (r/fail "changed-node"))
+    (when (= n (count (:blocks doc))) (r/fail "last-block"))
+    (assoc (result doc i (+ i n) [] [{:kind "delete" :ids (mapv :id blocks)}])
+      :inverse {:op "node/insert" :blocks blocks :after (previous-sibling doc b) :parent (:parent b) :slot (:slot b)})))
+(defn- set-fields [doc op]
+  (let [b (require-block doc (:block op)) patch (:patch op) ks (keys patch)
+        _ (when-not (and (map? patch) (every? #{:type :attrs} ks)) (r/fail "invalid-node-fields"))
+        before (select-keys b ks) next (merge b patch)]
+    (when (and (contains? op :expected) (not= (:expected op) before)) (r/fail "changed-node"))
+    (assoc (result doc (block-index doc (:id b)) (inc (block-index doc (:id b))) [next] [])
+      :inverse {:op "node/set" :block (:id b) :patch before :expected (select-keys next ks)})))
+(defn- move-node [doc op]
+  (let [id (:block op) b (require-block doc id) blocks (subtree doc id) ids (set (map :id blocks))
+        parent (:parent op) after (:after op)]
+    (when (and (:expected op) (not= (:expected op)
+      {:parent (:parent b) :slot (:slot b) :after (previous-sibling doc b)})) (r/fail "changed-position"))
+    (when (or (contains? ids parent) (contains? ids after)) (r/fail "cyclic-move"))
+    (let [removed (delete-node doc {:block id})
+          inserted (insert-nodes (:document removed) {:blocks blocks :after after :parent parent :slot (get op :slot "body")})]
+      (assoc inserted :mapping [] :inverse {:op "node/move" :block id
+        :after (previous-sibling doc b) :parent (:parent b) :slot (:slot b)
+        :expected {:parent parent :slot (get op :slot "body") :after after}}))))
+(defn- set-meta [doc op]
+  (let [patch (:patch op) ks (keys patch) before (select-keys (:meta doc) ks)]
+    (when-not (and (map? patch) (json-data? patch 0)) (r/fail "invalid-metadata"))
+    (when (and (contains? op :expected) (not= (:expected op) before)) (r/fail "changed-metadata"))
+    {:document (update doc :meta merge patch) :mapping [] :changed [] :metadata true
+     :inverse {:op "document/meta" :patch before :expected patch}}))
+(defn- replace-document [doc op]
+  (when-not (= doc (:expected op)) (r/fail "changed-document"))
+  (let [next (prepare (migrate (:document op)))
+        before-ids (mapv :id (:blocks doc)) after-ids (set (map :id (:blocks next)))
+        removed (filterv #(not (contains? after-ids %)) before-ids)]
+    (when-not (= (:id doc) (:id next)) (r/fail "wrong-document"))
+    {:document next :changed (vec (distinct (concat before-ids (map :id (:blocks next)))))
+     :structural true :metadata true :mapping (if (seq removed) [{:kind "delete" :ids removed}] [])
+     :inverse {:op "document/replace" :document doc :expected next}}))
+(defn- set-style [registry doc op]
+  (let [b (require-block doc (:block op)) from (:from op) to (:to op) fid (:function op)
+        _ (bounds! b from to)
+        _ (when (and (:expected op) (not= (:expected op) (slice (:text b) from to))) (r/fail "changed-source"))
+        matching (filterv #(= fid (get-in % [:call :function])) (:marks b))
+        clipped (vec (keep #(let [a (max from (:from %)) z (min to (:to %))]
+                              (when (< a z) (assoc % :from (- a from) :to (- z from)))) matching))
+        kept (vec (mapcat (fn [m]
+                  (if (or (not= fid (get-in m [:call :function])) (<= (:to m) from) (<= to (:from m))) [m]
+                    (concat (when (< (:from m) from) [(assoc m :to from)])
+                            (when (< to (:to m)) [(assoc m :from to)])))) (:marks b)))
+        added (if (= "style/restore" (:op op))
+                (mapv #(assoc % :from (+ from (:from %)) :to (+ from (:to %))) (:marks op))
+                (if (:enabled op) [{:from from :to to :call (r/application registry (:id op) fid (get op :args {}) "inline")}] []))
+        next (assoc b :marks (merge-marks (into kept added)))]
+    (when (= from to) (r/fail "empty-selection"))
+    (assoc (result doc (block-index doc (:id b)) (inc (block-index doc (:id b))) [next] [])
+      :inverse {:op "style/restore" :block (:id b) :from from :to to :function fid
+                :expected (slice (:text b) from to) :marks clipped})))
+
+(declare apply-trusted)
+(defn- apply-batch [registry doc ops]
+  (when-not (and (vector? ops) (<= 1 (count ops) 4096) (every? #(not= "batch" (:op %)) ops)) (r/fail "invalid-batch"))
+  (reduce (fn [out op]
+            (let [next (apply-trusted registry (:document out) op)]
+              {:document (:document next) :mapping (into (:mapping out) (:mapping next))
+               :changed (vec (distinct (concat (:changed out) (:changed next))))
+               :structural (or (:structural out) (:structural next))
+               :metadata (or (:metadata out) (:metadata next))
+               :inverse {:op "batch" :ops (into (if (= "batch" (get-in next [:inverse :op])) (get-in next [:inverse :ops]) [(:inverse next)]) (get-in out [:inverse :ops]))}}))
+          {:document doc :mapping [] :changed [] :inverse {:op "batch" :ops []}} ops))
+(defn apply-trusted [registry doc op]
+  (when-not (map? op) (r/fail "invalid-operation"))
+  (cond
+    (= "document/replace" (:op op)) (replace-document doc op)
+    (= "node/insert" (:op op)) (insert-nodes doc op)
+    (= "node/delete" (:op op)) (delete-node doc op)
+    (= "node/set" (:op op)) (set-fields doc op)
+    (= "node/move" (:op op)) (move-node doc op)
+    (= "document/meta" (:op op)) (set-meta doc op)
+    (contains? #{"style/set" "style/restore"} (:op op)) (set-style registry doc op)
+    (= "text/replace" (:op op)) (replace-text registry doc op)
+    (= "text/apply" (:op op)) (apply-inline registry doc op)
+    (= "block/apply" (:op op)) (apply-block registry doc op)
+    (contains? #{"call/remove" "call/args"} (:op op)) (change-call registry doc op)
+    (= "calls/restore" (:op op)) (restore-calls doc op)
+    (= "block/split" (:op op)) (split-block doc op)
+    (= "block/join" (:op op)) (join-blocks doc op)
+    (= "blocks/restore" (:op op)) (restore-blocks doc op)
+    (= "range/replace" (:op op)) (replace-range doc op)
+    (= "batch" (:op op)) (apply-batch registry doc (:ops op))
+    (= "text/transform" (:op op))
+    (let [spec (get registry (:function op)) b (require-block doc (:block op))]
+      (when-not (and spec (= "transform" (:kind spec))) (r/fail "unknown-transform"))
+      (bounds! b (:from op) (:to op))
+      (replace-text registry doc (assoc op :op "text/replace"
+        :text ((:run spec) (slice (:text b) (:from op) (:to op)) (r/arguments spec (get op :args {}))))))
+    :else (r/fail "unknown-operation")))
+
+(defn apply-op [registry doc op]
+  (validate doc) (apply-trusted registry doc op))
+
+(defn attempt [registry doc op]
+  (try (assoc (apply-op registry doc op) :ok true)
+       (catch error {:ok false :reason (get (ex-data error) :edit/error "edit-failed")})))

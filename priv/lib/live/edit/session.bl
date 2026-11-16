@@ -1,0 +1,153 @@
+; Native JS boundary: keep persistent BL state here; cross with small deltas.
+(ns ^:js live.edit.session
+  (:require [live.edit.document :as d] [live.edit.protocol :as p]
+            [live.edit.commands :as c] [live.edit.extensions :as e]
+            [live.edit.projection :as view] [live.edit.registry :as r]))
+(defn- data [value] (js->bl value :keywordize-keys true))
+(defn- fresh [] (.randomUUID (.-crypto js/globalThis)))
+(defn- normal-selection [selection]
+  (when selection
+    {:anchor (merge {:affinity "right"} (:anchor selection))
+     :head (merge {:affinity "right"} (:head selection))}))
+(defn- caret-styles [doc selection]
+  (when (c/collapsed? selection)
+    (let [point (:head selection) at (:offset point) b (d/find-block doc (:block point))]
+      (when (not= "code" (:type b))
+        (vec (distinct (map :call (filter #(and (< (:from %) at) (<= at (:to %))) (:marks b)))))))))
+(defn open
+  "Create an owned session from installed packages and a native JSON snapshot.
+   Document and reducer values stay BL; projections and changes are incremental."
+  [packages snapshot]
+  (let [ext (e/build packages) state (atom (p/replica (data snapshot)))
+        preview (atom nil) bookmarks (atom {}) listeners (atom [])
+        clock (atom 0) disposed (atom false)
+        alive (fn [] (when @disposed (r/fail "editor-disposed")))
+        doc (fn [] (or (:document @preview) (:visible @state)))
+        context (fn [selection]
+                  (assoc @state :document (:visible @state) :selection (or selection (:selection @state))
+                    :conflict (boolean (seq (:conflicts @state)))
+                    :can-undo (boolean (p/can-undo? @state)) :can-redo (boolean (p/can-redo? @state))))
+        info (fn [change]
+               (bl->js {:clock @clock :revision (:revision @state) :pending (count (:pending @state))
+                        :conflicts (mapv #(select-keys % [:reason]) (:conflicts @state))
+                        :canUndo (boolean (p/can-undo? @state)) :canRedo (boolean (p/can-redo? @state))
+                        :selection (:selection @state) :pendingStyles (get @state :pending-styles [])
+                        :meta (:meta (doc)) :preview (boolean @preview) :count (count (:blocks (doc)))
+                        :changed (get change :changed []) :structural (boolean (:structural change))
+                        :metadata (boolean (:metadata change))}))
+        notify (fn [change]
+                 (swap! clock inc)
+                 (let [value (info change)] (doseq [listener @listeners] (listener value)) value))
+        advance (fn [next]
+                  (alive)
+                  (let [change (:change next) old-preview @preview
+                        ids (vec (distinct (concat (:changed change) (:changed old-preview))))]
+                    (reset! preview nil) (reset! state next)
+                    (swap! bookmarks (fn [saved]
+                      (into {} (map (fn [[token selection]] [token (d/map-selection selection (:mapping change))]) saved))))
+                    (notify (assoc change :changed ids))))
+        resolve-target (fn [options]
+                         (let [token (:target options)
+                               selection (if token (get @bookmarks token) (:selection @state))]
+                           (when (and token (or (nil? selection) (get-in selection [:anchor :deleted]) (get-in selection [:head :deleted])))
+                             (r/fail "The selected text is no longer available.")) selection))
+        execute (fn [op options]
+                  (let [before (assoc @state :selection (or (resolve-target options) (:selection @state))
+                                            :group (:group options))
+                        next (p/enqueue ext before (get options :id (fresh)) op)
+                        next (if (:selection options) (assoc next :selection (normal-selection (:selection options))) next)
+                        next (if (and (c/collapsed? (:selection next)) (contains? #{"call/args" "call/remove"} (:op op)))
+                               (assoc next :pending-styles (or (caret-styles (:visible next) (:selection next)) [])) next)]
+                    (advance next)))
+        planned (fn [id args options]
+                  (c/plan ext (context (resolve-target options)) id args (get options :id (fresh))))
+        as-op (fn [plan]
+                (let [ops (:ops plan)]
+                  (when (seq ops) (if (= 1 (count ops)) (first ops) {:op "batch" :ops ops}))))
+        run (fn [id args options]
+              (alive)
+              (cond (= id "undo") (advance (p/undo ext @state (fresh)))
+                    (= id "redo") (advance (p/redo ext @state (fresh)))
+                    (= id "use-confirmed") (advance (p/use-confirmed @state))
+                    :else (let [plan (planned id args options)]
+                            (if-let [op (as-op plan)] (execute op (merge options (select-keys plan [:selection])))
+                              (do (swap! state assoc :pending-styles (:pending-styles plan)) (notify {}))))))
+        show-preview (fn [op]
+                       (alive)
+                       (let [edit (d/apply-trusted (:functions ext) (:visible @state) op)]
+                         (reset! preview (assoc edit :op op :basis @clock))
+                         (notify edit)
+                         (swap! preview assoc :basis @clock)
+                         (info edit)))]
+    #js {:read (fn [] (alive) (info {}))
+         :node (fn [id] (alive) (bl->js (d/find-block (doc) id)))
+         :layout (fn [] (alive) (bl->js (mapv #(select-keys % [:id :parent :slot :type]) (:blocks (doc)))))
+         :project (fn [ids] (alive) (bl->js (mapv #(when-let [b (d/find-block (doc) %)] (view/node ext b)) (js->bl ids))))
+         :catalog (fn [] (alive) (bl->js (mapv #(dissoc % :run :when :active) (c/catalogue ext))))
+         :query (fn [options] (alive) (bl->js (c/query ext (context (resolve-target (data options))))))
+         :run (fn [id args options] (run id (or (data args) {}) (or (data options) {})))
+         :change (fn [op options] (alive) (execute (data op) (or (data options) {})))
+         :selection (fn [value]
+                      (alive)
+                      (let [next (normal-selection (data value)) before (:selection @state)]
+                        (when (not= next before)
+                          (swap! state assoc :selection next :pending-styles (or (caret-styles (:visible @state) next) []) :group nil)
+                          (notify {}))))
+         :bookmark (fn [] (alive) (let [token (fresh)] (swap! bookmarks assoc token (:selection @state)) token))
+         :resolve (fn [token] (alive) (bl->js (get @bookmarks token)))
+         :release (fn [token] (swap! bookmarks dissoc token) nil)
+         :subscribe (fn [callback]
+                      (alive) (swap! listeners conj callback)
+                      (fn [] (swap! listeners #(filterv (fn [f] (not (identical? f callback))) %)) nil))
+         :preview (fn [id args options]
+                    (let [plan (planned id (or (data args) {}) (or (data options) {})) op (as-op plan)]
+                      (when-not op (r/fail "Select text to preview this function.")) (show-preview op)))
+         :previewOperation (fn [op] (show-preview (data op)))
+         :cancelPreview (fn []
+                          (when @preview (let [change @preview] (reset! preview nil) (notify change))))
+         :commitPreview (fn []
+                          (alive)
+                          (let [candidate @preview]
+                            (when-not (and candidate (= (:basis candidate) @clock)) (r/fail "Preview this action again; the text changed."))
+                            (execute (:op candidate) {})))
+         :markSent (fn [] (alive) (swap! state p/mark-sent) nil)
+         :outbound (fn [] (alive) (bl->js (p/outbound @state)))
+         :receive (fn [native]
+                    (alive)
+                    (let [revision (.-revision native) digest (.-digest native)
+                          rows (.filter (.-journal native) (fn [row] (> (.-revision row) (:revision @state))))
+                          full? (or (not= digest (:digest @state)) (not= (- revision (:revision @state)) (.-length rows)))
+                          incoming (if full? (data native)
+                                     {:revision revision :digest digest :journal (data rows)})]
+                      (advance (p/adopt ext @state incoming))))
+         :refuse (fn [reply] (alive) (advance (p/receive-reply ext @state (data reply))))
+         :fragment (fn [selection]
+                     (alive) (let [s (data selection)] (bl->js (d/fragment (doc) (:anchor s) (:head s)))))
+         :export (fn [] (alive) (bl->js (:visible @state)))
+         :debug (fn [] (alive) (bl->js (dissoc @state :change)))
+         :recovery (fn []
+                     (alive) (bl->js {:schema 1 :revision (:revision @state) :digest (:digest @state)
+                       :pending (:pending @state) :selection (:selection @state)
+                       :contracts (mapv (fn [[id spec]] {:id id :spec (-> spec (dissoc :render :run :validate :ui)
+                         (update :params #(into {} (map (fn [[k param]] [k (dissoc param :validate)]) %))))}) (:functions ext))
+                       :draft (:draft @state) :conflicts (:conflicts @state)}))
+         :restore (fn [recovery]
+                    (alive)
+                    (let [saved (data recovery) old-ext (assoc ext :functions (if (:contracts saved) (into {} (map (fn [entry] [(:id entry) (:spec entry)]) (:contracts saved))) (:functions ext)))]
+                      (when (and (nil? (:draft saved)) (not= (:digest saved) (:digest @state))) (r/fail "recovery-checkpoint-mismatch"))
+                      (when (and (:draft saved) (not= (get-in saved [:draft :id]) (get-in @state [:confirmed :id])))
+                        (r/fail "wrong-document"))
+                      (if (:draft saved)
+                        (swap! state assoc :visible (d/prepare (d/migrate (:draft saved))) :draft (:draft saved)
+                          :pending [] :conflicts (:conflicts saved))
+                        (doseq [row (:pending saved)]
+                          (swap! state (fn [s]
+                            (let [next (p/enqueue old-ext (assoc s :group (:group row)) (:id row) (:op row) (:action row))]
+                              (if (:proposal row) (assoc-in next [:pending (dec (count (:pending next))) :proposal] (:proposal row)) next))))))
+                      (swap! state assoc :selection (:selection saved)
+                        :pending-styles (or (caret-styles (:visible @state) (:selection saved)) []))
+                      (notify {:changed (mapv :id (:blocks (:visible @state))) :structural true :metadata true})))
+         :surface (fn [name]
+                    (alive) (when-let [spec (get-in ext [:surfaces name])]
+                              (bl->js ((:render spec) (context nil)))))
+         :dispose (fn [] (reset! disposed true) (reset! listeners []) (reset! bookmarks {}) (reset! state nil) (reset! preview nil))}))

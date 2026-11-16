@@ -1,0 +1,41 @@
+; The same pure Hiccup projection is painted on BEAM and in the browser.
+(ns live.edit.view (:require [live.edit.model :as m] [live.edit.registry :as r]))
+
+(defn- run-view [registry block from to]
+  (let [calls (mapv :call (filterv #(and (<= (:from %) from) (<= to (:to %))) (:marks block)))
+        source [:span {:data-edit-slot (:id block) :data-edit-from from :data-edit-to to}
+                (m/slice (:text block) from to)]]
+    (reduce (fn [body call]
+              [:span {:data-edit-call (:id call)} (r/present registry call "inline" body)])
+            source (reverse calls))))
+(defn block [registry b]
+  (let [ends (vec (sort (set (into [0 (m/length (:text b))] (mapcat (fn [x] [(:from x) (:to x)]) (:marks b))))))
+        runs (mapv (fn [i] (run-view registry b (nth ends i) (nth ends (inc i)))) (range (dec (count ends))))
+        text (into [:p {:data-edit-text (:id b)}]
+               (if (empty? runs) [[:br {:data-edit-placeholder true}]] runs))
+        wrapped (reduce (fn [body call]
+                          [:div {:data-edit-call (:id call)} (r/present registry call "block" body)])
+                        text (reverse (:wraps b)))]
+    [:div {:key (:id b) :data-edit-block (:id b)} wrapped]))
+(defn body [registry doc] (mapv #(block registry %) (:blocks doc)))
+(defn toolbar [registry]
+  (into [:div {:class "edit-toolbar" :role "toolbar" :aria-label "Text tools"}]
+    (concat (mapv (fn [spec]
+                    [:button {:type "button" :data-edit-action (:id spec)} (:label spec)]) (r/catalog registry))
+            [[:button {:type "button" :data-edit-action "undo"} "Undo"]
+             [:button {:type "button" :data-edit-action "redo"} "Redo"]
+             [:button {:type "button" :data-edit-action "export"} "Export"]])))
+(defn editor
+  "A semantic region. :event is an ordinary Live intent receiving :proposal."
+  [registry snapshot event stamp refusal]
+  [:section {:key (:id (:document snapshot)) :class "enchanted-editor"
+             :live/region {:kind "editable-text" :id (:id (:document snapshot))
+                           :model {:snapshot snapshot :event event :stamp stamp :refusal refusal}}}
+   (toolbar registry)
+   (into [:div {:class "edit-body" :role "textbox" :aria-label "Document" :aria-multiline "true"
+                :contenteditable "false" :spellcheck "true"}] (body registry (:document snapshot)))
+   [:div {:class "edit-inspector" :data-edit-inspector true}]
+   [:div {:class "edit-status" :role "status" :aria-live "polite"} "Connecting…"]
+   [:div {:class "edit-conflict" :hidden true}
+    [:p "Your draft is retained. Export it before choosing the confirmed version."]
+    [:button {:type "button" :data-edit-action "confirmed"} "Use confirmed version"]]])

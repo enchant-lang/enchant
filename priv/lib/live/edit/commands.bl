@@ -1,0 +1,127 @@
+; One catalogue serves buttons, palettes, menus, keyboard and custom surfaces.
+(ns live.edit.commands
+  (:require [live.edit.document :as d] [live.edit.capabilities :as r]))
+(defn collapsed? [selection]
+  (and (= (get-in selection [:anchor :block]) (get-in selection [:head :block]))
+       (= (get-in selection [:anchor :offset]) (get-in selection [:head :offset]))))
+(defn target [context]
+  (let [selection (:selection context)]
+    (when-not (and selection (not (:deleted (:anchor selection))) (not (:deleted (:head selection))))
+      (r/fail "Select some text or place the caret in the document."))
+    (d/ordered-range (:document context) (:anchor selection) (:head selection))))
+(defn catalogue [extensions]
+  (vec (concat
+    (map (fn [[id spec]]
+           (merge {:id id :label (:label spec) :kind (:kind spec) :scope (:scope spec)
+                   :params (:params spec) :icon (get-in spec [:ui :icon]
+                    (get {"text/highlight" "highlighter" "text/emphasis" "italic" "text/callout" "lightbulb" "text/uppercase" "case"} id "function"))}
+                  (:ui spec))) (sort-by first (:functions extensions)))
+    (mapcat (fn [[id spec]]
+      [{:id (str "insert/" id) :label (:label spec) :description (:description spec)
+        :icon (:icon spec) :kind "insert" :type id}
+       {:id (str "turn/" id) :label (str "Turn into " (:label spec)) :icon (:icon spec) :kind "turn" :type id}])
+      (sort-by first (:blocks extensions)))
+    [{:id "undo" :label "Undo" :icon "undo" :kind "history" :shortcut "Mod-z"}
+     {:id "redo" :label "Redo" :icon "redo" :kind "history" :shortcut "Mod-Shift-z"}
+     {:id "block/delete" :label "Delete block" :icon "trash" :kind "block"}
+     {:id "block/duplicate" :label "Duplicate" :icon "copy" :kind "block" :shortcut "Mod-Shift-d"}
+     {:id "block/indent" :label "Indent" :icon "indent" :kind "block"}
+     {:id "block/outdent" :label "Outdent" :icon "outdent" :kind "block"}
+     {:id "block/up" :label "Move up" :icon "arrow-up" :kind "block"}
+     {:id "block/down" :label "Move down" :icon "arrow-down" :kind "block"}]
+    (map (fn [[id spec]] (assoc spec :id id :kind "custom")) (:commands extensions)))))
+(defn- coverage [doc selection fid]
+  (if (or (nil? selection) (collapsed? selection)) "off"
+    (let [[a z] (d/ordered-range doc (:anchor selection) (:head selection))
+          rows (subvec (:blocks doc) (d/block-index doc (:block a)) (inc (d/block-index doc (:block z))))
+          values (map (fn [b]
+                        (let [from (if (= (:id b) (:block a)) (:offset a) 0)
+                              to (if (= (:id b) (:block z)) (:offset z) (d/length (:text b)))
+                              matching (filter #(= fid (get-in % [:call :function])) (:marks b))]
+                          (cond (some #(and (<= (:from %) from) (<= to (:to %))) matching) "on"
+                                (some #(and (< (:from %) to) (< from (:to %))) matching) "mixed"
+                                :else "off"))) rows)]
+      (cond (every? #{"on"} values) "on" (every? #{"off"} values) "off" :else "mixed"))))
+(defn query [extensions context]
+  (let [doc (:document context) selection (:selection context)
+        block (when selection (d/find-block doc (get-in selection [:head :block])))
+        valid (and block (not (get-in selection [:head :deleted])))
+        ai (when selection (d/block-index doc (get-in selection [:anchor :block])))
+        hi (when selection (d/block-index doc (get-in selection [:head :block])))
+        code? (when (and (int? ai) (int? hi))
+                (some #(= "code" (:type %)) (subvec (:blocks doc) (min ai hi) (inc (max ai hi)))))]
+    (mapv (fn [item]
+      (let [id (:id item) kind (:kind item)
+            enabled (cond (= id "undo") (:can-undo context) (= id "redo") (:can-redo context)
+                          (:conflict context) false
+                          (and code? (= "wrap" kind) (= "inline" (:scope item))) false
+                          (= "transform" kind) (and valid (not (collapsed? selection)))
+                          (= "custom" kind) (and valid (if-let [f (:when item)] (f context) true))
+                          :else valid)
+            active (cond (= "turn" kind) (if (= (:type item) (:type block)) "on" "off")
+                         (= "inline" (:scope item))
+                         (if (collapsed? selection)
+                           (if (some #(= id (:function %)) (:pending-styles context)) "on" "off")
+                           (coverage doc selection id)) :else "off")]
+        (assoc (dissoc item :run :when :active) :enabled (boolean enabled) :active active
+               :reason (when-not enabled (cond (:conflict context) "Resolve the retained draft first."
+                  (and code? (= "wrap" kind) (= "inline" (:scope item))) "Code blocks keep plain source. Select text outside the code block to format it."
+                  :else "Choose a target in the document.")))))
+      (catalogue extensions))))
+(defn plan [extensions context id args seed]
+  (let [item (first (filter #(= id (:id %)) (query extensions context)))
+        _ (when-not item (r/fail "Unknown editor command."))
+        _ (when-not (:enabled item) (r/fail (:reason item)))
+        doc (:document context) [a z] (target context) b (d/find-block doc (:block a))
+        kind (:kind item) spec (get (:functions extensions) id)]
+    (cond
+      (= "custom" kind) ((get-in extensions [:commands id :run]) context args)
+      (and (= "wrap" kind) (= "inline" (:scope item)) (collapsed? (:selection context)))
+      (let [old (filterv #(not= id (:function %)) (:pending-styles context))]
+        {:pending-styles (if (= "on" (:active item)) old
+                          (conj old {:id seed :function id :version (:version spec) :args (r/arguments spec args)}))})
+      (contains? #{"wrap" "transform"} kind)
+      {:ops (mapv (fn [i]
+                (let [row (nth (:blocks doc) i) fid (str seed "/" i)
+                      from (if (= (:id row) (:block a)) (:offset a) 0)
+                      to (if (= (:id row) (:block z)) (:offset z) (d/length (:text row)))]
+                  (cond (= "block" (:scope spec)) {:op "block/apply" :block (:id row) :function id :id fid :args args}
+                        (= "transform" kind) {:op "text/replace" :block (:id row) :from from :to to
+                          :expected (d/slice (:text row) from to)
+                          :text ((:run spec) (d/slice (:text row) from to) (r/arguments spec args))}
+                        :else {:op "style/set" :block (:id row) :from from :to to :function id :id fid :args args
+                               :enabled (not= "on" (:active item))})))
+              (range (d/block-index doc (:block a)) (inc (d/block-index doc (:block z)))))}
+      (contains? #{"insert" "turn"} kind)
+      (let [type (:type item) attrs (get-in extensions [:blocks type :defaults] {})]
+        (if (or (= "turn" kind) (empty? (:text b)))
+          {:ops [{:op "node/set" :block (:id b) :patch {:type type :attrs attrs}}]}
+          {:ops [{:op "node/insert" :after (:id b) :parent (:parent b) :slot (:slot b)
+                   :node (d/block seed type "" attrs)}]
+           :selection {:anchor {:block seed :offset 0} :head {:block seed :offset 0}}}))
+      (= id "block/delete") {:ops [{:op "node/delete" :block (:id b)}]}
+      (= id "block/duplicate")
+      (let [rows (d/subtree doc (:id b)) names (into {} (map-indexed (fn [i b] [(:id b) (str seed "/" i)]) rows))
+            rename-call #(assoc % :id (str seed "/call/" (:id %)))
+            copies (mapv #(assoc % :id (get names (:id %)) :parent (get names (:parent %) (:parent %))
+                            :marks (mapv (fn [m] (update m :call rename-call)) (:marks %))
+                            :wraps (mapv rename-call (:wraps %))) rows)]
+        {:ops [{:op "node/insert" :after (:id b) :parent (:parent b) :slot (:slot b) :blocks copies}]})
+      (= id "block/indent")
+      (let [previous (d/previous-sibling doc b)]
+        (when-not previous (r/fail "This is already the first block."))
+        {:ops [{:op "node/move" :block (:id b) :parent previous}]})
+      (= id "block/outdent")
+      (let [parent (d/find-block doc (:parent b))]
+        (when-not parent (r/fail "This block is already at the top level."))
+        {:ops [{:op "node/move" :block (:id b) :parent (:parent parent) :after (:id parent) :slot (:slot parent)}]})
+      (= id "block/up")
+      (let [previous (d/find-block doc (d/previous-sibling doc b))]
+        (when-not previous (r/fail "This is already the first block."))
+        {:ops [{:op "node/move" :block (:id b) :parent (:parent b) :slot (:slot b) :after (d/previous-sibling doc previous)}]})
+      (= id "block/down")
+      (let [following (first (filter #(and (= (:parent %) (:parent b)) (= (:slot %) (:slot b)))
+                          (subvec (:blocks doc) (+ (d/block-index doc (:id b)) (count (d/subtree doc (:id b)))))))]
+        (when-not following (r/fail "This is already the last block."))
+        {:ops [{:op "node/move" :block (:id b) :parent (:parent b) :slot (:slot b) :after (:id following)}]})
+      :else (r/fail "This action belongs to the editor session."))))

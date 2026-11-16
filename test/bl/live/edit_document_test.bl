@@ -1,0 +1,73 @@
+(ns live.edit.document-test
+  (:require [live.edit.document :as d] [live.edit.registry :as r] [live.edit.tools :as tools]))
+(def registry (r/functions [tools/package]))
+(def source (d/prepare (d/document "notes" [(d/block "a" "hello 🍌") (d/block "b" "مرحبا é")])) )
+(defn edit [doc op] (d/apply-op registry doc op))
+(defn roundtrip [doc op]
+  (let [next (edit doc op)] (= doc (:document (edit (:document next) (:inverse next))))))
+
+(deftest migration-preserves-source-and-applications
+  (let [old {:schema 1 :id "notes" :blocks [{:id "a" :text "abc" :marks [] :wraps []}]}
+        next (d/migrate old)]
+    (is (= 2 (:schema next))) (is (= "abc" (get-in next [:blocks 0 :text])))
+    (is (= "paragraph" (get-in next [:blocks 0 :type])))
+    (is (= next (d/migrate next)))))
+(deftest unicode-and-codepoint-ranges
+  (is (= 3 (d/length "a🍌b"))) (is (= 2 (d/length "é")))
+  (is (= "🍌" (d/slice "a🍌b" 1 2))) (is (= "ell" (d/slice "hello" 1 4)))
+  (is (roundtrip source {:op "text/replace" :block "a" :from 1 :to 5 :text "new"})))
+(deftest text-compensation-does-not-rewind-another-edit-in-the-same-block
+  (let [mine (edit source {:op "text/replace" :block "a" :from 0 :to 0 :text "Ada "})
+        peer (edit (:document mine) {:op "text/replace" :block "a" :from 11 :to 11 :text "!"})
+        undo (edit (:document peer) (:inverse mine))]
+    (is (= "hello 🍌!" (get-in undo [:document :blocks 0 :text])))))
+(deftest named-child-slots-and-subtree-moves
+  (let [container (d/block "box" "callout" "Note" {:icon "lightbulb"})
+        inserted (:document (edit source {:op "node/insert" :after "a" :node container}))
+        child (d/block "child" "paragraph" "nested" {})
+        nested (:document (edit inserted {:op "node/insert" :parent "box" :slot "caption" :node child}))]
+    (is (d/valid? nested)) (is (= ["box" "child"] (mapv :id (d/subtree nested "box"))))
+    (is (roundtrip nested {:op "node/move" :block "box" :after "b"}))
+    (is (roundtrip nested {:op "node/delete" :block "box"}))
+    (is (= false (:ok (d/attempt registry nested {:op "node/move" :block "box" :parent "child"}))))))
+(deftest typed-fields-and-metadata-compensate-with-guards
+  (is (roundtrip source {:op "node/set" :block "a" :patch {:type "heading" :attrs {:level 2}}}))
+  (is (roundtrip source {:op "document/meta" :patch {:title "Field notes"}}))
+  (is (= false (:ok (d/attempt registry source {:op "node/set" :block "a" :patch {:text "bypass"}})))))
+(deftest inline-style-restoration-preserves-other-functions
+  (let [op {:op "style/set" :block "a" :from 0 :to 5 :function "text/highlight" :id "h" :enabled true :args {}}
+        marked (:document (edit source op))]
+    (is (roundtrip source op))
+    (is (roundtrip marked {:op "style/set" :block "a" :from 1 :to 3 :function "text/highlight" :enabled false}))
+    (is (roundtrip marked {:op "text/replace" :block "a" :from 1 :to 4 :text ""}))))
+(deftest unknown-types-and-payloads-are-retained
+  (let [node (d/block "x" "other/chart" "Readable fallback" {:dataset [1 2 3] :layout {:axis "x"}})
+        doc (d/document "notes" [node])]
+    (is (d/valid? doc)) (is (= doc (d/migrate doc)))))
+
+(deftest explicit-caret-styles-stop-formatting-and-keep-a-single-application
+  (let [call {:id "h" :function "text/highlight" :version 1 :args {:tone "amber"}}
+        a (:document (edit source {:op "text/replace" :block "a" :from 0 :to 0 :text "A" :styles [call]}))
+        b (:document (edit a {:op "text/replace" :block "a" :from 1 :to 1 :text "B" :styles [call]}))
+        c (:document (edit b {:op "text/replace" :block "a" :from 2 :to 2 :text "C" :styles []}))]
+    (is (= 1 (count (get-in c [:blocks 0 :marks]))))
+    (is (= 2 (get-in c [:blocks 0 :marks 0 :to])))
+    (is (roundtrip b {:op "text/replace" :block "a" :from 0 :to 2 :text "X" :styles []})) ))
+(deftest split-and-join-preserve-container-children-and-typed-metadata
+  (let [doc (d/document "notes" [(d/block "box" "callout" "hello" {:icon "leaf"})
+                (assoc (d/block "child" "inside") :parent "box") (d/block "tail" "end")])
+        op {:op "block/split" :block "box" :at 2 :new "next" :rightMeta {:type "paragraph" :attrs {}}}
+        split (edit doc op)]
+    (is (= ["box" "child" "next" "tail"] (mapv :id (get-in split [:document :blocks]))))
+    (is (= "paragraph" (get-in split [:document :blocks 2 :type])))
+    (is (= doc (:document (edit (:document split) (:inverse split)))))
+    (is (roundtrip doc {:op "block/join" :left "box" :right "tail"}))))
+(deftest application-history-preserves-peer-text
+  (let [marked (:document (edit source {:op "text/apply" :block "a" :from 0 :to 5 :function "text/highlight" :id "h" :args {}}))
+        changed (edit marked {:op "call/args" :id "h" :args {:tone "mint"}})
+        peer (:document (edit (:document changed) {:op "text/replace" :block "a" :from 7 :to 7 :text "!"}))
+        undone (edit peer (:inverse changed))
+        removed (edit marked {:op "call/remove" :id "h"})]
+    (is (= "hello 🍌!" (get-in undone [:document :blocks 0 :text])))
+    (is (= "amber" (get-in undone [:document :blocks 0 :marks 0 :call :args :tone])))
+    (is (= marked (:document (edit (:document removed) (:inverse removed)))))))

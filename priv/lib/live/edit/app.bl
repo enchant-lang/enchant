@@ -1,0 +1,89 @@
+; One ordinary BL declaration prepares its public JS graph and Live assets.
+(ns live.edit.app
+  (:require [bl.js :as js] [bl.json :as json] [web]
+            [live.edit.annotations :as annotations] [live.edit.extensions :as extensions]
+            [live.edit.projection :as projection]))
+(def library (Path/dirname (BeamLisp.Loader/source_path "live.edit.app")))
+(defn- sha [body] (Base/encode16 (crypto/hash :sha256 body) (list (tuple :case :lower))))
+(defn- files [directory]
+  (vec (mapcat (fn [name]
+           (let [path (str directory "/" name)] (if (File/dir? path) (files path) [path])))
+         (sort (File/ls! directory)))))
+(defn- package-descriptor [reference]
+  (let [[namespace name] (split (str reference) "/")]
+    (when-not (and namespace name) (throw (ex-info "An editor package needs a namespace/var reference." {})))
+    (BeamLisp.Loader/ensure_loaded namespace)
+    {:value (BeamLisp.Env/fetch_exact! namespace name) :expression (symbol (str namespace "/" name))
+     :requires [namespace] :sources [namespace]}))
+(defn prepare!
+  "Prepare a reusable editor from package vars and annotated namespaces.
+   No application writes a JS entrypoint, driver registration or JS root list."
+  [options]
+  (let [descriptors (concat (map package-descriptor (get options :packages ["live.edit.standard/package"]))
+                           (map #(annotations/descriptor (str %)) (:annotations options)))
+        packages (mapv :value descriptors)
+        namespaces (vec (sort (distinct (mapcat :requires descriptors))))
+        sources (vec (sort (distinct (concat (mapcat :sources descriptors) ["live.edit.editor"]))))
+        assets (str library "/assets")
+        fingerprint (sha (pr-str [(BeamLisp.AOTCache/compiler_key) (web/priv-dir)
+          (mapv (fn [ns] [ns (sha (File/read! (BeamLisp.Loader/source_path ns)))]) sources)
+          (mapv (fn [file] [(Path/basename file) (sha (File/read! file))]) (filterv #(ends-with? % ".bl") (files library)))
+          (mapv (fn [file] [(subs file (inc (count assets))) (sha (File/read! file))]) (files assets))]))
+        short (subs fingerprint 0 16) namespace (str "enchanted.generated.e" short)
+        kind (str "enchanted-document/" (get options :name "document")) out (Path/expand (str (get options :out ".bl/editors") "/" short))
+        source-root (str out "/source") entry (str source-root "/enchanted/generated/e" short ".bl")
+        marker (str out "/manifest.json")
+        manifest {:schema "enchant.editor.bundle/1" :fingerprint fingerprint :entry namespace :kind kind
+                  :packages (mapv (fn [p] (:name (:value p))) descriptors)
+                  :annotations (vec (mapcat :annotations descriptors))
+                  :generated true :compiler (BeamLisp.AOTCache/compiler_key)}]
+    (when-not (and (File/regular? marker) (= fingerprint (get (json/decode (File/read! marker) {:keys :keyword}) :fingerprint)))
+      (File/mkdir_p! (Path/dirname entry))
+      (File/write! entry
+        (str "(ns ^:js " namespace " (:require [live.edit.editor :as editor] "
+             (join " " (map #(str "[" % "]") namespaces)) "))\n"
+             "(defn install [host] (editor/install-with host " (pr-str (mapv :expression descriptors)) " " (pr-str kind) "))\n"
+             "(defn api [] (editor/api-with " (pr-str (mapv :expression descriptors)) "))\n"))
+      (js/build! namespace {:out (str out "/out")
+        :paths (to-list (reverse (into [source-root] (BeamLisp.Loader/search_dirs))))
+        :entry-vars {namespace #{"install" "api"}}})
+      (File/cp_r! assets (str out "/assets"))
+      (File/write! (str out "/boot.mjs")
+        (str "import {mount} from './assets/runtime/host.js';\nimport './out/ns/" namespace ".mjs';\n"
+             "import {requireNamespace} from './out/interop.mjs';\n"
+             "const dispose=requireNamespace('" namespace "').install({mount});\n"
+             "window.Enchant=window.Enchant||{bundles:new Map()};window.Enchant.bundles.set('" kind "',{dispose});\n"
+             "if(!Live.root)Live.connect({url:(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws'+location.pathname+location.search,root:document.getElementById('live-root')});\n"))
+      (File/write! marker (json/encode manifest)))
+    {:registry (extensions/build packages) :manifest manifest :out out :prefix (str "/_edit/" short) :kind kind}))
+(defn editor [bundle snapshot event options]
+  (let [tree (projection/editor (:registry bundle) snapshot event (:stamp options) (:refusal options))]
+    (-> tree
+      (assoc-in [1 :live/region :kind] (:kind bundle))
+      (assoc-in [1 :live/region :model :resource] (:resource options))
+      (assoc-in [1 :live/region :model :readonly] (boolean (:readonly options)))
+      (assoc-in [1 :live/region :model :appearance] (:appearance options))
+      (assoc-in [1 :live/region :model :document-actions] (:document-actions options)))))
+(defn enhance [app bundle]
+  (let [previous-assets (:assets app) previous-shell (:shell app)
+        prefix (:prefix bundle) output (:out bundle)
+        assets (fn [conn path]
+          (if (starts-with? path (str prefix "/"))
+            (let [relative (subs path (inc (count prefix))) file (Path/expand (str output "/" relative))
+                  public? (or (= relative "boot.mjs") (starts-with? relative "assets/")
+                              (and (starts-with? relative "out/") (ends-with? relative ".mjs")))]
+              (if (and public? (starts-with? file (str output "/")) (File/regular? file))
+                (web/bytes-cached conn (cond (ends-with? file ".svg") "image/svg+xml" (ends-with? file ".css") "text/css" (ends-with? file ".woff2") "font/woff2"
+                                            (or (ends-with? file ".js") (ends-with? file ".mjs")) "application/javascript" :else "text/plain")
+                                  (File/read! file))
+                (web/text conn 404 "Asset not found")))
+            (when previous-assets (previous-assets conn path))))
+        shell (fn [title body style]
+          (let [style (str style "<link rel=\"stylesheet\" href=\"" prefix "/assets/editor.css\">"
+                           "<link rel=\"icon\" href=\"" prefix "/assets/favicon.svg\">"
+                           "<script type=\"module\" src=\"" prefix "/boot.mjs\"></script>")]
+            (if previous-shell (previous-shell title body style)
+              (str "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                   "<title>" title "</title>" style "</head><body class=\"ed-app\"><div id=\"live-root\">" body
+                   "</div><script src=\"/client.js\"></script></body></html>"))))]
+    (assoc app :assets assets :shell shell)))

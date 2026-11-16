@@ -1,0 +1,44 @@
+(ns live.edit.projection-test
+  (:require [live.edit.view :as view] [live.edit.model :as m] [live.edit.registry :as r]
+            [live.edit.tools :as tools] [live.edit.sync :as sync] [live.hiccup :as h]
+            [live.diff :as diff] [live.edit.store :as store] [datom] [live.socket :as socket]))
+(def registry (r/functions [tools/package]))
+(def document (m/document "notes" [(m/block "p1" "Hello 🍌")]))
+(def initial (sync/authority registry document))
+(defn projection [state] (view/editor registry state [:intent :edit] 0 nil))
+
+(deftest semantic-region-serialization-and-reference-equivalence
+  (let [before (projection initial)
+        changed (:state (sync/decide registry initial {:id "a1" :basis 0 :digest (:digest initial)
+                      :op {:op "text/replace" :block "p1" :from 0 :to 0 :text "Hi "}}))
+        after (projection changed) ops (diff/diff before after)]
+    (is (= :region (first (first ops))))
+    (is (= 1 (count ops)))
+    (is (= (diff/normalize after) (diff/apply-ops ops before)))
+    (is (includes? (h/hiccup->html before) "data-live-region='"))
+    (is (includes? (h/hiccup->html before) "data-edit-slot=\"p1\""))))
+
+(deftest overlapping-functions-project-with-source-identities
+  (let [a (:document (m/apply-op registry document {:op "text/apply" :block "p1" :from 0 :to 5
+                   :id "a1" :function "text/highlight" :args {}}))
+        b (:document (m/apply-op registry a {:op "text/apply" :block "p1" :from 3 :to 7
+                   :id "a2" :function "text/emphasis" :args {}}))
+        html (h/hiccup->html (into [:div] (view/body registry b)))]
+    (is (includes? html "data-edit-call=\"a1\""))
+    (is (includes? html "data-edit-call=\"a2\""))
+    (is (includes? html "data-edit-from=\"3\""))
+    (is (includes? html "🍌"))))
+
+(deftest live-writer-serializes-authority-and-deduplicates-proposals
+  (let [conn (datom/connect store/schema)
+        p {:id "a1" :basis 0 :digest (:digest initial)
+           :op {:op "text/replace" :block "p1" :from 0 :to 0 :text "A"}}]
+    (try
+      (store/initialize! conn registry document)
+      (datom/transact! conn [[:db/fn (fn [db] (store/transaction db registry "notes" p))]])
+      (is (= 0 (:revision (store/read-state (datom/db conn) "notes"))))
+      (store/publish! conn "notes")
+      (is (= "AHello 🍌" (get-in (store/read-state (datom/db conn) "notes") [:document :blocks 0 :text])))
+      (is (thrown? (datom/transact! conn [[:db/fn (fn [db] (store/transaction db registry "notes" p))]])))
+      (is (= 1 (:revision (store/read-state (datom/db conn) "notes"))))
+      (finally (datom/close! conn)))))

@@ -1,0 +1,244 @@
+; Shared semantic proposals, optimistic prediction and mapped compensation.
+(ns live.edit.protocol (:require [live.edit.document :as m] [live.edit.registry :as r]))
+(def journal-limit 256)
+(defn functions [registry] (get registry :functions registry))
+(defn- tail [xs n] (if (> (count xs) n) (subvec xs (- (count xs) n)) xs))
+(defn digest [registry]
+  (str "live.edit/2:"
+    (pr-str [(mapv (fn [[id spec]]
+      [id (:version spec) (:kind spec) (:scope spec)
+       (mapv (fn [[k p]] [(r/key-name k) (:type p) (:format p) (:default p) (:values p) (:min p) (:max p)])
+             (sort-by (fn [[k _]] (r/key-name k)) (:params spec)))]) (sort-by first (functions registry)))
+      (mapv (fn [[id spec]] [id (get spec :version 1) (:slots spec)]) (sort-by first (:blocks registry)))])))
+(defn authority [registry doc]
+  {:document (m/prepare (m/migrate doc)) :revision 0 :digest (digest registry) :journal []})
+(defn snapshot [state] (select-keys state [:document :revision :digest :journal]))
+(defn- apply-edit [registry doc op]
+  (let [edit (m/apply-trusted (functions registry) doc op) next (:document edit)]
+    (when (or (:structural edit) (= "node/set" (:op op)))
+      (doseq [b (:blocks next)]
+        (when-let [parent (m/find-block next (:parent b))]
+          (when-let [spec (get-in registry [:blocks (:type parent)])]
+            (when-not (some #{(:slot b)} (:slots spec)) (r/fail "unsupported-child-slot")))))) edit))
+(defn- empty-change [] {:changed [] :mapping [] :structural false :metadata false})
+(defn- changes [a b]
+  {:changed (vec (distinct (concat (:changed a) (:changed b))))
+   :mapping (into (get a :mapping []) (:mapping b))
+   :structural (or (:structural a) (:structural b)) :metadata (or (:metadata a) (:metadata b))})
+(defn- overlap? [a b c d] (and (< a d) (< c b)))
+(defn- rebase-one [op change]
+  (let [kind (:op op) target (:block op) affected (= target (:block change))
+        text? (contains? #{"text/replace" "text/transform"} kind)
+        ranged? (or text? (contains? #{"text/apply" "style/set" "style/restore"} kind))
+        from (if (= kind "block/split") (:at op) (:from op))
+        to (if (= kind "block/split") (:at op) (:to op))]
+    (when (and (= "range" (:kind change)) (some #{target} (:blocks change))) (r/fail "range-rebase-conflict"))
+    (when (and (= "delete" (:kind change))
+               (some (set (:ids change)) (remove nil? [target (:left op) (:right op) (:parent op) (:after op)])))
+      (r/fail "deleted-target"))
+    (when (and affected (= "replace" (:kind change)) (or text? (= kind "block/split"))
+      (or (and (= from to) (< (:from change) from (:to change)))
+          (and (< from to) (overlap? from to (:from change) (:to change)))
+          (and (< from to) (= (:from change) (:to change)) (< from (:from change) to))))
+      (r/fail "concurrent-text-conflict"))
+    (if (or ranged? (= kind "block/split"))
+      (let [a (m/map-point {:block target :offset from :affinity "right"} [change])
+            b (m/map-point {:block target :offset to :affinity (if (= from to) "right" "left")} [change])]
+        (when (or (:deleted a) (:deleted b)) (r/fail "deleted-target"))
+        (when-not (= (:block a) (:block b)) (r/fail "range-crosses-split"))
+        (if (= kind "block/split") (assoc op :block (:block a) :at (:offset a))
+          (assoc op :block (:block a) :from (:offset a) :to (:offset b)))) op)))
+(declare rebase)
+(defn rebase [op mapping]
+  (try {:ok true :op
+    (cond (= "batch" (:op op))
+          (assoc op :ops (mapv #(let [r (rebase % mapping)]
+                              (when-not (:ok r) (r/fail (:reason r))) (:op r)) (:ops op)))
+          (= "calls/restore" (:op op))
+          (assoc op :entries (mapv (fn [entry]
+            (let [a (m/map-point {:block (:block entry) :offset (get-in entry [:mark :from] 0) :affinity "left"} mapping)
+                  b (m/map-point {:block (:block entry) :offset (get-in entry [:mark :to] 0) :affinity "right"} mapping)]
+              (when (or (:deleted a) (:deleted b) (not= (:block a) (:block b))) (r/fail "deleted-target"))
+              (if (:mark entry) (assoc entry :block (:block a) :mark (assoc (:mark entry) :from (:offset a) :to (:offset b)))
+                (assoc entry :block (:block a))))) (:entries op)))
+          (= "range/replace" (:op op))
+          (let [a (m/map-point (:from op) mapping) b (m/map-point (:to op) mapping)]
+            (when (or (:deleted a) (:deleted b)) (r/fail "deleted-target"))
+            (when (some #(and (= "range" (:kind %))
+                              (or (some #{(:block (:from op))} (:blocks %))
+                                  (some #{(:block (:to op))} (:blocks %)))) mapping) (r/fail "range-rebase-conflict"))
+            (assoc op :from a :to b))
+          :else (reduce rebase-one op mapping))}
+       (catch e {:ok false :reason (get (ex-data e) :edit/error "rebase-failed")})))
+(defn- entries-after [state basis]
+  (let [entries (filterv #(> (:revision %) basis) (:journal state))]
+    (when-not (and (int? basis) (<= 0 basis (:revision state))
+                   (= (- (:revision state) basis) (count entries))
+                   (= (mapv :revision entries) (vec (range (inc basis) (inc (:revision state))))))
+      (r/fail "revision-history-unavailable")) entries))
+(defn proposal? [p]
+  (and (map? p) (= #{:id :basis :digest :op} (set (keys p))) (m/identifier? (:id p))
+       (int? (:basis p)) (<= 0 (:basis p)) (string? (:digest p)) (map? (:op p))))
+(defn decide [registry state proposal]
+  (try
+    (when-not (proposal? proposal) (r/fail "invalid-proposal"))
+    (when-not (= (digest registry) (:digest state) (:digest proposal)) (r/fail "client-outdated"))
+    (if-let [seen (first (filter #(= (:id proposal) (:id %)) (:journal state)))]
+      (do (when-not (= proposal (:proposal seen)) (r/fail "operation-id-reused"))
+          {:state state :reply {:ok true :id (:id proposal) :duplicate true :snapshot (snapshot state)}})
+      (let [moved (rebase (:op proposal) (vec (mapcat :mapping (entries-after state (:basis proposal)))))]
+        (when-not (:ok moved) (r/fail (:reason moved)))
+        (let [edit (apply-edit registry (:document state) (:op moved)) revision (inc (:revision state))
+              entry {:id (:id proposal) :revision revision :op (:op moved) :mapping (:mapping edit) :proposal proposal}
+              next (assoc state :document (:document edit) :revision revision
+                                :journal (tail (conj (:journal state) entry) journal-limit))]
+          {:state next :reply {:ok true :id (:id proposal) :snapshot (snapshot next)}})))
+    (catch e {:state state :reply {:ok false :id (:id proposal)
+                                 :reason (get (ex-data e) :edit/error "invalid-edit") :snapshot (snapshot state)}})))
+(defn replica [snapshot]
+  (let [doc (m/prepare (m/migrate (:document snapshot)))]
+    {:confirmed doc :visible doc :revision (:revision snapshot) :digest (:digest snapshot) :pending []
+     :past [] :future [] :conflicts [] :draft nil :change (empty-change)}))
+(defn- coalescible? [state row op action]
+  (let [old (:op row)]
+    (and row (= action "edit" (:action row)) (:group state) (= (:group state) (:group row))
+         (nil? (:proposal row)) (= "text/replace" (:op old) (:op op))
+         (= (:block old) (:block op)) (= (:from old) (:to old)) (= (:from op) (:to op))
+         (= (:from op) (+ (:from old) (m/length (:text old))))
+         (not (contains? old :restore)) (not (contains? op :restore))
+         (= (:styles old) (:styles op)) (< (+ (m/length (:text old)) (m/length (:text op))) 4096))))
+(defn enqueue
+  ([registry state id op] (enqueue registry state id op "edit"))
+  ([registry state id op action]
+   (when (seq (:conflicts state)) (r/fail "resolve-conflict-first"))
+   (when-not (and (m/identifier? id) (< (count (:pending state)) 4096)
+                  (not (some #(= id (:id %)) (:pending state)))) (r/fail "invalid-operation-id"))
+   (let [edit (apply-edit registry (:visible state) op) row (last (:pending state))
+         combined (when (coalescible? state row op action)
+                    (assoc (:op row) :text (str (get-in row [:op :text]) (:text op))))
+         pending (if combined
+                   (conj (pop (:pending state)) (assoc row :op combined
+                     :inverse (assoc (:inverse row) :to (+ (:from combined) (m/length (:text combined))) :expected (:text combined))))
+                   (conj (:pending state) {:id id :op op :action action :inverse (:inverse edit) :group (:group state)}))]
+     (assoc state :visible (:document edit) :change edit
+                  :selection (m/map-selection (:selection state) (:mapping edit)) :pending pending))))
+(defn outbound [state]
+  (when (and (empty? (:conflicts state)) (seq (:pending state)))
+    (let [row (first (:pending state))]
+      (or (:proposal row) {:id (:id row) :basis (:revision state) :digest (:digest state) :op (:op row)}))))
+(defn mark-sent [state]
+  (if-let [proposal (outbound state)] (assoc-in state [:pending 0 :proposal] proposal) state))
+(defn- text-change [before after id]
+  (let [a (m/points before) b (m/points after) an (count a) bn (count b)
+        start (loop [i 0] (if (and (< i an) (< i bn) (= (nth a i) (nth b i))) (recur (inc i)) i))
+        suffix (loop [n 0] (if (and (< n (- an start)) (< n (- bn start))
+                                    (= (nth a (- an n 1)) (nth b (- bn n 1)))) (recur (inc n)) n))]
+    {:kind "replace" :block id :from start :to (- an suffix) :inserted (- bn start suffix)}))
+(defn difference
+  ([before after] (difference before after (mapv :id (:blocks before))))
+  ([before after ids]
+   (if (identical? before after) []
+     (let [a (:blocks before) b (:blocks after) ai (mapv :id a) bi (mapv :id b)
+           removed (vec (remove (set bi) ai)) added (vec (remove (set ai) bi))
+           split (when (and (= 1 (count added)) (empty? removed))
+                   (let [new (m/find-block after (first added)) i (m/block-index after (:id new))
+                         left (m/find-block after (m/previous-sibling after new)) original (when left (m/find-block before (:id left)))]
+                     (when (and original (= (:text original) (str (:text left) (:text new))))
+                       {:kind "split" :block (:id left) :new (:id new) :at (m/length (:text left))})))
+           join (when (and (= 1 (count removed)) (empty? added))
+                  (let [right (m/find-block before (first removed)) i (m/block-index before (:id right))
+                        left (m/find-block before (m/previous-sibling before right)) joined (when left (m/find-block after (:id left)))]
+                    (when (and joined (= (:text joined) (str (:text left) (:text right))))
+                      {:kind "join" :left (:id left) :right (:id right) :at (m/length (:text left))})))]
+       (cond split [split] join [join]
+         :else (vec (concat (when (seq removed) [{:kind "delete" :ids removed}])
+                    (keep (fn [id] (let [x (m/find-block before id) y (m/find-block after id)]
+                            (when (and x y (not= (:text x) (:text y))) (text-change (:text x) (:text y) id)))) ids))))))))
+(defn- conflict [state reason]
+  (assoc state :draft (or (:draft state) (:visible state))
+               :conflicts (conj (:conflicts state) {:reason reason :pending (:pending state)}) :pending []))
+(defn- move-pending [registry state old-base new-base changed]
+  (try
+    (loop [rows (:pending state) old old-base next new-base kept [] dirty changed]
+      (if (empty? rows) (assoc state :pending kept :visible next :change dirty)
+        (let [row (first rows) mapping (difference old next (:changed dirty)) moved (rebase (:op row) mapping)]
+          (when-not (:ok moved) (r/fail (:reason moved)))
+          (let [old-result (apply-edit registry old (:op row)) new-result (apply-edit registry next (:op moved))]
+            (recur (rest rows) (:document old-result) (:document new-result)
+                   (conj kept (assoc row :op (:op moved) :inverse (:inverse new-result)))
+                   (changes dirty new-result))))))
+    (catch e (conflict state (get (ex-data e) :edit/error "rebase-failed")))))
+(defn- inverse-ops [op] (if (= "batch" (:op op)) (:ops op) [op]))
+(defn- remember [state row inverse]
+  (let [item {:op inverse :group (:group row)}]
+    (cond
+      (= "undo" (:action row)) (assoc state :past (if (seq (:past state)) (pop (:past state)) []) :future (conj (:future state) item))
+      (= "redo" (:action row)) (assoc state :future (if (seq (:future state)) (pop (:future state)) []) :past (conj (:past state) item))
+      :else (let [past (:past state) previous (last past)
+                  past (if (and (:group row) (= (:group row) (:group previous)))
+                         (conj (pop past) (assoc item :op {:op "batch" :ops (into (inverse-ops inverse) (inverse-ops (:op previous)))}))
+                         (conj past item))]
+              (assoc state :past (tail past 100) :future [])))))
+(defn- map-history [state mapping]
+  (let [move (fn [item] (let [moved (rebase (:op item) mapping)]
+                (if (:ok moved) (assoc item :op (:op moved)) (assoc item :blocked (:reason moved))))) ]
+    (-> state (update :past #(mapv move %)) (update :future #(mapv move %)))))
+(defn- adopt-entry [registry state entry]
+  (let [old (:confirmed state) edit (apply-edit registry old (:op entry)) next (:document edit)
+        head (first (:pending state)) base (assoc state :confirmed next :revision (:revision entry))]
+    (if (= (:id head) (:id entry))
+      (let [remaining (remember (assoc base :pending (vec (rest (:pending state)))) head (:inverse edit))]
+        (if (= (:op head) (:op entry)) (assoc remaining :change (empty-change))
+          (let [predicted (apply-edit registry old (:op head))]
+            (move-pending registry remaining (:document predicted) next edit))))
+      (move-pending registry (map-history base (:mapping edit)) old next edit))))
+(defn adopt [registry state incoming]
+  (if (and (<= (:revision incoming) (:revision state)) (= (:digest incoming) (:digest state)))
+    (assoc state :change (empty-change))
+    (try
+      (when-not (= (:digest state) (:digest incoming) (digest registry)) (r/fail "client-outdated"))
+      (let [entries (entries-after incoming (:revision state))
+            next (reduce (fn [s entry]
+                          (let [updated (adopt-entry registry s entry)]
+                            (assoc updated :change (changes (:change s) (:change updated)))))
+                         (assoc state :change (empty-change)) entries)
+            _ (when (and (:document incoming) (not= (:confirmed next) (:document incoming))) (r/fail "snapshot-mismatch"))
+            correction (difference (:visible state) (:visible next) (get-in next [:change :changed]))]
+        (assoc next :visible (or (:draft next) (:visible next))
+                    :change (assoc (:change next) :mapping correction)
+                    :selection (m/map-selection (:selection state) correction)))
+      (catch e
+        (let [reason (get (ex-data e) :edit/error "snapshot-failed") checkpoint (:document incoming)]
+          (if (and checkpoint (empty? (:pending state)) (empty? (:conflicts state)) (= reason "revision-history-unavailable"))
+            (assoc (replica incoming) :selection (:selection state)
+              :change {:changed (mapv :id (:blocks checkpoint)) :structural true :mapping [] :metadata true})
+            (assoc (conflict state reason)
+              :confirmed (if checkpoint (m/prepare (m/migrate checkpoint)) (:confirmed state))
+              :revision (:revision incoming) :change (empty-change))))))))
+(defn receive-reply [registry state reply]
+  (let [next (if (:snapshot reply) (adopt registry state (:snapshot reply)) state)]
+    (if (or (:ok reply) (not (some #(= (:id reply) (:id %)) (:pending next)))) next
+      (conflict next (:reason reply)))))
+(defn use-confirmed [state]
+  (assoc state :visible (:confirmed state) :pending [] :conflicts [] :draft nil :past [] :future []
+    :change {:changed (mapv :id (:blocks (:confirmed state))) :structural true :metadata true :mapping []}))
+(defn can-undo? [state]
+  (and (empty? (:conflicts state))
+       (or (= "edit" (:action (last (:pending state)))) (and (empty? (:pending state)) (seq (:past state))))))
+(defn can-redo? [state]
+  (and (empty? (:conflicts state))
+       (or (= "undo" (:action (last (:pending state)))) (and (empty? (:pending state)) (seq (:future state))))))
+(defn undo [registry state id]
+  (when-not (can-undo? state) (r/fail "undo-unavailable"))
+  (let [pending (:pending state) last-row (last pending)
+        rows (when (seq pending) (if (:group last-row)
+               (take-while #(and (= "edit" (:action %)) (= (:group %) (:group last-row))) (reverse pending)) [last-row]))
+        item (last (:past state))
+        op (if (seq rows) {:op "batch" :ops (vec (mapcat #(inverse-ops (:inverse %)) rows))} (:op item))]
+    (when (:blocked item) (r/fail (:blocked item)))
+    (enqueue registry (assoc state :group nil) id op "undo")))
+(defn redo [registry state id]
+  (when-not (can-redo? state) (r/fail "redo-unavailable"))
+  (let [last-row (last (:pending state)) item (last (:future state))]
+    (when (:blocked item) (r/fail (:blocked item)))
+    (enqueue registry (assoc state :group nil) id (if (= "undo" (:action last-row)) (:inverse last-row) (:op item)) "redo")))

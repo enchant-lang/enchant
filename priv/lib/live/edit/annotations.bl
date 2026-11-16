@@ -1,0 +1,32 @@
+; Compiler-owned declaration headers are inert. No metadata expressions run.
+(ns live.edit.annotations
+  (:require [compiler :as compiler] [reader-node :as rn] [js.build :as js]
+            [live.edit.registry :as r]))
+(defn- declaration? [form]
+  (let [node (rn/node-form form)]
+    (and (= :list (rn/node-tag node))
+         (contains? #{"defn" "defn-"} (rn/node-name (rn/node-form (first (rn/node-items node))))))))
+(defn discover [namespace]
+  (let [path (BeamLisp.Loader/source_path namespace)
+        env (BeamLisp.Compiler/new_env namespace)]
+    (vec (keep (fn [form]
+      (when (declaration? form)
+        (let [decl (compiler/declaration-source form env)
+              spec (get-in decl [:metadata :editor/function])]
+          (when spec
+            (when-not (and (map? spec) (= :public (:visibility decl))) (r/fail "invalid-editor-annotation"))
+            (let [name (rn/node-name (:name decl)) id (get spec :id (str namespace "/" name))
+                  role (if (= "transform" (:kind spec)) :run :render)
+                  spec (assoc (dissoc spec :id) :label (get spec :label name) :version (get spec :version 1))]
+              {:namespace namespace :name name :id id :role role :spec spec
+               :reference (symbol (str namespace "/" name)) :path path}))))) (js/read-forms path)))))
+(defn descriptor [namespace]
+  (BeamLisp.Loader/ensure_loaded namespace)
+  (let [entries (discover namespace)
+        expression {:name namespace :provides {:editor/functions
+                      (into {} (map (fn [entry] [(:id entry) (assoc (:spec entry) (:role entry) (:reference entry))]) entries))}}
+        value {:name namespace :provides {:editor/functions
+                 (into {} (map (fn [entry]
+                   [(:id entry) (assoc (:spec entry) (:role entry) (BeamLisp.Env/fetch_exact! namespace (:name entry)))]) entries))}}]
+    {:value value :expression expression :requires [namespace] :sources [namespace]
+     :annotations (mapv #(select-keys % [:namespace :name :id :role :spec]) entries)}))

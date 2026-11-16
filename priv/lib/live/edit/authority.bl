@@ -1,0 +1,114 @@
+; Live's Datom writer is the authority: validate and publish in one transaction.
+(ns live.edit.authority
+  (:require [live.edit.protocol :as sync] [live.edit.document :as document] [live.edit.registry :as r]
+            [datom] [datom.db :as db] [datom.store :as substrate] [bl.json :as json]))
+(def schema [{:db/ident :editable/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+             {:db/ident :editable/state :db/valueType :db.type/string}
+             {:db/ident :editable/published :db/valueType :db.type/string}
+             {:db/ident :editable/chunk-key :db/valueType :db.type/string :db/unique :db.unique/identity}
+             {:db/ident :editable/chunk-value :db/valueType :db.type/string}])
+(defn entity [database id]
+  (first (first (datom/q '[:find ?e :in $ ?id :where [?e :editable/id ?id]] database id))))
+(defn- raw-state [database id attribute]
+  (when-let [e (entity database id)] (db/attr-value database e attribute)))
+(defn- chunk-entity [database key]
+  (first (first (datom/q '[:find ?e :in $ ?key :where [?e :editable/chunk-key ?key]] database key))))
+(defn- decoded [database raw]
+  (when raw
+    (let [source (cond
+          (starts-with? raw "@edit-z/1:")
+          (zlib/uncompress (Base/decode64! (subs raw 10)))
+          (starts-with? raw "@edit-parts/1:")
+          (let [manifest (json/decode (subs raw 14) {:keys :keyword})
+                encoded (join "" (mapv (fn [key]
+                  (or (db/attr-value database (chunk-entity database key) :editable/chunk-value)
+                      (r/fail "missing-editor-storage-part"))) (:parts manifest)))
+                compressed (Base/decode64! encoded)
+                digest (Base/encode16 (crypto/hash :sha256 compressed) (list (tuple :case :lower)))]
+            (when-not (= digest (:digest manifest)) (r/fail "editor-storage-checksum"))
+            (zlib/uncompress compressed))
+          :else raw)]
+      (json/decode source {:keys :keyword}))))
+(defn- encoded [state]
+  ;; Datom's indexes include scalar values in keys. Keep every stored scalar
+  ;; below the substrate key bound; never send a giant JSON value to Fjall.
+  ;; Content-addressed parts are immutable and shared by authority/publication.
+  (let [source (json/encode state)]
+    (when (> (erlang/byte_size source) 67108864) (r/fail "editor-storage-limit"))
+    (if (<= (erlang/byte_size source) 24000) {:value source :rows []}
+      (let [compressed (zlib/compress source) encoded (Base/encode64 compressed)]
+        (if (<= (erlang/byte_size encoded) 24000) {:value (str "@edit-z/1:" encoded) :rows []}
+          (let [digest (Base/encode16 (crypto/hash :sha256 compressed) (list (tuple :case :lower)))
+                n (erlang/byte_size encoded)
+                rows (mapv (fn [i]
+                  {:db/id (- -1000 i) :editable/chunk-key (str digest "/" i)
+                   :editable/chunk-value (erlang/binary_part encoded (* i 16000) (min 16000 (- n (* i 16000))))})
+                  (range (quot (+ n 15999) 16000)))]
+            (let [manifest (str "@edit-parts/1:" (json/encode {:digest digest :parts (mapv :editable/chunk-key rows)}))]
+              (when (> (erlang/byte_size manifest) 24000) (r/fail "editor-storage-manifest-limit"))
+              {:value manifest :rows rows})))))))
+(defn read-authority [database id] (decoded database (raw-state database id :editable/state)))
+(defn read-state [database id] (decoded database (raw-state database id :editable/published)))
+(defn- sync! [conn]
+  (when (substrate/durable? (:store conn)) (substrate/sync! (:store conn))))
+(defn publish! [conn id]
+  (let [state (read-authority (datom/db conn) id)]
+    ;; First persist authority content and operation identities. Only then may
+    ;; any Live observer see this revision as confirmed. The publication row
+    ;; is a rebuildable projection; startup repeats this procedure.
+    (sync! conn)
+    (when (< (:revision (read-state (datom/db conn) id)) (:revision state))
+      (try
+        (datom/transact! conn
+          [[:db/fn (fn [database]
+                     (let [published (read-state database id)]
+                       (if (>= (:revision published) (:revision state))
+                         (throw (ex-info "Already published" {:intent/outcome {:status :noop}}))
+                         [[:db/add (entity database id) :editable/published (raw-state database id :editable/state)]])))]])
+        (catch error (when-not (= :noop (get-in (ex-data error) [:intent/outcome :status])) (throw error)))))))
+(defn initialize! [conn registry document]
+  (datom/transact! conn
+    [[:db/fn (fn [database]
+               (if (entity database (:id document)) []
+                 (let [initial (encoded (sync/authority registry document))]
+                   (conj (:rows initial) {:db/id -1 :editable/id (:id document)
+                     :editable/state (:value initial) :editable/published (:value initial)}))))]])
+  (publish! conn (:id document)))
+(defn transaction [database registry id proposal]
+  (let [state (read-authority database id)]
+    (when-not state (r/fail "missing-document"))
+    (let [decision (sync/decide registry state proposal) reply (:reply decision)]
+      (cond
+        (not (:ok reply))
+        (throw (ex-info "Edit refused" {:intent/outcome {:status :refused
+                              :why (json/encode (select-keys reply [:id :reason]))}}))
+        (= state (:state decision)) (throw (ex-info "Edit already committed" {:intent/outcome {:status :noop}}))
+        :else (let [next (encoded (:state decision))]
+                (conj (:rows next) [:db/add (entity database id) :editable/state (:value next)]))))))
+(defn performer [registry id authorize]
+  (fn [conn payload principal]
+    (when-not (authorize principal id)
+      (throw (ex-info "Edit denied" {:intent/outcome {:status :refused :why (json/encode {:id (get-in payload [:proposal :id]) :reason "edit-denied"})}})))
+    (let [proposal (json/decode (json/encode (:proposal payload)) {:keys :keyword})]
+      (try
+        (datom/transact! conn [[:db/fn (fn [database] (transaction database registry id proposal))]])
+        (catch error (when-not (= :noop (get-in (ex-data error) [:intent/outcome :status])) (throw error))))
+      (publish! conn id)
+      nil)))
+(defn refusal [outcome]
+  (when (= :denied (:status outcome))
+    (try (json/decode (:why outcome) {:keys :keyword})
+         (catch _ {:reason "edit-denied"}))))
+
+(defn upgrade!
+  "Checkpoint a declared installed-contract change without rewriting its data.
+   Old browser proposals retain their old digest and recover as local drafts."
+  [conn registry id]
+  (datom/transact! conn
+    [[:db/fn (fn [database]
+      (let [state (read-authority database id) doc (document/migrate (:document state))
+            digest (sync/digest registry)]
+        (if (and (= digest (:digest state)) (= doc (:document state))) []
+          (let [next (encoded {:document doc :revision (inc (:revision state)) :digest digest :journal []})]
+            (conj (:rows next) [:db/add (entity database id) :editable/state (:value next)])))))]] )
+  (publish! conn id))
