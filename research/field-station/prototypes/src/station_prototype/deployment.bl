@@ -36,6 +36,19 @@
      (when-not (and (= :ok (elem reply 0)) (String/contains? (elem reply 1) "101 Switching Protocols"))
       (throw (ex-info "WebSocket upgrade failed" {:reply reply}))) socket)
     (catch error (gen_tcp/close socket) (throw error))))))
+(defn pong! [socket]
+ ;; A unique ping must yield its actual pong, not merely a queued mount frame.
+ (gen_tcp/send socket (erlang/iolist_to_binary (list 137 136 0 0 0 0 "probe-v1")))
+ (let [expected (erlang/iolist_to_binary (list 138 8 "probe-v1"))
+       deadline (+ (System/monotonic_time :millisecond) 5000)]
+  (loop [bytes ""]
+   (cond (not= :nomatch (binary/match bytes expected)) true
+         (or (> (erlang/byte_size bytes) 1048576)
+             (>= (System/monotonic_time :millisecond) deadline)) false
+         :else
+          (let [reply (gen_tcp/recv socket 0 (max 1 (- deadline (System/monotonic_time :millisecond))))]
+           (if (= :ok (elem reply 0))
+            (recur (erlang/iolist_to_binary (list bytes (elem reply 1)))) false))))))
 (defn command-checks! [root]
  (let [print-program (command/tool "printf") sleep-program (command/tool "sleep")
        result (command/run print-program ["%s\n" "{\"component\":\"backup\",\"ready\":true}"
@@ -107,9 +120,8 @@
       (throw (ex-info (str "Native admission refused: " (:admission-error reply)) reply))))
     (checks/check! "candidate serves new requests while the old WebSocket remains open"
      (checks/eventually #(= "prototype-new" (get (get! port) "version")) 90000))
-    (gen_tcp/send @socket (Base/decode16! "898000000000"))
     (checks/check! "old WebSocket connection still responds after publication"
-     (= :ok (elem (gen_tcp/recv @socket 0 5000) 0)))
+     (pong! @socket))
     (gen_tcp/close @socket) (reset! socket nil)
     (let [after (complete! @owned) ready (get! port)]
      (checks/check! "online publication keeps the stable lifecycle owner" (= (:owner before) (:owner after)))
