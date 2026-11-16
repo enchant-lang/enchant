@@ -8,8 +8,8 @@
 ; keys) never qualified, so nested emission re-walked every subtree at every
 ; level. The walk, the memo and the edges are gone. This file asserts the
 ; contract that replaced them:
-;   * creating or publishing a cell costs the same reductions over a large
-;     capture as over a small one (the NIF's copy is not BL work);
+;   * creating or publishing a cell records no memo-graph edge (so a data
+;     cycle that the old walk refused is accepted), and the walk is gone;
 ;   * a value aliasing its own node is still terminal `:cyclic_memo`;
 ;   * a re-entrant force is still terminal `:recursive_force`;
 ;   * two processes forcing each other's running cells raise `:recursive_force`
@@ -20,50 +20,37 @@
 
 (ns lazy-clean-capture-test)
 
-(defn- big-map [tag]
-  (into {} (map (fn [i] [(str tag "-" i) {"kind" "k" "n" i "xs" (list i i i)}]) (range 400))))
-
-(defn- reductions []
-  (erlang/element 2 (erlang/process_info (erlang/self) :reductions)))
-
-(defn- cost [f]
-  (f)
-  (let [r0 (reductions)]
-    (dotimes [_ 40] (f))
-    (- (reductions) r0)))
-
 (defn- force-reason [lazy]
   (try (do (BeamLisp.LazySeq/force lazy) :no-error)
        (catch BeamLisp.LazySeq.ForceError e (erlang/map_get :reason e))))
 
-(deftest creating-a-cell-does-not-walk-its-capture
-  (let [small {:a 1}
-        big {:world (big-map "w") :now 1}
-        c-small (cost (fn [] (BeamLisp.LazySeq/new (fn [] small))))
-        c-big (cost (fn [] (BeamLisp.LazySeq/new (fn [] big))))]
-    (is (<= c-big (+ 400 (* 2 c-small)))
-        (str "create over a 400-entry capture costs " c-big " reductions, small " c-small))))
+;; If create walked the thunk's capture, `inner`'s cell would hold an edge to
+;; `outer`'s resource, and publishing `outer` with a value holding `inner`
+;; would close a cycle in the NIF graph and answer `:cycle`. With no walk, the
+;; graph has no edges and the publication is accepted.
+(deftest creating-a-cell-records-no-edges-for-its-capture
+  (let [outer (BeamLisp.LazySeq/new (fn [] :outer))
+        inner (BeamLisp.LazySeq/new (fn [] (list outer)))
+        resource (erlang/map_get :resource outer)
+        current (BeamLisp.LazyMemo/read_versioned resource)]
+    (is (= :ok (BeamLisp.LazyMemo/exchange_version resource (erlang/element 1 current)
+                 (tuple :completed (list inner)) (list (erlang/map_get :resource inner)))))
+    (is (erlang/=:= (list inner) (BeamLisp.LazySeq/force outer)))))
 
-(deftest publishing-a-value-does-not-walk-it
-  (let [small (list 1 2 3)
-        big (list (big-map "p") (BeamLisp.LazySeq/new (fn [] 1)) (big-map "q"))
-        c-small (cost (fn [] (BeamLisp.LazySeq/force (BeamLisp.LazySeq/new (fn [] small)))))
-        c-big (cost (fn [] (BeamLisp.LazySeq/force (BeamLisp.LazySeq/new (fn [] big)))))]
-    (is (<= c-big (+ 400 (* 2 c-small)))
-        (str "publish of a large value costs " c-big " reductions, small " c-small))))
+(deftest publishing-records-no-edges-for-the-value
+  ;; `a` publishes a value holding `b`; then `b` publishes a value holding `a`.
+  ;; The old publish walk refused the second as a retained cycle.
+  (let [holder (atom nil)
+        a (BeamLisp.LazySeq/new (fn [] (list :a @holder)))
+        b (BeamLisp.LazySeq/new (fn [] (list :b a)))]
+    (reset! holder b)
+    (is (erlang/=:= b (second (BeamLisp.LazySeq/force a))))
+    (is (erlang/=:= a (second (BeamLisp.LazySeq/force b))))))
 
-(deftest nested-captures-cost-linear-work
-  ;; Each level captures the previous level's node and a growing tree: the
-  ;; shape nested emission builds. The old walk made this quadratic.
-  (let [build (fn [n]
-                (loop [i 0 node nil tree {}]
-                  (if (= i n) node
-                    (let [tree {:child tree :i i}
-                          prev node]
-                      (recur (inc i) (BeamLisp.LazySeq/new (fn [] (list tree prev))) tree)))))
-        r0 (reductions) _ (build 200) c200 (- (reductions) r0)
-        r1 (reductions) _ (build 800) c800 (- (reductions) r1)]
-    (is (<= c800 (* 6 c200)) (str "800 levels " c800 " vs 200 levels " c200))))
+(deftest the-walk-and-the-clean-value-memo-are-gone
+  (doseq [[f n] [[:dependencies 1] [:deps_walk 6] [:deps_env 3] [:deps_clean_hit? 2]
+                 [:deps_clean_remember! 1] [:plain! 1]]]
+    (is (not (erlang/function_exported :Elixir.BeamLisp.LazyMemo f n)) (str f "/" n))))
 
 (deftest a-value-aliasing-its-own-node-is-cyclic
   (let [holder (atom nil)
