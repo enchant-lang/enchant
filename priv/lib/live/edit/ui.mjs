@@ -149,8 +149,8 @@ class DefaultUI {
   hideSelection(){clearTimeout(this.chipTimer);this.chip.hide();this.bubble.hide();if(this.token){this.editor.session.release(this.token);this.token=null;}}
   update(state){
     const offline=document.documentElement.dataset.live==='0',conflict=state.conflicts.length||this.editor.recoveryFailure;
-    const label=this.save.querySelector('.ed-save-label');label.textContent=conflict?'Draft retained':offline?'Offline':state.pending?'Saving…':'Saved';
-    this.save.dataset.state=conflict?'conflict':offline?'offline':state.pending?'saving':'saved';this.save.title=this.editor.status.textContent;
+    const label=this.save.querySelector('.ed-save-label');label.textContent=conflict?'Draft retained':state.validation?'Needs correction':offline?'Offline':state.pending?'Saving…':'Saved';
+    this.save.dataset.state=conflict||state.validation?'conflict':offline?'offline':state.pending?'saving':'saved';this.save.title=this.editor.status.textContent;
     if(this.title.value!==(state.meta.title||'')){this.title.value=state.meta.title||'';this.title.style.height='auto';this.title.style.height=this.title.scrollHeight+'px';}
     this.titleHeading.textContent=state.meta.title||'Untitled';
     this.title.readOnly=!!conflict||!!this.editor.model.readonly;

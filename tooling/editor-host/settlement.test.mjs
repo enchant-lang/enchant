@@ -21,7 +21,7 @@ test('assignment confirmation repeats when fields change during the ordered roun
  assert.equal(acknowledged,'newer title');assert.deepEqual(sent,['restored title','newer title']);assert.equal(confirmations,2);
 });
 test('unsafe field states and an already expired deadline never send assignments',async()=>{
- for(const flag of ['readonly','offline','conflict','stale','orphaned','composing','disposed']){
+ for(const flag of ['readonly','offline','conflict','invalid','stale','orphaned','composing','disposed']){
   let sent=false;await assert.rejects(settleAssignments(()=>({token:'mine',[flag]:true}),()=>{sent=true;},async()=>{}));assert.equal(sent,false);
  }
  let sent=false;await assert.rejects(settleAssignments(()=>({token:'mine'}),()=>{sent=true;},async()=>{},{timeout:0}),/pending/);assert.equal(sent,false);
@@ -37,13 +37,13 @@ test('an aborted assignment lifetime cannot emit or acknowledge a field',async()
  await assert.rejects(settleAssignments(()=>({token:'mine'}),()=>{sent=true;},async()=>{},{signal:controller.signal}),/closed/);assert.equal(sent,false);
 });
 test('loss of each publication precondition rejects without waiting for confirmation',async()=>{
- for(const flag of ['readonly','offline','conflict','composing','preview','disposed']){
+ for(const flag of ['readonly','offline','conflict','invalid','composing','preview','disposed']){
   const f=fixture(),ready=waitForSettlement(f.read,f.subscribe);
   f.change({[flag]:true});await assert.rejects(ready);assert.equal(f.listeners.size,0);
  }
 });
 test('unavailable editors never publish even with an empty queue',async()=>{
- for(const flag of ['readonly','offline','conflict','composing','preview','disposed']){
+ for(const flag of ['readonly','offline','conflict','invalid','composing','preview','disposed']){
   const f=fixture({pending:0,[flag]:true});await assert.rejects(waitForSettlement(f.read,f.subscribe));assert.equal(f.listeners.size,0);
  }
  const f=fixture({pending:0});await waitForSettlement(f.read,f.subscribe);assert.equal(f.listeners.size,0);

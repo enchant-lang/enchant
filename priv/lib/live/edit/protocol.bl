@@ -107,27 +107,45 @@
          (= (:from op) (+ (:from old) (m/length (:text old))))
          (not (contains? old :restore)) (not (contains? op :restore))
          (= (:styles old) (:styles op)) (< (+ (m/length (:text old)) (m/length (:text op))) 4096))))
+(defn- flat-ops [op]
+  (if (= "batch" (:op op)) (mapcat flat-ops (:ops op)) [op]))
+(defn- correction-row [rows id]
+  (let [ops (vec (mapcat #(flat-ops (:op %)) rows))
+        inverses (vec (mapcat #(flat-ops (:inverse %)) (reverse rows)))]
+    (when (or (> (count ops) 4096) (> (count inverses) 4096)) (r/fail "too-many-private-edits"))
+    {:id id :op {:op "batch" :ops ops} :action "edit" :group nil :inverse {:op "batch" :ops inverses}}))
 (defn enqueue
   ([registry state id op] (enqueue registry state id op "edit"))
   ([registry state id op action]
    (when (seq (:conflicts state)) (r/fail "resolve-conflict-first"))
    (when-not (and (m/identifier? id) (< (count (:pending state)) 4096)
+                  (not (some #{id} (:retired state)))
                   (not (some #(= id (:id %)) (:pending state)))) (r/fail "invalid-operation-id"))
    (let [edit (apply-edit registry (:visible state) op) row (last (:pending state))
          combined (when (coalescible? state row op action)
                     (assoc (:op row) :text (str (get-in row [:op :text]) (:text op))))
-         pending (if combined
+         pending (if (:validation state)
+                   [(correction-row (conj (:pending state) {:op op :inverse (:inverse edit)}) id)]
+                   (if combined
                    (conj (pop (:pending state)) (assoc row :op combined
                      :inverse (assoc (:inverse row) :to (+ (:from combined) (m/length (:text combined))) :expected (:text combined))))
-                   (conj (:pending state) {:id id :op op :action action :inverse (:inverse edit) :group (:group state)}))]
-     (assoc state :visible (:document edit) :change edit
+                   (conj (:pending state) {:id id :op op :action action :inverse (:inverse edit) :group (:group state)})))]
+     (assoc (dissoc state :validation) :visible (:document edit) :change edit
                   :selection (m/map-selection (:selection state) (:mapping edit)) :pending pending))))
 (defn outbound [state]
-  (when (and (empty? (:conflicts state)) (seq (:pending state)))
+  (when (and (empty? (:conflicts state)) (nil? (:validation state)) (seq (:pending state)))
     (let [row (first (:pending state))]
       (or (:proposal row) {:id (:id row) :basis (:revision state) :digest (:digest state) :op (:op row)}))))
 (defn mark-sent [state]
   (if-let [proposal (outbound state)] (assoc-in state [:pending 0 :proposal] proposal) state))
+(defn revise
+  "Combine already-authored corrections after a durable validation refusal.
+   The caller supplies a fresh identity; the confirmed basis never changes."
+  [state id]
+  (when-not (and (:validation state) (seq (:pending state)) (empty? (:conflicts state))
+                (m/identifier? id) (not (some #{id} (:retired state)))
+                (not (some #(= id (:id %)) (:pending state)))) (r/fail "invalid-validation-correction"))
+  (assoc (dissoc state :validation) :pending [(correction-row (:pending state) id)] :change (empty-change)))
 (defn- text-change [before after id]
   (let [a (m/points before) b (m/points after) an (count a) bn (count b)
         start (loop [i 0] (if (and (< i an) (< i bn) (= (nth a i) (nth b i))) (recur (inc i)) i))
@@ -155,7 +173,7 @@
                     (keep (fn [id] (let [x (m/find-block before id) y (m/find-block after id)]
                             (when (and x y (not= (:text x) (:text y))) (text-change (:text x) (:text y) id)))) ids))))))))
 (defn- conflict [state reason]
-  (assoc state :draft (or (:draft state) (:visible state))
+  (assoc (dissoc state :validation) :draft (or (:draft state) (:visible state))
                :conflicts (conj (:conflicts state) {:reason reason :pending (:pending state)}) :pending []))
 (defn- move-pending [registry state old-base new-base changed]
   (try
@@ -193,10 +211,14 @@
             (move-pending registry remaining (:document predicted) next edit))))
       (move-pending registry (map-history base (:mapping edit)) old next edit))))
 (defn adopt [registry state incoming]
-  (if (and (<= (:revision incoming) (:revision state)) (= (:digest incoming) (:digest state)))
+  (if (and (<= (:revision incoming) (:revision state)) (= (:digest incoming) (:digest state))
+           (or (nil? (:document incoming)) (= (get-in incoming [:document :id]) (get-in state [:confirmed :id]))))
     (assoc state :change (empty-change))
     (try
       (when-not (= (:digest state) (:digest incoming) (digest registry)) (r/fail "client-outdated"))
+      (when (and (:document incoming) (not= (get-in incoming [:document :id]) (get-in state [:confirmed :id])))
+        (r/fail "document-replaced"))
+      (when (:validation state) (r/fail "validation-basis-changed"))
       (let [entries (entries-after incoming (:revision state))
             next (reduce (fn [s entry]
                           (let [updated (adopt-entry registry s entry)]
@@ -218,9 +240,18 @@
 (defn receive-reply [registry state reply]
   (let [next (if (:snapshot reply) (adopt registry state (:snapshot reply)) state)]
     (if (or (:ok reply) (not (some #(= (:id reply) (:id %)) (:pending next)))) next
-      (conflict next (:reason reply)))))
+      (if (true? (:correctable reply))
+        (let [head (first (:pending next)) proposal (:proposal head)]
+          (if (and (= (:id reply) (:id head) (:id proposal))
+                   (= (:basis reply) (:basis proposal) (:revision next))
+                   (= (:digest reply) (:digest proposal) (:digest next))
+                   (string? (:reason reply)) (<= 1 (m/length (:reason reply)) 2000))
+            (assoc next :validation (select-keys reply [:id :basis :digest :reason])
+                        :retired (tail (vec (distinct (conj (get next :retired []) (:id reply)))) 256))
+            (conflict next "invalid-validation-receipt")))
+        (conflict next (:reason reply))))))
 (defn use-confirmed [state]
-  (assoc state :visible (:confirmed state) :pending [] :conflicts [] :draft nil :past [] :future []
+  (assoc (dissoc state :validation) :visible (:confirmed state) :pending [] :conflicts [] :draft nil :past [] :future []
     :change {:changed (mapv :id (:blocks (:confirmed state))) :structural true :metadata true :mapping []}))
 (defn can-undo? [state]
   (and (empty? (:conflicts state))

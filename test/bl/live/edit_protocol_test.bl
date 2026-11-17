@@ -141,3 +141,79 @@
     (is (= "deXf" (:text (m/find-block (:visible moved) "right"))))
     (is (= "right" (get-in moved [:selection :head :block])))
     (is (= (:document final) (:visible settled)))))
+
+(defn validation-reply [state id]
+ {:id id :ok false :correctable true :basis (:revision state) :digest (:digest state)
+  :reason "Add a task title. Your writing stays on this device." :snapshot (s/snapshot state)})
+(defn cleared-title []
+ (s/mark-sent (s/enqueue registry (s/replica initial) "invalid-title"
+  {:op "text/replace" :block "p1" :from 0 :to 6 :text "" :expected "abcdef"})))
+(deftest correctable-validation-keeps-private-writing-and-original-confirmed-basis
+ (let [pending (cleared-title) refused (s/receive-reply registry pending (validation-reply initial "invalid-title"))]
+  (is (= "" (get-in refused [:visible :blocks 0 :text])))
+  (is (= "abcdef" (get-in refused [:confirmed :blocks 0 :text])))
+  (is (= 0 (:revision refused)))
+  (is (empty? (:conflicts refused)))
+  (is (= 1 (count (:pending refused))))
+  (is (nil? (s/outbound refused)))
+  (is (s/can-undo? refused))
+  (is (= ["invalid-title"] (:retired refused)))
+  (is (thrown? (s/enqueue registry refused "invalid-title" (insert "p1" 0 "wrong identity"))))))
+(deftest correcting-validation-is-one-fresh-atomic-proposal-and-one-undo
+ (let [refused (s/receive-reply registry (cleared-title) (validation-reply initial "invalid-title"))
+       corrected (s/enqueue registry refused "correction" (insert "p1" 0 "Fixed"))
+       proposal (s/outbound corrected) [server settled] (settle initial corrected)
+       [undone client] (settle server (s/undo registry settled "undo-correction"))]
+  (is (= "correction" (:id proposal)))
+  (is (= 0 (:basis proposal)))
+  (is (= "batch" (get-in proposal [:op :op])))
+  (is (= 2 (count (get-in proposal [:op :ops]))))
+  (is (nil? (:validation corrected)))
+  (is (= 1 (:revision server)))
+  (is (= "Fixed" (get-in server [:document :blocks 0 :text])))
+  (is (empty? (:pending settled)))
+  (is (= "abcdef" (get-in undone [:document :blocks 0 :text])))
+  (is (= (:visible client) (:document undone)))
+  (is (= settled (s/receive-reply registry settled (validation-reply initial "invalid-title"))))))
+(deftest typing-already-queued-before-refusal-can-be-combined-without-another-keystroke
+ (let [queued (s/enqueue registry (cleared-title) "already-typed" (insert "p1" 0 "Written"))
+       refused (s/receive-reply registry queued (validation-reply initial "invalid-title"))
+       revised (s/revise refused "fresh-batch") [server settled] (settle initial revised)]
+  (is (= 2 (count (:pending refused))))
+  (is (= (:visible refused) (:visible revised)))
+  (is (= "fresh-batch" (:id (s/outbound revised))))
+  (is (= "Written" (get-in server [:document :blocks 0 :text])))
+  (is (empty? (:pending settled)))
+  (is (thrown? (s/revise refused "invalid-title")))))
+(deftest undo-can-correct-an-invalid-private-candidate
+ (let [refused (s/receive-reply registry (cleared-title) (validation-reply initial "invalid-title"))
+       corrected (s/undo registry refused "local-undo") [server settled] (settle initial corrected)]
+  (is (= "abcdef" (get-in corrected [:visible :blocks 0 :text])))
+  (is (= (:document initial) (:document server)))
+  (is (empty? (:conflicts settled)))
+  (is (empty? (:pending settled)))))
+(deftest correctable-receipts-require-the-exact-sent-proposal-and-basis
+ (doseq [change [{:basis 1} {:digest "wrong"} {:reason ""} {:correctable false}]]
+  (let [refused (s/receive-reply registry (cleared-title) (merge (validation-reply initial "invalid-title") change))]
+   (is (seq (:conflicts refused)))
+   (is (nil? (:validation refused)))))
+ (let [unsent (s/enqueue registry (s/replica initial) "invalid-title" (insert "p1" 0 "x"))
+       refused (s/receive-reply registry unsent (validation-reply initial "invalid-title"))]
+  (is (= "invalid-validation-receipt" (get-in refused [:conflicts 0 :reason])))))
+(deftest source-changes-during-validation-require-review-instead-of-automatic-rebase
+ (let [refused (s/receive-reply registry (cleared-title) (validation-reply initial "invalid-title"))
+       remote (:state (s/decide registry initial (s/outbound (s/enqueue registry (s/replica initial) "peer" (insert "p2" 0 "Peer: ")))))
+       stale (s/adopt registry refused (s/snapshot remote))]
+  (is (= "validation-basis-changed" (get-in stale [:conflicts 0 :reason])))
+  (is (= "" (get-in stale [:visible :blocks 0 :text])))
+  (is (= "Peer: مرحبا 🍌" (get-in stale [:confirmed :blocks 1 :text])))
+  (is (nil? (s/outbound stale)))
+  (is (nil? (:validation stale)))))
+(deftest replacing-a-document-at-the-same-revision-never-rebinds-local-writing
+ (let [refused (s/receive-reply registry (cleared-title) (validation-reply initial "invalid-title"))
+       other (assoc-in initial [:document :id] "another-editor")
+       replaced (s/adopt registry refused (s/snapshot other))]
+  (is (= "document-replaced" (get-in replaced [:conflicts 0 :reason])))
+  (is (= "notes" (get-in replaced [:visible :id])))
+  (is (= "another-editor" (get-in replaced [:confirmed :id])))
+  (is (nil? (s/outbound replaced)))))

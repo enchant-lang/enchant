@@ -96,7 +96,7 @@ export class Editor {
   }
   settlementState(){
     return {pending:this.state.pending,conflict:this.state.conflicts.length||!!this.recoveryFailure,
-      readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
+      invalid:!!this.state.validation,readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
       composing:this.composing||[...this.code.values()].some(code=>code.view.composing),preview:this.state.preview};
   }
   ready(){const state=this.settlementState();return !settlementError(state)&&!state.pending;}
@@ -174,11 +174,11 @@ export class Editor {
   paintStatus(){
     const conflict=this.state.conflicts.length||!!this.recoveryFailure,offline=document.documentElement.dataset.live==='0';
     this.root.dataset.editPending=String(this.state.pending);this.root.dataset.editConflict=String(this.state.conflicts.length);
-    this.root.dataset.editRevision=String(this.state.revision);this.root.dataset.editNotice=this.message?'1':'0';this.canvas.setAttribute('aria-readonly',String(!!conflict||!!this.model.readonly));
+    this.root.dataset.editRevision=String(this.state.revision);this.root.dataset.editNotice=this.message||this.state.validation?'1':'0';this.canvas.setAttribute('aria-readonly',String(!!conflict||!!this.model.readonly));
     this.canvas.contentEditable=String(!conflict&&!this.model.readonly);
     for(const field of this.canvas.querySelectorAll('[data-edit-isolated]'))field.contentEditable=String(!conflict&&!this.model.readonly);
     for(const code of this.code.values())code.setReadonly(!!conflict||!!this.model.readonly);
-    const message=this.message||(conflict?'Draft retained — review changes':offline?'Offline · draft on this device':this.state.pending?'Saving…':'All changes saved');
+    const message=this.message||this.state.validation?.reason||(conflict?'Draft retained — review changes':offline?'Offline · draft on this device':this.state.pending?'Saving…':'All changes saved');
     if(this.status.textContent!==message)this.status.textContent=message;
     this.root.dataset.connection=conflict?'conflict':offline?'offline':this.state.pending?'saving':'saved';
   }

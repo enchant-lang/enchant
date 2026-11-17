@@ -142,3 +142,22 @@ This is a projection/input primitive, not field validation or publication
 authority. Packages must supply appropriate Enter/structural commands before
 enabling it for a source grammar; the default split still operates on the full
 model text. Application writers continue validating the complete candidate.
+
+An application may return a correctable validation refusal only after durably
+retiring the exact refused proposal. The reply carries `:correctable true`, its
+`:id`, original `:basis` and `:digest`, and a bounded human `:reason`. The replica
+accepts it only for the exact sent head at the current confirmed revision. It
+retains the candidate and permits local correction/undo while withholding that
+proposal from publication. A correction combines the private operations into a
+bounded atomic batch with a fresh identity and the same confirmed basis. Typing
+already queued before the refusal is combined by the session without requiring
+another keystroke. Delayed old refusals cannot invalidate the newer proposal.
+
+Authoring stays available during validation, with a visible explanation and
+Needs correction status; publication barriers reject promptly. Recovery retains
+the refusal, original pending proposals and retired identities. New confirmed
+source while validation is unresolved becomes a review conflict. The generic
+host does not classify application failures as correctable, retire proposals on
+the server, or authorize retries. Applications must preserve negative receipts
+and recheck current grants in their ordinary final writer. Permission, identity,
+ownership and protocol failures remain recovery conflicts.
