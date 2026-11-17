@@ -55,9 +55,21 @@ mod linux {
         let mut command = Command::new(path);
         // Request-local PATH/bus variables select the program's environment,
         // never the controller executable or its authenticated local manager.
-        command.env_clear().env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"))
-            .env("PATH", "/run/current-system/sw/bin:/usr/bin:/bin");
+        command.env_clear().env("PATH", "/run/current-system/sw/bin:/usr/bin:/bin");
+        if uid==0 {
+            command.env("DBUS_SYSTEM_BUS_ADDRESS","unix:path=/run/dbus/system_bus_socket");
+        } else {
+            command.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
+                .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"));
+        }
+        Ok(command)
+    }
+
+    pub(super) fn manager(name: &str) -> Result<Command,String> {
+        let mut command=control(name)?;
+        // The actual kernel identity chooses the manager. Neither request
+        // data nor a forwarded environment may select a privileged bus.
+        if unsafe {libc::getuid()}!=0 {command.arg("--user");}
         Ok(command)
     }
 
@@ -132,8 +144,8 @@ mod linux {
         let timeout = limit(&value, "timeout_ms", 86_400_000)?;
         let memory = limit(&value, "memory_bytes", 8 * 1024 * 1024 * 1024)?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut command = control("systemd-run")?;
-        command.args(["--user", "--wait", "--pipe", "--collect", "--quiet"])
+        let mut command = manager("systemd-run")?;
+        command.args(["--wait", "--pipe", "--collect", "--quiet"])
             .arg(format!("--unit={unit}"))
             .args(["--property=Type=notify", "--property=NotifyAccess=main", "--property=ExitType=cgroup",
                    "--property=FileDescriptorStoreMax=16", "--property=FileDescriptorStorePreserve=restart",
@@ -176,7 +188,7 @@ mod linux {
             };
             count += size as u64;
             if count > maximum {
-                let _ = control("systemctl")?.args(["--user", "stop", &unit]).status();
+                let _ = manager("systemctl")?.args(["stop", &unit]).status();
                 let _ = process.wait();
                 return Err("command output capacity exceeded; entire domain stopped".into());
             }
@@ -218,7 +230,7 @@ mod linux {
 
     fn child(unit: &str) -> Result<i32, String> {
         let property = |name: &str| -> Result<String, String> {
-            let reply = control("systemctl")?.args(["--user", "show", "--value", &format!("--property={name}"), unit])
+            let reply = manager("systemctl")?.args(["show", "--value", &format!("--property={name}"), unit])
                 .output().map_err(|e| e.to_string())?;
             if !reply.status.success() { return Err("OS command domain unavailable".into()); }
             Ok(String::from_utf8_lossy(&reply.stdout).trim().into())
@@ -261,7 +273,7 @@ mod linux {
         let mut byte = [0];
         if barrier.read(&mut byte).map_err(|e| e.to_string())? != 0 { return Err("invalid loan acknowledgement".into()); }
         // Enqueue/processing acknowledgement alone does not prove storage.
-        let observed = control("systemctl")?.args(["--user", "show", "--value", "--property=NFileDescriptorStore", unit])
+        let observed = manager("systemctl")?.args(["show", "--value", "--property=NFileDescriptorStore", unit])
             .output().map_err(|e| e.to_string())?;
         if !observed.status.success() || String::from_utf8_lossy(&observed.stdout).trim().parse::<usize>().ok() != Some(loans.len()) {
             return Err("OS manager did not retain every command loan".into());

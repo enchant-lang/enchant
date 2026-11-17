@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use serde_json::{json, Value};
-use super::linux::control;
+use super::linux::manager;
 
 fn packet(tag: u8, bytes: &[u8]) -> std::io::Result<()> {
     let mut out = std::io::stdout().lock();
@@ -45,7 +45,7 @@ pub(super) fn note(request: &Value, unit: &str, event: &str, data: Value) -> Res
 }
 
 pub(super) fn stop_post(unit: &str, credential: &str) -> Result<i32, String> {
-    let reply = control("systemctl")?.args(["--user","show","--value","--property=ControlPID",unit])
+    let reply = manager("systemctl")?.args(["show","--value","--property=ControlPID",unit])
         .output().map_err(|e| e.to_string())?;
     if !reply.status.success() || String::from_utf8_lossy(&reply.stdout).trim() != std::process::id().to_string() {
         return Err("completion helper is not the OS domain's control process".into());
@@ -176,7 +176,7 @@ impl Wire {
                                     credits+=grant;
                                 },
                                 [2] => {
-                                    if control("systemctl")?.args(["--user","stop",unit]).stdout(Stdio::null()).stderr(Stdio::null())
+                                    if manager("systemctl")?.args(["stop",unit]).stdout(Stdio::null()).stderr(Stdio::null())
                                         .status().map_err(|e| e.to_string())?.success() {
                                         forced=Some("cancelled");
                                         detached=true;
@@ -200,7 +200,7 @@ impl Wire {
                     Ok(n) => {
                         count+=n as u64;
                         if count>maximum && forced.is_none() {
-                            let _=control("systemctl")?.args(["--user","stop",unit]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                            let _=manager("systemctl")?.args(["stop",unit]).stdout(Stdio::null()).stderr(Stdio::null()).status();
                             forced=Some("output-limit");
                             detached=true;
                         }
