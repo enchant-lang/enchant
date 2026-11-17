@@ -140,8 +140,12 @@
   "The `defn-` helpers this beam exports because a pinned module exports exactly
    its file's defns. Named, so the divergence is asserted rather than assumed:
    `sorted.ex` kept them private."
-  (list (tuple :"encode-seq" 1)
+  (list (tuple :bits 1)
+        (tuple :"encode-seq" 1)
+        (tuple :"fraction-digits" 2)
         (tuple :"function-clause!" 2)
+        (tuple :"number-payload" 1)
+        (tuple :pow10 1)
         (tuple :"largest-kv" 1)
         (tuple :"lazy-seq?" 1)
         (tuple :"self-mod" 0)
@@ -243,8 +247,13 @@
       (is (= (tuple 0 nil) (erlang/apply probe :encode_key (list nil))))
       (is (= (tuple 1 false) (erlang/apply probe :encode_key (list false))))
       (is (= (tuple 2 true) (erlang/apply probe :encode_key (list true))))
-      (is (= (tuple 3 1) (erlang/apply probe :encode_key (list 1))))
-      (is (= (tuple 3 1.5) (erlang/apply probe :encode_key (list 1.5))))
+      ; numbers: one exact payload, [floor | fraction digits], for every kind (Q3)
+      (is (= (tuple 3 (list 1)) (erlang/apply probe :encode_key (list 1))))
+      (is (= (tuple 3 (list 1 5)) (erlang/apply probe :encode_key (list 1.5))))
+      (is (= (tuple 3 (list 1 5)) (erlang/apply probe :encode_key (list 1.50M))))
+      (is (= (tuple 3 (list -2 9)) (erlang/apply probe :encode_key (list -1.1M))))
+      (is (erlang/< (erlang/apply probe :encode_key (list 0.1M)) (erlang/apply probe :encode_key (list 0.1))))
+      (is (erlang/< (erlang/apply probe :encode_key (list 0.1M)) (erlang/apply probe :encode_key (list [0]))))
       (is (= (tuple 4 "s") (erlang/apply probe :encode_key (list "s"))))
       (is (= (tuple 5 "foo") (erlang/apply probe :encode_key (list (quote foo)))))
       (is (= (tuple 6 "apple") (erlang/apply probe :encode_key (list :apple))))
@@ -264,14 +273,14 @@
       ; a lazy tail is REALISED into the encoding, so `[1 | (2 3)]` encodes as
       ; the sequence (1,2,3) rather than as the opaque struct in its tail.
       (let [improper (BeamLisp.Ns.Rt/cons 1 (BeamLisp.LazySeq/new (fn [] [2 3])))]
-        (is (= (tuple 7 (list (tuple 3 1) (tuple 3 2) (tuple 3 3)))
+        (is (= (tuple 7 (list (tuple 3 (list 1)) (tuple 3 (list 2)) (tuple 3 (list 3))))
                (erlang/apply probe :encode_key (list improper))))
         (is (= (erlang/apply probe :encode_key (list improper))
                (BeamLisp.Sorted/encode_key improper))))
       ; an improper tail that is NOT a lazy seq is encoded as a final element
       ; rather than raising — a key that crashes on insert fails a whole
       ; transaction for a value the language allows.
-      (is (= (tuple 7 (list (tuple 3 1) (tuple 6 "tail")))
+      (is (= (tuple 7 (list (tuple 3 (list 1)) (tuple 6 "tail")))
              (erlang/apply probe :encode_key
                (list (erlang/binary_to_term
                        (erlang/list_to_binary
