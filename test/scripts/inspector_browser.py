@@ -43,9 +43,9 @@ def evaluate(expression):
 
 def wait(expression):
     return evaluate("""new Promise((resolve,reject)=>{
-      const end=performance.now()+15000;
+      const end=performance.now()+10000;
       function check(){if(%s)return resolve(true);
-        if(performance.now()>end)return reject(Error('Condition did not settle'));
+        if(performance.now()>end)return reject(Error('Condition did not settle: '+JSON.stringify(window.EnchantInspector?.debug())));
         setTimeout(check,40)}check()})""" % expression)
 
 
@@ -79,7 +79,7 @@ try:
     assert evaluate("document.getElementById('enchant-inspector').shadowRoot.querySelector('.tokens').children.length===4")
     assert evaluate("document.getElementById('enchant-inspector').shadowRoot.querySelector('.selection').innerText.includes('counter')")
     rpc('click', selector='#demo-colour')
-    wait("document.getElementById('enchant-inspector').dataset.loomScale.includes('#b67548')")
+    wait("document.getElementById('enchant-inspector-source').dataset.loomScale.includes('#b67548')")
     rpc('screenshot', path=str(output / 'loom-picker.png'))
     evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
 

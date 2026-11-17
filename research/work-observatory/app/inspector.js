@@ -2,8 +2,10 @@
 // Reuses Live's existing patch seam; no second socket, global tap or cell writer.
 (() => {
   if (window.EnchantInspector) return;
-  const host = document.getElementById('enchant-inspector');
-  if (!host) return;
+  const source = () => document.getElementById('enchant-inspector-source');
+  if (!source()) return;
+  // Like the original Studio shell, keep tools outside Live's replaceable root.
+  const host = document.createElement('div');host.id='enchant-inspector';document.body.append(host);
   const root = host.attachShadow({mode: 'open'});
   const paths = {
     logo: '<path d="M5 5h14M5 12h10M5 19h14M5 5v14"/>',
@@ -43,11 +45,12 @@
   overlay.append(pickBox);
   const text = (parent, tag, value) => {const n=document.createElement(tag);n.textContent=String(value);parent.append(n);return n;};
   const mb = n => Number.isFinite(n) ? `${Math.round(n/1048576)} MB` : '—';
-  const stateName = p => ({ready:'Saved',running:'Working',blocked:'Stopped',stale:'Out of date',unavailable:'Unavailable',refused:'Unavailable'}[p.status] || (p.demand ? 'Waiting' : 'Not used'));
+  const stateName = p => ({ready:'Ready',running:'Working',blocked:'Stopped',stale:'Out of date',unavailable:'Unavailable',refused:'Unavailable'}[p.status] || (p.demand ? 'Waiting' : 'Not used'));
   function bars(parent, big) {
     parent.replaceChildren();
-    const max = Math.max(1, ...history.map(f=>f.ops));
-    history.forEach(f=>{const bar=document.createElement('i');bar.style.height=`${2+(f.ops/max)*(big?48:13)}px`;bar.title=`${f.ops} changes`;parent.append(bar);});
+    const max = Math.max(1, ...history.map(f=>f.ops||0));
+    history.forEach(f=>{const bar=document.createElement('i');bar.style.height=`${f.ops===null?(big?35:12):2+(f.ops/max)*(big?48:13)}px`;
+      if(f.ops===null)bar.style.background='#a9b8aa';bar.title=f.ops===null?'Whole page updated':`${f.ops} changes`;parent.append(bar);});
   }
   function activate(next) {
     if (disposed) return;
@@ -66,7 +69,7 @@
     stopSampling();setPicking(false);selected=null;pickBox.style.display='none';
   }
   async function refresh() {
-    if(disposed||!open||tab!=='server'||document.hidden||!host.isConnected||flight)return;
+    if(disposed||!open||tab!=='server'||document.hidden||!source()||!host.isConnected||flight)return;
     const current=generation, controller=new AbortController();flight=controller;
     queries++;pending++;peakFlights=Math.max(peakFlights,pending);
     const deadline=setTimeout(()=>controller.abort(),5000);
@@ -92,7 +95,7 @@
       const chart=text(body,'div','');chart.className='history';bars(chart,true);
       const caption=text(body,'div','');caption.className='frame-caption';
       text(caption,'span',`${history.length} updates`);
-      text(caption,'span',`${history.reduce((n,f)=>n+f.ops,0)} changes`);
+      const last=history[history.length-1];text(caption,'span',last?(last.ops===null?'Full view':`${last.ops} changes`):'');
       return;
     }
     if(tab==='element') {renderSelection();return;}
@@ -102,7 +105,7 @@
       const jobs=(sample.work||[]).flatMap(o=>o.jobs||[]), results=sample.projections||[];
       const stats=text(body,'div','');stats.className='stats';
       [[jobs.filter(j=>j.status==='running'||j.status==='cancelling').length,'Running'],
-       [`${results.filter(p=>p.status==='ready').length}/${results.length}`,'Saved'],
+       [`${results.filter(p=>p.status==='ready').length}/${results.length}`,'Ready'],
        [mb(sample.runtime?.vm?.memory),'Memory']].forEach(([v,label])=>{const cell=text(stats,'div','');cell.className='stat';text(cell,'strong',v);text(cell,'small',label);});
       results.slice(0,8).forEach(p=>{
         const row=text(body,'div','');row.className='line';
@@ -123,7 +126,7 @@
     return m?'#'+m.slice(1).map(v=>Number(v).toString(16).padStart(2,'0')).join(''):value;
   }
   function tokenName(category,value) {
-    let scale={};try {scale=JSON.parse(host.dataset.loomScale||'{}');}catch{}
+    let scale={};try {scale=JSON.parse(source()?.dataset.loomScale||'{}');}catch{}
     return Object.entries(scale[category]||{}).find(([,v])=>colorKey(String(v))===colorKey(value))?.[0];
   }
   function renderSelection() {
@@ -174,8 +177,14 @@
     overlay.append(box);boxes.add(box);
     const timer=setTimeout(()=>{box.remove();boxes.delete(box);timers.delete(timer);},650);timers.add(timer);
   }
+  function queueDraw() {
+    if(draw===null)draw=requestAnimationFrame(()=>{
+      draw=null;if(disposed)return;draws++;paintCredits=16;
+      bars($('.spark'),false);if(open&&tab!=='server')render();if(selected)reposition();
+    });
+  }
   function onPatch(e) {
-    if(!host.isConnected){dispose();return;}
+    if(!source()){dispose();return;}
     const ops=e.detail?.ops||[];history.push({ops:ops.length});if(history.length>32)history.shift();
     if(paint&&boxes.size<16)ops.slice(0,Math.min(paintCredits,16-boxes.size)).forEach(op=>{
       // Same Live path lookup used by the older tooling/studio.js instrument.
@@ -183,10 +192,14 @@
       try {let n=window.Live?.at(e.detail.root,op[1]);if(n?.nodeType===3)n=n.parentElement;flash(n);}catch{}
     });
     if(selected&&!selected.isConnected){selected=null;pickBox.style.display='none';}
-    if(draw===null)draw=requestAnimationFrame(()=>{
-      draw=null;if(disposed)return;draws++;paintCredits=16;
-      bars($('.spark'),false);if(open&&tab!=='server')render();if(selected)reposition();
-    });
+    queueDraw();
+  }
+  function onMount(e) {
+    if(!source()){dispose();return;}
+    history.push({ops:null});if(history.length>32)history.shift();
+    if(paint&&paintCredits>0){paintCredits--;paintLookups++;flash(e.detail.root);}
+    if(selected&&!selected.isConnected){selected=null;pickBox.style.display='none';}
+    queueDraw();
   }
   function onKey(e) {
     if(e.key==='Escape'){setPicking(false);selected=null;pickBox.style.display='none';close();}
@@ -214,11 +227,13 @@
     if(disposed)return;disposed=true;close();
     if(draw!==null)cancelAnimationFrame(draw);draw=null;
     timers.forEach(clearTimeout);timers.clear();boxes.clear();overlay.remove();
+    host.remove();
     document.removeEventListener('live:patch',onPatch);document.removeEventListener('visibilitychange',visibility);
+    document.removeEventListener('live:mount',onMount);
     document.removeEventListener('keydown',onKey,true);document.removeEventListener('scroll',reposition,true);
     window.removeEventListener('resize',reposition);window.removeEventListener('pagehide',dispose);
   }
-  document.addEventListener('live:patch',onPatch);document.addEventListener('visibilitychange',visibility);
+  document.addEventListener('live:patch',onPatch);document.addEventListener('live:mount',onMount);document.addEventListener('visibilitychange',visibility);
   document.addEventListener('keydown',onKey,true);document.addEventListener('scroll',reposition,true);
   window.addEventListener('resize',reposition);window.addEventListener('pagehide',dispose);
   window.EnchantInspector={version:1,dispose,debug:()=>({open,tab,picking,paint,frames:history.length,flashes:boxes.size,
