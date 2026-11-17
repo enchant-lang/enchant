@@ -325,8 +325,8 @@ test("CompilerData plain-clause shape view is bounded, passive, and distinguishe
   assert.equal(stacks.get(R.kw("raw")), "__STACKTRACE_RAW__");
 });
 
-test("native unit validation and fingerprint serialization refuse explicitly without granting custody", () => {
-  for (const key of ["Elixir.BeamLisp.CompilerData/check_contextual_unit!/1", "erlang/term_to_binary/2"]) {
+test("native Source-head access, unit validation and fingerprint serialization refuse without granting custody", () => {
+  for (const key of ["Elixir.BeamLisp.CompilerData/check_contextual_unit!/1", "erlang/term_to_binary/2", "persistent_term/get/2", "atomics/get/2"]) {
     assert.equal(typeof leaf(key), "function");
     assert.throws(() => leaf(key)(R.EMPTY_MAP, R.list(R.kw("deterministic"))),
       e => e instanceof R.BLError && e.message.includes(key) && /BEAM only/.test(e.message));
