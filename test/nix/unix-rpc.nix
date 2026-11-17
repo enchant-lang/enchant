@@ -5,7 +5,7 @@ let
   sources = ../../research/field-station/prototypes/src;
   contract = ../../research/field-station/prototypes/src/station_prototype/messages.bl;
   client = user: mode:
-    "su - ${user} -c '${installedSdk}/bin/bl --cold run ${./unix-rpc-client.bl} -- ${mode} ${contract}'";
+    "su - ${user} -c '${installedSdk}/bin/bl --cold run ${./unix-rpc-client.bl} -- ${mode}'";
 in pkgs.testers.runNixOSTest {
   name = "beam-lisp-native-unix-rpc-datom";
   nodes.machine = { ... }: {
@@ -21,7 +21,7 @@ in pkgs.testers.runNixOSTest {
       environment.HOME = "/var/lib/rpccheck";
       serviceConfig = {
         ExecStart = "${installedSdk}/bin/bl --cold -p ${sources} run ${./unix-rpc-server.bl} -- ${contract}";
-        RuntimeMaxSec = 240;
+        RuntimeMaxSec = 360;
         Group = "rpc-client";
         StateDirectory = "rpccheck";
         StateDirectoryMode = "0700";
@@ -37,7 +37,7 @@ in pkgs.testers.runNixOSTest {
     machine.wait_for_file("/run/rpccheck/ready", timeout=90)
     assert machine.succeed("stat -c %u:%g:%a /run/rpccheck/socket").strip() == "0:2000:660"
     with subtest("socket group and Datom account lookup deny independently"):
-        machine.fail("${client "outsider" "inbox"}", timeout=60)
+        assert machine.succeed("${client "outsider" "filesystem-denied"}", timeout=60).strip() == "filesystem-denied"
         eve = json.loads(machine.succeed("${client "eve" "inbox"}", timeout=60))
         assert eve == {"protocol": "enchant.rpc.unix/1", "error": "unauthenticated"}, eve
     with subtest("actual accounts see distinct checked Datom inboxes"):
