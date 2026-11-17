@@ -14,7 +14,7 @@ export function importHTML(html){
       if(node.nodeType===Node.TEXT_NODE){text+=node.data;return;}
       if(node.nodeType!==Node.ELEMENT_NODE||['SCRIPT','STYLE','NOSCRIPT','IFRAME','OBJECT','SVG','TEMPLATE'].includes(node.tagName))return;
       if(node.tagName==='BR'){text+='\n';return;}
-      if(['UL','OL'].includes(node.tagName))return;
+      if(['UL','OL','TABLE','PRE','BLOCKQUOTE','ASIDE'].includes(node.tagName))return;
       const from=chars(text);for(const child of node.childNodes)visit(child);const to=chars(text);if(from===to)return;
       const fid=({B:'text/bold',STRONG:'text/bold',I:'text/emphasis',EM:'text/emphasis',U:'text/underline',S:'text/strike',DEL:'text/strike',CODE:'text/code',MARK:'text/highlight',A:'text/link'})[node.tagName];
       const args=fid==='text/link'?{href:safeUrl(node.getAttribute('href'))}:fid==='text/highlight'?{tone:'amber'}:{};
@@ -52,7 +52,7 @@ export function importHTML(html){
     const attrs=check?{checked:check.checked}:kind==='heading'?{level:Number(tag[1])}:kind==='callout'?{icon:'lightbulb',tone:'amber'}:{};
     const id=identity(),content=inline(element.childNodes),block={...base(id,kind,'',attrs,parent),...content};
     blocks.push(block);
-    for(const child of element.children)if(child.tagName==='UL'||child.tagName==='OL')emit(child,id);
+    for(const child of element.children)if(['UL','OL','TABLE','PRE','BLOCKQUOTE','ASIDE'].includes(child.tagName))emit(child,id);
   }
   for(const child of document.body.childNodes){
     if(child.nodeType===Node.TEXT_NODE){if(child.data.trim())blocks.push(base(identity(),'paragraph',child.data));}
