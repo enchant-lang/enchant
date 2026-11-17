@@ -31,3 +31,4 @@
 (check "sealing twice raises" (raises? native-seal-image!))
 (check "sealed_value answers :error natively" (eq? (bl-key "error") ((leaf "Elixir.BeamLisp.Env/sealed_value/3") "core" "inc" #t)))
 (display "SEAL_CHECKS_PASSED ") (display checks) (newline)
+(exit 0)

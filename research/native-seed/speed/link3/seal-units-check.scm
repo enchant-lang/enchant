@@ -35,3 +35,4 @@
 (newline)
 (if (not (and (same? dev sealed-loaded) (same? dev sealed))) (exit 1))
 (display "SEAL_UNITS_PASSED") (newline)
+(exit 0)

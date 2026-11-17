@@ -190,9 +190,23 @@ When `:sealed?` is set:
    ```
    G=$(jq -r .gambit research/native-seed/toolchain-pin.json)/bin/gsi
    work run --memory 4G --timeout 1800 -- timeout 900 $G -e '(load "/tmp/r3link/host-gsi.scm")' \
-     -e '(load "/tmp/r3link/image-body.scm")' research/native-seed/speed/link3/seal-check.scm
+     -e '(load "/tmp/r3link/image-body.scm")' research/native-seed/speed/link3/seal-check.scm < /dev/null
    ```
-   SEAL_CHECK_RESULT
+   (`< /dev/null`, plus a final `(exit 0)`, so that gsi cannot sit in its REPL.
+   Two earlier runs without them reached the 1800 s cap.)
+   ```
+   SEAL_CHECKS_PASSED 17
+   ```
+   - The dev image runs compiled code and allows redefinition.
+   - The seal succeeds on the real image, so no Env value row shadows any of
+     its compiled definitions.
+   - After the seal, the following raise: `native-register!` of `core/inc`
+     (with the sealed value restored, and calls still answering 42),
+     `Env/intern` over `core/inc`, `Env/intern` over the seed `core/+`,
+     `delete_key` of the seed, `refuse_sealed_redefinition!` on a sealed slot,
+     and a second seal.
+   - New `user` vars, and rebinding a non-sealed `user` var, still work.
+   - `sealed_value` answers `:error` natively.
 3. **Sealed text runs and answers as dev** (gsi, `speed/link3/seal-units-check.scm`):
    - On the same dev image it computes 16 compiled `clojure.string` answers.
    - It loads the SEALED re-emission of sugar, server-clause, reader-node and
