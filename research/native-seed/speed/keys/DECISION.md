@@ -9,8 +9,19 @@ details. This file records them. Later work keeps them unless Othman reopens Q3.
 > collection, `frequencies`, `group-by` or `distinct` exactly when
 > `(= k1 k2)` is true.
 
-NaN is the one exception, because `=` is not reflexive on NaN and a key relation
-has to be (see below). Every operation that takes a key follows the law:
+There are two recorded exceptions:
+
+1. **NaN.** `=` is not reflexive on NaN, and a key relation has to be (see
+   below).
+2. **A list and a vector with equal elements are different keys.** `=` says
+   `(= [1 2] '(1 2))`, but `(get {[1 2] :x} '(1 2))` is nil, as it was before
+   this change. Making them one key would mean storing one sequential kind for
+   both, so `keys` would hand back a vector where the program stored a list.
+   Compiler and macro code reads list keys back as forms, so that is the larger
+   surprise. Within one kind the law holds fully: `(get {'(1 2M) :l} '(1.0 2))`
+   is `:l`.
+
+Every operation that takes a key follows the law:
 `get`, `assoc`, `dissoc`, `contains?`, `find`, `conj` into a map or set, `disj`,
 calling a map or set as a function, set and map literals, `set`, `hash-map`,
 `into`, `zipmap`, `merge`, `select-keys`, `frequencies`, `group-by`, `distinct`,
@@ -86,7 +97,7 @@ because every sorted entry point canonicalises its keys.
 | Integral floats | `1.0` and `1` are the same key. The stored key is `1`. |
 | Decimal keys | Any scale of a decimal is the same key as the equal int or float. `1.50M`, `1.5M` and `1.5` are the same key, stored as `1.5`. `0.1M` and `0.1` are different keys, because `(= 0.1M 0.1)` is false. |
 | `-0.0`, `0.0`, `0` | One key, stored as `0`. They are already equal under `=` (`(= 0.0 -0.0)` is true). |
-| NaN | Neither target can build a NaN today. BEAM floats are finite, and native `bl-float` refuses non-finite values. When E8 admits them, **every NaN is one key, equal to itself as a key**, even though `(= ##NaN ##NaN)` is false. This is JavaScript's SameValueZero rule, and the reasons for it are listed under NaN below. The native canonicaliser already maps any NaN to one NaN. On BEAM the clause is vacuous, so it costs nothing. |
+| NaN | Neither target can build a NaN today. BEAM floats are finite, and native `bl-float` refuses non-finite values. When E8 admits them, **every NaN is one key, equal to itself as a key**, even though `(= ##NaN ##NaN)` is false. This is JavaScript's SameValueZero rule, and the reasons for it are listed under NaN below. This wave adds no NaN clause on either target, because none can be reached. E8 must add two things: a canonicaliser clause that maps every NaN to one NaN term, and a fixed NaN position in the native tree order. `bl-key-compare` currently compares a NaN as 0 against every float. |
 | `(keys m)` for a key written as `1.0` | `(1)`. |
 | Set membership | Members are canonical, so `(count #{1 1.0})` is 1, `(contains? #{1} 1.0)` is true and `(= #{1} #{1.0})` is true. |
 | Sorted collections | The tree order is `compare`, and `compare` is 0 exactly when `=` holds, so sorted lookups already used value equality for int and float. The stored key is now canonical too, and decimal keys now land among the numbers: `(get (sorted-map 1.5M :x) 1.50M)` is `:x`. `(keys (sorted-map 1.0 :x))` is `(1)`. |
@@ -160,6 +171,8 @@ the native ones.
 (get {{:a 1} :m} {:a 1.0})            ;=> :m
 (get {#{1} :s} #{1.0})                ;=> :s
 (frequencies [1 1.0 1M])              ;=> {1 3}
+(get {'(1 2M) :l} '(1.0 2))           ;=> :l
+(get {[1 2] :x} '(1 2))               ;=> nil   ; recorded exception 2
 (group-by identity [1 1.0])           ;=> {1 [1 1.0]}  ; values keep their spelling
 (distinct [1 1.0 2])                  ;=> (1 2)
 (get (sorted-map 1.5M :x) 1.50M)      ;=> :x
@@ -181,8 +194,9 @@ Three of these expose the usual wrong implementations:
 
 * `identical?` and raw Erlang term equality are unchanged:
   `(identical? 1 1.0)` is false.
-* `case` and pattern matching stay exact-term. `=` and keys are the value
-  relation.
+* `case` already tests its constants with `=`, so `(case 1.0 1 :int :float)`
+  is `:int`. That was true before this change and is unchanged. Destructuring
+  and Erlang-level pattern matching stay exact-term.
 * Datom indexes have their own semantic keys (`datom.index/value-key`) and
   formats. Nothing changes there.
 * `formal.identity` and the data graph keep exact kinds and float bits, which

@@ -1,0 +1,69 @@
+;; Q3 native key checks (research/native-seed/speed/keys/DECISION.md).
+;; Append after host.scm, host/host-values.scm, host/host-leaves.scm,
+;; host/host-extra.scm, host/native-memo.scm. No BL compiler.
+(define native-keys-checks 0)
+(define (native-keys-check label ok)
+ (if (not ok) (error (string-append "native keys check failed: " label)))
+ (set! native-keys-checks (+ native-keys-checks 1)))
+(define (f x) (bl-float x))
+(define (dec u s) (bl-decimal u s))
+(define kx (bl-key "x"))
+(define (same-term? a b) (eqv? 0 (bl-key-compare a b)))
+(define numbers
+ (list 0 (f -0.0) (f 0.0) (dec 0 0) (dec 0 2) 1 (f 1.0) (dec 1 0) (dec 100 2) 100 (f 100.0)
+       (f 1.5) (dec 15 1) (dec 150 2) (f 0.1) (dec 1 1) (dec 10 2) (f 0.5) (dec 50 2) (f 0.25)
+       9007199254740992 (f 9007199254740992.0) 9007199254740993 -9007199254740993
+       (f 1e300) (f -2.5) (dec -250 2)))
+;; the law: same key iff (= a b), and equal keys are the identical canonical term
+(for-each (lambda (a)
+ (for-each (lambda (b)
+  (let ((eq (bl-equal? a b)))
+   (native-keys-check "canonical iff equal" (eq? eq (same-term? (bl-key-value a) (bl-key-value b))))
+   (native-keys-check "get iff equal" (eq? eq (eq? kx (bl-get (bl-map a kx) b))))
+   (native-keys-check "set membership iff equal" (eq? eq (h-set-has (native-set-from-list (list a)) b)))
+   (native-keys-check "assoc merges iff equal" (eq? eq (= 1 (native-map-count (bl-assoc (bl-map a 1) b 2)))))))
+  numbers)) numbers)
+;; canonical representatives (same as BEAM rt.bl hash-key)
+(native-keys-check "1.0 -> 1" (eqv? 1 (bl-key-value (f 1.0))))
+(native-keys-check "-0.0 -> 0" (eqv? 0 (bl-key-value (f -0.0))))
+(native-keys-check "1.00M -> 1" (eqv? 1 (bl-key-value (dec 100 2))))
+(native-keys-check "1.50M -> 1.5" (let ((k (bl-key-value (dec 150 2)))) (and (bl-tag? k 'float) (= 1.5 (vector-ref k 1)))))
+(native-keys-check "0.10M -> 0.1M" (let ((k (bl-key-value (dec 10 2))))
+ (and (native-decimal? k) (= 1 (bl-get k (bl-key "unscaled"))) (= 1 (bl-get k (bl-key "scale"))))))
+(native-keys-check "0.1M stays itself" (let ((d (dec 1 1))) (eq? d (bl-key-value d))))
+(native-keys-check "0.1 float stays itself" (let ((x (f 0.1))) (eq? x (bl-key-value x))))
+(native-keys-check "1e300 -> exact integer" (let ((k (bl-key-value (f 1e300)))) (and (exact? k) (integer? k))))
+(native-keys-check "keyword unchanged" (eq? kx (bl-key-value kx)))
+(let ((v (bl-vec (list 1 2)))) (native-keys-check "clean vector unchanged" (eq? v (bl-key-value v))))
+;; decision examples
+(native-keys-check "(get {1 :x} 1.0)" (eq? kx (bl-get (bl-map 1 kx) (f 1.0))))
+(native-keys-check "(get {0.1 :f} 0.1M) is nil" (bl-is-nil (bl-get (bl-map (f 0.1) kx) (dec 1 1))))
+(native-keys-check "(count {1 :a 1.0 :b})" (= 1 (native-map-count (bl-map 1 (bl-key "a") (f 1.0) (bl-key "b")))))
+(native-keys-check "later literal entry wins" (eq? (bl-key "b") (bl-get (bl-map 1 (bl-key "a") (f 1.0) (bl-key "b")) 1)))
+(native-keys-check "(keys {1.0 :x})" (equal? '(1) (native-map-keys (bl-map (f 1.0) kx))))
+(native-keys-check "dissoc by equal key" (= 0 (native-map-count (native-map-remove (bl-map 1 kx) (f 1.0)))))
+(native-keys-check "has? by equal key" (native-map-has? (bl-map 1 kx) (dec 100 2)))
+(native-keys-check "#{1 1.0 1M 1.00M} has one member"
+ (= 1 (bl-count (native-set-from-list (list 1 (f 1.0) (dec 1 0) (dec 100 2))))))
+(native-keys-check "disj by equal member" (= 0 (bl-count (native-set-remove (native-set-from-list (list 1)) (f 1.0)))))
+(native-keys-check "set as function" (eqv? 1 (bl-invoke (native-set-from-list (list 1)) (list (f 1.0)))))
+(native-keys-check "vector keys compare by value"
+ (eq? kx (bl-get (bl-map (bl-vec (list 1 2)) kx) (bl-vec (list (f 1.0) (f 2.0))))))
+(native-keys-check "map keys compare by value"
+ (eq? kx (bl-get (bl-map (bl-map (bl-key "a") 1) kx) (bl-map (bl-key "a") (f 1.0)))))
+(native-keys-check "list keys compare by value" (eq? kx (bl-get (bl-map (list 1 (dec 2 0)) kx) (list (f 1.0) 2))))
+(native-keys-check "tuple keys compare by value"
+ (eq? kx (bl-get (bl-map (bl-tuple (list 1)) kx) (bl-tuple (list (f 1.0))))))
+(native-keys-check "set keys compare by value"
+ (eq? kx (bl-get (bl-map (native-set-from-list (list 1)) kx) (native-set-from-list (list (f 1.0))))))
+(native-keys-check "values are untouched" (bl-tag? (bl-get (bl-map kx (f 1.0)) kx) 'float))
+(native-keys-check "equal maps with spelled keys" (bl-equal? (bl-map 1 kx) (bl-map (f 1.0) kx)))
+(native-keys-check "raw key predicate unchanged" (not (bl-key-equal? 1 (f 1.0))))
+;; tables follow the same keys, including their key-order list
+(let ((t (h-table-new)))
+ (h-table-insert t (f 1.0) kx)
+ (native-keys-check "table lookup by equal key" (not (bl-is-nil (h-table-lookup t 1))))
+ (native-keys-check "table delete by equal key" (h-table-delete t (dec 1 0)))
+ (native-keys-check "table empty after delete" (and (= 0 (h-table-size t)) (null? (h-table-snapshot t))))
+ (h-table-destroy t))
+(display "native keys checks: ") (display native-keys-checks) (newline)
