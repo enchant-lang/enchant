@@ -100,7 +100,9 @@ another synchronous computation; use an owned derivation for sticky refusal.
 LSP and `system.evidence/source` share concurrent requests under that admission.
 `codebase/index-source` shares facts by source bytes, namespace, type seeds,
 index mode and live code evidence. `code.index` rechecks a disk miss after
-admission and publishes complete fact files with an atomic rename. Mutable
+admission and publishes complete fact files with an atomic rename. `bl ask`
+uses that same artifact path. Persisted identities include namespace, type seeds,
+mode, source and qualified SDK; unlike inputs never share an artifact. Mutable
 connections remain owned by their callers.
 
 `codebase/loop-plan` propagates weighted loop depths in one topological pass.
