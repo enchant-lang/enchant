@@ -1,0 +1,42 @@
+(BeamLisp.Env/add_search_path
+  (Path/join (BeamLisp/cwd) "research/work-observatory/app"))
+(ns observatory.inspector-test
+  (:require [observatory.inspector :as inspector] [live.app :as app]
+            [live.hiccup :as html] [web] [bl.json :as json]))
+
+(defn request [path]
+  (erlang/apply :Elixir.Plug.Test :conn (list "GET" path "")))
+
+(deftest development-is-explicit-and-decoration-preserves-denied-views
+  (let [application {:routes [["/" (fn [_] [:main "App"])]]}]
+    (is (= application (inspector/attach application {})))
+    (is (thrown? (inspector/attach application {:enabled? true}))))
+  (let [decorated (inspector/decorate (fn [_] [:main "App"]) #(= :developer %))]
+    (is (= [:main "App"] (decorated {:me :visitor})))
+    (let [view (html/hiccup->html (decorated {:me :developer}))]
+      (is (String/contains? view "id=\"enchant-inspector\""))
+      (is (String/contains? view "data-loom-scale"))
+      (is (String/contains? view "/__enchant/inspector.js"))
+      (is (not (String/contains? view "__pulse/ws"))))))
+
+(deftest every-asset-and-snapshot-reuses-host-authentication
+  (let [me (atom :visitor) calls (atom 0) fallback (atom 0)
+        application (inspector/attach
+          {:principal (fn [_] (swap! calls inc) @me)
+           :http (fn [c _] (swap! fallback inc) (web/text c "App endpoint"))
+           :routes [["/" (fn [_] [:main "App"])]]}
+          {:enabled? true :authorize #(= :developer %)})]
+    (doseq [path ["/__enchant" "/__enchant/inspector.js" "/__enchant/inspector.css" "/__enchant/snapshot.json"]]
+      (is (= 404 (:status (app/router application (request path))))))
+    (is (= 4 @calls)) (is (= 0 @fallback))
+    (reset! me :developer)
+    (let [redirect (app/router application (request "/__enchant"))
+          script (app/router application (request "/__enchant/inspector.js"))
+          data (app/router application (request "/__enchant/snapshot.json"))]
+      (is (= 302 (:status redirect)))
+      (is (= "/" (elem (first (filter #(= "location" (elem % 0)) (:resp_headers redirect))) 1)))
+      (is (= 200 (:status script)))
+      (is (String/contains? (:resp_body script) "live:patch"))
+      (is (= "enchant.observatory.v1" (get (json/decode (:resp_body data)) "schema"))))
+    (is (= "App endpoint" (:resp_body (app/router application (request "/api")))))
+    (is (= 1 @fallback))))
