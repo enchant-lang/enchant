@@ -1,0 +1,40 @@
+; P3 on the REAL round-2 native image (no rebuild): the failing self-emission
+; step, reproduced for the compiler definitions that call into the `lower`
+; stub, then repeated after the image's Env holds the stub's BEAM link rows
+; (the rows native-install-bundle! now installs from bundle :stub-links).
+;
+;   work run --memory 4G --timeout 1800 -- MAIN/NS/out/round2-build/stage1 \
+;     --eval MAIN/NS/out/round2-build/bundle.scm research/native-seed/speed/link3/native-probe.bl
+;
+; Reads OUT/stub-links.scm (written by stubs.bl on BEAM); writes
+; OUT/native-<def>.scm, to compare byte for byte with OUT/beam-<def>.scm.
+(ns link3.native-probe
+ (:require [native.bootstrap :as bootstrap] [compiler :as c] [reader :as rd]))
+(def out "/tmp/r3link/out")
+(def wanted ["eval_form"])
+(defn emit-all [plan cu]
+ (doseq [name wanted]
+  (let [d (first (filter #(= name (:name %)) (:defs cu)))
+        _ (c/reset-fresh!)
+        node (c/compile (:form d) (assoc (c/new-env "compiler") :file (:path cu) :target :js))
+        text (try (bootstrap/emit-definition plan cu (assoc d :node node))
+                  (catch e (println (str "NATIVE_EMIT_REFUSED compiler/" name " " (:message e) " " (:data e))) nil))]
+   (when text
+    (host/write-file (str out "/native-" name ".scm") text)
+    (println (str "NATIVE_EMIT compiler/" name " " (count text) "B"))))))
+(defn run []
+ (let [bundle (host/eval-scheme (host/read-file (second (host/command-line))))
+       light (mapv (fn [u] (assoc u :defs (bootstrap/definition-values (rest (rd/read-string (:source u) (:path u))) (:ns u) (:path u))))
+                   (:units bundle))
+       plan (bootstrap/link-plan (dissoc bundle :units) light)
+       cu (first (filter #(= "compiler" (:ns %)) light))]
+  (println (str "NATIVE_PROBE units=" (count light) " stub-link-before=" (BeamLisp.Env/link "compiler" "lower/eval-anf")))
+  (emit-all plan cu)
+  ; Exactly what native-install-bundle! does for each :stub-links row.
+  (doseq [row (host/eval-scheme (host/read-file (str out "/stub-links.scm")))]
+   (BeamLisp.Env/put_link (nth row 0) (nth row 1) (nth row 2))
+   (when (= true (nth row 3)) (BeamLisp.Env/put_meta (nth row 0) (nth row 1) {:private true})))
+  (println (str "NATIVE_PROBE stub-link-after=" (BeamLisp.Env/link "compiler" "lower/eval-anf")))
+  (emit-all plan cu)
+  (println "NATIVE_PROBE_DONE")))
+(run)

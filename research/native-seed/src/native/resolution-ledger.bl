@@ -87,13 +87,34 @@
          [ns (assoc replay :refer-alls (vec (:refer_alls raw))
                     :core-excludes (vec (:core-excludes raw)) :require-specs (vec (:require_specs raw)))])) (:order closure)))]
   {:version 1 :seed-names seeds :headers headers}))
+(defn stub-links
+ "The link rows of every boot-tier stub namespace (closure :stubs, e.g.
+  `lower`), exactly as this BEAM's Env answers them: `[ns name info private?]`
+  sorted by namespace then name. On BEAM a stub is loaded, so a member call
+  such as compiler.bl's `(lower/eval-anf …)` compiles to a module-linked
+  remote that links as an excluded stub. The native image does not load the
+  stub; native-install-bundle! puts these SAME rows (and the privacy flag), so
+  the native compile answers the call exactly as BEAM does (P3)."
+ [closure]
+ (vec (mapcat (fn [ns]
+   (let [rows (sort-by first (BeamLisp.Env/match (tuple (tuple :link ns :$1) :$2)))]
+    (when (empty? rows)
+     (throw (ex-info "native resolution: stub namespace has no link rows" {:namespace ns})))
+    (map (fn [row]
+      (let [name (first row) meta (BeamLisp.Env/meta ns name)
+            private? (and (erlang/is_tuple meta) (= :ok (elem meta 0)) (erlang/is_map (elem meta 1))
+                          (= true (:private (elem meta 1))))]
+       [ns name (second row) private?])) rows)))
+  (sort (:stubs closure)))))
 (defn bundle-metadata
  "The bundle metadata every emission of this closure links against. The AOT
   driver (native.chunks) and the native self-emission (native.bootstrap, which
-  reads it back from bundle.scm) build their link plan from this one value."
+  reads it back from bundle.scm) build their link plan from this one value.
+  The native closure is a sealed image (N3): `:sealed true`."
  [closure leaves]
  (let [units (mapv #(get (:units closure) %) (:order closure))]
   {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure) :resolution (build closure)
+   :sealed true :stub-links (stub-links closure)
    :provider-sources (:provider-sources closure) :options (:options closure) :stubs (:stubs closure)
    :core-links (:core-links closure) :return-constructor-shapes (:return-constructor-shapes closure)
    :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)
