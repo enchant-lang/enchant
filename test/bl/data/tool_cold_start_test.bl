@@ -1,0 +1,23 @@
+;; This file is first in the qualification inventory, in a fresh capped VM.
+(ns data.tool-cold-start-test
+  (:require [runtime.activity :as activity] [codebase :as index] [bl.check :as check]))
+(defn- latest [reader kind]
+  (first (filter #(= kind (:tool %)) (:recent (activity/snapshot reader)))))
+(deftest first-index-retains-its-answer-before-a-second-identical-request
+  (let [reader (activity/open) src "(ns cold.tools) (defn leaf [x] (+ x 741))"]
+    (try
+      (index/index-source {} "cold.tools" src {:mode :calls})
+      (is (= 1 (get-in (latest reader "index") [:counts :computed])))
+      (is (= 0 (get-in (latest reader "index") [:counts :unstable] 0)))
+      (index/index-source {} "cold.tools" src {:mode :calls})
+      (is (= 0 (get-in (latest reader "index") [:counts :computed] 0)))
+      (is (= 1 (get-in (latest reader "index") [:counts :reused])))
+      (finally (activity/close! reader)))))
+(deftest first-check-initializes-all-document-providers-before-memo-evidence
+  (let [reader (activity/open) src "(ns cold.check) (defn leaf [x] (+ x 852))"]
+    (try
+      (is (= false (:unreadable (check/analyze-source "cold.bl" src)))))
+      (is (= false (:unreadable (check/analyze-source "cold.bl" src)))))
+      (is (= 0 (get-in (latest reader "check") [:counts :computed] 0)))
+      (is (= 1 (get-in (latest reader "check") [:counts :reused])))
+      (finally (activity/close! reader)))))
