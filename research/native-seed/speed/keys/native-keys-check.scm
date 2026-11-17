@@ -66,4 +66,21 @@
  (native-keys-check "table delete by equal key" (h-table-delete t (dec 1 0)))
  (native-keys-check "table empty after delete" (and (= 0 (h-table-size t)) (null? (h-table-snapshot t))))
  (h-table-destroy t))
+;; raw Erlang map leaves keep raw keys, exactly as on BEAM: 1 and 1.0 are two
+;; keys there, and only the BL key paths (bl-get/bl-assoc/sets) canonicalise
+(let* ((put (native-leaf "maps/put/3")) (get3 (native-leaf "maps/get/3")) (is-key (native-leaf "maps/is_key/2"))
+       (remove (native-leaf "maps/remove/2")) (from-list (native-leaf "maps/from_list/1"))
+       (map-get (native-leaf "Elixir.Map/get/3")) (is-map-key (native-leaf "erlang/is_map_key/2"))
+       (one (bl-invoke put (list 1 (bl-key "int") (bl-empty-map))))
+       (both (bl-invoke put (list (f 1.0) (bl-key "float") one))))
+ (native-keys-check "raw maps:put keeps 1 and 1.0 apart" (= 2 (native-map-count both)))
+ (native-keys-check "raw maps:get misses 1.0 in {1 => _}" (eq? kx (bl-invoke get3 (list (f 1.0) one kx))))
+ (native-keys-check "raw maps:get finds the exact float" (eq? (bl-key "float") (bl-invoke get3 (list (f 1.0) both kx))))
+ (native-keys-check "raw maps:is_key is exact" (not (bl-invoke is-key (list (f 1.0) one))))
+ (native-keys-check "raw is_map_key is exact" (not (bl-invoke is-map-key (list (dec 1 0) one))))
+ (native-keys-check "raw maps:remove is exact" (= 1 (native-map-count (bl-invoke remove (list (f 1.0) one)))))
+ (native-keys-check "raw maps:from_list keeps both"
+  (= 2 (native-map-count (bl-invoke from-list (list (list (bl-tuple (list 1 kx)) (bl-tuple (list (f 1.0) kx))))))))
+ (native-keys-check "raw Map.get is exact" (eq? kx (bl-invoke map-get (list one (f 1.0) kx))))
+ (native-keys-check "BL get on a raw map takes the canonical key" (eq? (bl-key "int") (bl-get both (f 1.0)))))
 (display "native keys checks: ") (display native-keys-checks) (newline)

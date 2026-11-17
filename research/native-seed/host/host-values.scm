@@ -375,7 +375,7 @@
   (subvector-move! entries (fx* 2 (fx+ position 1)) (fx* 2 count) copy (fx* 2 position))
   (vector 'map (vector 'pmap-small-v1 copy (fx- count 1)))))
 (define (native-map-entry m key)
- (let ((storage (vector-ref m 1)) (key (native-key-canon key)))
+ (let ((storage (vector-ref m 1)))
   (if (native-map-small? storage)
    (let ((found (native-small-map-search storage key)) (entries (vector-ref storage 1)))
     (if (fx< found 0) native-missing
@@ -384,7 +384,7 @@
 ;; Value-only lookup for a known map: the stored value or MISSING, without the
 ;; (key . value) pair native-map-entry allocates for callers needing the key.
 (define (native-map-ref m key missing)
- (let ((storage (vector-ref m 1)) (key (native-key-canon key)))
+ (let ((storage (vector-ref m 1)))
   (if (native-map-small? storage)
    (let ((found (native-small-map-search storage key)))
     (if (fx< found 0) missing (vector-ref (vector-ref storage 1) (fx+ 1 (fx* 2 found)))))
@@ -428,21 +428,31 @@
 (set! bl-empty-map (lambda () (vector 'map (vector 'pmap-small-v1 '#() 0))))
 ;; The optional default avoids a rest list per defaulted lookup; arguments
 ;; beyond the default stay ignored, exactly as with the former rest list.
-(set! bl-get (lambda (m k #!optional (fallback bl-nil) #!rest ignored)
+;; RAW and BL key paths are separate, exactly as on BEAM. The `native-raw-*`
+;; operations compare the exact term (Erlang map semantics: 1 and 1.0 are two
+;; keys) and back the raw `maps:*`/`Map.*` leaves, pattern matching and
+;; literal construction (whose keys the compiler already passed through
+;; `hash_key`). `bl-get`/`bl-assoc`/`native-map-has?`/`native-map-remove` are
+;; the BL key paths (core `get`/`assoc`, sets, conj, transients): they
+;; canonicalise the key first (Q3).
+(define (native-raw-get m k #!optional (fallback bl-nil))
  (if (not (bl-tag? m 'map)) fallback
-  (let ((storage (vector-ref m 1)) (k (native-key-canon k)))
+  (let ((storage (vector-ref m 1)))
    (if (native-map-small? storage)
     (let ((found (native-small-map-search storage k)))
      (if (fx< found 0) fallback (vector-ref (vector-ref storage 1) (fx+ 1 (fx* 2 found)))))
     (let ((node (native-tree-find (native-map-root m) k)))
-     (if node (vector-ref node 1) fallback)))))))
-(define (native-map-has? m k)
+     (if node (vector-ref node 1) fallback))))))
+(set! bl-get (lambda (m k #!optional (fallback bl-nil) #!rest ignored)
+ (native-raw-get m (native-key-canon k) fallback)))
+(define (native-raw-has? m k)
  (and (bl-tag? m 'map)
-  (let ((storage (vector-ref m 1)) (k (native-key-canon k)))
+  (let ((storage (vector-ref m 1)))
    (if (native-map-small? storage) (fx>= (native-small-map-search storage k) 0)
     (if (native-tree-find (native-map-root m) k) #t #f)))))
-(set! bl-assoc (lambda (m k v)
- (let* ((m (if (bl-tag? m 'map) m (bl-empty-map))) (storage (vector-ref m 1)) (k (native-key-canon k)))
+(define (native-map-has? m k) (native-raw-has? m (native-key-canon k)))
+(define (native-raw-assoc m k v)
+ (let* ((m (if (bl-tag? m 'map) m (bl-empty-map))) (storage (vector-ref m 1)))
   (if (native-map-small? storage)
    (let ((found (native-small-map-search storage k)) (count (vector-ref storage 2)))
     (if (or (>= found 0) (< count native-small-map-limit))
@@ -452,16 +462,18 @@
           (count (+ (native-map-count m) (if added 1 0))))
     ;; Legacy alist writes retain their former AVL normalization, including
     ;; its count semantics; existing valid AVL storage may become flat.
-    (native-map-with-root (native-tree-put root k v) count (native-map-tree? storage)))))))
-(define (native-map-remove m k)
+    (native-map-with-root (native-tree-put root k v) count (native-map-tree? storage))))))
+(set! bl-assoc (lambda (m k v) (native-raw-assoc m (native-key-canon k) v)))
+(define (native-raw-remove m k)
  (if (not (bl-tag? m 'map)) m
-  (let ((storage (vector-ref m 1)) (k (native-key-canon k)))
+  (let ((storage (vector-ref m 1)))
    (if (native-map-small? storage)
     (let ((found (native-small-map-search storage k)))
      (if (< found 0) m (native-small-map-remove storage found)))
     (let ((root (native-map-root m)))
      (if (not (native-tree-find root k)) m
       (native-map-with-root (native-tree-remove root k) (- (native-map-count m) 1) (native-map-tree? storage))))))))
+(define (native-map-remove m k) (native-raw-remove m (native-key-canon k)))
 ;; Literal ANF maps dominate construction. Fill one private buffer instead
 ;; of publishing/copying a new persistent map for every field. The buffer never
 ;; escapes until this constructor returns, and no subsequent operation mutates it.
@@ -469,7 +481,7 @@
  (let* ((entries (make-vector (* 2 count))) (storage (vector 'pmap-small-v1 entries 0)))
   (let add ((pairs pairs))
    (if (null? pairs) (vector 'map storage)
-    (let* ((key (native-key-canon (car pairs))) (value (cadr pairs)) (found (native-small-map-search storage key)))
+    (let* ((key (car pairs)) (value (cadr pairs)) (found (native-small-map-search storage key)))
      (if (>= found 0)
       (vector-set! entries (+ 1 (* 2 found)) value)
       (let ((position (- -1 found)) (used (vector-ref storage 2)))
@@ -489,7 +501,7 @@
    (native-small-map-build xs (quotient count 2))
    (let loop ((xs xs) (m (bl-empty-map)))
     (cond ((null? xs) m) ((null? (cdr xs)) (error "map needs key/value pairs"))
-          (else (loop (cddr xs) (bl-assoc m (car xs) (cadr xs))))))))))
+          (else (loop (cddr xs) (native-raw-assoc m (car xs) (cadr xs))))))))))
 
 ;; Persistent vector binary trie. Each update copies one root-to-leaf path.
 ;; #(vec #(pvec-v1 count capacity root)); internal nodes are two-slot vectors.
@@ -918,7 +930,7 @@
 (define (h-bmap pairs)
  (let loop ((pairs pairs) (m (bl-empty-map)))
   (if (null? pairs) m (let ((p (car pairs)))
-   (loop (cdr pairs) (bl-assoc m (bl-nth p 0) (bl-nth p 1)))))))
+   (loop (cdr pairs) (native-raw-assoc m (bl-nth p 0) (bl-nth p 1)))))))
 (set! h-empty-map bl-empty-map)
 (define (h-is-map x) (bl-tag? x 'map))
 (define h-map-get bl-get)
@@ -967,7 +979,7 @@
   (set! native-tables (cons table native-tables)) table))
 (define (h-table-lookup table key)
  (native-table-check table)
- (let ((entry (native-map-entry (vector-ref table 3) key)))
+ (let ((entry (native-map-entry (vector-ref table 3) (native-key-canon key))))
   (if (eq? entry native-missing) bl-nil (bl-tuple (list (car entry) (cdr entry))))))
 (define (h-table-insert table key value)
  (native-table-check table)
