@@ -163,3 +163,17 @@
     (is (= :cache (:from (index/facts-from-source {} root "shared.ask" source)))))
    (finally (if previous (System/put_env "BL_CACHE_DIR" previous) (System/delete_env "BL_CACHE_DIR"))
             (File/rm_rf! root)))))
+
+(deftest retained-answers-remain-readable-while-all-work-slots-are-busy
+ (let [parent (erlang/self) id (erlang/unique_integer (list :positive))
+       compute (fn [] {:answer 99})
+       _ (flight/value :efficiency.ready id :v compute)
+       holders (mapv (fn [i] (spawn (fn []
+          (flight/with-key [:busy id i]
+            (fn [] (erlang/send parent [:busy-held (erlang/self)]) (receive :release true)))))) [0 1])]
+  (try
+   (doseq [_ holders] (is (some? (receive [:busy-held p] p (after 5000 nil)))))
+   (spawn (fn [] (erlang/send parent [:ready-under-load id (flight/value :efficiency.ready id :v compute)])))
+   (is (= {:answer 99} (receive [:ready-under-load seen answer] :when (= seen id) answer (after 2000 nil)))
+       "cached delivery precedes releasing either computation holder")
+   (finally (doseq [p holders] (erlang/send p :release))))))

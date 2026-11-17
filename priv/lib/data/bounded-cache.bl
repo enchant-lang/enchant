@@ -284,19 +284,23 @@
             (publish-entry! name key revision value weight) false)) false))
     (catch _ false)))
 
+(defn computation-revision
+  "Exact existing local-function identity, shared by lookup and compute paths."
+  [revision f]
+  (when (and (erlang/is_function f) (= :local (erlang/element 2 (erlang/fun_info f :type))))
+    (tuple :computation revision (erlang/element 2 (erlang/fun_info f :module))
+           (erlang/element 2 (erlang/fun_info f :new_uniq))
+           (erlang/element 2 (erlang/fun_info f :index)))))
+
 (defn value
   "Compute on a miss; optional cache failure never changes the answer or
    suppresses computation errors. One revision occupies each logical key."
   [name key revision f]
-  (if (or (not (erlang/is_function f))
-          (not= :local (erlang/element 2 (erlang/fun_info f :type)))) (f)
-    (let [revision (tuple :computation revision
-                          (erlang/element 2 (erlang/fun_info f :module))
-                          (erlang/element 2 (erlang/fun_info f :new_uniq))
-                          (erlang/element 2 (erlang/fun_info f :index)))
-          hit (lookup name key revision)]
+  (if-let [revision (computation-revision revision f)]
+    (let [hit (lookup name key revision)]
       (if (:hit? hit) (:value hit)
-        (let [v (f)] (put! name key revision v) v)))))
+        (let [v (f)] (put! name key revision v) v)))
+    (f)))
 
 (defn clear! [name]
   (try (when-let [pid (Process/whereis name)] (call pid [:clear]))
