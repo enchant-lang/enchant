@@ -52,6 +52,9 @@ class CommandStreamControls(custody.CommandDomainControls):
         if process.stdin and not process.stdin.closed:
             process.stdin.close()  # observation abandonment is not cancellation
         process.wait(timeout=12)
+        for stream in [process.stdout,process.stderr]:
+            if stream and not stream.closed:
+                stream.close()
         self.assert_released(root)
 
     def test_output_needs_credit_but_completion_needs_no_extra_credit(self):

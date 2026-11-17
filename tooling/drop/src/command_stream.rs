@@ -54,7 +54,8 @@ pub(super) fn stop_post(unit: &str, credential: &str) -> Result<i32, String> {
     // ExecStopPost. The live launcher still holds the exact sealed memfd.
     let mut file=File::open(credential).map_err(|e| e.to_string())?;
     let required=libc::F_SEAL_SEAL|libc::F_SEAL_SHRINK|libc::F_SEAL_GROW|libc::F_SEAL_WRITE;
-    if unsafe {libc::fcntl(file.as_raw_fd(),libc::F_GET_SEALS)} & required != required {
+    let seals=unsafe {libc::fcntl(file.as_raw_fd(),libc::F_GET_SEALS)};
+    if seals<0 || seals & required != required {
         return Err("completion credential is not sealed".into());
     }
     let mut bytes=Vec::new();
