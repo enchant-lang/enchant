@@ -97,3 +97,8 @@ registry. It creates no region or authoring authority, strips Live handlers and
 editing hooks, keeps accessible read-only task status and code fallback, and
 accepts a pure `:icon` renderer with an optional `:label`. The caller still owns
 current source/parent authorization and any bounded derived snapshot cache.
+
+The code adapter adds its stable block ID as `context.block` to language-service
+requests. Applications may pair that identity with their source basis to analyze
+a working cell together with confirmed neighboring cells. The host does not
+construct a second source reader or choose a namespace.

@@ -7,7 +7,8 @@ import {cpOffset,unitOffset} from './geometry.mjs';
 import {CodeRequests} from './code-requests.mjs';
 export class CodeService {
   constructor(adapter,provider){
-    this.adapter=adapter;this.requests=new CodeRequests(()=>adapter.view.state.doc.toString(),provider);
+    this.adapter=adapter;this.requests=new CodeRequests(()=>adapter.view.state.doc.toString(),
+      {...provider,context:{...provider.context,block:adapter.id}});
     this.status=document.createElement('span');this.status.className='ed-code-service-status';this.status.setAttribute('role','status');
   }
   async request(operation,position=0){
