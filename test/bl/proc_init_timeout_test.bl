@@ -17,6 +17,11 @@
  (let [deadline (+ (erlang/monotonic_time :millisecond) 10000)]
   (loop [] (cond (action) true (> (erlang/monotonic_time :millisecond) deadline) false
                 :else (do (Process/sleep 10) (recur))))))
+(defn- hibernating? [pid]
+ (let [info (Process/info pid :current_function)]
+  (and (= (tuple :status :waiting) (Process/info pid :status))
+       (or (= (tuple :current_function (tuple :erlang :hibernate 3)) info)
+           (= (tuple :current_function (tuple :gen_server :loop_hibernate 4)) info)))))
 
 (deftest timed-init-preserves-the-user-state-and-arms-the-timeout
  (let [pid (start timeout-owner {:value 73 :owner (erlang/self)})]
@@ -28,8 +33,7 @@
 (deftest hibernating-init-preserves-state-through-wake-and-call
  (let [pid (start hibernate-owner 29)]
   (try
-   (is (wait-for (fn [] (= (tuple :current_function (tuple :erlang :hibernate 3))
-                           (Process/info pid :current_function)))))
+   (is (wait-for (fn [] (hibernating? pid))))
    (is (= {:value 29} (call pid :state)))
    (finally (stop pid)))))
 (deftest continuation-init-preserves-state-through-the-native-continuation
