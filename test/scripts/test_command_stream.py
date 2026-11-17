@@ -173,3 +173,38 @@ class CommandStreamControls(custody.CommandDomainControls):
                 self.assertTrue((root/'done').exists())
             finally:
                 self.finish(root, process)
+
+    def test_private_binary_input_reaches_eof_without_entering_command_arguments(self):
+        import hashlib
+        for body in [b'', bytes(range(256))*4096]:
+            with self.subTest(bytes=len(body)), tempfile.TemporaryDirectory(prefix='command-input-') as directory:
+                root = Path(directory)
+                request = self.request(root, 'import sys,hashlib;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest(),end="")')
+                request['input_bytes'] = len(body)
+                process = self.stream(request)
+                try:
+                    self.send(process, b'\x04'+body)
+                    self.send(process, b'\x01'+struct.pack('>I', 1))
+                    self.accepted(process)
+                    self.assertEqual((2, hashlib.sha256(body).hexdigest().encode()), self.frame(process))
+                    tag, payload = self.frame(process)
+                    self.assertEqual(3, tag)
+                    self.assertEqual('exited', json.loads(payload)['state'])
+                    self.assertEqual(0, process.wait(timeout=5))
+                finally:
+                    self.finish(root, process)
+
+    def test_missing_input_expires_before_program_birth(self):
+        with tempfile.TemporaryDirectory(prefix='command-input-expired-') as directory:
+            root = Path(directory)
+            request = self.request(root, 'from pathlib import Path;import sys;Path(sys.argv[1],"born").touch()', timeout=150)
+            request['input_bytes'] = 100
+            process = self.stream(request)
+            try:
+                tag, payload = self.frame(process)
+                self.assertEqual(3, tag)
+                self.assertEqual('unknown', json.loads(payload)['state'])
+                self.assertEqual(125, process.wait(timeout=5))
+                self.assertFalse((root/'born').exists())
+            finally:
+                self.finish(root, process)

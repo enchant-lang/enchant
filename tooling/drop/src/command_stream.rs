@@ -2,8 +2,8 @@
 //! Erlang ports use packet=4. Output requires credits; terminal metadata does
 //! not. EOF abandons observation and drains accepted work under its OS budget.
 use std::fs::File;
-use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::io::{Read, Write, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
 use std::path::Path;
@@ -18,6 +18,53 @@ fn packet(tag: u8, bytes: &[u8]) -> std::io::Result<()> {
     out.write_all(&[tag])?;
     out.write_all(bytes)?;
     out.flush()
+}
+
+// The optional input frame arrives before manager startup. Only its length
+// appears in argv. Bytes stay in an anonymous sealed file handed to stdin by
+// systemd-run --pipe; no credential, Env or filesystem path carries the body.
+pub(super) fn input(size: usize, deadline: u64) -> Result<File,String> {
+    fn read_exact(bytes: &mut [u8], deadline: u64) -> Result<(),String> {
+        let mut read=0;
+        while read<bytes.len() {
+            let remaining=deadline.saturating_sub(monotonic_ms()?);
+            if remaining==0 { return Err("command input deadline expired".into()); }
+            let mut poll=libc::pollfd{fd:0,events:libc::POLLIN,revents:0};
+            let ready=unsafe {libc::poll(&mut poll,1,remaining.min(100) as i32)};
+            if ready<0 {
+                if std::io::Error::last_os_error().kind()==std::io::ErrorKind::Interrupted {continue;}
+                return Err("command input poll failed".into());
+            }
+            if ready==0 {continue;}
+            let n=unsafe {libc::read(0,bytes[read..].as_mut_ptr().cast(),bytes.len()-read)};
+            if n==0 {return Err("command input ended before admission".into());}
+            if n<0 {
+                if matches!(std::io::Error::last_os_error().kind(),std::io::ErrorKind::Interrupted|std::io::ErrorKind::WouldBlock) {continue;}
+                return Err("command input unavailable".into());
+            }
+            read+=n as usize;
+        }
+        Ok(())
+    }
+    if size>1048576 {return Err("command input exceeds capacity".into());}
+    let mut header=[0u8;5];read_exact(&mut header,deadline)?;
+    if header[4]!=4 || u32::from_be_bytes(header[..4].try_into().unwrap()) as usize!=size+1 {
+        return Err("invalid command input frame".into());
+    }
+    let raw=unsafe {libc::memfd_create(c"bl-input".as_ptr(),libc::MFD_CLOEXEC|libc::MFD_ALLOW_SEALING)};
+    if raw<0 {return Err("private command input unavailable".into());}
+    let mut file=unsafe {File::from_raw_fd(raw)};
+    let mut left=size;let mut buffer=[0u8;8192];
+    while left>0 {
+        let count=left.min(buffer.len());read_exact(&mut buffer[..count],deadline)?;
+        file.write_all(&buffer[..count]).map_err(|_| "private command input write failed")?;
+        left-=count;
+    }
+    if unsafe {libc::fcntl(raw,libc::F_ADD_SEALS,libc::F_SEAL_SEAL|libc::F_SEAL_SHRINK|libc::F_SEAL_GROW|libc::F_SEAL_WRITE)}<0 {
+        return Err("private command input sealing failed".into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| "private command input rewind failed")?;
+    Ok(file)
 }
 
 pub(super) fn unknown(error: &str) {

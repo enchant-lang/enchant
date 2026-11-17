@@ -11,6 +11,10 @@ pub fn dispatch(arguments: &[String]) -> Option<i32> {
             println!("BEAM_LISP_CUSTODY_COMMAND_V1");
             Some(0)
         }
+        Some("--custody-input-protocol") => {
+            println!("BEAM_LISP_CUSTODY_INPUT_V1");
+            Some(0)
+        }
         Some("--custody-stream-protocol") => {
             println!("BEAM_LISP_CUSTODY_STREAM_V1");
             Some(0)
@@ -118,6 +122,9 @@ mod linux {
         strings(value.get("argv").ok_or("missing argv")?)?;
         let reads = strings(value.get("read_locks").ok_or("missing read locks")?)?;
         if reads.len() > 15 || reads.iter().any(|p| !Path::new(p).is_absolute()) { return Err("invalid read loans".into()); }
+        if let Some(size)=value.get("input_bytes") {
+            if !size.as_u64().is_some_and(|size| size<=1048576) {return Err("invalid command input capacity".into());}
+        }
         limit(&value, "timeout_ms", 86_400_000)?;
         limit(&value, "memory_bytes", 8 * 1024 * 1024 * 1024)?;
         limit(&value, "output_bytes", 16 * 1024 * 1024)?;
@@ -141,6 +148,10 @@ mod linux {
         let timeout = limit(&value, "timeout_ms", 86_400_000)?;
         let deadline=monotonic_ms()?.checked_add(timeout).ok_or("command deadline overflow")?;
         value["deadline_ms"]=serde_json::json!(deadline);
+        let input=if let Some(size)=value.get("input_bytes") {
+            if !streaming {return Err("private input requires command stream".into());}
+            Stdio::from(super::stream::input(size.as_u64().ok_or("invalid input length")? as usize,deadline)?)
+        } else {Stdio::null()};
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
         let unit = format!("bl-custody-{}-{nonce}.service", std::process::id());
         let mut wire = if streaming { Some(super::stream::Wire::new(&unit,deadline)?) } else { None };
@@ -193,7 +204,7 @@ mod linux {
         let sink_stdout: OwnedFd = sink.try_clone().map_err(|e| e.to_string())?.into();
         let sink_stderr: OwnedFd = sink.into();
         let mut process = command.arg(executable).args(["--custody-child", &unit])
-            .stdin(Stdio::null()).stdout(Stdio::from(sink_stdout))
+            .stdin(input).stdout(Stdio::from(sink_stdout))
             .stderr(Stdio::from(sink_stderr)).spawn().map_err(|e| format!("cannot start OS command domain: {e}"))?;
         drop(command);
         let maximum = limit(&value, "output_bytes", 16 * 1024 * 1024)?;
@@ -304,7 +315,8 @@ mod linux {
         socket.send(b"READY=1").map_err(|e| e.to_string())?;
         super::stream::note(&value, unit, "accepted", serde_json::json!({}))?;
         let mut command = Command::new(text(&value, "program")?);
-        command.args(strings(&value["argv"])?).current_dir(text(&value, "cwd")?).env_clear().stdin(Stdio::null());
+        command.args(strings(&value["argv"])?).current_dir(text(&value, "cwd")?).env_clear();
+        command.stdin(if value.get("input_bytes").is_some() {Stdio::inherit()} else {Stdio::null()});
         for (key, item) in environment.as_object().ok_or("missing environment")? {
             // Notification and inherited-FD control belong to the manager.
             if !["NOTIFY_SOCKET", "FDSTORE", "LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"].contains(&key.as_str()) {

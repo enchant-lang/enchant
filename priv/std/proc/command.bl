@@ -87,16 +87,18 @@
   (let [argv (:exec spec) workspace (:workspace spec) cwd (:cwd spec)
         limits (:limits spec {}) timeout (:timeout-ms limits 60000)
         explicit (:deadline-ms limits) parent (:deadline-ms (Process/get :bl_admission))
+        input (:input spec)
         env (:env spec (System/get_env))
         memory (:memory-bytes limits 1073741824) output (:output-bytes limits 16777216)]
    (when-not (and (map? spec) (map? options) (map? limits)
-                  (every? #{:exec :workspace :cwd :limits :env} (keys spec))
+                  (every? #{:exec :workspace :cwd :limits :env :input} (keys spec))
                   (every? #{:on-output :on-state :cancel?} (keys options))
                   (every? #{:timeout-ms :deadline-ms :memory-bytes :output-bytes} (keys limits))
                   (vector? argv) (<= 1 (count argv) 256) (every? string? argv)
                   (absolute? (first argv)) (absolute? workspace) (absolute? cwd)
                   (bounded? timeout 86400000) (bounded? memory 8589934592) (bounded? output 16777216)
                   (or (nil? explicit) (erlang/is_integer explicit))
+                  (or (nil? input) (and (string? input) (<= (erlang/byte_size input) 1048576)))
                   (map? env) (every? string? (keys env)) (every? string? (vals env)))
     (refuse :invalid-command-declaration))
    (let [now (System/monotonic_time :millisecond)
@@ -109,16 +111,21 @@
            bytes (File/read! executor)]
       (when (= :nomatch (binary/match bytes "BEAM_LISP_CUSTODY_STREAM_V1"))
        (refuse :command-stream-unavailable))
+      (when (and input (= :nomatch (binary/match bytes "BEAM_LISP_CUSTODY_INPUT_V1")))
+       (refuse :command-input-unavailable))
       (let [env (environment env)
-            request {:version 1 :follower (Tuple/to_list (claim/follower-context workspace))
+            request (cond-> {:version 1 :follower (Tuple/to_list (claim/follower-context workspace))
                      :read_locks [] :program (first argv) :argv (vec (rest argv)) :cwd cwd
                      :limits {:timeout_ms (remaining! deadline) :memory_bytes memory :output_bytes output}}
+                      input (assoc :input_bytes (erlang/byte_size input)))
             port (erlang/open_port
                    (tuple :spawn_executable (String/to_charlist executor))
                    (list :binary :exit_status :use_stdio (tuple :packet 4) (tuple :env env)
                          (tuple :args (list (String/to_charlist "--custody-stream")
                                             (String/to_charlist (json/encode request))))))]
-       (try (admission/with-request nil #(consume! port options))
+       (try
+        (when input (send! port (erlang/iolist_to_binary (list (erlang/list_to_binary (list 4)) input))))
+        (admission/with-request nil #(consume! port options))
         (finally
          (try (erlang/port_close port) (catch _ nil))
          (loop []
