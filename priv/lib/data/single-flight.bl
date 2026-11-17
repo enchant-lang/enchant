@@ -1,0 +1,37 @@
+;; Serialize one logical computation without moving its execution authority.
+(ns data.single-flight (:require [data.provenance :as provenance] [data.bounded-cache :as cache]))
+
+(defn with-key
+  "Run f in its actual caller under one VM-local key. Waiters recheck their
+   cache after admission. A dead holder releases native admission; no result
+   message can release it early. Waiting is bounded and never starts duplicate
+   work. Keys must have finite data identities; recursive acquisition refuses."
+  ([key f] (with-key key 30000 f))
+  ([key wait-ms f]
+   (when-not (and (int? wait-ms) (<= 0 wait-ms 60000))
+     (throw (ex-info "Invalid shared work wait" {:kind :invalid-shared-work-wait})))
+   (let [normalized (cache/key-data [(BeamLisp.Env/env_id) key] 0)
+         charge (when normalized (cache/footprint normalized))]
+     (when-not (and charge (<= charge 1048576))
+       (throw (ex-info "Shared work requires a finite key" {:kind :invalid-shared-work-key})))
+     (let [id (tuple :data.shared-work (crypto/hash :sha256 (erlang/term_to_binary normalized)))
+           held (Process/get :data.single-flight/held #{})
+           lock (tuple id (erlang/self)) nodes (list (erlang/node))
+           until (+ wait-ms (erlang/monotonic_time :millisecond))]
+       (when (contains? held id)
+         (throw (ex-info "Recursive shared work cannot await itself" {:kind :recursive-shared-work})))
+       (loop []
+         (if (global/set_lock lock nodes 0)
+           (try
+             (Process/put :data.single-flight/held (conj held id))
+             (f)
+             (finally (Process/put :data.single-flight/held held) (global/del_lock lock nodes)))
+           (if (>= (erlang/monotonic_time :millisecond) until)
+             (throw (ex-info "Shared work admission is busy" {:kind :shared-work-busy}))
+             (do (Process/sleep 1) (recur)))))))))
+
+(defn value [name key revision f]
+  (if (nil? revision) (f)
+    (do (cache/ready! name)
+      (with-key [name key revision]
+        (fn [] (cache/value name key revision f))))))

@@ -1,0 +1,86 @@
+(ns data.shared-efficiency-test
+ (:require [data.single-flight :as flight] [data.bounded-cache :as cache]
+           [data.derivation :as derivation] [data.projection :as projection]
+           [codebase :as cb] [bl.check :as check] [datom :as d]
+           [datom.watch :as watch] [datom.profile :as profile]
+           [datom.query.rank-demand :as demand]))
+(defn- settled [h]
+ (let [until (+ 10000 (erlang/monotonic_time :millisecond))]
+  (loop [] (let [r (projection/read h)]
+   (if (or (contains? #{:ready :blocked} (:status r)) (> (erlang/monotonic_time :millisecond) until)) r
+    (do (Process/sleep 1) (recur)))))))
+(deftest callers-share-one-computation-without-transferring-their-context
+ (let [parent (erlang/self) builds (atom 0) key (erlang/unique_integer (list :positive))
+       compute (fn [] (swap! builds inc) (erlang/send parent [:entered (erlang/self)])
+                    (receive :release {:answer 42} (after 5000 (throw "Unreleased flight"))))]
+  (cache/ready! :efficiency.flights)
+  (doseq [_ (range 16)]
+   (spawn (fn [] (erlang/send parent :started)
+     (erlang/send parent [:answer (flight/value :efficiency.flights key :v compute)]))))
+  (let [holder (receive [:entered pid] pid (after 5000 nil))]
+   (is (some? holder))
+   (doseq [_ (range 16)] (receive :started true (after 5000 (throw "Missing caller"))))
+   (erlang/send holder :release)
+   (doseq [_ (range 16)] (is (= {:answer 42} (receive [:answer a] a (after 5000 nil)))))
+   (is (= 1 @builds)))))
+(deftest bounded-wait-refuses-and-owner-death-releases-native-admission
+ (let [parent (erlang/self) key [:holder (erlang/unique_integer (list :positive))]
+       pid (spawn (fn [] (flight/with-key key (fn [] (erlang/send parent :held) (receive :never nil)))))
+       monitor (Process/monitor pid)]
+  (try
+   (is (= :held (receive :held :held (after 5000 nil))))
+   (is (= :shared-work-busy (try (flight/with-key key 0 (fn [] (throw "Duplicate work")))
+                               (catch e (:kind (ex-data e))))))
+   (erlang/exit pid :kill)
+   (receive [:DOWN ref :process dead _] :when (and (= ref monitor) (= dead pid)) true (after 5000 (throw "Holder alive")))
+   (is (= :released (flight/with-key key 2000 (fn [] :released))))
+   (finally (when (Process/alive? pid) (erlang/exit pid :kill)) (Process/demonitor monitor (list :flush))))))
+(deftest recursive-sharing-refuses-instead-of-deadlocking
+ (is (= :recursive-shared-work
+        (try (flight/with-key :recursive (fn [] (flight/with-key :recursive (fn [] :bad))))
+             (catch e (:kind (ex-data e)))))))
+(deftest codebase-loop-planning-visits-each-acyclic-edge-once
+ (doseq [n [16 256 2048]]
+  (let [edges (mapv (fn [i] [i (inc i) 1]) (range n)) p (cb/loop-plan (range (inc n)) edges)]
+   (is (= n (get-in p [:work :edge-visits])))
+   (is (= n (get-in p [:depths n])))
+   (is (= #{} (:unknown p)))))
+ (let [p (cb/loop-plan [0 1 2 3] [[0 1 1] [1 2 1] [2 1 1] [2 3 1]])]
+  (is (= #{1 2 3} (:unknown p)))
+  (is (= 1 (get-in p [:work :edge-visits])))))
+(deftest compact-check-reports-reuse-compiler-work-and-invalidate-on-publication
+ (let [src "(defn shared-check-facts [x] (+ x 391))"]
+  (check/analyze-source "shared.bl" src)
+  (check/analyze-source "shared.bl" src)
+  (let [before (:core-builds (check/work-stats))]
+   (doseq [_ (range 10)] (is (not (:unreadable (check/analyze-source "shared.bl" src)))))
+   (is (= before (:core-builds (check/work-stats))))
+   (BeamLisp.Env/put_key (tuple "check.new-provider" "value") 1)
+   (check/analyze-source "shared.bl" src)
+   (is (= (inc before) (:core-builds (check/work-stats)))))))
+(deftest owned-derivations-share-results-and-oversize-is-sticky
+ (let [c (d/connect []) calls (atom 0)
+       h (derivation/start! :efficiency/derive (d/db c) :v (fn [_] (swap! calls inc) {:answer 42}))]
+  (try
+   (doseq [_ (range 100)] (projection/read h))
+   (is (= 0 @calls))
+   (projection/subscribe! h)
+   (is (= :ready (:status (settled h))))
+   (doseq [_ (range 100)] (is (= {:answer 42} (:value (projection/read h)))))
+   (is (= 1 @calls))
+   (finally (projection/stop! h) (d/close! c))))
+ (let [c (d/connect []) calls (atom 0)
+       h (derivation/start! :efficiency/oversize (d/db c) :v
+             (fn [_] (swap! calls inc) (apply str (repeat 128 "x"))) {:max-output-bytes 64})]
+  (try
+   (projection/subscribe! h)
+   (is (= :blocked (:status (settled h))))
+   (doseq [_ (range 100)] (projection/read h))
+   (is (= 1 @calls))
+   (finally (projection/stop! h) (d/close! c)))))
+(deftest measured-rank-demand-needs-physical-work-not-only-elapsed-time
+ (let [sample {:elapsed-us 100000000 :rows 1 :basis 1 :work-steps 0}
+       absent (reduce (fn [s n] (demand/decision s n sample)) nil (range 100))
+       real (reduce (fn [s n] (demand/decision s n (assoc sample :work-steps 10))) nil (range 100))]
+  (is (not (:build? absent))) (is (= 0 (:paid-steps absent)))
+  (is (:build? real)) (is (pos? (:paid-steps real)))))

@@ -31,7 +31,7 @@
             [reader-node :as rn]
             [typed]
             [errors]
-            [data.bounded-cache :as cache] [data.provenance :as provenance]))
+            [data.bounded-cache :as cache] [data.provenance :as provenance] [data.single-flight :as flight]))
 
 ; ── the position index ───────────────────────────────────────────────────
 
@@ -92,14 +92,15 @@
    (memo-value name key (memo-context) compute))
   ([name key before compute]
    (cache/ready! name)
-   (let [hit (when before (cache/lookup name key before))]
-    (if (and (:hit? hit) (= before (memo-context)))
-      (:value hit)
-      (let [value (compute)]
-        (if (and before (= before (memo-context)))
-          (when-not (cache/put! name key before value) (swap! declined-retention inc))
-          (swap! changed-during-build inc))
-        value)))))
+   (let [run (fn []
+     (let [hit (when before (cache/lookup name key before))]
+       (if (and (:hit? hit) (= before (memo-context))) (:value hit)
+         (let [value (compute)]
+           (if (and before (= before (memo-context)))
+             (when-not (cache/put! name key before value) (swap! declined-retention inc))
+             (swap! changed-during-build inc))
+           value))))]
+     (if before (flight/with-key [name key before] run) (run)))))
 
 (defn analyzed
   "One parsed and lowered program, shared by every diagnostic and projection.
@@ -684,7 +685,7 @@
    checker, the inter-procedural checker, and (extensible) any other engine.
    Returns a list of {:msg :line :col :end-col ...} ready to render as squiggles.
    Env-scoped so ward forks isolate (BUG-041)."
-  [src ns a]
+  [src ns a ambient?]
   (let [k (tuple (env/id) ns (sha256-hex src))]
     ; Ambient engine warnings (recorded between checks, e.g. a positionless
     ; diagnostic) are SESSION state, not source state: merged after the memo,
@@ -706,17 +707,18 @@
               ; can refuse it.
               arity (ar/diagnostics-forms (or (BeamLisp.Loader/declared_ns src) "user") (:forms a))]
           (into [] (concat interproc local linear arity)))))
-      (typed/ambient-warnings))))
+      (if ambient? (typed/ambient-warnings) []))))
 
 (defn check-document
   "One parsed/lowered document shared by diagnostics and function facts. The
    returned bundle remains local even when concurrent/lazy publication safely
    declines cache retention. No consumer needs a second lowering pass."
-  [src ns]
+  ([src ns] (check-document src ns {:ambient? true}))
+  ([src ns options]
   (ready-engines! :diagnostics ["system.typecheck" "system.ir.identity" "system.emission"
                                 "system.source" "datalog-shape" "system.arity" "diag" "errors"])
   (let [a (analyzed src)]
-    {:analysis a :diagnostics (diagnostics-from-bundle src ns a)}))
+    {:analysis a :diagnostics (diagnostics-from-bundle src ns a (:ambient? options true))})))
 
 (defn diagnostics [src ns] (:diagnostics (check-document src ns)))
 

@@ -39,15 +39,18 @@
   first sample. Unknown/malformed cost declines; writes debit expected benefit."
  [previous now sample]
  (let [live? (and previous (< now (:expires-at previous)))
-       previous (if live? previous {:requests 0 :paid-us 0 :rows 0 :writes 0
+       previous (if live? previous {:requests 0 :paid-us 0 :paid-steps 0 :rows 0 :writes 0
                                    :expires-at (+ now WINDOW-MS)})
        valid? (and (map? sample) (erlang/is_integer (:elapsed-us sample))
                    (<= 0 (:elapsed-us sample) 1000000000)
+                   (or (not (contains? sample :work-steps))
+                       (and (erlang/is_integer (:work-steps sample)) (<= 0 (:work-steps sample) 1000000)))
                    (erlang/is_integer (:rows sample)) (<= 0 (:rows sample) 65536)
                    (erlang/is_integer (:basis sample)) (<= 0 (:basis sample)))
        writes (if (and valid? (:basis previous)) (max 0 (- (:basis sample) (:basis previous))) 0)
        next (if valid?
               (-> previous (update :requests (fn [n] (min 1000000 (inc n))))
+                  (update :paid-steps (fn [n] (+ (or n 0) (if (>= (:requests previous) 2) (get sample :work-steps 0) 0))))
                   (update :paid-us (fn [n] (min 1000000000000 (+ n (if (>= (:requests previous) 2) (max 0 (- (:elapsed-us sample) (policy-cost (:page-us sample) PAGE-US))) 0)))))
                   (update :rows max (:rows sample)) (update :writes + writes)
                   (assoc :basis (:basis sample))) previous)
@@ -56,7 +59,9 @@
        forecast (+ (* (:rows next) build-rate) (* (:writes next) (policy-cost (:write-us sample) WRITE-US)))]
   (assoc next :forecast-us forecast
               :build? (and valid? (>= (:requests next) MIN-REQUESTS)
-                           (> (:rows next) 0) (>= (:paid-us next) (* 2 forecast))))))
+                           (> (:rows next) 0) (>= (:paid-us next) (* 2 forecast))
+                           (or (not (contains? sample :work-steps))
+                               (>= (:paid-steps next) (* 2 (:rows next))))))))
 (defn watch!
  "Register a bounded fallback query identity; no store handles retained."
  [store-key query inputs definition]

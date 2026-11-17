@@ -61,12 +61,11 @@
 
 (defn- managed-plan! [query]
   (let [planned (plan! query) parsed (parse/parse query)]
-    ;; Physical page credits cannot account for an engine cartesian product.
-    ;; Keep managed plans to one stored pattern until intermediate-binding
-    ;; admission is implemented in the engine. The ordinary reader is unchanged.
-    (when-not (and (= 1 (count (:where parsed)))
-                   (parse/pattern-clause? (first (:where parsed))))
-      (throw (ex-info "Managed queries require one bounded stored pattern"
+    ;; Only positive stored patterns enter the metered join kernel. Rules,
+    ;; expressions and compound clauses remain outside this bounded fragment.
+    (when-not (and (<= 1 (count (:where parsed)) 8)
+                   (every? parse/pattern-clause? (:where parsed)))
+      (throw (ex-info "Managed queries require at most eight stored patterns"
                       {:kind :unbounded-projection-plan})))
     planned))
 
@@ -110,7 +109,8 @@
           (throw (ex-info "Projection source changed before execution" {:kind :superseded-projection})))
         (budget/spend! token 1 0)
         (let [view (assoc database :store (work-store/wrap! (:store database) token))
-              value (data/check! (d/q query view)
-                       {:max-nodes 32768 :max-bytes max-output-bytes :max-depth 64})]
+              value (budget/with-budget token
+                      (fn [] (data/check! (d/q query view)
+                       {:max-nodes 32768 :max-bytes max-output-bytes :max-depth 64})))]
           {:value value :basis (:basis-t database) :revision revision
            :work (select-keys (budget/snapshot token) [:steps :bytes])})))))

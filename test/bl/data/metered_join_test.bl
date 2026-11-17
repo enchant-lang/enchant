@@ -1,0 +1,31 @@
+(ns data.metered-join-test
+ (:require [datom :as d] [datom.store-ets :as ets] [datom.query.read-only :as closed]
+           [proc.work-budget :as budget] [datom.query.engine :as engine]))
+(def Q '[:find ?e ?f :where [?e :meter/value ?x] [?f :meter/value ?y]])
+(defn- connection [n]
+ (let [c (d/connect-with (ets/open) [{:db/ident :meter/value :db/valueType :db.type/long}])]
+  (d/transact! c (mapv (fn [i] {:db/id (- -1 i) :meter/value i}) (range n))) c))
+(deftest cartesian-joins-refuse-before-over-budget-bindings-are-allocated
+ (let [c (connection 32) t (budget/open! 700 1048576 10000)]
+  (try
+   (let [r (closed/revision! Q c)]
+    (is (= :work-steps (try (closed/read-budgeted! Q c (:revision r) t 1048576) nil
+                       (catch e (:kind (ex-data e))))))
+    (is (= 700 (:steps (budget/snapshot t))))
+    (is (<= (:bytes (budget/snapshot t)) 1048576)))
+   (finally (d/close! c)))))
+(deftest admitted-small-joins-match-the-ordinary-engine
+ (let [c (connection 4) t (budget/open! 2000 1048576 10000)]
+  (try
+   (let [r (closed/revision! Q c) answer (closed/read-budgeted! Q c (:revision r) t 1048576)]
+    (is (= 16 (count (:value answer))))
+    (is (= (set (d/q Q (d/db c))) (set (:value answer))))
+    (is (pos? (get-in answer [:work :steps]))))
+   (finally (d/close! c)))))
+(deftest every-unification-route-reserves-before-extending-a-binding
+ (let [t (budget/open! 1 4096 10000)]
+  (budget/with-budget t (fn []
+   (is (some? (engine/unify-pattern {} '[?e :a ?v] [1 :a 2 3 true])))
+   (is (= :work-steps (try (engine/unify-pattern {} '[?e :a ?v] [2 :a 3 4 true]) nil
+                           (catch e (:kind (ex-data e))))))))
+  (is (= 1 (:steps (budget/snapshot t))))))

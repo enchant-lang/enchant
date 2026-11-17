@@ -37,7 +37,7 @@ to create one; that first run is a measurement, not a verdict.
 
 ```beam-lisp
 (ns bl.check
-  (:require [bl.util :as u] [bl.lint :as lint] [bl.fix :as fix] [deodorant] [lsp]))
+  (:require [bl.util :as u] [bl.lint :as lint] [bl.fix :as fix] [deodorant] [lsp] [typed] [data.single-flight :as flight] [data.provenance :as provenance]))
 ```
 
 ## Which sources a check reads
@@ -117,6 +117,9 @@ keeps the cost one analysis per file instead of one per function.
    :diagnostics 0 :smells 0 :fns 0 :pure 0 :terminates 0 :eligible 0
    :pure-fns [] :terminates-fns [] :eligible-fns [] :fn-info []})
 
+(def ^:private core-builds (atom 0))
+(defn work-stats [] {:core-builds @core-builds})
+
 (defn analyze-source
   "The metrics for one source text: diagnostics, smells, and the per-function
    facts. `:unreadable true` when the compiler cannot parse the text; the
@@ -130,23 +133,28 @@ keeps the cost one analysis per file instead of one per function.
                     (BeamLisp.Loader/ensure_loaded namespace))))
             rules (vec (deodorant/all-rules))
             ns (u/ns-of src)
-            document (lsp/check-document src ns)
-            bundle (:analysis document)
-            smells (:smells (lint/lint-forms rules path src (:forms bundle)))
-            fns (into [] (map fn-facts (lsp/function-summaries* bundle)))
-            with (fn [k] (into [] (map (fn [f] (:name f)) (filter (fn [f] (get f k)) fns))))]
-        {:path path :sha digest :unreadable false
-         :diagnostics (count (:diagnostics document))
-         :diagnostic-info (:diagnostics document)
-         :smells (count smells) :smell-info smells
-         :fns (count fns)
-         :pure (count (filter (fn [f] (:pure f)) fns))
-         :terminates (count (filter (fn [f] (:terminates f)) fns))
-         :eligible (count (filter (fn [f] (:eligible f)) fns))
-         :pure-fns (with :pure)
-         :terminates-fns (with :terminates)
-         :eligible-fns (with :eligible)
-         :fn-info fns})
+            forms (atom nil)
+            core (flight/value :bl.check.metrics digest (provenance/definition-revision)
+              (fn []
+                (swap! core-builds inc)
+                (let [document (lsp/check-document src ns {:ambient? false})
+                      bundle (:analysis document)
+                      _ (reset! forms (:forms bundle))
+                      fns (mapv fn-facts (lsp/function-summaries* bundle))
+                      with (fn [k] (mapv :name (filterv #(get % k) fns)))]
+                  {:unreadable false :diagnostics (count (:diagnostics document))
+                   :diagnostic-info (vec (:diagnostics document)) :fns (count fns)
+                   :pure (count (filterv :pure fns)) :terminates (count (filterv :terminates fns))
+                   :eligible (count (filterv :eligible fns))
+                   :pure-fns (with :pure) :terminates-fns (with :terminates)
+                   :eligible-fns (with :eligible) :fn-info fns})))
+            ;; House rules may hold mutable guards. They ALWAYS execute; only
+            ;; the compiler's compact facts are retained, never rule verdicts.
+            smells (:smells (lint/lint-forms rules path src
+                              (or @forms (BeamLisp.Reader/read_string src))))]
+        (let [diagnostics (into (:diagnostic-info core) (typed/ambient-warnings))]
+          (assoc core :path path :sha digest :smells (count smells) :smell-info (vec smells)
+                 :diagnostic-info diagnostics :diagnostics (count diagnostics))))
       (catch error
         (assoc (unreadable-metrics path digest)
                :analysis-error {:stage :analysis :message (pr-str error)})))))

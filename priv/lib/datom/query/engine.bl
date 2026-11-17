@@ -38,7 +38,7 @@
 (ns datom.query.engine
   (:require [datom.db] [datom.index] [datom.store] [datom.query.agg] [datom.query.parse]
             [datom.query.plan] [datom.schema] [datom.query.analytic]
-            [data.bounded-cache :as cache-data]
+            [data.bounded-cache :as cache-data] [proc.work-budget :as budget]
             [datom.cache-validity :as validity] [datom.query.relation :as relation]
             [datom.query.rules] [datom.query.read-plan :as read-plan]
             [datom.query.rank-demand :as rank-demand]
@@ -100,6 +100,10 @@
    value are equal, without any special handling for the repeated
    variable."
   [bindings clause datom]
+  ;; Reserve a conservative binding/data charge BEFORE extending the map.
+  ;; Every hash/cartesian/unification fallback shares this same admission.
+  (when (budget/current)
+    (budget/spend-current! 1 (+ 128 (erlang/external_size bindings) (erlang/external_size datom))))
   (let [terms (datom.query.plan/pattern-terms clause)
         values [(datom.index/-e datom) (datom.index/-a datom) (datom.index/-v datom)
                 (datom.index/-tx datom)]]
@@ -819,7 +823,8 @@
                           (fn [b] (BeamLisp.Ns.Rt/semantic-key
                                     (mapv (fn [v] (get b v)) join-vars))))
             buckets (reduce (fn [acc d]
-                              (let [k (datom-key d)]
+                              (let [_ (when (budget/current) (budget/spend-current! 1 (+ 64 (erlang/external_size d))))
+                                    k (datom-key d)]
                                 (assoc acc k (conj (or (get acc k) []) d))))
                             {}
                             candidates)]
@@ -832,6 +837,9 @@
       ; hashing preserves ordinary unification rather than inventing equality
       ; for them or forcing a lazy input solely to optimize the join.
       (catch _key-error
+        ;; Managed work must never swallow exhaustion and restart as a
+        ;; cartesian fallback. Unknown semantic keys refuse in this fragment.
+        (when (budget/current) (throw _key-error))
         (flat-into (fn [b]
                      (filterv some? (mapv (fn [d] (unify-pattern b clause d)) candidates)))
                    bindings))))]
@@ -1277,6 +1285,7 @@
           (rank-demand/record-scan!
             (cache-data/key-data (datom.store/identity-of (datom.db/store-of db)) 0)
             query inputs {:elapsed-us (- (erlang/monotonic_time :microsecond) started)
+                          :work-steps (:work executed)
                           :rows (cond (nil? result) 0
                                       (or (sequential? result) (set? result) (map? result)) (count result)
                                       :else 1) :basis (datom.db/basis-t db)}))

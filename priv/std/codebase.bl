@@ -31,7 +31,8 @@
   (:require [typed] [datom] [compiler] [datom.query.relation] [datalog-shape :as shape]
            [datom.store-fjall] [datom.conn] [source-graph :as sg]
            [vm.paths :as paths] [env] [system.source :as source] [codebase.phase :as phase]
-           [codebase.refactor :as refactor]))
+           [codebase.refactor :as refactor] [data.single-flight :as flight]
+           [data.bounded-cache :as cache] [data.provenance :as provenance]))
 
 (defn contextual-facts
  "Project a completed syntax-v1 expansion without reading or expanding again.
@@ -463,8 +464,8 @@
         (if (some? defd)
           (let [r (defn-facts sigs ns-str form fid cid iid options)]
             (recur (rest fs) (:next-fn r) (:next-call r) (:next-instr r)
-                   (concat fn-acc (:fn r)) (concat call-acc (:calls r))
-                   (concat instr-acc (:instr r))))
+                   (reduce conj fn-acc (:fn r)) (reduce conj call-acc (:calls r))
+                   (reduce conj instr-acc (:instr r))))
           ; non-defn top level: record calls under "<top>"; an (ns …) form
           ; can still carry a colocated ^{:instr …} on its name.
           (let [[cf cid2] (walk-calls "<top>" ns-str form [] cid)
@@ -477,16 +478,29 @@
                                     (annotated-instr (second (node-items f))))
                         nil)]
             (recur (rest fs) fid cid2 (if (nil? ifact) iid (+ iid 1))
-                   fn-acc (concat call-acc cf)
-                   (if (nil? ifact) instr-acc (concat instr-acc [ifact])))))))))))
+                   fn-acc (reduce conj call-acc cf)
+                   (if (nil? ifact) instr-acc (conj instr-acc ifact)))))))))))
 
-(defn- graph-reachable [graph roots]
-  (loop [seen #{} todo (into [] roots)]
-    (if (empty? todo) seen
-      (let [n (first todo)]
-        (if (contains? seen n)
-          (recur seen (rest todo))
-          (recur (conj seen n) (concat (rest todo) (get graph n #{}))))))))
+(defn loop-plan
+  "Linear weighted call-graph plan. Kahn's remainder is exactly cycles and
+   their descendants. Every acyclic edge is visited once; recursive contexts
+   receive no finite depth claim. Parallel call edges retain their weights."
+  [names edges]
+  (let [nodes (reduce (fn [ns [from to _]] (conj (conj ns from) to)) (set names) edges)
+        incoming (reduce (fn [m [_ to _]] (update m to (fn [n] (inc (or n 0))))) {} edges)
+        outgoing (reduce (fn [m [from to w]] (update m from (fn [xs] (conj (or xs []) [to w])))) {} edges)
+        ready (reduce (fn [q n] (if (zero? (get incoming n 0)) (queue/in n q) q)) (queue/new) nodes)]
+    (loop [q ready pending incoming seen #{} depths {} visits 0]
+      (if (queue/is_empty q)
+        {:depths depths :unknown (set (remove seen nodes))
+         :work {:vertices (count nodes) :edges (count edges) :edge-visits visits}}
+        (let [[entry rest] (queue/out q) from (elem entry 1)
+              after (reduce (fn [[q counts ds n] [to weight]]
+                       (let [left (dec (get counts to))]
+                         [(if (zero? left) (queue/in to q) q) (assoc counts to left)
+                          (assoc ds to (max (get ds to 0) (+ (get depths from 0) weight))) (inc n)]))
+                     [rest pending depths visits] (get outgoing from []))]
+          (recur (get after 0) (get after 1) (conj seen from) (get after 2) (get after 3)))))))
 
 (defn loop-context
   "Add potential local call-path loop depths to indexed facts.
@@ -505,18 +519,8 @@
                       (let [to (local (:call/callee c))]
                         (when to [(:call/caller c) to (get c :call/loop-depth 0)])))
                     (:calls facts))
-        graph (reduce (fn [g [from to _]] (update g from (fn [xs] (conj (or xs #{}) to))))
-                      {} edges)
-        recursive (set (filter (fn [n]
-                                 (contains? (graph-reachable graph (get graph n #{})) n))
-                               names))
-        unknown (graph-reachable graph recursive)
-        depths (loop [n (count names) ds {}]
-                 (if (= n 0) ds
-                   (let [next (reduce (fn [d [from to w]]
-                                        (assoc d to (max (get d to 0) (+ (get ds from 0) w))))
-                                      ds edges)]
-                     (if (= next ds) ds (recur (dec n) next)))))]
+        plan (loop-plan names (vec edges))
+        unknown (:unknown plan) depths (:depths plan)]
     (assoc facts :calls
       (mapv (fn [c]
               (let [caller (:call/caller c)]
@@ -527,7 +531,7 @@
                            (+ (get depths caller 0) (get c :call/loop-depth 0))))))
             (:calls facts)))))
 
-(defn index-source
+(defn- index-source-uncached
   "Source text → {:fn […] :calls […] :instr […] :requires […]}.
 
    The text must BE text. A caller that read a file and passed the read's
@@ -535,7 +539,7 @@
    file — got a `function_clause` from deep inside the reader, which named
    neither the namespace nor the path. Fail here instead, where both are
    still known."
-  ([sigs ns-str src] (index-source sigs ns-str src {}))
+  ([sigs ns-str src] (index-source-uncached sigs ns-str src {}))
   ([sigs ns-str src options]
   (when-not (string? src)
     (throw (ex-info "codebase/index-source: source is not a string"
@@ -551,6 +555,21 @@
                      :requires requires)]
     (if (= :calls (:mode options))
       (assoc facts :index-mode :calls :coverage {:returns :not-requested}) facts))))
+
+(defn index-source
+  "Share immutable facts by exact source, seed vocabulary, namespace and mode.
+   Connections remain caller-owned. Unknown/opaque seeds use ordinary indexing;
+   changed code cannot return a retained answer under old evidence."
+  ([sigs ns-str src] (index-source sigs ns-str src {}))
+  ([sigs ns-str src options]
+   (let [revision (provenance/definition-revision)
+         seeds (cache/fingerprint sigs)
+         key [FACTS-VERSION ns-str (when (string? src) (sha256-hex src)) seeds options]
+         run (fn [] (index-source-uncached sigs ns-str src options))]
+     (if (and revision seeds (string? src))
+       (let [answer (flight/value :codebase.facts key revision run)]
+         (if (= revision (provenance/definition-revision)) answer (run)))
+       (run)))))
 
 (defn connect-codebase
   "A fresh datom conn with the codebase schema, plus `extra` definitions.

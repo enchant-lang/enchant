@@ -73,7 +73,9 @@
 (ns datom.watch
   (:require [datom.conn] [datom.db] [datom.index] [datom.store]
             [datom.query.engine] [datom.query.parse]
-            [datom.query.relation] [datom.query.rules] [proc.callback :as owned-callback]))
+            [datom.query.relation] [datom.query.rules] [proc.callback :as owned-callback]
+            [data.single-flight :as flight] [data.provenance :as provenance]
+            [data.bounded-cache :as cache]))
 
 ;; ── recognising the interest shape ──────────────────────────────────
 
@@ -332,7 +334,7 @@
       {:query (assoc p :in (conj (or (:in p) ['$]) root))
        :attrs (set (mapv (fn [c] (get c 1)) clauses))})))
 
-(defn delta-diff
+(defn- delta-diff-uncached
   "Automatically restrict an entity-local relation query to touched entities.
    The ordinary query engine evaluates both sides. Unknown shapes, temporal
    views or a commit stream overtaken by a newer snapshot use the full diff."
@@ -359,6 +361,28 @@
                         :removed (into (:removed acc) (:removed d))}))
                    {:added #{} :removed #{}} entities)]
         (when (or (seq (:added diff)) (seq (:removed diff))) diff)))))
+
+(defn delta-diff
+  "Share an eligible stored query's exact before/after diff. Callback delivery
+   remains per watch and per accepted commit. Unknown providers, wrappers or
+   code evidence use authoritative execution without sharing."
+  [query inputs db-before db-after tx-basis tx-datoms]
+  (let [plan (entity-plan query)
+        revision (when (and plan
+                        (= (datom.store/identity-of (datom.db/store-of db-before))
+                           (datom.store/capability-target (datom.db/store-of db-before)))
+                        (= (datom.store/identity-of (datom.db/store-of db-after))
+                           (datom.store/capability-target (datom.db/store-of db-after))))
+                   (provenance/definition-revision))
+        providers (when plan (datom.query.relation/stored-attributes-stamp (:attrs plan)))
+        key [(datom.db/view-key db-before) (datom.db/view-key db-after) query inputs tx-basis tx-datoms]
+        finite? (when revision (when-let [normalized (cache/key-data key 0)] (cache/footprint normalized)))
+        run (fn [] (delta-diff-uncached query inputs db-before db-after tx-basis tx-datoms))]
+    (if (and revision providers finite? (<= finite? 1048576))
+      (let [answer (flight/value :datom.watch.diffs key [revision providers] run)]
+        (if (and (= revision (provenance/definition-revision))
+                 (= providers (datom.query.relation/stored-attributes-stamp (:attrs plan)))) answer (run)))
+      (run))))
 
 ;; ── owned watch execution and acknowledged drain ──────────────────────
 

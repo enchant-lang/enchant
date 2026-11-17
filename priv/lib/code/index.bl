@@ -47,7 +47,7 @@
             [typed]
             [bl.env :as env]
             [bl.util :as u]
-            [vm.index]))
+            [vm.index] [data.single-flight :as flight] [data.provenance :as provenance]))
 
 (def MANIFEST-VERSION
   "Bumped when the SHAPE of a memo changes — not when a source does. A memo
@@ -235,8 +235,10 @@
 (defn- write-facts! [path facts]
   (try
     (File/mkdir_p (Path/dirname path))
-    (File/write! path (erlang/term_to_binary facts))
-    true
+    (let [temporary (str path ".tmp-" (erlang/unique_integer (list :positive)))]
+      (try (File/write! temporary (erlang/term_to_binary facts) (list :exclusive))
+           (File/rename! temporary path) true
+           (finally (File/rm temporary))))
     (catch e false)))
 
 (defn- norm-facts
@@ -274,9 +276,13 @@
         requires (codebase/requires-facts ns-str src)]
     (if (some? hit)
       {:facts (assoc (norm-facts hit) :requires requires) :from :cache :sha sha}
-      (let [facts (norm-facts (codebase/index-source sigs ns-str src))]
-        (write-facts! p facts)
-        {:facts facts :from :analyzed :sha sha}))))
+      (flight/with-key [:code.index/facts p (provenance/definition-revision)]
+        (fn []
+          (if-let [shared (read-facts p)]
+            {:facts (assoc (norm-facts shared) :requires requires) :from :cache :sha sha}
+            (let [facts (norm-facts (codebase/index-source sigs ns-str src))]
+              (write-facts! p facts)
+              {:facts facts :from :analyzed :sha sha})))))))
 
 ; ── the conn ─────────────────────────────────────────────────────────────
 

@@ -4,7 +4,7 @@
   (:require [proc.server] [proc.work :as work] [proc.instance :as instance] [proc.framework :as framework]
             [proc.work-budget :as budget] [data.projection-policy :as policy]
             [data.first-order :as data] [data.cache-pool :as pool] [data.delta-aggregate :as aggregate]
-            [data.bounded-cache :as cache] [datom]
+            [data.bounded-cache :as cache] [data.provenance :as provenance] [datom]
             [datom.query.read-only :as closed]))
 
 (def DEFAULTS
@@ -44,6 +44,25 @@
     (catch error
       (erlang/send parent [tag :candidate ticket
         {:status (or (:kind (ex-data error)) :failed)}]))))
+
+(defn- produce-derived [parent tag ticket declaration options context]
+  ;; This separate API delegates an owner-approved callback through proc.work;
+  ;; it makes no claim that arbitrary callbacks belong to the closed query API.
+  (Process/flag :max_heap_size {:size (:max-heap-words options) :kill true :error_logger false})
+  (try
+    ((:checkpoint context))
+    (let [token (budget/open! (:max-steps options) (:max-read-bytes options) (:timeout-ms options))
+          before (provenance/definition-revision)
+          value (budget/with-budget token (fn [] ((:compute declaration) (:database declaration))))
+          _ (when-not (and before (= before (provenance/definition-revision)))
+              (throw (ex-info "Derived code changed" {:kind :superseded-derivation})))
+          _ (data/check! value {:max-nodes 32768 :max-bytes (:max-output-bytes options) :max-depth 64})
+          bytes (erlang/term_to_binary value)]
+      (when (> (erlang/byte_size bytes) (:max-output-bytes options))
+        (throw (ex-info "Derived output exceeds retention" {:kind :oversized})))
+      (erlang/send parent [tag :candidate ticket {:status :ready :bytes bytes
+                              :charge (cache/footprint bytes) :work (select-keys (budget/snapshot token) [:steps :bytes])}]))
+    (catch error (erlang/send parent [tag :candidate ticket {:status (or (:kind (ex-data error)) :failed)}]))))
 
 (declare effects!)
 (declare schedule-expiry!)
@@ -90,7 +109,10 @@
           (let [parent (erlang/self) tag (:completion s) ticket (:ticket effect)
                 query (:query s) source (:source s) revision (:revision effect) options (:options s)
                 job (work/submit! (:workers s) {:title "Managed stored-data projection"}
-                      (fn [context] (produce parent tag ticket query source revision options context)))]
+                      (fn [context]
+                        (if-let [declaration (:derivation s)]
+                          (produce-derived parent tag ticket declaration options context)
+                          (produce parent tag ticket query source revision options context))))]
             (if (:id job)
               (assoc s :job (:id job) :candidate nil :terminal nil
                        :timer (erlang/send_after (:timeout-ms options) parent [tag :timeout ticket]))
@@ -98,12 +120,15 @@
         s)) state effects))
 
 (defn- refresh-source! [state]
+  (if (:derivation state)
+    (transition! state {:op :source :basis (get-in state [:derivation :basis])
+      :revision [(get-in state [:derivation :identity]) (provenance/definition-revision)]})
   (if-let [a (:aggregate state)]
     (transition! state {:op :source :basis (:version a)
                        :revision [(get-in a [:options :source-id]) (:version a)]})
   (let [evidence (closed/revision! (:query state) (:source state))]
     (transition! (assoc state :dirty? false)
-      {:op :source :basis (:basis evidence) :revision (:revision evidence)}))))
+      {:op :source :basis (:basis evidence) :revision (:revision evidence)})))))
 
 (defn- expire-state! [state]
   (if-let [a (:aggregate state)]
@@ -157,14 +182,14 @@
     (let [workers (work/start! {:max-active 1 :history 1 :completion-tag tag})
           evidence (:evidence opts)
           state {:source (:source opts) :query (:query opts) :options options
-                 :framework (framework/adopt! (:creator opts)) :aggregate (:aggregate opts)
+                 :framework (framework/adopt! (:creator opts)) :aggregate (:aggregate opts) :derivation (:derivation opts)
                  :read-token (:read-token opts) :control-token (:control-token opts)
                  :creator (erlang/monitor :process (:creator opts))
                  :reservation reservation :completion tag :workers workers
                  :subscribers {} :notified #{} :retained nil :candidate nil :job nil :timer nil :terminal nil
                  :expiry-timer nil :expiry-ticket nil
                  :policy (policy/initial (+ 256 (* 2 (:max-output-bytes options)))) :dirty? false}]
-      (if (:aggregate state) (refresh-source! state)
+      (if (or (:aggregate state) (:derivation state)) (refresh-source! state)
         (do (datom/listen! (:source state) {:attrs (set (:attributes evidence)) :payload :basis})
             (transition! state {:op :source :basis (:basis evidence) :revision (:revision evidence)}))))))
 
@@ -289,6 +314,26 @@
          pid (core/start projection-owner
                {:aggregate a :options options :creator (erlang/self)
                 :read-token read-token :control-token control-token}
+               {:name (instance/name name)})]
+     {:owner pid :read read-token :control control-token})))
+
+(defn start-derived!
+  "Owned derivation of an immutable DB value. The application owner delegates
+   compute through proc.work's callback custody; reader handles cannot execute
+   it. Failure/oversize stay blocked until explicit retry. This callback API
+   does not certify purity: the controller owns its declaration and effects."
+  ([name database key compute] (start-derived! name database key compute {}))
+  ([name database key compute options]
+   (when-not (and (keyword? name) (fn? compute) (BeamLisp.Ns.Rt/invocable? compute 1))
+     (throw (ex-info "Invalid owned derivation" {:kind :invalid-derivation})))
+   (let [options (options! options) revision (datom/db-revision database)
+         identity (cache/fingerprint [revision key])
+         _ (when-not (and identity (first revision) (int? (:basis-t database)))
+             (throw (ex-info "Derivation requires a versioned DB identity" {:kind :invalid-derivation-source})))
+         read-token (erlang/make_ref) control-token (erlang/make_ref)
+         pid (core/start projection-owner
+               {:derivation {:database database :identity identity :basis (:basis-t database) :compute compute}
+                :options options :creator (erlang/self) :read-token read-token :control-token control-token}
                {:name (instance/name name)})]
      {:owner pid :read read-token :control control-token})))
 
