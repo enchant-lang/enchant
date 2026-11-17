@@ -108,3 +108,19 @@ sequence from the document tree. It reflects structural moves and lets packages
 render ordered sequences and source-owned counters without inspecting DOM order
 or storing a second document. The existing `node` two-argument call remains
 valid; its renderer context has no sibling sequence unless supplied.
+
+Package block renderers receive `:siblings` in their context in both the initial
+view and incremental node shells. A renderer whose shell depends on sibling
+content/order declares `:render-context #{:siblings}` in its block specification.
+The host then expands sibling patches, including both scopes of a structural
+move, and compares rendered shells before reusing unchanged block data. Ordinary
+renderers retain their narrow patch set.
+
+A package can provide `:editor/sibling-context`, a pure function receiving
+`{:siblings [...]}` and earlier derived context, returning a map of extra context
+fields. Use namespaced keys. It runs once per sibling scope for each projection,
+so packages can derive numbering or other sequence data in linear time instead
+of rescanning the sequence for every block. Renderers also receive the normal
+`:text` and `:slots` values. Keep source parsing, application grants and IO out
+of these callbacks. `live.edit.projection/project` and `targets` expose the same
+pure projection/invalidation contract for native tests and host integration.
