@@ -24,7 +24,7 @@ pub fn dispatch(arguments: &[String]) -> Option<i32> {
                 if arguments.first().is_some_and(|arg| arg == "--custody-stream") {
                     #[cfg(target_os = "linux")]
                     stream::unknown(&error);
-                } else {
+                } else if !arguments.first().is_some_and(|arg| arg == "--custody-result") {
                     eprintln!("bl: custody command refused: {error}");
                 }
                 125
@@ -98,7 +98,7 @@ mod linux {
             (Some("--custody-command"), 2) => launch(&arguments[1], false),
             (Some("--custody-stream"), 2) => launch(&arguments[1], true),
             (Some("--custody-child"), 2) => child(&arguments[1]),
-            (Some("--custody-result"), 2) => super::stream::stop_post(&arguments[1]),
+            (Some("--custody-result"), 3) => super::stream::stop_post(&arguments[1], &arguments[2]),
             _ => Err("invalid command protocol arguments".into()),
         }
     }
@@ -143,7 +143,8 @@ mod linux {
             .arg(format!("--property=LoadCredential=bl-command:/proc/{}/fd/{raw}", std::process::id()))
             .arg(format!("--property=RuntimeMaxSec={}ms", timeout));
         if streaming {
-            command.arg(format!("--property=ExecStopPost={}", super::stream::stop_command(&executable, &unit)?));
+            command.arg(format!("--property=ExecStopPost={}", super::stream::stop_command(&executable, &unit,
+                &format!("/proc/{}/fd/{raw}",std::process::id()))?));
         }
         // Preserve a caller's capped test slice for the whole managed tree.
         // Session scopes live outside the user manager; those use app.slice.

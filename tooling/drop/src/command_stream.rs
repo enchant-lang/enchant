@@ -25,11 +25,11 @@ pub(super) fn unknown(error: &str) {
     let _ = packet(3, json!({"state":"unknown","category":"command-domain-unconfirmed","detail":detail}).to_string().as_bytes());
 }
 
-pub(super) fn stop_command(executable: &Path, unit: &str) -> Result<String, String> {
+pub(super) fn stop_command(executable: &Path, unit: &str, credential: &str) -> Result<String, String> {
     let path = executable.to_str().ok_or("command executor address is not UTF-8")?;
     if path.chars().any(char::is_control) { return Err("command executor address has control characters".into()); }
     let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$"));
-    Ok([quote(path), quote("--custody-result"), quote(unit)].join(" "))
+    Ok([quote(path), quote("--custody-result"), quote(unit), quote(credential)].join(" "))
 }
 
 pub(super) fn note(request: &Value, unit: &str, event: &str, data: Value) -> Result<(), String> {
@@ -44,15 +44,23 @@ pub(super) fn note(request: &Value, unit: &str, event: &str, data: Value) -> Res
     Ok(())
 }
 
-pub(super) fn stop_post(unit: &str) -> Result<i32, String> {
+pub(super) fn stop_post(unit: &str, credential: &str) -> Result<i32, String> {
     let reply = control("systemctl")?.args(["--user","show","--value","--property=ControlPID",unit])
         .output().map_err(|e| e.to_string())?;
     if !reply.status.success() || String::from_utf8_lossy(&reply.stdout).trim() != std::process::id().to_string() {
         return Err("completion helper is not the OS domain's control process".into());
     }
-    let directory = std::env::var_os("CREDENTIALS_DIRECTORY").ok_or("completion credential unavailable")?;
-    let request: Value = serde_json::from_slice(&std::fs::read(Path::new(&directory).join("bl-command"))
-        .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // systemd may already have removed the start credential directory during
+    // ExecStopPost. The live launcher still holds the exact sealed memfd.
+    let mut file=File::open(credential).map_err(|e| e.to_string())?;
+    let required=libc::F_SEAL_SEAL|libc::F_SEAL_SHRINK|libc::F_SEAL_GROW|libc::F_SEAL_WRITE;
+    if unsafe {libc::fcntl(file.as_raw_fd(),libc::F_GET_SEALS)} & required != required {
+        return Err("completion credential is not sealed".into());
+    }
+    let mut bytes=Vec::new();
+    (&mut file).take(1048577).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len()>1048576 {return Err("completion credential exceeds capacity".into());}
+    let request: Value=serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     note(&request,unit,"domain-stopped",json!({
         "result":std::env::var("SERVICE_RESULT").ok(),
         "exitCode":std::env::var("EXIT_CODE").ok(),
