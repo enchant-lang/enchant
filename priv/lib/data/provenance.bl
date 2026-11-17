@@ -1,12 +1,21 @@
 ;; Compact invalidation evidence shared by tooling and stored-data readers.
-(ns data.provenance (:require [data.bounded-cache :as cache]))
+(ns data.provenance)
+
+(defn- digest [native-counters]
+  ;; Both callers below receive only SDK-owned counter tuples. Hash that
+  ;; native data directly: no recursive public key normalization, footprint
+  ;; walk, duplicated namespace tree, or retained native scope reference.
+  (when native-counters
+    (crypto/hash :sha256 (erlang/term_to_binary native-counters (list :deterministic)))))
 
 (defn definition-revision
-  "Digest of live definition/code publication counters in the current lookup
-   chain. Cost follows scope depth, independent of definition count and of the
-   number of query namespaces. Dead/busy scopes decline. No definitions,
-   callables or native environment references are retained in the receipt."
-  []
-  (when-let [context (BeamLisp.Env/definition_context)]
-    (when-let [normalized (cache/key-data context 0)]
-      (crypto/hash :sha256 (erlang/term_to_binary normalized (list :deterministic))))))
+  "32-byte receipt over live definition/code publication counters. Work
+   follows scope depth, independent of definition/namespace count. Dead/busy
+   scopes decline; no definitions, callables or scope references are retained."
+  [] (digest (BeamLisp.Env/definition_context)))
+
+(defn namespace-revision
+  "32-byte receipt over a fixed SDK consumer's namespace dependency counters.
+   Work follows named dependencies and scope depth, never definition count.
+   Unrelated lazy loading preserves reuse. Unknown/busy/dead scopes decline."
+  [namespaces] (digest (BeamLisp.Env/namespace_generations (to-list namespaces))))

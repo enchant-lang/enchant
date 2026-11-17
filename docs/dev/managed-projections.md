@@ -76,11 +76,12 @@ commits, including incremental updates and expiry. Each subscriber has at most
 one outstanding wake until its next authorized read. HTTP first paint reads
 without subscribing, so repeated requests cannot initiate background work.
 
-`data.provenance/definition-revision` supplies Datom and LSP with one compact
-32-byte receipt over native definition-context counters. Validation cost follows
-environment depth, independent of published definition or namespace count.
-Any definition or code publication conservatively invalidates it. Busy and dead
-scopes decline; private analysis forks preserve the parent's receipt.
+`data.provenance` hashes SDK-owned counter tuples directly into 32-byte receipts,
+avoiding recursive identity normalization and retained environment references.
+LSP uses `definition-revision`: cost follows environment depth, independent of
+definition or namespace count. Datom uses `namespace-revision` over its fixed
+query dependencies, preserving answers during unrelated lazy loading. Busy and
+dead scopes decline; private analysis forks preserve the parent's receipt.
 
 ## Other shared opportunities
 
