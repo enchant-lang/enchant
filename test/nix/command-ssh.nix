@@ -18,7 +18,7 @@ in pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("sshd.service")
     machine.succeed("install -dm700 /root/.ssh")
-    machine.succeed("ssh-keygen -q -t ed25519 -N '' -f /root/command-key")
+    machine.succeed("ssh-keygen -q -t ed25519 -N \"\" -f /root/command-key")
     machine.succeed("sed 's|^|restrict,command=\"${responder}\" |' /root/command-key.pub > /root/.ssh/authorized_keys")
     machine.succeed("ssh-keyscan -t ed25519 127.0.0.1 > /root/known-hosts")
     machine.succeed("touch /root/empty-known-hosts")
