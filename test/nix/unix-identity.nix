@@ -29,6 +29,7 @@ in pkgs.testers.runNixOSTest {
     import json
     machine.start()
     machine.wait_for_file("/run/peercheck/ready")
+    assert machine.succeed("stat -c %u:%g:%a /run/peercheck/socket").strip() == "0:2000:660"
     with subtest("filesystem permission denies an unenrolled Unix group"):
         assert machine.succeed("${client "outsider" "filesystem-denied"}", timeout=60).strip() == "filesystem-denied"
     with subtest("payload cannot impersonate root and each kernel UID maps separately"):
@@ -39,6 +40,9 @@ in pkgs.testers.runNixOSTest {
     with subtest("socket access alone does not grant an account"):
         eve = json.loads(machine.succeed("${client "eve" "request"}", timeout=60))
         assert eve == {"ok": False}
-    machine.wait_until_succeeds("systemctl is-active --quiet peercheck.service && exit 1 || test \"$(systemctl show -p Result --value peercheck.service)\" = success", timeout=30)
+    machine.wait_until_succeeds("test \"$(systemctl show -p ActiveState --value peercheck.service)\" = inactive", timeout=30)
+    machine.succeed("test \"$(systemctl show -p MainPID --value peercheck.service)\" = 0")
+    machine.succeed("test \"$(systemctl show -p Result --value peercheck.service)\" = success")
+    machine.fail("test -e /run/peercheck/socket")
   '';
 }
