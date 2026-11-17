@@ -11,7 +11,10 @@ and retention limits. It neither decodes result payloads nor acknowledges a
 subscriber wake. `live.observatory/attach` mounts an explicitly enabled,
 host-authorized development view at `/__enchant`; its JSON endpoint and public
 `snapshot` function share the same bounded observation model. It creates no
-subscription, timer or computation. See `examples/tooling/work-observatory.bl`.
+subscription, timer or computation. The compact in-app dock is enabled with
+`live.app/serve` option `:devtools {:enabled? true :authorize developer?}`.
+It includes scoped real tool activity and selectable explanations. See
+[the inspector contract](inspector.md) and `examples/tooling/work-observatory.bl`.
 
 `start!` accepts a closed query containing up to eight positive stored Datom patterns on an
 actual native SDK connection. Source evidence includes attribute changes,
