@@ -75,3 +75,7 @@ Cold-start assertions are authoritative in canonical SDK qualification. Private
 source preflight compiles candidates first and can warm providers that an SDK
 loads lazily. Keep the canonical first-to-second-call gate ahead of the rest of
 the tests; do not substitute a warmed source overlay for this release check.
+
+CI also declares `test/bl/data/tool_cold_start_test.bl` in
+`scripts/test-isolation.json`, so sharding cannot warm its providers in another
+test first. Both full and call-only indexing must retain their first answer.
