@@ -53,7 +53,7 @@
   (finally (gen_tcp/close socket))))
 
 (defserver connection-worker
- (init [o] (erlang/send (erlang/self) :accept) (ok o))
+ (init [o] (Process/flag :trap_exit true) (erlang/send (erlang/self) :accept) (ok o))
  (handle-info :accept [o]
   (let [accepted (gen_tcp/accept (:listener o) 1000)]
    (cond
@@ -92,22 +92,33 @@
   (gen_tcp/close (:listener o))
   ;; Stop admission before draining. A child spec with infinite shutdown waits
   ;; for its current synchronous callback before OTP terminates that worker.
-  (when-let [supervisor (:supervisor o)] (Supervisor/stop supervisor :normal :infinity))
+  (when-let [supervisor (:supervisor o)]
+   (when (Process/alive? supervisor)
+    (try (Supervisor/stop supervisor :normal :infinity)
+     (catch error (when (Process/alive? supervisor) (throw error))))))
   (when (= (:stamp o) (stamp (:path o))) (File/rm (:path o)))
-  (finally (lease/release! (:lease o)))))
+  (finally
+   ;; The supervisor retains endpoint custody if disposal is still uncertain.
+   (when (or (nil? (:supervisor o)) (not (Process/alive? (:supervisor o))))
+    (lease/release! (:lease o))))))
 
 (defserver listener-owner
  (init [options]
+  (Process/flag :trap_exit true)
   (let [o (acquire! options)]
    (try
     (let [children (mapv (fn [index]
                           (BeamLisp.Supervisor/server index connection-worker o
                            {:restart :transient :shutdown :infinity})) (range (:concurrency o)))
           supervisor (BeamLisp.Supervisor/supervise :one-for-one children)]
+     ;; Parent/owner death cannot free the endpoint while children drain.
+     (lease/transfer! (:lease o) supervisor)
      (ok (assoc o :supervisor supervisor)))
     (catch error (close! o) (throw error)))))
  (handle-call :status [_ o]
   (reply {:status :listening :path (:path o) :concurrency (:concurrency o)} o))
+ (handle-info [:EXIT pid reason] [o]
+  (if (= pid (:supervisor o)) (stop reason o) (noreply o)))
  (terminate [_ o] (close! o)))
 
 (defn serve!
