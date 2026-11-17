@@ -15,7 +15,9 @@ A pair passes when the texts are equal, or when their canonical forms are equal;
 the rewrites whose firing counts differ between the sides are the explanation.
 
 usage: explain.py pairs OLD NEW    records "\\x1e LABEL \\n TEXT" (speed/backend3/equality.bl)
-       explain.py forms OLD NEW    top-level forms, compared in order (chunks inspect, emitted rt)
+       explain.py forms OLD NEW [--gensyms]   top-level forms, compared in order (chunks inspect,
+                                   emitted rt); --gensyms alpha-renames compiler gensyms first
+       explain.py count FILE      occurrences of each shape in one emitted file
 """
 import collections
 import re
@@ -238,13 +240,18 @@ def compare(label, old_text, new_text, tally, kinds, failures):
     compare_parsed(label, po, pn, tally, kinds, failures)
 
 
+RENAME = "--gensyms" in sys.argv
+
+
 def compare_parsed(label, po, pn, tally, kinds, failures):
-    if po == pn:
+    if po == pn or (RENAME and [rename_gensyms(x) for x in po] == [rename_gensyms(x) for x in pn]):
         tally["identical"] += 1
         return
     co, cn = collections.Counter(), collections.Counter()
     a = [canon(x, frozenset(), co) for x in po]
     b = [canon(x, frozenset(), cn) for x in pn]
+    if RENAME:
+        a, b = [rename_gensyms(x) for x in a], [rename_gensyms(x) for x in b]
     if a == b:
         tally["different, explained"] += 1
         why = []
@@ -257,6 +264,24 @@ def compare_parsed(label, po, pn, tally, kinds, failures):
         tally["UNEXPLAINED"] += 1
         d = first_difference(L(*a), L(*b))
         failures.append((label, "canonical forms differ", show(d[0]) if d else "", show(d[1]) if d else ""))
+
+
+GENSYM = re.compile(r"^v(?:_\d+)*?_95(?:_(?:4[89]|5[0-7]))+(?:_\d+)*$")
+
+
+def rename_gensyms(form):
+    """Alpha-rename ident-encoded compiler gensyms (`name_<n>`) by first
+    appearance, so two compiles of the same source with different gensym
+    counters compare equal. Distinct names stay distinct."""
+    names = {}
+
+    def walk(x):
+        if x[0] == "A" and GENSYM.match(x[1]):
+            return ("A", names.setdefault(x[1], f"gensym#{len(names)}"))
+        if x[0] == "L":
+            return ("L", [walk(y) for y in x[1]])
+        return x
+    return walk(form)
 
 
 def records(path):
@@ -294,6 +319,7 @@ def main():
     else:
         a = parse(open(old, encoding="utf-8").read())
         b = parse(open(new, encoding="utf-8").read())
+
         assert len(a) == len(b), f"form counts differ: {len(a)} {len(b)}"
         for i, (x, y) in enumerate(zip(a, b)):
             compare_parsed(f"form {i}: {show(x, 120)}", [x], [y], tally, kinds, failures)
