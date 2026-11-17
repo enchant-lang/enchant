@@ -504,35 +504,63 @@
  '(("check_source_callable!" 1) ("check_source_invocation!" 2)
    ("check_source_invocation1!" 2) ("check_source_invocation2!" 3)
    ("assert_native_framework_execution!" 0)))
-(native-add-leaf! "Elixir.BeamLisp.Server/return_constructor_shapes/0"
- (lambda () (bl-get native-bundle-metadata (bl-key "return-constructor-shapes"))))
+;; Service: host.tiers globs priv/boot/*.bl on BEAM; the native image has no
+;; tier tree. This is the pinned SDK's answer (sorted wildcard, data-readers
+;; removed). It decides which callees get no readiness guard, so it must equal
+;; BEAM's for native and BEAM emission to agree (speed/services/RESULT.md).
 (native-add-leaf! "Elixir.BeamLisp.Tiers/boot_namespaces/0"
- (lambda () '("anf" "compiler" "core" "diag" "lower" "optimize" "reader" "reader-node" "rt" "sugar")))
-(define (native-known-module ns)
- (let ((captured (bl-get native-namespace-modules ns native-missing)))
-  (if (not (eq? captured native-missing)) captured
-   ; Same unqualified platform spelling as Emit/base_module_for and the JS
-   ; moduleFor adapter: one CamelCased alias segment per dot-separated part.
-   ; Existing realm identities ALWAYS use the captured table above.
-   (bl-key
-    (string-append "Elixir.BeamLisp.Ns."
-     (list->string
-      (let loop ((chars (string->list ns)) (upper? #t) (out '()))
-       (if (null? chars) (reverse out)
-        (let ((ch (car chars)))
-         (cond ((char=? ch #\_) (loop (cdr chars) #t out))
-               ((char=? ch #\.) (loop (cdr chars) #t (cons ch out)))
-               (else (loop (cdr chars) #f (cons (if upper? (char-upcase ch) ch) out)))))))))))))
-(native-add-leaf! "Elixir.BeamLisp.Link/module_for/1" native-known-module)
-(native-add-leaf! "Elixir.BeamLisp.Emit/module_for/1" native-known-module)
-(native-add-leaf! "Elixir.BeamLisp.Emit/base_module_for/1" native-known-module)
-(native-add-leaf! "Elixir.BeamLisp.Link/settle/0" (lambda () (bl-key "ok")))
+ (lambda () '("anf" "binding" "compiler" "core" "diag" "expand" "expand-source" "lower" "lower-core"
+              "optimize" "reader" "reader-node" "rt" "server-clause" "sugar" "syntax")))
+;; Elixir stdlib counterparts (category b) the compiled host.server/host.emit/
+;; host.link naming paths call. Macro.camelize/1 is byte-wise ASCII; every
+;; non-ASCII UTF-8 byte passes through unchanged, so codepoints are equivalent.
+(define (native-macro-camelize text)
+ (if (not (string? text)) (native-badarg "Macro.camelize/1 expects a binary"))
+ (let ((upper (lambda (c) (if (and (char>=? c #\a) (char<=? c #\z)) (char-upcase c) c))))
+  (letrec
+   ((start (lambda (cs)
+     (cond ((null? cs) '())
+           ((char=? (car cs) #\_) (start (cdr cs)))
+           (else (cons (upper (car cs)) (rest (cdr cs)))))))
+    (rest (lambda (cs)
+     (cond ((null? cs) '())
+           ((and (char=? (car cs) #\_) (pair? (cdr cs)) (char=? (cadr cs) #\_)) (rest (cdr cs)))
+           ((and (char=? (car cs) #\_) (pair? (cdr cs)) (char>=? (cadr cs) #\a) (char<=? (cadr cs) #\z))
+            (cons (upper (cadr cs)) (rest (cddr cs))))
+           ((and (char=? (car cs) #\_) (pair? (cdr cs)) (char>=? (cadr cs) #\0) (char<=? (cadr cs) #\9))
+            (cons (cadr cs) (rest (cddr cs))))
+           ((and (char=? (car cs) #\_) (null? (cdr cs))) '())
+           ((char=? (car cs) #\/) (cons #\. (start (cdr cs))))
+           (else (cons (car cs) (rest (cdr cs))))))))
+   (list->string (start (string->list text))))))
+;; :elixir_aliases.concat/1: atoms by name, nil skipped, "Elixir." stripped
+;; from every later segment and a leading "." from binary segments.
+(define (native-module-concat segments)
+ (let* ((text (lambda (x)
+         (cond ((string? x) x) ((native-keyword? x) (native-atom-name x))
+               (else (native-badarg "Module.concat/1 expects atoms or binaries")))))
+        (partial (lambda (x)
+         (cond ((native-prefix? x "Elixir.") (substring x 7 (string-length x)))
+               ((native-prefix? x ".") (substring x 1 (string-length x)))
+               (else x))))
+        (segments (if (native-list? segments) segments (native-badarg "Module.concat/1 expects a list")))
+        (first (if (and (pair? segments) (native-keyword? (car segments)) (not (bl-is-nil (car segments))))
+                (native-atom-name (car segments)) (and (pair? segments) (car segments))))
+        (head? (and (string? first) (or (native-prefix? first "Elixir.") (string=? first "Elixir")))))
+  (let loop ((xs (if head? (cdr segments) segments)) (acc (if head? first "Elixir")))
+   (cond ((null? xs) (bl-key acc))
+         ((bl-is-nil (car xs)) (loop (cdr xs) acc))
+         (else (loop (cdr xs) (string-append acc "." (partial (text (car xs))))))))))
+(native-add-leaf! "Elixir.Macro/camelize/1" native-macro-camelize)
+(native-add-leaf! "Elixir.Module/concat/1" native-module-concat)
+(native-add-leaf! "Elixir.Module/concat/2" (lambda (a b) (native-module-concat (list a b))))
+;; The native image owns no named ETS table: every whereis answers undefined.
+(native-add-leaf! "ets/whereis/1" (lambda (name) (bl-key "undefined")))
 (native-add-leaf! "erlang/function_exported/3" native-remote-available?)
 
-;; The canonical compiler's host facade delegates read_data directly to the
-;; SAME compiler namespace; parsing and datum conversion stay in compiled BL.
-(native-add-leaf! "Elixir.BeamLisp.Compiler/read_data/1"
- (lambda (source) (bl-invoke (native-global "compiler" "read_data") (list source))))
+;; erlang:error/3: the arguments and options only annotate BEAM stack frames.
+(native-add-leaf! "erlang/error/3"
+ (lambda (reason arguments options) (native-raise (bl-key "error") reason (native-capture-stack))))
 
 ;; Native symbol accounting. The BEAM table watermark has no native table to
 ;; query; bound new source names explicitly instead. Existing names cost zero.
@@ -587,18 +615,6 @@
 (native-add-leaf! "Elixir.BeamLisp.Record/fields_of/1" (lambda (module)
  (let ((info (bl-get native-record-descriptors module)))
   (if (bl-is-nil info) (error "not a beam-lisp record/deftype" module) (bl-nth info 3)))))
-(native-add-leaf! "Elixir.BeamLisp.Server/callback/1" (lambda (name)
- (let ((row (assoc name '(("init" "init" 1 "vector") ("handle-call" "handle_call" 3 "pattern")
-                         ("handle-cast" "handle_cast" 2 "pattern") ("handle-info" "handle_info" 2 "pattern")
-                         ("handle-continue" "handle_continue" 2 "vector") ("terminate" "terminate" 2 "vector")))))
-  (if row (bl-tuple (list (bl-key (cadr row)) (caddr row) (bl-key (cadddr row)))) bl-nil))))
-(native-add-leaf! "Elixir.BeamLisp.Server/callback_order/0"
- (lambda () (map bl-key '("init" "handle_call" "handle_cast" "handle_info" "handle_continue" "terminate" "code_change"))))
-(native-add-leaf! "Elixir.BeamLisp.Server/module_for/2" (lambda (ns name)
- (let* ((base (native-atom-name (native-known-module (string-append ns "." name))))
-        (prefix "Elixir.BeamLisp.Ns."))
-  (bl-key (string-append "Elixir.BeamLisp.Server." (substring base (string-length prefix) (string-length base)))))))
-
 ;; These same execution/metadata seams are named BEAM-only refusals by the
 ;; production JS host. Never pretend their registration grants capability.
 (define native-beam-only-leaves
@@ -620,11 +636,40 @@
 (define native-beam-seed-only-leaves
  '("Elixir.BeamLisp.Supervisor/supervise/2" "Elixir.BeamLisp.Supervisor/supervise/3"
    "Elixir.BeamLisp.Supervisor/worker/2" "Elixir.BeamLisp.Supervisor/worker/3"
-   "Elixir.BeamLisp.Server/start/1" "Elixir.BeamLisp.Server/start/2" "Elixir.BeamLisp.Server/start/3"
-   "Elixir.BeamLisp.Server/start_link/1" "Elixir.BeamLisp.Server/start_link/2" "Elixir.BeamLisp.Server/start_link/3"
-   "Elixir.BeamLisp.Server/call/2" "Elixir.BeamLisp.Server/call/3" "Elixir.BeamLisp.Server/cast/2"
-   "Elixir.BeamLisp.Server/stop/1" "Elixir.BeamLisp.Server/stop/2" "erlang/link/1"
+   "erlang/link/1"
    "Elixir.BeamLisp.Refs/future_cancel/1"))
 (set! native-beam-only-leaves (append native-beam-only-leaves native-beam-seed-only-leaves))
 (set! native-excluded-host-leaves (append native-excluded-host-leaves native-beam-only-leaves))
 (for-each (lambda (key) (native-add-leaf! key (native-unavailable key))) native-beam-only-leaves)
+;; Remotes that the compiled host.server, host.emit, host.link and host.compiler definitions
+;; name but the native image cannot honour: Source custody, actor start, code
+;; loading, ETS, atomics and persistent_term. They are named refusals so the
+;; whole namespace links. None is reached by the naming paths those modules
+;; serve natively (Server/callback*, return_constructor_shapes, module_for;
+;; Emit/module_for, base_module_for, realm_*; Link/module_for). A key already
+;; provided by an earlier host file keeps that provider.
+(define native-service-refusals
+ '("Elixir.BeamLisp.Env/assert_execution_context!/0" "Elixir.BeamLisp.Env/begin_server_start!/1"
+   "Elixir.BeamLisp.Env/begin_unmanaged_start!/2" "Elixir.BeamLisp.Env/bind/1"
+   "Elixir.BeamLisp.Env/claim_server_start!/2" "Elixir.BeamLisp.Env/claim_unmanaged_start!/3"
+   "Elixir.BeamLisp.Env/complete_server_start!/1" "Elixir.BeamLisp.Env/ensure_sdk_owner_registry!/0"
+   "Elixir.BeamLisp.Env/executing_generation?/1" "Elixir.BeamLisp.Env/finish_server_start!/2"
+   "Elixir.BeamLisp.Env/finish_unmanaged_start!/2" "Elixir.BeamLisp.Env/launch_server_start!/1"
+   "Elixir.BeamLisp.Env/prepare_sdk_class!/1" "Elixir.BeamLisp.Env/retain_server_start_code!/1"
+   "Elixir.BeamLisp.Env/with_env/2" "Elixir.BeamLisp.Execution/install-actor!/2" "Elixir.BeamLisp.Supervisor/start_link/1"
+   "Elixir.BeamLisp.Env/mark_emitted/2" "Elixir.BeamLisp.Env/mark_emitted/5"
+   "Elixir.BeamLisp.Env/ns_definition_count/1" "Elixir.BeamLisp.Env/ns_defs/1"
+   "Elixir.BeamLisp.Env/publish_binaries!/2" "Elixir.BeamLisp.Env/put_ns_definition/3"
+   "Elixir.BeamLisp.Env/with_namespace_lock/2" "Elixir.BeamLisp.Env/with_publication/2"
+   "Elixir.CaseClauseError/exception/1" "Elixir.Process/whereis/1" "erlang/self/0"
+   "Elixir.Enum/member?/2" "Elixir.Enum/any?/2" "Elixir.Enum/find_value/2" "Elixir.Enum/group_by/3"
+   "Elixir.Enum/uniq_by/2" "Elixir.Function/capture/3" "Elixir.Integer/to_string/1" "Elixir.Keyword/get/2"
+   "Elixir.Tuple/insert_at/3" "Elixir.Access/get/2" "Elixir.Map/put/3" "Elixir.String.Chars/to_string/1"
+   "atomics/add_get/3" "atomics/new/2" "atomics/put/3" "code/load_binary/3"
+   "persistent_term/get/2" "persistent_term/put/2" "error_handler/raise_undef_exception/3"
+   "ets/match_delete/2" "ets/match_object/2"))
+(for-each (lambda (key)
+  (if (not (native-map-has? native-leaf-registry key))
+   (begin (set! native-excluded-host-leaves (cons key native-excluded-host-leaves))
+          (native-add-leaf! key (native-unavailable key)))))
+ native-service-refusals)

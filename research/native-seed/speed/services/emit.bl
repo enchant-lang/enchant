@@ -1,0 +1,159 @@
+; SERVICES focused emitter. Compile pinned host modules on the pinned SDK with
+; js.build (the closure's own staging path), then emit every definition with
+; native.scheme under an :aot-link context built exactly like
+; native.chunks/checked-context: intrinsics templates first, then direct leaf
+; cells, then arity/variadic/generic cells of the compiled additions (a
+; compiled target wins over a leaf, as at integration).
+; Globals use native.eval's resolver (the resolution ledger lives only in the
+; integrated closure).
+;
+; Usage: research/native-seed/run run research/native-seed/speed/services/emit.bl -- \
+;          OUT LEAVES.txt ns=path=Module ...
+; LEAVES.txt: one registered leaf key per line (the host the code will run on).
+; Writes OUT/<ns>.scm and OUT/remotes.txt (every remote signature, classified).
+(ns services.emit
+ (:require [native.bootstrap :as bootstrap] [native.eval :as ev] [native.scheme :as scheme]
+           [native.intrinsics :as intrinsics] [js.build :as build] [anf]
+           [clojure.string :as string]))
+(def args (BeamLisp/argv))
+(def out (nth args 0))
+(def leaves (set (remove empty? (string/split (File/read! (nth args 1)) #"\n"))))
+(def additions
+ (mapv (fn [spec] (let [[ns path module] (string/split spec #"=")] {:ns ns :path path :module (keyword module)}))
+       (filter #(String/contains? % "=") (drop 2 args))))
+(def oracle? (some #(= "oracle" %) args))
+(def units
+ (BeamLisp.Env/isolated
+  (fn []
+   (mapv (fn [a]
+    (let [prepared (build/prepare-ns (:path a))
+          compiled (build/compile-prepared prepared {:check-node identity})]
+     (assert (= (:ns a) (:ns prepared)))
+     (assoc compiled :module (:module a)))) additions))))
+(def by-module (into {} (map (fn [u] [(:module u) (:ns u)]) units)))
+(def definitions
+ (into {} (mapcat (fn [u] (keep (fn [d] (when (:name d) [[(:ns u) (:name d)] d])) (:defs u))) units)))
+(def definition-arities
+ (into {} (keep (fn [[slot d]] (when (= :fn (:kind d)) [slot (bootstrap/declaration-arities (:form d))])) definitions)))
+(defn remote-key [n]
+ (str (erlang/atom_to_binary (:mod n)) "/" (erlang/atom_to_binary (:fun n)) "/" (count (:args n))))
+(defn decision [n]
+ (let [f (erlang/atom_to_binary (:fun n)) a (count (:args n))
+       logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
+       key (remote-key n) ns (get by-module (:mod n))]
+  (cond
+   (intrinsics/remote-template n) ["template" key]
+   ; A compiled target wins over a leaf, as in native.bootstrap/remote-decision.
+   (and ns (contains? definitions [ns logical]))
+    (let [arities (get definition-arities [ns logical])]
+     (cond
+      (ends-with? f "__bl_v") (if (some? (:variadic arities)) ["variadic" key ns logical] ["dynamic" key])
+      (contains? (set (:fixed arities)) a) ["arity" key ns logical]
+      :else ["generic" key ns logical]))
+   (contains? leaves key) ["leaf" key]
+   :else ["missing" key])))
+(defn- direct-call [target]
+ {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- generic-call [target]
+ {:inline? true
+  :call (fn [operands]
+         (let [spread (string/join "" (map #(str " " %) operands))]
+          (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
+               ") (bl-invoke linked (list" spread "))))")))})
+(defn remote-link [n]
+ (if-let [template (intrinsics/remote-template n)]
+  {:inline? false :call template}
+  (let [[kind key ns logical] (decision n)]
+   (case kind
+    "leaf" (direct-call (bootstrap/leaf-binding-name key))
+    "arity" (direct-call (bootstrap/arity-binding-name ns logical (count (:args n))))
+    "variadic" (direct-call (bootstrap/variadic-binding-name ns logical))
+    "generic" (generic-call (bootstrap/binding-name ns logical))
+    nil))))
+(defn context [ns] (assoc (ev/context ns) :aot-link {:remote remote-link}))
+(defn link-definition [ns name kind arities]
+ (let [binding (bootstrap/binding-name ns name) global (bootstrap/global-binding-name ns name)
+       fixed (if (= :fn kind) (:fixed arities) [])
+       variadic? (and (= :fn kind) (some? (:variadic arities)))
+       cells (concat (map #(bootstrap/arity-binding-name ns name %) fixed)
+                     (when variadic? [(bootstrap/variadic-binding-name ns name)]) [global])]
+  (str (string/join "" (map #(str "(define " % " #f)\n") cells))
+       "(native-link! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " binding " value)"
+       (string/join "" (map #(str " (set! " (bootstrap/arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
+       (if variadic? (str " (set! " (bootstrap/variadic-binding-name ns name) " (native-variadic-entry value "
+                          (scheme/text (str ns "/" name)) "))") "")
+       ") (lambda (value) (set! " global " value)))\n")))
+(defn emit-definition [u d]
+ (let [ns (:ns u) value (scheme/emit (:node d) (context ns))]
+  (if (:name d)
+   (let [binding (bootstrap/binding-name ns (:name d))
+         arities (when (= :fn (:kind d)) (bootstrap/declaration-arities (:form d)))]
+    (str "(define " binding " " value ")\n"
+         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
+         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
+         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
+         (when arities
+          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+               (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))
+         (link-definition ns (:name d) (:kind d) arities)))
+   (str value "\n"))))
+(defn remotes [u]
+ (loop [todo (to-list (map :node (:defs u))) found #{}]
+  (if (erlang/== todo (list)) (sort-by str found)
+   (let [node (erlang/hd todo)]
+    (recur (erlang/++ (anf/executable-children node) (erlang/tl todo))
+           (if (= :remote (:op node)) (conj found (decision node)) found))))))
+(File/mkdir_p! out)
+(doseq [u units]
+ (let [fns (filter #(= :fn (:kind %)) (:defs u))
+       inits (remove #(= :fn (:kind %)) (:defs u))]
+  (File/write! (str out "/" (:ns u) ".scm")
+   (str (string/join "" (map #(emit-definition u %) fns)) (string/join "" (map #(emit-definition u %) inits))))
+  (println (str "SERVICES_EMIT " (:ns u) " " (count (:defs u)) " definitions"))))
+(File/write! (str out "/remotes.txt")
+ (string/join "" (for [u units r (remotes u)] (str (:ns u) " " (string/join " " r) "\n"))))
+
+; ---- BEAM oracle: the live pinned host modules over a fixed corpus ----------
+(defn proper? [xs]
+ (cond (erlang/=:= xs ()) true (erlang/is_list xs) (proper? (erlang/tl xs)) :else false))
+(defn enc [v]
+ (cond
+  (and (erlang/is_list v) (not (proper? v))) (str "(cons " (enc (erlang/hd v)) " " (enc (erlang/tl v)) ")")
+  (erlang/is_list v) (str "(list " (string/join " " (map enc v)) ")")
+  (erlang/is_tuple v) (str "(bl-make-tuple " (string/join " " (map enc (erlang/tuple_to_list v))) ")")
+  (and (erlang/is_map v) (not (erlang/is_map_key :__struct__ v)))
+  (str "(bl-map " (string/join " " (mapcat (fn [p] [(enc (erlang/element 1 p)) (enc (erlang/element 2 p))])
+                                           (maps/to_list v))) ")")
+  :else (scheme/literal v)))
+(defn outcome [thunk]
+ (let [r (try {:ok (thunk)} (catch e {:raised true}))]
+  (if (:raised r) "(vector 'raised)" (str "(vector 'ok " (enc (:ok r)) ")"))))
+(def names ["user" "host.compiler-data" "native.scheme" "clojure.core-ext" "a_b.c__d" "foo_" "_foo"
+            "a.B" "a..b" "" "x/y" "ns1_2x" "a_B" "a_1b" "my-app.core" "é.ü" "reader-node" "a__" "_"])
+(def corpus
+ (vec (concat
+  (for [n ["init" "handle-call" "handle-cast" "handle-info" "handle-continue" "terminate" "code-change" "foo" ""]]
+   ["Elixir.BeamLisp.Server" "callback" [n]])
+  [["Elixir.BeamLisp.Server" "callback" [:init]] ["Elixir.BeamLisp.Server" "callback" [nil]]
+   ["Elixir.BeamLisp.Server" "callback_order" []] ["Elixir.BeamLisp.Server" "return_constructor_shapes" []]
+   ["Elixir.BeamLisp.Server" "module_for" [1 "x"]] ["Elixir.BeamLisp.Server" "module_for" ["x" :y]]]
+  (for [a ["user" "my_app.core" "a.b_c" "x" "é"] b ["counter" "my-server" "d__e" "a_B" "a_1b" "a/b" ""]]
+   ["Elixir.BeamLisp.Server" "module_for" [a b]])
+  [["Elixir.BeamLisp.Server" "module_for" ["" "x"]]]
+  (for [m ["Elixir.BeamLisp.Emit" "Elixir.BeamLisp.Link"] n names] [m "module_for" [n]])
+  (for [n names] ["Elixir.BeamLisp.Emit" "base_module_for" [n]])
+  (for [n names] ["Elixir.BeamLisp.Emit" "realm_of" [n]])
+  (for [n ["user" "a.b"] b [:"Elixir.BeamLisp.Server" :"Elixir.BeamLisp.Ns"]] ["Elixir.BeamLisp.Emit" "realm_base" [n b]])
+  [["Elixir.BeamLisp.Emit" "base_module_for" [:x]] ["Elixir.BeamLisp.Link" "settle" []]
+   ["Elixir.BeamLisp.Server" "start" [:x]] ["Elixir.BeamLisp.Server" "call" [:x 1]]]
+  (for [src ["(+ 1 2)" "foo" ":k" "[1 2]" "{:a 1}" "#{1}" "\"x\"" "1.5" "(a) (b)" "" "(" 42 nil]]
+   ["Elixir.BeamLisp.Compiler" "read_data" [src]]))))
+(defn oracle-row [[m f xs]]
+ (let [key (str m "/" f "/" (count xs))]
+  (str "(services-check " (scheme/text key) " (lambda () ((native-remote " (scheme/text key) ") "
+       (string/join " " (map enc xs)) ")) " (outcome #(erlang/apply (keyword m) (keyword f) (to-list xs))) ")\n")))
+(when oracle?
+ (println (str "SERVICES_ORACLE_ENV " (Process/get :bl_env :global)))
+ (File/write! (str out "/oracle.scm") (string/join "" (map oracle-row corpus)))
+ (println (str "SERVICES_ORACLE " (count corpus) " cases")))
+(println "SERVICES_EMIT_DONE")
