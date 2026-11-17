@@ -36,7 +36,7 @@
                         :validation (when (:validation @state) (select-keys (:validation @state) [:reason]))
                         :canUndo (boolean (p/can-undo? @state)) :canRedo (boolean (p/can-redo? @state))
                         :selection (:selection @state) :pendingStyles (get @state :pending-styles [])
-                        :meta (:meta (doc)) :preview (boolean @preview) :count (count (:blocks (doc)))
+                        :meta (:meta (doc)) :preview (boolean @preview) :unchanged (boolean (:unchanged @preview)) :count (count (:blocks (doc)))
                         :changed (get change :changed []) :structural (boolean (:structural change))
                         :metadata (boolean (:metadata change))}))
         notify (fn [change]
@@ -67,7 +67,7 @@
                                (assoc next :pending-styles (or (caret-styles (:visible next) (:selection next)) [])) next)]
                     (advance next)))
         planned (fn [id args options]
-                  (c/plan ext (context (resolve-target options)) id args (get options :id (fresh))))
+                  (c/plan ext (cond-> (context (resolve-target options)) (:configure options) (assoc :configure true)) id args (get options :id (fresh))))
         as-op (fn [plan]
                 (let [ops (:ops plan)]
                   (when (seq ops) (if (= 1 (count ops)) (first ops) {:op "batch" :ops ops}))))
@@ -84,13 +84,17 @@
                                                  :else (:pending-styles @state))]
                                 (swap! state assoc :selection next-selection :pending-styles styles :group nil)
                                 (notify {}))))))
-        show-preview (fn [op]
-                       (alive)
-                       (let [edit (d/apply-trusted (:functions ext) (:visible @state) op)]
-                         (reset! preview (assoc edit :op op :basis @clock))
-                         (notify edit)
-                         (swap! preview assoc :basis @clock)
-                         (info edit)))]
+        show-plan (fn [plan]
+                    (alive)
+                    (let [op (as-op plan)
+                          edit (if op (d/apply-trusted (:functions ext) (:visible @state) op)
+                                  {:document (:visible @state) :changed []})
+                          unchanged (if op (= (:document edit) (:visible @state))
+                                      (and (or (not (contains? plan :pending-styles)) (= (:pending-styles plan) (:pending-styles @state)))
+                                           (or (not (:selection plan)) (= (normal-selection (:selection plan)) (:selection @state)))))]
+                     (reset! preview (assoc edit :op op :plan plan :unchanged unchanged :basis @clock))
+                     (notify edit) (swap! preview assoc :basis @clock) (info edit)))
+        show-preview (fn [op] (show-plan {:ops [op]}))]
     #js {:read (fn [] (alive) (info {}))
          :node (fn [id] (alive) (bl->js (d/find-block (doc) id)))
          :layout (fn [] (alive) (bl->js (mapv #(select-keys % [:id :parent :slot :type]) (:blocks (doc)))))
@@ -113,8 +117,7 @@
                       (alive) (swap! listeners conj callback)
                       (fn [] (swap! listeners #(filterv (fn [f] (not (identical? f callback))) %)) nil))
          :preview (fn [id args options]
-                    (let [plan (planned id (or (data args) {}) (or (data options) {})) op (as-op plan)]
-                      (when-not op (r/fail "Select text to preview this function.")) (show-preview op)))
+                    (show-plan (planned id (or (data args) {}) (assoc (or (data options) {}) :configure true))))
          :previewOperation (fn [op] (show-preview (data op)))
          :cancelPreview (fn []
                           (when @preview (let [change @preview] (reset! preview nil) (notify change))))
@@ -122,7 +125,15 @@
                           (alive)
                           (let [candidate @preview]
                             (when-not (and candidate (= (:basis candidate) @clock)) (r/fail "Preview this action again; the text changed."))
-                            (execute (:op candidate) {})))
+                            (when (:unchanged candidate) (r/fail "This value is already current."))
+                            (if-let [op (:op candidate)]
+                             (execute op (select-keys (:plan candidate) [:selection]))
+                             (let [plan (:plan candidate)]
+                              (reset! preview nil)
+                              (swap! state #(cond-> (assoc % :group nil)
+                                              (contains? plan :pending-styles) (assoc :pending-styles (:pending-styles plan))
+                                              (:selection plan) (assoc :selection (normal-selection (:selection plan)))))
+                              (notify {})))))
          :markSent (fn [] (alive) (swap! state p/mark-sent) nil)
          :outbound (fn [] (alive) (bl->js (p/outbound @state)))
          :receive (fn [native]

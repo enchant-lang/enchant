@@ -215,14 +215,15 @@ class DefaultUI {
   functionPanel(fid,existing=null){
     const token=this.panelTarget(),spec=this.editor.query({target:token}).find(item=>item.id===fid);
     if(!spec){this.editor.session.release(token);return;}
-    const call=existing||this.currentCall(fid),params=spec.params||{},args={},action=spec.kind==='custom';
-    for(const [key,param]of Object.entries(params))args[key]=Object.hasOwn(call?.args||{},key)?call.args[key]:param.default;
+    const call=existing||this.currentCall(fid),pending=this.editor.state.pendingStyles?.find(style=>style.function===fid),params=spec.params||{},args={},action=spec.kind==='custom';
+    const currentArgs=call?.args||pending?.args||{};
+    for(const [key,param]of Object.entries(params))args[key]=Object.hasOwn(currentArgs,key)?currentArgs[key]:param.default;
     const content=element('form','ed-function-form'),heading=element('div','ed-panel-heading');heading.append(icon(spec.icon||'function'),element('strong','',spec.label));
     const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',spec.description||(call?'Make this function your own.':'A small change, a new possibility.')));
     const error=element('div','ed-panel-error');error.setAttribute('role','status');
     const preview=()=>{try{
-      if(call)this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}});
-      else this.editor.session.preview(fid,{...args},{target:token});error.textContent='';apply.disabled=false;
+      const result=call?this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}}):this.editor.session.preview(fid,{...args},{target:token});
+      error.textContent=result?.unchanged?'This value is already current.':'';apply.disabled=!!result?.unchanged;
     }catch(reason){this.editor.session.cancelPreview();error.textContent=this.friendly(reason);apply.disabled=true;}};
     for(const [key,param]of Object.entries(params)){
       const label=param.label||(key==='tone'?'Color':key==='href'?'Destination':key);
@@ -247,7 +248,7 @@ class DefaultUI {
         });
         field.append(group);
       }else{
-        const input=element('input','ed-field');input.type=param.type==='boolean'?'checkbox':param.type==='integer'?'number':'text';input.setAttribute('aria-label',key);
+        const input=element('input','ed-field');input.type=param.type==='boolean'?'checkbox':param.type==='integer'?'number':'text';input.setAttribute('aria-label',label);input.name=key;input.dataset.parameter=key;
         if(input.type==='checkbox')input.checked=!!args[key];else input.value=String(args[key]??'');if(key==='href')input.placeholder='https://example.com';
         if(param.min!=null)input.min=param.min;if(param.max!=null)input.max=param.max;
         input.addEventListener('input',()=>{args[key]=input.type==='checkbox'?input.checked:input.type==='number'?input.valueAsNumber:input.value;preview();});field.append(input);
