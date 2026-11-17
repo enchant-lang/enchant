@@ -209,6 +209,9 @@ def main() -> None:
                         help="add -fno-inline-functions only to host -O1; reuse all unchanged O0 units")
     parser.add_argument("--standard-bindings", action="store_true",
                         help="assert immutable stock Gambit primitive bindings during Scheme -> C only")
+    parser.add_argument("--no-actors", action="store_true",
+                        help="stop after stage3's Source corpus: stage2 = stage3 and Source equality are "
+                             "witnessed, the actor corpus is NOT run, and the receipt says so")
     parser.add_argument("--compile-stage1-only", action="store_true",
                         help="checkpoint the real native stage1 image; never qualify a fixpoint")
     parser.add_argument("--compile-stage1-actors-only", action="store_true",
@@ -238,7 +241,7 @@ def main() -> None:
         args.actor_oracle = args.actor_oracle.resolve()
     if not 1 <= args.timeout <= 240:
         raise RuntimeError("native self-compilation retains its 240-second deadline")
-    if not (args.compile_stage1_only or args.compile_stage1_actors_only) and (not args.actor_manifest or not args.actor_oracle):
+    if not (args.compile_stage1_only or args.compile_stage1_actors_only or args.no_actors) and (not args.actor_manifest or not args.actor_oracle):
         raise RuntimeError("full fixpoint requires --actor-manifest and --actor-oracle")
     root, out = args.root.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -744,6 +747,21 @@ def main() -> None:
         corpus3 = source_gate("stage3", stage3)
         if corpus3 != corpus2:
             raise RuntimeError("stage3 actual ELF Source semantics differ")
+        if args.no_actors:
+            report = {"schema": "bl.native.bootstrap-source-fixpoint", "version": 1,
+                      "status": "source-fixpoint-actors-not-run",
+                      "stage2-sha256": h2, "stage3-sha256": h3, "stage2-stage3-byte-equal": True,
+                      "stage3-built-and-executed": True,
+                      "stage1-stage2-stage3-source-corpus-equal": True,
+                      "actor-corpus": "not run (--no-actors)",
+                      "self_emissions": self_emissions, "source_results": source_results,
+                      "standard_bindings": args.standard_bindings, "scheme_compiler_flags": gsc_flags,
+                      "inputs": inputs, "driver_sha256": digest(here), "compiler_recipe": compiler_recipe,
+                      "builds": builds, "runs": runs}
+            save(out / "source-fixpoint.json", report)
+            progress("source-fixpoint-actors-not-run")
+            print("NATIVE_SOURCE_BOOTSTRAP_FIXPOINT", h2, flush=True)
+            return
         for name in ("stage1", "stage2", "stage3"):
             actor_gate(name)
         for budget in BUDGETS:
