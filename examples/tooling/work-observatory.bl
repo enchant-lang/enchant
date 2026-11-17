@@ -11,15 +11,20 @@
 (def totals (projection/start-incremental! :observatory/example {:source-id "observatory/example/v1"}))
 (def sample-source "(ns playground)\n(defn leaf [x] (+ x 1))\n(defn total [x] (leaf x))")
 (defn run-tool [_ payload me]
-  (when-not (= :local-developer me) (throw "Developer required"))
-  (let [src (:source payload)]
-    (when-not (and (string? src) (<= (count src) 8192)) (throw "Source exceeds 8 KiB"))
-    (case (:tool payload)
-      :editor (lsp/analyzed src)
-      :check (check/analyze-source "playground.bl" src)
-      :index (codebase/index-source {} "playground" src {:mode :calls})
-      (throw "Unknown tool")))
-  nil)
+  (cond
+    (not= :local-developer me) {:refused "Developer required"}
+    (not (and (string? (:source payload)) (<= (count (:source payload)) 8192))) {:refused "Source exceeds 8 KiB"}
+    (not (contains? #{"editor" "check" "index"} (:tool payload))) {:refused "Unknown tool"}
+    :else
+    (do
+      ;; Tool spans retain a failed state. Invalid source must not kill the socket.
+      (try
+        (case (:tool payload)
+          "editor" (lsp/analyzed (:source payload))
+          "check" (check/analyze-source "playground.bl" (:source payload))
+          "index" (codebase/index-source {} "playground" (:source payload) {:mode :calls}))
+        (catch _ nil))
+      nil)))
 
 (defn home [{:keys [locals]}]
   (let [clicks (:clicks locals 0) warm? (:warm locals false) src (:source locals sample-source)]
@@ -47,9 +52,9 @@
                       :on-input [:assign :source [:from :value]]
                       :style "box-sizing:border-box;width:100%;resize:vertical;border:1px solid #dedfd5;border-radius:6px;padding:12px;background:#f6f5f0;color:#233b33;font:12px/1.6 monospace"} src]
           (box/row {:gap :2}
-            (ui/button {:id "demo-editor" :variant :subtle :on-click [:intent :tool {:tool :editor :source src}]} "Editor")
-            (ui/button {:id "demo-check" :variant :subtle :on-click [:intent :tool {:tool :check :source src}]} "Check")
-            (ui/button {:id "demo-index" :variant :subtle :on-click [:intent :tool {:tool :index :source src}]} "Index"))))
+            (ui/button {:id "demo-editor" :title "Analyze this source" :variant :subtle :on-click [:intent :tool {:tool "editor" :source src}]} "Editor")
+            (ui/button {:id "demo-check" :title "Run diagnostics and rules" :variant :subtle :on-click [:intent :tool {:tool "check" :source src}]} "Check")
+            (ui/button {:id "demo-index" :title "Find definitions and calls" :variant :subtle :on-click [:intent :tool {:tool "index" :source src}]} "Index"))))
       [:style "body{margin:0}button{touch-action:manipulation}"])))
 (def application
   {:principal (fn [_] :local-developer) :worlds (fn [_ _] {}) :home "/"

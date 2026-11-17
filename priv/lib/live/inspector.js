@@ -143,8 +143,9 @@
         const cell=text(facts,'div','');text(cell,'strong',v);text(cell,'small',label);
       });
       text(body,'div',({'first-use':'First request','same-source':'Same source','source-changed':'Source changed',requested:'Requested again'}[chosen.cause]||'Requested')).className='reason';
+      if(chosen.tool==='check')text(body,'small','Rules run each time');
       if(counts.unstable)text(body,'small','Definitions changed during work');
-      if(counts.declined)text(body,'small','Answer too large to keep');
+      if(counts.declined)text(body,'small','Answer not kept');
       if(chosen.state==='failed'||chosen.state==='interrupted')text(body,'small',chosen.state==='failed'?'Run failed':'Caller stopped');
       if(counts.evaluated) {
         text(body,'small',`${counts.evaluated} function evaluations`);
@@ -156,7 +157,7 @@
       if(chosen.parent&&rows.some(r=>r.id===chosen.parent)) {
         const parent=text(body,'button','↑ Parent run');parent.className='parent-run';parent.dataset.run=chosen.parent;
       }
-    } else rows.slice(0,32).forEach(r=>runRow(r,false));
+    } else {const tools=rows.filter(r=>r.tool!=='render');if(!tools.length)text(body,'div','No tool runs yet').className='empty';tools.slice(0,32).forEach(r=>runRow(r,false));}
     if(tape.dropped)text(body,'small','Some runs omitted');
     function runRow(r,child) {
       const row=text(body,'button','');row.className='run-row'+(child?' child':'');row.dataset.run=r.id;row.dataset.runId=r.id;row.dataset.tool=r.tool;row.dataset.cause=r.cause;
