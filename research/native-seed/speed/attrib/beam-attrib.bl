@@ -1,0 +1,58 @@
+; A3 attribution, BEAM side: the same real-namespace fixture as
+; native-attrib.scm.in (read -> compile -> emit of reader.bl in namespace
+; "reader", native.bootstrap/prepare's definition handling, native.eval/context
+; as emission options), profiled per phase with OTP tprof (call_time) through
+; bl.profile. One warm VM. Shares and call counts only; no timing claim.
+; Usage: run run speed/attrib/beam-attrib.bl -- SOURCE OUT_DIR REPS [snapshot]
+; With `snapshot`, every profiled repetition runs inside
+; BeamLisp.Loader/with_declaration_snapshot, as a real load/compile pass does;
+; without it the bare compiler API re-resolves lowercase prefixes
+; (`erlang/…`, `lists/…`) against the source path on every call.
+(ns native.attrib-beam
+ (:require [reader :as reader] [reader-node :as rn] [compiler :as compiler]
+           [native.scheme :as scheme] [native.eval :as ev] [bl.profile :as profile]
+           [clojure.string :as string]))
+(def argv (BeamLisp/argv))
+(def source (File/read! (nth argv 0)))
+(def out (nth argv 1))
+(def reps (erlang/binary_to_integer (nth argv 2)))
+(def ns-name "reader")
+(def attribution "priv/boot/reader.bl")
+(def snapshot? (and (> (count argv) 3) (= "snapshot" (nth argv 3))))
+(defn pass [action] (if snapshot? (BeamLisp.Loader/with_declaration_snapshot action) (action)))
+
+(defn read-all [] (reader/read-string source attribution))
+(defn env [] (assoc (compiler/new-env ns-name) :target :js :file attribution))
+(defn definition? [form] (contains? #{"defn" "defn-" "def"} (ev/head-symbol form)))
+(defn compile-one [form]
+ (let [decl (compiler/declaration-source form (assoc (compiler/new-env ns-name) :file attribution))
+       value (:value-form decl)
+       pos (rn/node-pos form)
+       value (if pos (rn/meta-node value pos) value)]
+  (compiler/reset-fresh!)
+  (compiler/compile value (env))))
+(defn compile-forms [forms] (mapv compile-one (filter definition? (rest forms))))
+(def emit-failures (atom 0))
+(defn emit-nodes [nodes]
+ (let [ctx (ev/context ns-name)]
+  (mapv (fn [node] (try (scheme/emit node ctx)
+                        (catch e (swap! emit-failures inc) ";; emit-failed"))) nodes)))
+
+(def forms (read-all))
+(def nodes (compile-forms forms))
+(def texts (emit-nodes nodes))
+(def text (string/join "\n" texts))
+(File/write! (str out "/beam.scm") text)
+(println (str "A3_FIXTURE snapshot " snapshot? " forms " (count forms) " definitions " (count nodes)
+              " emit-failures " @emit-failures " chars " (count text)))
+
+(defn report [phase action]
+ (let [result (profile/call-time (fn [] (dotimes [_ reps] (pass action))))]
+  (println (str "A3_TOTAL\t" phase "\t" (:total-us result) "\t" (:profiled? result)))
+  (doseq [r (:rows result)]
+   (println (str "PROF\t" phase "\t" (:ns r) "\t" (:fn r) "\t" (:calls r) "\t" (:us r)
+                 "\t" (:runtime? r))))))
+(report "read" read-all)
+(report "compile" (fn [] (compile-forms forms)))
+(report "emit" (fn [] (emit-nodes nodes)))
+(println "A3_DONE")
