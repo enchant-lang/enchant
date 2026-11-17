@@ -98,6 +98,26 @@
         (erlang/trace_pattern (tuple :erlang :binary_to_term 2) false (list :local :call_count))
         (projection/stop! totals)))))
 
+(deftest metadata-read-does-not-acknowledge-a-subscriber-wake
+  (let [totals (projection/start-incremental! :observatory/wake {:source-id "wake/v1"})
+        owner (:owner totals) token (:read totals)]
+    (try
+      (projection/subscribe! totals)
+      ;; Consume the first notification without using the acknowledging read API.
+      (is (= :wake (receive [:data.projection/changed p t]
+                     :when (and (= p owner) (= t token)) :wake (after 5000 :missing))))
+      (projection/status totals)
+      (projection/evict! totals)
+      ;; Calls are ordered through the same owner, so this samples after eviction.
+      (is (= :blocked (:status (projection/status totals))))
+      (is (= :quiet (receive [:data.projection/changed p t]
+                      :when (and (= p owner) (= t token)) :extra (after 0 :quiet))))
+      (projection/read totals)
+      (projection/retry! totals)
+      (is (= :wake (receive [:data.projection/changed p t]
+                     :when (and (= p owner) (= t token)) :wake (after 5000 :missing))))
+      (finally (projection/stop! totals)))))
+
 (deftest rendering-escapes-labels-and-keeps-unknown-data-honest
   (let [sample {:runtime {:resources [] :total 0 :realm {:title "<script>"}}
                 :work [{:name "<img src=x>" :available true :total 0 :jobs [] :truncated true}]
