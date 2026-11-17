@@ -1,0 +1,32 @@
+; FRAMES static site counts. Emit every definition of the named closure
+; namespaces through native.bootstrap/emit-definition (the AOT link context
+; native.chunks uses) and count budget and frame sites in the emitted text.
+; Usage: run run speed/frames/emit-units.bl -- PARTITION.json LEAVES.json OUT NS[,NS…]
+(ns frames.emit-units
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap] [native.scheme :as scheme]
+           [native.resolution-ledger :as ledger] [bl.json :as json]
+           [clojure.string :as string]))
+(def args (BeamLisp/argv))
+(def closure (artifact/read-closure (nth args 0)))
+(def leaves (set (get (json/decode (File/read! (nth args 1))) "registered_leaves")))
+(def out (nth args 2))
+(def wanted (string/split (nth args 3) #","))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def plan (bootstrap/link-plan (ledger/bundle-metadata closure leaves) units))
+(defn occurrences [text needle] (count (binary/matches text needle)))
+(File/mkdir_p! out)
+(doseq [ns wanted]
+ (let [unit (get (:units closure) ns)
+       fns (filter #(= :fn (:kind %)) (:defs unit))
+       text (string/join "" (map #(bootstrap/emit-definition plan unit %) fns))]
+  (File/write! (str out "/" ns ".scm") text)
+  ; The same definitions in source-frame (debug) emission, for frame-site counts.
+  (File/write! (str out "/" ns ".frames.scm")
+   (string/join "\n" (map #(scheme/emit (:node %) (assoc (bootstrap/link-context plan ns) :source-frames? true
+     :definition-ns ns :fn-label (:name %) :source-fn nil :source-arity nil :tail? false :loop nil)) fns)))
+  (println (str "FRAMES_UNIT " ns " definitions=" (count fns) " bytes=" (erlang/byte_size text)
+                " h-tick=" (occurrences text "(h-tick)")
+                " with-source-frame=" (occurrences text "bl-with-source-frame")
+                " source-call=" (occurrences text "bl-source-call")
+                " case-lambda=" (occurrences text "(case-lambda ")
+                " lambda-argv=" (occurrences text "(lambda argv ")))))
