@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -43,6 +44,26 @@ def round2_memo() -> bytes:
                           check=True, capture_output=True).stdout
 
 
+def mangle(name: str) -> bytes:
+    return ("v_" + "_".join(str(ord(c)) for c in name)).encode()
+
+
+def patch_down(rest: bytes) -> bytes:
+    """The frozen image's compiled host.lazy-seq predates this change. Its
+    receive_attempt tests the DOWN tag `(eq? X (string->symbol ":DOWN"))` in
+    both the vector and the tuple branch; this change's source binds the tag
+    to a wildcard, which compiles to no test. Replace exactly those two tests
+    inside that one definition by `(begin X #t)`; the guard on the monitor
+    reference is unchanged."""
+    start = rest.index(b"(define " + mangle("host.lazy-seq/receive_attempt") + b" ")
+    end = rest.index(b"\n", start)
+    body = rest[start:end]
+    patched, count = re.subn(rb'\(eq\? (\([^()]*\)) \(string->symbol ":DOWN"\)\)', rb"(begin \1 #t)", body)
+    if count != 2:
+        raise SystemExit("receive_attempt DOWN tests not found exactly twice: " + str(count))
+    return rest[:start] + patched + rest[end:]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("program", type=pathlib.Path)
@@ -52,6 +73,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=1500)
     parser.add_argument("--log", type=pathlib.Path)
     parser.add_argument("--oracle", type=pathlib.Path)
+    parser.add_argument("--patch-down", action="store_true",
+                        help="apply this change's receive_attempt DOWN clause to the frozen compiled lazy_seq")
+    parser.add_argument("--extra", type=pathlib.Path, help="Scheme inserted after the closure prelude")
     args = parser.parse_args()
     program = args.program.read_bytes()
     host = (args.closure / "host.scm").read_bytes()
@@ -67,6 +91,13 @@ def main() -> int:
         pure = pure.replace(old, new)
     load = ("\n(load " + json.dumps(str((args.closure / "text.o1").resolve())) + ")\n").encode()
     rest = program[len(HEADER + host + b"\n"):]
+    if args.extra:
+        prelude = (args.closure / "prelude.scm").read_bytes()[len(HEADER + host + b"\n"):]
+        if not rest.startswith(prelude + b"\n"):
+            raise SystemExit("program does not continue with the closure prelude")
+        rest = rest[:len(prelude) + 1] + args.extra.read_bytes() + b"\n" + rest[len(prelude) + 1:]
+    if args.patch_down:
+        rest = patch_down(rest)
     out = args.program.with_name(args.program.stem + "-gsi-" + args.memo + ".scm")
     out.write_bytes(HEADER + pure + load + rest)
     gsi = pathlib.Path(json.loads((BASE / "toolchain-pin.json").read_text())["gambit"]) / "bin/gsi"
