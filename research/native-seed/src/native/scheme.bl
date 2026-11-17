@@ -179,22 +179,41 @@
  "A self-call's callee: the `letrec` local of a function scaffold, always a procedure."
  [function options]
  (and (self-knot? function options) (contains? (or (:procedure-selves options) #{}) (:name (:fn function)))))
+(defn- global-call-link
+ "A sealed plan's direct link for a :global callee called with `arity` static
+  arguments (:aot-link :global, native.bootstrap/global-link), or nil."
+ [function arity options]
+ (when-let [hook (:global (:aot-link options))]
+  (when (= :global (:op function)) (hook function arity))))
 (defn- linked-language-call
- "AOT invoke fast path: a procedure is applied directly; every other callee
-  takes bl-invoke. Callee first, then arguments, in source order."
+ "AOT invoke fast path: a sealed global target is called through its arity
+  cell; a procedure is applied directly; every other callee takes bl-invoke.
+  Callee first, then arguments, in source order."
  [function arguments options]
- (let [direct? (procedure-self? function options)
-       callee (emit function (operand-options options)) statics (static-arguments arguments)]
-  (if statics
+ (let [statics (static-arguments arguments)
+       global (when statics (global-call-link function (count statics) options))]
+  (if global (linked-call nil global statics options)
+  (let [direct? (procedure-self? function options)
+        cell (when (and direct? statics)
+               (let [c (get (or (:self-cells options) {}) (:name (:fn function)))]
+                (when (and c (= (second c) (count statics))) (first c))))
+        callee (emit function (operand-options options))]
+  (cond
+   cell
+   (let [[binds operands] (linked-operands true statics options)
+         call (glue "(" cell (Enum/join (Enum/map (items operands) (fn [o] (glue " " o))) "") ")")]
+    (if (empty? binds) call (glue "(let* (" (spaced binds) ") " call ")")))
+   statics
    (let [[binds operands] (linked-operands true statics options)
          spread (Enum/join (Enum/map (items operands) (fn [o] (glue " " o))) "")
          call (if direct? (glue "(callee" spread ")")
                 (glue "(if (procedure? callee) (callee" spread ") (bl-invoke callee (list" spread ")))"))]
     (glue "(let ((callee " callee ")) "
          (if (empty? binds) call (glue "(let* (" (spaced binds) ") " call ")")) ")"))
+   :else
    (glue "(let* ((callee " callee ") (arguments " (emit arguments (operand-options options)) ")) "
         (if direct? "(apply callee arguments))"
-          "(if (procedure? callee) (apply callee arguments) (bl-invoke callee arguments)))")))))
+          "(if (procedure? callee) (apply callee arguments) (bl-invoke callee arguments)))")))))))
 (defn- ordered-language-call [node function arguments options]
  (cond
   (:source-frames? options) (ordered-target-call node function arguments "bl-invoke" options)
@@ -397,28 +416,32 @@
 (declare boolean-valued?)
 (defn- boolean-junction?
  "`(let [x init] (if x then else))` whose init is always #t or #f."
- [n]
+ [n options]
  (let [body (:body n) test (:test body)]
   (and (= :let (:op n)) (= :if (:op body)) (= :var (:op test)) (= (:name n) (:name test))
-       (boolean-valued? (:init n)))))
-(defn- junction-part? [n name] (or (and (= :var (:op n)) (= name (:name n))) (boolean-valued? n)))
+       (boolean-valued? (:init n) options))))
+(defn- junction-part? [n name options]
+ (or (and (= :var (:op n)) (= name (:name n))) (boolean-valued? n options)))
 (defn- boolean-valued?
  "An expression whose value is always #t or #f: a guard-position erlang BIF
-  (boolean-test?), a boolean literal, an `if` of boolean branches, or a
-  boolean junction of boolean parts."
- [n]
- (case (:op n)
-  :lit (or (= true (:val n)) (= false (:val n)))
-  :remote (boolean-test? n)
-  :if (and (boolean-valued? (:then n)) (boolean-valued? (:else n)))
-  :let (and (boolean-junction? n)
-            (junction-part? (:then (:body n)) (:name n)) (junction-part? (:else (:body n)) (:name n)))
-  false))
+  (boolean-test?), a boolean literal, an `if` of boolean branches, a boolean
+  junction of boolean parts, or anything the shared fact pass (:facts, a
+  BeamLisp.Facts environment) tags :bool, such as a variable bound to one."
+ [n options]
+ (or (case (:op n)
+      :lit (or (= true (:val n)) (= false (:val n)))
+      :remote (boolean-test? n)
+      :if (and (boolean-valued? (:then n) options) (boolean-valued? (:else n) options))
+      :let (and (boolean-junction? n options)
+                (junction-part? (:then (:body n)) (:name n) options)
+                (junction-part? (:else (:body n)) (:name n) options))
+      false)
+     (BeamLisp.Facts/bool-fact? (BeamLisp.Facts/expr n (or (:facts options) {})))))
 (defn- branch
  "Inline BL truthiness: everything except false and nil is true. The host
   local `t` cannot capture an ident-encoded Source local."
- [test-node test then else]
- (if (boolean-valued? test-node) (glue "(if " test " " then " " else ")")
+ [test-node test then else options]
+ (if (boolean-valued? test-node options) (glue "(if " test " " then " " else ")")
   (glue "(let ((t " test ")) (if (or (eq? t #f) (eq? t bl-nil)) " else " " then "))")))
 
 (defn- distinct-names? [names] (= (count names) (count (Enum/uniq names))))
@@ -449,7 +472,7 @@
           guard (:guard cl)
           guard-options (assoc (operand-options options) :source-frames? false)
           body (cond (nil? guard) body
-                     (total? guard guard-options) (branch guard (emit guard guard-options) body next)
+                     (total? guard guard-options) (branch guard (emit guard guard-options) body next guard-options)
                      :else (glue "(if (bl-guard (lambda () " (emit guard guard-options) ")) " body " " next ")"))
           _ (when-let [counts (:emission-counts options)]
               (swap! counts update :compiled-pattern-clauses (fnil inc 0)))
@@ -490,26 +513,34 @@
 (defn- formal-names [n]
  (Enum/map (lists/seq 0 (dec n)) (fn [i] (if (< i 64) (erlang/element (inc i) formal-table)
                                            (glue "fa" (erlang/integer_to_binary i))))))
-(defn- function-expression
- "One unguarded DISTINCT-variable clause binds its Source names as Scheme
-  formals. Other same-width clause chains match fixed formals directly; only
-  a mixed-width chain destructures its argument list."
- [n options frame]
- (let [fallback "(error \"native seed: function clause\")"
-       clause (BeamLisp.CompilerData/simple_function_clause n)
+(def ^:private clause-fallback "(error \"native seed: function clause\")")
+(defn- fixed-parts
+ "nil for a mixed-width clause chain; else {:formals :body} of the fixed-arity
+  function. One unguarded DISTINCT-variable clause binds its Source names as
+  Scheme formals; other same-width chains match fixed formals directly."
+ [n options]
+ (let [clause (BeamLisp.CompilerData/simple_function_clause n)
        names (when clause (Enum/map (items (:pats clause)) (fn [p] (:name p))))
        cs (items (:clauses n))
-       widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))
-       site (when frame (frame-site frame false))
-       tick? (body-calls? cs {:verdicts (:loop-verdicts options) :frames? (:source-frames? options)})]
+       widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))]
   (cond
    (and clause (distinct-names? names))
-    (fixed-function (Enum/map names (fn [name] (ident name))) (emit (:body clause) options) fallback site tick?)
+    {:formals (Enum/map names (fn [name] (ident name))) :body (emit (:body clause) options)}
    (= 1 (count widths))
     (let [formals (formal-names (first widths))]
-     (fixed-function formals (clauses cs formals fallback options false) fallback site tick?))
-   :else
-    (glue "(lambda argv " (function-entry (clauses cs "argv" fallback options false) site tick?) ")"))))
+     {:formals formals :body (clauses cs formals clause-fallback options false)})
+   :else nil)))
+(defn- function-ticks? [n options]
+ (body-calls? (items (:clauses n)) {:verdicts (:loop-verdicts options)}))
+(defn- function-expression
+ "A fixed-arity function is a case-lambda (fixed-parts); only a mixed-width
+  chain destructures its argument list."
+ [n options frame]
+ (let [site (when frame (frame-site frame false))
+       tick? (function-ticks? n options)]
+  (if-let [parts (fixed-parts n options)]
+   (fixed-function (:formals parts) (:body parts) clause-fallback site tick?)
+   (glue "(lambda argv " (function-entry (clauses (items (:clauses n)) "argv" clause-fallback options false) site tick?) ")"))))
 
 (def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
 (def core-leaves
@@ -651,13 +682,13 @@
  [n options]
  (when-let [parts (loop-parts n)]
   (let [known (:loop-verdicts options) verdicts (or known (loop-verdicts n))]
-   (cond (or (contains? verdicts (:self parts)) (:source-frames? options)) {:parts parts :verdicts verdicts}
+   (cond (contains? verdicts (:self parts)) {:parts parts :verdicts verdicts}
          (nil? known) {:verdicts verdicts}
          :else nil))))
 
 ; Can this function body (nested fn bodies excluded: they are functions with
 ; their own entry) pass control to BL code? `ctx` carries the loop verdicts in
-; force, whether source frames lower every loop (as loop-plan does), and the
+; force and the
 ; self of the innermost lowered loop, whose recur is a jump, not a call. One
 ; walk per function; a loop region not covered by the verdicts in force gets
 ; its verdicts once, as loop-plan computes them.
@@ -680,7 +711,7 @@
    :apply
    (if-let [parts (loop-parts n)]
     (let [verdicts (or (:verdicts ctx) (loop-verdicts n)) inside (assoc ctx :verdicts verdicts)]
-     (if (or (:frames? ctx) (contains? verdicts (:self parts)))
+     (if (contains? verdicts (:self parts))
       (or (any-calls? (:inits parts) inside) (body-calls? (:body parts) (assoc inside :loop (:self parts))))
       true))
     (if (and (:loop ctx) (recur-node? n (:loop ctx))) (any-calls? (:args n) ctx) true))
@@ -744,7 +775,8 @@
        body (emit (:inner parts) (assoc (forget-facts options (fn [] (list self)))
                                         :selves (assoc (or (:selves options) {}) self local)
                                         :procedure-selves (if (= :fn (:op (:inner parts))) (conj procedures self)
-                                                            (disj procedures self))))]
+                                                            (disj procedures self))
+                                        :self-cells (dissoc (or (:self-cells options) {}) self)))]
   (glue "(letrec ((" local " " body ")) " local ")")))
 
 (defn- multi-layout [n]
@@ -774,7 +806,8 @@
        self (:name node)
        inside (assoc (dissoc options :self-target)
                      :selves (assoc (or (:selves options) {}) self target)
-                     :procedure-selves (disj (or (:procedure-selves options) #{}) self))]
+                     :procedure-selves (disj (or (:procedure-selves options) #{}) self)
+                     :self-cells (dissoc (or (:self-cells options) {}) self))]
   ; Original ANF uses (self self) for its self value. Bind that ORIGINAL
   ; scaffold variable to a one-argument thunk of the WHOLE dispatcher.
   ; The arm still receives its original parameters/rest-list convention.
@@ -862,8 +895,8 @@
 (defn- pairs-operands [pairs] (Enum/flat_map (items pairs) (fn [pair] (items pair))))
 (defn emit [n options]
  (if-let [layout (multi-layout n)] (emit-multi layout options)
- ; Checked self-recursive loops always become named lets. Source-frame
- ; emission keeps its unchecked loop lowering for the actor runtime.
+ ; Checked self-recursive loops become named lets, in release and in
+ ; source-frame emission alike; an unchecked one runs as calls.
  (if-let [plan (loop-plan n options)]
   (let [options (assoc options :loop-verdicts (:verdicts plan))]
    (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit n options)))
@@ -872,7 +905,7 @@
    (ordered (:name (:loop options)) (:args n) (operand-options options))
   (self-knot? n options) (get (:selves options) (:name (:fn n)))
   (and (= :let (:op n)) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
-  (boolean-junction? n) (emit-junction n options)
+  (boolean-junction? n options) (emit-junction n options)
   :else
  (case (:op n)
   :lit (literal (:val n))
@@ -900,7 +933,7 @@
   :let (glue "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) (integer-binding options (:name n) (:init n))) ")")
   :if (if-let [dispatch (keyword-dispatch n options)] (emit-keyword-dispatch dispatch options)
        (branch (:test n) (emit (:test n) (operand-options options))
-               (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options)))
+               (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options) options))
   :do (let [statements (items (:stmts n))]
         (glue "(begin " (if (empty? statements) "bl-nil"
           (glue (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
@@ -942,3 +975,35 @@
         (assoc options :definition-ns (or (:ns definition) (:ns options)) :fn-label (:name definition)
                        :source-fn nil :source-arity nil :tail? false :loop nil)) ")\n")
   (catch e (throw (ex-info (str (:name definition) ": " (ex-message e)) (assoc (or (ex-data e) {}) :emission-stack __STACKTRACE__))))))
+
+(defn emit-sealed-function
+ "Release AOT emission of a fixed-arity function definition for a sealed
+  image, or nil when `node` is not one (another shape, or source frames).
+  Returns {:arity n :lambda text :value text}: `:lambda` is the function as a
+  literal `(lambda (formals) entry+body)` for the arity cell `cell`, so
+  Gambit can inline calls to it; `:value` is the definition's value, the
+  registered case-lambda that forwards its arity to `cell` and keeps the
+  function-clause arm for any other. Self-calls of that arity call `cell`;
+  the self as a value is `value-name`. Emission order and facts are those of
+  `emit` on the same node."
+ [node options cell value-name]
+ (when (and (= :let (:op node)) (not (:source-frames? options)))
+  (when-let [parts (self-parts node)]
+   (let [inner (:inner parts) self (:name node)
+         widths (Enum/uniq (Enum/map (items (:clauses inner)) (fn [c] (count (:pats c)))))]
+    (when (and (= :fn (:op inner)) (= 1 (count widths)))
+     (let [arity (first widths)
+           scaffold (assoc (forget-facts options (fn [] (list self)))
+                           :selves (assoc (or (:selves options) {}) self value-name)
+                           :procedure-selves (conj (or (:procedure-selves options) #{}) self)
+                           :self-cells (assoc (or (:self-cells options) {}) self [cell arity]))
+           inside (forget-facts scaffold (fn [] (clauses-binders (:clauses inner))))
+           tick? (function-ticks? inner inside)]
+      (when-let [fixed (fixed-parts inner inside)]
+       (let [formals (:formals fixed)
+             forward (glue "(" cell (Enum/join (Enum/map formals (fn [f] (glue " " f))) "") ")")
+             value (fixed-function formals forward clause-fallback nil false)]
+        {:arity arity
+         :lambda (glue "(lambda (" (spaced formals) ") " (function-entry (:body fixed) nil tick?) ")")
+         :value (if (:callable-arities? options)
+                  (glue "(bl-register-callable! " value " " (erlang/integer_to_binary arity) ")") value)}))))))))

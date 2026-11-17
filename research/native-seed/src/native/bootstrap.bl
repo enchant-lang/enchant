@@ -222,21 +222,25 @@
  ; Gambit sees constant top-level bindings. A compiled :fn has no global-view
  ; cell (references read its binding); a :val keeps one. native-seal-image!
  ; (emitted after the initializers) makes any later redefinition raise.
- [ns name kind arities]
+ ; `raw` is {arity lambda-text} (scheme/emit-sealed-function): that arity
+ ; cell is the literal lambda itself, which Gambit can inline.
+ [ns name kind arities raw]
  (let [binding (binding-name ns name)]
   (if (= :fn kind)
-   (str (string/join "" (map #(str "(define " (arity-binding-name ns name %) " (native-arity-entry " binding " " % "))\n")
+   (str (string/join "" (map #(str "(define " (arity-binding-name ns name %) " "
+                                   (or (get raw %) (str "(native-arity-entry " binding " " % ")")) ")\n")
                              (:fixed arities)))
         (if (some? (:variadic arities))
          (str "(define " (variadic-binding-name ns name) " (native-variadic-entry " binding " "
               (scheme/text (str ns "/" name)) "))\n") ""))
    (str "(define " (global-binding-name ns name) " (native-unmacro " binding "))\n"))))
 (defn link-definition
- ([ns name kind arities] (link-definition false ns name kind arities))
- ([sealed? ns name kind arities]
+ ([ns name kind arities] (link-definition false ns name kind arities {}))
+ ([sealed? ns name kind arities] (link-definition sealed? ns name kind arities {}))
+ ([sealed? ns name kind arities raw]
  ; One setter per linked slot (compiled view, including arity entries) and
  ; one for its global view; native-link! initializes both immediately.
- (if sealed? (sealed-link-definition ns name kind arities)
+ (if sealed? (sealed-link-definition ns name kind arities raw)
  (let [binding (binding-name ns name) global (global-binding-name ns name)
        fixed (if (= :fn kind) (:fixed arities) [])
        variadic? (and (= :fn kind) (some? (:variadic arities)))
@@ -260,11 +264,22 @@
    (let [global (global-binding-name ns name)]
     (str "(define " global " (native-unlinked " (scheme/text ns) " " (scheme/text name) "))\n"
          "(native-link-global! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " global " value)))\n")))))
+(defn- sealed-raw
+ "A sealed single-fixed-arity :fn: scheme/emit-sealed-function's {:arity
+  :lambda :value} for its arity cell, or nil (the ordinary emission)."
+ [plan ns d arities context]
+ (when (and (:sealed? plan) (= :fn (:kind d)) (nil? (:variadic arities)) (= 1 (count (:fixed arities))))
+  (let [arity (first (:fixed arities))
+        r (scheme/emit-sealed-function (:node d) context (arity-binding-name ns (:name d) arity)
+                                       (binding-name ns (:name d)))]
+   (when (and r (= arity (:arity r))) r))))
 (defn emit-definition [plan unit d]
- (let [ns (:ns unit) value (scheme/emit (:node d) (link-context plan ns))]
+ (let [ns (:ns unit) context (link-context plan ns)
+       arities (when (and (:name d) (= :fn (:kind d))) (declaration-arities (:form d)))
+       raw (when (:name d) (sealed-raw plan ns d arities context))
+       value (if raw (:value raw) (scheme/emit (:node d) context))]
   (if (:name d)
-   (let [binding (binding-name ns (:name d))
-         arities (when (= :fn (:kind d)) (declaration-arities (:form d)))]
+   (let [binding (binding-name ns (:name d))]
     (str "(define " binding " " value ")\n"
         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
@@ -272,7 +287,8 @@
         (when arities
          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
               (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))
-        (link-definition (:sealed? plan) ns (:name d) (:kind d) arities)))
+        (link-definition (:sealed? plan) ns (:name d) (:kind d) arities
+                         (if raw {(:arity raw) (:lambda raw)} {}))))
    (str value "\n"))))
 (defn emit-functions
  "The :fn definitions of `defs` (a window of `unit`), in order."
