@@ -1,0 +1,42 @@
+; prepare.bl — compile actor applications with the original actor runtime
+; against a frozen compiler closure, for the round-3 ACTOR checks.
+;
+; Usage (pinned SDK, under `work run`):
+;   research/native-seed/run run research/native-seed/speed/actor/prepare.bl -- \
+;     CLOSURE-DIR OUT-DIR APPLICATION...
+; For each APPLICATION it writes OUT-DIR/<basename>/program.scm: the closure's
+; prelude followed by the host link, host extensions, runtime, bridges and
+; application bodies that corpus/prepare.bl emits (the corpus witness only
+; for the original research/js-actors/test.bl). A refused link prints its
+; ex-data, which corpus/prepare.bl does not.
+(ns native.prepare-actor-check
+ (:require [native.proc-link :as linker]))
+(def base "research/native-seed")
+(def args (BeamLisp/argv))
+(def closure-dir (nth args 0))
+(def out (nth args 1))
+(defn prepare! [app]
+ (let [original? (= app "research/js-actors/test.bl")
+       extensions (vec (concat [(str base "/host/host-source-frames.scm")
+                                (str base "/host/virtual-turn-clock.scm")
+                                (str base "/host/actor-invariants.scm")]
+                               (when original? [(str base "/corpus/native-witness.scm")])))
+       result (try
+               (linker/build-project
+                {:application app :runtime "priv/lib/js/actor/runtime.bl" :bridges (str base "/bridges.bl")
+                 :links (str base "/actor-links.edn") :sdk-pin (str base "/sdk-pin.json")
+                 :host-link (str base "/host/host-proc-link.scm")
+                 :prelude (str closure-dir "/prelude.scm")
+                 :closure-manifest (str closure-dir "/partition.json") :leaves (str closure-dir "/leaves.json")
+                 :host-extensions extensions :source-frames? true :original-actor-corpus? original?
+                 :helper-namespaces []})
+               (catch e
+                (println (str "ACTOR_PREPARE_REFUSED " app " " (ex-message e) " " (pr-str (ex-data e))))
+                nil))]
+  (when result
+   (let [dir (str out "/" (Path/rootname (Path/basename app)))]
+    (File/mkdir_p! dir)
+    (File/write! (str dir "/program.scm")
+     (str (:program result) "\n" (if original? "(native-corpus-finish)\n" "")))
+    (println (str "ACTOR_PREPARED " app " " (count (:definitions result)) " definitions " dir))))))
+(doseq [app (drop 2 args)] (prepare! app))

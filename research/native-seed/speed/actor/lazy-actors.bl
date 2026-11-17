@@ -1,0 +1,137 @@
+; lazy-actors.bl — cross-process lazy waits on the native actor runtime.
+;
+; Round-3 item X (speed/actor/RESULT.md). The application half, run by
+; priv/lib/js/actor/runtime.bl's `bl-main` exactly like the original actor
+; corpus (research/js-actors/test.bl): every case runs in actor processes,
+; and lazy nodes are the compiled `host.lazy-seq` of the prelude. The same
+; four cases as test/bl/lazy_cross_process_wait_test.bl on BEAM:
+;   * owner parked in its thunk → the waiter blocks and gets the value;
+;   * two actors forcing each other's running cells → `:recursive_force`;
+;   * the owner's thunk raises → the waiter replays the error, a later force
+;     retries;
+;   * the owner is killed while parked → the waiter gets `:force_owner_lost`.
+; Prints `PASS label` / `FAIL label …` and a final `LAZY_ACTORS checks failures`.
+; Native actors have no `Process/sleep` or `:counters`: waits are receive
+; timeouts and the thunk reports each run by message.
+
+(defn lz-check [name actual expected]
+  (if (= actual expected)
+    (do (host/write (str "PASS " name)) 0)
+    (do (host/write (str "FAIL " name " got " (host/describe actual)
+                         " want " (host/describe expected)))
+        1)))
+
+(defn lz-outcome [lazy]
+  (try [:ok (BeamLisp.LazySeq/force lazy)]
+       (catch e
+         (if (contains? e :reason)
+           [:force-error (get e :reason)]
+           [:error (get e :message)]))))
+
+(defn lz-blocked-on [pid owner n]
+  (let [info (erlang/process_info pid (tuple :dictionary :bl_lazy_waits_on))]
+    (cond
+      (and (erlang/is_tuple info) (= owner (erlang/element 2 info))) true
+      (> n 1000) false
+      :else (do (receive (after 2 nil)) (lz-blocked-on pid owner (+ n 1))))))
+
+(defn lz-parked-owner [parent result]
+  (BeamLisp.LazySeq/new
+    (fn []
+      (erlang/send parent (tuple :owner-running (erlang/self)))
+      (receive :go (result) (after 5000 :timeout)))))
+
+(defn lz-reply-task [parent tag lazy]
+  (erlang/spawn
+    (fn []
+      (let [r (lz-outcome lazy)]
+        (erlang/send parent (tuple tag r (erlang/get :bl_lazy_waits_on)))))))
+
+(defn lz-reply [tag]
+  (receive [t r left] :when (= t tag) [r left] (after 5000 :no-reply)))
+
+(defn lz-running []
+  (receive [:owner-running pid] pid (after 5000 nil)))
+
+(defn lz-no-more-runs []
+  (receive [:owner-running pid] :ran-again (after 0 :once)))
+
+(defn lz-value-case []
+  (let [parent (erlang/self)
+        l (lz-parked-owner parent (fn [] :shared))
+        owner (lz-reply-task parent :owner l)
+        _ (lz-running)
+        waiter (lz-reply-task parent :waiter l)
+        blocked (lz-blocked-on waiter owner 0)]
+    (erlang/send owner :go)
+    (+ (lz-check "value-waiter-blocks-on-owner" blocked true)
+       (lz-check "value-owner" (lz-reply :owner) [[:ok :shared] :undefined])
+       (lz-check "value-waiter-gets-owner-value" (lz-reply :waiter) [[:ok :shared] :undefined])
+       (lz-check "value-thunk-ran-once" (lz-no-more-runs) :once)
+       (lz-check "value-memoized" (lz-outcome l) [:ok :shared]))))
+
+(defn lz-cycle-step [parent mine]
+  (fn []
+    (erlang/send parent (tuple :cycle-running mine (erlang/self)))
+    (receive [:go other] (BeamLisp.LazySeq/force other) (after 5000 :timeout))))
+
+(defn lz-cycle-case []
+  (let [parent (erlang/self)
+        a (BeamLisp.LazySeq/new (lz-cycle-step parent :a))
+        b (BeamLisp.LazySeq/new (lz-cycle-step parent :b))]
+    (lz-reply-task parent :a a)
+    (lz-reply-task parent :b b)
+    (let [pa (receive [:cycle-running :a pid] pid (after 5000 nil))
+          pb (receive [:cycle-running :b pid] pid (after 5000 nil))]
+      (erlang/send pa (tuple :go b))
+      (erlang/send pb (tuple :go a))
+      (+ (lz-check "cycle-a-raises" (lz-reply :a) [[:force-error :recursive_force] :undefined])
+         (lz-check "cycle-b-raises" (lz-reply :b) [[:force-error :recursive_force] :undefined])))))
+
+(defn lz-crash-case []
+  (let [parent (erlang/self)
+        runs (atom 0)
+        l (lz-parked-owner parent
+            (fn [] (if (= 1 (swap! runs inc))
+                     (throw (ex-info "owner crashed" {}))
+                     :recovered)))
+        owner (lz-reply-task parent :owner l)
+        _ (lz-running)
+        waiter (lz-reply-task parent :waiter l)
+        blocked (lz-blocked-on waiter owner 0)]
+    (erlang/send owner :go)
+    (let [o (lz-reply :owner) w (lz-reply :waiter)]
+      (lz-reply-task parent :retry l)
+      (erlang/send (lz-running) :go)
+      (+ (lz-check "crash-waiter-blocks-on-owner" blocked true)
+         (lz-check "crash-owner-raises" o [[:error "owner crashed"] :undefined])
+         (lz-check "crash-waiter-gets-owner-error" w [[:error "owner crashed"] :undefined])
+         (lz-check "crash-retry-recovers" (lz-reply :retry) [[:ok :recovered] :undefined])))))
+
+(defn lz-kill-case []
+  (let [parent (erlang/self)
+        l (lz-parked-owner parent (fn [] :never))
+        owner (lz-reply-task parent :owner l)
+        _ (lz-running)
+        waiter (lz-reply-task parent :waiter l)
+        blocked (lz-blocked-on waiter owner 0)]
+    (erlang/exit owner :kill)
+    (let [w (lz-reply :waiter)
+          r (first w)
+          reason (when (vector? r) (second r))]
+      (+ (lz-check "kill-waiter-blocks-on-owner" blocked true)
+         (lz-check "kill-waiter-gets-force-error" (first r) :force-error)
+         (lz-check "kill-reason-is-owner-lost"
+                   (when (erlang/is_tuple reason) (erlang/element 1 reason)) :force_owner_lost)
+         (lz-check "kill-reason-names-owner"
+                   (when (erlang/is_tuple reason) (erlang/element 2 reason)) owner)
+         (lz-check "kill-no-wait-entry-left" (second w) :undefined)
+         (lz-check "kill-lost-attempt-is-terminal"
+                   (let [later (second (lz-outcome l))]
+                     (when (erlang/is_tuple later) (erlang/element 1 later)))
+                   :force_owner_lost)))))
+
+(defn main []
+  (let [fails (+ (lz-value-case) (lz-cycle-case) (lz-crash-case) (lz-kill-case))]
+    (host/write (str "LAZY_ACTORS 21 " fails))
+    (if (= fails 0) nil (host/raise "lazy actor failures"))))
