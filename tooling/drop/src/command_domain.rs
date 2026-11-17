@@ -1,19 +1,32 @@
 //! Filesystem loans held by the OS service manager until the command's cgroup
 //! empties. This transport conveys no Source invocation or writer authority.
 
+#[cfg(target_os = "linux")]
+#[path = "command_stream.rs"]
+mod stream;
+
 pub fn dispatch(arguments: &[String]) -> Option<i32> {
     match arguments.first().map(String::as_str) {
         Some("--custody-protocol") => {
             println!("BEAM_LISP_CUSTODY_COMMAND_V1");
             Some(0)
         }
-        Some("--custody-command") | Some("--custody-child") => {
+        Some("--custody-stream-protocol") => {
+            println!("BEAM_LISP_CUSTODY_STREAM_V1");
+            Some(0)
+        }
+        Some("--custody-command") | Some("--custody-child") | Some("--custody-stream") | Some("--custody-result") => {
             #[cfg(target_os = "linux")]
             let result = linux::dispatch(arguments);
             #[cfg(not(target_os = "linux"))]
             let result: Result<i32, String> = Err("managed command custody is unsupported on this target".into());
             Some(result.unwrap_or_else(|error| {
-                eprintln!("bl: custody command refused: {error}");
+                if arguments.first().is_some_and(|arg| arg == "--custody-stream") {
+                    #[cfg(target_os = "linux")]
+                    stream::unknown(&error);
+                } else {
+                    eprintln!("bl: custody command refused: {error}");
+                }
                 125
             }))
         }
@@ -33,7 +46,7 @@ mod linux {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use serde_json::Value;
 
-    fn control(name: &str) -> Result<Command, String> {
+    pub(super) fn control(name: &str) -> Result<Command, String> {
         let uid = unsafe { libc::getuid() };
         if uid != unsafe { libc::geteuid() } { return Err("set-id command execution is unsupported".into()); }
         let path = ["/run/current-system/sw/bin", "/usr/bin", "/bin"].iter()
@@ -82,14 +95,22 @@ mod linux {
 
     pub fn dispatch(arguments: &[String]) -> Result<i32, String> {
         match (arguments.first().map(String::as_str), arguments.len()) {
-            (Some("--custody-command"), 2) => launch(&arguments[1]),
+            (Some("--custody-command"), 2) => launch(&arguments[1], false),
+            (Some("--custody-stream"), 2) => launch(&arguments[1], true),
             (Some("--custody-child"), 2) => child(&arguments[1]),
+            (Some("--custody-result"), 2) => super::stream::stop_post(&arguments[1]),
             _ => Err("invalid command protocol arguments".into()),
         }
     }
 
-    fn launch(input: &str) -> Result<i32, String> {
+    fn launch(input: &str, streaming: bool) -> Result<i32, String> {
         let mut value = request(input)?;
+        // Caller data cannot select the private completion channel.
+        if value.get("stream").is_some() { return Err("private command field supplied".into()); }
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
+        let unit = format!("bl-custody-{}-{nonce}.service", std::process::id());
+        let mut wire = if streaming { Some(super::stream::Wire::new(&unit)?) } else { None };
+        if let Some(wire) = &wire { value["stream"] = wire.descriptor(); }
         // The caller's effective environment arrives through exec's private
         // environment, never as secret-bearing JSON on the command line.
         let mut environment = serde_json::Map::new();
@@ -110,8 +131,6 @@ mod linux {
         }
         let timeout = limit(&value, "timeout_ms", 86_400_000)?;
         let memory = limit(&value, "memory_bytes", 8 * 1024 * 1024 * 1024)?;
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
-        let unit = format!("bl-custody-{}-{nonce}.service", std::process::id());
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut command = control("systemd-run")?;
         command.args(["--user", "--wait", "--pipe", "--collect", "--quiet"])
@@ -123,6 +142,9 @@ mod linux {
             .arg(format!("--property=MemoryMax={memory}"))
             .arg(format!("--property=LoadCredential=bl-command:/proc/{}/fd/{raw}", std::process::id()))
             .arg(format!("--property=RuntimeMaxSec={}ms", timeout));
+        if streaming {
+            command.arg(format!("--property=ExecStopPost={}", super::stream::stop_command(&executable, &unit)?));
+        }
         // Preserve a caller's capped test slice for the whole managed tree.
         // Session scopes live outside the user manager; those use app.slice.
         if let Ok(group) = std::fs::read_to_string("/proc/self/cgroup") {
@@ -140,6 +162,7 @@ mod linux {
             .stderr(Stdio::from(sink_stderr)).spawn().map_err(|e| format!("cannot start OS command domain: {e}"))?;
         drop(command);
         let maximum = limit(&value, "output_bytes", 16 * 1024 * 1024)?;
+        if let Some(wire) = &mut wire { return wire.run(&unit, process, output, maximum); }
         let mut count = 0u64;
         let mut buffer = [0u8; 8192];
         let mut forwarding = true;
@@ -244,6 +267,7 @@ mod linux {
         }
         drop(loans);
         socket.send(b"READY=1").map_err(|e| e.to_string())?;
+        super::stream::note(&value, unit, "accepted", serde_json::json!({}))?;
         let mut command = Command::new(text(&value, "program")?);
         command.args(strings(&value["argv"])?).current_dir(text(&value, "cwd")?).env_clear().stdin(Stdio::null());
         for (key, item) in environment.as_object().ok_or("missing environment")? {
@@ -253,6 +277,8 @@ mod linux {
             }
         }
         let status = command.status().map_err(|e| format!("command could not start: {e}"))?;
+        use std::os::unix::process::ExitStatusExt;
+        super::stream::note(&value, unit, "program-exited", serde_json::json!({"code":status.code(),"signal":status.signal()}))?;
         Ok(status.code().unwrap_or(125))
     }
 }
