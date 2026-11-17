@@ -210,30 +210,33 @@
    it over an empty table and made even its public defs undefined (BUG-113).
    An env that never settles keeps working through its routes."
   []
-  (let [env (BeamLisp.Env/env_id)]
-    (Enum/each
-      (ets/match_object :beam_lisp_vars (tuple (tuple env :shim_state :_) :_))
-      (fn [row]
-        (let [ns (erlang/element 3 (erlang/element 1 row))
-              st (erlang/element 2 row)]
-          (when (and (erlang/is_tuple st) (erlang/< 0 (erlang/element 2 st)))
-            (BeamLisp.Env/with_namespace_lock ns
-              (fn []
-                (BeamLisp.Env/with_publication ns
-                  (fn []
-                    ; Resolve pending state again under the same lock used by
-                    ; defvar: a concurrent loader may already have settled it.
-                    (let [current (BeamLisp.Env/lookup (tuple :shim_state ns))
-                          st (if (and (erlang/is_tuple current)
-                                      (erlang/== :ok (erlang/element 1 current)))
-                               (erlang/element 2 current) nil)]
-                      (when (and (erlang/is_tuple st) (erlang/< 0 (erlang/element 2 st)))
-                        (let [mod (BeamLisp.Emit/module_for ns)
-                              all_defs (BeamLisp.Env/ns_defs ns)
-                              beam (compile_shim mod all_defs ns)]
-                          (BeamLisp.Env/publish_binaries! (list beam) (erlang/element 3 st))
-                          (ets/match_delete :beam_lisp_vars (tuple (tuple env :fwd ns :_ :_) :_))
-                          (BeamLisp.Env/put_key (tuple :shim_state ns)
-                            (tuple (erlang/map_size all_defs) 0 (erlang/element 3 st)))
-                          (BeamLisp.Env/mark_emitted ns mod)))))))))))))
+  ; Without the env registry (before Env starts, or in the native image, which
+  ; owns no ETS table) no shim can be pending, so there is nothing to settle.
+  (when-not (erlang/== :undefined (ets/whereis :beam_lisp_vars))
+    (let [env (BeamLisp.Env/env_id)]
+      (Enum/each
+        (ets/match_object :beam_lisp_vars (tuple (tuple env :shim_state :_) :_))
+        (fn [row]
+          (let [ns (erlang/element 3 (erlang/element 1 row))
+                st (erlang/element 2 row)]
+            (when (and (erlang/is_tuple st) (erlang/< 0 (erlang/element 2 st)))
+              (BeamLisp.Env/with_namespace_lock ns
+                (fn []
+                  (BeamLisp.Env/with_publication ns
+                    (fn []
+                      ; Resolve pending state again under the same lock used by
+                      ; defvar: a concurrent loader may already have settled it.
+                      (let [current (BeamLisp.Env/lookup (tuple :shim_state ns))
+                            st (if (and (erlang/is_tuple current)
+                                        (erlang/== :ok (erlang/element 1 current)))
+                                 (erlang/element 2 current) nil)]
+                        (when (and (erlang/is_tuple st) (erlang/< 0 (erlang/element 2 st)))
+                          (let [mod (BeamLisp.Emit/module_for ns)
+                                all_defs (BeamLisp.Env/ns_defs ns)
+                                beam (compile_shim mod all_defs ns)]
+                            (BeamLisp.Env/publish_binaries! (list beam) (erlang/element 3 st))
+                            (ets/match_delete :beam_lisp_vars (tuple (tuple env :fwd ns :_ :_) :_))
+                            (BeamLisp.Env/put_key (tuple :shim_state ns)
+                              (tuple (erlang/map_size all_defs) 0 (erlang/element 3 st)))
+                            (BeamLisp.Env/mark_emitted ns mod))))))))))))))
   :ok)
