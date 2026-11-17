@@ -1,6 +1,11 @@
-(ns observatory.inspector-test
+(ns live.inspector-test
   (:require [live.inspector :as inspector] [live.app :as app]
-            [live.hiccup :as html] [web] [bl.json :as json]))
+            [live.hiccup :as html] [web] [bl.json :as json] [runtime.activity :as activity]))
+
+(defn options []
+  (merge {:enabled? true :authorize #(= :developer %)}
+    (when (= "source" (System/get_env "PROJECTION_PREFLIGHT_MODE"))
+      {:assets-root (Path/join (System/fetch_env! "BL_TEST_SOURCE_ROOT") "priv/lib/live")})))
 
 (defn request [path]
   (erlang/apply :Elixir.Plug.Test :conn (list "GET" path "")))
@@ -23,7 +28,7 @@
           {:principal (fn [_] (swap! calls inc) @me)
            :http (fn [c _] (swap! fallback inc) (web/text c "App endpoint"))
            :routes [["/" (fn [_] [:main "App"])]]}
-          {:enabled? true :authorize #(= :developer %)})]
+          (options))]
     (doseq [path ["/__enchant" "/__enchant/inspector.js" "/__enchant/inspector.css" "/__enchant/snapshot.json"]]
       (is (= 404 (:status (app/router application (request path))))))
     (is (= 4 @calls)) (is (= 0 @fallback))
@@ -37,4 +42,16 @@
       (is (String/contains? (:resp_body script) "live:patch"))
       (is (= "enchant.observatory.v1" (get (json/decode (:resp_body data)) "schema"))))
     (is (= "App endpoint" (:resp_body (app/router application (request "/api")))))
-    (is (= 1 @fallback))))
+    (is (= 1 @fallback))
+    (inspector/close! application)))
+
+(deftest serve-devtools-option-defaults-off-and-owns-its-reader
+  (let [application {:routes [["/" (fn [_] [:main "App"])]]}
+        plain (app/serve application {:port 0 :ip (tuple 127 0 0 1) :log false})]
+    (try (is (nil? (:live/inspector plain))) (finally (app/stop! plain)))
+    (let [served (app/serve application {:port 0 :ip (tuple 127 0 0 1) :log false :devtools (options)})
+          reader (:live/inspector served)]
+      (try (is (= true (:available (activity/snapshot reader))))
+        (finally (app/stop! served)))
+      (is (= false (:available (activity/snapshot reader))))
+      (app/stop! served))))
