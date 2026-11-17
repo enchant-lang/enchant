@@ -1,0 +1,51 @@
+(ns proc-init-timeout-test (:require [proc.server :as server]))
+
+(server/defserver timeout-owner
+ (init [value] (ok {:value value :timeouts 0} 5))
+ (handle-info :timeout [state] (noreply (update state :timeouts inc)))
+ (handle-call :state [_ state] (reply state state)))
+(server/defserver hibernate-owner
+ (init [value] (ok {:value value} (hibernate)))
+ (handle-call :state [_ state] (reply state state (hibernate))))
+(server/defserver continue-owner
+ (init [value] (ok {:value value} (continue :ready)))
+ (handle-continue :ready [state] (noreply (assoc state :continued true)))
+ (handle-call :state [_ state] (reply state state)))
+
+(defn- wait-for [action]
+ (let [deadline (+ (erlang/monotonic_time :millisecond) 10000)]
+  (loop [] (cond (action) true (> (erlang/monotonic_time :millisecond) deadline) false
+                :else (do (Process/sleep 10) (recur))))))
+
+(deftest timed-init-preserves-the-user-state-and-arms-the-timeout
+ (let [pid (start timeout-owner 73)]
+  (try
+   (is (= 73 (:value (call pid :state))))
+   (is (wait-for (fn [] (= 1 (:timeouts (call pid :state))))))
+   (finally (stop pid)))))
+(deftest hibernating-init-preserves-state-through-wake-and-call
+ (let [pid (start hibernate-owner 29)]
+  (try
+   (is (wait-for (fn [] (= (tuple :current_function (tuple :erlang :hibernate 3))
+                           (Process/info pid :current_function)))))
+   (is (= {:value 29} (call pid :state)))
+   (finally (stop pid)))))
+(deftest continuation-init-preserves-state-through-the-native-continuation
+ (let [pid (start continue-owner 41)]
+  (try
+   (is (= {:value 41 :continued true} (call pid :state)))
+   (finally (stop pid)))))
+(deftest contributed-state-and-deferred-timeout-survive-the-pure-plan
+ (let [plan (server/clause-plan
+              {:name 'probe :clauses '((init [value] (ok {:value value} (continue :ready))) (slice))
+               :vocabulary {:slice (fn [_ _] {:init {:slice 9}})} :native-heads #{"init"}})
+       returned (last (last (last (first (:body plan)))))]
+  (is (= 'ok (first returned)))
+  (is (= 3 (count returned)))
+  (is (= '(continue :ready) (nth returned 2)))
+  (is (= '{:value value} (second (second returned))))
+  (is (= {:slice 9} (nth (second returned) 2)))))
+(deftest malformed-init-return-arity-refuses-instead-of-erasing-state
+ (doseq [body '((ok) (ok {} 1 2))]
+  (is (thrown? (server/clause-plan {:name 'bad :clauses (list (list 'init '[arg] body))
+                                  :vocabulary {} :native-heads #{"init"}})))))
