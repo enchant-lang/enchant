@@ -70,3 +70,8 @@ scripts/inspector-scenario --sdk /nix/store/QUALIFIED-SDK \
 The runner requires the local optional browser helper/runtime. It retains native
 screenshots, fourteen witnessed claims, source/helper hashes and the exact SDK
 pin, and rejects changed test inputs. It never produces an SDK or starts an app.
+
+Cold-start assertions are authoritative in canonical SDK qualification. Private
+source preflight compiles candidates first and can warm providers that an SDK
+loads lazily. Keep the canonical first-to-second-call gate ahead of the rest of
+the tests; do not substitute a warmed source overlay for this release check.
