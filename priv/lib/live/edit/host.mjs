@@ -60,7 +60,10 @@ export class Editor {
     const selected=new Set(cells);this.canvas.classList.toggle('ed-grid-selection',!!cells.length);
     for(const [id,node] of this.nodes)node.classList.toggle('ed-cell-selected',selected.has(id));
   }
-  select(selection,{focus=true}={}){this.session.selection(selection);this.geometry.restore(selection,{focus});this.ui?.update?.(this.state);}
+  select(selection,{focus=true}={}){
+    this.session.selection(selection);this.geometry.restore(selection,{focus});
+    this.paintClipboardSelection(this.state.selection);this.ui?.update?.(this.state);
+  }
   node(id){return this.current.get(id)||this.session.node(id);}
   capture(){this.rememberSelection();return this.session.bookmark();}
   report(error){this.message=error?.message||String(error);this.paintStatus();this.ui?.report?.(this.message);return false;}

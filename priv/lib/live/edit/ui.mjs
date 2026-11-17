@@ -162,8 +162,13 @@ class DefaultUI {
     if(this.panel.opened||this.palette.open||this.pointerSelecting||this.editor.composing||conflict){this.hideSelection();return;}
     const selection=state.selection;
     if(!collapsed(selection)&&focus&&!touch){
-      if(!this.token)this.token=this.editor.capture();
-      const selected=JSON.stringify(selection);if(this.selectionKey!==selected){if(this.token)this.editor.session.release(this.token);this.token=this.editor.capture();this.selectionKey=selected;}
+      // Rendering must not reread DOM selection: capture() can synchronously
+      // publish another selection and release the outer update's bookmark.
+      const selected=JSON.stringify(selection);
+      if(!this.token||this.selectionKey!==selected){
+        const previous=this.token;this.token=this.editor.session.bookmark();this.selectionKey=selected;
+        if(previous)this.editor.session.release(previous);
+      }
       this.bubble.show(this.editor.geometry.anchor(this.token),{role:'toolbar',protect:this.mobile});this.chip.hide();
     }else{
       this.bubble.hide();if(this.token){this.editor.session.release(this.token);this.token=null;}
