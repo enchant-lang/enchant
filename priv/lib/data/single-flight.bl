@@ -2,15 +2,18 @@
 (ns data.single-flight (:require [data.bounded-cache :as cache]))
 
 (def MAX-ACTIVE 2)
+(defn- acquire-slot [nodes]
+  (loop [i 0]
+    (when (< i MAX-ACTIVE)
+      (if (global/set_lock (tuple (tuple :data.shared-work.slot i) (erlang/self)) nodes 0) i
+        (recur (inc i))))))
 (defn- with-slot [until f]
   ;; Nested compiler consumers keep their caller's slot. Native ownership
   ;; releases slots only on return or actual holder death, never a result send.
   (if (Process/get :data.single-flight/slot) (f)
     (let [nodes (list (erlang/node))]
       (loop []
-        (if-let [slot (first (filter (fn [i]
-                         (global/set_lock (tuple (tuple :data.shared-work.slot i) (erlang/self)) nodes 0))
-                                (range MAX-ACTIVE)))]
+        (if-let [slot (acquire-slot nodes)]
           (try (Process/put :data.single-flight/slot slot) (f)
             (finally (Process/delete :data.single-flight/slot)
               (global/del_lock (tuple (tuple :data.shared-work.slot slot) (erlang/self)) nodes)))
