@@ -12,7 +12,7 @@
 ; Writes DIR/closure.etf, identity.json and update.json; then run
 ; partition-closure.py --out DIR. See research/native-seed/speed/closure/RESULT.md.
 (ns native.update-closure
- (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json] [clojure.edn :as edn] [native.resolution-ledger :as ledger]))
+ (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json] [clojure.edn :as edn]))
 (def argv (vec (BeamLisp/argv)))
 (def path (or (first argv) "research/native-seed/out/compiler-closure/partition.json"))
 (def out (Path/dirname path))
@@ -92,32 +92,26 @@
  (let [anchors (set (concat ["rt" "core" "sugar"] requires))
        last-at (reduce (fn [at [i x]] (if (contains? anchors x) i at)) -1 (map-indexed vector order))]
   (vec (concat (take (inc last-at) order) [ns] (drop (inc last-at) order)))))
-(defn relink
- "Second pass, inside the same isolated Env. The native image installs the
-  link row of every closure member (`ledger/member-links`, from SOURCE
-  declarations) before it compiles anything. BEAM must compile against the
-  same rows, so a member's calls to itself, to later members and to unloaded
-  members link exactly as natively: install every row, then recompile every
-  member once in closure order. Rows already answered by this VM are replaced
-  by the source rows; the Env is isolated, so the driver is unaffected."
- [provisional]
- (let [rows (ledger/member-links provisional)]
-  (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
-  (println (str "NATIVE_UPDATE_LINK_ROWS " (count rows)))
-  (reduce (fn [result ns]
-   (let [old (get (:units result) ns)
-         _ (println (str "NATIVE_UPDATE_RELINK " ns))
-         unit (compile-unit ns (:path old) (set (:order result)))]
-    (assoc-in result [:units ns] unit)))
-   provisional (:order provisional))))
+; Link rows (LINK P3/N3): the native image installs the link row of every
+; closure member before compiling anything. BEAM must compile against the SAME
+; rows, or a member's calls to itself and to unloaded members link differently.
+; The rows come from member-rows.bl over a previous pass's closure (a separate
+; process: computing them needs native.bootstrap loaded, and recompiling the
+; native.bootstrap member here replaces that module). With NATIVE_LINK_ROWS
+; set, the rows are installed in the isolated Env and every member recompiles.
+(def link-rows-path (System/get_env "NATIVE_LINK_ROWS"))
+(def link-rows (when link-rows-path (erlang/binary_to_term (File/read! link-rows-path))))
+(when link-rows (println (str "NATIVE_UPDATE_LINK_ROWS " (count link-rows) " from " link-rows-path)))
+(def recompile-all? (or repin? (some? link-rows)))
 (def result
  (BeamLisp.Env/isolated
   (fn []
-   (relink (let [existing
+   (doseq [[ns name info _] link-rows] (BeamLisp.Env/put_link ns name info))
+   (let [existing
          (reduce (fn [result ns]
           (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
                 source (File/read! (:path old)) sha (artifact/sha source)]
-           (if (and (not repin?) (= sha (:source-sha256 old)))
+           (if (and (not recompile-all?) (= sha (:source-sha256 old)))
             (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
             (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
                   unit (compile-unit ns (:path old) (into (set (:order original)) declared))]
@@ -139,7 +133,7 @@
              requires (map first (:requires unit))]
         (-> result (assoc-in [:units ns] unit) (update :added conj ns)
             (update :order insert-after-dependencies ns requires))))))
-     existing additions))))))
+     existing additions)))))
 (def order (:order result))
 ; Order check: every closure dependency of a unit precedes it.
 (let [at (into {} (map-indexed (fn [i ns] [ns i]) order))]
