@@ -124,3 +124,21 @@ of rescanning the sequence for every block. Renderers also receive the normal
 `:text` and `:slots` values. Keep source parsing, application grants and IO out
 of these callbacks. `live.edit.projection/project` and `targets` expose the same
 pure projection/invalidation contract for native tests and host integration.
+
+A block may declare a pure `:text-range` callback receiving `[block context]`.
+Return `{:from cp-start :to cp-end :isolated true :label "Field name"}` to expose
+only a field within its complete model text. Bounds are Unicode codepoints;
+invalid or reversed ranges refuse projection. Inline mark identities and ranges
+keep their original model coordinates. Empty fields retain a caret placeholder.
+The host maps DOM selections and native input back to absolute model offsets,
+including composition and repeated text. `data-edit-start` and `data-edit-tail`
+describe the envelope; the tail length stays stable as a field grows, avoiding
+shell replacement on every keystroke. Ordinary blocks keep full-text behavior.
+
+Use an isolated field inside a noneditable package shell when adjacent metadata
+must stay outside native text input. The host applies current read-only/conflict
+state to isolated fields, and the reader removes their editability and hooks.
+This is a projection/input primitive, not field validation or publication
+authority. Packages must supply appropriate Enter/structural commands before
+enabling it for a source grammar; the default split still operates on the full
+model text. Application writers continue validating the complete candidate.
