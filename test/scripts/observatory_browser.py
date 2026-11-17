@@ -51,11 +51,12 @@ try:
       title:document.title, instruments:document.querySelectorAll('.plate').length,
       overflow:document.documentElement.scrollWidth>innerWidth,
       scripts:document.scripts.length,
+      diagrams:document.querySelectorAll('.stage svg').length,
       manual:document.body.innerText.includes('no polling'),
       unknown:document.body.innerText.includes('not yet instrumented')
     })""")
     assert desktop['instruments'] == 5 and not desktop['overflow'], desktop
-    assert desktop['scripts'] == 0 and desktop['manual'] and desktop['unknown'], desktop
+    assert desktop['scripts'] == 0 and desktop['diagrams'] == 5 and desktop['manual'] and desktop['unknown'], desktop
     rpc('screenshot', path=str(output / 'desktop.png'))
     rpc('viewport', width=390, height=844, mobile=True)
     narrow = rpc('eval', expression="""({
