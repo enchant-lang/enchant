@@ -1,0 +1,49 @@
+; eprof over emitting every definition of a real source (reader.bl by default).
+; Usage: run run speed/bigo/profile-real.bl -- PATH NS
+(ns bigo.profile-real (:require [reader-node :as rn] [reader :as reader] [compiler :as compiler] [native.scheme :as scheme]))
+(def argv (BeamLisp/argv))
+(def path (nth argv 0))
+(def ns-name (nth argv 1))
+(def options {:ns ns-name :namespace ns-name :namespace-qualified? true :callable-arities? true
+              ; placeholder linking: the chunk driver's resolvers name real targets
+              :global-resolver (fn [n] (str "g-" (:name n))) :binding-resolver (fn [n] "b")})
+(defn as-fn
+  "(defn name doc? attrs? & arities) -> (fn name & arities): the same function
+   value as an ANF :fn, which is what the native chunk driver emits."
+  [form]
+  (let [f (rn/node-form form)]
+    (when (= :list (rn/node-tag f))
+      (let [items (rn/node-items f)
+            head (rn/node-form (first items))]
+        (when (and (= :symbol (rn/node-tag head)) (contains? #{"defn" "defn-"} (rn/node-name head)))
+          (let [body (drop-while (fn [x] (contains? #{:string :map} (rn/node-tag (rn/node-form x)))) (drop 2 items))]
+            (rn/meta-node (rn/->tuple [:list (concat [(rn/->tuple [:symbol "fn"]) (second items)] body)])
+                          (rn/node-pos form))))))))
+(def forms (keep as-fn (rest (reader/read-string (File/read! path) path))))
+(def nodes (vec (keep (fn [form]
+                  (try (compiler/reset-fresh!)
+                       (compiler/compile form (assoc (compiler/new-env ns-name) :target :js :file path))
+                       (catch e nil))) forms)))
+(defn defvar-values
+  "Every outermost function value in a compiled definition (:fn nodes)."
+  [n]
+  (cond
+    (sequential? n) (mapcat defvar-values n)
+    (erlang/is_list n) (mapcat defvar-values n)
+    (erlang/is_map n) (if (= :fn (:op n)) [n] (mapcat defvar-values (maps/values (maps/remove :ann n))))
+    :else []))
+(def emittable (vec (filter (fn [n] (try (scheme/emit n options) true (catch e false)))
+                            (mapcat defvar-values nodes))))
+(let [vs (mapcat defvar-values nodes)]
+  (println "values" (count vs))
+  (when (seq vs) (println "first-error" (try (scheme/emit (first vs) options) "ok" (catch e (pr-str (ex-message e)))))))
+(println "forms" (count forms) "compiled" (count nodes) "emittable" (count emittable))
+(defn emit-all [] (doseq [n emittable] (scheme/emit n options)))
+(let [t0 (erlang/monotonic_time :microsecond)]
+  (emit-all)
+  (println "emit-us" (- (erlang/monotonic_time :microsecond) t0)
+           "out-bytes" (reduce + (map (fn [n] (count (scheme/emit n options))) emittable))))
+(eprof/start)
+(eprof/profile (list) emit-all)
+(eprof/stop_profiling)
+(eprof/analyze :total (list (erlang/list_to_tuple (list :sort :time))))

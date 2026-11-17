@@ -1,0 +1,61 @@
+; BACKEND C2 byte-equality: the rewritten emitter (native.scheme) against the
+; previous emitter (backend.old-scheme = HEAD's scheme.bl, renamed) on the same
+; ANF, under every option set the emitter is called with outside the AOT
+; context. Refusals must refuse with the same message; emission counts must
+; agree. Run: run -p research/native-seed/speed run THIS -- OUT FILE...
+(ns backend.equality
+ (:require [reader :as reader] [compiler :as compiler] [native.scheme :as scheme]
+           [backend.old-scheme :as old] [native.eval :as ev] [clojure.string :as string]))
+(def argv (BeamLisp/argv))
+(def out (first argv))
+(def files (rest argv))
+(def benchmark {:ns "user" :namespace "user" :namespace-qualified? true :callable-arities? true})
+(def variants
+ [["benchmark" benchmark]
+  ["benchmark+frames" (assoc benchmark :source-frames? true)]
+  ["eval-context" (ev/context "user")]
+  ["eval-context+frames" (assoc (ev/context "user") :source-frames? true)]
+  ["plain" {:ns "user"}]])
+(defn- outcome [thunk]
+ (try (thunk) (catch e (str "REFUSED " (ex-message e)))))
+(defn- compile-form [form path]
+ (try (compiler/reset-fresh!)
+      (compiler/compile form (assoc (compiler/new-env "user") :target :js :file path))
+      (catch e nil)))
+(def stats (atom {:nodes 0 :compared 0 :equal 0 :different 0 :refused 0 :bytes 0}))
+(def first-diff (atom nil))
+(defn- compare! [path i label a b]
+ (swap! stats update :compared inc)
+ (when (string/starts-with? a "REFUSED") (swap! stats update :refused inc))
+ (swap! stats update :bytes + (erlang/byte_size a))
+ (if (= a b) (swap! stats update :equal inc)
+  (do (swap! stats update :different inc)
+      (println "DIFF" path i label)
+      (when (nil? @first-diff)
+       (reset! first-diff true)
+       (File/write! (str out "/diff-old.scm") a)
+       (File/write! (str out "/diff-new.scm") b)))))
+(File/mkdir_p! out)
+(doseq [path files]
+ (let [forms (reader/read-string (File/read! path) path)]
+  (doseq [[i form] (map-indexed (fn [i form] [i form]) forms)]
+   (when-let [node (compile-form form path)]
+    (swap! stats update :nodes inc)
+    (doseq [[label options] variants]
+     (let [old-counts (atom {}) new-counts (atom {})
+           a (outcome #(old/emit node (assoc options :emission-counts old-counts)))
+           b (outcome #(scheme/emit node (assoc options :emission-counts new-counts)))]
+      (compare! path i label a b)
+      (compare! path i (str label "/counts") (pr-str @old-counts) (pr-str @new-counts))
+      (compare! path i (str label "/definition")
+       (outcome #(old/emit-definition {:name (str "d" i) :node node} options))
+       (outcome #(scheme/emit-definition {:name (str "d" i) :node node} options)))))))))
+; The leaf helpers other namespaces call directly.
+(doseq [s ["" "a" "x/y-z?" "é€😀" "\"\\\n\r\t\u0001\u007f"]]
+ (compare! "helpers" 0 "ident" (old/ident s) (scheme/ident s))
+ (compare! "helpers" 0 "text" (old/text s) (scheme/text s)))
+(doseq [v [nil true false 0 -12 4611686018427387904 1.5 -0.0 "s\n" :k :true [] [1 [2]] (list 1 "a")
+           #{1 2} {} {:a 1 "b" [nil]} (erlang/list_to_tuple (list 1 :x))]]
+ (compare! "helpers" 0 "literal" (old/literal v) (scheme/literal v)))
+(println "EQUALITY" (pr-str @stats))
+(println (if (zero? (:different @stats)) "EQUALITY_OK" "EQUALITY_FAILED"))

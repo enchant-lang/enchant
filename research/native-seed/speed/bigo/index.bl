@@ -1,0 +1,129 @@
+; Index the native compiler closure (the 18 namespaces stage 1 runs) into ONE
+; codebase datom store and run the complexity questions over it.
+; Usage: run run speed/bigo/index.bl -- QUESTION...
+(ns bigo.index (:require [codebase] [source-graph :as sg] [datom] [clojure.string :as string]))
+
+(def SOURCES
+  [["anf" "priv/boot/anf.bl"] ["clojure.core-ext" "priv/compat/clojure/core_ext.bl"]
+   ["clojure.re" "priv/compat/clojure/re.bl"] ["clojure.string" "priv/compat/clojure/string.bl"]
+   ["compiler" "priv/boot/compiler.bl"] ["core" "priv/boot/core.bl"] ["diag" "priv/boot/diag.bl"]
+   ["host.compiler-data" "priv/host/compiler_data.bl"] ["host.form-meta" "priv/host/form_meta.bl"]
+   ["host.meta" "priv/host/meta.bl"] ["native.bootstrap" "research/native-seed/src/native/bootstrap.bl"]
+   ["native.eval" "research/native-seed/src/native/eval.bl"]
+   ["native.scheme" "research/native-seed/src/native/scheme.bl"]
+   ["native.chunks" "research/native-seed/src/native/chunks.bl"]
+   ["native.intrinsics" "research/native-seed/src/native/intrinsics.bl"]
+   ["reader" "priv/boot/reader.bl"] ["reader-node" "priv/boot/reader-node.bl"] ["rt" "priv/boot/rt.bl"]
+   ["server-clause" "priv/boot/server-clause.bl"] ["sugar" "priv/boot/sugar.bl"]])
+
+(defn- shift [offset facts]
+  (map (fn [f] (assoc f :db/id (+ offset (:db/id f)))) facts))
+
+(defn- by-form
+  "Index one top-level form at a time; forms whose macro expansion raises are
+   skipped and named (core.bl defines the macros the walker would expand)."
+  [ns-str src]
+  (let [forms (BeamLisp.Reader/read_string src)
+        header (sg/header*-nodes forms)]
+    (loop [fs forms k 0 fns [] calls []]
+      (if (empty? fs)
+        (codebase/loop-context ns-str {:fn fns :calls calls :requires []})
+        (let [r (try (codebase/index-forms {} ns-str [(first fs)] header {:mode :calls})
+                     (catch e (do (println "skipped form" ns-str k) nil)))
+              base (* 20000 (inc k))
+              re (fn [xs] (map (fn [f] (assoc f :db/id (+ base (:db/id f)))) xs))]
+          (recur (rest fs) (inc k)
+                 (if r (into fns (re (:fn r))) fns)
+                 (if r (into calls (re (:calls r))) calls)))))))
+
+(defn build []
+  (let [conn (codebase/connect-codebase)]
+    (doseq [[i [ns-str path]] (map-indexed (fn [i s] [i s]) SOURCES)]
+      (let [t0 (erlang/monotonic_time :millisecond)
+            src (File/read! path)
+            facts (try (codebase/index-source {} ns-str src {:mode :calls})
+                    (catch e (by-form ns-str src)))
+            fns (map (fn [f] (assoc f :fn/ns ns-str)) (:fn facts))
+            all (concat fns (:calls facts) (:requires facts))]
+        (doseq [part (partition 1000 1000 [] (shift (* (inc i) 10000000) all))] (datom/transact! conn (vec part)))
+        (println "indexed" ns-str (count (:fn facts)) "fns" (count (:calls facts)) "calls"
+                 (- (erlang/monotonic_time :millisecond) t0) "ms")))
+    (datom/db conn)))
+
+(def db (build))
+
+(defn show [title rows]
+  (println (str "\n## " title " (" (count rows) ")"))
+  (doseq [r rows] (println (pr-str (vec r)))))
+
+; The callees whose cost on the native representation is linear in an argument.
+; (maps are sorted storage vectors, lists are pairs, strings are immutable.)
+(def LINEAR
+  #{"concat" "nth" "last" "butlast" "count" "str" "into" "vec" "apply" "assoc" "get"
+    "contains?" "some" "filter" "remove" "sort" "sort-by" "distinct" "reverse" "subs"
+    "take" "drop" "string/join" "merge" "update" "keys" "vals" "set" "conj" "dissoc"
+    "lists/append" "erlang/++" "erlang/length" "lists/reverse" "lists/nth" "lists/last"
+    "lists/member" "lists/keyfind" "lists/sort" "maps/put" "maps/get" "maps/find"
+    "maps/merge" "erlang/iolist_to_binary" "erlang/binary_to_list" "erlang/list_to_binary"
+    "assoc-in" "get-in" "update-in" "select-keys" "zipmap" "frequencies" "group-by" "mapcat"
+    "interpose" "split" "string/split" "string/replace" "re-find" "lists/flatten" "flatten"
+    "String/slice" "binary/part" "erlang/atom_to_binary" "erlang/binary_to_atom"})
+
+(defn rows [db]
+  ; [caller callee line syntactic-depth effective-depth-or--1]
+  (let [eff (into {} (map (fn [r] [(nth r 0) (nth r 1)]))
+                  (datom/q '[:find ?c ?d :where [?c :call/effective-loop-depth ?d]] db))]
+    (mapv (fn [r] (let [[c caller callee line d] (vec r)] [caller callee line d (get eff c -1)]))
+          (datom/q '[:find ?c ?caller ?callee ?line ?d
+                     :where [?c :call/caller-qualified ?caller] [?c :call/callee ?callee]
+                     [?c :call/line ?line] [?c :call/loop-depth ?d]] db))))
+
+;; ───────────────────────── the questions ─────────────────────────
+
+(def ENTRIES {"read" "reader/read-string" "compile" "compiler/compile" "emit" "native.scheme/emit"})
+
+;; Q1 the cone each phase can reach (resolved, cross-namespace call graph)
+(def CONES (into {} (map (fn [[k root]] [k (set (cons root (codebase/reachable-qualified db root)))]) ENTRIES)))
+(doseq [[k c] CONES] (println "cone" k (count c)))
+
+;; Q2 every call row, with loop depths and the cost coverage of its caller
+(def CALLS
+  (datom/q '[:find ?c ?caller ?callee ?line ?d
+             :where [?c :call/caller-qualified ?caller] [?c :call/callee ?callee]
+                    [?c :call/line ?line] [?c :call/loop-depth ?d]] db))
+(def EFF (into {} (map (fn [r] [(nth r 0) (nth r 1)])
+                   (datom/q '[:find ?c ?d :where [?c :call/effective-loop-depth ?d]] db))))
+(def RECURSIVE (into #{} (map (fn [r] (nth r 0))
+                 (datom/q '[:find ?caller :where [?c :call/cost-coverage "recursive"]
+                                                 [?c :call/caller-qualified ?caller]] db))))
+(println "recursive callers" (count RECURSIVE))
+
+(defn base [callee] (let [i (string/last-index-of callee "/")] (if (and i (not (string/starts-with? callee "erlang/")) (not (string/starts-with? callee "lists/")) (not (string/starts-with? callee "maps/"))) (subs callee (inc i)) callee)))
+(defn phase-of [caller] (string/join "," (keep (fn [[k c]] (when (contains? c caller) k)) (sort CONES))))
+
+;; Q3 a linear-cost callee inside a per-element loop (syntactic or inherited)
+(def IN-LOOP
+  (sort (keep (fn [r] (let [[c caller callee line d] (vec r) e (get EFF c d)]
+                        (when (and (contains? LINEAR (base callee)) (>= (max d e) 1) (not= "" (phase-of caller)))
+                          [(phase-of caller) caller (base callee) line d e]))) CALLS)))
+(show "linear callee inside a per-element loop, hot cones only" IN-LOOP)
+
+;; Q4 a linear-cost callee inside a recursive function (loop/recur or self-call)
+(def IN-REC
+  (sort (keep (fn [r] (let [[c caller callee line d] (vec r)]
+                        (when (and (contains? RECURSIVE caller) (contains? LINEAR (base callee)) (not= "" (phase-of caller)))
+                          [(phase-of caller) caller (base callee) line]))) CALLS)))
+(show "linear callee inside a recursive function, hot cones only" IN-REC)
+
+;; Q5 the most-called callees in each cone (static fan-in)
+(doseq [[k c] (sort CONES)]
+  (show (str "top callees, cone " k)
+        (take 30 (sort-by (fn [[n x]] (- x)) (frequencies (keep (fn [r] (when (contains? c (nth r 1)) (base (nth r 2)))) CALLS))))))
+
+;; Q6 recursive hot functions, by number of linear-cost calls inside them
+(show "recursive hot callers ranked by linear calls"
+      (take 40 (sort-by (fn [[n x]] (- x)) (frequencies (map (fn [r] (nth r 1)) IN-REC)))))
+
+;; Q7 require graph cycles in the closure (a cycle forces whole-closure rebuilds)
+(show "require cycles" (codebase/require-cycles db))
+(show "require edges" (sort (datom/q '[:find ?n ?d :where [?e :ns/name ?n] [?e :ns/requires ?d]] db)))

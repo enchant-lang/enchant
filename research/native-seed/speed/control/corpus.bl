@@ -1,0 +1,115 @@
+; Differential corpus for compiled control (workstream C). Executed on BEAM by
+; control.check for expected outcomes; check.bl also READS this file and
+; compiles each `(fn ...)` form with the SDK compiler for native emission.
+; Each entry: [name kind function calls]. kind :call applies the function to
+; each argument vector; kind :recv sends the one message to self first and
+; its receive (after 0) is emitted natively as a case on the parameter.
+; Only erlang remotes and special forms: the bare gsi host has no core/rt.
+(ns control.corpus)
+(def fixnum-max 2305843009213693951)
+(def cases
+ [["guards-int-kw-size" :call
+   (fn ([x] :when (and (int? x) (> x 0)) :pos)
+       ([x] :when (= x :k) :kw)
+       ([x] :when (= (tuple-size x) 2) :pair)
+       ([x] :other))
+   [[5] [-1] [0] [:k] [(tuple 1 2)] [(tuple 1)] [[1 2]] ["s"] [nil] [1.5] [] [1 2]]]
+  ["guards-predicates" :call
+   (fn ([x] :when (nil? x) :nil)
+       ([x] :when (true? x) :true)
+       ([x] :when (keyword? x) :kw)
+       ([x] :when (map? x) :map)
+       ([x] :when (vector? x) :vec)
+       ([x] :when (string? x) :str)
+       ([x] :when (float? x) :float)
+       ([x] :when (number? x) :num)
+       ([x] :when (list? x) :list)
+       ([x] :when (tuple? x) :tuple)
+       ([x] :other))
+   [[nil] [true] [false] [:a] [{:a 1}] [[1]] ["s"] [1.5] [3] [(list 1 2)] [(list)] [(tuple 1)]]]
+  ["guards-compare" :call
+   (fn ([a b] :when (< a b) :lt) ([a b] :when (= a b) :eq) ([a b] :when (not= a b) :ne) ([a b] :same))
+   [[1 2] [2 2] [3 1] [:a 1] [1 :a] ["a" "b"] [1 1.0] [[1] [1]] [1] [1 2 3]]]
+  ["guards-int-range" :call
+   (fn ([x] :when (and (int? x) (>= x 10) (<= x 20)) :in)
+       ([x] :when (and (int? x) (or (< x 10) (> x 20))) :out)
+       ([x] :when (or (= x 1.5) (= x :one)) :special)
+       ([x] :nonint))
+   [[10] [15] [20] [9] [21] [fixnum-max] [(erlang/* fixnum-max 4)] [1.5] [:one] ["x"]]]
+  ["guards-not-or" :call
+   (fn ([x] :when (not (nil? x)) :some) ([x] :none))
+   [[nil] [1] [false]]]
+  ["guards-raising" :call
+   (fn ([x y] :when (= (tuple-size x) y) :size)
+       ([x y] :when (> (rem x 3) y) :rem)
+       ([x y] :when (> (+ x y) 10) :big)
+       ([x y] :other))
+   [[(tuple 1 2) 1] [(tuple 2) 1] [5 1] [:a 1] [7 7] [7 :a] [1 1] ["s" "t"]]]
+  ["multi-arity" :call
+   (fn ([] :zero) ([x] [:one x]) ([x y] [:two x y]))
+   [[] [1] [1 2] [1 2 3]]]
+  ["variadic" :call
+   (fn [x & more] [x more])
+   [[1] [1 2 3] []]]
+  ["wildcards" :call
+   (fn [_ _] :ignored)
+   [[1 2] [1] []]]
+  ["same-width-clauses" :call
+   (fn ([a b] :when (= a b) [:same a]) ([a b] [:pair a b]))
+   [[1 1] [1 2] [(tuple 1) (tuple 1)] [1]]]
+  ["loop-sum" :call
+   (fn [n] (loop [i n acc 0] (if (erlang/=:= i 0) acc (recur (erlang/- i 1) (erlang/+ acc i)))))
+   [[0] [10] [100000]]]
+  ["loop-factorial-facts" :call
+   (fn [n] (loop [i n acc 1]
+            (if (erlang/is_integer i)
+             (if (erlang/is_integer acc) (if (erlang/=< i 1) acc (recur (erlang/- i 1) (erlang/* acc i))) :acc)
+             :not-int)))
+   [[1] [5] [25] [40] [:x] [1.5]]]
+  ["integer-overflow" :call
+   (fn [x] (let [a 2305843009213693951 b 1]
+            [(erlang/+ a b) (erlang/* a a) (erlang/- (erlang/- 0 a) 2) (erlang/< a (erlang/+ a b)) (erlang/=:= a x)]))
+   [[1] [fixnum-max]]]
+  ["integer-mixed" :call
+   (fn [x] (let [a 7] (if (erlang/< a x) [:lt (erlang/+ a x)] :ge)))
+   [[8] [7] [1.5] [100.5]]]
+  ["if-truthiness" :call
+   (fn [x] (if x :yes :no))
+   [[nil] [false] [true] [0] [(list)] [""] [:false]]]
+  ["if-nested" :call
+   (fn [x y] (if (if x y false) [:both x y] (if (erlang/is_integer x) :int :neither)))
+   [[1 2] [1 nil] [nil 2] [false false] [:a :b]]]
+  ["try-throw" :call
+   (fn [x] (try (throw x) (catch e [:caught e])))
+   [[1] [:a] [-5]]]
+  ["try-error" :call
+   (fn [x] (try (erlang/error x) (catch e :err)))
+   [[1] [:a]]]
+  ["try-finally" :call
+   (fn [x] (try (erlang/+ x 1) (finally :ignored)))
+   [[1] [:a]]]
+  ["recv-shapes" :recv
+   (fn [m] (receive [:a x] [:tag x]
+                    [:b [p q]] [:nested p q]
+                    {:k v :j 2} [:map v]
+                    {:s {:t w}} [:deep w]
+                    "str" :string
+                    42 :int
+                    nil :nil
+                    true :true
+                    :kw :keyword
+                    [a b c] [:three a b c]
+                    [] :empty
+                    (after 0 :nomatch)))
+   [(tuple :a 1) [:a 1] (tuple :a) (tuple :b (tuple 1 2)) (tuple :b [1 2]) [:b (tuple 1 2)] [:b [3 4]]
+    {:k 1 :j 2} {:k 1 :j 3} {:k nil :j 2} {:j 2} {:k 1 :j 2 :z 9} {:s {:t 5}} {:s {:u 5}} {:s 1}
+    "str" "other" 42 42.0 43 nil false true :kw :other (tuple 1 2 3) [1 2 3] (list 1 2 3)
+    (tuple) [] (list) 7]]
+  ["recv-guards" :recv
+   (fn [m] (receive [:n x] :when (int? x) [:int x]
+                    [:n x] :when (string? x) [:str x]
+                    [:n x] :when (= (tuple-size x) 2) [:pair x]
+                    [:n x] [:other x]
+                    _ :any
+                    (after 0 :nomatch)))
+   [(tuple :n 1) (tuple :n "s") (tuple :n (tuple :t 1)) (tuple :n :x) [:n 2] (tuple :m 1) 5]]])

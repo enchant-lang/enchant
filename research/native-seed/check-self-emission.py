@@ -26,7 +26,7 @@ HEADER = b";; BL native compiler. Generated from canonical BL source.\n"
 ENTRY = b"(native-main (native-command-line))\n"
 MARKER = "NATIVE_SELF_COMPILE 18 namespaces"
 HOST_SOURCES = ("host.scm", "host/host-values.scm", "host/host-leaves.scm",
-                "host/host-lazy.scm", "host/host-extra.scm", "host/host-compiler.scm")
+                "host/host-extra.scm", "host/host-compiler.scm", "host/native-memo.scm")
 
 
 def digest(path: Path) -> str:

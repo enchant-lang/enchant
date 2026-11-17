@@ -32,9 +32,11 @@ def main():
     original_bytes = manifest_path.read_bytes()
     original = json.loads(original_bytes)
     if (original.get("schema") != "bl.native.partitioned-closure" or original.get("version") != 1
-            or len(original.get("units", [])) != 18
-            or len({r["namespace"] for r in original["units"]}) != 18):
-        raise RuntimeError("expected the exact original eighteen-namespace parent")
+            or not 18 <= len(original.get("units", [])) <= 256
+            or len({r["namespace"] for r in original["units"]}) != len(original["units"])):
+        # The 18-namespace compiler closure, or one extended through
+        # update-closure.bl's declared closure additions.
+        raise RuntimeError("expected a partitioned compiler-closure parent (18..256 distinct namespaces)")
     if destination.exists():
         raise RuntimeError("snapshot destination must be new: " + str(destination))
 

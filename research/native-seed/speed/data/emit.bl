@@ -1,0 +1,167 @@
+; DATA workstream: compile pinned host modules and emit them exactly as the
+; AOT driver (native.chunks) would once they are closure members.
+;
+; Usage (pinned SDK, cwd = repository root):
+;   research/native-seed/run run research/native-seed/speed/data/emit.bl -- \
+;     PARTITION.json LEAVES.json OUT-DIR host.num=priv/host/num.bl=Elixir.BeamLisp.Num ...
+;
+; Each spec is NS=PATH=MODULE. The modules named by the specs lose their
+; registered leaves (the hard cutover), so every remote to MODULE/f/a links to
+; the compiled host.x/f cell, as chunks.bl links host.compiler-data. Remotes
+; that resolve neither to a leaf nor to a compiled definition are written to
+; OUT-DIR/unresolved.txt instead of aborting the run.
+;
+; One link rule is added here and requested from CLOSURE (chunks.bl): a pinned
+; host module names its own atom with (erlang/fun_info (fn [] nil) :module).
+; Natively the self module of a closure member is its :module, so that exact
+; shape (a fn literal and the literal :module) links to a constant tuple.
+(ns data.emit
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.eval :as ev] [native.scheme :as scheme] [clojure.string :as string]
+           [native.resolution :as resolution] [native.intrinsics :as intrinsics]
+           [js.build :as build] [bl.json :as json]))
+
+(def args (BeamLisp/argv))
+(def partition-path (nth args 0))
+(def leaves-path (nth args 1))
+(def out (nth args 2))
+(def specs
+ (mapv (fn [s] (let [[ns path module] (string/split s #"=")] {:ns ns :path path :module (keyword module)}))
+       (drop 3 args)))
+
+(def original (artifact/read-closure partition-path))
+
+(defn compile-unit [spec]
+ (let [prepared (build/prepare-ns (:path spec))
+       _ (assert (= (:ns spec) (:ns prepared)))
+       compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)]
+  (assoc compiled :source (:source prepared) :module (:module spec)
+         :base-module (BeamLisp.Emit/base_module_for (:ns spec)))))
+(def added (BeamLisp.Env/isolated (fn [] (mapv compile-unit specs))))
+(def closure
+ (assoc original
+  :units (reduce (fn [m u] (assoc m (:ns u) u)) (:units original) added)
+  :order (vec (concat (:order original) (map :ns added)))))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+
+(def own-prefixes (set (map #(str (erlang/atom_to_binary (:module %)) "/") specs)))
+(defn own-key? [key] (some #(string/starts-with? key %) own-prefixes))
+(def all-leaves (set (get (json/decode (File/read! leaves-path)) "registered_leaves")))
+(def leaves (set (remove own-key? all-leaves)))
+(def table (into {} (map (fn [u] [(:ns u) (set (keep :name (:defs u)))]) units)))
+(def resolution-ledger (resolution/build closure))
+(def by-module
+ (merge (into {} (mapcat (fn [u] [[(:module u) (:ns u)] [(:base-module u) (:ns u)]]) units))
+        {:Elixir.BeamLisp.CompilerData "host.compiler-data"
+         :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta"}
+        (into {} (map (fn [s] [(:module s) (:ns s)]) specs))))
+(def module-of-ns (into {} (map (fn [s] [(:ns s) (:module s)]) specs)))
+(def stub-modules (set (mapcat (fn [ns] [(BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))))
+(def definitions
+ (into {} (mapcat (fn [u] (keep (fn [d] (when (:name d) [[(:ns u) (:name d)] d])) (:defs u))) units)))
+(def definition-arities
+ (into {} (keep (fn [[slot d]] (when (= :fn (:kind d)) [slot (bootstrap/declaration-arities (:form d))]))
+                definitions)))
+(def unresolved (atom #{}))
+
+(defn remote-link-shape [ns logical mode arity]
+ (let [d (get definitions [ns logical]) arities (get definition-arities [ns logical])]
+  (cond
+   (= mode "rest-list-clause") (if (some? (:variadic arities)) "variadic" "dynamic")
+   (contains? (set (:fixed arities)) arity) "arity"
+   (some? d) "generic"
+   :else "dynamic")))
+(defn remote-decision [n]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
+       logical (if (string/ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
+       key (str (erlang/atom_to_binary m) "/" f "/" a)]
+  (cond
+   (contains? leaves key) ["leaf" key]
+   (and (contains? by-module m) (contains? (get table (get by-module m)) logical))
+    (let [ns (get by-module m) mode (if (string/ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
+     ["compiled" key ns logical mode (remote-link-shape ns logical mode a)])
+   (contains? stub-modules m) ["excluded-namespace" key]
+   :else (do (swap! unresolved conj key) ["unresolved" key]))))
+(defn- direct-call [target]
+ {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- generic-call [target]
+ {:inline? true
+  :call (fn [operands]
+         (let [spread (string/join "" (map #(str " " %) operands))]
+          (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
+               ") (bl-invoke linked (list" spread "))))")))})
+(defn closure-literal? [f]
+ (or (= :fn (:op f))
+     (some? (BeamLisp.CompilerData/self_application_parts f))))
+(defn self-module-call [ns n]
+ (let [[f k] (:args n)]
+  (when (and (= :erlang (:mod n)) (= :fun_info (:fun n)) (= 2 (count (:args n)))
+             (closure-literal? f) (= :lit (:op k)) (= :module (:val k)) (contains? module-of-ns ns))
+   {:inline? true
+    :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
+                       (scheme/text (erlang/atom_to_binary (get module-of-ns ns))) "))"))})))
+(defn remote-link [ns n]
+ (or (self-module-call ns n)
+  (if-let [template (intrinsics/remote-template n)]
+   {:inline? false :call template}
+   (let [decision (remote-decision n)]
+    (case (first decision)
+     "leaf" (direct-call (bootstrap/leaf-binding-name (second decision)))
+     "compiled"
+      (let [[_ _ ns logical _ shape] decision]
+       (case shape
+        "arity" (direct-call (bootstrap/arity-binding-name ns logical (count (:args n))))
+        "variadic" (direct-call (bootstrap/variadic-binding-name ns logical))
+        "generic" (generic-call (bootstrap/binding-name ns logical))
+        nil))
+     nil)))))
+(defn checked-context [ns]
+ (let [base (ev/context ns)]
+  (assoc base
+   :aot-link {:remote (fn [n] (remote-link ns n))}
+   :global-resolver
+   (fn [n]
+    (let [[_ _ _ _ _ sel-ns sel-name] (resolution/global-decision resolution-ledger table n)]
+     (bootstrap/global-binding-name sel-ns sel-name))))))
+(defn link-definition [ns name kind arities]
+ (let [binding (bootstrap/binding-name ns name) global (bootstrap/global-binding-name ns name)
+       fixed (if (= :fn kind) (:fixed arities) [])
+       variadic? (and (= :fn kind) (some? (:variadic arities)))
+       cells (concat (map #(bootstrap/arity-binding-name ns name %) fixed)
+                     (when variadic? [(bootstrap/variadic-binding-name ns name)]) [global])]
+  (str (string/join "" (map #(str "(define " % " #f)\n") cells))
+       "(native-link! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " binding " value)"
+       (string/join "" (map #(str " (set! " (bootstrap/arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
+       (if variadic? (str " (set! " (bootstrap/variadic-binding-name ns name) " (native-variadic-entry value "
+                          (scheme/text (str ns "/" name)) "))") "")
+       ") (lambda (value) (set! " global " value)))\n")))
+(defn emit-definition [u d]
+ (let [ns (:ns u) value (scheme/emit (:node d) (checked-context ns))]
+  (if (:name d)
+   (let [binding (bootstrap/binding-name ns (:name d))
+         arities (when (= :fn (:kind d)) (bootstrap/declaration-arities (:form d)))]
+    (str "(define " binding " " value ")\n"
+         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
+         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
+         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
+         (when arities
+          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+               (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))
+         (link-definition ns (:name d) (:kind d) arities)))
+   (str value "\n"))))
+
+(def functions
+ (string/join "" (for [u added d (:defs u) :when (= :fn (:kind d))] (emit-definition u d))))
+(def initializers
+ (string/join "" (for [u added d (:defs u) :when (not= :fn (:kind d))] (emit-definition u d))))
+(def arity-table
+ (string/join "\n" (for [u added d (:defs u) :when (and (:name d) (= :fn (:kind d)))]
+  (let [a (get definition-arities [(:ns u) (:name d)])]
+   (str (:ns u) "/" (:name d) " " (pr-str (:fixed a)) " " (pr-str (:variadic a)) " " (if (:private? d) "private" "public"))))))
+(File/mkdir_p! out)
+(File/write! (str out "/data.scm") (str ";; generated by speed/data/emit.bl\n" functions initializers))
+(File/write! (str out "/unresolved.txt") (string/join "\n" (sort @unresolved)))
+(File/write! (str out "/definitions.txt") arity-table)
+(println (str "DATA_EMITTED " (string/join "," (map :ns added)) " defs="
+              (reduce + (map #(count (:defs %)) added)) " unresolved=" (count @unresolved)))
+(doseq [k (sort @unresolved)] (println (str "DATA_UNRESOLVED " k)))

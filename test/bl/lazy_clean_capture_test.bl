@@ -1,117 +1,106 @@
-; lazy_clean_capture_test.bl — a lazy cell must not re-walk a big clean value it
-; captures through a SMALL wrapper, and the memo must not thrash past 16 values.
+; lazy_clean_capture_test.bl — a lazy cell costs O(1) BL work whatever it
+; captures or publishes, and cycles are still detected, at force time.
 ;
-; Every lazy cell walks its thunk's captured environment for memo resources
-; (`BeamLisp.LazyMemo/dependencies`). A big immutable value proven clean is
-; remembered by identity, so re-capturing it is O(1). Measured in an app render:
-; 40 small wrappers `{:snap snap :i i}` around ONE snapshot cost 327 ms (the
-; wrapper is not "big", so the snapshot inside it was re-walked every time), and
-; 18 rotating big values cost 810 ms (a 16-entry most-recent list thrashes).
-;
-; The probe is `:bl_deps_walked` — the count of big values actually walked, which
-; the host bumps once per real walk. Reductions/wall-clock would be flaky.
+; Big-O item M (research/native-seed/speed/native-speed.bl.org). A lazy cell
+; used to walk its thunk's captured environment at create, and its value at
+; publish, to feed the NIF's `would_cycle` edges; a bounded identity memo of
+; "clean" big values made re-captures cheap, but ANF nodes (fewer than eight
+; keys) never qualified, so nested emission re-walked every subtree at every
+; level. The walk, the memo and the edges are gone. This file asserts the
+; contract that replaced them:
+;   * creating or publishing a cell records no memo-graph edge (so a data
+;     cycle that the old walk refused is accepted), and the walk is gone;
+;   * a value aliasing its own node is still terminal `:cyclic_memo`;
+;   * a re-entrant force is still terminal `:recursive_force`;
+;   * two processes forcing each other's running cells raise `:recursive_force`
+;     instead of waiting forever;
+;   * a value that merely embeds its own node is ordinary data.
 ;
 ; Run: ./bin/bl test test/bl/lazy_clean_capture_test.bl
 
 (ns lazy-clean-capture-test)
 
-; Test the actual NIF-backed host. scripts/check-runtime-hosts stages edited
-; hosts in a fresh image, so this needs neither a probe compile nor a new floor.
-(defn- P [f & args] (erlang/apply :Elixir.BeamLisp.LazyMemo f args))
+(defn- force-reason [lazy]
+  (try (do (BeamLisp.LazySeq/force lazy) :no-error)
+       (catch BeamLisp.LazySeq.ForceError e (erlang/map_get :reason e))))
 
-(defn- big-map [tag]
-  (into {} (map (fn [i] [(str tag "-" i) {"kind" "k" "n" i}]) (range 200))))
+;; If create walked the thunk's capture, `inner`'s cell would hold an edge to
+;; `outer`'s resource, and publishing `outer` with a value holding `inner`
+;; would close a cycle in the NIF graph and answer `:cycle`. With no walk, the
+;; graph has no edges and the publication is accepted.
+(deftest creating-a-cell-records-no-edges-for-its-capture
+  (let [outer (BeamLisp.LazySeq/new (fn [] :outer))
+        inner (BeamLisp.LazySeq/new (fn [] (list outer)))
+        resource (erlang/map_get :resource outer)
+        current (BeamLisp.LazyMemo/read_versioned resource)]
+    (is (= :ok (BeamLisp.LazyMemo/exchange_version resource (erlang/element 1 current)
+                 (tuple :completed (list inner)) (list (erlang/map_get :resource inner)))))
+    (is (erlang/=:= (list inner) (BeamLisp.LazySeq/force outer)))))
 
-(defn- walks [] (Process/get :bl_deps_walked 0))
+(deftest publishing-records-no-edges-for-the-value
+  ;; `a` publishes a value holding `b`; then `b` publishes a value holding `a`.
+  ;; The old publish walk refused the second as a retained cycle.
+  (let [holder (atom nil)
+        a (BeamLisp.LazySeq/new (fn [] (list :a @holder)))
+        b (BeamLisp.LazySeq/new (fn [] (list :b a)))]
+    (reset! holder b)
+    (is (erlang/=:= b (second (BeamLisp.LazySeq/force a))))
+    (is (erlang/=:= a (second (BeamLisp.LazySeq/force b))))))
 
-(defn- capture-lazily
-  "What a lazy cell creation does to its thunk: split the captured env —
-   here exactly `[v]`, the one value the thunk closes over."
-  [v]
-  (P :deps_env (list v) () ()))
+(deftest the-walk-and-the-clean-value-memo-are-gone
+  (doseq [[f n] [[:dependencies 1] [:deps_walk 6] [:deps_env 3] [:deps_clean_hit? 2]
+                 [:deps_clean_remember! 1] [:plain! 1]]]
+    (is (not (erlang/function_exported :Elixir.BeamLisp.LazyMemo f n)) (str f "/" n))))
 
-(deftest small-wrappers-around-one-big-value-walk-it-once
-  (let [snap {:world (big-map "w") :now 1}
-        before (walks)]
-    (doseq [i (range 40)] (capture-lazily {:snap snap :i i}))
-    (is (<= (- (walks) before) 1)
-        "the big world inside 40 distinct small wrappers is walked at most once")))
+(deftest a-value-aliasing-its-own-node-is-cyclic
+  (let [holder (atom nil)
+        self (BeamLisp.LazySeq/new (fn [] @holder))]
+    (reset! holder self)
+    (is (= :cyclic_memo (force-reason self)))
+    (is (= (tuple :terminal :cyclic_memo) (BeamLisp.LazySeq/memo_state self))))
+  (let [holder (atom {})
+        left (BeamLisp.LazySeq/new (fn [] (:right @holder)))
+        right (BeamLisp.LazySeq/new (fn [] (:left @holder)))]
+    (reset! holder {:left left :right right})
+    (is (erlang/=:= right (BeamLisp.LazySeq/force left)))
+    (is (= :cyclic_memo (force-reason right)) "a chain of completed aliases closes the cycle")))
 
-(deftest a-four-key-world-holding-a-big-map-walks-it-once
-  (let [w {"entities" (big-map "e") "clock" {} "active" {} "faults" {}}
-        before (walks)]
-    (doseq [_ (range 40)] (capture-lazily w))
-    (is (<= (- (walks) before) 1)
-        "a small top-level map is not 'big', but the big map inside it is remembered")))
+(deftest a-re-entrant-force-is-recursive
+  (let [holder (atom nil)
+        self (BeamLisp.LazySeq/new (fn [] (BeamLisp.LazySeq/force @holder)))]
+    (reset! holder self)
+    (is (= :recursive_force (force-reason self)))
+    (is (= (tuple :terminal :recursive_force) (BeamLisp.LazySeq/memo_state self)))))
 
-(deftest more-than-sixteen-rotating-values-do-not-thrash
-  (let [bigs (mapv (fn [i] (big-map (str "r" i))) (range 24))
-        _ (doseq [b bigs] (capture-lazily b))
-        before (walks)]
-    (doseq [_ (range 3)] (doseq [b bigs] (capture-lazily b)))
-    (is (= 0 (- (walks) before))
-        "after one pass, every one of 24 live big values is already remembered")))
+(deftest two-processes-forcing-each-other-do-not-deadlock
+  (let [holder (atom {})
+        parent (erlang/self)
+        step (fn [mine theirs]
+               (fn []
+                 (erlang/send parent (tuple :running mine (erlang/self)))
+                 (receive :go :ok (after 5000 :timeout))
+                 (BeamLisp.LazySeq/force (get @holder theirs))))
+        a (BeamLisp.LazySeq/new (step :a :b))
+        b (BeamLisp.LazySeq/new (step :b :a))
+        run (fn [l] (fn [] [(try (BeamLisp.LazySeq/force l) :no-error
+                                 (catch BeamLisp.LazySeq.ForceError e (erlang/map_get :reason e)))
+                            (erlang/get :bl_lazy_waits_on)]))]
+    (reset! holder {:a a :b b})
+    (let [ta (Task/async (run a))
+          tb (Task/async (run b))
+          pa (receive [:running :a pid] pid (after 5000 nil))
+          pb (receive [:running :b pid] pid (after 5000 nil))]
+      (erlang/send pa :go)
+      (erlang/send pb :go)
+      (is (= [:recursive_force :undefined] (Task/await ta 10000))
+          "the recursive force is raised and no wait-for entry is left behind")
+      (is (= [:recursive_force :undefined] (Task/await tb 10000))))))
 
-(deftest crossing-the-cache-bound-keeps-the-new-working-set-warm
-  ;; Fill to the bound first: a fresh test VM otherwise hides a whole-cache
-  ;; generation flip when a live render starts near the previous limit.
-  (doseq [i (range (P :deps_clean_max))]
-    (P :deps_clean_remember! {:filler i}))
-  (let [bigs (mapv (fn [i] (big-map (str "boundary" i))) (range 24))]
-    (doseq [b bigs] (capture-lazily b))
-    (let [before (walks)]
-      (doseq [_ (range 3)] (doseq [b bigs] (capture-lazily b)))
-      (is (= 0 (- (walks) before)))))
-  (is (= (P :deps_clean_max) (Process/get :bl_deps_clean_n)))
-  (is (= (P :deps_clean_max) (queue/len (Process/get :bl_deps_clean_fifo)))))
-
-(deftest a-hidden-lazy-dependency-is-still-recorded
-  (let [resource (BeamLisp.LazyMemo/create_ref 1)
-        holder (assoc (big-map "dirty") :resource resource)
-        id (BeamLisp.LazyMemo/id resource)]
-    (doseq [_ (range 3)]
-      (is (= [id] (mapv BeamLisp.LazyMemo/id
-                          (BeamLisp.LazyMemo/dependencies {:holder holder})))))
-    (is (not (P :deps_clean_hit? holder nil)))))
-
-(deftest an-already-seen-sibling-cannot-make-a-dirty-value-clean
-  (let [resource (BeamLisp.LazyMemo/create_ref 1)
-        id (BeamLisp.LazyMemo/id resource)
-        holder (assoc (big-map "sibling") :resource resource)]
-    ;; The resource was already seen in a sibling. The isolated cleanliness
-    ;; check must discover it again, then merge/deduplicate it in the outer walk.
-    (is (= (list resource)
-           (P :deps_walk :inspect holder (list nil) (MapSet/new (list id))
-                         (MapSet/new) (list resource))))
-    (is (not (P :deps_clean_hit? holder nil)))
-    (is (= (list resource) (BeamLisp.LazyMemo/dependencies holder)))))
-
-(deftest plain-refuses-to-hide-a-resource
-  (let [resource (BeamLisp.LazyMemo/create_ref 1)
-        value {:resource resource}]
-    (is (= :refused (try (P :plain! value) :accepted (catch _ :refused))))
-    (is (not (P :deps_clean_hit? value nil)))
-    (is (= (list resource) (BeamLisp.LazyMemo/dependencies value)))))
-
-(deftest plain-declares-a-value-clean
-  (let [v {"entities" (big-map "p") "x" 1}
-        v2 (P :plain! v)
-        before (walks)]
-    (is (identical? v v2) "plain! returns its argument")
-    (doseq [_ (range 10)] (capture-lazily {:w v :i 1}))
-    (is (= 0 (- (walks) before)) "a declared-plain value is never walked")))
-
-
-(deftest tagged-public-maps-cannot-crash-dependency-discovery-or-hide-resources
-  (let [resource (BeamLisp.LazyMemo/create_ref :held)
-        id (BeamLisp.LazyMemo/id resource)
-        forged (maps/put :__struct__ :Elixir.BeamLisp.LazySeq
-                 {:constructor-frame :forged :constructor-id 1})]
-    (is (= (list) (BeamLisp.LazyMemo/dependencies forged)))
-    ;; This is how compiler diagnostics and ordinary lazy maps carry data.
-    (is (erlang/=:= forged (first (map identity (list forged)))))
-    (doseq [value [(Map/put forged :hidden resource)
-                  (maps/put :__struct__ :Elixir.BeamLisp.LazySeq {:resource nil :metadata resource})
-                  (maps/put :__struct__ :Elixir.BeamLisp.LazySeq {:resource (erlang/make_ref) :metadata resource})
-                  (maps/put :__struct__ :Elixir.BeamLisp.LazySeq {:resource resource :metadata nil :extra resource})]]
-      (is (= [id] (mapv BeamLisp.LazyMemo/id (BeamLisp.LazyMemo/dependencies value)))))))
+(deftest a-value-embedding-its-own-node-is-data
+  (let [holder (atom nil)
+        ones (BeamLisp.LazySeq/new (fn [] (list 1 @holder)))]
+    (reset! holder ones)
+    (let [v (BeamLisp.LazySeq/force ones)]
+      (is (= 1 (first v)))
+      (is (erlang/=:= ones (second v))))
+    (is (= 1 (first (second (BeamLisp.LazySeq/force ones)))) "never refused")))

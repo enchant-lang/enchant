@@ -1,0 +1,44 @@
+; Emission size/time of the real compiler closure: new emitter vs the frozen
+; reference (read-only artifact). Prints totals and the largest definitions
+; that contain case/try (the only clause chains in the compiler's own ANF).
+(ns control.size
+ (:require [native.artifact :as artifact] [native.scheme :as scheme] [native.eval :as ev]
+           [control.reference :as reference]))
+(def path "/home/othman/code/undefine/beam-lisp--execution-protocol/research/native-seed/out/compiler-native-owner/partition.json")
+(def closure (artifact/read-closure path))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(defn- has-op? [n ops]
+ (cond (vector? n) (some #(has-op? % ops) n)
+       (erlang/is_list n) (some #(has-op? % ops) n)
+       (erlang/is_map n) (or (contains? ops (:op n))
+                             (and (not= :lit (:op n)) (some #(has-op? % ops) (maps/values (dissoc n :ann)))))
+       :else false))
+(defn- try-emit [f node options] (try (f node options) (catch e nil)))
+(defn- timed [thunk]
+ (let [t0 (erlang/monotonic_time :microsecond) v (thunk)] [v (- (erlang/monotonic_time :microsecond) t0)]))
+(def rows (atom []))
+(def time-new (atom 0))
+(def time-old (atom 0))
+(doseq [u units]
+ (let [options (ev/context (:ns u))]
+  (doseq [d (:defs u)]
+   (when (:node d)
+    (let [[new tn] (timed #(try-emit scheme/emit (:node d) options))
+          [old to] (timed #(try-emit reference/emit (:node d) options))]
+     (swap! time-new + tn) (swap! time-old + to)
+     (swap! rows conj {:name (str (:ns u) "/" (:name d)) :new (when new (erlang/byte_size new))
+                       :old (when old (erlang/byte_size old)) :clauses? (has-op? (:node d) #{:case :try})}))))))
+(def ok (filter #(and (:new %) (:old %)) @rows))
+(println "CONTROL_SIZE definitions" (count @rows) "emitted-both" (count ok)
+         "refused-new" (count (filter #(nil? (:new %)) @rows)) "refused-old" (count (filter #(nil? (:old %)) @rows)))
+(println "CONTROL_SIZE total-old" (reduce + (map :old ok)) "total-new" (reduce + (map :new ok)))
+(println "CONTROL_SIZE emit-us old" @time-old "new" @time-new)
+(doseq [r (take 6 (sort-by #(- (:old %)) (filter :clauses? ok)))]
+ (println "CONTROL_SIZE clause-def" (:name r) "old" (:old r) "new" (:new r)))
+(doseq [r (take 4 (sort-by #(- (:old %) (:new %)) ok))]
+ (println "CONTROL_SIZE largest-growth" (:name r) "old" (:old r) "new" (:new r)))
+; Whole-closure emission time, alternating passes; minimum of three each.
+(def nodes (vec (mapcat (fn [u] (let [o (ev/context (:ns u))] (keep #(when (:node %) [(:node %) o]) (:defs u)))) units)))
+(defn- pass [f] (second (timed (fn [] (doseq [[n o] nodes] (f n o))))))
+(def samples (vec (for [_ (range 3)] [(pass reference/emit) (pass scheme/emit)])))
+(println "CONTROL_SIZE pass-ms old" (quot (apply min (map first samples)) 1000) "new" (quot (apply min (map second samples)) 1000))

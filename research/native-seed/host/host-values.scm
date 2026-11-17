@@ -9,7 +9,12 @@
  (cond ((string=? name "nil") bl-nil) ((string=? name "true") #t) ((string=? name "false") #f)
   (else (native-key-intern name)))))
 (define native-opaque-structs (make-table test: eq? weak-keys: #t))
+;; True once any non-vector value has been registered as an opaque struct.
+;; Until then a struct-module query on a non-vector is exactly bl-nil without
+;; a weak-table lookup (today only 7-slot reference vectors are registered).
+(define native-opaque-nonvector-structs? #f)
 (define (native-register-struct! value module fields-reader)
+ (if (not (vector? value)) (set! native-opaque-nonvector-structs? #t))
  (table-set! native-opaque-structs value (cons module fields-reader)) value)
 (define (native-opaque-struct? value) (if (table-ref native-opaque-structs value #f) #t #f))
 (define native-host-callables (make-table test: eq? weak-keys: #t))
@@ -26,21 +31,80 @@
     native-opaque-counter))))
 (define (native-list? x)
  (let loop ((p x)) (cond ((null? p) #t) ((pair? p) (loop (cdr p))) (else #f))))
+;; Gambit 4.9.5 symbol->string returns the symbol's own interned name string
+;; without copying ((eq? (symbol->string s) (symbol->string s)) => #t). Host
+;; code only READS that string; it is never mutated or published by itself.
+(define (native-colon-symbol? x)
+ (let ((s (symbol->string x))) (and (fx> (string-length s) 0) (char=? (string-ref s 0) #\:))))
+;; Keywords are colon symbols, or interned UTF16-fragment keyword wrappers.
 (define (native-keyword? x)
- (and (symbol? x) (let ((s (symbol->string x)))
-   (and (> (string-length s) 0) (char=? (string-ref s 0) #\:)))))
+ (if (symbol? x) (native-colon-symbol? x) (bl-tag? x 'utf16-keyword)))
 (define (native-compare-number a b) (cond ((< a b) -1) ((> a b) 1) (else 0)))
-(define (native-compare-string a b) (cond ((string<? a b) -1) ((string>? a b) 1) (else 0)))
+;; Normal Scheme strings contain Unicode scalars, so scalar indexing can
+;; compare their UTF16 order without allocating code-unit lists. The start
+;; offsets let keyword names be compared inside their symbol strings (after
+;; the shared colon) without a substring. Surrogate fragment wrappers retain
+;; the full unit-list path in native-compare-string.
+(define (native-scalar-string-compare-from a a-start b b-start)
+ (let ((a-size (string-length a)) (b-size (string-length b)))
+  (let loop ((i a-start) (j b-start))
+   (cond ((fx= i a-size) (if (fx= j b-size) 0 -1))
+    ((fx= j b-size) 1)
+    (else
+     (let ((a-code (char->integer (string-ref a i)))
+           (b-code (char->integer (string-ref b j))))
+      (cond ((fx= a-code b-code) (loop (fx+ i 1) (fx+ j 1)))
+       ;; Both supplementary scalars have the same ordering as their UTF16
+       ;; surrogate pairs; two BMP scalars compare directly as well.
+       ((or (and (fx< a-code 65536) (fx< b-code 65536))
+            (and (fx>= a-code 65536) (fx>= b-code 65536)))
+        (if (fx< a-code b-code) -1 1))
+       (else
+        (let ((a-unit (if (fx< a-code 65536) a-code (fx+ 55296 (fxquotient (fx- a-code 65536) 1024))))
+              (b-unit (if (fx< b-code 65536) b-code (fx+ 55296 (fxquotient (fx- b-code 65536) 1024)))))
+         ;; A normal BMP scalar cannot equal a high surrogate, so this
+         ;; mixed-width comparison decides at the first UTF16 unit.
+         (if (fx< a-unit b-unit) -1 1))))))))))
+(define (native-compare-string a b)
+ (cond ((eq? a b) 0)
+  ((and (string? a) (string? b)) (native-scalar-string-compare-from a 0 b 0))
+  (else (native-unit-compare (native-utf16-units a) (native-utf16-units b)))))
+;; Erlang term-order class. One type dispatch instead of up to ten tag tests;
+;; the classes and their numbering are exactly the previous cond's.
 (define (native-key-rank x)
- (cond ((and (number? x) (exact? x) (integer? x)) 0)
-       ((bl-tag? x 'float) 1)
-       ((or (boolean? x) (bl-is-nil x) (native-keyword? x)) 2)
-       ((bl-tag? x 'tuple) 3) ((bl-tag? x 'map) 4)
-       ((bl-tag? x 'vec) 5) ((bl-tag? x 'set) 6)
-       ((null? x) 7) ((pair? x) 8) ((native-string? x) 9) (else 10)))
+ (cond ((symbol? x) (if (native-colon-symbol? x) 2 10))
+       ((vector? x)
+        (cond ((eq? x bl-nil) 2)
+         ((fx= (vector-length x) 2)
+          (case (vector-ref x 0)
+           ((float) 1) ((tuple) 3) ((map) 4) ((vec) 5) ((set) 6)
+           ((utf16-keyword) 2) ((utf16-string) 9) (else 10)))
+         (else 10)))
+       ((pair? x) 8) ((null? x) 7) ((string? x) 9) ((boolean? x) 2)
+       ((and (number? x) (exact? x) (integer? x)) 0)
+       (else 10)))
+;; Interned Scheme symbol names are immutable. Reuse their decoded BL atom
+;; spelling without allocating a colon-stripping substring on every call.
+;; Weak keys keep this host memo from retaining unused atoms.
+(define native-symbol-atom-names (make-table test: eq? weak-keys: #t))
 (define (native-atom-name x)
- (cond ((bl-is-nil x) "nil") ((eq? x #t) "true") ((eq? x #f) "false")
+ (cond ((symbol? x)
+        (let ((cached (table-ref native-symbol-atom-names x #f)))
+         (or cached
+          (let* ((s (symbol->string x)) (name (substring s 1 (string-length s))))
+           (table-set! native-symbol-atom-names x name) name))))
+       ((bl-tag? x 'utf16-keyword) (vector-ref x 1))
+       ((bl-is-nil x) "nil") ((eq? x #t) "true") ((eq? x #f) "false")
        (else (substring (symbol->string x) 1 (string-length (symbol->string x))))))
+;; Two term-order atoms (nil/true/false/keyword). Scalar spellings compare in
+;; place: a symbol's name starts after its colon, booleans/nil use literals.
+(define (native-scalar-atom-text x)
+ (cond ((symbol? x) (symbol->string x)) ((eq? x #t) "true") ((eq? x #f) "false") (else "nil")))
+(define (native-compare-atoms a b)
+ (if (or (bl-tag? a 'utf16-keyword) (bl-tag? b 'utf16-keyword))
+  (native-compare-string (native-atom-name a) (native-atom-name b))
+  (native-scalar-string-compare-from (native-scalar-atom-text a) (if (symbol? a) 1 0)
+                                     (native-scalar-atom-text b) (if (symbol? b) 1 0))))
 (define (native-compare-lists a b)
  (cond ((null? a) (if (null? b) 0 -1)) ((null? b) 1)
        ((and (pair? a) (pair? b))
@@ -57,22 +121,34 @@
     ((= index b-size) 1)
     (else (let ((order (bl-key-compare (vector-ref a-items index) (vector-ref b-items index))))
      (if (= order 0) (loop (+ index 1)) order)))))))
+;; Same-kind cases first, in observed frequency order; each returns exactly
+;; what the ranked comparison returns for that pair. Everything else ranks.
 (define (bl-key-compare a b)
- (if (eq? a b) 0
-  (let ((ra (native-key-rank a)) (rb (native-key-rank b)))
-   (if (not (= ra rb)) (native-compare-number ra rb)
-    (case ra
-     ((0) (native-compare-number a b))
-     ((1) (native-compare-number (vector-ref a 1) (vector-ref b 1)))
-     ((2) (native-compare-string (native-atom-name a) (native-atom-name b)))
-     ((3) (native-compare-tuples a b))
-     ((5) (native-compare-lists (bl-items a) (bl-items b)))
-     ((4) (native-compare-lists (native-map-pairs a) (native-map-pairs b)))
-     ((6) (native-compare-lists (native-set-items a) (native-set-items b)))
-     ((7) 0) ((8) (native-compare-lists a b))
-     ((9) (native-compare-string a b))
-     (else (native-compare-number (native-opaque-id a) (native-opaque-id b))))))))
-(define (bl-key-equal? a b) (= (bl-key-compare a b) 0))
+ (cond ((eq? a b) 0)
+  ((symbol? a)
+   (if (and (symbol? b) (native-colon-symbol? a) (native-colon-symbol? b))
+    (native-scalar-string-compare-from (symbol->string a) 1 (symbol->string b) 1)
+    (native-key-compare-ranked a b)))
+  ((string? a) (if (string? b) (native-scalar-string-compare-from a 0 b 0) (native-key-compare-ranked a b)))
+  ((fixnum? a) (if (fixnum? b) (cond ((fx< a b) -1) ((fx< b a) 1) (else 0)) (native-key-compare-ranked a b)))
+  ((pair? a) (cond ((pair? b) (native-compare-lists a b)) ((null? b) 1) (else (native-key-compare-ranked a b))))
+  ((null? a) (if (pair? b) -1 (native-key-compare-ranked a b)))
+  (else (native-key-compare-ranked a b))))
+(define (native-key-compare-ranked a b)
+ (let ((ra (native-key-rank a)) (rb (native-key-rank b)))
+  (if (not (fx= ra rb)) (if (fx< ra rb) -1 1)
+   (case ra
+    ((0) (native-compare-number a b))
+    ((1) (native-compare-number (vector-ref a 1) (vector-ref b 1)))
+    ((2) (native-compare-atoms a b))
+    ((3) (native-compare-tuples a b))
+    ((5) (native-compare-lists (bl-items a) (bl-items b)))
+    ((4) (native-compare-lists (native-map-pairs a) (native-map-pairs b)))
+    ((6) (native-compare-lists (native-set-items a) (native-set-items b)))
+    ((7) 0) ((8) (native-compare-lists a b))
+    ((9) (native-compare-string a b))
+    (else (native-compare-number (native-opaque-id a) (native-opaque-id b)))))))
+(define (bl-key-equal? a b) (or (eq? a b) (eqv? (bl-key-compare a b) 0)))
 
 ;; Immutable small maps use sorted flat entries through16 keys; larger maps
 ;; use the existing persistent AVL nodes. Old alist and pmap-v1 inputs remain
@@ -146,22 +222,39 @@
       (native-tree-remove (native-right n) (vector-ref r 0))))))))))
 (define (native-tree-pairs n tail)
  (if n (native-tree-pairs (native-left n)
-   (cons (bl-tuple (list (vector-ref n 0) (vector-ref n 1))) (native-tree-pairs (native-right n) tail))) tail))
+   (cons (vector 'tuple (vector (vector-ref n 0) (vector-ref n 1))) (native-tree-pairs (native-right n) tail))) tail))
 ;; A nonnegative search result is the existing row. A negative result
 ;; encodes insertion position as -(position+1), without allocating a result pair.
 ;; Identity hits avoid all semantic comparisons; misses use the SAME exact key
-;; comparator as AVL storage. Entries stay sorted, so enumeration needs no sort.
+;; comparator as AVL storage. Entries stay strictly sorted by that total order.
+;; A scalar key (integer, float, atom, (), text) compares against any entry
+;; without side effects, so bisection finds exactly the row a left-to-right
+;; scan finds. Composite/opaque keys keep the scan: comparing them may assign
+;; lazy opaque ids, whose order must stay that of the former comparison
+;; sequence. Enumeration needs no sort.
+(define (native-scalar-key? key)
+ (let ((rank (native-key-rank key))) (or (fx<= rank 2) (fx= rank 7) (fx= rank 9))))
 (define (native-small-map-search storage key)
- (let ((entries (vector-ref storage 1)) (count (vector-ref storage 2)))
-  (let identity ((index 0))
-   (cond ((= index count)
-          (let ordered ((index 0))
-           (if (= index count) (- -1 index)
-            (let ((order (bl-key-compare key (vector-ref entries (* 2 index)))))
-             (cond ((= order 0) index) ((< order 0) (- -1 index))
-                   (else (ordered (+ index 1))))))))
-         ((eq? key (vector-ref entries (* 2 index))) index)
-         (else (identity (+ index 1)))))))
+ (let* ((entries (vector-ref storage 1)) (count (vector-ref storage 2))
+        (hit (if (string? key) -1
+              (let identity ((index 0))
+               (cond ((fx= index count) -1)
+                ((eq? key (vector-ref entries (fx* 2 index))) index)
+                (else (identity (fx+ index 1))))))))
+  (cond ((fx>= hit 0) hit)
+   ((native-scalar-key? key)
+    (let ordered ((low 0) (high count))
+     (if (fx= low high) (fx- -1 low)
+      (let* ((middle (fxquotient (fx+ low high) 2))
+             (order (bl-key-compare key (vector-ref entries (fx* 2 middle)))))
+       (cond ((eqv? order 0) middle) ((< order 0) (ordered low middle))
+             (else (ordered (fx+ middle 1) high)))))))
+   (else
+    (let ordered ((index 0))
+     (if (fx= index count) (fx- -1 index)
+      (let ((order (bl-key-compare key (vector-ref entries (fx* 2 index)))))
+       (cond ((eqv? order 0) index) ((< order 0) (fx- -1 index))
+             (else (ordered (fx+ index 1)))))))))))
 (define (native-small-map-root storage)
  (let ((entries (vector-ref storage 1)))
   (let build ((start 0) (end (vector-ref storage 2)))
@@ -188,38 +281,41 @@
                   (<= count native-small-map-limit) (native-small-map-from-root root count))))
   (vector 'map (or small (vector 'pmap-v1 root count)))))
 (define (native-small-map-assoc storage key value found)
- (let* ((entries (vector-ref storage 1)) (count (vector-ref storage 2))
-        (present? (>= found 0)) (position (if present? found (- -1 found)))
-        (new-count (+ count (if present? 0 1))) (copy (make-vector (* 2 new-count))))
-  (let fill ((index 0) (old-index 0))
-   (if (= index new-count) (vector 'map (vector 'pmap-small-v1 copy new-count))
-    (if (= index position)
-     (begin
-      ;; Replacement preserves the ORIGINAL stored key object, as AVL put did.
-      (vector-set! copy (* 2 index) (if present? (vector-ref entries (* 2 old-index)) key))
-      (vector-set! copy (+ 1 (* 2 index)) value)
-      (fill (+ index 1) (+ old-index (if present? 1 0))))
-     (begin
-      (vector-set! copy (* 2 index) (vector-ref entries (* 2 old-index)))
-      (vector-set! copy (+ 1 (* 2 index)) (vector-ref entries (+ 1 (* 2 old-index))))
-      (fill (+ index 1) (+ old-index 1))))))))
+ (let* ((entries (vector-ref storage 1)) (count (vector-ref storage 2)))
+  (if (fx>= found 0)
+   ;; Replacement keeps every row in place, including the ORIGINAL stored key
+   ;; object (as AVL put did); only the value slot of the copy changes.
+   (let ((copy (subvector entries 0 (fx* 2 count))))
+    (vector-set! copy (fx+ 1 (fx* 2 found)) value)
+    (vector 'map (vector 'pmap-small-v1 copy count)))
+   (let* ((position (fx- -1 found)) (copy (make-vector (fx* 2 (fx+ count 1)))))
+    (subvector-move! entries 0 (fx* 2 position) copy 0)
+    (vector-set! copy (fx* 2 position) key)
+    (vector-set! copy (fx+ 1 (fx* 2 position)) value)
+    (subvector-move! entries (fx* 2 position) (fx* 2 count) copy (fx+ 2 (fx* 2 position)))
+    (vector 'map (vector 'pmap-small-v1 copy (fx+ count 1)))))))
 (define (native-small-map-remove storage position)
  (let* ((entries (vector-ref storage 1)) (count (vector-ref storage 2))
-        (copy (make-vector (* 2 (- count 1)))))
-  (let fill ((index 0) (old-index 0))
-   (cond ((= old-index count) (vector 'map (vector 'pmap-small-v1 copy (- count 1))))
-    ((= old-index position) (fill index (+ old-index 1)))
-    (else
-     (vector-set! copy (* 2 index) (vector-ref entries (* 2 old-index)))
-     (vector-set! copy (+ 1 (* 2 index)) (vector-ref entries (+ 1 (* 2 old-index))))
-     (fill (+ index 1) (+ old-index 1)))))))
+        (copy (make-vector (fx* 2 (fx- count 1)))))
+  (subvector-move! entries 0 (fx* 2 position) copy 0)
+  (subvector-move! entries (fx* 2 (fx+ position 1)) (fx* 2 count) copy (fx* 2 position))
+  (vector 'map (vector 'pmap-small-v1 copy (fx- count 1)))))
 (define (native-map-entry m key)
  (let ((storage (vector-ref m 1)))
   (if (native-map-small? storage)
    (let ((found (native-small-map-search storage key)) (entries (vector-ref storage 1)))
-    (if (< found 0) native-missing
-     (cons (vector-ref entries (* 2 found)) (vector-ref entries (+ 1 (* 2 found))))))
+    (if (fx< found 0) native-missing
+     (cons (vector-ref entries (fx* 2 found)) (vector-ref entries (fx+ 1 (fx* 2 found))))))
    (native-tree-ref (native-map-root m) key))))
+;; Value-only lookup for a known map: the stored value or MISSING, without the
+;; (key . value) pair native-map-entry allocates for callers needing the key.
+(define (native-map-ref m key missing)
+ (let ((storage (vector-ref m 1)))
+  (if (native-map-small? storage)
+   (let ((found (native-small-map-search storage key)))
+    (if (fx< found 0) missing (vector-ref (vector-ref storage 1) (fx+ 1 (fx* 2 found)))))
+   (let ((node (native-tree-find (native-map-root m) key)))
+    (if node (vector-ref node 1) missing)))))
 (define (native-map-pairs m)
  (let ((storage (vector-ref m 1)))
   (if (native-map-small? storage)
@@ -227,25 +323,49 @@
     (let loop ((index (- (vector-ref storage 2) 1)) (out '()))
      (if (< index 0) out
       (loop (- index 1)
-       (cons (bl-tuple (list (vector-ref entries (* 2 index)) (vector-ref entries (+ 1 (* 2 index))))) out)))))
+       (cons (vector 'tuple (vector (vector-ref entries (* 2 index)) (vector-ref entries (+ 1 (* 2 index))))) out)))))
    (native-tree-pairs (native-map-root m) '()))))
+;; Keys in iteration order, without building and projecting entry tuples.
+(define (native-tree-keys n tail)
+ (if n (native-tree-keys (native-left n) (cons (vector-ref n 0) (native-tree-keys (native-right n) tail))) tail))
+(define (native-map-keys m)
+ (let ((storage (vector-ref m 1)))
+  (if (native-map-small? storage)
+   (let ((entries (vector-ref storage 1)))
+    (let loop ((index (fx- (vector-ref storage 2) 1)) (out '()))
+     (if (fx< index 0) out (loop (fx- index 1) (cons (vector-ref entries (fx* 2 index)) out)))))
+   (native-tree-keys (native-map-root m) '()))))
+;; (pred key value) over entries in iteration order, stopping at the first #f.
+(define (native-map-every? pred m)
+ (let ((storage (vector-ref m 1)))
+  (if (native-map-small? storage)
+   (let ((entries (vector-ref storage 1)) (count (vector-ref storage 2)))
+    (let loop ((index 0))
+     (or (fx= index count)
+      (and (pred (vector-ref entries (fx* 2 index)) (vector-ref entries (fx+ 1 (fx* 2 index))))
+           (loop (fx+ index 1))))))
+   (let loop ((pairs (native-tree-pairs (native-map-root m) '())))
+    (or (null? pairs)
+     (let ((items (vector-ref (car pairs) 1)))
+      (and (pred (vector-ref items 0) (vector-ref items 1)) (loop (cdr pairs)))))))))
 (define (native-map-count m)
  (let ((s (vector-ref m 1)))
   (if (or (native-map-small? s) (native-map-tree? s)) (vector-ref s 2) (length s))))
 (set! bl-empty-map (lambda () (vector 'map (vector 'pmap-small-v1 '#() 0))))
-(set! bl-get (lambda (m k . default)
- (let ((fallback (if (null? default) bl-nil (car default))))
-  (if (not (bl-tag? m 'map)) fallback
-   (let ((storage (vector-ref m 1)))
-    (if (native-map-small? storage)
-     (let ((found (native-small-map-search storage k)))
-      (if (< found 0) fallback (vector-ref (vector-ref storage 1) (+ 1 (* 2 found)))))
-     (let ((node (native-tree-find (native-map-root m) k)))
-      (if node (vector-ref node 1) fallback))))))))
+;; The optional default avoids a rest list per defaulted lookup; arguments
+;; beyond the default stay ignored, exactly as with the former rest list.
+(set! bl-get (lambda (m k #!optional (fallback bl-nil) #!rest ignored)
+ (if (not (bl-tag? m 'map)) fallback
+  (let ((storage (vector-ref m 1)))
+   (if (native-map-small? storage)
+    (let ((found (native-small-map-search storage k)))
+     (if (fx< found 0) fallback (vector-ref (vector-ref storage 1) (fx+ 1 (fx* 2 found)))))
+    (let ((node (native-tree-find (native-map-root m) k)))
+     (if node (vector-ref node 1) fallback)))))))
 (define (native-map-has? m k)
  (and (bl-tag? m 'map)
   (let ((storage (vector-ref m 1)))
-   (if (native-map-small? storage) (>= (native-small-map-search storage k) 0)
+   (if (native-map-small? storage) (fx>= (native-small-map-search storage k) 0)
     (if (native-tree-find (native-map-root m) k) #t #f)))))
 (set! bl-assoc (lambda (m k v)
  (let* ((m (if (bl-tag? m 'map) m (bl-empty-map))) (storage (vector-ref m 1)))
@@ -333,22 +453,49 @@
                (root2 (if grow (vector root #f) root)))
          (vector 'vec (vector 'pvec-v1 (if (= i n) (+ n 1) n) cap2
           (native-vector-put root2 cap2 i value) (native-vector-meta v)))))))
+;; A proper list builds its final trie directly: capacity is the least power of
+;; two >= count (1 when empty), absent slots/subtrees are #f and the metadata
+;; slot is nil -- exactly the storage the former one-element-at-a-time
+;; native-vector-assoc loop produced, without its O(n log n) path copies.
+;; Improper input keeps that loop (and its primitive error) unchanged.
+(define (native-vector-from-proper-list xs)
+ (let ((n (length xs)))
+  (if (fx= n 0) (vector 'vec (vector 'pvec-v1 0 1 #f))
+   (let ((items (list->vector xs))
+         (cap (let grow ((c 1)) (if (fx< c n) (grow (fx* 2 c)) c))))
+    (vector 'vec (vector 'pvec-v1 n cap
+     (let build ((start 0) (cap cap))
+      (cond ((fx>= start n) #f) ((fx= cap 1) (vector-ref items start))
+       (else (let ((half (fxquotient cap 2)))
+        (vector (build start half) (build (fx+ start half) half))))))
+     bl-nil))))))
 (set! bl-vec (lambda (xs)
- (let loop ((xs xs) (v (vector 'vec (vector 'pvec-v1 0 1 #f))))
-  (if (null? xs) v (loop (cdr xs) (native-vector-assoc v (native-vector-count v) (car xs)))))))
+ (if (native-list? xs) (native-vector-from-proper-list xs)
+  (let loop ((xs xs) (v (vector 'vec (vector 'pvec-v1 0 1 #f))))
+   (if (null? xs) v (loop (cdr xs) (native-vector-assoc v (native-vector-count v) (car xs))))))))
+;; Vector items walk the trie once, right to left, instead of one root-to-leaf
+;; descent (with bounds checks) per index.
 (set! bl-items (lambda (v)
- (if (bl-tag? v 'vec)
-  (let loop ((i (- (native-vector-count v) 1)) (out '()))
-   (if (< i 0) out (loop (- i 1) (cons (native-vector-ref v i) out))))
-  (vector->list (vector-ref v 1)))))
+ (let ((s (vector-ref v 1)))
+  (if (and (bl-tag? v 'vec) (native-vector-storage? s))
+   (let ((n (vector-ref s 1)))
+    (let walk ((node (vector-ref s 3)) (cap (vector-ref s 2)) (start 0) (out '()))
+     (cond ((fx>= start n) out)
+      ((fx= cap 1) (cons node out))
+      (else (let ((half (fxquotient cap 2)))
+       (walk (vector-ref node 0) half start
+        (walk (vector-ref node 1) half (fx+ start half) out)))))))
+   (vector->list s)))))
 (set! bl-nth (lambda (v n . default)
+ (if (and (fixnum? n) (fx>= n 0) (bl-tag? v 'tuple) (fx< n (vector-length (vector-ref v 1))))
+  (vector-ref (vector-ref v 1) n)
  (let ((valid (and (integer? n) (exact? n) (>= n 0)
                    (< n (cond ((bl-tag? v 'vec) (native-vector-count v))
                                ((bl-tag? v 'tuple) (vector-length (vector-ref v 1)))
                                ((native-list? v) (length v)) (else 0))))))
   (if valid (cond ((bl-tag? v 'vec) (native-vector-ref v n))
                   ((bl-tag? v 'tuple) (vector-ref (vector-ref v 1) n)) (else (list-ref v n)))
-   (if (null? default) (error "index out of range") (car default))))))
+   (if (null? default) (error "index out of range") (car default)))))))
 (set! bl-conj (lambda (v x)
  (cond ((bl-tag? v 'vec) (native-vector-assoc v (native-vector-count v) x))
        ((bl-tag? v 'set) (native-set-put v x))
@@ -363,8 +510,7 @@
        ((bl-tag? x 'tuple) (vector-length (vector-ref x 1))) ((string? x) (string-length x))
        ((native-list? x) (length x)) (else (error "value has no count")))))
 
-(define (native-set-items s)
- (map (lambda (entry) (bl-nth entry 0)) (native-map-pairs (vector-ref s 1))))
+(define (native-set-items s) (native-map-keys (vector-ref s 1)))
 (define (native-set-put s x) (vector 'set (bl-assoc (vector-ref s 1) x #t)))
 (define (native-set-remove s x) (vector 'set (native-map-remove (vector-ref s 1) x)))
 (define (native-set-from-list xs)
@@ -382,10 +528,19 @@
           (if (eq? members native-missing) (error "set struct requires members")
            (vector 'set (if (eq? (native-struct-module members) (bl-key "Elixir.MapSet")) (bl-get members (bl-key "map")) members)))))
         (else (bl-assoc fields (bl-key "__struct__") mod)))))
+;; Interned constant keys: the same symbols bl-key returns for these names,
+;; computed once instead of string-append + intern on every predicate call.
+(define native-struct-key (bl-key "__struct__"))
+(define native-vector-module-key (bl-key "Elixir.BeamLisp.Vector"))
+(define native-set-module-key (bl-key "Elixir.BeamLisp.Set"))
+(define native-decimal-module-key (bl-key "Elixir.BeamLisp.Decimal"))
 (define (native-struct-module x)
- (cond ((bl-tag? x 'vec) (bl-key "Elixir.BeamLisp.Vector"))
-       ((bl-tag? x 'set) (bl-key "Elixir.BeamLisp.Set"))
-       ((bl-tag? x 'map) (bl-get x (bl-key "__struct__")))
+ (cond ((vector? x)
+        (cond ((bl-tag? x 'vec) native-vector-module-key)
+         ((bl-tag? x 'set) native-set-module-key)
+         ((bl-tag? x 'map) (bl-get x native-struct-key))
+         (else (let ((descriptor (table-ref native-opaque-structs x #f))) (if descriptor (car descriptor) bl-nil)))))
+       ((not native-opaque-nonvector-structs?) bl-nil)
        (else (let ((descriptor (table-ref native-opaque-structs x #f))) (if descriptor (car descriptor) bl-nil)))))
 (define (native-struct-fields x)
  (cond ((bl-tag? x 'vec) (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.Vector") (bl-key "items") (native-vector-canonical-items x) (bl-key "meta") (native-vector-meta x)))
@@ -408,9 +563,12 @@
   (error "invalid decimal storage")
   (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.Decimal")
           (bl-key "unscaled") unscaled (bl-key "scale") scale)))
-(define (native-decimal? x) (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.Decimal")))
+(define (native-decimal? x) (eq? (native-struct-module x) native-decimal-module-key))
 (define (native-number? x)
- (or (and (number? x) (integer? x) (exact? x)) (bl-tag? x 'float) (native-decimal? x)))
+ (cond ((fixnum? x) #t)
+       ((vector? x) (or (bl-tag? x 'float) (native-decimal? x)))
+       ((and (number? x) (integer? x) (exact? x)) #t)
+       (else (native-decimal? x))))
 (define (native-ratio x)
  (cond ((and (number? x) (integer? x) (exact? x)) x)
        ((bl-tag? x 'float)
@@ -478,7 +636,17 @@
 (define (native-seq-list x) (if (bl-tag? x 'vec) (bl-items x) x))
 (set! bl-equal? (lambda (a b)
  (cond ((eq? a b) #t)
-       ((and (native-number? a) (native-number? b)) (= (native-number-compare a b) 0))
+       ;; Exact shortcuts. Distinct fixnums are unequal numbers; a symbol or
+       ;; boolean is no number/string/collection, so only identity equals it
+       ;; (while no non-vector is an opaque struct); scalar strings compare
+       ;; equal exactly when their characters agree.
+       ((and (fixnum? a) (fixnum? b)) #f)
+       (native-opaque-nonvector-structs? (native-equal-general? a b))
+       ((and (string? a) (string? b)) (string=? a b))
+       ((or (symbol? a) (boolean? a) (symbol? b) (boolean? b)) #f)
+       (else (native-equal-general? a b)))))
+(define (native-equal-general? a b)
+ (cond ((and (native-number? a) (native-number? b)) (= (native-number-compare a b) 0))
        ((and (native-string? a) (native-string? b)) (= (native-compare-string a b) 0))
        ((and (native-sequential? a) (native-sequential? b))
         (let loop ((a (native-seq-list a)) (b (native-seq-list b)))
@@ -486,19 +654,21 @@
                (else (and (bl-equal? (car a) (car b)) (loop (cdr a) (cdr b)))))))
        ((and (bl-tag? a 'map) (bl-tag? b 'map))
         (and (= (native-map-count a) (native-map-count b))
-         (let loop ((pairs (native-map-pairs a)))
-          (or (null? pairs)
-           (let* ((p (car pairs)) (k (bl-nth p 0)) (entry (native-map-entry b k)))
-            (and (not (eq? entry native-missing)) (bl-equal? (bl-nth p 1) (cdr entry)) (loop (cdr pairs))))))))
+         (native-map-every?
+          (lambda (k v) (let ((other (native-map-ref b k native-missing)))
+           (and (not (eq? other native-missing)) (bl-equal? v other)))) a)))
        ((and (bl-tag? a 'set) (bl-tag? b 'set))
         (and (= (bl-count a) (bl-count b))
-         (let loop ((xs (native-set-items a)))
-          (or (null? xs) (and (native-map-has? (vector-ref b 1) (car xs)) (loop (cdr xs)))))))
+         (native-map-every? (lambda (k v) (native-map-has? (vector-ref b 1) k)) (vector-ref a 1))))
        ((and (bl-tag? a 'tuple) (bl-tag? b 'tuple))
-        (let loop ((a (bl-items a)) (b (bl-items b)))
-         (cond ((null? a) (null? b)) ((null? b) #f)
-          (else (and (bl-equal? (car a) (car b)) (loop (cdr a) (cdr b)))))))
-       (else #f))))
+        ;; Elementwise over the common prefix first, as the former list walk
+        ;; did (element comparisons may assign lazy opaque ids), then sizes.
+        (let* ((a (vector-ref a 1)) (b (vector-ref b 1))
+               (n (vector-length a)) (m (vector-length b)) (k (fxmin n m)))
+         (let loop ((i 0))
+          (if (fx= i k) (fx= n m)
+           (and (bl-equal? (vector-ref a i) (vector-ref b i)) (loop (fx+ i 1)))))))
+       (else #f)))
 
 ;; $blfn is compiler data: {:$blfn {arity -> closure} {minimum closure}|nil}.
 (define (native-multi-callable? f)
@@ -587,9 +757,9 @@
           (or (not struct?) (bl-key-equal? (native-struct-module v) (cadr p)))
           (let loop ((ps patterns) (b env))
            (if (or (not b) (null? ps)) b
-            (let ((entry (native-map-entry fields (caar ps))))
-             (and (not (eq? entry native-missing))
-              (loop (cdr ps) (bl-match (cadar ps) (cdr entry) b)))))))))
+            (let ((value (native-map-ref fields (caar ps) native-missing)))
+             (and (not (eq? value native-missing))
+              (loop (cdr ps) (bl-match (cadar ps) value b)))))))))
    (else (error "native host: unsupported pattern"))))))
 
 ;; Diagnostics store real emitted source frames. Emitter may wrap entry with
@@ -684,7 +854,7 @@
 (define h-map-get bl-get)
 (define h-map-put bl-assoc)
 (set! h-map-remove native-map-remove)
-(set! h-map-keys (lambda (m) (if (bl-tag? m 'map) (map (lambda (p) (bl-nth p 0)) (native-map-pairs m)) '())))
+(set! h-map-keys (lambda (m) (if (bl-tag? m 'map) (native-map-keys m) '())))
 (set! h-map-size (lambda (m) (if (bl-tag? m 'map) (native-map-count m) 0)))
 (set! h-eq bl-equal?)
 (define h-identical bl-key-equal?)
@@ -774,8 +944,24 @@
  (if native-output-sink (native-output-sink topic value) (h-raise "no native output sink is registered")))
 (define native-global-registry (bl-empty-map))
 (define (h-ref ns name) (bl-get native-global-registry (string-append ns "/" name)))
+;; AOT link records, one per "ns/name" slot: #(compiled-value slot-setter
+;; global-setter). AOT code reads Scheme cells that these setters maintain
+;; (native-link! in host-compiler.scm); the dynamic native-remote path reads
+;; the record's value. Publication is the only way a slot changes.
+(define native-link-records (make-table test: equal?))
+(define (native-link-record key)
+ (or (table-ref native-link-records key #f)
+  (let ((record (vector native-missing #f #f)))
+   (table-set! native-link-records (string-copy key) record) record)))
+;; Installed by host-compiler.scm: publishes the global view of a slot.
+(define native-publish-global! (lambda (ns name record) #f))
 (define (native-register! ns name value)
- (set! native-global-registry (bl-assoc native-global-registry (string-append ns "/" name) value)) value)
+ (let* ((key (string-append ns "/" name)) (record (native-link-record key)))
+  (set! native-global-registry (bl-assoc native-global-registry key value))
+  (vector-set! record 0 value)
+  (if (vector-ref record 1) ((vector-ref record 1) value))
+  (native-publish-global! ns name record)
+  value))
 
 ;; File and evaluation leaves used by the native bootstrap driver.
 (define (native-eval-string text)
@@ -953,33 +1139,13 @@
 (define (native-unit-compare a b)
  (cond ((null? a) (if (null? b) 0 -1)) ((null? b) 1)
   ((< (car a) (car b)) -1) ((> (car a) (car b)) 1) (else (native-unit-compare (cdr a) (cdr b)))))
-;; Normal Scheme strings contain Unicode scalars, so scalar indexing can
-;; compare their UTF16 order without allocating code-unit lists. Surrogate
-;; fragment wrappers retain the full unit-list path below.
-(define (native-scalar-string-compare a b)
- (let ((a-size (string-length a)) (b-size (string-length b)))
-  (let loop ((index 0))
-   (cond ((= index a-size) (if (= index b-size) 0 -1))
-    ((= index b-size) 1)
-    (else
-     (let ((a-code (char->integer (string-ref a index)))
-           (b-code (char->integer (string-ref b index))))
-      (cond ((= a-code b-code) (loop (+ index 1)))
-       ;; Both supplementary scalars have the same ordering as their UTF16
-       ;; surrogate pairs; two BMP scalars compare directly as well.
-       ((or (and (< a-code 65536) (< b-code 65536))
-            (and (>= a-code 65536) (>= b-code 65536)))
-        (if (< a-code b-code) -1 1))
-       (else
-        (let ((a-unit (if (< a-code 65536) a-code (+ 55296 (quotient (- a-code 65536) 1024))))
-              (b-unit (if (< b-code 65536) b-code (+ 55296 (quotient (- b-code 65536) 1024)))))
-         ;; A normal BMP scalar cannot equal a high surrogate, so this
-         ;; mixed-width comparison decides at the first UTF16 unit.
-         (if (< a-unit b-unit) -1 1))))))))))
-(set! native-compare-string (lambda (a b)
- (cond ((eq? a b) 0)
-  ((and (string? a) (string? b)) (native-scalar-string-compare a b))
-  (else (native-unit-compare (native-utf16-units a) (native-utf16-units b))))))
+;; Codepoint (Erlang binary text) order of two scalar strings, in place.
+(define (native-codepoint-string-compare a b)
+ (let ((n (string-length a)) (m (string-length b)))
+  (let loop ((i 0))
+   (cond ((fx= i n) (if (fx= i m) 0 -1)) ((fx= i m) 1)
+    (else (let ((x (char->integer (string-ref a i))) (y (char->integer (string-ref b i))))
+     (cond ((fx< x y) -1) ((fx< y x) 1) (else (loop (fx+ i 1))))))))))
 (set! h-is-str native-string?)
 (set! h-str-size native-utf16-size)
 (set! h-str-cmp native-compare-string)
@@ -994,22 +1160,6 @@
 (set! h-str-cat (lambda xs
  (native-from-utf16 (apply append (map (lambda (x) (native-utf16-units (h-to-str x))) xs)))))
 (set! bl-str h-str-cat)
-(define native-scalar-keyword? native-keyword?)
-(set! native-keyword? (lambda (x) (or (native-scalar-keyword? x) (bl-tag? x 'utf16-keyword))))
-(define native-scalar-atom-name native-atom-name)
-;; Interned Scheme symbol names are immutable. Reuse their decoded BL atom
-;; spelling without allocating a colon-stripping substring on every AVL key
-;; comparison. Weak keys keep this host memo from retaining unused atoms.
-;; Boolean/nil normalization and UTF16 fragment keyword storage are separate.
-(define native-symbol-atom-names (make-table test: eq? weak-keys: #t))
-(set! native-atom-name (lambda (x)
- (cond ((symbol? x)
-        (let ((cached (table-ref native-symbol-atom-names x native-missing)))
-         (if (not (eq? cached native-missing)) cached
-          (let ((name (native-scalar-atom-name x)))
-           (table-set! native-symbol-atom-names x name) name))))
-       ((bl-tag? x 'utf16-keyword) (vector-ref x 1))
-       (else (native-scalar-atom-name x)))))
 (define native-utf16-keywords (make-table test: equal?))
 (define native-scalar-keyword-intern bl-key)
 (set! bl-key (lambda (name)

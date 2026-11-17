@@ -1,0 +1,22 @@
+; Probe: what shape does (erlang/fun_info (fn [] nil) :module) have in the
+; closure ANF, and what does the link plan know about host modules?
+(ns bigo.funinfo-probe (:require [native.artifact :as artifact] [native.resolution-ledger :as ledger] [native.bootstrap] [bl.json]))
+(def closure (artifact/read-closure "research/native-seed/out/speed-closure-2/partition.json"))
+(defn walk [n f]
+  (cond (erlang/is_list n) (doseq [x n] (walk x f))
+        (erlang/is_map n) (do (f n) (doseq [v (maps/values (maps/remove :ann n))] (walk v f)))
+        (erlang/is_tuple n) (walk (erlang/tuple_to_list n) f)
+        :else nil))
+(def u (get (:units closure) "host.lazy-memo"))
+(walk (:defs u) (fn [n] (when (and (= :remote (:op n)) (= :fun_info (:fun n)))
+                         (println "ARGS" (pr-str (map (fn [a] [(:op a) (:val a) (keys a)]) (:args n)))))))
+(println "HOST-MODULES" (pr-str (:host-modules closure)))
+(def leaves (set (get (bl.json/decode (File/read! "research/native-seed/out/round2-build/leaves.json")) "registered_leaves")))
+(def metadata (ledger/bundle-metadata closure leaves))
+(println "META-HOST" (pr-str (take 3 (:host-modules metadata))))
+(def plan (native.bootstrap/link-plan metadata (mapv #(get (:units closure) %) (:order closure))))
+(println "MODULE-OF" (pr-str (take 3 (:module-of plan))))
+(doseq [ns (:order closure)]
+  (walk (:defs (get (:units closure) ns))
+        (fn [n] (when (and (= :remote (:op n)) (= :fun_info (:fun n)))
+                  (println "SITE" ns (try (pr-str (native.bootstrap/remote-decision plan n ns)) (catch e (str "RAISES " (ex-message e)))))))))

@@ -1,9 +1,12 @@
 ; Bounded replay jobs. Use the SAME warm VM for plan, emit N, and assemble.
 ; Each job emits canonical ANF; this utility never compiles BL source.
+; Linking is NOT implemented here: native.bootstrap's link plan and
+; emit-definition are the one implementation, shared with the native
+; self-emission (bootstrap --compile). See speed/closure/RESULT.md.
 (ns native.chunks
  (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
-           [native.eval :as ev] [native.scheme :as scheme]
-           [bl.json :as json] [clojure.string :as string] [anf] [native.resolution :as resolution]))
+           [bl.json :as json] [clojure.string :as string] [anf]
+           [native.resolution-ledger :as ledger]))
 (def args (BeamLisp/argv))
 (def mode (or (nth args 0 nil) "plan"))
 (def artifact-path (or (nth args 1 nil) "research/native-seed/out/compiler-closure/partition.json"))
@@ -15,12 +18,10 @@
 (def units (mapv #(get (:units closure) %) (:order closure)))
 (doseq [u units] (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u))))))
 (def leaves (set (get (json/decode (File/read! leaves-path)) "registered_leaves")))
-(def table (into {} (map (fn [u] [(:ns u) (set (keep :name (:defs u)))]) units)))
-(def resolution-ledger (resolution/build closure))
-(def by-module (assoc (into {} (mapcat (fn [u] [[(:module u) (:ns u)] [(:base-module u) (:ns u)]]) units))
-                      :Elixir.BeamLisp.CompilerData "host.compiler-data"
-                      :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta"))
-(def stub-modules (set (mapcat (fn [ns] [(BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))))
+; The bundle metadata (written into bundle.scm) and the link plan built from
+; it: exactly what bootstrap --compile rebuilds from bundle.scm natively.
+(def metadata (ledger/bundle-metadata closure leaves))
+(def link-plan (bootstrap/link-plan metadata units))
 (def key-input
  {"artifact_sha256" (get manifest "artifact_sha256")
   "sdk_descriptor_sha256" (:sdk-descriptor-sha256 artifact/validation-context)
@@ -31,31 +32,48 @@
   "bootstrap_sha256" (artifact/sha (File/read! "research/native-seed/src/native/bootstrap.bl"))
   "driver_sha256" (artifact/sha (File/read! "research/native-seed/src/native/chunks.bl"))
   "resolution_sha256" (artifact/sha (File/read! "research/native-seed/src/native/resolution.bl"))
+  "resolution_ledger_sha256" (artifact/sha (File/read! "research/native-seed/src/native/resolution-ledger.bl"))
+  "intrinsics_sha256" (artifact/sha (File/read! "research/native-seed/src/native/intrinsics.bl"))
   "options_sha256" (artifact/sha (erlang/term_to_binary (:options closure) (list :deterministic)))})
 (def emission-input
  (assoc (select-keys key-input ["sdk_descriptor_sha256" "emitter_sha256" "eval_sha256"
-                              "bootstrap_sha256" "options_sha256" "driver_sha256" "resolution_sha256"])
-        "resolver_policy" "native-exact-late-lookup-v2"))
-(defn remote-decision [n]
- (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
-       logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
-       key (str (erlang/atom_to_binary m) "/" f "/" a)]
-  (cond
-   (contains? leaves key) ["leaf" key]
-   (and (contains? by-module m) (contains? (get table (get by-module m)) logical))
-    ["compiled" key (get by-module m) logical (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
-   (contains? stub-modules m) ["excluded-namespace" key]
-   :else (throw (ex-info (str "native V2 cache: unresolved remote signature " key) {:remote key})))))
-(defn global-decision [n] (resolution/global-decision resolution-ledger table n))
-(defn decisions-for [defs]
+                              "bootstrap_sha256" "options_sha256" "driver_sha256" "resolution_sha256"
+                              "resolution_ledger_sha256" "intrinsics_sha256"])
+        ; v2: a compiled target wins over a leaf of the same key, and pinned
+        ; host modules (metadata :host-modules) link to their namespace.
+        "resolver_policy" "native-aot-link-v2"))
+(def definitions
+ (into {} (mapcat (fn [u] (keep (fn [d] (when (:name d) [[(:ns u) (:name d)] d])) (:defs u))) units)))
+(defn decisions-for [ns defs]
  ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
  ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
+ ; A call site's emitted shape depends on its TARGET's kind and declared
+ ; arities, so each compiled decision carries that shape.
  (loop [todo (BeamLisp.CompilerData/eager_map :node defs) decisions #{}]
   (if (erlang/== todo (list)) (vec (sort-by str decisions))
    (let [node (erlang/hd todo)
-         decision (case (:op node) :remote (remote-decision node) :global (global-decision node) nil)]
+         decision (case (:op node)
+                   :remote (bootstrap/remote-decision link-plan node ns)
+                   :global (bootstrap/global-decision link-plan node) nil)]
     (recur (lists/append (anf/executable-children node) (erlang/tl todo))
            (if decision (conj decisions decision) decisions))))))
+(defn dead-leaves
+ "Registered host leaves whose key now links to a compiled closure definition
+  (compiled wins). Their owning workstream deletes them."
+ []
+ (vec (sort (filter (fn [key]
+   (let [i (string/index-of key "/") j (string/last-index-of key "/")]
+    (and (some? i) (< i j)
+         (some? (bootstrap/compiled-target link-plan (erlang/binary_to_atom (subs key 0 i)) (subs key (inc i) j))))))
+  leaves))))
+(defn report-dead-leaves! []
+ (let [dead (dead-leaves)]
+  (File/mkdir_p! out)
+  (File/write! (str out "/dead-leaves.json")
+   (json/encode {"schema" "bl.native.dead-leaves" "version" 1 "leaves" dead
+                 "host_modules" (mapv (fn [[ns module]] [ns (erlang/atom_to_binary module)]) (:host-modules metadata))}))
+  (doseq [key dead] (println (str "NATIVE_DEAD_LEAF " key)))
+  (println (str "NATIVE_DEAD_LEAVES " (count dead)))))
 (defn emission-record [row]
  (let [u (get (:units closure) (get row "namespace")) offset (get row "offset")
        defs (subvec (:defs u) offset (+ offset (get row "count")))]
@@ -63,43 +81,9 @@
    "ir_sha256" (artifact/sha (erlang/term_to_binary defs (list :deterministic)))
    "source_unit_sha256" (when (= offset 0)
      (artifact/sha (erlang/term_to_binary (select-keys u [:ns :path :source :requires :module :base-module]) (list :deterministic))))
-   "decisions" (decisions-for defs)}))
+   "decisions" (decisions-for (get row "namespace") defs)}))
 (defn key-from-record [record]
  (artifact/sha (erlang/term_to_binary [emission-input record] (list :deterministic))))
-(defn checked-context [ns]
- (let [base (ev/context ns)]
-  (assoc base
-   :remote-resolver
-   (fn [n]
-    (let [m (:mod n) f (erlang/atom_to_binary (:fun n))
-          logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
-          key (str (erlang/atom_to_binary m) "/" f "/" (count (:args n)))]
-     (when-not (or (contains? leaves key) (contains? stub-modules m)
-                    (and (contains? by-module m) (contains? (get table (get by-module m)) logical)))
-      (throw (ex-info "native chunks: missing exact remote capability" {:namespace ns :remote key :ann (:ann n)})))
-     ((:remote-resolver base) n)))
-   :global-resolver
-   (fn [n]
-    (global-decision n)
-    ((:global-resolver base) n)))))
-(defn emit-definition [u d]
- (let [ns (:ns u) value (scheme/emit (:node d) (checked-context ns))]
-  (if (:name d)
-   (str "(define " (bootstrap/binding-name ns (:name d)) " " value ")\n"
-        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " (bootstrap/binding-name ns (:name d)) ")\n"
-        "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
-        " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
-        (when (= :fn (:kind d))
-         (let [arities (bootstrap/declaration-arities (:form d))]
-          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
-               (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))))
-   (str value "\n"))))
-(defn bundle-metadata []
- {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure) :resolution resolution-ledger
-  :provider-sources (:provider-sources closure) :options (:options closure) :stubs (:stubs closure)
-  :core-links (:core-links closure) :return-constructor-shapes (:return-constructor-shapes closure)
-  :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)
-  :stub-modules (mapv (fn [ns] [ns (BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))})
 (defn chunk-path [key extension] (str out "/chunks/" key "." extension))
 (defn row-layout [size]
  (vec (mapcat (fn [u]
@@ -141,9 +125,8 @@
        offset (get row "offset") count* (get row "count")
        _ (assert (= key (key-from-record (get row "emission_record"))))
        defs (subvec (:defs u) offset (+ offset count*))
-       functions (string/join "" (map #(emit-definition u %) (filter #(= :fn (:kind %)) defs)))
-       initializers (str (when (and (= "core" (:ns u)) (= offset 0)) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n")
-                         (string/join "" (map #(emit-definition u %) (remove #(= :fn (:kind %)) defs))))
+       functions (bootstrap/emit-functions link-plan u defs)
+       initializers (bootstrap/emit-initializers link-plan u defs (= offset 0))
        source-unit (when (= offset 0) (bootstrap/data (select-keys u [:ns :path :source :requires :module :base-module])))
        report {"key" key "emission_inputs" emission-input "emission_record" (get row "emission_record")
                "functions_sha256" (artifact/sha functions) "initializers_sha256" (artifact/sha initializers)
@@ -177,7 +160,8 @@
   (when-not (= previous current)
    (when (File/regular? (str out "/chunk-export.json")) (File/rm! (str out "/chunk-export.json")))
    (File/write! path (json/encode current))
-   (println (str "NATIVE_CHUNK_PLAN " (count (get current "chunks")) " jobs")))
+   (println (str "NATIVE_CHUNK_PLAN " (count (get current "chunks")) " jobs"))
+   (report-dead-leaves!))
   current))
 (defn emit-window! [plan]
  (let [start (erlang/monotonic_time :millisecond)]
@@ -189,7 +173,7 @@
      {:complete? false :next index :built built :reused reused}
     :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused))))))
 (defn assemble! [plan]
- (let [rows (get plan "chunks") metadata (bundle-metadata)
+ (let [rows (get plan "chunks")
         metadata-source (bootstrap/data metadata)
         functions (string/join "" (map #(checked-chunk-text % "functions.scm" "functions_sha256") rows))
         initializers (string/join "" (map #(checked-chunk-text % "initializers.scm" "initializers_sha256") rows))
@@ -214,7 +198,8 @@
    (File/mkdir_p! (str out "/chunks"))
    (let [plan (make-plan size)]
     (File/write! (str out "/chunks.json") (json/encode plan))
-    (println (str "NATIVE_CHUNK_PLAN " (count (get plan "chunks")) " jobs"))))
+    (println (str "NATIVE_CHUNK_PLAN " (count (get plan "chunks")) " jobs"))
+    (report-dead-leaves!)))
  (= mode "emit")
   (let [plan (read-plan) index (String/to_integer (nth args 5))]
    (let [row (nth (get plan "chunks") index)]
@@ -229,6 +214,20 @@
       (println (str "NATIVE_CHUNKS_YIELD next=" index " built=" built " reused=" reused))
      :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused)))))
  (= mode "assemble") (assemble! (read-plan))
+ ; Focused inspection: emit only the named definitions ("ns/name,...") and
+ ; the seed links to OUT/inspect.scm. No plan, chunk or bundle is written.
+ (= mode "inspect")
+  (let [wanted (string/split (nth args 5) #",")
+        text (string/join ""
+              (for [slot wanted]
+               (let [at (string/index-of slot "/") ns (subs slot 0 at) name (subs slot (inc at))
+                     d (or (get definitions [ns name])
+                           (throw (ex-info "native chunks: inspect target absent" {:slot slot})))]
+                (bootstrap/emit-definition link-plan (get (:units closure) ns) d))))]
+   (File/mkdir_p! out)
+   (File/write! (str out "/inspect.scm") text)
+   (File/write! (str out "/seed-links.scm") (bootstrap/seed-links link-plan))
+   (println (str "NATIVE_CHUNKS_INSPECT " (count wanted))))
  (= mode "build-next")
   (let [plan (ensure-plan!) progress (emit-window! plan)]
    (if (:complete? progress)
@@ -236,4 +235,21 @@
      (assemble! plan)
      (println (str "NATIVE_BUILD_COMPLETE built=" (:built progress) " reused=" (:reused progress))))
     (println (str "NATIVE_BUILD_YIELD next=" (:next progress) " built=" (:built progress) " reused=" (:reused progress)))))
- :else (throw (ex-info "native chunks: expected plan, emit, emit-next, assemble or build-next" {:mode mode})))
+ (= mode "dead-leaves") (report-dead-leaves!)
+ ; Focused unit build: emit every chunk row of the named namespaces (args 5 =
+ ; "ns,ns,...", 6 = optional size) into OUT/chunks with the same keys and
+ ; reports a full plan would give those rows. No chunks.json, other row or
+ ; bundle is written.
+ (= mode "emit-unit")
+  (let [wanted (string/split (nth args 5) #",") size (String/to_integer (or (nth args 6 nil) "32"))
+        layout (row-layout size)]
+   (File/mkdir_p! (str out "/chunks"))
+   (report-dead-leaves!)
+   (doseq [ns wanted]
+    (let [rows (filter #(= ns (get % "namespace")) layout)]
+     (when (empty? rows) (throw (ex-info "native chunks: emit-unit namespace absent" {:namespace ns})))
+     (doseq [row rows]
+      (let [record (emission-record row)]
+       (emit-chunk! (assoc row "key" (key-from-record record) "emission_record" record))))
+     (println (str "NATIVE_CHUNKS_UNIT " ns " " (count rows))))))
+ :else (throw (ex-info "native chunks: expected plan, emit, emit-next, emit-unit, assemble, inspect, dead-leaves or build-next" {:mode mode})))

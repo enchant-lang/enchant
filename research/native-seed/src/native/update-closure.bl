@@ -1,58 +1,177 @@
-; Recompile ONLY source-changed members of the already qualified closure.
+; Recompile ONLY source-changed members of the already qualified closure, and
+; add the namespaces that workstreams declare explicitly.
 ; Reuse private partition shape proofs; never perform a full ANF inventory.
+;
+; Usage (pinned SDK, repository root as cwd):
+;   research/native-seed/run run research/native-seed/src/native/update-closure.bl -- \
+;     DIR/partition.json [ADDITIONS.edn ...]
+; Without ADDITIONS the declared set is every
+; research/native-seed/speed/*/closure-additions.edn. Each file is a vector of
+; {:ns "host.vector" :path "priv/host/vector.bl" :module :Elixir.BeamLisp.Vector}
+; in dependency order; :module is given only for a pinned BL host module.
+; Writes DIR/closure.etf, identity.json and update.json; then run
+; partition-closure.py --out DIR. See research/native-seed/speed/closure/RESULT.md.
 (ns native.update-closure
- (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]))
-(def path (or (first (BeamLisp/argv)) "research/native-seed/out/compiler-closure/partition.json"))
+ (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json] [clojure.edn :as edn]))
+(def argv (vec (BeamLisp/argv)))
+(def path (or (first argv) "research/native-seed/out/compiler-closure/partition.json"))
 (def out (Path/dirname path))
+(def additions-files
+ (if (> (count argv) 1) (subvec argv 1)
+  (vec (sort (Path/wildcard "research/native-seed/speed/*/closure-additions.edn")))))
 (def original (artifact/read-closure path))
 (def expected-options {:target :scheme :contextual-bindings :absent
                        :stub ["lower"] :staging :canonical-js.build
                        :namespace-qualified? true})
 (assert (= expected-options (:options original)))
-(assert (= (:sdk-pin original) (File/read! "research/native-seed/sdk-pin.json")))
-(def roots ["research/native-seed/src" "priv/boot" "priv/lib" "priv/std" "priv/compat"])
-(defn providers [prior]
- (let [previous (into {} (map (fn [p] [(:path p) p]) prior))]
- (mapv (fn [p]
-  (let [source (File/read! p) sha (artifact/sha source) old (get previous p)]
-   (if (= sha (:sha256 old)) old
-    {:path p :sha256 sha
-     :macro-provider? (and (String/contains? source "defmacro")
-                          (boolean (some build/defmacro? (build/read-forms p))))})))
-  (sort (distinct (concat ["priv/host/compiler_data.bl" "priv/host/form_meta.bl" "priv/host/meta.bl"]
-                (mapcat #(Path/wildcard (str % "/**/*.bl")) roots)))))))
-(def current-providers (providers (:provider-sources original)))
-(def macros (vec (filter :macro-provider? current-providers)))
-(assert (= macros (vec (filter :macro-provider? (:provider-sources original)))))
+; A closure is bound to the SDK whose compiler produced it. Under a new pin
+; (RE-PIN) no unit may be reused: every member recompiles with the pinned
+; compiler, the old macro-provider identity is not compared (nothing that
+; expanded under it survives), and the closure is re-bound to the new pin.
+(def pin (File/read! "research/native-seed/sdk-pin.json"))
+(def repin? (not= (:sdk-pin original) pin))
+(when repin? (println "NATIVE_UPDATE_REPIN every member recompiles under the new SDK pin"))
+(def sdk-source (get (json/decode pin) "source"))
+
+; --- declared additions -----------------------------------------------------
+(defn read-additions [file]
+ (let [rows (edn/read-string (File/read! file))]
+  (when-not (vector? rows)
+   (throw (ex-info "native update: closure additions must be a vector" {:file file})))
+  (mapv (fn [row]
+   (when-not (and (map? row) (string? (:ns row)) (string? (:path row))
+                  (or (nil? (:module row)) (keyword? (:module row)))
+                  (empty? (dissoc row :ns :path :module)) (File/regular? (:path row)))
+    (throw (ex-info "native update: invalid closure addition" {:file file :row row})))
+   (assoc row :file file)) rows)))
+(def additions
+ (let [rows (vec (mapcat read-additions additions-files))
+       names (map :ns rows)]
+  (when-not (= (count names) (count (distinct names)))
+   (throw (ex-info "native update: a namespace is declared by two closure additions" {:namespaces names})))
+  rows))
+(def declared (set (map :ns additions)))
+(def stubs (set (:stubs original)))
+; A pinned BL host module `Elixir.BeamLisp.X` is compiled as the closure
+; namespace host.x, and every :remote to it links to that namespace.
+(def base-host-modules
+ [["host.compiler-data" :Elixir.BeamLisp.CompilerData] ["host.form-meta" :Elixir.BeamLisp.FormMeta]
+  ["host.meta" :Elixir.BeamLisp.Meta]])
+(def host-modules
+ (let [rows (vec (sort-by first (distinct (concat base-host-modules (:host-modules original)
+                 (keep (fn [a] (when (:module a) [(:ns a) (:module a)])) additions)))))]
+  (when-not (and (= (count rows) (count (distinct (map first rows))))
+                 (= (count rows) (count (distinct (map second rows)))))
+   (throw (ex-info "native update: a host module or namespace is declared twice" {:host-modules rows})))
+  rows))
+(defn check-host-module! [ns source module]
+ ; The file must say what it is: its leading comment block declares a pinned
+ ; host module and names this exact module in backticks (comments wrap).
+ (let [header (String/replace (first (String/split source "\n(" (list (erlang/list_to_tuple (list :parts 2))))) "\n; " " ")]
+ (when-not (and (String/contains? header "the pinned HOST MODULE for")
+                (String/contains? header (str "`" (erlang/atom_to_binary module) "`")))
+  (throw (ex-info (str "native update: host module declaration does not match its source header: " ns)
+                  {:namespace ns :module module})))))
+
+; --- compile ------------------------------------------------------------------
+(defn compile-unit [ns source-path allowed]
+ (let [prepared (build/prepare-ns source-path)
+       _ (when-not (= ns (:ns prepared))
+           (throw (ex-info "native update: namespace header mismatch" {:namespace ns :path source-path :header (:ns prepared)})))
+       _ (doseq [[dependency _] (:requires prepared)]
+           (when-not (or (contains? allowed dependency) (contains? stubs dependency))
+            (throw (ex-info "native update: added dependency requires explicit closure extension"
+                            {:namespace ns :dependency dependency}))))
+       compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)
+       unit (assoc compiled :source (:source prepared)
+                   :module (BeamLisp.Link/module_for ns) :base-module (BeamLisp.Emit/base_module_for ns))]
+  (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits)
+  unit))
+(defn insert-after-dependencies [order ns requires]
+ ; Right after its last closure dependency (and never before rt/core/sugar).
+ (let [anchors (set (concat ["rt" "core" "sugar"] requires))
+       last-at (reduce (fn [at [i x]] (if (contains? anchors x) i at)) -1 (map-indexed vector order))]
+  (vec (concat (take (inc last-at) order) [ns] (drop (inc last-at) order)))))
 (def result
  (BeamLisp.Env/isolated
   (fn []
-   (reduce (fn [result ns]
-    (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
-          source (File/read! (:path old)) sha (artifact/sha source)]
-     (if (= sha (:source-sha256 old))
-      (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
-      (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
-            prepared (build/prepare-ns (:path old))
-            _ (assert (= ns (:ns prepared)))
-            _ (doseq [[dependency _] (:requires prepared)]
-                (when-not (or (contains? (:units original) dependency) (contains? (set (:stubs original)) dependency))
-                 (throw (ex-info "native update: added dependency requires explicit closure extension" {:namespace ns :dependency dependency}))))
-            module (BeamLisp.Link/module_for ns) base (BeamLisp.Emit/base_module_for ns)
-            _ (when-not (and (= (:module old) module) (= (:base-module old) base))
-                (throw (ex-info "native update: physical namespace identity changed; explicit aliases required"
-                                {:namespace ns :old [(:module old) (:base-module old)] :new [module base]})))
-            compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)
-            unit (assoc compiled :source (:source prepared) :module module :base-module base)
-            _ (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits)]
-       (-> result (assoc-in [:units ns] unit) (update :changed conj ns))))))
-    {:units {} :changed []} (:order original)))))
+   (let [existing
+         (reduce (fn [result ns]
+          (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
+                source (File/read! (:path old)) sha (artifact/sha source)]
+           (if (and (not repin?) (= sha (:source-sha256 old)))
+            (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
+            (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
+                  unit (compile-unit ns (:path old) (into (set (:order original)) declared))]
+             (when-not (and (= (:module old) (:module unit)) (= (:base-module old) (:base-module unit)))
+              (throw (ex-info "native update: physical namespace identity changed; explicit aliases required"
+                              {:namespace ns :old [(:module old) (:base-module old)] :new [(:module unit) (:base-module unit)]})))
+             (-> result (assoc-in [:units ns] unit) (update :changed conj ns))))))
+          {:units {} :changed [] :added [] :order (:order original)} (:order original))]
+    ; Additions in declared order; each may require only closure members,
+    ; stubs and EARLIER additions. One already in the closure is a member.
+    (reduce (fn [result a]
+     (let [ns (:ns a)]
+      (if (contains? (:units result) ns)
+       (do (when-not (= (:path a) (get-in result [:units ns :path]))
+            (throw (ex-info "native update: addition path differs from the closure member" {:namespace ns})))
+           result)
+       (let [_ (println (str "NATIVE_UPDATE_ADD " ns " " (:path a)))
+             unit (compile-unit ns (:path a) (set (keys (:units result))))
+             requires (map first (:requires unit))]
+        (-> result (assoc-in [:units ns] unit) (update :added conj ns)
+            (update :order insert-after-dependencies ns requires))))))
+     existing additions)))))
+(def order (:order result))
+; Order check: every closure dependency of a unit precedes it.
+(let [at (into {} (map-indexed (fn [i ns] [ns i]) order))]
+ (doseq [ns order [dependency _] (:requires (get (:units result) ns))
+         :when (and (contains? declared dependency) (contains? at dependency))]
+  (when-not (< (get at dependency) (get at ns))
+   (throw (ex-info "native update: a closure member requires an addition placed after it"
+                   {:namespace ns :dependency dependency})))))
+(doseq [[ns module] host-modules]
+ (let [u (or (get (:units result) ns)
+             (throw (ex-info "native update: declared host module namespace is not a closure member" {:namespace ns})))]
+  (check-host-module! ns (:source u) module)))
+
+; --- providers ----------------------------------------------------------------
+; A provider is read from where the pinned compile LOADS it: closure members
+; and research/native-seed/src (on the -p path) from this checkout; every
+; other priv/ source from the pinned SDK's immutable Source (sdk-pin.json).
+(def members (set (map :path (vals (:units result)))))
+(def sdk-prefix (str sdk-source "/"))
+(defn checkout-origin? [p] (or (contains? members p) (String/starts_with? p "research/native-seed/src/")))
+(def provider-paths
+ (sort (distinct (concat members (Path/wildcard "research/native-seed/src/**/*.bl")
+  (map #(subs % (count sdk-prefix))
+       (mapcat #(Path/wildcard (str sdk-prefix % "/**/*.bl")) ["priv/boot" "priv/lib" "priv/std" "priv/compat"]))))))
+(defn providers [prior]
+ (let [previous (into {} (map (fn [p] [(:path p) p]) prior))]
+  (mapv (fn [p]
+   (let [origin (if (checkout-origin? p) "checkout" "sdk")
+         location (if (= origin "checkout") p (str sdk-prefix p))
+         source (File/read! location) sha (artifact/sha source) old (get previous p)]
+    (if (= sha (:sha256 old)) (assoc old :origin origin)
+     {:path p :sha256 sha :origin origin
+      :macro-provider? (and (String/contains? source "defmacro")
+                           (boolean (some build/defmacro? (build/read-forms location))))})))
+   provider-paths)))
+(def admitted (set (map :path additions)))
+(defn macro-identity [ps]
+ (vec (keep (fn [p] (when (and (:macro-provider? p) (not (contains? admitted (:path p)))) [(:path p) (:sha256 p)])) ps)))
+(def current-providers (providers (:provider-sources original)))
+(def macros (macro-identity current-providers))
+(when-not (or repin? (= macros (macro-identity (:provider-sources original))))
+ (throw (ex-info "native update: macro providers changed; capture a fresh closure"
+                 {:now macros :captured (macro-identity (:provider-sources original))})))
 (def final-providers (providers current-providers))
-(assert (= macros (vec (filter :macro-provider? final-providers))))
+(assert (= macros (macro-identity final-providers)))
 (doseq [[ns u] (:units result)]
  (assert (= (:source-sha256 u) (artifact/sha (:source u))))
  (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u))))))
-(def closure (assoc original :units (:units result) :provider-sources final-providers))
+(def closure (assoc original :units (:units result) :order order :provider-sources final-providers
+                    :host-modules host-modules :sdk-pin pin))
 (def bytes (erlang/term_to_binary closure (list :deterministic)))
 (File/write! (str out "/closure.etf") bytes)
 (File/write! (str out "/identity.json")
@@ -60,8 +179,11 @@
                :artifact-sha256 (artifact/sha bytes) :sdk-pin-sha256 (artifact/sha (:sdk-pin closure))
                :options (:options closure) :providers final-providers}))
 (File/write! (str out "/update.json")
- (json/encode {:schema "bl.native.closure-update" :version 1 :changed (:changed result)
+ (json/encode {:schema "bl.native.closure-update" :version 2 :changed (:changed result) :added (:added result)
+               :additions-files additions-files
+               :host-modules (mapv (fn [[ns module]] [ns (erlang/atom_to_binary module)]) host-modules)
                :artifact-sha256 (artifact/sha bytes)
                :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
-                       {:namespace ns :source-sha256 (:source-sha256 u) :definitions (count (:defs u))})) (:order closure))}))
-(println (str "NATIVE_UPDATED " (count (:changed result)) " units; no full ANF walk"))
+                       {:namespace ns :source-sha256 (:source-sha256 u) :definitions (count (:defs u))})) order)}))
+(println (str "NATIVE_UPDATED " (count (:changed result)) " changed, " (count (:added result)) " added, "
+              (count order) " units; no full ANF walk"))

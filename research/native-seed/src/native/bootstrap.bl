@@ -4,6 +4,7 @@
 (ns native.bootstrap
  (:require [compiler :as c] [reader :as rd] [reader-node :as rn]
            [native.scheme :as scheme] [native.eval :as ev]
+           [native.resolution :as resolution] [native.intrinsics :as intrinsics]
            [clojure.string :as string]))
 
 (defn data [v]
@@ -52,6 +53,12 @@
     (assoc d :node (c/compile (:form d) (assoc (c/new-env ns) :file path :target :js)))) defs))))
 
 (defn binding-name [ns name] (scheme/ident (str ns "/" name)))
+; AOT link cells (host: native-link!, native-leaf-binding-name). The names
+; are disjoint from every binding-name: ident never emits "$" or a leading l.
+(defn global-binding-name [ns name] (str (binding-name ns name) "$g"))
+(defn arity-binding-name [ns name arity] (str (binding-name ns name) "$" arity))
+(defn variadic-binding-name [ns name] (str (binding-name ns name) "$v"))
+(defn leaf-binding-name [key] (str "l" (scheme/ident key)))
 (defn declaration-arities
  "Project arity data from the canonical declaration's ALREADY VALIDATED fn
   value. This is only export metadata; the compiler owns parsing and code."
@@ -79,30 +86,174 @@
           :when (= "defmacro" (ev/head-symbol form))]
    (ev/eval-form form)))
  (BeamLisp.Env/in_ns "user"))
-(defn emit-definition [unit d]
- (let [ns (:ns unit) value (scheme/emit (:node d) (ev/context ns))]
+; ---------------------------------------------------------------------------
+; AOT link plan: the ONE linking context. The BEAM driver (native.chunks) and
+; the native self-emission (compile-bundle, run by stage1 and stage2) both
+; build it from the bundle metadata (native.resolution-ledger/bundle-metadata,
+; carried in bundle.scm) and the units' definitions, and emit through
+; emit-definition below. Cells: research/native-seed/speed/link/RESULT.md;
+; plan and host modules: research/native-seed/speed/closure/RESULT.md.
+(defn link-plan [metadata units]
+ (let [named (fn [u] (filter :name (:defs u)))]
+  {:leaves (set (:leaves metadata))
+   :table (into {} (map (fn [u] [(:ns u) (set (map :name (named u)))]) units))
+   :defined (set (mapcat (fn [u] (map (fn [d] [(:ns u) (:name d)]) (named u))) units))
+   :arities (into {} (mapcat (fn [u] (keep (fn [d] (when (= :fn (:kind d))
+                                                    [[(:ns u) (:name d)] (declaration-arities (:form d))]))
+                                          (named u))) units))
+   ; A pinned BL host module (`Elixir.BeamLisp.X`, metadata :host-modules) IS
+   ; the definitions of its closure namespace, so a :remote to it links there.
+   :by-module (into {} (concat (mapcat (fn [[ns module base]] [[module ns] [base ns]]) (:namespace-modules metadata))
+                               (map (fn [[ns module]] [module ns]) (:host-modules metadata))))
+   :module-of (into {} (map (fn [[ns module]] [ns module]) (:host-modules metadata)))
+   :stub-modules (set (mapcat (fn [[_ module base]] [module base]) (:stub-modules metadata)))
+   :ledger (:resolution metadata)}))
+(defn remote-key [n]
+ (str (erlang/atom_to_binary (:mod n)) "/" (erlang/atom_to_binary (:fun n)) "/" (count (:args n))))
+(defn- logical-name [f] (if (string/ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f))
+(defn- remote-link-shape [plan ns logical mode arity]
+ (let [arities (get (:arities plan) [ns logical])]
+  (cond
+   (= mode "rest-list-clause") (if (some? (:variadic arities)) "variadic" "dynamic")
+   (contains? (set (:fixed arities)) arity) "arity"
+   (contains? (:defined plan) [ns logical]) "generic"
+   :else "dynamic")))
+(defn compiled-target
+ "The closure namespace whose definition is module/f, or nil."
+ [plan module f]
+ (let [ns (get (:by-module plan) module)]
+  (when (and ns (contains? (get (:table plan) ns) (logical-name f))) ns)))
+(declare self-module)
+(defn remote-decision
+ ; A compiled target wins over a host leaf with the same key; that leaf is
+ ; dead (native.chunks reports it for its owner to delete). With the linked
+ ; namespace, a host module's fun_info self-name is a link-time constant.
+ ([plan n ns]
+  (if-let [module (self-module plan ns n)]
+   ["self-module" (remote-key n) (erlang/atom_to_binary module)]
+   (remote-decision plan n)))
+ ([plan n]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) key (remote-key n) ns (compiled-target plan m f)]
+  (cond
+   ns (let [logical (logical-name f) mode (if (string/ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
+       ["compiled" key ns logical mode (remote-link-shape plan ns logical mode (count (:args n)))])
+   (contains? (:leaves plan) key) ["leaf" key]
+   (contains? (:stub-modules plan) m) ["excluded-namespace" key]
+   :else (throw (ex-info (str "native link: unresolved remote signature " key) {:remote key :ann (:ann n)}))))))
+(defn global-decision [plan n] (resolution/global-decision (:ledger plan) (:table plan) n))
+(defn- direct-call [target]
+ {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- generic-call [target]
+ ; A non-:fn definition or an undeclared arity: the live slot value decides.
+ {:inline? true
+  :call (fn [operands]
+         (let [spread (string/join "" (map #(str " " %) operands))]
+          (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
+               ") (bl-invoke linked (list" spread "))))")))})
+(defn- self-module
+ "A pinned host module names itself with `(erlang/fun_info (fn …) :module)`.
+  On BEAM a fun literal written in that module belongs to it, so the answer
+  is a link-time constant: {:module M} for the namespace being linked. Any
+  other fun_info stays unresolved and fails loudly."
+ [plan ns n]
+ (let [[f k] (:args n) module (get (:module-of plan) ns)]
+  (when (and module (= :erlang (:mod n)) (= :fun_info (:fun n)) (= 2 (count (:args n)))
+             (or (= :fn (:op f)) (some? (BeamLisp.CompilerData/self_application_parts f)))
+             (= :lit (:op k)) (= :module (:val k)))
+   module)))
+(defn remote-link
+ ; nil keeps the dynamic (native-remote KEY) path: excluded namespaces and
+ ; rest-list calls to a definition without a variadic arm raise there.
+ ([plan n] (remote-link plan nil n))
+ ([plan ns n]
+ (if-let [module (self-module plan ns n)]
+  {:inline? true
+   :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
+                      (scheme/text (erlang/atom_to_binary module)) "))"))}
+ (if-let [template (intrinsics/remote-template n)]
+  {:inline? false :call template}
+  (let [decision (remote-decision plan n)]
+   (case (first decision)
+    "leaf" (direct-call (leaf-binding-name (second decision)))
+    "compiled"
+     (let [[_ _ ns logical _ shape] decision]
+      (case shape
+       "arity" (direct-call (arity-binding-name ns logical (count (:args n))))
+       "variadic" (direct-call (variadic-binding-name ns logical))
+       "generic" (generic-call (binding-name ns logical))
+       nil))
+     nil))))))
+(defn link-context [plan ns]
+ ; native.eval/context plus :aot-link. Every remote must have an exact
+ ; capability (remote-decision raises otherwise); the dynamic resolver stays
+ ; for the shapes remote-link leaves unlinked.
+ (let [base (ev/context ns)]
+  (assoc base
+   :aot-link {:remote (fn [n] (remote-link plan ns n))}
+   :remote-resolver (fn [n] (remote-decision plan n ns) ((:remote-resolver base) n))
+   :global-resolver
+   (fn [n]
+    (let [[_ _ _ _ _ sel-ns sel-name] (global-decision plan n)]
+     (global-binding-name sel-ns sel-name))))))
+(defn link-definition [ns name kind arities]
+ ; One setter per linked slot (compiled view, including arity entries) and
+ ; one for its global view; native-link! initializes both immediately.
+ (let [binding (binding-name ns name) global (global-binding-name ns name)
+       fixed (if (= :fn kind) (:fixed arities) [])
+       variadic? (and (= :fn kind) (some? (:variadic arities)))
+       cells (concat (map #(arity-binding-name ns name %) fixed)
+                     (when variadic? [(variadic-binding-name ns name)]) [global])]
+  (str (string/join "" (map #(str "(define " % " #f)\n") cells))
+       "(native-link! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " binding " value)"
+       (string/join "" (map #(str " (set! " (arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
+       (if variadic? (str " (set! " (variadic-binding-name ns name) " (native-variadic-entry value "
+                          (scheme/text (str ns "/" name)) "))") "")
+       ") (lambda (value) (set! " global " value)))\n")))
+(defn seed-links [plan]
+ ; Seeds are interned by rt/seed-core; only their global view is linked.
+ (string/join ""
+  (for [[ns names] (sort-by first (:seed-names (:ledger plan))) name (sort names)
+        :when (not (contains? (get (:table plan) ns #{}) name))]
+   (let [global (global-binding-name ns name)]
+    (str "(define " global " (native-unlinked " (scheme/text ns) " " (scheme/text name) "))\n"
+         "(native-link-global! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " global " value)))\n")))))
+(defn emit-definition [plan unit d]
+ (let [ns (:ns unit) value (scheme/emit (:node d) (link-context plan ns))]
   (if (:name d)
-   (str "(define " (binding-name ns (:name d)) " " value ")\n"
-        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " (binding-name ns (:name d)) ")\n"
+   (let [binding (binding-name ns (:name d))
+         arities (when (= :fn (:kind d)) (declaration-arities (:form d)))]
+    (str "(define " binding " " value ")\n"
+        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
-        (when (= :fn (:kind d))
-         (let [arities (declaration-arities (:form d))]
-          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d))
-               " " (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))))
+        (when arities
+         (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+              (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))
+        (link-definition ns (:name d) (:kind d) arities)))
    (str value "\n"))))
+(defn emit-functions
+ "The :fn definitions of `defs` (a window of `unit`), in order."
+ [plan unit defs]
+ (string/join "" (map #(emit-definition plan unit %) (filter #(= :fn (:kind %)) defs))))
+(defn emit-initializers
+ "The other definitions of `defs`, in order. The window that starts core
+  first links the seeds and runs rt/seed-core."
+ [plan unit defs first-window?]
+ (str (when (and first-window? (= "core" (:ns unit)))
+       (str (seed-links plan) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n"))
+      (string/join "" (map #(emit-definition plan unit %) (remove #(= :fn (:kind %)) defs)))))
 (defn emit-compiled-bundle
  ([units bundle host-source]
   (emit-compiled-bundle units bundle host-source "(native-main (native-command-line))\n"))
  ([units bundle host-source entry-source]
- (let [functions (mapcat (fn [u] (map #(emit-definition u %) (filter #(= :fn (:kind %)) (:defs u)))) units)
-       initializers (mapcat (fn [u]
-          (concat (when (= "core" (:ns u)) ["(bl-invoke (native-global \"rt\" \"seed-core\") '())\n"])
-                  (map #(emit-definition u %) (remove #(= :fn (:kind %)) (:defs u))))) units)]
+ ; The same bytes, in the same order, as native.chunks assemble! joining its
+ ; rows: every unit's functions, then every unit's initializers.
+ (let [metadata (dissoc bundle :units) plan (link-plan metadata units)]
   (str ";; BL native compiler. Generated from canonical BL source.\n"
        host-source "\n"
-       "(native-install-bundle! " (data (dissoc bundle :units)) ")\n"
-       (string/join "" functions) (string/join "" initializers)
+       "(native-install-bundle! " (data metadata) ")\n"
+       (string/join "" (map #(emit-functions plan % (:defs %)) units))
+       (string/join "" (map #(emit-initializers plan % (:defs %) true) units))
        entry-source))))
 
 (defn compile-bundle [bundle host-source]

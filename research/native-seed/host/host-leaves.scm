@@ -1,13 +1,30 @@
 ;; Raw host/module leaves. Canonical core/rt/compiler definitions are linked
 ;; separately; these implement host storage, finite Enum, and Erlang primitives.
 (define native-leaf-registry (bl-empty-map))
+;; Every leaf also has a stable named top-level binding, the exact spelling of
+;; native.bootstrap/leaf-binding-name ("l" + scheme/ident), which AOT code
+;; calls directly. The registry stays the runtime lookup authority.
+(define (native-leaf-binding-name key)
+ (string-append "lv"
+  (apply string-append
+   (map (lambda (c) (string-append "_" (number->string (char->integer c)))) (string->list key)))))
+(define native-link-changed! (lambda () #f))
+(define (native-bind-leaf! key value)
+ (##global-var-set! (##make-global-var (string->symbol (native-leaf-binding-name key))) value)
+ (set! native-leaf-registry (bl-assoc native-leaf-registry key value))
+ (native-link-changed!))
 (define (native-add-leaf! key value)
  (native-mark-host-callable! value)
  (if (native-map-has? native-leaf-registry key) (error (string-append "duplicate native leaf: " key)))
  (if (procedure? value)
   (let find ((i (- (string-length key) 1)))
    (if (char=? (string-ref key i) #\/) (bl-register-callable! value (string->number (substring key (+ i 1) (string-length key)))) (find (- i 1)))))
- (set! native-leaf-registry (bl-assoc native-leaf-registry key value)) value)
+ (native-bind-leaf! key value) value)
+;; Replace an EXISTING leaf (source-frame transport rebinding): registry,
+;; named binding and dynamic lookups change together.
+(define (native-replace-leaf! key value)
+ (if (not (native-map-has? native-leaf-registry key)) (error "native leaf replacement expected an existing leaf" key))
+ (native-bind-leaf! key value) value)
 (define (native-leaf key) (bl-get native-leaf-registry key native-missing))
 (define (native-badarg who) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badarg") who)) (native-capture-stack)))
 (define (native-assert-list xs) (if (native-list? xs) xs (native-badarg "proper list expected")))
@@ -42,6 +59,10 @@
   (native-raise (bl-key "error")
    (bl-map (bl-key "type") (bl-key "native/runtime-unavailable")
            (bl-key "operation") "rt/k-to-list") (native-capture-stack))))
+;; Struct-tag predicates for the compiled lazy modules' values (their behaviour
+;; is the compiled BL of priv/host/lazy_seq.bl and seq_cursor.bl).
+(define (native-lazy? x) (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.LazySeq")))
+(define (native-cursor? x) (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.SeqCursor")))
 (define (native-finite-items x)
  (cond ((bl-is-nil x) '()) ((native-list? x) x)
        ((or (bl-tag? x 'tuple) (bl-tag? x 'vec)) (bl-items x))
@@ -432,20 +453,53 @@
   ((and (native-erlang-number? a) (native-erlang-number? b)) (= (native-number-compare a b) 0))
   ((and (pair? a) (pair? b)) (and (native-erlang-equal? (car a) (car b)) (native-erlang-equal? (cdr a) (cdr b))))
   ((and (bl-tag? a 'tuple) (bl-tag? b 'tuple))
-   (let loop ((a (bl-items a)) (b (bl-items b)))
-    (cond ((null? a) (null? b)) ((null? b) #f)
-     (else (and (native-erlang-equal? (car a) (car b)) (loop (cdr a) (cdr b)))))))
+   ;; Common prefix elementwise, then sizes: the former list walk's order.
+   (let* ((a (vector-ref a 1)) (b (vector-ref b 1))
+          (n (vector-length a)) (m (vector-length b)) (k (fxmin n m)))
+    (let loop ((i 0))
+     (if (fx= i k) (fx= n m)
+      (and (native-erlang-equal? (vector-ref a i) (vector-ref b i)) (loop (fx+ i 1)))))))
   ((and (bl-tag? a 'map) (bl-tag? b 'map))
    (and (= (native-map-count a) (native-map-count b))
-    (let loop ((ps (native-map-pairs a)))
-     (or (null? ps) (let* ((p (car ps)) (v (bl-get b (bl-nth p 0) native-missing)))
-      (and (not (eq? v native-missing)) (native-erlang-equal? (bl-nth p 1) v) (loop (cdr ps))))))))
+    (native-map-every?
+     (lambda (k va) (let ((v (native-map-ref b k native-missing)))
+      (and (not (eq? v native-missing)) (native-erlang-equal? va v)))) a)))
   (else (bl-key-equal? a b))))
 (set! native-term-compare (lambda (a b)
  (cond ((and (native-erlang-number? a) (native-erlang-number? b)) (native-number-compare a b))
   ;; Erlang text-binary order is codepoint/UTF8 order, independent of the
   ;; actor's explicitly JS-shaped UTF16 str-cmp operation.
+  ;; Scalar strings hold no lone surrogates, so their codepoint lists are
+  ;; exactly their characters: compare those in place.
+  ((and (string? a) (string? b)) (native-codepoint-string-compare a b))
   ((and (native-string? a) (native-string? b)) (native-unit-compare (h-str-codepoints a) (h-str-codepoints b)))
   (else (bl-key-compare a b)))))
 (native-add-leaf! "erlang/==/2" native-erlang-equal?)
 (native-add-leaf! "erlang//=/2" (lambda (a b) (not (native-erlang-equal? a b))))
+;; persistent_term and atomics (category b: ERTS BIFs, no BL source).
+;; The native image has one process-global term table; an atomics ref is a
+;; vector of exact integers, 1-indexed as in ERTS.
+(define native-persistent-terms (make-table))
+(native-add-leaf! "persistent_term/get/2"
+ (lambda (key default) (table-ref native-persistent-terms key default)))
+(native-add-leaf! "persistent_term/put/2"
+ (lambda (key value) (table-set! native-persistent-terms key value) (bl-key "ok")))
+(native-add-leaf! "atomics/get/2" (lambda (ref i) (vector-ref ref (- i 1))))
+;; rt.bl's invocation gate reads Env's live Source-extent count here. Native Env
+;; exports no check_source_* gate, so no Source extent is ever live natively:
+;; the count is the constant zero, exactly what the old native gate decided.
+(table-set! native-persistent-terms (bl-key "bl_source_extent_heads_live") (vector 0))
+;; erlang:fun_info/2 (category b). A BEAM fun has one arity: native procedures
+;; carry their emitted arity annotation. `:module` of a fun literal written in
+;; a pinned host module is a link-time constant (native.bootstrap/self-module);
+;; any other item has no native answer and fails loudly.
+(native-add-leaf! "erlang/fun_info/2"
+ (lambda (f item)
+  (cond
+   ((not (procedure? f)) (native-badarg "fun_info: not a fun"))
+   ((eq? item (bl-key "arity"))
+    (let ((entry (table-ref native-callable-arities f #f)))
+     (if (and (pair? entry) (null? (cdr entry)))
+      (vector 'tuple (vector (bl-key "arity") (car entry)))
+      (error "native fun_info: fun lacks a single emitted arity"))))
+   (else (error (string-append "native fun_info: unsupported item " (bl-show item)))))))

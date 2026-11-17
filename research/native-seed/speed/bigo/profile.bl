@@ -1,0 +1,26 @@
+; Where a phase's time goes: eprof over one call on a generated input.
+; Usage: run run speed/bigo/profile.bl -- N read|compile|emit FAMILY
+;   FAMILY: deep-fn | wide-let | forms
+(ns bigo.profile (:require [reader :as reader] [compiler :as compiler] [native.scheme :as scheme]
+                           [clojure.string :as string]))
+(def argv (BeamLisp/argv))
+(def n (erlang/binary_to_integer (nth argv 0)))
+(def phase (nth argv 1))
+(def family (nth argv 2))
+(def src
+  (cond
+    (= family "deep-fn") (str (apply str (repeat n "(fn [v] ")) "v" (apply str (repeat n ")")))
+    (= family "wide-let") (str "(fn [v] (let [" (string/join " " (map (fn [i] (str "a" i " " i)) (range n)))
+                              "] [" (string/join " " (map (fn [i] (str "a" i)) (range n))) "]))")
+    :else (string/join "\n" (repeat n "(fn [v] (let [first-value (if v \"yes\" \"no\")] (if v [first-value true] [first-value false])))"))))
+(def options {:ns "user" :namespace "user" :namespace-qualified? true :callable-arities? true})
+(def form (first (reader/read-string src "p.bl")))
+(defn compile1 [] (compiler/reset-fresh!) (compiler/compile form (assoc (compiler/new-env "user") :target :js :file "p.bl")))
+(def node (compile1))
+(def action (cond (= phase "emit") (fn [] (scheme/emit node options))
+                  (= phase "read") (fn [] (reader/read-string src "p.bl"))
+                  :else compile1))
+(eprof/start)
+(eprof/profile (list) action)
+(eprof/stop_profiling)
+(eprof/analyze :total (list (erlang/list_to_tuple (list :sort :time))))

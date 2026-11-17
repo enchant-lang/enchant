@@ -8,13 +8,10 @@
 ; `__struct__/0,1` pair and `__info__/1` are SYNTHESIZED by the `:struct_fields`
 ; option in the live module's declaration order (`:resource`, `:metadata`).
 ;
-; THE PRODUCTION TAG IS SPELLED LITERALLY, never read from a fun literal. The
-; native memo graph recognizes a lazy node by its struct tag:
-; `BeamLisp.LazyMemo.dependencies/1` descends into
-; `%{__struct__: BeamLisp.LazySeq, resource: resource}`, and the cycle guard is
-; built on that walk. A value tagged with a probe atom is an OPAQUE map there:
-; its memo resource is neither edge-shared nor cycle-checked, so a probe compile
-; that minted its own tag would answer DIFFERENT cycle/retry behaviour and prove
+; THE PRODUCTION TAG IS SPELLED LITERALLY, never read from a fun literal. Every
+; consumer (`lazy?`, the alias-cycle check, `Enumerable`, `Inspect`) recognizes
+; a lazy node by `%{__struct__: BeamLisp.LazySeq}`, so a probe compile that
+; minted its own tag would build values no consumer treats as lazy and prove
 ; nothing. `new/1,2` therefore builds `%BeamLisp.LazySeq{}` at any compile target
 ; (the `reactive.bl` `Derived`-tag idiom), and every tag test below compares
 ; against that same literal. The module-exact fun-literal read is used only to
@@ -39,14 +36,29 @@
 ; before it. The struct's `resource` is ONE word, so the cell copy, the CAS
 ; comparison and `estimate_bytes/1`'s `flat_size` all stop at it.
 ;
-; ONE WALK AND ONE COPY IN, ONE COPY OUT. Realising one element costs exactly:
-; one walk of the thunk's captured environment (at create — those are the cell's
-; cycle edges), one copy of it into the cell (create), one copy out (the claimer
-; reads `{:pending thunk}`), plus the value's own walk and copy when it is
-; published. Everything else is O(1): a claim, a waiter registration and a
-; terminal transition are VERSION compare-and-swaps carrying `:keep` — no term
-; load, no term compare, no dependency walk, no graph lock (see
+; ONE COPY IN, ONE COPY OUT, NO WALK. Realising one element costs exactly: one
+; copy of the thunk into the cell (create), one copy out (the claimer reads
+; `{:pending thunk}`), plus the value's copy when it is published. Nothing walks
+; what a thunk captures or what a value holds: every transition is a VERSION
+; compare-and-swap carrying `:keep`, so the memo graph has no edges (see
 ; `BeamLisp.LazyMemo`).
+;
+; ## CYCLES ARE DETECTED WHERE THEY HAPPEN (big-O item M)
+;
+;   * RE-ENTRANT FORCE. A force that finds the cell `:running` under its own
+;     process makes it terminal `:recursive_force` (`force_state`).
+;   * WAIT-FOR CYCLE. A force that would block on another process first records
+;     the owner it waits for under `:bl_lazy_waits_on` in its own dictionary,
+;     then follows those entries from the owner. Reaching itself means the owner
+;     is transitively waiting on this process: it raises `:recursive_force`
+;     instead of waiting forever. The edges exist only while a force is blocked.
+;   * ALIAS CYCLE. A `{:completed v}` whose `v` is this very node, or a chain of
+;     completed nodes leading back to it, would make `realize` spin; it is
+;     published as terminal `:cyclic_memo` (`alias_cycle?`). The check costs one
+;     peek per node on the chain, never a walk of `v`.
+;
+; A value that merely EMBEDS its own node (`[1 | self]`, a map holding it, a
+; failure reason carrying it) is ordinary data and is published as it is.
 ;
 ; THE FAILURE IS RECORDED BIT-FOR-BIT. The live `evaluate_attempt` catches
 ; `kind, reason` in two variables and stores `{:failed, thunk, kind, reason,
@@ -432,13 +444,63 @@
     :else state))
 
 (defn attempt_deps
-  "INTERNAL: the edge policy for publishing `state` — `:keep` for a terminal
-   state (it reaches nothing new), the state's own walk otherwise, which the NIF
-   UNIONS with the cell's existing edges."
-  [state]
+  "INTERNAL: the edge policy for publishing `state`: always `:keep`. The memo
+   graph has no edges; cycles are detected at force time (namespace header)."
+  [_state]
+  :keep)
+
+(defn alias_cycle?
+  "INTERNAL: would publishing `{:completed v}` on `resource` close an alias
+   cycle — `v` is the node itself, or a node whose completed value is, through
+   a chain of completed nodes, the node itself? Each step is one constant-size
+   peek; only a `:completed` link reads its value. A chain longer than
+   `realize`'s own bound counts as a cycle."
+  [resource v steps]
   (cond
-    (erlang/== :terminal (erlang/element 1 state)) :keep
-    :else (BeamLisp.LazyMemo/dependencies state)))
+    (erlang/== false (lazy? v)) false
+    :else (alias_link? resource (maps/get :resource v nil) steps)))
+
+(defn alias_link?
+  "INTERNAL: `alias_cycle?` for the node resource `r` met on the chain."
+  [resource r steps]
+  (cond
+    (erlang/=:= resource r) true
+    (erlang/== false (erlang/is_reference r)) false
+    (erlang/> steps 100000) true
+    (erlang/== :completed (erlang/element 1 (BeamLisp.LazyMemo/peek r)))
+    (let [state (BeamLisp.LazyMemo/read r)]
+      (cond
+        (and (erlang/is_tuple state) (erlang/== :completed (erlang/element 1 state)))
+        (alias_cycle? resource (erlang/element 2 state) (erlang/+ steps 1))
+        :else false))
+    :else false))
+
+(defn publishable
+  "INTERNAL: `state`, or terminal `:cyclic_memo` when it is a completed value
+   that aliases its own node (`alias_cycle?`)."
+  [resource state]
+  (cond
+    (and (erlang/== :completed (erlang/element 1 state))
+         (alias_cycle? resource (erlang/element 2 state) 0))
+    (tuple :terminal :cyclic_memo)
+    :else state))
+
+(defn wait_cycle?
+  "INTERNAL: is `pid` — the owner this process is about to wait for — waiting,
+   directly or through other forcing processes, for `me`? Follows each blocked
+   forcer's `:bl_lazy_waits_on` entry (`wait_for_attempt`) at this moment only.
+   A dead or remote process, or one that is not blocked, ends the chain."
+  [pid me steps]
+  (cond
+    (erlang/=:= pid me) true
+    (erlang/> steps 4096) false
+    (erlang/== false (erlang/is_pid pid)) false
+    (erlang/=/= (erlang/node pid) (erlang/node)) false
+    :else
+    (let [info (erlang/process_info pid (tuple :dictionary :bl_lazy_waits_on))]
+      (cond
+        (erlang/is_tuple info) (wait_cycle? (erlang/element 2 info) me (erlang/+ steps 1))
+        :else false))))
 
 (defn attempt_owner?
   "INTERNAL: is `state` the running attempt `attempt` owned by `owner`?"
@@ -488,7 +550,8 @@
         cell (erlang/element 2 current)]
     (cond
       (attempt_owner? cell attempt (erlang/self))
-      (let [waiters (erlang/element 4 cell)
+      (let [state (publishable resource state)
+            waiters (erlang/element 4 cell)
             outcome (attempt_outcome state)
             outgoing (BeamLisp.LazyMemo/exchange_version_admitted
                        resource version state (attempt_deps state)
@@ -695,6 +758,13 @@
   "INTERNAL: join a running attempt — register as a waiter with a version CAS
    (edges kept: a waiter is not a dependency), monitor the owner, and wait.
 
+   Before it blocks, the waiter records `owner` under `:bl_lazy_waits_on` and
+   follows the wait-for chain from it (`wait_cycle?`). Recording first is what
+   makes two processes that block on each other at the same time see at least
+   one of the two entries. A chain that reaches this process is a cross-process
+   recursive force and raises `:recursive_force`; the entry is erased on every
+   way out.
+
    NOT ADMITTED, for the same reason as `owner_lost`: running → running replaces
    one constant 64-byte control state with another (the waiter list is charged
    the constant, not its length), so it grows nothing and a refusal could only
@@ -708,25 +778,48 @@
         cell (erlang/element 2 current)]
     (cond
       (attempt_owner? cell attempt owner)
-      (let [outcome (BeamLisp.LazyMemo/exchange_version
-                      resource version
-                      (tuple :running owner attempt
-                             (erlang/++ (list (erlang/self))
-                                        (erlang/element 4 cell)))
-                      :keep)]
+      (do
+        (erlang/put :bl_lazy_waits_on owner)
+        (cond
+          (wait_cycle? owner (erlang/self) 0)
+          (do (erlang/erase :bl_lazy_waits_on)
+              (Process/demonitor monitor (list :flush))
+              (force_error :recursive_force))
+          :else (join_attempt l identity resource version cell owner attempt monitor again)))
+      :else (do (Process/demonitor monitor (list :flush)) again))))
+
+(defn join_attempt
+  "INTERNAL: `wait_for_attempt` once no wait-for cycle was found: register as a
+   waiter and block. `:bl_lazy_waits_on` is erased before any answer is peeled."
+  [l identity resource version cell owner attempt monitor again]
+  (let [outcome (try
+                  (BeamLisp.LazyMemo/exchange_version
+                    resource version
+                    (tuple :running owner attempt
+                           (erlang/++ (list (erlang/self)) (erlang/element 4 cell)))
+                    :keep)
+                  (catch-raw [kind reason stack]
+                    (erlang/erase :bl_lazy_waits_on)
+                    (erlang/apply :erlang :raise (list kind reason stack))))]
         (cond
           (erlang/== :ok outcome)
-            (let [reply (receive_attempt l identity owner attempt monitor)]
+            (let [reply (try
+                          (receive_attempt l identity owner attempt monitor)
+                          (catch-raw [kind reason stack]
+                            (erlang/erase :bl_lazy_waits_on)
+                            (erlang/apply :erlang :raise (list kind reason stack))))]
+              (erlang/erase :bl_lazy_waits_on)
               ; a released (halted) fold puts the cell back in play; the waiter
               ; re-dispatches instead of waiting for an answer that is not coming
               (cond (erlang/== reply :redispatch) again
                     :else (return_outcome reply)))
           (erlang/== :retry outcome)
-            (do (Process/demonitor monitor (list :flush)) again)
+            (do (erlang/erase :bl_lazy_waits_on)
+                (Process/demonitor monitor (list :flush)) again)
           :else
-            (do (Process/demonitor monitor (list :flush))
-                (force_error :cyclic_memo))))
-      :else (do (Process/demonitor monitor (list :flush)) again))))
+            (do (erlang/erase :bl_lazy_waits_on)
+                (Process/demonitor monitor (list :flush))
+                (force_error :cyclic_memo)))))
 
 (defn force_state
   "INTERNAL: the force state machine — a TOP-LEVEL self-recursion, so every
@@ -829,7 +922,10 @@
           (list "LazySeq.realize: thunk chain "
                 (Integer/to_string depth)
                 " deep without a head — a self-referential lazy seq never produces a cell; it would hang forever"))))
-    (let [v (force node)]
+    ; `force_state`, not `force`: `node` is already a lazy node, and the bare
+    ; name `force` resolves to core's `force` (Deferred) under the namespace
+    ; compile the native closure uses, which answers a non-delay unchanged.
+    (let [v (force_state node (erlang/make_ref))]
       (cond
         (erlang/== v ()) nil
 

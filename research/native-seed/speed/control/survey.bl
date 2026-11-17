@@ -1,0 +1,45 @@
+; Survey of the real compiler closure ANF: guard shapes and pattern kinds.
+(ns control.survey (:require [native.artifact :as artifact]))
+(def path "/home/othman/code/undefine/beam-lisp--execution-protocol/research/native-seed/out/compiler-native-owner/partition.json")
+(def closure (artifact/read-closure path))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def stats (atom {}))
+(defn bump [k] (swap! stats update k (fnil inc 0)))
+(defn shape [n]
+ (case (:op n)
+  :remote [:remote (:mod n) (:fun n) (count (:args n))]
+  :if [:if]
+  [(:op n)]))
+(defn guard-walk [n]
+ (bump [:guard-node (shape n)])
+ (case (:op n)
+  :remote (doseq [a (:args n)] (guard-walk a))
+  :if (do (guard-walk (:test n)) (guard-walk (:then n)) (guard-walk (:else n)))
+  :let (do (guard-walk (:init n)) (guard-walk (:body n)))
+  nil))
+(defn pat-walk [p]
+ (bump [:pat (:pop p)])
+ (case (:pop p)
+  :ptuple (doseq [x (:elems p)] (pat-walk x))
+  :pcons (do (pat-walk (:head p)) (pat-walk (:tail p)))
+  :palias (do (pat-walk (:a p)) (pat-walk (:b p)))
+  :pmap (doseq [[k x] (:pairs p)] (bump [:pmap-key (:op k)]) (pat-walk x))
+  :pstruct (do (bump [:pstruct (:mod p) (mapv first (:fields p))]) (doseq [[k x] (:fields p)] (pat-walk x)))
+  nil))
+(defn walk [n]
+ (cond
+  (sequential? n) (doseq [x n] (walk x))
+  (erlang/is_map n)
+  (do (bump [:op (:op n)])
+   (when (contains? #{:fn :case :try :recv} (:op n))
+    (let [cs (if (= :try (:op n)) (:catch n) (:clauses n))]
+     (when (= :fn (:op n)) (let [c (BeamLisp.CompilerData/simple_function_clause n)] (bump [:fn-simple (boolean c) (when c (= (count (:pats c)) (count (distinct (map :name (:pats c))))))])))
+     (when (= :fn (:op n)) (bump [:fn-arities (count (distinct (map #(count (:pats %)) cs))) (count cs)]))
+     (when (= :try (:op n)) (doseq [c cs] (bump [:catch-pats (count (:pats c))])))
+     (doseq [c cs]
+      (when (:guard c) (bump [:guard-top (shape (:guard c))]) (guard-walk (:guard c)))
+      (doseq [p (:pats c)] (pat-walk p)))))
+   (when (and (not (vector? n)) (not= :lit (:op n))) (doseq [v (maps/values (dissoc n :ann))] (walk v))))
+  :else nil))
+(doseq [u units] (doseq [d (:defs u)] (walk (:node d))))
+(doseq [e (sort-by #(- (erlang/element 2 %)) (maps/to_list @stats))] (println (erlang/element 2 e) (pr-str (erlang/element 1 e))))

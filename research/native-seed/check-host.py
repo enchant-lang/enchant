@@ -33,12 +33,12 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.unlink(missing_ok=True)
-    sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-lazy.scm", "host/host-extra.scm"]
+    sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-extra.scm", "host/native-memo.scm"]
     inputs = sources + ["host/native-posix.scm", "fixtures/host-values-check.scm",
-                       "fixtures/native-posix-check.scm", "fixtures/host-lazy-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
+                       "fixtures/native-posix-check.scm", "fixtures/native-memo-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
                        "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
-                       "fixtures/host-compiler-cache-check.scm", "fixtures/host-global-cache-check.scm",
+                       "fixtures/host-link-check.scm", "fixtures/host-global-cache-check.scm",
                        "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm",
                        "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm"]
     hashes = {p: digest(BASE / p) for p in inputs}
@@ -61,9 +61,9 @@ def main():
     (out / "values.scm").write_text(common + "\n" + (BASE / "fixtures/host-values-check.scm").read_text())
     values = run("values-control", [GAMBIT / "bin/gsi", "values.scm"])
     assert "native value/control checks: 27" in values, values
-    (out / "lazy.scm").write_text(common + "\n" + (BASE / "fixtures/host-lazy-check.scm").read_text())
+    (out / "lazy.scm").write_text(common + "\n" + (BASE / "fixtures/native-memo-check.scm").read_text())
     lazy = run("lazy-memo", [GAMBIT / "bin/gsi", "lazy.scm"])
-    assert "native lazy memo checks passed" in lazy, lazy
+    assert "native memo checks: 27" in lazy, lazy
     (out / "extra.scm").write_text(common + "\n" + (BASE / "fixtures/host-extra-check.scm").read_text()
         + "\n" + (BASE / "fixtures/host-symbol-name-check.scm").read_text()
         + "\n" + (BASE / "fixtures/host-raw-map-get-check.scm").read_text()
@@ -80,12 +80,12 @@ def main():
     assert "NATIVE_OPTIONAL_INPUT_DEADLINE_ABI_PASS 18" in extra, extra
     (out / "source-frames.scm").write_text(common + "\n"
         + (BASE / "host/host-compiler.scm").read_text() + "\n"
-        + (BASE / "fixtures/host-compiler-cache-check.scm").read_text() + "\n"
+        + (BASE / "fixtures/host-link-check.scm").read_text() + "\n"
         + (BASE / "fixtures/host-global-cache-check.scm").read_text() + "\n"
         + (BASE / "host/host-source-frames.scm").read_text() + "\n"
         + (BASE / "fixtures/host-source-frames-check.scm").read_text())
     frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
-    assert "native compiler-cache checks: 96" in frames, frames
+    assert "native link checks: 56" in frames, frames
     assert "native global-cache checks: 48" in frames, frames
     assert "native source-frame checks passed" in frames, frames
     (out / "posix.scm").write_text(common + "\n"

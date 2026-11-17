@@ -1,0 +1,732 @@
+#+title: Native BL, without the BEAM toll
+#+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
+#+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
+#+date: 2026-11-16
+#+status: Round 2 integrated (M, D, R, U, T, C2, B2, S) · self-hosted closure of 33 namespaces · native 13.1× warm BEAM on the pipeline · P open
+#+author: Claude for Othman
+
+* In one breath
+#+begin_lede
+The native seed does not yet compile BL. It runs a compiler and a runtime that
+are written in BEAM's vocabulary on top of a BEAM emulator written in Scheme.
+Every primitive operation — an =is_atom= guard, an Erlang equality test, a call to a
+sibling function — pays a flat 300–500 ns toll that BEAM pays in about one.
+
+The profile is flat by construction, so no local fix can win: the 8× helper
+speedup, =-O2=, the helper partition, the equality shortcut and the fused scan
+each moved the whole pipeline 0–10%. The fix is structural: link once, give BL
+its own kernel, make values cheap, compile control flow, and let the formal
+Core become the middle end.
+#+end_lede
+
+#+begin_stats
+35× | slower than warm BEAM | read → compile → emit, 132.7 ms vs 3.8 ms (=evidence/warm-core=)
+127× | reader alone | 54.6 ms vs 0.43 ms
+~107k | remote calls per read | six small forms (=evidence/warm-core-counts=)
+~300 ns | per remote call, net | lookup + call of =erlang/is_integer/1= (=evidence/bridge-microcost=)
+#+end_stats
+
+* Words this dossier leans on
+#+begin_terms
+Native seed | BL → Scheme (BL-owned emitter =src/native/scheme.bl=) → Gambit 4.9.5 → C → ELF. Self-hosted: stage 2 = stage 3 byte for byte.
+Remote | An ANF =:remote= node: a call to =Module/fun/arity=. BEAM compiles it to a call instruction or a guard; the seed resolves it by string at runtime.
+Leaf | A host procedure standing in for a BEAM BIF or Elixir function (=host/host-leaves.scm=, 433 of them).
+Toll | Fixed per-operation overhead independent of the work done: lookup, wrapper, list consing, =apply=, emulated type test.
+Kernel | The small set of primitives BL semantics is written against. Today: BEAM's. Proposed: BL's own, with one implementation per backend.
+Hard cutover | The old path is deleted in the same change, not kept behind a flag.
+Warm-core benchmark | Six macro-free Source forms read, compiled and emitted twenty times per sample, nine samples, in one warm process on each side (=benchmark/=).
+#+end_terms
+
+#+begin_honest :title "What this is not"
+Not a claim that BEAM is slow or that Gambit is fast. The comparison is the same
+Source, the same macros, the same ANF boundary and the same emitter on the same
+hardware; process start, file IO, macro installation and C compilation are
+excluded on both sides.
+#+end_honest
+
+* Why the native seed is slower
+** The arithmetic already closes most of the gap
+The dossier for the native seed recorded the counts and the micro-costs
+separately and concluded that counts alone do not attribute the gap. Multiplied
+together they do, to first order:
+
+#+begin_src beam-lisp :id ledger
+(ns speed.dossier)
+;; Read phase, one read of the six benchmark forms.
+;; Counts: evidence/warm-core-counts/observation.json (summed by kind).
+;; Net per-operation costs: evidence/bridge-microcost/observation.json
+;; (lookup-and-call medians minus the 69.5 ns empty observer), rounded down.
+(def read-ms-native 54.639)
+(def read-ms-beam 0.428)
+(def read-ops {:remote 106933 :key-compare 17937 :invoke 7047
+               :small-map-search 3116 :map-get 2911 :global 1963})
+(def net-ns {:remote 300})
+(def remote-ms (/ (* (:remote read-ops) (:remote net-ns)) 1000000.0))
+(def share (/ remote-ms read-ms-native))
+(assert (> share 0.5))
+(assert (> (/ read-ms-native read-ms-beam) 100))
+{:remote-calls (:remote read-ops)
+ :remote-toll-ms (Float/round remote-ms 1)
+ :share-of-native-read (Float/round share 2)
+ :beam-read-ms read-ms-beam}
+#+end_src
+#+RESULTS: ledger
+: {:remote-calls 106933, :remote-toll-ms 32.1, :share-of-native-read 0.59, :beam-read-ms 0.428}
+
+
+The remaining ~40% is the same toll in other clothes: 18k allocating key
+comparisons, 7k generic invocations, 6k map searches. Nothing in that list is
+a hotspot; every line is a per-operation constant.
+
+** Five stacked layers
+#+begin_graph :title "Where one guard's 300–500 ns goes"
+node src | BL Source | rt.bl, reader.bl, compiler.bl | 0,0 | you
+node anf | BEAM-shaped ANF | :remote erlang/is_atom/1 | 1,0 | foreign
+node emit | Scheme text | (native-remote "erlang/is_atom/1") | 2,0 | station
+node bind | Late binding | 4 epoch roots · eq table · string=? · variadic wrapper · apply | 2,1 | foreign
+node emul | BEAM emulation | keyword compare allocates · sorted maps · double-boxed tuples | 1,1 | foreign
+node interp | Interpreted control | pattern data · assoc binders · argv lists · guard catchers | 0,1 | foreign
+node gambit | Gambit settings | (separate) (safe) (interrupts-enabled) · C -O0/-O1 | 1,2 | door
+edge src -> anf | rt written in erlang/* guards | solid
+edge anf -> emit | every remote stays a string | solid
+edge emit -> bind | resolved again per call | solid
+edge bind -> emul | then the emulated primitive | solid
+edge emul -> interp | patterns interpreted | dash
+edge interp -> gambit | compiled without inlining | dash
+#+end_graph
+
+#+begin_rosetta
+| Layer | Mechanism today | Source |
+| Late string binding | Every call is =(native-remote "M/f/a")= or =(native-global "ns" "name")=: epoch checks, identity table, =string=?= because Scheme strings are mutable, a variadic =(lambda arguments …)= wrapper, =apply=. The exact answer was computed at build time by =native.resolution= and thrown away. | =host/host-compiler.scm:160-341=, =src/native/eval.bl:9-17= |
+| Semantics in BEAM guards | =kind-kind= classifies with up to 13 =erlang/is_*= tests; =k-eqv=, =k-first=, =k-compare= dispatch on BEAM representation. On BEAM each test is one instruction. | =priv/boot/rt.bl:234,1096,2024,2070= |
+| BEAM term emulation | Keyword comparison runs =substring= on both names; maps are sorted by Erlang term order and searched through a 10-way rank compare; tuples are boxes inside boxes; metadata is a wrapper tuple; multi-arity functions are =$blfn= tuples dispatched by map lookup. | =host/host-values.scm:34-75,504-535= |
+| Interpreted control | Generic patterns are built as data, matched by =bl-match-args=, binders fetched with =(cdr (assoc "x" bindings))=; multi-clause functions take =(lambda argv …)=; arithmetic allocates a closure per operation; guards install an exception catcher; =h-tick= on every entry. | =src/native/scheme.bl:149-200=, =eval.bl:17=, =host.scm:132= |
+| Gambit configuration | =(separate) (safe) (interrupts-enabled)=, C at =-O0=/=-O1=, 4.37 MB of Scheme split into 18 units of ≤256 KB to stay under gsc's 120 s deadline; self-emission ≈ 200 s. | =check-self-emission.py:148=, =evidence/scheme-fixpoint= |
+#+end_rosetta
+
+** Why every local experiment failed
+#+begin_rosetta
+| Experiment | Result | Why, given the ledger |
+| Checked Int helper | 8.15× faster helper, ~0% whole reader | The helper was one line among thousands of equal-cost lines. |
+| Reader-only C =-O2= | no win | The time is in dispatch through the host, which C optimisation cannot see through. |
+| Host helper partition | regression, timeout | More units, more cross-unit calls through the same toll. |
+| Int equality shortcut | 1–3% pipeline | One of ~40 hot primitives. |
+| Fused reader scan | 1.11× reader | Removed some calls in one loop; every remaining call keeps its toll. |
+#+end_rosetta
+
+* Seven step changes
+Each change removes a whole category of bugs, not only a cost. The first four
+are being implemented now; the last three are the next round (see the roster).
+
+#+begin_principles
+Link once | Every statically known target becomes a direct Scheme reference at build time. Globals are Gambit cells, so redefinition writes the cell. Deletes the epoch roots, identity caches, availability caches and wrappers. Bug class removed: stale-cache and epoch bugs. Cost: ~300 ns → a few ns per call.
+BL owns its kernel | About sixty primitives (kind, =, compare, first/rest/nth, get/assoc, invoke, raise, cons) specified once and implemented per backend. BEAM lowers =kind= to guards; native to a tag switch. This round: inline BIF templates and native kernel overrides that delegate every uncovered case to the compiled BL body. Bug class removed: backend parity drift — the Decimal equality, negative-divisor modulus and ETF identity bugs formal-logic found were all this class.
+Values designed for BL | This round: allocation-free keyword comparison, eq pre-scans in small maps, same-kind fast paths, order-identical results. Next: tagged immediates, interned keywords with id and hash, one header word with kind, arity and metadata, metadata out of wrapper tuples. Bug class removed: representation ambiguity (nil/false/(), struct-as-map, meta-wrapper-as-tuple).
+Compile control, never interpret it | Every pattern kind becomes decision code; fixed formals per arity; =case= matches its subject directly; total guards skip the exception catcher; inline truthiness; direct loops and integer lowering by default. Bug class removed: the direct and generic matchers drifting apart, and exponential clause duplication.
+Formal Core as the middle end | The elaborator produces typed Core with facts — Int, kind, purity, non-escape, ranked termination — and the emitter consumes them. Rewrite rules are proved once in Lean and applied freely, with no solver in the compile loop. Bug class removed: optimisations that miscompile; ends the byte-parity dossier per micro-experiment.
+Ticks and frames off the hot path | Budget checks only at loop back-edges and unknown calls; source frames from return-address tables rather than a dynamic parameter per call; debug and release share code shape. Bug class removed: observers that change the program.
+Two compile tiers | Edit loop: Core → closures in microseconds, no gsc/clang. Release: Core → C per function, content-addressed in the existing unit store. Emit structured forms, not 4.37 MB of concatenated text. Makes <1 s edit-to-test a property of the design and deletes the 256 KB chunking.
+#+end_principles
+
+** One call, before and after
+#+begin_sequence :title "A call to reader/pos-line today"
+lanes caller · compiled BL | rt · native-remote | cache · four epochs | wrapper · lambda arguments | target · v_reader/pos-line
+caller -> rt : (native-remote "Elixir.BeamLisp.Ns.Reader/pos-line/1")
+rt -> cache : epoch check ×4, eq table, string=?
+cache --> rt : wrapper
+rt --> caller : wrapper
+caller -> wrapper : (wrapper pos) — conses argument list
+wrapper -> wrapper : registry epoch check
+wrapper => target : (apply value arguments)
+#+end_sequence
+
+#+begin_sequence :title "The same call after linking"
+lanes caller · compiled BL | target · v_reader/pos-line
+caller => target : (v_reader/pos-line pos) — one global cell load, direct jump
+note caller, target : redefinition at runtime writes the cell through a registered setter
+#+end_sequence
+
+* How the work is organised
+** Development approach
+#+begin_principles
+One contract before fan-out | Value representation, file ownership and the two kernel interfaces were fixed in =speed/CONTRACT.md= and committed before any agent started, so four branches merge without negotiation.
+Disjoint ownership | Each workstream owns whole files or named functions. Shared files (=host-leaves.scm=, =scheme.bl=) are split by function and by binding-versus-body.
+Hard cutovers | The old path is deleted in the same commit. The only switch is the explicit =:aot-link= emission option, which separates AOT linking from runtime evaluation.
+Exact before fast | Every fast path either reproduces the old result bit for bit or delegates. Differential checks compare old against new, or BEAM against native, over generated value corpora.
+Focused checks in agents | gsi programs and single pinned-SDK scripts, seconds each. No image builds, no corpora, no benchmarks in agents.
+One integrator | The main thread merges, rebuilds the closure and the stage-1 image once, then runs the Source corpus, byte equality of emitted Scheme and the warm-core benchmark.
+#+end_principles
+
+#+begin_milestones :id delivery :title "Delivery sequence" :start M1
+milestone M0 | done | Checked native foundation | Foundation
+check Self-hosted fixpoint, Source corpus, 461 actor checks × 3 budgets (=evidence/scheme-fixpoint=).
+milestone M1 | active | Contract and fan-out | This round
+needs M0
+step Fix value representation, ownership and kernel interfaces in =speed/CONTRACT.md=.
+step Four agents in sparse worktrees: link, kernel, values, control.
+check Each agent's RESULT.md lists focused checks and passes.
+milestone M2 | active | Consolidation | This round
+needs M1
+step Merge the four branches; add host-kernel.scm and host-match.scm to the host source lists.
+step Refresh the closure units (=update-closure.bl=), emit the compiler (=chunks.bl build-next=), compile stage 1.
+check Source corpus passes on the new image.
+check Emitted Scheme is byte-identical between BEAM and native.
+gate Final warm BEAM-vs-native numbers recorded below.
+milestone M3 | proposed | Kernel in BL | Next round
+needs M2
+step Rewrite rt.bl dispatch against the BL kernel; BEAM lowers kind to guards.
+milestone M4 | proposed | Formal middle end | Next round
+needs M3
+step Typed Core with facts consumed by the emitter; rule proofs in Lean.
+milestone M5 | proposed | Two tiers and frames | Next round
+needs M2
+step Closure tier for edits; per-function C; table-based source frames.
+#+end_milestones
+
+* Where the big-O changes are
+The seven step changes remove per-operation tolls. This section asks a
+different question of the whole pipeline: where does cost grow faster than
+the input, and where is a constant so large that a different algorithm is
+orders of magnitude away? It was answered in three passes. The =codebase=
+fact store, over all 20 sources stage 1 runs, proposed candidates. Scaling
+runs on BEAM measured the exponents. =eprof= and =system.incr= named the
+causes.
+
+#+begin_stats
+2.0 | slope of emit on nested functions | quadratic: 1,024 levels emit in 7.9 s, compile in 20 ms
+~83% | of that emit inside the lazy-cell walk | =BeamLisp.LazyMemo.deps_walk=, 20.9 M calls at 256 levels
+~250 | function calls per source byte, reader | 2.9 M calls for 11.4 KB; ≈1.3 µs per byte on BEAM
+12 of 67 | definitions whose identity changes on an unchanged re-analysis | =native.scheme=, via =system.incr/fn-identity=
+#+end_stats
+
+** M · A lazy cell walks everything it captures
+Every lazy-sequence cell runs a walk proportional to the values its thunk
+captures. On BEAM, =priv/host/lazy_memo.bl= walks the closure environment at
+create time and the value at publish time. On native,
+=native-lazy-publish= in =host/host-lazy.scm= walks every published value. In
+both cases the purpose is the memo graph's =would_cycle= edges.
+
+An ANF node has fewer than eight keys, so the clean-value memo never
+remembers one. Each nesting level that builds a lazy sequence therefore walks
+its whole subtree again. Emit on nested functions has a slope of 1.95–2.06,
+and the walk with its predicates and map folds is ~83% of that emit. On
+real, shallow definitions from =reader.bl= it is ~20% of emit.
+
+Both runtimes already blackhole a running cell: a re-entrant force fails with
+=recursive_force=. Detecting cycles at force time, and between processes only
+when a force blocks, makes the edges unnecessary.
+- Per-cell cost goes from O(captured) to O(1), and emit goes from
+  O(size × depth) to O(size), for every BL program, not only the compiler.
+- Deleted with it: the dependency walk, the bounded identity memo of clean
+  values, the NIF's edge union and cycle check, and the publication walk.
+  That is a second, approximate model of reachability which must otherwise
+  stay in agreement with the real one.
+
+** D · Compiled code depends on what the VM has loaded
+=system.incr/fn-identity= over =src/native/scheme.bl= gives a new identity to
+12 of 67 definitions when the unchanged source is analyzed a second time.
+A comment-only edit changes the same 12, and a one-body edit changes those 12
+plus the edited one. All 12 call through the =string/= alias. Before
+=clojure.string= is loaded, such a call compiles to an exact =:invoke=; after,
+it compiles to =(do (Loader/ensure_ready "clojure.string") …)=.
+=reset-fresh!= does not change this.
+
+The fix is to resolve aliases from the namespace header's declared
+requirements, never from VM state, and to make readiness a link-time fact.
+Compilation then becomes a function of the source and its declared
+interfaces. That removes the "same source, different artifact" class of bug,
+and it is the precondition for U: a body's identity becomes a sound cache key
+for the unit store, the chunk store and incremental analysis.
+
+** R · The reader spends ~250 calls per byte
+The reader is linear but slow: about 1.3 µs per byte on BEAM, and native read
+is a further 15.5× slower. The read cone's static fan-in is led by equality (151
+sites), =first= (69), =rest= (50) and =empty?= (43). =eprof= agrees: 116 k
+=eqv=, 104 k =compare= and 86 k =empty-list?= calls for 11.4 KB.
+
+The source is an Erlang charlist. Each character is classified by a chain of
+generic equality tests, each going through =rt='s kind dispatch, and a
+four-field position tuple is rebuilt per token.
+
+The replacement is a byte-class automaton over the UTF-8 binary:
+- one 256-slot class table, so dispatch is a small-integer =case= (a jump
+  table on both backends);
+- tokens are binary slices;
+- the position is an offset plus a line counter, with columns derived only
+  when a diagnostic asks for them.
+
+The estimate is 20–50 ns per byte, 25–60× on BEAM. It is not measured yet.
+On native it also removes most of the generic-equality traffic that K
+currently absorbs.
+
+** U · A one-definition edit rebuilds most of stage 1
+The full stage-1 build breaks down as:
+
+| Step | Time |
+|---|---|
+| Emitting 55 chunks (content-addressed, so unchanged chunks are reused) | ~30 s |
+| Splitting =stage1.scm= | ~35 s |
+| Twenty gsc → C → object units | ~2 min |
+
+The split greedily packs consecutive top-level forms into 256 KB units:
+=split-stage1.log= shows 19 cuts between 228 and 262 KB. Any size change in
+one form moves every later boundary, so on average half the units recompile.
+
+The fix is to cut units by content (one unit per namespace chunk, or
+content-defined cut points) and key each unit by its own bytes, with the link
+table separate. Rebuild cost becomes proportional to the change: one edit
+recompiles one unit, about 6 s. With G's closure tier on top, the edit loop
+is milliseconds, two to four orders of magnitude.
+
+** T · BEAM pays its own invocation toll
+In every compile profile, the top self-time entries are =Env.source_head=,
+=function_exported/3=, =ets:whereis=, =ets:lookup= and =persistent_term:get=.
+Each runs about once per higher-order invocation, through =call-invoke= and
+=check_source_invocation!=, and together they are ~20% of compile. This is
+the BEAM twin of the =native-remote= toll that L removed, and link-time
+resolution removes it the same way. It is a constant factor, about 1.25×,
+not an order of magnitude.
+
+#+begin_src beam-lisp :id bigo
+;; speed/bigo/scaling.txt: BEAM microseconds per call, one shape grown per family.
+(def emit-rows {:deep-fn [[64 30641] [256 455906] [1024 7930886]]
+           :deep-if [[64 2028] [256 5775] [1024 20726] [2048 42185]]
+           :wide-call [[64 3376] [256 9986] [1024 31672] [2048 55023]]})
+(def compile-rows {:wide-let [[64 866] [2048 20419]] :deep-if [[64 288] [2048 8778]]})
+(def read-forms [[1343 2921] [43007 53016]]) ; [bytes us]
+(defn slope [[n0 t0] [n1 t1]] (Float/round (/ (math/log (/ t1 t0)) (math/log (/ n1 n0))) 2))
+(defn slopes [rows] (mapv slope rows (rest rows)))
+(def emit-slopes (into {} (map (fn [[k rows]] [k (slopes rows)]) emit-rows)))
+(def compile-slopes (into {} (map (fn [[k rows]] [k (slopes rows)]) compile-rows)))
+(assert (every? #(> % 1.8) (:deep-fn emit-slopes)))
+(assert (every? #(< % 1.2) (concat (:deep-if emit-slopes) (:wide-call emit-slopes))))
+(assert (every? #(< % 1.2) (mapcat val compile-slopes)))
+{:emit emit-slopes :compile compile-slopes
+ :read-us-per-byte (Float/round (/ (second (last read-forms)) (first (last read-forms))) 2)}
+#+end_src
+#+RESULTS: bigo
+: {:compile {:deep-if [0.99], :wide-let [0.91]}, :emit {:deep-fn [1.95 2.06], :deep-if [0.75 0.92 1.03], :wide-call [0.78 0.83 0.8]}, :read-us-per-byte 1.23}
+
+
+#+begin_honest :title "What the static facts did and did not find"
+The =codebase= store over-reports. It lists 145 calls to linear-cost
+operations inside per-element loops and 1,059 inside recursive functions in
+the three hot cones. None of the shapes they suggest grows faster than linear
+up to n = 2048: wide =let=, deep =let=, deep =if= and wide calls all stay at
+slopes of 0.6–1.25. None of them is a big-O problem today.
+
+The quadratic came from a runtime the facts cannot see: =LazyMemo= is host
+code below the language. The facts were most useful for scoping the work:
+- the size of each cone (read 103, compile 324, emit 69 functions);
+- the fan-in that pointed at the reader's character dispatch;
+- the recursion ranking that put =native.scheme/emit= and =anf/node-ok?= first.
+
+Also checked and fine:
+- Native maps are flat and sorted up to 16 keys, then AVL, so O(log n).
+- The require graph has 31 edges and no cycles.
+- Nested =str= emission copies O(size × depth) bytes but stays under 10% at
+  depth 2048.
+#+end_honest
+
+#+begin_rosetta
+| Question | Query or probe | Answer | Helped |
+| What can each phase reach? | =codebase/reachable-qualified= from =reader/read-string=, =compiler/compile=, =native.scheme/emit= | 103 / 324 / 69 functions | scoped every later query |
+| Which call sites sit in loops? | =[:find ?c ?caller ?callee ?line ?d :where [?c :call/caller-qualified ?caller] [?c :call/callee ?callee] [?c :call/line ?line] [?c :call/loop-depth ?d]]= plus =:call/effective-loop-depth= | 15,937 rows | input to the next two |
+| Linear operation inside a per-element loop | rows above filtered by a LINEAR callee set and depth ≥ 1, inside a hot cone | 145 sites | candidates only; none measured super-linear |
+| Linear operation inside recursion | =[:find ?caller :where [?c :call/cost-coverage "recursive"] [?c :call/caller-qualified ?caller]]= joined with the LINEAR rows | 1,059 sites; =anf/node-ok?= 65, =native.scheme/emit= 25 | pointed profiling at emit |
+| Static fan-in per cone | =frequencies= of callees within each cone | read: equality 151, =first= 69; emit: equality 152, =str= 119 | led to R |
+| Is the build order a DAG? | =codebase/require-cycles= over =[?e :ns/requires ?d]= | 0 cycles, 31 edges | safe to cut units per namespace (U) |
+| What does each phase cost as input grows? | =speed/bigo/scaling.bl=: nine shapes, n = 32…2048 | emit on nested functions slope 2.0; everything else ≤ 1.25 | found M |
+| Where does that time go? | =speed/bigo/profile.bl= (=eprof=) | =deps_walk= 20.9 M calls, ~83% | named M |
+| Is a body's identity stable? | =speed/bigo/incr.bl=: =system.incr/fn-identity= before and after an edit | 12 of 67 unstable on unchanged source | found D |
+#+end_rosetta
+
+#+begin_honest :title "Limits of the logic layer met on the way"
+Indexing the 20 sources (about 18 k lines, 1,387 functions) took about two
+minutes, roughly 6.6 ms per line. One 5 k-call transaction exceeded the 30 s
+writer call, so the index is transacted in batches of 1,000. The walker
+crashes on =core.bl='s own macro definitions, so that file is indexed one
+form at a time. =loop=/=recur= is not a loop head, and =:call/cost-coverage
+"recursive"= marks 675 functions, too coarse to rank by. These are the next
+things to fix if the fact store is to answer cost questions alone.
+#+end_honest
+
+* Workstream roster
+Workstreams L, K, V and C are integrated. M and D are the next round's first
+two items: one is a runtime big-O change for every BL program, the other a
+correctness precondition for incremental builds. C2 should be re-measured
+after M lands, because the new emitter builds more lazy sequences per node.
+
+** DONE L · Link once
+:PROPERTIES:
+:AREA: linking
+:OWNER: agent
+:PROTO: research/native-seed/speed/link
+:END:
+*Owns* =chunks.bl=, =eval.bl=, =bootstrap.bl=, =host-compiler.scm=, leaf
+binding forms in =host-leaves.scm=, the registry section of =host-values.scm=,
+and the call-protocol functions of =scheme.bl=.
+*Approach.* Use the decisions =chunks.bl= already computes. Compiled targets
+become direct references to =native.bootstrap/binding-name=; =$blfn=
+definitions publish one binding per arity and a variadic arm; leaves get stable
+named bindings; globals link directly with =$macro= unwrapping decided
+statically where possible. A setter per linked definition keeps runtime
+redefinition observable. An unknown callee takes =(if (procedure? f) (f a …)
+(bl-invoke f …))=. Arithmetic stops allocating a closure per operation. The
+kernel hooks are called here.
+*Deletes* the epoch roots, identity cache, availability cache and wrappers,
+and the fixtures that asserted them.
+*Checks* host fixtures in gsi; emission of a few real definitions over the
+captured closure; a gsi program for direct calls, arity entries, the variadic
+arm, redefinition, macro unwrap and the invoke fast path.
+
+** DONE K · Native kernel
+:PROPERTIES:
+:AREA: kernel
+:OWNER: agent
+:PROTO: research/native-seed/speed/kernel
+:END:
+*Owns* =src/native/intrinsics.bl= and the new =host/host-kernel.scm=.
+*Approach.* =remote-template= inlines the 47 hottest BIFs (equality, the
+type tests, element, hd, tl, setelement, make_tuple, tuple_to_list …) with exactly the registered
+leaf's semantics, errors included. =kernel-override= replaces the hot rt
+dispatchers (=k-eqv k-compare kind-kind k-first k-rest k-nth empty?
+empty-list? hash-hash-key …=) with native fast paths for common
+representations; every other case goes to =original=, the unchanged compiled
+BL body. When in doubt, delegate.
+*Checks* a BEAM-vs-native differential harness: the pinned SDK evaluates each
+covered operation over a value corpus and emits expected outcomes with
+=native.scheme/literal=; gsi asserts the fast paths match and the other inputs
+delegate.
+
+** DONE V · Value fast paths
+:PROPERTIES:
+:AREA: values
+:OWNER: agent
+:PROTO: research/native-seed/speed/values
+:END:
+*Owns* =host.scm=, =host-values.scm= (except the registry), =host-lazy.scm=,
+=host-extra.scm= and leaf bodies.
+*Approach.* Allocation-free keyword comparison; same-kind fast paths ahead of
+the rank cascade; =eq?= pre-scan in small maps; fast paths in =bl-get=,
+=bl-assoc=, =bl-equal?=; fewer intermediate lists. Every result and every
+iteration order stays bit-identical. Audit for redefinitions of standard
+bindings so Gambit may inline primitives.
+*Checks* the existing host suites plus differential fixtures of old against
+new implementations.
+
+** DONE C · Compiled control
+:PROPERTIES:
+:AREA: control
+:OWNER: agent
+:PROTO: research/native-seed/speed/control
+:END:
+*Owns* =scheme.bl= except L's functions, and a new =host/host-match.scm=.
+*Approach.* Decision code for every pattern kind, deleting the runtime pattern
+data path; fixed formals for multi-clause functions with the =case-lambda=
+wrong-arity fallback; =case= on its subject directly; total guards without an
+exception catcher; inline truthiness; direct loops and integer lowering by
+default. One shared failure continuation per clause chain.
+*Checks* a BEAM-vs-native differential corpus covering every pattern kind,
+guards, =case=, =try=, wrong arity, loops and bignum overflow, run in gsi.
+
+** DONE I · Integration and final numbers
+:PROPERTIES:
+:AREA: integration
+:OWNER: main thread
+:PROTO: research/native-seed/speed/final
+:END:
+Merge L, K, V, C. Add the new host files to the source lists. Refresh the
+closure's changed units, emit the 18-namespace compiler, compile stage 1 with
+the chosen Gambit declarations. Gates: Source corpus, byte-equal emitted
+Scheme, then the warm-core benchmark: final native against final BEAM.
+
+** DONE C2 · Restore emitter throughput
+:PROPERTIES:
+:AREA: control
+:PRIORITY: A
+:END:
+*Outcome (round 2).* BACKEND: the emitter builds no lazy sequence and joins text with two small helpers; one loop-verdict walk per region. 2,143 emitter comparisons and all 1,394 closure definitions are byte-identical.
+The new control-flow emitter doubles BEAM emit time on the benchmark fixture
+(5.7 → 11.2 ms) and the emitter is itself part of the measured compiler.
+Profile =total?=, =loop-plan= and the integer-fact threading on the six forms;
+memoise or fuse the walks so emission is linear in the tree again. Gate: BEAM
+emit at or below the previous emitter's time, unchanged bytes.
+
+** TODO A · Attribute the remaining front-end gap
+:PROPERTIES:
+:AREA: measurement
+:PRIORITY: A
+:END:
+Round 2: read 22.5×, compile 19.4× and emit 7.8× against the integrated
+BEAM. Candidates, in order:
+- the compiled kernel, through KERNEL's requests to BACKEND: boolean
+  =and=/=or=, keyword =case=, direct self-calls, quoted keyword literals;
+- entry ticks;
+- V2.
+
+Re-instrument the linked image at
+the cell level (calls per linked target, kernel fast-path hit rate, map and
+compare counts) and rank what is left. The likely candidates are V2
+(representation), F (ticks) and the uncovered multi-arity rt functions
+(=k-nth=, =nth=, =coll-get=).
+
+** DONE B2 · BL kernel in rt.bl
+:PROPERTIES:
+:AREA: kernel
+:HORIZON: later
+:END:
+*Outcome (round 2).* KERNEL: the native kernel is =rt.bl= compiled by the native compiler. All 34 Scheme overrides and =kernel-override= are deleted. Hot rt functions became inline type tests, and literal equality templates emit =eq?=/=null?=. Native differential: 42,040 rt rows equal BEAM; the 77 that differ are identical to the original rt.bl native answer.
+Rewrite rt.bl's representation dispatch against a BL primitive signature
+(=kind=, =same?=, =compare=, …) specified in the formal Core with Lean models.
+The BEAM backend lowers them to guards and BIFs; native to header switches.
+The native overrides from K become the native implementation of that
+signature, and the per-primitive conformance checks replace whole-program
+parity corpora as the backend gate.
+
+** TODO V2 · Value model for BL
+:PROPERTIES:
+:AREA: values
+:HORIZON: later
+:END:
+Tagged immediates for small integers, nil, booleans and characters. Interned
+keywords carrying an id and a precomputed hash. One header word holding kind,
+arity and a metadata slot, so metadata stops being a wrapper tuple. Hash maps,
+which needs a decision on whether map iteration order is a language guarantee
+(see Q1); =DATA-IDENTITY.md= already gives canonical identity without relying
+on storage order.
+
+** TODO E · Formal Core as the middle end
+:PROPERTIES:
+:AREA: formal
+:HORIZON: later
+:END:
+Promote =formal.elaborate= from verifier to compiler stage. Facts: Int,
+kind, purity, non-escape, ranked termination (=LOOPS.md=). The emitter's
+hand-threaded =:integer-facts= is replaced by checked facts. Rewrite rules
+are proved once in Lean (=research/p13d_rule_proofs=) and applied without a
+solver. This is where native can pass BEAM: monomorphic sites skip dispatch,
+integers unbox, proven loops carry no tick.
+
+** TODO F · Ticks and frames
+:PROPERTIES:
+:AREA: runtime
+:HORIZON: later
+:END:
+Budget checks at loop back-edges and calls to unknown functions only. Source
+frames rebuilt from code-address tables rather than a dynamic parameter per
+call. One code shape for debug and release.
+
+** TODO G · Two compile tiers
+:PROPERTIES:
+:AREA: build
+:HORIZON: later
+:END:
+A closure-compiled tier for the edit loop, with no gsc or clang involved.
+Per-function C for release, keyed in the existing unit store. Structured
+emission instead of concatenated text. Retires the 256 KB unit splitting
+and the 120 s gsc deadline as design constraints.
+
+** TODO P · Self-emission parity
+:PROPERTIES:
+:AREA: build
+:HORIZON: later
+:END:
+The AOT linker and kernel live in BEAM-side drivers this round, so the
+closure needs no new namespace. For stage 2 = stage 3 the native compiler's
+own self-emission path must adopt the same linking context: extend the
+closure explicitly with =native.intrinsics= and move the linking context into
+=native.eval=.
+*Status (round 2).* CLOSURE moved the whole linker into =native.bootstrap=,
+shared by the BEAM driver and self-emission. On BEAM both paths emit
+byte-identical Scheme for sugar, server-clause and reader-node. On the real
+image, =stage1 --compile= fails after 59 s: /native resolution: global
+context namespace absent from closure (lower)/. On BEAM, =lower= is loaded,
+so =compiler.bl='s calls into it compile as module-linked remotes, which link
+as an excluded stub. In the native image =lower= is not loaded, so the same
+source compiles to =:global= references. This is item D's class of bug for a
+boot-tier stub. Next: the native Env answers =lower='s link rows exactly as
+BEAM does, then one image build to show =stage2.scm= = =stage1.scm=.
+
+** DONE S · No host Scheme replicates a BL file
+:PROPERTIES:
+:AREA: self-hosting
+:END:
+Host Scheme may only be the native counterpart of something with no BL
+source: the term model, Erlang BIFs and Elixir stdlib, a NIF, or the OS
+(=speed/CONTRACT2.md=). The integrated closure has 33 namespaces, 14 more
+than round 1. They now include =host.lazy-memo=, =host.lazy-seq=,
+=host.seq-cursor=, =host.deferred=, =host.delay=, =host.sorted=,
+=host.ex-info=, =host.compile-error=, =host.emit=, =host.link=,
+=host.server=, =host.compiler=, =native.intrinsics= and
+=native.resolution=. Every remote links (0 unresolved), and the build reports
+0 dead leaves.
+
+*Residual replicas*, each with its owner's reason:
+- Vector, Set: need V2's representation;
+- Num, Decimal (and =native-decimal-parse=): about 20 stdlib leaves and the
+  regex FFI;
+- Transient: compiles, but has no differential yet;
+- Refs, Multi, Reactive: depend on Env and Task;
+- Record: =persistent_term= class publication;
+- =Tiers/boot_namespaces=: should come from bundle metadata.
+
+The Env, AOT and Loader leaves are native services, not replicas.
+
+** DONE M · Lazy cells without a capture walk
+:PROPERTIES:
+:AREA: runtime
+:PRIORITY: A
+:END:
+*Outcome (round 2).* LAZY: the BEAM walk is gone. Cycles are detected at force time: a re-entrant owner, a cross-process wait-for chain, or a completed-alias chain. A value that contains its own node is now data. Lazy is compiled natively from =lazy_memo.bl=, =lazy_seq.bl=, =seq_cursor.bl= and =deferred.bl=; =host-lazy.scm= is deleted, and =native-memo.scm= is only the NIF counterpart. BEAM lazy suites are green on the integrated SDK.
+*Owns* =priv/host/lazy_memo.bl=, the =native/lazy_memo= NIF's edge set and
+=host/host-lazy.scm='s publication walk.
+*Approach.* Detect cycles where they happen: a re-entrant force of a running
+cell by its owner raises, as both runtimes already do. A force that blocks on
+another process follows wait-for edges at that moment only. Delete the
+create, capture and publish walks, the clean-value memo and the edge union.
+*Checks* the existing lazy-memo suites (cyclic definitions, cross-process
+waits, failure replay), plus emit on 1,024 nested functions: slope ≤ 1.2 and
+unchanged bytes.
+
+** DONE D · Compile is a function of source
+:PROPERTIES:
+:AREA: compiler
+:PRIORITY: A
+:END:
+*Outcome (round 2).* FRONT: an aliased call into a declared, not-yet-loaded namespace links from its source, not load state. =incr.bl= on the integrated SDK: 0 of 84 identities change on an unchanged or comment-only re-analysis. Not covered: boot-tier stubs (see P).
+*Owns* alias resolution in =priv/boot/compiler.bl=.
+*Approach.* Resolve a qualified call from the namespace header's declared
+requirements, never from loaded state, and turn =Loader/ensure_ready= into a
+link-time fact.
+*Checks* =speed/bigo/incr.bl=: zero changed identities on an unchanged
+re-analysis, and exactly one on a one-body edit.
+
+** DONE R · Byte-class reader
+:PROPERTIES:
+:AREA: reader
+:PRIORITY: B
+:END:
+*Outcome (round 2).* READER: a per-codepoint automaton of inlined BIF steps (the charlist stays, because native text is codepoints). 11,127 differential checks over 1,021 files and a 103-case error corpus: 0 mismatches. Reader tests are green.
+*Approach.* A table-driven automaton over the UTF-8 binary: a 256-slot class
+table, small-integer dispatch, tokens as binary slices, and an offset plus a
+line counter for positions. The reader's diagnostics and span events stay
+byte-identical.
+*Checks* the reader answer key and span tests, plus =scaling.bl= read rows
+under 50 ns per byte on BEAM.
+
+** DONE U · Content-addressed units
+:PROPERTIES:
+:AREA: build
+:PRIORITY: B
+:END:
+*Outcome (round 2).* BACKEND: a unit ends only after a whole definition, at name-hash cut points, and keys exclude the ordinal. 40 of 40 random edits change exactly one of 58 units. Stage 1 is now 70 units.
+*Approach.* Cut stage-1 units at chunk boundaries or at content-defined cut
+points, key each unit by its bytes, and keep the link table apart. This
+depends on D for stable keys and composes with G's closure tier.
+*Checks* a one-definition edit rebuilds exactly one unit, and an unchanged
+rebuild rebuilds none.
+
+** DONE T · Link-time invocation on BEAM
+:PROPERTIES:
+:AREA: linking
+:HORIZON: later
+:END:
+*Outcome (round 2).* FRONT: the gate is a counter read when no Source extent is live. Natively the count is a constant zero cell, the same decision the deleted override made.
+Resolve the source-invocation gate (=call-invoke=, =check_source_invocation!=,
+=source_head=) at link time, as L did for native remotes. Expect about 1.25×
+on BEAM compile.
+
+* Final numbers
+Integrated stage-1 image =7c32ac57…=: rounds 1 and 2, a 33-namespace
+self-hosted closure, 70 units, =(standard-bindings) (extended-bindings)=.
+
+The BEAM side is the integrated SDK =v8jbl8q0…= (descriptor =f748c976…=),
+built from the same tree, so both sides run the same reader, compiler, =rt=,
+lazy runtime and emitter Source. The protocol is =benchmark/prepare-benchmark.py=:
+3 warm-ups, 9 samples × 20 repetitions, median, native then BEAM on the same
+host. The emitted Scheme is byte-identical between the two.
+
+#+begin_stats
+13.1× | native / BEAM, full pipeline | 11.08 ms vs 0.843 ms
+22.5× | read | 1.507 ms vs 0.067 ms
+19.4× | compile | 6.685 ms vs 0.345 ms
+7.8× | emit | 2.833 ms vs 0.365 ms
+#+end_stats
+
+#+begin_src beam-lisp :id final
+;; speed/final/evidence-r2/comparison.json (medians, ms).
+(def native {:read 1.507 :compile 6.685 :emit 2.833 :pipeline 11.082})
+(def beam {:read 0.067 :compile 0.345 :emit 0.365 :pipeline 0.843})
+(defn ratio [k] (Float/round (/ (get native k) (get beam k)) 1))
+(def ratios (into {} (map (fn [k] [k (ratio k)]) [:read :compile :emit :pipeline])))
+(assert (< (:pipeline ratios) 14))
+{:native-over-beam ratios}
+#+end_src
+#+RESULTS: final
+: {:native-over-beam {:compile 19.4, :read 22.5, :pipeline 13.1, :emit 7.8}}
+
+
+#+begin_honest :title "Read these numbers with three facts"
+BEAM gained from this round as much as native did. Item M removed BEAM's
+lazy-cell walk, C2 made emission linear, R rewrote the reader, and T made the
+invocation gate a counter read. The integrated BEAM pipeline runs the fixture
+in under a millisecond.
+
+Native lost round 1's hand-written Scheme kernel, by design: it now runs
+=rt.bl= compiled by its own compiler. KERNEL listed the emitter support that
+would make that code tight (boolean =and=/=or=, keyword =case=, direct
+self-calls, quoted keyword literals). Those requests are item A.
+
+Self-emission (P) does not yet reach a fixpoint. The image compiles every
+Source corpus form, but compiling its own closure stops on the =lower= stub.
+#+end_honest
+
+#+begin_rosetta
+| Gate | Result | Evidence |
+| Integrated SDK | built once, all Nix work on the build station; job =job_65d70b46168ac2f1= | =evidence-r2/build.json= |
+| BEAM test batch | 22 of 25 files green; projection preflight 7 of 7 (617 assertions). The 3 failures also fail on main's SDK. | =evidence-r2= receipt, Station thread |
+| Host checks | 11 of 11 | =check-host.py= |
+| Native closure | 33 units, 0 unresolved remotes, 0 dead leaves, 456 host leaves | =speed/bigo/unresolved-probe.bl= |
+| Workstream differentials | reader 11,127 / 0; kernel 42,040 rt rows; lazy 28 / 0; data 692 of 698 (6 outside its files); services 172 / 0; emitter 2,143 / 0 | =speed/*/RESULT.md= |
+| Source corpus | =NATIVE_COMPILER_SOURCE_CORPUS_OK=, 0 FAIL, identical to round 1 | =evidence-r2/source-corpus.log= |
+| Emitted Scheme | byte-identical native and BEAM | =evidence-r2/comparison.json= |
+| Not run, or open | actor corpus; stage 2 = stage 3 (P) | =evidence-r2/stage2-emit.log= |
+#+end_rosetta
+
+* Decisions
+#+begin_decision :id D1 :title "Keep the value representation fixed during the fan-out" :status proposed
+- [x] Fix the representation now; change algorithms only; redesign values next round (V2)
+- [ ] Redesign values in this round alongside linking and control
+Four agents can only work in parallel against a stable data layout: kernel
+templates, compiled patterns and host primitives all read it. The redesign
+touches every one of them and belongs to a single owner afterwards.
+#+end_decision
+
+#+begin_decision :id D2 :title "Planners are a compile-time choice for AOT code" :status proposed
+- [x] Compiled AOT code calls plain procedures directly; source-frame and actor planners are selected at emission
+- [ ] Keep consulting a runtime-replaceable bl-invoke on every call
+Runtime replacement of =bl-invoke= forces every call through a global
+procedure and a list. The actor and source-frame paths already choose at
+emission time through =:source-frames?=.
+#+end_decision
+
+#+begin_decision :id D3 :title "Kernel overrides delegate rather than reimplement" :status proposed
+- [x] Native fast paths for common representations; every other case calls the original compiled BL body
+- [ ] Reimplement each rt dispatcher entirely in Scheme
+Delegation makes exactness local and checkable: only the fast paths need a
+differential check, and the BL definition stays the specification.
+#+end_decision
+
+* Questions
+#+begin_ask :id Q1 :title "Is map iteration order part of the language?" :options "Yes, Erlang term order|No, unspecified; canonical only through formal identity|Insertion order"
+Today native maps reproduce Erlang term order exactly. That keeps emitted bytes
+identical across backends, but it forbids hash maps natively. BEAM itself
+switches from sorted to hash order above 32 keys, so programs that depend on
+it are already fragile.
+#+end_ask
+
+#+begin_ask :id Q2 :title "Where should the BL kernel signature live?" :options "formal-logic Core with Lean models|priv/boot as a BL protocol|Both: BL protocol checked against the Core"
+The kernel is the boundary every backend implements. Putting it in the formal
+Core makes per-primitive conformance a proof obligation instead of a corpus.
+#+end_ask

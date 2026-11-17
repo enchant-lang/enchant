@@ -19,6 +19,7 @@
  (if native-macro-trace-enabled? (time->seconds (current-time)) #f))
 (define (native-env-put! key value)
  (set! native-env-rows (bl-assoc native-env-rows key value))
+ (native-env-row-changed! key)
  (if (and native-macro-trace-enabled?
           (bl-tag? value 'tuple) (= (bl-count value) 2)
           (eq? (bl-nth value 0) (bl-key "$macro"))
@@ -157,6 +158,7 @@
 (define (native-register-arities! ns name fixed variadic)
  (set! native-export-arities
   (bl-assoc native-export-arities (native-row ns name) (bl-tuple (list fixed variadic))))
+ (set! native-availability-cache (make-table test: equal?))
  (bl-key "ok"))
 (define native-excluded-host-leaves
  '("Elixir.BeamLisp.Env/check_source_callable!/1"
@@ -164,6 +166,15 @@
    "Elixir.BeamLisp.Env/check_source_invocation1!/2"
    "Elixir.BeamLisp.Env/check_source_invocation2!/3"
    "Elixir.BeamLisp.Env/assert_native_framework_execution!/0"))
+;; Dynamic link state changes only through explicit publication points:
+;; native-add-leaf!/native-replace-leaf!, native-install-bundle! and
+;; native-register-arities!. Each one retires the memo tables below.
+(define native-availability-cache (make-table test: equal?))
+(define native-remote-table (make-table test: equal?))
+(set! native-link-changed!
+ (lambda ()
+  (set! native-availability-cache (make-table test: equal?))
+  (set! native-remote-table (make-table test: equal?))))
 (define (native-remote-available-uncached? module function arity)
  (let* ((module (native-module-name module)) (function (native-module-name function))
         (key (string-append module "/" function "/" (number->string arity)))
@@ -179,77 +190,17 @@
        (if variadic?
         (and (not (bl-is-nil (bl-nth info 1))) (= arity (+ 1 (bl-nth info 1))))
         (if (member arity (bl-items (bl-nth info 0))) #t #f)))))))))
-;; Boolean membership is stable only under the exact capability roots.
-;; Source function_exported/3 passes immutable atoms; nested identity tables
-;; avoid repeated MFA string construction and AVL probes for those arguments.
-;; Mutable strings retain the original path. False is valid only within this
-;; exact epoch; exceptions never enter the cache. This is finite export
-;; membership, not an absent-Source-binding or namespace-authority cache.
-(define native-availability-cache (make-table test: eq?))
-(define native-availability-roots (vector #f #f #f #f #f))
-(define native-availability-original-module-name native-module-name)
-(define native-availability-original-atom-name native-atom-name)
-(define native-availability-original-keyword? native-keyword?)
-(define (native-refresh-availability-cache!)
- (if (or (not (eq? (vector-ref native-availability-roots 0) native-leaf-registry))
-         (not (eq? (vector-ref native-availability-roots 1) native-module-names))
-         (not (eq? (vector-ref native-availability-roots 2) native-stub-names))
-         (not (eq? (vector-ref native-availability-roots 3) native-export-arities))
-         (not (eq? (vector-ref native-availability-roots 4) native-excluded-host-leaves)))
-  (begin
-   (set! native-availability-cache (make-table test: eq?))
-   (vector-set! native-availability-roots 0 native-leaf-registry)
-   (vector-set! native-availability-roots 1 native-module-names)
-   (vector-set! native-availability-roots 2 native-stub-names)
-   (vector-set! native-availability-roots 3 native-export-arities)
-   (vector-set! native-availability-roots 4 native-excluded-host-leaves))))
+;; Source function_exported/3 passes immutable atoms: memoize those exact
+;; booleans. Mutable strings and exceptions never enter the memo.
 (define (native-remote-available? module function arity)
- (if (and (symbol? module) (symbol? function) (integer? arity) (exact? arity)
-          (eq? native-module-name native-availability-original-module-name)
-          (eq? native-atom-name native-availability-original-atom-name)
-          (eq? native-keyword? native-availability-original-keyword?))
-  (begin
-   (native-refresh-availability-cache!)
-   (let* ((functions (table-ref native-availability-cache module #f))
-          (arities (and functions (table-ref functions function #f)))
-          (cached (if arities (table-ref arities arity native-missing) native-missing)))
-    (if (not (eq? cached native-missing)) cached
-     (let ((available (native-remote-available-uncached? module function arity)))
-      ;; Evaluate first: an exception cannot create a result entry.
-      (if (boolean? available)
-       (let ((functions (or functions (make-table test: eq?)))
-             (arities (or arities (make-table test: eqv?))))
-        (table-set! arities arity available)
-        (table-set! functions function arities)
-        (table-set! native-availability-cache module functions)))
-      available))))
+ (if (and (symbol? module) (symbol? function) (integer? arity) (exact? arity))
+  (let* ((key (vector module function arity))
+         (cached (table-ref native-availability-cache key native-missing)))
+   (if (not (eq? cached native-missing)) cached
+    (let ((available (native-remote-available-uncached? module function arity)))
+     (if (boolean? available) (table-set! native-availability-cache key available))
+     available)))
   (native-remote-available-uncached? module function arity)))
-;; Positive exact-MFA dispatch cache. Registry objects are persistent; an
-;; identity change retires all resolved wrappers before the next lookup.
-;; A compiled wrapper observes its LIVE registry root on every invocation, so redefining
-;; a source var neither leaves a stale procedure nor grants new membership.
-(define native-remote-original-invoke bl-invoke)
-(define native-remote-original-resolve native-resolve-call)
-(define native-remote-cache (make-table test: equal?))
-;; Key OBJECTS can be mutable strings. Every identity hit must also match an
-;; owned content snapshot; no string immutability or Source-only shortcut.
-(define native-remote-identity-cache (make-table test: eq? weak-keys: #t))
-(define native-remote-cache-leaves #f)
-(define native-remote-cache-modules #f)
-(define native-remote-cache-stubs #f)
-(define native-remote-cache-arities #f)
-(define (native-refresh-remote-cache!)
- (if (or (not (eq? native-remote-cache-leaves native-leaf-registry))
-         (not (eq? native-remote-cache-modules native-module-names))
-         (not (eq? native-remote-cache-stubs native-stub-names))
-         (not (eq? native-remote-cache-arities native-export-arities)))
-  (begin
-   (set! native-remote-cache (make-table test: equal?))
-   (set! native-remote-identity-cache (make-table test: eq? weak-keys: #t))
-   (set! native-remote-cache-leaves native-leaf-registry)
-   (set! native-remote-cache-modules native-module-names)
-   (set! native-remote-cache-stubs native-stub-names)
-   (set! native-remote-cache-arities native-export-arities))))
 (define (native-remote-key-parts key)
  ;; Function names can contain '/', e.g. core// or erlang//=. The FIRST
  ;; separator ends the module; only the LAST separator begins the arity.
@@ -273,71 +224,105 @@
               (and (char>=? c #\0) (char<=? c #\9) (digits (+ k 1))))))))
          (else (last (- j 1)))))))
      (else (first (+ i 1))))))))
-(define (native-remote-resolve-key key)
- (native-refresh-remote-cache!)
- (let ((cached (table-ref native-remote-cache key native-missing)))
-  (if (not (eq? cached native-missing)) cached
-   (let ((parts (native-remote-key-parts key)))
-    (if (not parts) (error "invalid native remote key" key)
-     (let ((leaf (bl-get native-leaf-registry key native-missing)))
-      (if (not (eq? leaf native-missing))
-       (begin (table-set! native-remote-cache (string-copy key) leaf) leaf)
-       (let* ((module (vector-ref parts 0)) (name (vector-ref parts 1)) (arity (vector-ref parts 2))
-              (ns (bl-get native-module-names module native-missing))
-              (stub (bl-get native-stub-names module native-missing))
-              (size (string-length name))
-              (variadic? (and (>= size 6) (string=? (substring name (- size 6) size) "__bl_v")))
-              (logical (if variadic? (substring name 0 (- size 6)) name)))
-        (cond
-         ((not (eq? ns native-missing))
-          (let* ((slot (string-append ns "/" logical))
-                 ;; A persistent registry root is a complete value epoch.
-                 ;; Source redefinition/removal/readdition changes that root;
-                 ;; otherwise this exact slot cannot have changed in place.
-                 (slot-root #f) (slot-value native-missing)
-                 (wrapper
-                  (lambda arguments
-                   (if (not (eq? slot-root native-global-registry))
-                    (begin
-                     (set! slot-value (bl-get native-global-registry slot native-missing))
-                     (set! slot-root native-global-registry)))
-                   (let ((value slot-value))
-                    (if (eq? value native-missing) (error "missing compiled native export" key)
-                     (if variadic?
-                      (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
-                       (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
-                       (error "native variadic clause missing" key))
-                      ;; The base Scheme invoker only applies plain procedures.
-                      ;; Later Source-frame/C/custom invokers OR planners own
-                      ;; their contexts/peeling; preserve their complete path.
-                      (if (and (eq? bl-invoke native-remote-original-invoke)
-                               (eq? native-resolve-call native-remote-original-resolve)
-                               (procedure? value)
-                               (not (table-ref native-host-callables value #f)))
-                       (apply value arguments) (bl-invoke value arguments))))))))
-           ;; Cache membership only when the exact existing arity ledger
-           ;; admits this MFA. Missing/stub/wrong-arity decisions stay uncached.
-           (if (native-remote-available? module name arity)
-            (table-set! native-remote-cache (string-copy key) wrapper))
-           wrapper))
-         ((not (eq? stub native-missing))
-          (lambda arguments (error "native target explicitly excludes namespace" stub key)))
-         (else (error "unimplemented native host leaf" key)))))))))))
 
-;; The structural cache remains authoritative. Repeated compiled literal
-;; objects use an identity front lookup plus ONE exact content comparison,
-;; avoiding repeated equal?-hash/bucket scans observed in native self-emission.
-;; Only an already positive structural entry can enter this front cache.
+;; ---- AOT link cells ------------------------------------------------------
+;; AOT-emitted code (native.chunks) calls Scheme top-level cells directly:
+;;   v_<slot>      compiled value      v_<slot>$<n>  fixed arity-n entry
+;;   v_<slot>$v    variadic arm        v_<slot>$g    global view, macro-unwrapped
+;;   lv_<key>      host leaf (native-add-leaf!)
+;; Each linked definition registers its setters here; every later publication
+;; of that slot (native-register!, an env row put/delete) runs them, so a
+;; redefinition is observed exactly as the former live lookup observed it.
+(define (native-unmacro value)
+ (if (and (bl-tag? value 'tuple) (= (bl-count value) 2) (eq? (bl-nth value 0) (bl-key "$macro")))
+  (bl-nth value 1) value))
+(define (native-arity-entry value arity)
+ (cond ((procedure? value) value)
+  ((native-multi-callable? value)
+   (let ((fixed (bl-get (bl-nth value 1) arity native-missing)))
+    (if (procedure? fixed) fixed (lambda arguments (bl-invoke value arguments)))))
+  (else (lambda arguments (bl-invoke value arguments)))))
+(define (native-variadic-entry value key)
+ (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+  (let ((arm (bl-nth (bl-nth value 2) 1)))
+   (if (procedure? arm) arm (lambda arguments (bl-invoke arm arguments))))
+  (lambda arguments (error "native variadic clause missing" key))))
+(define (native-unlinked ns name)
+ (lambda arguments (error "undefined native var" ns name)))
+;; The global view of ns/name: its env row when present, else the compiled value.
+(define (native-global-view ns name record)
+ (let ((row (native-env-value (native-row ns name))))
+  (if (eq? row native-missing) (vector-ref record 0) row)))
+(set! native-publish-global!
+ (lambda (ns name record)
+  (let ((setter (vector-ref record 2)))
+   (if setter
+    (let ((value (native-global-view ns name record)))
+     (if (not (eq? value native-missing)) (setter (native-unmacro value))))))))
+(define (native-link! ns name slot-setter global-setter)
+ (let ((record (native-link-record (string-append ns "/" name))))
+  (vector-set! record 1 slot-setter)
+  (vector-set! record 2 global-setter)
+  (if (not (eq? (vector-ref record 0) native-missing)) (slot-setter (vector-ref record 0)))
+  (native-publish-global! ns name record)
+  (bl-key "ok")))
+(define (native-link-global! ns name global-setter)
+ (let ((record (native-link-record (string-append ns "/" name))))
+  (vector-set! record 2 global-setter)
+  (native-publish-global! ns name record)
+  (bl-key "ok")))
+(define (native-env-row-changed! key)
+ (if (and (bl-tag? key 'tuple) (= (bl-count key) 2) (string? (bl-nth key 0)) (string? (bl-nth key 1)))
+  (let ((record (table-ref native-link-records (string-append (bl-nth key 0) "/" (bl-nth key 1)) #f)))
+   (if record (native-publish-global! (bl-nth key 0) (bl-nth key 1) record)))))
+
+;; ---- Dynamic MFA lookup ----------------------------------------------------
+;; Only runtime-evaluated code (native.eval/context, bootstrap --compile
+;; output), erlang/apply/3, make_fun/3 and explicit host calls reach this.
+;; A compiled target reads its link record's value on every call.
+(define (native-remote-resolve key)
+ (let ((parts (native-remote-key-parts key)))
+  (if (not parts) (error "invalid native remote key" key)
+   (let ((leaf (bl-get native-leaf-registry key native-missing)))
+    (if (not (eq? leaf native-missing))
+     (begin (table-set! native-remote-table (string-copy key) leaf) leaf)
+     (let* ((module (vector-ref parts 0)) (name (vector-ref parts 1))
+            (ns (bl-get native-module-names module native-missing))
+            (stub (bl-get native-stub-names module native-missing))
+            (size (string-length name))
+            (variadic? (and (>= size 6) (string=? (substring name (- size 6) size) "__bl_v")))
+            (logical (if variadic? (substring name 0 (- size 6)) name)))
+      (cond
+       ((not (eq? ns native-missing))
+        (let* ((record (native-link-record (string-append ns "/" logical)))
+               (wrapper
+                (lambda arguments
+                 (let ((value (vector-ref record 0)))
+                  (cond ((eq? value native-missing) (error "missing compiled native export" key))
+                   (variadic?
+                    (if (and (native-multi-callable? value) (not (bl-is-nil (bl-nth value 2))))
+                     (bl-invoke (bl-nth (bl-nth value 2) 1) arguments)
+                     (error "native variadic clause missing" key)))
+                   (else (bl-invoke value arguments)))))))
+         (table-set! native-remote-table (string-copy key) wrapper)
+         wrapper))
+       ((not (eq? stub native-missing))
+        (lambda arguments (error "native target explicitly excludes namespace" stub key)))
+       (else (error "unimplemented native host leaf" key)))))))))
 (define (native-remote key)
- (native-refresh-remote-cache!)
- (if (not (string? key)) (native-remote-resolve-key key)
-  (let ((entry (table-ref native-remote-identity-cache key native-missing)))
-   (if (and (not (eq? entry native-missing)) (string=? key (vector-ref entry 0)))
-    (vector-ref entry 1)
-    (let ((value (native-remote-resolve-key key)))
-     (if (eq? value (table-ref native-remote-cache key native-missing))
-      (table-set! native-remote-identity-cache key (vector (string-copy key) value)))
-     value)))))
+ (let ((hit (table-ref native-remote-table key #f)))
+  (or hit (native-remote-resolve key))))
+
+;; Named arithmetic for native.eval's :arithmetic-resolver (no per-operation closure).
+(define (native-arith-add a b) (native-num 'add a b))
+(define (native-arith-sub a b) (native-num 'sub a b))
+(define (native-arith-mul a b) (native-num 'mul a b))
+(define (native-arith-div a b) (native-num 'div a b))
+(define (native-arith-lt a b) (native-num 'lt a b))
+(define (native-arith-gt a b) (native-num 'gt a b))
+(define (native-arith-le a b) (native-num 'le a b))
+(define (native-arith-ge a b) (native-num 'ge a b))
+(define (native-arith-num-eq a b) (native-num 'num_eq a b))
 
 (define (native-install-bundle! metadata)
  (set! native-bundle-metadata metadata)
@@ -350,10 +335,11 @@
       (set! native-module-names (bl-assoc native-module-names (native-module-name module) ns)))
      (list (bl-nth row 1) (bl-nth row 2)))))
   (bl-items (bl-get metadata (bl-key "namespace-modules"))))
- ; CompilerData's exact host implementation is already written in BL.
- (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.CompilerData" "host.compiler-data"))
- (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.FormMeta" "host.form-meta"))
- (set! native-module-names (bl-assoc native-module-names "Elixir.BeamLisp.Meta" "host.meta"))
+ ; Pinned BL host modules (`Elixir.BeamLisp.X` = closure namespace host.x),
+ ; declared by the closure update: the same table the AOT link plan uses.
+ (for-each (lambda (row)
+   (set! native-module-names (bl-assoc native-module-names (native-module-name (bl-nth row 1)) (bl-nth row 0))))
+  (bl-items (bl-get metadata (bl-key "host-modules") (bl-vec '()))))
  (for-each (lambda (row)
    (for-each (lambda (module)
      (set! native-stub-names (bl-assoc native-stub-names (native-module-name module) (bl-nth row 0))))
@@ -363,6 +349,7 @@
    (native-env-put! (native-row (bl-key "link") "core" (bl-nth row 0)) (bl-nth row 1)))
   (bl-items (bl-get metadata (bl-key "core-links"))))
  (native-install-resolution! (bl-get metadata (bl-key "resolution")))
+ (native-link-changed!)
  (bl-key "ok"))
 (define (native-install-resolution! ledger)
  (if (not (bl-is-nil ledger))
@@ -396,7 +383,8 @@
  (native-add-leaf! (string-append "Elixir.BeamLisp.Env/" name "/" (number->string arity)) procedure))
 (native-env-leaf! "lookup" 1 native-lookup)
 (native-env-leaf! "put_key" 2 native-env-put!)
-(native-env-leaf! "delete_key" 1 (lambda (key) (set! native-env-rows (native-map-remove native-env-rows key)) (bl-key "ok")))
+(native-env-leaf! "delete_key" 1 (lambda (key)
+ (set! native-env-rows (native-map-remove native-env-rows key)) (native-env-row-changed! key) (bl-key "ok")))
 (native-env-leaf! "intern" 3 native-intern)
 (native-env-leaf! "fetch" 2 native-fetch)
 (native-env-leaf! "fetch!" 2 native-fetch!)
@@ -516,35 +504,63 @@
  '(("check_source_callable!" 1) ("check_source_invocation!" 2)
    ("check_source_invocation1!" 2) ("check_source_invocation2!" 3)
    ("assert_native_framework_execution!" 0)))
-(native-add-leaf! "Elixir.BeamLisp.Server/return_constructor_shapes/0"
- (lambda () (bl-get native-bundle-metadata (bl-key "return-constructor-shapes"))))
+;; Service: host.tiers globs priv/boot/*.bl on BEAM; the native image has no
+;; tier tree. This is the pinned SDK's answer (sorted wildcard, data-readers
+;; removed). It decides which callees get no readiness guard, so it must equal
+;; BEAM's for native and BEAM emission to agree (speed/services/RESULT.md).
 (native-add-leaf! "Elixir.BeamLisp.Tiers/boot_namespaces/0"
- (lambda () '("anf" "compiler" "core" "diag" "lower" "optimize" "reader" "reader-node" "rt" "sugar")))
-(define (native-known-module ns)
- (let ((captured (bl-get native-namespace-modules ns native-missing)))
-  (if (not (eq? captured native-missing)) captured
-   ; Same unqualified platform spelling as Emit/base_module_for and the JS
-   ; moduleFor adapter: one CamelCased alias segment per dot-separated part.
-   ; Existing realm identities ALWAYS use the captured table above.
-   (bl-key
-    (string-append "Elixir.BeamLisp.Ns."
-     (list->string
-      (let loop ((chars (string->list ns)) (upper? #t) (out '()))
-       (if (null? chars) (reverse out)
-        (let ((ch (car chars)))
-         (cond ((char=? ch #\_) (loop (cdr chars) #t out))
-               ((char=? ch #\.) (loop (cdr chars) #t (cons ch out)))
-               (else (loop (cdr chars) #f (cons (if upper? (char-upcase ch) ch) out)))))))))))))
-(native-add-leaf! "Elixir.BeamLisp.Link/module_for/1" native-known-module)
-(native-add-leaf! "Elixir.BeamLisp.Emit/module_for/1" native-known-module)
-(native-add-leaf! "Elixir.BeamLisp.Emit/base_module_for/1" native-known-module)
-(native-add-leaf! "Elixir.BeamLisp.Link/settle/0" (lambda () (bl-key "ok")))
+ (lambda () '("anf" "binding" "compiler" "core" "diag" "expand" "expand-source" "lower" "lower-core"
+              "optimize" "reader" "reader-node" "rt" "server-clause" "sugar" "syntax")))
+;; Elixir stdlib counterparts (category b) the compiled host.server/host.emit/
+;; host.link naming paths call. Macro.camelize/1 is byte-wise ASCII; every
+;; non-ASCII UTF-8 byte passes through unchanged, so codepoints are equivalent.
+(define (native-macro-camelize text)
+ (if (not (string? text)) (native-badarg "Macro.camelize/1 expects a binary"))
+ (let ((upper (lambda (c) (if (and (char>=? c #\a) (char<=? c #\z)) (char-upcase c) c))))
+  (letrec
+   ((start (lambda (cs)
+     (cond ((null? cs) '())
+           ((char=? (car cs) #\_) (start (cdr cs)))
+           (else (cons (upper (car cs)) (rest (cdr cs)))))))
+    (rest (lambda (cs)
+     (cond ((null? cs) '())
+           ((and (char=? (car cs) #\_) (pair? (cdr cs)) (char=? (cadr cs) #\_)) (rest (cdr cs)))
+           ((and (char=? (car cs) #\_) (pair? (cdr cs)) (char>=? (cadr cs) #\a) (char<=? (cadr cs) #\z))
+            (cons (upper (cadr cs)) (rest (cddr cs))))
+           ((and (char=? (car cs) #\_) (pair? (cdr cs)) (char>=? (cadr cs) #\0) (char<=? (cadr cs) #\9))
+            (cons (cadr cs) (rest (cddr cs))))
+           ((and (char=? (car cs) #\_) (null? (cdr cs))) '())
+           ((char=? (car cs) #\/) (cons #\. (start (cdr cs))))
+           (else (cons (car cs) (rest (cdr cs))))))))
+   (list->string (start (string->list text))))))
+;; :elixir_aliases.concat/1: atoms by name, nil skipped, "Elixir." stripped
+;; from every later segment and a leading "." from binary segments.
+(define (native-module-concat segments)
+ (let* ((text (lambda (x)
+         (cond ((string? x) x) ((native-keyword? x) (native-atom-name x))
+               (else (native-badarg "Module.concat/1 expects atoms or binaries")))))
+        (partial (lambda (x)
+         (cond ((native-prefix? x "Elixir.") (substring x 7 (string-length x)))
+               ((native-prefix? x ".") (substring x 1 (string-length x)))
+               (else x))))
+        (segments (if (native-list? segments) segments (native-badarg "Module.concat/1 expects a list")))
+        (first (if (and (pair? segments) (native-keyword? (car segments)) (not (bl-is-nil (car segments))))
+                (native-atom-name (car segments)) (and (pair? segments) (car segments))))
+        (head? (and (string? first) (or (native-prefix? first "Elixir.") (string=? first "Elixir")))))
+  (let loop ((xs (if head? (cdr segments) segments)) (acc (if head? first "Elixir")))
+   (cond ((null? xs) (bl-key acc))
+         ((bl-is-nil (car xs)) (loop (cdr xs) acc))
+         (else (loop (cdr xs) (string-append acc "." (partial (text (car xs))))))))))
+(native-add-leaf! "Elixir.Macro/camelize/1" native-macro-camelize)
+(native-add-leaf! "Elixir.Module/concat/1" native-module-concat)
+(native-add-leaf! "Elixir.Module/concat/2" (lambda (a b) (native-module-concat (list a b))))
+;; The native image owns no named ETS table: every whereis answers undefined.
+(native-add-leaf! "ets/whereis/1" (lambda (name) (bl-key "undefined")))
 (native-add-leaf! "erlang/function_exported/3" native-remote-available?)
 
-;; The canonical compiler's host facade delegates read_data directly to the
-;; SAME compiler namespace; parsing and datum conversion stay in compiled BL.
-(native-add-leaf! "Elixir.BeamLisp.Compiler/read_data/1"
- (lambda (source) (bl-invoke (native-global "compiler" "read_data") (list source))))
+;; erlang:error/3: the arguments and options only annotate BEAM stack frames.
+(native-add-leaf! "erlang/error/3"
+ (lambda (reason arguments options) (native-raise (bl-key "error") reason (native-capture-stack))))
 
 ;; Native symbol accounting. The BEAM table watermark has no native table to
 ;; query; bound new source names explicitly instead. Existing names cost zero.
@@ -580,26 +596,9 @@
 
 ;; Target exception representation is the same tagged data exposed to BL.
 ;; Raise/class/trace transport is supplied by host-values.scm.
-(define (native-ex-info message data)
- (bl-map (bl-key "__struct__") (bl-key "Elixir.BeamLisp.ExInfo")
-         (bl-key "__exception__") #t (bl-key "message") message (bl-key "data") data))
 (define (native-exception-value? x)
  (and (bl-tag? x 'map) (native-keyword? (bl-get x (bl-key "__struct__")))
       (native-map-has? x (bl-key "__exception__"))))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_info/2" native-ex-info)
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_data/1"
- (lambda (x) (if (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.ExInfo")) (bl-get x (bl-key "data")) bl-nil)))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_message/1"
- (lambda (x) (if (native-exception-value? x) (bl-get x (bl-key "message")) (bl-show x))))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/ex_original/1"
- (lambda (x) (if (eq? (native-struct-module x) (bl-key "Elixir.ErlangError")) (bl-get x (bl-key "original")) bl-nil)))
-(native-add-leaf! "Elixir.BeamLisp.ExInfo/raise_payload/1"
- (lambda (x)
-  (native-raise (bl-key "error")
-   (cond ((native-exception-value? x) x)
-         ((bl-tag? x 'map) (native-ex-info (bl-invoke (native-global "rt" "print_str") (list x)) x))
-         (else (native-ex-info (bl-show x) bl-nil)))
-   (native-capture-stack))))
 
 ;; Closed record registry; declaration/publication APIs require the BEAM's
 ;; Source custody and remain explicit exclusions, just as in the JS target.
@@ -616,18 +615,6 @@
 (native-add-leaf! "Elixir.BeamLisp.Record/fields_of/1" (lambda (module)
  (let ((info (bl-get native-record-descriptors module)))
   (if (bl-is-nil info) (error "not a beam-lisp record/deftype" module) (bl-nth info 3)))))
-(native-add-leaf! "Elixir.BeamLisp.Server/callback/1" (lambda (name)
- (let ((row (assoc name '(("init" "init" 1 "vector") ("handle-call" "handle_call" 3 "pattern")
-                         ("handle-cast" "handle_cast" 2 "pattern") ("handle-info" "handle_info" 2 "pattern")
-                         ("handle-continue" "handle_continue" 2 "vector") ("terminate" "terminate" 2 "vector")))))
-  (if row (bl-tuple (list (bl-key (cadr row)) (caddr row) (bl-key (cadddr row)))) bl-nil))))
-(native-add-leaf! "Elixir.BeamLisp.Server/callback_order/0"
- (lambda () (map bl-key '("init" "handle_call" "handle_cast" "handle_info" "handle_continue" "terminate" "code_change"))))
-(native-add-leaf! "Elixir.BeamLisp.Server/module_for/2" (lambda (ns name)
- (let* ((base (native-atom-name (native-known-module (string-append ns "." name))))
-        (prefix "Elixir.BeamLisp.Ns."))
-  (bl-key (string-append "Elixir.BeamLisp.Server." (substring base (string-length prefix) (string-length base)))))))
-
 ;; These same execution/metadata seams are named BEAM-only refusals by the
 ;; production JS host. Never pretend their registration grants capability.
 (define native-beam-only-leaves
@@ -649,11 +636,45 @@
 (define native-beam-seed-only-leaves
  '("Elixir.BeamLisp.Supervisor/supervise/2" "Elixir.BeamLisp.Supervisor/supervise/3"
    "Elixir.BeamLisp.Supervisor/worker/2" "Elixir.BeamLisp.Supervisor/worker/3"
-   "Elixir.BeamLisp.Server/start/1" "Elixir.BeamLisp.Server/start/2" "Elixir.BeamLisp.Server/start/3"
-   "Elixir.BeamLisp.Server/start_link/1" "Elixir.BeamLisp.Server/start_link/2" "Elixir.BeamLisp.Server/start_link/3"
-   "Elixir.BeamLisp.Server/call/2" "Elixir.BeamLisp.Server/call/3" "Elixir.BeamLisp.Server/cast/2"
-   "Elixir.BeamLisp.Server/stop/1" "Elixir.BeamLisp.Server/stop/2" "erlang/link/1"
+   "erlang/link/1"
    "Elixir.BeamLisp.Refs/future_cancel/1"))
 (set! native-beam-only-leaves (append native-beam-only-leaves native-beam-seed-only-leaves))
 (set! native-excluded-host-leaves (append native-excluded-host-leaves native-beam-only-leaves))
 (for-each (lambda (key) (native-add-leaf! key (native-unavailable key))) native-beam-only-leaves)
+;; Remotes that the compiled host.server, host.emit, host.link and host.compiler definitions
+;; name but the native image cannot honour: Source custody, actor start, code
+;; loading, ETS, atomics and persistent_term. They are named refusals so the
+;; whole namespace links. None is reached by the naming paths those modules
+;; serve natively (Server/callback*, return_constructor_shapes, module_for;
+;; Emit/module_for, base_module_for, realm_*; Link/module_for). A key already
+;; provided by an earlier host file keeps that provider.
+(define native-service-refusals
+ '("Elixir.BeamLisp.Env/assert_execution_context!/0" "Elixir.BeamLisp.Env/begin_server_start!/1"
+   "Elixir.BeamLisp.Env/begin_unmanaged_start!/2" "Elixir.BeamLisp.Env/bind/1"
+   "Elixir.BeamLisp.Env/claim_server_start!/2" "Elixir.BeamLisp.Env/claim_unmanaged_start!/3"
+   "Elixir.BeamLisp.Env/complete_server_start!/1" "Elixir.BeamLisp.Env/ensure_sdk_owner_registry!/0"
+   "Elixir.BeamLisp.Env/executing_generation?/1" "Elixir.BeamLisp.Env/finish_server_start!/2"
+   "Elixir.BeamLisp.Env/finish_unmanaged_start!/2" "Elixir.BeamLisp.Env/launch_server_start!/1"
+   "Elixir.BeamLisp.Env/prepare_sdk_class!/1" "Elixir.BeamLisp.Env/retain_server_start_code!/1"
+   "Elixir.BeamLisp.Env/with_env/2" "Elixir.BeamLisp.Execution/install-actor!/2" "Elixir.BeamLisp.Supervisor/start_link/1"
+   "Elixir.BeamLisp.Env/mark_emitted/2" "Elixir.BeamLisp.Env/mark_emitted/5"
+   "Elixir.BeamLisp.Env/ns_definition_count/1" "Elixir.BeamLisp.Env/ns_defs/1"
+   "Elixir.BeamLisp.Env/publish_binaries!/2" "Elixir.BeamLisp.Env/put_ns_definition/3"
+   "Elixir.BeamLisp.Env/with_namespace_lock/2" "Elixir.BeamLisp.Env/with_publication/2"
+   "Elixir.CaseClauseError/exception/1" "Elixir.Process/whereis/1" "erlang/self/0"
+   "Elixir.Enum/member?/2" "Elixir.Enum/any?/2" "Elixir.Enum/find_value/2" "Elixir.Enum/group_by/3"
+   "Elixir.Enum/uniq_by/2" "Elixir.Function/capture/3" "Elixir.Integer/to_string/1" "Elixir.Keyword/get/2"
+   "Elixir.Tuple/insert_at/3" "Elixir.Access/get/2" "Elixir.Map/put/3" "Elixir.String.Chars/to_string/1"
+   "atomics/add_get/3" "atomics/new/2" "atomics/put/3" "code/load_binary/3"
+   "persistent_term/get/2" "persistent_term/put/2" "error_handler/raise_undef_exception/3"
+   "ets/match_delete/2" "ets/match_object/2"
+   ;; compiler.bl reads a not-yet-loaded deferred namespace's source (item D);
+   ;; natively Env/deferred_dirs is empty, so these are never reached.
+   "Elixir.BeamLisp.Loader/source_content/1" "Elixir.BeamLisp.Loader/with_search_dir/2" "erlang/md5/1"
+   ;; lazy_memo.bl's NIF loader path; the native memo cell needs no library.
+   "Elixir.BeamLisp.Tiers/priv_root/0"))
+;; The native image links every namespace it runs: no namespace has deferred
+;; source, so compiler.bl's declared-link path is skipped (a service answer).
+(native-add-leaf! "Elixir.BeamLisp.Env/deferred_dirs/1" (lambda (ns) bl-nil))
+;; Registered by host/native-refusals.scm, which loads LAST, so every real
+;; provider in any host file wins over its refusal.
