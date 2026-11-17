@@ -123,7 +123,9 @@ summary evaluations.
 from the larger LSP bundle. Lint guards execute on every request, and ambient
 warnings merge from the current process after retention. Code publication
 invalidates retained facts. Baseline selection and regression rules retain
-their normal behavior.
+their normal behavior. The lint/deodorant preorder stacks use native list tails,
+so visiting a node shares its remaining siblings. Lint reports `:work :nodes`;
+the walk never pops and copies a pending vector of the remaining file.
 
 Eligible `datom.watch` queries share the exact before/after diff under source,
 query, provider and code evidence. Each watch still invokes its own callback
