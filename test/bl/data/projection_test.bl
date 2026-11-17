@@ -215,3 +215,23 @@
       (projection/delta! h {:sequence 103 :now now})
       (is (= 0 (drain-projection-wakes)))
       (finally (projection/stop! h) (drain-projection-wakes)))))
+
+(deftest real-commit-bursts-refresh-once-and-publish-the-latest-basis
+  (let [c (source) h (projection/start! :projection/commit-burst c QUERY)]
+    (try
+      (projection/subscribe! h)
+      (is (= :ready (:status (settled h))))
+      (erlang/apply :sys :suspend (list (:owner h) 1000))
+      (try
+        (doseq [n (range 8)] (d/transact! c [{:db/id -1 :projection/value n}]))
+        (finally (erlang/apply :sys :resume (list (:owner h) 1000))))
+      (let [expected (conj (set (range 8)) 10)
+            until (+ 10000 (erlang/monotonic_time :millisecond))
+            result (loop []
+              (let [r (projection/read h)]
+                (if (or (= expected (set (map second (:value r))))
+                        (> (erlang/monotonic_time :millisecond) until)) r
+                  (do (Process/sleep 1) (recur)))))]
+        (is (= expected (set (map second (:value result)))))
+        (is (= 2 (get-in result [:counts :started])) "one initial query and one burst query"))
+      (finally (projection/stop! h) (d/close! c)))))
