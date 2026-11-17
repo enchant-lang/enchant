@@ -301,7 +301,7 @@ export class Editor {
           if(!collapsed){this.replace('\n',null,selection);return;}
           if(!block.text&&['bullet','ordered','task'].includes(block.type)){this.run(block.parent?'block/outdent':'turn/paragraph');return;}
           const next=identity(),type=['bullet','ordered','task'].includes(block.type)?block.type:'paragraph';
-          this.transaction({op:'block/split',block:from.block,at:from.offset,new:next,rightMeta:{type,attrs:type==='task'?{checked:false}:block.type===type?block.attrs:{}}},
+          this.transaction({op:'block/split',block:from.block,at:from.offset,new:next,rightMeta:{type,attrs:type==='task'?{...block.attrs,checked:false}:block.type===type?block.attrs:{}}},
             {selection:{anchor:{block:next,offset:0},head:{block:next,offset:0}}});
         }else if((!sameBlock&&event.inputType.startsWith('delete'))||(!sameBlock&&event.inputType==='insertText')){event.preventDefault();this.replace(event.data||'',null,selection);}
         else if(event.inputType==='insertReplacementText'&&typeof event.data==='string'){event.preventDefault();this.replace(event.data,null,selection);}
