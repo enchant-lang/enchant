@@ -55,6 +55,17 @@
 (defn block
   ([id text] (block id "paragraph" text {}))
   ([id type text attrs] {:id id :type type :attrs attrs :parent nil :slot "body" :text text :marks [] :wraps []}))
+(defn cloned-attrs
+ "Rebase only declared self identity references for deliberate copies. Splits
+  retain their inherited ownership, letting packages distinguish new content
+  from a semantic clone. Descriptor values name existing attribute keys."
+ [attrs before after]
+ (let [fields (:identity/self attrs [])]
+  (when-not (and (vector? fields) (<= (count fields) 32)
+                (every? #(and (string? %) (<= 1 (length %) 128)) fields))
+   (r/fail "invalid-self-references"))
+  (let [fields (set fields)]
+   (into {} (map (fn [[key value]] [key (if (and (contains? fields (str key)) (= before value)) after value)]) attrs)))))
 (defn document [id blocks] (validate {:schema 2 :id id :meta {:title "Untitled" :icon "sparkles"} :blocks blocks}))
 (defn migrate [doc]
   (validate doc)
@@ -326,6 +337,8 @@
         fragments (replacement-fragment doc op) n (count fragments)
         renamed (into {} (map-indexed (fn [i piece] [(:id piece) (if (zero? i) (:id first-block) (str (:seed op) "/b/" i))]) fragments))
         prefix-size (length (:text prefix))
+        preserve-first? (or (not (contains? op :fragment)) (pos? prefix-size)
+                            (and (= ai bi) (< (:offset b) (length (:text first-block)))))
         next (mapv (fn [i]
                      (let [piece (nth fragments i)
                            id (if (zero? i) (:id first-block) (str (:seed op) "/b/" i))
@@ -338,10 +351,10 @@
                        (assoc piece :id id :text (str before (:text piece) after) :marks marks
                          :parent (get renamed (:parent piece) (:parent first-block))
                          :slot (if (contains? renamed (:parent piece)) (:slot piece) (:slot first-block))
-                         :type (if (and (zero? i) (seq (:text first-block))) (:type first-block) (:type piece))
-                         :attrs (if (and (zero? i) (seq (:text first-block))) (:attrs first-block) (:attrs piece))
-                         :wraps (cond (zero? i) (:wraps first-block)
-                                      (= i (dec n)) (:wraps last-block) :else (:wraps piece))))) (range n))
+                         :type (if (and (zero? i) preserve-first?) (:type first-block) (:type piece))
+                         :attrs (if (and (zero? i) preserve-first?) (:attrs first-block) (cloned-attrs (:attrs piece) (:id piece) id))
+                         :wraps (cond (and (zero? i) preserve-first?) (:wraps first-block)
+                                      (and (= i (dec n)) (seq (:text suffix))) (:wraps last-block) :else (:wraps piece))))) (range n))
         end {:block (:id (last next)) :offset (+ (if (= 1 n) prefix-size 0) (length (:text (last fragments))))}
         mapping [{:kind "range" :blocks (mapv :id (subvec (:blocks doc) ai (inc bi)))
                   :first (:block a) :last (:block b) :from (:offset a) :to (:offset b) :end end}]]
