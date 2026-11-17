@@ -37,7 +37,7 @@ to create one; that first run is a measurement, not a verdict.
 
 ```beam-lisp
 (ns bl.check
-  (:require [bl.util :as u] [bl.lint :as lint] [bl.fix :as fix] [deodorant] [lsp] [typed] [data.single-flight :as flight] [runtime.activity :as activity] [data.provenance :as provenance]))
+  (:require [bl.util :as u] [bl.lint :as lint] [bl.fix :as fix] [deodorant] [lsp] [typed] [data.single-flight :as flight] [data.bounded-cache :as cache] [runtime.activity :as activity] [data.provenance :as provenance]))
 ```
 
 ## Which sources a check reads
@@ -131,6 +131,8 @@ keeps the cost one analysis per file instead of one per function.
                 (fn []
                   (doseq [namespace ["bl.lint" "deodorant" "rewrite" "span-rewrite"]]
                     (BeamLisp.Loader/ensure_loaded namespace))))
+            _ (lsp/ready-document!)
+            _ (cache/ready! :bl.check.metrics)
             rules (vec (deodorant/all-rules))
             ns (u/ns-of src)
             forms (atom nil)
@@ -159,7 +161,9 @@ keeps the cost one analysis per file instead of one per function.
         (assoc (unreadable-metrics path digest)
                :analysis-error {:stage :analysis :message (pr-str error)})))))
 
-(defn analyze-source [path src]
+(defn analyze-source
+  "Diagnostics, always-current house rules and function facts for one source."
+  [path src]
   (activity/with-operation :check {:subject path :source (sha256 src)}
     (fn []
       (let [result (analyze-source* path src)]

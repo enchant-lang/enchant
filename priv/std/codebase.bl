@@ -565,12 +565,23 @@
       (cache/fingerprint [FACTS-VERSION (BeamLisp.Tiers/priv_root) ns-str
                           (sha256-hex src) seeds options]))))
 
+(def ^:private ^:per-env index-ready (atom false))
+(defn- ready-index! []
+  ;; Lazy provider publication must precede the evidence used for retention.
+  (when-not @index-ready
+    (BeamLisp.Loader/with_loading_session
+      (fn [] (doseq [namespace ["source-graph" "reader-node" "system.source" "datalog-shape"]]
+               (BeamLisp.Loader/ensure_loaded namespace))))
+    (reset! index-ready true))
+  (cache/ready! :codebase.facts))
+
 (defn- index-source*
   "Share immutable facts by exact source, seed vocabulary, namespace and mode.
    Connections remain caller-owned. Unknown/opaque seeds use ordinary indexing;
    changed code cannot return a retained answer under old evidence."
   ([sigs ns-str src] (index-source* sigs ns-str src {}))
   ([sigs ns-str src options]
+   (ready-index!)
    (let [revision (provenance/definition-revision)
          seeds (cache/fingerprint sigs)
          key [FACTS-VERSION ns-str (when (string? src) (sha256-hex src)) seeds options]
@@ -581,6 +592,7 @@
        (do (activity/mark! :computed) (run))))))
 
 (defn index-source
+  "Index exact source/seeds/mode with shared facts and optional scoped activity."
   ([sigs ns-str src] (index-source sigs ns-str src {}))
   ([sigs ns-str src options]
    (activity/with-operation :index {:subject ns-str :source (when (string? src) (sha256-hex src))}

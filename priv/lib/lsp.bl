@@ -104,13 +104,26 @@
        (if (and (:hit? hit) (= before (memo-context))) (do (activity/mark! :reused) (:value hit))
          (if before (flight/with-key [name key before] run) (run)))))))
 
+(defn- ready-analysis! []
+  (ready-engines! :analysis ["reader-node" "typed" "system.ir" "termination"
+                             "system.footprint" "system.summary" "system.analyze"
+                             "lsp.scope" "syntax" "env"]))
+
+(defn ready-document!
+  "Initialize document providers and optional retention before a caller captures
+   code-validity evidence. Does not parse, analyze or index a document."
+  []
+  (ready-analysis!)
+  (ready-engines! :diagnostics ["system.typecheck" "system.ir.identity" "system.emission"
+                                "system.source" "datalog-shape" "system.arity" "diag" "errors"])
+  (cache/ready! analyzed-cache)
+  (cache/ready! diagnostics-cache))
+
 (defn- analyzed*
   "One parsed and lowered program, shared by every diagnostic and projection.
    Retained by exact source bytes, environment and live definition context."
   [src]
-  (ready-engines! :analysis ["reader-node" "typed" "system.ir" "termination"
-                             "system.footprint" "system.summary" "system.analyze"
-                             "lsp.scope" "syntax" "env"])
+  (ready-analysis!)
   (memo-value analyzed-cache (tuple (env/id) (sha256-hex src))
     (fn []
       (swap! analysis-builds inc)
@@ -122,7 +135,9 @@
         {:summaries summaries :bodies bodies :known known :forms (:forms program)
          :context (when (= context (memo-context)) context)}))))
 
-(defn analyzed [src]
+(defn analyzed
+  "One exact-source program shared by diagnostics and projections; records actual work when enabled."
+  [src]
   (activity/with-operation :editor {:subject "Document" :source (sha256-hex src)}
     (fn [] (analyzed* src))))
 
@@ -721,8 +736,7 @@
    declines cache retention. No consumer needs a second lowering pass."
   ([src ns] (check-document src ns {:ambient? true}))
   ([src ns options]
-  (ready-engines! :diagnostics ["system.typecheck" "system.ir.identity" "system.emission"
-                                "system.source" "datalog-shape" "system.arity" "diag" "errors"])
+  (ready-document!)
   (let [a (analyzed src)]
     {:analysis a :diagnostics (diagnostics-from-bundle src ns a (:ambient? options true))})))
 
