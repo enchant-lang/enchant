@@ -13,7 +13,9 @@ class FloatingSurface {
   constructor(owner,name){
     this.owner=owner;this.editor=owner.editor;this.name=name;this.opened=false;
     this.element=element('div','ed-overlay');this.element.hidden=true;this.element.dataset.editorSurface=name;
-    this.element.dataset.theme=this.editor.root.closest('[data-theme]')?.dataset.theme||document.documentElement.dataset.theme||'light';
+    this.themeOwner=this.editor.root.closest('[data-theme]')||document.documentElement;
+    this.themeObserver=new MutationObserver(()=>{if(this.opened)this.syncTheme();});
+    this.themeObserver.observe(this.themeOwner,{attributes:true,attributeFilter:['data-theme','class','style']});
     (this.editor.options.portal||document.body).append(this.element);
     this.editor.listen(document,'pointerdown',event=>{
       if(this.opened&&!this.element.contains(event.target)&&!this.protect?.contains(event.target))this.hide('outside');
@@ -22,11 +24,21 @@ class FloatingSurface {
       if(event.key==='Escape'){event.preventDefault();event.stopPropagation();this.hide('escape');}
     });
   }
+  syncTheme(){
+    const root=this.editor.root,styles=getComputedStyle(root);
+    this.element.dataset.theme=root.closest('[data-theme]')?.dataset.theme||document.documentElement.dataset.theme||'light';
+    for(const property of this.themeProperties||[])this.element.style.removeProperty(property);
+    this.themeProperties=[];
+    for(const property of styles)if(property.startsWith('--ed-')){
+      this.element.style.setProperty(property,styles.getPropertyValue(property));this.themeProperties.push(property);
+    }
+    this.element.style.colorScheme=styles.colorScheme;
+  }
   show(anchor,{placement='top',gap=10,role='dialog',onClose,protect}={}){
-    this.cleanup?.();this.anchor=anchor;this.onClose=onClose;this.protect=protect;
+    this.cleanup?.();this.syncTheme();this.anchor=anchor;this.onClose=onClose;this.protect=protect;
     this.element.setAttribute('role',role);this.element.hidden=false;this.opened=true;
     this.cleanup=autoUpdate(anchor,this.element,()=>{
-      computePosition(anchor,this.element,{strategy:'fixed',placement,middleware:[offset(gap),inline(),flip({padding:12}),shift({padding:12})]})
+      computePosition(anchor,this.element,{strategy:'fixed',placement,middleware:[offset(gap),inline(),flip({padding:12}),shift({padding:12,crossAxis:true})]})
         .then(({x,y,placement})=>{if(!this.opened)return;this.element.style.left=x+'px';this.element.style.top=y+'px';this.element.dataset.placement=placement;});
     });
   }
@@ -34,7 +46,7 @@ class FloatingSurface {
     if(!this.opened)return;this.opened=false;this.cleanup?.();this.cleanup=null;this.element.hidden=true;
     const callback=this.onClose;this.onClose=null;callback?.(reason);
   }
-  dispose(){this.hide('dispose');this.element.remove();}
+  dispose(){this.hide('dispose');this.themeObserver.disconnect();this.element.remove();}
 }
 export class SurfaceHost {
   constructor(editor){this.editor=editor;this.owned=new Map();}
@@ -137,8 +149,8 @@ class DefaultUI {
   hideSelection(){clearTimeout(this.chipTimer);this.chip.hide();this.bubble.hide();if(this.token){this.editor.session.release(this.token);this.token=null;}}
   update(state){
     const offline=document.documentElement.dataset.live==='0',conflict=state.conflicts.length||this.editor.recoveryFailure;
-    const label=this.save.querySelector('.ed-save-label');label.textContent=conflict?'Draft retained':offline?'Offline':state.pending?'Saving…':'Saved';
-    this.save.dataset.state=conflict?'conflict':offline?'offline':state.pending?'saving':'saved';this.save.title=this.editor.status.textContent;
+    const label=this.save.querySelector('.ed-save-label');label.textContent=conflict?'Draft retained':state.validation?'Needs correction':offline?'Offline':state.pending?'Saving…':'Saved';
+    this.save.dataset.state=conflict||state.validation?'conflict':offline?'offline':state.pending?'saving':'saved';this.save.title=this.editor.status.textContent;
     if(this.title.value!==(state.meta.title||'')){this.title.value=state.meta.title||'';this.title.style.height='auto';this.title.style.height=this.title.scrollHeight+'px';}
     this.titleHeading.textContent=state.meta.title||'Untitled';
     this.title.readOnly=!!conflict||!!this.editor.model.readonly;
@@ -162,8 +174,13 @@ class DefaultUI {
     if(this.panel.opened||this.palette.open||this.pointerSelecting||this.editor.composing||conflict){this.hideSelection();return;}
     const selection=state.selection;
     if(!collapsed(selection)&&focus&&!touch){
-      if(!this.token)this.token=this.editor.capture();
-      const selected=JSON.stringify(selection);if(this.selectionKey!==selected){if(this.token)this.editor.session.release(this.token);this.token=this.editor.capture();this.selectionKey=selected;}
+      // Rendering must not reread DOM selection: capture() can synchronously
+      // publish another selection and release the outer update's bookmark.
+      const selected=JSON.stringify(selection);
+      if(!this.token||this.selectionKey!==selected){
+        const previous=this.token;this.token=this.editor.session.bookmark();this.selectionKey=selected;
+        if(previous)this.editor.session.release(previous);
+      }
       this.bubble.show(this.editor.geometry.anchor(this.token),{role:'toolbar',protect:this.mobile});this.chip.hide();
     }else{
       this.bubble.hide();if(this.token){this.editor.session.release(this.token);this.token=null;}
@@ -195,16 +212,17 @@ class DefaultUI {
   currentCall(fid){const selection=this.editor.state.selection;if(!selection)return null;const b=this.editor.node(selection.head.block),at=selection.head.offset;
     return [...(b?.wraps||[]),...(b?.marks.filter(m=>m.from<=at&&at<=m.to).map(m=>m.call)||[])].find(call=>call.function===fid)||null;}
   functionPanel(fid,existing=null){
-    const spec=this.editor.catalog.find(item=>item.id===fid);if(!spec)return;
-    const token=this.panelTarget(),call=existing||this.currentCall(fid),params=spec.params||{},args={};
+    const token=this.panelTarget(),spec=this.editor.query({target:token}).find(item=>item.id===fid);
+    if(!spec){this.editor.session.release(token);return;}
+    const call=existing||this.currentCall(fid),params=spec.params||{},args={},action=spec.kind==='custom';
     for(const [key,param]of Object.entries(params))args[key]=call?.args[key]??param.default;
     const content=element('form','ed-function-form'),heading=element('div','ed-panel-heading');heading.append(icon(spec.icon||'function'),element('strong','',spec.label));
-    const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',call?'Make this function your own.':'A small change, a new possibility.'));
+    const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',spec.description||(call?'Make this function your own.':'A small change, a new possibility.')));
     const error=element('div','ed-panel-error');error.setAttribute('role','status');
     const preview=()=>{try{
       if(call)this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}});
       else this.editor.session.preview(fid,{...args},{target:token});error.textContent='';apply.disabled=false;
-    }catch(reason){error.textContent=this.friendly(reason);apply.disabled=true;}};
+    }catch(reason){this.editor.session.cancelPreview();error.textContent=this.friendly(reason);apply.disabled=true;}};
     for(const [key,param]of Object.entries(params)){
       const field=element(param.type==='enum'?'div':'label','ed-parameter');field.append(element('span','ed-field-label',key==='tone'?'Color':key==='href'?'Destination':key));
       if(param.type==='enum'){
@@ -215,13 +233,14 @@ class DefaultUI {
         const input=element('input','ed-field');input.type=param.type==='boolean'?'checkbox':param.type==='integer'?'number':'text';input.setAttribute('aria-label',key);
         if(input.type==='checkbox')input.checked=!!args[key];else input.value=String(args[key]??'');if(key==='href')input.placeholder='https://example.com';
         if(param.min!=null)input.min=param.min;if(param.max!=null)input.max=param.max;
-        input.addEventListener('input',()=>{args[key]=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value;preview();});field.append(input);
+        input.addEventListener('input',()=>{args[key]=input.type==='checkbox'?input.checked:input.type==='number'?input.valueAsNumber:input.value;preview();});field.append(input);
       }content.append(field);
     }
     if(!Object.keys(params).length)content.append(element('p','ed-panel-description',call?'This function is applied to your text.':'Preview this function on the selected text.'));
     content.append(error);const actions=element('div','ed-panel-actions');
     if(call){const remove=button('Remove function','trash',()=>{this.editor.session.cancelPreview();this.editor.transaction({op:'call/remove',id:call.id},{target:token});this.panel.hide('apply');});remove.append(element('span','','Remove'));actions.append(remove);}
-    const apply=button(call?'Save change':'Apply function',null,()=>{} ,'ed-primary');apply.type='submit';apply.append(element('span','',call?'Save change':'Apply function'),element('kbd','','↵'));actions.append(apply);content.append(actions);
+    const applyLabel=call?'Save change':action?'Apply change':'Apply function';
+    const apply=button(applyLabel,null,()=>{} ,'ed-primary');apply.type='submit';apply.append(element('span','',applyLabel),element('kbd','','↵'));actions.append(apply);content.append(actions);
     content.addEventListener('submit',event=>{event.preventDefault();try{if(!this.editor.state.preview)preview();if(apply.disabled)return;this.editor.session.commitPreview();this.panel.hide('apply');}catch(reason){error.textContent=this.friendly(reason);}});
     this.openPanel(content,token,null,{focus:content.querySelector('input')||apply});preview();
   }

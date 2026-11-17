@@ -9,6 +9,26 @@
     (when-not (and selection (not (:deleted (:anchor selection))) (not (:deleted (:head selection))))
       (r/fail "Select some text or place the caret in the document."))
     (d/ordered-range (:document context) (:anchor selection) (:head selection))))
+(defn- selected-ranges [extensions context]
+ (let [doc (:document context)
+       provided (some (fn [provider] (provider context)) (:ranges extensions))
+       data (or provided
+                (let [[a z] (target context)]
+                 {:ranges (mapv (fn [b]
+                                  {:block (:id b) :from (if (= (:id b) (:block a)) (:offset a) 0)
+                                   :to (if (= (:id b) (:block z)) (:offset z) (d/length (:text b)))})
+                           (subvec (:blocks doc) (d/block-index doc (:block a)) (inc (d/block-index doc (:block z)))))}))
+       ranges (:ranges data)]
+  (cond
+   (:reason data) {:reason (:reason data)}
+   (not (and (vector? ranges)
+              (every? (fn [span]
+                        (let [b (d/find-block doc (:block span)) a (:from span) z (:to span)]
+                         (and b (integer? a) (integer? z) (<= 0 a z (d/length (:text b)))))) ranges)))
+   {:reason "Choose a current text selection."}
+   :else (let [ranges (filterv #(< (:from %) (:to %)) ranges)]
+           (if (> (count ranges) 4096) {:reason "Select fewer text blocks for one formatting action."}
+            {:ranges ranges})))))
 (defn catalogue [extensions]
   (vec (concat
     (map (fn [[id spec]]
@@ -30,22 +50,22 @@
      {:id "block/up" :label "Move up" :icon "arrow-up" :kind "block"}
      {:id "block/down" :label "Move down" :icon "arrow-down" :kind "block"}]
     (map (fn [[id spec]] (assoc spec :id id :kind "custom")) (sort-by first (:commands extensions))))))
-(defn- coverage [doc selection fid]
-  (if (or (nil? selection) (collapsed? selection)) "off"
-    (let [[a z] (d/ordered-range doc (:anchor selection) (:head selection))
-          rows (subvec (:blocks doc) (d/block-index doc (:block a)) (inc (d/block-index doc (:block z))))
-          values (map (fn [b]
-                        (let [from (if (= (:id b) (:block a)) (:offset a) 0)
-                              to (if (= (:id b) (:block z)) (:offset z) (d/length (:text b)))
-                              matching (filter #(= fid (get-in % [:call :function])) (:marks b))]
-                          (cond (some #(and (<= (:from %) from) (<= to (:to %))) matching) "on"
-                                (some #(and (< (:from %) to) (< from (:to %))) matching) "mixed"
-                                :else "off"))) rows)]
-      (cond (every? #{"on"} values) "on" (every? #{"off"} values) "off" :else "mixed"))))
+(defn- coverage [doc ranges fid]
+ (if (empty? ranges) "off"
+  (let [values (map (fn [span]
+                      (let [b (d/find-block doc (:block span)) from (:from span) to (:to span)
+                            matching (filter #(= fid (get-in % [:call :function])) (:marks b))]
+                       (cond (some #(and (<= (:from %) from) (<= to (:to %))) matching) "on"
+                             (some #(and (< (:from %) to) (< from (:to %))) matching) "mixed"
+                             :else "off"))) ranges)]
+   (cond (every? #{"on"} values) "on" (every? #{"off"} values) "off" :else "mixed"))))
 (defn query [extensions context]
   (let [doc (:document context) selection (:selection context)
         block (when selection (d/find-block doc (get-in selection [:head :block])))
-        valid (and block (not (get-in selection [:head :deleted])))
+        valid (and block (d/find-block doc (get-in selection [:anchor :block]))
+                   (not (get-in selection [:head :deleted])) (not (get-in selection [:anchor :deleted])))
+        range-data (when valid (selected-ranges extensions context))
+        policy-context (assoc context :selection/ranges (:ranges range-data) :selection/reason (:reason range-data))
         ai (when selection (d/block-index doc (get-in selection [:anchor :block])))
         hi (when selection (d/block-index doc (get-in selection [:head :block])))
         code? (when (and (int? ai) (int? hi))
@@ -58,19 +78,24 @@
                           (= "transform" kind) (and valid (not (collapsed? selection)))
                           (= "custom" kind) (and valid (if-let [f (:when item)] (f context) true))
                           :else valid)
+            ranged? (or (= "transform" kind) (and (= "wrap" kind) (= "inline" (:scope item))))
+            range-reason (when ranged? (or (:reason range-data)
+                              (when (and (not (collapsed? selection)) (empty? (:ranges range-data))) "Select text to format.")))
+            enabled (and enabled (nil? range-reason))
             active (cond (= "turn" kind) (if (= (:type item) (:type block)) "on" "off")
                          (= "inline" (:scope item))
                          (if (collapsed? selection)
                            (if (some #(= id (:function %)) (:pending-styles context)) "on" "off")
-                           (coverage doc selection id)) :else "off")]
+                           (coverage doc (:ranges range-data) id)) :else "off")]
         (reduce (fn [result policy]
-                  (let [decision (policy context result)]
-                    (assoc result :enabled (boolean (and (:enabled result) (:enabled decision)))
+                  (let [decision (policy policy-context result)]
+                    (assoc (if (contains? decision :params) (assoc result :params (:params decision)) result)
+                                  :enabled (boolean (and (:enabled result) (:enabled decision)))
                                   :reason (or (:reason decision) (:reason result)))))
          (assoc (dissoc item :run :when :active) :enabled (boolean enabled) :active active
-               :reason (when-not enabled (cond (:conflict context) "Resolve the retained draft first."
+               :reason (when-not enabled (or range-reason (cond (:conflict context) "Resolve the retained draft first."
                   (and code? (= "wrap" kind) (= "inline" (:scope item))) "Code blocks keep plain source. Select text outside the code block to format it."
-                  :else "Choose a target in the document."))) (:policies extensions))))
+                  :else "Choose a target in the document.")))) (:policies extensions))))
       (catalogue extensions))))
 (defn plan [extensions context id args seed]
   (let [item (first (filter #(= id (:id %)) (query extensions context)))
@@ -84,6 +109,15 @@
       (let [old (filterv #(not= id (:function %)) (:pending-styles context))]
         {:pending-styles (if (= "on" (:active item)) old
                           (conj old {:id seed :function id :version (:version spec) :args (r/arguments spec args)}))})
+      (or (= "transform" kind) (and (= "wrap" kind) (= "inline" (:scope item))))
+      {:ops (mapv (fn [span]
+                    (let [block (:block span) from (:from span) to (:to span) row (d/find-block doc block)
+                          fid (str seed "/" (d/block-index doc block))]
+                     (if (= "transform" kind)
+                      {:op "text/replace" :block block :from from :to to :expected (d/slice (:text row) from to)
+                       :text ((:run spec) (d/slice (:text row) from to) (r/arguments spec args))}
+                      {:op "style/set" :block block :from from :to to :function id :id fid :args args
+                       :enabled (not= "on" (:active item))}))) (:ranges (selected-ranges extensions context)))}
       (contains? #{"wrap" "transform"} kind)
       {:ops (mapv (fn [i]
                 (let [row (nth (:blocks doc) i) fid (str seed "/" i)
@@ -106,8 +140,11 @@
       (= id "block/delete") {:ops [{:op "node/delete" :block (:id b)}]}
       (= id "block/duplicate")
       (let [rows (d/subtree doc (:id b)) names (into {} (map-indexed (fn [i b] [(:id b) (str seed "/" i)]) rows))
-            rename-call #(assoc % :id (str seed "/call/" (:id %)))
-            copies (mapv #(assoc % :id (get names (:id %)) :parent (get names (:parent %) (:parent %))
+            call-names (into {} (map-indexed (fn [i id] [id (str seed "/call/" i)])
+                                            (sort (d/call-ids (assoc doc :blocks rows)))))
+            rename-call #(assoc % :id (get call-names (:id %)))
+            copies (mapv #(assoc % :attrs (d/cloned-attrs (:attrs %) (:id %) (get names (:id %)))
+                            :id (get names (:id %)) :parent (get names (:parent %) (:parent %))
                             :marks (mapv (fn [m] (update m :call rename-call)) (:marks %))
                             :wraps (mapv rename-call (:wraps %))) rows)]
         {:ops [{:op "node/insert" :after (:id b) :parent (:parent b) :slot (:slot b) :blocks copies}]})

@@ -145,6 +145,10 @@ server; a program that starts its server and returns parks here forever.
               (loading/prepare! project (u/resolve target))
               (BeamLisp/run_file (u/resolve target))
               (loading/start-background! project (u/resolve target)))))
+        ;; The program has returned and its reader/compiler frames can unwind.
+        ;; Collect this caller's transient initialization heap once before the
+        ;; long idle wait; serving processes retain their own managed custody.
+        (erlang/garbage_collect)
         (println (str "bl serve: " target " running — Ctrl+C to stop"))
         ;; where the access log goes, said out loud: a server that logs every
         ;; request must not leave you guessing where the log went (and in

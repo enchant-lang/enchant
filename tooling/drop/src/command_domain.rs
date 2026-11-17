@@ -1,19 +1,36 @@
 //! Filesystem loans held by the OS service manager until the command's cgroup
 //! empties. This transport conveys no Source invocation or writer authority.
 
+#[cfg(target_os = "linux")]
+#[path = "command_stream.rs"]
+mod stream;
+
 pub fn dispatch(arguments: &[String]) -> Option<i32> {
     match arguments.first().map(String::as_str) {
         Some("--custody-protocol") => {
             println!("BEAM_LISP_CUSTODY_COMMAND_V1");
             Some(0)
         }
-        Some("--custody-command") | Some("--custody-child") => {
+        Some("--custody-input-protocol") => {
+            println!("BEAM_LISP_CUSTODY_INPUT_V1");
+            Some(0)
+        }
+        Some("--custody-stream-protocol") => {
+            println!("BEAM_LISP_CUSTODY_STREAM_V1");
+            Some(0)
+        }
+        Some("--custody-command") | Some("--custody-child") | Some("--custody-stream") | Some("--custody-result") => {
             #[cfg(target_os = "linux")]
             let result = linux::dispatch(arguments);
             #[cfg(not(target_os = "linux"))]
             let result: Result<i32, String> = Err("managed command custody is unsupported on this target".into());
             Some(result.unwrap_or_else(|error| {
-                eprintln!("bl: custody command refused: {error}");
+                if arguments.first().is_some_and(|arg| arg == "--custody-stream") {
+                    #[cfg(target_os = "linux")]
+                    stream::unknown(&error);
+                } else if !arguments.first().is_some_and(|arg| arg == "--custody-result") {
+                    eprintln!("bl: custody command refused: {error}");
+                }
                 125
             }))
         }
@@ -28,12 +45,23 @@ mod linux {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use serde_json::Value;
 
-    fn control(name: &str) -> Result<Command, String> {
+    fn user_manager() -> bool {
+        if unsafe { libc::getuid() } != 0 { return true; }
+        // The private Nix worker runs a root user manager rather than PID 1
+        // systemd. Prefer the host system bus; otherwise accept only the
+        // fixed, root-owned local user socket. Request Env selects neither.
+        let socket = |path| std::fs::symlink_metadata(path).is_ok_and(|metadata|
+            metadata.file_type().is_socket() && metadata.uid() == 0);
+        !socket("/run/dbus/system_bus_socket") && socket("/run/user/0/bus")
+    }
+
+    pub(super) fn control(name: &str) -> Result<Command, String> {
         let uid = unsafe { libc::getuid() };
         if uid != unsafe { libc::geteuid() } { return Err("set-id command execution is unsupported".into()); }
         let path = ["/run/current-system/sw/bin", "/usr/bin", "/bin"].iter()
@@ -42,10 +70,30 @@ mod linux {
         let mut command = Command::new(path);
         // Request-local PATH/bus variables select the program's environment,
         // never the controller executable or its authenticated local manager.
-        command.env_clear().env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"))
-            .env("PATH", "/run/current-system/sw/bin:/usr/bin:/bin");
+        command.env_clear().env("PATH", "/run/current-system/sw/bin:/usr/bin:/bin");
+        if !user_manager() {
+            command.env("DBUS_SYSTEM_BUS_ADDRESS","unix:path=/run/dbus/system_bus_socket");
+        } else {
+            command.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
+                .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"));
+        }
         Ok(command)
+    }
+
+    pub(super) fn manager(name: &str) -> Result<Command,String> {
+        let mut command=control(name)?;
+        // The actual kernel identity chooses the manager. Neither request
+        // data nor a forwarded environment may select a privileged bus.
+        if user_manager() {command.arg("--user");}
+        Ok(command)
+    }
+
+    pub(super) fn monotonic_ms() -> Result<u64,String> {
+        let mut time=libc::timespec{tv_sec:0,tv_nsec:0};
+        if unsafe {libc::clock_gettime(libc::CLOCK_MONOTONIC,&mut time)}!=0 || time.tv_sec<0 {
+            return Err("OS monotonic clock unavailable".into());
+        }
+        Ok(time.tv_sec as u64*1000+time.tv_nsec as u64/1_000_000)
     }
 
     fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -74,6 +122,9 @@ mod linux {
         strings(value.get("argv").ok_or("missing argv")?)?;
         let reads = strings(value.get("read_locks").ok_or("missing read locks")?)?;
         if reads.len() > 15 || reads.iter().any(|p| !Path::new(p).is_absolute()) { return Err("invalid read loans".into()); }
+        if let Some(size)=value.get("input_bytes") {
+            if !size.as_u64().is_some_and(|size| size<=1048576) {return Err("invalid command input capacity".into());}
+        }
         limit(&value, "timeout_ms", 86_400_000)?;
         limit(&value, "memory_bytes", 8 * 1024 * 1024 * 1024)?;
         limit(&value, "output_bytes", 16 * 1024 * 1024)?;
@@ -82,14 +133,29 @@ mod linux {
 
     pub fn dispatch(arguments: &[String]) -> Result<i32, String> {
         match (arguments.first().map(String::as_str), arguments.len()) {
-            (Some("--custody-command"), 2) => launch(&arguments[1]),
+            (Some("--custody-command"), 2) => launch(&arguments[1], false),
+            (Some("--custody-stream"), 2) => launch(&arguments[1], true),
             (Some("--custody-child"), 2) => child(&arguments[1]),
+            (Some("--custody-result"), 3) => super::stream::stop_post(&arguments[1], &arguments[2]),
             _ => Err("invalid command protocol arguments".into()),
         }
     }
 
-    fn launch(input: &str) -> Result<i32, String> {
+    fn launch(input: &str, streaming: bool) -> Result<i32, String> {
         let mut value = request(input)?;
+        // Caller data cannot select the private completion channel.
+        if value.get("stream").is_some() || value.get("deadline_ms").is_some() { return Err("private command field supplied".into()); }
+        let timeout = limit(&value, "timeout_ms", 86_400_000)?;
+        let deadline=monotonic_ms()?.checked_add(timeout).ok_or("command deadline overflow")?;
+        value["deadline_ms"]=serde_json::json!(deadline);
+        let input=if let Some(size)=value.get("input_bytes") {
+            if !streaming {return Err("private input requires command stream".into());}
+            Stdio::from(super::stream::input(size.as_u64().ok_or("invalid input length")? as usize,deadline)?)
+        } else {Stdio::null()};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
+        let unit = format!("bl-custody-{}-{nonce}.service", std::process::id());
+        let mut wire = if streaming { Some(super::stream::Wire::new(&unit,deadline)?) } else { None };
+        if let Some(wire) = &wire { value["stream"] = wire.descriptor(); }
         // The caller's effective environment arrives through exec's private
         // environment, never as secret-bearing JSON on the command line.
         let mut environment = serde_json::Map::new();
@@ -108,21 +174,23 @@ mod linux {
             libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE) } < 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let timeout = limit(&value, "timeout_ms", 86_400_000)?;
         let memory = limit(&value, "memory_bytes", 8 * 1024 * 1024 * 1024)?;
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
-        let unit = format!("bl-custody-{}-{nonce}.service", std::process::id());
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mut command = control("systemd-run")?;
-        command.args(["--user", "--wait", "--pipe", "--collect", "--quiet"])
+        let mut command = manager("systemd-run")?;
+        command.args(["--wait", "--pipe", "--collect", "--quiet"])
             .arg(format!("--unit={unit}"))
             .args(["--property=Type=notify", "--property=NotifyAccess=main", "--property=ExitType=cgroup",
                    "--property=FileDescriptorStoreMax=16", "--property=FileDescriptorStorePreserve=restart",
-                   "--property=KillMode=control-group", "--property=TimeoutStartSec=10", "--property=TimeoutStopSec=2",
+                   "--property=KillMode=control-group", "--property=TimeoutStopSec=2",
                    "--property=MemorySwapMax=0", "--property=TasksMax=512"])
             .arg(format!("--property=MemoryMax={memory}"))
+            .arg(format!("--property=TimeoutStartSec={}ms",timeout.min(10000)))
             .arg(format!("--property=LoadCredential=bl-command:/proc/{}/fd/{raw}", std::process::id()))
             .arg(format!("--property=RuntimeMaxSec={}ms", timeout));
+        if streaming {
+            command.arg(format!("--property=ExecStopPost={}", super::stream::stop_command(&executable, &unit,
+                &format!("/proc/{}/fd/{raw}",std::process::id()))?));
+        }
         // Preserve a caller's capped test slice for the whole managed tree.
         // Session scopes live outside the user manager; those use app.slice.
         if let Ok(group) = std::fs::read_to_string("/proc/self/cgroup") {
@@ -136,10 +204,11 @@ mod linux {
         let sink_stdout: OwnedFd = sink.try_clone().map_err(|e| e.to_string())?.into();
         let sink_stderr: OwnedFd = sink.into();
         let mut process = command.arg(executable).args(["--custody-child", &unit])
-            .stdin(Stdio::null()).stdout(Stdio::from(sink_stdout))
+            .stdin(input).stdout(Stdio::from(sink_stdout))
             .stderr(Stdio::from(sink_stderr)).spawn().map_err(|e| format!("cannot start OS command domain: {e}"))?;
         drop(command);
         let maximum = limit(&value, "output_bytes", 16 * 1024 * 1024)?;
+        if let Some(wire) = &mut wire { return wire.run(&unit, process, output, maximum); }
         let mut count = 0u64;
         let mut buffer = [0u8; 8192];
         let mut forwarding = true;
@@ -152,7 +221,7 @@ mod linux {
             };
             count += size as u64;
             if count > maximum {
-                let _ = control("systemctl")?.args(["--user", "stop", &unit]).status();
+                let _ = manager("systemctl")?.args(["stop", &unit]).status();
                 let _ = process.wait();
                 return Err("command output capacity exceeded; entire domain stopped".into());
             }
@@ -194,7 +263,7 @@ mod linux {
 
     fn child(unit: &str) -> Result<i32, String> {
         let property = |name: &str| -> Result<String, String> {
-            let reply = control("systemctl")?.args(["--user", "show", "--value", &format!("--property={name}"), unit])
+            let reply = manager("systemctl")?.args(["show", "--value", &format!("--property={name}"), unit])
                 .output().map_err(|e| e.to_string())?;
             if !reply.status.success() { return Err("OS command domain unavailable".into()); }
             Ok(String::from_utf8_lossy(&reply.stdout).trim().into())
@@ -237,22 +306,30 @@ mod linux {
         let mut byte = [0];
         if barrier.read(&mut byte).map_err(|e| e.to_string())? != 0 { return Err("invalid loan acknowledgement".into()); }
         // Enqueue/processing acknowledgement alone does not prove storage.
-        let observed = control("systemctl")?.args(["--user", "show", "--value", "--property=NFileDescriptorStore", unit])
+        let observed = manager("systemctl")?.args(["show", "--value", "--property=NFileDescriptorStore", unit])
             .output().map_err(|e| e.to_string())?;
         if !observed.status.success() || String::from_utf8_lossy(&observed.stdout).trim().parse::<usize>().ok() != Some(loans.len()) {
             return Err("OS manager did not retain every command loan".into());
         }
         drop(loans);
         socket.send(b"READY=1").map_err(|e| e.to_string())?;
+        super::stream::note(&value, unit, "accepted", serde_json::json!({}))?;
         let mut command = Command::new(text(&value, "program")?);
-        command.args(strings(&value["argv"])?).current_dir(text(&value, "cwd")?).env_clear().stdin(Stdio::null());
+        command.args(strings(&value["argv"])?).current_dir(text(&value, "cwd")?).env_clear();
+        command.stdin(if value.get("input_bytes").is_some() {Stdio::inherit()} else {Stdio::null()});
         for (key, item) in environment.as_object().ok_or("missing environment")? {
             // Notification and inherited-FD control belong to the manager.
             if !["NOTIFY_SOCKET", "FDSTORE", "LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"].contains(&key.as_str()) {
                 command.env(key, item.as_str().ok_or("invalid environment")?);
             }
         }
+        if monotonic_ms()?>=value["deadline_ms"].as_u64().ok_or("private command deadline missing")? {
+            super::stream::note(&value,unit,"budget-expired",serde_json::json!({}))?;
+            return Ok(125);
+        }
         let status = command.status().map_err(|e| format!("command could not start: {e}"))?;
+        use std::os::unix::process::ExitStatusExt;
+        super::stream::note(&value, unit, "program-exited", serde_json::json!({"code":status.code(),"signal":status.signal()}))?;
         Ok(status.code().unwrap_or(125))
     }
 }

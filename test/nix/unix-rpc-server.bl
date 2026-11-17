@@ -1,0 +1,50 @@
+; Disposable cross-user integration. Reuses the checked domain and writer tx.
+(ns unix-rpc-server
+ (:require [rpc.unix :as rpc] [auth.identity :as identity] [auth.interface :as interface]
+           [datom :as d] [datom.store-fjall :as fjall]
+           [station-prototype.store :as store] [station-prototype.provider :as provider]))
+
+(let [schema (into store/schema
+               [{:db/ident :account/uid :db/valueType :db.type/long :db/unique :db.unique/identity}
+                {:db/ident :account/subject :db/valueType :db.type/string}])
+      conn (d/connect-with (fjall/open "/var/lib/rpccheck/data") schema)
+      completed (atom 0)]
+ (try
+  (store/seed! conn)
+  (d/transact! conn [{:db/id -1 :account/uid 1000 :account/subject "alice"}
+                    {:db/id -2 :account/uid 1001 :account/subject "bob"}])
+  (store/add-message! conn "alice-message" "ora" ["alice"] "Alice native inbox" 1)
+  (store/add-message! conn "bob-message" "ora" ["bob"] "Bob native inbox" 2)
+  (let [p (provider/open! (first (BeamLisp/argv)) conn #(System/system_time :millisecond))]
+   (try
+    ;; Explicit trusted fixture preparation, before socket readiness. This is
+    ;; not an identity supplied by a client or a production readiness claim.
+    (identity/with-verified {:subject "alice" :kind :person :application "prototype-client"}
+     #(interface/invoke! p "inbox" ["ora"]))
+    (File/write! "/run/rpccheck/interface.edn" (pr-str (:manifest p)))
+    (File/chmod! "/run/rpccheck/interface.edn" 292)
+    (let [server (rpc/serve!
+                  {:path "/run/rpccheck/socket" :socket-mode 432
+                   :application "prototype-client" :concurrency 2 :request-ms 15000
+                   :resolve-uid (fn [uid]
+                                  (when-let [account (first (first (d/q
+                                    '[:find ?subject :in $ ?uid :where
+                                      [?a :account/uid ?uid] [?a :account/subject ?subject]] (d/db conn) uid)))]
+                                   {:subject account :kind :person}))
+                   :handler (fn [request]
+                              (let [reply ((interface/endpoint p) request)]
+                               (swap! completed inc) reply))})]
+     (try
+      (File/write! "/run/rpccheck/ready" "ready")
+      (loop [remaining 3000]
+       (cond (= 5 @completed) :done
+             (pos? remaining) (do (Process/sleep 100) (recur (dec remaining)))
+             :else (throw (ex-info "Cross-user fixture requests missing" {}))))
+      (finally (rpc/stop! server)))
+     (let [receipt (store/request-record (d/db conn) ["alice" "ora" :claim "claim-one"])]
+      (when-not (= "alice" (get-in receipt [:request/result :claim/owner]))
+       (throw (ex-info "Writer receipt missing" {}))))
+     (when (identity/current) (throw (ex-info "Identity leaked into service owner" {}))))
+    (finally (interface/close! p))))
+  (finally (d/close! conn))))
+(System/halt 0)

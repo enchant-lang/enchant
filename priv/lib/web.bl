@@ -281,13 +281,13 @@
    The request owner releases callbacks abandoned by a raised handler."
   [conn action]
   (let [cwd (BeamLisp/cwd) argv (BeamLisp/argv)
-        run (BeamLisp.Env/convey
-              (fn [response]
-                (BeamLisp/with_cwd cwd
-                  (fn [] (BeamLisp/with_argv argv (fn [] (action response)))))))
-        ;; Keep the private Host conveyance behind this fixed SDK boundary.
-        ;; A Source send checks the registered function itself before entry.
-        registration (callback/register! (fn [response] (run response))
+        ;; Native callback admission already captures/restores Env and query
+        ;; authority. Capturing an additional private Host conveyance makes
+        ;; this callable inadmissible when an actual Source handler sends.
+        registration (callback/register!
+                       (fn [response]
+                        (BeamLisp/with_cwd cwd
+                         (fn [] (BeamLisp/with_argv argv (fn [] (action response))))))
                         (BeamLisp.Env/callback_modules action))]
     (try
       (let [bound (fn [response]
@@ -300,6 +300,23 @@
       (catch error
         (try (callback/unregister! registration) (catch _ nil))
         (erlang/raise __EXCEPTION_KIND__ error __STACKTRACE__)))))
+
+(defn before-send-headers
+ "Apply fixed response header data at send time. Useful for trusted ingress
+  metadata registered before a Source handler runs. No Root callback crosses
+  that boundary. Only immutable data and fixed SDK code are captured; there is
+  no application code custody or Env transition to retain or re-enter."
+ [conn headers remove]
+ (when-not (and (map? headers) (or (vector? remove) (list? remove))
+                (<= (+ (count headers) (count remove)) 64)
+                (every? (fn [[name value]] (and (string? name) (string? value))) headers)
+                (every? string? remove))
+  (throw (ex-info "Response header policy requires bounded string data"
+           {:kind :invalid-response-header-policy})))
+ (let [bound (fn [response]
+              (reduce (fn [response [name value]] (resp-header response name value))
+               (reduce without-resp-header response remove) headers))]
+  (erlang/apply Conn :register_before_send (list conn bound))))
 
 ;; ── Server-Sent Events (chunked streaming) ──────────────────────────
 ;; The transport an MCP server uses to PUSH notifications to a client over

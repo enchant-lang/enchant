@@ -561,6 +561,15 @@
         {:status :noop}
       :else nil)))
 
+(defn completed
+  "A trusted performer finished its authorized writer or verified receipt replay.
+   This server-only value belongs to the selected connection and requests no
+   second transaction. Conditional UI may continue; no new framework commit is
+   claimed. Construct only after the domain operation succeeds."
+  [conn]
+  (when (nil? conn) (throw (ex-info "A completed intent needs its selected world." {})))
+  (tuple :live.socket/completed conn))
+
 (defn- perform-intent
   "Authorize (if :auth is set) then transact an intent. The intent's op is
    looked up in the socket's :intents registry — a map of op → a fn
@@ -572,6 +581,10 @@
 
      {:ok state :committed true}   the performer returned a tx and
                                    `transact!` returned a report.
+     {:ok state :committed false :completed true}
+                                 a direct writer finished its own action or
+                                   verified its receipt. No second transaction;
+                                   conditional UI may continue.
      {:ok state :committed false}  the performer returned nil, OR a writer
                                    `:db/fn` aborted with a {:status :noop}
                                    marker. Nothing wrote.
@@ -619,6 +632,15 @@
                   ;; a nil tx is a legitimate no-op (the performer validated
                   ;; and chose not to write).
                   (nil? out) {:ok state :committed false}
+                  ;; Direct writers already applied their action or verified its
+                  ;; receipt. JSON cannot forge a tuple for this selected world.
+                  (and (erlang/is_tuple out) (= 2 (erlang/tuple_size out))
+                       (= :live.socket/completed (elem out 0)))
+                  (do
+                    (when-not (= conn (elem out 1))
+                      (throw (ex-info "A completed intent belongs to another world."
+                                     {:kind :live.socket/completion-world})))
+                    {:ok state :committed false :completed true})
                   ;; a trusted performer may refuse in-band.
                   (and (map? out) (contains? out :refused))
                     {:denied (:refused out) :terminal true}
@@ -750,7 +772,9 @@
              state2 (assoc state :locals (assoc (:locals state) :route target))]
          (if (and buffered? (projection-queued? [:navigate]))
            state2
-           (measure/navigation (on-commit state2 false))))
+           (let [projected (measure/navigation (on-commit state2 false))]
+            (if (contains? #{:committed :completed} (get-in state [:locals :live/outcome :status]))
+              (push! projected [:navigate target]) projected))))
 
      (= :intent (first ev))
        ;; the intent's payload is what the VIEW declared ([:intent :post {:room r}]),
@@ -787,7 +811,7 @@
            ;; :ev/id deduped) yet is genuinely landed, so the client must stop
            ;; replaying it. The ack is opt-in: no :ev/id → no ack message, so
            ;; every existing app is unaffected.
-           (let [st (with-outcome (:ok result) op (if (:committed result) :committed :noop) nil)
+           (let [st (with-outcome (:ok result) op (cond (:completed result) :completed (:committed result) :committed :else :noop) nil)
                  key (get payload :ev/id)
                  st (if key (push! st [:ack key]) st)]
              (if (:committed result) st (on-commit st false)))))

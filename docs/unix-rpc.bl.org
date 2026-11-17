@@ -1,0 +1,62 @@
+#+title: Owned native Unix RPC
+
+=rpc.unix= composes the existing native server/supervisor, kernel file lease,
+SO_PEERCRED identity and first-order codec. It is a host library; application
+Source cannot bind sockets or select arbitrary host endpoints. No production
+service is automatically enrolled by importing it.
+
+#+begin_src clojure
+(require '[rpc.unix :as rpc] '[auth.interface :as interface])
+
+;; Nix enrolls the private directory, account mapping and allowed socket group.
+;; provider is an existing checked namespace, with host-owned Datom ports.
+(def server
+  (rpc/serve! {:path "/run/messages/native.sock"
+               :application "station-cli"
+               :resolve-uid account-for-kernel-uid
+               :concurrency 8 :request-ms 2000 :max-frame-bytes 65536
+               :handler (interface/endpoint provider)}))
+(rpc/status server) ; {:status :listening :path ... :concurrency 8}
+(rpc/request! "/run/messages/native.sock"
+              (interface/request provider "inbox" ["work"]))
+(rpc/stop! server) ; waits for accepted callbacks to finish
+#+end_src
+
+The resolver receives the actual kernel UID and returns a current subject/kind
+or nil. The host sets the application. Payload identity and roles carry no
+authority. The existing checked namespace dispatcher rechecks application,
+resource, current membership/roles, attenuation and exact code on each call.
+The RPC envelope is not itself an authorization decision; consumers must also
+interpret the checked namespace reply using =auth.transport/result!=.
+
+Connections use one bounded packet-4 frame in each direction. Native values
+pass the closed first-order codec; compression, opaque handles, new atoms and
+trailing bytes refuse. The contract/schema vocabulary must be loaded first.
+The listener has 1–64 workers. Each worker owns its accepted socket, establishes
+a verified identity extent and clears that extent before accepting again.
+There is one admission deadline across identity lookup and receive; accepted
+effects are drained rather than killed when their observer times out.
+
+The parent directory must belong to the service UID and forbid group/world
+writes. Socket permissions are 0600 or explicitly 0660; Nix owns group policy.
+The persistent kernel lease follows the worker supervisor. Stopping closes
+admission, waits for synchronous callbacks, and unlinks only its stamped socket.
+Owner death retains custody until workers drain. A later owner reclaims a stale
+socket only after verifying type, UID and a definite dead-endpoint probe.
+An uncertain probe never authorizes unlinking. Lock inodes remain persistent.
+
+The constructor's listening status establishes socket ownership, not complete
+application readiness or a latency guarantee. Cold identity metadata measured
+in the cross-user fixture takes seconds. A real service must prepare its complete
+handler context before advertising readiness and qualify that service's traffic.
+Process replacement and exclusive Datom writer transfer remain separate work.
+
+[[file:../research/field-station/integration/evidence/unix-rpc-native.json][38 promoted listener assertions pass]], including owner-death drain, stale
+recovery and foreign-file preservation. The combined run containing those
+checks failed in a separate Datom fixture; its corrected 16-assertion check
+passes separately. [[file:../research/field-station/integration/evidence/unix-rpc-users.json][The actual cross-user joined RPC/Datom guest also passes]],
+using an indexed seeded account directory, checked inbox calls and an actual
+writer-side claim receipt. It confirms explicit filesystem/account/resource
+denials and clean shutdown. Production accounts, browser ingress, full Messages
+behavior and service latency remain unqualified. Cold fixture client commands
+took 28–32 seconds; do not mistake that for a responsive installed CLI.

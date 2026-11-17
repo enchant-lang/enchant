@@ -4,6 +4,7 @@ export function settlementError(state){
   if(state.readonly)return 'This document is shared for reading. Your draft is retained.';
   if(state.offline)return 'You are offline. Reconnect before sharing your writing.';
   if(state.conflict)return 'Resolve the retained draft before sharing your writing.';
+  if(state.invalid)return 'Correct the highlighted writing before sharing. Your draft is retained.';
   if(state.orphaned)return 'Some fields changed. Keep the draft and choose current values before sharing.';
   if(state.stale)return 'The source changed. Your draft is retained for comparison.';
   if(state.composing)return 'Finish entering the current character before sharing.';

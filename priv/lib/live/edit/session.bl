@@ -2,7 +2,7 @@
 (ns ^:js live.edit.session
   (:require [live.edit.document :as d] [live.edit.protocol :as p]
             [live.edit.commands :as c] [live.edit.extensions :as e]
-            [live.edit.projection :as view] [live.edit.registry :as r]))
+            [live.edit.projection :as view] [live.edit.registry :as r] [live.edit.input :as input]))
 (defn- data [value] (js->bl value :keywordize-keys true))
 (defn- fresh [] (.randomUUID (.-crypto js/globalThis)))
 (defn- normal-selection [selection]
@@ -22,6 +22,9 @@
         preview (atom nil) bookmarks (atom {}) listeners (atom [])
         clock (atom 0) disposed (atom false)
         alive (fn [] (when @disposed (r/fail "editor-disposed")))
+        authored-correction (fn [next]
+                              (if (and (:validation next) (> (count (:pending next)) 1))
+                                (p/revise next (fresh)) next))
         doc (fn [] (or (:document @preview) (:visible @state)))
         context (fn [selection]
                   (assoc @state :document (:visible @state) :selection (or selection (:selection @state))
@@ -30,6 +33,7 @@
         info (fn [change]
                (bl->js {:clock @clock :revision (:revision @state) :pending (count (:pending @state))
                         :conflicts (mapv #(select-keys % [:reason]) (:conflicts @state))
+                        :validation (when (:validation @state) (select-keys (:validation @state) [:reason]))
                         :canUndo (boolean (p/can-undo? @state)) :canRedo (boolean (p/can-redo? @state))
                         :selection (:selection @state) :pendingStyles (get @state :pending-styles [])
                         :meta (:meta (doc)) :preview (boolean @preview) :count (count (:blocks (doc)))
@@ -52,9 +56,12 @@
                            (when (and token (or (nil? selection) (get-in selection [:anchor :deleted]) (get-in selection [:head :deleted])))
                              (r/fail "The selected text is no longer available.")) selection))
         execute (fn [op options]
-                  (let [before (assoc @state :selection (or (resolve-target options) (:selection @state))
+                  (let [id (get options :id (fresh))
+                        planned-input (input/plan ext (context (resolve-target options)) op (assoc options :id id))
+                        op (:op planned-input) options (:options planned-input)
+                        before (assoc @state :selection (or (resolve-target options) (:selection @state))
                                             :group (:group options))
-                        next (p/enqueue ext before (get options :id (fresh)) op)
+                        next (p/enqueue ext before id op)
                         next (if (:selection options) (assoc next :selection (normal-selection (:selection options))) next)
                         next (if (and (c/collapsed? (:selection next)) (contains? #{"call/args" "call/remove"} (:op op)))
                                (assoc next :pending-styles (or (caret-styles (:visible next) (:selection next)) [])) next)]
@@ -87,7 +94,8 @@
     #js {:read (fn [] (alive) (info {}))
          :node (fn [id] (alive) (bl->js (d/find-block (doc) id)))
          :layout (fn [] (alive) (bl->js (mapv #(select-keys % [:id :parent :slot :type]) (:blocks (doc)))))
-         :project (fn [ids] (alive) (bl->js (mapv #(when-let [b (d/find-block (doc) %)] (view/node ext b)) (js->bl ids))))
+         :projectTargets (fn [ids structural metadata] (alive) (bl->js (view/targets ext (doc) (js->bl ids) structural metadata)))
+         :project (fn [ids] (alive) (bl->js (view/project ext (doc) (js->bl ids))))
          :catalog (fn [] (alive) (bl->js (mapv #(dissoc % :run :when :active) (c/catalogue ext))))
          :query (fn [options] (alive) (bl->js (c/query ext (context (resolve-target (data options))))))
          :run (fn [id args options] (run id (or (data args) {}) (or (data options) {})))
@@ -124,8 +132,8 @@
                           full? (or (not= digest (:digest @state)) (not= (- revision (:revision @state)) (.-length rows)))
                           incoming (if full? (data native)
                                      {:revision revision :digest digest :journal (data rows)})]
-                      (advance (p/adopt ext @state incoming))))
-         :refuse (fn [reply] (alive) (advance (p/receive-reply ext @state (data reply))))
+                      (advance (authored-correction (p/adopt ext @state incoming)))))
+         :refuse (fn [reply] (alive) (advance (authored-correction (p/receive-reply ext @state (data reply)))))
          :clipboard (fn [kind payload selection]
                       (alive)
                       (let [ctx (assoc (context (data selection)) :seed (fresh) :functions (:functions ext))
@@ -141,6 +149,7 @@
          :recovery (fn []
                      (alive) (bl->js {:schema 1 :revision (:revision @state) :digest (:digest @state)
                        :pending (:pending @state) :selection (:selection @state)
+                       :validation (:validation @state) :retired (get @state :retired [])
                        :contracts (mapv (fn [[id spec]] {:id id :spec (-> spec (dissoc :render :run :validate :ui)
                          (update :params #(into {} (map (fn [[k param]] [k (dissoc param :validate)]) %))))}) (:functions ext))
                        :draft (:draft @state) :conflicts (:conflicts @state)}))
@@ -159,6 +168,11 @@
                               (if (:proposal row) (assoc-in next [:pending (dec (count (:pending next))) :proposal] (:proposal row)) next))))))
                       (swap! state assoc :selection (:selection saved)
                         :pending-styles (or (caret-styles (:visible @state) (:selection saved)) []))
+                      (when-not (and (vector? (get saved :retired [])) (<= (count (:retired saved)) 256)
+                                     (every? d/identifier? (:retired saved))) (r/fail "invalid-recovery-retired-identities"))
+                      (swap! state assoc :retired (get saved :retired []))
+                      (when (:validation saved)
+                        (swap! state #(p/receive-reply ext % (assoc (:validation saved) :ok false :correctable true))))
                       (notify {:changed (mapv :id (:blocks (:visible @state))) :structural true :metadata true})))
          :surface (fn [name]
                     (alive) (when-let [spec (get-in ext [:surfaces name])]

@@ -14,7 +14,7 @@ export function importHTML(html){
       if(node.nodeType===Node.TEXT_NODE){text+=node.data;return;}
       if(node.nodeType!==Node.ELEMENT_NODE||['SCRIPT','STYLE','NOSCRIPT','IFRAME','OBJECT','SVG','TEMPLATE'].includes(node.tagName))return;
       if(node.tagName==='BR'){text+='\n';return;}
-      if(['UL','OL'].includes(node.tagName))return;
+      if(['UL','OL','TABLE','PRE','BLOCKQUOTE','ASIDE'].includes(node.tagName))return;
       const from=chars(text);for(const child of node.childNodes)visit(child);const to=chars(text);if(from===to)return;
       const fid=({B:'text/bold',STRONG:'text/bold',I:'text/emphasis',EM:'text/emphasis',U:'text/underline',S:'text/strike',DEL:'text/strike',CODE:'text/code',MARK:'text/highlight',A:'text/link'})[node.tagName];
       const args=fid==='text/link'?{href:safeUrl(node.getAttribute('href'))}:fid==='text/highlight'?{tone:'amber'}:{};
@@ -47,11 +47,12 @@ export function importHTML(html){
     if(tag==='PRE'){blocks.push(base(identity(),'code',element.textContent,{language:'text'},parent));return;}
     const known=/^(P|H[1-3]|LI|BLOCKQUOTE|ASIDE)$/.test(tag);
     if(!known&&element.querySelector('p,h1,h2,h3,ul,ol,pre,blockquote,aside,hr,img,table')){for(const child of element.children)emit(child,parent);return;}
-    const kind=type||({H1:'heading',H2:'heading',H3:'heading',BLOCKQUOTE:'quote',ASIDE:'callout'})[tag]||'paragraph';
-    const attrs=kind==='heading'?{level:Number(tag[1])}:kind==='callout'?{icon:'lightbulb',tone:'amber'}:{};
+    const check=tag==='LI'?[...element.children].find(child=>child.tagName==='INPUT'&&child.type==='checkbox'):null;
+    const kind=check?'task':type||({H1:'heading',H2:'heading',H3:'heading',BLOCKQUOTE:'quote',ASIDE:'callout'})[tag]||'paragraph';
+    const attrs=check?{checked:check.checked}:kind==='heading'?{level:Number(tag[1])}:kind==='callout'?{icon:'lightbulb',tone:'amber'}:{};
     const id=identity(),content=inline(element.childNodes),block={...base(id,kind,'',attrs,parent),...content};
     blocks.push(block);
-    for(const child of element.children)if(child.tagName==='UL'||child.tagName==='OL')emit(child,id);
+    for(const child of element.children)if(['UL','OL','TABLE','PRE','BLOCKQUOTE','ASIDE'].includes(child.tagName))emit(child,id);
   }
   for(const child of document.body.childNodes){
     if(child.nodeType===Node.TEXT_NODE){if(child.data.trim())blocks.push(base(identity(),'paragraph',child.data));}
@@ -79,9 +80,21 @@ export function fragmentHTML(blocks){
     if(b.type==='divider')return '<hr>';
     if(b.type==='image')return `<img src="${escapes(safeUrl(b.attrs.src))}" alt="${escapes(b.attrs.alt||'')}">`;
     const tag=b.type==='heading'?'h'+Math.max(1,Math.min(3,b.attrs.level||2)):b.type==='quote'?'blockquote':b.type==='callout'?'aside':'p';
-    return `<${tag}>${inline(b)}</${tag}>`;
+    return `<${tag}>${inline(b)}${renderRows(children.get(b.id)||[])}</${tag}>`;
   }
-  return blocks.filter(b=>!['table-row','table-cell'].includes(b.type)).map(render).join('');
+  function renderRows(rows){
+    let html='',list=null;
+    const close=()=>{if(list){html+=`</${list}>`;list=null;}};
+    for(const b of rows){
+      if(['bullet','ordered','task'].includes(b.type)){
+        const tag=b.type==='ordered'?'ol':'ul';if(list!==tag){close();html+=`<${tag}>`;list=tag;}
+        const check=b.type==='task'?`<input type="checkbox" disabled${b.attrs.checked?' checked':''}>`:'';
+        html+=`<li>${check}${inline(b)}${renderRows(children.get(b.id)||[])}</li>`;
+      }else{close();html+=render(b);}
+    }close();return html;
+  }
+  const identities=new Set(blocks.map(b=>b.id));
+  return renderRows(blocks.filter(b=>!identities.has(b.parent)));
 }
 export function markdown(document){
   return document.blocks.map(b=>{

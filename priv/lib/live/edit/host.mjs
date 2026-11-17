@@ -2,7 +2,7 @@ export {mountFormRecovery} from './form-recovery.mjs';
 import {waitForSettlement,settlementError} from './settlement.mjs';
 export {mountSourceInput} from './source-input.mjs';
 // Owned DOM/input adapter. Semantic policy and persistent session state are BL.
-import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';
+import {Geometry,codepoints,nativeFieldReplacement} from './geometry.mjs';
 import {CodeAdapter} from './code.mjs';
 import {projectionParts} from './projection-parts.mjs';
 import {DraftStore} from './drafts.mjs';
@@ -60,7 +60,10 @@ export class Editor {
     const selected=new Set(cells);this.canvas.classList.toggle('ed-grid-selection',!!cells.length);
     for(const [id,node] of this.nodes)node.classList.toggle('ed-cell-selected',selected.has(id));
   }
-  select(selection,{focus=true}={}){this.session.selection(selection);this.geometry.restore(selection,{focus});this.ui?.update?.(this.state);}
+  select(selection,{focus=true}={}){
+    this.session.selection(selection);this.geometry.restore(selection,{focus});
+    this.paintClipboardSelection(this.state.selection);this.ui?.update?.(this.state);
+  }
   node(id){return this.current.get(id)||this.session.node(id);}
   capture(){this.rememberSelection();return this.session.bookmark();}
   report(error){this.message=error?.message||String(error);this.paintStatus();this.ui?.report?.(this.message);return false;}
@@ -93,7 +96,7 @@ export class Editor {
   }
   settlementState(){
     return {pending:this.state.pending,conflict:this.state.conflicts.length||!!this.recoveryFailure,
-      readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
+      invalid:!!this.state.validation,readonly:this.model.readonly,disposed:this.disposed,offline:document.documentElement.dataset.live==='0',
       composing:this.composing||[...this.code.values()].some(code=>code.view.composing),preview:this.state.preview};
   }
   ready(){const state=this.settlementState();return !settlementError(state)&&!state.pending;}
@@ -120,15 +123,15 @@ export class Editor {
     this.root.dispatchEvent(new CustomEvent('enchanted:change',{detail:change}));
   }
   paint(change){
-    const ids=[...new Set(change.changed||[])];if(!ids.length&&!change.structural)return;
+    const ids=this.session.projectTargets([...new Set(change.changed||[])],!!change.structural,!!change.metadata);if(!ids.length&&!change.structural)return;
     const selection=this.state.selection,active=document.activeElement;
     const shouldRestore=this.canvas.contains(active)||active===this.canvas;
     const trees=this.session.project(ids);this.metrics.projected+=trees.length;
     for(let i=0;i<ids.length;i++){
       const id=ids[i],tree=trees[i],old=this.nodes.get(id),next=this.session.node(id);
       if(!tree){old?.remove();this.nodes.delete(id);this.current.delete(id);this.shells.delete(id);this.code.get(id)?.dispose();this.code.delete(id);continue;}
-      if(old&&same(this.current.get(id),next))continue;
       const parts=projectionParts(tree,id),oldText=old&&this.textElement(id);
+      if(old&&same(this.current.get(id),next)&&parts.signature&&parts.signature===this.shells.get(id))continue;
       if(next.type!=='code'&&parts.signature&&parts.signature===this.shells.get(id)&&oldText){
         const freshText=this.services.render(parts.text);
         if(!oldText.isEqualNode(freshText))oldText.replaceChildren(...freshText.childNodes);
@@ -171,10 +174,11 @@ export class Editor {
   paintStatus(){
     const conflict=this.state.conflicts.length||!!this.recoveryFailure,offline=document.documentElement.dataset.live==='0';
     this.root.dataset.editPending=String(this.state.pending);this.root.dataset.editConflict=String(this.state.conflicts.length);
-    this.root.dataset.editRevision=String(this.state.revision);this.canvas.setAttribute('aria-readonly',String(!!conflict||!!this.model.readonly));
+    this.root.dataset.editRevision=String(this.state.revision);this.root.dataset.editNotice=this.message||this.state.validation?'1':'0';this.canvas.setAttribute('aria-readonly',String(!!conflict||!!this.model.readonly));
     this.canvas.contentEditable=String(!conflict&&!this.model.readonly);
+    for(const field of this.canvas.querySelectorAll('[data-edit-isolated]'))field.contentEditable=String(!conflict&&!this.model.readonly);
     for(const code of this.code.values())code.setReadonly(!!conflict||!!this.model.readonly);
-    const message=this.message||(conflict?'Draft retained — review changes':offline?'Offline · draft on this device':this.state.pending?'Saving…':'All changes saved');
+    const message=this.message||this.state.validation?.reason||(conflict?'Draft retained — review changes':offline?'Offline · draft on this device':this.state.pending?'Saving…':'All changes saved');
     if(this.status.textContent!==message)this.status.textContent=message;
     this.root.dataset.connection=conflict?'conflict':offline?'offline':this.state.pending?'saving':'saved';
   }
@@ -204,7 +208,13 @@ export class Editor {
     if(this.model.readonly)return this.report(Error('This document is read only.'));
     if(this.recoveryFailure)return this.report(Error('Download or dismiss the retained draft first.'));
     this.message='';const t=performance.now();this.localInput=true;
-    try{this.session.change(op,options);this.metrics.transactions++;this.metrics.lastTransactionMs=performance.now()-t;return true;}
+    try{
+      this.session.change(op,options);
+      const s=this.state.selection;
+      if(options?.group&&this.typing?.id===options.group&&s?.anchor.block===s?.head.block&&s.anchor.offset===s.head.offset&&s.head.block===this.typing.block)
+        this.typing.end=s.head.offset;
+      this.metrics.transactions++;this.metrics.lastTransactionMs=performance.now()-t;return true;
+    }
     catch(error){return this.report(error);}finally{this.localInput=false;}
   }
   run(id,args={},options={}){
@@ -221,16 +231,16 @@ export class Editor {
     if(from.block===to.block&&!fragment&&!/[\r\n]/.test(text)){
       const end={...from,offset:from.offset+codepoints(text).length};
       const op={op:'text/replace',block:from.block,from:from.offset,to:to.offset,text,styles:this.state.pendingStyles};
-      return this.transaction(op,{id:seed,group:this.typingGroup(from.block,from.offset,to.offset,text),selection:{anchor:end,head:end}});
+      return this.transaction(op,{id:seed,group:this.typingGroup(from.block,from.offset,to.offset,text),selection:{anchor:end,head:end},input:true});
     }
     return this.transaction({op:'range/replace',from,to,seed,...(fragment?{fragment}:{text})},{id:seed});
   }
-  nativeText(id,before,after,selection,input=null){
+  nativeText(id,before,after,selection,input=null,field={}){
     if(this.composing)return false;
     const head=selection?.anchor.block===id&&selection.head.block===id&&selection.anchor.offset===selection.head.offset?selection.head.offset:null;
-    const delta=nativeReplacement(before,after,{head,text:input?.data});if(!delta)return true;
+    const delta=nativeFieldReplacement(before,after,{...field,head,text:input?.data});if(!delta)return true;
     const group=this.typingGroup(id,delta.from,delta.to,delta.text);
-    return this.transaction({op:'text/replace',block:id,...delta,styles:this.node(id)?.type==='code'?[]:this.state.pendingStyles},{group,selection});
+    return this.transaction({op:'text/replace',block:id,...delta,styles:this.node(id)?.type==='code'?[]:this.state.pendingStyles},{group,selection,input:true});
   }
   typingGroup(id,from,to,text){
     const now=performance.now(),direction=text?'insert':'delete';
@@ -243,7 +253,7 @@ export class Editor {
     const text=event?.target?.closest?.('[data-edit-text]')||this.textElement(this.state.selection?.head.block);
     if(!text||text.closest('[data-edit-code]'))return;
     const id=text.dataset.editText,before=this.node(id)?.text;if(before==null)return;
-    this.nativeText(id,before,text.textContent,this.geometry.read(),event);
+    this.nativeText(id,before,text.textContent,this.geometry.read(),event,{start:Number(text.dataset.editStart||0),tail:Number(text.dataset.editTail||0)});
   }
   focusNeighbour(id,direction){
     const at=this.order.indexOf(id),next=this.order[at+direction];if(!next)return false;
@@ -266,7 +276,12 @@ export class Editor {
       if(this.model.readonly){this.report(Error('This document is read only.'));return;}
       this.session.selection({anchor:{block:id,offset:0},head:{block:id,offset:0}});
       const target=this.session.bookmark();
-      try{this.run(control.dataset.editCommand,{}, {target});this.geometry.restore(this.state.selection,{focus:true});}
+      try{
+        const command=this.query({target}).find(item=>item.id===control.dataset.editCommand);
+        if(this.ui&&command?.params&&Object.keys(command.params).length){
+          this.geometry.restore(this.state.selection);this.ui.functionPanel(command.id);
+        }else{this.run(control.dataset.editCommand,{}, {target});this.geometry.restore(this.state.selection,{focus:true});}
+      }
       finally{this.session.release(target);}
     });
     this.listen(this.canvas,'compositionstart',()=>{this.composing=true;this.root.dataset.editComposing='true';this.ui?.hideSelection?.();});
@@ -298,7 +313,7 @@ export class Editor {
           if(!collapsed){this.replace('\n',null,selection);return;}
           if(!block.text&&['bullet','ordered','task'].includes(block.type)){this.run(block.parent?'block/outdent':'turn/paragraph');return;}
           const next=identity(),type=['bullet','ordered','task'].includes(block.type)?block.type:'paragraph';
-          this.transaction({op:'block/split',block:from.block,at:from.offset,new:next,rightMeta:{type,attrs:type==='task'?{checked:false}:block.type===type?block.attrs:{}}},
+          this.transaction({op:'block/split',block:from.block,at:from.offset,new:next,rightMeta:{type,attrs:type==='task'?{...block.attrs,checked:false}:block.type===type?block.attrs:{}}},
             {selection:{anchor:{block:next,offset:0},head:{block:next,offset:0}}});
         }else if((!sameBlock&&event.inputType.startsWith('delete'))||(!sameBlock&&event.inputType==='insertText')){event.preventDefault();this.replace(event.data||'',null,selection);}
         else if(event.inputType==='insertReplacementText'&&typeof event.data==='string'){event.preventDefault();this.replace(event.data,null,selection);}
@@ -375,7 +390,7 @@ export class Editor {
       event.clipboardData.setData('text/plain',prepared?.text??blocks.map(b=>b.text).join('\n'));event.clipboardData.setData('text/html',fragmentHTML(blocks));
       event.clipboardData.setData(FRAGMENT_MIME,JSON.stringify({schema:'enchant.fragment/2',blocks}));if(cut){if(this.model.readonly||this.recoveryFailure)throw Error('This document cannot be edited.');
         if(!this.session.clipboard('cut',{},selection))this.replace('',null,selection);}
-    }catch(error){this.report(error);}
+    }catch(error){event.preventDefault();this.report(error);}
   }
   download(format='json'){
     const doc=this.session.export(),body=this.recoveryFailure?JSON.stringify(this.recoveryFailure,null,2):format==='markdown'?markdown(doc):JSON.stringify(doc,null,2)+'\n';

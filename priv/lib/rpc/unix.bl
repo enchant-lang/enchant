@@ -1,0 +1,178 @@
+; Bounded host Unix RPC composition over native supervision, leases and identity.
+; Host enrollment remains explicit. This library does not enroll a service.
+(ns rpc.unix
+ (:require [auth.unix :as unix] [auth.identity :as identity] [data.first-order :as data]
+           [proc.admission :as admission] [proc.server] [os.lease :as lease] [vm.net :as net]))
+(def protocol "enchant.rpc.unix/1")
+(defn- refuse [kind] (throw (ex-info "Local RPC refused" {:kind kind})))
+(defn- stamp [path]
+ (let [r (File/lstat path)]
+  (when (= :ok (elem r 0))
+   ;; File.Stat has native atom keys. Keyword lookup supports that host
+   ;; representation; select-keys/contains? tests exact language map keys.
+   (let [s (elem r 1)]
+    {:inode (:inode s) :major_device (:major_device s) :minor_device (:minor_device s)
+     :uid (:uid s) :mode (:mode s)}))))
+(defn- options! [options]
+ (let [o (merge {:concurrency 8 :request-ms 2000 :max-frame-bytes 65536 :socket-mode 384} options)
+       path (:path o)]
+  (when-not (and (map? options)
+                 (every? #{:path :application :resolve-uid :handler :concurrency :request-ms :max-frame-bytes :socket-mode} (keys o))
+                 (string? path) (String/valid? path) (= path (Path/expand path))
+                 (<= 1 (erlang/byte_size path) 107) (not (String/contains? path (erlang/list_to_binary (list 0))))
+                 (string? (:application o)) (<= 1 (erlang/byte_size (:application o)) 128)
+                 (BeamLisp.Ns.Rt/invocable? (:resolve-uid o) 1) (BeamLisp.Ns.Rt/invocable? (:handler o) 1)
+                 (erlang/is_integer (:concurrency o)) (<= 1 (:concurrency o) 64)
+                 (erlang/is_integer (:request-ms o)) (<= 1 (:request-ms o) 60000)
+                 (erlang/is_integer (:max-frame-bytes o)) (<= 128 (:max-frame-bytes o) 1048576)
+                 (contains? #{384 432} (:socket-mode o)))
+   (refuse :rpc/invalid-options))
+  (let [parent (File/stat! (Path/dirname path))]
+   (when-not (and (= :directory (:type parent)) (= (:uid parent) (:uid (File/stat! "/proc/self")))
+                  (= 0 (erlang/band (:mode parent) 18)))
+    (refuse :rpc/unsafe-endpoint-directory))) o))
+(defn- envelope [value] {:protocol protocol :value value})
+(defn- error-envelope [category] {:protocol protocol :error category})
+(defn- remaining! [deadline]
+ (let [left (- deadline (System/monotonic_time :millisecond))]
+  (when-not (pos? left) (refuse :rpc/expired)) left))
+(defn- connection! [socket o]
+ (try
+  (let [token (admission/token (erlang/self) (:request-ms o))
+        deadline (:deadline-ms token)
+        reply
+        (try
+         (admission/with-request token
+          (fn []
+           (unix/with-peer! socket (:application o) (:resolve-uid o)
+            (fn []
+             (admission/check!)
+             (let [received (gen_tcp/recv socket 0 (remaining! deadline))]
+              (when-not (= :ok (elem received 0)) (refuse :rpc/frame-unavailable))
+              (admission/check!)
+              (let [request (data/decode! (elem received 1) {:max-bytes (:max-frame-bytes o)})]
+               (when-not (and (map? request) (= #{:protocol :request} (set (keys request)))
+                              (= protocol (:protocol request))) (refuse :rpc/invalid-envelope))
+               (admission/check!)
+               (envelope ((:handler o) (:request request)))))))))
+         (catch error
+          (error-envelope (if (= :auth/unauthenticated (:kind (ex-data error))) :unauthenticated :request-failed))))
+        encoded (try (data/encode! reply {:max-bytes (:max-frame-bytes o)})
+                  (catch _ (data/encode! (error-envelope :invalid-result) {:max-bytes (:max-frame-bytes o)})))]
+   (gen_tcp/send socket encoded))
+  (finally (gen_tcp/close socket))))
+
+(defserver connection-worker
+ (init [o] (Process/flag :trap_exit true) (erlang/send (erlang/self) :accept) (ok o))
+ (handle-info :accept [o]
+  (let [accepted (gen_tcp/accept (:listener o) 1000)]
+   (cond
+    (= :ok (elem accepted 0))
+     (do (connection! (elem accepted 1) o) (erlang/send (erlang/self) :accept) (noreply o))
+    (= :timeout (elem accepted 1))
+     (do (erlang/send (erlang/self) :accept) (noreply o))
+    (= :closed (elem accepted 1)) (stop :normal o)
+    :else (stop :accept-failed o)))))
+
+(defn- acquire! [o]
+ (let [path (:path o) held (lease/acquire! (str path ".owner"))]
+  (when-not (:ok held) (refuse :rpc/endpoint-owned))
+  (try
+   (let [existing (stamp path)]
+    (when existing
+     (when-not (and (= 49152 (erlang/band (:mode existing) 61440))
+                     (= (:uid existing) (:uid (File/stat! "/proc/self")))
+                     (= :dead (net/probe path))) (refuse :rpc/endpoint-unverified))
+     (File/rm! path))
+    (let [opened (gen_tcp/listen 0
+                   (list (tuple :inet_backend :inet) :local :binary
+                         (tuple :ifaddr (tuple :local (String/to_charlist path)))
+                         (tuple :active false) (tuple :packet 4) (tuple :packet_size (:max-frame-bytes o))
+                         (tuple :backlog (:concurrency o))
+                         (tuple :send_timeout (:request-ms o)) (tuple :send_timeout_close true)))]
+     (when-not (= :ok (elem opened 0)) (refuse :rpc/bind-failed))
+     (let [listener (elem opened 1)]
+      (try
+       (File/chmod! path (:socket-mode o))
+       (assoc o :listener listener :lease (:ok held) :stamp (stamp path))
+       (catch error (gen_tcp/close listener) (throw error))))))
+   (catch error (lease/release! (:ok held)) (throw error)))))
+(defn- close! [o]
+ (try
+  (gen_tcp/close (:listener o))
+  ;; Stop admission before draining. A child spec with infinite shutdown waits
+  ;; for its current synchronous callback before OTP terminates that worker.
+  (when-let [supervisor (:supervisor o)]
+   (when (Process/alive? supervisor)
+    (try (Supervisor/stop supervisor :normal :infinity)
+     (catch error (when (Process/alive? supervisor) (throw error))))))
+  (when (= (:stamp o) (stamp (:path o))) (File/rm (:path o)))
+  (finally
+   ;; The supervisor retains endpoint custody if disposal is still uncertain.
+   (when (or (nil? (:supervisor o)) (not (Process/alive? (:supervisor o))))
+    (lease/release! (:lease o))))))
+
+(defserver listener-owner
+ (init [options]
+  (Process/flag :trap_exit true)
+  (let [o (acquire! options)]
+   (try
+    (let [children (mapv (fn [index]
+                          (BeamLisp.Supervisor/server index connection-worker o
+                           {:restart :transient :shutdown :infinity})) (range (:concurrency o)))
+          supervisor (BeamLisp.Supervisor/supervise :one-for-one children)]
+     ;; Parent/owner death cannot free the endpoint while children drain.
+     (lease/transfer! (:lease o) supervisor)
+     (ok (assoc o :supervisor supervisor)))
+    (catch error (close! o) (throw error)))))
+ (handle-call :status [_ o]
+  (reply {:status :listening :path (:path o) :concurrency (:concurrency o)} o))
+ (handle-info [:EXIT pid reason] [o]
+  (if (= pid (:supervisor o)) (stop reason o) (noreply o)))
+ (terminate [_ o] (close! o)))
+
+(defn serve!
+ "Host constructor. Nix owns directory/group enrollment; this owner retains
+  the kernel lease and fixed worker tree. Stop drains accepted callbacks."
+ [options]
+ (BeamLisp.Env/assert_native_framework_execution!)
+ (let [o (options! options)]
+  (admission/with-request nil
+   #(identity/without-identity (fn [] (start listener-owner o))))))
+(defn stop! [server]
+ (BeamLisp.Env/assert_native_framework_execution!)
+ (GenServer/stop server :normal :infinity) :stopped)
+(defn status [server] (call server :status))
+
+(defn request!
+ "Native host client; application Source uses its explicitly enrolled resource
+  instead of selecting arbitrary host socket paths. No identity travels here."
+ ([path request] (request! path request {}))
+ ([path request options]
+  (BeamLisp.Env/assert_native_framework_execution!)
+  (admission/check!)
+  (let [timeout (:timeout-ms options 3000) maximum (:max-frame-bytes options 65536)]
+   (when-not (and (map? options) (every? #{:timeout-ms :max-frame-bytes} (keys options))
+                  (erlang/is_integer timeout) (<= 1 timeout 60000)
+                  (erlang/is_integer maximum) (<= 128 maximum 1048576)
+                  (string? path) (= path (Path/expand path)) (<= 1 (erlang/byte_size path) 107))
+    (refuse :rpc/invalid-options))
+  (let [now (System/monotonic_time :millisecond)
+        deadline (min (+ now timeout) (or (:deadline-ms (Process/get :bl_admission)) (+ now timeout)))
+        encoded (data/encode! {:protocol protocol :request request} {:max-bytes maximum})
+        opened (gen_tcp/connect (tuple :local (String/to_charlist path)) 0
+                 (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4)
+                       (tuple :packet_size maximum) (tuple :active false)
+                       (tuple :send_timeout (remaining! deadline)) (tuple :send_timeout_close true)) (remaining! deadline))]
+   (when-not (= :ok (elem opened 0)) (refuse :rpc/unavailable))
+   (let [socket (elem opened 1)]
+    (try
+     (inet/setopts socket (list (tuple :send_timeout (remaining! deadline))))
+     (when-not (= :ok (gen_tcp/send socket encoded)) (refuse :rpc/unavailable))
+     (let [received (gen_tcp/recv socket 0 (remaining! deadline))]
+      (when-not (= :ok (elem received 0)) (refuse :rpc/unavailable))
+      (let [reply (data/decode! (elem received 1) {:max-bytes maximum})]
+       (when-not (and (= protocol (:protocol reply))
+                      (contains? #{#{:protocol :value} #{:protocol :error}} (set (keys reply))))
+        (refuse :rpc/invalid-envelope)) reply))
+     (finally (gen_tcp/close socket))))))))

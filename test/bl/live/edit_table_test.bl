@@ -155,3 +155,55 @@
   (is (d/valid? doc))
   (is (d/valid? (d/document "clipboard" (:blocks copied))))
   (is (= "Original" (:text (d/find-block edited "table/r1/c0"))))))
+
+(deftest rectangular-formatting-and-coverage-use-exactly-the-selected-cells
+ (let [written (reduce (fn [doc id]
+                         (:document (d/apply-op (:functions registry) doc
+                           {:op "text/replace" :block id :from 0 :to 0 :text (str "Cell " id)})))
+                inserted ["table/r1/c0" "table/r1/c1" "table/r2/c0" "table/r2/c1"])
+       ctx (assoc (context written "table/r2/c1") :selection
+             {:anchor {:block "table/r1/c1" :offset 2} :head {:block "table/r2/c1" :offset 1}})
+       action (commands/plan registry ctx "text/bold" {} "rectangle-bold")
+       marked (apply-plan written action)
+       active (first (filter #(= "text/bold" (:id %)) (commands/query registry (assoc ctx :document marked))))
+       unmarked (apply-plan marked (commands/plan registry (assoc ctx :document marked) "text/bold" {} "rectangle-unbold"))
+       upper (apply-plan written (commands/plan registry ctx "text/uppercase" {} "rectangle-upper"))]
+  (is (= ["table/r1/c1" "table/r2/c1"] (mapv :block (:ops action))))
+  (is (= [0 0] (mapv :from (:ops action))))
+  (is (= [16 16] (mapv :to (:ops action))))
+  (is (= "on" (:active active)))
+  (is (= (d/find-block written "table/r2/c0") (d/find-block marked "table/r2/c0")))
+  (is (= written unmarked))
+  (is (= "CELL TABLE/R1/C1" (:text (d/find-block upper "table/r1/c1"))))
+  (is (= (d/find-block written "table/r2/c0") (d/find-block upper "table/r2/c0")))))
+
+(deftest empty-cells-do-not-skew-rectangular-formatting-coverage
+ (let [written (:document (d/apply-op (:functions registry) inserted
+                          {:op "text/replace" :block "table/r2/c1" :from 0 :to 0 :text "🌱"}))
+       ctx (assoc (context written "table/r2/c1") :selection
+             {:anchor {:block "table/r1/c1" :offset 0} :head {:block "table/r2/c1" :offset 1}})
+       action (commands/plan registry ctx "text/bold" {} "nonempty")
+       marked (apply-plan written action)]
+  (is (= ["table/r2/c1"] (mapv :block (:ops action))))
+  (is (= 1 (get-in action [:ops 0 :to])))
+  (is (= "on" (:active (first (filter #(= "text/bold" (:id %))
+                           (commands/query registry (assoc ctx :document marked)))))))))
+
+(deftest mixed-prose-and-table-selections-refuse-before-a-proposal
+ (doseq [selection [{:anchor {:block "table/r1/c0" :offset 0} :head {:block "intro" :offset 1}}
+                   {:anchor {:block "intro" :offset 1} :head {:block "table/r1/c0" :offset 0}}]]
+  (let [ctx (assoc (context inserted "intro") :selection selection)
+        items (commands/query registry ctx)]
+   (doseq [id ["text/bold" "block/delete"]]
+    (let [item (first (filter #(= id (:id %)) items))]
+     (is (false? (:enabled item)))
+     (is (includes? (:reason item) "one table"))))
+   (is (thrown? (commands/plan registry ctx "text/bold" {} "mixed"))))))
+
+(deftest a-whole-table-can-move-into-and-out-of-a-container-with-its-cells
+ (let [indented (apply-plan inserted (plan inserted "table" "block/indent" "indent-table"))
+       restored (apply-plan indented (plan indented "table" "block/outdent" "outdent-table"))]
+  (is (= "intro" (:parent (d/find-block indented "table"))))
+  (is (d/valid? indented))
+  (is (= 6 (count (filter #(= "table-cell" (:type %)) (:blocks indented)))))
+  (is (= inserted restored))))

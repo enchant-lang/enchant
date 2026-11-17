@@ -857,3 +857,61 @@
     (s/remount (assoc st :attached? false))
     (is (= :none (drain 100)))
     (flush-mailbox)))
+
+(deftest direct-domain-writers-complete-without-a-second-framework-transaction
+ (let [conn (fresh-conn)
+       state (s/mount {:view board :shared conn :sink (erlang/self)
+                       :intents {:direct (fn [world payload _]
+                                           (when-not (datom/entity (datom/db world) [:task/slug (:slug payload)])
+                                            (datom/transact! world (create-task world payload nil)))
+                                           (s/completed world))}})]
+  (try
+   (drain 500)
+   (let [before (datom/basis-t (datom/db conn))
+         event [[:intent :direct {:slug "direct" :title "Domain writer"}]
+                [:assign :draft "after completion"] [:navigate "/next"]]
+         after (s/handle-event state event {})]
+    (is (= (inc before) (datom/basis-t (datom/db conn))))
+    (is (= "Domain writer" (:task/title (datom/entity (datom/db conn) [:task/slug "direct"]))))
+    (is (= :completed (get-in after [:locals :live/outcome :status])))
+    (is (= "after completion" (get-in after [:locals :draft])))
+    (is (= "/next" (get-in after [:locals :route])))
+    (let [before-replay (datom/basis-t (datom/db conn))
+          replay (s/handle-event after event {})]
+     (is (= before-replay (datom/basis-t (datom/db conn))))
+     (is (= :completed (get-in replay [:locals :live/outcome :status])))
+     (is (= "/next" (get-in replay [:locals :route])))))
+   (finally (datom/close! conn) (flush-mailbox)))))
+
+(deftest completion-is-bound-to-the-selected-server-world-and-is-not-wire-data
+ (let [conn (fresh-conn) other (fresh-conn)
+       state (s/mount {:view board :shared conn :sink (erlang/self)
+                       :intents {:wrong (fn [_ _ _] (s/completed other))
+                                 :wire (fn [_ payload _] (:value payload))}})]
+  (try
+   (drain 500)
+   (let [before (datom/basis-t (datom/db conn))]
+    (is (thrown? (s/handle-event state [[:intent :wrong {}] [:navigate "/not-landed"]] {})))
+    (doseq [imitation [["live.socket/completed" {}] {:completed true}]]
+     (is (thrown? (s/handle-event state [:intent :wire {:value imitation}] {}))))
+    (is (= before (datom/basis-t (datom/db conn))))
+    (is (nil? (get-in state [:locals :route]))))
+   (finally (datom/close! conn) (datom/close! other) (flush-mailbox)))))
+
+(deftest conditional-navigation-is-announced-only-after-an-intent-succeeds
+ (let [conn (fresh-conn)
+       state (s/mount {:view board :shared conn :sink (erlang/self)
+                :intents {:success (fn [world _ _] (s/completed world))
+                          :refusal (fn [_ _ _]
+                                    (throw (ex-info "Retain this view"
+                                      {:intent/outcome {:status :refused :why "Retain this view"}})))}})]
+  (try
+   (flush-mailbox)
+   (let [refused (s/handle-event state [[:intent :refusal {}] [:navigate "/wrong"]] {})]
+    (is (nil? (get-in refused [:locals :route])))
+    (is (= :none (receive [:navigate route] route (after 20 :none)))))
+   (flush-mailbox)
+   (let [accepted (s/handle-event state [[:intent :success {}] [:navigate "/accepted"]] {})]
+    (is (= "/accepted" (get-in accepted [:locals :route])))
+    (is (= "/accepted" (receive [:navigate route] route (after 100 :none)))))
+   (finally (datom/close! conn) (flush-mailbox)))))

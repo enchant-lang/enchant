@@ -1,0 +1,37 @@
+(ns live.edit.input-test
+ (:require [live.edit.input :as input] [live.edit.document :as d]
+           [live.edit.extensions :as extensions] [live.edit.standard :as standard]))
+(defn field-planner [context args]
+ (when (= "field" (get-in context [:document :id]))
+  (let [op (:op args) at (:from op) caret (+ at 1 (d/length (:text op)))]
+   {:op {:op "batch" :ops [{:op "text/replace" :block (:block op) :from at :to at :text " " :styles []}
+                           (assoc op :from (inc at) :to (inc at))]}
+    :selection {:anchor {:block (:block op) :offset caret} :head {:block (:block op) :offset caret}}})))
+(def ext (extensions/build [standard/package {:name "native-field" :provides {:editor/typing field-planner}}]))
+(def document (d/prepare (d/document "field" [(d/block "head" "TODO")])))
+(def operation {:op "text/replace" :block "head" :from 4 :to 4 :text "🌱" :expected ""
+                :styles [{:id "typed-bold" :function "text/bold" :version 1 :args {}}]})
+(deftest input-planning-retains-model-coordinates-unicode-marks-and-atomic-undo
+ (let [options {:input true :id "typed" :group "word" :selection {:anchor {:block "head" :offset 5} :head {:block "head" :offset 5}}}
+       plan (input/plan ext {:document document} operation options)
+       edit (d/apply-op (:functions ext) document (:op plan))
+       next (:document edit) mark (first (get-in next [:blocks 0 :marks]))
+       undone (:document (d/apply-op (:functions ext) next (:inverse edit)))]
+  (is (= "TODO 🌱" (get-in next [:blocks 0 :text])))
+  (is (= 5 (:from mark)))
+  (is (= 6 (:to mark)))
+  (is (= 6 (get-in plan [:options :selection :head :offset])))
+  (is (= "typed" (get-in plan [:options :id])))
+  (is (= "word" (get-in plan [:options :group])))
+  (is (= document undone))))
+(deftest planning-is-opt-in-and-unhandled-input-keeps-its-original-operation
+ (is (= {:op operation :options {}} (input/plan ext {:document document} operation {})))
+ (is (= {:op operation :options {:input true}} (input/plan ext {:document (assoc document :id "other")} operation {:input true})))
+ (is (= {:op operation :options {:input true}} (input/plan (extensions/build [standard/package]) {:document document} operation {:input true}))))
+(deftest the-first-handling-package-owns-one-input-plan-and-malformed-plans-refuse
+ (let [second-called (atom false)
+       layered (assoc ext :typings [field-planner (fn [_ _] (reset! second-called true) {:op operation})])]
+  (input/plan layered {:document document} operation {:input true})
+  (is (not @second-called)))
+ (doseq [result [true {} {:op nil} {:op "text/replace"}]]
+  (is (thrown? (input/plan (assoc ext :typings [(fn [_ _] result)]) {:document document} operation {:input true})))))

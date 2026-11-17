@@ -4,6 +4,21 @@
 (def ext (e/build [standard/package]))
 (def doc (d/prepare (d/document "notes" [(d/block "a" "hello") (d/block "b" "world")])))
 (def context {:document doc :selection {:anchor {:block "a" :offset 0} :head {:block "a" :offset 5}}})
+(deftest current-parameter-presentation-keeps-enable-and-registry-validation-guards
+ (let [policy (fn [_ item]
+                (if (= "text/highlight" (:id item))
+                 (-> item (assoc-in [:params :tone :default] "mint")
+                          (assoc-in [:params :tone :values] ["mint"]) (assoc :enabled true)) item))
+       current (e/build [standard/package {:name "current-values" :provides {:editor/command-policy policy}}])
+       item (first (filter #(= "text/highlight" (:id %)) (c/query current context)))
+       base (first (filter #(= "text/highlight" (:id %)) (c/catalogue current)))
+       disabled (first (filter #(= "text/highlight" (:id %)) (c/query current (assoc context :conflict true))))
+       plan (c/plan current context "text/highlight" {:tone "forged"} "bad-value")]
+  (is (= "mint" (get-in item [:params :tone :default])))
+  (is (= ["mint"] (get-in item [:params :tone :values])))
+  (is (= "amber" (get-in base [:params :tone :default])))
+  (is (false? (:enabled disabled)))
+  (is (thrown? (d/apply-op (:functions current) doc (first (:ops plan)))))))
 (deftest one-catalogue-describes-every-surface
   (let [items (c/query ext context) bold (first (filter #(= "text/bold" (:id %)) items))]
     (is (= true (:enabled bold))) (is (= "bold" (:icon bold)))
@@ -48,3 +63,34 @@
   (is (not (contains? ids "turn/retained")))
   (is (contains? ids "insert/code"))
   (is (thrown? (c/plan ext context "insert/retained" {} "retained")))))
+
+(deftest duplicate-rebases-declared-self-references-through-the-complete-subtree
+ (let [attrs {:identity/self ["example/owner"] :example/owner "one" :example/other "one"}
+       initial (d/prepare (d/document "ownership" [(d/block "one" "task" "Parent" attrs)
+                 (assoc (d/block "child" "Nested") :parent "one" :attrs (assoc attrs :example/owner "child"))]))
+       context {:document initial :selection {:anchor {:block "one" :offset 0} :head {:block "one" :offset 0}}}
+       plan (c/plan ext context "block/duplicate" {} "copy")
+       copied (:document (d/apply-op (:functions ext) initial (first (:ops plan))))
+       clone (d/find-block copied "copy/0") child (d/find-block copied "copy/1")
+       split (:document (d/apply-op (:functions ext) initial
+                          {:op "block/split" :block "one" :at 6 :new "split" :rightMeta {:type "task" :attrs attrs}}))]
+  (is (= "copy/0" (get-in clone [:attrs :example/owner])))
+  (is (= "copy/1" (get-in child [:attrs :example/owner])))
+  (is (= "one" (get-in clone [:attrs :example/other])))
+  (is (= "copy/0" (:parent child)))
+  (is (= "one" (get-in (d/find-block split "split") [:attrs :example/owner])))))
+
+(deftest repeated-duplicates-keep-application-identities-fresh-and-bounded
+ (let [original-block (assoc (d/block "original" "Rich text") :marks
+               [{:from 0 :to 4 :call {:id (apply str (repeat 120 "a")) :function "text/bold" :version 1 :args {}}}])
+       final (loop [doc (d/prepare (d/document "bounded-copy" [original-block])) id "original" at 0]
+               (if (= at 6) doc
+                (let [seed (str "copy-" at)
+                      ctx {:document doc :selection {:anchor {:block id :offset 0} :head {:block id :offset 0}}}
+                      plan (c/plan ext ctx "block/duplicate" {} seed)
+                      next (:document (d/apply-op (:functions ext) doc (first (:ops plan))))]
+                 (recur next (str seed "/0") (inc at)))))]
+  (is (d/valid? final))
+  (is (= 7 (count (:blocks final))))
+  (is (= 7 (count (d/call-ids final))))
+  (is (every? #(<= (d/length %) 128) (d/call-ids final)))))

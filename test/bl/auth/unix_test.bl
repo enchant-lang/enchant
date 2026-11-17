@@ -1,0 +1,85 @@
+(ns auth.unix-test
+ (:require [auth.unix :as unix] [auth.identity :as identity] [proc.task :as task]
+           [reload.generation :as generation] [bl.json :as json]))
+
+(defn- fixture [action]
+ (let [root (str "/tmp/auth-unix-" (System/system_time :nanosecond))
+       _ (File/mkdir_p! root) _ (File/chmod! root 448) path (str root "/rpc")
+       _ (when (> (erlang/byte_size path) 107) (throw (ex-info "Unix fixture path exceeds kernel capacity" {:bytes (erlang/byte_size path)})))
+       opened (gen_tcp/listen 0 (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4)
+                                 (tuple :active false) (tuple :packet_size 65536)
+                                 (tuple :ifaddr (tuple :local (String/to_charlist path)))))
+       listener (elem opened 1)
+       client (task/async-nolink
+                (fn []
+                 (let [connected (gen_tcp/connect (tuple :local (String/to_charlist path)) 0
+                                   (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4)
+                                         (tuple :active false)) 3000)
+                       socket (elem connected 1)]
+                  (try (gen_tcp/send socket (json/encode {"uid" 0 "subject" "forged-root" "kind" "application"}))
+                   (finally (gen_tcp/close socket))))))]
+  (try
+   (let [accepted (gen_tcp/accept listener 3000) socket (elem accepted 1)]
+    (try (action socket root) (finally (gen_tcp/close socket))))
+   (finally (gen_tcp/close listener) (task/await client 5000) (File/rm_rf! root)))))
+
+(deftest kernel-uid-routes-through-current-account-data-not-payload-or-ambient-person
+ (fixture
+  (fn [socket _]
+   (let [uid (:uid (File/stat! "/proc/self")) before (identity/current) calls (atom [])
+         payload (json/decode (elem (gen_tcp/recv socket 0 3000) 1))
+         peer (unix/peer! socket)]
+    (is (= uid (:uid peer)))
+    (is (= (String/to_integer (List/to_string (os/getpid))) (:pid peer)))
+    (is (= "forged-root" (get payload "subject")))
+    (identity/with-verified {:subject "ambient-person" :application "another" :kind :person}
+     (fn []
+      (unix/with-peer! socket "messages"
+       (fn [actual]
+        (swap! calls conj actual)
+        (is (nil? (identity/current)))
+        {:subject "person:alice" :kind :person :rights #{[:forged]} :application "payload-app"})
+       (fn []
+        (let [principal (identity/current)]
+         (is (= "person:alice" (:subject principal)))
+         (is (= "messages" (:application principal)))
+         (is (= :person (:kind principal)))
+         (is (= :unix (:provider principal)))
+         (is (= uid (:uid principal)))
+         (is (not (contains? principal :rights))))))
+      (is (= "ambient-person" (:subject (identity/current))))))
+    (is (= [uid] @calls))
+    (is (= before (identity/current)))))))
+
+(deftest unknown-account-and-handler-failure-never-leak-or-reuse-identity
+ (fixture
+  (fn [socket _]
+   (let [entered (atom false) before (identity/current)]
+    (is (= :auth/unauthenticated
+         (try (unix/with-peer! socket "messages" (fn [_] nil) #(reset! entered true))
+          nil (catch error (:kind (ex-data error))))))
+    (is (= false @entered))
+    (is (= :controlled
+         (try
+          (unix/with-peer! socket "messages" (fn [_] {:subject "alice" :kind :person})
+           #(throw (ex-info "Controlled handler failure" {:kind :controlled})))
+          nil (catch error (:kind (ex-data error))))))
+    (is (= before (identity/current)))))))
+
+(deftest source-cannot-mint-a-host-verified-unix-principal
+ (fixture
+  (fn [socket root]
+   (let [sources (str root "/source") file (str sources "/peer_probe/sample.bl")]
+    (File/mkdir_p! (Path/dirname file))
+    (File/write! file "(ns peer-probe.sample (:require [auth.unix :as unix]))
+      (defn run [socket] (unix/with-peer! socket \"messages\"
+        (fn [_] {:subject \"forged-root\" :kind :person}) (fn [] :forged)))")
+    (let [graph (BeamLisp.Loader/with_load_path sources
+                 #(generation/prepare! (generation/project-plan
+                    {:application-id "peer-probe" :entrypoint "peer-probe.sample/run"
+                     :fixed-runtime true :native-modules #{"erlang"}})))]
+     (try
+      (is (= :native_framework_execution_required
+           (try (generation/invoke! graph "peer-probe.sample/run" [socket]) nil
+            (catch error (or (:original error) error)))))
+      (finally (generation/retire! graph))))))))

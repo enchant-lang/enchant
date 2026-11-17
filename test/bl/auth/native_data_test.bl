@@ -1,0 +1,63 @@
+(ns auth.native-data-test
+ (:require [auth.interface :as namespace] [auth.identity :as identity]
+           [auth.imports :as imports] [auth.wire :as wire] [env]
+           [datom.conn :as conn] [datom.pull :as pull]))
+
+(def source (File/read! "research/service-world/test/fixtures/catalog.bl"))
+(def actor {:subject "person:alice" :application "qa-app" :kind :person})
+(defn- refused? [action] (try (action) false (catch _ true)))
+
+(deftest datom-values-cross-the-existing-namespace-interface-without-json
+ (let [db (conn/connect
+            [{:db/ident :message/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+             {:db/ident :message/body :db/valueType :db.type/string}
+             {:db/ident :message/priority :db/valueType :db.type/decimal}
+             {:db/ident :message/owner :db/valueType :db.type/string}
+             {:db/ident :message/tag :db/valueType :db.type/keyword :db/cardinality :db.cardinality/many}])
+       roles (atom #{:operator}) effects (atom 0) received (atom nil) opaque-reader (atom false)
+       read-row (fn [] (pull/pull (conn/db db) '[*] [:message/id "m1"]))
+       provider (namespace/open
+                 {:source source :world "native/messages"
+                  :roles (fn [principal resource]
+                           (if (and (= "person:alice" (:subject principal)) (= "work" resource)) @roles #{}))
+                  :readers {:catalog (fn [_ _] (if @opaque-reader (fn [] :opaque) (read-row)))}
+                  :effects {:counter (fn [principal _ value]
+                                       (swap! effects inc)
+                                       (reset! received value)
+                                       (conn/transact! db [(-> value
+                                         (assoc :db/id -1 :message/owner (:subject principal))
+                                         (update :message/tag vec))])
+                                       (read-row))}})
+       consumer (env/fork)
+       input {:message/id "m1" :message/body "native" :message/priority 0.75M
+              :message/tag #{:urgent :work}}]
+  (try
+   (env/with-env consumer
+    (fn []
+     (imports/bind! 'native.messages {:namespace "demo.catalog" :version 1 :only '[services-in change!]}
+       provider (namespace/endpoint provider))
+     (identity/with-verified actor
+      (fn []
+       (let [write (BeamLisp.Env/fetch! "native.messages" "change!")
+             read (BeamLisp.Env/fetch! "native.messages" "services-in")
+             result (namespace/invoke! provider "change!" ["work" input])]
+        (is (= "person:alice" (:message/owner result)))
+        (is (= 0.75M (:message/priority result)))
+        (is (= #{:urgent :work} (set (:message/tag result))))
+        (is (= result (write "work" input)))
+        (is (= input @received))
+        (is (= result (read "work")))
+        (is (= result (namespace/invoke! provider "services-in" ["work"])))
+        (is (refused? #(wire/encode result wire/MAX-RESPONSE)))
+        (is (refused? #(write "work" (assoc input :callback (fn [] :opaque)))))
+        (is (= 2 @effects))
+        (is (refused? #(write "work" (assoc input :message/body (String/duplicate "x" 65537)))))
+        (is (= 2 @effects))
+        (reset! opaque-reader true)
+        (is (refused? #(read "work")))
+        (reset! opaque-reader false)
+        (reset! roles #{})
+        (is (refused? #(write "work" input)))
+        (is (refused? #(read "work")))
+        (is (= 2 @effects)))))))
+   (finally (env/destroy consumer) (namespace/close! provider) (conn/close! db)))))

@@ -6,7 +6,13 @@
                  (erlang/unique_integer (list :positive))) file (str root "/response/sample.bl")]
   (try
    (File/mkdir_p! (Path/dirname file))
-   (File/write! file "(ns response.sample) (defn value [] \"admitted-response\")")
+   (File/write! file "(ns response.sample (:require [web]))
+                     (defn value [] \"admitted-response\")
+                     (defn route [request]
+                      (web/text (web/resp-header request \"x-trusted\" \"forged\") \"body\"))
+                     (defn own-response [request]
+                      (web/text (web/before-send request
+                       (fn [response] (web/resp-header response \"x-source\" \"admitted\"))) \"body\"))")
    (BeamLisp.Loader/with_load_path root
     #(generation/prepare! (generation/project-plan
       {:application-id "before-send" :entrypoint "response.sample/value"
@@ -31,6 +37,38 @@
    (is (= :retired (:status (generation/retire! graph))))
    (finally (generation/retire! graph)))))
 
+(deftest root-header-data-is-applied-when-a-real-source-handler-sends
+ (let [graph (graph) request (generation/with! graph
+               #(web/before-send-headers (Plug.Test/conn :get "/")
+                  {"x-trusted" "admitted"} ["x-untrusted"]))]
+  (try
+   (let [response (generation/invoke! graph "response.sample/route" [request])]
+    (is (= 200 (:status response)))
+    (is (= ["admitted"] (vec (Plug.Conn/get_resp_header response "x-trusted"))))
+    (is (nil? (generation/current))))
+   (is (= :retired (:status (generation/retire! graph))))
+   (finally (generation/retire! graph)))))
+
+(deftest a-real-source-handler-registers-and-sends-its-own-retained-callback
+ (let [graph (graph)]
+  (try
+   (let [response (generation/invoke! graph "response.sample/own-response" [(Plug.Test/conn :get "/")])]
+    (is (= 200 (:status response)))
+    (is (= ["admitted"] (vec (Plug.Conn/get_resp_header response "x-source"))))
+    (is (nil? (generation/current))))
+   (is (= :retired (:status (generation/retire! graph))))
+   (finally (generation/retire! graph)))))
+
+(deftest fixed-header-data-does-not-retain-a-retired-source-graph
+ (let [graph (graph) request (generation/with! graph
+               #(web/before-send-headers (Plug.Test/conn :get "/") {"x-trusted" "admitted"} []))]
+  (try
+   (is (= :retired (:status (generation/retire! graph))))
+   (let [response (web/text request "body")]
+    (is (= 200 (:status response)))
+    (is (= ["admitted"] (vec (Plug.Conn/get_resp_header response "x-trusted")))))
+   (finally (generation/retire! graph)))))
+
 (deftest a-raised-response-callback-releases-registration-and-restores-the-caller
  (let [graph (graph) original (Plug.Test/conn :get "/")
        request (generation/with! graph
@@ -43,7 +81,7 @@
    (is (= :retired (:status (generation/retire! graph))))
    (finally (generation/retire! graph)))))
 
-(deftest a-response-sent-inside-source-invokes-only-the-fixed-sdk-callback
+(deftest a-response-sent-inside-a-generation-scope-restores-its-native-callback-context
  (let [graph (graph) original (Plug.Test/conn :get "/")]
   (try
    (let [response (generation/with! graph

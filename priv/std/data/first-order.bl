@@ -10,3 +10,29 @@
   Options: :max-nodes (16384), :max-bytes (1048576), :max-depth (64)."
  ([value] (BeamLisp.CompilerData/check_first_order! value))
  ([value options] (BeamLisp.CompilerData/check_first_order! value options)))
+
+(defn encode!
+ "Encode bounded first-order data as uncompressed native ETF. No callbacks,
+  handles or protocol dispatch. Options use the same budgets as check!."
+ ([value] (encode! value {}))
+ ([value options]
+  (check! value options)
+  (let [bytes (erlang/term_to_binary value)]
+   (when (> (erlang/byte_size bytes) (:max-bytes options 1048576))
+    (throw (ex-info "First-order wire exceeds its byte budget" {:kind :data/wire-too-large}))) bytes)))
+
+(defn decode!
+ "Decode one bounded closed ETF value. Check raw tags, depth, compression,
+  trailing bytes and opaque handles BEFORE allocating runtime objects. Safe
+  decoding refuses new atoms; the receiving contract/schema must exist first."
+ ([bytes] (decode! bytes {}))
+ ([bytes options]
+  (when-not (and (erlang/is_binary bytes) (map? options)
+                 (erlang/is_integer (:max-bytes options 1048576))
+                 (<= 1 (:max-bytes options 1048576) 1048576)
+                 (<= (erlang/byte_size bytes) (:max-bytes options 1048576)))
+   (throw (ex-info "First-order wire exceeds its byte budget" {:kind :data/wire-too-large})))
+  (try
+   (BeamLisp.CompilerData/check_closed_etf! bytes)
+   (check! (erlang/binary_to_term bytes (list :safe)) options)
+   (catch _ (throw (ex-info "Invalid first-order wire value" {:kind :data/invalid-wire}))))))

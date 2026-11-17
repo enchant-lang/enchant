@@ -5,27 +5,36 @@
   (let [calls (mapv :call (filterv #(and (<= (:from %) from) (<= to (:to %))) (:marks block)))
         source [:span {:data-edit-from from :data-edit-to to} (d/slice (:text block) from to)]]
     (reduce (fn [body call] [:span {:data-edit-call (:id call)} (r/present registry call "inline" body)]) source (reverse calls))))
-(defn inline [extensions block]
-  (let [ends (vec (sort (set (into [0 (d/length (:text block))] (mapcat (fn [m] [(:from m) (:to m)]) (:marks block))))))]
-    (if (zero? (d/length (:text block))) [[:br {:data-edit-placeholder true}]]
+(defn inline-range [extensions block from to]
+  (when-not (and (int? from) (int? to) (<= 0 from to (d/length (:text block))))
+    (r/fail "invalid-projected-text-range"))
+  (let [ends (vec (sort (set (into [from to] (filter #(< from % to) (mapcat (fn [m] [(:from m) (:to m)]) (:marks block)))))))]
+    (if (= from to) [[:br {:data-edit-placeholder true}]]
       (mapv #(run-view (:functions extensions) block (nth ends %) (nth ends (inc %))) (range (dec (count ends)))))))
+(defn inline [extensions block] (inline-range extensions block 0 (d/length (:text block))))
 (defn slot [name] [:div {:class "ed-children" :data-edit-children name}])
 (defn- slots [extensions b]
   (let [spec (get-in extensions [:blocks (:type b)])]
     (mapv slot (get spec :slots ["body"]))))
-(defn- text-view [extensions b tag]
-  (into [tag {:class "ed-text" :data-edit-text (:id b) :dir "auto" :data-placeholder "Write something…"}]
-        (inline extensions b)))
+(defn- text-view [extensions b tag context]
+  (let [provider (get-in extensions [:blocks (:type b) :text-range])
+        field (when provider (provider b context))
+        from (get field :from 0) to (get field :to (d/length (:text b)))
+        attrs (cond-> {:class "ed-text" :data-edit-text (:id b) :dir "auto" :data-placeholder "Write something…"}
+                field (assoc :data-edit-start from :data-edit-tail (- (d/length (:text b)) to))
+                (:isolated field) (assoc :contenteditable "true" :data-edit-isolated true :tabindex 0)
+                (:label field) (assoc :aria-label (:label field)))]
+    (into [tag attrs] (inline-range extensions b from to))))
 (defn- safe-url [s]
   (when (and (string? s) (re-find #"^(https?://|/|#)" s)) s))
-(defn node [extensions b]
+(defn node [extensions b & [context]]
   (let [id (:id b) type (get b :type "paragraph") attrs (:attrs b)
         spec (get-in extensions [:blocks type])
         text (text-view extensions b
-               (if (= "heading" type) (get {1 :h1 2 :h2 3 :h3} (:level attrs) :h2) :p))
+               (if (= "heading" type) (get {1 :h1 2 :h2 3 :h3} (:level attrs) :h2) :p) context)
         content
         (cond
-          (:render spec) ((:render spec) b {:text text :slots (into {} (map (fn [name] [name (slot name)]) (:slots spec)))})
+          (:render spec) ((:render spec) b (merge context {:text text :slots (into {} (map (fn [name] [name (slot name)]) (:slots spec)))}))
           (= "divider" type) [:div {:class "ed-divider" :contenteditable "false" :role "separator"} [:hr]]
           (= "code" type) [:div {:class "ed-code" :contenteditable "false"}
                              [:div {:class "ed-code-label"} [:span {:data-icon "code"}]
@@ -67,18 +76,40 @@
       (if (:data-edit-children attrs)
         (into (subvec tree 0 start) (get children (:data-edit-children attrs) []))
         (into (subvec tree 0 start) (mapv #(fill-children % children) (subvec tree start)))))))
+(defn- contexts [extensions grouped document]
+ (into {} (map (fn [[parent siblings]]
+                 [parent (reduce (fn [context provider] (merge context (provider context)))
+                                 {:siblings siblings :document document} (:sibling-contexts extensions))]) grouped)))
+(defn targets
+ "Expand incremental patches for renderers declaring sibling dependencies.
+  Structural moves also affect the old parent, so include contextual nodes in
+  both scopes. Ordinary renderers keep their original narrow patch set."
+ [extensions document ids structural? & [metadata?]]
+ (let [changed (set ids)
+       parents (set (keep #(when-let [b (d/find-block document %)] [(:parent b)]) ids))]
+  (vec (distinct (concat ids
+   (map :id (filter (fn [b]
+                    (let [dependencies (get-in extensions [:blocks (:type b) :render-context] #{})]
+                     (or (and (contains? dependencies :siblings) (or structural? (contains? parents [(:parent b)])))
+                         (and (contains? dependencies :document) (or metadata? structural? (seq ids)))))) (:blocks document))))))))
+(defn project
+ "Project independent node shells with the same package context as SSR."
+ [extensions document ids]
+ (let [grouped (group-by :parent (:blocks document)) context (contexts extensions grouped document)]
+  (mapv #(when-let [b (d/find-block document %)] (node extensions b (get context (:parent b)))) ids)))
 (declare project-tree)
-(defn- project-tree [extensions grouped b]
+(defn- project-tree [extensions grouped context b]
   (let [children (group-by :slot (get grouped (:id b) []))
-        projected (into {} (map (fn [[name rows]] [name (mapv #(project-tree extensions grouped %) rows)]) children))
+        projected (into {} (map (fn [[name rows]] [name (mapv #(project-tree extensions grouped context %) rows)]) children))
         known (set (get-in extensions [:blocks (:type b) :slots] ["body"]))
-        base (fill-children (node extensions b) projected)]
+        base (fill-children (node extensions b (get context (:parent b))) projected)]
     (into base (mapv (fn [name] (into [:div {:class "ed-children ed-retained-slot" :data-edit-children name}] (get projected name)))
                    (remove known (keys children))))))
-(defn body-node [extensions doc b] (project-tree extensions (group-by :parent (:blocks doc)) b))
+(defn body-node [extensions doc b]
+ (let [grouped (group-by :parent (:blocks doc))] (project-tree extensions grouped (contexts extensions grouped doc) b)))
 (defn body [extensions doc]
-  (let [grouped (group-by :parent (:blocks doc))]
-    (mapv #(project-tree extensions grouped %) (get grouped nil []))))
+  (let [grouped (group-by :parent (:blocks doc)) context (contexts extensions grouped doc)]
+    (mapv #(project-tree extensions grouped context %) (get grouped nil []))))
 (defn- reading-tree [tree icon]
  (cond
   (vector? tree)

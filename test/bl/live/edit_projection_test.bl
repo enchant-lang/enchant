@@ -1,11 +1,57 @@
 (ns live.edit.projection-test
   (:require [live.edit.view :as view] [live.edit.model :as m] [live.edit.registry :as r]
             [live.edit.tools :as tools] [live.edit.sync :as sync] [live.hiccup :as h]
-            [live.diff :as diff] [live.edit.store :as store] [datom] [live.socket :as socket]))
+            [live.edit.projection :as tree] [live.edit.document :as doc]
+            [live.edit.extensions :as extensions] [live.edit.standard :as standard] [live.diff :as diff] [live.edit.store :as store] [datom] [live.socket :as socket]))
 (def registry (r/functions [tools/package]))
 (def document (m/document "notes" [(m/block "p1" "Hello 🍌")]))
 (def initial (sync/authority registry document))
 (defn projection [state] (view/editor registry state [:intent :edit] 0 nil))
+
+(deftest document-context-has-explicit-incremental-invalidation
+ (let [render (fn [block context]
+                [:section {:data-context (str (get-in context [:document :id]) ":" (get-in context [:document :meta :mode]))}
+                 (:text context)])
+       ext (extensions/build [standard/package {:name "document-context" :provides
+              {:editor/blocks {"paragraph" {:label "Text" :slots ["body"] :render-context #{:document} :render render}}}}])
+       initial (assoc-in (doc/document "global" [(doc/block "one" "First") (doc/block "two" "Second")
+                                                (doc/block "code" "code" "Source" {})]) [:meta :mode] "first")
+       changed (assoc-in initial [:meta :mode] "next")
+       before (h/hiccup->html (into [:div] (tree/body ext initial)))
+       ids (tree/targets ext changed [] false true)
+       after (h/hiccup->html (into [:div] (tree/project ext changed ids)))
+       single (h/hiccup->html (tree/body-node ext changed (first (:blocks changed))))]
+  (is (includes? before "global:first"))
+  (is (= ["one" "two"] ids))
+  (is (= ["one" "two"] (tree/targets ext changed ["one"] false)))
+  (is (empty? (tree/targets ext changed [] false)))
+  (is (includes? after "global:next"))
+  (is (not (includes? after "global:first")))
+  (is (includes? single "global:next"))))
+
+(deftest bounded-text-fields-preserve-model-positions-and-inline-functions
+ (let [b (assoc (doc/block "heading" "heading" "TODO 🌱 title :work:" {:level 2})
+               :marks [{:call {:id "bold-title" :function "text/bold" :version 1 :args {}} :from 7 :to 12}])
+       ext (extensions/build [standard/package {:name "title-field" :provides
+              {:editor/blocks {"heading" {:label "Heading" :slots ["body"]
+                :text-range (fn [_ _] {:from 5 :to 12 :isolated true :label "Heading title"})}}}}])
+       html (h/hiccup->html (tree/node ext b))
+       read-html (h/hiccup->html (tree/reader ext (doc/document "read-field" [b]) {}))
+       empty-html (h/hiccup->html (into [:div] (tree/inline-range ext b 5 5)))
+       invalid (assoc-in ext [:blocks "heading" :text-range] (fn [_ _] {:from 12 :to 5}))]
+  (is (includes? html "data-edit-start=\"5\""))
+  (is (includes? html "data-edit-tail=\"7\""))
+  (is (includes? html "aria-label=\"Heading title\""))
+  (is (includes? html "data-edit-from=\"7\""))
+  (is (includes? html "data-edit-call=\"bold-title\""))
+  (is (includes? html "🌱 "))
+  (is (not (includes? html "TODO")))
+  (is (not (includes? html ":work:")))
+  (is (not (includes? read-html "data-edit-start")))
+  (is (not (includes? read-html "contenteditable=\"true\"")))
+  (is (includes? read-html "Heading title"))
+  (is (includes? empty-html "data-edit-placeholder"))
+  (is (thrown? (tree/node invalid b)))))
 
 (deftest semantic-region-serialization-and-reference-equivalence
   (let [before (projection initial)
@@ -42,3 +88,54 @@
       (is (thrown? (datom/transact! conn [[:db/fn (fn [db] (store/transaction db registry "notes" p))]])))
       (is (= 1 (:revision (store/read-state (datom/db conn) "notes"))))
       (finally (datom/close! conn)))))
+
+(deftest package-renderers-see-current-siblings-after-a-structural-move
+ (let [render (fn [block context]
+                [:section {:data-scope (str (:id block) ":" (join "," (mapv :id (:siblings context))))}
+                 (:text context) (get-in context [:slots "body"])])
+       extensions (extensions/build [standard/package
+                    {:name "context-observer" :provides {:editor/blocks {"paragraph" {:label "Text" :slots ["body"] :render render}}}}])
+       initial (doc/prepare (doc/document "siblings"
+                 [(doc/block "one" "First") (assoc (doc/block "child" "Nested") :parent "one") (doc/block "two" "Second")]))
+       before (h/hiccup->html (into [:div] (tree/body extensions initial)))
+       moved (:document (doc/apply-op (:functions extensions) initial
+                           {:op "node/move" :block "child" :parent nil :after "two" :slot "body"}))
+       after (h/hiccup->html (into [:div] (tree/body extensions moved)))
+       standalone (h/hiccup->html (tree/node extensions (first (:blocks initial))))]
+  (is (includes? before "data-scope=\"one:one,two\""))
+  (is (includes? before "data-scope=\"child:child\""))
+  (is (includes? after "data-scope=\"child:one,two,child\""))
+  (is (not (includes? after "data-scope=\"child:child\"")))
+  (is (includes? standalone "data-scope=\"one:\""))))
+
+(deftest incremental-shells-use-package-sibling-context-and-expand-dependencies
+ (let [calls (atom 0)
+       provider (fn [context]
+                  (swap! calls inc)
+                  {:example/weight (reduce + 0 (map #(get-in % [:attrs :weight] 0) (:siblings context)))})
+       render (fn [block context] [:section {:data-weight (:example/weight context)
+                                            :data-peers (join "," (map :id (:siblings context)))} (:text context)])
+       ext (extensions/build [standard/package {:name "sibling-observer"
+             :provides {:editor/sibling-context provider
+              :editor/blocks {"paragraph" {:label "Text" :slots ["body"] :render-context #{:siblings} :render render}}}}])
+       initial (doc/prepare (doc/document "context"
+                 [(assoc (doc/block "one" "First") :attrs {:weight 1})
+                  (assoc (doc/block "child" "Nested") :parent "one" :attrs {:weight 10})
+                  (assoc (doc/block "two" "Second") :attrs {:weight 2})
+                  (doc/block "code" "code" "literal" {})]))
+       before (h/hiccup->html (into [:div] (tree/project ext initial ["one" "two"])))
+       changed (:document (doc/apply-op (:functions ext) initial
+                          {:op "node/set" :block "one" :patch {:attrs {:weight 5}}}))
+       ids (tree/targets ext changed ["one"] false)
+       after (h/hiccup->html (into [:div] (tree/project ext changed ids)))]
+  (is (= ["one" "two"] ids))
+  (is (= ["one" "child" "two"] (tree/targets ext changed ["one"] true)))
+  (is (= ["gone" "one" "child" "two"] (tree/targets ext changed ["gone"] true)))
+  (is (= ["code" "one" "two"] (tree/targets ext changed ["code"] false)))
+  (is (= ["one"] (tree/targets (extensions/build [standard/package]) changed ["one"] true)))
+  (is (includes? before "data-weight=\"3\""))
+  (is (includes? after "data-weight=\"7\""))
+  (is (not (includes? after "data-weight=\"3\"")))
+  (is (includes? after "data-peers=\"one,two,code\""))
+  ;; Providers run once for each sibling scope, regardless of requested shells.
+  (is (= 4 @calls))))

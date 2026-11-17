@@ -25,15 +25,40 @@ export function nativeReplacement(before,after,{head=null,text}={}) {
   return {from,to,text:b.slice(from,b.length-suffix).join(''),expected:a.slice(from,to).join('')};
 }
 
+// A package may expose a field inside a larger source-backed text block.
+// DOM input contains only that field; model operations retain absolute CPs.
+export function nativeFieldReplacement(before,after,{start=0,tail=0,head=null,text}={}) {
+  const points=codepoints(before),end=points.length-tail;
+  if(!Number.isInteger(start)||!Number.isInteger(tail)||start<0||tail<0||start>end)
+    throw Error('Invalid projected text range.');
+  const delta=nativeReplacement(points.slice(start,end).join(''),after,{head:head===null?null:head-start,text});
+  return delta?{...delta,from:delta.from+start,to:delta.to+start}:null;
+}
+
 export class Geometry {
   constructor(editor) { this.editor = editor; }
-  point(node, offset) {
+  leafPoint(element,end){
+    const block=element?.closest?.('[data-edit-block]');
+    if(!block||!this.editor.canvas.contains(block)||block.querySelector('[data-edit-block]'))return null;
+    const id=block.dataset.editBlock,data=this.editor.node(id);
+    if(!data||this.editor.textElement(id)||this.editor.code.has(id))return null;
+    return {block:id,offset:end?codepoints(data.text).length:0,affinity:end?'right':'left'};
+  }
+  point(node, offset, opaque=false, end=true) {
     const element = node?.nodeType === 1 ? node : node?.parentElement;
     const text = element?.closest('[data-edit-text]');
-    if (!text || !this.editor.canvas.contains(text) || element.closest('[data-edit-code]')) return null;
+    if (!text || !this.editor.canvas.contains(text) || element.closest('[data-edit-code]')) {
+      if(!opaque||!element||!this.editor.canvas.contains(element))return null;
+      if(node.nodeType===1){
+        const previous=node.childNodes[offset-1],next=node.childNodes[offset];
+        if(previous?.matches?.('[data-edit-block]')){const point=this.leafPoint(previous,true);if(point)return point;}
+        if(next?.matches?.('[data-edit-block]')){const point=this.leafPoint(next,false);if(point)return point;}
+      }
+      return this.leafPoint(element,end);
+    }
     try {
       const range = document.createRange(); range.selectNodeContents(text); range.setEnd(node, offset);
-      return {block: text.dataset.editText, offset: codepoints(range.toString()).length, affinity:'right'};
+      return {block: text.dataset.editText, offset: Number(text.dataset.editStart||0)+codepoints(range.toString()).length, affinity:'right'};
     } catch { return null; }
   }
   hit({x,y}) {
@@ -51,7 +76,8 @@ export class Geometry {
     const code = document.activeElement?.closest('[data-edit-code]');
     if (code && this.editor.canvas.contains(code)) return this.editor.code.get(code.dataset.editCode)?.selection();
     const native = document.getSelection(); if (!native?.rangeCount) return null;
-    const anchor = this.point(native.anchorNode, native.anchorOffset), head = this.point(native.focusNode, native.focusOffset);
+    const opaque=!native.isCollapsed;
+    const anchor = this.point(native.anchorNode,native.anchorOffset,opaque,false), head = this.point(native.focusNode,native.focusOffset,opaque,true);
     return anchor && head ? {anchor, head} : null;
   }
   targetRanges(event) {
@@ -59,9 +85,15 @@ export class Geometry {
     const anchor=this.point(range.startContainer,range.startOffset),head=this.point(range.endContainer,range.endOffset);
     return anchor && head ? {anchor,head} : null;
   }
-  nativePoint(point) {
-    const text = this.editor.textElement(point.block); if (!text) return null;
-    const walker = document.createTreeWalker(text,NodeFilter.SHOW_TEXT);let remaining=point.offset,node;
+  nativePoint(point,opaque=false) {
+    const text = this.editor.textElement(point.block);
+    if(!text){
+      const block=this.editor.nodes.get(point.block);
+      if(!opaque||!this.leafPoint(block,true)||!block.parentNode)return null;
+      const index=[...block.parentNode.childNodes].indexOf(block);
+      return [block.parentNode,index+(point.affinity==='left'?0:1)];
+    }
+    const walker = document.createTreeWalker(text,NodeFilter.SHOW_TEXT);let remaining=Math.max(0,point.offset-Number(text.dataset.editStart||0)),node;
     while ((node=walker.nextNode())) {
       const chars=codepoints(node.data);
       if(remaining<=chars.length) return [node,chars.slice(0,remaining).join('').length];
@@ -75,7 +107,8 @@ export class Geometry {
     if(a.deleted || h.deleted) return;
     const code=this.editor.code.get(a.block);
     if(code && a.block===h.block) { code.select(a.offset,h.offset,focus);return; }
-    const start=this.nativePoint(a),end=this.nativePoint(h);if(!start || !end)return;
+    const opaque=a.block!==h.block||a.offset!==h.offset||a.affinity!==h.affinity;
+    const start=this.nativePoint(a,opaque),end=this.nativePoint(h,opaque);if(!start || !end)return;
     if(focus)this.editor.canvas.focus({preventScroll:true});
     document.getSelection().setBaseAndExtent(start[0],start[1],end[0],end[1]);
   }
@@ -85,7 +118,8 @@ export class Geometry {
     const order=this.editor.order;
     const a=selection.anchor,h=selection.head;
     const forward=order.indexOf(a.block)<order.indexOf(h.block) || (a.block===h.block && a.offset<=h.offset);
-    const from=this.nativePoint(forward?a:h),to=this.nativePoint(forward?h:a);if(!from || !to)return null;
+    const opaque=a.block!==h.block||a.offset!==h.offset||a.affinity!==h.affinity;
+    const from=this.nativePoint(forward?a:h,opaque),to=this.nativePoint(forward?h:a,opaque);if(!from || !to)return null;
     try {const range=document.createRange();range.setStart(...from);range.setEnd(...to);return range;}catch{return null;}
   }
   anchor(target=null) {

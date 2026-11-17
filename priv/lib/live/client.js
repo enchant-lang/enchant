@@ -794,6 +794,12 @@
             announce("live:patch-error", { failed: failed });
             if (!remountAsked) { remountAsked = true; sendFrame(JSON.stringify(["remount"])); }
           }
+        } else if (kind === "navigate") {
+          // Conditional navigation is announced only after its intent succeeds.
+          if (typeof a === "string" && a.startsWith("/") && !a.startsWith("//") &&
+              location.pathname + location.search + location.hash !== a) {
+            history.pushState({ live: a }, "", a);
+          }
         } else if (kind === "tap") {
           announce("live:tap", { t: a, basis: b });
         } else if (kind === "denied") {
@@ -1104,6 +1110,11 @@
     return null;
   }
 
+  function hasIntent(term) {
+    return Array.isArray(term) && (term[0] === "intent" ||
+      (Array.isArray(term[0]) && term.some(hasIntent)));
+  }
+
   // relay the JSON term stored in attribute `attr` of `el` to the server
   const settlingActions = new WeakSet(), actionWarnings = new WeakMap();
   const awaitSelector = '[data-live-await-region],[data-live-await-regions]';
@@ -1173,7 +1184,7 @@
     // reflects the live route — a bookmarkable SPA over one socket. The
     // server still gets the SAME event and re-routes; this only syncs the URL.
     var nav = navTarget(term);
-    if (nav) {
+    if (nav && !hasIntent(term)) {
       try { history.pushState({ live: nav }, "", nav); } catch (_e) {}
       // The URL just moved. If the socket is down the term below is dropped, so
       // remember the route for the reopen flush — otherwise the address bar

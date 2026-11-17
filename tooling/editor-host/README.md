@@ -97,3 +97,91 @@ registry. It creates no region or authoring authority, strips Live handlers and
 editing hooks, keeps accessible read-only task status and code fallback, and
 accepts a pure `:icon` renderer with an optional `:label`. The caller still owns
 current source/parent authorization and any bounded derived snapshot cache.
+
+The code adapter adds its stable block ID as `context.block` to language-service
+requests. Applications may pair that identity with their source basis to analyze
+a working cell together with confirmed neighboring cells. The host does not
+construct a second source reader or choose a namespace.
+
+Pure block renderers also receive `context.siblings`: the current same-parent
+sequence from the document tree. It reflects structural moves and lets packages
+render ordered sequences and source-owned counters without inspecting DOM order
+or storing a second document. The existing `node` two-argument call remains
+valid; its renderer context has no sibling sequence unless supplied.
+
+Package block renderers receive `:siblings` in their context in both the initial
+view and incremental node shells. A renderer whose shell depends on sibling
+content/order declares `:render-context #{:siblings}` in its block specification.
+The host then expands sibling patches, including both scopes of a structural
+move, and compares rendered shells before reusing unchanged block data. Ordinary
+renderers retain their narrow patch set.
+
+A package can provide `:editor/sibling-context`, a pure function receiving
+`{:siblings [...]}` and earlier derived context, returning a map of extra context
+fields. Use namespaced keys. It runs once per sibling scope for each projection,
+so packages can derive numbering or other sequence data in linear time instead
+of rescanning the sequence for every block. Renderers also receive the normal
+`:text` and `:slots` values. Keep source parsing, application grants and IO out
+of these callbacks. `live.edit.projection/project` and `targets` expose the same
+pure projection/invalidation contract for native tests and host integration.
+
+A block may declare a pure `:text-range` callback receiving `[block context]`.
+Return `{:from cp-start :to cp-end :isolated true :label "Field name"}` to expose
+only a field within its complete model text. Bounds are Unicode codepoints;
+invalid or reversed ranges refuse projection. Inline mark identities and ranges
+keep their original model coordinates. Empty fields retain a caret placeholder.
+The host maps DOM selections and native input back to absolute model offsets,
+including composition and repeated text. `data-edit-start` and `data-edit-tail`
+describe the envelope; the tail length stays stable as a field grows, avoiding
+shell replacement on every keystroke. Ordinary blocks keep full-text behavior.
+
+Use an isolated field inside a noneditable package shell when adjacent metadata
+must stay outside native text input. The host applies current read-only/conflict
+state to isolated fields, and the reader removes their editability and hooks.
+This is a projection/input primitive, not field validation or publication
+authority. Packages must supply appropriate Enter/structural commands before
+enabling it for a source grammar; the default split still operates on the full
+model text. Application writers continue validating the complete candidate.
+
+Projection context includes the current `:document` once as well as siblings.
+Declare `:render-context #{:document}` for shells that depend on other nodes or
+metadata; incremental patches then include those shells on text, structural or
+metadata changes. Narrow renderers keep their normal patch set. This permits a
+package to keep one bounded workflow/schema snapshot in document metadata.
+
+`:editor/typing` is an optional pure package function `[context input]`. Input
+contains the proposed standard `:op`, native post-input `:selection` and fresh
+`:seed`. Return nil to defer or `{:op ... :selection ...}` to plan the edit.
+The first handling package owns the plan. Native typing, composition commit and
+inline replacement use the same path; semantic commands and undo keep their
+already planned operations. A package can insert required field separators in
+one batch, keep marks on the typed content and adjust the caret in codepoints.
+The host follows the resulting caret for typing groups. No IO or server grant
+belongs in the planner; the ordinary writer validates the final candidate.
+
+Parameterized declarative command buttons open the shared parameter surface.
+It reads the current bookmarked command query, including current defaults and
+workflow choices. Empty/invalid numbers refuse preview, cancel the old preview
+and keep Apply disabled; an empty input is never interpreted as zero.
+Command policies may return contextual `:params` presentation. They cannot
+enable a command disabled by the base query; registered function validation and
+the final writer continue admitting the actual operation.
+
+An application may return a correctable validation refusal only after durably
+retiring the exact refused proposal. The reply carries `:correctable true`, its
+`:id`, original `:basis` and `:digest`, and a bounded human `:reason`. The replica
+accepts it only for the exact sent head at the current confirmed revision. It
+retains the candidate and permits local correction/undo while withholding that
+proposal from publication. A correction combines the private operations into a
+bounded atomic batch with a fresh identity and the same confirmed basis. Typing
+already queued before the refusal is combined by the session without requiring
+another keystroke. Delayed old refusals cannot invalidate the newer proposal.
+
+Authoring stays available during validation, with a visible explanation and
+Needs correction status; publication barriers reject promptly. Recovery retains
+the refusal, original pending proposals and retired identities. New confirmed
+source while validation is unresolved becomes a review conflict. The generic
+host does not classify application failures as correctable, retire proposals on
+the server, or authorize retries. Applications must preserve negative receipts
+and recheck current grants in their ordinary final writer. Permission, identity,
+ownership and protocol failures remain recovery conflicts.
