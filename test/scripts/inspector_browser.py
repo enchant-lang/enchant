@@ -78,6 +78,8 @@ try:
     assert evaluate("document.getElementById('demo-count').innerText.trim()==='1'")
     assert evaluate("document.getElementById('enchant-inspector').shadowRoot.querySelector('.tokens').children.length===4")
     assert evaluate("document.getElementById('enchant-inspector').shadowRoot.querySelector('.selection').innerText.includes('counter')")
+    rpc('click', selector='#demo-colour')
+    wait("document.getElementById('enchant-inspector').dataset.loomScale.includes('#b67548')")
     rpc('screenshot', path=str(output / 'loom-picker.png'))
     evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
 
@@ -87,10 +89,12 @@ try:
     wait('EnchantInspector.debug().flashes>0')
     # Flood the existing event seam; retained frames and overlays stay bounded.
     bounded = evaluate("""(()=>{
+      const before=EnchantInspector.debug();
       const ops=Array.from({length:10000},()=>['text',[],'unused']);
       for(let n=0;n<100;n++)document.dispatchEvent(new CustomEvent('live:patch',{detail:{root:Live.root,ops}}));
-      return EnchantInspector.debug()})()""")
+      const after=EnchantInspector.debug();return {...after,lookupDelta:after.paintLookups-before.paintLookups,drawDelta:after.draws-before.draws}})()""")
     assert bounded['frames'] == 32 and bounded['flashes'] <= 16, bounded
+    assert bounded['lookupDelta'] <= 16 and bounded['drawDelta'] == 0 and bounded['drawScheduled'], bounded
     assert bounded['requests'] == 0 and not bounded['pollScheduled'], bounded
     action('paint')
 
@@ -122,11 +126,11 @@ try:
     assert not narrow['overflow'] and narrow['width'] <= 294 and narrow['left'] >= 0 and narrow['right'] <= 390, narrow
     rpc('screenshot', path=str(output / 'mobile.png'))
     evaluate('EnchantInspector.dispose();EnchantInspector.dispose()')
-    assert evaluate('EnchantInspector.debug().disposed && !EnchantInspector.debug().pollScheduled && !EnchantInspector.debug().inFlight')
+    assert evaluate('EnchantInspector.debug().disposed && !EnchantInspector.debug().pollScheduled && !EnchantInspector.debug().inFlight && !EnchantInspector.debug().drawScheduled')
     assert evaluate("!document.getElementById('enchant-inspector-overlays')")
     record = dict(status='passed', url=url, initial=initial, bounded=bounded, narrow=narrow,
                   tests=['injected compact dock','real Live updates','read-only Loom picker',
-                         '32 frames / 16 overlays','one in-flight sample','late result discarded',
+                         'live Loom theme','32 frames / 16 overlays / 16 lookups per draw','coalesced browser drawing','one in-flight sample','late result discarded',
                          'closed panel stops sampling','phone layout','idempotent disposal'],
                   screenshots=['desktop.png','loom-picker.png','server.png','mobile.png'],
                   check_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

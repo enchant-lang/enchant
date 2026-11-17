@@ -33,6 +33,7 @@
   let open = false, tab = 'updates', paint = false, picking = false, selected = null;
   let sample = null, error = false, poll = null, flight = null, generation = 0, disposed = false;
   let queries = 0, pending = 0, peakFlights = 0, lastAt = 0;
+  let draw = null, draws = 0, paintCredits = 16, paintLookups = 0;
   const overlay = document.createElement('div');
   overlay.id = 'enchant-inspector-overlays';
   overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147482900';
@@ -176,13 +177,16 @@
   function onPatch(e) {
     if(!host.isConnected){dispose();return;}
     const ops=e.detail?.ops||[];history.push({ops:ops.length});if(history.length>32)history.shift();
-    bars($('.spark'),false);
-    if(paint)ops.slice(0,16).forEach(op=>{
+    if(paint&&boxes.size<16)ops.slice(0,Math.min(paintCredits,16-boxes.size)).forEach(op=>{
       // Same Live path lookup used by the older tooling/studio.js instrument.
+      paintCredits--;paintLookups++;
       try {let n=window.Live?.at(e.detail.root,op[1]);if(n?.nodeType===3)n=n.parentElement;flash(n);}catch{}
     });
     if(selected&&!selected.isConnected){selected=null;pickBox.style.display='none';}
-    if(open&&tab!=='server')render();if(selected)reposition();
+    if(draw===null)draw=requestAnimationFrame(()=>{
+      draw=null;if(disposed)return;draws++;paintCredits=16;
+      bars($('.spark'),false);if(open&&tab!=='server')render();if(selected)reposition();
+    });
   }
   function onKey(e) {
     if(e.key==='Escape'){setPicking(false);selected=null;pickBox.style.display='none';close();}
@@ -201,13 +205,14 @@
       case 'server':activate('server');break;
       case 'close':close();break;
       case 'pick':activate('element');setPicking(!picking);break;
-      case 'paint':paint=!paint;button.setAttribute('aria-pressed',String(paint));if(!paint){boxes.forEach(b=>b.remove());boxes.clear();timers.forEach(clearTimeout);timers.clear();}break;
+      case 'paint':paint=!paint;paintCredits=16;button.setAttribute('aria-pressed',String(paint));if(!paint){boxes.forEach(b=>b.remove());boxes.clear();timers.forEach(clearTimeout);timers.clear();}break;
       case 'refresh':refresh();break;
     }
   });
   function visibility(){stopSampling();if(!document.hidden&&open&&tab==='server')refresh();}
   function dispose() {
     if(disposed)return;disposed=true;close();
+    if(draw!==null)cancelAnimationFrame(draw);draw=null;
     timers.forEach(clearTimeout);timers.clear();boxes.clear();overlay.remove();
     document.removeEventListener('live:patch',onPatch);document.removeEventListener('visibilitychange',visibility);
     document.removeEventListener('keydown',onKey,true);document.removeEventListener('scroll',reposition,true);
@@ -217,5 +222,6 @@
   document.addEventListener('keydown',onKey,true);document.addEventListener('scroll',reposition,true);
   window.addEventListener('resize',reposition);window.addEventListener('pagehide',dispose);
   window.EnchantInspector={version:1,dispose,debug:()=>({open,tab,picking,paint,frames:history.length,flashes:boxes.size,
-    requests:queries,inFlight:!!flight,activeRequests:pending,peakFlights,pollScheduled:poll!==null,disposed})};
+    requests:queries,inFlight:!!flight,activeRequests:pending,peakFlights,pollScheduled:poll!==null,
+    drawScheduled:draw!==null,draws,paintLookups,disposed})};
 })();
