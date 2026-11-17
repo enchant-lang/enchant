@@ -1,5 +1,5 @@
 #+title: Native BL, without the BEAM toll
-#+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
+#+subtitle: The original 35× gap, the native compiler changes that narrowed it, and the evidence still needed to qualify the next rounds.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
 #+status: Round 3 wave 1 merged to main · exact SDK and actor qualification in progress
@@ -7,20 +7,21 @@
 
 * In one breath
 #+begin_lede
-The native seed does not yet compile BL. It runs a compiler and a runtime that
-are written in BEAM's vocabulary on top of a BEAM emulator written in Scheme.
-Every primitive operation — an =is_atom= guard, an Erlang equality test, a call to a
-sibling function — pays a flat 300–500 ns toll that BEAM pays in about one.
+The original native seed ran a compiler and runtime written in BEAM's
+vocabulary on a Scheme host. Primitive type tests, equality and sibling
+calls crossed that host boundary. Early local experiments each moved the
+whole pipeline by 0–10%.
 
-The profile is flat by construction, so no local fix can win: the 8× helper
-speedup, =-O2=, the helper partition, the equality shortcut and the fused scan
-each moved the whole pipeline 0–10%. The fix is structural: link once, give BL
-its own kernel, make values cheap, compile control flow, and let the formal
-Core become the middle end.
+Wave 1 of round 3 rebuilds the 34-namespace compiler from Source. Its
+native stage2 and stage3 match byte for byte. The archived six-form warm
+pipeline takes 8.11 ms on native and 1.73 ms on BEAM.
+Linking, the BL kernel, and compiled control flow account for much of the
+change from the original baseline below. The integration review records
+the remaining qualification and performance work.
 #+end_lede
 
 #+begin_stats
-35× | slower than warm BEAM | read → compile → emit, 132.7 ms vs 3.8 ms (=evidence/warm-core=)
+35× | original warm pipeline gap | read → compile → emit, 132.7 ms vs 3.8 ms (=evidence/warm-core=)
 127× | reader alone | 54.6 ms vs 0.43 ms
 ~107k | remote calls per read | six small forms (=evidence/warm-core-counts=)
 ~300 ns | per remote call, net | lookup + call of =erlang/is_integer/1= (=evidence/bridge-microcost=)
@@ -453,7 +454,7 @@ Profile =total?=, =loop-plan= and the integer-fact threading on the six forms;
 memoise or fuse the walks so emission is linear in the tree again. Gate: BEAM
 emit at or below the previous emitter's time, unchanged bytes.
 
-** TODO A · Attribute the remaining front-end gap
+** DONE A · Attribute the remaining front-end gap
 :PROPERTIES:
 :AREA: measurement
 :PRIORITY: A
@@ -470,6 +471,8 @@ the cell level (calls per linked target, kernel fast-path hit rate, map and
 compare counts) and rank what is left. The likely candidates are V2
 (representation), F (ticks) and the uncovered multi-arity rt functions
 (=k-nth=, =nth=, =coll-get=).
+*Round 3:* A3 ran the real-namespace profile. The integration review tracks
+repeating it on the wave-1 image.
 
 ** DONE B2 · BL kernel in rt.bl
 :PROPERTIES:
@@ -530,7 +533,7 @@ emission instead of concatenated text. Retires the 256 KB unit splitting
 and the 120 s gsc deadline as design constraints.
 *Round 3:* carried as G1 and G2.
 
-** TODO P · Self-emission parity
+** DONE P · Self-emission parity
 :PROPERTIES:
 :AREA: build
 :HORIZON: later
@@ -550,6 +553,8 @@ as an excluded stub. In the native image =lower= is not loaded, so the same
 source compiles to =:global= references. This is item D's class of bug for a
 boot-tier stub. Next: the native Env answers =lower='s link rows exactly as
 BEAM does, then one image build to show =stage2.scm= = =stage1.scm=.
+*Round 3:* P3 records byte-identical stage2/stage3 and the successful Source
+corpus. Stage1/stage2 match after local-name normalization.
 
 ** DONE S · No host Scheme replicates a BL file
 :PROPERTIES:
@@ -958,8 +963,9 @@ Round 3, wave 1. Integrated SDK =mp370y60…= (descriptor =a99a1534…=) on both
 sides; a 34-namespace sealed closure that rebuilds itself (stage2 = stage3).
 Protocol unchanged: 3 warm-ups, 9 samples × 20 repetitions, median, native
 then BEAM on the same host. The emitted Scheme is byte-identical between the
-two. The host was loaded (load average 11 to 15); native is stable between
-runs, BEAM is not, so two runs are kept and the slower-ratio one is quoted.
+two. The host was loaded (load average 11 to 15). This table shows the
+second set of timing logs. The first run matches the archived build and
+preparation, as recorded in the integration review.
 
 #+begin_stats
 7.5× | native / BEAM, full pipeline | 8.82 ms vs 1.17 ms (round 2: 13.1×)
@@ -988,7 +994,8 @@ read from 1.51 to 0.57 ms, compile from 6.69 to 4.58 ms.
 BEAM's pipeline is slower than round 2 (0.84 to 1.17 ms), almost all in emit
 (0.37 to 0.61 ms). Emit here is the native Scheme emitter running on BEAM,
 which now analyses tick sites, facts and constants per node; it is not BEAM's
-own code generation. The other run on this build measured 4.7× (BEAM 1.73 ms).
+own code generation. The archived run with matching preparation measured
+4.7× (8.11 ms native, 1.73 ms BEAM).
 
 The actor corpus has not run on the compiled round-3 image (item X).
 #+end_honest
@@ -1015,14 +1022,26 @@ The Speedwork worktree was retired after the merge and review cutover. Its
 tip is retained as =archive/native-speed-round3-wave1-20261117=, and the
 ignored output tree is preserved behind the original artifact path.
 
-The retained benchmark measures native at 8.82 ms, down from 11.08 ms
-(20.4%). The two wave-1 runs report 4.7× and 7.5× as slow as BEAM because
-the BEAM comparison moved. The warm fixture contains six small forms. The
+The archived run with a matching preparation record measures 8.11 ms on
+native and 1.73 ms on BEAM (4.7×). The second set of logs reports 8.82 ms
+and 1.17 ms (7.5×), without a separately retained preparation record. The
+committed preparation record previously named the pre-optimization image.
+It now names the verified wave-1 archive, and the matched raw logs are
+retained as =beam-run1.log= and =native-run1.log=. The warm fixture contains
+six small forms. The
 real-namespace profile covers 104 definitions of =reader.bl=, on the round-2
 image, with compile accounting for 82.5% of native samples. Wave 1 changed
 several of that profile's hottest call sites. Repeat the real-namespace
 profile using the merged closure and identical resolved inputs before using
 those shares to size wave 2.
+
+V2 starts from a narrower representation change than the original roster
+suggests. Fixnums and booleans already use Gambit values, ordinary keywords
+are interned symbols, and vector storage already carries metadata. Nil is a
+single shared vector. Measure keyword ordering and hashing, composite-key
+normalization and map layout before making those representations broader.
+The Q3 contract also records the list/vector distinction, exact raw map
+leaves and the constraints on admitting NaN. Those cases bound V2c and E8.
 
 ** Repeated work exposed by the review
 
@@ -1043,6 +1062,12 @@ those shares to size wave 2.
   pays the whole-plan cost per window. Measure planning, emission and final
   validation independently. A plan owned by one frozen build request can
   survive window boundaries while final assembly still verifies every output.
+- The two-pass closure updater recompiles every member whenever it installs
+  link rows. Wave 1's second pass reports all 34 members recompiled, with
+  zero added. This closes self-emission and leaves a new incremental cost.
+  A viable cache key would bind each unit to the link rows it actually
+  consulted, including missing resolutions, alongside its source and macro
+  dependencies. Test an unchanged request, a body edit and an arity edit.
 - =scheme.bl= encodes each identifier into a Unicode codepoint list and a
   second list of Scheme spelling fragments on every occurrence. Source-site
   handling separately walks function bodies for ticks, and fact queries walk
@@ -1065,6 +1090,12 @@ those shares to size wave 2.
   that path and another 45,418 recursive calls. Evaluate a fixed-array
   representation for proven closed ANF nodes and a wider persistent vector
   only after counting those operations on the new closure.
+- The retained stage1 ELF is 39,436,264 bytes. Its dynamic relocation
+  table alone occupies 6,217,824 bytes and contains 258,922 relative
+  relocations. This cost sits before the warm fixture. Measure process start
+  to first result with page faults and relocation work reported separately.
+  That will establish whether packed relative relocations or a smaller
+  initial image can improve a cold invocation.
 
 ** Qualification before representation changes
 
