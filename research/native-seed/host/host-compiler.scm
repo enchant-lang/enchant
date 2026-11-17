@@ -115,7 +115,7 @@
   (native-mark-host-callable! (lambda (acc element) (cons element acc))) 2))
 (set! native-canonical-sequence-items
  (lambda (value)
-  (if (eq? (native-struct-module value) (bl-key "Elixir.BeamLisp.SeqCursor"))
+  (if (native-cursor? value)
    (reverse (bl-invoke (native-global-exact "rt" "lazy-fold-source")
              (list native-cursor-list-step '() value)))
    (bl-invoke (native-global-exact "rt" "k-to-list") (list value)))))
