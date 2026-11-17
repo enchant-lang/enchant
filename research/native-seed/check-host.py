@@ -35,7 +35,7 @@ def main():
     evidence.unlink(missing_ok=True)
     sources = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-extra.scm", "host/native-memo.scm"]
     inputs = sources + ["host/native-posix.scm", "fixtures/host-values-check.scm",
-                       "fixtures/native-posix-check.scm", "fixtures/native-memo-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
+                       "fixtures/native-posix-check.scm", "fixtures/native-memo-check.scm", "fixtures/native-memo-actor-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
                        "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
                        "fixtures/host-link-check.scm", "fixtures/host-global-cache-check.scm",
@@ -64,6 +64,9 @@ def main():
     (out / "lazy.scm").write_text(common + "\n" + (BASE / "fixtures/native-memo-check.scm").read_text())
     lazy = run("lazy-memo", [GAMBIT / "bin/gsi", "lazy.scm"])
     assert "native memo checks: 27" in lazy, lazy
+    (out / "lazy-actor.scm").write_text(common + "\n" + (BASE / "fixtures/native-memo-actor-check.scm").read_text())
+    lazy_actor = run("lazy-memo-actors", [GAMBIT / "bin/gsi", "lazy-actor.scm"])
+    assert "memo actor checks: 14" in lazy_actor, lazy_actor
     (out / "extra.scm").write_text(common + "\n" + (BASE / "fixtures/host-extra-check.scm").read_text()
         + "\n" + (BASE / "fixtures/host-symbol-name-check.scm").read_text()
         + "\n" + (BASE / "fixtures/host-raw-map-get-check.scm").read_text()
