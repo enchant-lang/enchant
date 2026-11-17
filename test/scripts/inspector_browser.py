@@ -113,7 +113,7 @@ try:
     action('server')
     wait("!EnchantInspector.debug().inFlight && document.getElementById('enchant-inspector').shadowRoot.querySelector('.stats')")
     assert evaluate('EnchantInspector.debug().peakFlights===1')
-    assert evaluate("!document.getElementById('enchant-inspector').shadowRoot.innerText.includes('95367 MB')")
+    assert evaluate("!document.getElementById('enchant-inspector').shadowRoot.textContent.includes('95367 MB')")
     rpc('screenshot', path=str(output / 'server.png'))
     action('close')
     assert evaluate('!EnchantInspector.debug().pollScheduled')
