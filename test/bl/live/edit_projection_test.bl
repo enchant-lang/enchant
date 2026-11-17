@@ -1,7 +1,8 @@
 (ns live.edit.projection-test
   (:require [live.edit.view :as view] [live.edit.model :as m] [live.edit.registry :as r]
             [live.edit.tools :as tools] [live.edit.sync :as sync] [live.hiccup :as h]
-            [live.diff :as diff] [live.edit.store :as store] [datom] [live.socket :as socket]))
+            [live.edit.projection :as tree] [live.edit.document :as doc]
+            [live.edit.extensions :as extensions] [live.edit.standard :as standard] [live.diff :as diff] [live.edit.store :as store] [datom] [live.socket :as socket]))
 (def registry (r/functions [tools/package]))
 (def document (m/document "notes" [(m/block "p1" "Hello 🍌")]))
 (def initial (sync/authority registry document))
@@ -42,3 +43,22 @@
       (is (thrown? (datom/transact! conn [[:db/fn (fn [db] (store/transaction db registry "notes" p))]])))
       (is (= 1 (:revision (store/read-state (datom/db conn) "notes"))))
       (finally (datom/close! conn)))))
+
+(deftest package-renderers-see-current-siblings-after-a-structural-move
+ (let [render (fn [block context]
+                [:section {:data-scope (str (:id block) ":" (join "," (mapv :id (:siblings context))))}
+                 (:text context) (get-in context [:slots "body"])])
+       extensions (extensions/build [standard/package
+                    {:name "context-observer" :provides {:editor/blocks {"paragraph" {:label "Text" :slots ["body"] :render render}}}}])
+       initial (doc/prepare (doc/document "siblings"
+                 [(doc/block "one" "First") (assoc (doc/block "child" "Nested") :parent "one") (doc/block "two" "Second")]))
+       before (h/hiccup->html (into [:div] (tree/body extensions initial)))
+       moved (:document (doc/apply-op (:functions extensions) initial
+                           {:op "node/move" :block "child" :parent nil :after "two" :slot "body"}))
+       after (h/hiccup->html (into [:div] (tree/body extensions moved)))
+       standalone (h/hiccup->html (tree/node extensions (first (:blocks initial))))]
+  (is (includes? before "data-scope=\"one:one,two\""))
+  (is (includes? before "data-scope=\"child:child\""))
+  (is (includes? after "data-scope=\"child:one,two,child\""))
+  (is (not (includes? after "data-scope=\"child:child\"")))
+  (is (includes? standalone "data-scope=\"one:\""))))

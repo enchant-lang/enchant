@@ -102,3 +102,9 @@ The code adapter adds its stable block ID as `context.block` to language-service
 requests. Applications may pair that identity with their source basis to analyze
 a working cell together with confirmed neighboring cells. The host does not
 construct a second source reader or choose a namespace.
+
+Pure block renderers also receive `context.siblings`: the current same-parent
+sequence from the document tree. It reflects structural moves and lets packages
+render ordered sequences and source-owned counters without inspecting DOM order
+or storing a second document. The existing `node` two-argument call remains
+valid; its renderer context has no sibling sequence unless supplied.
