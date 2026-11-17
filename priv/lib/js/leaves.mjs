@@ -204,6 +204,10 @@ export function moduleFor(ns) {
 }
 // the eager collection ops the compiler runs over finite data (CompilerData)
 const eagerList = (x) => (x === null || x === undefined ? [] : A.toArray(x));
+// One portable actor realm owns its term store. Native BEAM terms and Source
+// head references never cross into it. See OTP persistent_term get/put/erase:
+// https://www.erlang.org/doc/apps/erts/persistent_term.html
+let PERSISTENT_TERMS = R.EMPTY_MAP;
 const PDICT = new Map();
 const nextGensym = (() => { let n = 0; return () => ++n; })();
 const UNDEFINED = R.kw("undefined");
@@ -558,6 +562,11 @@ Object.assign(LEAVES, {
 
   // the process dictionary: one JS realm is one "process"
   // erlang:get/put answer the atom `undefined` for a missing key, not nil
+  "persistent_term/get/0": () => list(PERSISTENT_TERMS.entries().map(([k,v]) => T(k,v))),
+  "persistent_term/get/1": k => PERSISTENT_TERMS.has(k) ? PERSISTENT_TERMS.get(k) : badarg("persistent_term.get missing key", k),
+  "persistent_term/get/2": (k, fallback) => PERSISTENT_TERMS.get(k, fallback),
+  "persistent_term/put/2": (k, value) => { PERSISTENT_TERMS = PERSISTENT_TERMS.assoc(k, value); return OK; },
+  "persistent_term/erase/1": k => { const had = PERSISTENT_TERMS.has(k); PERSISTENT_TERMS = PERSISTENT_TERMS.dissoc(k); return had; },
   "erlang/get/1": (k) => (PDICT.has(pkey(k)) ? PDICT.get(pkey(k)) : UNDEFINED),
   "erlang/put/2": (k, v) => { const old = PDICT.has(pkey(k)) ? PDICT.get(pkey(k)) : UNDEFINED; PDICT.set(pkey(k), v); return old; },
   "erlang/erase/1": (k) => { const key = pkey(k), old = PDICT.has(key) ? PDICT.get(key) : UNDEFINED; PDICT.delete(key); return old; },
