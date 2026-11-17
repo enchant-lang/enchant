@@ -21,6 +21,7 @@ in pkgs.testers.runNixOSTest {
       serviceConfig = {
         ExecStart = "${installedSdk}/bin/bl --cold run ${./unix-identity-server.bl}";
         RuntimeMaxSec = 180;
+        Group = "rpc-client";
         StateDirectory = "peercheck";
         StateDirectoryMode = "0700";
       };
@@ -33,7 +34,8 @@ in pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("peercheck.service")
     machine.wait_for_file("/run/peercheck/ready", timeout=60)
-    assert machine.succeed("stat -c %u:%g:%a /run/peercheck/socket").strip() == "0:2000:660"
+    metadata = machine.succeed("stat -c %u:%g:%a /run/peercheck/socket").strip()
+    assert metadata == "0:2000:660", metadata
     with subtest("filesystem permission denies an unenrolled Unix group"):
         assert machine.succeed("${client "outsider" "filesystem-denied"}", timeout=60).strip() == "filesystem-denied"
     with subtest("payload cannot impersonate root and each kernel UID maps separately"):
