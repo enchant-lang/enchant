@@ -180,3 +180,102 @@ None. No host Scheme implements any part of facts.bl.
 - **Per-call cost**: `bind` now runs `expr` at every let on both backends, bounded by
   64 units of new-case fuel. Old cases cost what they did. No timing was taken, as the
   contract requires.
+
+---
+
+## Restructure (coordinator request): FACTS inside `BeamLisp.Optimize`, no new floor member
+
+**Why.** A new pinned host changes the compiler-key inputs: the seed.bl host table and
+aot_cache.bl `codegen_modules` / `pinned_host_source`. The committed floor then
+computes a different key, and generation P's preboot fails
+`packaged_member?(BeamLisp.CompilerData)`. The floor cannot be regenerated here.
+
+**What changed** (after `git merge worktree-native-speed`, whose tip is the baseline below):
+- `priv/host/facts.bl` is **deleted**. Its pass is now the delimited section
+  `;; ══ FACTS … ══` / `;; ══ end of FACTS ══` of `priv/host/optimize.bl`, the existing
+  pinned host `Elixir.BeamLisp.Optimize`. The section reuses optimize's identical
+  helpers (`getv put op? named? item call?`). Public API names are unchanged
+  (`function-facts expr bind forget shadow refine tag int-fact? bool-fact? raise? pure?
+  range-of integer-op? closed-int? expression-fuel int-callback literal-fn native-arity
+  pattern-names`), with one exception: `version` → **`facts-version`** (`"facts-1"`),
+  because optimize has its own `version`. Three private names were renamed to avoid
+  clashing with optimize's: `arith-comparison?` → `fact-arith-comparison?`, and
+  `walk`/`walk-all`/`walk-clauses` → `facts-walk*`. The old private forwarding shims
+  are gone; the rewrites call `expr`/`bind`/… directly.
+- The optimize.bl header now declares "the pinned HOST MODULE for
+  `Elixir.BeamLisp.Optimize`". `update-closure.bl`'s `check-host-module!` requires
+  that declaration.
+- **Every Facts registration is reverted.** These files show no diff against `main`
+  (`git diff main -- priv/build/seed.bl priv/host/aot_cache.bl test/bl/codegen_provenance_test.bl test/bl/aot_cache_host_test.bl test/bl/seed_host_inventory_test.bl`
+  is empty), and `seed_host_inventory_test` is back to 73.
+- `scheme.bl`: the `BeamLisp.Facts/` → `BeamLisp.Optimize/` rename only, at the call
+  sites in `forget-facts`, `integer-operand?`, `integer-binding`, `integer-branch` and
+  BACKEND's `boolean-valued?`.
+- `speed/facts/closure-additions.edn` →
+  `[{:ns "host.optimize" :path "priv/host/optimize.bl" :module :Elixir.BeamLisp.Optimize}]`.
+  **Closure safety of optimize.bl's requires:** `(ns host.optimize)` has no
+  `:require`. Its remotes are:
+  - Erlang BIFs, each a registered leaf in `round2-build/leaves.json`, including
+    `erlang:setelement/3`, `erlang:error/1` and `Elixir.ArgumentError/exception/1`;
+  - `BeamLisp.Ns.Anf/*`, the `anf` unit, already in the closure;
+  - `BeamLisp.CompilerData/eager_map`, the base host `host.compiler-data`.
+
+  None is unsafe. The closure's boot facade `optimize` (`priv/boot/optimize.bl`)
+  calls `BeamLisp.Optimize/*`; those remotes now link to `host.optimize`.
+- Updated scripts: `sites.bl`, `validate.bl`, `scope-check.bl`, and BACKEND's
+  `speed/backend3/facts-run.bl` (+ `pass2.sh`'s `FACTS=` path). All load
+  `priv/host/optimize.bl` as `BeamLisp.Optimize`.
+
+**New constraint on the pinned SDK (all four scripts).** Replacing the SDK's own pinned
+`BeamLisp.Optimize` changes its bytes. After that, the SDK refuses any NEW compilation
+or lazy namespace load whose imports reach it, with
+`{:missing_sdk_dependency_unit_owner, BeamLisp.Optimize, "host.optimize", nil, …}`.
+The cause is in `aot.bl`: `complete_source_sdk_closure!` falls through to
+`sdk_source_dependency!`, and `host.optimize` has no Source owner. So each script
+compiles and warms everything first and replaces the module in its **last form**
+(`hot!`):
+- `validate.bl` elaborates the whole corpus before `hot!`;
+- `scope-check.bl` restates the ten `scan/emission-check.bl` cases as functions and
+  warms the emitter's lazily loaded paths with literal-only nodes first.
+
+`facts-run.bl` evaluates its target script *after* loading, so on the pinned SDK it hits
+that refusal. Its header says so, and BACKEND's scripts would need the same
+"compile first, replace last" shape. On an SDK pinned after integration none of this
+applies: the module is native there and `hot` is not passed.
+
+### Checks after the restructure (each under `work run --memory 4G --timeout 3000`)
+
+1. **Baseline on the merged tip `192e9ebda`** (FACTS still in facts.bl), recorded
+   before any edit:
+   `research/native-seed/run run research/native-seed/speed/facts/sites.bl -- $MAIN/research/native-seed/out/speed-closure-2/partition.json .local/facts/tip/sites.etf hot`
+   gave: reader 104 defs, 36 intrinsics; rt 468 defs, 0 intrinsics, optimize
+   `native-call` 22; warm-core fixture Scheme sha `3b0ee79a…` (3693 bytes).
+2. **After**: `… sites.bl -- … .local/facts/after2/sites.etf hot .local/facts/tip/sites.etf`.
+   reader 36 → 36, rt 0 → 0, `native-call` 22 → 22. Every definition's Scheme and
+   optimized ANF is byte-identical; the fixture's Scheme and optimize output are
+   unchanged; `FACTS_COMPARE_PROBLEMS 0`.
+3. **D4 validation**:
+   `research/native-seed/run -p research/formal-logic/src run research/native-seed/speed/facts/validate.bl -- .local/facts/validate2`
+   gave `{:functions 28 :violations 0 :evaluations 1802 :unknown-param-violations 0 :controls 9 :missed-controls 0}`.
+   The facts found are identical to the first run (Int 36, Bool 7, ranges 10, no-raise
+   40), and all 28 pairs are `:checked` by `formal.elaboration/check`.
+4. **Fact scope**:
+   `research/native-seed/run run research/native-seed/speed/facts/scope-check.bl -- .local/facts/scope2`
+   gave `SCAN_EMISSION_PASS 10`.
+
+`./bin/bl` was not run: it would prepare an SDK.
+
+### Requests and risks (replacing the earlier list where they differ)
+
+- The **floor-regeneration request is withdrawn**: no new floor member exists.
+  `optimize.bl` changes as before, which rotates the compiler key exactly as any
+  optimizer edit does.
+- **Closure:** `update-closure.bl` must pick up the new `closure-additions.edn` row
+  (`host.optimize`). The first native compile of `host.optimize` happens there. Its
+  remotes were checked against `leaves.json`, but `host.optimize` has never been
+  compiled natively before.
+- **BACKEND's `facts-run.bl`** cannot evaluate a script on the pinned SDK after the
+  replacement (see the constraint above). Until the SDK is re-pinned, BACKEND's checks
+  need the "compile first, replace last" shape.
+- Native.scheme now calls `BeamLisp.Optimize/*` on BEAM. On the integrated SDK that is
+  the SDK's own optimizer, so there is no hot loading.
