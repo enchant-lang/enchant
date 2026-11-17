@@ -5,9 +5,13 @@
 ; The boot pass is deterministic, bounded and solver-independent: its rules
 ; instantiate structural/inductive laws with checked domain preconditions.
 ; Unknown callables, live providers and observable lazy ownership stay baseline.
+; Every fact (integer/boolean tags, ranges, callable arities, closed integer
+; callbacks, guard refinement) comes from the shared pass in facts.bl
+; (BeamLisp.Facts), which native emission reads too; this file owns only the
+; rewrite preconditions and the rewrites.
 (ns host.optimize)
 
-(defn version [] "optimize-3")
+(defn version [] "optimize-4")
 (defn- runtime-module [] :Elixir.BeamLisp.Ns.Rt)
 
 (defn- map [f xs] (BeamLisp.CompilerData/eager_map f xs))
@@ -32,109 +36,16 @@
     {:rule :strict-first-filter :law :private-total-filter-first :proof :induction}))
 
 ; —— facts and scope ——————————————————————————————————————————————————————
+; Readers of the shared fact pass. `fact` is a binding's value fact.
 
-(defn- pattern-names [p]
-  (cond
-    (erlang/== :pvar (getv p :pop)) (if (erlang/== "_" (getv p :name)) (list) (list (getv p :name)))
-    (or (erlang/== :ptuple (getv p :pop)) (erlang/== :pstruct (getv p :pop)))
-      (if (erlang/== :ptuple (getv p :pop))
-        (lists/append (map (fn [x] (pattern-names x)) (getv p :elems)))
-        (lists/append (map (fn [kv] (pattern-names (second kv))) (getv p :fields))))
-    (erlang/== :pcons (getv p :pop)) (erlang/++ (pattern-names (getv p :head)) (pattern-names (getv p :tail)))
-    (erlang/== :palias (getv p :pop)) (erlang/++ (pattern-names (getv p :a)) (pattern-names (getv p :b)))
-    (erlang/== :pmap (getv p :pop)) (lists/append (map (fn [kv] (pattern-names (second kv))) (getv p :pairs)))
-    :else (list)))
-
-(defn- shadow [env pats]
-  (lists/foldl (fn [name acc] (maps/remove name acc)) env
-    (lists/append (map (fn [p] (pattern-names p)) pats))))
-
-(defn- scaffold-body [n]
-  (when (op? n :let)
-    (let [name (getv n :name) init (getv n :init) cls (getv init :clauses) body (getv n :body)]
-      (when (and (op? init :fn) (erlang/is_list cls) (erlang/== 1 (erlang/length cls)))
-        (let [cl (erlang/hd cls) pats (getv cl :pats) args (getv body :args)]
-          (when (and (nil? (getv cl :guard)) (erlang/is_list pats) (erlang/== 1 (erlang/length pats))
-                     (erlang/== :pvar (getv (erlang/hd pats) :pop))
-                     (erlang/== name (getv (erlang/hd pats) :name))
-                     (op? body :apply) (named? (getv body :fn) name)
-                     (erlang/is_list args) (erlang/== 1 (erlang/length args)) (named? (erlang/hd args) name))
-            (getv cl :body)))))))
-
-(defn- literal-fn [n]
-  (if (op? n :fn) n
-    (let [body (scaffold-body n)] (when (op? body :fn) body))))
-
-(defn- native-arity [n]
-  (let [f (literal-fn n) cls (getv f :clauses)]
-    (when (and (some? f) (erlang/is_list cls) (not (erlang/== cls (list))))
-      (let [argc (erlang/length (getv (erlang/hd cls) :pats))]
-        (when (lists/all (fn [cl] (erlang/== argc (erlang/length (getv cl :pats)))) cls) argc)))))
-
-(defn- integer-list? [xs]
-  (cond
-    (erlang/== xs (list)) true
-    (erlang/is_list xs) (and (erlang/is_integer (erlang/hd xs)) (integer-list? (erlang/tl xs)))
-    :else false))
-
-(declare fact)
-(defn- args-tag? [args env tag]
-  (lists/all (fn [n] (erlang/== tag (getv (fact n env) :tag))) args))
-
-(defn- integer-op? [n]
-  (and (or (op? n :arith) (and (op? n :remote) (erlang/== :erlang (getv n :mod))))
-       (lists/member (if (op? n :arith) (getv n :bif) (getv n :fun)) (list :+ :- :*))
-       (erlang/== 2 (erlang/length (getv n :args)))))
-
-(declare closed-int?)
-(defn- closed-int?
-  "Total integer expressions over this explicit lexical domain. No globals,
-   mutable reads, guards, division, captured unknowns or callable annotations."
-  [n env]
-  (cond
-    (op? n :lit) (erlang/is_integer (getv n :val))
-    (op? n :var) (erlang/== :int (getv (maps/get (getv n :name) env {}) :tag))
-    (integer-op? n) (lists/all (fn [arg] (closed-int? arg env)) (getv n :args))
-    (op? n :let) (and (closed-int? (getv n :init) env)
-                      (closed-int? (getv n :body) (put env (getv n :name) {:tag :int})))
-    :else false))
-
-
-(defn- expression-fuel
-  "Remaining node fuel for the supported integer-expression grammar, or nil.
-   Stops before descending beyond the bound, including deeply nested bodies."
-  [n left]
-  (when (erlang/> left 0)
-    (cond
-      (or (op? n :lit) (op? n :var)) (erlang/- left 1)
-      (integer-op? n)
-        (let [a (expression-fuel (item (getv n :args) 0) (erlang/- left 1))]
-          (when (some? a) (expression-fuel (item (getv n :args) 1) a)))
-      (op? n :let)
-        (let [a (expression-fuel (getv n :init) (erlang/- left 1))]
-          (when (some? a) (expression-fuel (getv n :body) a)))
-      :else nil)))
-
-(defn- int-callback
-  "A closed total integer callback of `argc` parameters, within a bounded node
-   budget. A variable resolves to the callback recorded in its DEFINITION-scope
-   fact, never to the current meaning of its name; that fn is closed over its own
-   parameters, so re-materializing it elsewhere captures nothing."
-  [n argc env]
-  (let [src (if (op? n :var)
-              (getv (maps/get (getv n :name) env {}) :callback) n)
-        f (literal-fn src) cls (getv f :clauses)]
-    (when (and (some? f) (erlang/is_list cls) (erlang/== 1 (erlang/length cls)))
-      (let [cl (erlang/hd cls) pats (getv cl :pats)]
-        (when (and (nil? (getv cl :guard)) (erlang/== argc (erlang/length pats))
-                   (lists/all (fn [p] (and (erlang/== :pvar (getv p :pop))
-                                          (not (erlang/== "_" (getv p :name))))) pats))
-          (let [names (map (fn [p] (getv p :name)) pats)
-                env (lists/foldl (fn [name e] (put e name {:tag :int})) {} names)]
-            (when (and (erlang/== argc (erlang/length (lists/usort names)))
-                       (some? (expression-fuel (getv cl :body) 64))
-                       (closed-int? (getv cl :body) env))
-              {:fn f :clause cl :names names})))))))
+(defn- fact [n env] (BeamLisp.Facts/expr n env))
+(defn- refine [env test] (BeamLisp.Facts/refine env test))
+(defn- shadow [env pats] (BeamLisp.Facts/shadow env pats))
+(defn- literal-fn [n] (BeamLisp.Facts/literal-fn n))
+(defn- integer-op? [n] (BeamLisp.Facts/integer-op? n))
+(defn- closed-int? [n env] (BeamLisp.Facts/closed-int? n env))
+(defn- expression-fuel [n left] (BeamLisp.Facts/expression-fuel n left))
+(defn- int-callback [n argc env] (BeamLisp.Facts/int-callback n argc env))
 
 (defn- scalar-value? [v]
   (or (erlang/is_integer v) (erlang/is_float v) (erlang/is_binary v)
@@ -210,48 +121,6 @@
              (erlang/is_integer (getv a :val)) (erlang/is_integer (getv b :val))
              (erlang/=< (getv a :val) (getv b :val))))
     :else false))
-
-(defn- fact [n env]
-  (cond
-    (op? n :var) (maps/get (getv n :name) env {})
-    (op? n :lit)
-      (let [v (getv n :val)]
-        (cond (erlang/is_integer v) {:tag :int}
-              (erlang/is_float v) {:tag :float}
-              (integer-list? v) {:tag :integer-list}
-              :else {}))
-    (op? n :enil) {:tag :integer-list}
-    (op? n :cons)
-      (if (and (erlang/== :int (getv (fact (getv n :head) env) :tag))
-               (erlang/== :integer-list (getv (fact (getv n :tail) env) :tag)))
-        {:tag :integer-list} {})
-    (some? (native-arity n))
-      (let [a (native-arity n) cb (when (lists/member a (list 1 2)) (int-callback n a env))]
-        (if (some? cb) {:arity a :callback (getv cb :fn)} {:arity a}))
-    (integer-op? n) (if (args-tag? (getv n :args) env :int) {:tag :int} {})
-    (and (call? n :lists :seq) (lists/member (erlang/length (getv n :args)) (list 2 3))
-         (args-tag? (getv n :args) env :int)) {:tag :integer-list}
-    (and (call? n :lists :map) (erlang/== 2 (erlang/length (getv n :args)))
-         (some? (int-callback (item (getv n :args) 0) 1 env))
-         (erlang/== :integer-list (getv (fact (item (getv n :args) 1) env) :tag))) {:tag :integer-list}
-    :else {}))
-
-(defn- refine [env test]
-  (let [args (getv test :args)]
-    (cond
-      (and (call? test :erlang :is_function) (erlang/== 2 (erlang/length args))
-           (op? (item args 0) :var) (op? (item args 1) :lit)
-           (erlang/is_integer (getv (item args 1) :val)) (erlang/>= (getv (item args 1) :val) 0))
-        (put env (getv (item args 0) :name) {:arity (getv (item args 1) :val)})
-      (and (op? test :remote) (erlang/== :erlang (getv test :mod))
-           (lists/member (getv test :fun) (list :is_integer :is_float :is_number))
-           (erlang/== 1 (erlang/length args)) (op? (item args 0) :var))
-        (put env (getv (item args 0) :name)
-             {:tag (cond (erlang/== :is_integer (getv test :fun)) :int
-                         (erlang/== :is_float (getv test :fun)) :float :else :number)})
-      (and (op? test :if) (or (lit? (getv test :else) nil) (lit? (getv test :else) false)))
-        (refine (refine env (getv test :test)) (getv test :then))
-      :else env)))
 
 ; —— checked laws ————————————————————————————————————————————————————————
 
@@ -364,7 +233,7 @@
                (call? body :lists :foldl) (erlang/== 3 (erlang/length (getv body :args)))
                (named? (item (getv body :args) 2) name))
       (let [args (getv body :args)
-            inner (put env name (fact init env))
+            inner (BeamLisp.Facts/bind env name init)
             ok (and (not (erlang/== "_" name)) (not (named? (item args 0) name))
                     (closed-int? (item args 1) inner))
             fused (when ok (fuse-fold (put body :args (list (item args 0) (item args 1) init)) env))]
@@ -564,7 +433,7 @@
     (cond
       (erlang/== op :let)
         (let [ip (walk (getv n :init) env state mod) init (elem ip 0)
-              scoped (put env (getv n :name) (fact init env))
+              scoped (BeamLisp.Facts/bind env (getv n :name) init)
               bp (walk (getv n :body) scoped (elem ip 1) mod)]
           (tuple (put (put n :init init) :body (elem bp 0)) (elem bp 1)))
       (erlang/== op :if)

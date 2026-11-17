@@ -1,0 +1,137 @@
+; FACTS (E1) site counts: what each backend recognises, per definition, on
+; the closure's rt and reader units and on the warm-core benchmark fixture.
+; Counts and hashes only; no timing.
+;
+; Usage (pinned SDK, repository root as cwd):
+;   research/native-seed/run run research/native-seed/speed/facts/sites.bl -- \
+;     PARTITION.json OUT.etf [hot] [BASELINE.etf]
+; `hot` compiles this checkout's priv/host/facts.bl and priv/host/optimize.bl
+; with BeamLisp.AOT/compile_host_file and loads them into this VM first (the
+; pinned SDK has neither). With BASELINE.etf, every per-definition row is
+; compared with it and each difference is printed.
+(ns native.facts-sites
+ (:require [native.artifact :as artifact] [native.scheme :as scheme] [native.eval :as ev]
+           [anf :as a] [reader :as reader] [compiler :as compiler] [clojure.string :as string]))
+
+(def argv (vec (BeamLisp/argv)))
+(def partition-path (Path/expand (nth argv 0)))
+(def out-path (Path/expand (nth argv 1)))
+(def hot? (some #(= "hot" %) argv))
+(def baseline-path (first (filter #(string/ends-with? % ".etf") (drop 2 argv))))
+
+(when hot?
+ (let [dir (str (Path/dirname out-path) "/hot-ebin")]
+  (File/mkdir_p! dir)
+  (doseq [[leaf module] [["facts.bl" :Elixir.BeamLisp.Facts] ["optimize.bl" :Elixir.BeamLisp.Optimize]]]
+   (let [path (Path/expand (str "priv/host/" leaf))]
+    (try (BeamLisp.AOT/compile_host_file path (list (tuple :module module) (tuple :output_dir dir) (tuple :file path)))
+     (catch e (println "FACTS_HOT_ERROR" leaf (ex-message e) (pr-str (ex-data e))) (throw e)))
+    (println "FACTS_HOT_LOADED" leaf (BeamLisp.Optimize/version))))))
+
+(defn sha [value] (artifact/sha (erlang/term_to_binary value (list :deterministic))))
+
+; Copy the two parts into an owned directory: read-part may write a proof sidecar.
+(def work-dir (str (Path/dirname out-path) "/parts"))
+(File/mkdir_p! work-dir)
+(def manifest (bl.json/decode (File/read! partition-path)))
+(defn unit-for [ns]
+ (let [row (first (filter #(= ns (get % "namespace")) (get manifest "units")))
+       source (artifact/part-path partition-path (get row "path"))
+       copy (str work-dir "/" ns ".etf")]
+  (when-not (File/exists? copy) (File/write! copy (File/read! source)))
+  (artifact/read-part (str work-dir "/input.json") {"path" (str ns ".etf") "sha256" (get row "sha256")})))
+
+; Each erlang-operator call site in emission order: its callee text. An
+; integer intrinsic shows as the bare Scheme operator.
+(def callee-pattern #"\(let \(\(callee (\(native-remote \"erlang/[^\"]+\"\)|[^ ()]+)\)\)")
+(defn callees [text] (mapv second (re-seq callee-pattern text)))
+(defn emit-row [ns node]
+ (let [counts (atom {})]
+  (try
+   (let [text (scheme/emit node (assoc (ev/context ns) :emission-counts counts))]
+    {:scheme (artifact/sha text) :callees (callees text)
+     :intrinsics (get @counts :integer-intrinsics 0)
+     :guards-total (count (re-seq #"\(bl-guard " text))})
+   (catch e {:refused (ex-message e)}))))
+
+(defn optimize-rows [nodes]
+ (let [descriptor (a/module :Elixir.NativeFactsSites
+                   (list {:op :defn-clause :fname :probe :params (list) :guard nil
+                          :body (a/doo nodes) :ann {}})
+                   (list [:probe 0]) (list))
+       result (BeamLisp.Optimize/run descriptor {:enabled? true :report? true :max-nodes 1000000 :module-identity? false})
+       optimized (:stmts (:body (first (:clauses (:descriptor result)))))]
+  {:stats (:stats result)
+   :evidence (frequencies (map :rule (:evidence result)))
+   :refusals (frequencies (map (fn [r] [(:rule r) (:reason r)]) (:refusals result)))
+   :nodes (mapv sha optimized)}))
+
+(defn unit-rows [ns nodes names]
+ (let [opt (optimize-rows nodes)]
+  {:defs (mapv (fn [i] (assoc (emit-row ns (nth nodes i)) :name (nth names i) :optimized (nth (:nodes opt) i)))
+               (range (count nodes)))
+   :optimize (dissoc opt :nodes)}))
+
+(defn closure-unit [ns]
+ (let [unit (unit-for ns) defs (:defs unit)]
+  (unit-rows ns (mapv :node defs) (mapv #(or (:name %) "<top>") defs))))
+
+; The warm-core fixture: same options as benchmark/beam-benchmark.bl.
+(defn fixture []
+ (let [source (File/read! "research/native-seed/benchmark/compiler-values.bl")
+       forms (reader/read-string source "native-devtool-benchmark.bl")
+       nodes (mapv (fn [form] (compiler/reset-fresh!)
+                    (compiler/compile form (assoc (compiler/new-env "user") :target :js :file "native-devtool-benchmark.bl")))
+                   forms)
+       options {:ns "user" :namespace "user" :namespace-qualified? true :callable-arities? true}
+       text (string/join "\n" (map #(scheme/emit % options) nodes))
+       opt (optimize-rows nodes)]
+  {:scheme (artifact/sha text) :bytes (count text) :optimize opt}))
+
+(def result {:optimizer (BeamLisp.Optimize/version)
+             :units {"rt" (closure-unit "rt") "reader" (closure-unit "reader")}
+             :fixture (fixture)})
+(File/write! out-path (erlang/term_to_binary result))
+
+(defn summary [unit]
+ (let [defs (:defs unit)]
+  {:defs (count defs) :refused (count (filter :refused defs))
+   :intrinsics (reduce + (map #(get % :intrinsics 0) defs))
+   :bare-erlang-sites (reduce + (map (fn [d] (count (remove #(string/starts-with? % "(native-remote") (:callees d)))) defs))
+   :generic-erlang-sites (reduce + (map (fn [d] (count (filter #(string/starts-with? % "(native-remote") (:callees d)))) defs))
+   :bl-guards (reduce + (map #(get % :guards-total 0) defs))
+   :optimize-evidence (:evidence (:optimize unit))
+   :optimize-rewrites (get-in unit [:optimize :stats :rewrites])}))
+(doseq [[ns unit] (:units result)] (println "FACTS_SITES" ns (pr-str (summary unit))))
+(println "FACTS_FIXTURE" (pr-str (dissoc (:fixture result) :optimize))
+         (pr-str (:evidence (:optimize (:fixture result)))))
+
+; Compare with a baseline: every old intrinsic site must still be one.
+(when baseline-path
+ (let [old (erlang/binary_to_term (File/read! baseline-path))
+       problems (atom 0)]
+  (doseq [ns ["rt" "reader"]]
+   (let [od (get-in old [:units ns :defs]) nd (get-in result [:units ns :defs])]
+    (assert (= (mapv :name od) (mapv :name nd)))
+    (doseq [[o n] (map vector od nd)]
+     (let [oc (:callees o) nc (:callees n)
+           lost (when (= (count oc) (count nc))
+                  (filter (fn [[x y]] (and (not (string/starts-with? x "(native-remote")) (string/starts-with? y "(native-remote")))
+                          (map vector oc nc)))
+           gained (when (= (count oc) (count nc))
+                    (filter (fn [[x y]] (and (string/starts-with? x "(native-remote") (not (string/starts-with? y "(native-remote"))))
+                            (map vector oc nc)))]
+      (when (or (not= (count oc) (count nc)) (seq lost) (not= (:refused o) (:refused n)))
+       (swap! problems inc)
+       (println "FACTS_LOST" ns (:name o) (pr-str {:old oc :new nc :refused [(:refused o) (:refused n)]})))
+      (when (not= (:scheme o) (:scheme n))
+       (println "FACTS_SCHEME_CHANGED" ns (:name o) "gained" (pr-str (mapv second gained))
+                "guards" (:guards-total o) "->" (:guards-total n)))
+      (when (not= (:optimized o) (:optimized n))
+       (println "FACTS_OPTIMIZED_CHANGED" ns (:name o)))))
+    (println "FACTS_OPTIMIZE_EVIDENCE" ns (pr-str (get-in old [:units ns :optimize :evidence])) "->"
+             (pr-str (get-in result [:units ns :optimize :evidence])))))
+  (println "FACTS_FIXTURE_SCHEME" (if (= (get-in old [:fixture :scheme]) (get-in result [:fixture :scheme])) "unchanged" "CHANGED")
+           "OPTIMIZED" (if (= (get-in old [:fixture :optimize :nodes]) (get-in result [:fixture :optimize :nodes])) "unchanged" "CHANGED"))
+  (println "FACTS_COMPARE_PROBLEMS" @problems)))
+(println "FACTS_SITES_DONE")

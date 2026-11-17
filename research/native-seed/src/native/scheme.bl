@@ -168,15 +168,16 @@
 (defn binders [p] (Enum/reverse (binders-into p (list))))
 (defn- patterns-binders [pats] (Enum/reduce (items pats) (list) (fn [p acc] (binders-into p acc))))
 
-; Integer facts name Source variables proven to hold exact integers. Every
+; Facts (:facts, a BeamLisp.Facts environment: Source name -> value fact)
+; come from the shared ANF fact pass that BEAM's optimizer reads too. Every
 ; Scheme binder of a Source name forgets that name's fact. `names` is a
 ; function returning the names, so no binder list is built without facts.
 (defn- forget-facts [options names]
- (let [facts (:integer-facts options)]
+ (let [facts (:facts options)]
   (if (empty? facts) options
    (let [names (items (names))]
     (if (any-of? names (fn [name] (contains? facts name)))
-     (assoc options :integer-facts (Enum/reduce names facts (fn [name facts] (disj facts name)))) options)))))
+     (assoc options :facts (BeamLisp.Facts/forget facts names)) options)))))
 
 ; Patterns compile to decision code on the subject. A continuation carries the
 ; lexical bindings at EMISSION time: no pattern data, runtime binding alist or
@@ -577,16 +578,16 @@
 
 (defn- integer-operand? [n options]
  (or (and (= :lit (:op n)) (erlang/is_integer (:val n)))
-     (and (= :var (:op n)) (contains? (or (:integer-facts options) #{}) (:name n)))))
+     (BeamLisp.Facts/int-fact? (BeamLisp.Facts/expr n (or (:facts options) {})))))
 (defn- integer-binding [options name value]
- (let [facts (or (:integer-facts options) #{})]
-  (cond (integer-operand? value options) (assoc options :integer-facts (conj facts name))
-        (contains? facts name) (assoc options :integer-facts (disj facts name))
-        :else options)))
+ (let [facts (or (:facts options) {})
+       bound (BeamLisp.Facts/bind facts name value)]
+  ; Unchanged options when there is nothing to know or to forget.
+  (if (and (empty? (get bound name)) (not (contains? facts name))) options
+   (assoc options :facts bound))))
 (defn- integer-branch [options test]
- (if (and (= :remote (:op test)) (= :erlang (:mod test))
-          (= :is_integer (:fun test)) (= 1 (count (:args test))) (= :var (:op (first (:args test)))))
-  (update options :integer-facts (fn [facts] (conj (or facts #{}) (:name (first (:args test)))))) options))
+ (let [facts (or (:facts options) {}) refined (BeamLisp.Facts/refine facts test)]
+  (if (erlang/=:= facts refined) options (assoc options :facts refined))))
 (defn- integer-intrinsic [node options]
  (when (and (= :erlang (:mod node)) (= 2 (count (:args node)))
             (Enum/all? (items (:args node)) (fn [arg] (integer-operand? arg options))))
