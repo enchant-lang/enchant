@@ -59,3 +59,14 @@ Cold indexing and checks initialize their lazy providers before capturing memo
 identity. The first index performs one computation; the second identical index
 and check perform zero new compiler computations. The first file in the focused
 qualification inventory enforces this transition in a fresh VM.
+
+With an owned preview on 4057, replay the browser acceptance in one capped VM:
+
+```sh
+scripts/inspector-scenario --sdk /nix/store/QUALIFIED-SDK \
+  --url http://127.0.0.1:4057 --out .local/inspector-browser-evidence
+```
+
+The runner requires the local optional browser helper/runtime. It retains native
+screenshots, fourteen witnessed claims, source/helper hashes and the exact SDK
+pin, and rejects changed test inputs. It never produces an SDK or starts an app.

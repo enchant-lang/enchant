@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Witness the inspector through Enchant's scenario/browser namespaces on one SDK."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+from urllib.parse import urlsplit
+
+root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--sdk', type=Path, required=True)
+parser.add_argument('--url', default='http://127.0.0.1:4057')
+parser.add_argument('--out', type=Path, required=True)
+args = parser.parse_args()
+sdk = args.sdk.resolve(strict=True)
+if not re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/]+', str(sdk)):
+    parser.error('Use an immutable SDK product')
+metadata = (sdk / 'artifact.json').read_bytes()
+if json.loads(metadata).get('kind') != 'sdk':
+    parser.error('Expected an SDK selection')
+url = urlsplit(args.url)
+if url.scheme != 'http' or url.hostname != '127.0.0.1' or not url.port or url.path not in ('', '/') or url.query or url.fragment or url.username:
+    parser.error('Use the owned loopback preview URL')
+output = args.out.resolve()
+if output.exists():
+    parser.error('Keep existing evidence; select a fresh output directory')
+helper = Path(os.environ.get('BL_BROWSER_PORT', root / 'optional/browser-port/target/release/bl-browser-port')).resolve(strict=True)
+runtime = (Path.home() / '.local/share/bl-browser/runtime-wayland').resolve(strict=True)
+source = root / 'research/work-observatory/scenarios/inspector.bl'
+inputs = [Path(__file__).resolve(), source, *sorted((root / 'optional/browser-port/bl').rglob('*.bl'))]
+hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+output.mkdir(parents=True)
+command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
+           '--expand-environment=no', '--working-directory=' + str(root),
+           '--property=MemoryMax=1500M', '--property=MemorySwapMax=0',
+           '--property=CPUQuota=200%', '--property=RuntimeMaxSec=480',
+           '--property=KillMode=control-group',
+           '--setenv=ERL_FLAGS=+S 2:2 +SDcpu 1:1 +SDio 1',
+           '--setenv=BL_BROWSER_PORT=' + str(helper),
+           '--setenv=CHROMIUM=' + str(runtime / 'bin/chromium'),
+           '--setenv=SWAY=' + str(runtime / 'bin/sway'),
+           '--setenv=WAYVNC=' + str(runtime / 'bin/wayvnc'),
+           '--setenv=INSPECTOR_URL=' + args.url.rstrip('/'),
+           '--setenv=INSPECTOR_EVIDENCE=' + str(output),
+           str(sdk / 'bin/bl'), '--cold', '-p', str(root / 'optional/browser-port/bl'),
+           'run', str(source)]
+with (output / 'run.log').open('w') as log:
+    result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=500)
+scenario_path = output / 'scenario.json'
+scenario = json.loads(scenario_path.read_text()) if scenario_path.exists() else {}
+unchanged = all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest for name, digest in hashes.items())
+verdicts = scenario.get('verdicts', [])
+passed = (result.returncode == 0 and scenario.get('ok') is True and unchanged
+          and len(verdicts) == 14 and all(v.get('verdict') == 'witnessed' for v in verdicts))
+receipt = {'status': 'passed' if passed else 'failed', 'exit': result.returncode,
+           'sdk': str(sdk), 'sdk_descriptor_sha256': hashlib.sha256(metadata).hexdigest(),
+           'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
+           'namespaces': scenario.get('namespaces'), 'claims': len(verdicts),
+           'verdict': 'witnessed', 'inputs': hashes, 'inputs_unchanged': unchanged,
+           'native_helper': str(helper), 'native_helper_sha256': hashlib.sha256(helper.read_bytes()).hexdigest(),
+           'native_runtime': str(runtime), 'scenario': 'scenario.json'}
+(output / 'acceptance.json').write_text(json.dumps(receipt, indent=2) + '\n')
+print(output / 'acceptance.json')
+raise SystemExit(0 if passed else 1)
