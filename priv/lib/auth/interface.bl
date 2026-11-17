@@ -2,7 +2,7 @@
 ;; enter this exact dispatcher; neither receives the provider's implementation.
 (ns auth.interface
  (:require [auth] [auth.logic :as logic] [auth.identity :as identity] [auth.resource] [auth.contract :as contract]
-           [auth.wire :as wire] [effect] [env]))
+           [auth.wire :as wire] [data.first-order :as data] [effect] [env]))
 
 (def PROTOCOL "enchant.namespaces")
 (def VERSION 2)
@@ -88,7 +88,7 @@
   application's ceiling, resource membership, current roles and exact code."
  [provider operation args]
  (require! (and (string? operation) (vector? args)) :auth/malformed)
- (wire/encode args wire/MAX-REQUEST)
+ (data/check! args {:max-bytes wire/MAX-REQUEST})
  (let [principal (identity/current)
        authenticated (and principal
                           (or (nil? (:expires-at principal)) (> (:expires-at principal) (wire/now))))
@@ -117,10 +117,10 @@
                  (let [read (get (:readers provider) port)]
                   (require! read :auth/effect-unavailable)
                   (let [value (read principal resource)]
-                   (wire/encode value wire/MAX-RESPONSE) value)))
+                   (data/check! value {:max-bytes wire/MAX-RESPONSE}))))
          :perform (fn [port value]
                     (require! (contains? (:send ports) port) :auth/effect-denied)
-                    (wire/encode value wire/MAX-REQUEST)
+                    (data/check! value {:max-bytes wire/MAX-REQUEST})
                     (let [perform (get (:effects provider) port)]
                      (require! perform :auth/effect-unavailable)
                      (perform principal resource value)))}
@@ -130,8 +130,7 @@
                   (env/with-env (:owner provider)
                    #(effect/with-methods :auth/resources methods
                       (fn [] (apply (:function binding) args))))))]
-   (wire/encode result wire/MAX-RESPONSE)
-   result)))
+   (data/check! result {:max-bytes wire/MAX-RESPONSE}))))
 (defn request [provider operation args]
  {"protocol" PROTOCOL "protocol-version" VERSION "id" (logic/digest (crypto/strong_rand_bytes 16))
   "world" (:world provider) "namespace" (get-in provider [:manifest :namespace])
@@ -142,7 +141,7 @@
              "world" (:world provider) "namespace" (get-in provider [:prepared :namespace])
              "interface" (contract/id (:manifest provider))}]
   (try
-   (wire/encode request wire/MAX-REQUEST)
+   (data/check! request {:max-bytes wire/MAX-REQUEST})
    (require! (and (map? request) (= PROTOCOL (get request "protocol"))
                   (= VERSION (get request "protocol-version"))
                   (= #{"protocol" "protocol-version" "id" "world" "namespace" "interface" "version" "operation" "args"} (set (keys request)))
@@ -157,4 +156,4 @@
 (defn endpoint [provider]
  (fn [request]
   ;; Keep caller identity separate from provider Env conveyance.
-  (dispatch provider (wire/decode (wire/encode request wire/MAX-REQUEST) wire/MAX-REQUEST))))
+  (dispatch provider request)))

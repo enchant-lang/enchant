@@ -1,7 +1,7 @@
 ;; Transport is outside the imported application interface.
 (ns auth.transport
  (:require [auth] [auth.interface :as namespace] [auth.identity :as identity]
-           [auth.wire :as wire] [auth.authority :as private]
+           [auth.wire :as wire] [auth.authority :as private] [data.first-order :as data]
            [connector.transport :as transport] [auth.revocation :as revocation] [web]))
 (def PATH "/realms/v1")
 (def KINDS
@@ -11,6 +11,7 @@
   "auth/unproved" :auth/unproved "auth/effect-denied" :auth/effect-denied
   "auth/effect-unavailable" :auth/effect-unavailable "auth/malformed" :auth/malformed})
 (defn result! [request reply]
+ (data/check! reply {:max-bytes wire/MAX-RESPONSE})
  (when-not (and (map? reply) (= namespace/PROTOCOL (get reply "protocol"))
                 (= namespace/VERSION (get reply "protocol-version"))
                 (= (get request "id") (get reply "id")) (= (get request "world") (get reply "world"))
@@ -58,7 +59,11 @@
        (if (:error read) (reply conn 413 {:error "invalid-body"})
         (try
          (identity/with-verified principal
-          #(reply conn 200 (namespace/dispatch provider (wire/decode (:body read) wire/MAX-REQUEST))))
+          #(let [response (namespace/dispatch provider (wire/decode (:body read) wire/MAX-REQUEST))]
+             ;; JSON is an explicit boundary. Native local calls never pass
+             ;; through it; this adapter must still refuse non-JSON results.
+             (wire/encode response wire/MAX-RESPONSE)
+             (reply conn 200 response)))
          (catch _ (reply conn 400 {:error "invalid-body"})))))
       (reply request 401 {:error "unauthenticated"}))
      (catch _ (reply request 503 {:error "authority-unavailable"})))))))
