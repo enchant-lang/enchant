@@ -41,10 +41,21 @@ mod linux {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use serde_json::Value;
+
+    fn user_manager() -> bool {
+        if unsafe { libc::getuid() } != 0 { return true; }
+        // The private Nix worker runs a root user manager rather than PID 1
+        // systemd. Prefer the host system bus; otherwise accept only the
+        // fixed, root-owned local user socket. Request Env selects neither.
+        let socket = |path| std::fs::symlink_metadata(path).is_ok_and(|metadata|
+            metadata.file_type().is_socket() && metadata.uid() == 0);
+        !socket("/run/dbus/system_bus_socket") && socket("/run/user/0/bus")
+    }
 
     pub(super) fn control(name: &str) -> Result<Command, String> {
         let uid = unsafe { libc::getuid() };
@@ -56,7 +67,7 @@ mod linux {
         // Request-local PATH/bus variables select the program's environment,
         // never the controller executable or its authenticated local manager.
         command.env_clear().env("PATH", "/run/current-system/sw/bin:/usr/bin:/bin");
-        if uid==0 {
+        if !user_manager() {
             command.env("DBUS_SYSTEM_BUS_ADDRESS","unix:path=/run/dbus/system_bus_socket");
         } else {
             command.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
@@ -69,7 +80,7 @@ mod linux {
         let mut command=control(name)?;
         // The actual kernel identity chooses the manager. Neither request
         // data nor a forwarded environment may select a privileged bus.
-        if unsafe {libc::getuid()}!=0 {command.arg("--user");}
+        if user_manager() {command.arg("--user");}
         Ok(command)
     }
 
