@@ -2,7 +2,7 @@
 #+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
-#+status: Round 2 merged on main · native 13.1× warm BEAM on the pipeline · round 3 roster: 24 items in four waves
+#+status: Round 3 wave 1 integrated · native rebuilds itself (stage2 = stage3) · native 7.5× warm BEAM on the pipeline (was 13.1×)
 #+author: Claude for Othman
 
 * In one breath
@@ -685,12 +685,13 @@ E7 Proven loops carry no tick | — | ✓ | F, FL60
 E8 Unboxed floats | — | ✓ | Q5, FL32
 #+end_rosetta
 
-** TODO A3 · Attribute the gap on a real corpus
+** DONE A3 · Attribute the gap on a real corpus
 :PROPERTIES:
 :AREA: measurement
 :PRIORITY: A
 :TARGET: both
 :END:
+*Outcome (round 3).* MEASURE: reader.bl (104 definitions) through read, compile and emit. Native: compile 82.5 %; top costs the compiled kernel (15.8 %), bl-invoke resolution of variadic calls (12.3 %), a struct test that materialised a set (10.9 %) and a quoted special-forms set rebuilt per node (10.2 %); ticks under 0.1 %. BEAM: the invocation gate (17.2 %), generic =, variadic tuple/list. Both one-site items were fixed in this wave (=speed/attrib/RESULT.md=).
 Supersedes A. The warm-core fixture is six small forms; at under a millisecond
 on BEAM it weights fixed costs too heavily. Add a second fixture: compile one
 real closure namespace (=reader.bl= is a good size) through read, compile
@@ -699,33 +700,36 @@ map operations and comparisons. On BEAM, profile the same phases with
 =tprof=. Rank what is left on both. Every later item states its expected
 share from this ranking before it starts.
 
-** TODO P3 · Self-emission fixpoint
+** DONE P3 · Self-emission fixpoint
 :PROPERTIES:
 :AREA: build
 :PRIORITY: A
 :TARGET: native
 :END:
+*Outcome (round 3).* The native image rebuilds itself: stage1 compiles its own 34-namespace bundle inside the 240 s deadline, stage2 = stage3 byte for byte, and the Source corpus agrees on all three stages (=evidence-r3/source-fixpoint.json=, actors not run). Native self-emission equals BEAM's stage1 line for line after renaming gensym locals. It took four fixes: every member compiled against the image's own link rows and core's (=member-rows.bl=), bounded link-row batches (gsc timed out on one 439 KB form), NIF counterparts reaching sealed local calls, and set/map literals in term order.
 Carries P. The native Env answers the =lower= stub's link rows exactly as
 BEAM does, then one image build shows =stage2.scm= = =stage1.scm=. After that,
 native can rebuild itself without BEAM, and every later native item is
 checked by self-emission, not only by differentials.
 
-** TODO X · Actor corpus and cross-process lazy waits
+** NEXT X · Actor corpus and cross-process lazy waits
 :PROPERTIES:
 :AREA: correctness
 :PRIORITY: A
 :TARGET: both
 :END:
+*Outcome (round 3).* ACTOR: a force on a cell another actor is evaluating now WAITS on both targets, as on BEAM; a two-actor wait-for cycle still raises. Native corpus at the default budget: 461 checks identical to round 1 (gsi). Open: budgets 17 and 41 and the compiled-ELF run (FRAMES moved turn boundaries), and the JS baseline.
 Run the actor corpus on the integrated SDK and the native image. Decide
 whether a native frame that forces a lazy sequence owned by a parked actor
 waits, as before M, or refuses, as now. Implement the choice on both targets.
 
-** TODO N1 · Kernel emitter forms
+** DONE N1 · Kernel emitter forms
 :PROPERTIES:
 :AREA: backend
 :PRIORITY: A
 :TARGET: native
 :END:
+*Outcome (round 3).* BACKEND: boolean junctions, keyword case, direct self-calls and keyword constants, then sealed direct and variadic calls, literal arity cells (1,542 definitions) and every constant literal hoisted. rt unit: 1,185 string->symbol calls to 0, 51 self-call tests to 0. Every emission difference reduces to a named transform (=speed/backend3=).
 KERNEL's requests to BACKEND:
 - boolean =and=/=or= without truthiness wrappers when both sides are known
   booleans;
@@ -735,34 +739,47 @@ KERNEL's requests to BACKEND:
 Round 1's hand-written kernel ran the pipeline at 2.8× BEAM, so that is the
 reference this item aims back towards, now from compiled =rt.bl=.
 
-** TODO N2 · Multi-arity rt fast paths
+** DONE N2 · Multi-arity rt fast paths
 :PROPERTIES:
 :AREA: kernel
 :TARGET: native
 :END:
+*Outcome (round 3).* BACKEND: nth, k-nth and conj answer a list or vector inline; 6,636 new differential rows equal BEAM.
 =k-nth=, =nth= and =coll-get= miss the inline type tests B2 gave the
 single-arity functions.
 
-** TODO N3 · Sealed direct links
+** DONE N3 · Sealed direct links
 :PROPERTIES:
 :AREA: linking
 :TARGET: both
 :BLOCKED_BY: Q4
 :END:
+*Outcome (round 3).* LINK: the native closure is sealed (cells defined once, redefinition refused); BEAM has =Env/seal!= for releases, not yet called by any release build. Dev images unchanged.
 A global call fetches a Var. In a sealed image or release, where no binding
 can change, the linker resolves each call to its procedure. On native, that is
 a direct Scheme call that Gambit's block compilation can inline. On BEAM, it
 is a local or static remote call, and it makes cross-module inlining possible.
 =INTRINSICS.md= names the missing piece: a binding-validity precondition.
 
-** TODO N4 · Frames and budget sites
+** DONE N4 · Frames and budget sites
 :PROPERTIES:
 :AREA: runtime
 :TARGET: native
 :END:
+*Outcome (round 3).* FRAMES: ticks at loop heads and at entries of functions that can call BL code (rt: 1,275 to 586); debug frames from per-site constants (4,454 per-call frame builds to 171). Turn counts per budget change; see X.
 Carries F. Budget checks only at loop back-edges and calls to unknown
 functions. Source frames rebuilt from code-address tables, not a dynamic
 parameter per call. One code shape for debug and release.
+
+** DONE Q3 · Value-equality collection keys
+:PROPERTIES:
+:AREA: semantics
+:TARGET: both
+:END:
+*Outcome (round 3).* KEYS: two keys are the same key iff they are =; each key is
+stored as one canonical representative (=speed/keys/DECISION.md=), so
+=(get {1 :x} 1.0)= is =:x= on both targets and raw Erlang map functions stay
+exact. Sorted collections order every number numerically.
 
 ** TODO V2a · Gambit immediates and interned keywords
 :PROPERTIES:
@@ -823,12 +840,13 @@ Vector, Set, Num, Decimal, Transient, Refs, Multi, Reactive and Record move
 off host Scheme once V2 fixes their representation. Nothing in this item is
 a speed change; it is the end of S.
 
-** TODO E1 · One fact pass, two backends
+** DONE E1 · One fact pass, two backends
 :PROPERTIES:
 :AREA: formal
 :PRIORITY: A
 :TARGET: both
 :END:
+*Outcome (round 3).* FACTS: one conservative fact pass inside =BeamLisp.Optimize= (no new floor member) feeds the BEAM optimiser and native emission. Output byte-identical on rt, reader and warm-core; 28 functions validated against formal.elaboration/check, 0 violations, 9/9 wrong facts caught.
 One ANF pass computes, conservatively and without a solver:
 - Int and Bool types, with ranges;
 - whether a body can raise;
@@ -936,60 +954,54 @@ Per-function C for release, keyed in the existing unit store. This retires
 the 256 KB unit splitting and the 120 s gsc deadline as design constraints.
 
 * Final numbers
-Integrated stage-1 image =7c32ac57…=: rounds 1 and 2, a 33-namespace
-self-hosted closure, 70 units, =(standard-bindings) (extended-bindings)=.
-
-The BEAM side is the integrated SDK =v8jbl8q0…= (descriptor =f748c976…=),
-built from the same tree, so both sides run the same reader, compiler, =rt=,
-lazy runtime and emitter Source. The protocol is =benchmark/prepare-benchmark.py=:
-3 warm-ups, 9 samples × 20 repetitions, median, native then BEAM on the same
-host. The emitted Scheme is byte-identical between the two.
+Round 3, wave 1. Integrated SDK =mp370y60…= (descriptor =a99a1534…=) on both
+sides; a 34-namespace sealed closure that rebuilds itself (stage2 = stage3).
+Protocol unchanged: 3 warm-ups, 9 samples × 20 repetitions, median, native
+then BEAM on the same host. The emitted Scheme is byte-identical between the
+two. The host was loaded (load average 11 to 15); native is stable between
+runs, BEAM is not, so two runs are kept and the slower-ratio one is quoted.
 
 #+begin_stats
-13.1× | native / BEAM, full pipeline | 11.08 ms vs 0.843 ms
-22.5× | read | 1.507 ms vs 0.067 ms
-19.4× | compile | 6.685 ms vs 0.345 ms
-7.8× | emit | 2.833 ms vs 0.365 ms
+7.5× | native / BEAM, full pipeline | 8.82 ms vs 1.17 ms (round 2: 13.1×)
+8.7× | read | 0.572 ms vs 0.066 ms (round 2: 22.5×)
+12.2× | compile | 4.581 ms vs 0.376 ms (round 2: 19.4×)
+6.8× | emit | 4.130 ms vs 0.610 ms (round 2: 7.8×)
 #+end_stats
 
 #+begin_src beam-lisp :id final
-;; speed/final/evidence-r2/comparison.json (medians, ms).
-(def native {:read 1.507 :compile 6.685 :emit 2.833 :pipeline 11.082})
-(def beam {:read 0.067 :compile 0.345 :emit 0.365 :pipeline 0.843})
+;; speed/final/evidence-r3/comparison.json (medians, ms).
+(def native {:read 0.572 :compile 4.581 :emit 4.130 :pipeline 8.817})
+(def beam {:read 0.066 :compile 0.376 :emit 0.610 :pipeline 1.172})
 (defn ratio [k] (Float/round (/ (get native k) (get beam k)) 1))
 (def ratios (into {} (map (fn [k] [k (ratio k)]) [:read :compile :emit :pipeline])))
-(assert (< (:pipeline ratios) 14))
+(assert (< (:pipeline ratios) 8))
 {:native-over-beam ratios}
 #+end_src
 #+RESULTS: final
-: {:native-over-beam {:compile 19.4, :read 22.5, :pipeline 13.1, :emit 7.8}}
+: {:native-over-beam {:compile 12.2, :read 8.7, :pipeline 7.5, :emit 6.8}}
 
 
 #+begin_honest :title "Read these numbers with three facts"
-BEAM gained from this round as much as native did. Item M removed BEAM's
-lazy-cell walk, C2 made emission linear, R rewrote the reader, and T made the
-invocation gate a counter read. The integrated BEAM pipeline runs the fixture
-in under a millisecond.
+Native moved by itself this round: the pipeline went from 11.08 to 8.82 ms,
+read from 1.51 to 0.57 ms, compile from 6.69 to 4.58 ms.
 
-Native lost round 1's hand-written Scheme kernel, by design: it now runs
-=rt.bl= compiled by its own compiler. KERNEL listed the emitter support that
-would make that code tight (boolean =and=/=or=, keyword =case=, direct
-self-calls, quoted keyword literals). Those requests are item A.
+BEAM's pipeline is slower than round 2 (0.84 to 1.17 ms), almost all in emit
+(0.37 to 0.61 ms). Emit here is the native Scheme emitter running on BEAM,
+which now analyses tick sites, facts and constants per node; it is not BEAM's
+own code generation. The other run on this build measured 4.7× (BEAM 1.73 ms).
 
-Self-emission (P) does not yet reach a fixpoint. The image compiles every
-Source corpus form, but compiling its own closure stops on the =lower= stub.
+The actor corpus has not run on the compiled round-3 image (item X).
 #+end_honest
 
 #+begin_rosetta
 | Gate | Result | Evidence |
-| Integrated SDK | built once, all Nix work on the build station; job =job_65d70b46168ac2f1= | =evidence-r2/build.json= |
-| BEAM test batch | 22 of 25 files green; projection preflight 7 of 7 (617 assertions). The 3 failures also fail on main's SDK. | =evidence-r2= receipt, Station thread |
-| Host checks | 11 of 11 | =check-host.py= |
-| Native closure | 33 units, 0 unresolved remotes, 0 dead leaves, 456 host leaves | =speed/bigo/unresolved-probe.bl= |
-| Workstream differentials | reader 11,127 / 0; kernel 42,040 rt rows; lazy 28 / 0; data 692 of 698 (6 outside its files); services 172 / 0; emitter 2,143 / 0 | =speed/*/RESULT.md= |
-| Source corpus | =NATIVE_COMPILER_SOURCE_CORPUS_OK=, 0 FAIL, identical to round 1 | =evidence-r2/source-corpus.log= |
-| Emitted Scheme | byte-identical native and BEAM | =evidence-r2/comparison.json= |
-| Not run, or open | actor corpus; stage 2 = stage 3 (P) | =evidence-r2/stage2-emit.log= |
+| Integrated SDK | built once on the build station; 52 of 55 focused files green, the 3 failures identical on the round-2 SDK | =sdk-pin.json= |
+| Host checks | 12 of 12 stages | =check-host.py= |
+| Native closure | 34 units, 0 unresolved remotes, 0 dead leaves, 462 host leaves | =speed/bigo/unresolved-probe-r3.bl= |
+| Self-hosting | stage2 = stage3 byte-equal; Source corpus equal on stages 1–3 | =evidence-r3/source-fixpoint.json= |
+| Native vs BEAM emission | equal line for line after gensym renaming | =speed/final/compare-stages.py= |
+| Emitted benchmark Scheme | byte-identical native and BEAM | =evidence-r3/comparison.json= |
+| Not run | actor corpus on the compiled image; JS baseline | item X |
 #+end_rosetta
 
 * Decisions
