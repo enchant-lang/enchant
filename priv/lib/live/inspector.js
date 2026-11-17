@@ -159,7 +159,7 @@
     } else rows.slice(0,32).forEach(r=>runRow(r,false));
     if(tape.dropped)text(body,'small','Some runs omitted');
     function runRow(r,child) {
-      const row=text(body,'button','');row.className='run-row'+(child?' child':'');row.dataset.run=r.id;row.dataset.runId=r.id;
+      const row=text(body,'button','');row.className='run-row'+(child?' child':'');row.dataset.run=r.id;row.dataset.runId=r.id;row.dataset.tool=r.tool;row.dataset.cause=r.cause;
       const label=text(row,'span','');text(label,'i','').className='dot '+(r.state==='working'||r.state==='waiting'?'running':r.state==='failed'?'blocked':'ready');
       label.append(document.createTextNode(toolName(r.tool)));
       const state=r.state==='waiting'?'Waiting':r.state==='working'?'Working':r.state==='failed'?'Failed':r.state==='interrupted'?'Stopped':(r.counts?.reused&&!r.counts?.computed)?'Reused':'Done';

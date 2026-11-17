@@ -30,6 +30,10 @@
           (assoc all (:scope reader) (assoc t :readers readers)))) all)))
   nil)
 
+(defn- retain [rows]
+  (let [v (vec rows) n (count v)]
+    (if (> n max-recent) (subvec v (- n max-recent)) v)))
+
 (defn- alive? [row] (erlang/is_process_alive (:pid row)))
 (defn- public-row [row time]
   (-> row (dissoc :pid :started :source)
@@ -85,6 +89,7 @@
   (let [key (scope)]
     (if-not (contains? @tapes key) (f)
       (let [id (erlang/unique_integer (list :positive :monotonic))
+            tool (if (contains? #{:editor :check :index :render} tool) tool :other)
             parent (current-id) started (now) admitted (atom false)
             subject (or (label (:subject metadata)) "")
             source (label (:source metadata))]
@@ -92,8 +97,7 @@
           (if-let [t (get all key)]
             (let [dead (filterv #(not (alive? %)) (vals (:active t)))
                   active (reduce #(dissoc %1 (:id %2)) (:active t) dead)
-                  recent (vec (take-last max-recent
-                           (concat (:recent t) (map #(assoc % :state "interrupted" :ended started) dead))))
+                  recent (retain (concat (:recent t) (map #(assoc % :state "interrupted" :ended started) dead)))
                   previous (last (filter #(and (= tool (:tool %)) (= subject (:subject %))) recent))]
               (if (>= (count active) max-active)
                 (assoc all key (assoc t :active active :recent recent :dropped (inc (:dropped t))))
@@ -113,5 +117,5 @@
                 (if-let [r (get-in all [key :active id])]
                   (-> all (update-in [key :active] dissoc id)
                     (update-in [key :recent]
-                      #(vec (take-last max-recent (conj % (assoc r :ended (now)
-                        :state (if (pos? (get-in r [:counts :failed] 0)) "failed" "done"))))))) all))))))))))
+                      #(retain (conj % (assoc r :ended (now)
+                        :state (if (pos? (get-in r [:counts :failed] 0)) "failed" "done")))))) all))))))))))

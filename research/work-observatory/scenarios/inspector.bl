@@ -1,0 +1,119 @@
+;; Real Enchant namespace acceptance. No synthetic screenshots or browser driver.
+;; Run with -p optional/browser-port/bl and the local native browser runtime.
+(ns observatory.inspector-scenario
+  (:require [scenario :as s] [browser.page :as page] [browser.film :as film]
+            [bl.json :as json]))
+
+(def output (System/fetch_env! "INSPECTOR_EVIDENCE"))
+(def url (or (System/get_env "INSPECTOR_URL") "http://127.0.0.1:4057"))
+(def shadow "document.getElementById('enchant-inspector').shadowRoot")
+(defn js [p code] (page/evaluate! p code))
+(defn check-js [code] (fn [p _] (= true (js p code))))
+(defn act [term] (s/does :developer term))
+(defn sees [code message] (s/sees :developer (check-js code) message))
+(defn wait-for [code] (act [:wait code]))
+(defn dock [selector] (act [:dock selector]))
+
+(defn click-shadow! [p selector]
+  ;; page/cdp! is the actual browser namespace; press/release are trusted input.
+  ;; Hit-test the shadow target before pressing, just as page/click! does for CSS.
+  (let [point (js p (str "(()=>{const root=" shadow ",e=root.querySelector(" (json/encode selector)
+                   ");if(!e||e.disabled)throw Error('Dock target absent');e.scrollIntoView({block:'nearest'});"
+                   "const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;"
+                   "if(!r.width||!r.height||!e.contains(root.elementFromPoint(x,y)))throw Error('Dock target covered');return {x,y}})()"))
+        x (get point "x") y (get point "y")]
+    (doseq [kind ["mouseMoved" "mousePressed" "mouseReleased"]]
+      (page/cdp! p "Input.dispatchMouseEvent"
+        {"type" kind "x" x "y" y "button" (if (= kind "mouseMoved") "none" "left")
+         "clickCount" (if (= kind "mouseMoved") 0 1)}))
+    (swap! (:gestures p) conj {:click true :selector selector :x (/ x (:width p)) :y (/ y (:height p))})
+    :ok))
+
+(defn steps []
+  [(act [:navigate (str url "/__enchant")])
+   (wait-for "window.EnchantInspector&&document.documentElement.dataset.live==='1'")
+   (sees "(()=>{const h=document.getElementById('enchant-inspector'),r=h.getBoundingClientRect(),d=EnchantInspector.debug();return location.pathname==='/'&&document.querySelectorAll('#enchant-inspector').length===1&&r.width<=260&&r.height<=42&&!d.open&&d.requests===0&&!d.pollScheduled&&document.documentElement.scrollWidth<=innerWidth})()" "Small, singular, idle dock")
+   (act [:click "#demo-add"])
+   (wait-for "document.getElementById('demo-count').textContent.trim()==='1'")
+   (dock "[data-action=pick]")
+   (act [:click "#demo-add"])
+   (sees (str "document.getElementById('demo-count').textContent.trim()==='1'&&" shadow ".querySelectorAll('.token').length===4") "Loom picker reads without activating the app")
+   (act [:key "Escape"])
+   (act [:click "#demo-colour"])
+   (wait-for "document.getElementById('enchant-inspector-source').dataset.loomScale.includes('#b67548')")
+   (dock "[data-action=paint]")
+   (act [:click "#demo-add"])
+   (wait-for "document.getElementById('demo-count').textContent.trim()==='2'")
+   (dock "[data-action=updates]")
+   (sees (str shadow ".querySelectorAll('.history button[data-run]').length>0") "Updates link to their actual server render")
+   (dock ".history button[data-run]:last-child")
+   (wait-for (str shadow ".querySelector('.reason')?.textContent==='Requested again'"))
+   (sees (str shadow ".querySelector('.selection b').textContent==='Page'") "Selected page update explains its render")
+   (dock "[data-action=all-runs]")
+   (act [:click "#demo-editor"])
+   (wait-for (str "[..." shadow ".querySelectorAll('.run-row')].some(e=>e.textContent.includes('Editor')&&e.textContent.includes('Done'))"))
+   (act [:click "#demo-editor"])
+   (wait-for (str "[..." shadow ".querySelectorAll('.run-row')].some(e=>e.textContent.includes('Editor')&&e.textContent.includes('Reused'))"))
+   (sees "EnchantInspector.debug().peakFlights===1" "Actual editor repeats reuse work with one observation request")
+   (act [:click "#demo-check"])
+   (wait-for (str "[..." shadow ".querySelectorAll('.run-row')].some(e=>e.textContent.includes('Check')&&e.textContent.includes('Done'))"))
+   (act [:click "#demo-check"])
+   (act [:click "#demo-check"])
+   (wait-for (str "[..." shadow ".querySelectorAll('.run-row')].some(e=>e.textContent.includes('Check')&&e.textContent.includes('Reused'))"))
+   (act [:click "#demo-index"])
+   (wait-for (str "[..." shadow ".querySelectorAll('.run-row')].some(e=>e.textContent.includes('Index')&&e.textContent.includes('Done'))"))
+   (act [:click "#demo-index"])
+   (wait-for (str "[..." shadow ".querySelectorAll('.run-row')].some(e=>e.textContent.includes('Index')&&e.textContent.includes('Reused'))"))
+   (dock ".run-row")
+   (sees (str shadow ".querySelectorAll('.run-facts strong').length===3&&" shadow ".querySelector('.reason')?.textContent==='Same source'") "Selected tool shows actual builds, reuse and admission wait")
+   (dock "[data-action=all-runs]")
+   (act [:fill "#demo-source" "(ns playground)\n(defn leaf [x] (+ x 99))\n(defn total [x] (leaf x))"])
+   (wait-for "document.getElementById('demo-source').value.includes('99')")
+   (act [:click "#demo-editor"])
+   (wait-for (str shadow ".querySelector('[data-tool=editor][data-cause=source-changed]')!==null"))
+   (dock "[data-tool=editor][data-cause=source-changed]")
+   (sees (str shadow ".querySelector('.reason')?.textContent==='Source changed'&&" shadow ".querySelector('.function-names')?.textContent.includes('leaf')") "Changed source names the functions actually evaluated")
+   (act [:phone])
+   (sees (str "(()=>{const r=" shadow ".querySelector('.panel').getBoundingClientRect();return r.width<=294&&r.left>=0&&r.right<=innerWidth&&document.documentElement.scrollWidth<=innerWidth})()") "Phone panel fits with explanations visible")
+   (act [:desktop])
+   (dock "[data-action=close]")
+   (act [:eval "(()=>{window.beforeFlood=EnchantInspector.debug();const root=document.querySelector('[data-enchant-app]');for(let i=0;i<100;i++)document.dispatchEvent(new CustomEvent('live:patch',{detail:{root,ops:Array.from({length:10000},()=>['text',[], 'x'])}}));window.afterFlood=EnchantInspector.debug();return true})()"])
+   (sees "afterFlood.frames===32&&afterFlood.flashes<=16&&afterFlood.paintLookups-beforeFlood.paintLookups<=16&&afterFlood.draws===beforeFlood.draws&&afterFlood.drawScheduled&&afterFlood.requests===beforeFlood.requests" "Flood stays bounded and coalesces one draw without polling")
+   (dock "[data-action=server]")
+   (wait-for (str shadow ".querySelectorAll('.stat').length===3"))
+   (sees "EnchantInspector.debug().peakFlights===1" "Server uses the same single-flight observation sampler")
+   (act [:eval "(()=>{window.realFetch=window.fetch;window.held=null;window.fetch=()=>new Promise(resolve=>{window.held=resolve});return true})()"])
+   (dock "[data-action=refresh]")
+   (wait-for "!!window.held")
+   (act [:eval "(()=>{const r=document.getElementById('enchant-inspector').shadowRoot;for(let i=0;i<20;i++)r.querySelector('[data-action=refresh]').click();return true})()"])
+   (sees "EnchantInspector.debug().activeRequests===1&&EnchantInspector.debug().peakFlights===1" "Repeated refresh cannot create concurrent requests")
+   (dock "[data-action=close]")
+   (act [:eval "(()=>{held({ok:true,json:async()=>({schema:'enchant.observatory.v1',runtime:{vm:{memory:999999999999}},work:[],projections:[]})});window.fetch=realFetch;return true})()"])
+   (wait-for "EnchantInspector.debug().activeRequests===0")
+   (sees "!EnchantInspector.debug().open&&!EnchantInspector.debug().pollScheduled" "Closing discards late completion and leaves no sampler")
+   (act [:eval "EnchantInspector.dispose();EnchantInspector.dispose();document.dispatchEvent(new CustomEvent('live:patch',{detail:{root:document.body,ops:[]}}));true"])
+   (sees "(()=>{const d=EnchantInspector.debug();return d.disposed&&!d.pollScheduled&&!d.inFlight&&!d.drawScheduled&&!document.getElementById('enchant-inspector')&&!document.getElementById('enchant-inspector-overlays')})()" "Disposal is complete and idempotent")])
+
+(File/mkdir_p! output)
+(let [scratch (str "/tmp/enchant-inspector-browser-" (erlang/unique_integer (list :positive)))
+      p (page/open! {:width 1280 :height 900
+            :launch {"profile" (str scratch "/profile") "runtime" (str scratch "/runtime")
+                     "chromium" (System/fetch_env! "CHROMIUM") "compositor" (System/fetch_env! "SWAY")
+                     "vnc" (System/fetch_env! "WAYVNC") "width" 1280 "height" 1000}})]
+  (try
+    (let [base (film/world p :developer output)
+          world (assoc base :step! (fn [pg event]
+            (let [term (nth event 2)]
+              (case (first term)
+                :dock (click-shadow! pg (nth term 1))
+                :phone (page/cdp! pg "Emulation.setDeviceMetricsOverride" {"width" 390 "height" 844 "deviceScaleFactor" 1 "mobile" false})
+                :desktop (page/cdp! pg "Emulation.setDeviceMetricsOverride" {"width" 1280 "height" 900 "deviceScaleFactor" 1 "mobile" false})
+                ((:step! base) pg event)))))
+          result (s/run-world (s/scenario "Real tool inspector" {:developer {}} (steps)) world)
+          receipt (assoc (select-keys result [:ok :verdicts :bases])
+                    :namespaces ["scenario" "browser.page" "browser.film"]
+                    :sdk (BeamLisp.Tiers/priv_root))]
+      (File/write! (str output "/scenario.json") (json/encode receipt))
+      (println "inspector-scenario" (:ok result) (pr-str (:verdicts result)))
+      (when-not (:ok result) (throw "Inspector browser scenario refuted")))
+    (finally (page/close! p) (File/rm_rf! scratch))))

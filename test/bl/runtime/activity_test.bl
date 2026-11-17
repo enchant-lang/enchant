@@ -71,3 +71,25 @@
       (is (= "done" (:state (first (rows r)))))
       (is (nil? (Process/get :runtime.activity/waiting)))
       (finally (erlang/exit holder :kill) (a/close! r)))))
+
+(deftest active-capacity-never-blocks-work-and-dead-callers-are-swept
+  (let [r (a/open) parent (erlang/self) workers (atom [])]
+    (try
+      (doseq [_ (range 64)]
+        (swap! workers conj (spawn (fn []
+          (a/with-operation :editor {} (fn [] (erlang/send parent :entered) (receive :release nil)))))))
+      (doseq [_ (range 64)] (is (= :entered (receive :entered :entered (after 5000 nil)))))
+      (is (= 64 (count (:running (a/snapshot r)))))
+      (is (= :still-runs (a/with-operation :check {} (fn [] :still-runs))))
+      (is (= 1 (:dropped (a/snapshot r))))
+      (doseq [pid @workers]
+        (let [ref (Process/monitor pid)]
+          (erlang/exit pid :kill)
+          (receive [:DOWN r :process p _] :when (and (= r ref) (= p pid)) true
+            (after 5000 (throw "Caller did not stop")))))
+      (is (every? #(= "interrupted" (:state %)) (:running (a/snapshot r))))
+      (a/with-operation :editor {} (fn [] :swept))
+      (is (empty? (:running (a/snapshot r))))
+      (is (= 64 (count (rows r))))
+      (is (= false (:available (a/snapshot (assoc r :lease (erlang/make_ref))))))
+      (finally (doseq [pid @workers] (when (Process/alive? pid) (erlang/exit pid :kill))) (a/close! r)))))
