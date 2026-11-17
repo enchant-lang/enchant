@@ -1,0 +1,75 @@
+#+title: Native command custody and output demand
+
+The new =proc.command= API is under SDK qualification. The Linux wire passed
+real user-manager and booted root-manager tests; the earlier BL prototype
+passed 13 assertions. Those component proofs do not qualify the newer Env and
+inherited-budget additions. The field-station roster records the current gate.
+
+* Declare one command
+#+begin_src clojure
+(require '[proc.command :as command])
+
+(command/run!
+ {:exec ["/nix/store/…-nix/bin/nix" "build" ".#system"]
+  :cwd "/home/me/workstation"
+  :workspace "/home/me/.cache/workstation/system-build"
+  :limits {:timeout-ms 300000
+           :memory-bytes 2147483648
+           :output-bytes 16777216}}
+ {:on-output #(IO/binwrite :stderr %)
+  :on-state #(println (select-keys % ["state" "unit"]))})
+;; => {:status :exited :exit 0 :domain-empty true
+;;     :unit "bl-custody-…service" :output-bytes … :output-complete true …}
+#+end_src
+
+The executable is absolute; argv is data. The existing claim protocol owns the
+workspace. The existing stock launcher starts a systemd domain and transfers
+actual file-description loans into the manager before program execution.
+Kernel identity chooses the system manager for root and the user manager for
+ordinary users. Request Env cannot choose another manager or controller binary.
+
+An output callback withholds the next credit until it returns. Each native
+chunk contains at most 8192 bytes; a native window admits at most 64 chunks.
+The synchronous BL facade grants one chunk at a time. A slow consumer blocks
+the actual OS writer after the bounded socket buffers fill. This differs from
+retaining a bounded prefix while an unbounded mailbox keeps accumulating data.
+The declared total output limit remains an explicit stop policy.
+
+* Keep execution and observation separate
+#+begin_src clojure
+(require '[proc.task :as task])
+
+(def job (task/async-nolink #(command/run! declaration observers)))
+(task/yield job 1000)
+;; A nil yield abandons no effects. Explicitly ignore only the result alias:
+(task/ignore job)
+#+end_src
+
+The accepted command retains its native lifetime. Observer failure drains work
+before rethrowing the original error. Observation disappearance does not mean
+cancellation. =:cancel?= requests an explicit stop, and the result waits for the
+domain and its descendant-held loans to finish. A child in another process
+session cannot escape cgroup cleanup merely by closing inherited descriptors.
+
+Outcomes distinguish =:exited= (including nonzero principal exit), =:timed-out=,
+=:cancelled=, =:signalled=, =:output-limit= and =:unknown=. Missing completion
+evidence never converts an outer process's zero exit into success. Discarded
+output is counted explicitly. Private lifecycle records travel separately from
+program output; programs cannot accidentally print a completion record.
+
+* Env and budgets
+=:env= defaults to the current request-local snapshot. Supplying a map replaces
+it exactly. The port adapter unsets absent keys from the VM's actual inherited
+environment, so a deleted request value cannot reappear in the child. Env is
+carried privately, not embedded in a shell string or secret-bearing argv.
+
+=:limits= defaults to one minute, 1 GiB of memory and 16 MiB of total output.
+An optional monotonic =:deadline-ms= and inherited admission budget clip that
+timeout. Expired admission refuses before workspace or child creation. The
+native helper includes manager startup in its own private monotonic deadline
+and checks it before program birth. OS stop acknowledgement is not disposal
+evidence; the terminal record follows actual domain completion.
+
+This is a trusted host/worker adapter. It grants filesystem custody, not Source
+invocation authority. Source application code must use an explicitly enrolled
+host resource instead of acquiring arbitrary host commands through this API.
