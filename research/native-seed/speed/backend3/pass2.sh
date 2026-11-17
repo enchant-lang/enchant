@@ -19,13 +19,9 @@ if [ "${RT:-1}" = 1 ]; then
  run $NS/src $WT run $B3/facts-run.bl -- $FACTS $B3/emit-rt.bl $P $L $O/rt-head.bl $O/rt-new.scm; echo RT_NEW_EXIT $?
 fi
 if [ "${INSPECT:-1}" = 1 ]; then
- slots=$(paste -sd, "$B3/out/slots.txt")
- for side in old new; do
-  src=$O/old-src; [ $side = new ] && src=$NS/src
-  mkdir -p $O/inspect-$side
-  run $src $MAIN run $B3/facts-run.bl -- $FACTS $src/native/chunks.bl inspect $P $C/host.scm $O/inspect-$side $L "$slots"
-  echo INSPECT_${side}_EXIT $?
- done
+ # every named definition of the closure, through bootstrap/emit-definition (emit-closure.bl)
+ run $O/old-src $WT run $B3/facts-run.bl -- $FACTS $B3/emit-closure.bl $P $L $O/closure-old.scm; echo CLOSURE_OLD_EXIT $?
+ run $NS/src $WT run $B3/facts-run.bl -- $FACTS $B3/emit-closure.bl $P $L $O/closure-new.scm; echo CLOSURE_NEW_EXIT $?
 fi
 if [ "${EQ:-1}" = 1 ]; then
  run $NS/src $NS -p $NS/speed run $B3/facts-run.bl -- $FACTS $B3/equality.bl $O/eq benchmark/compiler-values.bl \

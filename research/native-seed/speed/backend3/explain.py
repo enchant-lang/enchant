@@ -140,6 +140,9 @@ def canon(x, selves, counts):
     if len(items) == 2 and items[0] == A("string->symbol") and items[1][0] == "T" and SAFE.match(items[1][1]):
         counts["d string->symbol"] += 1
         return ("Q", items[1][1])
+    if len(items) == 2 and items[0] == A("bl-key") and items[1][0] == "T" and SAFE.match(":" + items[1][1]):
+        counts["d bl-key"] += 1
+        return ("Q", ":" + items[1][1])
     if len(items) == 2 and items[0] == A("quote") and items[1][0] == "S" and SAFE.match(items[1][1]):
         counts["d quoted"] += 1
         return ("Q", items[1][1])
@@ -196,6 +199,13 @@ def canon(x, selves, counts):
             and procedure_if(items[2], True):
         counts["c self-call test"] += 1
         return L(items[0], items[1], L(A("apply"), A("callee"), A("arguments")))
+    # (i) variadic arm call (v_ns/f$v A1..Am (list R..)) -> (v_ns/f$N A1..Am R..)
+    if items and items[0][0] == "A" and items[0][1].endswith("$v") and len(items) >= 2 \
+            and is_list(items[-1], "list"):
+        rest = items[-1][1][1:]
+        n = len(items) - 2 + len(rest)
+        counts["i variadic arm call"] += 1
+        return L(A(items[0][1][:-2] + f"${n}"), *items[1:-1], *rest)
     # (e) sealed global call: (let ((callee v_ns/f)) [(let* B] (if (procedure? callee) …)) -> [(let* B] (v_ns/f$N A..))
     if is_list(x, "let", 3) and is_list(items[1], size=1) and is_list(items[1][1][0], size=2) \
             and items[1][1][0][1][0] == A("callee") and sealed_binding(items[1][1][0][1][1]) \
@@ -238,6 +248,24 @@ def scaffold_self(form):
                 and lr[2][0] == "A":
             return substitute(form, {lr[2][1]: SELF})
     return form
+
+
+def unhoist(forms, counts):
+    """(h) hoisted constants, inverted on the new side: every
+    (define <binding>$q<i> LIT) is removed and its name replaced by LIT."""
+    constants = {}
+    for x in forms:
+        if is_list(x, "define", 3) and x[1][1][0] == "A" and re.search(r"\$q\d+$", x[1][1][1]):
+            constants[x[1][1][1]] = x[1][2]
+    counts["h hoisted constant"] += len(constants)
+    def uses(y):
+        if y[0] == "A" and y[1] in constants:
+            counts["h constant reference"] += 1
+            return constants[y[1]]
+        if y[0] == "L":
+            return ("L", [uses(z) for z in y[1]])
+        return y
+    return [uses(x) for x in forms if not (is_list(x, "define", 3) and x[1][1][0] == "A" and x[1][1][1] in constants)]
 
 
 def unraw(forms, counts):
@@ -435,7 +463,7 @@ def main():
         a = parse(open(old, encoding="utf-8").read())
         b = parse(open(new, encoding="utf-8").read())
         raw = collections.Counter()
-        b = unraw(b, raw)
+        b = unraw(unhoist(b, raw), raw)
         kinds.update(raw)
         a, b = [scaffold_self(x) for x in a], [scaffold_self(x) for x in b]
 

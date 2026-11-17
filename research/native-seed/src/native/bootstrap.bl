@@ -146,6 +146,15 @@
 (defn global-decision [plan n] (resolution/global-decision (:ledger plan) (:table plan) n))
 (defn- direct-call [target]
  {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- variadic-call
+ "The variadic arm `target` called as native-resolve-call would: the first
+  `minimum` operands, then the rest as one list."
+ [target minimum]
+ {:inline? true
+  :call (fn [operands]
+         (let [ops (vec operands)]
+          (str "(" target (string/join "" (map #(str " " %) (subvec ops 0 minimum)))
+               " (list" (string/join "" (map #(str " " %) (subvec ops minimum))) "))")))})
 (defn- generic-call [target]
  ; A non-:fn definition or an undeclared arity: the live slot value decides.
  {:inline? true
@@ -171,8 +180,7 @@
  ([plan ns n]
  (if-let [module (self-module plan ns n)]
   {:inline? true
-   :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
-                      (scheme/text (erlang/atom_to_binary module)) "))"))}
+   :call (fn [_] (str "(bl-make-tuple " (scheme/literal :module) " " (scheme/literal module) ")"))}
  (if-let [template (intrinsics/remote-template n)]
   {:inline? false :call template}
   (let [decision (remote-decision plan n)]
@@ -198,9 +206,14 @@
   (emitter interface for :invoke of a :global callee; see link3/RESULT.md)."
  [plan n arity]
  (let [[_ _ _ _ sel-kind sel-ns sel-name] (global-decision plan n)]
-  (when (and (sealed-function? plan sel-kind sel-ns sel-name)
-             (contains? (set (:fixed (get (:arities plan) [sel-ns sel-name]))) arity))
-   (direct-call (arity-binding-name sel-ns sel-name arity)))))
+  (when (sealed-function? plan sel-kind sel-ns sel-name)
+   (let [arities (get (:arities plan) [sel-ns sel-name])]
+    (cond
+     (contains? (set (:fixed arities)) arity) (direct-call (arity-binding-name sel-ns sel-name arity))
+     ; No fixed arm of that arity: the variadic arm, as native-resolve-call picks it.
+     (and (some? (:variadic arities)) (>= arity (:variadic arities)))
+      (variadic-call (variadic-binding-name sel-ns sel-name) (:variadic arities))
+     :else nil)))))
 (defn link-context [plan ns]
  ; native.eval/context plus :aot-link. Every remote must have an exact
  ; capability (remote-decision raises otherwise); the dynamic resolver stays
@@ -273,14 +286,25 @@
         r (scheme/emit-sealed-function (:node d) context (arity-binding-name ns (:name d) arity)
                                        (binding-name ns (:name d)))]
    (when (and r (= arity (:arity r))) r))))
+(defn- constant-defines
+ "The definition's hoisted constant literals (scheme/hoisted), in order."
+ [sink]
+ (string/join "" (map (fn [[name text]] (str "(define " name " " text ")\n")) (:rows @sink))))
 (defn emit-definition [plan unit d]
- (let [ns (:ns unit) context (link-context plan ns)
+ (let [ns (:ns unit) sink (atom {:index {} :rows []})
+       context (if (:name d) (assoc (link-context plan ns) :constants sink :constant-prefix (binding-name ns (:name d)))
+                 (link-context plan ns))
        arities (when (and (:name d) (= :fn (:kind d))) (declaration-arities (:form d)))
        raw (when (:name d) (sealed-raw plan ns d arities context))
        value (if raw (:value raw) (scheme/emit (:node d) context))]
   (if (:name d)
-   (let [binding (binding-name ns (:name d))]
-    (str "(define " binding " " value ")\n"
+   (let [binding (binding-name ns (:name d))
+         constants (constant-defines sink)]
+    ; A function's value is a closure, so its constants follow its head (and
+    ; stay in its unit); any other value is evaluated now, after them.
+    (str (if (= :fn (:kind d)) "" constants)
+        "(define " binding " " value ")\n"
+        (if (= :fn (:kind d)) constants "")
         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
