@@ -121,13 +121,17 @@
        at (+ (* row (count (first cells))) column) cell (nth flat (min (dec (count flat)) (inc at)))]
   {:selection (selection (:id cell) (if (= at (dec (count flat))) (d/length (:text cell)) 0))}))
 (defn command-policy [context item]
- (if-not (inside? context) item
+ (if (and (:selection/reason context)
+          (or (inside? context)
+              (ancestor (:document context) (get-in context [:selection :anchor :block]) "table")))
+  (if (= "history" (:kind item)) item (assoc item :enabled false :reason (:selection/reason context)))
+  (if-not (inside? context) item
   (let [id (:id item) root? (= "table" (:type (d/find-block (:document context) (get-in context [:selection :head :block]))))
         structural (or (starts-with? id "turn/") (starts-with? id "insert/") (starts-with? id "block/"))
         allowed (or (not structural) (and root? (contains? #{"block/delete" "block/duplicate" "block/up" "block/down"} id)))
         allowed (and allowed (or (cell? context) (not (contains? #{"wrap" "transform"} (:kind item)))))
         allowed (and allowed (not (and (= "wrap" (:kind item)) (= "block" (:scope item)))))]
-   (if allowed item (assoc item :enabled false :reason "Use the table controls to keep its rows and columns together.")))))
+   (if allowed item (assoc item :enabled false :reason "Use the table controls to keep its rows and columns together."))))))
 (defn- control [command target label icon]
  [:button {:type "button" :contenteditable "false" :data-edit-command command :data-edit-command-target target
            :aria-label label :title label} [:span {:data-icon icon}] [:span label]])
@@ -163,6 +167,22 @@
    (let [start (shape (assoc-in context [:selection :head :block] anchor)) end (shape context)]
     (assoc end :from-row (min (:row start) (:row end)) :to-row (max (:row start) (:row end))
                :from-column (min (:column start) (:column end)) :to-column (max (:column start) (:column end)))))))
+(defn selection-ranges [context]
+ (let [document (:document context) a (get-in context [:selection :anchor :block])
+       z (get-in context [:selection :head :block])
+       left (ancestor document a "table") right (ancestor document z "table")]
+  (when (and (or left right) (not= a z))
+   (if-not (and left right (= (:id left) (:id right))
+                (= "table-cell" (:type (d/find-block document a)))
+                (= "table-cell" (:type (d/find-block document z))))
+    {:reason "Select cells in one table, or choose the table as a whole block."}
+    (try
+     (let [rect (rectangle context)]
+      {:ranges (vec (mapcat (fn [row]
+                        (mapv (fn [cell] {:block (:id cell) :from 0 :to (d/length (:text cell))})
+                         (subvec (nth (:cells rect) row) (:from-column rect) (inc (:to-column rect)))))
+                       (range (:from-row rect) (inc (:to-row rect)))))} )
+     (catch _ {:reason "This table needs source review before formatting."}))))))
 (defn- grid-cell [value seed functions]
  (let [cell (assoc (d/block seed "table-cell" (:text value) {}) :marks (:marks value []))]
   (when-not (and (d/block? cell) (empty? (:wraps value)) (not (:parent value)))

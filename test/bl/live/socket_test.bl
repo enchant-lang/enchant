@@ -897,3 +897,21 @@
     (is (= before (datom/basis-t (datom/db conn))))
     (is (nil? (get-in state [:locals :route]))))
    (finally (datom/close! conn) (datom/close! other) (flush-mailbox)))))
+
+(deftest conditional-navigation-is-announced-only-after-an-intent-succeeds
+ (let [conn (fresh-conn)
+       state (s/mount {:view board :shared conn :sink (erlang/self)
+                :intents {:success (fn [world _ _] (s/completed world))
+                          :refusal (fn [_ _ _]
+                                    (throw (ex-info "Retain this view"
+                                      {:intent/outcome {:status :refused :why "Retain this view"}})))}})]
+  (try
+   (flush-mailbox)
+   (let [refused (s/handle-event state [[:intent :refusal {}] [:navigate "/wrong"]] {})]
+    (is (nil? (get-in refused [:locals :route])))
+    (is (= :none (receive [:navigate route] route (after 20 :none)))))
+   (flush-mailbox)
+   (let [accepted (s/handle-event state [[:intent :success {}] [:navigate "/accepted"]] {})]
+    (is (= "/accepted" (get-in accepted [:locals :route])))
+    (is (= "/accepted" (receive [:navigate route] route (after 100 :none)))))
+   (finally (datom/close! conn) (flush-mailbox)))))

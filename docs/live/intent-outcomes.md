@@ -219,3 +219,8 @@ This acknowledgement concerns session-local input projection. It is not a
 business decision, a persisted receipt, or the durable outbox's `[:ack id]`.
 Older clients ignore the mount's extra field; a new client talking to a server
 without that feature keeps the previous attribute-only editing behavior.
+
+Live compound navigation waits for successful intents. The browser does not
+optimistically change the URL for a term containing an intent; the socket sends
+`[:navigate path]` only after that intent permits the navigation step. Refusals
+and no-ops retain both the view and URL. Ordinary links still navigate promptly.

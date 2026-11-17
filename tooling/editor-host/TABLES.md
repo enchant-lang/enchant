@@ -44,3 +44,19 @@ with fresh application IDs. TSV quotes preserve tabs/newlines; HTML uses real
 table/row/cell elements and refuses merged/nested tables. Unsupported cell
 structures refuse before a proposal. A large grid is limited by the reducer's
 4096-operation batch budget; paste a smaller section when needed.
+
+Selection range providers
+-------------------------
+Packages may supply `:editor/selection-ranges`, a pure function of the command
+context. Return nil to defer, `{:ranges [{:block id :from cp :to cp}]}` to supply
+semantic text ranges, or `{:reason "…"}` to refuse an unsupported selection.
+Ranges reference current blocks and use Unicode code-point offsets. Commands
+validate them, omit empty spans, and cap formatting at 4096 operations. The same
+ranges drive inline coverage, formatting and text transforms; command policies
+receive `:selection/ranges` and `:selection/reason`.
+
+The standard table provider uses the clipboard rectangle: selections across
+cells format complete cells inside the rectangle, including reversed selections.
+Unselected cells between those cells in document order remain untouched. A
+selection crossing table/prose or separate tables is refused before proposing
+an edit. Select the table itself for whole-block structural actions.
