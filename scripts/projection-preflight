@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--sdk', type=Path, required=True)
 parser.add_argument('--revision', default='HEAD')
+parser.add_argument('--canonical', action='store_true', help='Qualify original namespaces on an SDK containing these exact sources')
 parser.add_argument('--out', type=Path, required=True)
 args = parser.parse_args()
 sdk = args.sdk.resolve(strict=True)
@@ -42,11 +43,17 @@ if len(files) != len(set(files)) or not 1 <= len(files) <= 32:
 sources = {name: committed(name) for name in files}
 if sum(map(len, sources.values())) > 1024 * 1024:
     raise ValueError('Focused source fixture exceeds 1 MiB')
+if args.canonical:
+    for name, _, _ in manifest['sources']:
+        installed = sdk / 'image' / name
+        if not installed.is_file() or installed.read_bytes() != sources[name]:
+            parser.error('Canonical SDK source differs from committed input: ' + name)
 output = args.out.resolve()
 if output.exists():
     parser.error('Keep existing receipts; select a fresh --out path')
 output.parent.mkdir(parents=True, exist_ok=True)
-receipt = {'revision': revision, 'scope': 'current-source-private-namespace-preflight',
+scope = ('canonical-sdk-qualification' if args.canonical else 'current-source-private-namespace-preflight')
+receipt = {'revision': revision, 'scope': scope,
            'sdk': str(sdk), 'sdk_descriptor_sha256': hashlib.sha256(metadata_bytes).hexdigest(),
            'SDK_production_requested': False,
            'files': {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}}
@@ -64,6 +71,7 @@ with tempfile.TemporaryDirectory(prefix='projection-preflight-') as temporary:
                '--setenv=ERL_FLAGS=+S 2:2 +SDcpu 1:1 +SDio 1',
                '--setenv=BL_TEST_SOURCE_ROOT=' + str(frozen),
                '--setenv=PROJECTION_PREFLIGHT_OUTPUT=' + str(result),
+               '--setenv=PROJECTION_PREFLIGHT_MODE=' + ('canonical' if args.canonical else 'source'),
                str(sdk / 'bin/bl'), '--cold', 'run', str(frozen / manifest['driver'])]
     run = subprocess.run(command, timeout=320)
     receipt['exit'] = run.returncode
