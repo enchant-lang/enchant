@@ -85,10 +85,8 @@
   (BeamLisp.Env/assert_native_framework_execution!)
   (admission/check!)
   (let [argv (:exec spec) workspace (:workspace spec) cwd (:cwd spec)
-        limits (:limits spec) timeout (:timeout-ms limits 60000)
+        limits (:limits spec {}) timeout (:timeout-ms limits 60000)
         explicit (:deadline-ms limits) parent (:deadline-ms (Process/get :bl_admission))
-        now (System/monotonic_time :millisecond)
-        deadline (min (+ now timeout) (or explicit (+ now timeout)) (or parent (+ now timeout)))
         env (:env spec (System/get_env))
         memory (:memory-bytes limits 1073741824) output (:output-bytes limits 16777216)]
    (when-not (and (map? spec) (map? options) (map? limits)
@@ -101,6 +99,8 @@
                   (or (nil? explicit) (erlang/is_integer explicit))
                   (map? env) (every? string? (keys env)) (every? string? (vals env)))
     (refuse :invalid-command-declaration))
+   (let [now (System/monotonic_time :millisecond)
+         deadline (min (+ now timeout) (or explicit (+ now timeout)) (or parent (+ now timeout)))]
    (remaining! deadline)
    (claim/with-writer! workspace "native-command"
     (fn []
@@ -109,12 +109,13 @@
            bytes (File/read! executor)]
       (when (= :nomatch (binary/match bytes "BEAM_LISP_CUSTODY_STREAM_V1"))
        (refuse :command-stream-unavailable))
-      (let [request {:version 1 :follower (Tuple/to_list (claim/follower-context workspace))
+      (let [env (environment env)
+            request {:version 1 :follower (Tuple/to_list (claim/follower-context workspace))
                      :read_locks [] :program (first argv) :argv (vec (rest argv)) :cwd cwd
                      :limits {:timeout_ms (remaining! deadline) :memory_bytes memory :output_bytes output}}
             port (erlang/open_port
                    (tuple :spawn_executable (String/to_charlist executor))
-                   (list :binary :exit_status :use_stdio (tuple :packet 4) (tuple :env (environment env))
+                   (list :binary :exit_status :use_stdio (tuple :packet 4) (tuple :env env)
                          (tuple :args (list (String/to_charlist "--custody-stream")
                                             (String/to_charlist (json/encode request))))))]
        (try (admission/with-request nil #(consume! port options))
@@ -122,4 +123,4 @@
          (try (erlang/port_close port) (catch _ nil))
          (loop []
           (receive [seen _] :when (= seen port) (recur)
-                   (after 0 nil))))))))))))
+                   (after 0 nil)))))))))))))

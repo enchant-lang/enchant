@@ -1,0 +1,95 @@
+(ns proc.command-test
+ (:require [proc.command :as command] [proc.admission :as admission]))
+
+(defn- fixture [action]
+ (let [root (str (System/get_env "HOME") "/tmp/command-facade-" (System/system_time :nanosecond))
+       platform (str root "/platform") package (System/fetch_env! "STATION_COMMAND_EXECUTOR_PACKAGE")
+       before (System/get_env "BL_ARTIFACT_PLATFORM")]
+  (File/mkdir_p! (str platform "/bin"))
+  (File/ln_s! (str package "/bin/bl-command-executor") (str platform "/bin/bl-command-executor"))
+  (File/cp! (str package "/executor.json") (str platform "/executor.json"))
+  (try
+   (System/put_env "BL_ARTIFACT_PLATFORM" platform)
+   (action root)
+   (finally
+    (if before (System/put_env "BL_ARTIFACT_PLATFORM" before) (System/delete_env "BL_ARTIFACT_PLATFORM"))
+    (File/rm_rf! root)))))
+
+(defn- spec [root code]
+ {:exec ["/bin/sh" "-c" code "command-fixture" root] :workspace (str root "/workspace") :cwd root
+  :limits {:timeout-ms 5000 :memory-bytes 268435456 :output-bytes 65536}})
+
+(deftest argv-output-and-nonzero-result-remain-distinct
+ (fixture
+  (fn [root]
+   (let [output (atom []) states (atom [])
+         result (command/run! (spec root "printf hello; exit 7")
+                  {:on-output #(swap! output conj %) :on-state #(swap! states conj %)})]
+    (is (= :exited (:status result)))
+    (is (= 7 (:exit result)))
+    (is (= "hello" (apply str @output)))
+    (is (= true (:domain-empty result)))
+    (is (= true (:output-complete result)))
+    (is (= ["accepted"] (mapv #(get % "state") @states)))))))
+
+(deftest a-failed-output-observer-drains-accepted-work-before-rethrowing
+ (fixture
+  (fn [root]
+   (is (= :observer-failed
+        (try
+         (command/run! (spec root "printf begin; sleep 0.2; printf done >\"$1/completed\"")
+          {:on-output (fn [_] (throw (ex-info "Controlled observer failure" {:kind :observer-failed})))})
+         nil (catch error (:kind (ex-data error))))))
+   (is (= "done" (File/read! (str root "/completed")))))))
+
+(deftest cancellation-is-explicit-and-confirmed-by-the-empty-domain
+ (fixture
+  (fn [root]
+   (let [stop (atom false)
+         result (command/run! (spec root "sleep 30")
+                  {:on-state (fn [_] (reset! stop true)) :cancel? #(deref stop)})]
+    (is (= :cancelled (:status result)))
+    (is (= true (:domain-empty result)))))))
+
+(deftest expired-admission-does-not-create-a-workspace-or-a-child
+ (fixture
+  (fn [root]
+   (is (= :cancelled
+        (try
+         (admission/with-request (admission/token (erlang/self) 0)
+          #(command/run! (spec root "touch \"$1/born\"")))
+         nil (catch error (:kind (ex-data error))))))
+   (is (not (File/exists? (str root "/workspace"))))
+   (is (not (File/exists? (str root "/born")))))))
+
+(deftest request-local-env-and-explicit-env-never-revive-the-vms-old-values
+ (fixture
+  (fn [root]
+   (let [before (System/get_env "STATION_COMMAND_SCOPED")
+         original (System/get_env "STATION_COMMAND_REAL_ONLY")]
+    (try
+     (is (= "real-vm-value" (List/to_string (os/getenv (String/to_charlist "STATION_COMMAND_REAL_ONLY")))))
+     (System/put_env "STATION_COMMAND_SCOPED" "request")
+     (System/delete_env "STATION_COMMAND_REAL_ONLY")
+     (let [out (atom [])
+           declaration (spec root "printf '%s' \"$STATION_COMMAND_SCOPED:${STATION_COMMAND_REAL_ONLY-absent}\"")]
+      (is (= :exited (:status (command/run! declaration {:on-output #(swap! out conj %)}))))
+      (is (= "request:absent" (apply str @out)))
+      (reset! out [])
+      (is (= :exited (:status (command/run! (assoc declaration :env {"STATION_COMMAND_SCOPED" "explicit"})
+                                {:on-output #(swap! out conj %)}))))
+      (is (= "explicit:absent" (apply str @out))))
+     (finally
+      (if before (System/put_env "STATION_COMMAND_SCOPED" before) (System/delete_env "STATION_COMMAND_SCOPED"))
+      (if original (System/put_env "STATION_COMMAND_REAL_ONLY" original) (System/delete_env "STATION_COMMAND_REAL_ONLY"))))))))
+
+(deftest explicit-expired-budget-and-invalid-input-refuse-before-custody
+ (fixture
+  (fn [root]
+   (doseq [[limits kind] [[{:deadline-ms (dec (System/monotonic_time :millisecond))} :cancelled]
+                         [{:timeout-ms "invalid"} :invalid-command-declaration]]]
+    (is (= kind
+         (try (command/run! (assoc (spec root "touch \"$1/born\"") :limits limits))
+              nil (catch error (:kind (ex-data error)))))))
+   (is (not (File/exists? (str root "/workspace"))))
+   (is (not (File/exists? (str root "/born")))))))
