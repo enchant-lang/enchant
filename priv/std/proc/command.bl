@@ -1,0 +1,125 @@
+; Trusted host commands over the stock native domain. Filesystem custody is
+; independent of Source invocation authority; no raw command fallback exists.
+(ns proc.command
+ (:require [claim] [proc.admission :as admission] [bl.json :as json]))
+
+(defn- refuse [kind] (throw (ex-info "Native command refused" {:kind kind})))
+(defn- absolute? [value]
+ (and (string? value) (String/starts_with? value "/") (= value (Path/expand value))))
+(defn- bounded? [value maximum]
+ (and (erlang/is_integer value) (<= 1 value maximum)))
+(defn- send! [port bytes]
+ ;; A completed helper can close just before its final packet is consumed.
+ ;; Its queued terminal/exit messages remain the evidence; never replay here.
+ (try (erlang/port_command port bytes) (catch _ false)))
+(def credit (erlang/list_to_binary (list 1 0 0 0 1)))
+(def cancel (erlang/list_to_binary (list 2)))
+
+(defn- callback [action value]
+ (try (action value) nil
+  (catch error [__EXCEPTION_KIND__ error __STACKTRACE__])))
+
+(defn- result! [receipt exit]
+ (if-not (and (map? receipt) (= true (get receipt "domainEmpty"))
+                (contains? #{"exited" "timed-out" "cancelled" "signalled" "output-limit" "unknown"} (get receipt "state"))
+                (not (and (= "exited" (get receipt "state")) (= 0 (get receipt "exitCode")) (not= 0 exit))))
+  {:status :unknown :domain-empty false :observer-exit exit :category :command-outcome-unconfirmed}
+ {:status (keyword (get receipt "state")) :exit (get receipt "exitCode")
+  :signal (get receipt "signal") :unit (get receipt "unit")
+  :output-bytes (get receipt "outputBytes") :discarded-output-bytes (get receipt "discardedOutputBytes")
+  :output-complete (get receipt "outputComplete") :domain-empty true}))
+
+(defn- environment [values]
+ ;; Port env is an overlay on the VM's actual OS environment. Explicitly unset
+ ;; keys absent from the request-local snapshot instead of reviving old secrets.
+ (let [actual (map (fn [entry]
+                     (first (String/split (List/to_string entry) "=" (list (tuple :parts 2)))))
+                  (os/getenv))]
+  (to-list (map (fn [key]
+                  (tuple (String/to_charlist key)
+                    (if (contains? values key) (String/to_charlist (get values key)) false)))
+              (set (concat actual (keys values)))))))
+
+(defn- remaining! [deadline]
+ (let [remaining (- deadline (System/monotonic_time :millisecond))]
+  (when-not (pos? remaining) (refuse :cancelled)) remaining))
+
+(defn- consume! [port options]
+ (let [output! (:on-output options #(IO/binwrite :stderr %))
+       progress! (:on-state options (fn [_] nil))]
+  (send! port credit)
+  (loop [receipt nil error nil cancelled false]
+   (let [poll (if (or cancelled receipt error (nil? (:cancel? options))) [false nil]
+                (try [(boolean ((:cancel? options))) nil]
+                 (catch failure [false [__EXCEPTION_KIND__ failure __STACKTRACE__]])))
+         error (or error (second poll))
+         cancelled (if (first poll) (do (send! port cancel) true) cancelled)]
+    (receive
+     [seen [:data bytes]] :when (= seen port)
+      (let [size (erlang/byte_size bytes)]
+       (when-not (<= 1 size 8193) (refuse :invalid-command-frame))
+       (let [tag (binary/at bytes 0) payload (erlang/binary_part bytes 1 (dec size))]
+        (case tag
+         1 (let [event (json/decode payload)]
+             (recur receipt (or error (callback progress! event)) cancelled))
+         2 (let [failure (when-not error (callback output! payload))]
+             ;; A slow callback withholds the next credit from the OS writer.
+             ;; Observer failure drains accepted work before rethrowing it.
+             (send! port credit)
+             (recur receipt (or error failure) cancelled))
+         3 (recur (json/decode payload) error cancelled)
+         (refuse :invalid-command-frame))))
+     [seen [:exit_status exit]] :when (= seen port)
+      (let [result (result! receipt exit)]
+       (if error (erlang/raise (first error) (second error) (nth error 2)) result))
+     (after 100 (recur receipt error cancelled)))))))
+
+(defn run!
+ "Run a closed argv declaration under actual workspace and cgroup custody.
+  Data callbacks exert real OS backpressure. Env defaults to the current request
+  snapshot; :env supplies an exact replacement. An optional monotonic deadline
+  and inherited admission budget bound startup too. Use proc.task for an
+  independent accepted command; abandoning its result does not cancel it."
+ ([spec] (run! spec {}))
+ ([spec options]
+  (BeamLisp.Env/assert_native_framework_execution!)
+  (admission/check!)
+  (let [argv (:exec spec) workspace (:workspace spec) cwd (:cwd spec)
+        limits (:limits spec) timeout (:timeout-ms limits 60000)
+        explicit (:deadline-ms limits) parent (:deadline-ms (Process/get :bl_admission))
+        now (System/monotonic_time :millisecond)
+        deadline (min (+ now timeout) (or explicit (+ now timeout)) (or parent (+ now timeout)))
+        env (:env spec (System/get_env))
+        memory (:memory-bytes limits 1073741824) output (:output-bytes limits 16777216)]
+   (when-not (and (map? spec) (map? options) (map? limits)
+                  (every? #{:exec :workspace :cwd :limits :env} (keys spec))
+                  (every? #{:on-output :on-state :cancel?} (keys options))
+                  (every? #{:timeout-ms :deadline-ms :memory-bytes :output-bytes} (keys limits))
+                  (vector? argv) (<= 1 (count argv) 256) (every? string? argv)
+                  (absolute? (first argv)) (absolute? workspace) (absolute? cwd)
+                  (bounded? timeout 86400000) (bounded? memory 8589934592) (bounded? output 16777216)
+                  (or (nil? explicit) (erlang/is_integer explicit))
+                  (map? env) (every? string? (keys env)) (every? string? (vals env)))
+    (refuse :invalid-command-declaration))
+   (remaining! deadline)
+   (claim/with-writer! workspace "native-command"
+    (fn []
+     (admission/check!)
+     (let [executor (claim/command-executor)
+           bytes (File/read! executor)]
+      (when (= :nomatch (binary/match bytes "BEAM_LISP_CUSTODY_STREAM_V1"))
+       (refuse :command-stream-unavailable))
+      (let [request {:version 1 :follower (Tuple/to_list (claim/follower-context workspace))
+                     :read_locks [] :program (first argv) :argv (vec (rest argv)) :cwd cwd
+                     :limits {:timeout_ms (remaining! deadline) :memory_bytes memory :output_bytes output}}
+            port (erlang/open_port
+                   (tuple :spawn_executable (String/to_charlist executor))
+                   (list :binary :exit_status :use_stdio (tuple :packet 4) (tuple :env (environment env))
+                         (tuple :args (list (String/to_charlist "--custody-stream")
+                                            (String/to_charlist (json/encode request))))))]
+       (try (admission/with-request nil #(consume! port options))
+        (finally
+         (try (erlang/port_close port) (catch _ nil))
+         (loop []
+          (receive [seen _] :when (= seen port) (recur)
+                   (after 0 nil))))))))))))
