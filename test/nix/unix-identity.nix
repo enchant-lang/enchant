@@ -4,7 +4,7 @@ let
   installedSdk = if builtins.isPath sdk || builtins.isString sdk
     then builtins.storePath (toString sdk) else sdk;
   client = user: mode:
-    "su - ${user} -c '${installedSdk}/bin/bl --cold run ${./unix-identity-client.bl} -- ${mode}'";
+    "su - ${user} -c '${installedSdk}/bin/bl --cold run ${./unix-identity-client.bl} -- ${mode}' 2>&1";
 in pkgs.testers.runNixOSTest {
   name = "beam-lisp-unix-kernel-identity";
   nodes.machine = { ... }: {
