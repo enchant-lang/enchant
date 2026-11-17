@@ -163,3 +163,123 @@ replicated.
 * The `priv/boot` and `priv/host` edits trigger a toolchain rebuild on the next
   run, as usual. The integrated SDK must include `set.bl` and `transient.bl`
   together with `rt.bl`.
+
+---
+
+# Second pass (after `git merge worktree-native-speed` at `12241b695`)
+
+The second pass closed Requests 1–3 of the first pass and added the two
+native items MEASURE asked for.
+
+## Commits
+
+* `c4d733726`: canonical quoted and syntax map keys, decimals ranked with the
+  numbers in sorted collections, raw native map leaves.
+* `b07f9432c`: native struct-field fast path, inline keyword compare,
+  fixtures, and the native differential in `check-native.sh`.
+* `14f7da044`: `host_sorted_test` improper-list encodings use the new number
+  payload.
+
+## Changes
+
+1. **Quoted map literals.**
+   * `compiler.bl` `datum`, `:map` branch only: each key goes through
+     `Rt.hash_key`. LINK's `compile-call` hunks are untouched.
+   * `syntax.bl` `to-datum`, `:map` branch: the same.
+   * Result: `(get '{1.0 :x} 1)` is `:x`, `(count '{1 :a 1.0 :b})` is 1, and
+     syntax data round-trips with canonical keys.
+2. **`host/sorted.bl` `encode_key`.**
+   * Every number, of any kind, encodes as `{3, [floor | fraction-digits]}`.
+     The fraction digits are the exact decimal digits of the fractional part,
+     with no trailing zeros. A float's fraction m/2^k always has k decimal
+     digits, so Erlang's list order equals numeric order.
+   * Decimals that are not floats, such as `0.1M`, now sort among the
+     numbers: `[0 0.1M 0.1 0.25 1]`.
+   * The pinned encodings in `host_sorted_test` changed from `(tuple 3 1)`
+     to `(tuple 3 (list 1))`, plus the two improper-list rows. The documented
+     helper list gained `bits`, `fraction-digits`, `number-payload` and
+     `pow10`. No persisted format uses `encode_key`; it only orders the
+     in-memory `gb_trees`.
+3. **Native raw Erlang map leaves are exact-term again, as on BEAM.**
+   * `host-values.scm` splits each map operation into an exact-term
+     `native-raw-get/has?/assoc/remove` and a BL key path
+     (`bl-get`/`bl-assoc`/`native-map-has?`/`native-map-remove`) that
+     canonicalises the key, then calls the raw one.
+   * Raw again: the literal constructor (`bl-map`, whose keys the compiler
+     already passed through `hash_key`), `h-bmap`, `native-map-entry` and
+     `native-map-ref`.
+   * Switched to the raw operations in `host-leaves.scm`: `maps:get/2,3`,
+     `maps:find`, `maps:is_key`, `erlang:is_map_key`, `erlang:map_get`,
+     `maps:put`, `maps:remove`, `maps:without`, `maps:with`, `maps:merge`,
+     `maps:filter`, `maps:from_list`, the process dictionary, and
+     `Process.get`.
+   * Switched in `host-extra.scm`: `Map.get`, `Map.delete`, `Map.update`,
+     `Enum.group_by` and the `maps:map` helper.
+   * Tables now canonicalise in `h-table-lookup` as well, so their three
+     operations agree.
+4. **Struct fast path (MEASURE A3, about 10.9% natively).**
+   * `maps:get/2,3`, `erlang:map_get` and `is_map_key` of `:__struct__` on a
+     native set, vector or opaque struct answer from the tag. They no longer
+     build the set's member map through `native-struct-fields`.
+   * The field keys (`meta`, `items`, `members`) are interned once. Before
+     this, `native-raw-map-has?` allocated
+     `(list (bl-key …) …)`, a `string-append` plus an intern, on every call.
+   * Other fields (`:members`) still materialise, as before.
+5. **Keyword comparison.**
+   * In `bl-key-compare`, two symbols now take one `symbol->string` and one
+     first-character test per side, inline. Before, a comparison made two
+     `native-colon-symbol?` calls, each fetching the name again.
+   * The order is unchanged: names are still compared from after the colon
+     with the same UTF-16 rule, and non-keyword symbols still go through the
+     ranked path.
+   * A different representation (cached ranks) would need a layout or
+     global-table change, so this is the only part done.
+
+## Checks
+
+* **Native**: `work run --memory-high 900M --memory 1G --timeout 5400 -- bash research/native-seed/speed/keys/check-native.sh`, final run `out/native-run5.log`, exit 0.
+  * `native keys checks: 2964` (2,947 earlier). New rows:
+    * raw `maps:put`/`maps:get`/`is_key`/`is_map_key`/`maps:remove`/`maps:from_list`/`Map.get` keep `1` and `1.0` apart, and BL `get` on such a map takes the canonical key;
+    * `:__struct__` of a set or vector is answered with **zero** `native-struct-fields` calls (counted by wrapping it), while `:members` still makes exactly one.
+  * values 27, memo 27, extra and raw-leaf fixtures all at the counts `check-host.py` expects.
+  * **values differential** (`speed/values/values-diff-check.scm`, which compares the round-2 host procedures): 145,790 checks, 1,320 differing outcomes. **All of them are map storage or lookup with float or decimal keys**: 1,029 `random map *` rows, whose random keys include `-0.0`, `1.0` and decimals, and 371 `bl-map literal *` rows, each naming a float or decimal key looked up through the canonical `bl-get` in a raw literal. **Zero** differences in key order (`bl-key-compare`, `small-map-search`, `term-compare`), keywords, strings, struct modules, equality or vectors. The script fails if any other row differs.
+* **BEAM**, one batched cold run of 26 files: value_keys, the 19 files from the first pass, and the compiler/syntax literal tests (`compiler_metadata_datum`, `contextual_datum_macro`, `contextual_syntax`, `reader_literal`, `reader_number_literal`, `test_macro_literal`).
+  * The merged tree (`12241b695`) **cannot prepare an SDK**. Preboot fails at
+    `true = BeamLisp.Bootstrap.packaged_member?(BeamLisp.CompilerData)` (`scripts/check-source-floor`, "generation P fresh boot failed").
+  * I reproduced the same failure on `12241b695` with none of my pass-2
+    changes (`out/isolate.log`). It is FACTS' pending floor regeneration: their
+    RESULT says the seed table now has `Facts` and the floor must be
+    regenerated. Agents may not regenerate it.
+  * So I ran the batch on the pre-merge KEYS tree (`deb67233a`) plus exactly
+    the pass-2 `priv/` diff (`out/pass2.patch`). The 26 test files are
+    byte-identical in both trees. The working tree was restored to `HEAD`
+    afterwards.
+  * Result (`out/batch3.log`): 25 files passed. `host_sorted_test` had two
+    stale improper-list encodings, fixed in `14f7da044`. Rerun of
+    `host_sorted`, `sorted` and `value_keys` (`out/batch4.log`):
+    **3 files passed, 0 failed, all green** (170 + 93 + 3,906 assertions).
+    The other 23 files: 5,186 assertions, all passed.
+* `./bin/bl realm stop`: on the restored tree this began an SDK preparation
+  (no realm was running). I stopped that preparation, since it would fail
+  the same way.
+
+## Requests (updated)
+
+* The first pass's Requests 1–3 are closed.
+* Still open: 4 (Q3 on the JS target) and 5 (NaN in E8).
+* **New, for the main thread**: after the FACTS floor regeneration, rerun
+  `out/batch3.log`'s command on the merged tree, once. These KEYS checks
+  were not run on the merged tree.
+
+## Risks (added)
+
+* The integrated BEAM run of these changes is still pending on the floor
+  regeneration.
+* Native raw map leaves are exact-term again. The values differential's
+  `bl-map literal` rows show the boundary: a raw literal holding a float or
+  decimal key is not found by BL `get` with the equal integer. That is the
+  BEAM behaviour too, where only the BL paths canonicalise. Real BL literals
+  pass through `hash_key` first.
+* Numbers in sorted collections now encode as a list. Each comparison costs a
+  little more, and non-integral floats and decimals build a digit list (up to
+  1,074 digits for a subnormal float).
