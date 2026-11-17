@@ -1,0 +1,40 @@
+; Host-only Unix ingress. Kernel connection evidence, never payload identity.
+(ns auth.unix (:require [auth.identity :as identity]))
+(defn- refuse [kind] (throw (ex-info "Unix identity unavailable" {:kind kind})))
+(defn peer!
+ "Read Linux SO_PEERCRED from an actual connected inet-backend Unix socket.
+  PID is diagnostic; only the kernel UID is passed to the account resolver."
+ [socket]
+ (BeamLisp.Env/assert_native_framework_execution!)
+ (when-not (= (tuple :unix :linux) (os/type)) (refuse :auth/unsupported-peer-transport))
+ (let [result (try (inet/getopts socket (list (tuple :raw 1 17 12))) (catch _ nil))
+       row (when (and (tuple? result) (= :ok (elem result 0))) (first (elem result 1)))
+       bytes (when (and (tuple? row) (= 4 (tuple_size row))) (elem row 3))]
+  (when-not (and (erlang/is_binary bytes) (= 12 (erlang/byte_size bytes)))
+   (refuse :auth/kernel-peer-unavailable))
+  (let [read32 (fn [offset] (binary/decode_unsigned (binary/part bytes offset 4) (erlang/system_info :endian)))
+        pid (read32 0) uid (read32 4) gid (read32 8)]
+   (when-not (and (< 0 pid 2147483648) (< uid 4294967295) (< gid 4294967295))
+    (refuse :auth/kernel-peer-unavailable))
+   {:pid pid :uid uid :gid gid :transport :unix})))
+
+(defn with-peer!
+ "Resolve a kernel UID through host-owned current account data, then enter the
+  existing verified identity extent. Unknown accounts deny; no anonymous,
+  service-account or payload fallback exists. resolve-uid returns subject/kind;
+  roles stay with their existing provider and are checked per invocation."
+ [socket application resolve-uid action]
+ (BeamLisp.Env/assert_native_framework_execution!)
+ (when-not (and (string? application) (<= 1 (erlang/byte_size application) 128)
+                (erlang/is_function resolve-uid 1) (erlang/is_function action 0))
+  (refuse :auth/invalid-ingress))
+ (let [peer (peer! socket)]
+  (identity/without-identity
+   (fn []
+    (let [principal (resolve-uid (:uid peer))]
+     (when-not (and (map? principal) (string? (:subject principal))
+                    (<= 1 (erlang/byte_size (:subject principal)) 512)
+                    (contains? #{:person :application} (:kind principal)))
+      (refuse :auth/unauthenticated))
+     (identity/with-verified
+      (merge peer (select-keys principal [:subject :kind]) {:application application :provider :unix}) action))))))
