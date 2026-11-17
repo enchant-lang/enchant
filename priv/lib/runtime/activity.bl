@@ -5,7 +5,8 @@
 (def max-active 64)
 (def max-recent 64)
 (def ^:private ^:per-env tapes (atom {}))
-(defn- scope [] (or (Process/get :bl-vm-scope) (BeamLisp.Env/env_id)))
+(defn- scope [] (or (Process/get :runtime.activity/scope)
+                       (Process/get :bl-vm-scope) (BeamLisp.Env/env_id)))
 (defn- now [] (erlang/monotonic_time :millisecond))
 (defn- label [s] (when (string? s) (subs s 0 (min 160 (count s)))))
 
@@ -29,6 +30,18 @@
         (if (empty? readers) (dissoc all (:scope reader))
           (assoc all (:scope reader) (assoc t :readers readers)))) all)))
   nil)
+
+(defn with-reader
+  "Attribute an authorized app callback to its captured tape when an HTTP/OTP
+   callback lacks the host's VM marker. Never rebind execution/VM authority or
+   override an explicitly different realm. A foreign/closed reader is inert."
+  [reader f]
+  (let [realm (Process/get :bl-vm-scope) key (:scope reader)]
+    (if-not (and (or (nil? realm) (= realm key))
+                 (contains? (get-in @tapes [key :readers] #{}) (:lease reader))) (f)
+      (let [previous (Process/get :runtime.activity/scope)]
+        (try (Process/put :runtime.activity/scope key) (f)
+          (finally (Process/put :runtime.activity/scope previous)))))))
 
 (defn- retain [rows]
   (let [v (vec rows) n (count v)]

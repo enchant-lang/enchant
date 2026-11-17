@@ -19,12 +19,23 @@
 (defn decorate
   "Inject the small dock only for an authorized development viewer. The shadow
    DOM is portalled outside the app's patch root; the marker carries its theme."
-  [screen authorize]
-  (fn [context]
+  ([screen authorize] (decorate screen authorize nil))
+  ([screen authorize reader]
+   (fn [context]
     (if (= true (authorize (:me context)))
-      (activity/with-operation :render {:subject "Page"}
-        (fn [] [:div {:data-enchant-app ""} (screen context) (chip)]))
-      (screen context))))
+      (activity/with-reader reader
+        (fn [] (activity/with-operation :render {:subject "Page"}
+          (fn [] [:div {:data-enchant-app ""} (screen context) (chip)]))))
+      (screen context)))))
+
+(defn- instrument-intent [entry authorize reader]
+  (let [perform (if (map? entry) (:perform entry) entry)]
+    (if-not (fn? perform) entry
+      (let [wrapped (fn [conn payload me]
+                      (if (= true (authorize me))
+                        (activity/with-reader reader #(perform conn payload me))
+                        (perform conn payload me)))]
+        (if (map? entry) (assoc entry :perform wrapped) wrapped)))))
 
 (defn close! [app]
   (when-let [reader (:live/inspector app)] (activity/close! reader))
@@ -50,7 +61,8 @@
           previous (:http app)]
       (assoc app
         :live/inspector reader
-        :routes (mapv (fn [[path screen]] [path (decorate screen authorize)]) (:routes app))
+        :intents (into {} (map (fn [[op entry]] [op (instrument-intent entry authorize reader)]) (:intents app {})))
+        :routes (mapv (fn [[path screen]] [path (decorate screen authorize reader)]) (:routes app))
         :http (fn [conn path]
           (cond
             (= path "/__enchant/snapshot.json") (read-snapshot conn path)

@@ -55,3 +55,32 @@
         (finally (app/stop! served)))
       (is (= false (:available (activity/snapshot reader))))
       (app/stop! served))))
+
+(deftest authorized-callback-attribution-does-not-change-execution-realm
+  (let [previous (Process/get :bl-vm-scope)
+        mounted (try
+                  (Process/put :bl-vm-scope "inspector-host")
+                  (inspector/attach
+                    {:routes [["/" (fn [_] [:main "App"])]]
+                     :intents {:tool {:target :session :perform
+                       (fn [_ _ _] (activity/with-operation :index {} #(activity/mark! :computed)) :original)}}}
+                    (options))
+                  (finally (Process/put :bl-vm-scope previous)))
+        reader (:live/inspector mounted) perform (get-in mounted [:intents :tool :perform])]
+    (try
+      (is (= :session (get-in mounted [:intents :tool :target])))
+      (is (= :original (perform nil nil :developer)))
+      (is (= "index" (:tool (first (:recent (activity/snapshot reader))))))
+      (is (= previous (Process/get :bl-vm-scope)))
+      (is (nil? (Process/get :runtime.activity/scope)))
+      (is (= :original (perform nil nil :visitor)))
+      (is (= 1 (count (:recent (activity/snapshot reader)))))
+      (try
+        (Process/put :bl-vm-scope "different-realm")
+        (is (= :original (perform nil nil :developer)))
+        (is (= 1 (count (:recent (activity/snapshot reader)))))
+        (finally (Process/put :bl-vm-scope previous)))
+      (let [screen (second (first (:routes mounted)))]
+        (screen {:me :developer})
+        (is (= "render" (:tool (first (:recent (activity/snapshot reader))))))
+      (finally (inspector/close! mounted)))))
