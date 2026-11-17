@@ -167,7 +167,7 @@ changed.
 Before the external-call fix the same native run failed the cycle (both actors
 `[:ok [:ref 1 1]]`) and, with `contains?` on the native exception struct, the
 kill classification. A gsi trace of the memo NIF calls located the cause.
-`lazy-actors.bl` now classifies with `get`.
+`lazy-actors.bl` now classifies with `get`. (The recorded run printed the summary line as `LAZY_ACTORS 21 0`. Since then the only change is that constant, corrected to the 17 checks.)
 
 ## Commands (reproduce)
 
