@@ -1,0 +1,31 @@
+(ns data.worklist-test
+ (:require [data.worklist :as worklist] [system.analyze :as analyze] [system.footprint :as fp]))
+(deftest acyclic-evaluation-visits-each-node-once-after-its-dependencies
+ (doseq [n [16 128 2048]]
+  (let [graph (into {} (mapv (fn [i] [i (if (zero? i) #{} #{(dec i)})]) (range n)))
+        result (worklist/settle graph {} (set (keys graph)) (* 14 n)
+                 (fn [i state] (if (zero? i) 1 (inc (get state (dec i))))))]
+   (is (:converged? result))
+   (is (= n (:evaluations result)))
+   (is (= n (get-in result [:values (dec n)])))
+   (is (every? #(= 1 %) (vals (:visits result)))))))
+(deftest cyclic-work-cannot-exceed-its-evaluation-ceiling
+ (let [r (worklist/settle {:a #{:b} :b #{:a}} {} #{:a :b} 9
+           (fn [n state] (inc (get state (if (= n :a) :b :a) 0))))]
+  (is (= false (:converged? r)))
+  (is (= 9 (:evaluations r)))))
+(deftest unchanged-clean-nodes-never-run
+ (let [calls (atom []) r (worklist/settle {:a #{} :b #{:a}} {:a 1 :b 2} #{} 0
+                        (fn [n _] (swap! calls conj n) :bad))]
+  (is (:converged? r)) (is (= [] @calls)) (is (= {:a 1 :b 2} (:values r)))))
+(deftest long-source-chains-propagate-effects-in-one-summary-per-definition
+ (let [n 32 src (str "(defn f0 [x] (File/read x))\n"
+                    (apply str (mapv (fn [i] (str "(defn f" i " [x] (f" (dec i) " x))\n")) (range 1 n))))
+       program (analyze/prepare-program src)
+       result (analyze/analyze-prepared program {} (set (keys (:bodies program))))]
+  (is (:converged? result))
+  (is (= (count (:bodies program)) (:summaries-evaluated result)))
+  (is (seq (get-in result [:summaries "f0" :footprint])))
+  (is (= (get-in result [:summaries "f0" :footprint])
+         (get-in result [:summaries "f31" :footprint])))
+  (is (not (contains? (get-in result [:summaries "f31" :footprint]) fp/opaque-world)))))

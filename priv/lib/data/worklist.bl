@@ -1,0 +1,39 @@
+;; Dependency-first bounded fixed points. Evaluation stays in the caller.
+(ns data.worklist)
+(defn plan [graph]
+ (let [nodes (set (keys graph))
+       deps (into {} (map (fn [[n ds]] [n (set (filter nodes ds))]) graph))
+       reverse (reduce (fn [m [n ds]] (reduce (fn [m d] (update m d (fn [xs] (conj (or xs #{}) n)))) m ds)) {} deps)
+       counts (into {} (map (fn [[n ds]] [n (count ds)]) deps))
+       ready (reduce (fn [q n] (if (zero? (get counts n)) (queue/in n q) q)) (queue/new) (sort nodes))]
+  (loop [q ready incoming counts order [] seen #{}]
+   (if (queue/is_empty q)
+    {:order (into order (sort (remove seen nodes))) :dependents reverse
+     :acyclic (count order) :edges (reduce + 0 (map count (vals deps)))}
+    (let [[entry tail] (queue/out q) n (elem entry 1)
+          after (reduce (fn [[q cs] caller]
+                   (let [left (dec (get cs caller))]
+                    [(if (zero? left) (queue/in caller q) q) (assoc cs caller left)]))
+                  [tail incoming] (get reverse n #{}))]
+     (recur (get after 0) (get after 1) (conj order n) (conj seen n)))))))
+(defn settle
+ "Evaluate active nodes after their dependencies. Only changed values wake
+  dependents; duplicate pending work coalesces. A fixed evaluation ceiling
+  bounds cycles. An unfinished queue is explicit nonconvergence, never proof."
+ [graph initial active ceiling evaluate]
+ (let [p (plan graph) active (set active)
+       order (filterv active (:order p))]
+  (loop [q (queue/from_list (to-list order)) queued (set order) values initial visits {} n 0]
+   (cond
+    (queue/is_empty q) {:values values :converged? true :evaluations n :visits visits}
+    (>= n ceiling) {:values values :converged? false :evaluations n :visits visits}
+    :else
+     (let [[entry tail] (queue/out q) node (elem entry 1) queued (disj queued node)
+           value (evaluate node values) changed (not= value (get values node ::missing))
+           next (if changed
+                  (reduce (fn [[q pending] caller]
+                    (if (or (not (contains? active caller)) (contains? pending caller)) [q pending]
+                     [(queue/in caller q) (conj pending caller)]))
+                   [tail queued] (get-in p [:dependents node] #{})) [tail queued])]
+      (recur (get next 0) (get next 1) (assoc values node value)
+             (update visits node (fn [v] (inc (or v 0)))) (inc n)))))))
