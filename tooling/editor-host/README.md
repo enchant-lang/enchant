@@ -163,6 +163,9 @@ Parameterized declarative command buttons open the shared parameter surface.
 It reads the current bookmarked command query, including current defaults and
 workflow choices. Empty/invalid numbers refuse preview, cancel the old preview
 and keep Apply disabled; an empty input is never interpreted as zero.
+Command policies may return contextual `:params` presentation. They cannot
+enable a command disabled by the base query; registered function validation and
+the final writer continue admitting the actual operation.
 
 An application may return a correctable validation refusal only after durably
 retiring the exact refused proposal. The reply carries `:correctable true`, its
