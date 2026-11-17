@@ -1,0 +1,63 @@
+(ns auth.query-test
+ (:require [auth.interface :as namespace] [auth.identity :as identity] [auth.logic :as logic]
+           [datom :as d]))
+(def source "(ns ^{:auth {:version 1
+ :exports {find-in {:roles #{:viewer} :resource {:arg 0} :effects {:read #{:messages}}}}
+ :grants {\"native-client\" #{find-in}}}}
+ native.lookup (:require [auth.resource :as resource]))
+ (defn find-in [project query] (resource/query :messages query))")
+(def actor {:subject "person:alice" :application "native-client" :kind :person})
+(defn- failure [action] (try (action) nil (catch error (ex-data error))))
+
+(deftest native-query-data-uses-the-existing-checked-read-budget
+ (let [db (d/connect [{:db/ident :message/id :db/valueType :db.type/string :db/unique :db.unique/identity}
+                      {:db/ident :message/project :db/valueType :db.type/string}
+                      {:db/ident :message/body :db/valueType :db.type/string}])
+       _ (d/transact! db [{:db/id -1 :message/id "m1" :message/project "project-a" :message/body "Native read"}
+                          {:db/id -2 :message/id "private" :message/project "project-b" :message/body "Private"}])
+       calls (atom []) roles (atom #{:viewer}) opaque (atom false)
+       p (namespace/open {:source source :world "query-test"
+          :roles (fn [_ resource] (if (= "project-a" resource) @roles #{}))
+          :queries {:messages (fn [principal resource query]
+                                (swap! calls conj [(:subject principal) resource query])
+                                (when-not (and (map? query) (= #{:message/id} (set (keys query)))
+                                                (string? (:message/id query)))
+                                 (throw (ex-info "Invalid query" {:kind :auth/malformed})))
+                                (let [eid (first (first (d/q '[:find ?e :in $ ?id :where [?e :message/id ?id]]
+                                                         (d/db db) (:message/id query))))
+                                      row (when eid (d/entity (d/db db) eid))]
+                                 (when-not (= resource (:message/project row))
+                                  (throw (ex-info "Unavailable" {:kind :auth/denied})))
+                                 (if @opaque (fn [] :private) (select-keys row [:message/id :message/body]))))}})]
+  (try
+   (is (= :read (get-in p [:prepared :exports "find-in" :classification])))
+   (is (= #{:messages} (get-in p [:prepared :exports "find-in" :ports :read])))
+   (is (= :auth/unauthenticated (:kind (failure #(namespace/invoke! p "find-in" ["project-a" {:message/id "m1"}])))))
+   (is (empty? @calls))
+   (identity/with-verified actor
+    (fn []
+     (is (= {:message/id "m1" :message/body "Native read"}
+          (namespace/invoke! p "find-in" ["project-a" {:message/id "m1"}])))
+     (is (= [["person:alice" "project-a" {:message/id "m1"}]] @calls))
+     (is (= :auth/denied (:kind (failure #(namespace/invoke! p "find-in" ["project-a" {:message/id "private"}])))))
+     (is (= :auth/malformed (:kind (failure #(namespace/invoke! p "find-in" ["project-a" {:raw-query '(all-data)}])))))
+     (let [count-before (count @calls)]
+      (is (some? (failure #(namespace/invoke! p "find-in" ["project-a" {:message/id (fn [] :opaque)}]))))
+      (is (some? (failure #(namespace/invoke! p "find-in" ["project-a" {:message/id (String/duplicate "x" 65537)}]))))
+      (is (= count-before (count @calls))))
+     (reset! opaque true)
+     (is (some? (failure #(namespace/invoke! p "find-in" ["project-a" {:message/id "m1"}]))))
+     (reset! opaque false)
+     (let [count-before (count @calls)]
+      (reset! roles #{})
+      (is (= :auth/denied (:kind (failure #(namespace/invoke! p "find-in" ["project-a" {:message/id "m1"}])))))
+      (is (= count-before (count @calls))))))
+   (identity/with-verified (assoc actor :rights #{})
+    #(is (= :auth/denied (:kind (failure (fn [] (namespace/invoke! p "find-in" ["project-a" {:message/id "m1"}])))))))
+   (finally (namespace/close! p) (d/close! db)))))
+
+(deftest query-intrinsics-cannot-escape-the-declared-effect-surface
+ (is (= :unsupported (:status (logic/prepare (String/replace source ":effects {:read #{:messages}}" ":effects :pure")))))
+ (doseq [call ["(resource/query :messages)" "(resource/query :messages query query)" "(resource/query query query)"]]
+  (is (= :unbounded-resource-port
+       (:reason (failure #(logic/prepare (String/replace source "(resource/query :messages query)" call))))))))
