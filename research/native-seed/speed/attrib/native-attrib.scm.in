@@ -1,0 +1,299 @@
+;; A3 attribution observer for the round-2 stage-1 image. Starts no VM of its
+;; own: it is the --eval Scheme payload of ONE stage1 process. Read -> compile
+;; -> emit one real closure namespace (reader.bl) through the image's compiled
+;; reader, compiler and emitter, exactly as native.bootstrap/prepare and
+;; native.eval/context do, then:
+;;   pass 1  sampling profile (heartbeat interrupt, no wrappers), REPS rounds;
+;;   pass 2  exact counts: every linked BL slot, every host leaf and every
+;;           host procedure is wrapped by a counting closure (one round).
+;; Counting perturbs execution; only pass 1 gives shares, only pass 2 counts.
+(define A-source-path @SOURCE@)
+(define A-bundle-path @BUNDLE@)
+(define A-targets-path @TARGETS@)
+(define A-out @OUT@)
+(define A-reps @REPS@)
+(define A-ns "reader")
+(define A-attribution "priv/boot/reader.bl")
+
+(define (A-select ns name) (native-global-exact ns name))
+(define (A-call f . xs) (bl-invoke f xs))
+(define A-read-string (A-select "reader" "read-string"))
+(define A-compile (A-select "compiler" "compile"))
+(define A-new-env (A-select "compiler" "new-env"))
+(define A-reset (A-select "compiler" "reset-fresh!"))
+(define A-decl (A-select "compiler" "declaration-source"))
+(define A-meta-node (A-select "reader-node" "meta-node"))
+(define A-node-pos (A-select "reader-node" "node-pos"))
+(define A-head (A-select "native.eval" "head-symbol"))
+(define A-context (A-select "native.eval" "context"))
+(define A-eval-form (A-select "native.eval" "eval-form"))
+(define A-emit (A-select "native.scheme" "emit"))
+
+(define (A-log . xs) (for-each display xs) (newline) (force-output))
+
+;; ---- the fixture: identical steps to attrib/beam-attrib.bl ---------------
+(define A-source (native-read-file A-source-path))
+(define (A-read) (A-call A-read-string A-source A-attribution))
+(define (A-env) (bl-assoc (bl-assoc (A-call A-new-env A-ns) (bl-key "target") (bl-key "js"))
+                          (bl-key "file") A-attribution))
+(define (A-definition? form)
+ (let ((head (A-call A-head form)))
+  (and (string? head) (or (string=? head "defn") (string=? head "defn-") (string=? head "def")))))
+(define (A-compile-one form)
+ ;; native.bootstrap/definition-values + prepare, without Env side effects.
+ (let* ((decl (A-call A-decl form (bl-assoc (A-call A-new-env A-ns) (bl-key "file") A-attribution)))
+        (value (bl-get decl (bl-key "value-form")))
+        (pos (A-call A-node-pos form))
+        (value (if (bl-truthy pos) (A-call A-meta-node value pos) value)))
+  (A-call A-reset)
+  (A-call A-compile value (A-env))))
+(define (A-compile-forms forms)
+ (let loop ((xs (cdr forms)) (out '()))
+  (if (null? xs) (reverse out)
+   (loop (cdr xs) (if (A-definition? (car xs)) (cons (A-compile-one (car xs)) out) out)))))
+(define A-emit-failures 0)
+(define (A-emit-nodes nodes)
+ (let ((ctx (A-call A-context A-ns)))
+  (map (lambda (node)
+        (with-exception-catcher
+         (lambda (e) (set! A-emit-failures (+ A-emit-failures 1)) ";; emit-failed")
+         (lambda () (A-call A-emit node ctx)))) nodes)))
+(define (A-join texts)
+ (call-with-output-string ""
+  (lambda (port)
+   (let loop ((xs texts) (first #t))
+    (if (pair? xs)
+     (begin (if (not first) (newline port)) (display (car xs) port) (loop (cdr xs) #f)))))))
+
+;; ---- pass 1: sampling ----------------------------------------------------
+(define A-phase 'idle)
+(define A-self (make-table test: equal?))
+(define A-owner (make-table test: equal?))
+(define A-incl (make-table test: equal?))
+(define A-samples (make-table test: eq?))
+(define A-depth-limit 512)
+(define A-in-handler #f)
+(define A-code-label (make-table test: eq?))
+(define (A-code p) (if (##closure? p) (##closure-code p) p))
+(define (A-bump! table key) (table-set! table key (+ 1 (table-ref table key 0))))
+(define (A-frame-name k)
+ ;; A compiled BL definition is an unnamed lambda inside its unit's top level,
+ ;; so Gambit's creator for its frames is the unit itself ("unit_<hash>#").
+ ;; Then the frame's return point identifies the code: its subprocedure id
+ ;; within the unit. analyze.py maps ids to the enclosing definition with the
+ ;; CODE rows (entry id of every linked definition). Named host procedures
+ ;; keep their own names.
+ (let ((c (##continuation-creator k)))
+  (if (not c) "none"
+   (let ((n (##procedure-name c)))
+    (cond ((not n) "anonymous")
+          ((symbol? n)
+           (let ((s (symbol->string n)))
+            (if (and (> (string-length s) 0) (char=? #\# (string-ref s (- (string-length s) 1))))
+             (let ((ret (##continuation-ret k)))
+              (string-append "sub:" s ":" (number->string (##subprocedure-id ret))))
+             s)))
+          (else "anonymous"))))))
+(define (A-skip-frame? n)
+ (or (member n '("A-heartbeat!" "A-sample!" "##interrupt-handler" "##thread-heartbeat!" "none" "anonymous"))
+     (and (> (string-length n) 8) (string=? (substring n 0 8) "##interp"))))
+(define (A-bl? n) (and (> (string-length n) 3) (string=? (substring n 0 3) "bl:")))
+(define A-stacks (make-table test: equal?))
+(define (A-sample! cont)
+ ;; cont's first frames are the handler and Gambit's interrupt dispatch. The
+ ;; rest of the stack (innermost first, at most A-depth-limit frames) is kept
+ ;; as one key; analyze.py derives self, inclusive and owner shares from it.
+ (let skip ((k cont) (guard 0))
+  (if (and k (< guard 8))
+   (let ((n (A-frame-name k)))
+    (if (A-skip-frame? n)
+     (skip (##continuation-next k) (+ guard 1))
+     (begin
+      (A-bump! A-samples A-phase)
+      (A-bump! A-self (cons A-phase n))
+      (let walk ((k k) (d 0) (names '()))
+       (if (and k (< d A-depth-limit))
+        (walk (##continuation-next k) (+ d 1) (cons (A-frame-name k) names))
+        (A-bump! A-stacks (cons A-phase (reverse names)))))))))))
+(define (A-print-stacks)
+ (table-for-each
+  (lambda (key count)
+   (display "STACK\t") (display (car key)) (display "\t") (write count)
+   (for-each (lambda (n) (display "\t") (display n)) (cdr key)) (newline)) A-stacks))
+(define (A-label-codes! targets)
+ ;; Entry procedures of every linked arity slot and host procedure.
+ (for-each
+  (lambda (row)
+   (let* ((kind (car row)) (sym (cadr row)) (label (caddr row)) (value (A-global-ref sym)))
+    (if (procedure? value)
+     (let ((code (A-code value))
+           (name (if (string=? kind "slot")
+                  (let loop ((i (- (string-length label) 1)))
+                   (if (char=? (string-ref label i) #\/) (string-append "bl:" (substring label 0 i)) (loop (- i 1))))
+                  label)))
+      (if (not (table-ref A-code-label code #f))
+       (begin
+        (table-set! A-code-label code name)
+        (let ((pn (##procedure-name (##subprocedure-parent code))))
+         (if (and (string=? kind "slot") (symbol? pn))
+          (begin (display "CODE\t") (display name) (display "\t") (display pn)
+                 (display ":") (display (##subprocedure-id code)) (newline))))))))))
+  targets)
+ (force-output))
+(define (A-heartbeat!)
+ (if (and (not A-in-handler) (not (eq? A-phase 'idle)))
+  (begin (set! A-in-handler #t) (##continuation-capture A-sample!) (set! A-in-handler #f)))
+ (##thread-heartbeat!))
+(define (A-print-table tag table)
+ (table-for-each
+  (lambda (key count)
+   (display tag) (display "\t") (display (car key)) (display "\t") (write (cdr key))
+   (display "\t") (write count) (newline)) table))
+(define (A-repeat n thunk) (if (> n 0) (begin (thunk) (A-repeat (- n 1) thunk))))
+
+;; ---- pass 2: counting wrappers -------------------------------------------
+(define A-counting? #f)
+(define A-labels (make-vector 20000 #f))
+(define A-calls (make-vector 20000 0))
+(define A-next 0)
+(define A-current -1)
+(define A-edges (make-table))
+(define A-label-of (make-table test: eq?))
+(define (A-copy-registration! orig w)
+ (let ((a (table-ref native-callable-arities orig #f)))
+  (if a (table-set! native-callable-arities w a)))
+ (if (table-ref native-host-callables orig #f) (table-set! native-host-callables w #t)))
+(define (A-wrap label orig)
+ (let ((i A-next))
+  (set! A-next (+ i 1))
+  (vector-set! A-labels i label)
+  (let ((w (lambda args
+            (if A-counting?
+             (let ((caller A-current))
+              (vector-set! A-calls i (+ 1 (vector-ref A-calls i)))
+              (let ((key (+ (* (+ caller 1) 32768) i)))
+               (table-set! A-edges key (+ 1 (table-ref A-edges key 0))))
+              (set! A-current i)
+              (let ((r (apply orig args)))
+               (set! A-current caller) r))
+             (apply orig args)))))
+   (A-copy-registration! orig w)
+   (if (not (table-ref A-label-of orig #f)) (table-set! A-label-of orig label))
+   w)))
+(define A-skip-host
+ ;; The observer's own plumbing, the wrapper's registration tables and Gambit
+ ;; control transfer stay unwrapped.
+ '(bl-register-callable! native-mark-host-callable! h-run-turn h-park h-make-frames
+   native-main native-command-line native-eval-string native-read-file native-write-file))
+(define (A-global-set! sym value) (##global-var-set! (##make-global-var sym) value))
+(define (A-global-ref sym) (##global-var-ref (##make-global-var sym)))
+(define (A-install-wrappers! targets)
+ ;; targets: (("slot" sym "ns/name/arity") ... ("host" sym "name") ...)
+ (for-each
+  (lambda (row)
+   (let* ((kind (car row)) (sym (cadr row)) (label (caddr row)) (value (A-global-ref sym)))
+    (if (and (procedure? value) (not (memq sym A-skip-host)))
+     (A-global-set! sym (A-wrap (string-append kind ":" label) value)))))
+  targets)
+ (for-each
+  (lambda (row)
+   (let* ((key (bl-nth row 0)) (sym (string->symbol (native-leaf-binding-name key)))
+          (value (A-global-ref sym)))
+    (if (procedure? value) (A-global-set! sym (A-wrap (string-append "leaf:" key) value)))))
+  (native-map-pairs native-leaf-registry)))
+;; Calibration of sampled return points: every compiled BL lambda calls
+;; (h-tick) first, non-tail. The continuation of h-tick is therefore a return
+;; point inside the calling lambda; while counting, A-current names the linked
+;; slot whose wrapper entered it. CALIB rows join return-point ids to names.
+(define A-calib (make-table test: equal?))
+(define (A-calib! k)
+ (if A-counting?
+  (let ((c (##continuation-creator k)))
+   (if c
+    (let ((n (##procedure-name c)))
+     (if (symbol? n)
+      (let ((s (symbol->string n)))
+       (if (and (> (string-length s) 0) (char=? #\# (string-ref s (- (string-length s) 1))))
+        (A-bump! A-calib
+         (cons (string-append "sub:" s ":" (number->string (##subprocedure-id (##continuation-ret k))))
+               (if (>= A-current 0) (vector-ref A-labels A-current) "root")))))))))))
+(define (A-install-calibration!)
+ (let ((tick (A-global-ref 'h-tick)))
+  (A-global-set! 'h-tick
+   (lambda () (##continuation-capture (lambda (k) (A-calib! k) (tick)))))))
+(define (A-print-calib)
+ (table-for-each
+  (lambda (key count)
+   (display "CALIB\t") (display (car key)) (display "\t") (display (cdr key))
+   (display "\t") (write count) (newline)) A-calib)
+ (force-output))
+(define (A-print-counts phase)
+ (let loop ((i 0))
+  (if (< i A-next)
+   (begin
+    (if (> (vector-ref A-calls i) 0)
+     (begin (display "COUNT\t") (display phase) (display "\t") (display (vector-ref A-labels i))
+            (display "\t") (write (vector-ref A-calls i)) (newline)))
+    (loop (+ i 1)))))
+ (table-for-each
+  (lambda (key count)
+   (let ((caller (- (quotient key 32768) 1)) (callee (remainder key 32768)))
+    (display "EDGE\t") (display phase) (display "\t")
+    (display (if (< caller 0) "root" (vector-ref A-labels caller)))
+    (display "\t") (display (vector-ref A-labels callee)) (display "\t") (write count) (newline)))
+  A-edges)
+ (force-output))
+(define (A-reset-counts!)
+ (set! A-calls (make-vector 20000 0)) (set! A-edges (make-table)) (set! A-current -1))
+(define (A-counted phase thunk)
+ (A-reset-counts!)
+ (set! A-counting? #t)
+ (let ((r (thunk)))
+  (set! A-counting? #f)
+  (A-print-counts phase) r))
+
+(define A-targets '())
+(define (A-no-eval . arguments) (error "authored Scheme evaluation during attribution"))
+(define (A-run)
+ (let ((bundle (native-eval-string (native-read-file A-bundle-path))))
+  (A-call (A-select "native.bootstrap" "install-source-macros!") bundle))
+ (let ((forms (A-read)))
+  (A-call A-eval-form (car forms))
+  (let* ((nodes (A-compile-forms forms)) (texts (A-emit-nodes nodes)) (text (A-join texts)))
+   (native-write-file (string-append A-out "/native.scm") text)
+   (A-log "A3_FIXTURE forms " (length forms) " definitions " (length nodes)
+          " emit-failures " A-emit-failures " chars " (string-length text))
+   (set! A-targets (native-eval-string (native-read-file A-targets-path)))
+   (A-label-codes! A-targets)
+   ;; After the fixture is set up, any authored-Scheme eval is a fault.
+   (set! native-eval-string A-no-eval)
+   (set! native-leaf-registry (bl-assoc native-leaf-registry "host/eval-scheme/1" A-no-eval))
+   (A-log "A3_SETUP_DONE " (real-time))
+   ;; pass 1
+   (##interrupt-vector-set! 2 A-heartbeat!)
+   (##set-heartbeat-interval! @INTERVAL@)
+   (A-repeat A-reps (lambda ()
+    (set! A-phase 'read) (A-read)
+    (set! A-phase 'compile) (A-compile-forms forms)
+    (set! A-phase 'emit) (A-emit-nodes nodes)
+    (set! A-phase 'idle)
+    (A-log "A3_ROUND " (real-time))))
+   (##interrupt-vector-set! 2 ##thread-heartbeat!)
+   (A-print-table "SAMPLES" (let ((t (make-table test: equal?)))
+                             (table-for-each (lambda (k v) (table-set! t (cons k 'all) v)) A-samples) t))
+   (A-print-table "SELF" A-self)
+   (A-print-stacks)
+   (force-output)
+   ;; pass 2
+   (A-install-wrappers! A-targets)
+   (A-install-calibration!)
+   (A-log "A3_WRAPPED " A-next)
+   (let* ((forms2 (A-counted "read" A-read))
+          (nodes2 (A-counted "compile" (lambda () (A-compile-forms forms2))))
+          (texts2 (A-counted "emit" (lambda () (A-emit-nodes nodes2)))))
+    (native-write-file (string-append A-out "/native-counted.scm") (A-join texts2)))
+   (A-print-calib)
+   (A-log "A3_DONE"))))
+(with-exception-catcher
+ (lambda (failure) (display-exception failure) (newline) (force-output) (exit 1))
+ (lambda () (A-run) (exit 0)))
