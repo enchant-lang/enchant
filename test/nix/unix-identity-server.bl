@@ -9,21 +9,28 @@
       resolver (fn [uid] (case uid 1000 {:subject "person:alice" :kind :person}
                                   1001 {:subject "person:bob" :kind :person} nil))]
  (try
+  (let [started (System/monotonic_time :millisecond)]
+   (identity/without-identity (fn [] nil))
+   (IO/puts :stderr (json/encode {"stage" "identity-prepared" "elapsedMs" (- (System/monotonic_time :millisecond) started)})))
   (File/chmod! path 432)
   (File/write! "/run/peercheck/ready" "ready")
   (dotimes [_ 3]
    (let [accepted (gen_tcp/accept listener 60000)
          _ (when-not (= :ok (elem accepted 0)) (throw (ex-info "Identity fixture accept expired" {})))
-         socket (elem accepted 1)]
+         socket (elem accepted 1) started (System/monotonic_time :millisecond)]
     (try
+     (IO/puts :stderr (json/encode {"stage" "accepted"}))
      (let [request (gen_tcp/recv socket 0 3000)
            _ (when-not (= :ok (elem request 0)) (throw (ex-info "Identity fixture frame missing" {})))
            reply (try
-                  (unix/with-peer! socket "messages" resolver
+                  (do
+                   (IO/puts :stderr (json/encode {"stage" "frame-received"}))
+                   (unix/with-peer! socket "messages" resolver
                    (fn [] (let [principal (identity/current)]
                             {"ok" true "uid" (:uid principal) "subject" (:subject principal)
-                             "application" (:application principal)})))
+                             "application" (:application principal)}))))
                   (catch _ {"ok" false}))]
+      (IO/puts :stderr (json/encode {"stage" "identity-resolved" "elapsedMs" (- (System/monotonic_time :millisecond) started)}))
       (gen_tcp/send socket (json/encode reply))
       (when (identity/current) (throw (ex-info "Identity leaked outside request" {}))))
      (finally (gen_tcp/close socket)))))
