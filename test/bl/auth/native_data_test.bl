@@ -14,7 +14,7 @@
              {:db/ident :message/priority :db/valueType :db.type/decimal}
              {:db/ident :message/owner :db/valueType :db.type/string}
              {:db/ident :message/tag :db/valueType :db.type/keyword :db/cardinality :db.cardinality/many}])
-       roles (atom #{:operator}) effects (atom 0) opaque-reader (atom false)
+       roles (atom #{:operator}) effects (atom 0) received (atom nil) opaque-reader (atom false)
        read-row (fn [] (pull/pull (conn/db db) '[*] [:message/id "m1"]))
        provider (namespace/open
                  {:source source :world "native/messages"
@@ -23,7 +23,10 @@
                   :readers {:catalog (fn [_ _] (if @opaque-reader (fn [] :opaque) (read-row)))}
                   :effects {:counter (fn [principal _ value]
                                        (swap! effects inc)
-                                       (conn/transact! db [(assoc value :db/id -1 :message/owner (:subject principal))])
+                                       (reset! received value)
+                                       (conn/transact! db [(-> value
+                                         (assoc :db/id -1 :message/owner (:subject principal))
+                                         (update :message/tag vec))])
                                        (read-row))}})
        consumer (env/fork)
        input {:message/id "m1" :message/body "native" :message/priority 0.75M
@@ -42,6 +45,7 @@
         (is (= 0.75M (:message/priority result)))
         (is (= #{:urgent :work} (set (:message/tag result))))
         (is (= result (write "work" input)))
+        (is (= input @received))
         (is (= result (read "work")))
         (is (= result (namespace/invoke! provider "services-in" ["work"])))
         (is (refused? #(wire/encode result wire/MAX-RESPONSE)))
