@@ -5,24 +5,33 @@
   (let [calls (mapv :call (filterv #(and (<= (:from %) from) (<= to (:to %))) (:marks block)))
         source [:span {:data-edit-from from :data-edit-to to} (d/slice (:text block) from to)]]
     (reduce (fn [body call] [:span {:data-edit-call (:id call)} (r/present registry call "inline" body)]) source (reverse calls))))
-(defn inline [extensions block]
-  (let [ends (vec (sort (set (into [0 (d/length (:text block))] (mapcat (fn [m] [(:from m) (:to m)]) (:marks block))))))]
-    (if (zero? (d/length (:text block))) [[:br {:data-edit-placeholder true}]]
+(defn inline-range [extensions block from to]
+  (when-not (and (int? from) (int? to) (<= 0 from to (d/length (:text block))))
+    (r/fail "invalid-projected-text-range"))
+  (let [ends (vec (sort (set (into [from to] (filter #(< from % to) (mapcat (fn [m] [(:from m) (:to m)]) (:marks block)))))))]
+    (if (= from to) [[:br {:data-edit-placeholder true}]]
       (mapv #(run-view (:functions extensions) block (nth ends %) (nth ends (inc %))) (range (dec (count ends)))))))
+(defn inline [extensions block] (inline-range extensions block 0 (d/length (:text block))))
 (defn slot [name] [:div {:class "ed-children" :data-edit-children name}])
 (defn- slots [extensions b]
   (let [spec (get-in extensions [:blocks (:type b)])]
     (mapv slot (get spec :slots ["body"]))))
-(defn- text-view [extensions b tag]
-  (into [tag {:class "ed-text" :data-edit-text (:id b) :dir "auto" :data-placeholder "Write something…"}]
-        (inline extensions b)))
+(defn- text-view [extensions b tag context]
+  (let [provider (get-in extensions [:blocks (:type b) :text-range])
+        field (when provider (provider b context))
+        from (get field :from 0) to (get field :to (d/length (:text b)))
+        attrs (cond-> {:class "ed-text" :data-edit-text (:id b) :dir "auto" :data-placeholder "Write something…"}
+                field (assoc :data-edit-start from :data-edit-tail (- (d/length (:text b)) to))
+                (:isolated field) (assoc :contenteditable "true" :data-edit-isolated true :tabindex 0)
+                (:label field) (assoc :aria-label (:label field)))]
+    (into [tag attrs] (inline-range extensions b from to))))
 (defn- safe-url [s]
   (when (and (string? s) (re-find #"^(https?://|/|#)" s)) s))
 (defn node [extensions b & [context]]
   (let [id (:id b) type (get b :type "paragraph") attrs (:attrs b)
         spec (get-in extensions [:blocks type])
         text (text-view extensions b
-               (if (= "heading" type) (get {1 :h1 2 :h2 3 :h3} (:level attrs) :h2) :p))
+               (if (= "heading" type) (get {1 :h1 2 :h2 3 :h3} (:level attrs) :h2) :p) context)
         content
         (cond
           (:render spec) ((:render spec) b (merge context {:text text :slots (into {} (map (fn [name] [name (slot name)]) (:slots spec)))}))

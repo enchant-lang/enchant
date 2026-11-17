@@ -8,6 +8,26 @@
 (def initial (sync/authority registry document))
 (defn projection [state] (view/editor registry state [:intent :edit] 0 nil))
 
+(deftest bounded-text-fields-preserve-model-positions-and-inline-functions
+ (let [b (assoc (doc/block "heading" "heading" "TODO 🌱 title :work:" {:level 2})
+               :marks [{:call {:id "bold-title" :function "text/bold" :version 1 :args {}} :from 7 :to 12}])
+       ext (extensions/build [standard/package {:name "title-field" :provides
+              {:editor/blocks {"heading" {:label "Heading" :slots ["body"]
+                :text-range (fn [_ _] {:from 5 :to 12 :isolated true :label "Heading title"})}}}}])
+       html (h/hiccup->html (tree/node ext b))
+       empty-html (h/hiccup->html (into [:div] (tree/inline-range ext b 5 5)))
+       invalid (assoc-in ext [:blocks "heading" :text-range] (fn [_ _] {:from 12 :to 5}))]
+  (is (includes? html "data-edit-start=\"5\""))
+  (is (includes? html "data-edit-tail=\"7\""))
+  (is (includes? html "aria-label=\"Heading title\""))
+  (is (includes? html "data-edit-from=\"7\""))
+  (is (includes? html "data-edit-call=\"bold-title\""))
+  (is (includes? html "🌱 "))
+  (is (not (includes? html "TODO")))
+  (is (not (includes? html ":work:")))
+  (is (includes? empty-html "data-edit-placeholder"))
+  (is (thrown? (tree/node invalid b)))))
+
 (deftest semantic-region-serialization-and-reference-equivalence
   (let [before (projection initial)
         changed (:state (sync/decide registry initial {:id "a1" :basis 0 :digest (:digest initial)

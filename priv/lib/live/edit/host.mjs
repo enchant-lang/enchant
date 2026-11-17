@@ -2,7 +2,7 @@ export {mountFormRecovery} from './form-recovery.mjs';
 import {waitForSettlement,settlementError} from './settlement.mjs';
 export {mountSourceInput} from './source-input.mjs';
 // Owned DOM/input adapter. Semantic policy and persistent session state are BL.
-import {Geometry,codepoints,nativeReplacement} from './geometry.mjs';
+import {Geometry,codepoints,nativeFieldReplacement} from './geometry.mjs';
 import {CodeAdapter} from './code.mjs';
 import {projectionParts} from './projection-parts.mjs';
 import {DraftStore} from './drafts.mjs';
@@ -176,6 +176,7 @@ export class Editor {
     this.root.dataset.editPending=String(this.state.pending);this.root.dataset.editConflict=String(this.state.conflicts.length);
     this.root.dataset.editRevision=String(this.state.revision);this.root.dataset.editNotice=this.message?'1':'0';this.canvas.setAttribute('aria-readonly',String(!!conflict||!!this.model.readonly));
     this.canvas.contentEditable=String(!conflict&&!this.model.readonly);
+    for(const field of this.canvas.querySelectorAll('[data-edit-isolated]'))field.contentEditable=String(!conflict&&!this.model.readonly);
     for(const code of this.code.values())code.setReadonly(!!conflict||!!this.model.readonly);
     const message=this.message||(conflict?'Draft retained — review changes':offline?'Offline · draft on this device':this.state.pending?'Saving…':'All changes saved');
     if(this.status.textContent!==message)this.status.textContent=message;
@@ -228,10 +229,10 @@ export class Editor {
     }
     return this.transaction({op:'range/replace',from,to,seed,...(fragment?{fragment}:{text})},{id:seed});
   }
-  nativeText(id,before,after,selection,input=null){
+  nativeText(id,before,after,selection,input=null,field={}){
     if(this.composing)return false;
     const head=selection?.anchor.block===id&&selection.head.block===id&&selection.anchor.offset===selection.head.offset?selection.head.offset:null;
-    const delta=nativeReplacement(before,after,{head,text:input?.data});if(!delta)return true;
+    const delta=nativeFieldReplacement(before,after,{...field,head,text:input?.data});if(!delta)return true;
     const group=this.typingGroup(id,delta.from,delta.to,delta.text);
     return this.transaction({op:'text/replace',block:id,...delta,styles:this.node(id)?.type==='code'?[]:this.state.pendingStyles},{group,selection});
   }
@@ -246,7 +247,7 @@ export class Editor {
     const text=event?.target?.closest?.('[data-edit-text]')||this.textElement(this.state.selection?.head.block);
     if(!text||text.closest('[data-edit-code]'))return;
     const id=text.dataset.editText,before=this.node(id)?.text;if(before==null)return;
-    this.nativeText(id,before,text.textContent,this.geometry.read(),event);
+    this.nativeText(id,before,text.textContent,this.geometry.read(),event,{start:Number(text.dataset.editStart||0),tail:Number(text.dataset.editTail||0)});
   }
   focusNeighbour(id,direction){
     const at=this.order.indexOf(id),next=this.order[at+direction];if(!next)return false;

@@ -25,6 +25,16 @@ export function nativeReplacement(before,after,{head=null,text}={}) {
   return {from,to,text:b.slice(from,b.length-suffix).join(''),expected:a.slice(from,to).join('')};
 }
 
+// A package may expose a field inside a larger source-backed text block.
+// DOM input contains only that field; model operations retain absolute CPs.
+export function nativeFieldReplacement(before,after,{start=0,tail=0,head=null,text}={}) {
+  const points=codepoints(before),end=points.length-tail;
+  if(!Number.isInteger(start)||!Number.isInteger(tail)||start<0||tail<0||start>end)
+    throw Error('Invalid projected text range.');
+  const delta=nativeReplacement(points.slice(start,end).join(''),after,{head:head===null?null:head-start,text});
+  return delta?{...delta,from:delta.from+start,to:delta.to+start}:null;
+}
+
 export class Geometry {
   constructor(editor) { this.editor = editor; }
   leafPoint(element,end){
@@ -48,7 +58,7 @@ export class Geometry {
     }
     try {
       const range = document.createRange(); range.selectNodeContents(text); range.setEnd(node, offset);
-      return {block: text.dataset.editText, offset: codepoints(range.toString()).length, affinity:'right'};
+      return {block: text.dataset.editText, offset: Number(text.dataset.editStart||0)+codepoints(range.toString()).length, affinity:'right'};
     } catch { return null; }
   }
   hit({x,y}) {
@@ -83,7 +93,7 @@ export class Geometry {
       const index=[...block.parentNode.childNodes].indexOf(block);
       return [block.parentNode,index+(point.affinity==='left'?0:1)];
     }
-    const walker = document.createTreeWalker(text,NodeFilter.SHOW_TEXT);let remaining=point.offset,node;
+    const walker = document.createTreeWalker(text,NodeFilter.SHOW_TEXT);let remaining=Math.max(0,point.offset-Number(text.dataset.editStart||0)),node;
     while ((node=walker.nextNode())) {
       const chars=codepoints(node.data);
       if(remaining<=chars.length) return [node,chars.slice(0,remaining).join('').length];
