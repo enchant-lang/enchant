@@ -13,7 +13,9 @@ class FloatingSurface {
   constructor(owner,name){
     this.owner=owner;this.editor=owner.editor;this.name=name;this.opened=false;
     this.element=element('div','ed-overlay');this.element.hidden=true;this.element.dataset.editorSurface=name;
-    this.element.dataset.theme=this.editor.root.closest('[data-theme]')?.dataset.theme||document.documentElement.dataset.theme||'light';
+    this.themeOwner=this.editor.root.closest('[data-theme]')||document.documentElement;
+    this.themeObserver=new MutationObserver(()=>{if(this.opened)this.syncTheme();});
+    this.themeObserver.observe(this.themeOwner,{attributes:true,attributeFilter:['data-theme','class','style']});
     (this.editor.options.portal||document.body).append(this.element);
     this.editor.listen(document,'pointerdown',event=>{
       if(this.opened&&!this.element.contains(event.target)&&!this.protect?.contains(event.target))this.hide('outside');
@@ -22,11 +24,21 @@ class FloatingSurface {
       if(event.key==='Escape'){event.preventDefault();event.stopPropagation();this.hide('escape');}
     });
   }
+  syncTheme(){
+    const root=this.editor.root,styles=getComputedStyle(root);
+    this.element.dataset.theme=root.closest('[data-theme]')?.dataset.theme||document.documentElement.dataset.theme||'light';
+    for(const property of this.themeProperties||[])this.element.style.removeProperty(property);
+    this.themeProperties=[];
+    for(const property of styles)if(property.startsWith('--ed-')){
+      this.element.style.setProperty(property,styles.getPropertyValue(property));this.themeProperties.push(property);
+    }
+    this.element.style.colorScheme=styles.colorScheme;
+  }
   show(anchor,{placement='top',gap=10,role='dialog',onClose,protect}={}){
-    this.cleanup?.();this.anchor=anchor;this.onClose=onClose;this.protect=protect;
+    this.cleanup?.();this.syncTheme();this.anchor=anchor;this.onClose=onClose;this.protect=protect;
     this.element.setAttribute('role',role);this.element.hidden=false;this.opened=true;
     this.cleanup=autoUpdate(anchor,this.element,()=>{
-      computePosition(anchor,this.element,{strategy:'fixed',placement,middleware:[offset(gap),inline(),flip({padding:12}),shift({padding:12})]})
+      computePosition(anchor,this.element,{strategy:'fixed',placement,middleware:[offset(gap),inline(),flip({padding:12}),shift({padding:12,crossAxis:true})]})
         .then(({x,y,placement})=>{if(!this.opened)return;this.element.style.left=x+'px';this.element.style.top=y+'px';this.element.dataset.placement=placement;});
     });
   }
@@ -34,7 +46,7 @@ class FloatingSurface {
     if(!this.opened)return;this.opened=false;this.cleanup?.();this.cleanup=null;this.element.hidden=true;
     const callback=this.onClose;this.onClose=null;callback?.(reason);
   }
-  dispose(){this.hide('dispose');this.element.remove();}
+  dispose(){this.hide('dispose');this.themeObserver.disconnect();this.element.remove();}
 }
 export class SurfaceHost {
   constructor(editor){this.editor=editor;this.owned=new Map();}
