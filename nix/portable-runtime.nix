@@ -4,6 +4,11 @@
 let
   executable = pkgs.runCommand "beam-lisp-portable-executable" {
     nativeBuildInputs = [ pkgs.jq pkgs.coreutils ];
+    # Image/compiler paths in the copied receipt describe the producer. They
+    # are not receiver dependencies: the portable payload carries its runtime.
+    # Keep the bytes/digest intact; the wrapper below declares the host ABI.
+    unsafeDiscardReferences.out = true;
+    allowedReferences = [];
   } ''
     test "$(jq -er '.version == 1 and .kind == "release" and .packaging == "portable-shell-v1" and .target == "x86_64-linux" and .file == "bl.drop"' ${release}/artifact.json)" = true
     test "$(sha256sum ${release}/bl.drop | cut -d' ' -f1)" = "$(jq -er .sha256 ${release}/artifact.json)"
