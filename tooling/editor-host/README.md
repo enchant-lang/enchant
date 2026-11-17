@@ -143,6 +143,27 @@ authority. Packages must supply appropriate Enter/structural commands before
 enabling it for a source grammar; the default split still operates on the full
 model text. Application writers continue validating the complete candidate.
 
+Projection context includes the current `:document` once as well as siblings.
+Declare `:render-context #{:document}` for shells that depend on other nodes or
+metadata; incremental patches then include those shells on text, structural or
+metadata changes. Narrow renderers keep their normal patch set. This permits a
+package to keep one bounded workflow/schema snapshot in document metadata.
+
+`:editor/typing` is an optional pure package function `[context input]`. Input
+contains the proposed standard `:op`, native post-input `:selection` and fresh
+`:seed`. Return nil to defer or `{:op ... :selection ...}` to plan the edit.
+The first handling package owns the plan. Native typing, composition commit and
+inline replacement use the same path; semantic commands and undo keep their
+already planned operations. A package can insert required field separators in
+one batch, keep marks on the typed content and adjust the caret in codepoints.
+The host follows the resulting caret for typing groups. No IO or server grant
+belongs in the planner; the ordinary writer validates the final candidate.
+
+Parameterized declarative command buttons open the shared parameter surface.
+It reads the current bookmarked command query, including current defaults and
+workflow choices. Empty/invalid numbers refuse preview, cancel the old preview
+and keep Apply disabled; an empty input is never interpreted as zero.
+
 An application may return a correctable validation refusal only after durably
 retiring the exact refused proposal. The reply carries `:correctable true`, its
 `:id`, original `:basis` and `:digest`, and a bounded human `:reason`. The replica

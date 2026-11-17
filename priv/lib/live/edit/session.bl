@@ -2,7 +2,7 @@
 (ns ^:js live.edit.session
   (:require [live.edit.document :as d] [live.edit.protocol :as p]
             [live.edit.commands :as c] [live.edit.extensions :as e]
-            [live.edit.projection :as view] [live.edit.registry :as r]))
+            [live.edit.projection :as view] [live.edit.registry :as r] [live.edit.input :as input]))
 (defn- data [value] (js->bl value :keywordize-keys true))
 (defn- fresh [] (.randomUUID (.-crypto js/globalThis)))
 (defn- normal-selection [selection]
@@ -56,9 +56,12 @@
                            (when (and token (or (nil? selection) (get-in selection [:anchor :deleted]) (get-in selection [:head :deleted])))
                              (r/fail "The selected text is no longer available.")) selection))
         execute (fn [op options]
-                  (let [before (assoc @state :selection (or (resolve-target options) (:selection @state))
+                  (let [id (get options :id (fresh))
+                        planned-input (input/plan ext (context (resolve-target options)) op (assoc options :id id))
+                        op (:op planned-input) options (:options planned-input)
+                        before (assoc @state :selection (or (resolve-target options) (:selection @state))
                                             :group (:group options))
-                        next (p/enqueue ext before (get options :id (fresh)) op)
+                        next (p/enqueue ext before id op)
                         next (if (:selection options) (assoc next :selection (normal-selection (:selection options))) next)
                         next (if (and (c/collapsed? (:selection next)) (contains? #{"call/args" "call/remove"} (:op op)))
                                (assoc next :pending-styles (or (caret-styles (:visible next) (:selection next)) [])) next)]
@@ -91,7 +94,7 @@
     #js {:read (fn [] (alive) (info {}))
          :node (fn [id] (alive) (bl->js (d/find-block (doc) id)))
          :layout (fn [] (alive) (bl->js (mapv #(select-keys % [:id :parent :slot :type]) (:blocks (doc)))))
-         :projectTargets (fn [ids structural] (alive) (bl->js (view/targets ext (doc) (js->bl ids) structural)))
+         :projectTargets (fn [ids structural metadata] (alive) (bl->js (view/targets ext (doc) (js->bl ids) structural metadata)))
          :project (fn [ids] (alive) (bl->js (view/project ext (doc) (js->bl ids))))
          :catalog (fn [] (alive) (bl->js (mapv #(dissoc % :run :when :active) (c/catalogue ext))))
          :query (fn [options] (alive) (bl->js (c/query ext (context (resolve-target (data options))))))

@@ -212,8 +212,9 @@ class DefaultUI {
   currentCall(fid){const selection=this.editor.state.selection;if(!selection)return null;const b=this.editor.node(selection.head.block),at=selection.head.offset;
     return [...(b?.wraps||[]),...(b?.marks.filter(m=>m.from<=at&&at<=m.to).map(m=>m.call)||[])].find(call=>call.function===fid)||null;}
   functionPanel(fid,existing=null){
-    const spec=this.editor.catalog.find(item=>item.id===fid);if(!spec)return;
-    const token=this.panelTarget(),call=existing||this.currentCall(fid),params=spec.params||{},args={},action=spec.kind==='custom';
+    const token=this.panelTarget(),spec=this.editor.query({target:token}).find(item=>item.id===fid);
+    if(!spec){this.editor.session.release(token);return;}
+    const call=existing||this.currentCall(fid),params=spec.params||{},args={},action=spec.kind==='custom';
     for(const [key,param]of Object.entries(params))args[key]=call?.args[key]??param.default;
     const content=element('form','ed-function-form'),heading=element('div','ed-panel-heading');heading.append(icon(spec.icon||'function'),element('strong','',spec.label));
     const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',spec.description||(call?'Make this function your own.':'A small change, a new possibility.')));
@@ -221,7 +222,7 @@ class DefaultUI {
     const preview=()=>{try{
       if(call)this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}});
       else this.editor.session.preview(fid,{...args},{target:token});error.textContent='';apply.disabled=false;
-    }catch(reason){error.textContent=this.friendly(reason);apply.disabled=true;}};
+    }catch(reason){this.editor.session.cancelPreview();error.textContent=this.friendly(reason);apply.disabled=true;}};
     for(const [key,param]of Object.entries(params)){
       const field=element(param.type==='enum'?'div':'label','ed-parameter');field.append(element('span','ed-field-label',key==='tone'?'Color':key==='href'?'Destination':key));
       if(param.type==='enum'){
@@ -232,7 +233,7 @@ class DefaultUI {
         const input=element('input','ed-field');input.type=param.type==='boolean'?'checkbox':param.type==='integer'?'number':'text';input.setAttribute('aria-label',key);
         if(input.type==='checkbox')input.checked=!!args[key];else input.value=String(args[key]??'');if(key==='href')input.placeholder='https://example.com';
         if(param.min!=null)input.min=param.min;if(param.max!=null)input.max=param.max;
-        input.addEventListener('input',()=>{args[key]=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value;preview();});field.append(input);
+        input.addEventListener('input',()=>{args[key]=input.type==='checkbox'?input.checked:input.type==='number'?input.valueAsNumber:input.value;preview();});field.append(input);
       }content.append(field);
     }
     if(!Object.keys(params).length)content.append(element('p','ed-panel-description',call?'This function is applied to your text.':'Preview this function on the selected text.'));

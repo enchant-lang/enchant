@@ -123,7 +123,7 @@ export class Editor {
     this.root.dispatchEvent(new CustomEvent('enchanted:change',{detail:change}));
   }
   paint(change){
-    const ids=this.session.projectTargets([...new Set(change.changed||[])],!!change.structural);if(!ids.length&&!change.structural)return;
+    const ids=this.session.projectTargets([...new Set(change.changed||[])],!!change.structural,!!change.metadata);if(!ids.length&&!change.structural)return;
     const selection=this.state.selection,active=document.activeElement;
     const shouldRestore=this.canvas.contains(active)||active===this.canvas;
     const trees=this.session.project(ids);this.metrics.projected+=trees.length;
@@ -208,7 +208,13 @@ export class Editor {
     if(this.model.readonly)return this.report(Error('This document is read only.'));
     if(this.recoveryFailure)return this.report(Error('Download or dismiss the retained draft first.'));
     this.message='';const t=performance.now();this.localInput=true;
-    try{this.session.change(op,options);this.metrics.transactions++;this.metrics.lastTransactionMs=performance.now()-t;return true;}
+    try{
+      this.session.change(op,options);
+      const s=this.state.selection;
+      if(options?.group&&this.typing?.id===options.group&&s?.anchor.block===s?.head.block&&s.anchor.offset===s.head.offset&&s.head.block===this.typing.block)
+        this.typing.end=s.head.offset;
+      this.metrics.transactions++;this.metrics.lastTransactionMs=performance.now()-t;return true;
+    }
     catch(error){return this.report(error);}finally{this.localInput=false;}
   }
   run(id,args={},options={}){
@@ -225,7 +231,7 @@ export class Editor {
     if(from.block===to.block&&!fragment&&!/[\r\n]/.test(text)){
       const end={...from,offset:from.offset+codepoints(text).length};
       const op={op:'text/replace',block:from.block,from:from.offset,to:to.offset,text,styles:this.state.pendingStyles};
-      return this.transaction(op,{id:seed,group:this.typingGroup(from.block,from.offset,to.offset,text),selection:{anchor:end,head:end}});
+      return this.transaction(op,{id:seed,group:this.typingGroup(from.block,from.offset,to.offset,text),selection:{anchor:end,head:end},input:true});
     }
     return this.transaction({op:'range/replace',from,to,seed,...(fragment?{fragment}:{text})},{id:seed});
   }
@@ -234,7 +240,7 @@ export class Editor {
     const head=selection?.anchor.block===id&&selection.head.block===id&&selection.anchor.offset===selection.head.offset?selection.head.offset:null;
     const delta=nativeFieldReplacement(before,after,{...field,head,text:input?.data});if(!delta)return true;
     const group=this.typingGroup(id,delta.from,delta.to,delta.text);
-    return this.transaction({op:'text/replace',block:id,...delta,styles:this.node(id)?.type==='code'?[]:this.state.pendingStyles},{group,selection});
+    return this.transaction({op:'text/replace',block:id,...delta,styles:this.node(id)?.type==='code'?[]:this.state.pendingStyles},{group,selection,input:true});
   }
   typingGroup(id,from,to,text){
     const now=performance.now(),direction=text?'insert':'delete';
@@ -270,7 +276,12 @@ export class Editor {
       if(this.model.readonly){this.report(Error('This document is read only.'));return;}
       this.session.selection({anchor:{block:id,offset:0},head:{block:id,offset:0}});
       const target=this.session.bookmark();
-      try{this.run(control.dataset.editCommand,{}, {target});this.geometry.restore(this.state.selection,{focus:true});}
+      try{
+        const command=this.query({target}).find(item=>item.id===control.dataset.editCommand);
+        if(this.ui&&command?.params&&Object.keys(command.params).length){
+          this.geometry.restore(this.state.selection);this.ui.functionPanel(command.id);
+        }else{this.run(control.dataset.editCommand,{}, {target});this.geometry.restore(this.state.selection,{focus:true});}
+      }
       finally{this.session.release(target);}
     });
     this.listen(this.canvas,'compositionstart',()=>{this.composing=true;this.root.dataset.editComposing='true';this.ui?.hideSelection?.();});

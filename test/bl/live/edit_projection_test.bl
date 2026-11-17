@@ -8,6 +8,27 @@
 (def initial (sync/authority registry document))
 (defn projection [state] (view/editor registry state [:intent :edit] 0 nil))
 
+(deftest document-context-has-explicit-incremental-invalidation
+ (let [render (fn [block context]
+                [:section {:data-context (str (get-in context [:document :id]) ":" (get-in context [:document :meta :mode]))}
+                 (:text context)])
+       ext (extensions/build [standard/package {:name "document-context" :provides
+              {:editor/blocks {"paragraph" {:label "Text" :slots ["body"] :render-context #{:document} :render render}}}}])
+       initial (assoc-in (doc/document "global" [(doc/block "one" "First") (doc/block "two" "Second")
+                                                (doc/block "code" "code" "Source" {})]) [:meta :mode] "first")
+       changed (assoc-in initial [:meta :mode] "next")
+       before (h/hiccup->html (into [:div] (tree/body ext initial)))
+       ids (tree/targets ext changed [] false true)
+       after (h/hiccup->html (into [:div] (tree/project ext changed ids)))
+       single (h/hiccup->html (tree/body-node ext changed (first (:blocks changed))))]
+  (is (includes? before "global:first"))
+  (is (= ["one" "two"] ids))
+  (is (= ["one" "two"] (tree/targets ext changed ["one"] false)))
+  (is (empty? (tree/targets ext changed [] false)))
+  (is (includes? after "global:next"))
+  (is (not (includes? after "global:first")))
+  (is (includes? single "global:next"))))
+
 (deftest bounded-text-fields-preserve-model-positions-and-inline-functions
  (let [b (assoc (doc/block "heading" "heading" "TODO 🌱 title :work:" {:level 2})
                :marks [{:call {:id "bold-title" :function "text/bold" :version 1 :args {}} :from 7 :to 12}])
