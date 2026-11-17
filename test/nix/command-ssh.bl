@@ -1,0 +1,23 @@
+; Actual SSH transport from the installed SDK in an isolated NixOS guest.
+(ns command-ssh-check (:require [proc.command :as command]))
+(defn- assert! [value] (when-not value (throw (ex-info "Native SSH control failed" {}))))
+(let [[ssh] (BeamLisp/argv)
+      input (erlang/iolist_to_binary (to-list (repeat 65536 (erlang/list_to_binary (list 0 1 255 10)))))
+      base [ssh "-T" "-oBatchMode=yes" "-oStrictHostKeyChecking=yes"
+                 "-oIdentitiesOnly=yes" "-oConnectTimeout=3" "-i" "/root/command-key"]
+      argv (into base ["-oUserKnownHostsFile=/root/known-hosts" "root@127.0.0.1" "upgrade"])
+      declaration {:exec argv :cwd "/root" :workspace "/root/ssh-command"
+                   :env {"LC_ALL" "C.UTF-8"} :input input
+                   :limits {:timeout-ms 15000 :memory-bytes 268435456 :output-bytes 1048576}}
+      out (atom []) result (command/run! declaration {:on-output #(swap! out conj %)})]
+ (assert! (= :exited (:status result)))
+ (assert! (= 0 (:exit result)))
+ (assert! (= true (:domain-empty result)))
+ (assert! (= true (:output-complete result)))
+ (assert! (= input (erlang/iolist_to_binary (to-list @out))))
+ (let [untrusted (into base ["-oUserKnownHostsFile=/root/empty-known-hosts" "root@127.0.0.1" "upgrade"])
+       failed (command/run! (assoc declaration :exec untrusted) {:on-output (fn [_] nil)})]
+  (assert! (= :exited (:status failed)))
+  (assert! (= 255 (:exit failed)))
+  (assert! (= true (:domain-empty failed))))
+ (println "NATIVE-SSH private binary stdin, EOF, strict host identity and domain cleanup passed"))
