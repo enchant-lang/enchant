@@ -9,6 +9,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from unittest.mock import patch
 import test_command_domain as custody
 
 
@@ -154,3 +155,21 @@ class CommandStreamControls(custody.CommandDomainControls):
                 self.finish(root, process)
                 if child is not None:
                     os.close(child)
+
+    def test_request_environment_cannot_redirect_the_command_manager(self):
+        with tempfile.TemporaryDirectory(prefix='command-stream-manager-') as directory:
+            root = Path(directory)
+            request = self.request(root, 'from pathlib import Path;import sys;Path(sys.argv[1],"done").touch()')
+            with patch.dict(os.environ, {'DBUS_SYSTEM_BUS_ADDRESS': 'unix:path=/missing/system-bus',
+                                         'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/missing/user-bus',
+                                         'XDG_RUNTIME_DIR': '/missing/runtime'}):
+                process = self.stream(request)
+            try:
+                self.accepted(process)
+                tag, payload = self.frame(process)
+                self.assertEqual(3, tag)
+                result = json.loads(payload)
+                self.assertEqual(0, result['exitCode'])
+                self.assertTrue((root/'done').exists())
+            finally:
+                self.finish(root, process)
