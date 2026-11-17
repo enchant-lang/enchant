@@ -123,16 +123,23 @@
  [plan module f]
  (let [ns (get (:by-module plan) module)]
   (when (and ns (contains? (get (:table plan) ns) (logical-name f))) ns)))
-(defn remote-decision [plan n]
+(declare self-module)
+(defn remote-decision
  ; A compiled target wins over a host leaf with the same key; that leaf is
- ; dead (native.chunks reports it for its owner to delete).
+ ; dead (native.chunks reports it for its owner to delete). With the linked
+ ; namespace, a host module's fun_info self-name is a link-time constant.
+ ([plan n ns]
+  (if-let [module (self-module plan ns n)]
+   ["self-module" (remote-key n) (erlang/atom_to_binary module)]
+   (remote-decision plan n)))
+ ([plan n]
  (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) key (remote-key n) ns (compiled-target plan m f)]
   (cond
    ns (let [logical (logical-name f) mode (if (string/ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
        ["compiled" key ns logical mode (remote-link-shape plan ns logical mode (count (:args n)))])
    (contains? (:leaves plan) key) ["leaf" key]
    (contains? (:stub-modules plan) m) ["excluded-namespace" key]
-   :else (throw (ex-info (str "native link: unresolved remote signature " key) {:remote key :ann (:ann n)})))))
+   :else (throw (ex-info (str "native link: unresolved remote signature " key) {:remote key :ann (:ann n)}))))))
 (defn global-decision [plan n] (resolution/global-decision (:ledger plan) (:table plan) n))
 (defn- direct-call [target]
  {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
@@ -183,8 +190,7 @@
  (let [base (ev/context ns)]
   (assoc base
    :aot-link {:remote (fn [n] (remote-link plan ns n))}
-   :remote-resolver (fn [n] (when-not (self-module plan ns n) (remote-decision plan n))
-                      ((:remote-resolver base) n))
+   :remote-resolver (fn [n] (remote-decision plan n ns) ((:remote-resolver base) n))
    :global-resolver
    (fn [n]
     (let [[_ _ _ _ _ sel-ns sel-name] (global-decision plan n)]

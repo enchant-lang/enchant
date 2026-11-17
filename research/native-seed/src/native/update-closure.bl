@@ -24,8 +24,14 @@
                        :stub ["lower"] :staging :canonical-js.build
                        :namespace-qualified? true})
 (assert (= expected-options (:options original)))
-(assert (= (:sdk-pin original) (File/read! "research/native-seed/sdk-pin.json")))
-(def sdk-source (get (json/decode (:sdk-pin original)) "source"))
+; A closure is bound to the SDK whose compiler produced it. Under a new pin
+; (RE-PIN) no unit may be reused: every member recompiles with the pinned
+; compiler, the old macro-provider identity is not compared (nothing that
+; expanded under it survives), and the closure is re-bound to the new pin.
+(def pin (File/read! "research/native-seed/sdk-pin.json"))
+(def repin? (not= (:sdk-pin original) pin))
+(when repin? (println "NATIVE_UPDATE_REPIN every member recompiles under the new SDK pin"))
+(def sdk-source (get (json/decode pin) "source"))
 
 ; --- declared additions -----------------------------------------------------
 (defn read-additions [file]
@@ -59,10 +65,13 @@
    (throw (ex-info "native update: a host module or namespace is declared twice" {:host-modules rows})))
   rows))
 (defn check-host-module! [ns source module]
- ; The file must say what it is: the header names the exact pinned module.
- (when-not (String/contains? source (str "the pinned HOST MODULE for `" (erlang/atom_to_binary module) "`"))
-  (throw (ex-info "native update: host module declaration does not match its source header"
-                  {:namespace ns :module module}))))
+ ; The file must say what it is: its leading comment block declares a pinned
+ ; host module and names this exact module in backticks (comments wrap).
+ (let [header (String/replace (first (String/split source "\n(" (list (erlang/list_to_tuple (list :parts 2))))) "\n; " " ")]
+ (when-not (and (String/contains? header "the pinned HOST MODULE for")
+                (String/contains? header (str "`" (erlang/atom_to_binary module) "`")))
+  (throw (ex-info (str "native update: host module declaration does not match its source header: " ns)
+                  {:namespace ns :module module})))))
 
 ; --- compile ------------------------------------------------------------------
 (defn compile-unit [ns source-path allowed]
@@ -90,7 +99,7 @@
          (reduce (fn [result ns]
           (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
                 source (File/read! (:path old)) sha (artifact/sha source)]
-           (if (= sha (:source-sha256 old))
+           (if (and (not repin?) (= sha (:source-sha256 old)))
             (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
             (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
                   unit (compile-unit ns (:path old) (into (set (:order original)) declared))]
@@ -153,7 +162,7 @@
  (vec (keep (fn [p] (when (and (:macro-provider? p) (not (contains? admitted (:path p)))) [(:path p) (:sha256 p)])) ps)))
 (def current-providers (providers (:provider-sources original)))
 (def macros (macro-identity current-providers))
-(when-not (= macros (macro-identity (:provider-sources original)))
+(when-not (or repin? (= macros (macro-identity (:provider-sources original))))
  (throw (ex-info "native update: macro providers changed; capture a fresh closure"
                  {:now macros :captured (macro-identity (:provider-sources original))})))
 (def final-providers (providers current-providers))
@@ -162,7 +171,7 @@
  (assert (= (:source-sha256 u) (artifact/sha (:source u))))
  (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u))))))
 (def closure (assoc original :units (:units result) :order order :provider-sources final-providers
-                    :host-modules host-modules))
+                    :host-modules host-modules :sdk-pin pin))
 (def bytes (erlang/term_to_binary closure (list :deterministic)))
 (File/write! (str out "/closure.etf") bytes)
 (File/write! (str out "/identity.json")

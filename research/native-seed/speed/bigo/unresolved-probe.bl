@@ -1,0 +1,21 @@
+; Every remote in the integrated closure whose link decision raises, grouped by
+; key with the namespaces that call it. Run before emission to see the whole
+; missing-capability set at once.
+(ns bigo.unresolved-probe (:require [native.artifact :as artifact] [native.resolution-ledger :as ledger] [native.bootstrap] [bl.json]))
+(def closure (artifact/read-closure "research/native-seed/out/speed-closure-2/partition.json"))
+(defn walk [n f]
+  (cond (erlang/is_list n) (doseq [x n] (walk x f))
+        (erlang/is_map n) (do (f n) (doseq [v (maps/values (maps/remove :ann n))] (walk v f)))
+        (erlang/is_tuple n) (walk (erlang/tuple_to_list n) f)
+        :else nil))
+(def leaves (set (get (bl.json/decode (File/read! "research/native-seed/out/round2-build/leaves.json")) "registered_leaves")))
+(def plan (native.bootstrap/link-plan (ledger/bundle-metadata closure leaves)
+                                      (mapv #(get (:units closure) %) (:order closure))))
+(def missing (atom {}))
+(doseq [ns (:order closure)]
+  (walk (:defs (get (:units closure) ns))
+        (fn [n] (when (= :remote (:op n))
+                  (try (native.bootstrap/remote-decision plan n ns)
+                       (catch e (swap! missing update (native.bootstrap/remote-key n) (fn [s] (conj (or s #{}) ns)))))))))
+(doseq [[k nss] (sort @missing)] (println "MISSING" k (pr-str (sort nss))))
+(println "MISSING_TOTAL" (count @missing))

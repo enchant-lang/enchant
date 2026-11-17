@@ -667,9 +667,14 @@
    "Elixir.Tuple/insert_at/3" "Elixir.Access/get/2" "Elixir.Map/put/3" "Elixir.String.Chars/to_string/1"
    "atomics/add_get/3" "atomics/new/2" "atomics/put/3" "code/load_binary/3"
    "persistent_term/get/2" "persistent_term/put/2" "error_handler/raise_undef_exception/3"
-   "ets/match_delete/2" "ets/match_object/2"))
-(for-each (lambda (key)
-  (if (not (native-map-has? native-leaf-registry key))
-   (begin (set! native-excluded-host-leaves (cons key native-excluded-host-leaves))
-          (native-add-leaf! key (native-unavailable key)))))
- native-service-refusals)
+   "ets/match_delete/2" "ets/match_object/2"
+   ;; compiler.bl reads a not-yet-loaded deferred namespace's source (item D);
+   ;; natively Env/deferred_dirs is empty, so these are never reached.
+   "Elixir.BeamLisp.Loader/source_content/1" "Elixir.BeamLisp.Loader/with_search_dir/2" "erlang/md5/1"
+   ;; lazy_memo.bl's NIF loader path; the native memo cell needs no library.
+   "Elixir.BeamLisp.Tiers/priv_root/0"))
+;; The native image links every namespace it runs: no namespace has deferred
+;; source, so compiler.bl's declared-link path is skipped (a service answer).
+(native-add-leaf! "Elixir.BeamLisp.Env/deferred_dirs/1" (lambda (ns) bl-nil))
+;; Registered by host/native-refusals.scm, which loads LAST, so every real
+;; provider in any host file wins over its refusal.

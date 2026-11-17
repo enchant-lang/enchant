@@ -489,3 +489,17 @@
 ;; exports no check_source_* gate, so no Source extent is ever live natively:
 ;; the count is the constant zero, exactly what the old native gate decided.
 (table-set! native-persistent-terms (bl-key "bl_source_extent_heads_live") (vector 0))
+;; erlang:fun_info/2 (category b). A BEAM fun has one arity: native procedures
+;; carry their emitted arity annotation. `:module` of a fun literal written in
+;; a pinned host module is a link-time constant (native.bootstrap/self-module);
+;; any other item has no native answer and fails loudly.
+(native-add-leaf! "erlang/fun_info/2"
+ (lambda (f item)
+  (cond
+   ((not (procedure? f)) (native-badarg "fun_info: not a fun"))
+   ((eq? item (bl-key "arity"))
+    (let ((entry (table-ref native-callable-arities f #f)))
+     (if (and (pair? entry) (null? (cdr entry)))
+      (vector 'tuple (vector (bl-key "arity") (car entry)))
+      (error "native fun_info: fun lacks a single emitted arity"))))
+   (else (error (string-append "native fun_info: unsupported item " (bl-show item)))))))
