@@ -7,6 +7,8 @@
 ; The pinned SDK still has the old lazy memo. Ordinary lazy behaviour is the
 ; same there; the cycle cases whose contract item M changed carry an explicit
 ; `:expect`, the answer this checkout's BEAM gives (lazy_clean_capture_test).
+; The native image's runtime eval has no `lazy-seq`/`delay` macro, so the corpus
+; spells their expansions: `(BeamLisp.LazySeq/from_fun (fn [] ...))`, `(BeamLisp.Deferred/delay (fn [] ...))`.
 (ns lazy.oracle (:require [native.scheme :as scheme] [clojure.string :as string] [compiler :as c]))
 
 (def out-dir (first (BeamLisp/argv)))
@@ -26,8 +28,8 @@
   ["filter" "(vec (filter odd? (range 20)))"]
   ["remove" "(vec (remove even? (range 10)))"]
   ["iterate" "(vec (take 6 (iterate (fn [x] (* 2 x)) 1)))"]
-  ["concat" "(vec (concat [1 2] (list 3) (lazy-seq [4 5]) nil))"]
-  ["lazy-cons" "(vec (take 4 ((fn step [n] (lazy-seq (cons n (step (inc n))))) 7)))"]
+  ["concat" "(vec (concat [1 2] (list 3) (BeamLisp.LazySeq/from_fun (fn [] [4 5])) nil))"]
+  ["lazy-cons" "(vec (take 4 ((fn step [n] (BeamLisp.LazySeq/from_fun (fn [] (cons n (step (inc n)))))) 7)))"]
   ["count-big" "(count (map inc (range 100)))"]
   ["nth-big" "(nth (map inc (range 1000)) 500)"]
   ["cursor-drop" "(first (drop 40 (map identity (vec (range 100)))))"]
@@ -41,15 +43,15 @@
   ["take-while" "(vec (take-while (fn [x] (< x 5)) (range)))"]
   ["drop-while" "(vec (drop-while (fn [x] (< x 5)) (range 8)))"]
   ["memoized-once" "(let [n (atom 0) s (map (fn [x] (swap! n inc) x) (range 3))] (doall s) (doall s) @n)"]
-  ["empty" "(vec (take 3 (lazy-seq nil)))"]
+  ["empty" "(vec (take 3 (BeamLisp.LazySeq/from_fun (fn [] nil))))"]
   ["seq-nil" "(seq (map inc []))"]
   ["realized" "(let [s (map inc [1 2])] [(realized? s) (do (doall s) (realized? s))])"]
-  ["delay" "(let [n (atom 0) d (delay (swap! n inc) 42)] [(realized? d) (force d) (force d) @n (realized? d)])"]
-  ["deref-delay" "(let [d (delay :v)] @d)"]
-  ["failure-retry" "(let [n (atom 0) s (lazy-seq (swap! n inc) (throw (ex-info \"boom\" {})))] [(try (doall s) (catch e (ex-message e))) (try (doall s) (catch e (ex-message e))) @n])"]
-  ["alias-cycle" "(let [a (atom nil) s (lazy-seq @a)] (reset! a s) (try (doall s) :no-error (catch e (ex-message e))))"]
-  ["recursive-force" "(let [a (atom nil) s (lazy-seq (cons 1 (doall @a)))] (reset! a s) (try (doall s) :no-error (catch e (ex-message e))))"]
-  ["embedding" "(let [a (atom nil) s (lazy-seq (list 1 @a))] (reset! a s) (= 1 (first (second (seq s)))))"
+  ["delay" "(let [n (atom 0) d (BeamLisp.Deferred/delay (fn [] (swap! n inc) 42))] [(realized? d) (force d) (force d) @n (realized? d)])"]
+  ["deref-delay" "(let [d (BeamLisp.Deferred/delay (fn [] :v))] @d)"]
+  ["failure-retry" "(let [n (atom 0) s (BeamLisp.LazySeq/from_fun (fn [] (swap! n inc) (throw (ex-info \"boom\" {}))))] [(try (doall s) (catch e (ex-message e))) (try (doall s) (catch e (ex-message e))) @n])"]
+  ["alias-cycle" "(let [a (atom nil) s (BeamLisp.LazySeq/from_fun (fn [] @a))] (reset! a s) (try (doall s) :no-error (catch e (ex-message e))))"]
+  ["recursive-force" "(let [a (atom nil) s (BeamLisp.LazySeq/from_fun (fn [] (cons 1 (doall @a))))] (reset! a s) (try (doall s) :no-error (catch e (ex-message e))))"]
+  ["embedding" "(let [a (atom nil) s (BeamLisp.LazySeq/from_fun (fn [] (list 1 @a)))] (reset! a s) (= 1 (first (second (seq s)))))"
    :expect true]])
 
 (defn outcome [src]

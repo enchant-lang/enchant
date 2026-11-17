@@ -59,6 +59,10 @@
   (native-raise (bl-key "error")
    (bl-map (bl-key "type") (bl-key "native/runtime-unavailable")
            (bl-key "operation") "rt/k-to-list") (native-capture-stack))))
+;; Struct-tag predicates for the compiled lazy modules' values (their behaviour
+;; is the compiled BL of priv/host/lazy_seq.bl and seq_cursor.bl).
+(define (native-lazy? x) (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.LazySeq")))
+(define (native-cursor? x) (eq? (native-struct-module x) (bl-key "Elixir.BeamLisp.SeqCursor")))
 (define (native-finite-items x)
  (cond ((bl-is-nil x) '()) ((native-list? x) x)
        ((or (bl-tag? x 'tuple) (bl-tag? x 'vec)) (bl-items x))
