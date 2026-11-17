@@ -378,7 +378,7 @@ export class Editor {
       event.clipboardData.setData('text/plain',prepared?.text??blocks.map(b=>b.text).join('\n'));event.clipboardData.setData('text/html',fragmentHTML(blocks));
       event.clipboardData.setData(FRAGMENT_MIME,JSON.stringify({schema:'enchant.fragment/2',blocks}));if(cut){if(this.model.readonly||this.recoveryFailure)throw Error('This document cannot be edited.');
         if(!this.session.clipboard('cut',{},selection))this.replace('',null,selection);}
-    }catch(error){this.report(error);}
+    }catch(error){event.preventDefault();this.report(error);}
   }
   download(format='json'){
     const doc=this.session.export(),body=this.recoveryFailure?JSON.stringify(this.recoveryFailure,null,2):format==='markdown'?markdown(doc):JSON.stringify(doc,null,2)+'\n';
