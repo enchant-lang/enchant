@@ -3,7 +3,7 @@
            [data.derivation :as derivation] [data.projection :as projection]
            [codebase :as cb] [bl.check :as check] [datom :as d]
            [datom.watch :as watch] [datom.profile :as profile]
-           [datom.query.rank-demand :as demand] [deodorant] [code.index :as index] [bl.ask :as ask]))
+           [datom.query.rank-demand :as demand] [deodorant] [code.index :as index] [bl.ask :as ask] [bl.lint :as lint]))
 (defn- settled [h]
  (let [until (+ 10000 (erlang/monotonic_time :millisecond))]
   (loop [] (let [r (projection/read h)]
@@ -177,3 +177,15 @@
    (is (= {:answer 99} (receive [:ready-under-load seen answer] :when (= seen id) answer (after 2000 nil)))
        "cached delivery precedes releasing either computation holder")
    (finally (doseq [p holders] (erlang/send p :release))))))
+
+(deftest lint-stack-visits-wide-files-once-without-vector-pop-copies
+ (let [trace (tuple (BeamLisp.Emit/module_for "core") :pop 1)]
+  (erlang/trace_pattern trace true (list :local :call_count))
+  (try
+   (doseq [n [16 128 1024]]
+    (let [src (apply str (mapv (fn [i] (str "(defn f" i " [x] x)\n")) (range n)))
+          result (lint/lint-forms [] "wide.bl" src (BeamLisp.Reader/read_string src))]
+     (is (= (* 6 n) (get-in result [:work :nodes])))
+     (is (= [] (:smells result)))))
+   (is (= (tuple :call_count 0) (erlang/trace_info trace :call_count)))
+   (finally (erlang/trace_pattern trace false (list :local :call_count))))))

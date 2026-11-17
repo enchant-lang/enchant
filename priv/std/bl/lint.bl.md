@@ -196,22 +196,24 @@ sweep; a linter reports what it can read and keeps going.
                text-rules))))))
 
 (defn lint-forms
-  "Lint the parsed forms shared by a diagnostics request, retaining positions."
+  "Lint shared reader forms with a native-list preorder stack. Each node is
+   pushed and popped once; visiting a node never copies the remaining file."
   [rules path src forms]
   (let [prepared (deodorant/prepare-rules rules)
-        roots (mapv (fn [n] [n (node->data n) nil]) forms)
-        found (loop [pending (vec (reverse roots)) found []]
-                (if (empty? pending) found
-                  (let [[node form inherited] (peek pending)
-                        pos (or (reader-node/node-pos node) inherited)
-                        tag (reader-node/node-tag (reader-node/node-form node))
-                        kids (if (contains? #{:list :vector} tag)
-                               (mapv (fn [n f] [n f pos]) (reader-node/node-items node) form) [])
-                        at (try (mapv (fn [r] (smell r form pos))
-                                      (deodorant/matches-prepared prepared form))
-                                (catch _ []))]
-                    (recur (into (pop pending) (reverse kids)) (into found at)))))]
-    {:path path :smells (vec (sort-by :line (concat found (text-smell-entries rules src))))}))
+        roots (to-list (map (fn [n] [n (node->data n) nil]) forms))
+        walked (loop [pending roots found () visited 0]
+          (if (erlang/== pending ()) {:found (lists/reverse found) :visited visited}
+            (let [[node form inherited] (erlang/hd pending)
+                  pos (or (reader-node/node-pos node) inherited)
+                  tag (reader-node/node-tag (reader-node/node-form node))
+                  kids (if (contains? #{:list :vector} tag)
+                         (to-list (map (fn [n f] [n f pos]) (reader-node/node-items node) form)) ())
+                  at (try (mapv (fn [r] (smell r form pos)) (deodorant/matches-prepared prepared form))
+                          (catch _ []))]
+              (recur (lists/append kids (erlang/tl pending))
+                     (reduce (fn [out x] (cons x out)) found at) (inc visited)))))]
+    {:path path :smells (vec (sort-by :line (concat (:found walked) (text-smell-entries rules src))))
+     :work {:nodes (:visited walked)}}))
 
 (defn lint-source
   "Convert each reader tree once and retain source positions."
