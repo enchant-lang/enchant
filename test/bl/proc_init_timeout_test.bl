@@ -1,8 +1,9 @@
 (ns proc-init-timeout-test (:require [proc.server :as server]))
 
 (server/defserver timeout-owner
- (init [value] (ok {:value value :timeouts 0} 5))
- (handle-info :timeout [state] (noreply (update state :timeouts inc)))
+ (init [options] (ok options 5))
+ (handle-info :timeout [state]
+  (erlang/send (:owner state) [:observed-init-timeout (:value state)]) (noreply state))
  (handle-call :state [_ state] (reply state state)))
 (server/defserver hibernate-owner
  (init [value] (ok {:value value} (hibernate)))
@@ -18,10 +19,11 @@
                 :else (do (Process/sleep 10) (recur))))))
 
 (deftest timed-init-preserves-the-user-state-and-arms-the-timeout
- (let [pid (start timeout-owner 73)]
+ (let [pid (start timeout-owner {:value 73 :owner (erlang/self)})]
   (try
+   ;; Reading state before the timeout would itself cancel OTP's idle timeout.
+   (is (= 73 (receive [:observed-init-timeout value] value (after 10000 :missing-timeout))))
    (is (= 73 (:value (call pid :state))))
-   (is (wait-for (fn [] (= 1 (:timeouts (call pid :state))))))
    (finally (stop pid)))))
 (deftest hibernating-init-preserves-state-through-wake-and-call
  (let [pid (start hibernate-owner 29)]
