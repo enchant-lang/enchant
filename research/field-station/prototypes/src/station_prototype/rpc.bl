@@ -29,22 +29,28 @@
     (refuse :rpc/unsafe-endpoint-directory))) o))
 (defn- envelope [value] {:protocol protocol :value value})
 (defn- error-envelope [category] {:protocol protocol :error category})
+(defn- remaining! [deadline]
+ (let [left (- deadline (System/monotonic_time :millisecond))]
+  (when-not (pos? left) (refuse :rpc/expired)) left))
 (defn- connection! [socket o]
  (try
-  (let [reply
+  (let [token (admission/token (erlang/self) (:request-ms o))
+        deadline (:deadline-ms token)
+        reply
         (try
-         (unix/with-peer! socket (:application o) (:resolve-uid o)
+         (admission/with-request token
           (fn []
-           (let [token (admission/token (erlang/self) (:request-ms o))]
-            (admission/with-request token
-             (fn []
-              (let [received (gen_tcp/recv socket 0 (:request-ms o))]
-               (when-not (= :ok (elem received 0)) (refuse :rpc/frame-unavailable))
+           (unix/with-peer! socket (:application o) (:resolve-uid o)
+            (fn []
+             (admission/check!)
+             (let [received (gen_tcp/recv socket 0 (remaining! deadline))]
+              (when-not (= :ok (elem received 0)) (refuse :rpc/frame-unavailable))
+              (admission/check!)
+              (let [request (data/decode! (elem received 1) {:max-bytes (:max-frame-bytes o)})]
+               (when-not (and (map? request) (= #{:protocol :request} (set (keys request)))
+                              (= protocol (:protocol request))) (refuse :rpc/invalid-envelope))
                (admission/check!)
-               (let [request (data/decode! (elem received 1) {:max-bytes (:max-frame-bytes o)})]
-                (when-not (and (map? request) (= #{:protocol :request} (set (keys request)))
-                               (= protocol (:protocol request))) (refuse :rpc/invalid-envelope))
-                (envelope ((:handler o) (:request request))))))))))
+               (envelope ((:handler o) (:request request))))))))
          (catch error
           (error-envelope (if (= :auth/unauthenticated (:kind (ex-data error))) :unauthenticated :request-failed))))
         encoded (try (data/encode! reply {:max-bytes (:max-frame-bytes o)})
@@ -140,20 +146,29 @@
  ([path request] (request! path request {}))
  ([path request options]
   (BeamLisp.Env/assert_native_framework_execution!)
-  (let [timeout (:timeout-ms options 3000) maximum (:max-frame-bytes options 65536)
+  (admission/check!)
+  (let [timeout (:timeout-ms options 3000) maximum (:max-frame-bytes options 65536)]
+   (when-not (and (map? options) (every? #{:timeout-ms :max-frame-bytes} (keys options))
+                  (erlang/is_integer timeout) (<= 1 timeout 60000)
+                  (erlang/is_integer maximum) (<= 128 maximum 1048576)
+                  (string? path) (= path (Path/expand path)) (<= 1 (erlang/byte_size path) 107))
+    (refuse :rpc/invalid-options))
+  (let [now (System/monotonic_time :millisecond)
+        deadline (min (+ now timeout) (or (:deadline-ms (Process/get :bl_admission)) (+ now timeout)))
         encoded (data/encode! {:protocol protocol :request request} {:max-bytes maximum})
         opened (gen_tcp/connect (tuple :local (String/to_charlist path)) 0
                  (list (tuple :inet_backend :inet) :local :binary (tuple :packet 4)
                        (tuple :packet_size maximum) (tuple :active false)
-                       (tuple :send_timeout timeout) (tuple :send_timeout_close true)) timeout)]
+                       (tuple :send_timeout (remaining! deadline)) (tuple :send_timeout_close true)) (remaining! deadline))]
    (when-not (= :ok (elem opened 0)) (refuse :rpc/unavailable))
    (let [socket (elem opened 1)]
     (try
+     (inet/setopts socket (list (tuple :send_timeout (remaining! deadline))))
      (when-not (= :ok (gen_tcp/send socket encoded)) (refuse :rpc/unavailable))
-     (let [received (gen_tcp/recv socket 0 timeout)]
+     (let [received (gen_tcp/recv socket 0 (remaining! deadline))]
       (when-not (= :ok (elem received 0)) (refuse :rpc/unavailable))
       (let [reply (data/decode! (elem received 1) {:max-bytes maximum})]
        (when-not (and (= protocol (:protocol reply))
                       (contains? #{#{:protocol :value} #{:protocol :error}} (set (keys reply))))
         (refuse :rpc/invalid-envelope)) reply))
-     (finally (gen_tcp/close socket)))))))
+     (finally (gen_tcp/close socket))))))))
