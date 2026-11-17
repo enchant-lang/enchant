@@ -368,6 +368,19 @@
 (define (native-arith-ge a b) (native-num 'ge a b))
 (define (native-arith-num-eq a b) (native-num 'num_eq a b))
 
+;; Install link rows `[ns name info private?]` (closure members and boot-tier
+;; stubs). The emitted prelude passes them in bounded batches after
+;; native-install-bundle!, so no single top-level form outgrows gsc's deadline.
+(define (native-put-namespace-links! rows)
+ (for-each (lambda (row)
+   (native-env-put! (native-row (bl-key "link") (bl-nth row 0) (bl-nth row 1)) (bl-nth row 2))
+   (if (eq? #t (bl-nth row 3))
+    (native-put-meta (bl-nth row 0) (bl-nth row 1) (bl-map (bl-key "private") #t))))
+  (bl-items rows)))
+(define (native-install-namespace-links! rows)
+ (native-put-namespace-links! rows)
+ (native-link-changed!)
+ (bl-key "ok"))
 (define (native-install-bundle! metadata)
  (set! native-bundle-metadata metadata)
  (for-each
@@ -395,11 +408,7 @@
  ; Link rows of every closure member and boot-tier stub (P3): a call into
  ; one compiles exactly as on BEAM (a module-linked remote), never :global.
  ; Stub rows carry their privacy; members' privacy is their emitted meta.
- (for-each (lambda (row)
-   (native-env-put! (native-row (bl-key "link") (bl-nth row 0) (bl-nth row 1)) (bl-nth row 2))
-   (if (eq? #t (bl-nth row 3))
-    (native-put-meta (bl-nth row 0) (bl-nth row 1) (bl-map (bl-key "private") #t))))
-  (bl-items (bl-get metadata (bl-key "namespace-links") (bl-vec '()))))
+ (native-put-namespace-links! (bl-get metadata (bl-key "namespace-links") (bl-vec '())))
  (native-install-resolution! (bl-get metadata (bl-key "resolution")))
  (native-link-changed!)
  (bl-key "ok"))

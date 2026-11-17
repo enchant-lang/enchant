@@ -330,6 +330,17 @@
  (str (when (and first-window? (= "core" (:ns unit)))
        (str (seed-links plan) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n"))
       (string/join "" (map #(emit-definition plan unit %) (remove #(= :fn (:kind %)) defs)))))
+(defn bundle-install-source
+ "The prelude's bundle install: the metadata without its link rows, then the
+  rows in bounded batches as separate top-level forms. One form holding all
+  ~1,700 rows is ~440 KB of constructor calls, which gsc cannot compile within
+  its deadline; the unit splitter can only split between top-level forms."
+ [metadata]
+ (let [links (vec (:namespace-links metadata)) n (count links) size 128]
+  (str "(native-install-bundle! " (data (dissoc metadata :namespace-links)) ")\n"
+       (string/join "" (map (fn [i] (str "(native-install-namespace-links! "
+                                         (data (subvec links i (min n (+ i size)))) ")\n"))
+                            (range 0 n size))))))
 (defn emit-compiled-bundle
  ([units bundle host-source]
   (emit-compiled-bundle units bundle host-source "(native-main (native-command-line))\n"))
@@ -339,7 +350,7 @@
  (let [metadata (dissoc bundle :units) plan (link-plan metadata units)]
   (str ";; BL native compiler. Generated from canonical BL source.\n"
        host-source "\n"
-       "(native-install-bundle! " (data metadata) ")\n"
+       (bundle-install-source metadata)
        (string/join "" (map #(emit-functions plan % (:defs %)) units))
        (string/join "" (map #(emit-initializers plan % (:defs %) true) units))
        (seal-source plan)
