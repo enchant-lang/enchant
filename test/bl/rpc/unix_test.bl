@@ -1,0 +1,143 @@
+(ns rpc.unix-test
+ (:require [rpc.unix :as rpc] [auth.identity :as identity] [proc.task :as task] [os.lease :as lease] [proc.admission :as admission]
+           [reload.generation :as generation]))
+(defn- fixture [action]
+ (let [root (str "/tmp/native-rpc-" (System/system_time :nanosecond))]
+  (File/mkdir_p! root) (File/chmod! root 448)
+  (try (action root) (finally (File/rm_rf! root)))))
+(defn- options [root handler]
+ (let [uid (:uid (File/stat! "/proc/self"))]
+  {:path (str root "/rpc") :application "messages" :concurrency 1 :request-ms 3000
+   :resolve-uid (fn [actual] (when (= uid actual) {:subject "person:alice" :kind :person}))
+   :handler handler}))
+
+(deftest native-principal-and-data-share-one-owned-endpoint
+ (fixture
+  (fn [root]
+   (let [o (options root (fn [request] {:subject (:subject (identity/current)) :request request}))
+         server (rpc/serve! o)]
+    (try
+     (is (= :listening (:status (rpc/status server))))
+     (is (= {:protocol rpc/protocol :value {:subject "person:alice" :request {:uid 0 :subject "forged"}}}
+            (rpc/request! (:path o) {:uid 0 :subject "forged"})))
+     (is (try (rpc/serve! o) false (catch _ true)))
+     (is (= 7 (get-in (rpc/request! (:path o) 7) [:value :request])))
+     (finally (rpc/stop! server)))
+    (is (not (Process/alive? server)))
+    (is (not (File/exists? (:path o))))
+    (is (File/exists? (str (:path o) ".owner")))
+    (let [replacement (rpc/serve! o)]
+     (try (is (= :listening (:status (rpc/status replacement))))
+      (finally (rpc/stop! replacement))))))))
+
+(deftest stop-retains-kernel-custody-until-accepted-effect-finishes
+ (fixture
+  (fn [root]
+   (let [observer (erlang/self)
+         o (options root (fn [_]
+                           (erlang/send observer [:entered (erlang/self)])
+                           (receive :release :ok (after 2000 (throw (ex-info "Release missing" {}))))
+                           (File/write! (str root "/effect") "committed") :committed))
+         server (rpc/serve! o)
+         client (task/async-nolink #(rpc/request! (:path o) :mutate))
+         worker (receive [:entered pid] pid (after 3000 nil))
+         stop (atom nil)]
+    (try
+     (is (erlang/is_pid worker))
+     (reset! stop (task/async-nolink #(rpc/stop! server)))
+     (is (nil? (task/yield @stop 100)))
+     (is (try (rpc/serve! o) false (catch _ true)))
+     (is (not (File/exists? (str root "/effect"))))
+     (erlang/send worker :release)
+     (is (= :committed (:value (task/await client 5000))))
+     (is (= :stopped (task/await @stop 5000)))
+     (reset! stop nil)
+     (is (= "committed" (File/read! (str root "/effect"))))
+     (is (not (File/exists? (:path o))))
+     (finally
+      (when (erlang/is_pid worker) (erlang/send worker :release))
+      (when @stop (task/yield @stop 5000))
+      (when (Process/alive? server) (rpc/stop! server))))))))
+
+(deftest native-supervision-replaces-an-idle-dead-worker
+ (fixture
+  (fn [root]
+   (let [observer (erlang/self)
+         o (options root (fn [_] (erlang/send observer [:worker (erlang/self)]) :ok))
+         server (rpc/serve! o)]
+    (try
+     (is (= :ok (:value (rpc/request! (:path o) :first))))
+     (let [first (receive [:worker pid] pid (after 2000 nil))]
+      (erlang/exit first :kill)
+      (is (= :ok (:value (rpc/request! (:path o) :second))))
+      (let [second (receive [:worker pid] pid (after 2000 nil))]
+       (is (not= first second))
+       (is (Process/alive? second))))
+     (finally (rpc/stop! server)))))))
+
+(defn- await-lease [path]
+ (loop [remaining 100]
+  (let [held (lease/acquire! path)]
+   (cond
+    (:ok held) (lease/release! (:ok held))
+    (pos? remaining) (do (Process/sleep 10) (recur (dec remaining)))
+    :else (throw (ex-info "Endpoint custody never ended" {}))))))
+
+(deftest owner-death-cannot-release-custody-before-the-worker-supervisor-drains
+ (fixture
+  (fn [root]
+   (let [observer (erlang/self)
+         o (options root (fn [_]
+                           (erlang/send observer [:entered (erlang/self)])
+                           (receive :release :ok (after 2000 (throw (ex-info "Release missing" {}))))
+                           (File/write! (str root "/effect") "committed") :committed))
+         server (rpc/serve! o) monitor (erlang/monitor :process server)
+         client (task/async-nolink #(rpc/request! (:path o) :mutate))
+         worker (receive [:entered pid] pid (after 3000 nil))]
+    (try
+     (is (erlang/is_pid worker))
+     (erlang/exit server :kill)
+     (is (= :killed (receive [:DOWN seen :process _ reason] :when (= seen monitor) reason (after 2000 :missing))))
+     (is (try (rpc/serve! o) false (catch _ true)))
+     (is (not (File/exists? (str root "/effect"))))
+     (erlang/send worker :release)
+     (is (= :committed (:value (task/await client 5000))))
+     (await-lease (str (:path o) ".owner"))
+     (is (= "committed" (File/read! (str root "/effect"))))
+     (let [replacement (rpc/serve! o)]
+      (try (is (= :listening (:status (rpc/status replacement))))
+       (finally (rpc/stop! replacement))))
+     (finally
+      (when (erlang/is_pid worker) (erlang/send worker :release))
+      (erlang/demonitor monitor (list :flush))
+      (when (Process/alive? server) (rpc/stop! server))))))))
+
+(deftest source-cannot-bind-or-select-an-arbitrary-host-rpc-endpoint
+ (fixture
+  (fn [root]
+   (let [sources (str root "/source") file (str sources "/rpc_probe/sample.bl") path (str root "/forbidden")]
+    (File/mkdir_p! (Path/dirname file))
+    (File/write! file "(ns rpc-probe.sample (:require [rpc.unix :as rpc]))
+      (defn serve [path] (rpc/serve! {:path path :application \"messages\"
+        :resolve-uid (fn [_] {:subject \"forged\" :kind :person}) :handler (fn [x] x)}))
+      (defn request [path] (rpc/request! path :ping))")
+    (let [graph (BeamLisp.Loader/with_load_path sources
+                 #(generation/prepare! (generation/project-plan
+                    {:application-id "rpc-probe" :entrypoint "rpc-probe.sample/serve"
+                     :fixed-runtime true :native-modules #{"erlang"}})))]
+     (try
+      (doseq [entry ["rpc-probe.sample/serve" "rpc-probe.sample/request"]]
+       (is (= :native_framework_execution_required
+            (try (generation/invoke! graph entry [path]) nil
+             (catch error (or (:original error) error))))))
+      (is (not (File/exists? path)))
+      (is (not (File/exists? (str path ".owner"))))
+      (finally (generation/retire! graph))))))))
+
+(deftest expired-client-admission-refuses-before-connecting
+ (fixture
+  (fn [root]
+   (is (= :cancelled
+        (try (admission/with-request (admission/token (erlang/self) 0)
+               #(rpc/request! (str root "/absent") :ping))
+         nil (catch error (:kind (ex-data error)))))))))
