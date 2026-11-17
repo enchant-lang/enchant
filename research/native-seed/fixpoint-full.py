@@ -627,7 +627,7 @@ def main() -> None:
                     or witness.get("candidate_was_fresh") is not True
                     or witness.get("frozen_host_prefix_equal") is not True
                     or witness.get("native_main_entry_equal") is not True
-                    or witness.get("marker") != "NATIVE_SELF_COMPILE 18 namespaces"
+                    or witness.get("marker") != "NATIVE_SELF_COMPILE 33 namespaces"
                     or witness.get("cleanup", {}).get("errors") != []
                     or not 0 < witness.get("child_seconds", 1000000) <= 240
                     or witness.get("derived_native_image") is not None):
@@ -647,7 +647,7 @@ def main() -> None:
             log = path_for(witness["log_path"])
             bind(log, witness["log_sha256"])
             output = log.read_text(errors="replace")
-            if output != witness["stdout"] or [l for l in output.splitlines() if l.startswith("NATIVE_SELF_COMPILE ")] != ["NATIVE_SELF_COMPILE 18 namespaces"]:
+            if output != witness["stdout"] or [l for l in output.splitlines() if l.startswith("NATIVE_SELF_COMPILE ")] != ["NATIVE_SELF_COMPILE 33 namespaces"]:
                 raise RuntimeError("self-emission resume log differs from its exact eighteen-namespace witness")
             check_emitted(candidate)
             destination = out / "stage2.scm"
@@ -671,7 +671,7 @@ def main() -> None:
                 [image, "--compile", out / "bundle.scm", out / "host.scm", destination],
                 cwd=root, timeout=args.timeout, env=env)
             if (not destination.is_file() or destination.is_symlink()
-                    or [l for l in output.splitlines() if l.startswith("NATIVE_SELF_COMPILE ")] != ["NATIVE_SELF_COMPILE 18 namespaces"]):
+                    or [l for l in output.splitlines() if l.startswith("NATIVE_SELF_COMPILE ")] != ["NATIVE_SELF_COMPILE 33 namespaces"]):
                 raise RuntimeError(name + " did not emit a fresh exact original18 Source compilation")
             check_emitted(destination)
             bind(destination)

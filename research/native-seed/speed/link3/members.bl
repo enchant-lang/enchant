@@ -1,0 +1,74 @@
+; P3 on the pinned SDK (BEAM): the link rows the bundle carries
+; (:namespace-links), checked against this Env, and the BEAM half of the
+; native-vs-BEAM link differential.
+;
+;   work run --memory 4G --timeout 1800 -- research/native-seed/run run \
+;     research/native-seed/speed/link3/members.bl -- CLOSURE/partition.json LEAVES.json OUT
+;
+; Writes OUT/namespace-links.scm (the rows as bundle Scheme data),
+; OUT/sample.scm (the [ns name] sample) and OUT/beam/<i>.scm: each sampled
+; definition's closure ANF (what stage 1 is built from) emitted through the
+; one link plan. native-probe.bl compiles the same definitions from SOURCE on
+; the native image; compare-links.py compares their link decisions.
+(ns link3.members
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.resolution-ledger :as ledger] [anf] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def closure (artifact/read-closure (nth args 0)))
+(def leaves (get (json/decode (File/read! (nth args 1))) "registered_leaves"))
+(def out (nth args 2))
+(File/mkdir_p! (str out "/beam"))
+; The merged native.scheme reads BeamLisp.Facts, which the pinned SDK lacks:
+; compile this checkout's facts.bl into the VM first (as speed/facts/sites.bl).
+(let [dir (str out "/hot-ebin") path (Path/expand "priv/host/facts.bl")]
+ (File/mkdir_p! dir)
+ (BeamLisp.Env/isolated (fn [] (BeamLisp.AOT/compile_host_file path
+  (list (tuple :module :Elixir.BeamLisp.Facts) (tuple :output_dir dir) (tuple :file path)))))
+ (println "FACTS_HOT_LOADED"))
+(def metadata (ledger/bundle-metadata closure leaves))
+(def rows (:namespace-links metadata))
+(def stub-names (set (:stubs closure)))
+(println (str "NAMESPACE_LINK_ROWS " (count rows) " stubs=" (count (filter #(contains? stub-names (first %)) rows))
+              " namespaces=" (count (distinct (map first rows)))))
+; 1. Rows against this Env. Stubs are read from it; members come from source,
+;    so compare each member row with the Env's row when the Env has one.
+(def compared
+ (reduce (fn [acc [ns name info _]]
+  (let [env (BeamLisp.Env/lookup (tuple :link ns name))]
+   (cond
+    (= :error env) (update acc :env-absent conj ns)
+    (= (second (erlang/tuple_to_list env)) info) (update acc :equal inc)
+    :else (update acc :different conj [ns name info (second (erlang/tuple_to_list env))]))))
+  {:equal 0 :different [] :env-absent []} rows))
+(println (str "ROWS_EQUAL_ENV " (:equal compared) " different=" (count (:different compared))
+              " env-absent=" (count (:env-absent compared))
+              " env-absent-namespaces=" (vec (sort (distinct (:env-absent compared))))))
+(doseq [d (take 10 (:different compared))] (println (str "ROW_DIFFERENT " d)))
+; Members whose Env has NO row but which the BEAM-compiled closure still links
+; as module remotes are the evidence the rows reflect BEAM compilation: count
+; the closure's compiled remotes into each member namespace.
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def plan (bootstrap/link-plan (dissoc metadata :sealed) units))
+(defn census-of [ns node acc]
+ (loop [todo (list node) acc acc]
+  (if (empty? todo) acc
+   (let [n (first todo)
+         acc (case (:op n)
+              :remote (let [d (bootstrap/remote-decision plan n ns)]
+                       (update acc (first d) (fnil inc 0)))
+              :global (update acc (if (contains? stub-names (:ns n)) "stub-global" "global") (fnil inc 0))
+              acc)]
+    (recur (lists/append (anf/executable-children n) (erlang/tl todo)) acc)))))
+(println (str "CLOSURE_ANF_DECISIONS "
+              (into {} (reduce (fn [acc u] (reduce (fn [acc d] (census-of (:ns u) (:node d) acc)) acc (:defs u))) {} units))))
+(File/write! (str out "/namespace-links.scm") (bootstrap/data rows))
+; 2. The sample: up to 4 :fn definitions of every unit, plus compiler/eval_form.
+(def sample
+ (vec (distinct (concat [["compiler" "eval_form"]]
+  (mapcat (fn [u] (map (fn [d] [(:ns u) (:name d)]) (take 4 (filter #(and (:name %) (= :fn (:kind %))) (:defs u))))) units)))))
+(File/write! (str out "/sample.scm") (bootstrap/data sample))
+(doseq [[i [ns name]] (map-indexed vector sample)]
+ (let [u (get (:units closure) ns) d (first (filter #(= name (:name %)) (:defs u)))]
+  (File/write! (str out "/beam/" i ".scm") (bootstrap/emit-definition plan u d))))
+(println (str "SAMPLE " (count sample) " definitions"))
+(println "MEMBERS_DONE")

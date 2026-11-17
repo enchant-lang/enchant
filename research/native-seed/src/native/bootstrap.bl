@@ -167,24 +167,28 @@
 (defn remote-link
  ; nil keeps the dynamic (native-remote KEY) path: excluded namespaces and
  ; rest-list calls to a definition without a variadic arm raise there.
+ ; :kind says what the remote reaches (:self-module, :template, :leaf or
+ ; :compiled), for the emitter's analyses: a leaf or template is a host
+ ; primitive, a compiled target is a BL call. It never changes the text.
  ([plan n] (remote-link plan nil n))
  ([plan ns n]
  (if-let [module (self-module plan ns n)]
-  {:inline? true
+  {:inline? true :kind :self-module
    :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
                       (scheme/text (erlang/atom_to_binary module)) "))"))}
  (if-let [template (intrinsics/remote-template n)]
-  {:inline? false :call template}
+  {:inline? false :kind :template :call template}
   (let [decision (remote-decision plan n)]
    (case (first decision)
-    "leaf" (direct-call (leaf-binding-name (second decision)))
+    "leaf" (assoc (direct-call (leaf-binding-name (second decision))) :kind :leaf)
     "compiled"
-     (let [[_ _ ns logical _ shape] decision]
-      (case shape
-       "arity" (direct-call (arity-binding-name ns logical (count (:args n))))
-       "variadic" (direct-call (variadic-binding-name ns logical))
-       "generic" (generic-call (binding-name ns logical))
-       nil))
+     (let [[_ _ ns logical _ shape] decision
+           link (case shape
+                 "arity" (direct-call (arity-binding-name ns logical (count (:args n))))
+                 "variadic" (direct-call (variadic-binding-name ns logical))
+                 "generic" (generic-call (binding-name ns logical))
+                 nil)]
+      (when link (assoc link :kind :compiled)))
      nil))))))
 (defn sealed-function?
  "Under a sealed plan, the selected compiled :fn definition ns/name: its
@@ -200,7 +204,7 @@
  (let [[_ _ _ _ sel-kind sel-ns sel-name] (global-decision plan n)]
   (when (and (sealed-function? plan sel-kind sel-ns sel-name)
              (contains? (set (:fixed (get (:arities plan) [sel-ns sel-name]))) arity))
-   (direct-call (arity-binding-name sel-ns sel-name arity)))))
+   (assoc (direct-call (arity-binding-name sel-ns sel-name arity)) :kind :compiled))))
 (defn link-context [plan ns]
  ; native.eval/context plus :aot-link. Every remote must have an exact
  ; capability (remote-decision raises otherwise); the dynamic resolver stays

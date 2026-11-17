@@ -1,40 +1,51 @@
-; P3 on the REAL round-2 native image (no rebuild): the failing self-emission
-; step, reproduced for the compiler definitions that call into the `lower`
-; stub, then repeated after the image's Env holds the stub's BEAM link rows
-; (the rows native-install-bundle! now installs from bundle :stub-links).
+; P3 on the REAL round-2 native image (no rebuild): self-emission of a sample
+; of closure definitions, compiled from SOURCE by the image exactly as
+; native.bootstrap/prepare does (mark the namespace loaded, evaluate its ns
+; form, compile each definition after a fresh reset), emitted through the
+; bundle's link plan. Twice: first with the image's own Env, then after it
+; holds the bundle's :namespace-links rows (the rows native-install-bundle!
+; now installs).
 ;
 ;   work run --memory 4G --timeout 1800 -- MAIN/NS/out/round2-build/stage1 \
 ;     --eval MAIN/NS/out/round2-build/bundle.scm research/native-seed/speed/link3/native-probe.bl
 ;
-; Reads OUT/stub-links.scm (written by stubs.bl on BEAM); writes
-; OUT/native-<def>.scm, to compare byte for byte with OUT/beam-<def>.scm.
+; Reads OUT/namespace-links.scm and OUT/sample.scm (members.bl, BEAM); writes
+; OUT/native-before/<i>.scm and OUT/native/<i>.scm.
 (ns link3.native-probe
- (:require [native.bootstrap :as bootstrap] [compiler :as c] [reader :as rd]))
+ (:require [native.bootstrap :as bootstrap] [native.eval :as ev] [compiler :as c] [reader :as rd]))
 (def out "/tmp/r3link/out")
-(def wanted ["eval_form"])
-(defn emit-all [plan cu]
- (doseq [name wanted]
-  (let [d (first (filter #(= name (:name %)) (:defs cu)))
+(defn emit-sample [plan units sample dir]
+ (reduce (fn [refused [i [ns name]]]
+  (let [u (get units ns) d (first (filter #(= name (:name %)) (:defs u)))
         _ (c/reset-fresh!)
-        node (c/compile (:form d) (assoc (c/new-env "compiler") :file (:path cu) :target :js))
-        text (try (bootstrap/emit-definition plan cu (assoc d :node node))
-                  (catch e (println (str "NATIVE_EMIT_REFUSED compiler/" name " " (:message e) " " (:data e))) nil))]
-   (when text
-    (host/write-file (str out "/native-" name ".scm") text)
-    (println (str "NATIVE_EMIT compiler/" name " " (count text) "B"))))))
+        node (c/compile (:form d) (assoc (c/new-env ns) :file (:path u) :target :js))
+        text (try (bootstrap/emit-definition plan u (assoc d :node node))
+                  (catch e (println (str "NATIVE_EMIT_REFUSED " dir " " ns "/" name " " (:message e) " " (:data e))) nil))]
+   (if text (do (host/write-file (str out "/" dir "/" i ".scm") text) refused) (inc refused))))
+  0 (map-indexed vector sample)))
 (defn run []
  (let [bundle (host/eval-scheme (host/read-file (second (host/command-line))))
-       light (mapv (fn [u] (assoc u :defs (bootstrap/definition-values (rest (rd/read-string (:source u) (:path u))) (:ns u) (:path u))))
-                   (:units bundle))
-       plan (bootstrap/link-plan (dissoc bundle :units) light)
-       cu (first (filter #(= "compiler" (:ns %)) light))]
-  (println (str "NATIVE_PROBE units=" (count light) " stub-link-before=" (BeamLisp.Env/link "compiler" "lower/eval-anf")))
-  (emit-all plan cu)
-  ; Exactly what native-install-bundle! does for each :stub-links row.
-  (doseq [row (host/eval-scheme (host/read-file (str out "/stub-links.scm")))]
+       sample (host/eval-scheme (host/read-file (str out "/sample.scm")))
+       wanted (set (map first sample))
+       light (mapv (fn [u]
+               (let [forms (rd/read-string (:source u) (:path u))]
+                (when (contains? wanted (:ns u))
+                 ; prepare's namespace setup, for the sampled units only
+                 (BeamLisp.Env/mark_loaded (:ns u))
+                 (ev/eval-form (first forms)))
+                (assoc u :defs (bootstrap/definition-values (rest forms) (:ns u) (:path u)))))
+             (:units bundle))
+       _ (BeamLisp.Env/in_ns "user")
+       units (into {} (map (fn [u] [(:ns u) u]) light))
+       plan (bootstrap/link-plan (dissoc bundle :units) light)]
+  (println (str "NATIVE_PROBE units=" (count light) " sample=" (count sample)
+                " compile-link-before=" (BeamLisp.Env/link "compiler" "compile")))
+  (println (str "NATIVE_PROBE_BEFORE refused=" (emit-sample plan units sample "native-before")))
+  ; Exactly what native-install-bundle! does for each :namespace-links row.
+  (doseq [row (host/eval-scheme (host/read-file (str out "/namespace-links.scm")))]
    (BeamLisp.Env/put_link (nth row 0) (nth row 1) (nth row 2))
    (when (= true (nth row 3)) (BeamLisp.Env/put_meta (nth row 0) (nth row 1) {:private true})))
-  (println (str "NATIVE_PROBE stub-link-after=" (BeamLisp.Env/link "compiler" "lower/eval-anf")))
-  (emit-all plan cu)
+  (println (str "NATIVE_PROBE compile-link-after=" (BeamLisp.Env/link "compiler" "compile")))
+  (println (str "NATIVE_PROBE_AFTER refused=" (emit-sample plan units sample "native")))
   (println "NATIVE_PROBE_DONE")))
 (run)
