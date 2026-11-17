@@ -43,6 +43,18 @@ if len(files) != len(set(files)) or not 1 <= len(files) <= 64:
 sources = {name: committed(name) for name in files}
 if sum(map(len, sources.values())) > 1024 * 1024:
     raise ValueError('Focused source fixture exceeds 1 MiB')
+# Source fixtures may delegate unchanged cache infrastructure to a qualified
+# SDK, whose native ownership cannot be recreated by a private namespace.
+cache_name = 'priv/lib/data/bounded-cache.bl'
+if not args.canonical and cache_name in sources:
+    candidate = sources[cache_name]
+    installed = (sdk / 'image' / cache_name).read_bytes()
+    before = candidate.index(b'(defn computation-revision')
+    old_before = installed.index(b'(defn computation-revision') if b'(defn computation-revision' in installed else installed.index(b'(defn value\n')
+    end = candidate.index(b'(defn clear!')
+    old_end = installed.index(b'(defn clear!')
+    if candidate[:before] != installed[:old_before] or candidate[end:] != installed[old_end:]:
+        raise ValueError('Changed cache infrastructure requires canonical SDK qualification')
 if args.canonical:
     for name, _, _ in manifest['sources']:
         installed = sdk / 'image' / name
@@ -56,6 +68,7 @@ scope = ('canonical-sdk-qualification' if args.canonical else 'current-source-pr
 receipt = {'revision': revision, 'scope': scope,
            'sdk': str(sdk), 'sdk_descriptor_sha256': hashlib.sha256(metadata_bytes).hexdigest(),
            'SDK_production_requested': False,
+           'cache_infrastructure': ('exact-sdk-source' if args.canonical else 'unchanged-sdk-owner-with-candidate-client'),
            'files': {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}}
 with tempfile.TemporaryDirectory(prefix='projection-preflight-') as temporary:
     frozen = Path(temporary) / 'source'

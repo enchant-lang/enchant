@@ -9,6 +9,19 @@
 (def SOURCES (get INVENTORY "sources"))
 (def TESTS (get INVENTORY "tests"))
 
+(defn- cache-client-source [prefix source]
+  ;; Native VM-lifetime owners require SDK identity. Delegate unchanged
+  ;; infrastructure to the exact SDK; compile the candidate client functions.
+  (let [start (elem (binary/match source "(defn computation-revision") 0)
+        stop (elem (binary/match source "(defn clear!") 0)
+        delegates '(key-data footprint fingerprint ready! lookup put! clear! key-identities stats)
+        arities '[[x depth] [x] [x] [name] [name key revision] [name key revision value] [name] [name] [name]]]
+    (str "(ns " prefix ".cache (:require [data.bounded-cache :as sdk-cache]))\n"
+      (apply str (map (fn [name args]
+         (str "(defn " name " " (pr-str args) " (sdk-cache/" name
+              (apply str (map #(str " " %) args)) "))\n")) delegates arities))
+      (binary/part source start (- stop start)))))
+
 (defn with-candidate [action]
   (let [root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
         prefix (str "projection-preflight-" (erlang/unique_integer (list :positive)))
@@ -25,7 +38,8 @@
     (try
       (doseq [[file _ suffix] SOURCES]
         (let [path (Path/join dir (str suffix ".bl"))]
-          (File/write! path (rename (BeamLisp.Loader/read_source (Path/join root file))))
+          (let [source (BeamLisp.Loader/read_source (Path/join root file))]
+            (File/write! path (if (= suffix "cache") (cache-client-source prefix source) (rename source))))
           (let [beams (BeamLisp.AOT/compile_file path (list (tuple :output_dir dir) (tuple :mark_loaded? true)))]
             (swap! modules into (mapv #(elem % 0) beams)))))
       (action (mapv (fn [path] {:path path :src (rename (File/read! (Path/join root path)))}) TESTS))
