@@ -126,8 +126,14 @@
 (define (bl-key-compare a b)
  (cond ((eq? a b) 0)
   ((symbol? a)
-   (if (and (symbol? b) (native-colon-symbol? a) (native-colon-symbol? b))
-    (native-scalar-string-compare-from (symbol->string a) 1 (symbol->string b) 1)
+   ;; Two keywords: one name fetch and one first-character test per side, in
+   ;; place (the same order as before: names compared after the shared colon).
+   (if (symbol? b)
+    (let ((sa (symbol->string a)) (sb (symbol->string b)))
+     (if (and (fx> (string-length sa) 0) (char=? (string-ref sa 0) #\:)
+              (fx> (string-length sb) 0) (char=? (string-ref sb 0) #\:))
+      (native-scalar-string-compare-from sa 1 sb 1)
+      (native-key-compare-ranked a b)))
     (native-key-compare-ranked a b)))
   ((string? a) (if (string? b) (native-scalar-string-compare-from a 0 b 0) (native-key-compare-ranked a b)))
   ((fixnum? a) (if (fixnum? b) (cond ((fx< a b) -1) ((fx< b a) 1) (else 0)) (native-key-compare-ranked a b)))

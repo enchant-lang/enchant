@@ -30,21 +30,35 @@
 (define (native-assert-list xs) (if (native-list? xs) xs (native-badarg "proper list expected")))
 (define (native-assert-tuple t) (if (bl-tag? t 'tuple) t (native-badarg "tuple expected")))
 (define (native-assert-map m) (if (or (bl-tag? m 'map) (bl-tag? m 'vec) (bl-tag? m 'set) (native-opaque-struct? m)) (native-struct-fields m) (native-badarg "map expected")))
+;; Specialised values (vector, set, opaque struct) answer their struct fields
+;; directly, as BEAM's maps:get/is_key on the struct would: `:__struct__` (the
+;; key every kind test reads) never materialises the member map (MEASURE A3).
+;; Field keys are interned once here rather than per call.
+(define native-meta-key (bl-key "meta"))
+(define native-items-key (bl-key "items"))
+(define native-members-key (bl-key "members"))
 (define (native-raw-map-has? m key)
- (cond ((bl-tag? m 'vec) (if (memq key (list (bl-key "__struct__") (bl-key "meta") (bl-key "items"))) #t #f))
-  ((bl-tag? m 'set) (if (memq key (list (bl-key "__struct__") (bl-key "members"))) #t #f))
+ (cond ((bl-tag? m 'vec) (or (eq? key native-struct-key) (eq? key native-meta-key) (eq? key native-items-key)))
+  ((bl-tag? m 'set) (or (eq? key native-struct-key) (eq? key native-members-key)))
+  ((and (eq? key native-struct-key) (not (bl-tag? m 'map)) (native-opaque-struct? m)) #t)
   (else (native-raw-has? (native-assert-map m) key))))
 (define (native-raw-map-size m)
  (cond ((bl-tag? m 'vec) 3) ((bl-tag? m 'set) 2)
   (else (native-map-count (native-assert-map m)))))
+(define (native-badkey key)
+ (native-raise (bl-key "error") (bl-tuple (list (bl-key "badkey") key)) (native-capture-stack)))
 (define (native-map-fetch key m)
- (if (bl-tag? m 'vec)
-  (cond ((eq? key (bl-key "__struct__")) (bl-key "Elixir.BeamLisp.Vector"))
-   ((eq? key (bl-key "meta")) (native-vector-meta m))
-   ((eq? key (bl-key "items")) (native-vector-canonical-items m))
-   (else (native-raise (bl-key "error") (bl-tuple (list (bl-key "badkey") key)) (native-capture-stack))))
-  (let ((v (native-raw-get (native-assert-map m) key native-missing)))
-   (if (eq? v native-missing) (native-raise (bl-key "error") (bl-tuple (list (bl-key "badkey") key)) (native-capture-stack)) v))))
+ (cond
+  ((bl-tag? m 'vec)
+   (cond ((eq? key native-struct-key) native-vector-module-key)
+    ((eq? key native-meta-key) (native-vector-meta m))
+    ((eq? key native-items-key) (native-vector-canonical-items m))
+    (else (native-badkey key))))
+  ((and (bl-tag? m 'set) (eq? key native-struct-key)) native-set-module-key)
+  ((and (eq? key native-struct-key) (not (bl-tag? m 'map)) (native-opaque-struct? m)) (native-struct-module m))
+  (else
+   (let ((v (native-raw-get (native-assert-map m) key native-missing)))
+    (if (eq? v native-missing) (native-badkey key) v)))))
 (define (native-raw-map-get m key default)
  ;; Ordinary maps (including plain tagged structs) already have the raw
  ;; fields. Search once; retain existing specialized projection/type gates.
