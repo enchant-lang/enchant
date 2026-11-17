@@ -1,0 +1,100 @@
+; FRAMES focused check (N4). Compiles every definition of speed/frames/corpus.bl
+; on the pinned SDK and emits it with the native.scheme on the load path
+; (run once with the old emitter, once with the new one), in release and in
+; source-frame (debug) emission. Writes, under OUT:
+;   TAG-release.scm, TAG-frames.scm  definitions (native-register! …)
+;   probes.scm                       identical for every tag: value probes with
+;                                    BEAM's outcome as the oracle, stack/trace
+;                                    probes, preemption and turn-count probes
+; Usage: run-src.sh SRC run speed/frames/check.bl -- OUT TAG
+(ns frames.check
+ (:require [reader :as reader] [compiler :as compiler] [native.scheme :as scheme]
+           [native.eval :as ev] [native.bootstrap :as bootstrap]
+           [frames.corpus :as corpus] [clojure.string :as string]))
+(def argv (BeamLisp/argv))
+(def out (nth argv 0))
+(def tag (nth argv 1))
+(def corpus-ns "frames.corpus")
+(def path "research/native-seed/speed/frames/corpus.bl")
+
+(def base (ev/context corpus-ns))
+(def context
+ (assoc base
+  :global-resolver
+  (fn [n] (when (= corpus-ns (:ns n)) (str "(native-global " (scheme/text (:ns n)) " " (scheme/text (:name n)) ")")))
+  :remote-resolver
+  ; Kernel names with a host procedure (scheme/core-leaves) take the emitter's
+  ; own path: rt.bl itself is not loaded in these gsi programs.
+  (fn [n] (cond (= :host (:mod n)) (str "h-" (erlang/atom_to_binary (:fun n)))
+                (and (contains? #{:Elixir.BeamLisp.Ns.Rt :Elixir.BeamLisp.Ns.Core} (:mod n))
+                     (get scheme/core-leaves (erlang/atom_to_binary (:fun n)))) nil
+                :else ((:remote-resolver base) n)))))
+
+(def definitions
+ (let [forms (reader/read-string (File/read! path) path)]
+  (mapv (fn [d] (compiler/reset-fresh!)
+          (assoc d :node (compiler/compile (:form d) (assoc (compiler/new-env corpus-ns) :file path :target :js))))
+        (filter :name (bootstrap/definition-values (rest forms) corpus-ns path)))))
+(defn- emit-all [options]
+ (string/join "\n"
+  (map (fn [d] (str "(native-register! " (scheme/text corpus-ns) " " (scheme/text (:name d)) " "
+                    (scheme/emit (:node d) (assoc options :definition-ns corpus-ns :fn-label (:name d)
+                                                  :source-fn nil :source-arity nil :tail? false :loop nil)) ")"))
+       definitions)))
+(File/mkdir_p! out)
+(File/write! (str out "/" tag "-release.scm") (emit-all context))
+(File/write! (str out "/" tag "-frames.scm") (emit-all (assoc context :source-frames? true)))
+
+; ---- probes ------------------------------------------------------------------
+(defn- fun [name] {:frames-fn name})
+(defn- native-arg [a]
+ (cond (and (map? a) (:frames-fn a)) (str "(native-global " (scheme/text corpus-ns) " " (scheme/text (:frames-fn a)) ")")
+       (erlang/is_list a) (str "(list " (string/join " " (map native-arg a)) ")")
+       :else (scheme/literal a)))
+(defn- native-args [args] (str "(list " (string/join " " (map native-arg args)) ")"))
+(defn- native-call [name args] (str "(bl-invoke (native-global " (scheme/text corpus-ns) " " (scheme/text name) ") " (native-args args) ")"))
+(def beam-fns
+ {"leaf-add" corpus/leaf-add "leaf-pick" corpus/leaf-pick "sum-to" corpus/sum-to "deep" corpus/deep
+  "tail-count" corpus/tail-count "even-down?" corpus/even-down? "twice" corpus/twice "add3" corpus/add3
+  "mapped" corpus/mapped "raiser" corpus/raiser "raise-mid" corpus/raise-mid "raise-top" corpus/raise-top
+  "thrower" corpus/thrower "catch-and-tag" corpus/catch-and-tag "rethrow" corpus/rethrow
+  "finally-order" corpus/finally-order "hof-raise" corpus/hof-raise "badarith" corpus/badarith
+  "clause-fail" corpus/clause-fail "error-raiser" corpus/error-raiser "work-hof" corpus/work-hof "work-calls" corpus/work-calls})
+(defn- beam-arg [a] (if (and (map? a) (:frames-fn a)) (get beam-fns (:frames-fn a)) a))
+; Native host differences that predate N4 (host error text): reported, not failed.
+(def informational #{"badarith" "clause-fail" "error-raiser"})
+(def value-cases
+ [["leaf-add" [1 2]] ["leaf-pick" [4]] ["leaf-pick" [:k]] ["sum-to" [1000]] ["deep" [200]]
+  ["tail-count" [5000 0]] ["even-down?" [101]] ["twice" [(fun "add3") 1]] ["mapped" [(list 1 2 3)]]
+  ["raiser" [7]] ["raise-mid" [7]] ["raise-top" [7]] ["thrower" [8]] ["catch-and-tag" [9]]
+  ["rethrow" [10]] ["finally-order" [11]] ["hof-raise" [5]] ["hof-raise" [1]] ["work-calls" [50]]
+  ["badarith" [1]] ["clause-fail" [3]] ["error-raiser" [6]]])
+(def stack-cases
+ [["stack-outer" []] ["stack-after-call" []] ["stack-tail-down" [100]] ["stack-deep" [5]]
+  ["stack-via-hof" []] ["stack-map" []] ["stack-loop" []] ["stack-multi" [1 2]] ["stack-multi" [1]]
+  ["stack-variadic" [1 2 3]] ["stack-catch" [3]] ["stack-catch-deep" [3]] ["stack-finally" [4]]
+  ["stack-after-catch" [5]] ["stack-raw-apply" []]])
+(def trace-cases
+ [["raiser" [1]] ["raise-top" [2]] ["thrower" [3]] ["rethrow" [4]] ["hof-raise" [1]]
+  ["badarith" [1]] ["clause-fail" [3]] ["finally-order" [5]] ["error-raiser" [6]]])
+(def spin-cases [["spin" []] ["spin-loop" []] ["ping" [0]] ["grow" [0]] ["spin-self" []] ["hof-spin" []] ["spin-catch" []]])
+(def work-cases [["work" [2000]] ["work-calls" [200]] ["deep" [300]] ["even-down?" [301]] ["tail-count" [500 0]] ["mapped" [(list 1 2 3 4 5 6 7 8)]]])
+(def probes
+ (concat
+  (for [[name args] value-cases]
+   (let [o (corpus/outcome (get beam-fns name) (apply list (map beam-arg args)))]
+    (str "(frames-value " (scheme/text (str name (pr-str args))) " " (if (contains? informational name) "#t" "#f") " "
+         (scheme/literal o) " (lambda () " (native-call "outcome" [(fun name) (apply list args)]) "))")))
+  (for [[name args] stack-cases]
+   (str "(frames-show " (scheme/text (str name (pr-str args))) " (lambda () " (native-call name args) "))"))
+  (for [[name args] trace-cases]
+   (str "(frames-trace " (scheme/text (str name (pr-str args))) " (lambda () " (native-call name args) "))"))
+  ["(frames-show \"max-frames\" (lambda () (h-max-frames)))"]
+  (for [[name args] spin-cases]
+   (str "(frames-turns " (scheme/text name) " 50 3 (native-global " (scheme/text corpus-ns) " " (scheme/text name) ") " (native-args args) ")"))
+  (for [[name args] work-cases budget [17 41 1000]]
+   (str "(frames-turns " (scheme/text name) " " budget " 100000 (native-global " (scheme/text corpus-ns) " " (scheme/text name) ") " (native-args args) ")"))
+  (for [[name args] work-cases]
+   (str "(frames-ticks " (scheme/text name) " (lambda () " (native-call name args) "))"))))
+(File/write! (str out "/probes.scm") (str (string/join "\n" probes) "\n(frames-report)\n"))
+(println "FRAMES_EMITTED" tag (count definitions) "definitions;" (count probes) "probes")

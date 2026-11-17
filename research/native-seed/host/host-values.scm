@@ -762,21 +762,16 @@
               (loop (cdr ps) (bl-match (cadar ps) value b)))))))))
    (else (error "native host: unsupported pattern"))))))
 
-;; Diagnostics store real emitted source frames. Emitter may wrap entry with
-;; native-with-frame; frames remain runtime observations, never source authority.
-(define native-logical-frames (make-parameter '()))
+;; The logical source stack of debug (source-frame) emission: records
+;; #(site critical depth), innermost first, and the pending call site.
+;; Release code never touches them; host/host-source-frames.scm installs the
+;; site operations and answers frames. Frames are runtime observations, never
+;; source authority.
+(define native-source-frames '())
+(define native-source-pending #f)
 (define native-max-frames 0)
-(define (bl-with-source-frame frame thunk)
- (let ((stack (cons frame (native-logical-frames))))
-  (set! native-max-frames (max native-max-frames (length stack)))
-  ;; Parameters follow the captured continuation across scheduler suspension.
-  (parameterize ((native-logical-frames stack))
-   (with-exception-catcher
-    (lambda (e)
-     (if (native-raised? e) (raise e)
-      (native-raise (native-exception-kind e) (native-exception-reason e) stack))) thunk))))
-(define native-with-frame bl-with-source-frame)
-(define (h-logical-stack) (native-logical-frames))
+(define (h-logical-stack) '())
+(define (native-logical-frames) (h-logical-stack))
 (define (h-max-frames) native-max-frames)
 (set! h-make-frames (lambda (f args)
  (vector (lambda () (bl-invoke f (if (bl-tag? args 'vec) (bl-items args) args))

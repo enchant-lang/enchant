@@ -76,10 +76,33 @@
    :ns (:source-ns options) :fn (:source-fn options) :arity (:source-arity options)
    :call (if (:tail? options) :tail :direct)
    :internal (and (string? (:file ann)) (string/ends-with? (:file ann) "/actor/runtime.bl"))}))
+; Source frames (debug emission) are statements around a call, never a
+; wrapper: the call keeps its position, so a tail call stays a Scheme tail
+; call. Each site is an emission-table entry: a constant vector
+; #(internal? key value …) in the code, turned into its frame map only when a
+; stack is observed (host/host-source-frames.scm). A map value with no Scheme
+; datum falls back to a builder #(internal? (lambda () map)).
+(defn- site-symbol? [s]
+ (Enum/all? (unicode/characters_to_list s) (fn [c] (and (> c 32) (< c 127) (not= c 124) (not= c 92)))))
+(defn- site-datum [v]
+ (cond (nil? v) "#!void" (= v true) "#t" (= v false) "#f"
+       (integer? v) (erlang/integer_to_binary v) (string? v) (text v)
+       (and (keyword? v) (site-symbol? (erlang/atom_to_binary v))) (glue "|:" (erlang/atom_to_binary v) "|")
+       :else nil))
+(defn- frame-site [frame internal?]
+ (let [data (Enum/map (maps/to_list frame) (fn [pair]
+              [(site-datum (erlang/element 1 pair)) (site-datum (erlang/element 2 pair))]))
+       flag (if internal? "#t" "#f")]
+  (if (Enum/all? data (fn [d] (and (some? (first d)) (some? (second d)))))
+   (glue "'#(" flag (Enum/join (Enum/map data (fn [d] (glue " " (first d) " " (second d)))) "") ")")
+   (glue "(vector " flag " (lambda () " (literal frame) "))"))))
 (defn- source-call [node expression options]
  (if (:source-frames? options)
-  (glue "(bl-source-call " (literal (source-call-frame node options)) " "
-       (if (:tail? options) "#t" "#f") " (lambda () " expression "))") expression))
+  (let [frame (source-call-frame node options) site (frame-site frame (:internal frame))]
+   (if (:tail? options)
+    (glue "(begin (bl-source-tail " site ") " expression ")")
+    (glue "(let ((source-entry (bl-source-call " site "))) (bl-source-return source-entry " expression "))")))
+  expression))
 (defn joined [xs options] (spaced (Enum/map (items xs) (fn [x] (emit x options)))))
 (defn- operand-bindings
  "`(a<i> <operand>)` for each operand, emitted in source order."
@@ -395,19 +418,25 @@
                   (glue "(pk" (first binding) " " (emit (second binding) guard-options) ")")))) ") " arm ")"))]
      (if more (glue "(let ((clause-next (lambda () " more "))) " arm ")") arm))))))
 
-(defn- function-entry [body frame]
- (if frame
-  (glue "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
-  (glue "(h-tick) " body)))
+; Budget sites. A turn budget is spent by (h-tick) at every loop back-edge
+; (the named-let head of a lowered loop) and at the entry of every function
+; whose body can call BL code (`body-calls?`). A function that cannot call BL
+; code runs a bounded straight line between ticks, so it pays none, whether
+; its caller knows it or not. Every cycle of BL control passes through one
+; of these ticks: see speed/frames/RESULT.md.
+(declare body-calls?)
+(defn- function-entry [body site tick?]
+ (let [body (if tick? (glue "(h-tick) " body) body)]
+  (if site (glue "(bl-source-enter " site ") " body) body)))
 
-(defn- fixed-function [formals body fallback frame]
- ; Gambit's case-lambda keeps wrong-arity calls on the original entry tick,
- ; frame and function-clause path. Gambit 4.9.5's macro needs an optional
- ; position when a rest arm is present: a one-required rest fallback covers
- ; every nonzero arity of a zero-parameter function without capturing a
- ; Source variable.
- (glue "(case-lambda ((" (spaced formals) ") " (function-entry body frame) ") ("
-      (if (empty? formals) "(extra . argv)" "argv") " " (function-entry fallback frame) "))"))
+(defn- fixed-function [formals body fallback site tick?]
+ ; Gambit's case-lambda keeps wrong-arity calls on the original entry frame
+ ; and function-clause path; that arm only raises, so it never ticks.
+ ; Gambit 4.9.5's macro needs an optional position when a rest arm is
+ ; present: a one-required rest fallback covers every nonzero arity of a
+ ; zero-parameter function without capturing a Source variable.
+ (glue "(case-lambda ((" (spaced formals) ") " (function-entry body site tick?) ") ("
+      (if (empty? formals) "(extra . argv)" "argv") " " (function-entry fallback site false) "))"))
 (def ^:private formal-table (erlang/list_to_tuple (Enum/map (lists/seq 0 63) (fn [i] (str "fa" i)))))
 (defn- formal-names [n]
  (Enum/map (lists/seq 0 (dec n)) (fn [i] (if (< i 64) (erlang/element (inc i) formal-table)
@@ -421,15 +450,17 @@
        clause (BeamLisp.CompilerData/simple_function_clause n)
        names (when clause (Enum/map (items (:pats clause)) (fn [p] (:name p))))
        cs (items (:clauses n))
-       widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))]
+       widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))
+       site (when frame (frame-site frame false))
+       tick? (body-calls? cs {:verdicts (:loop-verdicts options) :frames? (:source-frames? options)})]
   (cond
    (and clause (distinct-names? names))
-    (fixed-function (Enum/map names (fn [name] (ident name))) (emit (:body clause) options) fallback frame)
+    (fixed-function (Enum/map names (fn [name] (ident name))) (emit (:body clause) options) fallback site tick?)
    (= 1 (count widths))
     (let [formals (formal-names (first widths))]
-     (fixed-function formals (clauses cs formals fallback options false) fallback frame))
+     (fixed-function formals (clauses cs formals fallback options false) fallback site tick?))
    :else
-    (glue "(lambda argv " (function-entry (clauses cs "argv" fallback options false) frame) ")"))))
+    (glue "(lambda argv " (function-entry (clauses cs "argv" fallback options false) site tick?) ")"))))
 
 (def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
 (def core-leaves
@@ -574,6 +605,40 @@
    (cond (or (contains? verdicts (:self parts)) (:source-frames? options)) {:parts parts :verdicts verdicts}
          (nil? known) {:verdicts verdicts}
          :else nil))))
+
+; Can this function body (nested fn bodies excluded: they are functions with
+; their own entry) pass control to BL code? `ctx` carries the loop verdicts in
+; force, whether source frames lower every loop (as loop-plan does), and the
+; self of the innermost lowered loop, whose recur is a jump, not a call. One
+; walk per function; a loop region not covered by the verdicts in force gets
+; its verdicts once, as loop-plan computes them.
+(defn- primitive-remote?
+ "A host primitive, OTP or Elixir function returns after work bounded by its
+  finite arguments; a BL callback it runs is a function with its own entry.
+  BL-compiled modules (Elixir.BeamLisp.*) and apply can run unbounded BL."
+ [n]
+ (let [m (:mod n)]
+  (and (keyword? m) (not= :apply (:fun n))
+       (not (string/starts-with? (erlang/atom_to_binary m) "Elixir.BeamLisp")))))
+(defn- any-calls? [xs ctx] (any-of? (items xs) (fn [x] (body-calls? x ctx))))
+(defn- body-calls? [n ctx]
+ (cond
+  (sequential? n) (any-calls? n ctx)
+  (not (erlang/is_map n)) false
+  :else
+  (case (:op n)
+   :lit false :var false :global false :binding false :enil false :fn false
+   :apply
+   (if-let [parts (loop-parts n)]
+    (let [verdicts (or (:verdicts ctx) (loop-verdicts n)) inside (assoc ctx :verdicts verdicts)]
+     (if (or (:frames? ctx) (contains? verdicts (:self parts)))
+      (or (any-calls? (:inits parts) inside) (body-calls? (:body parts) (assoc inside :loop (:self parts))))
+      true))
+    (if (and (:loop ctx) (recur-node? n (:loop ctx))) (any-calls? (:args n) ctx) true))
+   :invoke true
+   :recv true
+   :remote (or (not (primitive-remote? n)) (any-calls? (:args n) ctx))
+   (any-calls? (vals (dissoc n :ann)) ctx))))
 
 (defn- integer-operand? [n options]
  (or (and (= :lit (:op n)) (erlang/is_integer (:val n)))
