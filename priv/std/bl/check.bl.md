@@ -37,7 +37,7 @@ to create one; that first run is a measurement, not a verdict.
 
 ```beam-lisp
 (ns bl.check
-  (:require [bl.util :as u] [bl.lint :as lint] [bl.fix :as fix] [deodorant] [lsp] [typed] [data.single-flight :as flight] [data.provenance :as provenance]))
+  (:require [bl.util :as u] [bl.lint :as lint] [bl.fix :as fix] [deodorant] [lsp] [typed] [data.single-flight :as flight] [runtime.activity :as activity] [data.provenance :as provenance]))
 ```
 
 ## Which sources a check reads
@@ -120,7 +120,7 @@ keeps the cost one analysis per file instead of one per function.
 (def ^:private core-builds (atom 0))
 (defn work-stats [] {:core-builds @core-builds})
 
-(defn analyze-source
+(defn- analyze-source*
   "The metrics for one source text: diagnostics, smells, and the per-function
    facts. `:unreadable true` when the compiler cannot parse the text; the
    counts are then zero and the file is a failure on its own."
@@ -158,6 +158,13 @@ keeps the cost one analysis per file instead of one per function.
       (catch error
         (assoc (unreadable-metrics path digest)
                :analysis-error {:stage :analysis :message (pr-str error)})))))
+
+(defn analyze-source [path src]
+  (activity/with-operation :check {:subject path :source (sha256 src)}
+    (fn []
+      (let [result (analyze-source* path src)]
+        (when (:unreadable result) (activity/mark! :failed))
+        result))))
 
 (defn- source-metrics
   "Read one path and measure it. A file that cannot be read at all is a metric,

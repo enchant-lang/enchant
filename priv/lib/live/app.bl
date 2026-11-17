@@ -56,7 +56,7 @@
 ; rendering, diffing, or transport. It only supplies the frame.
 
 (ns live.app
-  (:require [live.socket :as sock]
+  (:require [live.socket :as sock] [live.inspector :as inspector]
             [live.measure :as measure]
             [live.temporal :as temporal] [connector.clock :as clock]
             [data.projection :as managed]
@@ -707,13 +707,16 @@
 (defn serve
   "Serve `app` on `opts[:port]` (loopback when `opts[:ip]` is an ip tuple).
    Optional :around wraps the complete router as (fn [handler conn] …).
+   :devtools {:enabled? true :authorize developer?} injects the SDK inspector.
+   Default off; optional :work/:projections grant existing owners to its reader.
    Starts one Bandit listener without evaluating any sample screens.
    Its plug routes assets/client/ws/SSR. Each SSR carries its realized CSS;
    live mounts and patches deliver newly reached rules. Every viewer gets one live
    app-socket; navigation is a keyed patch, not a reload; liveness is ambient
    over `(:observe app)`."
   [app opts]
-  (let [shared (or (get app :shared-conn) (datom/connect []))
+  (let [app (inspector/attach app (get opts :devtools {}))
+        shared (or (get app :shared-conn) (datom/connect []))
         app2 (assoc app :shared-conn shared)
         owned? (nil? (get app :shared-conn))]
     (try
@@ -731,6 +734,7 @@
           (assoc app2 :live/listener (elem result 1) :live/owns-shared-conn? owned?)
           (throw (ex-info "listener failed to start" {:kind :listener-start :reason (elem result 1)}))))
       (catch e
+        (inspector/close! app)
         (when owned? (datom/close! shared))
         (throw e)))))
 
@@ -742,6 +746,7 @@
     (when (Process/alive? listener)
       (try (Supervisor/stop listener :normal 30000)
            (catch e (when (Process/alive? listener) (throw e))))))
+  (inspector/close! app)
   ;; Never close the data owner until listener shutdown has completed.
   (when (:live/owns-shared-conn? app) (datom/close! (:shared-conn app)))
   nil)

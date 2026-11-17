@@ -31,7 +31,7 @@
   (:require [typed] [datom] [compiler] [datom.query.relation] [datalog-shape :as shape]
            [datom.store-fjall] [datom.conn] [source-graph :as sg]
            [vm.paths :as paths] [env] [system.source :as source] [codebase.phase :as phase]
-           [codebase.refactor :as refactor] [data.single-flight :as flight]
+           [codebase.refactor :as refactor] [data.single-flight :as flight] [runtime.activity :as activity]
            [data.bounded-cache :as cache] [data.provenance :as provenance]))
 
 (defn contextual-facts
@@ -565,11 +565,11 @@
       (cache/fingerprint [FACTS-VERSION (BeamLisp.Tiers/priv_root) ns-str
                           (sha256-hex src) seeds options]))))
 
-(defn index-source
+(defn- index-source*
   "Share immutable facts by exact source, seed vocabulary, namespace and mode.
    Connections remain caller-owned. Unknown/opaque seeds use ordinary indexing;
    changed code cannot return a retained answer under old evidence."
-  ([sigs ns-str src] (index-source sigs ns-str src {}))
+  ([sigs ns-str src] (index-source* sigs ns-str src {}))
   ([sigs ns-str src options]
    (let [revision (provenance/definition-revision)
          seeds (cache/fingerprint sigs)
@@ -577,8 +577,14 @@
          run (fn [] (index-source-uncached sigs ns-str src options))]
      (if (and revision seeds (string? src))
        (let [answer (flight/value :codebase.facts key revision run)]
-         (if (= revision (provenance/definition-revision)) answer (run)))
-       (run)))))
+         (if (= revision (provenance/definition-revision)) answer (do (activity/mark! :unstable) (activity/mark! :computed) (run))))
+       (do (activity/mark! :computed) (run))))))
+
+(defn index-source
+  ([sigs ns-str src] (index-source sigs ns-str src {}))
+  ([sigs ns-str src options]
+   (activity/with-operation :index {:subject ns-str :source (when (string? src) (sha256-hex src))}
+     (fn [] (index-source* sigs ns-str src options)))))
 
 (defn connect-codebase
   "A fresh datom conn with the codebase schema, plus `extra` definitions.

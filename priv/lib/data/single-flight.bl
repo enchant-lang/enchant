@@ -1,5 +1,5 @@
 ;; Serialize one logical computation without moving its execution authority.
-(ns data.single-flight (:require [data.bounded-cache :as cache]))
+(ns data.single-flight (:require [data.bounded-cache :as cache] [runtime.activity :as activity]))
 
 (def MAX-ACTIVE 2)
 (defn- acquire-slot [nodes]
@@ -7,19 +7,23 @@
     (when (< i MAX-ACTIVE)
       (if (global/set_lock (tuple (tuple :data.shared-work.slot i) (erlang/self)) nodes 0) i
         (recur (inc i))))))
+(defn- await! [attempt until message]
+  (or (attempt)
+    (activity/waiting
+      (fn []
+        (loop []
+          (when (>= (erlang/monotonic_time :millisecond) until)
+            (throw (ex-info message {:kind :shared-work-busy})))
+          (Process/sleep 10)
+          (or (attempt) (recur)))))))
 (defn- with-slot [until f]
-  ;; Nested compiler consumers keep their caller's slot. Native ownership
-  ;; releases slots only on return or actual holder death, never a result send.
+  ;; Nested compiler consumers retain the actual caller's native admission.
   (if (Process/get :data.single-flight/slot) (f)
-    (let [nodes (list (erlang/node))]
-      (loop []
-        (if-let [slot (acquire-slot nodes)]
-          (try (Process/put :data.single-flight/slot slot) (f)
-            (finally (Process/delete :data.single-flight/slot)
-              (global/del_lock (tuple (tuple :data.shared-work.slot slot) (erlang/self)) nodes)))
-          (if (>= (erlang/monotonic_time :millisecond) until)
-            (throw (ex-info "Shared work capacity is busy" {:kind :shared-work-busy}))
-            (do (Process/sleep 10) (recur))))))))
+    (let [nodes (list (erlang/node))
+          slot (await! #(acquire-slot nodes) until "Shared work capacity is busy")]
+      (try (Process/put :data.single-flight/slot slot) (f)
+        (finally (Process/delete :data.single-flight/slot)
+          (global/del_lock (tuple (tuple :data.shared-work.slot slot) (erlang/self)) nodes))))))
 
 (defn with-key
   "Run f in its actual caller under one VM-local key. Waiters recheck their
@@ -40,23 +44,26 @@
            until (+ wait-ms (erlang/monotonic_time :millisecond))]
        (when (contains? held id)
          (throw (ex-info "Recursive shared work cannot await itself" {:kind :recursive-shared-work})))
-       (loop []
-         (if (global/set_lock lock nodes 0)
-           (try
-             (Process/put :data.single-flight/held (conj held id))
-             (with-slot until f)
-             (finally (Process/put :data.single-flight/held held) (global/del_lock lock nodes)))
-           (if (>= (erlang/monotonic_time :millisecond) until)
-             (throw (ex-info "Shared work admission is busy" {:kind :shared-work-busy}))
-             (do (Process/sleep 10) (recur)))))))))
+       (await! #(global/set_lock lock nodes 0) until "Shared work admission is busy")
+       (try
+         (Process/put :data.single-flight/held (conj held id))
+         (with-slot until f)
+         (finally (Process/put :data.single-flight/held held) (global/del_lock lock nodes))))))
 
 (defn value [name key revision f]
-  (if (nil? revision) (f)
+  (if (nil? revision) (do (activity/mark! :computed) (f))
     (do (cache/ready! name)
       ;; A retained answer is not a job. It remains readable even when every
       ;; computation slot is occupied; both paths use the same function stamp.
       (let [stamp (cache/computation-revision revision f)
             hit (when stamp (cache/lookup name key stamp))]
-        (if (:hit? hit) (:value hit)
+        (if (:hit? hit) (do (activity/mark! :reused) (:value hit))
           (with-key [name key revision]
-            (fn [] (cache/value name key revision f))))))))
+            (fn []
+              ;; Keep the original function stamp; wrapping f changes its identity.
+              (let [hit (when stamp (cache/lookup name key stamp))]
+                (if (:hit? hit) (do (activity/mark! :reused) (:value hit))
+                  (do (activity/mark! :computed)
+                    (let [v (f)]
+                      (when (and stamp (not (cache/put! name key stamp v))) (activity/mark! :declined))
+                      v))))))))))))

@@ -12,6 +12,7 @@
     pick: '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><rect x="6" y="6" width="12" height="12" rx="2"/>',
     paint: '<path d="m14 3 7 7-9 9-7-7zM5 12l-2 2 7 7 2-2M15 4l-5 5"/>',
     server: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M7 7h.1M7 17h.1M14 7h3M14 17h3"/>',
+    tools: '<path d="m4 7 5 5-5 5M12 17h8"/>',
     close: '<path d="m7 7 10 10M17 7 7 17"/>',
     updates: '<path d="M3 18h3l3-12 5 15 3-10h4"/>',
     refresh: '<path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6"/>'
@@ -21,18 +22,22 @@
   const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
   root.innerHTML = `<link rel="stylesheet" href="/__enchant/inspector.css">
     <section class="panel" id="dev-panel" hidden aria-label="Dev tools"><div class="head"><b id="title">Updates</b>
-    <div class="tabs"><button data-tab="updates" aria-selected="true">Updates</button><button data-tab="element" aria-selected="false">Loom</button><button data-tab="server" aria-selected="false">Server</button></div></div><div class="body"></div></section>
+    <div class="tabs"><button data-tab="updates" aria-selected="true">Updates</button><button data-tab="tools" aria-selected="false">Tools</button><button data-tab="element" aria-selected="false">Loom</button><button data-tab="server" aria-selected="false">Server</button></div></div><div class="body"></div></section>
     <nav class="dock" aria-label="Dev tools">
     <button class="tool brand" data-action="open" aria-label="Open dev tools" title="Dev tools" aria-expanded="false" aria-controls="dev-panel">${icon('logo')}</button>
     <div class="spark" role="button" tabindex="0" data-action="updates" title="Page updates" aria-label="Page updates"></div><div class="rule"></div>
     <button class="tool" data-action="paint" aria-label="Highlight updates" title="Highlight updates" aria-pressed="false">${icon('paint')}</button>
     <button class="tool" data-action="pick" aria-label="Pick an element" title="Pick an element" aria-pressed="false">${icon('pick')}</button>
+    <button class="tool" data-action="tools" aria-label="Tool activity" title="Tool activity">${icon('tools')}</button>
     <button class="tool" data-action="server" aria-label="Server activity" title="Server activity">${icon('server')}</button>
     <button class="tool" data-action="close" aria-label="Close panel" title="Close panel" hidden>${icon('close')}</button></nav>`;
   const $ = s => root.querySelector(s);
   const panel = $('.panel'), body = $('.body');
   const history = [], boxes = new Set(), timers = new Set();
   let open = false, tab = 'updates', paint = false, picking = false, selected = null;
+  let selectedRun = null;
+  const sampling = () => tab==='server'||tab==='tools';
+  const runId = () => {const n=Number(source()?.dataset.toolRun);return Number.isSafeInteger(n)&&n>0?n:null;};
   let sample = null, error = false, poll = null, flight = null, generation = 0, disposed = false;
   let queries = 0, pending = 0, peakFlights = 0, lastAt = 0;
   let draw = null, draws = 0, paintCredits = 16, paintLookups = 0;
@@ -49,16 +54,16 @@
   function bars(parent, big) {
     parent.replaceChildren();
     const max = Math.max(1, ...history.map(f=>f.ops||0));
-    history.forEach(f=>{const bar=document.createElement('i');bar.style.height=`${f.ops===null?(big?35:12):2+(f.ops/max)*(big?48:13)}px`;
-      if(f.ops===null)bar.style.background='#a9b8aa';bar.title=f.ops===null?'Whole page updated':`${f.ops} changes`;parent.append(bar);});
+    history.forEach(f=>{const bar=document.createElement(big&&f.run?'button':'i');if(big&&f.run){bar.dataset.run=String(f.run);bar.setAttribute('aria-label','Explain update');} bar.style.height=`${f.ops===null?(big?35:12):2+(f.ops/max)*(big?48:13)}px`;
+      if(f.ops===null)bar.style.background='#a9b8aa';bar.title=f.ops===null?'Whole page updated':`${f.ops} changes`;if(big&&f.run)bar.title+=' · Explain';parent.append(bar);});
   }
   function activate(next) {
     if (disposed) return;
     stopSampling(); open=true;tab=next;panel.hidden=false;$('[data-action="open"]').setAttribute('aria-expanded','true');
     $('[data-action="close"]').hidden=false;
     root.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===tab)));
-    $('#title').textContent={updates:'Updates',element:'Loom',server:'Server'}[tab];
-    render(); if(tab==='server') refresh();
+    $('#title').textContent={updates:'Updates',element:'Loom',server:'Server',tools:'Tools'}[tab];
+    render(); if(sampling()) refresh();
   }
   function stopSampling() {
     generation++;clearTimeout(poll);poll=null;
@@ -69,7 +74,7 @@
     stopSampling();setPicking(false);selected=null;pickBox.style.display='none';
   }
   async function refresh() {
-    if(disposed||!open||tab!=='server'||document.hidden||!source()||!host.isConnected||flight)return;
+    if(disposed||!open||!sampling()||document.hidden||!source()||!host.isConnected||flight)return;
     const current=generation, controller=new AbortController();flight=controller;
     queries++;pending++;peakFlights=Math.max(peakFlights,pending);
     const deadline=setTimeout(()=>controller.abort(),5000);
@@ -83,7 +88,7 @@
     } catch(e) {if(current===generation&&!disposed)error=true;}
     finally {
       pending--;clearTimeout(deadline);if(flight===controller)flight=null;
-      if(!disposed&&open&&tab==='server'&&!document.hidden) {
+      if(!disposed&&open&&sampling()&&!document.hidden) {
         render();clearTimeout(poll);poll=setTimeout(refresh,2000);
       }
     }
@@ -99,6 +104,7 @@
       return;
     }
     if(tab==='element') {renderSelection();return;}
+    if(tab==='tools') {renderTools();return;}
     if(!sample) {
       const empty=text(body,'div',error?'Unavailable':'…');empty.className='empty';
     } else {
@@ -118,6 +124,47 @@
     const footer=text(body,'div','');footer.className='footer';
     text(footer,'span',error?'Unavailable':lastAt?'Sampled just now':'');
     const refreshButton=text(footer,'button','Refresh');refreshButton.dataset.action='refresh';
+  }
+  const toolName = kind => ({editor:'Editor',check:'Check',index:'Index',render:'Page'}[kind]||'Tool');
+  function renderTools() {
+    const tape=sample?.activity;
+    if(!tape?.available){text(body,'div',error?'Unavailable':sample?'Not enabled':'…').className='empty';return;}
+    const rows=[...(tape.running||[]),...(tape.recent||[])];
+    if(!rows.length){text(body,'div','No tool runs yet').className='empty';return;}
+    const chosen=rows.find(r=>r.id===selectedRun);
+    if(selectedRun&&!chosen){text(body,'small','Run no longer retained');selectedRun=null;}
+    if(chosen) {
+      const head=text(body,'div','');head.className='selection';text(head,'b',toolName(chosen.tool));
+      const back=text(head,'button','All runs');back.dataset.action='all-runs';
+      text(body,'small',chosen.subject).className='subject';
+      const facts=text(body,'div','');facts.className='run-facts';
+      const counts=chosen.counts||{};
+      [[counts.computed||0,'Built'],[counts.reused||0,'Reused'],[`${chosen.wait_ms??chosen['wait-ms']??0} ms`,'Wait']].forEach(([v,label])=>{
+        const cell=text(facts,'div','');text(cell,'strong',v);text(cell,'small',label);
+      });
+      text(body,'div',({'first-use':'First request','same-source':'Same source','source-changed':'Source changed',requested:'Requested again'}[chosen.cause]||'Requested')).className='reason';
+      if(counts.unstable)text(body,'small','Definitions changed during work');
+      if(counts.declined)text(body,'small','Answer too large to keep');
+      if(chosen.state==='failed'||chosen.state==='interrupted')text(body,'small',chosen.state==='failed'?'Run failed':'Caller stopped');
+      if(counts.evaluated) {
+        text(body,'small',`${counts.evaluated} function evaluations`);
+        const names=text(body,'div','');names.className='function-names';
+        (chosen.items||[]).forEach(name=>text(names,'code',name));
+      }
+      const children=rows.filter(r=>r.parent===chosen.id);
+      children.forEach(r=>runRow(r,true));
+      if(chosen.parent&&rows.some(r=>r.id===chosen.parent)) {
+        const parent=text(body,'button','↑ Parent run');parent.className='parent-run';parent.dataset.run=chosen.parent;
+      }
+    } else rows.slice(0,32).forEach(r=>runRow(r,false));
+    if(tape.dropped)text(body,'small','Some runs omitted');
+    function runRow(r,child) {
+      const row=text(body,'button','');row.className='run-row'+(child?' child':'');row.dataset.run=r.id;row.dataset.runId=r.id;
+      const label=text(row,'span','');text(label,'i','').className='dot '+(r.state==='working'||r.state==='waiting'?'running':r.state==='failed'?'blocked':'ready');
+      label.append(document.createTextNode(toolName(r.tool)));
+      const state=r.state==='waiting'?'Waiting':r.state==='working'?'Working':r.state==='failed'?'Failed':r.state==='interrupted'?'Stopped':(r.counts?.reused&&!r.counts?.computed)?'Reused':'Done';
+      text(row,'small',`${state} · ${r['elapsed-ms']} ms`);row.title=r.subject;
+    }
   }
   function colorKey(value) {
     if(/^#[0-9a-f]{3}$/i.test(value))return '#'+[...value.slice(1)].map(c=>c+c).join('').toLowerCase();
@@ -180,12 +227,12 @@
   function queueDraw() {
     if(draw===null)draw=requestAnimationFrame(()=>{
       draw=null;if(disposed)return;draws++;paintCredits=16;
-      bars($('.spark'),false);if(open&&tab!=='server')render();if(selected)reposition();
+      bars($('.spark'),false);if(open&&!sampling())render();if(selected)reposition();
     });
   }
   function onPatch(e) {
     if(!source()){dispose();return;}
-    const ops=e.detail?.ops||[];history.push({ops:ops.length});if(history.length>32)history.shift();
+    const ops=e.detail?.ops||[];history.push({ops:ops.length,run:runId()});if(history.length>32)history.shift();
     if(paint&&boxes.size<16)ops.slice(0,Math.min(paintCredits,16-boxes.size)).forEach(op=>{
       // Same Live path lookup used by the older tooling/studio.js instrument.
       paintCredits--;paintLookups++;
@@ -196,7 +243,7 @@
   }
   function onMount(e) {
     if(!source()){dispose();return;}
-    history.push({ops:null});if(history.length>32)history.shift();
+    history.push({ops:null,run:runId()});if(history.length>32)history.shift();
     if(paint&&paintCredits>0){paintCredits--;paintLookups++;flash(e.detail.root);}
     if(selected&&!selected.isConnected){selected=null;pickBox.style.display='none';}
     queueDraw();
@@ -209,12 +256,15 @@
     }
   }
   root.addEventListener('click',e=>{
-    const button=e.target.closest('[data-action],[data-tab]');if(!button)return;
+    const button=e.target.closest('[data-action],[data-tab],[data-run]');if(!button)return;
     e.stopPropagation();
+    if(button.dataset.run){selectedRun=Number(button.dataset.run);if(tab==='tools'){render();}else activate('tools');return;}
     if(button.dataset.tab){activate(button.dataset.tab);return;}
     switch(button.dataset.action) {
       case 'open':open?close():activate('updates');break;
       case 'updates':activate('updates');break;
+      case 'all-runs':selectedRun=null;render();break;
+      case 'tools':selectedRun=null;activate('tools');break;
       case 'server':activate('server');break;
       case 'close':close();break;
       case 'pick':activate('element');setPicking(!picking);break;
@@ -222,7 +272,7 @@
       case 'refresh':refresh();break;
     }
   });
-  function visibility(){stopSampling();if(!document.hidden&&open&&tab==='server')refresh();}
+  function visibility(){stopSampling();if(!document.hidden&&open&&sampling())refresh();}
   function dispose() {
     if(disposed)return;disposed=true;close();
     if(draw!==null)cancelAnimationFrame(draw);draw=null;
@@ -236,7 +286,7 @@
   document.addEventListener('live:patch',onPatch);document.addEventListener('live:mount',onMount);document.addEventListener('visibilitychange',visibility);
   document.addEventListener('keydown',onKey,true);document.addEventListener('scroll',reposition,true);
   window.addEventListener('resize',reposition);window.addEventListener('pagehide',dispose);
-  window.EnchantInspector={version:1,dispose,debug:()=>({open,tab,picking,paint,frames:history.length,flashes:boxes.size,
+  window.EnchantInspector={version:2,dispose,debug:()=>({open,tab,picking,paint,selectedRun,frames:history.length,flashes:boxes.size,
     requests:queries,inFlight:!!flight,activeRequests:pending,peakFlights,pollScheduled:poll!==null,
     drawScheduled:draw!==null,draws,paintLookups,disposed})};
 })();

@@ -1,0 +1,117 @@
+;; An optional finite trace in the actual caller. No worker, timer or result cache.
+(ns runtime.activity)
+
+(def max-scopes 16)
+(def max-active 64)
+(def max-recent 64)
+(def ^:private ^:per-env tapes (atom {}))
+(defn- scope [] (or (Process/get :bl-vm-scope) (BeamLisp.Env/env_id)))
+(defn- now [] (erlang/monotonic_time :millisecond))
+(defn- label [s] (when (string? s) (subs s 0 (min 160 (count s)))))
+
+(defn open
+  "Trusted host captures its own scope. At most sixteen scopes and readers each.
+   Close the returned reader when its development surface stops."
+  []
+  (let [key (scope) lease (erlang/make_ref)]
+    (swap! tapes (fn [all]
+      (let [t (get all key {:readers #{} :active {} :recent [] :dropped 0})]
+        (when (or (and (not (contains? all key)) (>= (count all) max-scopes))
+                  (>= (count (:readers t)) max-scopes))
+          (throw "Activity reader capacity reached"))
+        (assoc all key (update t :readers conj lease)))))
+    {:scope key :lease lease}))
+
+(defn close! [reader]
+  (swap! tapes (fn [all]
+    (if-let [t (get all (:scope reader))]
+      (let [readers (disj (:readers t) (:lease reader))]
+        (if (empty? readers) (dissoc all (:scope reader))
+          (assoc all (:scope reader) (assoc t :readers readers)))) all)))
+  nil)
+
+(defn- alive? [row] (erlang/is_process_alive (:pid row)))
+(defn- public-row [row time]
+  (-> row (dissoc :pid :started :source)
+      (assoc :tool (name (:tool row)) :elapsed-ms (max 0 (- (or (:ended row) time) (:started row))))
+      (dissoc :ended)))
+(defn snapshot
+  "Finite metadata only; never creates a tape, loads a tool or acknowledges work."
+  [reader]
+  (let [t (get @tapes (:scope reader)) time (now)]
+    (if-not (contains? (:readers t #{}) (:lease reader))
+      {:available false :running [] :recent []}
+      {:available true
+       :running (mapv #(public-row (if (alive? %) % (assoc % :state "interrupted")) time)
+                       (sort-by :id (vals (:active t))))
+       :recent (mapv #(public-row % time) (reverse (:recent t)))
+       :dropped (:dropped t) :limits {:active max-active :recent max-recent}})))
+
+(defn current-id [] (Process/get :runtime.activity/current))
+(defn- edit! [f]
+  (when-let [id (current-id)]
+    (let [key (scope)]
+      (swap! tapes (fn [all]
+        (if (get-in all [key :active id]) (update-in all [key :active id] f) all))))))
+
+(defn mark!
+  "Record actual decisions, never inferred hits. Only sixteen bounded item labels."
+  ([kind] (mark! kind nil))
+  ([kind detail]
+   (when (contains? #{:computed :reused :unstable :declined :evaluated :failed} kind)
+     (edit! (fn [r]
+       (let [r (update-in r [:counts kind] (fn [n] (inc (or n 0))))]
+         (if-let [s (label detail)]
+           (if (< (count (:items r)) 16) (update r :items conj s) r) r)))))
+   nil))
+
+(defn waiting
+  "Wrap only admission waiting. Nested calls charge the outer wait once."
+  [f]
+  (if (or (nil? (current-id)) (Process/get :runtime.activity/waiting)) (f)
+    (let [started (now)]
+      (try
+        (Process/put :runtime.activity/waiting true)
+        (edit! #(assoc % :state "waiting"))
+        (f)
+        (finally
+          (Process/delete :runtime.activity/waiting)
+          (edit! #(-> % (assoc :state "working") (update :wait-ms + (- (now) started)))))))))
+
+(defn with-operation
+  "Opt-in scope trace. Telemetry capacity never delays or refuses actual work.
+   metadata accepts bounded subject/source strings, never source text or values."
+  [tool metadata f]
+  (let [key (scope)]
+    (if-not (contains? @tapes key) (f)
+      (let [id (erlang/unique_integer (list :positive :monotonic))
+            parent (current-id) started (now) admitted (atom false)
+            subject (or (label (:subject metadata)) "")
+            source (label (:source metadata))]
+        (swap! tapes (fn [all]
+          (if-let [t (get all key)]
+            (let [dead (filterv #(not (alive? %)) (vals (:active t)))
+                  active (reduce #(dissoc %1 (:id %2)) (:active t) dead)
+                  recent (vec (take-last max-recent
+                           (concat (:recent t) (map #(assoc % :state "interrupted" :ended started) dead))))
+                  previous (last (filter #(and (= tool (:tool %)) (= subject (:subject %))) recent))]
+              (if (>= (count active) max-active)
+                (assoc all key (assoc t :active active :recent recent :dropped (inc (:dropped t))))
+                (do (reset! admitted true)
+                  (assoc all key (assoc t :recent recent :active
+                    (assoc active id {:id id :parent parent :tool tool :subject subject
+                      :source source :cause (cond (nil? previous) "first-use"
+                        (nil? source) "requested" (= source (:source previous)) "same-source" :else "source-changed")
+                      :pid (erlang/self) :started started :state "working" :wait-ms 0 :counts {} :items []})))))) all)))
+        (if-not @admitted (f)
+          (try
+            (Process/put :runtime.activity/current id)
+            (try (f) (catch e (mark! :failed) (throw e)))
+            (finally
+              (Process/put :runtime.activity/current parent)
+              (swap! tapes (fn [all]
+                (if-let [r (get-in all [key :active id])]
+                  (-> all (update-in [key :active] dissoc id)
+                    (update-in [key :recent]
+                      #(vec (take-last max-recent (conj % (assoc r :ended (now)
+                        :state (if (pos? (get-in r [:counts :failed] 0)) "failed" "done"))))))) all))))))))))

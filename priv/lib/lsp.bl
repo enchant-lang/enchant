@@ -31,7 +31,7 @@
             [reader-node :as rn]
             [typed]
             [errors]
-            [data.bounded-cache :as cache] [data.provenance :as provenance] [data.single-flight :as flight]))
+            [data.bounded-cache :as cache] [data.provenance :as provenance] [data.single-flight :as flight] [runtime.activity :as activity]))
 
 ; ── the position index ───────────────────────────────────────────────────
 
@@ -94,17 +94,17 @@
    (cache/ready! name)
    (let [run (fn []
      (let [hit (when before (cache/lookup name key before))]
-       (if (and (:hit? hit) (= before (memo-context))) (:value hit)
-         (let [value (compute)]
+       (if (and (:hit? hit) (= before (memo-context))) (do (activity/mark! :reused) (:value hit))
+         (let [_ (activity/mark! :computed) value (compute)]
            (if (and before (= before (memo-context)))
-             (when-not (cache/put! name key before value) (swap! declined-retention inc))
-             (swap! changed-during-build inc))
+             (when-not (cache/put! name key before value) (activity/mark! :declined) (swap! declined-retention inc))
+             (do (activity/mark! :unstable) (swap! changed-during-build inc)))
            value))))]
      (let [hit (when before (cache/lookup name key before))]
-       (if (and (:hit? hit) (= before (memo-context))) (:value hit)
+       (if (and (:hit? hit) (= before (memo-context))) (do (activity/mark! :reused) (:value hit))
          (if before (flight/with-key [name key before] run) (run)))))))
 
-(defn analyzed
+(defn- analyzed*
   "One parsed and lowered program, shared by every diagnostic and projection.
    Retained by exact source bytes, environment and live definition context."
   [src]
@@ -121,6 +121,10 @@
             known (reduce (fn [m [name s]] (assoc m name (:returns s))) {} (into [] summaries))]
         {:summaries summaries :bodies bodies :known known :forms (:forms program)
          :context (when (= context (memo-context)) context)}))))
+
+(defn analyzed [src]
+  (activity/with-operation :editor {:subject "Document" :source (sha256-hex src)}
+    (fn [] (analyzed* src))))
 
 (defn- growth-of-src
   ([src] (growth-of-src src (analyzed src)))

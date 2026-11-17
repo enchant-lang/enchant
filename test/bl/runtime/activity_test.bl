@@ -1,0 +1,73 @@
+(ns runtime.activity-test
+  (:require [runtime.activity :as a] [data.single-flight :as flight] [lsp]
+            [bl.check :as check] [codebase :as cb]))
+(defn- rows [r] (:recent (a/snapshot r)))
+
+(deftest finite-scoped-readers-record-real-decisions-and-never-values
+  (let [r (a/open) calls (atom 0) key (erlang/make_ref)
+        f (fn [] (swap! calls inc) {:private "secret"})]
+    (try
+      (is (empty? (rows r)))
+      (doseq [_ (range 2)]
+        (a/with-operation :check {:subject "small.bl" :source "digest"}
+          #(flight/value :activity.test key :v f)))
+      (is (= 1 @calls))
+      (is (= 1 (get-in (first (rows r)) [:counts :reused])))
+      (is (= 1 (get-in (second (rows r)) [:counts :computed])))
+      (is (= "same-source" (:cause (first (rows r)))))
+      (is (not (String/contains? (pr-str (a/snapshot r)) "secret")))
+      (is (not (contains? (first (rows r)) :source)))
+      (let [before (rows r)] (doseq [_ (range 40)] (a/snapshot r)) (is (= before (rows r))))
+      (let [old (Process/get :bl-vm-scope)]
+        (try (Process/put :bl-vm-scope (erlang/make_ref))
+          (a/with-operation :index {} #(a/mark! :computed))
+          (is (= 2 (count (rows r))))
+          (finally (Process/put :bl-vm-scope old))))
+      (doseq [i (range 100)]
+        (a/with-operation :editor {:subject (apply str (repeat 200 "x")) :source (str i)}
+          #(doseq [_ (range 30)] (a/mark! :evaluated "function"))))
+      (is (= 64 (count (rows r))))
+      (is (= 16 (count (:items (first (rows r))))))
+      (is (= 30 (get-in (first (rows r)) [:counts :evaluated])))
+      (is (= 160 (count (:subject (first (rows r))))))
+      (is (= "source-changed" (:cause (first (rows r)))))
+      (is (thrown? (a/with-operation :check {} #(throw "private error"))))
+      (is (= "failed" (:state (first (rows r)))))
+      (is (nil? (a/current-id)))
+      (finally (a/close! r)))
+    (is (= false (:available (a/snapshot r))))
+    (is (= :answer (a/with-operation :check {} (fn [] :answer))))))
+
+(deftest actual-tools-produce-nested-traces-and-warm-work-cannot-recompute
+  (let [r (a/open) src "(ns activity.fixture) (defn leaf [x] (+ x 17)) (defn root [x] (leaf x))"]
+    (try
+      (lsp/analyzed src) (lsp/analyzed src)
+      (is (= "editor" (:tool (first (rows r)))))
+      (is (pos? (get-in (first (rows r)) [:counts :reused] 0)))
+      (is (= 0 (get-in (first (rows r)) [:counts :computed] 0)))
+      (cb/index-source {} "activity.fixture" src {:mode :calls})
+      (cb/index-source {} "activity.fixture" src {:mode :calls})
+      (is (= "index" (:tool (first (rows r)))))
+      (is (= 1 (get-in (first (rows r)) [:counts :reused])))
+      (check/analyze-source "fixture.bl" src)
+      (check/analyze-source "fixture.bl" src)
+      (check/analyze-source "fixture.bl" src)
+      (is (= "check" (:tool (first (rows r)))))
+      (is (pos? (get-in (first (rows r)) [:counts :reused] 0)))
+      (is (= 0 (get-in (first (rows r)) [:counts :computed] 0)))
+      (let [children (filter :parent (rows r))]
+        (is (seq children))
+        (is (every? #(some (fn [p] (= (:id p) (:parent %))) (rows r)) children)))
+      (finally (a/close! r)))))
+
+(deftest waiting-is-real-bounded-and-restored-after-refusal
+  (let [r (a/open) parent (erlang/self) key [:activity.wait (erlang/unique_integer (list :positive))]
+        holder (spawn #(flight/with-key key (fn [] (erlang/send parent :held) (receive :release :ok))))]
+    (try
+      (is (= :held (receive :held :held (after 5000 nil))))
+      (a/with-operation :check {}
+        (fn [] (is (thrown? (flight/with-key key 30 #(throw "must not execute"))))))
+      (is (>= (:wait-ms (first (rows r))) 30))
+      (is (= "done" (:state (first (rows r)))))
+      (is (nil? (Process/get :runtime.activity/waiting)))
+      (finally (erlang/exit holder :kill) (a/close! r)))))

@@ -1,0 +1,66 @@
+;; Opt-in SDK development UI over bounded read-only observations.
+;; Follows tooling.pulse/with-chip; uses the existing live:patch browser seam.
+(ns live.inspector
+  (:require [live.observatory :as observations] [loom.token :as token]
+            [bl.json :as json] [runtime.activity :as activity] [web]))
+
+(defn- asset [options file]
+  (if-let [root (or (:assets-root options) (System/get_env "ENCHANT_INSPECTOR_ROOT"))]
+    (File/read! (Path/join root file))
+    (web/asset (str "lib/live/" file))))
+
+(defn- chip []
+  (let [scale (json/encode (select-keys (token/theme) [:space :radius :color :text]))]
+    [[:div {:id "enchant-inspector-source" :key "enchant-inspector"
+            :data-tool-run (str (activity/current-id))
+            :data-loom-scale (if (<= (count scale) 16384) scale "{}") }]
+     [:script {:src "/__enchant/inspector.js" :defer true :key "enchant-inspector-script"}]]))
+
+(defn decorate
+  "Inject the small dock only for an authorized development viewer. The shadow
+   DOM is portalled outside the app's patch root; the marker carries its theme."
+  [screen authorize]
+  (fn [context]
+    (if (= true (authorize (:me context)))
+      (activity/with-operation :render {:subject "Page"}
+        (fn [] [:div {:data-enchant-app ""} (screen context) (chip)]))
+      (screen context))))
+
+(defn close! [app]
+  (when-let [reader (:live/inspector app)] (activity/close! reader))
+  nil)
+
+(defn attach
+  "Opt-in app decoration. Retains the SDK snapshot/auth boundary and composes
+   existing HTTP routes. Optional :assets-root supplies app-owned UI assets."
+  [app options]
+  (if-not (= true (:enabled? options)) app
+    (let [authorize (:authorize options)
+          _ (when-not (fn? authorize) (throw "Inspector needs host authorization"))
+          assets (into {} (map (fn [[path file]]
+                    (let [bytes (asset options file)]
+                      (when (> (count bytes) 65536) (throw "Inspector asset exceeds 64 KiB"))
+                      [path bytes]))
+                   [["/__enchant/inspector.js" "inspector.js"]
+                    ["/__enchant/inspector.css" "inspector.css"]]))
+          reader (activity/open)
+          model (try (observations/open (assoc options :activity reader))
+                  (catch e (activity/close! reader) (throw e)))
+          read-snapshot (observations/handler model authorize)
+          previous (:http app)]
+      (assoc app
+        :live/inspector reader
+        :routes (mapv (fn [[path screen]] [path (decorate screen authorize)]) (:routes app))
+        :http (fn [conn path]
+          (cond
+            (= path "/__enchant/snapshot.json") (read-snapshot conn path)
+            (or (= path "/__enchant") (contains? assets path))
+            (let [conn (web/resp-header conn "cache-control" "no-store")]
+              (cond
+                (not= true (authorize (web/private conn :me))) (web/text conn 404 "not found")
+                (not= "get" (web/method conn)) (web/text conn 405 "GET required")
+                (= path "/__enchant") (web/text (web/resp-header conn "location" "/") 302 "")
+                (= path "/__enchant/inspector.js") (web/js conn (get assets path))
+                :else (web/bytes conn "text/css" (get assets path))))
+            previous (previous conn path)
+            :else nil))))))
