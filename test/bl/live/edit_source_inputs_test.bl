@@ -1,9 +1,12 @@
-(ns live.edit.source-inputs-test (:require [live.edit.app :as app]))
+(ns live.edit.source-inputs-test (:require [live.edit.app :as app] [env]))
 (defn- file [root name source]
  (let [path (str root "/" name ".bl")] (File/write! path source) path))
+(defn- inputs-in [parent root namespaces]
+ (env/isolated parent (fn [] (BeamLisp.Env/add_search_path root) (app/source-inputs namespaces))))
 (deftest editor-cache-inputs-follow-helper-content-edges-and-current-source-origins
  (let [root (str (System/tmp_dir!) "/editor-inputs-" (erlang/unique_integer (list :positive)))
        first-root (str root "/first") second-root (str root "/second")
+       parent (env/current) parent-paths (BeamLisp.Loader/search_dirs)
        suffix (str (erlang/unique_integer (list :positive)))
        entry (str "cache_entry_" suffix) helper (str "cache_helper_" suffix) extra (str "cache_extra_" suffix)
        sentinel (str root "/must-not-execute")
@@ -12,26 +15,33 @@
   (try
    (File/mkdir_p! first-root) (File/mkdir_p! second-root)
    (file first-root entry entry-source) (file first-root helper helper-source)
-   (BeamLisp.Env/add_search_path first-root)
-   (let [initial (app/source-inputs [entry])
-         helper-row (first (filter #(= helper (first %)) initial))]
-    (is (= #{entry helper} (set (map first initial))))
-    (is (= initial (app/source-inputs [entry])))
-    (is (not (File/exists? sentinel)))
-    (file first-root helper (String/replace helper-source "First" "Second"))
-    (let [changed (app/source-inputs [entry])]
-     (is (not= initial changed))
-     (is (= (first (filter #(= entry (first %)) initial)) (first (filter #(= entry (first %)) changed))))
-     (is (not= (nth helper-row 2) (nth (first (filter #(= helper (first %)) changed)) 2))))
-    (file first-root helper (str "(ns " helper " (:require [" extra "]))\n(def label \"Second\")\n"))
-    (file first-root extra (str "(ns " extra ")\n"))
-    (let [extended (app/source-inputs [entry])]
-     (is (= #{entry helper extra} (set (map first extended))))
-     (doseq [name [entry helper extra]] (File/cp! (str first-root "/" name ".bl") (str second-root "/" name ".bl")))
-     (BeamLisp.Env/add_search_path second-root)
-     (let [rebound (app/source-inputs [entry])]
-      (is (not= extended rebound))
-      (is (= (mapv #(nth % 2) extended) (mapv #(nth % 2) rebound)))
-      (is (every? #(starts-with? (second %) second-root) rebound))))
-    (is (not (File/exists? sentinel))))
+   ;; Each origin has its own environment; the parent's resolution stays intact.
+   (let [extended
+         (env/isolated parent
+          (fn []
+           (BeamLisp.Env/add_search_path first-root)
+           (let [initial (app/source-inputs [entry])
+                 helper-row (first (filter #(= helper (first %)) initial))]
+            (is (= #{entry helper} (set (map first initial))))
+            (is (= initial (app/source-inputs [entry])))
+            (is (not (File/exists? sentinel)))
+            (file first-root helper (String/replace helper-source "First" "Second"))
+            (let [changed (app/source-inputs [entry])]
+             (is (not= initial changed))
+             (is (= (first (filter #(= entry (first %)) initial)) (first (filter #(= entry (first %)) changed))))
+             (is (not= (nth helper-row 2) (nth (first (filter #(= helper (first %)) changed)) 2))))
+            (file first-root helper (str "(ns " helper " (:require [" extra "]))\n(def label \"Second\")\n"))
+            (file first-root extra (str "(ns " extra ")\n"))
+            (let [extended (app/source-inputs [entry])]
+             (is (= #{entry helper extra} (set (map first extended))))
+             extended))))]
+    (doseq [name [entry helper extra]]
+     (File/cp! (str first-root "/" name ".bl") (str second-root "/" name ".bl")))
+    (is (= extended (inputs-in parent first-root [entry])))
+    (let [rebound (inputs-in parent second-root [entry])]
+     (is (not= extended rebound))
+     (is (= (mapv #(nth % 2) extended) (mapv #(nth % 2) rebound)))
+     (is (every? #(starts-with? (second %) second-root) rebound))))
+   (is (= parent-paths (BeamLisp.Loader/search_dirs)))
+   (is (not (File/exists? sentinel)))
    (finally (File/rm_rf! root)))))
