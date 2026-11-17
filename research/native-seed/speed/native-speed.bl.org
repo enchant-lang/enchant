@@ -2,7 +2,7 @@
 #+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
-#+status: Round 2 integrated (M, D, R, U, T, C2, B2, S) · self-hosted closure of 33 namespaces · native 13.1× warm BEAM on the pipeline · P open
+#+status: Round 2 merged on main · native 13.1× warm BEAM on the pipeline · round 3 roster: 24 items in four waves
 #+author: Claude for Othman
 
 * In one breath
@@ -504,9 +504,10 @@ on storage order.
 Promote =formal.elaborate= from verifier to compiler stage. Facts: Int,
 kind, purity, non-escape, ranked termination (=LOOPS.md=). The emitter's
 hand-threaded =:integer-facts= is replaced by checked facts. Rewrite rules
-are proved once in Lean (=research/p13d_rule_proofs=) and applied without a
-solver. This is where native can pass BEAM: monomorphic sites skip dispatch,
-integers unbox, proven loops carry no tick.
+are checked once (=research/p13d_rule_proofs= uses z3, not Lean) and applied
+without a solver. This is where native can pass BEAM: monomorphic sites skip
+dispatch, integers unbox, proven loops carry no tick.
+*Round 3:* split into E1–E9 below.
 
 ** TODO F · Ticks and frames
 :PROPERTIES:
@@ -516,6 +517,7 @@ integers unbox, proven loops carry no tick.
 Budget checks at loop back-edges and calls to unknown functions only. Source
 frames rebuilt from code-address tables rather than a dynamic parameter per
 call. One code shape for debug and release.
+*Round 3:* carried as N4 (frames, budget sites) and E7 (proven loops).
 
 ** TODO G · Two compile tiers
 :PROPERTIES:
@@ -526,6 +528,7 @@ A closure-compiled tier for the edit loop, with no gsc or clang involved.
 Per-function C for release, keyed in the existing unit store. Structured
 emission instead of concatenated text. Retires the 256 KB unit splitting
 and the 120 s gsc deadline as design constraints.
+*Round 3:* carried as G1 and G2.
 
 ** TODO P · Self-emission parity
 :PROPERTIES:
@@ -637,6 +640,301 @@ Resolve the source-invocation gate (=call-invoke=, =check_source_invocation!=,
 =source_head=) at link time, as L did for native remotes. Expect about 1.25×
 on BEAM compile.
 
+* Round 3 roster: both targets faster, native at native speed
+Round 2 removed shared costs that grew faster than linearly. Over the two
+rounds' final runs, BEAM's pipeline went from 15.8 to 0.84 ms (18.7×) and
+native's from 44.5 to 11.1 ms (4.0×). What is left is mostly native-only: a
+kernel compiled without the emitter forms it needs, values that box what
+Gambit holds unboxed, and a compiler that knows nothing it could use to drop
+checks.
+
+The formal-logic thread (=research/formal-logic/PROJECT.bl.org=) already
+*computes* most of the facts an optimiser needs:
+- Int/Bool types from real compiler ANF (=formal.elaborate=);
+- the raise effect and exact error outcomes (=formal.core=);
+- ranked loop termination (=formal/verify-loop=, author-supplied ranks);
+- canonical data identity independent of storage order (=formal.identity=);
+- purity and footprint (=system.analyze=).
+
+No compiler consumes any of them. BEAM's =priv/host/optimize.bl= keeps its
+own integer tag lattice, and native's =scheme.bl= threads its own
+=:integer-facts=, which forgets a type on every rebinding and on every loop
+parameter. Round 3 joins these: one fact pass, two backends.
+
+#+begin_roadmap :id round3 :title "Round 3, in four waves"
+first | Measure, gate and decide | Attribute the gap on a real corpus, close self-emission, run the actor corpus and settle the semantic questions the later waves depend on. | A3 P3 X Q1 Q3 Q4 Q5
+then | Native catches up | Give the compiled kernel the forms it needs, link sealed calls directly and pay ticks only where needed. | N1 N2 N3 N4
+then | Values | Use Gambit's immediates, interned keywords, header metadata, hash maps, fixed-slot records and byte text. | V2a V2b V2c V2d V2e S2
+last | Facts become speed | One shared fact pass, loops that keep their facts, unsafe native regions, checked rewrites and proven loops without ticks. | E1 E2 E3 E4 E5 E6 E7 E8 E9 G1 G2
+#+end_roadmap
+
+#+begin_rosetta
+Item | BEAM | Native | Needs
+A3 Attribute on a real corpus | ✓ | ✓ | —
+N1 Kernel emitter forms | — | ✓ | A3
+N3 Sealed direct links | ✓ | ✓ | Q4
+V2a–c Immediates, keywords, hash maps | — | ✓ | Q1, Q3
+V2d Fixed-slot records | ✓ | ✓ | Core closed-record profile
+V2e Byte text | ✓ | ✓ | FL31 domains
+E1 Shared fact pass | ✓ | ✓ | FL51 for validation
+E2 Facts through loops | ✓ | ✓ | E1
+E3 Unsafe native regions | — | ✓ | E1, E2
+E5 Inline, CSE, dead code | ✓ | ✓ | E1, Q3, FL61
+E6 Checked rewrite library | ✓ | ✓ | E1
+E7 Proven loops carry no tick | — | ✓ | F, FL60
+E8 Unboxed floats | — | ✓ | Q5, FL32
+#+end_rosetta
+
+** TODO A3 · Attribute the gap on a real corpus
+:PROPERTIES:
+:AREA: measurement
+:PRIORITY: A
+:TARGET: both
+:END:
+Supersedes A. The warm-core fixture is six small forms; at under a millisecond
+on BEAM it weights fixed costs too heavily. Add a second fixture: compile one
+real closure namespace (=reader.bl= is a good size) through read, compile
+and emit. On native, count calls per linked target, kernel fast-path hits,
+map operations and comparisons. On BEAM, profile the same phases with
+=tprof=. Rank what is left on both. Every later item states its expected
+share from this ranking before it starts.
+
+** TODO P3 · Self-emission fixpoint
+:PROPERTIES:
+:AREA: build
+:PRIORITY: A
+:TARGET: native
+:END:
+Carries P. The native Env answers the =lower= stub's link rows exactly as
+BEAM does, then one image build shows =stage2.scm= = =stage1.scm=. After that,
+native can rebuild itself without BEAM, and every later native item is
+checked by self-emission, not only by differentials.
+
+** TODO X · Actor corpus and cross-process lazy waits
+:PROPERTIES:
+:AREA: correctness
+:PRIORITY: A
+:TARGET: both
+:END:
+Run the actor corpus on the integrated SDK and the native image. Decide
+whether a native frame that forces a lazy sequence owned by a parked actor
+waits, as before M, or refuses, as now. Implement the choice on both targets.
+
+** TODO N1 · Kernel emitter forms
+:PROPERTIES:
+:AREA: backend
+:PRIORITY: A
+:TARGET: native
+:END:
+KERNEL's requests to BACKEND:
+- boolean =and=/=or= without truthiness wrappers when both sides are known
+  booleans;
+- keyword =case= as an =eq?= dispatch;
+- direct self-calls inside a definition;
+- quoted keyword literals hoisted to constants.
+Round 1's hand-written kernel ran the pipeline at 2.8× BEAM, so that is the
+reference this item aims back towards, now from compiled =rt.bl=.
+
+** TODO N2 · Multi-arity rt fast paths
+:PROPERTIES:
+:AREA: kernel
+:TARGET: native
+:END:
+=k-nth=, =nth= and =coll-get= miss the inline type tests B2 gave the
+single-arity functions.
+
+** TODO N3 · Sealed direct links
+:PROPERTIES:
+:AREA: linking
+:TARGET: both
+:BLOCKED_BY: Q4
+:END:
+A global call fetches a Var. In a sealed image or release, where no binding
+can change, the linker resolves each call to its procedure. On native, that is
+a direct Scheme call that Gambit's block compilation can inline. On BEAM, it
+is a local or static remote call, and it makes cross-module inlining possible.
+=INTRINSICS.md= names the missing piece: a binding-validity precondition.
+
+** TODO N4 · Frames and budget sites
+:PROPERTIES:
+:AREA: runtime
+:TARGET: native
+:END:
+Carries F. Budget checks only at loop back-edges and calls to unknown
+functions. Source frames rebuilt from code-address tables, not a dynamic
+parameter per call. One code shape for debug and release.
+
+** TODO V2a · Gambit immediates and interned keywords
+:PROPERTIES:
+:AREA: values
+:TARGET: native
+:BLOCKED_BY: A3
+:END:
+Carries V2. Represent small integers, nil, booleans and characters as
+Gambit's own immediates wherever the BL value model boxes them today.
+Keywords are interned symbols with a precomputed hash, so keyword equality
+is =eq?=.
+
+** TODO V2b · Metadata in the header
+:PROPERTIES:
+:AREA: values
+:TARGET: native
+:END:
+One header word holds kind, arity and a metadata slot, so metadata stops
+being a wrapper tuple.
+
+** TODO V2c · Hash maps
+:PROPERTIES:
+:AREA: values
+:TARGET: native
+:BLOCKED_BY: Q1 Q3
+:END:
+A hash array mapped trie for maps and sets, once Q1 removes the term-order
+guarantee. Emitted bytes stay identical because identity goes through
+=formal.identity=, not through storage order.
+
+** TODO V2d · Fixed-slot records
+:PROPERTIES:
+:AREA: values
+:TARGET: both
+:END:
+The Core's closed-record profile already fixes field order and eager
+evaluation. A closed record becomes a tuple with =element/2= access on BEAM
+and a vector with =vector-ref= access natively, instead of a map lookup per
+field.
+
+** TODO V2e · Text as bytes
+:PROPERTIES:
+:AREA: reader
+:TARGET: both
+:END:
+Read is the widest ratio (22.5×). The reader still walks a list of
+codepoints, because native text is held per codepoint. Read UTF-8 bytes
+instead: binary matching on BEAM, a bytevector natively. Codepoints, bytes
+and graphemes stay separate domains, as FL31 requires.
+
+** TODO S2 · Retire the residual replicas
+:PROPERTIES:
+:AREA: self-hosting
+:TARGET: native
+:BLOCKED_BY: V2a V2b
+:END:
+Vector, Set, Num, Decimal, Transient, Refs, Multi, Reactive and Record move
+off host Scheme once V2 fixes their representation. Nothing in this item is
+a speed change; it is the end of S.
+
+** TODO E1 · One fact pass, two backends
+:PROPERTIES:
+:AREA: formal
+:PRIORITY: A
+:TARGET: both
+:END:
+One ANF pass computes, conservatively and without a solver:
+- Int and Bool types, with ranges;
+- whether a body can raise;
+- footprint from =system.analyze=.
+It replaces both =optimize.bl='s tag lattice and native's =:integer-facts=,
+and both emitters read it. =formal.elaboration/check= validates its answers
+in tests, which is translation validation (FL51), never a compile-time proof
+obligation. That keeps the trust policy that =research/optimizer-integration=
+sets.
+
+** TODO E2 · Facts through loops
+:PROPERTIES:
+:AREA: formal
+:TARGET: both
+:BLOCKED_BY: E1
+:END:
+A loop parameter keeps its type when every back-edge preserves it. Today any
+rebinding forgets. On BEAM this extends =:numeric-domain= dispatch
+elimination to loop bodies. Natively, loop arithmetic becomes raw fixnum
+operations.
+
+** TODO E3 · Unsafe native regions
+:PROPERTIES:
+:AREA: backend
+:TARGET: native
+:BLOCKED_BY: E1 E2
+:END:
+This is where native uses its native speed. Inside a region where E1 proves
+types and raise-freedom, emit Gambit's unchecked fixnum and vector
+primitives under =(declare (not safe))=. Keep an overflow check wherever the
+range is not proven. Outside proven regions, the code stays safe.
+
+** TODO E4 · Raise-free bodies skip their handler
+:PROPERTIES:
+:AREA: backend
+:TARGET: native
+:BLOCKED_BY: E1
+:END:
+A body that cannot raise installs no catch frame.
+
+** TODO E5 · Inline, common subexpressions, dead code
+:PROPERTIES:
+:AREA: formal
+:TARGET: both
+:BLOCKED_BY: E1 Q3
+:END:
+Inline helpers with an empty footprint (model-anf already does this for
+SMT). Remove dead pure code and share common pure subexpressions. Sharing
+equal expressions needs Q3's equality, and effectful code needs FL61's
+composition rule.
+
+** TODO E6 · Checked rewrite library
+:PROPERTIES:
+:AREA: formal
+:TARGET: both
+:BLOCKED_BY: E1
+:END:
+Each rewrite rule is checked once, at definition, with z3 as in
+=p13d_rule_proofs= or with =formal/verify-translation=. It is applied with
+tag preconditions from E1. =(= x 0)= → =(zero? x)= is the model: false for
+strings, proven for Int.
+
+** TODO E7 · Proven loops carry no tick
+:PROPERTIES:
+:AREA: runtime
+:TARGET: native
+:BLOCKED_BY: N4 E2
+:END:
+Start with counted loops whose rank is syntactic: an integer counter that
+strictly decreases towards a bound. Then accept author ranks through
+=formal/verify-loop= (FL60). On BEAM, reductions stay mandatory.
+
+** TODO E8 · Unboxed floats
+:PROPERTIES:
+:AREA: backend
+:TARGET: native
+:BLOCKED_BY: Q5
+:END:
+Flonum regions once FL32 settles signed zeros, NaN and the Source float
+profile.
+
+** TODO E9 · Fusion beyond map and fold
+:PROPERTIES:
+:AREA: formal
+:TARGET: both
+:BLOCKED_BY: E1
+:END:
+=optimize.bl= fuses only strict map-fold and first-filter. Extend fusion to
+single-consumer pipelines whose stages are total and pure.
+
+** TODO G1 · A closure-compiled edit tier
+:PROPERTIES:
+:AREA: build
+:TARGET: native
+:END:
+Carries G. For the edit loop, compile to closures, with no gsc or clang
+involved.
+
+** TODO G2 · Per-function C for release
+:PROPERTIES:
+:AREA: build
+:TARGET: native
+:END:
+Per-function C for release, keyed in the existing unit store. This retires
+the 256 KB unit splitting and the 120 s gsc deadline as design constraints.
+
 * Final numbers
 Integrated stage-1 image =7c32ac57…=: rounds 1 and 2, a 33-namespace
 self-hosted closure, 70 units, =(standard-bindings) (extended-bindings)=.
@@ -718,6 +1016,14 @@ Delegation makes exactness local and checkable: only the fast paths need a
 differential check, and the BL definition stays the specification.
 #+end_decision
 
+#+begin_decision :id D4 :title "Optimiser facts are computed by the compiler and validated in tests" :status proposed
+- [x] The fact pass is conservative BL code; =formal.elaboration/check= validates it in tests; no solver runs at compile time
+- [ ] Discharge facts through the solver during compilation
+This keeps the trust policy that =research/optimizer-integration= sets (the
+compiler has no proof authority) and keeps compile time bounded. A solver
+checks each rewrite rule once, at definition (E6).
+#+end_decision
+
 * Questions
 #+begin_ask :id Q1 :title "Is map iteration order part of the language?" :options "Yes, Erlang term order|No, unspecified; canonical only through formal identity|Insertion order"
 Today native maps reproduce Erlang term order exactly. That keeps emitted bytes
@@ -729,4 +1035,21 @@ it are already fragile.
 #+begin_ask :id Q2 :title "Where should the BL kernel signature live?" :options "formal-logic Core with Lean models|priv/boot as a BL protocol|Both: BL protocol checked against the Core"
 The kernel is the boundary every backend implements. Putting it in the formal
 Core makes per-primitive conformance a proof obligation instead of a corpus.
+#+end_ask
+
+#+begin_ask :id Q3 :title "Which equality do collection keys use?" :options "Value equality: (get {1 :x} 1.0) is :x|Representation equality, and = agrees with it|Keep the current split"
+Today =(= 1 1.0)= is true while =(get {1 :x} 1.0)= is nil, because keys are
+raw BEAM terms. Hash maps (V2c) and shared subexpressions (E5) both need one
+answer. This is part of formal-logic FL10.
+#+end_ask
+
+#+begin_ask :id Q4 :title "May a sealed image link global calls directly?" :options "Yes: a release seals its Vars, a dev image keeps them mutable|No: every global call stays a Var fetch"
+Direct links are N3's speedup on both targets, and they let Gambit and BEAM
+inline across namespaces. They need =INTRINSICS.md='s missing binding-validity
+precondition: what makes a binding final.
+#+end_ask
+
+#+begin_ask :id Q5 :title "Which float profile do unboxed floats follow?" :options "IEEE binary64, round-to-nearest-even, signed zeros and NaN kept|Finite floats only; NaN and infinity raise"
+=formal.beam-float= models finite binary64 only. Native flonum regions (E8)
+must agree with BEAM on the cases BEAM produces. This is part of FL32.
 #+end_ask
