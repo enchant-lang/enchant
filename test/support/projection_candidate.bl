@@ -22,13 +22,16 @@
               (apply str (map #(str " " %) args)) "))\n")) delegates arities))
       (binary/part source start (- stop start)))))
 
-(defn with-candidate* [action]
-  (let [root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
+(defn with-candidate*
+  ([action] (with-candidate* nil action))
+  ([selected action]
+  (let [sources (if selected (filterv #(contains? selected (nth % 1)) SOURCES) SOURCES)
+        root (or (System/get_env "BL_TEST_SOURCE_ROOT") (BeamLisp/cwd))
         prefix (str "projection-preflight-" (erlang/unique_integer (list :positive)))
         dir (Path/join (System/tmp_dir!) prefix) modules (atom []) previous (BeamLisp.Env/capture)
         ;; Replace longer names before their prefixes; replacement names have
         ;; no canonical namespace substring and cannot be rewritten twice.
-        renames (sort-by (fn [[_ canonical _]] (- (count canonical))) SOURCES)
+        renames (sort-by (fn [[_ canonical _]] (- (count canonical))) sources)
         rename (fn [text]
                  (reduce (fn [text [_ canonical suffix]]
                            (String/replace text
@@ -36,7 +39,7 @@
                              (str prefix "." suffix))) text renames))]
     (File/mkdir_p! dir)
     (try
-      (doseq [[file _ suffix] SOURCES]
+      (doseq [[file _ suffix] sources]
         (let [path (Path/join dir (str suffix ".bl"))]
           (let [source (BeamLisp.Loader/read_source (Path/join root file))]
             (File/write! path (if (= suffix "cache") (cache-client-source prefix source) (rename source))))
@@ -46,7 +49,7 @@
       (finally
         (BeamLisp.Env/bind previous)
         (doseq [module @modules] (code/purge module) (code/delete module))
-        (File/rm_rf! dir)))))
+        (File/rm_rf! dir))))))
 
 (defn with-candidate [action]
   (with-candidate* (fn [entries _rename] (action entries))))
