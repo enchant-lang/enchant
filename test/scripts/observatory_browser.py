@@ -43,7 +43,7 @@ def rpc(op, **options):
 
 
 try:
-    rpc('open', width=1320, height=1050, mobile=False)
+    rpc('open', width=1320, height=1400, mobile=False)
     rpc('navigate', url=url + '/')
     assert rpc('eval', expression="document.querySelector('a[href=\"/__enchant\"]')!==null")
     rpc('click', selector='a[href="/__enchant"]')
@@ -67,6 +67,8 @@ try:
     assert not narrow['overflow'] and narrow['navigation'], narrow
     assert len(narrow['columns'].split()) == 1, narrow
     rpc('screenshot', path=str(output / 'narrow.png'))
+    rpc('eval', expression='window.scrollTo(0,document.body.scrollHeight)')
+    rpc('screenshot', path=str(output / 'narrow-detail.png'))
     rpc('click', selector='nav a[href="/__enchant"]')
     assert rpc('eval', expression="location.pathname==='/__enchant'")
     with urllib.request.urlopen(url + '/__enchant/snapshot.json', timeout=15) as response:
@@ -78,7 +80,8 @@ try:
     assert sample['projections'], 'Example must expose its real projection owner'
     record = dict(status='passed', url=url, desktop=desktop, narrow=narrow,
                   sample=sample, driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
-                  check_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+                  check_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  screenshots=['desktop.png', 'narrow.png', 'narrow-detail.png'])
     (output / 'browser.json').write_text(json.dumps(record, indent=2) + '\n')
     print(output / 'browser.json')
 finally:
