@@ -60,7 +60,20 @@
       (let [sample (view/snapshot observation)]
         (is (not (:available (first (:work sample)))))
         (is (= "unavailable" (:status (first (:projections sample))))))
-      (finally (projection/stop! totals) (work/stop! jobs)))))
+      (finally (projection/stop! totals) (when (Process/alive? jobs) (work/stop! jobs))))))
+
+(deftest worker-lanes-report-real-owned-work-without-control-handles
+  (let [jobs (work/start! {:max-active 1 :history 2})]
+    (try
+      (work/submit! jobs {:title "Compile this source"} (fn [_] (receive :finish nil (after 5000 nil))))
+      (let [sample (view/snapshot (view/open {:work {:compiler jobs}}))
+            row (first (:jobs (first (:work sample))))]
+        (is (= "Compile this source" (:title row)))
+        (is (= "running" (:status row)))
+        (is (not (contains? row :pid)))
+        (is (not (contains? row :cancel)))
+        (is (String/contains? (view/page sample) "lane running")))
+      (finally (work/stop! jobs)))))
 
 (deftest metadata-read-never-decodes-retained-results
   (let [totals (projection/start-incremental! :observatory/metadata {:source-id "metadata/v1"})]
