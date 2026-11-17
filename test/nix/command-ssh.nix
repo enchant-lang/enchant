@@ -1,5 +1,5 @@
 # No production endpoint or credential. The guest creates its own keypair.
-{ pkgs, sdk }:
+{ pkgs, sdk, portable ? false }:
 let
   # Preserve the installed SDK's closure instead of copying only its directory.
   installedSdk = if builtins.isPath sdk || builtins.isString sdk
@@ -9,9 +9,10 @@ let
   exec ${pkgs.coreutils}/bin/cat
 '';
 in pkgs.testers.runNixOSTest {
-  name = "beam-lisp-native-command-ssh";
+  name = if portable then "beam-lisp-portable-command-ssh" else "beam-lisp-native-command-ssh";
   nodes.machine = { ... }: {
     system.stateVersion = "25.05";
+    programs.nix-ld.enable = portable;
     services.openssh.enable = true;
     services.openssh.settings.PermitRootLogin = "prohibit-password";
     environment.systemPackages = [ pkgs.openssh ];
