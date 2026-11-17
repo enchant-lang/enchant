@@ -304,7 +304,8 @@
 (defn before-send-headers
  "Apply fixed response header data at send time. Useful for trusted ingress
   metadata registered before a Source handler runs. No Root callback crosses
-  that boundary; Source invocation checks and native callback custody remain."
+  that boundary. Only immutable data and fixed SDK code are captured; there is
+  no application code custody or Env transition to retain or re-enter."
  [conn headers remove]
  (when-not (and (map? headers) (or (vector? remove) (list? remove))
                 (<= (+ (count headers) (count remove)) 64)
@@ -312,10 +313,10 @@
                 (every? string? remove))
   (throw (ex-info "Response header policy requires bounded string data"
            {:kind :invalid-response-header-policy})))
- (before-send conn
-  (fn [response]
-   (reduce (fn [response [name value]] (resp-header response name value))
-    (reduce without-resp-header response remove) headers))))
+ (let [bound (fn [response]
+              (reduce (fn [response [name value]] (resp-header response name value))
+               (reduce without-resp-header response remove) headers))]
+  (erlang/apply Conn :register_before_send (list conn bound))))
 
 ;; ── Server-Sent Events (chunked streaming) ──────────────────────────
 ;; The transport an MCP server uses to PUSH notifications to a client over
