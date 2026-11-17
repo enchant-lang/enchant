@@ -83,6 +83,30 @@
     (pos? remaining) (do (Process/sleep 10) (recur (dec remaining)))
     :else (throw (ex-info "Endpoint custody never ended" {}))))))
 
+(deftest endpoint-retirement-and-recovery-preserve-a-replaced-file
+ (fixture
+  (fn [root]
+   (let [o (options root (fn [value] value)) server (rpc/serve! o)]
+    (try
+     (File/rm! (:path o))
+     (File/write! (:path o) "foreign")
+     (rpc/stop! server)
+     (is (= "foreign" (File/read! (:path o))))
+     (is (try (rpc/serve! o) false (catch _ true)))
+     (is (= "foreign" (File/read! (:path o))))
+     (finally (when (Process/alive? server) (rpc/stop! server))))))))
+
+(deftest native-values-roundtrip-and-opaque-results-have-a-finite-error
+ (fixture
+  (fn [root]
+   (let [o (options root (fn [value] (if (= :opaque value) (fn [] :private) value)))
+         server (rpc/serve! o) value {:message/tags #{:work :urgent} :priority 0.75}]
+    (try
+     (is (= value (:value (rpc/request! (:path o) value))))
+     (is (= {:protocol rpc/protocol :error :invalid-result} (rpc/request! (:path o) :opaque)))
+     (is (= :still-serving (:value (rpc/request! (:path o) :still-serving))))
+     (finally (rpc/stop! server)))))))
+
 (deftest owner-death-cannot-release-custody-before-the-worker-supervisor-drains
  (fixture
   (fn [root]
