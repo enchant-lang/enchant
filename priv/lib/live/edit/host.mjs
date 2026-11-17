@@ -123,15 +123,15 @@ export class Editor {
     this.root.dispatchEvent(new CustomEvent('enchanted:change',{detail:change}));
   }
   paint(change){
-    const ids=[...new Set(change.changed||[])];if(!ids.length&&!change.structural)return;
+    const ids=this.session.projectTargets([...new Set(change.changed||[])],!!change.structural);if(!ids.length&&!change.structural)return;
     const selection=this.state.selection,active=document.activeElement;
     const shouldRestore=this.canvas.contains(active)||active===this.canvas;
     const trees=this.session.project(ids);this.metrics.projected+=trees.length;
     for(let i=0;i<ids.length;i++){
       const id=ids[i],tree=trees[i],old=this.nodes.get(id),next=this.session.node(id);
       if(!tree){old?.remove();this.nodes.delete(id);this.current.delete(id);this.shells.delete(id);this.code.get(id)?.dispose();this.code.delete(id);continue;}
-      if(old&&same(this.current.get(id),next))continue;
       const parts=projectionParts(tree,id),oldText=old&&this.textElement(id);
+      if(old&&same(this.current.get(id),next)&&parts.signature&&parts.signature===this.shells.get(id))continue;
       if(next.type!=='code'&&parts.signature&&parts.signature===this.shells.get(id)&&oldText){
         const freshText=this.services.render(parts.text);
         if(!oldText.isEqualNode(freshText))oldText.replaceChildren(...freshText.childNodes);

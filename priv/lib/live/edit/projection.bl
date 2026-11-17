@@ -67,18 +67,39 @@
       (if (:data-edit-children attrs)
         (into (subvec tree 0 start) (get children (:data-edit-children attrs) []))
         (into (subvec tree 0 start) (mapv #(fill-children % children) (subvec tree start)))))))
+(defn- contexts [extensions grouped]
+ (into {} (map (fn [[parent siblings]]
+                 [parent (reduce (fn [context provider] (merge context (provider context)))
+                                 {:siblings siblings} (:sibling-contexts extensions))]) grouped)))
+(defn targets
+ "Expand incremental patches for renderers declaring sibling dependencies.
+  Structural moves also affect the old parent, so include contextual nodes in
+  both scopes. Ordinary renderers keep their original narrow patch set."
+ [extensions document ids structural?]
+ (let [changed (set ids)
+       parents (set (keep #(when-let [b (d/find-block document %)] [(:parent b)]) ids))]
+  (vec (distinct (concat ids
+   (map :id (filter (fn [b]
+                    (and (contains? (get-in extensions [:blocks (:type b) :render-context] #{}) :siblings)
+                         (or structural? (contains? parents [(:parent b)])))) (:blocks document))))))))
+(defn project
+ "Project independent node shells with the same package context as SSR."
+ [extensions document ids]
+ (let [grouped (group-by :parent (:blocks document)) context (contexts extensions grouped)]
+  (mapv #(when-let [b (d/find-block document %)] (node extensions b (get context (:parent b)))) ids)))
 (declare project-tree)
-(defn- project-tree [extensions grouped b]
+(defn- project-tree [extensions grouped context b]
   (let [children (group-by :slot (get grouped (:id b) []))
-        projected (into {} (map (fn [[name rows]] [name (mapv #(project-tree extensions grouped %) rows)]) children))
+        projected (into {} (map (fn [[name rows]] [name (mapv #(project-tree extensions grouped context %) rows)]) children))
         known (set (get-in extensions [:blocks (:type b) :slots] ["body"]))
-        base (fill-children (node extensions b {:siblings (get grouped (:parent b) [])}) projected)]
+        base (fill-children (node extensions b (get context (:parent b))) projected)]
     (into base (mapv (fn [name] (into [:div {:class "ed-children ed-retained-slot" :data-edit-children name}] (get projected name)))
                    (remove known (keys children))))))
-(defn body-node [extensions doc b] (project-tree extensions (group-by :parent (:blocks doc)) b))
+(defn body-node [extensions doc b]
+ (let [grouped (group-by :parent (:blocks doc))] (project-tree extensions grouped (contexts extensions grouped) b)))
 (defn body [extensions doc]
-  (let [grouped (group-by :parent (:blocks doc))]
-    (mapv #(project-tree extensions grouped %) (get grouped nil []))))
+  (let [grouped (group-by :parent (:blocks doc)) context (contexts extensions grouped)]
+    (mapv #(project-tree extensions grouped context %) (get grouped nil []))))
 (defn- reading-tree [tree icon]
  (cond
   (vector? tree)

@@ -62,3 +62,35 @@
   (is (includes? after "data-scope=\"child:one,two,child\""))
   (is (not (includes? after "data-scope=\"child:child\"")))
   (is (includes? standalone "data-scope=\"one:\""))))
+
+(deftest incremental-shells-use-package-sibling-context-and-expand-dependencies
+ (let [calls (atom 0)
+       provider (fn [context]
+                  (swap! calls inc)
+                  {:example/weight (reduce + 0 (map #(get-in % [:attrs :weight] 0) (:siblings context)))})
+       render (fn [block context] [:section {:data-weight (:example/weight context)
+                                            :data-peers (join "," (map :id (:siblings context)))} (:text context)])
+       ext (extensions/build [standard/package {:name "sibling-observer"
+             :provides {:editor/sibling-context provider
+              :editor/blocks {"paragraph" {:label "Text" :slots ["body"] :render-context #{:siblings} :render render}}}}])
+       initial (doc/prepare (doc/document "context"
+                 [(assoc (doc/block "one" "First") :attrs {:weight 1})
+                  (assoc (doc/block "child" "Nested") :parent "one" :attrs {:weight 10})
+                  (assoc (doc/block "two" "Second") :attrs {:weight 2})
+                  (doc/block "code" "code" "literal")]))
+       before (h/hiccup->html (into [:div] (tree/project ext initial ["one" "two"])))
+       changed (:document (doc/apply-op (:functions ext) initial
+                          {:op "node/set" :block "one" :patch {:attrs {:weight 5}}}))
+       ids (tree/targets ext changed ["one"] false)
+       after (h/hiccup->html (into [:div] (tree/project ext changed ids)))]
+  (is (= ["one" "two"] ids))
+  (is (= ["one" "child" "two"] (tree/targets ext changed ["one"] true)))
+  (is (= ["gone" "one" "child" "two"] (tree/targets ext changed ["gone"] true)))
+  (is (= ["code" "one" "two"] (tree/targets ext changed ["code"] false)))
+  (is (= ["one"] (tree/targets (extensions/build [standard/package]) changed ["one"] true)))
+  (is (includes? before "data-weight=\"3\""))
+  (is (includes? after "data-weight=\"7\""))
+  (is (not (includes? after "data-weight=\"3\"")))
+  (is (includes? after "data-peers=\"one,two,code\""))
+  ;; Providers run once for each sibling scope, regardless of requested shells.
+  (is (= 4 @calls))))
