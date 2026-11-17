@@ -37,7 +37,8 @@ in pkgs.testers.runNixOSTest {
     metadata = machine.succeed("stat -c %u:%g:%a /run/peercheck/socket").strip()
     assert metadata == "0:2000:660", metadata
     with subtest("filesystem permission denies an unenrolled Unix group"):
-        assert machine.succeed("${client "outsider" "filesystem-denied"}", timeout=60).strip() == "filesystem-denied"
+        outsider = machine.succeed("${client "outsider" "filesystem-denied"}", timeout=60).strip()
+        assert outsider == "filesystem-denied", repr(outsider)
     with subtest("payload cannot impersonate root and each kernel UID maps separately"):
         alice = json.loads(machine.succeed("${client "alice" "request"}", timeout=60))
         bob = json.loads(machine.succeed("${client "bob" "request"}", timeout=60))
