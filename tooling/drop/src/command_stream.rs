@@ -108,6 +108,7 @@ impl Wire {
         let mut accepted = false;
         let mut eof = false;
         let mut count = 0u64;
+        let mut discarded = 0u64;
         let mut forced: Option<&str> = None;
         let mut protocol_error = false;
         let mut program = None;
@@ -132,6 +133,13 @@ impl Wire {
                 status=process.try_wait().map_err(|e| e.to_string())?;
                 if status.is_some() {finished=Some(Instant::now());}
             }
+            // Terminal metadata is independent of output demand. Inspect EOF
+            // without consuming a pending data byte when no credit remains.
+            if !eof && !detached && credits==0 {
+                let mut byte=0u8;
+                if unsafe {libc::recv(output.as_raw_fd(), (&mut byte as *mut u8).cast(),1,libc::MSG_PEEK|libc::MSG_DONTWAIT)}==0 {eof=true;}
+            }
+            if completion.as_ref().is_some_and(|c|c["result"]=="timeout") {detached=true;}
             if status.is_some() && eof && (completion.is_some() || finished.is_some_and(|at|at.elapsed()>=Duration::from_millis(250))) {break;}
             let mut ready = [
                 libc::pollfd{fd:if detached {-1}else{0},events:libc::POLLIN,revents:0},
@@ -162,6 +170,7 @@ impl Wire {
                                     if control("systemctl")?.args(["--user","stop",unit]).stdout(Stdio::null()).stderr(Stdio::null())
                                         .status().map_err(|e| e.to_string())?.success() {
                                         forced=Some("cancelled");
+                                        detached=true;
                                     }
                                 },
                                 [3] => {detached=true;forwarding=false;},
@@ -189,7 +198,7 @@ impl Wire {
                         if !detached {
                             credits-=1;
                             if forwarding && packet(2,&bytes[..n]).is_err() {forwarding=false;detached=true;}
-                        }
+                        } else {discarded+=n as u64;}
                     },
                     Err(e) if matches!(e.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::Interrupted) => {},
                     Err(_) => return Err("command output stream failed".into()),
@@ -206,6 +215,7 @@ impl Wire {
         let code=program.as_ref().and_then(|p|p["code"].as_i64());
         let result=json!({"state":state,"unit":unit,"accepted":accepted,"exitCode":code,
             "signal":program.as_ref().and_then(|p|p["signal"].as_i64()),"outputBytes":count,
+            "discardedOutputBytes":discarded,"outputComplete":discarded==0,
             "domainEmpty":true,"serviceResult":service,"observerExitCode":status.and_then(|s|s.code())});
         if forwarding {let _=packet(3,result.to_string().as_bytes());}
         Ok(if state=="exited" {code.unwrap_or(125) as i32}else{125})
