@@ -17,9 +17,12 @@ in pkgs.testers.runNixOSTest {
     systemd.tmpfiles.rules = [ "d /run/peercheck 2750 root rpc-client -" ];
     systemd.services.peercheck = {
       wantedBy = [ "multi-user.target" ];
+      environment.HOME = "/var/lib/peercheck";
       serviceConfig = {
         ExecStart = "${installedSdk}/bin/bl --cold run ${./unix-identity-server.bl}";
         RuntimeMaxSec = 180;
+        StateDirectory = "peercheck";
+        StateDirectoryMode = "0700";
       };
     };
     virtualisation.memorySize = 2048;
@@ -28,7 +31,8 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     machine.start()
-    machine.wait_for_file("/run/peercheck/ready")
+    machine.wait_for_unit("peercheck.service")
+    machine.wait_for_file("/run/peercheck/ready", timeout=60)
     assert machine.succeed("stat -c %u:%g:%a /run/peercheck/socket").strip() == "0:2000:660"
     with subtest("filesystem permission denies an unenrolled Unix group"):
         assert machine.succeed("${client "outsider" "filesystem-denied"}", timeout=60).strip() == "filesystem-denied"
