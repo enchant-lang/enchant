@@ -3,7 +3,7 @@
            [data.derivation :as derivation] [data.projection :as projection]
            [codebase :as cb] [bl.check :as check] [datom :as d]
            [datom.watch :as watch] [datom.profile :as profile]
-           [datom.query.rank-demand :as demand]))
+           [datom.query.rank-demand :as demand] [deodorant]))
 (defn- settled [h]
  (let [until (+ 10000 (erlang/monotonic_time :millisecond))]
   (loop [] (let [r (projection/read h)]
@@ -84,3 +84,42 @@
        real (reduce (fn [s n] (demand/decision s n (assoc sample :work-steps 10))) nil (range 100))]
   (is (not (:build? absent))) (is (= 0 (:paid-steps absent)))
   (is (:build? real)) (is (pos? (:paid-steps real)))))
+
+(deftest eligible-watchers-share-an-exact-diff-without-new-physical-reads
+ (let [c (d/connect [{:db/ident :watch/shared :db/valueType :db.type/long}])
+       q '[:find ?e ?v :where [?e :watch/shared ?v]]]
+  (try
+   (d/transact! c [{:db/id 101 :watch/shared 1}])
+   (let [before (d/db c) counted (profile/watch (:store before))]
+    (d/transact! c [[:db/add 101 :watch/shared 2]])
+    (let [after (d/db c) basis (d/basis-t after) tx [[101 :watch/shared 2 basis true]]
+          b (assoc before :store counted) a (assoc after :store counted)
+          run (fn [] (watch/delta-diff q [] b a basis tx))]
+     (doseq [_ (range 8)] (run))
+     (profile/reset! counted)
+     (doseq [_ (range 8)]
+      (is (= {:added #{[101 2]} :removed #{[101 1]}} (run))))
+     (is (= 0 (:rows (profile/counters counted))))))
+   (finally (d/close! c)))))
+(deftest mutable-lint-guards-run-even-when-compiler-facts-are-retained
+ (let [enabled (atom false) saved @deodorant/registry
+       src "(defn guarded-report [x] (erlang/+ x 991))"]
+  (try
+   (deodorant/register-smell! {:name 'shared-guard :tier :safe
+     :pattern '(erlang/+ ?x 991) :replacement '(inc ?x) :when (fn [_] @enabled)})
+   (let [before (check/analyze-source "guard.bl" src)]
+    (reset! enabled true)
+    (let [after (check/analyze-source "guard.bl" src)]
+     (is (not (:unreadable before))) (is (not (:unreadable after)))
+     (is (= (inc (:smells before)) (:smells after)))))
+   (finally (reset! deodorant/registry saved)))))
+(deftest warm-codebase-facts-do-not-revisit-the-call-graph
+ (let [src "(ns shared.facts) (defn a [x] (+ x 1)) (defn b [x] (a x))"
+       run (fn [] (cb/index-source {} "shared.facts" src {:mode :calls}))]
+  (run) (run)
+  (let [trace (tuple (BeamLisp.Emit/module_for "codebase") :loop-plan 2)]
+   (erlang/trace_pattern trace true (list :local :call_count))
+   (try
+    (doseq [_ (range 10)] (is (= 2 (count (:fn (run))))))
+    (is (= (tuple :call_count 0) (erlang/trace_info trace :call_count)))
+    (finally (erlang/trace_pattern trace false (list :local :call_count)))))))
