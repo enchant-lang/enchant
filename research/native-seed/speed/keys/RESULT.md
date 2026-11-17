@@ -258,7 +258,7 @@ native items MEASURE asked for.
     stale improper-list encodings, fixed in `14f7da044`. Rerun of
     `host_sorted`, `sorted` and `value_keys` (`out/batch4.log`):
     **3 files passed, 0 failed, all green** (170 + 93 + 3,906 assertions).
-    The other 23 files: 5,186 assertions, all passed.
+    The other 23 files: 4,921 assertions, all passed.
 * `./bin/bl realm stop`: on the restored tree this began an SDK preparation
   (no realm was running). I stopped that preparation, since it would fail
   the same way.
