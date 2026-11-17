@@ -1,0 +1,98 @@
+(ns live.observatory-test
+  (:require [live.observatory :as view] [live.app :as app] [web]
+            [data.projection :as projection] [proc.work :as work] [bl.json :as json]))
+
+(defn- conn [method path me]
+  (web/put-private (erlang/apply :Elixir.Plug.Test :conn (list method path "")) :me me))
+
+(deftest disabled-mount-is-inert-and-enabled-mount-needs-authorization
+  (let [application {:http :untouched}]
+    (is (= application (view/attach application {})))
+    (is (= application (view/attach application {:enabled? false :work :invalid})))
+    (is (thrown? (view/attach application {:enabled? true})))
+    (is (thrown? (view/open {:work (into {} (map (fn [n] [n nil]) (range 17)))})))))
+
+(deftest authorization-and-method-checks-precede-owner-observation
+  ;; An invalid scope crashes if snapshot is ever entered.
+  (let [handler (view/handler {:scope nil} (fn [me] (= :developer me)))]
+    (doseq [path [view/path (str view/path "/snapshot.json")]]
+      (is (= 404 (:status (handler (conn "GET" path :visitor) path))))
+      (is (= 405 (:status (handler (conn "POST" path :developer) path)))))
+    (is (nil? (handler (conn "GET" "/other" :developer) "/other"))))
+  (let [handler (view/handler {:scope nil} (fn [_] :truthy))]
+    (is (= 404 (:status (handler (conn "GET" view/path :developer) view/path))))))
+
+(deftest route-composition-and-principal-resolution-happen-once
+  (let [fallback (atom 0) principals (atom 0)
+        application (view/attach
+          {:principal (fn [_] (swap! principals inc) :developer)
+           :http (fn [c _] (swap! fallback inc) (web/text c "existing route"))}
+          {:enabled? true :authorize (fn [me] (= :developer me))})
+        sample (app/router application (conn "GET" view/path nil))
+        other (app/router application (conn "GET" "/other" nil))]
+    (is (= 200 (:status sample)))
+    (is (String/contains? (:resp_body sample) "Work, made visible."))
+    (is (= "existing route" (:resp_body other)))
+    (is (= 1 @fallback)) (is (= 2 @principals))
+    (is (= "no-store" (elem (first (filter #(= "cache-control" (elem % 0)) (:resp_headers sample))) 1)))))
+
+(deftest repeated-snapshots-do-not-start-projections-or-expose-values
+  (let [totals (projection/start-incremental! :observatory/test {:source-id "observatory/test/v1"})
+        jobs (work/start! {:max-active 1 :history 2})
+        observation (view/open {:work {:owned jobs} :projections {:totals totals}})]
+    (try
+      (doseq [_ (range 12)]
+        (let [sample (view/snapshot observation) row (first (:projections sample))]
+          (is (= view/schema (:schema sample)))
+          (is (= 0 (get-in row [:counts :started])))
+          (is (= 0 (:demand row)))
+          (is (not (contains? row :value)))
+          (is (not (contains? row :owner)))
+          (is (string? (json/encode sample)))))
+      (let [handler (view/handler observation (fn [_] true))
+            response (handler (conn "GET" (str view/path "/snapshot.json") :developer)
+                              (str view/path "/snapshot.json"))]
+        (is (= 200 (:status response)))
+        (is (= view/schema (get (json/decode (:resp_body response)) "schema")))))
+      (let [forged (assoc (projection/reader totals) :read :invalid)]
+        (is (= :refused (:status (projection/status forged)))))
+      (projection/stop! totals) (work/stop! jobs)
+      (let [sample (view/snapshot observation)]
+        (is (not (:available (first (:work sample)))))
+        (is (= "unavailable" (:status (first (:projections sample))))))
+      (finally (projection/stop! totals) (work/stop! jobs)))))
+
+(deftest metadata-read-never-decodes-retained-results
+  (let [totals (projection/start-incremental! :observatory/metadata {:source-id "metadata/v1"})]
+    (try
+      (projection/subscribe! totals)
+      (let [until (+ 5000 (erlang/monotonic_time :millisecond))]
+        (loop []
+          (when-not (= :ready (:status (projection/status totals)))
+            (when (> (erlang/monotonic_time :millisecond) until) (throw "Projection did not settle"))
+            (Process/sleep 5) (recur))))
+      ;; The retained-result decoder is not entered by metadata reads.
+      (erlang/trace_pattern (tuple :erlang :binary_to_term 2) true (list :local :call_count))
+      (doseq [_ (range 12)] (projection/status totals))
+      (is (= (tuple :call_count 0) (erlang/trace_info (tuple :erlang :binary_to_term 2) :call_count)))
+      (is (= :ready (:status (projection/read totals))))
+      (is (pos? (elem (erlang/trace_info (tuple :erlang :binary_to_term 2) :call_count) 1)))
+      (let [metadata (projection/status totals)]
+        (is (not (contains? metadata :value)))
+        (is (= 1 (:demand metadata)))
+        (is (pos? (:retention-limit metadata))))
+      (finally
+        (erlang/trace_pattern (tuple :erlang :binary_to_term 2) false (list :local :call_count))
+        (projection/stop! totals)))))
+
+(deftest rendering-escapes-labels-and-keeps-unknown-data-honest
+  (let [sample {:runtime {:resources [] :total 0 :realm {:title "<script>"}}
+                :work [{:name "<img src=x>" :available true :total 0 :jobs [] :truncated true}]
+                :projections [] :sampled-at 0}
+        html (view/page sample)]
+    (is (String/contains? html "&lt;script&gt;"))
+    (is (String/contains? html "&lt;img src=x&gt;"))
+    (is (not (String/contains? html "<script>")))
+    (is (String/contains? html "not yet instrumented"))
+    (is (String/contains? html "snapshot is truncated"))
+    (is (String/contains? html "no polling")))))

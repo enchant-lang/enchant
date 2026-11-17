@@ -146,12 +146,16 @@
           :expiry-timer (erlang/send_after delay (erlang/self) [(:completion after) :expire ticket])))
       after)))
 
-(defn- response [state]
+(defn- observed-state [state]
   (let [view (policy/observe (:policy state))
         expired? (when-let [a (:aggregate state)]
                    (when-let [at (aggregate/next-expiry a)] (<= at (erlang/system_time :millisecond))))
         view (if expired? (assoc view :status :stale :reason :expired) view)
         view (if (:dirty? state) (assoc view :status :stale :reason :unobserved-source) view)]
+    view))
+
+(defn- response [state]
+  (let [view (observed-state state)]
     (if (and (= :ready (:status view)) (:retained state))
       (assoc view :value (erlang/binary_to_term (get-in state [:retained :bytes]) (list :safe))
                   :work (get-in state [:retained :work]))
@@ -214,6 +218,13 @@
   (handle-call [:read token] [from state]
     (if (authorized? state token :read-token)
       (reply (response state) (update state :notified disj (elem from 0)))
+      (reply (refused :projection-reader) state)))
+  (handle-call [:status token] [_from state]
+    (if (authorized? state token :read-token)
+      (reply (assoc (select-keys (observed-state state) [:status :reason :counts])
+               :retained-charge (get-in state [:policy :result :charge])
+               :retention-limit (get-in state [:policy :max-charge])
+               :demand (get-in state [:policy :demand]) :limits (:options state)) state)
       (reply (refused :projection-reader) state)))
   (handle-call [:subscribe token] [from state]
     (if (authorized? state token :read-token)
@@ -339,6 +350,10 @@
 
 (defn reader [handle] (select-keys handle [:owner :read]))
 (defn read [handle] (call (:owner handle) [:read (:read handle)]))
+(defn status
+  "Read metadata with a reader grant. Never decodes retained values, changes
+   demand, acknowledges wakes, retries or refreshes the source."
+  [handle] (call (:owner handle) [:status (:read handle)]))
 (defn subscribe! [handle] (call (:owner handle) [:subscribe (:read handle)]))
 (defn unsubscribe! [handle] (call (:owner handle) [:unsubscribe (:read handle)]))
 (defn refresh! [handle] (call (:owner handle) [:control (:control handle) :refresh]))

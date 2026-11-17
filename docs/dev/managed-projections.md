@@ -6,6 +6,13 @@ subscription grants demand. `read` returns retained data or an explicit status;
 calling it repeatedly never starts work. The creator owns the controller's
 lifetime. Duplicate names refuse.
 
+Use `projection/status` with a reader grant to inspect status, counters, demand
+and retention limits. It neither decodes result payloads nor acknowledges a
+subscriber wake. `live.observatory/attach` mounts an explicitly enabled,
+host-authorized development view at `/__enchant`; its JSON endpoint and public
+`snapshot` function share the same bounded observation model. It creates no
+subscription, timer or computation. See `examples/tooling/work-observatory.bl`.
+
 `start!` accepts a closed query containing up to eight positive stored Datom patterns on an
 actual native SDK connection. Source evidence includes attribute changes,
 compiler generations and provider provenance. Unknown evidence refuses reuse.
