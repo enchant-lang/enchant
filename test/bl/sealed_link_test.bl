@@ -10,24 +10,26 @@
 
 (defn- unseal! [] (persistent_term/erase :bl_sealed_image))
 
-(BeamLisp/eval "(ns sealed-link-fixture)
+(defn- fixture! [] (BeamLisp/eval "(ns sealed-link-fixture)
  (defn twice [x] (* 2 x))
  (defn arities ([x] x) ([x y] (+ x y)) ([x y & more] (reduce + (+ x y) more)))
  (def alias-twice twice)
  (def alias-arities arities)
  (def closure-value (let [k 3] (fn [x] (+ k x))))
- (def per-call-counter (atom 0))")
+ (def per-call-counter (atom 0))"))
 
 (deftest dev-image-keeps-the-fetched-var
+ (fixture!)
  (is (= false (BeamLisp.Env/sealed?)))
  (is (= :error (BeamLisp.Env/sealed_value "sealed-link-fixture" "alias-twice" true)))
  (let [node (compile-in "sealed-link-fixture" "(alias-twice 21)")]
   (is (= :invoke (:op node)))
   (is (= :global (:op (:callee node)))))
  ; Redefinition is allowed in a dev image.
- (is (= 5 (BeamLisp/eval "(do (in-ns 'sealed-link-fixture) (def scratch 4) (def scratch 5) scratch)"))))
+ (is (= 5 (BeamLisp/eval "(ns sealed-link-fixture) (def scratch 4) (def scratch 5) scratch"))))
 
 (deftest sealed-image-links-global-calls-directly
+ (fixture!)
  (let [dev-fixed (compile-in "sealed-link-fixture" "(alias-twice 21)")
        dev-multi (compile-in "sealed-link-fixture" "(alias-arities 1 2 3 4)")
        dev-closure (compile-in "sealed-link-fixture" "(closure-value 4)")]
@@ -56,14 +58,15 @@
    (finally (unseal!)))))
 
 (deftest sealed-image-refuses-redefinition
+ (fixture!)
  (try
   (BeamLisp.Env/seal!)
-  (let [message (fn [source] (try (BeamLisp/eval source) nil (catch e (ex-message e))))]
+  (let [message (fn [source] (try (BeamLisp/eval source) nil (catch e (str (:message e) " " (ex-message e) " " (pr-str e)))))]
    (is (re-find #"sealed image: cannot redefine sealed-link-fixture/twice"
-                (str (message "(do (in-ns 'sealed-link-fixture) (defn twice [x] (* 3 x)))"))))
+                (str (message "(ns sealed-link-fixture) (defn twice [x] (* 3 x))"))))
    (is (re-find #"sealed image: cannot redefine sealed-link-fixture/alias-twice"
-                (str (message "(do (in-ns 'sealed-link-fixture) (def alias-twice 0))"))))
+                (str (message "(ns sealed-link-fixture) (def alias-twice 0)"))))
    ; The old procedure is untouched, and a NEW name is still definable.
    (is (= 42 (BeamLisp/eval "(sealed-link-fixture/twice 21)")))
-   (is (= 9 (BeamLisp/eval "(do (in-ns 'sealed-link-fixture) (def fresh-after-seal 9) fresh-after-seal)"))))
+   (is (= 9 (BeamLisp/eval "(ns sealed-link-fixture) (def fresh-after-seal 9) fresh-after-seal"))))
   (finally (unseal!))))
