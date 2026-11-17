@@ -252,10 +252,13 @@
   (let ((caught (reason (lambda () (bl-invoke assoc (list two-fields -1 30))))))
    (native-extra-check "Vector invalid index precedes metadata lookup"
     (eq? (native-struct-module caught) (bl-key "Elixir.ArgumentError"))))))
-;; Hybrid maps must preserve the OLD raw key relation and iteration order.
-(let* ((keys (list 1 (bl-float 1.0) bl-nil #f (bl-key "mixed")
+;; Hybrid maps must preserve the raw ordered relation and iteration order over
+;; mixed kinds. The keys are canonical (Q3, speed/keys/DECISION.md): 1.0 and
+;; 10.0M would now be the keys 1 and 10, so the float and decimal rows use
+;; 1.5 and 0.1M; speed/keys/native-keys-check.scm checks the merging.
+(let* ((keys (list 1 (bl-float 1.5) bl-nil #f (bl-key "mixed")
                    (bl-tuple '(1)) (bl-vec '(1)) (native-set-from-list '(1 2))
-                   '() '(1) "λ/()" (bl-map (bl-key "inner") 1) (bl-decimal 100 1)))
+                   '() '(1) "λ/()" (bl-map (bl-key "inner") 1) (bl-decimal 1 1)))
        (rows (let loop ((keys keys) (index 0) (out '()))
                (if (null? keys) (reverse out)
                 (loop (cdr keys) (+ index 1)
@@ -278,7 +281,7 @@
   (and (bl-equal? hybrid reference) (native-erlang-equal? hybrid reference) (= 0 (bl-key-compare hybrid reference))))
  (native-extra-check "hybrid present nil and false differ from missing"
   (and (bl-is-nil (bl-get hybrid 1 native-missing))
-       (eq? #f (bl-get hybrid (bl-float 1.0) native-missing))
+       (eq? #f (bl-get hybrid (bl-float 1.5) native-missing))
        (eq? native-missing (bl-get hybrid (bl-key "missing") native-missing)))))
 (let* ((original (list->string (string->list "same-key")))
        (lookup (list->string (string->list "same-key")))
