@@ -1,0 +1,129 @@
+; BACKEND3 copy of speed/kernel2/emit-rt.bl (resolution ledger now in native.resolution-ledger). KERNEL2 focused emission: compile THIS worktree's priv/boot/rt.bl on the
+; pinned SDK, put it in place of the closure's rt unit, and emit every rt
+; function through native.scheme with the AOT link context exactly as
+; native.chunks/checked-context builds it (minus the deleted kernel-override).
+; Usage: run run speed/kernel2/emit-rt.bl -- PARTITION.json LEAVES.json RT.bl OUT.scm [RT2.bl OUT2.scm …]
+(ns native.backend3-emit
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.eval :as ev] [native.scheme :as scheme] [js.build :as build]
+           [clojure.string :as string] [bl.json :as json] [native.resolution :as resolution] [native.resolution-ledger :as ledger]
+           [native.intrinsics :as intrinsics]))
+(def args (BeamLisp/argv))
+(def base (artifact/read-closure (nth args 0)))
+(def leaves (set (get (json/decode (File/read! (nth args 1))) "registered_leaves")))
+(defn compile-rt [rt-path]
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [prepared (build/prepare-ns rt-path)
+         _ (assert (= "rt" (:ns prepared)))
+         compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)]
+    (assoc compiled :source (:source prepared) :path "priv/boot/rt.bl"
+           :module (BeamLisp.Link/module_for "rt") :base-module (BeamLisp.Emit/base_module_for "rt"))))))
+; Every rt source is compiled first; the link context's definition table holds
+; the union of their names, so each emission links its own definitions.
+(def rt-jobs (mapv (fn [i] [(nth args i) (nth args (+ i 1))]) (filter even? (range 2 (count args)))))
+(def rt-units (mapv (fn [[path _]] (compile-rt path)) rt-jobs))
+(def rt-unit (first rt-units))
+(def closure (assoc-in base [:units "rt"] rt-unit))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def table (update (into {} (map (fn [u] [(:ns u) (set (keep :name (:defs u)))]) units))
+                   "rt" (fn [names] (reduce into names (map #(set (keep :name (:defs %))) rt-units)))))
+(def resolution-ledger (ledger/build closure))
+(def by-module (assoc (into {} (mapcat (fn [u] [[(:module u) (:ns u)] [(:base-module u) (:ns u)]]) units))
+                      :Elixir.BeamLisp.CompilerData "host.compiler-data"
+                      :Elixir.BeamLisp.FormMeta "host.form-meta" :Elixir.BeamLisp.Meta "host.meta"))
+(def stub-modules (set (mapcat (fn [ns] [(BeamLisp.Link/module_for ns) (BeamLisp.Emit/base_module_for ns)]) (:stubs closure))))
+(def definitions
+ (into {} (mapcat (fn [u] (keep (fn [d] (when (:name d) [[(:ns u) (:name d)] d])) (:defs u))) units)))
+(def definition-arities
+ (into {} (keep (fn [[slot d]] (when (= :fn (:kind d)) [slot (bootstrap/declaration-arities (:form d))]))
+                definitions)))
+(defn remote-link-shape [ns logical mode arity]
+ (let [d (get definitions [ns logical]) arities (get definition-arities [ns logical])]
+  (cond
+   (= mode "rest-list-clause") (if (some? (:variadic arities)) "variadic" "dynamic")
+   (contains? (set (:fixed arities)) arity) "arity"
+   (some? d) "generic"
+   :else "dynamic")))
+(defn remote-decision [n]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) a (count (:args n))
+       logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
+       key (str (erlang/atom_to_binary m) "/" f "/" a)]
+  (cond
+   (contains? leaves key) ["leaf" key]
+   (and (contains? by-module m) (contains? (get table (get by-module m)) logical))
+    (let [ns (get by-module m) mode (if (ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
+     ["compiled" key ns logical mode (remote-link-shape ns logical mode a)])
+   (contains? stub-modules m) ["excluded-namespace" key]
+   :else (throw (ex-info (str "kernel2 emit: unresolved remote signature " key) {:remote key})))))
+(defn global-decision [n] (resolution/global-decision resolution-ledger table n))
+(defn- direct-call [target]
+ {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- generic-call [target]
+ {:inline? true
+  :call (fn [operands]
+         (let [spread (string/join "" (map #(str " " %) operands))]
+          (str "(let ((linked " target ")) (if (procedure? linked) (linked" spread
+               ") (bl-invoke linked (list" spread "))))")))})
+(defn remote-link [n]
+ (if-let [template (intrinsics/remote-template n)]
+  {:inline? false :call template}
+  (let [decision (remote-decision n)]
+   (case (first decision)
+    "leaf" (direct-call (bootstrap/leaf-binding-name (second decision)))
+    "compiled"
+     (let [[_ _ ns logical _ shape] decision]
+      (case shape
+       "arity" (direct-call (bootstrap/arity-binding-name ns logical (count (:args n))))
+       "variadic" (direct-call (bootstrap/variadic-binding-name ns logical))
+       "generic" (generic-call (bootstrap/binding-name ns logical))
+       nil))
+     nil))))
+(defn checked-context [ns]
+ (let [base (ev/context ns)]
+  (assoc base
+   :aot-link {:remote remote-link}
+   :remote-resolver
+   (fn [n]
+    (let [m (:mod n) f (erlang/atom_to_binary (:fun n))
+          logical (if (ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f)
+          key (str (erlang/atom_to_binary m) "/" f "/" (count (:args n)))]
+     (when-not (or (contains? leaves key) (contains? stub-modules m)
+                    (and (contains? by-module m) (contains? (get table (get by-module m)) logical)))
+      (throw (ex-info "kernel2 emit: missing exact remote capability" {:namespace ns :remote key :ann (:ann n)})))
+     ((:remote-resolver base) n)))
+   :global-resolver
+   (fn [n]
+    (let [[_ _ _ _ _ sel-ns sel-name] (global-decision n)]
+     (bootstrap/global-binding-name sel-ns sel-name))))))
+(defn link-definition [ns name kind arities]
+ (let [binding (bootstrap/binding-name ns name) global (bootstrap/global-binding-name ns name)
+       fixed (if (= :fn kind) (:fixed arities) [])
+       variadic? (and (= :fn kind) (some? (:variadic arities)))
+       cells (concat (map #(bootstrap/arity-binding-name ns name %) fixed)
+                     (when variadic? [(bootstrap/variadic-binding-name ns name)]) [global])]
+  (str (string/join "" (map #(str "(define " % " #f)\n") cells))
+       "(native-link! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " binding " value)"
+       (string/join "" (map #(str " (set! " (bootstrap/arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
+       (if variadic? (str " (set! " (bootstrap/variadic-binding-name ns name) " (native-variadic-entry value "
+                          (scheme/text (str ns "/" name)) "))") "")
+       ") (lambda (value) (set! " global " value)))\n")))
+(defn emit-definition [u d]
+ (let [ns (:ns u) value (scheme/emit (:node d) (checked-context ns))]
+  (if (:name d)
+   (let [binding (bootstrap/binding-name ns (:name d))
+         arities (when (= :fn (:kind d)) (bootstrap/declaration-arities (:form d)))]
+    (str "(define " binding " " value ")\n"
+        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
+        "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
+        " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
+        (when arities
+         (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+              (bootstrap/data (:fixed arities)) " " (bootstrap/data (:variadic arities)) ")\n"))
+        (link-definition ns (:name d) (:kind d) arities)))
+   (str value "\n"))))
+(doseq [[[_ out] unit] (map (fn [job unit] [job unit]) rt-jobs rt-units)]
+ (let [fns (filter #(= :fn (:kind %)) (:defs unit))
+       text (string/join "" (map #(emit-definition unit %) fns))]
+  (File/write! out text)
+  (println (str "KERNEL2_EMITTED " out " " (count fns) " rt functions, " (count text) " bytes"))))

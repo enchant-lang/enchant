@@ -1296,9 +1296,17 @@
                   `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :nth) ~(tuple2 :arity 2)))))
 
 (defn k-nth
+  ; FAST PATHS FIRST. A list or a vector with a non-negative integer index is
+  ; the common access; it is answered here by exactly what the clauses below
+  ; reach for it (`lists-at` → `nth-list`, `struct-of?` → `Vector/nth`), with
+  ; inline type tests and no classifier. Every other input takes those clauses.
   ([x i]
    (cond
-    (erlang/is_list x) (lists-at x i)
+    (erlang/is_list x) (cond (and (erlang/is_integer i) (erlang/>= i 0)) (nth-list x i)
+                             :else (lists-at x i))
+    (and (erlang/is_integer i) (erlang/>= i 0) (erlang/is_map x)
+         (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector"))
+    (BeamLisp.Vector/nth x i)
     (erlang/== false (erlang/is_integer i)) (cond (erlang/== x nil) nil
                                                   (struct-of? x :"Elixir.BeamLisp.Vector") (BeamLisp.Vector/nth x i)
                                                   (erlang/== (kind-kind x) :tuple) nil
@@ -1322,7 +1330,12 @@
         :else (nth-refuse x)))))
 
   ([x i default]
-   (let [v (k-nth x i)]
+   (let [v (cond
+             (and (erlang/is_integer i) (erlang/>= i 0))
+             (cond (erlang/is_list x) (nth-list x i)
+                   (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector")) (BeamLisp.Vector/nth x i)
+                   :else (k-nth x i))
+             :else (k-nth x i))]
      (cond
        (erlang/== v nil) (cond (in-range? x i) nil :else default)
        :else v))))
@@ -2213,7 +2226,13 @@
    reference, a non-entry into a map — refuses rather than growing a struct."
   ([x] x)
   ([x v]
-   (let [kd (kind-kind x)]
+   (cond
+     ; A list and a vector, the common targets, are answered before the
+     ; classifier: `kind-kind` says :list and :vector for exactly these.
+     (erlang/is_list x) (raw-cons v x)
+     (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector")) (BeamLisp.Vector/conj x v)
+     :else
+     (let [kd (kind-kind x)]
      (cond
        (erlang/== kd :nil) (raw-cons v ())
        (erlang/== kd :list) (raw-cons v x)
@@ -2254,7 +2273,7 @@
                                  `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :conj) ~(tuple2 :arity 2)))))
        ; a string, a number, a fn: RT had no conj clause for them
        :else (erlang/error (Elixir.FunctionClauseError/exception
-                             `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :conj) ~(tuple2 :arity 2))))))))
+                             `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :conj) ~(tuple2 :arity 2)))))))))
 
 ;; ── CONTAINS? ──────────────────────────────────────────────────────────────
 
@@ -4637,7 +4656,15 @@
 (defn count [x] (k-count x))
 (defn nth
   "Lenient element access for sequential destructuring: nil-safe, out-of-range gives nil."
-  ([x i] (k-nth x i))
+  ; `k-nth`'s fast paths, so the common access costs no second call.
+  ([x i]
+   (cond
+     (and (erlang/is_integer i) (erlang/>= i 0))
+     (cond (erlang/is_list x) (nth-list x i)
+           (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector"))
+           (BeamLisp.Vector/nth x i)
+           :else (k-nth x i))
+     :else (k-nth x i)))
   ([x i default] (k-nth x i default)))
 (defn empty? [x] (k-empty? x))
 (defn take
@@ -4749,7 +4776,13 @@
   "Clojure `conj`: prepend to a list, append to a vector — one item or many,
    `(conj coll x & xs)`, each added in order as by repeated `conj`."
   ([coll] (coll-conj coll))
-  ([coll x] (coll-conj coll x))
+  ; `coll-conj`'s fast paths, so the common call costs no second call.
+  ([coll x]
+   (cond
+     (erlang/is_list coll) (raw-cons x coll)
+     (and (erlang/is_map coll) (erlang/=:= (maps/get :__struct__ coll nil) :"Elixir.BeamLisp.Vector"))
+     (BeamLisp.Vector/conj coll x)
+     :else (coll-conj coll x)))
   ([coll x & xs] (coll-conj-variadic coll x xs)))
 (defn contains?
   "`contains?`: KEY membership for maps, index-in-range for vectors — never
