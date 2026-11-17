@@ -1,0 +1,46 @@
+(ns data.downstream-reuse-test
+  (:require [datom :as d] [datom.profile :as profile] [datom.cache-validity :as validity]
+            [lsp] [data.provenance :as provenance]))
+
+(deftest ordinary-datom-queries-share-results-and-invalidate-after-code-publication
+  (let [c (d/connect [{:db/ident :reuse/name :db/valueType :db.type/string}
+                      {:db/ident :reuse/group :db/valueType :db.type/string}])
+        q '[:find ?e ?n :where [?e :reuse/group "g"] [?e :reuse/name ?n]]]
+    (try
+      (d/transact! c (mapv (fn [n] {:db/id (- -1 n) :reuse/name (str n) :reuse/group "g"}) (range 64)))
+      (let [database (d/db c) watched (profile/watch (:store database)) view (assoc database :store watched)]
+        ;; Startup learns the work hint and may initialize an optional cache.
+        ;; Require convergence, then assert exact physical work on warm reads.
+        (loop [left 12]
+          (profile/reset! watched)
+          (d/q q view)
+          (when (and (pos? (:rows (profile/counters watched))) (pos? left)) (recur (dec left))))
+        (profile/reset! watched)
+        (is (= 64 (count (d/q q view))))
+        (is (= 0 (:rows (profile/counters watched))))
+        (let [before (validity/definition-stamp)]
+          (BeamLisp.Env/put_key (tuple "reuse.unrelated-provider" "value") 1)
+          (is (= before (validity/definition-stamp)))
+          (profile/reset! watched)
+          (d/q q view)
+          (is (= 0 (:rows (profile/counters watched))))
+          (BeamLisp.Env/put_key (tuple "datom.value-codec" "reuse-receipt") 1)
+          (is (not= before (validity/definition-stamp)))
+          (profile/reset! watched)
+          (is (= 64 (count (d/q q view))))
+          (is (pos? (:rows (profile/counters watched))))))
+      (finally (d/close! c)))))
+
+(deftest lsp-reuses-analysis-and-invalidates-on-new-provider-publication
+  ;; Warm initialization is separate from the unchanged-input contract.
+  (let [src "(defn downstream-receipt [x] (+ x 7))"]
+    (lsp/analyzed src)
+    (lsp/analyzed src)
+    (let [before (:builds (lsp/memo-stats))]
+      (doseq [_ (range 10)] (lsp/analyzed src))
+      (is (= before (:builds (lsp/memo-stats))))
+      (BeamLisp.Env/put_key (tuple "reuse.lsp-provider" "value") 1)
+      (lsp/analyzed src)
+      (is (= (inc before) (:builds (lsp/memo-stats))))
+      (doseq [_ (range 10)] (lsp/analyzed src))
+      (is (= (inc before) (:builds (lsp/memo-stats)))))))

@@ -1,0 +1,71 @@
+(ns live.edit.session-portable-test (:require [bl.js :as js]))
+(def probe-source
+ (str
+  "(ns ^:js qa.edit-session-preview\n"
+  " (:require [live.edit.session :as session] [live.edit.standard :as standard]\n"
+  "           [live.edit.document :as document] [live.edit.protocol :as protocol] [live.edit.extensions :as extensions]))\n"
+  "(def checks (atom 0))\n"
+  "(defn check [condition] (when-not condition (throw (ex-info \"Session preview contract failed.\" {:at @checks}))) (swap! checks inc))\n"
+  "(def custom {:name \"preview-check\" :provides {:editor/commands\n"
+  " {\"test/noop\" {:label \"Current value\" :run (fn [_ _] {:ops []})}\n"
+  "  \"test/title\" {:label \"Title\" :run (fn [_ args] {:ops [{:op \"document/meta\" :patch {:title (:title args)}}]})}}}})\n"
+  "(def packages [standard/package custom])\n"
+  "(def ext (extensions/build packages))\n"
+  "(def initial (protocol/snapshot (protocol/authority ext (document/document \"preview\" [(document/block \"a\" \"Text\")]))))\n"
+  "(def ed (session/open packages (bl->js initial)))\n"
+  "(defn read-state [] (js->bl (.read ed) :keywordize-keys true))\n"
+  "(.selection ed (bl->js {:anchor {:block \"a\" :offset 0} :head {:block \"a\" :offset 0}}))\n"
+  "(def baseline (read-state))\n"
+  "(def preview (js->bl (.preview ed \"text/highlight\" (bl->js {:tone \"mint\"}) #js {}) :keywordize-keys true))\n"
+  "(check (:preview preview))\n"
+  "(check (not (:unchanged preview)))\n"
+  "(check (zero? (:pending preview)))\n"
+  "(check (nil? (.outbound ed)))\n"
+  "(.cancelPreview ed)\n"
+  "(check (empty? (:pendingStyles (read-state))))\n"
+  "(.preview ed \"text/highlight\" (bl->js {:tone \"mint\"}) #js {})\n"
+  "(.commitPreview ed)\n"
+  "(check (= \"mint\" (get-in (read-state) [:pendingStyles 0 :args :tone])))\n"
+  "(check (zero? (:pending (read-state))))\n"
+  "(check (not (:canUndo (read-state))))\n"
+  "(.preview ed \"text/highlight\" (bl->js {:tone \"rose\"}) #js {})\n"
+  "(.commitPreview ed)\n"
+  "(check (= [\"rose\"] (mapv #(get-in % [:args :tone]) (:pendingStyles (read-state)))))\n"
+  "(def noop (js->bl (.preview ed \"test/noop\" #js {} #js {}) :keywordize-keys true))\n"
+  "(check (:unchanged noop))\n"
+  "(check (nil? (.outbound ed)))\n"
+  "(check (try (.commitPreview ed) false (catch _ true)))\n"
+  "(.cancelPreview ed)\n"
+  "(.preview ed \"test/title\" (bl->js {:title \"New title\"}) #js {})\n"
+  "(check (= \"New title\" (get-in (read-state) [:meta :title])))\n"
+  "(check (zero? (:pending (read-state))))\n"
+  "(.cancelPreview ed)\n"
+  "(check (not= \"New title\" (get-in (read-state) [:meta :title])))\n"
+  "(.preview ed \"test/title\" (bl->js {:title \"New title\"}) #js {})\n"
+  "(.commitPreview ed)\n"
+  "(check (= \"New title\" (get-in (read-state) [:meta :title])))\n"
+  "(check (= 1 (:pending (read-state))))\n"
+  "(check (some? (.outbound ed)))\n"
+  "(check (:canUndo (read-state)))\n"
+  "(.run ed \"undo\" #js {} #js {})\n"
+  "(check (not= \"New title\" (get-in (read-state) [:meta :title])))\n"
+  "(.preview ed \"test/noop\" #js {} #js {})\n"
+  "(.selection ed (bl->js {:anchor {:block \"a\" :offset 1} :head {:block \"a\" :offset 1}}))\n"
+  "(check (try (.commitPreview ed) false (catch _ true)))\n"
+  "(.cancelPreview ed)\n"
+  "(check (= (:revision baseline) (:revision (read-state))))\n"
+  "(println (str \"SESSION_PREVIEW_CHECKS \" @checks))\n"
+ ))
+(deftest compiled-session-previews-private-typing-styles-and-guards-real-authority
+ (let [root (str (System/tmp_dir!) "/session-preview-" (erlang/unique_integer (list :positive)))
+       fixture (str root "/src") out (str root "/out")
+       library (Path/dirname (Path/dirname (Path/dirname (BeamLisp.Loader/source_path "live.edit.session"))))]
+  (is (contains? (js/core-names) "re-find"))
+  (try
+   (File/mkdir_p! (str fixture "/qa"))
+   (File/write! (str fixture "/qa/edit_session_preview.bl") probe-source)
+   (js/build! "qa.edit-session-preview" {:paths (list fixture library) :out out})
+   (let [result (System/cmd "node" (list (str out "/ns/qa.edit-session-preview.mjs")) (list (tuple :stderr_to_stdout true)))]
+    (is (= 0 (elem result 1)) (elem result 0))
+    (is (= "SESSION_PREVIEW_CHECKS 22\n" (elem result 0))))
+   (finally (File/rm_rf! root)))))

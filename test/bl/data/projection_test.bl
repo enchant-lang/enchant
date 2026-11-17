@@ -189,3 +189,51 @@
       (is (nil? (:value (projection/read h))))
       (is (= 1 (get-in (projection/read h) [:counts :started])))
       (finally (projection/stop! h) (d/close! c)))))
+
+(defn- drain-projection-wakes []
+  (receive [:data.projection/changed _ _] (inc (drain-projection-wakes)) (after 0 0)))
+
+(deftest subscriber-wakes-coalesce-until-an-authorized-read
+  (drain-projection-wakes)
+  (let [h (projection/start-incremental! :projection/wakes {:source-id "wakes"})
+        now (erlang/system_time :millisecond)]
+    (try
+      (projection/subscribe! h)
+      (is (= 1 (drain-projection-wakes)))
+      ;; Synchronous deltas are a deterministic owner mailbox barrier. The
+      ;; subscriber deliberately does not acknowledge its outstanding wake.
+      (doseq [n (range 1 101)]
+        (let [answer (projection/delta! h {:sequence n :now now :upsert [{:id 1 :at now}]})]
+          (when (= :refused (:status answer))
+            (throw (ex-info "Wake fixture delta must be accepted" {:answer answer :sequence n})))))
+      (is (= 0 (drain-projection-wakes)))
+      (projection/read (assoc h :read (erlang/make_ref)))
+      (projection/delta! h {:sequence 101 :now now})
+      (is (= 0 (drain-projection-wakes)) "an unauthorized read cannot acknowledge")
+      (is (= 101 (get-in (projection/read h) [:value :cursor])))
+      (projection/delta! h {:sequence 102 :now now})
+      (is (= 1 (drain-projection-wakes)))
+      (projection/unsubscribe! h)
+      (projection/delta! h {:sequence 103 :now now})
+      (is (= 0 (drain-projection-wakes)))
+      (finally (projection/stop! h) (drain-projection-wakes)))))
+
+(deftest real-commit-bursts-refresh-once-and-publish-the-latest-basis
+  (let [c (source) h (projection/start! :projection/commit-burst c QUERY)]
+    (try
+      (projection/subscribe! h)
+      (is (= :ready (:status (settled h))))
+      (erlang/apply :sys :suspend (list (:owner h) 1000))
+      (try
+        (doseq [n (range 8)] (d/transact! c [{:db/id -1 :projection/value n}]))
+        (finally (erlang/apply :sys :resume (list (:owner h) 1000))))
+      (let [expected (conj (set (range 8)) 10)
+            until (+ 10000 (erlang/monotonic_time :millisecond))
+            result (loop []
+              (let [r (projection/read h)]
+                (if (or (= expected (set (map second (:value r))))
+                        (> (erlang/monotonic_time :millisecond) until)) r
+                  (do (Process/sleep 1) (recur)))))]
+        (is (= expected (set (map second (:value result)))))
+        (is (= 2 (get-in result [:counts :started])) "one initial query and one burst query"))
+      (finally (projection/stop! h) (d/close! c)))))

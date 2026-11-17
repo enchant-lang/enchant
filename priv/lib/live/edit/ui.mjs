@@ -1,6 +1,7 @@
 import {computePosition,autoUpdate,offset,flip,shift,inline} from '@floating-ui/dom';
 import {icon,iconNames} from './icons.mjs';
 import {recoveryMessage} from './settlement.mjs';
+import {choiceLabel} from './parameter-labels.mjs';
 
 const element=(tag,className,text)=>{const node=document.createElement(tag);if(className)node.className=className;if(text!=null)node.textContent=text;if(tag==='kbd')node.setAttribute('aria-hidden','true');return node;};
 const button=(label,glyph,action,className='')=>{
@@ -214,23 +215,40 @@ class DefaultUI {
   functionPanel(fid,existing=null){
     const token=this.panelTarget(),spec=this.editor.query({target:token}).find(item=>item.id===fid);
     if(!spec){this.editor.session.release(token);return;}
-    const call=existing||this.currentCall(fid),params=spec.params||{},args={},action=spec.kind==='custom';
-    for(const [key,param]of Object.entries(params))args[key]=call?.args[key]??param.default;
+    const call=existing||this.currentCall(fid),pending=this.editor.state.pendingStyles?.find(style=>style.function===fid),params=spec.params||{},args={},action=spec.kind==='custom';
+    const currentArgs=call?.args||pending?.args||{};
+    for(const [key,param]of Object.entries(params))args[key]=Object.hasOwn(currentArgs,key)?currentArgs[key]:param.default;
     const content=element('form','ed-function-form'),heading=element('div','ed-panel-heading');heading.append(icon(spec.icon||'function'),element('strong','',spec.label));
     const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',spec.description||(call?'Make this function your own.':'A small change, a new possibility.')));
     const error=element('div','ed-panel-error');error.setAttribute('role','status');
     const preview=()=>{try{
-      if(call)this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}});
-      else this.editor.session.preview(fid,{...args},{target:token});error.textContent='';apply.disabled=false;
+      const result=call?this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}}):this.editor.session.preview(fid,{...args},{target:token});
+      error.textContent=result?.unchanged?'This value is already current.':'';apply.disabled=!!result?.unchanged;
     }catch(reason){this.editor.session.cancelPreview();error.textContent=this.friendly(reason);apply.disabled=true;}};
     for(const [key,param]of Object.entries(params)){
-      const field=element(param.type==='enum'?'div':'label','ed-parameter');field.append(element('span','ed-field-label',key==='tone'?'Color':key==='href'?'Destination':key));
+      const label=param.label||(key==='tone'?'Color':key==='href'?'Destination':key);
+      const field=element(param.type==='enum'?'div':'label','ed-parameter');field.append(element('span','ed-field-label',label));
       if(param.type==='enum'){
-        const group=element('div','ed-value-choices');group.setAttribute('role','radiogroup');group.setAttribute('aria-label',key);
-        for(const value of param.values){const choice=button(value,null,()=>{args[key]=value;for(const c of group.children)c.setAttribute('aria-checked',String(c===choice));preview();},'ed-value-choice');choice.dataset.tone=value;choice.setAttribute('role','radio');choice.setAttribute('aria-checked',String(args[key]===value));choice.append(element('span','ed-color-dot'),element('span','',value[0].toUpperCase()+value.slice(1)));group.append(choice);}
+        const group=element('div','ed-value-choices');group.setAttribute('role','radiogroup');group.setAttribute('aria-label',label);
+        for(const value of param.values){
+          const label=choiceLabel(param,value),choice=button(label,null,()=>{
+            args[key]=value;for(const c of group.children){c.setAttribute('aria-checked',String(c===choice));c.tabIndex=c===choice?0:-1;}preview();
+          },'ed-value-choice');
+          choice.dataset.tone=value;choice.setAttribute('role','radio');choice.setAttribute('aria-checked',String(args[key]===value));choice.tabIndex=args[key]===value?0:-1;
+          if(key==='tone')choice.append(element('span','ed-color-dot'));choice.append(element('span','',label));group.append(choice);
+        }
+        if(![...group.children].some(c=>c.tabIndex===0)&&group.firstElementChild)group.firstElementChild.tabIndex=0;
+        group.addEventListener('keydown',event=>{
+          if(event.altKey||event.ctrlKey||event.metaKey)return;
+          const rows=[...group.children],at=rows.indexOf(document.activeElement);let next;
+          if(event.key==='Home')next=0;else if(event.key==='End')next=rows.length-1;
+          else if(event.key==='ArrowRight'||event.key==='ArrowDown')next=(at+1)%rows.length;
+          else if(event.key==='ArrowLeft'||event.key==='ArrowUp')next=(at-1+rows.length)%rows.length;else return;
+          if(!rows[next])return;event.preventDefault();event.stopPropagation();rows[next].focus();rows[next].click();
+        });
         field.append(group);
       }else{
-        const input=element('input','ed-field');input.type=param.type==='boolean'?'checkbox':param.type==='integer'?'number':'text';input.setAttribute('aria-label',key);
+        const input=element('input','ed-field');input.type=param.type==='boolean'?'checkbox':param.type==='integer'?'number':'text';input.setAttribute('aria-label',label);input.name=key;input.dataset.parameter=key;
         if(input.type==='checkbox')input.checked=!!args[key];else input.value=String(args[key]??'');if(key==='href')input.placeholder='https://example.com';
         if(param.min!=null)input.min=param.min;if(param.max!=null)input.max=param.max;
         input.addEventListener('input',()=>{args[key]=input.type==='checkbox'?input.checked:input.type==='number'?input.valueAsNumber:input.value;preview();});field.append(input);
@@ -242,7 +260,7 @@ class DefaultUI {
     const applyLabel=call?'Save change':action?'Apply change':'Apply function';
     const apply=button(applyLabel,null,()=>{} ,'ed-primary');apply.type='submit';apply.append(element('span','',applyLabel),element('kbd','','↵'));actions.append(apply);content.append(actions);
     content.addEventListener('submit',event=>{event.preventDefault();try{if(!this.editor.state.preview)preview();if(apply.disabled)return;this.editor.session.commitPreview();this.panel.hide('apply');}catch(reason){error.textContent=this.friendly(reason);}});
-    this.openPanel(content,token,null,{focus:content.querySelector('input')||apply});preview();
+    this.openPanel(content,token,null,{focus:content.querySelector('input,[role=radio][tabindex="0"]')||apply});preview();
   }
   friendly(error){const message=error?.message||String(error);return {'invalid-link':'Enter a web address, email link, or page anchor.','invalid-arguments':'Choose a valid value for this function.','empty-selection':'Select some text to preview this function.'}[message]||message;}
   functionsMenu(){

@@ -325,11 +325,35 @@ test("CompilerData plain-clause shape view is bounded, passive, and distinguishe
   assert.equal(stacks.get(R.kw("raw")), "__STACKTRACE_RAW__");
 });
 
-test("native unit validation and fingerprint serialization refuse explicitly without granting custody", () => {
-  for (const key of ["Elixir.BeamLisp.CompilerData/check_contextual_unit!/1", "erlang/term_to_binary/2"]) {
+test("native Source-head access, unit validation and fingerprint serialization refuse without granting custody", () => {
+  for (const key of ["Elixir.BeamLisp.CompilerData/check_contextual_unit!/1", "erlang/term_to_binary/2", "atomics/get/2"]) {
     assert.equal(typeof leaf(key), "function");
     assert.throws(() => leaf(key)(R.EMPTY_MAP, R.list(R.kw("deterministic"))),
       e => e instanceof R.BLError && e.message.includes(key) && /BEAM only/.test(e.message));
   }
   assert.equal(leaf("Elixir.BeamLisp.CompilerData/not_a_function/1"), undefined);
+});
+
+
+test("persistent terms keep structural keys, missing defaults and falsy values within this realm", () => {
+  const get=leaf("persistent_term/get/2"), read=leaf("persistent_term/get/1"), put=leaf("persistent_term/put/2"), erase=leaf("persistent_term/erase/1");
+  const key=new R.Tup([R.kw("qa_persistent_terms"), R.vec(1,2)]);
+  const same=new R.Tup([R.kw("qa_persistent_terms"), R.vec(1,2)]);
+  assert.equal(erase(key),false);
+  assert.equal(get(key,"missing"),"missing");
+  assert.throws(()=>read(key), /missing key/);
+  try {
+    for (const value of [null,false,0,"",R.hashMap(R.kw("a"),7)]) {
+      assert.equal(put(key,value),R.kw("ok"));
+      assert.equal(get(same,"missing"),value);
+      assert.equal(read(same),value);
+      assert.ok(xs(leaf("persistent_term/get/0")()).some(pair=>R.eqv(pair.items[0],same)&&R.eqv(pair.items[1],value)));
+    }
+  } finally { assert.equal(erase(same),true); }
+  assert.equal(erase(key),false);
+  assert.equal(get(key,"missing"),"missing");
+  // The realm has no native Source-head cell. Its normal invocation gate takes
+  // the existing full check; it cannot manufacture an atomic native reference.
+  assert.equal(get(R.kw("bl_source_extent_heads_live"),null),null);
+  assert.throws(()=>leaf("atomics/get/2")(R.vec(0),1), /BEAM only/);
 });

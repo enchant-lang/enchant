@@ -24,6 +24,7 @@
 ;                                           ; the NAMED, ALREADY-GUARDED worlds
 ;                                           ; this principal may read for this
 ;                                           ; route — nil ⇒ not permitted/absent
+;    :projections (fn [me] -> {:totals reader …}) ; optional principal-owned grants
 ;    :observe (fn [me] -> [conn …])         ; conns to LISTEN to for liveness
 ;    :session-for (fn [me request] -> conn) ; optional app-owned private world
 ;    :intents {:ingest/confirm confirm-fn}  ; the only writes; op → performer
@@ -58,6 +59,7 @@
   (:require [live.socket :as sock]
             [live.measure :as measure]
             [live.temporal :as temporal] [connector.clock :as clock]
+            [data.projection :as managed]
             [live.hiccup :as h]
             [loom.token :as t]
             [datom]
@@ -160,6 +162,22 @@
   [:div [:div {:key (str "route:" (first (split-target target)))
                :data-live-route target} body]])
 
+(defn- projection-readers [app me]
+  ;; The resolver grants reader capabilities for this authenticated principal.
+  ;; Controllers remain in the application owner; no handle enters locals.
+  (let [readers (if-let [resolve (:projections app)] (resolve me) {})]
+    (when-not (and (map? readers) (<= (count readers) 32) (every? keyword? (keys readers)))
+      (throw (ex-info "Live projections require at most 32 named readers" {:kind :invalid-live-projections})))
+    (into {} (map (fn [[k handle]] [k (managed/reader handle)]) readers))))
+
+(defn- projection-values [readers]
+  (into {} (map (fn [[k handle]]
+    [k (try (managed/read handle) (catch _ {:status :unavailable :reason :projection-owner-unavailable}))]) readers)))
+
+(defn- demand-projections! [readers active?]
+  (doseq [[_ handle] readers]
+    (try (if active? (managed/subscribe! handle) (managed/unsubscribe! handle)) (catch _ nil))))
+
 (defn dispatch
   "The universal view: (shared session locals) → hiccup, for ANY app. The app
    value, the resolved principal, and the current route travel in `locals`
@@ -202,7 +220,9 @@
                  ;; (or nil when the principal may not see it). The resolver
                  ;; already applied RLS/as-of; the screen just reads.
                  :db (fn [k] (get worlds k))
-                 :worlds worlds}]
+                 :worlds worlds
+                 :projections (if (contains? locals :live/projections) (:live/projections locals)
+                                (projection-values (projection-readers app me)))}]
         (route-boundary target (measure/phase :screen (screen ctx)))))))
 
 ;; ════════════════════════════════════════════════════════════════════
@@ -231,7 +251,8 @@
         ambient (cond-> (select-keys initial [:app :me])
                   (contains? ctx :me) (assoc :me (get ctx :me)))]
     (fn [shared session locals]
-      (render shared session (merge locals ambient)))))
+      (render shared session (assoc (merge locals ambient) :live/projections
+                                   (projection-values (:projection-readers ctx)))))))
 
 ;; ════════════════════════════════════════════════════════════════════
 ;; 4. THE WEB FRAME — SSR first paint · ws boundary · request stylesheet collection
@@ -381,6 +402,9 @@
           ;; registration until death; generation evidence prunes dead owners.
           ;; Reconnection must not silently replace its original callbacks.
           _ (when (generation/current) (generation/capture!))
+          readers (projection-readers (get-in ctx [:locals :app]) (get ctx :me (get-in ctx [:locals :me])))
+          ctx (assoc ctx :projection-readers readers)
+          _ (demand-projections! readers true)
           observe (get ctx :observe [])
           shared (get ctx :shared) session (get ctx :session)
           listen (sock/listen-options (or (get ctx :listen) {}))
@@ -393,7 +417,7 @@
               (datom/listen! session (sock/listen-options {})))
           projection-at (when (get-in ctx [:locals :app :deadline])
                           (clock/now (get-in ctx [:locals :app :clock])))
-          st (sock/mount {:view (contextual-view ctx)
+          st (sock/mount {:projection-readers readers :view (contextual-view ctx)
                           :shared (get ctx :shared)
                           :session (get ctx :session)
                           :sink (get ctx :sink)
@@ -418,6 +442,11 @@
   (handle-info [:datom/changed _basis _attrs] [st]
     (noreply (project-with-time! st (fn [current] (sock/on-commit current)))))
 
+  (handle-info [:data.projection/changed owner token] [st]
+    (noreply (if (and (:attached? st)
+                     (some (fn [[_ h]] (and (= owner (:owner h)) (= token (:read h)))) (:projection-readers st)))
+      (project-with-time! st (fn [current] (sock/on-commit current false))) st)))
+
   (handle-info [:connector.clock/changed identity] [st]
     (noreply (if (:temporal st)
       (assoc st :temporal (temporal/clock-changed! (:temporal st) identity (:attached? st))) st)))
@@ -431,6 +460,8 @@
   ;; a transport died, or the grace window closed with none attached
   (handle-info [:DOWN ref :process _pid _why] [st]
     (let [after (sock/detach st ref)]
+      (when (and (:attached? st) (not (:attached? after)))
+        (demand-projections! (:projection-readers st) false))
       (noreply (if (and (:temporal after) (not (:attached? after)))
         (assoc after :temporal (temporal/pause! (:temporal after))) after))))
   (handle-info [:live/expire] [st]
@@ -443,11 +474,13 @@
 
   ;; a transport for this session reconnects
   (handle-call [:live/attach sink me] [_from st]
-    (let [at (projection-instant st) r (sock/attach st sink me)]
+    (let [_ (when (= me (:me st)) (demand-projections! (:projection-readers st) true))
+          at (projection-instant st) r (sock/attach st sink me)]
       (reply (first r) (if (= :ok (first r)) (rearm-temporal! (second r) at) (second r)))))
 
   (handle-call [:live/attach sink me mounted?] [_from st]
-    (let [r (sock/attach st sink me mounted?)]
+    (let [_ (when (= me (:me st)) (demand-projections! (:projection-readers st) true))
+          r (sock/attach st sink me mounted?)]
       (reply (first r) (second r))))
 
   ;; a browser event (click/input/navigate). It arrives as a CAST on the wire
@@ -463,7 +496,9 @@
 
   ;; introspection for tests
   (handle-call [:state] [_from st] (reply st st))
-  (terminate [_reason st] (temporal/close! (:temporal st))))
+  (terminate [_reason st]
+    (demand-projections! (:projection-readers st) false)
+    (temporal/close! (:temporal st))))
 
 (defn- app-socket-ctx
   "The socket context for one transport: the app's seams plus the

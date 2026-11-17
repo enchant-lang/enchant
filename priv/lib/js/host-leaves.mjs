@@ -402,6 +402,9 @@ export const IO = {
 
 const beamOnly = (k) => () => { throw new BLError(k + " runs on the BEAM only (not part of the JS target)"); };
 export const BEAM_ONLY = Object.fromEntries([
+  // Native Source-head fast paths are linked in shared rt, but only the BEAM
+  // owns persistent-term/atomics custody. Explicit JS calls refuse by name.
+  "atomics/get/2",
   // Compiler hooks remain resolvable in shared code. function_exported is
   // false on JS, and explicit use cannot manufacture BEAM custody/metadata.
   "Elixir.BeamLisp.AOT/constructor_metadata_compiling?/0",
