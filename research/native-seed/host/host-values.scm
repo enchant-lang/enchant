@@ -746,7 +746,7 @@
 
 ;; $blfn is compiler data: {:$blfn {arity -> closure} {minimum closure}|nil}.
 (define (native-multi-callable? f)
- (and (bl-tag? f 'tuple) (= (bl-count f) 3) (eq? (bl-nth f 0) (bl-key "$blfn"))))
+ (and (bl-tag? f 'tuple) (= (bl-count f) 3) (eq? (bl-nth f 0) (quote |:$blfn|))))
 (define (native-take xs n)
  (if (= n 0) '() (cons (car xs) (native-take (cdr xs) (- n 1)))))
 (define (native-drop xs n) (if (= n 0) xs (native-drop (cdr xs) (- n 1))))
