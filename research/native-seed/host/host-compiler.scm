@@ -392,14 +392,14 @@
  (for-each (lambda (row)
    (native-env-put! (native-row (bl-key "link") "core" (bl-nth row 0)) (bl-nth row 1)))
   (bl-items (bl-get metadata (bl-key "core-links"))))
- ; Boot-tier stubs (P3): BEAM's own link rows and privacy for the namespaces
- ; the image excludes, so a call into one compiles exactly as on BEAM (a
- ; module-linked remote that links as an excluded namespace), never :global.
+ ; Link rows of every closure member and boot-tier stub (P3): a call into
+ ; one compiles exactly as on BEAM (a module-linked remote), never :global.
+ ; Stub rows carry their privacy; members' privacy is their emitted meta.
  (for-each (lambda (row)
    (native-env-put! (native-row (bl-key "link") (bl-nth row 0) (bl-nth row 1)) (bl-nth row 2))
    (if (eq? #t (bl-nth row 3))
     (native-put-meta (bl-nth row 0) (bl-nth row 1) (bl-map (bl-key "private") #t))))
-  (bl-items (bl-get metadata (bl-key "stub-links") (bl-vec '()))))
+  (bl-items (bl-get metadata (bl-key "namespace-links") (bl-vec '()))))
  (native-install-resolution! (bl-get metadata (bl-key "resolution")))
  (native-link-changed!)
  (bl-key "ok"))

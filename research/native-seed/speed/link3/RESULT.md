@@ -346,3 +346,179 @@ category as the existing `Env/*` leaves in `host-compiler.scm`.
 - **No timing was measured** (forbidden). The expected native gain from N3
   alone is small until both BACKEND requests land. Today it removes every
   `set!` on link cells and the `$g` indirection for compiled functions.
+
+---
+
+# Pass 2: closure-member link rows, `:kind` on links, and the self-compile literal
+
+I merged `worktree-native-speed` (LINK, KEYS, FACTS, FRAMES and BACKEND) once,
+as the coordinator allowed. `stubs.bl` (pass 1) is replaced by `members.bl`.
+
+## 1. The native Env answers closure members' link rows
+
+- `native.resolution-ledger/member-links` (new) computes one row per `:fn`
+  definition of every closure member except `core`, from its SOURCE
+  declaration. The row is
+  `[ns name {module, arity→name, {min, name__bl_v}|nil} false]`, which is
+  exactly what `Link/defvar` installs and what `compiler/prelink-info`
+  computes, built with `bootstrap/declaration-arities`. `core` keeps
+  `:core-links`, which are the Env's own rows, seeds included.
+- `bundle-metadata` now carries `:namespace-links` = member rows followed by
+  the stub rows (`stub-links`, unchanged: BEAM Env rows plus privacy). The
+  `:stub-links` key is gone, and `native-install-bundle!` installs
+  `:namespace-links`. Member privacy needs no row flag, because the AOT code
+  already emits `native-put-meta`.
+
+### Checks
+
+1. **BEAM** (`speed/link3/members.bl`, pinned SDK; it compiles this
+   checkout's `facts.bl` into the VM first, because the merged `native.scheme`
+   calls `BeamLisp.Facts`):
+   ```
+   work run --memory 4G --timeout 5400 -- research/native-seed/run run research/native-seed/speed/link3/members.bl -- \
+     /tmp/r3link/closure/partition.json MAIN/NS/out/round2-build/leaves.json /tmp/r3link/out
+   ```
+   ```
+   NAMESPACE_LINK_ROWS 1561 stubs=46 namespaces=33
+   ROWS_EQUAL_ENV 1100 different=1 env-absent=460 env-absent-namespaces=[clojure.core-ext clojure.string host.* (16) native.eval native.intrinsics native.resolution native.scheme]
+   ROW_DIFFERENT [native.bootstrap link-definition {…%{4 => …}} {…%{4 => …, 5 => …}}]
+   CLOSURE_ANF_DECISIONS {"compiled" 9172, "excluded-namespace" 2, "global" 2703, "leaf" 6226, "self-module" 23}
+   SAMPLE 121 definitions
+   ```
+   - Every member row for which this VM has a row is equal to it, except
+     `link-definition`. There the VM has loaded THIS checkout's bootstrap,
+     with pass 1's new 5-arity, while the closure source is round 2's.
+   - Pinned host modules (`host.*`) and some `native.*` and `clojure.*`
+     namespaces have no BEAM rows at all in this VM.
+   - The sample is up to 4 `:fn` definitions of every unit, plus
+     `compiler/eval_form`. Each is emitted from the closure ANF, which is what
+     stage 1 is built from.
+2. **Native, the real round-2 image** (`speed/link3/native-probe.bl`):
+   ```
+   work run --memory 4G --timeout 5400 -- MAIN/NS/out/round2-build/stage1 \
+     --eval MAIN/NS/out/round2-build/bundle.scm research/native-seed/speed/link3/native-probe.bl
+   ```
+   The probe follows `prepare` for each sampled unit (`mark_loaded`, evaluate
+   its `ns` form, fresh reset per definition), compiles from source and emits
+   through the bundle's plan. It does this before and after it puts
+   `:namespace-links`.
+   ```
+   NATIVE_PROBE units=33 sample=121 compile-link-before=error
+   NATIVE_EMIT_REFUSED native-before compiler/eval_form native resolution: global context namespace absent from closure {:namespace "lower"}
+   NATIVE_PROBE_BEFORE refused=1
+   NATIVE_PROBE compile-link-after={:ok, {BeamLisp.Ns.Compiler, %{2 => :compile}, nil}}
+   NATIVE_PROBE_AFTER refused=0
+   ```
+3. **`eval_form`**: link tokens, decoded, from `beam/0.scm` and `native/0.scm`:
+   ```
+   BEAM   compiler/assert-native-evaluation!$0 compiler/compile$2 core/list$g rt/str_v$1 (native-remote "…Ns.Lower/eval-anf/2") …
+   native compiler/assert-native-evaluation!$0 compiler/compile$2 core/list$v rt/str_v$1 (native-remote "…Ns.Lower/eval-anf/2") …
+   ```
+   - `compile` and `assert-native-evaluation!` now match BEAM, and so does
+     the stub call.
+   - The one remaining difference is `core/list`. The closure ANF reads the
+     global, while a fresh pinned-SDK compile of the same source (pass 1,
+     `beam-eval_form.scm`) links `core/list$v`, as native does. The odd one
+     out is the closure ANF, not native.
+4. **The whole sample** (`speed/link3/compare-links.py OUT`,
+   `speed/link3/analyze-links.py OUT`; arity, variadic and global cells,
+   `native-remote` and `native-global`; leaves are excluded because the image
+   predates N1's templates):
+   ```
+   LINKS native-before: sampled=121 equal=71 different=49 refused=1
+   LINKS native:        sampled=121 equal=72 different=49 refused=0
+   CLASSES native-before: BEAM global, native linked: core=75, BEAM linked, native global: other-member=44, BEAM linked, native global: own-namespace=13
+   CLASSES native:        BEAM global, native linked: core=76, BEAM global, native linked: other-member=5, BEAM global, native linked: own-namespace=39
+   ```
+   - The native side no longer reads any global where BEAM links. That
+     covers all 57 cross-member and own-namespace cases, including
+     `compile` and `assert-native-evaluation!`.
+   - **What is left is load-dependence in the BEAM closure ANF itself**
+     (item D's bug on the BEAM side). The `update-closure` VMs that compiled
+     the members did not have rows for namespaces that were not loaded
+     there: `host.*`, `native.eval`, `native.scheme`, `native.resolution`,
+     `native.intrinsics`, `clojure.string`. So BEAM compiled calls into them,
+     including a namespace's calls to its own defns, as globals (44 tokens).
+   - `core` seeds such as `list`, `nil?` and `second` were globals in that
+     compile (76 tokens), although the same VM's `:core-links` have rows for
+     them.
+   - Native is now a function of source; the closure ANF is not.
+   - **stage1 = stage2 therefore still fails** until the closure is
+     recompiled with those rows (see Requests). **stage2 = stage3 is
+     unaffected**, because both sides run the same native compiler on the
+     same bundle.
+
+## 2. `:kind` on link maps (FRAMES request 3)
+
+`bootstrap/remote-link` maps carry `:kind`: `:self-module`, `:template`,
+`:leaf` or `:compiled`. Sealed `global-link` maps carry `:compiled`. The
+emitter reads only `:call` and `:inline?` (`linked-call`, and
+`keyword-test` in the merged `scheme.bl`), so emitted text does not change. I
+did not run a separate byte check for this pass. FRAMES request 2
+(`ordered-call`/`ordered-language-call` in debug) is entirely `scheme.bl`
+plus a host leaf marker. Both are outside my files and are under Requests.
+
+## 3. `NATIVE_SELF_COMPILE`
+
+The literal is now `33 namespaces` in `fixpoint-full.py` (lines 630, 650, 674)
+and `check-self-emission.py:27`. **Check the count at integration.** FACTS
+declares `host.facts` in `speed/facts/closure-additions.edn`, so if the
+integrated closure update adds it, the bundle has **34** units and the
+literal must be 34.
+
+## Requests (pass 2)
+
+- **BACKEND (`scheme.bl` `primitive-remote?`).** Ask the link first. When
+  `(:aot-link options)` is present and `((:remote aot) n)` gives `:kind`
+  `:leaf` or `:template`, the remote is a host primitive; `:compiled` and
+  `:self-module` keep today's rule. `body-calls?` passes `options`, or a
+  `ctx` that holds the link function.
+- **BACKEND + host leaf owner (FRAMES request 2).** First, `native-add-leaf!`
+  (host-values) or FRAMES's `host-source-frames.scm` wraps a host-callable
+  leaf so that its entry installs the source-frame callback marker. Then
+  `ordered-call` and `ordered-language-call` can drop their
+  `:source-frames?` → `bl-invoke` branches and use the release call shape.
+  Neither part is in LINK's files.
+- **Main thread / CLOSURE: make the closure ANF a function of source.**
+  `update-closure.bl` compiles members inside `BeamLisp.Env/isolated`.
+  1. Before compiling, put the `ledger/member-links` rows for every
+     `(ns name)` that has no Env row.
+  2. Recompile every member once, the way the RE-PIN path does, because
+     SHA reuse keeps the old ANF.
+  3. Find out why seed names (`list`, `nil?`) compile as `core` globals
+     there, when `:core-links` lists them.
+
+  I did not run this. A full recompile does not fit `run`'s 240 s cap, and
+  the closure rebuild is integration work. Without it, stage1 ≠ stage2
+  stays (the 120 tokens above).
+
+## Risks (pass 2)
+
+- `:namespace-links` adds 1561 rows to `bundle.scm`.
+  `native-install-bundle!` puts them once, as 3-tuple keys (no
+  global-view hook, and no seal check).
+- With member rows, natively compiled and `--eval` code calls member defns
+  as module remotes, with the same readiness guard BEAM emits. Dynamic
+  `native-remote` still prefers a registered leaf over a compiled target with
+  the same key (CLOSURE's round-2 note), so dead leaves must stay deleted.
+- Each row is built from the closure source's declared clause shapes. A defn
+  produced by a macro other than `defn`/`defn-` gets no row, so it stays a
+  global natively, as D does on BEAM.
+
+## Updated integration command
+
+```sh
+NS=research/native-seed
+python3 $NS/snapshot-closure.py $NS/out/speed-closure-2 $NS/out/speed-closure-3
+work run --memory 4G --timeout 1800 -- $NS/run run $NS/src/native/update-closure.bl -- $NS/out/speed-closure-3/partition.json
+python3 $NS/partition-closure.py --out $NS/out/speed-closure-3
+python3 -c "import json;print(len(json.load(open('$NS/out/speed-closure-3/update.json'))['units']))"   # = N; NATIVE_SELF_COMPILE literal must say N (33, or 34 with host.facts)
+python3 $NS/prepare-host.py --out $NS/out/round3-build      # leaves.json gains Env/sealed_value/3, Env/refuse_sealed_redefinition!/2
+work run --memory 4G --timeout 1800 -- $NS/run run $NS/src/native/chunks.bl -- build-next \
+  $NS/out/speed-closure-3/partition.json $NS/out/round3-build/host.scm $NS/out/round3-build   # repeat until NATIVE_BUILD_COMPLETE
+grep -c '(native-seal-image!)' $NS/out/round3-build/stage1.scm                  # 1
+grep -c 'bl-key "namespace-links"' $NS/out/round3-build/bundle.scm               # 1
+python3 $NS/fixpoint-full.py --out $NS/out/round3-build --corpus $NS/fixtures/compiler-source.bl
+#   = stage1 --compile bundle.scm host.scm stage2.scm  (NATIVE_SELF_COMPILE N namespaces)
+#     build stage2; stage2 --compile … stage3.scm; byte-compare stage2.scm stage3.scm
+```

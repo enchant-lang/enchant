@@ -5,7 +5,7 @@
 ; (:resolution), so the native self-emission reads the SAME decisions data.
 ; The decision functions over it live in the closure member native.resolution.
 (ns native.resolution-ledger
- (:require [reader :as rd] [reader-node :as rn]))
+ (:require [reader :as rd] [reader-node :as rn] [native.bootstrap :as bootstrap]))
 (defn symbol? [node name]
  (let [n (rn/node-form node)] (and (= :symbol (rn/node-tag n)) (= name (rn/node-name n)))))
 (defn definition [closure name]
@@ -87,6 +87,27 @@
          [ns (assoc replay :refer-alls (vec (:refer_alls raw))
                     :core-excludes (vec (:core-excludes raw)) :require-specs (vec (:require_specs raw)))])) (:order closure)))]
   {:version 1 :seed-names seeds :headers headers}))
+(defn member-links
+ "The link rows a closure member's defns install when it loads on BEAM
+  (`Link/defvar`, prelinked by `compiler/prelink-info` from the clause
+  shapes): `[ns name {module, arity→name, {min, name__bl_v}|nil} false]` for
+  every `:fn` definition, from its SOURCE declaration, so they are a function
+  of the closure and not of what the driver VM loaded. `core` is excluded: its
+  rows are `:core-links`, the Env's own (seeds included)."
+ [closure]
+ (vec (mapcat (fn [ns]
+   (let [u (get (:units closure) ns)]
+    (keep (fn [d]
+      (when (and (:name d) (= :fn (:kind d)))
+       (let [arities (bootstrap/declaration-arities (:form d))
+             fixed (:fixed arities) variadic (:variadic arities)
+             fname (erlang/binary_to_atom (:name d))]
+        [ns (:name d)
+         (tuple (:module u) (reduce (fn [m n] (assoc m n fname)) {} fixed)
+                (when (some? variadic) (tuple variadic (erlang/binary_to_atom (str (:name d) "__bl_v")))))
+         false])))
+     (:defs u))))
+  (remove #(= "core" %) (:order closure)))))
 (defn stub-links
  "The link rows of every boot-tier stub namespace (closure :stubs, e.g.
   `lower`), exactly as this BEAM's Env answers them: `[ns name info private?]`
@@ -114,7 +135,10 @@
  [closure leaves]
  (let [units (mapv #(get (:units closure) %) (:order closure))]
   {:schema "bl.native.source-bundle" :version 1 :sdk-pin (:sdk-pin closure) :resolution (build closure)
-   :sealed true :stub-links (stub-links closure)
+   :sealed true
+   ; Every link row the native Env answers as BEAM does: closure members from
+   ; their source declarations, boot-tier stubs from this Env (P3).
+   :namespace-links (vec (concat (member-links closure) (stub-links closure)))
    :provider-sources (:provider-sources closure) :options (:options closure) :stubs (:stubs closure)
    :core-links (:core-links closure) :return-constructor-shapes (:return-constructor-shapes closure)
    :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units)
