@@ -1,0 +1,31 @@
+(ns data.first-order-wire-test (:require [data.first-order :as data]))
+(defn- kind [action] (try (action) nil (catch error (:kind (ex-data error)))))
+
+(deftest native-data-roundtrips-without-rendering-or-evaluating-source
+ (doseq [value [nil false true 42 -2 3.25 "bytes" :messages/inbox
+                [1 "two" {:message/id "one" :topic "work"}] #{:read :write}
+                (list :db/add 1 :message/body "text")]]
+  (is (= value (data/decode! (data/encode! value))))))
+
+(deftest byte-and-shape-budgets-refuse-at-the-codec-boundary
+ (let [bytes (data/encode! "some data")]
+  (is (= :data/wire-too-large (kind #(data/decode! bytes {:max-bytes 3}))))
+  (is (= :data/wire-too-large (kind #(data/encode! "some data" {:max-bytes 3}))))
+  (is (= :data/invalid-wire (kind #(data/decode! (data/encode! [[[1]]]) {:max-depth 1}))))))
+
+(deftest executable-opaque-compressed-and-trailing-values-never-enter-data
+ (let [opaque [(erlang/self) (erlang/make_ref) (fn [] :not-data)]
+       compressed (erlang/term_to_binary (String/duplicate "x" 10000) (list (tuple :compressed 9)))]
+  (doseq [value opaque]
+   (is (= :data/invalid-wire (kind #(data/decode! (erlang/term_to_binary value))))))
+  (is (= 80 (binary/at compressed 1)))
+  (is (= :data/invalid-wire (kind #(data/decode! compressed))))
+  (is (= :data/invalid-wire (kind #(data/decode! (str (data/encode! {:ok true}) "trailing")))))))
+
+(deftest unknown-wire-atoms-are-not-interned
+ (let [name (str "unregistered_wire_atom_" (System/system_time :nanosecond))
+       exists? #(try (erlang/binary_to_existing_atom name :utf8) true (catch _ false))
+       bytes (erlang/iolist_to_binary (list (erlang/list_to_binary (list 131 119 (erlang/byte_size name))) name))]
+  (is (= false (exists?)))
+  (is (= :data/invalid-wire (kind #(data/decode! bytes))))
+  (is (= false (exists?)))))
