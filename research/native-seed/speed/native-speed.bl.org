@@ -2,7 +2,7 @@
 #+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
-#+status: Round 3 wave 1 integrated · native rebuilds itself (stage2 = stage3) · native 7.5× warm BEAM on the pipeline (was 13.1×)
+#+status: Round 3 wave 1 merged to main · exact SDK and actor qualification in progress
 #+author: Claude for Othman
 
 * In one breath
@@ -1002,6 +1002,82 @@ The actor corpus has not run on the compiled round-3 image (item X).
 | Native vs BEAM emission | equal line for line after gensym renaming | =speed/final/compare-stages.py= |
 | Emitted benchmark Scheme | byte-identical native and BEAM | =evidence-r3/comparison.json= |
 | Not run | actor corpus on the compiled image; JS baseline | item X |
+#+end_rosetta
+
+* Integration review on main
+
+Wave 1 landed in =7e4116156=. The merge preserves the branch's boot, host,
+native-seed and four focused test files byte for byte, and includes the
+separate tooling changes already on =main=. The exact merged SDK build
+started from those committed inputs. The branch tip and its qualification
+artifacts form the reference for this takeover.
+
+The retained benchmark measures native at 8.82 ms, down from 11.08 ms
+(20.4%). The two wave-1 runs report 4.7× and 7.5× as slow as BEAM because
+the BEAM comparison moved. The warm fixture contains six small forms. The
+real-namespace profile covers 104 definitions of =reader.bl=, on the round-2
+image, with compile accounting for 82.5% of native samples. Wave 1 changed
+several of that profile's hottest call sites. Repeat the real-namespace
+profile using the merged closure and identical resolved inputs before using
+those shares to size wave 2.
+
+** Repeated work exposed by the review
+
+- Large-map equality and composite key normalization called =native-map-every?=,
+  which built a complete list of entry tuples before visiting the first key.
+  Commit =416405ab7= walks the AVL in key order and stops at the first rejection.
+  At 1,024 entries a rejection at the first key visits the left spine, and
+  constructs zero entry tuples. The same change makes a successful AVL
+  deletion use one search path and makes =maps/keys= emit keys directly.
+  Raw key comparison, persisted layouts, and legacy duplicate-row counts
+  retain their existing contracts.
+- =chunks.bl= builds the whole emission plan before each =build-next= window.
+  Every row walks ANF, hashes its input and resolves link signatures. The
+  next window reloads the closure in a fresh VM and starts over. The retained
+  wave-1 run fits in one window with 81 jobs. A larger closure or a slow host
+  pays the whole-plan cost per window. Measure planning, emission and final
+  validation independently. A plan owned by one frozen build request can
+  survive window boundaries while final assembly still verifies every output.
+- =scheme.bl= encodes each identifier into a Unicode codepoint list and a
+  second list of Scheme spelling fragments on every occurrence. Source-site
+  handling separately walks function bodies for ticks, and fact queries walk
+  expressions again during emission. Count unique identifier bytes versus
+  occurrence bytes and repeated ANF visits on the updated image. A scoped
+  identifier cache and an emission work table are smaller experiments than
+  changing the text or ANF representation.
+- The native compiler already has a no-copy UTF-16 ordering path for scalar
+  keys. Persistent vector reads still descend a binary trie one level per
+  bit of the index. The earlier reader compile recorded 43,756 entries into
+  that path and another 45,418 recursive calls. Evaluate a fixed-array
+  representation for proven closed ANF nodes and a wider persistent vector
+  only after counting those operations on the new closure.
+
+** Qualification before representation changes
+
+The historical Source fixpoint witness covers stages 1–3. The actor gate
+still needs the original Source corpus on the compiled ELF and a fresh
+JavaScript oracle at default, 17 and 41. The reported JavaScript link blocker
+predates already-merged commits =6b8597208= and =862fa0f52=, which supply the
+explicit atomics refusal and portable persistent-term leaves. Those commits
+are present in the Speedwork ancestry. The current baseline must be built
+with the exact SDK and current JS assets to establish the present failure
+or pass. The historical =gsi= failures at budgets 17 and 41 make that
+transport unsuitable as the acceptance gate for the compiled image.
+
+The stage comparator now rejects missing or extra lines and exits nonzero
+for differences after local renaming. Its shell callers propagate the
+self-emission and Source fixpoint failures. A stage1/stage2 comparison with
+renamed locals is a diagnostic. Raw stage2/stage3 byte identity remains the
+self-hosting gate.
+
+#+begin_rosetta
+| Remaining work | First acceptance boundary |
+| X and BEAM seal activation | Exact SDK test batch, original actor matrix and authenticated release selection. A BEAM seal API exists and still needs a release caller. |
+| V2a–V2c and S2 | Measure representation changes separately. Preserve numeric and composite key parity, raw map leaves and canonical output before retiring host replicas. |
+| V2d–V2e | Use proven closed records and byte-offset lexical operations first. Preserve public grapheme and Unicode diagnostic behavior. |
+| E2–E4 and E7 | Prove facts at every back-edge. Qualify exception/cleanup behavior and bounded actor progress before removing checks or ticks. |
+| E5–E6, E8–E9 | Verify each rewrite against the applicable Core profile. Test overflow, signed zero, NaN, callback order and observable failures. |
+| G1–G2 | Measure one edit in a warm closure and one function in a release build. Preserve artifact identity, activation and the existing build deadlines. |
 #+end_rosetta
 
 * Decisions
