@@ -1,0 +1,233 @@
+; FACTS (E1) validation, D4: the shared fact pass is checked against the
+; formal Core in tests, never at compile time (translation validation, FL51).
+;
+; For every corpus function formal.elaborate accepts (the Int/Bool fragment):
+;   1. formal.elaborate/prepare-function lowers the compiler's actual ANF to a
+;      typed Core, and formal.elaboration/check independently re-checks that
+;      ANF/Core relation (no elaborator, no solver);
+;   2. BeamLisp.Facts/function-facts runs on THE SAME ANF, with the declared parameter
+;      sorts as parameter facts;
+;   3. ANF lets and Core lets correspond one to one in pre-order (the elaborator
+;      maps each :let to one let-in; the checked relation fixes that pairing);
+;   4. each binding's fact and the result fact are checked:
+;      - static: a :tag :int/:bool fact must equal the Core sort that
+;        formal.core/typecheck derives; :raise? false requires typecheck to
+;        report no :raise effect for that sub-expression;
+;      - semantic: formal.core/evaluate over sample inputs (all live bindings,
+;        in their actual environments): a no-raise fact never raises, a value
+;        lies in its [lo, hi] range and has its tag's sort.
+; Negative controls mutate correct facts; each must be caught.
+;
+; Usage (pinned SDK, repository root as cwd):
+;   research/native-seed/run -p research/formal-logic/src run research/native-seed/speed/facts/validate.bl -- OUT-DIR
+(ns native.facts-validate
+ (:require [formal.elaborate :as producer] [formal.elaboration :as validation]
+           [formal.core :as core] [formal.term :as t]))
+
+(def out-dir (Path/expand (or (first (BeamLisp/argv)) ".local/facts/validate")))
+(File/mkdir_p! out-dir)
+(code/ensure_loaded :Elixir.BeamLisp.Facts)
+(when-not (erlang/function_exported :Elixir.BeamLisp.Facts :function-facts 2)
+ ; The pinned SDK predates the module: compile this checkout's source.
+ (BeamLisp.Env/isolated (fn [] (BeamLisp.AOT/compile_host_file (Path/expand "priv/host/facts.bl")
+  (list (tuple :module :Elixir.BeamLisp.Facts) (tuple :output_dir out-dir)
+        (tuple :file (Path/expand "priv/host/facts.bl"))))))
+ (println "FACTS_VALIDATE compiled priv/host/facts.bl"))
+
+(def I t/Int)
+(def B t/Bool)
+(def corpus
+ [["add" "(fn [a b] (+ a b))" [["a" I] ["b" I]]]
+  ["sub" "(fn [a b] (- a b))" [["a" I] ["b" I]]]
+  ["mul" "(fn [a b] (* a b))" [["a" I] ["b" I]]]
+  ["lt" "(fn [a b] (< a b))" [["a" I] ["b" I]]]
+  ["ge" "(fn [a b] (>= a b))" [["a" I] ["b" I]]]
+  ["eq" "(fn [a b] (= a b))" [["a" I] ["b" I]]]
+  ["let-chain" "(fn [a] (let [x (+ a 1) y (* x 2)] (- y a)))" [["a" I]]]
+  ["literal-ranges" "(fn [a] (let [k 5 j (+ k 7) m (* j -3)] (< m a)))" [["a" I]]]
+  ["min" "(fn [a b] (if (< a b) a b))" [["a" I] ["b" I]]]
+  ["sign" "(fn [a b] (let [c (if (> a 0) 1 -1)] (* c b)))" [["a" I] ["b" I]]]
+  ["quot" "(fn [a b] (quot a b))" [["a" I] ["b" I]]]
+  ["rem-let" "(fn [a b] (let [q (rem a b)] (+ q 1)))" [["a" I] ["b" I]]]
+  ["mod-do" "(fn [a b] (do (mod a b) a))" [["a" I] ["b" I]]]
+  ["truthy-int" "(fn [a] (if a 1 2))" [["a" I]]]
+  ["bool-let" "(fn [a] (let [t (< a 0) u (if t 0 a)] (+ u 1)))" [["a" I]]]
+  ["inc" "(fn [a] (inc a))" [["a" I]]]
+  ["zero" "(fn [a] (zero? a))" [["a" I]]]
+  ["sum-diff" "(fn [a b] (let [s (+ a b) d (- a b)] (* s d)))" [["a" I] ["b" I]]]
+  ["bool-param" "(fn [flag] (if flag 1 0))" [["flag" B]]]
+  ["bool-branch" "(fn [flag a] (if flag (+ a 1) (- a 1)))" [["flag" B] ["a" I]]]
+  ["shadow" "(fn [a] (let [x 3] (let [x (+ x 4)] (* x a))))" [["a" I]]]
+  ["span" "(fn [a b] (let [lo (if (< a b) a b) hi (if (< a b) b a)] (- hi lo)))" [["a" I] ["b" I]]]
+  ["not-lt" "(fn [a] (not (< a 3)))" [["a" I]]]
+  ["three" "(fn [a b c] (let [x (* a b) y (+ x c)] (< y 0)))" [["a" I] ["b" I] ["c" I]]]
+  ["negative-literal" "(fn [a] (let [z (- 10 20)] (+ z a)))" [["a" I]]]
+  ["nested-ops" "(fn [a] (let [w (* (+ 2 3) (- 4 6))] (+ w a)))" [["a" I]]]
+  ["quot-literal" "(fn [a] (let [h (quot a 2)] (* h 2)))" [["a" I]]]
+  ["bool-and" "(fn [a b] (let [p (< a b) q (if p (> a 0) false)] (if q a b)))" [["a" I] ["b" I]]]])
+
+(defn param-fact [sort] (cond (= sort I) {:tag :int} (= sort B) {:tag :bool} :else {}))
+
+; Core lets in pre-order, each with its declarations in scope.
+(defn core-lets [expr decls]
+ (if (= :let (:op expr))
+  (let [[init body] (:args expr)]
+   (concat [{:name (:data expr) :initial init :decls decls}]
+           (core-lets init decls)
+           (core-lets body (assoc decls (:data expr) (:sort init)))))
+  (mapcat #(core-lets % decls) (:args expr))))
+
+(defn sort-tag [sort] (cond (= sort I) :int (= sort B) :bool :else :other))
+(defn raise-free? [f] (= false (:raise? f)))
+
+(defn static-violations [label fact expr decls]
+ (let [typing (core/typecheck expr decls) tag (:tag fact)]
+  (concat
+   (when (and (some? tag) (not= tag (sort-tag (:sort expr))))
+    [{:check :sort :at label :fact tag :core (:sort expr)}])
+   (when (and (raise-free? fact) (contains? (:effects typing) :raise))
+    [{:check :raise-effect :at label :core-effects (:effects typing)}]))))
+
+(defn value-violations [label fact result]
+ (case (:status result)
+  :raised (when (raise-free? fact) [{:check :raised :at label :error (:error result)}])
+  :returned
+   (let [v (:value result) tag (:tag fact) lo (:lo fact) hi (:hi fact)]
+    (concat
+     (when (and (= tag :int) (not (integer? v))) [{:check :value-sort :at label :value v}])
+     (when (and (= tag :bool) (not (boolean? v))) [{:check :value-sort :at label :value v}])
+     (when (and (some? lo) (or (not (integer? v)) (< v lo))) [{:check :range :at label :value v :lo lo}])
+     (when (and (some? hi) (or (not (integer? v)) (> v hi))) [{:check :range :at label :value v :hi hi}])))
+  [{:check :evaluation :at label :result result}]))
+
+; Walk the Core in the same pre-order, evaluating each live let's initial in
+; its actual environment. A dead subtree (untaken branch, after a raise) is
+; traversed only to keep the pre-order index.
+(declare live-walk)
+(defn live-walk-all [exprs decls assign live state]
+ (reduce (fn [state e] (live-walk e decls assign live state)) state exprs))
+(defn live-walk [expr decls assign live state]
+ (case (:op expr)
+  :let
+  (let [[init body] (:args expr) i (:index state) fact (get (:facts state) i)
+        result (when live (core/evaluate init decls assign))
+        state (update state :index inc)
+        state (if live (-> state (update :violations concat (value-violations [:binding i] fact result))
+                           (update :checked inc)) state)
+        state (live-walk init decls assign live state)
+        ok (and live (= :returned (:status result)))]
+   (live-walk body (assoc decls (:data expr) (:sort init))
+              (if ok (assoc assign (:data expr) (:value result)) assign) ok state))
+  :if
+  (let [[test yes no] (:args expr)
+        c (when live (core/evaluate test decls assign))
+        state (live-walk test decls assign live state)
+        taken (and live (= :returned (:status c)))]
+   (live-walk no decls assign (and taken (= false (:value c)))
+    (live-walk yes decls assign (and taken (= true (:value c))) state)))
+  (live-walk-all (:args expr) decls assign live state)))
+
+(def samples [-7 -1 0 1 2 5 100 1180591620717411303424])
+(defn assignments [params]
+ (let [width (if (> (count params) 2) 4 (count samples))]
+  (reduce (fn [rows [name sort]]
+           (for [row rows v (if (= sort B) [true false] (take width samples))] (assoc row name v)))
+          [{}] params)))
+
+(defn check-entry
+ "Every violation of `facts` (a BeamLisp.Facts/function-facts report) against the
+  checked Core of `prepared`."
+ [prepared facts params]
+ (let [body (:core prepared) decls (into {} params)
+       lets (vec (core-lets body decls)) bindings (vec (:bindings facts))
+       aligned (= (count lets) (count bindings))
+       static (concat
+               (static-violations :result (:result facts) body decls)
+               (when aligned
+                (mapcat (fn [i] (static-violations [:binding i] (:fact (nth bindings i))
+                                 (:initial (nth lets i)) (:decls (nth lets i))))
+                        (range (count lets)))))
+       semantic (reduce (fn [acc assign]
+                         (let [r (core/evaluate body decls assign)
+                               s (live-walk body decls assign true
+                                  {:index 0 :facts (mapv :fact bindings) :violations [] :checked 0})]
+                          (-> acc (update :violations concat (value-violations :result (:result facts) r) (:violations s))
+                                  (update :evaluations + 1 (:checked s)))))
+                        {:violations [] :evaluations 0} (assignments params))]
+  {:aligned aligned :lets (count lets) :bindings (count bindings)
+   :violations (vec (concat (when-not aligned [{:check :alignment :core (count lets) :facts (count bindings)}])
+                            static (:violations semantic)))
+   :evaluations (:evaluations semantic)}))
+
+(defn known [f] (cond-> [] (some? (:tag f)) (conj (:tag f)) (some? (:lo f)) (conj :lo) (some? (:hi f)) (conj :hi)
+                      (raise-free? f) (conj :no-raise)))
+
+(def rows
+ (mapv (fn [[id source params]]
+  (let [prepared (producer/prepare-function source params)
+        _ (assert (= :elaborated (:status prepared)) (str id " " (pr-str (:reason prepared))))
+        object (get-in prepared [:elaboration :object])
+        recheck (validation/check object)
+        _ (assert (= :checked (get-in prepared [:elaboration :check :status])) id)
+        _ (assert (= :checked (:status recheck)) (str id " " (pr-str recheck)))
+        facts (BeamLisp.Facts/function-facts (:anf prepared) (mapv (fn [[_ sort]] (param-fact sort)) params))
+        unknown (BeamLisp.Facts/function-facts (:anf prepared))
+        result (check-entry prepared facts params)
+        control (check-entry prepared unknown params)]
+   {:id id :source source :prepared prepared :facts facts :params params
+    :elaboration (:status recheck) :check result :unknown-params control
+    :known {:result (known (:result facts))
+            :bindings (mapv (fn [b] [(:name b) (known (:fact b))]) (:bindings facts))}}))
+  corpus))
+
+(doseq [row rows]
+ (println "FACTS_VALIDATE" (:id row) (:elaboration row)
+          "lets" (get-in row [:check :lets]) "evaluations" (get-in row [:check :evaluations])
+          "violations" (count (get-in row [:check :violations]))
+          "unknown-params-violations" (count (get-in row [:unknown-params :violations]))
+          "known" (pr-str (:known row)))
+ (doseq [v (get-in row [:check :violations])] (println "FACTS_VIOLATION" (:id row) (pr-str v))))
+
+; —— negative controls: each deliberately wrong fact must be caught ——————————
+(defn row-of [id] (first (filter #(= id (:id %)) rows)))
+(defn mutate-binding [facts i f] (update facts :bindings (fn [bs] (update (vec bs) i (fn [b] (update b :fact f))))))
+(defn binding-index [row name] (first (keep-indexed (fn [i b] (when (= name (:name b)) i)) (:bindings (:facts row)))))
+(def controls
+ [["result int claimed bool" "add" (fn [row] (update (:facts row) :result assoc :tag :bool))]
+  ["bool result claimed int" "lt" (fn [row] (update (:facts row) :result assoc :tag :int))]
+  ["quot claimed raise-free" "quot" (fn [row] (update (:facts row) :result assoc :raise? false))]
+  ["rem binding claimed raise-free" "rem-let"
+   (fn [row] (mutate-binding (:facts row) 0 #(assoc % :raise? false)))]
+  ["literal range shifted" "literal-ranges"
+   (fn [row] (mutate-binding (:facts row) 0 #(assoc % :lo 6 :hi 6)))]
+  ["sum range invented" "sum-diff"
+   (fn [row] (mutate-binding (:facts row) 0 #(assoc % :tag :int :hi 0)))]
+  ["bool binding claimed int" "bool-let"
+   (fn [row] (mutate-binding (:facts row) 0 #(assoc % :tag :int)))]
+  ["join range too narrow" "sign"
+   (fn [row] (mutate-binding (:facts row) 0 #(assoc % :lo 1)))]
+  ["int claimed float" "let-chain"
+   (fn [row] (mutate-binding (:facts row) 0 #(assoc % :tag :float)))]])
+(def control-rows
+ (mapv (fn [[label id mutate]]
+        (let [row (row-of id) wrong (mutate row)
+              r (check-entry (:prepared row) wrong (:params row))]
+         {:control label :entry id :caught (pos? (count (:violations r))) :violations (:violations r)}))
+       controls))
+(doseq [c control-rows]
+ (println "FACTS_CONTROL" (if (:caught c) "CAUGHT" "MISSED") (:control c) (pr-str (first (:violations c)))))
+
+(def violations (reduce + (map #(count (get-in % [:check :violations])) rows)))
+(def unknown-violations (reduce + (map #(count (get-in % [:unknown-params :violations])) rows)))
+(def missed (count (remove :caught control-rows)))
+(def tally (frequencies (mapcat (fn [row] (concat (get-in row [:known :result])
+                                                   (mapcat second (get-in row [:known :bindings])))) rows)))
+(File/write! (str out-dir "/validate.etf")
+ (erlang/term_to_binary {:rows (mapv #(dissoc % :prepared) rows) :controls control-rows}))
+(println "FACTS_VALIDATE_SUMMARY" (pr-str {:functions (count rows) :violations violations
+                                           :unknown-param-violations unknown-violations
+                                           :controls (count control-rows) :missed-controls missed
+                                           :evaluations (reduce + (map #(get-in % [:check :evaluations]) rows))
+                                           :facts-known tally}))
+(assert (= 0 violations unknown-violations missed))
+(println "FACTS_VALIDATE_PASS")
