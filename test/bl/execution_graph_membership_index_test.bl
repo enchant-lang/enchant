@@ -1,0 +1,38 @@
+(ns execution-graph-membership-index-test (:require [reload.generation :as g]))
+
+(defn- graph [revision]
+ (g/prepare! {:application-id "membership-index" :native-modules #{"erlang" "MembershipIndexFixture"}
+              :resources {:revision revision}
+              :sources {"membership.index" "(ns membership.index) (defn value [] 42)"}}))
+(defn- legacy [module]
+ (ets/match_object :beam_lisp_source_extent_heads
+  (tuple (tuple :execution_graph_member module :_) :_)))
+(defn- check-index [module]
+ (let [actual (BeamLisp.Env/execution_graph_members module)]
+  (is (= (sort (legacy module)) (sort actual)))
+  (doseq [row actual]
+   (is (= (list row) (ets/lookup :beam_lisp_source_extent_heads (elem row 0)))))
+  actual))
+
+(deftest shared-memberships-remain-exact-and-retain-live-code
+ (let [pair (first (Code/compile_string "defmodule MembershipIndexFixture do\n def value, do: 1\nend"))
+       module (elem pair 0) first-graph (graph 1) second-graph (graph 2)]
+  (try
+   (doseq [generation [first-graph second-graph]]
+    (g/with! generation (fn []
+     (is (= 42 (g/invoke! generation "membership.index/value" [])))
+     (is (= false (BeamLisp.Env/retire_module! module)))
+     (is (= 1 (erlang/apply module :value (list)))))))
+   (let [rows (check-index module) scopes (set (map (fn [row] (elem (elem row 0) 2)) rows))]
+    (is (contains? scopes (:scope first-graph)))
+    (is (contains? scopes (:scope second-graph))))
+   (is (= (list) (check-index :membership_index_unknown_module)))
+   (finally (g/retire! second-graph) (g/retire! first-graph)
+            (BeamLisp.Env/retire_module! module)))))
+
+(deftest unpublished-retirement-barrier-publishes-the-same-complete-index
+ (let [generation (graph 3) modules (:modules generation)]
+  (g/retire! generation)
+  (doseq [module modules]
+   (let [rows (check-index module)]
+    (is (some (fn [row] (= (:scope generation) (elem (elem row 0) 2))) rows))))))
