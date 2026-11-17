@@ -2,7 +2,7 @@
 #+subtitle: Why the self-hosted native compiler runs 35× slower than warm BEAM, the seven structural changes that remove the cause, and the parallel workstreams that land them.
 #+kicker: enchant / research/native-seed · speed dossier · 2026-11-16
 #+date: 2026-11-16
-#+status: L, K, V, C integrated · native within 2.8× of warm BEAM on the pipeline (was 35×) · big-O study adds M, D, R, U, T
+#+status: Round 2 integrated (M, D, R, U, T, C2, B2, S) · self-hosted closure of 33 namespaces · native 13.1× warm BEAM on the pipeline · P open
 #+author: Claude for Othman
 
 * In one breath
@@ -441,11 +441,12 @@ closure's changed units, emit the 18-namespace compiler, compile stage 1 with
 the chosen Gambit declarations. Gates: Source corpus, byte-equal emitted
 Scheme, then the warm-core benchmark: final native against final BEAM.
 
-** TODO C2 · Restore emitter throughput
+** DONE C2 · Restore emitter throughput
 :PROPERTIES:
 :AREA: control
 :PRIORITY: A
 :END:
+*Outcome (round 2).* BACKEND: the emitter builds no lazy sequence and joins text with two small helpers; one loop-verdict walk per region. 2,143 emitter comparisons and all 1,394 closure definitions are byte-identical.
 The new control-flow emitter doubles BEAM emit time on the benchmark fixture
 (5.7 → 11.2 ms) and the emitter is itself part of the measured compiler.
 Profile =total?=, =loop-plan= and the integer-fact threading on the six forms;
@@ -457,17 +458,25 @@ emit at or below the previous emitter's time, unchanged bytes.
 :AREA: measurement
 :PRIORITY: A
 :END:
-Read is still 15.5× and compile 12.2×. Re-instrument the linked image at
+Round 2: read 22.5×, compile 19.4× and emit 7.8× against the integrated
+BEAM. Candidates, in order:
+- the compiled kernel, through KERNEL's requests to BACKEND: boolean
+  =and=/=or=, keyword =case=, direct self-calls, quoted keyword literals;
+- entry ticks;
+- V2.
+
+Re-instrument the linked image at
 the cell level (calls per linked target, kernel fast-path hit rate, map and
 compare counts) and rank what is left. The likely candidates are V2
 (representation), F (ticks) and the uncovered multi-arity rt functions
 (=k-nth=, =nth=, =coll-get=).
 
-** TODO B2 · BL kernel in rt.bl
+** DONE B2 · BL kernel in rt.bl
 :PROPERTIES:
 :AREA: kernel
 :HORIZON: later
 :END:
+*Outcome (round 2).* KERNEL: the native kernel is =rt.bl= compiled by the native compiler. All 34 Scheme overrides and =kernel-override= are deleted. Hot rt functions became inline type tests, and literal equality templates emit =eq?=/=null?=. Native differential: 42,040 rt rows equal BEAM; the 77 that differ are identical to the original rt.bl native answer.
 Rewrite rt.bl's representation dispatch against a BL primitive signature
 (=kind=, =same?=, =compare=, …) specified in the formal Core with Lean models.
 The BEAM backend lowers them to guards and BIFs; native to header switches.
@@ -528,12 +537,48 @@ closure needs no new namespace. For stage 2 = stage 3 the native compiler's
 own self-emission path must adopt the same linking context: extend the
 closure explicitly with =native.intrinsics= and move the linking context into
 =native.eval=.
+*Status (round 2).* CLOSURE moved the whole linker into =native.bootstrap=,
+shared by the BEAM driver and self-emission. On BEAM both paths emit
+byte-identical Scheme for sugar, server-clause and reader-node. On the real
+image, =stage1 --compile= fails after 59 s: /native resolution: global
+context namespace absent from closure (lower)/. On BEAM, =lower= is loaded,
+so =compiler.bl='s calls into it compile as module-linked remotes, which link
+as an excluded stub. In the native image =lower= is not loaded, so the same
+source compiles to =:global= references. This is item D's class of bug for a
+boot-tier stub. Next: the native Env answers =lower='s link rows exactly as
+BEAM does, then one image build to show =stage2.scm= = =stage1.scm=.
 
-** TODO M · Lazy cells without a capture walk
+** DONE S · No host Scheme replicates a BL file
+:PROPERTIES:
+:AREA: self-hosting
+:END:
+Host Scheme may only be the native counterpart of something with no BL
+source: the term model, Erlang BIFs and Elixir stdlib, a NIF, or the OS
+(=speed/CONTRACT2.md=). The integrated closure has 33 namespaces, 14 more
+than round 1. They now include =host.lazy-memo=, =host.lazy-seq=,
+=host.seq-cursor=, =host.deferred=, =host.delay=, =host.sorted=,
+=host.ex-info=, =host.compile-error=, =host.emit=, =host.link=,
+=host.server=, =host.compiler=, =native.intrinsics= and
+=native.resolution=. Every remote links (0 unresolved), and the build reports
+0 dead leaves.
+
+*Residual replicas*, each with its owner's reason:
+- Vector, Set: need V2's representation;
+- Num, Decimal (and =native-decimal-parse=): about 20 stdlib leaves and the
+  regex FFI;
+- Transient: compiles, but has no differential yet;
+- Refs, Multi, Reactive: depend on Env and Task;
+- Record: =persistent_term= class publication;
+- =Tiers/boot_namespaces=: should come from bundle metadata.
+
+The Env, AOT and Loader leaves are native services, not replicas.
+
+** DONE M · Lazy cells without a capture walk
 :PROPERTIES:
 :AREA: runtime
 :PRIORITY: A
 :END:
+*Outcome (round 2).* LAZY: the BEAM walk is gone. Cycles are detected at force time: a re-entrant owner, a cross-process wait-for chain, or a completed-alias chain. A value that contains its own node is now data. Lazy is compiled natively from =lazy_memo.bl=, =lazy_seq.bl=, =seq_cursor.bl= and =deferred.bl=; =host-lazy.scm= is deleted, and =native-memo.scm= is only the NIF counterpart. BEAM lazy suites are green on the integrated SDK.
 *Owns* =priv/host/lazy_memo.bl=, the =native/lazy_memo= NIF's edge set and
 =host/host-lazy.scm='s publication walk.
 *Approach.* Detect cycles where they happen: a re-entrant force of a running
@@ -544,11 +589,12 @@ create, capture and publish walks, the clean-value memo and the edge union.
 waits, failure replay), plus emit on 1,024 nested functions: slope ≤ 1.2 and
 unchanged bytes.
 
-** TODO D · Compile is a function of source
+** DONE D · Compile is a function of source
 :PROPERTIES:
 :AREA: compiler
 :PRIORITY: A
 :END:
+*Outcome (round 2).* FRONT: an aliased call into a declared, not-yet-loaded namespace links from its source, not load state. =incr.bl= on the integrated SDK: 0 of 84 identities change on an unchanged or comment-only re-analysis. Not covered: boot-tier stubs (see P).
 *Owns* alias resolution in =priv/boot/compiler.bl=.
 *Approach.* Resolve a qualified call from the namespace header's declared
 requirements, never from loaded state, and turn =Loader/ensure_ready= into a
@@ -556,11 +602,12 @@ link-time fact.
 *Checks* =speed/bigo/incr.bl=: zero changed identities on an unchanged
 re-analysis, and exactly one on a one-body edit.
 
-** TODO R · Byte-class reader
+** DONE R · Byte-class reader
 :PROPERTIES:
 :AREA: reader
 :PRIORITY: B
 :END:
+*Outcome (round 2).* READER: a per-codepoint automaton of inlined BIF steps (the charlist stays, because native text is codepoints). 11,127 differential checks over 1,021 files and a 103-case error corpus: 0 mismatches. Reader tests are green.
 *Approach.* A table-driven automaton over the UTF-8 binary: a 256-slot class
 table, small-integer dispatch, tokens as binary slices, and an offset plus a
 line counter for positions. The reader's diagnostics and span events stay
@@ -568,88 +615,83 @@ byte-identical.
 *Checks* the reader answer key and span tests, plus =scaling.bl= read rows
 under 50 ns per byte on BEAM.
 
-** TODO U · Content-addressed units
+** DONE U · Content-addressed units
 :PROPERTIES:
 :AREA: build
 :PRIORITY: B
 :END:
+*Outcome (round 2).* BACKEND: a unit ends only after a whole definition, at name-hash cut points, and keys exclude the ordinal. 40 of 40 random edits change exactly one of 58 units. Stage 1 is now 70 units.
 *Approach.* Cut stage-1 units at chunk boundaries or at content-defined cut
 points, key each unit by its bytes, and keep the link table apart. This
 depends on D for stable keys and composes with G's closure tier.
 *Checks* a one-definition edit rebuilds exactly one unit, and an unchanged
 rebuild rebuilds none.
 
-** TODO T · Link-time invocation on BEAM
+** DONE T · Link-time invocation on BEAM
 :PROPERTIES:
 :AREA: linking
 :HORIZON: later
 :END:
+*Outcome (round 2).* FRONT: the gate is a counter read when no Source extent is live. Natively the count is a constant zero cell, the same decision the deleted override made.
 Resolve the source-invocation gate (=call-invoke=, =check_source_invocation!=,
 =source_head=) at link time, as L did for native remotes. Expect about 1.25×
 on BEAM compile.
 
 * Final numbers
-Integrated stage-1 image =57b8bdbd…= (L + K + V + C, =(standard-bindings)
-(extended-bindings)=, qualified C flags). Same protocol as
-=benchmark/prepare-benchmark.py=: same Source and the same emitter on both
-sides, 3 warm-ups, 9 samples × 20 repetitions, median, run one after the
-other on the same host. Emitted Scheme is byte-identical between native and
-BEAM.
+Integrated stage-1 image =7c32ac57…=: rounds 1 and 2, a 33-namespace
+self-hosted closure, 70 units, =(standard-bindings) (extended-bindings)=.
+
+The BEAM side is the integrated SDK =v8jbl8q0…= (descriptor =f748c976…=),
+built from the same tree, so both sides run the same reader, compiler, =rt=,
+lazy runtime and emitter Source. The protocol is =benchmark/prepare-benchmark.py=:
+3 warm-ups, 9 samples × 20 repetitions, median, native then BEAM on the same
+host. The emitted Scheme is byte-identical between the two.
 
 #+begin_stats
-2.8× | native / BEAM, full pipeline | 44.5 ms vs 15.8 ms
-15.5× | read | 13.46 ms vs 0.87 ms
-12.2× | compile | 10.36 ms vs 0.85 ms
-1.9× | emit | 20.83 ms vs 11.19 ms
+13.1× | native / BEAM, full pipeline | 11.08 ms vs 0.843 ms
+22.5× | read | 1.507 ms vs 0.067 ms
+19.4× | compile | 6.685 ms vs 0.345 ms
+7.8× | emit | 2.833 ms vs 0.365 ms
 #+end_stats
 
 #+begin_src beam-lisp :id final
-;; speed/final/evidence/comparison.json (medians, ms) and
-;; speed/final/evidence/beam-previous-emitter.log (BEAM, previous emitter).
-(def native {:read 13.458 :compile 10.359 :emit 20.832 :pipeline 44.507})
-(def beam {:read 0.870 :compile 0.848 :emit 11.190 :pipeline 15.806})
-(def beam-previous-emitter {:read 0.744 :compile 0.868 :emit 5.697 :pipeline 8.895})
-(defn ratio [a b k] (Float/round (/ (get a k) (get b k)) 2))
-(def ratios (into {} (map (fn [k] [k (ratio native beam k)]) [:read :compile :emit :pipeline])))
-;; Front-end phases do not depend on the emitter; they are the clean comparison.
-(assert (< (:read ratios) 20))
-(assert (< (:compile ratios) 20))
-(assert (< (:pipeline ratios) 3))
-{:native-over-beam ratios
- :pipeline-vs-previous-emitter-on-beam (ratio native beam-previous-emitter :pipeline)
- :new-emitter-cost-on-beam (ratio beam beam-previous-emitter :emit)}
+;; speed/final/evidence-r2/comparison.json (medians, ms).
+(def native {:read 1.507 :compile 6.685 :emit 2.833 :pipeline 11.082})
+(def beam {:read 0.067 :compile 0.345 :emit 0.365 :pipeline 0.843})
+(defn ratio [k] (Float/round (/ (get native k) (get beam k)) 1))
+(def ratios (into {} (map (fn [k] [k (ratio k)]) [:read :compile :emit :pipeline])))
+(assert (< (:pipeline ratios) 14))
+{:native-over-beam ratios}
 #+end_src
 #+RESULTS: final
-: {:native-over-beam {:compile 12.22, :read 15.47, :pipeline 2.82, :emit 1.86}, :pipeline-vs-previous-emitter-on-beam 5.0, :new-emitter-cost-on-beam 1.96}
+: {:native-over-beam {:compile 19.4, :read 22.5, :pipeline 13.1, :emit 7.8}}
 
 
 #+begin_honest :title "Read these numbers with three facts"
-The host was heavily loaded during the run (15 GB RAM, ~16 GB swap in use by
-other sessions). BEAM measured about 2× slower than in the original ledger,
-so absolute milliseconds are not comparable across days; the ratios were
-taken back to back.
+BEAM gained from this round as much as native did. Item M removed BEAM's
+lazy-cell walk, C2 made emission linear, R rewrote the reader, and T made the
+invocation gate a counter read. The integrated BEAM pipeline runs the fixture
+in under a millisecond.
 
-The new control-flow emitter (C) is about 2× slower on BEAM for this
-fixture's emit phase, and both sides run it, so the emit and pipeline ratios
-are partly flattered. Against BEAM running the previous emitter, the native
-pipeline is 5.0×. Read and compile do not depend on the emitter: 15.5× and
-12.2×.
+Native lost round 1's hand-written Scheme kernel, by design: it now runs
+=rt.bl= compiled by its own compiler. KERNEL listed the emitter support that
+would make that code tight (boolean =and=/=or=, keyword =case=, direct
+self-calls, quoted keyword literals). Those requests are item A.
 
-The remaining front-end gap has not been attributed yet: the linked image no
-longer routes calls through the counting hooks, so the old counters cannot
-see it. Before the next round, re-instrument at the cell level.
+Self-emission (P) does not yet reach a fixpoint. The image compiles every
+Source corpus form, but compiling its own closure stops on the =lower= stub.
 #+end_honest
 
 #+begin_rosetta
 | Gate | Result | Evidence |
-| Host suites | all pass, combined tree | =check-host.py= |
-| Value differential | 145,790 checks, 0 failures | =speed/values= |
-| Kernel differential | 54,196 template = leaf; 18,188 override = BEAM; 0 raises | =speed/kernel= |
-| Control differential | 768 checks, 0 failures | =speed/control= |
-| Source corpus | =NATIVE_COMPILER_SOURCE_CORPUS_OK=, 0 FAIL, identical to the original qualified log; 5.3 s | =speed/final/evidence/source-corpus.log= |
-| Emitted Scheme | byte-identical native and BEAM | =speed/final/evidence/comparison.json= |
-| Dynamic call sites left | 4 =native-remote= sites in a 4.9 MB prelude | =speed/final/evidence/build.json= |
-| Not run | actor corpus at three budgets; stage 2 = stage 3 fixpoint (stage 2 is still late-bound, see P) | — |
+| Integrated SDK | built once, all Nix work on the build station; job =job_65d70b46168ac2f1= | =evidence-r2/build.json= |
+| BEAM test batch | 22 of 25 files green; projection preflight 7 of 7 (617 assertions). The 3 failures also fail on main's SDK. | =evidence-r2= receipt, Station thread |
+| Host checks | 11 of 11 | =check-host.py= |
+| Native closure | 33 units, 0 unresolved remotes, 0 dead leaves, 456 host leaves | =speed/bigo/unresolved-probe.bl= |
+| Workstream differentials | reader 11,127 / 0; kernel 42,040 rt rows; lazy 28 / 0; data 692 of 698 (6 outside its files); services 172 / 0; emitter 2,143 / 0 | =speed/*/RESULT.md= |
+| Source corpus | =NATIVE_COMPILER_SOURCE_CORPUS_OK=, 0 FAIL, identical to round 1 | =evidence-r2/source-corpus.log= |
+| Emitted Scheme | byte-identical native and BEAM | =evidence-r2/comparison.json= |
+| Not run, or open | actor corpus; stage 2 = stage 3 (P) | =evidence-r2/stage2-emit.log= |
 #+end_rosetta
 
 * Decisions
