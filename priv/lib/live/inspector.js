@@ -288,6 +288,6 @@
   document.addEventListener('keydown',onKey,true);document.addEventListener('scroll',reposition,true);
   window.addEventListener('resize',reposition);window.addEventListener('pagehide',dispose);
   window.EnchantInspector={version:2,dispose,debug:()=>({open,tab,picking,paint,selectedRun,frames:history.length,flashes:boxes.size,
-    requests:queries,inFlight:!!flight,activeRequests:pending,peakFlights,pollScheduled:poll!==null,
+    requests:queries,sampleMemory:sample?.runtime?.vm?.memory??null,inFlight:!!flight,activeRequests:pending,peakFlights,pollScheduled:poll!==null,
     drawScheduled:draw!==null,draws,paintLookups,disposed})};
 })();

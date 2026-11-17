@@ -23,6 +23,10 @@ worklist evaluations, with sixteen labels retained. They are not a complete
 function list. Check always runs house rules, including when compiler facts
 are reused. Browser update counts count patch operations, not CPU usage.
 
+Authorized app screen/intent callbacks retain the host tape across HTTP/OTP
+callbacks. This changes telemetry attribution only; it never rebinds execution
+authority or overrides an explicitly different realm.
+
 Activity records instrument `lsp/analyzed`, `bl.check/analyze-source` and
 `codebase/index-source`. They stay in the caller's environment and VM scope.
 They describe work in this scope; a separate cold CLI VM is a separate runtime.
@@ -50,3 +54,8 @@ The focused qualification inventory is `scripts/projection-preflight.json`.
 `research/work-observatory/scenarios/inspector.bl` runs real native input and
 screenshots through `scenario`, `browser.page` and `browser.film`. Browser
 verdicts are witnessed, never represented as model proofs.
+
+Cold indexing and checks initialize their lazy providers before capturing memo
+identity. The first index performs one computation; the second identical index
+and check perform zero new compiler computations. The first file in the focused
+qualification inventory enforces this transition in a fresh VM.
