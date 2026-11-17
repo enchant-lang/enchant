@@ -1,0 +1,121 @@
+; lazy_cross_process_wait_test.bl — a force that finds a cell running under
+; another process WAITS for that owner, and the wait still ends in every case.
+;
+; Round-3 item X (research/native-seed/speed/actor/RESULT.md). The semantics
+; are the BEAM ones, kept on both targets:
+;   * the owner is parked inside the thunk → the waiter blocks and gets the
+;     owner's value; the thunk runs once;
+;   * two processes each force the other's running cell → a genuine wait-for
+;     cycle, raised as `:recursive_force` instead of a deadlock;
+;   * the owner's thunk raises → the waiter replays the owner's failure, and a
+;     later force retries the thunk;
+;   * the owner dies while parked → the waiter gets `:force_owner_lost`.
+; No path leaves a `:bl_lazy_waits_on` entry behind.
+;
+; Run: ./bin/bl test test/bl/lazy_cross_process_wait_test.bl
+
+(ns lazy-cross-process-wait-test)
+
+(defn- outcome [lazy]
+  (try [:ok (BeamLisp.LazySeq/force lazy)]
+       (catch BeamLisp.LazySeq.ForceError e [:force-error (erlang/map_get :reason e)])
+       (catch e [:error (Elixir.Exception/message e)])))
+
+(defn- blocked-on
+  "Wait until `pid` records that it waits for `owner`."
+  [pid owner]
+  (loop [n 0]
+    (let [info (erlang/process_info pid (tuple :dictionary :bl_lazy_waits_on))]
+      (cond
+        (and (erlang/is_tuple info) (= owner (erlang/element 2 info))) true
+        (> n 1000) false
+        :else (do (Process/sleep 2) (recur (inc n)))))))
+
+(defn- parked-owner
+  "A lazy node whose thunk tells `parent` it runs, then parks until `:go`."
+  [parent runs result]
+  (BeamLisp.LazySeq/new
+    (fn []
+      (erlang/apply :counters :add (list runs 1 1))
+      (erlang/send parent (tuple :owner-running (erlang/self)))
+      (receive :go (result) (after 5000 :timeout)))))
+
+(defn- reply-task [parent tag lazy]
+  (erlang/spawn
+    (fn []
+      (let [r (outcome lazy)]
+        (erlang/send parent (tuple tag r (erlang/get :bl_lazy_waits_on)))))))
+
+(defn- reply [tag]
+  (receive [tag r left] [r left] (after 5000 :no-reply)))
+
+(deftest a-waiter-gets-the-value-of-a-parked-owner
+  (let [parent (erlang/self)
+        runs (erlang/apply :counters :new (list 1 ()))
+        l (parked-owner parent runs (fn [] :shared))
+        owner (reply-task parent :owner l)
+        _ (receive [:owner-running pid] pid (after 5000 nil))
+        waiter (reply-task parent :waiter l)]
+    (is (blocked-on waiter owner) "the waiter blocks on the owner")
+    (erlang/send owner :go)
+    (is (= [[:ok :shared] :undefined] (reply :owner)))
+    (is (= [[:ok :shared] :undefined] (reply :waiter)) "the waiter gets the owner's value")
+    (is (= 1 (erlang/apply :counters :get (list runs 1))) "the thunk ran once")
+    (is (= [:ok :shared] (outcome l)))))
+
+(deftest two-processes-forcing-each-other-raise-the-cycle
+  (let [holder (atom {})
+        parent (erlang/self)
+        step (fn [mine theirs]
+               (fn []
+                 (erlang/send parent (tuple :running mine (erlang/self)))
+                 (receive :go :ok (after 5000 :timeout))
+                 (BeamLisp.LazySeq/force (get @holder theirs))))
+        a (BeamLisp.LazySeq/new (step :a :b))
+        b (BeamLisp.LazySeq/new (step :b :a))]
+    (reset! holder {:a a :b b})
+    (reply-task parent :a a)
+    (reply-task parent :b b)
+    (let [pa (receive [:running :a pid] pid (after 5000 nil))
+          pb (receive [:running :b pid] pid (after 5000 nil))]
+      (erlang/send pa :go)
+      (erlang/send pb :go)
+      (is (= [[:force-error :recursive_force] :undefined] (reply :a)))
+      (is (= [[:force-error :recursive_force] :undefined] (reply :b))))))
+
+(deftest a-waiter-replays-the-failure-of-a-crashing-owner
+  (let [parent (erlang/self)
+        runs (erlang/apply :counters :new (list 1 ()))
+        l (parked-owner parent runs
+            (fn [] (if (= 1 (erlang/apply :counters :get (list runs 1)))
+                     (erlang/error (Elixir.RuntimeError/exception "owner crashed"))
+                     :recovered)))
+        owner (reply-task parent :owner l)
+        _ (receive [:owner-running pid] pid (after 5000 nil))
+        waiter (reply-task parent :waiter l)]
+    (is (blocked-on waiter owner))
+    (erlang/send owner :go)
+    (is (= [[:error "owner crashed"] :undefined] (reply :owner)))
+    (is (= [[:error "owner crashed"] :undefined] (reply :waiter))
+        "the waiter gets the owner's error, not a hang")
+    (is (= 1 (erlang/apply :counters :get (list runs 1))))
+    (let [retry (reply-task parent :retry l)]
+      (receive [:owner-running pid] (erlang/send pid :go) (after 5000 nil))
+      (is (= [[:ok :recovered] :undefined] (reply :retry)) "a failure is retryable"))))
+
+(deftest a-waiter-learns-that-a-killed-owner-is-gone
+  (let [parent (erlang/self)
+        runs (erlang/apply :counters :new (list 1 ()))
+        l (parked-owner parent runs (fn [] :never))
+        owner (reply-task parent :owner l)
+        _ (receive [:owner-running pid] pid (after 5000 nil))
+        waiter (reply-task parent :waiter l)]
+    (is (blocked-on waiter owner))
+    (erlang/exit owner :kill)
+    (let [[r left] (reply :waiter)]
+      (is (= :force-error (first r)))
+      (is (= :force_owner_lost (erlang/element 1 (second r))))
+      (is (= owner (erlang/element 2 (second r))))
+      (is (= :undefined left)))
+    (is (= :force_owner_lost (erlang/element 1 (second (outcome l))))
+        "the lost attempt is terminal")))
