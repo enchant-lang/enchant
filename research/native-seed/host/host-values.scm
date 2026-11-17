@@ -199,8 +199,7 @@
         (if (native-decimal? k) (not (eq? (native-decimal-canon k) k))
          (not (native-map-every? (lambda (key value) (not (or (native-key-dirty? key) (native-key-dirty? value)))) k))))
        ((bl-tag? k 'set)
-        (let loop ((xs (native-set-items k)))
-         (and (pair? xs) (or (native-key-dirty? (car xs)) (loop (cdr xs))))))
+        (not (native-map-every? (lambda (key value) (not (native-key-dirty? key))) (vector-ref k 1))))
        (else #f)))
 ;; (pred item) over a vector's items without building the item list: a key
 ;; lookup with a clean vector key allocates nothing.
@@ -291,10 +290,14 @@
  (if (not n) #f
   (let ((c (bl-key-compare k (vector-ref n 0))))
    (cond
-    ((< c 0) (native-balance (native-node (vector-ref n 0) (vector-ref n 1)
-                (native-tree-remove (native-left n) k) (native-right n))))
-    ((> c 0) (native-balance (native-node (vector-ref n 0) (vector-ref n 1)
-                (native-left n) (native-tree-remove (native-right n) k))))
+    ((< c 0)
+     (let* ((left (native-left n)) (remaining (native-tree-remove left k)))
+      (if (eq? left remaining) n
+       (native-balance (native-node (vector-ref n 0) (vector-ref n 1) remaining (native-right n))))))
+    ((> c 0)
+     (let* ((right (native-right n)) (remaining (native-tree-remove right k)))
+      (if (eq? right remaining) n
+       (native-balance (native-node (vector-ref n 0) (vector-ref n 1) (native-left n) remaining)))))
     ((not (native-left n)) (native-right n))
     ((not (native-right n)) (native-left n))
     (else (let ((r (native-tree-min (native-right n))))
@@ -424,10 +427,11 @@
      (or (fx= index count)
       (and (pred (vector-ref entries (fx* 2 index)) (vector-ref entries (fx+ 1 (fx* 2 index))))
            (loop (fx+ index 1))))))
-   (let loop ((pairs (native-tree-pairs (native-map-root m) '())))
-    (or (null? pairs)
-     (let ((items (vector-ref (car pairs) 1)))
-      (and (pred (vector-ref items 0) (vector-ref items 1)) (loop (cdr pairs)))))))))
+   (let walk ((node (native-map-root m)))
+    (or (not node)
+     (and (walk (native-left node))
+          (pred (vector-ref node 0) (vector-ref node 1))
+          (walk (native-right node))))))))
 (define (native-map-count m)
  (let ((s (vector-ref m 1)))
   (if (or (native-map-small? s) (native-map-tree? s)) (vector-ref s 2) (length s))))
@@ -476,9 +480,9 @@
    (if (native-map-small? storage)
     (let ((found (native-small-map-search storage k)))
      (if (< found 0) m (native-small-map-remove storage found)))
-    (let ((root (native-map-root m)))
-     (if (not (native-tree-find root k)) m
-      (native-map-with-root (native-tree-remove root k) (- (native-map-count m) 1) (native-map-tree? storage))))))))
+    (let* ((root (native-map-root m)) (remaining (native-tree-remove root k)))
+     (if (eq? root remaining) m
+      (native-map-with-root remaining (- (native-map-count m) 1) (native-map-tree? storage))))))))
 (define (native-map-remove m k) (native-raw-remove m (native-key-canon k)))
 ;; Literal ANF maps dominate construction. Fill one private buffer instead
 ;; of publishing/copying a new persistent map for every field. The buffer never

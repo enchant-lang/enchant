@@ -313,6 +313,15 @@
    (native-extra-check "deletion back to16 demotes without changing old AVL"
     (and (native-map-small? (vector-ref small 1)) (= 16 (native-map-count small)) (= 17 (native-map-count large))
          (= 0 (native-compare-lists (native-map-pairs full) (native-map-pairs small)))))
+   (native-extra-check "absent AVL deletion retains the original map"
+    (eq? large (native-raw-remove large -1)))
+   (let ((seen '()) (keys (native-leaf "maps/keys/1")))
+    (native-extra-check "AVL predicates stop in key order and raw map keys stay ordered"
+     (and (not (native-map-every? (lambda (key value)
+                 (set! seen (cons key seen))
+                 (< key 2)) large))
+          (equal? seen '(2 1 0))
+          (equal? (keys large) (native-map-keys large)))))
    (let remove ((index 0) (current small))
     (if (= index 16)
      (native-extra-check "hybrid deletion through empty map"

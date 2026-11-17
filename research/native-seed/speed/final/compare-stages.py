@@ -8,6 +8,7 @@ Usage: compare-stages.py BUILD_DIR
 """
 import re
 import sys
+from itertools import zip_longest
 from pathlib import Path
 
 LOCAL = re.compile(r'v(?:_\d+)+?_95(?:_(?:4[89]|5[0-7]))+\b')
@@ -26,10 +27,12 @@ a_text = (build / 'stage1.scm').read_text()
 b_text = (build / 'stage2.scm').read_text()
 print('BYTE_IDENTICAL' if a_text == b_text else 'BYTES_DIFFER')
 a, b = norm(a_text), norm(b_text)
-diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+diff = [i for i, (x, y) in enumerate(zip_longest(a, b)) if x != y]
 print('lines', len(a), len(b), 'differing after local renaming', len(diff))
 for i in diff[:3]:
-    x, y = a[i], b[i]
+    x = a[i] if i < len(a) else "<missing line>"
+    y = b[i] if i < len(b) else "<missing line>"
     j = next((k for k in range(min(len(x), len(y))) if x[k] != y[k]), min(len(x), len(y)))
     print(i, 'BEAM  :', x[max(0, j - 100):j + 100])
     print(i, 'native:', y[max(0, j - 100):j + 100])
+sys.exit(bool(diff))

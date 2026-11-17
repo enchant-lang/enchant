@@ -293,7 +293,7 @@
 (native-add-leaf! "maps/to_list/1" (lambda (m) (native-map-pairs (native-assert-map m))))
 (native-add-leaf! "maps/merge/2" native-map-merge)
 (native-add-leaf! "maps/values/1" (lambda (m) (map (lambda (p) (bl-nth p 1)) (native-map-pairs (native-assert-map m)))))
-(native-add-leaf! "maps/keys/1" (lambda (m) (map (lambda (p) (bl-nth p 0)) (native-map-pairs (native-assert-map m)))))
+(native-add-leaf! "maps/keys/1" (lambda (m) (native-map-keys (native-assert-map m))))
 (native-add-leaf! "maps/size/1" native-raw-map-size)
 (native-add-leaf! "maps/remove/2" (lambda (k m) (native-raw-remove (native-assert-map m) k)))
 (native-add-leaf! "maps/iterator/1" (lambda (m) (vector 'map-iterator (native-map-pairs (native-assert-map m)))))
