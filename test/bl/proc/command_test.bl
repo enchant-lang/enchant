@@ -1,5 +1,6 @@
 (ns proc.command-test
- (:require [proc.command :as command] [proc.admission :as admission]))
+ (:require [proc.command :as command] [proc.admission :as admission]
+           [reload.generation :as generation]))
 
 (defn- fixture [action]
  (let [root (str (System/get_env "HOME") "/tmp/command-facade-" (System/system_time :nanosecond))
@@ -93,3 +94,21 @@
               nil (catch error (:kind (ex-data error)))))))
    (is (not (File/exists? (str root "/workspace"))))
    (is (not (File/exists? (str root "/born")))))))
+
+(deftest source-code-cannot-acquire-trusted-host-command-authority
+ (fixture
+  (fn [root]
+   (let [sources (str root "/source") file (str sources "/command_probe/sample.bl")]
+    (File/mkdir_p! (Path/dirname file))
+    (File/write! file "(ns command-probe.sample (:require [proc.command :as command]))
+                       (defn run [spec] (command/run! spec))")
+    (let [graph (BeamLisp.Loader/with_load_path sources
+                 #(generation/prepare! (generation/project-plan
+                    {:application-id "command-probe" :entrypoint "command-probe.sample/run"
+                     :fixed-runtime true :native-modules #{"erlang"}})))]
+     (try
+      (is (try (generation/invoke! graph "command-probe.sample/run" [(spec root "touch \"$1/born\"")])
+               false (catch _ true)))
+      (is (not (File/exists? (str root "/workspace"))))
+      (is (not (File/exists? (str root "/born"))))
+      (finally (generation/retire! graph))))))))
