@@ -189,3 +189,28 @@
       (is (nil? (:value (projection/read h))))
       (is (= 1 (get-in (projection/read h) [:counts :started])))
       (finally (projection/stop! h) (d/close! c)))))
+
+(defn- drain-projection-wakes []
+  (receive [:data.projection/changed _ _] (inc (drain-projection-wakes)) (after 0 0)))
+
+(deftest subscriber-wakes-coalesce-until-an-authorized-read
+  (let [h (projection/start-incremental! :projection/wakes {:source-id "wakes"})
+        now (erlang/system_time :millisecond)]
+    (try
+      (projection/subscribe! h)
+      (is (= 1 (drain-projection-wakes)))
+      ;; Synchronous deltas are a deterministic owner mailbox barrier. The
+      ;; subscriber deliberately does not acknowledge its outstanding wake.
+      (doseq [n (range 1 101)]
+        (projection/delta! h {:sequence n :now now :upsert [{:id n :at now}]}))
+      (is (= 0 (drain-projection-wakes)))
+      (projection/read (assoc h :read (erlang/make_ref)))
+      (projection/delta! h {:sequence 101 :now now})
+      (is (= 0 (drain-projection-wakes)) "an unauthorized read cannot acknowledge")
+      (is (= 101 (get-in (projection/read h) [:value :cursor])))
+      (projection/delta! h {:sequence 102 :now now})
+      (is (= 1 (drain-projection-wakes)))
+      (projection/unsubscribe! h)
+      (projection/delta! h {:sequence 103 :now now})
+      (is (= 0 (drain-projection-wakes)))
+      (finally (projection/stop! h) (drain-projection-wakes)))))

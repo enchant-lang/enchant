@@ -1,0 +1,34 @@
+(ns data.provenance-test
+  (:require [data.provenance :as provenance] [datom.cache-validity :as validity]))
+
+(deftest compact-receipts-follow-publications-without-growing-with-definitions
+  (BeamLisp.Env/isolated (fn []
+    (let [before (provenance/definition-revision)
+          shape (erts_debug/flat_size (BeamLisp.Env/definition_context))]
+      (is (= 32 (erlang/byte_size before)))
+      (is (= before (validity/definition-stamp)))
+      (doseq [n (range 256)]
+        (BeamLisp.Env/put_key (tuple (str "receipt.provider-" n) "value") n))
+      (let [after (provenance/definition-revision)]
+        (is (not= before after))
+        (is (= 32 (erlang/byte_size after)))
+        ;; Exact structural bound: publishing 256 namespaces adds no counter
+        ;; rows to this receipt, so validation cannot walk their definitions.
+        (is (= shape (erts_debug/flat_size (BeamLisp.Env/definition_context))))
+        (doseq [_ (range 100)] (is (= after (provenance/definition-revision)))))))))
+
+(deftest private-analysis-does-not-invalidate-its-parent
+  (let [before (provenance/definition-revision)]
+    (BeamLisp.Env/isolated (fn [] (BeamLisp.Env/put_key (tuple "receipt.private" "value") 1)))
+    (is (= before (provenance/definition-revision)))))
+
+(deftest busy-and-destroyed-contexts-decline
+  (BeamLisp.Env/isolated (fn []
+    (let [before (provenance/definition-revision)]
+      (try (BeamLisp.Env/with_publication "receipt.writer" (fn []
+             (is (nil? (provenance/definition-revision)))
+             (throw :expected))) (catch _ nil))
+      (is (not= before (provenance/definition-revision))))))
+  (let [child (BeamLisp.Env/fork)]
+    (BeamLisp.Env/destroy child)
+    (BeamLisp.Env/with_env child (fn [] (is (nil? (provenance/definition-revision)))))))

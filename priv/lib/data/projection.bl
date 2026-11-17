@@ -47,9 +47,19 @@
 
 (declare effects!)
 (declare schedule-expiry!)
+(defn- notify! [state]
+  ;; One unacknowledged wake per reader process. Reading acknowledges only
+  ;; this wake; it never grants demand, work, retry or publication authority.
+  (reduce (fn [s pid]
+    (if (contains? (:notified s) pid) s
+      (do (erlang/send pid [:data.projection/changed (erlang/self) (:read-token s)])
+          (update s :notified conj pid)))) state (keys (:subscribers state))))
+
 (defn- transition! [state event]
-  (let [[after effects] (policy/step (:policy state) event)]
-    (effects! (assoc state :policy after) effects)))
+  (let [[after effects] (policy/step (:policy state) event)
+        next (effects! (assoc state :policy after) effects)]
+    (if (= (policy/observe (:policy state)) (policy/observe (:policy next))) next
+      (notify! next))))
 
 (defn- effects! [state effects]
   (reduce
@@ -151,7 +161,7 @@
                  :read-token (:read-token opts) :control-token (:control-token opts)
                  :creator (erlang/monitor :process (:creator opts))
                  :reservation reservation :completion tag :workers workers
-                 :subscribers {} :retained nil :candidate nil :job nil :timer nil :terminal nil
+                 :subscribers {} :notified #{} :retained nil :candidate nil :job nil :timer nil :terminal nil
                  :expiry-timer nil :expiry-ticket nil
                  :policy (policy/initial (+ 256 (* 2 (:max-output-bytes options)))) :dirty? false}]
       (if (:aggregate state) (refresh-source! state)
@@ -176,8 +186,10 @@
 
 (proc.server/defserver projection-owner
   (init [opts] (ok (initial! opts)))
-  (handle-call [:read token] [_from state]
-    (reply (if (authorized? state token :read-token) (response state) (refused :projection-reader)) state))
+  (handle-call [:read token] [from state]
+    (if (authorized? state token :read-token)
+      (reply (response state) (update state :notified disj (elem from 0)))
+      (reply (refused :projection-reader) state)))
   (handle-call [:subscribe token] [from state]
     (if (authorized? state token :read-token)
       (let [after (subscribe-state! state (elem from 0))] (reply (response after) after))
@@ -186,7 +198,7 @@
     (if (authorized? state token :read-token)
       (let [pid (elem from 0) monitor (get-in state [:subscribers pid])]
         (when monitor (erlang/demonitor monitor (list :flush)))
-        (let [after (update state :subscribers dissoc pid)
+        (let [after (-> state (update :subscribers dissoc pid) (update :notified disj pid))
               next (transition! after {:op :demand :count (count (:subscribers after))})]
           (let [next (schedule-expiry! next)] (reply (response next) next))))
       (reply (refused :projection-reader) state)))
@@ -234,7 +246,7 @@
   (handle-info [:DOWN monitor :process pid _reason] [state]
     (if (and (= monitor (:creator state)) (not (Process/alive? pid))) (stop :normal state)
       (if (and (= monitor (get-in state [:subscribers pid])) (not (Process/alive? pid)))
-        (let [after (update state :subscribers dissoc pid)]
+        (let [after (-> state (update :subscribers dissoc pid) (update :notified disj pid))]
           (noreply (schedule-expiry! (transition! after {:op :demand :count (count (:subscribers after))}))))
         (noreply state))))
   (handle-info _ [state] (noreply state))

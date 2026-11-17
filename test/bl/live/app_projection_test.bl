@@ -1,0 +1,66 @@
+(ns live.app-projection-test
+  (:require [live.app :as app] [data.projection :as projection] [datom :as d]))
+
+(defn- await! [f]
+  (let [until (+ 5000 (erlang/monotonic_time :millisecond))]
+    (loop []
+      (if-let [answer (f)] answer
+        (do (when (> (erlang/monotonic_time :millisecond) until) (throw "Live projection did not settle"))
+            (Process/sleep 1) (recur))))))
+(defn- quiet-sink [] (receive :stop nil _ (quiet-sink)))
+(defn- flush-frames [] (receive [:patch _] (flush-frames) [:mount _ _] (flush-frames) (after 0 nil)))
+
+(deftest app-shares-managed-results-and-owns-demand-outside-editable-locals
+  (let [conn (d/connect []) seen (atom nil) principals (atom [])
+        h (projection/start-incremental! :live/shared-totals {:source-id "live/v1"})
+        application {:home "/totals" :worlds (fn [_ _] {})
+          :projections (fn [me] (swap! principals conj me) (if (= "alice" me) {:totals h} {}))
+          :routes [["/totals" (fn [ctx]
+            (reset! seen (:projections ctx))
+            [:main (pr-str (:projections ctx))])]]}
+        sink (spawn quiet-sink)
+        started (start app/app-socket {:view app/dispatch :shared conn :sink sink :me "alice"
+                                      :locals {:app application :me "alice" :route "/totals"}})
+        pid (if (map? started) (:pid started) started)
+        now (erlang/system_time :millisecond)]
+    (try
+      (projection/delta! h {:sequence 1 :now now :upsert [{:id 1 :at now}]})
+      (await! #(= 1 (get-in @seen [:totals :value :groups [] :count])))
+      (is (= ["alice"] @principals) "resolve capabilities once using authenticated identity")
+      (let [state (call pid [:state])]
+        (is (not (contains? (get-in state [:projection-readers :totals]) :control)))
+        (is (not (contains? (:locals state) :projection-readers))))
+      (let [before (get-in (projection/read h) [:counts :started])]
+        (doseq [_ (range 100)] (call pid [:event [:assign :draft "x"]]))
+        (is (= before (get-in (projection/read h) [:counts :started]))))
+      (call pid [:event [:assign :live/projections {:totals {:status :ready :value "forged"}}]])
+      (call pid [:event [:assign :me "bob"]])
+      (is (= 1 (get-in @seen [:totals :value :groups [] :count])))
+      (erlang/exit sink :kill)
+      (await! #(not (:attached? (call pid [:state]))))
+      (let [before (get-in (projection/read h) [:counts :started])]
+        (projection/delta! h {:sequence 2 :now now :upsert [{:id 2 :at now}]})
+        (is (= before (get-in (projection/read h) [:counts :started]))))
+      (is (= :denied (call pid [:live/attach (erlang/self) "bob"])))
+      (is (= :ok (call pid [:live/attach (erlang/self) "alice"])))
+      (await! #(= 2 (get-in @seen [:totals :value :groups [] :count])))
+      (projection/stop! h)
+      (call pid [:event [:assign :draft "owner stopped"]])
+      (is (= :unavailable (get-in @seen [:totals :status])))
+      (is (Process/alive? pid))
+      (finally (stop pid) (when (Process/alive? sink) (erlang/exit sink :kill))
+               (projection/stop! h) (d/close! conn) (flush-frames)))))
+
+(deftest ssr-reads-retained-values-without-demand-and-resolves-per-principal
+  (let [h (projection/start-incremental! :live/ssr-totals {:source-id "ssr/v1"})
+        seen (atom nil)
+        application {:home "/" :worlds (fn [_ _] {})
+          :projections (fn [me] (if (= me "alice") {:totals h} {}))
+          :routes [["/" (fn [ctx] (reset! seen (:projections ctx)) [:main "totals"])]]}]
+    (try
+      (app/dispatch nil nil {:app application :me "alice" :route "/"})
+      (is (= :pending (get-in @seen [:totals :status])))
+      (is (= 0 (get-in (projection/read h) [:counts :started])))
+      (app/dispatch nil nil {:app application :me "bob" :route "/"})
+      (is (= {} @seen))
+      (finally (projection/stop! h)))))
