@@ -53,7 +53,11 @@ expiry boundaries, shared answers, refusal and lifecycle cleanup. Their deadline
 detect stuck protocols; performance assertions use operation counts. Source
 preflight compiles committed candidates into private namespaces on a retained
 SDK and records frozen input hashes. Canonical SDK qualification runs the same
-test files under their original names on the integrated artifact.
+test files under their original names on the integrated artifact. Use
+`scripts/projection-preflight --canonical --sdk /nix/store/SDK --out RECEIPT.json`;
+the runner refuses unless every selected consumer source matches the SDK image
+byte for byte. It freezes committed test inputs, caps one cold VM at two cores
+and 2 GiB with no swap, and records source and artifact hashes.
 
 These guarantees apply to the managed API. `data.bounded-cache/value` remains an
 optional cache with compute-on-miss semantics. Use a managed projection at a hot
