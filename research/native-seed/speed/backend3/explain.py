@@ -140,6 +140,9 @@ def canon(x, selves, counts):
     if len(items) == 2 and items[0] == A("string->symbol") and items[1][0] == "T" and SAFE.match(items[1][1]):
         counts["d string->symbol"] += 1
         return ("Q", items[1][1])
+    if len(items) == 2 and items[0] == A("bl-key") and items[1][0] == "T" and SAFE.match(":" + items[1][1]):
+        counts["d bl-key"] += 1
+        return ("Q", ":" + items[1][1])
     if len(items) == 2 and items[0] == A("quote") and items[1][0] == "S" and SAFE.match(items[1][1]):
         counts["d quoted"] += 1
         return ("Q", items[1][1])
@@ -196,7 +199,117 @@ def canon(x, selves, counts):
             and procedure_if(items[2], True):
         counts["c self-call test"] += 1
         return L(items[0], items[1], L(A("apply"), A("callee"), A("arguments")))
+    # (i) variadic arm call (v_ns/f$v A1..Am (list R..)) -> (v_ns/f$N A1..Am R..)
+    if items and items[0][0] == "A" and items[0][1].endswith("$v") and len(items) >= 2 \
+            and is_list(items[-1], "list"):
+        rest = items[-1][1][1:]
+        n = len(items) - 2 + len(rest)
+        counts["i variadic arm call"] += 1
+        return L(A(items[0][1][:-2] + f"${n}"), *items[1:-1], *rest)
+    # (e) sealed global call: (let ((callee v_ns/f)) [(let* B] (if (procedure? callee) …)) -> [(let* B] (v_ns/f$N A..))
+    if is_list(x, "let", 3) and is_list(items[1], size=1) and is_list(items[1][1][0], size=2) \
+            and items[1][1][0][1][0] == A("callee") and sealed_binding(items[1][1][0][1][1]) \
+            and not self_ref(items[1][1][0][1][1], selves):
+        target, body = items[1][1][0][1][1][1], items[2]
+        hit = procedure_if(body, False)
+        if hit:
+            counts["e sealed global call"] += 1
+            return L(A(f"{target}${len(hit[1]) - 1}"), *hit[1][1:])
+        if is_list(body, "let*", 3):
+            hit = procedure_if(body[1][2], False)
+            if hit:
+                counts["e sealed global call"] += 1
+                return L(A("let*"), body[1][1], L(A(f"{target}${len(hit[1]) - 1}"), *hit[1][1:]))
     return x
+
+
+def sealed_binding(x):
+    """A compiled definition's binding name: ident-encoded ns/name (a "/" code
+    47), no link-cell suffix."""
+    return x[0] == "A" and x[1].startswith("v_") and "$" not in x[1] and "_47_" in x[1]
+
+
+SELF = A("self#")
+
+
+def substitute(x, mapping):
+    if x[0] == "A" and x[1] in mapping:
+        return mapping[x[1]]
+    if x[0] == "L":
+        return ("L", [substitute(y, mapping) for y in x[1]])
+    return x
+
+
+def scaffold_self(form):
+    """(define B (letrec ((S INIT)) S)): rename the scaffold local S to self#."""
+    if is_list(form, "define", 3) and is_list(form[1][2], "letrec", 3):
+        lr = form[1][2][1]
+        if is_list(lr[1], size=1) and is_list(lr[1][1][0], size=2) and lr[2] == lr[1][1][0][1][0] \
+                and lr[2][0] == "A":
+            return substitute(form, {lr[2][1]: SELF})
+    return form
+
+
+def unhoist(forms, counts):
+    """(h) hoisted constants, inverted on the new side: every
+    (define <binding>$q<i> LIT) is removed and its name replaced by LIT."""
+    constants = {}
+    for x in forms:
+        if is_list(x, "define", 3) and x[1][1][0] == "A" and re.search(r"\$q\d+$", x[1][1][1]):
+            constants[x[1][1][1]] = x[1][2]
+    counts["h hoisted constant"] += len(constants)
+    def uses(y):
+        if y[0] == "A" and y[1] in constants:
+            counts["h constant reference"] += 1
+            return constants[y[1]]
+        if y[0] == "L":
+            return ("L", [uses(z) for z in y[1]])
+        return y
+    return [uses(x) for x in forms if not (is_list(x, "define", 3) and x[1][1][0] == "A" and x[1][1][1] in constants)]
+
+
+def unraw(forms, counts):
+    """(f) raw lambda, inverted on the new side: the pair
+         (define B (bl-register-callable! (case-lambda ((F..) (C F..)) ARM) N))  ...  (define C (lambda (F..) . BODY))
+       becomes the scaffold form and the native-arity-entry cell:
+         (define B (letrec ((self# (bl-register-callable! (case-lambda ((F..) . BODY*) ARM) N))) self#))
+         (define C (native-arity-entry B N))
+       where BODY* reads self# for B and calls self# through `callee` for C."""
+    lambdas = {}
+    for x in forms:
+        if is_list(x, "define", 3) and x[1][1][0] == "A" and is_list(x[1][2], "lambda") and "$" in x[1][1][1]:
+            lambdas[x[1][1][1]] = x[1][2]
+    out = []
+    for x in forms:
+        if is_list(x, "define", 3) and is_list(x[1][2], "bl-register-callable!", 3) \
+                and is_list(x[1][2][1][1], "case-lambda", 3):
+            b = x[1][1][1]
+            ri = x[1][2][1]
+            arm, other = ri[1][1][1], ri[1][1][2]
+            n = ri[2]
+            cell = f"{b}${n[1]}"
+            if cell in lambdas and arm[1][1] == L(A(cell), *arm[1][0][1]) and len(arm[1]) == 2:
+                lam = lambdas[cell]
+                if lam[1][1] == arm[1][0]:
+                    def back(y):
+                        if y[0] != "L":
+                            return SELF if y == A(b) else y
+                        ys = y[1]
+                        if is_list(y, "let*", 3) and is_list(ys[2]) and ys[2][1] and ys[2][1][0] == A(cell):
+                            return L(A("let"), L(L(A("callee"), SELF)),
+                                     L(A("let*"), back(ys[1]), L(A("callee"), *[back(z) for z in ys[2][1][1:]])))
+                        if ys and ys[0] == A(cell):
+                            return L(A("let"), L(L(A("callee"), SELF)), L(A("callee"), *[back(z) for z in ys[1:]]))
+                        return ("L", [back(z) for z in ys])
+                    body = [back(z) for z in lam[1][2:]]
+                    case = L(A("case-lambda"), L(arm[1][0], *body), other)
+                    out.append(L(A("define"), A(b), L(A("letrec"), L(L(SELF, L(A("bl-register-callable!"), case, n))), SELF)))
+                    counts["f raw lambda"] += 1
+                    lambdas[cell] = L(A("native-arity-entry"), A(b), n)
+                    continue
+        out.append(x)
+    return [L(A("define"), x[1][1], lambdas[x[1][1][1]]) if is_list(x, "define", 3) and x[1][1][0] == "A"
+            and x[1][1][1] in lambdas and is_list(x[1][2], "lambda") else x for x in out]
 
 
 def show(x, limit=400):
@@ -284,6 +397,28 @@ def rename_gensyms(form):
     return walk(form)
 
 
+LOOP = "(let v_36_108_111_111_112_47"   # a named let `$loop/…`
+
+
+def frames_loop(label, old, new, news):
+    """(g) Source-frame emission no longer lowers loops the verdicts call
+    unsafe: the debug text has fewer named-let loops than before, and exactly
+    as many as the release emission of the same node."""
+    if "+frames" not in label:
+        return False
+    release = news.get(label.replace("+frames", ""))
+    if release is None:
+        return False
+    if label.endswith("/counts"):
+        loops = re.compile(r":direct-loops (\d+)")
+        def n(t):
+            m = loops.search(t)
+            return int(m.group(1)) if m else 0
+        rest = lambda t: loops.sub("", t).replace("{, ", "{").replace(", }", "}")
+        return n(old) > n(new) == n(release) and rest(old) == rest(new)
+    return old.count(LOOP) > new.count(LOOP) == release.count(LOOP)
+
+
 def records(path):
     text = open(path, encoding="utf-8").read()
     for chunk in text.split("\x1e")[1:]:
@@ -314,11 +449,23 @@ def main():
     if mode == "pairs":
         a, b = list(records(old)), list(records(new))
         assert [x[0] for x in a] == [x[0] for x in b], "record labels differ"
+        news = dict(b)
         for (label, x), (_, y) in zip(a, b):
+            before = len(failures)
             compare(label, x, y, tally, kinds, failures)
+            if len(failures) > before and frames_loop(label, x, y, news):
+                failures.pop()
+                tally["UNEXPLAINED"] -= 1
+                tally["different, explained"] += 1
+                tally["explained by g"] += 1
+                kinds["g unchecked loop no longer lowered in debug"] += 1
     else:
         a = parse(open(old, encoding="utf-8").read())
         b = parse(open(new, encoding="utf-8").read())
+        raw = collections.Counter()
+        b = unraw(unhoist(b, raw), raw)
+        kinds.update(raw)
+        a, b = [scaffold_self(x) for x in a], [scaffold_self(x) for x in b]
 
         assert len(a) == len(b), f"form counts differ: {len(a)} {len(b)}"
         for i, (x, y) in enumerate(zip(a, b)):

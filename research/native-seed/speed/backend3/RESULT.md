@@ -181,3 +181,105 @@ None. No host Scheme was added. N2 is BL in `rt.bl`.
 - **Byte changes.** Integration recompiles every unit, because `scheme.bl` changed and nearly every definition's bytes change through (d). `rt.bl` changed, so the rt unit relinks.
 - **Checks ran interpreted on gsi only.** Compiled behaviour and speed are for the main thread's benchmark.
 - `speed/backend3/old-scheme.bl` is a frozen copy of HEAD's emitter, used only by `equality.bl`. Delete it after integration.
+
+---
+
+# Second pass: cross-workstream requests (after `git merge worktree-native-speed`)
+
+The integrated tip (12241b695: LINK, KEYS, FACTS, FRAMES and BACKEND) was merged into `native-r3-backend`. In this pass BACKEND owns all of `scheme.bl`. The two consumers in `bootstrap.bl` that the requests need were changed too (see Risks).
+
+## Changes
+
+| # | Request | What is emitted now | Where |
+| --- | --- | --- | --- |
+| (e) | LINK: sealed global calls | A `:global` callee with static arguments consults `(:aot-link options) :global` (`bootstrap/global-link`). A linked target is called as `(v_ns/f$N a…)`, like a linked remote, with no `(let ((callee v_ns/f)) (if (procedure? callee) …))`. Dev plans have no `:global` hook, so their bytes do not change. | `scheme.bl` `global-call-link`, `linked-language-call` |
+| (i) | MEASURE #2: variadic and multi-arity calls | `global-link` also links a static call whose arity has no fixed arm, but which a variadic arm accepts (arity ≥ its minimum). The call is `(v_ns/f$v a1…am (list rest…))`, exactly as `native-resolve-call` splits the arguments. `core/list` (858 sites) and `native.scheme/glue` (109) were the largest users of `bl-invoke` → `native-resolve-call` in the sealed closure. | `bootstrap.bl` `global-link`, new `variadic-call` |
+| (f) | LINK: inlinable arity cells | A sealed definition with exactly one fixed arity and no variadic arm emits `(define v_ns/f$N (lambda (formals) (h-tick)? body))`, a literal lambda that Gambit can inline. The definition's value is `(bl-register-callable! (case-lambda ((formals) (v_ns/f$N formals)) (argv function-clause)) N)`, which keeps the wrong-arity arm, because `bl-invoke` applies procedures directly. Self-calls of that arity call the cell; the self as a value is `v_ns/f`. Ticks and sites are unchanged: the entry tick sits in the lambda only, and the forwarding arm has none. This applies in release only; source-frame emission keeps the scaffold. | `scheme.bl` new `emit-sealed-function`, `fixed-parts`, `function-ticks?`, `:self-cells`; `bootstrap.bl` `sealed-raw`, `emit-definition`, `sealed-link-definition` (a `raw` cell argument), `link-definition` (new arity) |
+| (a′) | FACTS: Bool facts | `boolean-valued?` (and with it `branch` and the junctions) also accepts any expression that `BeamLisp.Facts/expr` tags `:bool` under `:facts`, such as a variable bound to a comparison. `emit-junction` was re-checked against the merged `:let`/`:if` arms: it emits the init with `operand-options`, binds through `integer-binding` (now `Facts/bind`), and emits then/else with `integer-branch` (now `Facts/refine`) of the test, so it matches the `:let` + `:if` it replaces. | `boolean-junction?`, `junction-part?`, `boolean-valued?`, `branch` (now take options) |
+| (g) | FRAMES: one loop lowering | `loop-plan` no longer lowers unchecked loops under `:source-frames?`, so debug lowers exactly the loops release lowers. `body-calls?`'s `:frames?` flag is deleted. | `loop-plan`, `body-calls?`, `function-expression` |
+| (h) | MEASURE #5: constant literals | Under a definition's constant sink (set by `bootstrap/emit-definition`), every `:lit` whose Scheme builds a value (set, map, vector, list, tuple, struct, float, decimal, non-symbol-safe keyword) is emitted once as `(define v_ns/f$q<i> LIT)`. It is referenced by name and built at load. A function's constants follow its define; any other definition's constants precede it. `compiler/kernel-special-forms-literal`, `kernel-java-lang-classes-literal` and the six other `kernel-*-literal` tables now return a constant. Emitted keyword interning (`(bl-key "match")`, `(bl-key "nomatch")`, the self-module tuple) is now quoted constants. | `scheme.bl` new `hoisted`, `:lit`, `clauses`, `:recv`; `bootstrap.bl` `constant-defines`, `emit-definition`, `self-module` |
+
+## Checks
+
+All of these come from one job, `speed/backend3/pass2.sh`, under `work run --memory 4G --timeout 10800`. OLD is the merged tip's `src` (`out/r2/old-src`, `git archive HEAD`). NEW is this worktree. The pinned SDK predates `Elixir.BeamLisp.Facts`, so every run goes through `speed/backend3/facts-run.bl`, which compiles and loads `priv/host/facts.bl` first, as `speed/facts/sites.bl` does. `chunks inspect` now asserts against the moved-on main checkout, so the closure emission uses `speed/backend3/emit-closure.bl`: the same link plan and `emit-definition` over every named definition.
+
+### explain.py: every difference reduces to a named transform
+
+Four transforms are new in `explain.py`, each the inverse of one change:
+- (e): the `procedure?`-tested call of a binding becomes `(binding$N A…)`.
+- (i): `(f$v a… (list r…))` becomes `(f$N a… r…)`.
+- (f): forwarding value plus raw lambda become scaffold plus `native-arity-entry`.
+- (h): `$q` constants are substituted back.
+
+(d) also covers `(bl-key "x")`. (g) accepts a frame-variant pair when debug now has fewer named loops than before, and exactly as many as release of the same node.
+
+| Corpus | Compared | Identical | Explained | Unexplained | Transform occurrences |
+| --- | --- | --- | --- | --- | --- |
+| whole closure, sealed AOT (1 723 definitions, 33 units) | 8 716 forms | 8 067 | 649 | **0** | e 2 504, i 973, f 1 542, h 62 constants (62 references), a 74, d 276 + 64 `bl-key` |
+| rt unit, sealed AOT (475 functions, gensyms renamed) | 2 405 forms | 2 394 | 11 | **0** | f 450, e 36, h 2, a 3 |
+| emitter equality (non-AOT, five option sets) | 2 548 | 2 540 | 8 | **0** | a 24, d 108 (`bl-key` → quoted); g 0 |
+
+`EXPLAIN_OK` on all three. (g) never fired: neither the equality corpus nor the FRAMES corpus contains a loop the verdicts call unsafe. The FRAMES harness below is the behavioural check.
+
+### Occurrence counts (OLD → NEW)
+
+| Shape | rt unit | whole closure |
+| --- | --- | --- |
+| `(if (procedure? callee) …)` | 87 → 51 | 4 216 → 1 710 |
+| `(native-arity-entry …)` cells | 501 → 51 | 1 794 → 252 |
+| literal-lambda arity cells | 0 → 450 | 0 → 1 542 |
+| `$v` variadic-arm calls | 27 → 27 | 406 → 1 379 |
+| truthiness wrappers | 136 → 133 | 2 400 → 2 325 |
+| hoisted constants (`$q`) | 0 → 2 | 0 → 62 |
+| `bl-set-from-list` inside function bodies | 0 → 0 | 9 → 0 (8 are now load-time `$q` constants) |
+
+### Native rt differential (`check.py`): `KERNEL2_CHECK_PASS`
+
+Here `base` is the merged tip's rt.bl with the merged tip's emitter, and `new` is the same rt.bl with this pass's emitter. Both are sealed AOT emission, with raw lambdas and constants loaded in the harness.
+
+The first run of `check.py` was taken before (h) and (i) were added; it showed 0 differences introduced. The re-run after (h)/(i) is recorded in `out/r2/check2.log`; its numbers follow.
+
+| Check | Count |
+| --- | --- |
+| round-2 rt rows: new = BEAM | 42 019 |
+| round-2 rt rows: new ≠ BEAM, new = base | 98 |
+| rt rows: difference introduced by this pass | **0** |
+| N2 rows = BEAM | 6 636 / 6 636 |
+| native-only exotic inputs, new = base | 6 156 / 6 156 |
+| templates = leaf / = BEAM / guard booleans | 92 376 / 91 952 / 27 642 |
+
+The 98 non-BEAM rows (84 in pass 1) are all identical in `base`. They come from the merged tip's rt.bl and host, for example KEYS's value-equality keys against the pinned SDK's oracle and native map order, not from the emitter.
+
+### FRAMES harness (`speed/frames/check.bl` + `run.py`, NEW emitted here, OLD = FRAMES's pre-N4 reference)
+
+```
+old-release / old-frames / new-release / new-frames: FRAMES_CHECKS 72 FAILURES 0 (each)
+release: 47 observation lines; old == new: True
+frames:  47 observation lines; old == new: True
+```
+
+TICKS and TURNS equal FRAMES's own recorded numbers, for example `work-calls` 401 → 201 and `mapped` 9 → 1.
+
+No BEAM test was needed: this pass changes only `research/native-seed/src` (`scheme.bl`, `bootstrap.bl`), not `priv/`. No `bl` realm was started.
+
+## Requests (pass 2)
+
+1. **LINK / owner of `bootstrap.bl`:** review the consumers I added. They are:
+   - `sealed-raw` and the `raw` argument of `sealed-link-definition`/`link-definition` (a new arity, with old callers unchanged);
+   - `variadic-call` in `global-link`;
+   - the constant sink and `constant-defines` in `emit-definition`;
+   - `self-module` with quoted keywords.
+
+   `speed/data|lazy|services|kernel2` keep private copies of `link-definition` with the old arity, and they are unaffected.
+2. **Host (`native-resolve-call`, `native-multi-callable?`):** they intern `(bl-key "$blfn")` on every call (MEASURE #13). That is host code, not emitted code. A module-level `(define native-blfn-key (bl-key "$blfn"))` would end it.
+3. **`chunks.bl inspect`:** asserts that the main checkout's sources still match the closure SHAs. After integration they no longer do, so it fails. `speed/backend3/emit-closure.bl` is the assertion-free equivalent.
+
+## Risks (pass 2)
+
+- **(f) changes procedure identity.** A sealed single-arity definition now has two procedures: the registered forwarding value `v_ns/f` and the cell `v_ns/f$N`. Callers through cells never see the value, and every value use, including the self as a value, is `v_ns/f`. Anything that compared an arity cell with the binding (`eq?`) would now differ. I found nothing that does.
+- **(f) interacts with splitting.** `v_ns/f$N` is still a `$` name after its head, so it stays in its unit. Cross-unit inlining still needs the caller and callee in one Gambit unit (LINK's note).
+- **(h) and constants of non-function definitions** are emitted before their define, so the splitter attaches them to the previous group. This is correct, because units load in order, but a value definition's constants can sit in the neighbouring unit.
+- **(h) and identity:** every evaluation of one quoted literal now returns the same object. This matches BEAM's literal pool. A program that relied on fresh literals (`identical?`) would see a difference, as it would on BEAM.
+- **(i) applies only when sealed,** because it goes through `global-link`. Dev images keep `bl-invoke` for variadic global calls.
+- **(a′) relies on facts.bl's `:bool` tag meaning exactly `#t`/`#f` natively.** That holds for BIF and comparison results and boolean literals. If `facts.bl` ever tags a value that can be the native `:true` symbol, the plain `if` would misread it.
+- **The pinned SDK lacks `BeamLisp.Facts`.** Every BEAM-side emitter run must load `facts.bl` first (`facts-run.bl`) until the SDK is re-pinned.
