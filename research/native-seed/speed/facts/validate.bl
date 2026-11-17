@@ -5,7 +5,7 @@
 ;   1. formal.elaborate/prepare-function lowers the compiler's actual ANF to a
 ;      typed Core, and formal.elaboration/check independently re-checks that
 ;      ANF/Core relation (no elaborator, no solver);
-;   2. BeamLisp.Facts/function-facts runs on THE SAME ANF, with the declared parameter
+;   2. BeamLisp.Optimize/function-facts runs on THE SAME ANF, with the declared parameter
 ;      sorts as parameter facts;
 ;   3. ANF lets and Core lets correspond one to one in pre-order (the elaborator
 ;      maps each :let to one let-in; the checked relation fixes that pairing);
@@ -26,13 +26,18 @@
 
 (def out-dir (Path/expand (or (first (BeamLisp/argv)) ".local/facts/validate")))
 (File/mkdir_p! out-dir)
-(code/ensure_loaded :Elixir.BeamLisp.Facts)
-(when-not (erlang/function_exported :Elixir.BeamLisp.Facts :function-facts 2)
- ; The pinned SDK predates the module: compile this checkout's source.
- (BeamLisp.Env/isolated (fn [] (BeamLisp.AOT/compile_host_file (Path/expand "priv/host/facts.bl")
-  (list (tuple :module :Elixir.BeamLisp.Facts) (tuple :output_dir out-dir)
-        (tuple :file (Path/expand "priv/host/facts.bl"))))))
- (println "FACTS_VALIDATE compiled priv/host/facts.bl"))
+; FACTS lives in the pinned host BeamLisp.Optimize, which the pinned SDK
+; predates: hot! replaces it with this checkout's priv/host/optimize.bl. The SDK
+; checks the Source owner of every import a NEW compilation reaches, and a
+; replaced pinned host has none, so the replacement happens in the last form,
+; after everything here is compiled.
+(defn hot! []
+ (code/ensure_loaded :Elixir.BeamLisp.Optimize)
+ (when-not (erlang/function_exported :Elixir.BeamLisp.Optimize :function-facts 2)
+  (BeamLisp.Env/isolated (fn [] (BeamLisp.AOT/compile_host_file (Path/expand "priv/host/optimize.bl")
+   (list (tuple :module :Elixir.BeamLisp.Optimize) (tuple :output_dir out-dir)
+         (tuple :file (Path/expand "priv/host/optimize.bl"))))))
+  (println "FACTS_VALIDATE compiled priv/host/optimize.bl")))
 
 (def I t/Int)
 (def B t/Bool)
@@ -135,7 +140,7 @@
           [{}] params)))
 
 (defn check-entry
- "Every violation of `facts` (a BeamLisp.Facts/function-facts report) against the
+ "Every violation of `facts` (a BeamLisp.Optimize/function-facts report) against the
   checked Core of `prepared`."
  [prepared facts params]
  (let [body (:core prepared) decls (into {} params)
@@ -162,7 +167,9 @@
 (defn known [f] (cond-> [] (some? (:tag f)) (conj (:tag f)) (some? (:lo f)) (conj :lo) (some? (:hi f)) (conj :hi)
                       (raise-free? f) (conj :no-raise)))
 
-(def rows
+; Elaboration compiles (formal.elaborate runs the compiler), so it runs BEFORE
+; hot!; only the fact pass and the Core checks run after it.
+(defn prepare-rows []
  (mapv (fn [[id source params]]
   (let [prepared (producer/prepare-function source params)
         _ (assert (= :elaborated (:status prepared)) (str id " " (pr-str (:reason prepared))))
@@ -170,26 +177,24 @@
         recheck (validation/check object)
         _ (assert (= :checked (get-in prepared [:elaboration :check :status])) id)
         _ (assert (= :checked (:status recheck)) (str id " " (pr-str recheck)))
-        facts (BeamLisp.Facts/function-facts (:anf prepared) (mapv (fn [[_ sort]] (param-fact sort)) params))
-        unknown (BeamLisp.Facts/function-facts (:anf prepared))
+        ; Warm the Core checker's paths before hot! (no fact pass needed).
+        _ (check-entry prepared {:result {} :bindings []} params)]
+   {:id id :source source :prepared prepared :params params :elaboration (:status recheck)}))
+  corpus))
+(defn compute-rows [prepared-rows]
+ (mapv (fn [row]
+  (let [prepared (:prepared row) params (:params row)
+        facts (BeamLisp.Optimize/function-facts (:anf prepared) (mapv (fn [[_ sort]] (param-fact sort)) params))
+        unknown (BeamLisp.Optimize/function-facts (:anf prepared))
         result (check-entry prepared facts params)
         control (check-entry prepared unknown params)]
-   {:id id :source source :prepared prepared :facts facts :params params
-    :elaboration (:status recheck) :check result :unknown-params control
+   (assoc row :facts facts :check result :unknown-params control
     :known {:result (known (:result facts))
-            :bindings (mapv (fn [b] [(:name b) (known (:fact b))]) (:bindings facts))}}))
-  corpus))
-
-(doseq [row rows]
- (println "FACTS_VALIDATE" (:id row) (:elaboration row)
-          "lets" (get-in row [:check :lets]) "evaluations" (get-in row [:check :evaluations])
-          "violations" (count (get-in row [:check :violations]))
-          "unknown-params-violations" (count (get-in row [:unknown-params :violations]))
-          "known" (pr-str (:known row)))
- (doseq [v (get-in row [:check :violations])] (println "FACTS_VIOLATION" (:id row) (pr-str v))))
+            :bindings (mapv (fn [b] [(:name b) (known (:fact b))]) (:bindings facts))})))
+  prepared-rows))
 
 ; —— negative controls: each deliberately wrong fact must be caught ——————————
-(defn row-of [id] (first (filter #(= id (:id %)) rows)))
+(defn row-of [rows id] (first (filter #(= id (:id %)) rows)))
 (defn mutate-binding [facts i f] (update facts :bindings (fn [bs] (update (vec bs) i (fn [b] (update b :fact f))))))
 (defn binding-index [row name] (first (keep-indexed (fn [i b] (when (= name (:name b)) i)) (:bindings (:facts row)))))
 (def controls
@@ -208,20 +213,31 @@
    (fn [row] (mutate-binding (:facts row) 0 #(assoc % :lo 1)))]
   ["int claimed float" "let-chain"
    (fn [row] (mutate-binding (:facts row) 0 #(assoc % :tag :float)))]])
-(def control-rows
+(defn compute-controls [rows]
  (mapv (fn [[label id mutate]]
-        (let [row (row-of id) wrong (mutate row)
+        (let [row (row-of rows id) wrong (mutate row)
               r (check-entry (:prepared row) wrong (:params row))]
          {:control label :entry id :caught (pos? (count (:violations r))) :violations (:violations r)}))
        controls))
+(defn main [prepared-rows]
+ (let [rows (compute-rows prepared-rows)]
+(doseq [row rows]
+ (println "FACTS_VALIDATE" (:id row) (:elaboration row)
+          "lets" (get-in row [:check :lets]) "evaluations" (get-in row [:check :evaluations])
+          "violations" (count (get-in row [:check :violations]))
+          "unknown-params-violations" (count (get-in row [:unknown-params :violations]))
+          "known" (pr-str (:known row)))
+ (doseq [v (get-in row [:check :violations])] (println "FACTS_VIOLATION" (:id row) (pr-str v))))
+
+(let [control-rows (compute-controls rows)]
 (doseq [c control-rows]
  (println "FACTS_CONTROL" (if (:caught c) "CAUGHT" "MISSED") (:control c) (pr-str (first (:violations c)))))
 
-(def violations (reduce + (map #(count (get-in % [:check :violations])) rows)))
-(def unknown-violations (reduce + (map #(count (get-in % [:unknown-params :violations])) rows)))
-(def missed (count (remove :caught control-rows)))
-(def tally (frequencies (mapcat (fn [row] (concat (get-in row [:known :result])
-                                                   (mapcat second (get-in row [:known :bindings])))) rows)))
+(let [violations (reduce + (map #(count (get-in % [:check :violations])) rows))
+      unknown-violations (reduce + (map #(count (get-in % [:unknown-params :violations])) rows))
+      missed (count (remove :caught control-rows))
+      tally (frequencies (mapcat (fn [row] (concat (get-in row [:known :result])
+                                                   (mapcat second (get-in row [:known :bindings])))) rows))]
 (File/write! (str out-dir "/validate.etf")
  (erlang/term_to_binary {:rows (mapv #(dissoc % :prepared) rows) :controls control-rows}))
 (println "FACTS_VALIDATE_SUMMARY" (pr-str {:functions (count rows) :violations violations
@@ -230,4 +246,6 @@
                                            :evaluations (reduce + (map #(get-in % [:check :evaluations]) rows))
                                            :facts-known tally}))
 (assert (= 0 violations unknown-violations missed))
-(println "FACTS_VALIDATE_PASS")
+(println "FACTS_VALIDATE_PASS")))
+))
+(let [prepared-rows (prepare-rows)] (hot!) (main prepared-rows))

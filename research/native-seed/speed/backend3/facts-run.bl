@@ -1,16 +1,27 @@
-; Run a BL script on the pinned SDK with this checkout's Elixir.BeamLisp.Facts
-; (priv/host/facts.bl, E1) compiled and loaded first: the pinned SDK predates
-; it, and native.scheme reads facts through it. (speed/facts/sites.bl's `hot`.)
-; Usage: run speed/backend3/facts-run.bl -- FACTS.bl SCRIPT.bl ARGS...
+; Run a BL script on the pinned SDK with this checkout's BeamLisp.Optimize
+; (priv/host/optimize.bl, whose FACTS section is E1's fact pass) compiled and
+; loaded first: the pinned SDK predates FACTS, and native.scheme reads facts
+; through BeamLisp.Optimize/expr, bind, forget, refine, int-fact?, bool-fact?.
+; Usage: run speed/backend3/facts-run.bl -- OPTIMIZE.bl SCRIPT.bl ARGS...
+;
+; LIMITATION (FACTS): replacing the SDK's own pinned BeamLisp.Optimize changes
+; its bytes, and the SDK refuses any NEW compilation whose imports reach it
+; ({:missing_sdk_dependency_unit_owner, BeamLisp.Optimize, ...}). A script
+; evaluated here after the replacement compiles its forms then, so it is
+; refused. Scripts must compile first and replace last, as
+; speed/facts/{sites,validate,scope-check}.bl do (their `hot!` runs in the last
+; form), or run on an SDK pinned after integration, where none of this is needed.
 (ns backend3.facts-run (:require [compiler :as compiler]))
 (def args (BeamLisp/argv))
-(def facts-path (Path/expand (first args)))
+(def optimize-path (Path/expand (first args)))
 (def script (second args))
 (def ebin (str (System/tmp_dir!) "/backend3-facts-" (System/unique_integer (list :positive))))
 (File/mkdir_p! ebin)
-(BeamLisp.Env/isolated
- (fn [] (BeamLisp.AOT/compile_host_file facts-path
-         (list (tuple :module :Elixir.BeamLisp.Facts) (tuple :output_dir ebin) (tuple :file facts-path)))))
-(println "BACKEND3_FACTS_LOADED" (erlang/function_exported :Elixir.BeamLisp.Facts :expr 2))
+(code/ensure_loaded :Elixir.BeamLisp.Optimize)
+(when-not (erlang/function_exported :Elixir.BeamLisp.Optimize :expr 2)
+ (BeamLisp.Env/isolated
+  (fn [] (BeamLisp.AOT/compile_host_file optimize-path
+          (list (tuple :module :Elixir.BeamLisp.Optimize) (tuple :output_dir ebin) (tuple :file optimize-path))))))
+(println "BACKEND3_FACTS_LOADED" (erlang/function_exported :Elixir.BeamLisp.Optimize :expr 2))
 (BeamLisp/with_argv (lists/nthtail 2 args)
  (fn [] (compiler/eval_string (File/read! script) (compiler/new-env "user") script)))

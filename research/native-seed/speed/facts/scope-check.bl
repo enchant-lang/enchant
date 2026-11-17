@@ -1,14 +1,68 @@
-; FACTS (E1): run the existing native fact-scope checks
-; (research/native-seed/scan/emission-check.bl: shadowing by let, fn, case and
-; loops; is_integer refinement only in the then-branch) against this
-; checkout's facts.bl. The pinned SDK predates BeamLisp.Facts, so compile it first.
+; FACTS (E1): the native fact-scope checks of
+; research/native-seed/scan/emission-check.bl (shadowing by let, fn, case and
+; loops; is_integer refinement only in the then-branch), run against this
+; checkout's FACTS section of priv/host/optimize.bl. The ten cases are that
+; file's, verbatim; they are restated here as functions because the pinned SDK
+; predates FACTS: hot! replaces its BeamLisp.Optimize in the last form, after
+; everything is compiled (the SDK checks the Source owner of every import a new
+; compilation reaches, and a replaced pinned host has none).
 ; Usage: research/native-seed/run run research/native-seed/speed/facts/scope-check.bl -- OUT-DIR
-(ns native.facts-scope-check)
+(ns native.facts-scope-check (:require [native.scheme :as emitter]))
 (def out-dir (Path/expand (or (first (BeamLisp/argv)) ".local/facts/scope")))
 (File/mkdir_p! out-dir)
-(code/ensure_loaded :Elixir.BeamLisp.Facts)
-(when-not (erlang/function_exported :Elixir.BeamLisp.Facts :function-facts 2)
- (BeamLisp.Env/isolated (fn [] (BeamLisp.AOT/compile_host_file (Path/expand "priv/host/facts.bl")
-  (list (tuple :module :Elixir.BeamLisp.Facts) (tuple :output_dir out-dir)
-        (tuple :file (Path/expand "priv/host/facts.bl")))))))
-(BeamLisp/run_file (Path/expand "research/native-seed/scan/emission-check.bl"))
+(defn hot! []
+ (code/ensure_loaded :Elixir.BeamLisp.Optimize)
+ (when-not (erlang/function_exported :Elixir.BeamLisp.Optimize :function-facts 2)
+  (BeamLisp.Env/isolated (fn [] (BeamLisp.AOT/compile_host_file (Path/expand "priv/host/optimize.bl")
+   (list (tuple :module :Elixir.BeamLisp.Optimize) (tuple :output_dir out-dir)
+         (tuple :file (Path/expand "priv/host/optimize.bl"))))))))
+(defn L [v] {:op :lit :val v :ann {}})
+(defn V [s] {:op :var :name s :ann {}})
+(defn P [s] {:pop :pvar :name s})
+(defn F [names body] {:op :fn :ann {} :clauses (list {:pats (Enum/map names P) :guard nil :body body})})
+(defn A [f args] {:op :apply :ann {} :fn f :args args})
+(defn R [f args] {:op :remote :ann {} :mod :erlang :fun f :args args})
+(defn B [name init body] {:op :let :ann {} :name name :init init :body body})
+(defn I [test yes no] {:op :if :ann {} :test test :then yes :else no})
+(defn loop-node [body]
+ (A (B "self" (F (list "self") (F (list "x") body)) (A (V "self") (list (V "self")))) (list (L 0))))
+(defn recur-node [arg] (A (A (V "self") (list (V "self"))) (list arg)))
+(defn check [label node loops integers]
+ (let [counts (atom {})
+       result (emitter/emit node {:scan-v1? true :specialize-v1? true :emission-counts counts
+                                 :remote-resolver (fn [_] "checked-primitive")})]
+  (assert (= loops (get @counts :direct-loops 0)) (str label " loops " @counts))
+  (assert (= integers (get @counts :integer-intrinsics 0)) (str label " integers " @counts))
+  (assert (string? result))
+  (println "SCAN_EMISSION_CHECK" label)))
+; Literal-only shapes never call the fact pass (a literal integer operand is
+; recognised before any fact lookup, and an empty environment is never
+; consulted), so they run on the SDK's optimizer too.
+(defn cases []
+ [[:loop (loop-node (recur-node (L 1)))]
+  [:fn (F (list "x") (R :+ (list (L 1) (L 2))))]
+  [:remote (R :+ (list (L 1) (L 2)))]
+  [:if (I (L true) (R :+ (list (L 1) (L 2))) (L nil))]
+  [:case {:op :case :ann {} :subj (L "text")
+          :clauses (list {:pats (list (P "y")) :guard nil :body (R :+ (list (L 1) (L 2)))})}]])
+; Before hot!, emit these shapes once, ignoring failures: any namespace the
+; emitter loads lazily is loaded now, before the replacement.
+(defn warm! []
+ (doseq [[_ node] (cases)]
+  (try (emitter/emit node {:scan-v1? true :specialize-v1? true :emission-counts (atom {})
+                          :remote-resolver (fn [_] "checked-primitive")})
+   (catch _ nil))))
+(defn main []
+ (check :direct-loop (loop-node (recur-node (V "x"))) 1 0)
+ (check :escaping-self (loop-node {:op :tuple :ann {} :elems (list (V "self"))}) 0 0)
+ (check :non-tail (loop-node {:op :do :ann {} :stmts (list (recur-node (V "x")) (L 0))}) 0 0)
+ (check :wrong-knot (loop-node (A (A (V "self") (list (L 9))) (list (V "x")))) 0 0)
+ (check :let-shadow (B "x" (L 1) (B "x" (L "text") (R :+ (list (V "x") (L 1))))) 0 0)
+ (check :fn-shadow (B "x" (L 1) (F (list "x") (R :+ (list (V "x") (L 1))))) 0 0)
+ (check :true-only (I (R :is_integer (list (V "x"))) (R :+ (list (V "x") (L 1))) (R :+ (list (V "x") (L 1)))) 0 1)
+ (check :loop-shadow (B "x" (L 1) (loop-node (R :+ (list (V "x") (L 1))))) 1 0)
+ (check :loop-refinement (loop-node (I (R :is_integer (list (V "x"))) (R :+ (list (V "x") (L 1))) (L nil))) 1 1)
+ (check :case-shadow (B "x" (L 1) {:op :case :ann {} :subj (L "text")
+  :clauses (list {:pats (list (P "x")) :guard nil :body (R :+ (list (V "x") (L 1)))})}) 0 0)
+ (println "SCAN_EMISSION_PASS 10"))
+(do (warm!) (hot!) (main))

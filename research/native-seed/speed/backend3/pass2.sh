@@ -2,13 +2,13 @@
 # BACKEND round 3, second pass: every emission of the checks, in one work run.
 # OLD = the integrated tip before this pass (out/r2/old-src, git archive of
 # HEAD at 12241b695); NEW = this worktree's src. The pinned SDK predates
-# Elixir.BeamLisp.Facts, so each run goes through facts-run.bl.
+# E1 FACTS (now in BeamLisp.Optimize), so each run goes through facts-run.bl.
 # usage: work run --memory 4G --timeout 10800 -- research/native-seed/speed/backend3/pass2.sh
 set -uo pipefail
 WT=/home/othman/code/undefine/beam-lisp--execution-protocol/.claude/worktrees/native-speed/.claude/worktrees/r3-backend
 MAIN=/home/othman/code/undefine/beam-lisp--execution-protocol/.claude/worktrees/native-speed
 NS=$WT/research/native-seed; B3=$NS/speed/backend3; O=$B3/out/r2
-FACTS=$WT/priv/host/facts.bl
+FACTS=$WT/priv/host/optimize.bl  # E1 FACTS now lives in BeamLisp.Optimize
 P=$MAIN/research/native-seed/out/speed-closure-2/partition.json
 L=$MAIN/research/native-seed/out/round2-build/leaves.json
 C=$MAIN/research/native-seed/out/speed-closure-2
