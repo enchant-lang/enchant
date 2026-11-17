@@ -6,7 +6,7 @@ subscription grants demand. `read` returns retained data or an explicit status;
 calling it repeatedly never starts work. The creator owns the controller's
 lifetime. Duplicate names refuse.
 
-`start!` accepts a closed query containing one stored Datom pattern on an
+`start!` accepts a closed query containing up to eight positive stored Datom patterns on an
 actual native SDK connection. Source evidence includes attribute changes,
 compiler generations and provider provenance. Unknown evidence refuses reuse.
 A source revision replaces the latest pending intent; one worker remains active
@@ -14,10 +14,10 @@ until its actual death, including callback cleanup. Tickets discard obsolete
 completions. Unrelated attribute commits preserve a valid answer.
 
 Physical reads reserve step credits before entering the substrate's bounded
-page operation. Every page also has a byte ceiling. Managed plans refuse joins
-because page counts cannot bound intermediate binding multiplication. Extending
-this fragment requires admission before intermediate rows are allocated in the
-query engine, including its fallback paths.
+page operation. Every page also has a byte ceiling. Every unification reserves a step and a conservative byte charge before
+extending a binding. Hash-bucket construction is charged too. Exhaustion is
+re-thrown before a hash join can restart as a Cartesian fallback. Compound
+clauses, rules, functions and computed providers stay outside this fragment.
 
 The controller reserves shared retention credits for the declaration, revision
 evidence, answer and incremental state. Each query worker has a heap ceiling
@@ -87,17 +87,77 @@ definition or namespace count. Datom uses `namespace-revision` over its fixed
 query dependencies, preserving answers during unrelated lazy loading. Busy and
 dead scopes decline; private analysis forks preserve the parent's receipt.
 
-## Other shared opportunities
+## Shared tooling work
 
-| Entry point | Suitable improvement | Required boundary and test |
-| --- | --- | --- |
-| `datom.watch` query watches | Share maintained query state across subscribers | Preserve per-commit callback effects and principal scope; assert every accepted commit is delivered once while shared query work runs once. |
-| `datom/memo-by-basis` | Add an explicit owned derivation API for expensive views | Arbitrary closures need their existing execution owner; assert concurrent readers do not duplicate an admitted derivation and rejected retention cannot trigger a retry loop. |
-| `system.evidence/source` and `lsp/analyzed` | Share bounded analysis jobs and retain smaller per-consumer artifacts | Preserve compiler scope and code generation; assert one analysis for concurrent requests and exact invalidation after a provider edit. |
-| `datom.query.engine` managed joins | Admit intermediate rows before allocation | Debit every expansion, including alternate plans and fallbacks; adversarial Cartesian products must refuse before exceeding credits. |
-| `datom.query.rank-demand` | Reuse measured work receipts for construction policy | Forecasts remain policy; assert cache hits mint no work credits and aborted construction releases its slot only after worker death. |
+`data.single-flight/with-key` serializes a finite logical identity in its actual
+caller's environment. Waiters recheck retention after admission. Two caller
+processes can execute shared work at once across keys; nested consumers reuse
+their caller's slot. Native locks release on return or holder death. Waiting
+has a deadline and refuses busy capacity. Computation stays under its original
+execution authority. Cache eviction or refused retention can still require
+another synchronous computation; use an owned derivation for sticky refusal.
 
-Existing transaction watches deliver effects, and ordinary queries return values
-synchronously. Adopting a retained status protocol at these boundaries requires
-an explicit API contract. Each consumer can use managed readers where pending
-or blocked results are meaningful.
+LSP and `system.evidence/source` share concurrent requests under that admission.
+`codebase/index-source` shares facts by source bytes, namespace, type seeds,
+index mode and live code evidence. `code.index` rechecks a disk miss after
+admission and publishes complete fact files with an atomic rename. Mutable
+connections remain owned by their callers.
+
+`codebase/loop-plan` propagates weighted loop depths in one topological pass.
+Nodes left behind are cycles and their descendants; those contexts receive no
+finite depth claim. Fact collection appends eagerly. The plan reports exact
+vertex, edge and visited-edge counts.
+
+`system.analyze` processes functions after their dependencies. Changed return
+or footprint evidence wakes only dependent functions; duplicate pending work
+coalesces. Acyclic functions need one summary evaluation. Recursive work has
+at most fourteen evaluations per dirty definition in aggregate; latent effects
+have their separate sixty-six-per-definition ceiling. Unfinished work fails
+closed and cannot claim complete coverage. Incremental reports count actual
+summary evaluations.
+
+`bl check` retains compact compiler facts and source diagnostics separately
+from the larger LSP bundle. Lint guards execute on every request, and ambient
+warnings merge from the current process after retention. Code publication
+invalidates retained facts. Baseline selection and regression rules retain
+their normal behavior.
+
+Eligible `datom.watch` queries share the exact before/after diff under source,
+query, provider and code evidence. Each watch still invokes its own callback
+for every accepted relevant commit. Unknown providers and behavioral wrappers
+use authoritative query execution. Sharing a pure diff does not merge effects.
+
+Ranked-index demand records physical scan work beside elapsed time. A measured
+sample with zero work cannot pay for construction; a result-cache hit does not
+produce a scan receipt. Cost forecasts remain policy and grant no write or
+query authority.
+
+## Owned basis derivations
+
+Use `data.derivation/start!` when an expensive database derivation needs an
+explicit owner and retained statuses:
+
+```clojure
+(def totals
+  (data.derivation/start! :reports/totals database :totals/v1
+    (fn [db] (build-totals db))
+    {:max-output-bytes 65536 :timeout-ms 5000}))
+```
+
+The controller delegates its callback through `proc.work` custody. Readers use
+the ordinary projection reader, subscription and read APIs; reading never
+starts work. Failure or oversized output stays blocked until a controller
+retry or revision change. Worker death releases capacity. Dispose the
+controller before closing its database. The owner is responsible for its
+callback's effects and declared immutable inputs; this callback interface does
+not certify arbitrary code as a closed stored-data query.
+
+Incremental source watermarks advance only with accepted checkpoints. Expiry
+maintenance has its own clock, so subscribing or expiring rows cannot reject
+an already ordered source update. Rows already expired at maintenance time
+are discarded without resurrecting an old window.
+
+`scripts/tooling-efficiency-measure.bl` measures identical synthetic corpora on
+two pinned SDKs in separate capped VMs. It records first and warm observations
+and reductions. The qualification tests enforce operation counts, invalidation,
+capacity and refusal independently of machine timing.
