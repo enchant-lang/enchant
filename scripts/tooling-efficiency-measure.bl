@@ -1,0 +1,33 @@
+;; One bounded warm VM, same corpus and protocol for retained and new SDKs.
+(ns tooling.efficiency-measure
+ (:require [codebase :as cb] [bl.check :as check] [bl.json :as json]))
+(defn source [n]
+ (str "(ns tooling.efficiency-fixture)\n"
+      (apply str (mapv (fn [i]
+        (str "(defn f" i " [x] " (if (zero? i) "(+ x 1)" (str "(f" (dec i) " x)")) ")\n")) (range n)))))
+(defn sample [f]
+ (let [before (elem (Process/info (erlang/self) :reductions) 1)
+       started (erlang/monotonic_time :microsecond) answer (f)]
+  {:microseconds (- (erlang/monotonic_time :microsecond) started)
+   :reductions (- (elem (Process/info (erlang/self) :reductions) 1) before)
+   :answer answer}))
+(defn observation [n]
+ (let [src (source n)
+       index (fn [] (let [r (cb/index-source {} "tooling.efficiency-fixture" src {:mode :calls})]
+                       {:functions (count (:fn r)) :calls (count (:calls r))}))
+       gate (fn [] (select-keys (check/analyze-source "efficiency-fixture.bl" src)
+                               [:sha :fns :unreadable :diagnostics :smells :analysis-error]))
+       first-index (sample index) warm-index (mapv (fn [_] (sample index)) (range 3))
+       first-check (sample gate) warm-check (mapv (fn [_] (sample gate)) (range 3))]
+  {:definitions n :source-sha256 (sha256-hex src)
+   :index {:first first-index :warm warm-index}
+   :check {:first first-check :warm warm-check}}))
+;; Initialize engines independently of recorded first-use observations.
+(cb/index-source {} "tooling.efficiency-fixture" (source 2) {:mode :calls})
+(check/analyze-source "efficiency-fixture.bl" (source 2))
+(let [report {:version 1 :scope "warm-source-index-and-check-observations"
+              :label (System/fetch_env! "TOOLING_MEASURE_LABEL")
+              :protocol {:warm-repetitions 3 :definitions [16 64 256]
+                         :memory-cap "2GiB" :cpu-quota 2 :swap 0}
+              :observations (mapv observation [16 64 256])}]
+ (File/write! (System/fetch_env! "TOOLING_MEASURE_OUTPUT") (json/encode report)))

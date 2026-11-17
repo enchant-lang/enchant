@@ -53,3 +53,15 @@
   (let [calls (atom 0)]
     (is (= :refused (try (fresh {:group-by [(fn [_] (swap! calls inc))]}) :wrong (catch _ :refused))))
     (is (= 0 @calls))))
+
+(deftest maintenance-clock-does-not-reject-an-ordered-source-checkpoint
+  (let [a (aggregate/initial {:source-id "late/v1" :window-ms 10})
+        one (aggregate/apply-delta a {:sequence 1 :now 100 :upsert [{:id 1 :at 100}]})
+        expired (aggregate/expire one 150)
+        two (aggregate/apply-delta expired {:sequence 2 :now 110 :upsert [{:id 2 :at 105}]})]
+    (is (= 2 (:cursor two)))
+    (is (= 150 (:now two)))
+    (is (= 110 (:source-now two)))
+    (is (= {} (:events two)))
+    (is (= :aggregate-clock-regression
+           (try (aggregate/apply-delta two {:sequence 3 :now 109}) nil (catch e (:kind (ex-data e))))))))
