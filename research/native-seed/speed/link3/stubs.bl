@@ -1,0 +1,66 @@
+; P3 on the pinned SDK (BEAM): the stub link rows the bundle carries, checked
+; against this Env's own answers, and the BEAM half of the stub differential.
+;
+;   work run --memory 4G --timeout 1800 -- research/native-seed/run run \
+;     research/native-seed/speed/link3/stubs.bl -- CLOSURE/partition.json LEAVES.json OUT
+;
+; Writes OUT/stub-links.scm (the rows as bundle Scheme data, read by
+; native-probe.bl) and OUT/beam-<def>.scm: compiler definitions that call into
+; `lower`, compiled HERE from their source with the same per-definition fresh
+; reset as native.bootstrap/prepare, and emitted through the one link plan.
+(ns link3.stubs
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.resolution-ledger :as ledger] [compiler :as c] [reader :as rd]
+           [anf] [bl.json :as json] [clojure.string :as string]))
+(def args (BeamLisp/argv))
+(def closure (artifact/read-closure (nth args 0)))
+(def leaves (get (json/decode (File/read! (nth args 1))) "registered_leaves"))
+(def out (nth args 2))
+(File/mkdir_p! out)
+(def metadata (ledger/bundle-metadata closure leaves))
+(def rows (:stub-links metadata))
+(println (str "STUB_LINK_ROWS " (count rows) " namespaces=" (vec (distinct (map first rows)))))
+; 1. Each row is what THIS Env answers for a qualified call from a closure
+;    member that aliases the stub (compiler: [lower :as lower]).
+(doseq [[ns name info private?] rows]
+ (let [answer (BeamLisp.Env/link "compiler" (str ns "/" name))]
+  (when-not (= answer (tuple :ok info))
+   (throw (ex-info "stub row differs from Env/link" {:ns ns :name name :row info :env answer})))))
+(println (str "STUB_LINK_ROWS_EQUAL_ENV " (count rows) " private=" (count (filter #(nth % 3) rows))))
+(File/write! (str out "/stub-links.scm") (bootstrap/data rows))
+; 2. Closure ANF: every remote into a stub module links as an excluded
+;    namespace, and no :global names a stub namespace.
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def plan (bootstrap/link-plan (dissoc metadata :sealed) units))
+(def stub-names (set (:stubs closure)))
+(defn walk [ns node acc]
+ (loop [todo (list node) acc acc]
+  (if (empty? todo) acc
+   (let [n (first todo)
+         acc (case (:op n)
+              :remote (let [d (bootstrap/remote-decision plan n ns)]
+                       (if (= "excluded-namespace" (first d)) (update acc :excluded conj (second d)) acc))
+              :global (if (contains? stub-names (:ns n)) (update acc :stub-globals conj [(:ns n) (:name n)]) acc)
+              acc)]
+    (recur (lists/append (anf/executable-children n) (erlang/tl todo)) acc)))))
+(def census
+ (reduce (fn [acc u] (reduce (fn [acc d] (walk (:ns u) (:node d) acc)) acc (:defs u)))
+         {:excluded #{} :stub-globals #{}} units))
+(println (str "CLOSURE_STUB_REMOTES " (vec (sort (:excluded census)))))
+(println (str "CLOSURE_STUB_GLOBALS " (count (:stub-globals census))))
+; 3. Source compile + emission of the compiler definitions that call lower.
+(def wanted ["eval_form"])
+(def light
+ (mapv (fn [u] (assoc u :defs (bootstrap/definition-values (rest (rd/read-string (:source u) (:path u))) (:ns u) (:path u))))
+       units))
+(def light-plan (bootstrap/link-plan (dissoc metadata :sealed) light))
+(def cu (first (filter #(= "compiler" (:ns %)) light)))
+(doseq [name wanted]
+ (let [d (first (filter #(= name (:name %)) (:defs cu)))
+       _ (c/reset-fresh!)
+       node (c/compile (:form d) (assoc (c/new-env "compiler") :file (:path cu) :target :js))
+       text (bootstrap/emit-definition light-plan cu (assoc d :node node))]
+  (File/write! (str out "/beam-" name ".scm") text)
+  (println (str "BEAM_EMIT compiler/" name " " (count text) "B sha=" (artifact/sha text)
+                " lower-remotes=" (count (re-seq #"native-remote \"Elixir\.BeamLisp\.Ns\.Lower/" text))))))
+(println "STUBS_DONE")

@@ -1,0 +1,72 @@
+(ns sealed-link-test
+ "N3: a sealed image (BeamLisp.Env/seal!) links a global call to the
+  procedure its var holds and refuses any later redefinition; a dev image
+  keeps today's fetched Var. Sealing is node-wide, so every test restores the
+  dev state in `finally`.")
+
+(defn- compile-in [ns source]
+ (BeamLisp.Compiler/compile (first (BeamLisp.Reader/read_string source))
+   (BeamLisp.Compiler/new_env ns)))
+
+(defn- unseal! [] (persistent_term/erase :bl_sealed_image))
+
+(defn- fixture! [] (BeamLisp/eval "(ns sealed-link-fixture)
+ (defn twice [x] (* 2 x))
+ (defn arities ([x] x) ([x y] (+ x y)) ([x y & more] (reduce + (+ x y) more)))
+ (def alias-twice twice)
+ (def alias-arities arities)
+ (def closure-value (let [k 3] (fn [x] (+ k x))))
+ (def per-call-counter (atom 0))"))
+
+(deftest dev-image-keeps-the-fetched-var
+ (fixture!)
+ (is (= false (BeamLisp.Env/sealed?)))
+ (is (= :error (BeamLisp.Env/sealed_value "sealed-link-fixture" "alias-twice" true)))
+ (let [node (compile-in "sealed-link-fixture" "(alias-twice 21)")]
+  (is (= :invoke (:op node)))
+  (is (= :global (:op (:callee node)))))
+ ; Redefinition is allowed in a dev image.
+ (is (= 5 (BeamLisp/eval "(ns sealed-link-fixture) (def scratch 4) (def scratch 5) scratch"))))
+
+(deftest sealed-image-links-global-calls-directly
+ (fixture!)
+ (let [dev-fixed (compile-in "sealed-link-fixture" "(alias-twice 21)")
+       dev-multi (compile-in "sealed-link-fixture" "(alias-arities 1 2 3 4)")
+       dev-closure (compile-in "sealed-link-fixture" "(closure-value 4)")]
+  (try
+   (BeamLisp.Env/seal!)
+   (is (= true (BeamLisp.Env/sealed?)))
+   (let [fixed (compile-in "sealed-link-fixture" "(alias-twice 21)")
+         qualified (compile-in "user" "(sealed-link-fixture/alias-twice 21)")
+         one (compile-in "sealed-link-fixture" "(alias-arities 7)")
+         multi (compile-in "sealed-link-fixture" "(alias-arities 1 2 3 4)")
+         closure (compile-in "sealed-link-fixture" "(closure-value 4)")
+         module (BeamLisp.Link/module_for "sealed-link-fixture")]
+    ; The var's procedure, as a static remote call (the defn's own module).
+    (is (= [:remote module :twice] [(:op fixed) (:mod fixed) (:fun fixed)]))
+    (is (= [:remote module :twice] [(:op qualified) (:mod qualified) (:fun qualified)]))
+    (is (= [:remote module :arities] [(:op one) (:mod one) (:fun one)]))
+    (is (= [:remote module :arities__bl_v] [(:op multi) (:mod multi) (:fun multi)]))
+    ; A closure value has no static procedure: it stays a fetched invoke.
+    (is (= dev-closure closure))
+    ; Sealed and dev code compute the same answers.
+    (is (= 42 (BeamLisp/eval "(sealed-link-fixture/alias-twice 21)")))
+    (is (= 10 (BeamLisp/eval "(sealed-link-fixture/alias-arities 1 2 3 4)")))
+    (is (= 7 (BeamLisp/eval "(sealed-link-fixture/closure-value 4)")))
+    (is (= :invoke (:op dev-fixed)))
+    (is (= :invoke (:op dev-multi))))
+   (finally (unseal!)))))
+
+(deftest sealed-image-refuses-redefinition
+ (fixture!)
+ (try
+  (BeamLisp.Env/seal!)
+  (let [message (fn [source] (try (BeamLisp/eval source) nil (catch e (str (:message e) " " (ex-message e) " " (pr-str e)))))]
+   (is (re-find #"sealed image: cannot redefine sealed-link-fixture/twice"
+                (str (message "(ns sealed-link-fixture) (defn twice [x] (* 3 x))"))))
+   (is (re-find #"sealed image: cannot redefine sealed-link-fixture/alias-twice"
+                (str (message "(ns sealed-link-fixture) (def alias-twice 0)"))))
+   ; The old procedure is untouched, and a NEW name is still definable.
+   (is (= 42 (BeamLisp/eval "(sealed-link-fixture/twice 21)")))
+   (is (= 9 (BeamLisp/eval "(ns sealed-link-fixture) (def fresh-after-seal 9) fresh-after-seal"))))
+  (finally (unseal!))))
