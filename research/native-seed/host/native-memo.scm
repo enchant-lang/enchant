@@ -138,11 +138,31 @@
   (cons "nif_seen_admit" native-memo-seen-admit)
   (cons "nif_collect_cycles" (lambda () 0))
   (cons "nif_collector_status" (lambda () ""))))
+;; A sealed image emits each definition's own binding and arity cells
+;; (`v_<ns/name>`, `v_<ns/name>$N`) before registering it, and its local calls
+;; read those cells directly. As erlang:load_nif replaces the module's own
+;; functions on BEAM, the counterpart rebinds them too (dev images read the
+;; registry through native-link!).
+(define (native-memo-binding-name ns name)
+ (string-append "v" (apply string-append
+  (map (lambda (c) (string-append "_" (number->string (char->integer c))))
+       (string->list (string-append ns "/" name))))))
+(define (native-memo-rebind! symbol value)
+ (let ((cell (##make-global-var symbol)))
+  (if (not (##unbound? (##global-var-ref cell))) (##global-var-set! cell value))))
+(define (native-memo-install-cells! ns name nif)
+ (let ((binding (native-memo-binding-name ns name)))
+  (native-memo-rebind! (string->symbol binding) nif)
+  (let loop ((arity 0))
+   (if (<= arity 8)
+    (begin (native-memo-rebind! (string->symbol (string-append binding "$" (number->string arity))) nif)
+           (loop (+ arity 1)))))))
 (define native-register-without-memo-nifs native-register!)
 (set! native-register! (lambda (ns name value)
  (native-register-without-memo-nifs ns name
   (if (string=? ns native-memo-ns)
-   (let ((nif (assoc name native-memo-nifs))) (if nif (cdr nif) value))
+   (let ((nif (assoc name native-memo-nifs)))
+    (if nif (begin (native-memo-install-cells! ns name (cdr nif)) (cdr nif)) value))
    value))))
 
 ;; ── Erlang/OTP and Elixir BIFs the compiled lazy modules call ──────────────

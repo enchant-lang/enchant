@@ -304,20 +304,26 @@
        value (if raw (:value raw) (scheme/emit (:node d) context))]
   (if (:name d)
    (let [binding (binding-name ns (:name d))
-         constants (constant-defines sink)]
+         constants (constant-defines sink)
+         cells (link-definition (:sealed? plan) ns (:name d) (:kind d) arities
+                                (if raw {(:arity raw) (:lambda raw)} {}))]
     ; A function's value is a closure, so its constants follow its head (and
     ; stay in its unit); any other value is evaluated now, after them.
     (str (if (= :fn (:kind d)) "" constants)
         "(define " binding " " value ")\n"
         (if (= :fn (:kind d)) constants "")
+        ; Sealed: the cells exist before registration, so a native counterpart
+        ; installed at native-register! (a NIF, as erlang:load_nif replaces the
+        ; module's own functions on BEAM) reaches local calls too. Dev images
+        ; register first: native-link! initializes its cells from the registry.
+        (if (:sealed? plan) cells "")
         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
         (when arities
          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
               (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))
-        (link-definition (:sealed? plan) ns (:name d) (:kind d) arities
-                         (if raw {(:arity raw) (:lambda raw)} {}))))
+        (if (:sealed? plan) "" cells)))
    (str value "\n"))))
 (defn emit-functions
  "The :fn definitions of `defs` (a window of `unit`), in order."
