@@ -158,7 +158,7 @@
    corpus that no longer exists."
   [entries]
   (sha256-hex
-    (str MANIFEST-VERSION "|" codebase/FACTS-VERSION "|"
+    (str (BeamLisp.Tiers/priv_root) "|" MANIFEST-VERSION "|" codebase/FACTS-VERSION "|"
          (join ";" (map (fn [e] (str (get e 0) " " (get e 1))) (to-list entries))))))
 
 (defn- readable-corpus
@@ -252,37 +252,24 @@
                :calls (to-list (or (:calls facts) []))
                :instr (to-list (or (:instr facts) []))))
 
-(defn facts-for
-  "One source's facts, from its content-addressed cache or freshly analyzed.
-
-   A pair whose path is nil is a namespace with no file of its own — the
-   language's own `codebase`/`typed` — resolved BY NAME through the load path,
-   which is what resolves in a checkout and in a release alike.
-
-   The return says WHERE they came from — a run that re-analyzed every file and
-   a run that re-analyzed none must not look alike — and the cache is written on
-   a miss so the next run is the other case.
-
-   `sigs` are the type seeds the indexer reads return annotations against."
-  [sigs root ns-str path]
-  (let [src (source-text ns-str path)
-        sha (sha256-hex src)
-        p (facts-path root sha)
-        hit (read-facts p)
-        ; Require edges are µs to derive and are NEVER trusted to the facts
-        ; cache: a stale cached edge is a wrong graph the cycle check would
-        ; swear by. The seconds-cost streams (fn/calls/instr) keep the cache;
-        ; the graph is re-read from the source in hand, hit or miss.
-        requires (codebase/requires-facts ns-str src)]
-    (if (some? hit)
-      {:facts (assoc (norm-facts hit) :requires requires) :from :cache :sha sha}
-      (flight/with-key [:code.index/facts p (provenance/definition-revision)]
-        (fn []
-          (if-let [shared (read-facts p)]
-            {:facts (assoc (norm-facts shared) :requires requires) :from :cache :sha sha}
+(defn facts-from-source
+  "One immutable facts artifact shared by code/index and bl ask. Namespace,
+   source, type seeds, mode and SDK are all part of its persistent identity."
+  [sigs root ns-str src]
+  (let [sha (sha256-hex src) identity (codebase/analysis-key sigs ns-str src {})
+        key (when identity (Base/encode16 identity (list (tuple :case :lower))))
+        path (when key (facts-path root key))
+        requires (codebase/requires-facts ns-str src)
+        read (fn [] (when path (read-facts path)))
+        run (fn []
+          (if-let [hit (read)] {:facts (assoc (norm-facts hit) :requires requires) :from :cache :sha sha}
             (let [facts (norm-facts (codebase/index-source sigs ns-str src))]
-              (write-facts! p facts)
-              {:facts facts :from :analyzed :sha sha})))))))
+              (when path (write-facts! path facts))
+              {:facts facts :from :analyzed :sha sha})))]
+    (if identity (flight/with-key [:code.index/facts identity] run) (run))))
+
+(defn facts-for [sigs root ns-str path]
+  (facts-from-source sigs root ns-str (source-text ns-str path)))
 
 ; ── the conn ─────────────────────────────────────────────────────────────
 
@@ -530,16 +517,17 @@
   (let [t0 (System/monotonic_time :millisecond)
         corpus (readable-corpus pairs)
         k (key-of (:sources corpus))
+        seeds (codebase/analysis-key sigs "code.index" "" {})
         h (get-in (deref held) [:by-key k])
         ms (fn [] (- (System/monotonic_time :millisecond) t0))
         tell (fn [m] (if (some? report) (report m) nil))]
-    (if (and (some? h) (datom/alive? (:conn h)))
+    (if (and seeds (= seeds (:seed-identity h)) (some? h) (datom/alive? (:conn h)))
       (do (tell {:phase :ready :hit true :ms (ms) :stats (:stats h)}) h)
       (try
         (let [built (assemble! sigs (:pairs corpus) root report opts)
               stats (with-read-skips (:stats built) (:skipped corpus))
               v (assoc built
-                       :key k
+                       :key k :seed-identity seeds
                        :built-at (System/monotonic_time :millisecond)
                        :stats stats
                        :sources (:sources corpus))]

@@ -3,7 +3,7 @@
            [data.derivation :as derivation] [data.projection :as projection]
            [codebase :as cb] [bl.check :as check] [datom :as d]
            [datom.watch :as watch] [datom.profile :as profile]
-           [datom.query.rank-demand :as demand] [deodorant]))
+           [datom.query.rank-demand :as demand] [deodorant] [code.index :as index] [bl.ask :as ask]))
 (defn- settled [h]
  (let [until (+ 10000 (erlang/monotonic_time :millisecond))]
   (loop [] (let [r (projection/read h)]
@@ -137,3 +137,29 @@
    ;; Nested consumers execute under an existing holder rather than acquiring
    ;; a third slot; return/death release the holder's native ownership.
    (finally (doseq [p holders] (erlang/send p :release))))))
+
+(deftest persisted-facts-share-across-tools-without-confusing-analysis-inputs
+ (let [root (str (System/tmp_dir!) "/shared-facts-" (erlang/unique_integer (list :positive)))
+       previous (System/get_env "BL_CACHE_DIR") src "(defn same [x] x)"]
+  (try
+   (System/put_env "BL_CACHE_DIR" root)
+   (let [a (index/facts-from-source {} root "scope.a" src)
+         b (index/facts-from-source {} root "scope.b" src)
+         again (index/facts-from-source {} root "scope.a" src)]
+    (is (= :analyzed (:from a))) (is (= :analyzed (:from b)))
+    (is (= :cache (:from again)))
+    (is (= #{"scope.a"} (set (map :fn/ns (get-in a [:facts :fn])))))
+    (is (= #{"scope.b"} (set (map :fn/ns (get-in b [:facts :fn])))))
+    (is (= (:facts a) (:facts again))))
+   (let [key (cb/analysis-key {} "scope.a" src {})]
+    (is (not= key (cb/analysis-key {:seed :one} "scope.a" src {})))
+    (is (not= key (cb/analysis-key {} "scope.a" src {:mode :calls})))
+    (is (nil? (cb/analysis-key {:opaque (fn [] 1)} "scope.a" src {}))))
+   (let [source "(ns shared.ask) (defn next [x] (inc x))"
+         indexed (index/facts-from-source {} root "shared.ask" source)
+         from-ask (ask/source-facts {} source root)]
+    (is (= (get-in indexed [:facts :fn]) (:fn from-ask)))
+    (is (= (get-in indexed [:facts :calls]) (:calls from-ask)))
+    (is (= :cache (:from (index/facts-from-source {} root "shared.ask" source)))))
+   (finally (if previous (System/put_env "BL_CACHE_DIR" previous) (System/delete_env "BL_CACHE_DIR"))
+            (File/rm_rf! root)))))

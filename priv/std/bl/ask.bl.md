@@ -184,13 +184,10 @@ index, and a changed byte changes the hash, so a stale entry is unreachable.
    definition and call facts, from the cache when this exact text has been
    indexed before."
   [sigs src root]
-  (let [sha (sha256-hex (str codebase/FACTS-VERSION "\n" src))]
-    (or (cached-analysis "facts" sha root)
-        (let [ns-str (u/ns-of src)
-              facts (codebase/index-source sigs ns-str src)
-              entry {:ns ns-str :fn (u/to-list (:fn facts)) :calls (u/to-list (:calls facts))}]
-          (remember-analysis! "facts" sha entry root)
-          entry))))
+  (let [ns-str (u/ns-of src)
+        r (code.index/facts-from-source sigs root ns-str src)]
+    {:ns ns-str :fn (u/to-list (get-in r [:facts :fn]))
+     :calls (u/to-list (get-in r [:facts :calls]))}))
 
 (def tx-batch
   "Facts per transaction. Large enough to amortise the per-transaction cost,

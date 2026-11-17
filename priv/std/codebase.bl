@@ -556,6 +556,15 @@
     (if (= :calls (:mode options))
       (assoc facts :index-mode :calls :coverage {:returns :not-requested}) facts))))
 
+(defn analysis-key
+  "Persistent identity of the exact declared analysis inputs and qualified SDK.
+   Opaque seed vocabularies decline caching instead of sharing a source-only key."
+  [sigs ns-str src options]
+  (when (string? src)
+    (when-let [seeds (cache/fingerprint sigs)]
+      (cache/fingerprint [FACTS-VERSION (BeamLisp.Tiers/priv_root) ns-str
+                          (sha256-hex src) seeds options]))))
+
 (defn index-source
   "Share immutable facts by exact source, seed vocabulary, namespace and mode.
    Connections remain caller-owned. Unknown/opaque seeds use ordinary indexing;
@@ -705,7 +714,7 @@
    `entries` is `[[ns-string sha] …]`."
   [model-id entries]
   (sha256-hex
-    (str model-id "|" FACTS-VERSION "|"
+    (str (BeamLisp.Tiers/priv_root) "|" model-id "|" FACTS-VERSION "|"
          (join ";" (map (fn [e] (str (get e 0) " " (get e 1))) (to-list entries))))))
 
 (defn manifest-path
@@ -850,7 +859,9 @@
    it, and the fill did not run — or `:filled`."
   ([sigs ns-str src] (analyze-cached sigs ns-str src {}))
   ([sigs ns-str src opts]
-  (let [sha (sha256-hex (str FACTS-VERSION "\n" src))
+  (let [identity (analysis-key sigs ns-str src {})
+        sha (or (when identity (Base/encode16 identity (list (tuple :case :lower))))
+                (sha256-hex (str FACTS-VERSION "\n" src)))
         columns (:columns opts [])
         ; The store follows the SOURCES, not the shell that invoked the command:
         ; a corpus in another tree cannot scatter its stores into the cwd.
@@ -862,7 +873,7 @@
         ; so this costs nothing when the column is there, and it is what EVOLVES
         ; a store written before the column existed.
         column-schema (concat (mapcat :schema columns) [FILLED-WITH])]
-    (if-not (and (cache-available?) (cache-writable? (blanalysis-dir root)))
+    (if-not (and identity (cache-available?) (cache-writable? (blanalysis-dir root)))
       ; no persistent backend, or a directory we cannot write: index fresh into
       ; an in-memory conn (uncached)
       (let [conn (connect-codebase column-schema)]
