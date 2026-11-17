@@ -873,6 +873,51 @@
                     (apply list (concat fixed-args (list (anf-list rest-args))))))
       :else nil))))
 
+(defn- sealed-link-info
+  "The `{module, arity→fname, variadic-or-nil}` triple of a BL function VALUE
+   when every arm is an exported function of one module (a defn's capture, or
+   the `$blfn` tag `Emit/fn_value` builds), else nil."
+  [v]
+  (let [arm (fn [f n]
+              (when (and (erlang/is_function f n)
+                         (= :external (erlang/element 2 (erlang/fun_info f :type))))
+                (list (erlang/element 2 (erlang/fun_info f :module))
+                      (erlang/element 2 (erlang/fun_info f :name)))))]
+    (cond
+      (erlang/is_function v)
+        (let [n (erlang/element 2 (erlang/fun_info v :arity)) mf (arm v n)]
+          (when mf (tuple (first mf) {n (second mf)} nil)))
+      (and (erlang/is_tuple v) (= 3 (erlang/tuple_size v))
+           (= (erlang/binary_to_atom "$blfn") (erlang/element 1 v))
+           (erlang/is_map (erlang/element 2 v)))
+        (let [fixed (maps/to_list (erlang/element 2 v))
+              vrest (erlang/element 3 v)
+              arms (map (fn [pair] (arm (erlang/element 2 pair) (erlang/element 1 pair))) fixed)
+              varm (when (and (erlang/is_tuple vrest) (= 2 (erlang/tuple_size vrest)))
+                     (arm (erlang/element 2 vrest) (inc (erlang/element 1 vrest))))
+              mods (distinct (map first (if varm (cons varm arms) arms)))]
+          (when (and (every? some? arms) (or (nil? vrest) (some? varm)) (= 1 (count mods)))
+            (tuple (first mods)
+                   (reduce (fn [m pair] (assoc m (erlang/element 1 (first pair)) (second (second pair))))
+                           {} (map list fixed arms))
+                   (when varm (tuple (erlang/element 1 vrest) (second varm))))))
+      :else nil)))
+
+(defn- sealed-call
+  "N3 · sealed direct links. In a SEALED image (`BeamLisp.Env/seal!`, the
+   release build flag) no var can be rebound, so a call whose `:global` callee
+   selects an exported BL function compiles to the same static remote call a
+   linked defn gets (`linked-call`), instead of fetching the var and invoking
+   it. nil (keep the fetched global) in a dev image, for any other value and
+   when the arity does not match. The answer comes from the var the runtime
+   fetch would select (`Env/sealed_value`), which sealing makes immutable."
+  [callee arg-nodes env]
+  (when (and (= :global (:op callee))
+             (erlang/function_exported :Elixir.BeamLisp.Env :sealed_value 3))
+    (let [r (BeamLisp.Env/sealed_value (:ns callee) (:name callee) (= :exact (:lookup callee)))
+          info (when (erlang/is_tuple r) (sealed-link-info (erlang/element 2 r)))]
+      (when info (linked-call info arg-nodes env)))))
+
 (defn- core-qualified
   "Map `clojure.core/x` to `core/x`, leaving every other name unchanged.
 
@@ -1255,7 +1300,8 @@
                     direct (if (nil? info) nil (linked-call info arg-nodes env))]
                 (if (some? direct)
                   (ready-guard tns direct env)
-                  (anf-invoke (a/global-exact tns tvar) arg-nodes))))))
+                  (let [callee (a/global-exact tns tvar)]
+                    (or (sealed-call callee arg-nodes env) (anf-invoke callee arg-nodes))))))))
 
       ; (.method recv args…) — a Java instance method through the manifest.
       ; Keyed by method NAME (a call site names no class); the target is a
@@ -1315,7 +1361,8 @@
                            (linked-call (erlang/element 3 lo) arg-nodes env))]
               (if (some? direct)
                 (ready-guard (erlang/element 2 lo) direct env)
-                (anf-invoke (compile-symbol name env) arg-nodes))))))
+                (let [callee (compile-symbol name env)]
+                  (or (sealed-call callee arg-nodes env) (anf-invoke callee arg-nodes))))))))
 
       ; (expr args) with a compound head — compile it, then call it
       :else
@@ -2401,13 +2448,15 @@
       (= tag :set) (BeamLisp.Set/new (Enum/map (rn/node-items form) (fn [value] (datum value))))
       (= tag :map)
         ; build a plain map value from the key/value data; :maps.from_list
-        ; takes a list of {k, v} tuples, which is what each pair becomes
+        ; takes a list of {k, v} tuples, which is what each pair becomes. Each
+        ; key is its canonical key (Q3), as an evaluated literal's is:
+        ; `(get '{1.0 :x} 1)` is :x.
         (maps/from_list
           (Enum/map (rn/node-items form)
             (fn [pair]
               (let [kv (erlang/tuple_to_list pair)]
                 (erlang/list_to_tuple
-                  (list (datum (first kv)) (datum (second kv))))))))
+                  (list (BeamLisp.Ns.Rt/hash_key (datum (first kv))) (datum (second kv))))))))
       :else form)))
 
 (defn- compile-quote

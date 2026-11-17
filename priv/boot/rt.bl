@@ -648,22 +648,18 @@
          :else (bad-call f n))
 
        ;; Sets are functions of their members: the member, or the default.
+       ;; The answer is the STORED member, the canonical key (Q3): `(#{1} 1.0)`
+       ;; is 1. `get` owns that, as it does for maps.
        (erlang/== kd :set)
        (cond
-         (erlang/== n 1)
-         (cond (BeamLisp.Set/member? f (erlang/hd args)) (erlang/hd args) :else nil)
-         (erlang/== n 2)
-         (cond (BeamLisp.Set/member? f (erlang/hd args)) (erlang/hd args)
-               :else (erlang/hd (erlang/tl args)))
+         (erlang/== n 1) (facade-get f (erlang/hd args))
+         (erlang/== n 2) (facade-get f (erlang/hd args) (erlang/hd (erlang/tl args)))
          :else (bad-call f n))
 
        (erlang/== kd :sorted-set)
        (cond
-         (erlang/== n 1)
-         (cond (BeamLisp.Sorted/set_member? f (erlang/hd args)) (erlang/hd args) :else nil)
-         (erlang/== n 2)
-         (cond (BeamLisp.Sorted/set_member? f (erlang/hd args)) (erlang/hd args)
-               :else (erlang/hd (erlang/tl args)))
+         (erlang/== n 1) (facade-get f (erlang/hd args))
+         (erlang/== n 2) (facade-get f (erlang/hd args) (erlang/hd (erlang/tl args)))
          :else (bad-call f n))
 
        (erlang/== kd :sorted-map)
@@ -1296,9 +1292,17 @@
                   `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :nth) ~(tuple2 :arity 2)))))
 
 (defn k-nth
+  ; FAST PATHS FIRST. A list or a vector with a non-negative integer index is
+  ; the common access; it is answered here by exactly what the clauses below
+  ; reach for it (`lists-at` → `nth-list`, `struct-of?` → `Vector/nth`), with
+  ; inline type tests and no classifier. Every other input takes those clauses.
   ([x i]
    (cond
-    (erlang/is_list x) (lists-at x i)
+    (erlang/is_list x) (cond (and (erlang/is_integer i) (erlang/>= i 0)) (nth-list x i)
+                             :else (lists-at x i))
+    (and (erlang/is_integer i) (erlang/>= i 0) (erlang/is_map x)
+         (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector"))
+    (BeamLisp.Vector/nth x i)
     (erlang/== false (erlang/is_integer i)) (cond (erlang/== x nil) nil
                                                   (struct-of? x :"Elixir.BeamLisp.Vector") (BeamLisp.Vector/nth x i)
                                                   (erlang/== (kind-kind x) :tuple) nil
@@ -1322,7 +1326,12 @@
         :else (nth-refuse x)))))
 
   ([x i default]
-   (let [v (k-nth x i)]
+   (let [v (cond
+             (and (erlang/is_integer i) (erlang/>= i 0))
+             (cond (erlang/is_list x) (nth-list x i)
+                   (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector")) (BeamLisp.Vector/nth x i)
+                   :else (k-nth x i))
+             :else (k-nth x i))]
      (cond
        (erlang/== v nil) (cond (in-range? x i) nil :else default)
        :else v))))
@@ -1438,21 +1447,30 @@
 
 
 ;; ════ rt.hash ══════════════════════════════════════════════════════════════════
-; rt/hash.bl — the value a hash boundary sees.
+; rt/hash.bl — the value a hash boundary sees: the CANONICAL KEY.
 ;
-; Metadata is invisible to `eqv`, so it must be invisible to HASHING: otherwise
-; `(= a b)` is true while `(get {a :x} b)` is nil, and the same value counts
-; twice under `distinct` or in a set. Elixir's maps and MapSets key on the raw
-; term, which DOES see the struct's `:meta` field, so the metadata is stripped
-; here — at every hash boundary, recursively, because a vector holding a
-; metadata-bearing vector has to hash like the plain one.
+; THE LAW (Q3, research/native-seed/speed/keys/DECISION.md): two keys are the
+; same key of a map, set or sorted collection exactly when `(= k1 k2)`. The
+; stores themselves (BEAM maps, `MapSet`, `gb_trees`) compare raw terms, so
+; every key is replaced, at every key boundary, by ONE canonical representative
+; of its `=` class. Equal keys are then the identical term, so they also hash
+; equal; nothing about the store or the value layout changes.
 ;
-; THE COMMON CASE MUST NOT ALLOCATE. This runs on every map and set key
-; operation, and the overwhelmingly common answer is "nothing anywhere carries
-; metadata". So the walk is short-circuited (it descends only as far as the
-; first metadata) and a value with none is returned AS ITSELF, not rebuilt.
-
-
+; THE REPRESENTATIVE.
+;   * metadata is invisible to `=`, so it is stripped, recursively;
+;   * an integral number (int, float or decimal) is the INTEGER: 1.0 -> 1,
+;     -0.0 -> 0, 1.00M -> 1;
+;   * a non-integral decimal whose value a binary64 float holds exactly is that
+;     FLOAT (1.50M -> 1.5); any other decimal drops trailing zeros (0.10M ->
+;     0.1M) and is never rounded to a float (0.1M stays 0.1M: (= 0.1M 0.1) is
+;     false);
+;   * a non-integral float is itself;
+;   * collections, tuples and records are rebuilt from canonical elements.
+;
+; THE COMMON CASE MUST NOT ALLOCATE OR WALK. An integer, keyword or string is
+; answered by its type test before anything else (1, 2 and 3 guards), and a
+; composite that needs nothing is returned AS ITSELF, not rebuilt: the walk
+; only proves that, descending no further than the first value to change.
 
 ;; ── representation predicates ──────────────────────────────────────────────
 ; Literal module atoms, like the classifier: comparing against a literal is
@@ -1465,139 +1483,195 @@
 
 (defn- dense-items?
   "A vector's `:items` is a dense tuple, OR a 5-tuple tagged `:bl_vec` for the
-   trie form. Only the dense form is walked here; a trie node's metadata is
-   reached through the same walk when it is a leaf."
+   trie form."
   [t]
   (and (erlang/is_tuple t)
        (erlang/== false (and (erlang/== 5 (erlang/tuple_size t))
                              (erlang/== :bl_vec (erlang/element 1 t))))))
 
-(declare carries-meta?)
+(defn- meta-wrapper? [x]
+  (and (erlang/is_tuple x) (erlang/== 3 (erlang/tuple_size x))
+       (erlang/== :meta (erlang/element 1 x))))
+
+(declare key-dirty?)
 
 (declare hash-hash-key)
 
-(defn- any-meta-in-list? [xs]
+(declare pow10)
+
+;; ── canonical numbers ──────────────────────────────────────────────────────
+; Each `*-canon` answers nil when its argument is ALREADY canonical, and the
+; replacement otherwise, so one computation serves both the walk ("does
+; anything change?") and the rebuild. nil is never a canonical number.
+
+(defn- float-canon
+  "An integral float's equal integer (0.0 and -0.0 are 0), else nil. `trunc`
+   is exact and Erlang compares an integer with a float exactly, so this holds
+   for every finite float, 1.0e300 included."
+  [f]
+  (let [t (erlang/trunc f)]
+    (cond (erlang/== t f) t :else nil)))
+
+(defn- decimal-float
+  "The binary64 float equal to `n / 2^s` (n odd, s >= 1), or nil when there is
+   none: an odd numerator needs every significand bit, so it must be below
+   2^53, and the last bit must be at or above 2^-1074. Both divisions are then
+   exact IEEE divisions of exact operands; 2^s is split above 2^1000 so its
+   float stays finite."
+  [n s]
+  (cond
+    (erlang/>= (erlang/abs n) 9007199254740992) nil
+    (erlang/> s 1074) nil
+    (erlang/=< s 1000) (erlang// n (erlang/bsl 1 s))
+    :else (erlang// (erlang// n (erlang/bsl 1 537)) (erlang/bsl 1 (erlang/- s 537)))))
+
+(defn- decimal-fraction
+  "`d` reduced to `u/10^s` (u not divisible by 10, s >= 1): the float with
+   that exact value when one exists, else the decimal without its trailing
+   zeros — nil when that is `d` itself."
+  [d u s reduced?]
+  ; u/10^s is dyadic iff 5^s divides u; then it is (u/5^s)/2^s with an ODD
+  ; numerator (an even one would make u divisible by 10).
+  (let [p5 (erlang/div (pow10 s) (erlang/bsl 1 s))
+        f (cond (erlang/== 0 (erlang/rem u p5)) (decimal-float (erlang/div u p5) s)
+                :else nil)]
+    (cond
+      (erlang/=/= nil f) f
+      reduced? nil
+      :else (maps/put :scale s (maps/put :unscaled u d)))))
+
+(defn- decimal-canon [d]
+  (let [u (BeamLisp.Decimal/unscaled d)
+        s (BeamLisp.Decimal/scale d)]
+    (cond
+      (erlang/=< s 0) (erlang/* u (pow10 (erlang/- 0 s)))
+      (erlang/== u 0) 0
+      :else
+      (loop [uu u ss s]
+        (cond
+          (erlang/== ss 0) uu
+          (erlang/== 0 (erlang/rem uu 10)) (recur (erlang/div uu 10) (erlang/- ss 1))
+          :else (decimal-fraction d uu ss (erlang/== ss s)))))))
+
+;; ── the walk: does anything inside change? ─────────────────────────────────
+
+(defn- key-dirty-list? [xs]
   (loop [ys xs]
     (cond
-      (erlang/== false (erlang/is_list ys)) false
       (erlang/== ys ()) false
-      :else (cond (carries-meta? (erlang/hd ys)) true
-                  :else (recur (erlang/tl ys))))))
+      (erlang/is_list ys) (cond (key-dirty? (erlang/hd ys)) true
+                                :else (recur (erlang/tl ys)))
+      :else false)))
 
-(defn- needs-normalizing?
-  "Whether any element of a dense items tuple carries metadata."
-  [t]
-  (loop [i 0]
+(defn- key-dirty-tuple?
+  "Whether any element of tuple `t`, from 1-based position `from`, changes."
+  [t from]
+  (loop [i from]
     (cond
-      (erlang/>= i (erlang/tuple_size t)) false
-      :else (cond (carries-meta? (erlang/element (erlang/+ i 1) t)) true
-                  :else (recur (erlang/+ i 1))))))
+      (erlang/> i (erlang/tuple_size t)) false
+      (key-dirty? (erlang/element i t)) true
+      :else (recur (erlang/+ i 1)))))
 
-(defn- any-meta-in-map? [m]
+(defn- key-dirty-map? [m]
   (loop [iter (maps/iterator m)]
     (let [nx (maps/next iter)]
       (cond
         (erlang/== nx :none) false
-        :else (let [k (erlang/element 1 nx)
-                    v (erlang/element 2 nx)
-                    rest-iter (erlang/element 3 nx)]
-                (cond
-                  (carries-meta? k) true
-                  (carries-meta? v) true
-                  :else (recur rest-iter)))))))
+        (key-dirty? (erlang/element 1 nx)) true
+        (key-dirty? (erlang/element 2 nx)) true
+        :else (recur (erlang/element 3 nx))))))
 
-(defn- carries-meta?
-  "Whether `x` holds metadata anywhere inside it. A scalar answers immediately
-   (one tag test), so a deep structure is only walked as far as its first
-   metadata."
+(defn- vector-dirty? [x]
+  (cond
+    (erlang/=/= nil (maps/get :meta x nil)) true
+    ; no `:items` field: the JS target's vector (PLAN-163 C2)
+    (erlang/== false (erlang/is_map_key :items x)) (key-dirty-list? (BeamLisp.Vector/to_list x))
+    :else (let [items (erlang/map_get :items x)]
+            (cond (dense-items? items) (key-dirty-tuple? items 1)
+                  :else (key-dirty-list? (BeamLisp.Vector/to_list x))))))
+
+(defn- key-dirty?
+  "Whether `x`'s canonical key differs from `x`. Integers, keywords and strings
+   answer on their own type test, first."
   [x]
   (cond
-    (and (erlang/is_tuple x) (erlang/== 3 (erlang/tuple_size x))
-         (erlang/== :meta (erlang/element 1 x)))
-      true
+    (erlang/is_integer x) false
+    (erlang/is_atom x) false
+    (erlang/is_binary x) false
+    (erlang/is_float x) (erlang/=/= nil (float-canon x))
+    (erlang/is_tuple x) (cond (meta-wrapper? x) true :else (key-dirty-tuple? x 1))
     (erlang/is_map x)
     (let [mod (hash-struct-mod x)]
       (cond
-        (erlang/== mod :"Elixir.BeamLisp.Vector")
-        (let [meta (erlang/map_get :meta x)]
-          (cond
-            (erlang/=/= nil meta) true
-            ; no `:items` field: the JS target's vector (PLAN-163 C2)
-            (erlang/== false (erlang/is_map_key :items x)) (any-meta-in-list? (BeamLisp.Vector/to_list x))
-            :else
-            (let [items (erlang/map_get :items x)]
-              (cond (dense-items? items) (needs-normalizing? items)
-                    :else false))))
-
-        (erlang/== mod :"Elixir.BeamLisp.Set")
-        (any-meta-in-list? (BeamLisp.Set/to_list x))
-
-        ;; another struct: not a collection, and its fields are not user data
-        (erlang/=/= nil mod) false
-
-        :else (any-meta-in-map? x)))
-
-    (erlang/is_list x) (any-meta-in-list? x)
+        (erlang/== mod nil) (key-dirty-map? x)
+        (erlang/== mod :"Elixir.BeamLisp.Vector") (vector-dirty? x)
+        (erlang/== mod :"Elixir.BeamLisp.Set") (key-dirty-list? (BeamLisp.Set/to_list x))
+        (erlang/== mod :"Elixir.BeamLisp.Decimal") (erlang/=/= nil (decimal-canon x))
+        ; a record's field VALUES are data (`=` compares them); any other
+        ; struct is opaque and keys as itself
+        (BeamLisp.Record/record_module? mod) (key-dirty-map? x)
+        :else false))
+    (erlang/is_list x) (key-dirty-list? x)
     :else false))
 
 ;; ── the hash key ───────────────────────────────────────────────────────────
 
-(defn- normalize-map [m]
-  (maps/from_list (k-to-list
-                        (map (fn [pair] (tuple2 (hash-hash-key (erlang/element 1 pair))
-                                                    (hash-hash-key (erlang/element 2 pair))))
-                             (maps/to_list m)))))
+(defn- canon-list [xs] (k-to-list (map (fn [e] (hash-hash-key e)) xs)))
 
-(defn- normalize-set [s]
-  (BeamLisp.Set/new (k-to-list (map (fn [x] (hash-hash-key x)) (BeamLisp.Set/to_list s)))))
+(defn- normalize-map
+  "Every key and value canonical. Also right for a record: its field names and
+   `__struct__` tag are atoms, which are their own keys."
+  [m]
+  (maps/from_list (k-to-list
+                    (map (fn [pair] (tuple2 (hash-hash-key (erlang/element 1 pair))
+                                            (hash-hash-key (erlang/element 2 pair))))
+                         (maps/to_list m)))))
+
+(defn- canon-vector [x]
+  (cond
+    (erlang/== false (vector-dirty? x)) x
+    (erlang/== false (erlang/is_map_key :items x))
+      (BeamLisp.Vector/new (canon-list (BeamLisp.Vector/to_list x)))
+    :else
+    (let [items (erlang/map_get :items x)
+          bare (cond (erlang/== nil (erlang/map_get :meta x)) x
+                     :else (maps/put :meta nil x))]
+      (cond
+        (dense-items? items)
+          (cond (key-dirty-tuple? items 1)
+                  (maps/put :items (erlang/list_to_tuple (canon-list (erlang/tuple_to_list items))) bare)
+                :else bare)
+        (key-dirty-list? (BeamLisp.Vector/to_list x))
+          (BeamLisp.Vector/new (canon-list (BeamLisp.Vector/to_list x)))
+        :else bare))))
 
 (defn hash-hash-key
-  "A value normalized for use as a hash key: metadata stripped throughout, and
-   the SAME term returned whenever there was none to strip."
+  "The canonical key of `x`: equal under `=` iff the identical term, and the
+   SAME term returned whenever nothing had to change (see the section header)."
   [x]
   (cond
-    (and (erlang/is_tuple x) (erlang/== 3 (erlang/tuple_size x))
-         (erlang/== :meta (erlang/element 1 x)))
-      (hash-hash-key (erlang/element 2 x))
+    (erlang/is_integer x) x
+    (erlang/is_atom x) x
+    (erlang/is_binary x) x
+    (erlang/is_float x) (let [c (float-canon x)] (cond (erlang/== nil c) x :else c))
+    (erlang/is_tuple x)
+    (cond (meta-wrapper? x) (hash-hash-key (erlang/element 2 x))
+          (key-dirty-tuple? x 1) (erlang/list_to_tuple (canon-list (erlang/tuple_to_list x)))
+          :else x)
     (erlang/is_map x)
     (let [mod (hash-struct-mod x)]
       (cond
-        (erlang/== mod :"Elixir.BeamLisp.Vector")
-        (cond
-          ; no `:items` field: the JS target's vector (PLAN-163 C2) — rebuilt
-          ; from its normalized elements, which also drops the metadata
-          (erlang/== false (erlang/is_map_key :items x))
-          (cond (carries-meta? x) (BeamLisp.Vector/new (k-to-list (map (fn [e] (hash-hash-key e)) (BeamLisp.Vector/to_list x))))
-                :else x)
-          :else
-        (let [meta (erlang/map_get :meta x)
-              normalized (cond (erlang/== nil meta) x
-                               :else (maps/put :meta nil x))
-              items (erlang/map_get :items x)]
-          (cond
-            (dense-items? items)
-            (cond (needs-normalizing? items)
-                  (maps/put :items
-                            (erlang/list_to_tuple (k-to-list (map (fn [e] (hash-hash-key e))
-                                                                   (erlang/tuple_to_list items))))
-                            normalized)
-                  :else normalized)
-            :else normalized)))
-
+        (erlang/== mod nil) (cond (key-dirty-map? x) (normalize-map x) :else x)
+        (erlang/== mod :"Elixir.BeamLisp.Vector") (canon-vector x)
         (erlang/== mod :"Elixir.BeamLisp.Set")
-        (let [members (BeamLisp.Set/to_list x)]
-          (cond (any-meta-in-list? members) (normalize-set x)
-                :else x))
-
-        (erlang/=/= nil mod) x
-
-        :else (cond (any-meta-in-map? x) (normalize-map x)
-                    :else x)))
-
-    (erlang/is_list x)
-    (cond (any-meta-in-list? x) (k-to-list (map (fn [e] (hash-hash-key e)) x))
-          :else x)
-
+          (cond (key-dirty-list? (BeamLisp.Set/to_list x))
+                  (BeamLisp.Set/new (canon-list (BeamLisp.Set/to_list x)))
+                :else x)
+        (erlang/== mod :"Elixir.BeamLisp.Decimal")
+          (let [c (decimal-canon x)] (cond (erlang/== nil c) x :else c))
+        (BeamLisp.Record/record_module? mod) (cond (key-dirty-map? x) (normalize-map x) :else x)
+        :else x))
+    (erlang/is_list x) (cond (key-dirty-list? x) (canon-list x) :else x)
     :else x))
 
 
@@ -2148,8 +2222,9 @@
   (BeamLisp.Vector/new (raw-cons kk (raw-cons v ()))))
 
 (defn- coll-hash-key [k]
-  "The hash boundary, asked once: hashing must strip metadata, or `(= a b)` is
-   true while `{a :x}` cannot find `b`. The implementation belongs to rt.hash and
+  "The key boundary, asked once: every key is its canonical representative
+   (rt.hash), or `(= a b)` is true while `{a :x}` cannot find `b` — metadata,
+   `1` against `1.0`, `1.5M` against `1.50M`. The implementation belongs to rt.hash and
    is not duplicated here — this used to forward to the HOST runtime's
    `hash_key`, the module this cutover deletes (and the forwarder is named in
    prose nowhere else on purpose: `gap.bl` scans for that module's name and
@@ -2163,7 +2238,12 @@
    index access is decided before any map clause. A transient map reads through
    to its live state (`frequencies`/`group-by` do `(get transient k d)`). A
    reference type REFUSES: it is not a collection. Anything that is not a
-   lookup target answers the default, never an error."
+   lookup target answers the default, never an error.
+
+   Keys are value-equal (Q3): the canonical key is looked up, and a set answers
+   its STORED member. A map built outside the key paths (interop, a quoted
+   literal) may hold a raw non-canonical key, so a miss on a key that is not
+   its own canonical form also tries the exact raw term."
   ([m key] (coll-get m key nil))
   ([m key default]
    (let [kd (kind-kind m)]
@@ -2171,11 +2251,18 @@
        (erlang/== kd :vector)
          (if (and (erlang/is_integer key) (erlang/>= key 0) (erlang/< key (BeamLisp.Vector/count m)))
           (BeamLisp.Vector/nth m key) default)
-       (erlang/== kd :map) (maps/get (coll-hash-key key) m default)
+       (erlang/== kd :map)
+         (let [hk (coll-hash-key key)]
+           (cond (erlang/=:= hk key) (maps/get hk m default)
+                 :else (maps/get hk m (maps/get key m default))))
        (erlang/== kd :nil) default
-       (erlang/== kd :set) (cond (BeamLisp.Set/member? m key) key :else default)
-       (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_get m key default)
-       (erlang/== kd :sorted-set) (cond (BeamLisp.Sorted/set_member? m key) key :else default)
+       (erlang/== kd :set)
+         (let [hk (coll-hash-key key)]
+           (cond (BeamLisp.Set/member? m hk) hk :else default))
+       (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_get m (coll-hash-key key) default)
+       (erlang/== kd :sorted-set)
+         (let [hk (coll-hash-key key)]
+           (cond (BeamLisp.Sorted/set_member? m hk) hk :else default))
        (erlang/== kd :transient)
          (cond (erlang/== :map (erlang/element 2 m)) (BeamLisp.Transient/get m key default)
                :else default)
@@ -2213,18 +2300,24 @@
    reference, a non-entry into a map — refuses rather than growing a struct."
   ([x] x)
   ([x v]
-   (let [kd (kind-kind x)]
+   (cond
+     ; A list and a vector, the common targets, are answered before the
+     ; classifier: `kind-kind` says :list and :vector for exactly these.
+     (erlang/is_list x) (raw-cons v x)
+     (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector")) (BeamLisp.Vector/conj x v)
+     :else
+     (let [kd (kind-kind x)]
      (cond
        (erlang/== kd :nil) (raw-cons v ())
        (erlang/== kd :list) (raw-cons v x)
        (erlang/== kd :vector) (BeamLisp.Vector/conj x v)
        (erlang/== kd :lazy) (raw-cons v x)
        (erlang/== kd :set) (BeamLisp.Set/add x v)
-       (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_add x v)
+       (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_add x (coll-hash-key v))
        (erlang/== kd :sorted-map)
          (let [kv (entry-kv v)]
            (cond (erlang/=/= kv nil)
-                   (BeamLisp.Sorted/map_put x (erlang/element 1 kv) (erlang/element 2 kv))
+                   (BeamLisp.Sorted/map_put x (coll-hash-key (erlang/element 1 kv)) (erlang/element 2 kv))
                  :else (raise-argument (erlang/iolist_to_binary
                                          `("conj on a sorted map expects a [k v] entry, got: " ~(Elixir.Kernel/inspect v))))))
        (erlang/== kd :ref-cell)
@@ -2254,7 +2347,7 @@
                                  `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :conj) ~(tuple2 :arity 2)))))
        ; a string, a number, a fn: RT had no conj clause for them
        :else (erlang/error (Elixir.FunctionClauseError/exception
-                             `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :conj) ~(tuple2 :arity 2))))))))
+                             `(~(tuple2 :module :"Elixir.BeamLisp.Ns.Rt") ~(tuple2 :function :conj) ~(tuple2 :arity 2)))))))))
 
 ;; ── CONTAINS? ──────────────────────────────────────────────────────────────
 
@@ -2263,13 +2356,17 @@
     (cond
       (erlang/== kd :vector) (and (erlang/is_integer key) (erlang/>= key 0) (erlang/< key (BeamLisp.Vector/count coll)))
       (erlang/== kd :set) (BeamLisp.Set/member? coll key)
-      (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_member? coll key)
-      (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_has_key? coll key)
+      (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_member? coll (coll-hash-key key))
+      (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_has_key? coll (coll-hash-key key))
       (erlang/== kd :ref-cell)
         (raise-argument (erlang/iolist_to_binary
                           `("contains?: " ~(Elixir.Kernel/inspect (erlang/map_get :__struct__ coll)) " is a reference, not a collection")))
       (erlang/== kd :record) (cond (erlang/== key :__struct__) false :else (erlang/is_map_key key coll))
-      (erlang/== kd :map) (erlang/is_map_key (coll-hash-key key) coll)
+      (erlang/== kd :map)
+        (let [hk (coll-hash-key key)]
+          (cond (erlang/is_map_key hk coll) true
+                (erlang/=:= hk key) false
+                :else (erlang/is_map_key key coll)))
       :else false)))
 
 ;; ── ASSOC ──────────────────────────────────────────────────────────────────
@@ -2282,7 +2379,7 @@
     (cond
       (erlang/== kd :vector) (BeamLisp.Vector/assoc coll key val)
       (erlang/== kd :set) (raise-argument "assoc not supported on a set")
-      (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_put coll key val)
+      (erlang/== kd :sorted-map) (BeamLisp.Sorted/map_put coll (coll-hash-key key) val)
       (erlang/== kd :sorted-set) (raise-argument "assoc not supported on a sorted set")
       (erlang/== kd :ref-cell)
         (raise-argument (erlang/iolist_to_binary
@@ -2330,21 +2427,27 @@
 
 ;; ── FIND ───────────────────────────────────────────────────────────────────
 
-(defn coll-find [m key]
+(defn coll-find
+  "The `[key value]` entry for `key`, whose key is the STORED (canonical) key:
+   `(find {1 :x} 1.0)` is `[1 :x]` (Q3)."
+  [m key]
   (let [kd (kind-kind m)]
     (cond
       (erlang/== kd :ref-cell) (no-clause "find" 2 m)
       (erlang/== kd :sorted-map)
-      (cond (BeamLisp.Sorted/map_has_key? m key)
-            (coll-entry key (BeamLisp.Sorted/map_get m key nil))
-            :else nil)
+      (let [hk (coll-hash-key key)]
+        (cond (BeamLisp.Sorted/map_has_key? m hk)
+              (coll-entry hk (BeamLisp.Sorted/map_get m hk nil))
+              :else nil))
       (erlang/== kd :record)
       (cond (erlang/== key :__struct__) nil
             (erlang/is_map_key key m) (coll-entry key (maps/get key m))
             :else nil)
       (erlang/== kd :map)
       (let [hk (coll-hash-key key)]
-        (cond (erlang/is_map_key hk m) (coll-entry key (maps/get hk m))
+        (cond (erlang/is_map_key hk m) (coll-entry hk (maps/get hk m))
+              (erlang/=:= hk key) nil
+              (erlang/is_map_key key m) (coll-entry key (maps/get key m))
               :else nil))
       :else nil)))
 
@@ -2362,7 +2465,7 @@
   (let [kd (kind-kind coll)]
     (cond
       (erlang/== kd :set) (BeamLisp.Set/del coll elem)
-      (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_del coll elem)
+      (erlang/== kd :sorted-set) (BeamLisp.Sorted/set_del coll (coll-hash-key elem))
       :else coll)))
 
 ;; ── PEEK ───────────────────────────────────────────────────────────────────
@@ -2523,9 +2626,11 @@
 ; entry is `{key-key, value-key}`); sorting uses the same `rt.eq` order, so a
 ; hashed collection and its sorted sibling project to one key. The sort is a
 ; MULTISET sort — duplicates are preserved, never merged — so cardinality is not
-; silently collapsed: `#{1 1.0}` (two distinct BEAM map keys) keys differently
-; from `#{1}`. Two DIFFERENT collections can still collide on one key (the
-; not-injective caveat), so a lookup must compare the values.
+; silently collapsed by the projection. (A set built through the key paths
+; already holds one member per `=` class, Q3: `#{1 1.0}` IS `#{1}`; a raw
+; MapSet with two equal members would key as two.) Two DIFFERENT collections
+; can still collide on one key (the not-injective caveat), so a lookup must
+; compare the values.
 ;
 ; Construction uses `rt.raw` (raw cons/tuple) and BIFs only. The
 ; projection is `semantic-key`, NOT `key`: an unqualified `(key x)` inside this
@@ -4488,7 +4593,7 @@
     (loop [s (BeamLisp.Sorted/set_new ()) ys xs]
       (cond
         (erlang/== ys ()) s
-        :else (recur (BeamLisp.Sorted/set_add s (erlang/hd ys)) (erlang/tl ys))))))
+        :else (recur (BeamLisp.Sorted/set_add s (hash-hash-key (erlang/hd ys))) (erlang/tl ys))))))
 
 (defn sorted-sorted-set-of
   "Build an ordered set from a collection's distinct elements.
@@ -4501,7 +4606,7 @@
     (loop [s (BeamLisp.Sorted/set_new ()) ys xs]
       (cond
         (erlang/== ys ()) s
-        :else (recur (BeamLisp.Sorted/set_add s (erlang/hd ys)) (erlang/tl ys))))))
+        :else (recur (BeamLisp.Sorted/set_add s (hash-hash-key (erlang/hd ys))) (erlang/tl ys))))))
 
 ;; ── map construction ───────────────────────────────────────────────────────
 
@@ -4518,7 +4623,7 @@
         (erlang/== (erlang/tl ps) ())
         (raise-argument (erlang/iolist_to_binary `("sorted-map: no value supplied for key " ~(Elixir.Kernel/inspect (erlang/hd ps)))))
         :else (let [k (erlang/hd ps) v (erlang/hd (erlang/tl ps))]
-                (recur (BeamLisp.Sorted/map_put m k v) (erlang/tl (erlang/tl ps))))))))
+                (recur (BeamLisp.Sorted/map_put m (hash-hash-key k) v) (erlang/tl (erlang/tl ps))))))))
 
 (defn sorted-sorted-map-of
   "RT's `sorted_map_of/1`: an ordered map from a collection of `[k v]` entries,
@@ -4529,10 +4634,10 @@
       (cond
         (and (struct-of? e :"Elixir.BeamLisp.Vector")
              (erlang/== 2 (BeamLisp.Vector/count e)))
-          (BeamLisp.Sorted/map_put m (BeamLisp.Vector/nth e 0) (BeamLisp.Vector/nth e 1))
+          (BeamLisp.Sorted/map_put m (hash-hash-key (BeamLisp.Vector/nth e 0)) (BeamLisp.Vector/nth e 1))
         (and (erlang/is_list e) (erlang/=/= e ()) (erlang/is_list (erlang/tl e))
              (erlang/=/= (erlang/tl e) ()) (erlang/== (erlang/tl (erlang/tl e)) ()))
-          (BeamLisp.Sorted/map_put m (erlang/hd e) (erlang/hd (erlang/tl e)))
+          (BeamLisp.Sorted/map_put m (hash-hash-key (erlang/hd e)) (erlang/hd (erlang/tl e)))
         :else
           (raise-argument (erlang/iolist_to_binary
                             `("sorted-map-of: not a [k v] entry: " ~(Elixir.Kernel/inspect e))))))
@@ -4575,7 +4680,7 @@
    dispatches here for ordered maps specifically."
   [m k]
   (cond
-    (sorted-sorted-map? m) (BeamLisp.Sorted/map_delete m k)
+    (sorted-sorted-map? m) (BeamLisp.Sorted/map_delete m (hash-hash-key k))
     :else (raise-argument (erlang/iolist_to_binary `("sorted-dissoc: expected a sorted map, got " ~(Elixir.Kernel/inspect m))))))
 
 ;; ════ rt — the public surface ════════════════════════════════════════════
@@ -4637,7 +4742,15 @@
 (defn count [x] (k-count x))
 (defn nth
   "Lenient element access for sequential destructuring: nil-safe, out-of-range gives nil."
-  ([x i] (k-nth x i))
+  ; `k-nth`'s fast paths, so the common access costs no second call.
+  ([x i]
+   (cond
+     (and (erlang/is_integer i) (erlang/>= i 0))
+     (cond (erlang/is_list x) (nth-list x i)
+           (and (erlang/is_map x) (erlang/=:= (maps/get :__struct__ x nil) :"Elixir.BeamLisp.Vector"))
+           (BeamLisp.Vector/nth x i)
+           :else (k-nth x i))
+     :else (k-nth x i)))
   ([x i default] (k-nth x i default)))
 (defn empty? [x] (k-empty? x))
 (defn take
@@ -4749,7 +4862,13 @@
   "Clojure `conj`: prepend to a list, append to a vector — one item or many,
    `(conj coll x & xs)`, each added in order as by repeated `conj`."
   ([coll] (coll-conj coll))
-  ([coll x] (coll-conj coll x))
+  ; `coll-conj`'s fast paths, so the common call costs no second call.
+  ([coll x]
+   (cond
+     (erlang/is_list coll) (raw-cons x coll)
+     (and (erlang/is_map coll) (erlang/=:= (maps/get :__struct__ coll nil) :"Elixir.BeamLisp.Vector"))
+     (BeamLisp.Vector/conj coll x)
+     :else (coll-conj coll x)))
   ([coll x & xs] (coll-conj-variadic coll x xs)))
 (defn contains?
   "`contains?`: KEY membership for maps, index-in-range for vectors — never

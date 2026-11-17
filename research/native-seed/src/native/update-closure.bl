@@ -92,14 +92,29 @@
  (let [anchors (set (concat ["rt" "core" "sugar"] requires))
        last-at (reduce (fn [at [i x]] (if (contains? anchors x) i at)) -1 (map-indexed vector order))]
   (vec (concat (take (inc last-at) order) [ns] (drop (inc last-at) order)))))
+; Link rows (LINK P3/N3): the native image installs the link row of every
+; closure member before compiling anything. BEAM must compile against the SAME
+; rows, or a member's calls to itself and to unloaded members link differently.
+; The rows come from member-rows.bl over a previous pass's closure (a separate
+; process: computing them needs native.bootstrap loaded, and recompiling the
+; native.bootstrap member here replaces that module). With NATIVE_LINK_ROWS
+; set, the rows are installed in the isolated Env and every member recompiles.
+(def link-rows-path (System/get_env "NATIVE_LINK_ROWS"))
+(def link-rows (when link-rows-path (erlang/binary_to_term (File/read! link-rows-path))))
+(when link-rows (println (str "NATIVE_UPDATE_LINK_ROWS " (count link-rows) " from " link-rows-path)))
+(def recompile-all? (or repin? (some? link-rows)))
 (def result
  (BeamLisp.Env/isolated
   (fn []
+   (doseq [[ns name info _] link-rows] (BeamLisp.Env/put_link ns name info))
+   ; With them, core's own rows exactly as native-install-bundle! installs
+   ; :core-links (seeds included), so core calls link as they do natively.
+   (when link-rows (doseq [[name info] (:core-links original)] (BeamLisp.Env/put_link "core" name info)))
    (let [existing
          (reduce (fn [result ns]
           (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
                 source (File/read! (:path old)) sha (artifact/sha source)]
-           (if (and (not repin?) (= sha (:source-sha256 old)))
+           (if (and (not recompile-all?) (= sha (:source-sha256 old)))
             (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
             (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
                   unit (compile-unit ns (:path old) (into (set (:order original)) declared))]

@@ -1,0 +1,23 @@
+; Profile the warm-core benchmark's emit phase on BEAM (tprof call_time via
+; bl.profile): the same six Source values, options and fresh-name reset as
+; benchmark/beam-benchmark.bl. Shares and call counts only.
+; Usage: run run speed/attrib/warm-emit.bl -- benchmark/compiler-values.bl REPS
+(ns native.warm-emit-profile
+ (:require [reader :as reader] [compiler :as compiler]
+           [native.scheme :as scheme] [bl.profile :as profile]))
+(def argv (BeamLisp/argv))
+(def source (File/read! (nth argv 0)))
+(def reps (erlang/binary_to_integer (nth argv 1)))
+(def attribution "native-devtool-benchmark.bl")
+(def options {:ns "user" :namespace "user" :namespace-qualified? true :callable-arities? true})
+(def forms (reader/read-string source attribution))
+(def nodes (Enum/map forms (fn [form] (compiler/reset-fresh!)
+                             (compiler/compile form (assoc (compiler/new-env "user") :target :js :file attribution)))))
+(defn emit-nodes [] (Enum/map nodes (fn [node] (scheme/emit node options))))
+(dotimes [_ 3] (emit-nodes))
+(let [result (profile/call-time (fn [] (dotimes [_ reps] (emit-nodes))))]
+ (println (str "WARM_EMIT_TOTAL\t" (:total-us result)))
+ (doseq [r (filter (fn [r] (contains? #{"native.scheme" "Optimize" "Facts"} (str (:ns r)))) (:rows result))]
+  (println (str "SCHEME\t" (:ns r) "\t" (:fn r) "\t" (:calls r) "\t" (:us r))))
+ (doseq [r (take 30 (sort-by (fn [r] (- (:us r))) (:rows result)))]
+  (println (str "PROF\t" (:ns r) "\t" (:fn r) "\t" (:calls r) "\t" (:us r)))))

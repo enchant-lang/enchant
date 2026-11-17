@@ -1,0 +1,155 @@
+(ns value-keys-test (:require [decimal :as d] [syntax :as syntax]))
+
+;; Q3: collection keys use value equality. Every example is from
+;; research/native-seed/speed/keys/DECISION.md; a failure here means the
+;; implementation and the recorded decision disagree.
+
+(defn- hk [x] (BeamLisp.Ns.Rt/hash_key x))
+
+(def numbers
+ [0 -0.0 0.0 0M 0.00M 1 1.0 1M 1.00M 100 100.0 1.5 1.5M 1.50M
+  0.1 0.1M 0.10M 0.5 0.50M 0.25 9007199254740992 9007199254740992.0
+  9007199254740993 -9007199254740993 1.0e300 -2.5 -2.50M])
+
+(deftest the-law-same-key-iff-equal
+ (doseq [a numbers b numbers]
+  (is (= (= a b) (erlang/=:= (hk a) (hk b))) [a b])
+  (is (= (= a b) (= :x (get {a :x} b))) [a b])
+  (is (= (= a b) (contains? #{a} b)) [a b])
+  (is (= (= a b) (= 1 (count (set [a b])))) [a b])
+  (is (= (= a b) (= 1 (count (assoc {a 1} b 2)))) [a b])
+  (when (= a b)
+   (is (= (erlang/phash2 (hk a)) (erlang/phash2 (hk b))) [a b])
+   (is (= (BeamLisp.Ns.Rt/semantic-hash a) (BeamLisp.Ns.Rt/semantic-hash b)) [a b]))))
+
+(deftest canonical-representatives
+ (is (erlang/=:= 1 (hk 1.0)))
+ (is (erlang/=:= 0 (hk -0.0)))
+ (is (erlang/=:= 0 (hk 0.0)))
+ (is (erlang/=:= 1 (hk 1.00M)))
+ (is (erlang/=:= 1.5 (hk 1.50M)))
+ (is (erlang/=:= 0.5 (hk 0.50M)))
+ (is (erlang/=:= -2.5 (hk -2.50M)))
+ (is (erlang/=:= 0.1 (hk 0.1)))
+ (is (erlang/=:= 0.25 (hk 0.25)))
+ (is (d/same-representation? 0.1M (hk 0.10M)))
+ (is (d/same-representation? 0.1M (hk 0.1M)))
+ (is (integer? (hk 1.0e300)))
+ (is (= 1.0e300 (hk 1.0e300)))
+ ;; common keys are returned as themselves
+ (doseq [k [7 :kw "text" nil true [1 2] {:a 1} #{:a}]]
+  (is (erlang/=:= k (hk k)) k)))
+
+(deftest decision-counterexamples
+ (is (= :x (get {1 :x} 1.0)))
+ (is (= :x (get {1.0 :x} 1)))
+ (is (= :z (get {0 :z} -0.0)))
+ (is (= :h (get {1.5 :h} 1.50M)))
+ (is (nil? (get {0.1 :f} 0.1M)))
+ (is (= :d (get {0.1M :d} 0.10M)))
+ (is (= 1 (count {1 :a 1.0 :b})))
+ (is (= :b (get {1 :a 1.0 :b} 1)))
+ (is (erlang/=:= [1] (vec (keys {1.0 :x}))))
+ (is (erlang/=:= [0] (vec (keys {-0.0 :x}))))
+ (is (erlang/=:= [1.5] (vec (keys {1.50M :x}))))
+ (is (d/same-representation? 0.1M (first (keys {0.10M :x}))))
+ (is (erlang/=:= 1 (first (find {1 :x} 1.0))))
+ (is (= [1 :x] (find {1 :x} 1.0)))
+ (is (contains? {1 :x} 1.0))
+ (is (= {} (dissoc {1 :x} 1.0)))
+ (is (erlang/=:= {1 :b} (assoc {1 :a} 1.0 :b)))
+ (is (= 1 (count #{1 1.0 1M 1.00M})))
+ (is (contains? #{2} 2.0))
+ (is (erlang/=:= 1 (#{1} 1.0)))
+ (is (erlang/=:= 1 (get #{1} 1.0)))
+ (is (= :none (#{1} 2.0 :none)))
+ (is (= #{} (disj #{1} 1.0)))
+ (is (= #{1} #{1.0}))
+ (is (= 1 (count (set [0 0.0 -0.0]))))
+ (is (= :v (get {[1 2] :v} [1.0 2.0])))
+ (is (= :m (get {{:a 1} :m} {:a 1.0})))
+ (is (= :s (get {#{1} :s} #{1.0})))
+ (is (= :l (get {(list 1 2M) :l} (list 1.0 2))))
+ ;; recorded exception: a list and a vector are different keys, as before
+ (is (nil? (get {(list 1 2) :l} [1 2])))
+ (is (= {1 3} (frequencies [1 1.0 1M])))
+ (let [g (group-by identity [1 1.0])]
+  (is (= [1] (vec (keys g))))
+  (is (float? (second (get g 1)))))
+ (is (= [1 2] (vec (distinct [1 1.0 2]))))
+ (is (= :x (get (sorted-map 1.5M :x) 1.50M)))
+ (is (erlang/=:= [1] (vec (keys (sorted-map 1.0 :x)))))
+ (is (contains? (sorted-set 1 2 3) 2.0))
+ (is (= 1 (count (sorted-set 1 1.0 1M))))
+ (is (float? (get {:a 1.0} :a)))
+ (is (erlang/=:= (hk 1.0) (hk 1))))
+
+(deftest construction-paths-agree
+ (let [pairs [[1 :a] [1.0 :b] [1.00M :c] [-0.0 :z] [0 :y]]]
+  (doseq [m [(into {} pairs) (reduce conj {} pairs) (zipmap (map first pairs) (map second pairs))
+             (apply hash-map (mapcat identity pairs)) (persistent! (reduce conj! (transient {}) pairs))
+             (merge {} (into {} pairs))]]
+   (is (= 2 (count m)) m)
+   (is (= :c (get m 1)) m)
+   (is (= :y (get m 0.0)) m)))
+ ;; `into` switches to transients above its threshold: same keys either way
+ (let [big (vec (mapcat (fn [i] [[i :int] [(+ i 0.0) :float]]) (range 9000)))
+       m (into {} big)]
+  (is (= 9000 (count m)))
+  (is (= :float (get m 42))))
+ (let [t (transient {})]
+  (assoc! t 1.0 :x)
+  (is (= :x (get t 1)))
+  (dissoc! t 1)
+  (is (= {} (persistent! t))))
+ (is (= #{1 2} (set [1 1.0 2 2M])))
+ (is (= #{1 2} (into #{} [1 1.0 2 2M])))
+ (is (= 1 (count (conj #{1} 1.0 1M)))))
+
+(defrecord KeyPoint [x y])
+
+(deftest records-and-metadata-are-value-keys
+ (is (= :r (get {(->KeyPoint 1 2) :r} (->KeyPoint 1.0 2M))))
+ (is (= :meta (get {[1] :meta} (with-meta [1.0] {:tag :t}))))
+ (is (= 1 (count (set [[1] (with-meta [1] {:a 1}) [1.0]])))))
+
+(deftest raw-maps-still-answer-their-exact-term
+ ;; A map built outside the key paths keeps its raw key; the exact term still
+ ;; finds it, and dissoc still removes it.
+ (let [raw (maps/put 2.0 :raw (maps/new))]
+  (is (= :raw (get raw 2.0)))
+  (is (contains? raw 2.0))
+  (is (= [2.0 :raw] (find raw 2.0)))
+  (is (= 0 (count (dissoc raw 2.0))))))
+
+(deftest identity-stays-exact
+ (is (= false (identical? 1 1.0)))
+ (is (= :int (case 1.0 1 :int :float)))  ; `case` already tests with `=`
+ (is (float? (first [1.0 1])))
+ (is (integer? (second [1.0 1]))))
+
+(deftest quoted-and-syntax-maps-have-canonical-keys
+ (is (= :x (get '{1.0 :x} 1)))
+ (is (erlang/=:= [1] (vec (keys '{1.0 :x}))))
+ (is (= 1 (count '{1 :a 1.0 :b})))
+ (is (= 1 (count '#{1 1.0})))
+ (let [syntax (syntax/from-datum (maps/put 1.0 :x (maps/new))
+               {:world (crypto/hash :sha256 "world") :namespace 'example :space 'value
+                :scopes {0 [(crypto/hash :sha256 "module")]}})]
+  (is (= :x (get (syntax/to-datum syntax) 1)))))
+
+(deftest sorted-decimals-rank-with-the-numbers
+ (is (= [0 0.1M 0.1 0.25 1] (vec (sorted-set 1 0.1 0.25 0.1M 0))))
+ (is (= [-1.1M -1 0.5] (vec (sorted-set 0.5 -1 -1.1M))))
+ (is (= 0.1M (first (sorted-set [0] 0.1M "s"))))
+ (is (= [0.1M 0.2M] (vec (keys (sorted-map 0.20M :b 0.1M :a)))))
+ (is (= :a (get (sorted-map 0.10M :a) 0.1M))))
+
+(deftest raw-erlang-maps-keep-raw-keys
+ ;; the raw BIFs are Erlang's: 1 and 1.0 stay two keys there (Q3 changes only
+ ;; the BL key paths), and a BL lookup on such a map takes the canonical key
+ (let [m (maps/put 1.0 :float (maps/put 1 :int (maps/new)))]
+  (is (= 2 (maps/size m)))
+  (is (= :float (maps/get 1.0 m)))
+  (is (= false (maps/is_key 1.0 (maps/put 1 :int (maps/new)))))
+  (is (= :int (get m 1.0)))))

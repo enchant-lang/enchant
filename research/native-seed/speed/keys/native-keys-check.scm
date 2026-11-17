@@ -1,0 +1,108 @@
+;; Q3 native key checks (research/native-seed/speed/keys/DECISION.md).
+;; Append after host.scm, host/host-values.scm, host/host-leaves.scm,
+;; host/host-extra.scm, host/native-memo.scm. No BL compiler.
+(define native-keys-checks 0)
+(define (native-keys-check label ok)
+ (if (not ok) (error (string-append "native keys check failed: " label)))
+ (set! native-keys-checks (+ native-keys-checks 1)))
+(define (f x) (bl-float x))
+(define (dec u s) (bl-decimal u s))
+(define kx (bl-key "x"))
+(define (same-term? a b) (eqv? 0 (bl-key-compare a b)))
+;; A BL map literal: the compiler passes every key through `hash_key`
+;; (bl-key-value) before the raw literal constructor, exactly as on BEAM.
+(define (lit . kvs)
+ (let loop ((kvs kvs) (out '()))
+  (if (null? kvs) (apply bl-map (reverse out))
+   (loop (cddr kvs) (cons (cadr kvs) (cons (bl-key-value (car kvs)) out))))))
+(define numbers
+ (list 0 (f -0.0) (f 0.0) (dec 0 0) (dec 0 2) 1 (f 1.0) (dec 1 0) (dec 100 2) 100 (f 100.0)
+       (f 1.5) (dec 15 1) (dec 150 2) (f 0.1) (dec 1 1) (dec 10 2) (f 0.5) (dec 50 2) (f 0.25)
+       9007199254740992 (f 9007199254740992.0) 9007199254740993 -9007199254740993
+       (f 1e300) (f -2.5) (dec -250 2)))
+;; the law: same key iff (= a b), and equal keys are the identical canonical term
+(for-each (lambda (a)
+ (for-each (lambda (b)
+  (let ((eq (bl-equal? a b)))
+   (native-keys-check "canonical iff equal" (eq? eq (same-term? (bl-key-value a) (bl-key-value b))))
+   (native-keys-check "get iff equal" (eq? eq (eq? kx (bl-get (lit a kx) b))))
+   (native-keys-check "set membership iff equal" (eq? eq (h-set-has (native-set-from-list (list a)) b)))
+   (native-keys-check "assoc merges iff equal" (eq? eq (= 1 (native-map-count (bl-assoc (lit a 1) b 2)))))))
+  numbers)) numbers)
+;; canonical representatives (same as BEAM rt.bl hash-key)
+(native-keys-check "1.0 -> 1" (eqv? 1 (bl-key-value (f 1.0))))
+(native-keys-check "-0.0 -> 0" (eqv? 0 (bl-key-value (f -0.0))))
+(native-keys-check "1.00M -> 1" (eqv? 1 (bl-key-value (dec 100 2))))
+(native-keys-check "1.50M -> 1.5" (let ((k (bl-key-value (dec 150 2)))) (and (bl-tag? k 'float) (= 1.5 (vector-ref k 1)))))
+(native-keys-check "0.10M -> 0.1M" (let ((k (bl-key-value (dec 10 2))))
+ (and (native-decimal? k) (= 1 (bl-get k (bl-key "unscaled"))) (= 1 (bl-get k (bl-key "scale"))))))
+(native-keys-check "0.1M stays itself" (let ((d (dec 1 1))) (eq? d (bl-key-value d))))
+(native-keys-check "0.1 float stays itself" (let ((x (f 0.1))) (eq? x (bl-key-value x))))
+(native-keys-check "1e300 -> exact integer" (let ((k (bl-key-value (f 1e300)))) (and (exact? k) (integer? k))))
+(native-keys-check "keyword unchanged" (eq? kx (bl-key-value kx)))
+(let ((v (bl-vec (list 1 2)))) (native-keys-check "clean vector unchanged" (eq? v (bl-key-value v))))
+;; decision examples
+(native-keys-check "(get {1 :x} 1.0)" (eq? kx (bl-get (lit 1 kx) (f 1.0))))
+(native-keys-check "(get {0.1 :f} 0.1M) is nil" (bl-is-nil (bl-get (lit (f 0.1) kx) (dec 1 1))))
+(native-keys-check "(count {1 :a 1.0 :b})" (= 1 (native-map-count (lit 1 (bl-key "a") (f 1.0) (bl-key "b")))))
+(native-keys-check "later literal entry wins" (eq? (bl-key "b") (bl-get (lit 1 (bl-key "a") (f 1.0) (bl-key "b")) 1)))
+(native-keys-check "(keys {1.0 :x})" (equal? '(1) (native-map-keys (lit (f 1.0) kx))))
+(native-keys-check "dissoc by equal key" (= 0 (native-map-count (native-map-remove (lit 1 kx) (f 1.0)))))
+(native-keys-check "has? by equal key" (native-map-has? (lit 1 kx) (dec 100 2)))
+(native-keys-check "#{1 1.0 1M 1.00M} has one member"
+ (= 1 (bl-count (native-set-from-list (list 1 (f 1.0) (dec 1 0) (dec 100 2))))))
+(native-keys-check "disj by equal member" (= 0 (bl-count (native-set-remove (native-set-from-list (list 1)) (f 1.0)))))
+(native-keys-check "set as function" (eqv? 1 (bl-invoke (native-set-from-list (list 1)) (list (f 1.0)))))
+(native-keys-check "vector keys compare by value"
+ (eq? kx (bl-get (lit (bl-vec (list 1 2)) kx) (bl-vec (list (f 1.0) (f 2.0))))))
+(native-keys-check "map keys compare by value"
+ (eq? kx (bl-get (lit (lit (bl-key "a") 1) kx) (lit (bl-key "a") (f 1.0)))))
+(native-keys-check "list keys compare by value" (eq? kx (bl-get (lit (list 1 (dec 2 0)) kx) (list (f 1.0) 2))))
+(native-keys-check "tuple keys compare by value"
+ (eq? kx (bl-get (lit (bl-tuple (list 1)) kx) (bl-tuple (list (f 1.0))))))
+(native-keys-check "set keys compare by value"
+ (eq? kx (bl-get (lit (native-set-from-list (list 1)) kx) (native-set-from-list (list (f 1.0))))))
+(native-keys-check "values are untouched" (bl-tag? (bl-get (lit kx (f 1.0)) kx) 'float))
+(native-keys-check "equal maps with spelled keys" (bl-equal? (lit 1 kx) (lit (f 1.0) kx)))
+(native-keys-check "raw key predicate unchanged" (not (bl-key-equal? 1 (f 1.0))))
+;; tables follow the same keys, including their key-order list
+(let ((t (h-table-new)))
+ (h-table-insert t (f 1.0) kx)
+ (native-keys-check "table lookup by equal key" (not (bl-is-nil (h-table-lookup t 1))))
+ (native-keys-check "table delete by equal key" (h-table-delete t (dec 1 0)))
+ (native-keys-check "table empty after delete" (and (= 0 (h-table-size t)) (null? (h-table-snapshot t))))
+ (h-table-destroy t))
+;; raw Erlang map leaves keep raw keys, exactly as on BEAM: 1 and 1.0 are two
+;; keys there, and only the BL key paths (bl-get/bl-assoc/sets) canonicalise
+(let* ((put (native-leaf "maps/put/3")) (get3 (native-leaf "maps/get/3")) (is-key (native-leaf "maps/is_key/2"))
+       (remove (native-leaf "maps/remove/2")) (from-list (native-leaf "maps/from_list/1"))
+       (map-get (native-leaf "Elixir.Map/get/3")) (is-map-key (native-leaf "erlang/is_map_key/2"))
+       (one (bl-invoke put (list 1 (bl-key "int") (bl-empty-map))))
+       (both (bl-invoke put (list (f 1.0) (bl-key "float") one))))
+ (native-keys-check "raw maps:put keeps 1 and 1.0 apart" (= 2 (native-map-count both)))
+ (native-keys-check "raw maps:get misses 1.0 in {1 => _}" (eq? kx (bl-invoke get3 (list (f 1.0) one kx))))
+ (native-keys-check "raw maps:get finds the exact float" (eq? (bl-key "float") (bl-invoke get3 (list (f 1.0) both kx))))
+ (native-keys-check "raw maps:is_key is exact" (not (bl-invoke is-key (list (f 1.0) one))))
+ (native-keys-check "raw is_map_key is exact" (not (bl-invoke is-map-key (list (dec 1 0) one))))
+ (native-keys-check "raw maps:remove is exact" (= 1 (native-map-count (bl-invoke remove (list (f 1.0) one)))))
+ (native-keys-check "raw maps:from_list keeps both"
+  (= 2 (native-map-count (bl-invoke from-list (list (list (bl-tuple (list 1 kx)) (bl-tuple (list (f 1.0) kx))))))))
+ (native-keys-check "raw Map.get is exact" (eq? kx (bl-invoke map-get (list one (f 1.0) kx))))
+ (native-keys-check "BL get on a raw map takes the canonical key" (eq? (bl-key "int") (bl-get both (f 1.0)))))
+;; struct fast path: `:__struct__` of a set, vector or opaque struct is
+;; answered without materialising its fields (MEASURE A3), as BEAM answers it
+(let* ((saved native-struct-fields) (calls 0)
+       (get3 (native-leaf "maps/get/3")) (is-key (native-leaf "maps/is_key/2"))
+       (map-get (native-leaf "erlang/map_get/2"))
+       (s (native-set-from-list (list 1 2 3))) (v (bl-vec (list 1 2))))
+ (set! native-struct-fields (lambda (x) (set! calls (+ calls 1)) (saved x)))
+ (native-keys-check "set __struct__ via maps:get/3" (eq? native-set-module-key (bl-invoke get3 (list native-struct-key s kx))))
+ (native-keys-check "set __struct__ via map_get/2" (eq? native-set-module-key (bl-invoke map-get (list native-struct-key s))))
+ (native-keys-check "set has __struct__" (bl-invoke is-key (list native-struct-key s)))
+ (native-keys-check "set lacks other keys" (eq? kx (bl-invoke get3 (list (bl-key "absent") s kx))))
+ (native-keys-check "vector __struct__" (eq? native-vector-module-key (bl-invoke get3 (list native-struct-key v kx))))
+ (native-keys-check "no field map was materialised" (= 0 calls))
+ (native-keys-check "set members still answer" (bl-tag? (bl-invoke get3 (list (bl-key "members") s kx)) 'map))
+ (native-keys-check "members do materialise" (= 1 calls))
+ (set! native-struct-fields saved))
+(display "native keys checks: ") (display native-keys-checks) (newline)

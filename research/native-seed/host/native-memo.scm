@@ -37,11 +37,8 @@
  (vector-set! cell 1 (+ 1 (vector-ref cell 1)))
  (vector-set! cell 2 state)
  (vector-set! cell 3 bytes))
-(define native-memo-send #f)
 (define (native-memo-notify! notifications)
- (for-each (lambda (n)
-  (if (not native-memo-send) (set! native-memo-send (native-leaf "erlang/send/2")))
-  (native-memo-send (bl-nth n 0) (bl-nth n 1))) notifications))
+ (for-each (lambda (n) (native-memo-actor-call "native-send!" (bl-nth n 0) (bl-nth n 1))) notifications))
 (define (native-memo-read r) (vector-ref (native-memo-cell r) 2))
 (define (native-memo-read-versioned r)
  (let ((cell (native-memo-cell r))) (bl-make-tuple (vector-ref cell 1) (vector-ref cell 2))))
@@ -141,31 +138,101 @@
   (cons "nif_seen_admit" native-memo-seen-admit)
   (cons "nif_collect_cycles" (lambda () 0))
   (cons "nif_collector_status" (lambda () ""))))
+;; A sealed image emits each definition's own binding and arity cells
+;; (`v_<ns/name>`, `v_<ns/name>$N`) before registering it, and its local calls
+;; read those cells directly. As erlang:load_nif replaces the module's own
+;; functions on BEAM, the counterpart rebinds them too (dev images read the
+;; registry through native-link!).
+(define (native-memo-binding-name ns name)
+ (string-append "v" (apply string-append
+  (map (lambda (c) (string-append "_" (number->string (char->integer c))))
+       (string->list (string-append ns "/" name))))))
+(define (native-memo-rebind! symbol value)
+ (let ((cell (##make-global-var symbol)))
+  (if (not (##unbound? (##global-var-ref cell))) (##global-var-set! cell value))))
+(define (native-memo-install-cells! ns name nif)
+ (let ((binding (native-memo-binding-name ns name)))
+  (native-memo-rebind! (string->symbol binding) nif)
+  (let loop ((arity 0))
+   (if (<= arity 8)
+    (begin (native-memo-rebind! (string->symbol (string-append binding "$" (number->string arity))) nif)
+           (loop (+ arity 1)))))))
 (define native-register-without-memo-nifs native-register!)
 (set! native-register! (lambda (ns name value)
  (native-register-without-memo-nifs ns name
   (if (string=? ns native-memo-ns)
-   (let ((nif (assoc name native-memo-nifs))) (if nif (cdr nif) value))
+   (let ((nif (assoc name native-memo-nifs)))
+    (if nif (begin (native-memo-install-cells! ns name (cdr nif)) (cdr nif)) value))
    value))))
 
 ;; ── Erlang/OTP and Elixir BIFs the compiled lazy modules call ──────────────
-;; Categories (b) and (d) of CONTRACT2.md: no BL source exists for these. The
-;; native image has one process, so `self` is the host's frame identity, no
-;; other process can own a running cell, and the wait-for path (monitor,
-;; sleep under budget pressure) refuses as unavailable instead of hanging.
+;; Categories (b) and (d) of CONTRACT2.md: no BL source exists for these.
+;;
+;; Processes are the actor runtime's (priv/lib/js/actor/runtime.bl, compiled
+;; into the `native.kernel` namespace of an actor program): `self` is the
+;; host's frame identity, which that runtime sets to the running pid. A force
+;; that finds a cell running under another actor WAITS, as on BEAM: the
+;; compiled `wait_for_attempt` monitors the owner, records whom it waits on in
+;; its own process dictionary, follows the wait-for chain through
+;; `process_info` (a cycle raises `:recursive_force`), registers as a waiter
+;; and blocks in `receive`; the owner's publication sends it the outcome, and
+;; the owner's death sends it a DOWN. Every primitive below is the actor
+;; runtime's own operation (category d), looked up when called, so the force
+;; protocol itself stays the compiled BL of lazy_seq.bl.
+;;
+;; The compiler image has no actor runtime and one process (`self` is nil):
+;; no cell can be running under another owner, so these are never reached
+;; there, and they refuse as unavailable if they were.
 (define (native-memo-bif! key value) (native-add-leaf! key value))
+(define (native-memo-actor name)
+ (let ((value (native-fetch-value "native.kernel" name #t)))
+  (if (eq? value native-missing) #f value)))
+(define (native-memo-actor-call name . arguments)
+ (let ((f (native-memo-actor name)))
+  (if f (bl-invoke f arguments)
+   (native-raise (bl-key "error") (bl-tuple (list (bl-key "native_unsupported") name)) (native-capture-stack)))))
+;; Each process has its own dictionary, as on BEAM: `get`/`put`/`erase`
+;; (host-leaves.scm) read and write the running actor's map; outside any actor
+;; (self nil) the image's single dictionary is used, as before. Another
+;; process's dictionary is readable only through `process_info`, and only
+;; while that process is alive.
+(define native-memo-root-pdict native-pdict)
+(define native-memo-dictionaries (make-table test: equal?))
+(set! native-pdict
+ (lambda value
+  (let ((self (h-self)))
+   (cond ((bl-is-nil self) (apply native-memo-root-pdict value))
+    ((null? value) (table-ref native-memo-dictionaries self (bl-empty-map)))
+    (else (table-set! native-memo-dictionaries self (car value)))))))
+(define (native-memo-dictionary-of pid)
+ (cond ((bl-key-equal? pid (h-self)) (native-pdict))
+  ((and (not (bl-is-nil pid)) (native-memo-actor "rt-alive?")
+        (bl-truthy (native-memo-actor-call "rt-alive?" pid)))
+   (table-ref native-memo-dictionaries pid (bl-empty-map)))
+  (else (table-set! native-memo-dictionaries pid) #f)))
 (native-memo-bif! "erlang/self/0" (lambda () (h-self)))
 (native-memo-bif! "erlang/node/0" (lambda () (bl-key "nonode@nohost")))
 (native-memo-bif! "erlang/node/1" (lambda (pid) (bl-key "nonode@nohost")))
 (native-memo-bif! "erlang/process_info/2"
  (lambda (pid item)
-  (cond ((not (bl-key-equal? pid (h-self))) (bl-key "undefined"))
-   ((and (bl-tag? item 'tuple) (= 2 (vector-length (vector-ref item 1)))
-         (eq? (bl-nth item 0) (bl-key "dictionary")))
-    (bl-make-tuple item (bl-get (native-pdict) (bl-nth item 1) (bl-key "undefined"))))
-   (else (native-badarg "process_info item")))))
-(native-memo-bif! "Elixir.Process/monitor/1" (native-memo-unsupported "Elixir.Process/monitor/1"))
-(native-memo-bif! "Elixir.Process/demonitor/2" (native-memo-unsupported "Elixir.Process/demonitor/2"))
+  (if (not (and (bl-tag? item 'tuple) (= 2 (vector-length (vector-ref item 1)))
+                (eq? (bl-nth item 0) (bl-key "dictionary"))))
+   (native-badarg "process_info item"))
+  (let ((dictionary (native-memo-dictionary-of pid)))
+   (if dictionary
+    (bl-make-tuple item (bl-get dictionary (bl-nth item 1) (bl-key "undefined")))
+    (bl-key "undefined")))))
+;; An actor pid is the runtime's `[:pid runtime serial]` handle.
+(native-replace-leaf! "erlang/is_pid/1"
+ (let ((previous (native-leaf "erlang/is_pid/1")))
+  (lambda (x)
+   (if (native-memo-actor "rt-pid?") (bl-truthy (native-memo-actor-call "rt-pid?" x)) (previous x)))))
+;; The runtime posts a monitor's DOWN as `[:down ref :process pid reason]`;
+;; `receive_attempt` selects it by the monitor reference, not by the tag.
+(native-memo-bif! "Elixir.Process/monitor/1"
+ (lambda (pid) (native-memo-actor-call "native-monitor!" (bl-key "process") pid)))
+(native-memo-bif! "Elixir.Process/demonitor/2"
+ (lambda (ref options) (native-memo-actor-call "native-demonitor!" ref options)))
 (native-memo-bif! "Elixir.Process/sleep/1" (native-memo-unsupported "Elixir.Process/sleep/1"))
 (native-memo-bif! "erlang/load_nif/2" (native-memo-unsupported "erlang/load_nif/2"))
 (native-memo-bif! "global/trans/2" (native-memo-unsupported "global/trans/2"))

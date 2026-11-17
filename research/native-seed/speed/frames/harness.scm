@@ -1,0 +1,57 @@
+;; gsi harness for frames.check. Append after the host (and, for debug
+;; programs, the source-frame host), before the definitions and probes.
+(define frames-checks 0)
+(define frames-failures 0)
+(define (frames-line . xs) (for-each display xs) (newline))
+(define (frames-fail . xs) (set! frames-failures (+ frames-failures 1)) (apply frames-line "FRAMES_FAIL " xs))
+;; Top-level probes run as host code: put the logical stack back between them
+;; (debug programs install a reset; release keeps none).
+(define frames-reset! (lambda () #f))
+(define (frames-trace-frames raw)
+ (if (and (bl-tag? raw 'tuple) (= (bl-count raw) 2)) (bl-nth raw 1) raw))
+(define (frames-run thunk)
+ (call-with-current-continuation
+  (lambda (k)
+   (with-exception-catcher
+    (lambda (e) (k (list 'raised (bl-show (native-exception-kind e)) (bl-show (native-exception-reason e)))))
+    (lambda () (list 'ok (thunk)))))))
+(define (frames-value label info? expected thunk)
+ (frames-reset!) (set! frames-checks (+ frames-checks 1))
+ (let ((r (frames-run thunk)))
+  (if (and (eq? (car r) 'ok) (bl-key-equal? (cadr r) expected))
+   (frames-line "VALUE " label " = " (bl-show expected))
+   (if info?
+    (frames-line "VALUE_INFO " label " beam=" (bl-show expected) " native=" (if (eq? (car r) 'ok) (bl-show (cadr r)) r))
+    (frames-fail label " beam=" (bl-show expected) " native=" (if (eq? (car r) 'ok) (bl-show (cadr r)) r))))))
+(define (frames-show label thunk)
+ (frames-reset!) (set! frames-checks (+ frames-checks 1))
+ (let ((r (frames-run thunk)))
+  (frames-line "SHOW " label " " (if (eq? (car r) 'ok) (bl-show (cadr r)) r))))
+(define (frames-trace label thunk)
+ (frames-reset!) (set! frames-checks (+ frames-checks 1))
+ (bl-try (lambda () (frames-line "TRACE " label " ok " (bl-show (thunk))))
+  (lambda (kind reason raw)
+   (frames-line "TRACE " label " " (bl-show kind) " " (bl-show reason) " " (bl-show (frames-trace-frames raw))))
+  #f))
+;; Dynamic budget sites: every executed (h-tick), inside or outside a turn.
+(define frames-tick-count 0)
+(define frames-tick-original h-tick)
+(set! h-tick (lambda () (set! frames-tick-count (+ frames-tick-count 1)) (frames-tick-original)))
+(define (frames-turns label budget limit f args)
+ (frames-reset!) (set! frames-checks (+ frames-checks 1))
+ (let ((frame (h-make-frames f args)))
+  (let loop ((turns 1))
+   (let ((status (bl-get (h-run-turn frame budget) (bl-key "status"))))
+    (if (and (eq? status (bl-key "yield")) (< turns limit)) (loop (+ turns 1))
+     (begin
+      ;; A three-turn limit is a non-terminating probe: it must still yield.
+      (if (and (= limit 3) (not (eq? status (bl-key "yield")))) (frames-fail label " did not yield: " (bl-show status)))
+      (if (and (> limit 3) (not (eq? status (bl-key "done")))) (frames-fail label " did not finish: " (bl-show status)))
+      (frames-line "TURNS " label " budget=" budget " turns=" turns " status=" (bl-show status))))))))
+(define (frames-ticks label thunk)
+ (frames-reset!) (set! frames-tick-count 0)
+ (frames-run thunk)
+ (frames-line "TICKS " label " " frames-tick-count))
+(define (frames-report)
+ (frames-line "FRAMES_CHECKS " frames-checks " FAILURES " frames-failures)
+ (exit (if (= frames-failures 0) 0 1)))

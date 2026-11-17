@@ -1,0 +1,30 @@
+; BACKEND round 3 focused emission (replaces speed/kernel2/emit-rt.bl, whose
+; private copy of the link context no longer matches the closure). Compile
+; each named rt.bl on the pinned SDK, put the first in place of the closure's
+; rt unit, and emit every rt :fn through native.bootstrap/emit-definition with
+; the ONE link plan (native.chunks builds the same one).
+; Usage: run speed/backend3/emit-rt.bl -- PARTITION.json LEAVES.json RT.bl OUT.scm [RT2.bl OUT2.scm …]
+(ns native.backend3-emit
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap] [js.build :as build]
+           [clojure.string :as string] [bl.json :as json] [native.resolution-ledger :as ledger]))
+(def args (BeamLisp/argv))
+(def base (artifact/read-closure (nth args 0)))
+(def leaves (set (get (json/decode (File/read! (nth args 1))) "registered_leaves")))
+(defn compile-rt [rt-path]
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [prepared (build/prepare-ns rt-path)
+         _ (assert (= "rt" (:ns prepared)))
+         compiled (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)]
+    (assoc compiled :source (:source prepared) :path "priv/boot/rt.bl"
+           :module (BeamLisp.Link/module_for "rt") :base-module (BeamLisp.Emit/base_module_for "rt"))))))
+(def rt-jobs (mapv (fn [i] [(nth args i) (nth args (+ i 1))]) (filter even? (range 2 (count args)))))
+(def rt-units (mapv (fn [[path _]] (compile-rt path)) rt-jobs))
+(def closure (assoc-in base [:units "rt"] (first rt-units)))
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def plan (bootstrap/link-plan (ledger/bundle-metadata closure leaves) units))
+(doseq [[[_ out] unit] (map (fn [job unit] [job unit]) rt-jobs rt-units)]
+ (let [fns (filter #(= :fn (:kind %)) (:defs unit))
+       text (string/join "" (map #(bootstrap/emit-definition plan unit %) fns))]
+  (File/write! out text)
+  (println (str "BACKEND3_EMITTED " out " " (count fns) " rt functions, " (count text) " bytes"))))

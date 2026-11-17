@@ -38,6 +38,22 @@
   ; A text with nothing to escape is its own escape (same UTF-8 bytes).
   (if (Enum/all? cs (fn [c] (plain-text-code? c))) (glue "\"" s "\"")
    (glue "\"" (Enum/join (Enum/map cs (fn [c] (text-code c))) "") "\""))))
+; A keyword whose name is plain ASCII symbol text is a quoted symbol constant,
+; free in compiled and interpreted Gambit alike; any other name keeps the
+; run-time interning of its escaped text.
+(def ^:private symbol-safe-codes
+ (erlang/list_to_tuple (Enum/map (lists/seq 0 127) (fn [c]
+  (or (and (>= c 48) (<= c 57)) (and (>= c 65) (<= c 90)) (and (>= c 97) (<= c 122))
+      (lists/member c (unicode/characters_to_list "-_?!*+<>=/.$%&~^@:")))))))
+(defn- keyword-datum
+ "The quoted-symbol datum of keyword name `name`, or nil when it is not plain symbol text."
+ [name]
+ (when (Enum/all? (unicode/characters_to_list name)
+        (fn [c] (and (< c 128) (erlang/element (inc c) symbol-safe-codes))))
+  (glue "|:" name "|")))
+(defn- keyword-literal [name]
+ (if-let [datum (keyword-datum name)] (glue "'" datum)
+  (glue "(string->symbol " (text (glue ":" name)) ")")))
 (declare literal)
 (defn- literal-items [xs] (spaced (Enum/map (items xs) (fn [x] (literal x)))))
 (defn literal [v]
@@ -46,19 +62,37 @@
        (erlang/is_float v) (glue "(bl-float " (erlang/float_to_binary v (list :short)) ")")
        (= (type v) :Elixir.BeamLisp.Decimal)
         (str "(bl-decimal " (BeamLisp.Decimal/unscaled v) " " (BeamLisp.Decimal/scale v) ")")
-       (keyword? v) (glue "(string->symbol " (text (glue ":" (erlang/atom_to_binary v))) ")")
+       (keyword? v) (keyword-literal (erlang/atom_to_binary v))
        (vector? v) (glue "(bl-make-vec " (literal-items v) ")")
        (erlang/is_list v) (glue "(list " (literal-items v) ")")
-       (set? v) (glue "(bl-set-from-list (list " (literal-items v) "))")
+       ; Sets and maps emit in Erlang term order: their storage order differs
+       ; between targets (Q1: iteration order is unspecified), emitted bytes may not.
+       (set? v) (glue "(bl-set-from-list (list " (spaced (Enum/map (lists/sort (Enum/to_list v)) literal)) "))")
        (erlang/is_map v)
         (let [module (get v :__struct__)
               entries (if module (dissoc v :__struct__) v)
               fields (glue "(bl-map " (literal-items (BeamLisp.CompilerData/eager_mapcat
                 (fn [entry] (list (erlang/element 1 entry) (erlang/element 2 entry)))
-                (maps/to_list entries))) ")")]
+                (lists/sort (maps/to_list entries)))) ")")]
          (if module (glue "(bl-struct " (literal module) " " fields ")") fields))
        (erlang/is_tuple v) (glue "(bl-make-tuple " (literal-items (erlang/tuple_to_list v)) ")")
        :else (throw (ex-info "native seed: unsupported literal" {:value v}))))
+; Constant hoisting. Under a definition's sink (:constants, an atom of
+; {:index {text name} :rows [[name text]…]}, with :constant-prefix), a literal
+; whose Scheme text builds a value (a set, map, vector, list, tuple, struct,
+; float, decimal or interned keyword: text that starts with "(") is emitted
+; once as a top-level constant `<prefix>$q<i>` and referenced by name, so it
+; is built at load, not at every evaluation (native.bootstrap/emit-definition
+; writes the defines). Without a sink, literals are emitted in place.
+(defn- hoisted [text options]
+ (let [sink (:constants options)]
+  (if (and sink (string/starts-with? text "("))
+   (let [state @sink found (get (:index state) text)]
+    (or found
+     (let [name (glue (:constant-prefix options) "$q" (erlang/integer_to_binary (count (:rows state))))]
+      (reset! sink {:index (assoc (:index state) text name) :rows (conj (:rows state) [name text])})
+      name)))
+   text)))
 (defn refuse [n]
  (throw (ex-info (str "native seed: unsupported ANF or host capability "
                       (pr-str (select-keys n [:op :mod :fun :ns :name :val :pop])))
@@ -76,10 +110,33 @@
    :ns (:source-ns options) :fn (:source-fn options) :arity (:source-arity options)
    :call (if (:tail? options) :tail :direct)
    :internal (and (string? (:file ann)) (string/ends-with? (:file ann) "/actor/runtime.bl"))}))
+; Source frames (debug emission) are statements around a call, never a
+; wrapper: the call keeps its position, so a tail call stays a Scheme tail
+; call. Each site is an emission-table entry: a constant vector
+; #(internal? key value …) in the code, turned into its frame map only when a
+; stack is observed (host/host-source-frames.scm). A map value with no Scheme
+; datum falls back to a builder #(internal? (lambda () map)).
+(defn- site-symbol? [s]
+ (Enum/all? (unicode/characters_to_list s) (fn [c] (and (> c 32) (< c 127) (not= c 124) (not= c 92)))))
+(defn- site-datum [v]
+ (cond (nil? v) "#!void" (= v true) "#t" (= v false) "#f"
+       (integer? v) (erlang/integer_to_binary v) (string? v) (text v)
+       (and (keyword? v) (site-symbol? (erlang/atom_to_binary v))) (glue "|:" (erlang/atom_to_binary v) "|")
+       :else nil))
+(defn- frame-site [frame internal?]
+ (let [data (Enum/map (maps/to_list frame) (fn [pair]
+              [(site-datum (erlang/element 1 pair)) (site-datum (erlang/element 2 pair))]))
+       flag (if internal? "#t" "#f")]
+  (if (Enum/all? data (fn [d] (and (some? (first d)) (some? (second d)))))
+   (glue "'#(" flag (Enum/join (Enum/map data (fn [d] (glue " " (first d) " " (second d)))) "") ")")
+   (glue "(vector " flag " (lambda () " (literal frame) "))"))))
 (defn- source-call [node expression options]
  (if (:source-frames? options)
-  (glue "(bl-source-call " (literal (source-call-frame node options)) " "
-       (if (:tail? options) "#t" "#f") " (lambda () " expression "))") expression))
+  (let [frame (source-call-frame node options) site (frame-site frame (:internal frame))]
+   (if (:tail? options)
+    (glue "(begin (bl-source-tail " site ") " expression ")")
+    (glue "(let ((source-entry (bl-source-call " site "))) (bl-source-return source-entry " expression "))")))
+  expression))
 (defn joined [xs options] (spaced (Enum/map (items xs) (fn [x] (emit x options)))))
 (defn- operand-bindings
  "`(a<i> <operand>)` for each operand, emitted in source order."
@@ -135,19 +192,46 @@
 (defn- static-arguments [n]
  (loop [n n items []]
   (case (:op n) :enil items :cons (recur (:tail n) (conj items (:head n))) nil)))
+(declare self-knot?)
+(defn- procedure-self?
+ "A self-call's callee: the `letrec` local of a function scaffold, always a procedure."
+ [function options]
+ (and (self-knot? function options) (contains? (or (:procedure-selves options) #{}) (:name (:fn function)))))
+(defn- global-call-link
+ "A sealed plan's direct link for a :global callee called with `arity` static
+  arguments (:aot-link :global, native.bootstrap/global-link), or nil."
+ [function arity options]
+ (when-let [hook (:global (:aot-link options))]
+  (when (= :global (:op function)) (hook function arity))))
 (defn- linked-language-call
- "AOT invoke fast path: a procedure is applied directly; every other callee
-  takes bl-invoke. Callee first, then arguments, in source order."
+ "AOT invoke fast path: a sealed global target is called through its arity
+  cell; a procedure is applied directly; every other callee takes bl-invoke.
+  Callee first, then arguments, in source order."
  [function arguments options]
- (let [callee (emit function (operand-options options)) statics (static-arguments arguments)]
-  (if statics
+ (let [statics (static-arguments arguments)
+       global (when statics (global-call-link function (count statics) options))]
+  (if global (linked-call nil global statics options)
+  (let [direct? (procedure-self? function options)
+        cell (when (and direct? statics)
+               (let [c (get (or (:self-cells options) {}) (:name (:fn function)))]
+                (when (and c (= (second c) (count statics))) (first c))))
+        callee (emit function (operand-options options))]
+  (cond
+   cell
+   (let [[binds operands] (linked-operands true statics options)
+         call (glue "(" cell (Enum/join (Enum/map (items operands) (fn [o] (glue " " o))) "") ")")]
+    (if (empty? binds) call (glue "(let* (" (spaced binds) ") " call ")")))
+   statics
    (let [[binds operands] (linked-operands true statics options)
          spread (Enum/join (Enum/map (items operands) (fn [o] (glue " " o))) "")
-         call (glue "(if (procedure? callee) (callee" spread ") (bl-invoke callee (list" spread ")))")]
+         call (if direct? (glue "(callee" spread ")")
+                (glue "(if (procedure? callee) (callee" spread ") (bl-invoke callee (list" spread ")))"))]
     (glue "(let ((callee " callee ")) "
          (if (empty? binds) call (glue "(let* (" (spaced binds) ") " call ")")) ")"))
+   :else
    (glue "(let* ((callee " callee ") (arguments " (emit arguments (operand-options options)) ")) "
-        "(if (procedure? callee) (apply callee arguments) (bl-invoke callee arguments)))"))))
+        (if direct? "(apply callee arguments))"
+          "(if (procedure? callee) (apply callee arguments) (bl-invoke callee arguments)))")))))))
 (defn- ordered-language-call [node function arguments options]
  (cond
   (:source-frames? options) (ordered-target-call node function arguments "bl-invoke" options)
@@ -168,15 +252,16 @@
 (defn binders [p] (Enum/reverse (binders-into p (list))))
 (defn- patterns-binders [pats] (Enum/reduce (items pats) (list) (fn [p acc] (binders-into p acc))))
 
-; Integer facts name Source variables proven to hold exact integers. Every
+; Facts (:facts, a BeamLisp.Optimize fact environment: Source name -> value fact)
+; come from the shared ANF fact pass that BEAM's optimizer reads too. Every
 ; Scheme binder of a Source name forgets that name's fact. `names` is a
 ; function returning the names, so no binder list is built without facts.
 (defn- forget-facts [options names]
- (let [facts (:integer-facts options)]
+ (let [facts (:facts options)]
   (if (empty? facts) options
    (let [names (items (names))]
     (if (any-of? names (fn [name] (contains? facts name)))
-     (assoc options :integer-facts (Enum/reduce names facts (fn [name facts] (disj facts name)))) options)))))
+     (assoc options :facts (BeamLisp.Optimize/forget facts names)) options)))))
 
 ; Patterns compile to decision code on the subject. A continuation carries the
 ; lexical bindings at EMISSION time: no pattern data, runtime binding alist or
@@ -342,11 +427,39 @@
                          (or (boolean-test? (first args))
                              (and (= :lit (:op (first args))) (contains? #{true false} (:val (first args)))))))))
   false))
+; Boolean values. The compiler expands `(and a b)` to `(let [x a] (if x b x))`
+; and `(or a b)` to `(let [x a] (if x x b))`. When `a` is #t or #f, the
+; junction's own test is a plain `if`; when its branches are boolean too, so is
+; its value, and an enclosing test needs no truthiness wrapper either.
+(declare boolean-valued?)
+(defn- boolean-junction?
+ "`(let [x init] (if x then else))` whose init is always #t or #f."
+ [n options]
+ (let [body (:body n) test (:test body)]
+  (and (= :let (:op n)) (= :if (:op body)) (= :var (:op test)) (= (:name n) (:name test))
+       (boolean-valued? (:init n) options))))
+(defn- junction-part? [n name options]
+ (or (and (= :var (:op n)) (= name (:name n))) (boolean-valued? n options)))
+(defn- boolean-valued?
+ "An expression whose value is always #t or #f: a guard-position erlang BIF
+  (boolean-test?), a boolean literal, an `if` of boolean branches, a boolean
+  junction of boolean parts, or anything the shared fact pass (:facts, a
+  BeamLisp.Optimize fact environment) tags :bool, such as a variable bound to one."
+ [n options]
+ (or (case (:op n)
+      :lit (or (= true (:val n)) (= false (:val n)))
+      :remote (boolean-test? n)
+      :if (and (boolean-valued? (:then n) options) (boolean-valued? (:else n) options))
+      :let (and (boolean-junction? n options)
+                (junction-part? (:then (:body n)) (:name n) options)
+                (junction-part? (:else (:body n)) (:name n) options))
+      false)
+     (BeamLisp.Optimize/bool-fact? (BeamLisp.Optimize/expr n (or (:facts options) {})))))
 (defn- branch
  "Inline BL truthiness: everything except false and nil is true. The host
   local `t` cannot capture an ident-encoded Source local."
- [test-node test then else]
- (if (boolean-test? test-node) (glue "(if " test " " then " " else ")")
+ [test-node test then else options]
+ (if (boolean-valued? test-node options) (glue "(if " test " " then " " else ")")
   (glue "(let ((t " test ")) (if (or (eq? t #f) (eq? t bl-nil)) " else " " then "))")))
 
 (defn- distinct-names? [names] (= (count names) (count (Enum/uniq names))))
@@ -373,11 +486,11 @@
     (let [next (if final? fallback "(clause-next)")
           options (forget-facts options (fn [] (patterns-binders pats)))
           body (emit (:body cl) options)
-          body (if wrap? (glue "(bl-vec (list (bl-key \"match\") (lambda () " body ")))" ) body)
+          body (if wrap? (glue "(bl-vec (list " (literal :match) " (lambda () " body ")))") body)
           guard (:guard cl)
           guard-options (assoc (operand-options options) :source-frames? false)
           body (cond (nil? guard) body
-                     (total? guard guard-options) (branch guard (emit guard guard-options) body next)
+                     (total? guard guard-options) (branch guard (emit guard guard-options) body next guard-options)
                      :else (glue "(if (bl-guard (lambda () " (emit guard guard-options) ")) " body " " next ")"))
           _ (when-let [counts (:emission-counts options)]
               (swap! counts update :compiled-pattern-clauses (fnil inc 0)))
@@ -395,41 +508,57 @@
                   (glue "(pk" (first binding) " " (emit (second binding) guard-options) ")")))) ") " arm ")"))]
      (if more (glue "(let ((clause-next (lambda () " more "))) " arm ")") arm))))))
 
-(defn- function-entry [body frame]
- (if frame
-  (glue "(bl-with-source-frame " (literal frame) " (lambda () (h-tick) " body "))")
-  (glue "(h-tick) " body)))
+; Budget sites. A turn budget is spent by (h-tick) at every loop back-edge
+; (the named-let head of a lowered loop) and at the entry of every function
+; whose body can call BL code (`body-calls?`). A function that cannot call BL
+; code runs a bounded straight line between ticks, so it pays none, whether
+; its caller knows it or not. Every cycle of BL control passes through one
+; of these ticks: see speed/frames/RESULT.md.
+(declare body-calls?)
+(defn- function-entry [body site tick?]
+ (let [body (if tick? (glue "(h-tick) " body) body)]
+  (if site (glue "(bl-source-enter " site ") " body) body)))
 
-(defn- fixed-function [formals body fallback frame]
- ; Gambit's case-lambda keeps wrong-arity calls on the original entry tick,
- ; frame and function-clause path. Gambit 4.9.5's macro needs an optional
- ; position when a rest arm is present: a one-required rest fallback covers
- ; every nonzero arity of a zero-parameter function without capturing a
- ; Source variable.
- (glue "(case-lambda ((" (spaced formals) ") " (function-entry body frame) ") ("
-      (if (empty? formals) "(extra . argv)" "argv") " " (function-entry fallback frame) "))"))
+(defn- fixed-function [formals body fallback site tick?]
+ ; Gambit's case-lambda keeps wrong-arity calls on the original entry frame
+ ; and function-clause path; that arm only raises, so it never ticks.
+ ; Gambit 4.9.5's macro needs an optional position when a rest arm is
+ ; present: a one-required rest fallback covers every nonzero arity of a
+ ; zero-parameter function without capturing a Source variable.
+ (glue "(case-lambda ((" (spaced formals) ") " (function-entry body site tick?) ") ("
+      (if (empty? formals) "(extra . argv)" "argv") " " (function-entry fallback site false) "))"))
 (def ^:private formal-table (erlang/list_to_tuple (Enum/map (lists/seq 0 63) (fn [i] (str "fa" i)))))
 (defn- formal-names [n]
  (Enum/map (lists/seq 0 (dec n)) (fn [i] (if (< i 64) (erlang/element (inc i) formal-table)
                                            (glue "fa" (erlang/integer_to_binary i))))))
-(defn- function-expression
- "One unguarded DISTINCT-variable clause binds its Source names as Scheme
-  formals. Other same-width clause chains match fixed formals directly; only
-  a mixed-width chain destructures its argument list."
- [n options frame]
- (let [fallback "(error \"native seed: function clause\")"
-       clause (BeamLisp.CompilerData/simple_function_clause n)
+(def ^:private clause-fallback "(error \"native seed: function clause\")")
+(defn- fixed-parts
+ "nil for a mixed-width clause chain; else {:formals :body} of the fixed-arity
+  function. One unguarded DISTINCT-variable clause binds its Source names as
+  Scheme formals; other same-width chains match fixed formals directly."
+ [n options]
+ (let [clause (BeamLisp.CompilerData/simple_function_clause n)
        names (when clause (Enum/map (items (:pats clause)) (fn [p] (:name p))))
        cs (items (:clauses n))
        widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))]
   (cond
    (and clause (distinct-names? names))
-    (fixed-function (Enum/map names (fn [name] (ident name))) (emit (:body clause) options) fallback frame)
+    {:formals (Enum/map names (fn [name] (ident name))) :body (emit (:body clause) options)}
    (= 1 (count widths))
     (let [formals (formal-names (first widths))]
-     (fixed-function formals (clauses cs formals fallback options false) fallback frame))
-   :else
-    (glue "(lambda argv " (function-entry (clauses cs "argv" fallback options false) frame) ")"))))
+     {:formals formals :body (clauses cs formals clause-fallback options false)})
+   :else nil)))
+(defn- function-ticks? [n options]
+ (body-calls? (items (:clauses n)) {:verdicts (:loop-verdicts options)}))
+(defn- function-expression
+ "A fixed-arity function is a case-lambda (fixed-parts); only a mixed-width
+  chain destructures its argument list."
+ [n options frame]
+ (let [site (when frame (frame-site frame false))
+       tick? (function-ticks? n options)]
+  (if-let [parts (fixed-parts n options)]
+   (fixed-function (:formals parts) (:body parts) clause-fallback site tick?)
+   (glue "(lambda argv " (function-entry (clauses (items (:clauses n)) "argv" clause-fallback options false) site tick?) ")"))))
 
 (def arithmetic {:add "+" :sub "-" :mul "*" :div "bl-div" :lt "<" :gt ">" :le "<=" :ge ">=" :num_eq "="})
 (def core-leaves
@@ -571,22 +700,62 @@
  [n options]
  (when-let [parts (loop-parts n)]
   (let [known (:loop-verdicts options) verdicts (or known (loop-verdicts n))]
-   (cond (or (contains? verdicts (:self parts)) (:source-frames? options)) {:parts parts :verdicts verdicts}
+   (cond (contains? verdicts (:self parts)) {:parts parts :verdicts verdicts}
          (nil? known) {:verdicts verdicts}
          :else nil))))
 
+; Can this function body (nested fn bodies excluded: they are functions with
+; their own entry) pass control to BL code? `ctx` carries the loop verdicts in
+; force and the
+; self of the innermost lowered loop, whose recur is a jump, not a call. One
+; walk per function; a loop region not covered by the verdicts in force gets
+; its verdicts once, as loop-plan computes them.
+(defn- primitive-remote?
+ "A host primitive, OTP or Elixir function returns after work bounded by its
+  finite arguments; a BL callback it runs is a function with its own entry.
+  BL-compiled modules (Elixir.BeamLisp.*) and apply can run unbounded BL."
+ [n]
+ (let [m (:mod n)]
+  (and (keyword? m) (not= :apply (:fun n))
+       (not (string/starts-with? (erlang/atom_to_binary m) "Elixir.BeamLisp")))))
+; A direct walk: no closure or dynamic invoke per element (any-of? made this
+; second pass over every function body cost as much as emitting it).
+(defn- any-calls? [xs ctx]
+ (loop [xs (items xs)]
+  (cond (erlang/=:= xs (list)) false
+        (body-calls? (erlang/hd xs) ctx) true
+        :else (recur (erlang/tl xs)))))
+(defn- body-calls? [n ctx]
+ (cond
+  (sequential? n) (any-calls? n ctx)
+  (not (erlang/is_map n)) false
+  :else
+  (case (:op n)
+   :lit false :var false :global false :binding false :enil false :fn false
+   :apply
+   (if-let [parts (loop-parts n)]
+    (let [verdicts (or (:verdicts ctx) (loop-verdicts n)) inside (assoc ctx :verdicts verdicts)]
+     (if (contains? verdicts (:self parts))
+      (or (any-calls? (:inits parts) inside) (body-calls? (:body parts) (assoc inside :loop (:self parts))))
+      true))
+    (if (and (:loop ctx) (recur-node? n (:loop ctx))) (any-calls? (:args n) ctx) true))
+   :invoke true
+   :recv true
+   :remote (or (not (primitive-remote? n)) (any-calls? (:args n) ctx))
+   (any-calls? (maps/values (maps/remove :ann n)) ctx))))
+
 (defn- integer-operand? [n options]
  (or (and (= :lit (:op n)) (erlang/is_integer (:val n)))
-     (and (= :var (:op n)) (contains? (or (:integer-facts options) #{}) (:name n)))))
+     (BeamLisp.Optimize/int-fact? (BeamLisp.Optimize/expr n (or (:facts options) {})))))
 (defn- integer-binding [options name value]
- (let [facts (or (:integer-facts options) #{})]
-  (cond (integer-operand? value options) (assoc options :integer-facts (conj facts name))
-        (contains? facts name) (assoc options :integer-facts (disj facts name))
-        :else options)))
+ (let [facts (or (:facts options) {})
+       bound (BeamLisp.Optimize/bind facts name value)]
+  ; Unchanged options when there is nothing to know or to forget.
+  (if (and (empty? (get bound name)) (not (contains? facts name))) options
+   (assoc options :facts bound))))
 (defn- integer-branch [options test]
- (if (and (= :remote (:op test)) (= :erlang (:mod test))
-          (= :is_integer (:fun test)) (= 1 (count (:args test))) (= :var (:op (first (:args test)))))
-  (update options :integer-facts (fn [facts] (conj (or facts #{}) (:name (first (:args test)))))) options))
+ (let [facts (or (:facts options) {}) refined (BeamLisp.Optimize/refine facts test)]
+  (if (erlang/=:= facts refined) options (assoc options :facts refined))))
 (defn- integer-intrinsic [node options]
  (when (and (= :erlang (:mod node)) (= 2 (count (:args node)))
             (Enum/all? (items (:args node)) (fn [arg] (integer-operand? arg options))))
@@ -623,9 +792,15 @@
        function (function-expression n inside frame)]
   (if (:callable-arities? options) (glue "(bl-register-callable! " function " " (erlang/integer_to_binary arity) ")") function)))
 (defn- emit-source-scaffold [n parts options]
+ ; The local is bound to the emitted :fn, a procedure (bl-register-callable!
+ ; returns its procedure), so a self-call applies it directly.
  (let [self (:name n) local (ident self)
+       procedures (or (:procedure-selves options) #{})
        body (emit (:inner parts) (assoc (forget-facts options (fn [] (list self)))
-                                        :selves (assoc (or (:selves options) {}) self local)))]
+                                        :selves (assoc (or (:selves options) {}) self local)
+                                        :procedure-selves (if (= :fn (:op (:inner parts))) (conj procedures self)
+                                                            (disj procedures self))
+                                        :self-cells (dissoc (or (:self-cells options) {}) self)))]
   (glue "(letrec ((" local " " body ")) " local ")")))
 
 (defn- multi-layout [n]
@@ -653,8 +828,10 @@
 (defn- emit-multi-arm [node target options]
  (let [parts (BeamLisp.CompilerData/self_application_parts node)
        self (:name node)
-       inside (assoc (dissoc options :self-target) :selves
-                     (assoc (or (:selves options) {}) self target))]
+       inside (assoc (dissoc options :self-target)
+                     :selves (assoc (or (:selves options) {}) self target)
+                     :procedure-selves (disj (or (:procedure-selves options) #{}) self)
+                     :self-cells (dissoc (or (:self-cells options) {}) self))]
   ; Original ANF uses (self self) for its self value. Bind that ORIGINAL
   ; scaffold variable to a one-argument thunk of the WHOLE dispatcher.
   ; The arm still receives its original parameters/rest-list convention.
@@ -676,14 +853,74 @@
        "(set! " target " (bl-make-tuple " (emit (:tag layout) options) " " fixed-source " " variadic-source ")) "
        target "))")))
 
+(defn- emit-junction
+ "A boolean junction, emitted as `:let` and `:if` emit it, with the plain test."
+ [n options]
+ (let [local (ident (:name n)) body (:body n)
+       init (emit (:init n) (operand-options options))
+       options (integer-binding options (:name n) (:init n))]
+  (glue "(let ((" local " " init ")) (if " local " "
+       (emit (:then body) (integer-branch options (:test body))) " " (emit (:else body) options) "))")))
+; Keyword dispatch. A chain `(cond (== x :a) A (== x :b) B … :else E)` whose
+; AOT templates are exactly `(eq? x KEYWORD)` becomes one Scheme `case` on the
+; interned symbol (eqv? is eq? on symbols). The tests are a variable and a
+; literal: emitting them has no effect, so only the branches are emitted, in
+; their source order.
+(defn- plain-keyword? [n]
+ (and (= :lit (:op n)) (keyword? (:val n))
+      (not (contains? #{"true" "false" "nil"} (erlang/atom_to_binary (:val n))))))
+(defn- keyword-test
+ "[name datum] when `n` is an AOT-linked `==`/`=:=` of variable `name` and a
+  plain keyword whose template is exactly `(eq? variable keyword)`."
+ [n options]
+ (when (and (= :remote (:op n)) (= :erlang (:mod n)) (contains? #{:== :=:=} (:fun n)))
+  (let [args (items (:args n))]
+   (when (= 2 (count args))
+    (let [a (erlang/hd args) b (erlang/hd (erlang/tl args))
+          side (cond (and (= :var (:op a)) (plain-keyword? b)) 1
+                     (and (= :var (:op b)) (plain-keyword? a)) 0
+                     :else nil)]
+     (when side
+      (let [variable (if (= side 1) a b) k (:val (if (= side 1) b a))
+            datum (keyword-datum (erlang/atom_to_binary k))
+            link (when datum ((:remote (:aot-link options)) n))]
+       (when (and link (not (:inline? link))
+                  (= (if (= side 1) "(eq? a0 a1)" "(eq? a1 a0)") ((:call link) ["a0" "a1"])))
+        [(:name variable) datum]))))))))
+(defn- keyword-dispatch
+ "nil, or {:subject name :arms (reversed list of [datum node]) :else node} for
+  a chain of at least two `if`s testing one variable against distinct keywords."
+ [n options]
+ (when (and (:aot-link options) (not (:source-frames? options)))
+  (when-let [first-test (keyword-test (:test n) options)]
+   (let [subject (first first-test)]
+    (loop [node (:else n) arms (list [(second first-test) (:then n)]) seen #{(second first-test)}]
+     (let [t (when (= :if (:op node)) (keyword-test (:test node) options))]
+      (if (and t (= subject (first t)) (not (contains? seen (second t))))
+       (recur (:else node) (cons [(second t) (:then node)] arms) (conj seen (second t)))
+       (when (not (erlang/=:= (erlang/tl arms) ())) {:subject subject :arms arms :else node}))))))))
+(defn- emit-keyword-dispatch [dispatch options]
+ (let [arms (Enum/map (Enum/reverse (:arms dispatch)) (fn [arm] [(first arm) (emit (second arm) options)]))
+       otherwise (emit (:else dispatch) options)
+       ; Adjacent arms with the same code share one clause: groups of
+       ; {reversed datums, code}, in reverse.
+       groups (Enum/reduce arms (list) (fn [arm acc]
+                (if (and (not (erlang/=:= acc ())) (= (second arm) (erlang/element 2 (erlang/hd acc))))
+                 (cons (erlang/list_to_tuple (list (cons (first arm) (erlang/element 1 (erlang/hd acc))) (second arm)))
+                       (erlang/tl acc))
+                 (cons (erlang/list_to_tuple (list (list (first arm)) (second arm))) acc))))]
+  (glue "(case " (ident (:subject dispatch)) " "
+       (spaced (Enum/map (Enum/reverse groups) (fn [group]
+        (glue "((" (spaced (Enum/reverse (erlang/element 1 group))) ") " (erlang/element 2 group) ")"))))
+       " (else " otherwise "))")))
 (defn- clauses-binders [cs]
  (Enum/reduce (items cs) (list) (fn [clause acc]
   (Enum/reduce (items (:pats clause)) acc (fn [p acc] (binders-into p acc))))))
 (defn- pairs-operands [pairs] (Enum/flat_map (items pairs) (fn [pair] (items pair))))
 (defn emit [n options]
  (if-let [layout (multi-layout n)] (emit-multi layout options)
- ; Checked self-recursive loops always become named lets. Source-frame
- ; emission keeps its unchecked loop lowering for the actor runtime.
+ ; Checked self-recursive loops become named lets, in release and in
+ ; source-frame emission alike; an unchecked one runs as calls.
  (if-let [plan (loop-plan n options)]
   (let [options (assoc options :loop-verdicts (:verdicts plan))]
    (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit n options)))
@@ -692,9 +929,10 @@
    (ordered (:name (:loop options)) (:args n) (operand-options options))
   (self-knot? n options) (get (:selves options) (:name (:fn n)))
   (and (= :let (:op n)) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
+  (boolean-junction? n options) (emit-junction n options)
   :else
  (case (:op n)
-  :lit (literal (:val n))
+  :lit (hoisted (literal (:val n)) options)
   :var (ident (:name n))
   :global (or (when-let [resolver (:global-resolver options)] (resolver n))
           (if (and (= (:ns options) (:ns n)) (contains? (:definitions options) (:name n)))
@@ -717,8 +955,9 @@
   :apply (ordered-language-call n (:fn n) (argument-list (:args n)) options)
   :invoke (ordered-language-call n (:callee n) (:arguments n) options)
   :let (glue "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) (integer-binding options (:name n) (:init n))) ")")
-  :if (branch (:test n) (emit (:test n) (operand-options options))
-              (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options))
+  :if (if-let [dispatch (keyword-dispatch n options)] (emit-keyword-dispatch dispatch options)
+       (branch (:test n) (emit (:test n) (operand-options options))
+               (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options) options))
   :do (let [statements (items (:stmts n))]
         (glue "(begin " (if (empty? statements) "bl-nil"
           (glue (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
@@ -732,7 +971,7 @@
           (clauses (items (:clauses n)) ["subject"] "(error \"native seed: case clause\")" options false) ")")
   :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")
               scan (glue "(lambda (message) "
-                    (clauses (items (:clauses n)) ["message"] "(bl-key \"nomatch\")" options true) ")")
+                    (clauses (items (:clauses n)) ["message"] (literal :nomatch) options true) ")")
               after (glue "(lambda () " (if (:after n) (emit (:after n) options) "bl-nil") ")")
               receive (source-call n (glue "(" (ident "rt-receive") " " scan " " after " timeout)")
                          (operand-options options))]
@@ -760,3 +999,35 @@
         (assoc options :definition-ns (or (:ns definition) (:ns options)) :fn-label (:name definition)
                        :source-fn nil :source-arity nil :tail? false :loop nil)) ")\n")
   (catch e (throw (ex-info (str (:name definition) ": " (ex-message e)) (assoc (or (ex-data e) {}) :emission-stack __STACKTRACE__))))))
+
+(defn emit-sealed-function
+ "Release AOT emission of a fixed-arity function definition for a sealed
+  image, or nil when `node` is not one (another shape, or source frames).
+  Returns {:arity n :lambda text :value text}: `:lambda` is the function as a
+  literal `(lambda (formals) entry+body)` for the arity cell `cell`, so
+  Gambit can inline calls to it; `:value` is the definition's value, the
+  registered case-lambda that forwards its arity to `cell` and keeps the
+  function-clause arm for any other. Self-calls of that arity call `cell`;
+  the self as a value is `value-name`. Emission order and facts are those of
+  `emit` on the same node."
+ [node options cell value-name]
+ (when (and (= :let (:op node)) (not (:source-frames? options)))
+  (when-let [parts (self-parts node)]
+   (let [inner (:inner parts) self (:name node)
+         widths (Enum/uniq (Enum/map (items (:clauses inner)) (fn [c] (count (:pats c)))))]
+    (when (and (= :fn (:op inner)) (= 1 (count widths)))
+     (let [arity (first widths)
+           scaffold (assoc (forget-facts options (fn [] (list self)))
+                           :selves (assoc (or (:selves options) {}) self value-name)
+                           :procedure-selves (conj (or (:procedure-selves options) #{}) self)
+                           :self-cells (assoc (or (:self-cells options) {}) self [cell arity]))
+           inside (forget-facts scaffold (fn [] (clauses-binders (:clauses inner))))
+           tick? (function-ticks? inner inside)]
+      (when-let [fixed (fixed-parts inner inside)]
+       (let [formals (:formals fixed)
+             forward (glue "(" cell (Enum/join (Enum/map formals (fn [f] (glue " " f))) "") ")")
+             value (fixed-function formals forward clause-fallback nil false)]
+        {:arity arity
+         :lambda (glue "(lambda (" (spaced formals) ") " (function-entry (:body fixed) nil tick?) ")")
+         :value (if (:callable-arities? options)
+                  (glue "(bl-register-callable! " value " " (erlang/integer_to_binary arity) ")") value)}))))))))

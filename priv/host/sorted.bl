@@ -141,6 +141,55 @@
         :else (list (encode_key h) (encode_key t))))
     :else (list (encode_key s))))
 
+;; Numbers (rank 3) encode as one exact payload whatever their kind: the list
+;; `[floor | fraction-digits]`, the integer part followed by the decimal digits
+;; of the fractional part without trailing zeros. Every int, float and decimal
+;; has a FINITE such expansion (a float's fraction is m/2^k, which has k
+;; decimal digits), so Erlang's list order IS numeric order, `1`, `1.0` and
+;; `1.00M` encode identically, and a decimal such as `0.1M` sorts among the
+;; numbers (between `0.09999999999999999` and `0.1`, the float) instead of
+;; after every collection (Q3).
+
+(defn- fraction-digits
+  "The decimal digits of `n / 10^k` (0 <= n < 10^k) without trailing zeros."
+  [n k]
+  (if (erlang/== n 0)
+    ()
+    (let [text (erlang/integer_to_list n)
+          padded (erlang/++ (lists/duplicate (erlang/- k (erlang/length text)) 48) text)
+          trimmed (lists/reverse (lists/dropwhile (fn [c] (erlang/== c 48)) (lists/reverse padded)))]
+      (lists/map (fn [c] (erlang/- c 48)) trimmed))))
+
+(defn- pow10 [k]
+  (loop [i k acc 1]
+    (if (erlang/== i 0) acc (recur (erlang/- i 1) (erlang/* acc 10)))))
+
+(defn- bits
+  "k for q = 2^k."
+  [q]
+  (loop [x q k 0]
+    (if (erlang/== x 1) k (recur (erlang/bsr x 1) (erlang/+ k 1)))))
+
+(defn- number-payload [k]
+  (cond
+    (erlang/is_integer k) (list k)
+    (erlang/is_float k)
+    (let [i (erlang/floor k)
+          r (Float/ratio k)
+          p (erlang/element 1 r)
+          q (erlang/element 2 r)
+          e (bits q)]
+      ; frac = (p - i*q)/2^e = (p - i*q)*5^e / 10^e
+      (cons i (fraction-digits (erlang/* (erlang/- p (erlang/* i q)) (erlang/div (pow10 e) (erlang/bsl 1 e))) e)))
+    :else
+    (let [u (maps/get :unscaled k)
+          s (maps/get :scale k)]
+      (if (erlang/=< s 0)
+        (list (erlang/* u (pow10 (erlang/- 0 s))))
+        (let [d (pow10 s)
+              i (if (erlang/>= u 0) (erlang/div u d) (erlang/- 0 (erlang/div (erlang/+ (erlang/- 0 u) (erlang/- d 1)) d)))]
+          (cons i (fraction-digits (erlang/- u (erlang/* i d)) s)))))))
+
 (defn encode_key
   "Encode `key` so its native Erlang order matches `BeamLisp.Ns.Rt/compare`.
    Ranks mirror `family-rank` (`priv/boot/rt.bl`) exactly; within a rank the
@@ -153,7 +202,8 @@
     (erlang/== nil k) (tuple 0 nil)
     (erlang/== false k) (tuple 1 false)
     (erlang/== true k) (tuple 2 true)
-    (erlang/is_number k) (tuple 3 k)
+    (erlang/is_number k) (tuple 3 (number-payload k))
+    (tagged? k :"Elixir.BeamLisp.Decimal") (tuple 3 (number-payload k))
     (erlang/is_binary k) (tuple 4 k)
     (and (erlang/is_tuple k)
          (erlang/== 2 (erlang/tuple_size k))

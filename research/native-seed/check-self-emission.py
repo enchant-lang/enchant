@@ -24,7 +24,7 @@ import uuid
 DEADLINE = 240
 HEADER = b";; BL native compiler. Generated from canonical BL source.\n"
 ENTRY = b"(native-main (native-command-line))\n"
-MARKER = "NATIVE_SELF_COMPILE 18 namespaces"
+MARKER = "NATIVE_SELF_COMPILE 34 namespaces"
 HOST_SOURCES = ("host.scm", "host/host-values.scm", "host/host-leaves.scm",
                 "host/host-extra.scm", "host/host-compiler.scm", "host/native-memo.scm")
 

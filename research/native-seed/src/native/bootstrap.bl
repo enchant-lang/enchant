@@ -107,6 +107,9 @@
                                (map (fn [[ns module]] [module ns]) (:host-modules metadata))))
    :module-of (into {} (map (fn [[ns module]] [ns module]) (:host-modules metadata)))
    :stub-modules (set (mapcat (fn [[_ module base]] [module base]) (:stub-modules metadata)))
+   ; N3: the build declares the image sealed (bundle-metadata: the native
+   ; closure always is). Absent, linking is the dev form, byte for byte.
+   :sealed? (= true (:sealed metadata))
    :ledger (:resolution metadata)}))
 (defn remote-key [n]
  (str (erlang/atom_to_binary (:mod n)) "/" (erlang/atom_to_binary (:fun n)) "/" (count (:args n))))
@@ -143,6 +146,15 @@
 (defn global-decision [plan n] (resolution/global-decision (:ledger plan) (:table plan) n))
 (defn- direct-call [target]
  {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
+(defn- variadic-call
+ "The variadic arm `target` called as native-resolve-call would: the first
+  `minimum` operands, then the rest as one list."
+ [target minimum]
+ {:inline? true
+  :call (fn [operands]
+         (let [ops (vec operands)]
+          (str "(" target (string/join "" (map #(str " " %) (subvec ops 0 minimum)))
+               " (list" (string/join "" (map #(str " " %) (subvec ops minimum))) "))")))})
 (defn- generic-call [target]
  ; A non-:fn definition or an undeclared arity: the live slot value decides.
  {:inline? true
@@ -164,40 +176,89 @@
 (defn remote-link
  ; nil keeps the dynamic (native-remote KEY) path: excluded namespaces and
  ; rest-list calls to a definition without a variadic arm raise there.
+ ; :kind says what the remote reaches (:self-module, :template, :leaf or
+ ; :compiled), for the emitter's analyses: a leaf or template is a host
+ ; primitive, a compiled target is a BL call. It never changes the text.
  ([plan n] (remote-link plan nil n))
  ([plan ns n]
  (if-let [module (self-module plan ns n)]
-  {:inline? true
-   :call (fn [_] (str "(bl-make-tuple (bl-key \"module\") (bl-key "
-                      (scheme/text (erlang/atom_to_binary module)) "))"))}
+  {:inline? true :kind :self-module
+   :call (fn [_] (str "(bl-make-tuple " (scheme/literal :module) " " (scheme/literal module) ")"))}
  (if-let [template (intrinsics/remote-template n)]
-  {:inline? false :call template}
+  {:inline? false :kind :template :call template}
   (let [decision (remote-decision plan n)]
    (case (first decision)
-    "leaf" (direct-call (leaf-binding-name (second decision)))
+    "leaf" (assoc (direct-call (leaf-binding-name (second decision))) :kind :leaf)
     "compiled"
-     (let [[_ _ ns logical _ shape] decision]
-      (case shape
-       "arity" (direct-call (arity-binding-name ns logical (count (:args n))))
-       "variadic" (direct-call (variadic-binding-name ns logical))
-       "generic" (generic-call (binding-name ns logical))
-       nil))
+     (let [[_ _ ns logical _ shape] decision
+           link (case shape
+                 "arity" (direct-call (arity-binding-name ns logical (count (:args n))))
+                 "variadic" (direct-call (variadic-binding-name ns logical))
+                 "generic" (generic-call (binding-name ns logical))
+                 nil)]
+      (when link (assoc link :kind :compiled)))
      nil))))))
+(defn sealed-function?
+ "Under a sealed plan, the selected compiled :fn definition ns/name: its
+  binding never changes after link, so references read it directly."
+ [plan sel-kind sel-ns sel-name]
+ (and (:sealed? plan) (= "compiled" sel-kind) (contains? (:arities plan) [sel-ns sel-name])))
+(defn global-link
+ "Sealed images only: a :global CALL with `arity` static arguments whose
+  selected target is a compiled :fn declaring that arity links straight to
+  the immutable arity cell, as a :remote to it does. nil keeps the value read
+  (emitter interface for :invoke of a :global callee; see link3/RESULT.md)."
+ [plan n arity]
+ (let [[_ _ _ _ sel-kind sel-ns sel-name] (global-decision plan n)]
+  (when (sealed-function? plan sel-kind sel-ns sel-name)
+   (let [arities (get (:arities plan) [sel-ns sel-name])]
+    (cond
+     (contains? (set (:fixed arities)) arity)
+      (assoc (direct-call (arity-binding-name sel-ns sel-name arity)) :kind :compiled)
+     ; No fixed arm of that arity: the variadic arm, as native-resolve-call picks it.
+     (and (some? (:variadic arities)) (>= arity (:variadic arities)))
+      (assoc (variadic-call (variadic-binding-name sel-ns sel-name) (:variadic arities)) :kind :compiled)
+     :else nil)))))
 (defn link-context [plan ns]
  ; native.eval/context plus :aot-link. Every remote must have an exact
  ; capability (remote-decision raises otherwise); the dynamic resolver stays
  ; for the shapes remote-link leaves unlinked.
  (let [base (ev/context ns)]
   (assoc base
-   :aot-link {:remote (fn [n] (remote-link plan ns n))}
+   :aot-link (if (:sealed? plan)
+              {:remote (fn [n] (remote-link plan ns n)) :global (fn [n arity] (global-link plan n arity))}
+              {:remote (fn [n] (remote-link plan ns n))})
    :remote-resolver (fn [n] (remote-decision plan n ns) ((:remote-resolver base) n))
    :global-resolver
    (fn [n]
-    (let [[_ _ _ _ _ sel-ns sel-name] (global-decision plan n)]
-     (global-binding-name sel-ns sel-name))))))
-(defn link-definition [ns name kind arities]
+    (let [[_ _ _ _ sel-kind sel-ns sel-name] (global-decision plan n)]
+     (if (sealed-function? plan sel-kind sel-ns sel-name)
+      (binding-name sel-ns sel-name)
+      (global-binding-name sel-ns sel-name)))))))
+(defn- sealed-link-definition
+ ; N3: every cell is defined once from the compiled value and never set!, so
+ ; Gambit sees constant top-level bindings. A compiled :fn has no global-view
+ ; cell (references read its binding); a :val keeps one. native-seal-image!
+ ; (emitted after the initializers) makes any later redefinition raise.
+ ; `raw` is {arity lambda-text} (scheme/emit-sealed-function): that arity
+ ; cell is the literal lambda itself, which Gambit can inline.
+ [ns name kind arities raw]
+ (let [binding (binding-name ns name)]
+  (if (= :fn kind)
+   (str (string/join "" (map #(str "(define " (arity-binding-name ns name %) " "
+                                   (or (get raw %) (str "(native-arity-entry " binding " " % ")")) ")\n")
+                             (:fixed arities)))
+        (if (some? (:variadic arities))
+         (str "(define " (variadic-binding-name ns name) " (native-variadic-entry " binding " "
+              (scheme/text (str ns "/" name)) "))\n") ""))
+   (str "(define " (global-binding-name ns name) " (native-unmacro " binding "))\n"))))
+(defn link-definition
+ ([ns name kind arities] (link-definition false ns name kind arities {}))
+ ([sealed? ns name kind arities] (link-definition sealed? ns name kind arities {}))
+ ([sealed? ns name kind arities raw]
  ; One setter per linked slot (compiled view, including arity entries) and
  ; one for its global view; native-link! initializes both immediately.
+ (if sealed? (sealed-link-definition ns name kind arities raw)
  (let [binding (binding-name ns name) global (global-binding-name ns name)
        fixed (if (= :fn kind) (:fixed arities) [])
        variadic? (and (= :fn kind) (some? (:variadic arities)))
@@ -208,7 +269,11 @@
        (string/join "" (map #(str " (set! " (arity-binding-name ns name %) " (native-arity-entry value " % "))") fixed))
        (if variadic? (str " (set! " (variadic-binding-name ns name) " (native-variadic-entry value "
                           (scheme/text (str ns "/" name)) "))") "")
-       ") (lambda (value) (set! " global " value)))\n")))
+       ") (lambda (value) (set! " global " value)))\n")))))
+(defn seal-source
+ "The bundle's last form before its entry point: sealed images only."
+ [plan]
+ (if (:sealed? plan) "(native-seal-image!)\n" ""))
 (defn seed-links [plan]
  ; Seeds are interned by rt/seed-core; only their global view is linked.
  (string/join ""
@@ -217,19 +282,48 @@
    (let [global (global-binding-name ns name)]
     (str "(define " global " (native-unlinked " (scheme/text ns) " " (scheme/text name) "))\n"
          "(native-link-global! " (scheme/text ns) " " (scheme/text name) " (lambda (value) (set! " global " value)))\n")))))
+(defn- sealed-raw
+ "A sealed single-fixed-arity :fn: scheme/emit-sealed-function's {:arity
+  :lambda :value} for its arity cell, or nil (the ordinary emission)."
+ [plan ns d arities context]
+ (when (and (:sealed? plan) (= :fn (:kind d)) (nil? (:variadic arities)) (= 1 (count (:fixed arities))))
+  (let [arity (first (:fixed arities))
+        r (scheme/emit-sealed-function (:node d) context (arity-binding-name ns (:name d) arity)
+                                       (binding-name ns (:name d)))]
+   (when (and r (= arity (:arity r))) r))))
+(defn- constant-defines
+ "The definition's hoisted constant literals (scheme/hoisted), in order."
+ [sink]
+ (string/join "" (map (fn [[name text]] (str "(define " name " " text ")\n")) (:rows @sink))))
 (defn emit-definition [plan unit d]
- (let [ns (:ns unit) value (scheme/emit (:node d) (link-context plan ns))]
+ (let [ns (:ns unit) sink (atom {:index {} :rows []})
+       context (if (:name d) (assoc (link-context plan ns) :constants sink :constant-prefix (binding-name ns (:name d)))
+                 (link-context plan ns))
+       arities (when (and (:name d) (= :fn (:kind d))) (declaration-arities (:form d)))
+       raw (when (:name d) (sealed-raw plan ns d arities context))
+       value (if raw (:value raw) (scheme/emit (:node d) context))]
   (if (:name d)
    (let [binding (binding-name ns (:name d))
-         arities (when (= :fn (:kind d)) (declaration-arities (:form d)))]
-    (str "(define " binding " " value ")\n"
+         constants (constant-defines sink)
+         cells (link-definition (:sealed? plan) ns (:name d) (:kind d) arities
+                                (if raw {(:arity raw) (:lambda raw)} {}))]
+    ; A function's value is a closure, so its constants follow its head (and
+    ; stay in its unit); any other value is evaluated now, after them.
+    (str (if (= :fn (:kind d)) "" constants)
+        "(define " binding " " value ")\n"
+        (if (= :fn (:kind d)) constants "")
+        ; Sealed: the cells exist before registration, so a native counterpart
+        ; installed at native-register! (a NIF, as erlang:load_nif replaces the
+        ; module's own functions on BEAM) reaches local calls too. Dev images
+        ; register first: native-link! initializes its cells from the registry.
+        (if (:sealed? plan) cells "")
         "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
         "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
         (when arities
          (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
               (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))
-        (link-definition ns (:name d) (:kind d) arities)))
+        (if (:sealed? plan) "" cells)))
    (str value "\n"))))
 (defn emit-functions
  "The :fn definitions of `defs` (a window of `unit`), in order."
@@ -242,6 +336,17 @@
  (str (when (and first-window? (= "core" (:ns unit)))
        (str (seed-links plan) "(bl-invoke (native-global \"rt\" \"seed-core\") '())\n"))
       (string/join "" (map #(emit-definition plan unit %) (remove #(= :fn (:kind %)) defs)))))
+(defn bundle-install-source
+ "The prelude's bundle install: the metadata without its link rows, then the
+  rows in bounded batches as separate top-level forms. One form holding all
+  ~1,700 rows is ~440 KB of constructor calls, which gsc cannot compile within
+  its deadline; the unit splitter can only split between top-level forms."
+ [metadata]
+ (let [links (vec (:namespace-links metadata)) n (count links) size 128]
+  (str "(native-install-bundle! " (data (dissoc metadata :namespace-links)) ")\n"
+       (string/join "" (map (fn [i] (str "(native-install-namespace-links! "
+                                         (data (subvec links i (min n (+ i size)))) ")\n"))
+                            (filter #(= 0 (erlang/rem % size)) (range n)))))))
 (defn emit-compiled-bundle
  ([units bundle host-source]
   (emit-compiled-bundle units bundle host-source "(native-main (native-command-line))\n"))
@@ -251,9 +356,10 @@
  (let [metadata (dissoc bundle :units) plan (link-plan metadata units)]
   (str ";; BL native compiler. Generated from canonical BL source.\n"
        host-source "\n"
-       "(native-install-bundle! " (data metadata) ")\n"
+       (bundle-install-source metadata)
        (string/join "" (map #(emit-functions plan % (:defs %)) units))
        (string/join "" (map #(emit-initializers plan % (:defs %) true) units))
+       (seal-source plan)
        entry-source))))
 
 (defn compile-bundle [bundle host-source]

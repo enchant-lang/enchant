@@ -1,0 +1,60 @@
+; N3 sealed-vs-dev emission differential on the pinned SDK (BEAM).
+;
+;   work run --memory 4G --timeout 1800 -- research/native-seed/run run \
+;     research/native-seed/speed/link3/seal-diff.bl -- CLOSURE/partition.json LEAVES.json ROUND2-CHUNKS OUT ns,ns,...
+;
+; dev    = the link plan without :sealed: must be byte-identical to the round-2
+;          driver chunks (today's behaviour, bit for bit).
+; sealed = the plan with :sealed (what bundle-metadata now declares): written
+;          to OUT/sealed-<ns>.scm for the gsi differential, plus structural
+;          counts (no setter, no native-link!, no global-view read of a
+;          compiled function).
+(ns link3.seal-diff
+ (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+           [native.resolution-ledger :as ledger] [bl.json :as json] [clojure.string :as string]))
+(def args (BeamLisp/argv))
+(def closure (artifact/read-closure (nth args 0)))
+(def leaves (get (json/decode (File/read! (nth args 1))) "registered_leaves"))
+(def chunks (nth args 2))
+(def out (nth args 3))
+(def namespaces (string/split (nth args 4) #","))
+(File/mkdir_p! out)
+(def units (mapv #(get (:units closure) %) (:order closure)))
+(def metadata (ledger/bundle-metadata closure leaves))
+(assert (= true (:sealed metadata)))
+(def dev (bootstrap/link-plan (dissoc metadata :sealed) units))
+(def sealed (bootstrap/link-plan metadata units))
+(def reports
+ (keep (fn [path] (let [r (json/decode (File/read! path))] (when (get r "emission_record") r)))
+       (Path/wildcard (str chunks "/*.json"))))
+(defn driver [ns ext]
+ (let [rows (sort-by #(get-in % ["emission_record" "row" "offset"])
+                     (filter #(= ns (get-in % ["emission_record" "row" "namespace"])) reports))]
+  (when (empty? rows) (throw (ex-info "seal-diff: no round-2 chunks" {:namespace ns})))
+  (string/join "" (map #(File/read! (str chunks "/" (get % "key") "." ext)) rows))))
+(defn emit [plan u] [(bootstrap/emit-functions plan u (:defs u)) (bootstrap/emit-initializers plan u (:defs u) true)])
+(def compiled-fn-globals
+ (set (map (fn [[ns name]] (bootstrap/global-binding-name ns name)) (keys (:arities sealed)))))
+(defn count-re [re text] (count (re-seq re text)))
+(def results
+ (mapv (fn [ns]
+  (let [u (get (:units closure) ns)
+        [df di] (emit dev u) [sf si] (emit sealed u)
+        dev-equal? (and (= df (driver ns "functions.scm")) (= di (driver ns "initializers.scm")))
+        text (str sf si)
+        fn-global-reads (count (filter #(string/includes? text %) compiled-fn-globals))]
+   (File/write! (str out "/sealed-" ns ".scm") text)
+   (File/write! (str out "/dev-" ns ".scm") (str df di))
+   (println (str "SEAL_DIFF " ns " dev=" (if dev-equal? "BYTE-EQUAL-ROUND2" "DIFFERENT")
+                 " dev-bytes=" (count (str df di)) " sealed-bytes=" (count text)
+                 " dev-native-link=" (count-re #"\(native-link! " (str df di))
+                 " sealed-native-link=" (count-re #"\(native-link! " text)
+                 " sealed-set!=" (count-re #"\(set! " text)
+                 " sealed-compiled-fn-$g-reads=" fn-global-reads
+                 " sealed-arity-cells=" (count-re #"\(define v_[^ ]+\$[0-9]+ \(native-arity-entry " text)))
+   {"namespace" ns "dev_byte_equal_round2" dev-equal? "sealed_sha256" (artifact/sha text)
+    "sealed_set" (count-re #"\(set! " text) "sealed_native_link" (count-re #"\(native-link! " text)
+    "sealed_compiled_fn_global_reads" fn-global-reads}))
+  namespaces))
+(File/write! (str out "/seal-diff.json") (json/encode {"schema" "link3.seal-diff" "version" 1 "results" results}))
+(println (str "SEAL_DIFF_DONE dev-equal=" (count (filter #(get % "dev_byte_equal_round2") results)) "/" (count results)))

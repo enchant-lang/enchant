@@ -8,6 +8,16 @@
 (define native-stub-names (bl-empty-map))
 (define native-env-current "user")
 (define native-bundle-metadata bl-nil)
+;; N3: a sealed image (bundle :sealed, emitted as (native-seal-image!) after
+;; every initializer). AOT code then calls compiled definitions through
+;; constant cells, so a later redefinition must raise, never be ignored.
+(define native-image-sealed? #f)
+(define native-sealed-slots (make-table test: equal?))
+(define (native-sealed-refuse! key)
+ (error "native sealed image: redefinition refused (AOT callers are linked directly)" key))
+(define (native-sealed-row? key)
+ (and (bl-tag? key 'tuple) (= (bl-count key) 2) (string? (bl-nth key 0)) (string? (bl-nth key 1))
+      (table-ref native-sealed-slots (string-append (bl-nth key 0) "/" (bl-nth key 1)) #f)))
 (define (native-row . parts) (bl-tuple parts))
 (define (native-env-value key)
  (bl-get native-env-rows key native-missing))
@@ -18,6 +28,8 @@
 (define native-macro-trace-start
  (if native-macro-trace-enabled? (time->seconds (current-time)) #f))
 (define (native-env-put! key value)
+ (if (and native-image-sealed? (native-sealed-row? key))
+  (native-sealed-refuse! (string-append (bl-nth key 0) "/" (bl-nth key 1))))
  (set! native-env-rows (bl-assoc native-env-rows key value))
  (native-env-row-changed! key)
  (if (and native-macro-trace-enabled?
@@ -275,6 +287,38 @@
  (if (and (bl-tag? key 'tuple) (= (bl-count key) 2) (string? (bl-nth key 0)) (string? (bl-nth key 1)))
   (let ((record (table-ref native-link-records (string-append (bl-nth key 0) "/" (bl-nth key 1)) #f)))
    (if record (native-publish-global! (bl-nth key 0) (bl-nth key 1) record)))))
+;; Seal every linked slot: each compiled definition and each seed global view.
+;; A compiled slot shadowed by an Env value row would make its direct callers
+;; disagree with a fetch, so sealing refuses it. Afterwards an Env value row
+;; for a sealed slot raises in native-env-put!, and a native-register! of a
+;; compiled slot restores the sealed value, then raises.
+(define (native-seal-image!)
+ (if native-image-sealed? (error "native sealed image: already sealed"))
+ (for-each
+  (lambda (pair)
+   (let* ((key (bl-nth pair 0)) (record (table-ref native-link-records key #f))
+          (split (native-string-split-once key #\/)))
+    (if split
+     (let ((ns (car split)) (name (cdr split)))
+      (if (not (eq? native-missing (native-env-value (native-row ns name))))
+       (error "native sealed image: an Env value row shadows a compiled definition" key))
+      (table-set! native-sealed-slots (string-copy key) #t)
+      (if record
+       (let ((sealed (vector-ref record 0)))
+        (vector-set! record 1
+         (lambda (value)
+          (vector-set! record 0 sealed)
+          (set! native-global-registry (bl-assoc native-global-registry key sealed))
+          (native-sealed-refuse! key)))
+        (vector-set! record 2 #f)))))))
+  (native-map-pairs native-global-registry))
+ (table-for-each
+  (lambda (key record)
+   (if (and (eq? (vector-ref record 0) native-missing) (vector-ref record 2))
+    (table-set! native-sealed-slots key #t)))
+  native-link-records)
+ (set! native-image-sealed? #t)
+ (bl-key "ok"))
 
 ;; ---- Dynamic MFA lookup ----------------------------------------------------
 ;; Only runtime-evaluated code (native.eval/context, bootstrap --compile
@@ -324,6 +368,19 @@
 (define (native-arith-ge a b) (native-num 'ge a b))
 (define (native-arith-num-eq a b) (native-num 'num_eq a b))
 
+;; Install link rows `[ns name info private?]` (closure members and boot-tier
+;; stubs). The emitted prelude passes them in bounded batches after
+;; native-install-bundle!, so no single top-level form outgrows gsc's deadline.
+(define (native-put-namespace-links! rows)
+ (for-each (lambda (row)
+   (native-env-put! (native-row (bl-key "link") (bl-nth row 0) (bl-nth row 1)) (bl-nth row 2))
+   (if (eq? #t (bl-nth row 3))
+    (native-put-meta (bl-nth row 0) (bl-nth row 1) (bl-map (bl-key "private") #t))))
+  (bl-items rows)))
+(define (native-install-namespace-links! rows)
+ (native-put-namespace-links! rows)
+ (native-link-changed!)
+ (bl-key "ok"))
 (define (native-install-bundle! metadata)
  (set! native-bundle-metadata metadata)
  (for-each
@@ -348,6 +405,10 @@
  (for-each (lambda (row)
    (native-env-put! (native-row (bl-key "link") "core" (bl-nth row 0)) (bl-nth row 1)))
   (bl-items (bl-get metadata (bl-key "core-links"))))
+ ; Link rows of every closure member and boot-tier stub (P3): a call into
+ ; one compiles exactly as on BEAM (a module-linked remote), never :global.
+ ; Stub rows carry their privacy; members' privacy is their emitted meta.
+ (native-put-namespace-links! (bl-get metadata (bl-key "namespace-links") (bl-vec '())))
  (native-install-resolution! (bl-get metadata (bl-key "resolution")))
  (native-link-changed!)
  (bl-key "ok"))
@@ -384,6 +445,8 @@
 (native-env-leaf! "lookup" 1 native-lookup)
 (native-env-leaf! "put_key" 2 native-env-put!)
 (native-env-leaf! "delete_key" 1 (lambda (key)
+ (if (and native-image-sealed? (native-sealed-row? key))
+  (native-sealed-refuse! (string-append (bl-nth key 0) "/" (bl-nth key 1))))
  (set! native-env-rows (native-map-remove native-env-rows key)) (native-env-row-changed! key) (bl-key "ok")))
 (native-env-leaf! "intern" 3 native-intern)
 (native-env-leaf! "fetch" 2 native-fetch)
@@ -414,6 +477,14 @@
 (native-env-leaf! "core_excludes" 1 (lambda (ns)
  (bl-get native-env-rows (native-row (bl-key "refer_clojure_exclude") ns) '())))
 (native-env-leaf! "caps" 0 (lambda () (bl-key "all")))
+;; N3. The compile-time seal (env.bl sealed_value) is BEAM build state: the
+;; native compiler answers like an unsealed BEAM build, so compiled ANF stays
+;; a function of source (stage parity). The image's own seal is link time.
+(native-env-leaf! "sealed_value" 3 (lambda (ns name exact?) (bl-key "error")))
+(native-env-leaf! "refuse_sealed_redefinition!" 2 (lambda (ns name)
+ (if (and native-image-sealed? (table-ref native-sealed-slots (string-append ns "/" name) #f))
+  (native-sealed-refuse! (string-append ns "/" name)))
+ (bl-key "ok")))
 (native-env-leaf! "caps_allowed?" 2 (lambda (module op) #t))
 (native-env-leaf! "op_of" 2 (lambda (module fn) bl-nil))
 (for-each (lambda (row)
