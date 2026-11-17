@@ -123,3 +123,17 @@
     (doseq [_ (range 10)] (is (= 2 (count (:fn (run))))))
     (is (= (tuple :call_count 0) (erlang/trace_info trace :call_count)))
     (finally (erlang/trace_pattern trace false (list :local :call_count)))))))
+
+(deftest distinct-analysis-jobs-share-a-bounded-native-capacity
+ (let [parent (erlang/self) key (erlang/unique_integer (list :positive))
+       holders (mapv (fn [i] (spawn (fn []
+          (flight/with-key [:capacity key i]
+            (fn [] (erlang/send parent [:capacity-held (erlang/self)]) (receive :release true)))))) [0 1])]
+  (try
+   (doseq [_ holders] (is (some? (receive [:capacity-held p] p (after 5000 nil)))))
+   (is (= :shared-work-busy
+          (try (flight/with-key [:capacity key 2] 0 (fn [] :unbounded)) nil
+               (catch e (:kind (ex-data e))))))
+   ;; Nested consumers execute under an existing holder rather than acquiring
+   ;; a third slot; return/death release the holder's native ownership.
+   (finally (doseq [p holders] (erlang/send p :release))))))

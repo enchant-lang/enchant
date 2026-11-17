@@ -1,5 +1,22 @@
 ;; Serialize one logical computation without moving its execution authority.
-(ns data.single-flight (:require [data.provenance :as provenance] [data.bounded-cache :as cache]))
+(ns data.single-flight (:require [data.bounded-cache :as cache]))
+
+(def MAX-ACTIVE 2)
+(defn- with-slot [until f]
+  ;; Nested compiler consumers keep their caller's slot. Native ownership
+  ;; releases slots only on return or actual holder death, never a result send.
+  (if (Process/get :data.single-flight/slot) (f)
+    (let [nodes (list (erlang/node))]
+      (loop []
+        (if-let [slot (first (filter (fn [i]
+                         (global/set_lock (tuple (tuple :data.shared-work.slot i) (erlang/self)) nodes 0))
+                                (range MAX-ACTIVE)))]
+          (try (Process/put :data.single-flight/slot slot) (f)
+            (finally (Process/delete :data.single-flight/slot)
+              (global/del_lock (tuple (tuple :data.shared-work.slot slot) (erlang/self)) nodes)))
+          (if (>= (erlang/monotonic_time :millisecond) until)
+            (throw (ex-info "Shared work capacity is busy" {:kind :shared-work-busy}))
+            (do (Process/sleep 1) (recur))))))))
 
 (defn with-key
   "Run f in its actual caller under one VM-local key. Waiters recheck their
@@ -24,7 +41,7 @@
          (if (global/set_lock lock nodes 0)
            (try
              (Process/put :data.single-flight/held (conj held id))
-             (f)
+             (with-slot until f)
              (finally (Process/put :data.single-flight/held held) (global/del_lock lock nodes)))
            (if (>= (erlang/monotonic_time :millisecond) until)
              (throw (ex-info "Shared work admission is busy" {:kind :shared-work-busy}))
