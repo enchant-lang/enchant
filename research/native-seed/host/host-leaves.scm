@@ -234,6 +234,12 @@
 (native-add-leaf! "erlang/is_map_key/2" (lambda (k m) (native-raw-map-has? m k)))
 (native-add-leaf! "erlang/trunc/1" (lambda (x) (truncate (native-ratio x))))
 (native-add-leaf! "erlang/round/1" (lambda (x) (let ((r (native-ratio x))) (if (< r 0) (- (floor (+ (- r) 1/2))) (floor (+ r 1/2))))))
+(native-add-leaf! "erlang/floor/1" (lambda (x) (floor (native-ratio x))))
+(native-add-leaf! "erlang/bsr/2" (lambda (a b) (arithmetic-shift a (- b))))
+(native-add-leaf! "erlang/integer_to_list/1" (lambda (n) (map char->integer (string->list (number->string n)))))
+(native-add-leaf! "lists/dropwhile/2"
+ (lambda (f xs) (let loop ((xs (native-assert-list xs)))
+  (if (and (pair? xs) (bl-truthy (bl-invoke f (list (car xs))))) (loop (cdr xs)) xs))))
 (native-add-leaf! "erlang/throw/1" native-throw)
 (native-add-leaf! "erlang/exit/1" h-exit)
 (native-add-leaf! "erlang/error/1" (lambda (x) (native-raise (bl-key "error") x (native-capture-stack))))
