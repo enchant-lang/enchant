@@ -111,8 +111,9 @@ vertex, edge and visited-edge counts.
 `system.analyze` processes functions after their dependencies. Changed return
 or footprint evidence wakes only dependent functions; duplicate pending work
 coalesces. Acyclic functions need one summary evaluation. Recursive work has
-at most fourteen evaluations per dirty definition in aggregate; latent effects
-have their separate sixty-six-per-definition ceiling. Unfinished work fails
+at most fourteen evaluations of each dirty definition; latent effects have a
+separate sixty-six-evaluations-per-definition ceiling. A costly cycle cannot
+borrow the unused budgets of cheap functions. Unfinished work fails
 closed and cannot claim complete coverage. Incremental reports count actual
 summary evaluations.
 

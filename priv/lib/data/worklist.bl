@@ -20,7 +20,9 @@
  "Evaluate active nodes after their dependencies. Only changed values wake
   dependents; duplicate pending work coalesces. A fixed evaluation ceiling
   bounds cycles. An unfinished queue is explicit nonconvergence, never proof."
- [graph initial active ceiling evaluate]
+ ([graph initial active ceiling evaluate]
+  (settle graph initial active ceiling ceiling evaluate))
+ ([graph initial active ceiling per-node-ceiling evaluate]
  (let [p (plan graph) active (set active)
        order (filterv active (:order p))]
   (loop [q (queue/from_list (to-list order)) queued (set order) values initial visits {} n 0]
@@ -29,11 +31,13 @@
     (>= n ceiling) {:values values :converged? false :evaluations n :visits visits}
     :else
      (let [[entry tail] (queue/out q) node (elem entry 1) queued (disj queued node)
-           value (evaluate node values) changed (not= value (get values node ::missing))
+           over? (>= (get visits node 0) per-node-ceiling)
+           value (when-not over? (evaluate node values)) changed (not= value (get values node ::missing))
            next (if changed
                   (reduce (fn [[q pending] caller]
                     (if (or (not (contains? active caller)) (contains? pending caller)) [q pending]
                      [(queue/in caller q) (conj pending caller)]))
                    [tail queued] (get-in p [:dependents node] #{})) [tail queued])]
-      (recur (get next 0) (get next 1) (assoc values node value)
-             (update visits node (fn [v] (inc (or v 0)))) (inc n)))))))
+      (if over? {:values values :converged? false :evaluations n :visits visits}
+        (recur (get next 0) (get next 1) (assoc values node value)
+             (update visits node (fn [v] (inc (or v 0)))) (inc n)))))))))
