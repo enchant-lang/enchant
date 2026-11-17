@@ -24,8 +24,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BASE = HERE.parents[1]
 OUT = HERE / "out"
-HOST = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-lazy.scm",
-        "host/host-extra.scm", "host/host-compiler.scm", "host/host-match.scm", "host/host-kernel.scm"]
+# prepare-host.py's load order (host-lazy.scm became native-memo.scm after round 2).
+HOST = ["host.scm", "host/host-values.scm", "host/host-leaves.scm", "host/host-extra.scm",
+        "host/host-compiler.scm", "host/host-match.scm", "host/host-kernel.scm", "host/native-memo.scm",
+        "host/native-gb-trees.scm", "host/native-data-bifs.scm", "host/native-refusals.scm"]
 SLICE = 2000
 MIN_SLICE = 250
 GSI = Path(json.loads((BASE / "toolchain-pin.json").read_text())["gambit"]) / "bin/gsi"

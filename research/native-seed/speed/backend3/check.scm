@@ -116,11 +116,12 @@
        (loop (+ index 1)))))))))
 
 ;; Native-only values (no BEAM encoding): both sides must answer alike.
-(define lazy-value (native-lazy-new (lambda () bl-nil)))
+;; (Round 2 had a lazy seq here; lazy seqs are now compiled BL (host.lazy-seq),
+;; which this rt-only harness does not load.)
 (define utf16-text (native-from-utf16 '(55296)))
 (define exotics
  (list (string->symbol ":nil") (string->symbol ":true") (string->symbol ":false") (string->symbol "plain")
-       utf16-text (bl-key utf16-text) (native-ref-new 'atom 1) lazy-value
+       utf16-text (bl-key utf16-text) (native-ref-new 'atom 1)
        (bl-struct (bl-key utf16-text) (bl-map (bl-key "a") 1)) (bl-make-tuple utf16-text 1 2)
        (bl-make-tuple (bl-key utf16-text) 1 2) (bl-make-tuple (bl-key utf16-text) 1)
        (bl-make-tuple (string->symbol ":meta") 1 (bl-map))))
