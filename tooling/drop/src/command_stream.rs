@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use serde_json::{json, Value};
-use super::linux::manager;
+use super::linux::{manager,monotonic_ms};
 
 fn packet(tag: u8, bytes: &[u8]) -> std::io::Result<()> {
     let mut out = std::io::stdout().lock();
@@ -74,10 +74,11 @@ pub(super) struct Wire {
     receiver: UnixDatagram,
     address: String,
     secret: String,
+    deadline: u64,
 }
 
 impl Wire {
-    pub(super) fn new(unit: &str) -> Result<Self,String> {
+    pub(super) fn new(unit: &str,deadline: u64) -> Result<Self,String> {
         let address = format!("bl-stream-{unit}");
         let mut random = [0u8;32];
         File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut random)).map_err(|e| e.to_string())?;
@@ -85,7 +86,7 @@ impl Wire {
         let socket = SocketAddr::from_abstract_name(address.as_bytes()).map_err(|e| e.to_string())?;
         let receiver = UnixDatagram::bind_addr(&socket).map_err(|e| e.to_string())?;
         receiver.set_nonblocking(true).map_err(|e| e.to_string())?;
-        Ok(Self{receiver,address,secret})
+        Ok(Self{receiver,address,secret,deadline})
     }
 
     pub(super) fn descriptor(&self) -> Value { json!({"address":self.address,"secret":self.secret}) }
@@ -135,12 +136,20 @@ impl Wire {
                     },
                     Some("program-exited") => program=Some(message["data"].clone()),
                     Some("domain-stopped") => completion=Some(message["data"].clone()),
+                    Some("budget-expired") => {forced=Some("timed-out");detached=true;},
                     _ => {},
                 }
             }
             if status.is_none() {
                 status=process.try_wait().map_err(|e| e.to_string())?;
                 if status.is_some() {finished=Some(Instant::now());}
+            }
+            if status.is_none() && forced.is_none() && monotonic_ms()?>=self.deadline {
+                // The inherited execution budget includes manager startup.
+                // A stop request is not disposal evidence: still wait for the
+                // actual domain and its descriptor loans to finish below.
+                let _=manager("systemctl")?.args(["stop",unit]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                forced=Some("timed-out");detached=true;
             }
             // Terminal metadata is independent of output demand. Inspect EOF
             // without consuming a pending data byte when no credit remains.

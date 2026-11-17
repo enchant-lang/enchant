@@ -73,6 +73,14 @@ mod linux {
         Ok(command)
     }
 
+    pub(super) fn monotonic_ms() -> Result<u64,String> {
+        let mut time=libc::timespec{tv_sec:0,tv_nsec:0};
+        if unsafe {libc::clock_gettime(libc::CLOCK_MONOTONIC,&mut time)}!=0 || time.tv_sec<0 {
+            return Err("OS monotonic clock unavailable".into());
+        }
+        Ok(time.tv_sec as u64*1000+time.tv_nsec as u64/1_000_000)
+    }
+
     fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         value.get(key).and_then(Value::as_str).ok_or_else(|| format!("missing string {key}"))
     }
@@ -118,10 +126,13 @@ mod linux {
     fn launch(input: &str, streaming: bool) -> Result<i32, String> {
         let mut value = request(input)?;
         // Caller data cannot select the private completion channel.
-        if value.get("stream").is_some() { return Err("private command field supplied".into()); }
+        if value.get("stream").is_some() || value.get("deadline_ms").is_some() { return Err("private command field supplied".into()); }
+        let timeout = limit(&value, "timeout_ms", 86_400_000)?;
+        let deadline=monotonic_ms()?.checked_add(timeout).ok_or("command deadline overflow")?;
+        value["deadline_ms"]=serde_json::json!(deadline);
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
         let unit = format!("bl-custody-{}-{nonce}.service", std::process::id());
-        let mut wire = if streaming { Some(super::stream::Wire::new(&unit)?) } else { None };
+        let mut wire = if streaming { Some(super::stream::Wire::new(&unit,deadline)?) } else { None };
         if let Some(wire) = &wire { value["stream"] = wire.descriptor(); }
         // The caller's effective environment arrives through exec's private
         // environment, never as secret-bearing JSON on the command line.
@@ -141,7 +152,6 @@ mod linux {
             libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE) } < 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let timeout = limit(&value, "timeout_ms", 86_400_000)?;
         let memory = limit(&value, "memory_bytes", 8 * 1024 * 1024 * 1024)?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut command = manager("systemd-run")?;
@@ -149,9 +159,10 @@ mod linux {
             .arg(format!("--unit={unit}"))
             .args(["--property=Type=notify", "--property=NotifyAccess=main", "--property=ExitType=cgroup",
                    "--property=FileDescriptorStoreMax=16", "--property=FileDescriptorStorePreserve=restart",
-                   "--property=KillMode=control-group", "--property=TimeoutStartSec=10", "--property=TimeoutStopSec=2",
+                   "--property=KillMode=control-group", "--property=TimeoutStopSec=2",
                    "--property=MemorySwapMax=0", "--property=TasksMax=512"])
             .arg(format!("--property=MemoryMax={memory}"))
+            .arg(format!("--property=TimeoutStartSec={}ms",timeout.min(10000)))
             .arg(format!("--property=LoadCredential=bl-command:/proc/{}/fd/{raw}", std::process::id()))
             .arg(format!("--property=RuntimeMaxSec={}ms", timeout));
         if streaming {
@@ -288,6 +299,10 @@ mod linux {
             if !["NOTIFY_SOCKET", "FDSTORE", "LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"].contains(&key.as_str()) {
                 command.env(key, item.as_str().ok_or("invalid environment")?);
             }
+        }
+        if monotonic_ms()?>=value["deadline_ms"].as_u64().ok_or("private command deadline missing")? {
+            super::stream::note(&value,unit,"budget-expired",serde_json::json!({}))?;
+            return Ok(125);
         }
         let status = command.status().map_err(|e| format!("command could not start: {e}"))?;
         use std::os::unix::process::ExitStatusExt;
