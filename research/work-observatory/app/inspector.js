@@ -18,10 +18,10 @@
   };
   const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
   root.innerHTML = `<link rel="stylesheet" href="/__enchant/inspector.css">
-    <section class="panel" hidden aria-label="Dev tools"><div class="head"><b id="title">Updates</b>
+    <section class="panel" id="dev-panel" hidden aria-label="Dev tools"><div class="head"><b id="title">Updates</b>
     <div class="tabs"><button data-tab="updates" aria-selected="true">Updates</button><button data-tab="element" aria-selected="false">Loom</button><button data-tab="server" aria-selected="false">Server</button></div></div><div class="body"></div></section>
     <nav class="dock" aria-label="Dev tools">
-    <button class="tool brand" data-action="open" aria-label="Open dev tools" title="Dev tools">${icon('logo')}</button>
+    <button class="tool brand" data-action="open" aria-label="Open dev tools" title="Dev tools" aria-expanded="false" aria-controls="dev-panel">${icon('logo')}</button>
     <div class="spark" role="button" tabindex="0" data-action="updates" title="Page updates" aria-label="Page updates"></div><div class="rule"></div>
     <button class="tool" data-action="paint" aria-label="Highlight updates" title="Highlight updates" aria-pressed="false">${icon('paint')}</button>
     <button class="tool" data-action="pick" aria-label="Pick an element" title="Pick an element" aria-pressed="false">${icon('pick')}</button>
@@ -50,7 +50,7 @@
   }
   function activate(next) {
     if (disposed) return;
-    stopSampling(); open=true;tab=next;panel.hidden=false;
+    stopSampling(); open=true;tab=next;panel.hidden=false;$('[data-action="open"]').setAttribute('aria-expanded','true');
     $('[data-action="close"]').hidden=false;
     root.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===tab)));
     $('#title').textContent={updates:'Updates',element:'Loom',server:'Server'}[tab];
@@ -61,7 +61,7 @@
     if(flight) flight.abort();
   }
   function close() {
-    open=false;panel.hidden=true;$('[data-action="close"]').hidden=true;
+    open=false;panel.hidden=true;$('[data-action="close"]').hidden=true;$('[data-action="open"]').setAttribute('aria-expanded','false');
     stopSampling();setPicking(false);selected=null;pickBox.style.display='none';
   }
   async function refresh() {
