@@ -201,10 +201,10 @@ class DefaultUI {
     return [...(b?.wraps||[]),...(b?.marks.filter(m=>m.from<=at&&at<=m.to).map(m=>m.call)||[])].find(call=>call.function===fid)||null;}
   functionPanel(fid,existing=null){
     const spec=this.editor.catalog.find(item=>item.id===fid);if(!spec)return;
-    const token=this.panelTarget(),call=existing||this.currentCall(fid),params=spec.params||{},args={};
+    const token=this.panelTarget(),call=existing||this.currentCall(fid),params=spec.params||{},args={},action=spec.kind==='custom';
     for(const [key,param]of Object.entries(params))args[key]=call?.args[key]??param.default;
     const content=element('form','ed-function-form'),heading=element('div','ed-panel-heading');heading.append(icon(spec.icon||'function'),element('strong','',spec.label));
-    const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',call?'Make this function your own.':'A small change, a new possibility.'));
+    const close=button('Close','close',()=>this.panel.hide('close'));heading.append(close);content.append(heading,element('p','ed-panel-description',spec.description||(call?'Make this function your own.':'A small change, a new possibility.')));
     const error=element('div','ed-panel-error');error.setAttribute('role','status');
     const preview=()=>{try{
       if(call)this.editor.session.previewOperation({op:'call/args',id:call.id,expected:call.args,args:{...args}});
@@ -226,7 +226,8 @@ class DefaultUI {
     if(!Object.keys(params).length)content.append(element('p','ed-panel-description',call?'This function is applied to your text.':'Preview this function on the selected text.'));
     content.append(error);const actions=element('div','ed-panel-actions');
     if(call){const remove=button('Remove function','trash',()=>{this.editor.session.cancelPreview();this.editor.transaction({op:'call/remove',id:call.id},{target:token});this.panel.hide('apply');});remove.append(element('span','','Remove'));actions.append(remove);}
-    const apply=button(call?'Save change':'Apply function',null,()=>{} ,'ed-primary');apply.type='submit';apply.append(element('span','',call?'Save change':'Apply function'),element('kbd','','↵'));actions.append(apply);content.append(actions);
+    const applyLabel=call?'Save change':action?'Apply change':'Apply function';
+    const apply=button(applyLabel,null,()=>{} ,'ed-primary');apply.type='submit';apply.append(element('span','',applyLabel),element('kbd','','↵'));actions.append(apply);content.append(actions);
     content.addEventListener('submit',event=>{event.preventDefault();try{if(!this.editor.state.preview)preview();if(apply.disabled)return;this.editor.session.commitPreview();this.panel.hide('apply');}catch(reason){error.textContent=this.friendly(reason);}});
     this.openPanel(content,token,null,{focus:content.querySelector('input')||apply});preview();
   }
