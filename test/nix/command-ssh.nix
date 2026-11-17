@@ -1,7 +1,7 @@
 # No production endpoint or credential. The guest creates its own keypair.
 { pkgs, sdk }:
 let responder = pkgs.writeShellScript "command-ssh-responder" ''
-  test "$SSH_ORIGINAL_COMMAND" = upgrade
+  if [ "$SSH_ORIGINAL_COMMAND" != upgrade ]; then exit 64; fi
   exec ${pkgs.coreutils}/bin/cat
 '';
 in pkgs.testers.runNixOSTest {
