@@ -191,7 +191,8 @@ class DefaultUI {
         if(call)this.chipTimer=setTimeout(()=>{if(this.editor.composing||this.panel.opened||this.editor.disposed)return;
           const spec=this.editor.catalog.find(f=>f.id===call.function);if(!spec)return;
           const control=button('Edit '+spec.label,'function',()=>this.functionPanel(call.function,call));control.append(element('span','',spec.label));
-          this.chip.element.replaceChildren(control);this.chip.show(this.editor.geometry.anchor(),{placement:'bottom-start',gap:5});
+          // Keep the inline inspector above writing, clear of adjacent block fields.
+          this.chip.element.replaceChildren(control);this.chip.show(this.editor.geometry.anchor(),{placement:'top-start',gap:5});
         },220);
       }
     }
