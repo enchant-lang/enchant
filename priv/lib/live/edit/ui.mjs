@@ -361,10 +361,20 @@ class DefaultUI {
   }
   mediaPanel(id,anchor){
     const token=this.panelTarget(),node=this.editor.node(id),image=node.type==='image',content=element('form','ed-function-form');
-    content.append(element('strong','',image?'Add an image':'Add a bookmark'));const field=element('input','ed-field');field.type='url';field.setAttribute('aria-label',image?'Image address':'Bookmark address');field.placeholder='https://…';field.value=(image?node.attrs.src:node.attrs.href)||'';field.required=true;
+    content.append(element('strong','',image?'Image address':'Bookmark address'));
+    const field=element('input','ed-field');field.type='text';field.inputMode='url';field.autocomplete='off';
+    field.setAttribute('aria-label',image?'Image address':'Bookmark address');
+    field.placeholder='https://… or /path';field.value=(image?node.attrs.src:node.attrs.href)||'';field.required=true;
     const apply=button('Save address',null,null,'ed-primary');apply.type='submit';apply.append(element('span','','Save address'));content.append(field,apply);
-    content.addEventListener('submit',event=>{event.preventDefault();if(!field.reportValidity())return;
-      this.editor.transaction({op:'node/set',block:id,patch:{attrs:{...node.attrs,[image?'src':'href']:field.value}},expected:{attrs:node.attrs}});this.panel.hide('choose');
+    field.addEventListener('input',()=>field.setCustomValidity(''));
+    content.addEventListener('submit',event=>{
+      event.preventDefault();const value=field.value.trim();
+      const valid=/^(?:https?:\/\/[^/\s]+|\/(?!\/))\S*$/i.test(value) && !/[\\[\]<>]/.test(value);
+      field.setCustomValidity(valid?'':'Enter a web address or a path beginning with a single slash.');
+      if(!field.reportValidity())return;
+      if(this.editor.transaction({op:'node/set',block:id,patch:{attrs:{...node.attrs,[image?'src':'href']:value}},expected:{attrs:node.attrs}})){
+        this.panel.hide('choose');
+      }
     });this.openPanel(content,token,anchor,{focus:field});
   }
   documentMenu(anchor){
