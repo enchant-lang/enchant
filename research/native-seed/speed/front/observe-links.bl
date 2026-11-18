@@ -67,8 +67,12 @@
                         (tuple :Elixir.BeamLisp.Env :search_paths 0)})
 (def runtime-read-entries #{(tuple :Elixir.BeamLisp.Env :op_of 2)
                             (tuple :Elixir.BeamLisp.Env :source_head 0)
+                            (tuple :Elixir.BeamLisp.Env :source_target_declaration! 3)
                             (tuple :application_controller :get_env 2)
-                            (tuple :application_controller :get_env 3)})
+                            (tuple :application_controller :get_env 3)
+                            (tuple :code :lib_dir 1)
+                            (tuple :code :priv_dir 1)
+                            (tuple :code :ensure_loaded 1)})
 (def env-private-entry (tuple :Elixir.BeamLisp.Env :source_private 1))
 (def resolver-read-entries #{(tuple :Elixir.BeamLisp.Loader :source_decls 1)
                              (tuple :Elixir.BeamLisp.Loader :source_path 1)})
@@ -357,10 +361,25 @@
   [:application-value value]
   :unavailable))
 
+(defn- code-directory-result [value]
+ (cond
+  (= (tuple :error :bad_name) value) :missing-code-directory
+  (and (erlang/is_list value) (<= (count (take 4097 value)) 4096))
+  (let [path (unicode/characters_to_binary value)]
+   (if (small-env-text? path) [:code-directory path] :unavailable))
+  :else :unavailable))
+
 (defn- env-read-result [[function :as key] value]
  (case function
   :op_of (if (erlang/is_atom value) [:operation value] :unavailable)
   :source_head (if (nil? value) :no-source-extent :unavailable)
+  :source_target_declaration! (if (contains? #{:public :refuse :external} value) value :unavailable)
+  :lib_dir (code-directory-result value)
+  :priv_dir (code-directory-result value)
+  :ensure_loaded (cond
+                   (= (tuple :module (second key)) value) :loaded-module
+                   (= (tuple :error :nofile) value) :missing-module
+                   :else :unavailable)
   :application-setting (cond
                         (= :undefined value) :missing-application-setting
                         (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :ok (elem value 0)))
@@ -386,6 +405,13 @@
             :loaded_ns? (when (small-env-text? argument) [function argument])
             :search_paths [function]
             :source_head [function]
+            :source_target_declaration! (let [[module name arity] arguments]
+                                          (when (and (erlang/is_atom module) (erlang/is_atom name)
+                                                     (int? arity) (<= 0 arity 255))
+                                           [function module name arity]))
+            :lib_dir (when (erlang/is_atom argument) [function argument])
+            :priv_dir (when (erlang/is_atom argument) [function argument])
+            :ensure_loaded (when (erlang/is_atom argument) [function argument])
             :op_of (when (every? erlang/is_atom arguments) (into [function] arguments))
             :get_env (let [name (second arguments)]
                        (when (and (erlang/is_atom argument) (erlang/is_atom name))
@@ -431,6 +457,14 @@
                                                 :unavailable
                                                 (BeamLisp.Env/op_of argument name))
                                        :source_head (when (BeamLisp.Env/source_execution_active?) :active)
+                                       :source_target_declaration! (BeamLisp.Env/source_target_declaration! argument name default)
+                                       :lib_dir (code/lib_dir argument)
+                                       :priv_dir (code/priv_dir argument)
+                                       :ensure_loaded (cond
+                                                       (erlang/module_loaded argument) (tuple :module argument)
+                                                       (and (= :interactive (code/get_mode)) (= :non_existing (code/which argument)))
+                                                       (tuple :error :nofile)
+                                                       :else :unavailable)
                                        :application-setting (application/get_env argument name)
                                        :get_env (if (= 4 (count key))
                                                  (application/get_env argument name default)
@@ -539,6 +573,16 @@
                             :else :unavailable)]))
                observed)))
 
+(defn- observed-code-modules [effects after]
+ (reduce (fn [observed [[function module] outcome]]
+           (if (= :ensure_loaded function)
+            (let [location (if (= :loaded-module outcome) (first (get after module)) false)]
+             (if (and (some? location) (or (not (contains? observed module)) (= location (get observed module))))
+              (assoc observed module location)
+              (assoc observed module :unavailable)))
+            observed))
+         (:code-reads effects {}) (:env-reads effects)))
+
 (defn- changed-code-reads [reads]
  (vec (take 12 (keep (fn [[module expected]]
                        (let [location (code-location (code/is_loaded module))
@@ -603,6 +647,10 @@
   [:trace _ kind [:code :is_loaded 1] value]
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources (finish-code-read effects kind value))
+  [:trace _ kind [:code function 1] value]
+  :when (or (= kind :return_from) (= kind :exception_from))
+  (recur calls pending hits misses reads sources
+   (finish-env-read effects (tuple :code function 1) kind value))
   [:trace _ :send message target]
   (recur calls pending hits misses reads sources (process-event effects :send message target))
   [:trace _ :send_to_non_existing_process message target]
@@ -1413,8 +1461,10 @@
                                      (fn []
                                       (let [before (code-snapshot)
                                             [compiled observed] (observe!)
-                                            reads (captured-code-reads before (get-in observed [:effects :code-reads])
-                                                                       (code-snapshot))]
+                                            after (code-snapshot)
+                                            reads (captured-code-reads before
+                                                                       (observed-code-modules (:effects observed) after)
+                                                                       after)]
                                        [compiled (assoc-in observed [:effects :code-reads] reads)])))]
                                [compiled (assoc-in observed [:effects :code-mutations] mutations)])
                               (observe!))]
@@ -1527,10 +1577,24 @@
     (let [[_ observed] (trace! #(application/get_env :kernel control :undefined) {:runtime-reads? true})]
      (assert (= [setting-key] (changed-env-reads (get-in observed [:effects :env-reads])))))
     (assert (= :unavailable (env-read-result extent-key (tuple :unportable (erlang/self)))))
+    (let [target [:source_target_declaration! :erlang :length 1]
+          ensure [:ensure_loaded control]
+          directory [:lib_dir :kernel]
+          [_ observation] (trace! (fn []
+                                    (BeamLisp.Env/source_target_declaration! :erlang :length 1)
+                                    (code/ensure_loaded control)
+                                    (code/lib_dir :kernel))
+                                   {:runtime-reads? true})
+          reads (get-in observation [:effects :env-reads])]
+     (assert (= #{target ensure directory} (set (keys reads))))
+     (assert (= :missing-module (get reads ensure)))
+     (assert (empty? (changed-env-reads reads)))
+     (assert (not (erlang/module_loaded control))))
     {:schema "bl.native.runtime-read-control" :version 1 :reuse-authority false
      :operation-miss-tracked true :operation-change-detected true :application-change-detected true
      :unset-distinguished-from-configured-undefined true
      :opaque-application-default-excluded true :configured-default-collision-refused true
+     :source-target-checked true :library-directory-checked true :ensure-loaded-miss-rechecked-without-loading true
      :no-source-extent-tracked true :live-source-extent-refused true})
    (finally
     (application/unset_env :kernel control)
@@ -1829,7 +1893,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v7 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v8 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1958,7 +2022,7 @@
  (let [receipt (read-registry-member bytes)]
   (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
                              :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5
-                             :native-bound-registry-v6 :native-bound-registry-v7} (:schema receipt))
+                             :native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8} (:schema receipt))
                  (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
@@ -2024,11 +2088,13 @@
                                        (and (not= :native-bound-registry-v1 (:schema receipt)) (not (map? (:env-reads entry))))
                                        {:reason :missing-env-reads}
                                        (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4
-                                                         :native-bound-registry-v5 :native-bound-registry-v6 :native-bound-registry-v7}
+                                                         :native-bound-registry-v5 :native-bound-registry-v6 :native-bound-registry-v7
+                                                         :native-bound-registry-v8}
                                                        (:schema receipt))
                                             (not (map? (:code-reads entry))))
                                        {:reason :missing-code-reads}
-                                       (and (contains? #{:native-bound-registry-v6 :native-bound-registry-v7} (:schema receipt))
+                                       (and (contains? #{:native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8}
+                                                       (:schema receipt))
                                             (not (map? (:resolver-reads entry))))
                                        {:reason :missing-resolver-reads}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
