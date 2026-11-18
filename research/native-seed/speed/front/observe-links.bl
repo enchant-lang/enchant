@@ -232,6 +232,17 @@
 (defn- receipt-matches? [receipt initial]
  (every? (fn [[key outcome]] (= outcome (get initial key))) (:reads receipt)))
 
+(defn- link-consumers [members]
+ (reduce (fn [index [member _ receipt _]]
+           (reduce (fn [out key]
+                     (update out key (fn [names] (conj (or names #{}) (:ns member)))))
+                   index (keys (:reads receipt))))
+         {} members))
+
+(defn- changed-links [baseline candidate]
+ (filter (fn [key] (not= (get baseline key) (get candidate key)))
+         (into (set (keys baseline)) (keys candidate))))
+
 (defn- ancestor-outcome [chain [index [ns name]]]
  (if-let [scope (nth chain index nil)]
   (let [rows (ets/lookup :beam_lisp_vars (BeamLisp.Env/pfx scope (tuple :link ns name)))]
@@ -501,9 +512,17 @@
                       [member (def-bytes compiled) receipt (ordered-report observed)]))
                    (:order closure))
        seeded (erlang/monotonic_time :microsecond)
+       consumers (link-consumers prior)
+       indexed (erlang/monotonic_time :microsecond)
+       changed (vec (changed-links (:local-links baseline) (:local-links candidate)))
+       before-select (erlang/monotonic_time :microsecond)
+       invalidated (into #{} (mapcat #(get consumers % #{}) changed))
+       selected (erlang/monotonic_time :microsecond)
        plan (mapv (fn [[member bytes receipt operations]]
-                    {:member member :baseline-bytes bytes :operations operations
-                     :reuse? (receipt-matches? receipt (:local-links candidate))}) prior)
+                    (let [reuse? (not (contains? invalidated (:ns member)))]
+                     (assert (= reuse? (receipt-matches? receipt (:local-links candidate))))
+                     {:member member :baseline-bytes bytes :operations operations :reuse? reuse?}))
+                  prior)
        planned (erlang/monotonic_time :microsecond)
        result (mapv (fn [{:keys [member baseline-bytes operations reuse?]}]
                       (let [bytes (if reuse? baseline-bytes
@@ -512,10 +531,15 @@
                        {:namespace (:ns member) :reused reuse? :exact-clean-definitions exact?
                         :operations operations})) plan)
        checked (erlang/monotonic_time :microsecond)]
-  {:schema "bl.native.link-replay-shadow" :version 1 :reuse-authority false
+  {:schema "bl.native.link-replay-shadow" :version 2 :reuse-authority false
    :baseline-link-rows-sha256 (:sha256 baseline) :candidate-link-rows-sha256 (:sha256 candidate)
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :baseline-compilation-us (- seeded started) :plan-us (- planned seeded)
+   :reverse-index {:keys (count consumers) :changed-keys (count changed)
+                   :consulted-changed-keys (count (filter #(contains? consumers %) changed))
+                   :affected-members (vec (sort invalidated))
+                   :index-us (- indexed seeded) :link-table-diff-us (- before-select indexed)
+                   :selection-us (- selected before-select)}
    :candidate-compilation-and-oracle-comparison-us (- checked planned)
    :members result}))
 
