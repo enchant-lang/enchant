@@ -2,9 +2,7 @@
 ; No source parser, ANF interpreter, or Jolt/Clojure compatibility layer.
 (ns native.scheme (:require [clojure.string :as string]))
 
-; Emission is linear and allocation-light on both backends:
-; - text is assembled by `cat` (one Enum.join over STRINGS; `str` dispatches on
-;   every argument's kind and re-enters the runtime per piece);
+; - text is assembled by glue (one Enum.join over the parts);
 ; - every sequence is an eager Erlang list built with Enum or a loop. No lazy
 ;   sequence is created, so nothing captures an ANF subtree or the options.
 ; Every caller-visible result, and the order in which subtrees are emitted (it
@@ -540,22 +538,23 @@
  (Enum/map (lists/seq 0 (dec n)) (fn [i] (if (< i 64) (erlang/element (inc i) formal-table)
                                            (glue "fa" (erlang/integer_to_binary i))))))
 (def ^:private clause-fallback "(error \"native seed: function clause\")")
+(defn- simple-layout [n]
+ (when-let [clause (BeamLisp.CompilerData/simple_function_clause n)]
+  (let [names (Enum/map (items (:pats clause)) (fn [p] (:name p)))]
+   (when (distinct-names? names)
+    {:formals (Enum/map names ident) :body (:body clause)}))))
 (defn- fixed-parts
  "nil for a mixed-width clause chain; else {:formals :body} of the fixed-arity
   function. One unguarded DISTINCT-variable clause binds its Source names as
   Scheme formals; other same-width chains match fixed formals directly."
  [n options]
- (let [clause (BeamLisp.CompilerData/simple_function_clause n)
-       names (when clause (Enum/map (items (:pats clause)) (fn [p] (:name p))))
-       cs (items (:clauses n))
-       widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))]
-  (cond
-   (and clause (distinct-names? names))
-    {:formals (Enum/map names (fn [name] (ident name))) :body (emit (:body clause) options)}
-   (= 1 (count widths))
+ (if-let [layout (simple-layout n)]
+  (assoc layout :body (emit (:body layout) options))
+  (let [cs (items (:clauses n))
+        widths (Enum/uniq (Enum/map cs (fn [c] (count (:pats c)))))]
+   (when (= 1 (count widths))
     (let [formals (formal-names (first widths))]
-     {:formals formals :body (clauses cs formals clause-fallback options false)})
-   :else nil)))
+     {:formals formals :body (clauses cs formals clause-fallback options false)})))))
 (defn- function-ticks? [n options]
  (body-calls? (items (:clauses n)) {:verdicts (:loop-verdicts options)}))
 (defn- function-expression
@@ -847,17 +846,17 @@
                     {:ns (or (:definition-ns options) (:ns options)) :fn function-name :arity arity :call :direct})
        function (function-expression n inside frame)]
   (if (:callable-arities? options) (glue "(bl-register-callable! " function " " (erlang/integer_to_binary arity) ")") function)))
-(defn- emit-source-scaffold [n parts options]
+(defn- scaffold-options [options self local inner]
  ; The local is bound to the emitted :fn, a procedure (bl-register-callable!
  ; returns its procedure), so a self-call applies it directly.
- (let [self (:name n) local (ident self)
-       procedures (or (:procedure-selves options) #{})
-       body (emit (:inner parts) (assoc (forget-facts options (fn [] (list self)))
-                                        :selves (assoc (or (:selves options) {}) self local)
-                                        :procedure-selves (if (= :fn (:op (:inner parts))) (conj procedures self)
-                                                            (disj procedures self))
-                                        :self-cells (dissoc (or (:self-cells options) {}) self)))]
-  (glue "(letrec ((" local " " body ")) " local ")")))
+ (let [procedures (or (:procedure-selves options) #{})]
+  (assoc (forget-facts options (fn [] (list self)))
+         :selves (assoc (or (:selves options) {}) self local)
+         :procedure-selves (if (= :fn (:op inner)) (conj procedures self) (disj procedures self))
+         :self-cells (dissoc (or (:self-cells options) {}) self))))
+(defn- emit-source-scaffold [n parts options]
+ (let [self (:name n) local (ident self) inner (:inner parts)]
+  (glue "(letrec ((" local " " (emit inner (scaffold-options options self local inner)) ")) " local ")")))
 
 (defn- multi-layout [n]
  ; The compiler's exact $blfn constructor, with checked inert function
@@ -972,6 +971,47 @@
 (defn- clauses-binders [cs]
  (Enum/reduce (items cs) (list) (fn [clause acc]
   (Enum/reduce (items (:pats clause)) acc (fn [p acc] (binders-into p acc))))))
+(defn- function-options [n options]
+ (forget-facts options (fn [] (clauses-binders (:clauses n)))))
+(defn- register-function [function arity options]
+ (if (:callable-arities? options)
+  (glue "(bl-register-callable! " function " " (erlang/integer_to_binary arity) ")")
+  function))
+(defn- finish-wrapper-chain [body heads tails]
+ (if (empty? heads) body
+  (Enum/join (lists/reverse heads (cons body tails)) "")))
+(defn- emit-unframed-chain
+ "Emit consecutive fixed function and self-binding wrappers without repeatedly
+  materializing their child text. The terminal expression uses normal emission."
+ [node options first-scaffold]
+ (loop [n node options options scaffold first-scaffold heads (list) tails (list)]
+  (if scaffold
+   (let [self (:name n) local (ident self) inner (:inner scaffold)]
+    (recur inner (scaffold-options options self local inner)
+           (when (= :let (:op inner)) (self-parts inner))
+           (cons (glue "(letrec ((" local " ") heads) (cons (glue ")) " local ")") tails)))
+   (if (= :fn (:op n))
+    (let [inside (function-options n options)
+          simple (simple-layout n)
+          body (:body simple)
+          next-scaffold (when (= :let (:op body)) (self-parts body))
+          arity (count (:pats (first (:clauses n))))]
+     (if (and simple (or next-scaffold (= :fn (:op body))))
+      (let [formals (:formals simple)
+            register? (:callable-arities? inside)
+            head (glue (if register? "(bl-register-callable! " "")
+                       "(case-lambda ((" (spaced formals) ") "
+                       (if (function-ticks? n inside) "(h-tick) " ""))
+            tail (glue ") (" (if (empty? formals) "(extra . argv)" "argv")
+                       " " clause-fallback "))"
+                       (if register? (glue " " (erlang/integer_to_binary arity) ")") ""))]
+       (recur body inside next-scaffold (cons head heads) (cons tail tails)))
+      (let [function (if simple
+                        (let [tick? (function-ticks? n inside)]
+                         (fixed-function (:formals simple) (emit body inside) clause-fallback nil tick?))
+                        (function-expression n inside nil))]
+       (finish-wrapper-chain (register-function function arity inside) heads tails))))
+    (finish-wrapper-chain (emit n options) heads tails)))))
 (defn- pairs-operands [pairs] (Enum/flat_map (items pairs) (fn [pair] (items pair))))
 (defn emit [n options]
  (if-let [layout (multi-layout n)] (emit-multi layout options)
@@ -984,7 +1024,10 @@
   (and (:loop options) (recur-node? n (:self (:loop options))))
    (ordered (:name (:loop options)) (:args n) (operand-options options))
   (self-knot? n options) (get (:selves options) (:name (:fn n)))
-  (and (= :let (:op n)) (self-parts n)) (emit-source-scaffold n (self-parts n) options)
+  (and (= :let (:op n)) (self-parts n))
+  (let [parts (self-parts n)]
+   (if (:source-frames? options) (emit-source-scaffold n parts options)
+    (emit-unframed-chain n options parts)))
   (boolean-junction? n options) (emit-junction n options)
   :else
  (case (:op n)
@@ -1017,12 +1060,8 @@
   :do (let [statements (items (:stmts n))]
         (glue "(begin " (if (empty? statements) "bl-nil"
           (glue (joined (butlast statements) (operand-options options)) " " (emit (last statements) options))) ")"))
-  :fn (let [options (forget-facts options (fn [] (clauses-binders (:clauses n))))]
-       (if (:source-frames? options) (emit-source-function n options)
-       (let [function (function-expression n options nil)]
-        (if (:callable-arities? options)
-         (glue "(bl-register-callable! " function " " (erlang/integer_to_binary (count (:pats (first (:clauses n))))) ")")
-         function))))
+  :fn (if (:source-frames? options) (emit-source-function n (function-options n options))
+       (emit-unframed-chain n options nil))
   :case (glue "(let ((subject " (emit (:subj n) (operand-options options)) ")) "
           (clauses (items (:clauses n)) ["subject"] "(error \"native seed: case clause\")" options false) ")")
   :recv (let [timeout (if (:timeout n) (emit (:timeout n) (operand-options options)) "bl-nil")

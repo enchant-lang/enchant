@@ -18,11 +18,13 @@ REPLACEMENTS = {
  (let [key :native-speed/emission-counts
        counts (erlang/get key)]
   (erlang/put key (assoc counts metric (+ (get counts metric 0) work)))))
-(defn- glue [& parts]
+(defn- record-join! [parts]
  (record! "glue_calls" 1)
  (record! "glue_input_bytes"
           (Enum/reduce parts 0 (fn [part total]
-            (+ total (erlang/byte_size (if (erlang/is_binary part) part (String.Chars/to_string part)))))))
+            (+ total (erlang/byte_size (if (erlang/is_binary part) part (String.Chars/to_string part))))))))
+(defn- glue [& parts]
+ (record-join! parts)
  (Enum/join parts ""))''',
     "[value tail active state]\n (cond": '[value tail active state]\n (record! "loop_walk_visits" 1)\n (cond',
     "(defn- body-calls? [n ctx]\n (cond": '(defn- body-calls? [n ctx]\n (record! "body_call_visits" 1)\n (cond',
@@ -40,6 +42,10 @@ def instrument(source):
         if source.count(old) != 1:
             raise ValueError(f"Expected one instrumentation site: {old}")
         source = source.replace(old, new)
+    flatten = '(Enum/join (lists/reverse heads (cons body tails)) "")'
+    source = source.replace(flatten, '''(let [parts (lists/reverse heads (cons body tails))]
+   (record-join! parts)
+   (Enum/join parts ""))''')
     return source
 
 
@@ -47,6 +53,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--size", type=int, choices=SIZES,
                         help="select one pair of generated fixtures")
+    parser.add_argument("--reference", type=Path, default=SCHEME,
+                        help="compare exact Scheme against this emitter Source")
     args = parser.parse_args()
     pin = json.loads(PIN.read_text())
     sdk = Path(pin["sdk"])
@@ -59,6 +67,9 @@ def main():
         module = work / "native/speed-counted.bl"
         module.parent.mkdir()
         module.write_text(instrument(SCHEME.read_text()), encoding="utf-8")
+        reference = module.with_name("speed-reference.bl")
+        reference.write_text(args.reference.read_text().replace(
+            "(ns native.scheme ", "(ns native.speed-reference ", 1), encoding="utf-8")
         runtime = work / "runtime"
         runtime.mkdir(mode=0o700)
         selected = [(family, size, path) for family, size, path in fixtures(work)
@@ -85,6 +96,7 @@ def main():
             "version": 1,
             "sdk_descriptor_sha256": descriptor_sha,
             "emitter_sha256": sha(SCHEME),
+            "reference_sha256": sha(args.reference),
             "overlay_sha256": sha(module),
             "scope": "Source-level counts on BEAM. Both emitters received the same ANF and produced identical text.",
             "fixtures": rows,
