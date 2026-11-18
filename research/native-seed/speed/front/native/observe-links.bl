@@ -133,6 +133,25 @@
   (if (> n registry-trace-limit) effects
    (update-in effects [:registry-calls operation] (fn [old] (inc (or old 0)))))))
 
+(defn- link-pattern-relation [pattern]
+ ;; Installed link objects are {{scope, :link, namespace, name}, info}.
+ ;; ETS wildcards and match variables can bind a whole key or its tag.
+ (if (and (erlang/is_tuple pattern) (= 2 (erlang/tuple_size pattern)))
+  (let [key (elem pattern 0)]
+   (cond
+    (not (erlang/is_tuple key)) :possible-key
+    (not= 4 (erlang/tuple_size key)) [:different-key-arity (erlang/tuple_size key)]
+    :else (let [tag (elem key 1)]
+            (if (and (erlang/is_atom tag) (not (contains? #{:link :_} tag))
+                     (not (String/starts_with? (erlang/atom_to_binary tag) "$")))
+             :different-key-tag
+             :possible-key-tag))))
+  :possible-object))
+
+(defn- disjoint-link-pattern? [relation]
+ (or (= :different-key-tag relation)
+     (and (vector? relation) (= :different-key-arity (first relation)))))
+
 (defn- process-destination [destination]
  (if (erlang/is_pid destination)
   (let [name (erlang/process_info destination :registered_name)]
@@ -551,7 +570,10 @@
   [:trace _ :call [module function arguments]]
   (let [arity (count arguments) entry (tuple module function arity) key (first arguments)
         effects (if (and (:registry? effects) (contains? registry-operations entry) (= :beam_lisp_vars key))
-                   (registry-call effects [function arity]) effects)]
+                   (cond-> (registry-call effects [function arity])
+                    (and (:link-scan-patterns? effects) (= :match_object function) (= 2 arity))
+                    (boundary-event :link-scan-patterns (link-pattern-relation (second arguments))))
+                   effects)]
    (cond
     (or (contains? env-read-entries entry) (contains? runtime-read-entries entry))
     (recur calls pending hits misses reads sources (start-env-read effects entry arguments))
@@ -1934,7 +1956,37 @@
   {:schema "bl.native.row-install-control" :version 1 :distinct-rows (count keys)
    :samples samples :child-binding-masks-inherited-link true}))
 
-(defn- stage-link-subset-member [closure rows ns]
+(defn- link-pattern-control []
+ (let [table (ets/new :native_link_pattern_control (list :set))
+       link (tuple (tuple :scope :link "probe" "x") :link-value)
+       other (tuple (tuple :scope :ns_defs "probe") :namespace-value)
+       cases [[(tuple (tuple :_ :ns_defs :_) :_) :disjoint]
+              [(tuple (tuple :_ :ns_defs :_ :_) :_) :disjoint]
+              [(tuple (tuple :_ :link :_ :_) :_) :possible]
+              [(tuple (tuple :_ :"$1" :_ :_) :_) :possible]
+              [(tuple (tuple :_ :_ :_ :_) :_) :possible]
+              [(tuple :"$1" :_) :possible]
+              [:_ :possible]]]
+  (try
+   (ets/insert table link)
+   (ets/insert table other)
+   (doseq [[pattern expected] cases]
+    (let [disjoint? (= :disjoint expected)
+          matched (ets/match_object table pattern)]
+     (assert (= disjoint? (disjoint-link-pattern? (link-pattern-relation pattern))))
+     (assert (= (not disjoint?) (boolean (some #(erlang/=:= link %) matched))))))
+   (count cases)
+   (finally (ets/delete table)))))
+
+(defn- indexed-link-rows [rows key-of]
+ (reduce-kv (fn [index position row]
+              (update index (key-of row) #(conj (or % []) [position row])))
+             {} rows))
+
+(defn- select-indexed-link-rows [index inputs]
+ (mapv second (sort-by first (mapcat #(get index % []) inputs))))
+
+(defn- stage-link-subset-member [closure rows row-index core-index ns]
  (let [member (get-in closure [:units ns])
        _ (assert (some? member))
        compile! (fn []
@@ -1948,7 +2000,7 @@
                  (fn []
                   (install-batched-rows! context installed)
                   (BeamLisp.Compiler/with_fresh_names action))))
-       [full observed] (scoped closure rows #(trace! compile! {:registry? true :registry-inputs? true}))
+       [full observed] (scoped closure rows #(trace! compile! {:registry? true :registry-inputs? true :link-scan-patterns? true}))
        effects (:effects observed)
        input-links (into (set (keys (:reads (link-receipt observed))))
                          (keep (fn [[_ slot key]]
@@ -1956,25 +2008,38 @@
                                             (= :link (elem key 0)))
                                   [(elem key 1) (elem key 2)]))
                                (keys (:registry-inputs effects))))
-       retained (filterv (fn [[provider name _ _]] (contains? input-links [provider name])) rows)
-       retained-core (filterv (fn [[name _]] (contains? input-links ["core" name])) (:core-links closure))
+       retained (select-indexed-link-rows row-index input-links)
+       retained-core (select-indexed-link-rows core-index input-links)
+       scans (:link-scan-patterns effects)
+       _ (assert (= (get-in effects [:registry-calls [:match_object 2]] 0) (reduce + 0 (vals scans))))
        subset (scoped (assoc closure :core-links retained-core) retained compile!)]
   (assert (erlang/=:= member (second full)) (str "Full link run drifted for " ns))
   (assert (erlang/=:= full subset) (str "Stage or compilation changed after pruning rows for " ns))
   {:namespace ns :full-rows (+ (count rows) (count (:core-links closure)))
    :subset-rows (+ (count retained) (count retained-core)) :observed-link-reads (:calls observed)
    :exact-prepared-inputs true :exact-unit true
+   :match-object-patterns (mapv (fn [[relation calls]] {:relation relation :calls calls
+                                                       :disjoint-from-link-rows (disjoint-link-pattern? relation)})
+                                (sort-by (comp pr-str first) scans))
    :remaining-table-read-operations
    (vec (keep (fn [[[operation arity] calls]]
-                (when-not (or (contains? registry-writes operation) (contains? #{:lookup :member} operation))
+                (when-not (or (contains? registry-writes operation) (contains? #{:lookup :member} operation)
+                              (and (= [:match_object 2] [operation arity])
+                                   (every? disjoint-link-pattern? (keys scans))))
                  [operation arity calls]))
               (sort (:registry-calls effects))))}))
 
 (defn- stage-link-subset [closure rowset selected]
- {:schema "bl.native.stage-link-subset-shadow" :version 1 :reuse-authority false
-  :link-rows-sha256 (:sha256 rowset)
-  :members (mapv #(stage-link-subset-member closure (:rows rowset) %)
-                  (if selected [selected] ["rt" "compiler" "native.scheme" "host.link" "host.delay" "sugar"]))})
+ (let [rows (:rows rowset)
+       row-index (indexed-link-rows rows (fn [[provider name _ _]] [provider name]))
+       core-index (indexed-link-rows (:core-links closure) (fn [[name _]] ["core" name]))
+       members (cond
+                 (= selected "--all") (:order closure)
+                 selected [selected]
+                 :else ["rt" "compiler" "native.scheme" "host.link" "host.delay" "sugar"])]
+  {:schema "bl.native.stage-link-subset-shadow" :version 2 :reuse-authority false
+   :link-rows-sha256 (:sha256 rowset) :pattern-controls (link-pattern-control)
+   :members (mapv #(stage-link-subset-member closure rows row-index core-index %) members)}))
 
 (defn run-observation [argv]
  (let [[partition rows selected output comparison source-receipt mode qualification receipt-sha closure-output] argv]
