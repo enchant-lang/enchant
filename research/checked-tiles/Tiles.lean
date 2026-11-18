@@ -2,6 +2,17 @@ import Std
 
 namespace CheckedTiles
 
+-- Human-owned application law. A color channel may brighten or stay unchanged.
+def BrightByte (x result : Nat) : Prop := x ≤ result ∧ result < 256
+instance (x result : Nat) : Decidable (BrightByte x result) :=
+  inferInstanceAs (Decidable (x ≤ result ∧ result < 256))
+
+-- For a nonempty row the last group is (extent - 1) / tile.
+theorem launched (x extent tile : Nat) (valid : x < extent) :
+    x / tile ≤ (extent - 1) / tile :=
+  Nat.div_le_div_right (by omega)
+
+
 -- Each thread that passes the bounds check writes the same channel as
 -- the sequential image at that coordinate. x counts packed channels.
 def tiledAt (f : Nat → Nat) (src : Nat → Nat → Nat) (tw th x y : Nat) :=

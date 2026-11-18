@@ -112,20 +112,22 @@ def prepare(source, root, raw, args):
     obs = json.loads((d / 'observed.json').read_text())
     require(obs['sdk'] == str(sdk) and len(obs['table']) == 256, "incomplete BEAM domain")
     beam_ms = elapsed(t0)
-    for x, y in enumerate(obs['table']):
-        if type(y) is not int or not x <= y < 256:
-            raise Rejected(f"channel {x} returned {y}; law requires {x} ≤ output ≤ 255")
-    table = bytes(obs['table'])
-    ref = (d / 'beam.rgb').read_bytes()
-    require(ref == raw.translate(table), "source frame disagrees with exhaustive channel observations")
+    require(all(type(v) is int and v >= 0 for v in obs['table']), 'non-natural observation')
+    bad = next(((x, y) for x, y in enumerate(obs['table']) if not x <= y < 256), None)
+    if bad is None:
+        theorem = f"∀ x : Fin 256, CheckedTiles.BrightByte x.val ({entry} x.val)"
+    else:
+        x, y = bad
+        theorem = f"{entry} {x} = {y} ∧ ¬ CheckedTiles.BrightByte {x} ({entry} {x})"
     proof += f"""
 set_option maxRecDepth 10000
 set_option maxHeartbeats 4000000
 {lean}
-def observed : List Nat := {list(table)}
+def observed : List Nat := {obs['table']}
 theorem observed_agrees : (List.range 256).map {entry} = observed := by decide
-theorem protected_channel : ∀ x : Fin 256, x.val ≤ {entry} x.val ∧ {entry} x.val < 256 := by decide
-#print axioms protected_channel
+theorem channel_verdict : {theorem} := by decide
+#print axioms channel_verdict
+#print axioms CheckedTiles.launched
 #print axioms observed_agrees
 #print axioms CheckedTiles.stitch
 #print axioms CheckedTiles.owner
@@ -137,6 +139,14 @@ theorem protected_channel : ∀ x : Fin 256, x.val ≤ {entry} x.val ∧ {entry}
     require('sorryAx' not in verdict, 'proof contains an admission')
     (d / 'lean.txt').write_text(verdict)
     lean_ms = elapsed(start)
+    if bad is not None:
+        x, y = bad
+        write_json(d/'rejected.json', {'input': x, 'output': y, 'proof': digest(proof.encode()),
+                                        'source': digest(source.encode()), 'sdk': str(sdk)})
+        raise Rejected(f"channel {x} returned {y}; Lean checked the violation of {x} ≤ output ≤ 255")
+    table = bytes(obs['table'])
+    ref = (d / 'beam.rgb').read_bytes()
+    require(ref == raw.translate(table), "source frame disagrees with exhaustive channel observations")
     headers = c + f'\n#define PIXEL {entry}\n'
     cpu_source = headers + (HERE / 'cpu.c').read_text()
     gpu_source = headers + (HERE / 'tile.cl').read_text()
@@ -167,6 +177,18 @@ theorem protected_channel : ∀ x : Fin 256, x.val ≤ {entry} x.val ∧ {entry}
     receipt['timings']['cpu_lookup'] = timings(lambda: raw.translate(table), ref)
     frame = cpu(raw, stride, args.height, args.tile, 4)
     receipt['backend'] = 'CPU / OpenMP'
+    if args.sweep:
+        # Independently checked table supplies the reference for larger repeated frames.
+        receipt['sweep'] = {}
+        def sweep(name, render):
+            for w, h in ((24, 8), (960, 180), (5760, 1080)):
+                size = w*h
+                sample = (raw * ((size + len(raw) - 1)//len(raw)))[:size]
+                result = sample.translate(table)
+                row = receipt['sweep'].setdefault(f'{w} channels x {h} rows', {})
+                row[name] = timings(lambda: render(sample, w, h, args.tile), result)
+        sweep('cpu_4', lambda data, w, h, tile: cpu(data, w, h, tile, 4))
+        sweep('cpu_lookup', lambda data, w, h, tile: data.translate(table))
     if not args.cpu_only:
         try:
             start = time.perf_counter()
@@ -174,6 +196,8 @@ theorem protected_channel : ∀ x : Fin 256, x.val ≤ {entry} x.val ∧ {entry}
                 receipt['gpu_setup_ms'] = elapsed(start)
                 receipt['gpu'] = gpu.info
                 check_backend(gpu.render)
+                if args.sweep:
+                    sweep('gpu_whole_call', gpu.render)
                 receipt['timings']['gpu_whole_call'] = timings(lambda: gpu.render(raw, stride, args.height, args.tile), ref)
                 frame = gpu.render(raw, stride, args.height, args.tile)
                 receipt['backend'] = 'OpenCL / ' + gpu.info['device']
@@ -231,6 +255,7 @@ def main():
     p.add_argument('--width', type=int, default=129)
     p.add_argument('--height', type=int, default=73)
     p.add_argument('--tile', type=int, choices=range(1, 17), default=8)
+    p.add_argument('--sweep', action='store_true', help='also measure an 8x8 patch, 320x180 and 1920x1080 RGB')
     p.add_argument('--placement', choices=['measured', 'device'], default='measured')
     group = p.add_mutually_exclusive_group()
     group.add_argument('--cpu-only', action='store_true')
