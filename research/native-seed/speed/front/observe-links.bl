@@ -70,6 +70,8 @@
                             (tuple :Elixir.BeamLisp.Env :source_target_declaration! 3)
                             (tuple :application_controller :get_env 2)
                             (tuple :application_controller :get_env 3)
+                            (tuple :Elixir.File :cwd! 0)
+                            (tuple :Elixir.File :dir? 1)
                             (tuple :code :lib_dir 1)
                             (tuple :code :priv_dir 1)
                             (tuple :code :ensure_loaded 1)})
@@ -177,7 +179,7 @@
         :else :unknown)))))
    observed)))
 
-(defn- process-event [effects kind message target]
+(defn- process-event [effects kind message target sources]
  (let [destination (process-destination target)
        request (message-request message)
        operation (message-operation request)
@@ -194,13 +196,21 @@
      observed))
    (and (:ownership? effects) (= :send kind) (= :file_server_2 destination))
    (let [parents (:pending-loader-owners effects)
-         frame (fn [entry] (if entry [(elem entry 1) (elem entry 2)] [:outside-observed-api]))]
-    (boundary-event observed :file-read-owners [operation (frame (first parents)) (frame (peek parents))]))
+         frame (fn [entry] (if entry [(elem entry 1) (elem entry 2)] [:outside-observed-api]))
+         [runtime-owner] (peek (:pending-env-reads effects))
+         [source-owner path] (peek sources)
+         owner (if (and source-owner path) source-owner runtime-owner)]
+    (-> observed
+        (boundary-event :file-read-owners [operation (frame (first parents)) (frame (peek parents))])
+        (boundary-event :file-server-read-owners [operation (when owner (elem owner 1))])))
    (and (:ownership? effects) (= :send kind) (= :code_server destination))
    (let [rpc (when (and (= :code_call operation) (erlang/is_tuple request)
                         (= 3 (erlang/tuple_size request))) (elem request 2))
-         outer (first (:pending-loader-owners effects))]
-    (boundary-event observed :code-server-owners [(message-operation rpc) (when outer (elem outer 1))]))
+         outer (first (:pending-loader-owners effects))
+         [owner] (peek (:pending-env-reads effects))]
+    (-> observed
+        (boundary-event :code-server-owners [(message-operation rpc) (when outer (elem outer 1))])
+        (boundary-event :code-server-read-owners [(message-operation rpc) (when owner (elem owner 1))])))
    :else observed)))
 
 (defn- record-source-probe [effects path outcome]
@@ -383,6 +393,8 @@
  (case function
   :op_of (if (erlang/is_atom value) [:operation value] :unavailable)
   :source_head (if (nil? value) :no-source-extent :unavailable)
+  :cwd! (if (small-env-text? value) value :unavailable)
+  :dir? (if (or (true? value) (false? value)) value :unavailable)
   :source_target_declaration! (if (contains? #{:public :refuse :external} value) value :unavailable)
   :lib_dir (code-directory-result value)
   :priv_dir (code-directory-result value)
@@ -415,6 +427,8 @@
             :loaded_ns? (when (small-env-text? argument) [function argument])
             :search_paths [function]
             :source_head [function]
+            :cwd! [function]
+            :dir? (when (small-env-text? argument) [function argument])
             :source_target_declaration! (let [[module name arity] arguments]
                                           (when (and (erlang/is_atom module) (erlang/is_atom name)
                                                      (int? arity) (<= 0 arity 255))
@@ -467,6 +481,8 @@
                                                 :unavailable
                                                 (BeamLisp.Env/op_of argument name))
                                        :source_head (when (BeamLisp.Env/source_execution_active?) :active)
+                                       :cwd! (File/cwd!)
+                                       :dir? (File/dir? argument)
                                        :source_target_declaration! (BeamLisp.Env/source_target_declaration! argument name default)
                                        :lib_dir (code/lib_dir argument)
                                        :priv_dir (code/priv_dir argument)
@@ -661,10 +677,15 @@
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources
    (finish-env-read effects (tuple :code function 1) kind value))
+  [:trace _ kind [:Elixir.File function arity] value]
+  :when (and (or (= function :cwd!) (= function :dir?))
+             (or (= kind :return_from) (= kind :exception_from)))
+  (recur calls pending hits misses reads sources
+   (finish-env-read effects (tuple :Elixir.File function arity) kind value))
   [:trace _ :send message target]
-  (recur calls pending hits misses reads sources (process-event effects :send message target))
+  (recur calls pending hits misses reads sources (process-event effects :send message target reads))
   [:trace _ :send_to_non_existing_process message target]
-  (recur calls pending hits misses reads sources (process-event effects :send-miss message target))
+  (recur calls pending hits misses reads sources (process-event effects :send-miss message target reads))
   [:trace _ :spawn _ _]
   (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:spawn]))
   [:trace _ kind _] :when (or (= kind :link) (= kind :unlink) (= kind :getting_linked) (= kind :getting_unlinked)
@@ -1453,6 +1474,27 @@
  (BeamLisp.Loader/with_declaration_snapshot
   (fn [] (build/compile-prepared prepared {:check-node identity}))))
 
+(defn- observed-effect-refusals [effects]
+ (let [tables #{[:lookup :beam_lisp_ops :op_of]
+                [:lookup :beam_lisp_source_extent_heads :source_head]
+                [:lookup :beam_lisp_source_extent_heads :source_target_declaration!]
+                [:lookup_element :ac_tab :get_env]
+                [:lookup :code_server :is_loaded]}
+       code #{[:dir :priv_dir] [:dir :lib_dir] [:get_object_code_for_loading :ensure_loaded]}
+       files #{[:get_cwd :cwd!] [:read_file_info :dir?] [:read_file_info :regular?]
+               [:read_file :read!] [:read_file :read_file]}
+       messages #{[:send :code_server :code_call] [:send :Elixir.BeamLisp.Env :get]
+                  [:send :file_server_2 :get_cwd] [:send :file_server_2 :read_file_info]
+                  [:send :file_server_2 :read_file]}]
+  (vec (take 12
+        (concat
+         (map #(vector :table %) (sort (remove tables (keys (:table-read-owners effects)))))
+         (map #(vector :code-server %) (sort (remove code (keys (:code-server-read-owners effects)))))
+         (map #(vector :file-server %) (sort (remove files (keys (:file-server-read-owners effects)))))
+         (map #(vector :env %) (sort (remove (fn [[_ owner]] (contains? #{[:loaded_ns?] [:search_paths]} owner))
+                                         (keys (:env-read-owners effects)))))
+         (map #(vector :process %) (sort (remove messages (keys (:process-boundary effects))))))))))
+
 (defn- prepared-inputs [prepared]
  (select-keys prepared [:ns :path :source-sha256 :requires :js-interop? :env :defs]))
 
@@ -1503,6 +1545,7 @@
     (assert (= 1 (get-in effects [:process-boundary [:send :Elixir.BeamLisp.Env :get]])))
     (assert (= 1 (reduce + 0 (vals (:env-agent-readers effects)))))
     (assert (not (contains? (:env-agent-readers effects) [:unclassified])))
+    (assert (some #(= :process (first %)) (observed-effect-refusals effects)))
     {:table-read-observed true :table-write-observed true :message-observed true :env-reader-observed true})
    (finally (ets/delete table)))))
 
@@ -1533,9 +1576,12 @@
                       :env-agent-readers (vec (sort (:env-agent-readers effects)))
                       :env-read-owners (vec (sort (:env-read-owners effects)))
                       :file-read-owners (vec (sort (:file-read-owners effects)))
+                      :file-server-read-owners (vec (sort (:file-server-read-owners effects)))
                       :table-read-owners (vec (sort (:table-read-owners effects)))
                       :extent-read-kinds (vec (sort (:extent-read-kinds effects)))
                       :code-server-owners (vec (sort (:code-server-owners effects)))
+                      :code-server-read-owners (vec (sort (:code-server-read-owners effects)))
+                      :effect-refusals (observed-effect-refusals effects)
                       :rejected-env-reads (vec (sort (:rejected-env-reads effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (if selected [selected] (:order closure)))})))
@@ -1859,11 +1905,13 @@
 (defn- capture-registry-member [closure baseline member entries bound?]
  (let [[prepared compiled observed callables]
        (observe-lowering closure baseline member entries
-                        {:env-reads? bound? :code-reads? bound? :resolver-reads? bound? :runtime-reads? bound?})
+                        {:env-reads? bound? :code-reads? bound? :resolver-reads? bound? :runtime-reads? bound?
+                         :boundary? bound? :ownership? bound?})
        _ (when (and bound? (not (erlang/=:= (def-bytes compiled) (def-bytes member))))
            (throw (ex-info "Native registry capture diverged from the qualified donor"
                     {:namespace (:ns member)})))
        effects (:effects observed)
+       effect-refusals (when bound? (observed-effect-refusals effects))
        application-reads (filter (fn [[[function] _]] (= :application-setting function)) (:env-reads effects))
        reason (cond
                 (not (registry-lowering-supported? effects (registry-phase-status observed))) :unaccounted-registry
@@ -1875,6 +1923,7 @@
                 (seq (:code-mutations effects)) :code-mutated-during-lowering
                 (:unknown-resolver-read effects) :unknown-resolver-read
                 (:unstable-resolver-read effects) :unstable-resolver-read
+                (seq effect-refusals) :unaccounted-effects
                 (or (:unstable-code-read effects) (some #{:unavailable} (vals (:code-reads effects)))) :unstable-code-read)
        prepared-id (when-not reason (closed-identity prepared))
        reads (when prepared-id (into {} (map (fn [[key value]] [key (registry-value-signature value callables)])
@@ -1883,13 +1932,15 @@
        reason (or reason (when-not prepared-id :opaque-prepared-input) (when (pos? opaque) :opaque-registry-value))]
   (if reason
    (cond-> {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
+    (seq effect-refusals) (assoc :effect-refusals effect-refusals)
     (seq (:code-mutations effects)) (assoc :code-mutations (vec (sort (:code-mutations effects)))))
    (cond-> {:prepared prepared-id :registry reads :probes (source-probes observed)
             :sources (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest]) (:sources observed)))))
             :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)}
     bound? (assoc :env-reads (:env-reads effects {}) :env-read-calls (:env-read-count effects 0)
                   :code-reads (:code-reads effects {}) :code-read-calls (:code-read-count effects 0)
-                  :resolver-reads (resolver-receipt effects) :resolver-read-calls (:resolver-read-count effects 0))
+                  :resolver-reads (resolver-receipt effects) :resolver-read-calls (:resolver-read-count effects 0)
+                  :checked-observable-effects true)
     (not bound?) (assoc :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits))))))
 
 (defn- registry-member-bytes [entry]
@@ -1904,7 +1955,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v8 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v9 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1972,6 +2023,7 @@
             :changed-code-reads changed-code)
      (contains? entry :code-mutations)
      (assoc :code-mutations code-mutations)
+     (contains? entry :effect-refusals) (assoc :effect-refusals (:effect-refusals entry))
      (contains? entry :resolver-reads)
      (assoc :resolver-read-calls (:resolver-read-calls entry)
             :distinct-resolver-reads (count (:resolver-reads entry))
@@ -2033,7 +2085,8 @@
  (let [receipt (read-registry-member bytes)]
   (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
                              :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5
-                             :native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8} (:schema receipt))
+                             :native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8
+                             :native-bound-registry-v9} (:schema receipt))
                  (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
@@ -2100,14 +2153,17 @@
                                        {:reason :missing-env-reads}
                                        (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4
                                                          :native-bound-registry-v5 :native-bound-registry-v6 :native-bound-registry-v7
-                                                         :native-bound-registry-v8}
+                                                         :native-bound-registry-v8 :native-bound-registry-v9}
                                                        (:schema receipt))
                                             (not (map? (:code-reads entry))))
                                        {:reason :missing-code-reads}
-                                       (and (contains? #{:native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8}
+                                       (and (contains? #{:native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8
+                                                         :native-bound-registry-v9}
                                                        (:schema receipt))
                                             (not (map? (:resolver-reads entry))))
                                        {:reason :missing-resolver-reads}
+                                       (and (= :native-bound-registry-v9 (:schema receipt)) (not (true? (:checked-observable-effects entry))))
+                                       {:reason :missing-effect-checks}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
                                mutation (when (and control-root (= "host.delay" ns))
                                           #(BeamLisp.Env/add_search_path control-root))]
