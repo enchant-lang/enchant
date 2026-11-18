@@ -584,9 +584,10 @@
        flags (if (:boundary? options) (list :call :send :procs) (list :call))]
   (try
    (assert (= 1 (erlang/apply :trace :function
-                  (list session registry-lookup-entry match (list :local)))))
+                  (list session registry-lookup-entry match (list :local)))) "could not trace registry lookup")
    (doseq [entry (cond-> source-read-entries (:source-probes? options) (conj source-probe-entry))]
-    (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
+    (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))
+            (str "could not trace Source read " (pr-str entry))))
    (doseq [entry (cond-> (if (:env-reads? options) env-read-entries #{})
                   (:code-reads? options) (conj code-read-entry)
                   (:ownership? options) (into (conj loader-owner-entries env-private-entry)))]
@@ -598,9 +599,10 @@
    (when sample-macros?
     (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
    (when (:macro-lookups? options)
-    (assert (= 1 (erlang/apply :trace :function (list session macro-lookup-entry returns (list :local))))))
+    (assert (= 1 (erlang/apply :trace :function (list session macro-lookup-entry returns (list :local))))
+            "could not trace macro lookup"))
    (assert (= 1 (erlang/apply :trace :function
-                 (list session macro-entry (if sample-macros? returns true) (list :local)))))
+                 (list session macro-entry (if sample-macros? returns true) (list :local)))) "could not trace macro expansion")
    (doseq [[entry spec] (if (:registry? options)
                          (map (fn [entry]
                                 [entry (registry-trace-spec (elem entry 2)
@@ -615,9 +617,10 @@
      (when-not (= 1 matched)
       (throw (ex-info (str "Native observation could not install trace " (pr-str entry))
                        {:entry entry :matched matched})))))
-   (assert (= 1 (erlang/apply :trace :process (list session owner true flags))))
+   (assert (= 1 (erlang/apply :trace :process (list session owner true flags))) "could not start owner trace")
    (let [result (action)
-         _ (when (:boundary? options) (assert (= 1 (erlang/apply :trace :process (list session owner false flags)))))
+         _ (when (:boundary? options)
+             (assert (= 1 (erlang/apply :trace :process (list session owner false flags))) "could not stop owner trace"))
          barrier (erlang/apply :trace :delivered (list session owner))
          ticket (erlang/make_ref)]
     (receive [:trace_delivered seen ref] :when (and (= seen owner) (= ref barrier))
@@ -1285,10 +1288,12 @@
                                        [compiled (assoc-in observed [:effects :code-reads] reads)])))]
                                [compiled (assoc-in observed [:effects :code-mutations] mutations)])
                               (observe!))]
-    (assert (not-any? (fn [[_ _ key]]
-                        (and (erlang/is_tuple key) (> (erlang/tuple_size key) 1)
-                             (= :fwd (elem key 0)) (= "native.observe-links" (elem key 1))))
-                      (keys (get-in observed [:effects :registry-inputs]))))
+    (let [self-reads (filter (fn [[_ _ key]]
+                               (and (erlang/is_tuple key) (> (erlang/tuple_size key) 1)
+                                    (= :fwd (elem key 0)) (= "native.observe-links" (elem key 1))))
+                            (keys (get-in observed [:effects :registry-inputs])))]
+     (assert (empty? self-reads)
+             (str "Probe leaked into lowering reads for " (:ns member) ": " (pr-str self-reads))))
     [(prepared-inputs prepared) compiled observed callables])))))
 
 (defn- lowering-boundary-control []
