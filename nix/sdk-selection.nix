@@ -3,6 +3,9 @@
 { pkgs, image, platform, coordinator, assemblyIdentity ? null }:
 pkgs.runCommand "beam-lisp-sdk-selection" {
   nativeBuildInputs = [ pkgs.python3 ];
+  # Packaging only links an SDK image that is already built. Prefer the store
+  # that has those dependencies instead of forwarding the image for this step.
+  preferLocalBuild = true;
 } ''
   mkdir -p "$out/bin"
   ln -s ${image}/lib "$out/lib"
