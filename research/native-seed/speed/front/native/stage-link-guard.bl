@@ -2,7 +2,7 @@
 (ns native.stage-link-guard
  (:require [native.artifact :as artifact] [bl.json :as json] [js.build :as build]
            [native.checked-relink :refer [install-batched-rows! lower-with-snapshot
-                                          prepared-inputs read-registry-member]]))
+                                          prepared-inputs read-registry-member checked-update]]))
 
 (def guard-event-limit 100000)
 
@@ -185,9 +185,8 @@
     :unmodeled-operations (:unsupported observed)
     :omitted-inputs omitted :fallback-rows (if refusal (+ (count rows) (count (:core-links closure))) 0)}]))
 
-(defn guarded-update [closure rowset request]
- (let [{:strs [plan sha256 qualification]} request
-       captured (read-stage-plan closure plan sha256)
+(defn- qualified-stage-plan [closure path digest qualification]
+ (let [captured (read-stage-plan closure path digest)
        evidence-bytes (File/read! qualification)
        evidence (json/decode evidence-bytes)
        anchor (:donor captured)
@@ -196,7 +195,12 @@
                       (= (:sdk-descriptor-sha256 artifact/validation-context) (get evidence "sdk-descriptor-sha256"))
                       (= (:qualification-sha256 anchor) (artifact/sha evidence-bytes))
                       (= (:closure-sha256 anchor) (get recorded "candidate-closure-sha256"))
-                      (= (:links-sha256 anchor) (get recorded "installed-link-sha256"))))
+                      (= (:links-sha256 anchor) (get recorded "installed-link-sha256"))))]
+  captured))
+
+(defn- guarded-full-update [closure rowset request]
+ (let [{:strs [plan sha256 qualification]} request
+       captured (qualified-stage-plan closure plan sha256 qualification)
        rows (:rows rowset)
        [row-index core-index :as index] (stage-row-index closure rows)
        live (link-key-membership (concat (keys row-index) (keys core-index)))
@@ -208,3 +212,52 @@
    :changed (:order closure) :added [] :order (:order closure)
    :stage-link-candidate {:plan-sha256 sha256 :candidate-link-rows-sha256 (:sha256 rowset)
                           :members (mapv second results)}}))
+
+(defn- donor-link-keys [entry]
+ (keep (fn [[_ slot key]]
+         (when (and (= :own slot) (erlang/is_tuple key) (= 3 (erlang/tuple_size key))
+                    (= :link (elem key 0)))
+          [(elem key 1) (elem key 2)]))
+       (keys (:registry entry))))
+
+(defn- guarded-reuse-trial [closure captured [row-index core-index] live member entry replay!]
+ (let [prior (get-in captured [:members (:ns member)])]
+  (when (and (= [(:path member) (:source-sha256 member)] [(:path prior) (:source-sha256 prior)])
+             (empty? (:unsupported prior)))
+   (let [retained (into (set (:inputs prior)) (donor-link-keys entry))
+         rows (select-indexed-link-rows row-index retained)
+         core-links (select-indexed-link-rows core-index retained)
+         keys (link-key-membership retained)
+         [[replay observed] cost] (phase-cost #(replay! (assoc closure :core-links core-links) rows
+                                                (fn [stage!] (guard-stage-links (BeamLisp.Env/env_id) live keys stage!))))
+         refusal (cond
+                   (not (:complete? observed)) :candidate-trace-incomplete
+                   (seq (:unsupported observed)) :candidate-table-read-unmodeled
+                   (seq (:omitted-inputs observed)) :candidate-link-not-installed
+                   (not (:reused replay)) (:reason replay))]
+    {:replay (when-not refusal replay)
+     :receipt {:used-subset (nil? refusal) :fallback refusal
+               :attempted-subset-rows (+ (count rows) (count core-links))
+               :guard-events (:trace-events observed) :verification-cost cost}}))))
+
+(defn- guarded-reuse-update [closure rowset request]
+ (let [{:strs [plan stage-plan-sha256 qualification]} request
+       captured (qualified-stage-plan closure plan stage-plan-sha256 qualification)
+       [row-index core-index :as index] (stage-row-index closure (:rows rowset))
+       live (link-key-membership (concat (keys row-index) (keys core-index)))
+       trial (fn [member entry replay!] (guarded-reuse-trial closure captured index live member entry replay!))
+       result (checked-update closure rowset request nil trial)
+       _ (assert (= (:donor captured) (:donor result)))
+       members (mapv (fn [member]
+                       (merge {:namespace (:namespace member) :donor-reused (:reused member)
+                               :donor-refusal (:reason member) :used-subset false}
+                              (:stage-subset member)))
+                     (:members result))]
+  (assoc result :stage-link-candidate
+   {:plan-sha256 stage-plan-sha256 :donor-receipt-sha256 (:receipt-sha256 result)
+    :candidate-link-rows-sha256 (:sha256 rowset) :members members})))
+
+(defn guarded-update [closure rowset request]
+ (if (contains? request "receipt")
+  (guarded-reuse-update closure rowset request)
+  (guarded-full-update closure rowset request)))

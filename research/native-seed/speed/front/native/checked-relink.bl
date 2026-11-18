@@ -235,7 +235,7 @@
 (defn with-registry-stage
  ([closure rows member entries action]
   (with-registry-stage closure rows member entries {} (fn [prepared callables _] (action prepared callables))))
- ([closure rows member entries {:keys [batch-rows? mark]} action]
+ ([closure rows member entries {:keys [batch-rows? mark with-stage]} action]
  (let [macros (if (= "core" (:ns member)) [] entries)
        phase-callables (into {} (map (fn [[name entry]] [entry name]) macros))]
   (BeamLisp.Env/isolated
@@ -247,8 +247,8 @@
       (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
      (BeamLisp.Compiler/with_fresh_names
       (fn []
-       (let [prepared (build/prepare-ns (:path member))]
-        (action prepared phase-callables staging))))))))))
+       (let [prepare! #(action (build/prepare-ns (:path member)) phase-callables staging)]
+        (if with-stage (with-stage prepare!) (prepare!))))))))))
 
 (defn lower-with-snapshot [prepared]
  (BeamLisp.Loader/with_declaration_snapshot
@@ -328,9 +328,12 @@
  ([closure candidate member entry entries change-env! retained-unit]
   (replay-registry-member closure candidate member entry entries change-env! retained-unit true nil))
  ([closure candidate member entry entries change-env! retained-unit compare-clean? mark]
+  (replay-registry-member closure candidate member entry entries change-env! retained-unit compare-clean? mark {}))
+ ([closure candidate member entry entries change-env! retained-unit compare-clean? mark
+   {:keys [reuse-only? with-stage]}]
  (let [ns (:ns member)]
   (with-registry-stage closure (:rows candidate) member entries
-   {:batch-rows? (not compare-clean?) :mark mark}
+   {:batch-rows? (not compare-clean?) :mark mark :with-stage with-stage}
   (fn [prepared callables staging]
    (let [staged (when mark (mark :member-stage ns staging))
          _ (when change-env! (change-env!))
@@ -363,16 +366,17 @@
                             (changed-resolver-reads (:resolver-reads entry)))
          reason (or prior-reason (when (seq changed-resolver) :resolver-input-changed))
          validated (when mark (mark :member-validation ns staged))
-         compiled (when reason (lower-with-snapshot prepared))
-         _ (when (and mark reason) (mark :member-lowering ns validated))
+         compiled (when (and reason (not reuse-only?)) (lower-with-snapshot prepared))
+         _ (when (and mark compiled) (mark :member-lowering ns validated))
          ;; Retained definition bytes do not need decoding for the comparison.
          actual (when compare-clean? (if reason (def-bytes compiled) (:definition-bytes entry)))
          replayed-unit (when retained-unit
-                         (if reason
+                         (cond
+                          (nil? reason) retained-unit
+                          compiled
                           (assoc (dissoc compiled :cache-status :cache-key) :source (:source prepared)
                                  :module (BeamLisp.Link/module_for (:ns prepared))
-                                 :base-module (BeamLisp.Emit/base_module_for (:ns prepared)))
-                          retained-unit))]
+                                 :base-module (BeamLisp.Emit/base_module_for (:ns prepared)))))]
     (cond-> {:namespace (:ns member) :reused (nil? reason) :reason reason :opaque-inputs (:opaque-inputs entry 0)
              :opaque-keys (:opaque-keys entry) :changed-registry-keys changed}
      compare-clean? (assoc :exact-clean-definitions (erlang/=:= actual (def-bytes member)))
@@ -437,7 +441,7 @@
    {:sha256 (artifact/sha bytes) :bytes (erlang/byte_size bytes) :exact-partitions (count results)})))
 
 (defn replay-bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha
-                              control-root export-path update? mark]
+                              control-root export-path update? mark stage-trial]
  (let [start (when mark (mark))
        anchor (qualified-donor donor qualification-path)
        bytes (File/read! receipt-path)
@@ -484,10 +488,19 @@
                                           #(BeamLisp.Env/add_search_path control-root))
                                ;; Known refusals need no matching callable identities.
                                ;; Use the SDK compiler's ordinary macros for their full pass.
-                               member-entries (if (and update? (:reason entry)) [] entries)]
-                          (replay-registry-member closure candidate (get-in closure [:units ns])
-                                                  entry member-entries mutation (when (or export-path update?) old)
-                                                  (not update?) mark)))
+                               member-entries (if (and update? (:reason entry)) [] entries)
+                               member (get-in closure [:units ns])
+                               trial (when (and stage-trial (not (:reason entry)))
+                                       (stage-trial member entry
+                                        (fn [stage-closure rows with-stage]
+                                         (replay-registry-member stage-closure (assoc candidate :rows rows) member
+                                         entry member-entries nil old false mark
+                                         {:reuse-only? true :with-stage with-stage}))))
+                               replayed (or (:replay trial)
+                                            (replay-registry-member closure candidate member
+                                             entry member-entries mutation (when (or export-path update?) old)
+                                             (not update?) mark))]
+                          (cond-> replayed trial (assoc :stage-subset (:receipt trial)))))
                        (:order closure))
           members (mapv #(dissoc % :replayed-unit) results)
           exported (when export-path (export-verified-closure! export-path closure results))
@@ -507,7 +520,9 @@
                      :changed (mapv :namespace (remove :reused members))
                      :added [] :order (:order closure))))))))
 
-(defn checked-update [closure rowset request mark]
+(defn checked-update
+ ([closure rowset request mark] (checked-update closure rowset request mark nil))
+ ([closure rowset request mark stage-trial]
  (let [{:strs [receipt samples donor qualification sha256]} request]
   (when-not (every? #(and (string? %) (not (empty? %))) [receipt samples donor qualification sha256])
    (refuse-bound-registry :incomplete-update-request))
@@ -515,4 +530,4 @@
         donor-closure (artifact/read-closure donor)]
    (when mark (mark :donor-load nil start))
    (replay-bound-registry closure rowset receipt samples donor-closure
-                          qualification sha256 nil nil true mark))))
+                          qualification sha256 nil nil true mark stage-trial)))))

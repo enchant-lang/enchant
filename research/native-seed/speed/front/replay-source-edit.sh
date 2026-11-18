@@ -12,13 +12,24 @@ usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
   echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --capture-local QUALIFICATION PHASE_MACRO_SAMPLES [--arity]" >&2
   echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json {--stage-link-plan|--stage-link-guard|--stage-link-candidate} QUALIFICATION [--arity]" >&2
+  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --stage-link-reuse QUALIFICATION PHASE_MACRO_SAMPLES [--arity]" >&2
   exit 2
 }
 capture_local=false
 stage_link_plan=false
 stage_link_candidate=false
+stage_link_reuse=false
 edit=
-if [[ "${3:-}" == --stage-link-plan || "${3:-}" == --stage-link-guard || "${3:-}" == --stage-link-candidate ]]; then
+if [[ "${3:-}" == --stage-link-reuse ]]; then
+  [[ $# == 5 || $# == 6 ]] || usage
+  stage_link_plan=true
+  stage_link_candidate=true
+  stage_link_reuse=true
+  capture_local=true
+  qualification=$(realpath "$4")
+  samples=$(realpath "$5")
+  edit=${6:-}
+elif [[ "${3:-}" == --stage-link-plan || "${3:-}" == --stage-link-guard || "${3:-}" == --stage-link-candidate ]]; then
   [[ $# == 4 || $# == 5 ]] || usage
   stage_link_plan=true
   stage_replay_mode=--replay-stage-link-plan
@@ -86,7 +97,9 @@ if "$stage_link_plan"; then
 fi
 if "$capture_local"; then
   receipt="$overlay/bound-donor.etf"
-  capture_start=$(python3 -c 'import time; print(time.monotonic_ns())')
+  if ! "$stage_link_reuse"; then
+    capture_start=$(python3 -c 'import time; print(time.monotonic_ns())')
+  fi
   (
     cd "$overlay"
     "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
@@ -129,7 +142,18 @@ if [[ "${NATIVE_RELINK_COMPARE:-}" == 1 ]] || "$stage_link_candidate"; then
   candidate=$seed/out/checked
   cp -a "$edited" "$candidate"
   request="$overlay/relink.json"
-  if "$stage_link_candidate"; then
+  if "$stage_link_reuse"; then
+    request_variable=NATIVE_STAGE_LINK_PLAN_REQUEST
+    python3 - "$request" "$receipt" "$samples" "$baseline/partition.json" "$qualification" \
+      "$receipt_sha" "$plan" "$plan_sha" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+keys = ("receipt", "samples", "donor", "qualification", "sha256", "plan", "stage-plan-sha256")
+Path(sys.argv[1]).write_text(json.dumps(dict(zip(keys, sys.argv[2:], strict=True))))
+PY
+  elif "$stage_link_candidate"; then
     request_variable=NATIVE_STAGE_LINK_PLAN_REQUEST
     python3 - "$request" "$plan" "$plan_sha" "$qualification" <<'PY'
 import json
@@ -179,6 +203,9 @@ members = candidate[section]["members"]
 assert len(members) == len(clean["units"])
 assert any(member[key] for member in members)
 assert any(not member[key] for member in members)
+if "donor-receipt-sha256" in candidate[section]:
+    assert any(member["used-subset"] and member["donor-reused"] for member in members)
+    assert all(not member["used-subset"] or member["donor-reused"] for member in members)
 assert candidate["artifact-sha256"] == clean["artifact-sha256"]
 
 def timings(directory):
