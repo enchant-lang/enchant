@@ -43,13 +43,14 @@ def frame(out: File, pair: File & Result<&1, &1, U32 & String, List<&2, U32>>) -
     return (f, dest)
 
 def stream(n: Nat, files: File & File) -> IO(Unit):
-  (src, dst) = files
   match n:
     case 0n:
+      (src, dst) = files
       do IO<Unit>:
         u : Unit <- File.close(src)
         File.close(dst)
     case 1n+p:
+      (src, dst) = files
       do IO<Unit>:
         read : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(src, 256)
         next : File & File <- frame(dst, read)

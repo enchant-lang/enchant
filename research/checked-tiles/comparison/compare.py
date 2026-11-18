@@ -49,7 +49,7 @@ def main():
     report = {'bend': PIN, 'input': receipt['input_sha256'], 'output': receipt['output_sha256'],
               'width': receipt['width'], 'height': receipt['height'],
               'timing': 'fresh process, input read, transform and output write; compiler measured separately',
-              'implementation': '32 list chunks with explicit fork/join; four CPU threads', 'runs': {}}
+              'implementation': '256-byte IO chunks; each has 32 fork/join leaves', 'runs': {}}
     compiler = [os.getenv('BUN','bun'), str(root/'bend2/main.ts'), str(HERE/'wash.bend'), '-o', str(d/'wash')]
     report['compile_ms'] = run(compiler, d)
     variants = {'Bend CPU 1': ['./wash', '+RTS', '--threads', '1', '--gpu', 'off'],
