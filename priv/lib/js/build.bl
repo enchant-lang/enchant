@@ -145,7 +145,7 @@
           (recur st2 (conj out [(second r) (unicode/characters_to_binary consumed)])))
         out)))))
 
-(defn read-forms [path] (vec (map first (read-forms+text path))))
+(defn read-forms [path] (mapv first (read-forms+text path)))
 
 (defn- node-symbols
   "Every symbol name appearing anywhere inside reader node `n`."
@@ -173,7 +173,7 @@
 
 (defn- stage-forms
   [path source texts options]
-  (let [forms (vec (map first texts))
+  (let [forms (mapv first texts)
         has-head? (and (= :list (rn-tag (first forms))) (sym? (first (rn-items (first forms))) "ns"))
         head (if has-head? (ns-head forms)
                  (if-let [fallback (:fallback-ns options)] {:ns fallback :requires []}
@@ -260,15 +260,21 @@
    (if cached
     (assoc (update cached :defs (fn [defs] (mapv (fn [d] (update d :node check)) defs)))
            :cache-status :hit :cache-key key)
-    (let [compiled (assoc (dissoc prepared :texts :env :source :cache-eligible?) :defs
-       (vec (map (fn [d]
-                   (admission/check!)
-                   (assoc d :node
-                     (try (check (BeamLisp.Ns.Compiler/compile (:form d) env))
-                          (catch ex
-                            (throw (ex-info (str path ": " (or (:name d) "top-level form") ": " (ex-message ex))
-                                            {:path path :name (:name d)}))))))
-                 (:defs prepared))))]
+    (let [compile-defs
+          (fn []
+            (mapv (fn [d]
+                    (admission/check!)
+                    (assoc d :node
+                      (try (check (BeamLisp.Ns.Compiler/compile (:form d) env))
+                           (catch ex
+                             (throw (ex-info (str path ": " (or (:name d) "top-level form") ": " (ex-message ex))
+                                             {:path path :name (:name d)}))))))
+                  (:defs prepared)))
+          ; A custom checker runs between definitions and can change the
+          ; resolver's inputs. Only the standard pass shares declaration reads.
+          defs (if (:check-node options) (compile-defs)
+                   (BeamLisp.Loader/with_declaration_snapshot compile-defs))
+          compiled (assoc (dissoc prepared :texts :env :source :cache-eligible?) :defs defs)]
       (assoc (cache/store! (when (= key (cache/key-for prepared options)) key) compiled) :cache-status (if key :miss :declined) :cache-key key))))))
 
 (defn compile-ns
@@ -719,4 +725,4 @@
     (doseq [ns order] (File/write! (str out "/" (ns-file ns)) (:text (get emitted ns))))
     {:modules order :bytes (reduce + 0 (map (fn [ns] (count (:text (get emitted ns)))) order))
      :cache (cache/stats)
-     :sources (vec (map (fn [ns] (:path (get compiled ns))) order))}))
+     :sources (mapv (fn [ns] (:path (get compiled ns))) order)}))
