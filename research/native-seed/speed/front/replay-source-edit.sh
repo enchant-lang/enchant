@@ -2,6 +2,7 @@
 # Rebuild the one-body edit in a private overlay, then check selective relinking.
 # --capture-local captures the qualified donor in the same overlay before
 # making the edit. This keeps configured absolute loader roots exact.
+# NATIVE_BOUND_REPLAY_EXPORT saves the checked closure ETF after bound replay.
 set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
@@ -28,6 +29,11 @@ fi
 [[ -z "$edit" || "$edit" == --arity ]] || usage
 baseline=$(realpath "$1")
 report=$(realpath -m "$2")
+export_path=
+if [[ -n "${NATIVE_BOUND_REPLAY_EXPORT:-}" ]]; then
+  [[ "$capture_local" == true || -n "${receipt:-}" ]] || usage
+  export_path=$(realpath -m "$NATIVE_BOUND_REPLAY_EXPORT")
+fi
 root=$(cd "$(dirname "$0")/../../../.." && pwd -P)
 cd "$root"
 seed=research/native-seed
@@ -80,9 +86,18 @@ systemd-run --user --quiet --collect --wait --pipe --working-directory="$overlay
   --property=KillMode=control-group --setenv=XDG_RUNTIME_DIR="$overlay/runtime" \
   "$seed/speed/final/closure-r3.sh" "$edited"
 if [[ -n "${receipt:-}" ]]; then
+  mode=--bound-registry
+  extra=()
+  if [[ -n "$export_path" ]]; then
+    mode=--bound-export
+    extra+=("$export_path")
+  fi
   "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
-    "$edited/link-rows.etf" --bound-registry "$report" "$receipt" "$samples" \
-    "$baseline/partition.json" "$qualification" "$receipt_sha"
+    "$edited/link-rows.etf" "$mode" "$report" "$receipt" "$samples" \
+    "$baseline/partition.json" "$qualification" "$receipt_sha" "${extra[@]}"
+  if [[ -n "$export_path" ]]; then
+    cmp "$export_path" "$edited/closure.etf"
+  fi
 else
   "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
     "$edited/link-rows.etf" --source-shadow "$report" "$baseline/partition.json" "$overlay/baseline.etf"
