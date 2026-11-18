@@ -13,7 +13,7 @@
 ;;   PARTITION LINK_ROWS --phase-compile REPORT PHASE_MACRO_SAMPLES
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
-;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES
+;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --env-read-control REPORT
 ;;   PARTITION LINK_ROWS --code-read-control REPORT
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
@@ -1316,7 +1316,9 @@
     {:table-read-observed true :table-write-observed true :message-observed true :env-reader-observed true})
    (finally (ets/delete table)))))
 
-(defn- lowering-effects [closure rows samples-path]
+(defn- lowering-effects [closure rows samples-path selected]
+ (when (and selected (not (contains? (:units closure) selected)))
+  (throw (ex-info "Unknown native lowering member" {:namespace selected})))
  (with-phase-entries rows samples-path
   (fn [entries _]
    {:schema "bl.native.lowering-effects" :version 4 :reuse-authority false
@@ -1326,7 +1328,10 @@
     :members (mapv (fn [ns]
                     (let [member (get-in closure [:units ns])
                           [_ output observation]
-                          (observe-lowering closure rows member entries {:boundary? true :ownership? true :env-reads? true})
+                          (try (observe-lowering closure rows member entries {:boundary? true :ownership? true :env-reads? true})
+                               (catch error
+                                (throw (ex-info (str "Lowering probe failed for " ns ": " (pr-str (ex-data error)))
+                                                {:namespace ns :observation-error (ex-data error)}))))
                           effects (:effects observation)
                           phase (registry-phase-status observation)]
                      (assert (erlang/=:= (def-bytes member) (def-bytes output)))
@@ -1338,7 +1343,7 @@
                       :env-read-owners (vec (sort (:env-read-owners effects)))
                       :file-read-owners (vec (sort (:file-read-owners effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
-                   (:order closure))})))
+                   (if selected [selected] (:order closure)))})))
 
 (defn- env-read-control [report-path]
  (BeamLisp.Env/isolated
@@ -1975,7 +1980,7 @@
                 (= selected "--registry-phases") (registry-phases closure baseline comparison false)
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
-                (= selected "--lowering-effects") (lowering-effects closure baseline comparison)
+                (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
                 (= selected "--env-read-control") (env-read-control output)
                 (= selected "--code-read-control") (code-read-control output)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
