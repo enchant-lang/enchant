@@ -126,6 +126,18 @@
 
 ;; UTF-8 binary primitives preserve BEAM byte indices independently of Scheme
 ;; strings' Unicode scalar indices. Invalid/split sequences are refused.
+(define (native-utf8-span-size text start end)
+ (let loop ((i start) (size 0))
+  (if (fx= i end) size
+   (let* ((c (char->integer (string-ref text i)))
+          (width (cond ((fx< c 128) 1) ((fx< c 2048) 2)
+                  ((and (fx>= c 55296) (fx< c 57344)) (native-badarg "surrogate is not a UTF-8 scalar"))
+                  ((fx< c 65536) 3) ((fx< c 1114112) 4)
+                  (else (native-badarg "invalid Unicode scalar")))))
+    (loop (fx+ i 1) (+ size width))))))
+(define (native-utf8-size text)
+ (if (not (string? text)) (native-badarg "invalid scalar string: lone UTF16 surrogate cannot become a text binary"))
+ (native-utf8-span-size text 0 (string-length text)))
 (define (native-utf8-bytes text)
  (if (not (string? text)) (native-badarg "invalid scalar string: lone UTF16 surrogate cannot become a text binary"))
  (let loop ((cs (string->list text)) (out '()))
@@ -227,7 +239,7 @@
 (native-add-leaf! "erlang/atom_to_list/1" (lambda (a) (h-str-codepoints (native-atom-name a))))
 (native-add-leaf! "erlang/binary_to_list/1" native-utf8-bytes)
 (native-add-leaf! "erlang/list_to_binary/1" native-utf8-string)
-(native-add-leaf! "erlang/byte_size/1" (lambda (s) (length (native-utf8-bytes s))))
+(native-add-leaf! "erlang/byte_size/1" native-utf8-size)
 (native-add-leaf! "erlang/binary_part/3" native-binary-part)
 (native-add-leaf! "erlang/map_size/1" native-raw-map-size)
 (native-add-leaf! "erlang/map_get/2" native-map-fetch)

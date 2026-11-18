@@ -405,6 +405,12 @@
       (native-prefix? "λ😀/é/" "λ😀")
       (native-suffix? "λ😀/é/" "é/")
       (= 6 (bl-nth (native-binary-match "λ😀/é/" "/") 0))))
+(native-extra-check "native byte count preserves UTF-8 widths and embedded NUL"
+ (let ((text (string-append (string (integer->char 0)) "éλ€😀")))
+  (= 12 (length (native-utf8-bytes text)) ((native-leaf "erlang/byte_size/1") text))))
+(native-extra-check "binary matches carry byte offsets between non-overlapping matches"
+ (bl-equal? (native-binary-matches "λ😀λé😀😀" "😀")
+            (list (bl-tuple (list 2 4)) (bl-tuple (list 10 4)) (bl-tuple (list 14 4)))))
 ;; Text assembly keeps the original ABI while avoiding growing-prefix copies.
 (native-extra-check "empty join ignores separator" (string=? "" (native-join 42 '())))
 (let ((part (list->string '(#\a #\b))))

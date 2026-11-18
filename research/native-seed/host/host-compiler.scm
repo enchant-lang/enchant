@@ -642,7 +642,7 @@
 (define native-source-symbol-byte-limit 16777216)
 (define native-reader-symbol-count 0)
 (define (native-atom-check token)
- (if (and (string? token) (> (length (native-utf8-bytes token)) 1048576))
+ (if (and (string? token) (> (native-utf8-size token) 1048576))
   (error "native symbol token exceeds one MiB"))
  (if (or (> native-source-symbol-count native-source-symbol-limit)
          (> native-source-symbol-bytes native-source-symbol-byte-limit))
@@ -655,7 +655,7 @@
   (begin
    (set! native-source-symbols (bl-assoc native-source-symbols token #t))
    (set! native-source-symbol-count (+ native-source-symbol-count 1))
-   (set! native-source-symbol-bytes (+ native-source-symbol-bytes (length (native-utf8-bytes token))))
+   (set! native-source-symbol-bytes (+ native-source-symbol-bytes (native-utf8-size token)))
    (native-atom-check token)))
  (bl-key "ok"))
 (native-add-leaf! "Elixir.BeamLisp.AtomGuard/check!/1" native-atom-check)

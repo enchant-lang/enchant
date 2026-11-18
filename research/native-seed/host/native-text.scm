@@ -87,7 +87,7 @@ c-end
 (define native-regex-marker (list 'native-regex-marker))
 (define (native-regex? x) (and (vector? x) (= (vector-length x) 2) (eq? (vector-ref x 0) native-regex-marker)))
 (define (native-with-matches pattern text global? body)
- (let ((result (native-text-scan pattern (length (native-utf8-bytes pattern)) text (length (native-utf8-bytes text)) (if global? 1 0))))
+ (let ((result (native-text-scan pattern (native-utf8-size pattern) text (native-utf8-size text) (if global? 1 0))))
   (if (not result) (h-raise "native PCRE2 allocation failed"))
   (dynamic-wind (lambda () #f)
    (lambda () (if (not (= (native-text-status result) 0))
