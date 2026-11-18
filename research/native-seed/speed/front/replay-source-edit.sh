@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Rebuild the one-body edit in a private overlay, then check selective relinking.
 set -euo pipefail
-if [[ $# != 2 ]]; then
-  echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json" >&2
+if [[ $# != 2 && $# != 6 ]]; then
+  echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES]" >&2
   exit 2
 fi
 baseline=$(realpath "$1")
 report=$(realpath -m "$2")
+if [[ $# == 6 ]]; then
+  receipt=$(realpath "$3")
+  receipt_sha=$4
+  qualification=$(realpath "$5")
+  samples=$(realpath "$6")
+fi
 root=$(cd "$(dirname "$0")/../../../.." && pwd -P)
 cd "$root"
 seed=research/native-seed
@@ -34,12 +40,20 @@ after = b'(Enum/join (cons "w" (Enum/map (unicode/characters_to_list s)'
 assert source.count(before) == 1, "the retained emitter body does not match the edit fixture"
 path.write_bytes(source.replace(before, after, 1))
 PY
-"$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
-  "$baseline/link-rows.etf" --capture-source "$overlay/baseline.etf"
+if [[ -z "${receipt:-}" ]]; then
+  "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
+    "$baseline/link-rows.etf" --capture-source "$overlay/baseline.etf"
+fi
 cd "$overlay"
 systemd-run --user --quiet --collect --wait --pipe --working-directory="$overlay" \
   --property=MemoryMax=3G --property=MemorySwapMax=0 --property=RuntimeMaxSec=420 \
   --property=KillMode=control-group --setenv=XDG_RUNTIME_DIR="$overlay/runtime" \
   "$seed/speed/final/closure-r3.sh" "$edited"
-"$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
-  "$edited/link-rows.etf" --source-shadow "$report" "$baseline/partition.json" "$overlay/baseline.etf"
+if [[ -n "${receipt:-}" ]]; then
+  "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
+    "$edited/link-rows.etf" --bound-registry "$report" "$receipt" "$samples" \
+    "$baseline/partition.json" "$qualification" "$receipt_sha"
+else
+  "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
+    "$edited/link-rows.etf" --source-shadow "$report" "$baseline/partition.json" "$overlay/baseline.etf"
+fi

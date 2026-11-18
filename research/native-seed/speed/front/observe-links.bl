@@ -19,6 +19,7 @@
 ;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
 ;;   DONOR_PARTITION DONOR_LINK_ROWS --capture-bound-registry RECEIPT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --bound-registry REPORT RECEIPT PHASE_MACRO_SAMPLES DONOR_PARTITION QUALIFICATION RECEIPT_SHA
+;;   DONOR_PARTITION LINK_ROWS --bound-registry-controls REPORT RECEIPT QUALIFICATION RECEIPT_SHA
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --outer-control REPORT
@@ -1188,7 +1189,8 @@
        reason (or reason (when-not prepared-id :opaque-prepared-input) (when (pos? opaque) :opaque-registry-value))]
   (if reason
    {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
-   (cond-> {:prepared prepared-id :registry reads :probes (source-probes observed) :sources (:sources observed)
+   (cond-> {:prepared prepared-id :registry reads :probes (source-probes observed)
+            :sources (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest]) (:sources observed)))))
             :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)}
     (not bound?) (assoc :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits))))))
 
@@ -1297,6 +1299,27 @@
   (when-not (and (= :native-bound-registry-v1 (:schema receipt)) (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
+
+(defn- refusal-kind [action]
+ (try (action) :accepted (catch error (:kind (ex-data error)))))
+
+(defn- bound-registry-controls [closure rows receipt-path qualification-path expected-sha]
+ (let [anchor (qualified-donor closure qualification-path)
+       data (File/read! receipt-path)
+       _ (authenticated-registry data expected-sha anchor)
+       changed-bytes (str "tampered" data)
+       stale-anchor (assoc anchor :closure-sha256 (artifact/sha "different qualified closure"))
+       first-member (first (:order closure))
+       unrelated (update-in closure [:units first-member :source] str "\n; unrelated closure")
+       observed {:receipt-bytes (refusal-kind #(authenticated-registry changed-bytes expected-sha anchor))
+                 :other-donor (refusal-kind #(authenticated-registry data expected-sha stale-anchor))
+                 :spliced-partitions (refusal-kind #(qualified-donor unrelated qualification-path))
+                 :wrong-donor-links (refusal-kind #(capture-bound-registry
+                                                    closure (assoc rows :sha256 (artifact/sha "different links"))
+                                                    nil qualification-path))}]
+  (assert (= {:receipt-bytes :receipt-digest-mismatch :other-donor :receipt-donor-mismatch
+              :spliced-partitions :wrong-qualified-donor :wrong-donor-links :wrong-donor-links} observed))
+  {:schema "bl.native.bound-registry-controls" :version 1 :donor anchor :checks observed}))
 
 (defn- bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha]
  (let [anchor (qualified-donor donor qualification-path)
@@ -1508,7 +1531,8 @@
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot"
-                                              "--cached-registry" "--capture-bound-registry" "--bound-registry" "--lowering-effects"} selected)))
+                                              "--cached-registry" "--capture-bound-registry" "--bound-registry"
+                                              "--bound-registry-controls" "--lowering-effects"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -1526,6 +1550,7 @@
                 (= selected "--bound-registry") (bound-registry closure baseline comparison source-receipt
                                                    (if (= partition mode) closure (artifact/read-closure mode))
                                                    qualification receipt-sha)
+                (= selected "--bound-registry-controls") (bound-registry-controls closure baseline comparison source-receipt mode)
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
