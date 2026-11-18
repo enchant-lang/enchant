@@ -108,18 +108,21 @@
     (assert (= record (get row "emission_record")))
     (assert (= (key-from-record record) (get row "key")))))
   plan))
-(defn chunk-ready? [row]
- (try
-  (let [key (get row "key") report (json/decode (File/read! (chunk-path key "json")))]
-   (and (= key (get report "key"))
-        (= emission-input (get report "emission_inputs"))
-        (= (get row "emission_record") (get report "emission_record"))
-        (= (artifact/sha (File/read! (chunk-path key "functions.scm"))) (get report "functions_sha256"))
-        (= (artifact/sha (File/read! (chunk-path key "initializers.scm"))) (get report "initializers_sha256"))
-        (or (not= 0 (get row "offset"))
-            (= (artifact/sha (File/read! (str out "/chunks/" (get row "namespace") ".source-unit.scm")))
-               (get report "source_unit_sha256")))))
-  (catch _ false)))
+(defn checked-chunk-text [path digest]
+ (let [text (File/read! path)]
+  (assert (= (artifact/sha text) digest))
+  text))
+(defn checked-chunk [row]
+ (let [key (get row "key") report (json/decode (File/read! (chunk-path key "json")))]
+  (assert (= key (get report "key")))
+  (assert (= emission-input (get report "emission_inputs")))
+  (assert (= (get row "emission_record") (get report "emission_record")))
+  {:functions (checked-chunk-text (chunk-path key "functions.scm") (get report "functions_sha256"))
+   :initializers (checked-chunk-text (chunk-path key "initializers.scm") (get report "initializers_sha256"))
+   :source (when (= 0 (get row "offset"))
+             (checked-chunk-text (chunk-path key "source-unit.scm") (get report "source_unit_sha256")))}))
+(defn ready-chunk [row]
+ (try (checked-chunk row) (catch _ nil)))
 (defn emit-chunk! [row]
  (let [key (get row "key") u (get (:units closure) (get row "namespace"))
        offset (get row "offset") count* (get row "count")
@@ -133,16 +136,11 @@
                "source_unit_sha256" (when source-unit (artifact/sha source-unit))}]
   (File/write! (chunk-path key "functions.scm") functions)
   (File/write! (chunk-path key "initializers.scm") initializers)
-  (when source-unit (File/write! (str out "/chunks/" (:ns u) ".source-unit.scm") source-unit))
+  ; Keep the source fragment with the content key that covers it so an edit
+  ; and its reversal can each reuse their complete chunk.
+  (when source-unit (File/write! (chunk-path key "source-unit.scm") source-unit))
   (File/write! (chunk-path key "json") (json/encode report))
   (println (str "NATIVE_CHUNK " (:ns u) " " offset " " count* " " key))))
-(defn checked-chunk-text [row extension hash-key]
- (let [key (get row "key") report (json/decode (File/read! (chunk-path key "json")))
-       text (File/read! (chunk-path key extension))]
-  (assert (= key (get report "key")))
-  (assert (= emission-input (get report "emission_inputs")))
-  (assert (= (get row "emission_record") (get report "emission_record")))
-  (assert (= (artifact/sha text) (get report hash-key))) text))
 (defn ensure-plan! []
  (let [path (str out "/chunks.json")
        previous (when (File/regular? path)
@@ -165,33 +163,33 @@
   current))
 (defn emit-window! [plan]
  (let [start (erlang/monotonic_time :millisecond)]
-  (loop [rows (get plan "chunks") index 0 built 0 reused 0]
-   (cond
-    (empty? rows) {:complete? true :next index :built built :reused reused}
-    (chunk-ready? (first rows)) (recur (rest rows) (inc index) built (inc reused))
-    (>= (- (erlang/monotonic_time :millisecond) start) 110000)
-     {:complete? false :next index :built built :reused reused}
-    :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused))))))
-(defn assemble! [plan]
- (let [rows (get plan "chunks")
-        metadata-source (bootstrap/data metadata)
-        functions (string/join "" (map #(checked-chunk-text % "functions.scm" "functions_sha256") rows))
-        initializers (string/join "" (map #(checked-chunk-text % "initializers.scm" "initializers_sha256") rows))
-        sources (mapv (fn [u]
-         (let [row (first (filter #(and (= (:ns u) (get % "namespace")) (= 0 (get % "offset"))) rows))
-               report (json/decode (File/read! (chunk-path (get row "key") "json")))
-               text (File/read! (str out "/chunks/" (:ns u) ".source-unit.scm"))]
-          (assert (= (artifact/sha text) (get report "source_unit_sha256"))) text)) units)
+  (loop [rows (get plan "chunks") checked [] built 0 reused 0]
+   (if (empty? rows) {:chunks checked :built built :reused reused}
+    (let [row (first rows)]
+     (if-let [chunk (ready-chunk row)]
+      (recur (rest rows) (conj checked chunk) built (inc reused))
+      (if (>= (- (erlang/monotonic_time :millisecond) start) 110000)
+       {:next (count checked) :built built :reused reused}
+       (do (emit-chunk! row)
+           (recur (rest rows) (conj checked (checked-chunk row)) (inc built) reused)))))))))
+(defn assemble! [chunks]
+ ; Assembly uses the verified bytes in plan order, with one source fragment
+ ; from the first row of each namespace.
+ (let [metadata-source (bootstrap/data metadata)
+        functions (string/join "" (map :functions chunks))
+        initializers (string/join "" (map :initializers chunks))
+        sources (vec (keep :source chunks))
         prelude (str ";; BL native compiler. Generated from canonical BL source.\n" (File/read! host-path) "\n"
                      (bootstrap/bundle-install-source metadata) functions initializers
                      (bootstrap/seal-source link-plan))]
+   (assert (= (count units) (count sources)))
    (File/write! (str out "/bundle.scm") (str "(bl-assoc " metadata-source " (bl-key \"units\") (bl-vec (list " (string/join "\n" sources) ")))"))
    (File/write! (str out "/prelude.scm") prelude)
    (File/write! (str out "/stage1.scm") (str prelude "(native-main (native-command-line))\n"))
    (File/write! (str out "/chunk-export.json")
     (json/encode {"schema" "bl.native.chunk-export" "version" 2 "inputs" key-input "emission_inputs" emission-input
-                  "jobs" (count rows) "prelude_sha256" (artifact/sha prelude)}))
-   (println (str "NATIVE_CHUNKS_ASSEMBLED " (count rows) " checked jobs"))))
+                  "jobs" (count chunks) "prelude_sha256" (artifact/sha prelude)}))
+   (println (str "NATIVE_CHUNKS_ASSEMBLED " (count chunks) " checked jobs"))))
 (cond
  (= mode "plan")
   (let [size (String/to_integer (or (nth args 5 nil) "32"))]
@@ -204,17 +202,17 @@
  (= mode "emit")
   (let [plan (read-plan) index (String/to_integer (nth args 5))]
    (let [row (nth (get plan "chunks") index)]
-    (if (chunk-ready? row) (println (str "NATIVE_CHUNK_REUSED " (get row "key"))) (emit-chunk! row))))
+    (if (ready-chunk row) (println (str "NATIVE_CHUNK_REUSED " (get row "key"))) (emit-chunk! row))))
  (= mode "emit-next")
   (let [plan (read-plan) start (erlang/monotonic_time :millisecond)]
    (loop [rows (get plan "chunks") index 0 built 0 reused 0]
     (cond
      (empty? rows) (println (str "NATIVE_CHUNKS_COMPLETE built=" built " reused=" reused))
-     (chunk-ready? (first rows)) (recur (rest rows) (inc index) built (inc reused))
+     (ready-chunk (first rows)) (recur (rest rows) (inc index) built (inc reused))
      (>= (- (erlang/monotonic_time :millisecond) start) 110000)
       (println (str "NATIVE_CHUNKS_YIELD next=" index " built=" built " reused=" reused))
      :else (do (emit-chunk! (first rows)) (recur (rest rows) (inc index) (inc built) reused)))))
- (= mode "assemble") (assemble! (read-plan))
+ (= mode "assemble") (assemble! (mapv checked-chunk (get (read-plan) "chunks")))
  ; Focused inspection: emit only the named definitions ("ns/name,...") and
  ; the seed links to OUT/inspect.scm. No plan, chunk or bundle is written.
  (= mode "inspect")
@@ -231,9 +229,9 @@
    (println (str "NATIVE_CHUNKS_INSPECT " (count wanted))))
  (= mode "build-next")
   (let [plan (ensure-plan!) progress (emit-window! plan)]
-   (if (:complete? progress)
+   (if-let [chunks (:chunks progress)]
     (do
-     (assemble! plan)
+     (assemble! chunks)
      (println (str "NATIVE_BUILD_COMPLETE built=" (:built progress) " reused=" (:reused progress))))
     (println (str "NATIVE_BUILD_YIELD next=" (:next progress) " built=" (:built progress) " reused=" (:reused progress)))))
  (= mode "dead-leaves") (report-dead-leaves!)
