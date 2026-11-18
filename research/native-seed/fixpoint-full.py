@@ -426,16 +426,38 @@ def main() -> None:
             oracle = json.loads(args.actor_oracle.read_text())
             if (oracle.get("schema") != "bl.native.original-actor-oracle" or oracle.get("version") != 1
                     or oracle.get("status") != "complete" or oracle.get("sdk-pin") != pin
-                    or oracle.get("target") != "javascript" or oracle.get("native-execution") is not False
                     or oracle.get("clock-model") != CLOCK_MODEL
                     or oracle["application"] != {"path": "research/js-actors/test.bl", "sha256": ORIGINAL}
                     or set(oracle["budgets"]) != set(BUDGETS)):
                 raise RuntimeError("actor oracle is not the complete freshly rebuilt original-source baseline")
+            if oracle.get("target") == "javascript" and oracle.get("native-execution") is False:
+                js_receipt = oracle["js-qualification"]
+                bind(path_for(js_receipt["path"]), js_receipt["sha256"])
+            else:
+                # The paired runner already executed and validated the fresh
+                # production JS graph. Its final receipt binds the oracle and
+                # the exact JS logs from each budget.
+                paired_path = args.actor_oracle.with_name("qualification.json")
+                bind(paired_path)
+                paired = json.loads(paired_path.read_text())
+                artifacts = paired.get("logs", {})
+                if (paired.get("schema") != "bl.native.original-actor-qualification"
+                        or paired.get("version") != 1 or paired.get("status") != "pass"
+                        or paired.get("original_actor_corpus_qualified") is not True
+                        or paired.get("sdk") != pin or paired.get("inputs") != oracle["inputs"]
+                        or artifacts.get(str(args.actor_oracle), {}).get("sha256") != digest(args.actor_oracle)):
+                    raise RuntimeError("actor oracle lacks its exact paired qualification receipt")
+                for budget in BUDGETS:
+                    log = oracle["budgets"][budget]["js_log"]
+                    rows = paired.get("results", {}).get(budget, {}).get("javascript", {})
+                    if (artifacts.get(str(path_for(log["path"]).resolve()), {}).get("sha256") != log["sha256"]
+                            or any(rows.get(k) != oracle["budgets"][budget][k] for k in ("labels", "traces"))):
+                        raise RuntimeError("paired qualification did not bind the exact JavaScript witness at " + budget)
             if path_for(oracle["body"]["path"]).resolve() != args.actor_body.resolve():
                 raise RuntimeError("actor body path differs from oracle")
             if any(oracle[name] != captured[name] for name in ("application", "runtime", "body")):
                 raise RuntimeError("fresh native capture differs from portable JS oracle Source/body identities")
-            for record in (oracle["application"], oracle["runtime"], oracle["body"], oracle["js-qualification"]):
+            for record in (oracle["application"], oracle["runtime"], oracle["body"]):
                 bind(path_for(record["path"]), record["sha256"])
             for name, sha in oracle["inputs"].items():
                 bind(path_for(name), sha)
