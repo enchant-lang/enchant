@@ -158,4 +158,41 @@ end ReverseIndex
 
 end OrderedEffects
 
+section SnapshotReads
+
+variable {Key Value : Type}
+
+def agreesWithReads (state : Key → Value) (reads : List (Key × Value)) : Prop :=
+  ∀ key value, (key, value) ∈ reads → state key = value
+
+theorem conflictingReadsRejectSnapshot (reads : List (Key × Value)) (state : Key → Value)
+    (key : Key) (first second : Value)
+    (firstRead : (key, first) ∈ reads) (secondRead : (key, second) ∈ reads)
+    (different : first ≠ second) : ¬ agreesWithReads state reads := by
+  intro agrees
+  exact different ((agrees key first firstRead).symm.trans (agrees key second secondRead))
+
+theorem checkEachReadKeyOnce (reads : List (Key × Value)) (captured : Key → Option Value)
+    (state : Key → Value)
+    (exactCoverage : ∀ key value, (key, value) ∈ reads ↔ captured key = some value) :
+    agreesWithReads state reads ↔ ∀ key value, captured key = some value → state key = value := by
+  constructor
+  · intro agrees key value recorded
+    exact agrees key value ((exactCoverage key value).mpr recorded)
+  · intro agrees key value observed
+    exact agrees key value ((exactCoverage key value).mp observed)
+
+-- An observed negative Boolean remains an input. None means no observation.
+example (key : Key) (state : Key → Bool) (ready : state key = true) :
+    ¬ agreesWithReads state [(key, false)] := by
+  intro agrees
+  have missing := agrees key false (by simp)
+  rw [ready] at missing
+  contradiction
+
+#print axioms conflictingReadsRejectSnapshot
+#print axioms checkEachReadKeyOnce
+
+end SnapshotReads
+
 end NativeLinkReplay
