@@ -80,6 +80,47 @@ theorem replayOrdered (old new : Key → Option Value) (program : Staging Key Va
 
 #print axioms replayOrdered
 
+def inputKeys : List (Event Key Value) → List Key
+  | [] => []
+  | .read key _ :: tail => key :: inputKeys tail
+  | .write key _ :: tail => (inputKeys tail).filter (fun candidate => decide (candidate ≠ key))
+
+theorem validIffInputKeys (receipt : List (Event Key Value)) (old new : Key → Option Value)
+    (baseline : valid old receipt) : valid new receipt ↔ ∀ key ∈ inputKeys receipt, new key = old key := by
+  induction receipt generalizing old new with
+  | nil => simp [valid, inputKeys]
+  | cons event tail ih =>
+    cases event with
+    | read key outcome =>
+      simp only [valid] at baseline ⊢
+      rw [ih old new baseline.2]
+      constructor
+      · intro matches candidate member
+        simp only [inputKeys, List.mem_cons] at member
+        rcases member with same | later
+        · subst candidate
+          exact matches.1.trans baseline.1.symm
+        · exact matches.2 candidate later
+      · intro matches
+        exact ⟨(matches key (by simp [inputKeys])).trans baseline.1,
+               fun candidate member => matches candidate (by simp [inputKeys, member])⟩
+    | write key outcome =>
+      simp only [valid] at baseline ⊢
+      rw [ih (replace old key outcome) (replace new key outcome) baseline]
+      constructor
+      · intro matches candidate member
+        have selected := List.mem_filter.mp (by simpa only [inputKeys] using member)
+        have distinct : candidate ≠ key := of_decide_eq_true selected.2
+        simpa [replace, distinct] using matches candidate selected.1
+      · intro matches candidate member
+        by_cases same : candidate = key
+        · simp [replace, same]
+        · have selected : candidate ∈ inputKeys (.write key outcome :: tail) := by
+            simp [inputKeys, same, member]
+          simpa [replace, same] using matches candidate selected
+
+#print axioms validIffInputKeys
+
 end OrderedEffects
 
 end NativeLinkReplay
