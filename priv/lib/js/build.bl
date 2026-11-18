@@ -171,17 +171,9 @@
                  (into out (map (fn [s] (get by-name s)) syms))))))))
 
 
-(defn prepare-ns
-  "One namespace staging path for JavaScript lowering. Defines only macros and
-   their statically referenced helpers, never application initializers. Caller
-   owns Env isolation. :after-ns installs target links inside that isolation;
-   :after-staging masks compile-time helper links before runtime lowering;
-   :fallback-ns supports headerless actor fragments during migration."
-  ([path] (prepare-ns path {}))
-  ([path options]
-  (admission/check!)
-  (let [source (File/read! path) texts (read-forms+text path source)
-        forms (vec (map first texts))
+(defn- stage-forms
+  [path source texts options]
+  (let [forms (vec (map first texts))
         has-head? (and (= :list (rn-tag (first forms))) (sym? (first (rn-items (first forms))) "ns"))
         head (if has-head? (ns-head forms)
                  (if-let [fallback (:fallback-ns options)] {:ns fallback :requires []}
@@ -240,7 +232,19 @@
     {:ns ns :path path :requires (:requires head) :js-interop? (:js-interop env)
      :texts texts :source source
      :source-sha256 (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))
-     :env env :defs defs :cache-eligible? cache-eligible?})))
+     :env env :defs defs :cache-eligible? cache-eligible?}))
+
+(defn prepare-ns
+  "One namespace staging path for JavaScript lowering. Defines only macros and
+   their statically referenced helpers, never application initializers. Caller
+   owns Env isolation. :after-ns installs target links inside that isolation;
+   :after-staging masks compile-time helper links before runtime lowering;
+   :fallback-ns supports headerless actor fragments during migration."
+  ([path] (prepare-ns path {}))
+  ([path options]
+   (admission/check!)
+   (let [source (File/read! path)]
+     (stage-forms path source (read-forms+text path source) options))))
 
 (defn compile-prepared
   "Compile through one checked ANF path. Certified lexical source may reuse
@@ -555,16 +559,19 @@
 (defn- load-order
   "Namespaces reachable from `entry` (within `roots`), dependencies first."
   [roots entries stubs]
-  (loop [todo (vec entries) seen #{} order [] compiled {}]
+  (loop [todo (vec entries) seen #{} order [] compiled {} pending {}]
     (if (empty? todo)
       {:order order :compiled compiled}
       (let [ns (first todo)]
         (if (contains? seen ns)
-          (recur (rest todo) seen order compiled)
+          (recur (rest todo) seen order compiled pending)
           (let [path (if (contains? stubs ns) nil (ns-path roots ns))]
             (if (nil? path)
-              (recur (rest todo) (conj seen ns) order compiled)   ; not ours: core or BEAM-only
-              (let [head (ns-head (read-forms path))
+              (recur (rest todo) (conj seen ns) order compiled pending)   ; not ours: core or BEAM-only
+              (let [{:keys [source texts head] :as parsed}
+                      (or (get pending path)
+                          (let [source (File/read! path) texts (read-forms+text path source)]
+                            {:source source :texts texts :head (ns-head (mapv first texts))}))
                     deps (vec (filter (fn [d] (and (not (contains? seen d)) (not (contains? stubs d)) (some? (ns-path roots d))))
                                       ; core's seed boundary imports rt even
                                       ; though its source has no :require. This
@@ -574,9 +581,14 @@
                                       (concat (when (= ns "core") ["rt"])
                                               (map first (:requires head)))))]
                 (if (empty? (filter (fn [d] (not (contains? (set order) d))) deps))
-                  (let [c (compile-ns path)]
-                    (recur (rest todo) (conj seen ns) (conj order ns) (assoc compiled ns c)))
-                  (recur (concat deps todo) seen order compiled))))))))))
+                  (do
+                    (admission/check!)
+                    (when-not (= source (File/read! path))
+                      (throw (ex-info "js.build: Source changed after dependency discovery" {:path path})))
+                    (let [c (compile-prepared (stage-forms path source texts {}))]
+                      (recur (rest todo) (conj seen ns) (conj order ns)
+                             (assoc compiled ns c) (dissoc pending path))))
+                  (recur (concat deps todo) seen order compiled (assoc pending path parsed))))))))))
 
 (def ^:private toolchain
   "The compiler's own namespaces. A library that calls into them by module
