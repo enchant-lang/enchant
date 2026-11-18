@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild the one-body edit in a private overlay, then check selective relinking.
+# NATIVE_CAPTURE_LOCAL=1 captures the qualified donor in that same overlay
+# before making the edit. This keeps configured absolute loader roots exact.
 set -euo pipefail
 if [[ $# != 2 && $# != 6 && $# != 7 || $# == 7 && $7 != --arity ]]; then
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
@@ -29,6 +31,18 @@ for item in run sdk-pin.json partition-closure.py speed; do
 done
 cp -a --reflink=auto "$seed/src" "$overlay/$seed/src"
 cp --reflink=auto "$baseline/partition.json" "$baseline/link-rows.etf" "$overlay/$edited/"
+if [[ "${NATIVE_CAPTURE_LOCAL:-}" == 1 ]]; then
+  : "${qualification:?local capture requires the qualified donor evidence}"
+  : "${samples:?local capture requires the donor macro samples}"
+  receipt="$overlay/bound-donor.etf"
+  (
+    cd "$overlay"
+    "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
+      "$baseline/link-rows.etf" --capture-bound-registry "$receipt" "$samples" "$qualification"
+  )
+  receipt_sha=$(sha256sum "$receipt")
+  receipt_sha=${receipt_sha%% *}
+fi
 python3 - "$overlay/$seed/src/native/scheme.bl" "${7:-}" <<'PY'
 from pathlib import Path
 import sys
