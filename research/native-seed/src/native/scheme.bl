@@ -775,6 +775,42 @@
 
 (def ^:private loop-initial-table
  (erlang/list_to_tuple (Enum/map (lists/seq 0 63) (fn [i] (str "loop-initial-" i)))))
+(defn- retained-loop-facts [n self variables facts candidates]
+ (if (empty? candidates) candidates
+  ; The structural loop verdict allows back-edges only through these tail
+  ; positions. Every other node permits no call to this loop's self.
+  (case (:op n)
+   :let (retained-loop-facts (:body n) self variables
+          (BeamLisp.Optimize/bind facts (:name n) (:init n)) candidates)
+   :if (let [then-facts (BeamLisp.Optimize/refine facts (:test n))
+             kept (retained-loop-facts (:then n) self variables then-facts candidates)]
+         (retained-loop-facts (:else n) self variables facts kept))
+   :do (retained-loop-facts (last (:stmts n)) self variables facts candidates)
+   :apply (if (recur-node? n self)
+            (Enum/reduce (Enum/zip variables (items (:args n))) candidates
+             (fn [pair kept]
+              (let [name (erlang/element 1 pair) expected (:tag (maps/get name kept nil))]
+               (if (and expected (not= expected (BeamLisp.Optimize/tag
+                                 (BeamLisp.Optimize/expr (erlang/element 2 pair) facts))))
+                 (maps/remove name kept) kept))))
+            candidates)
+   candidates)))
+(defn- loop-facts [parts outer base]
+ (let [variables (:vars parts)
+       initial
+       (Enum/reduce (Enum/zip variables (:inits parts)) {}
+        (fn [pair facts]
+         (let [tag (BeamLisp.Optimize/tag (BeamLisp.Optimize/expr (erlang/element 2 pair) outer))]
+          (if (or (= :int tag) (= :bool tag))
+            (maps/put (erlang/element 1 pair) {:tag tag} facts) facts))))]
+  ; Evaluate edges using the candidate assumptions, then repeat after any
+  ; removal so a fact cannot rely on a parameter that lost its type. A bounded
+  ; pass can conservatively drop the remaining facts. No ranges are assumed.
+  (loop [candidates initial passes 4]
+   (if (or (empty? candidates) (= 0 passes)) base
+    (let [facts (maps/merge base candidates)
+          kept (retained-loop-facts (:body parts) (:self parts) variables facts candidates)]
+     (if (erlang/=:= candidates kept) facts (recur kept (dec passes))))))))
 (defn- emit-source-loop [n parts options]
  (let [_ (when (:emission-counts options)
            (swap! (:emission-counts options) update :direct-loops (fnil inc 0)))
@@ -788,9 +824,10 @@
                   (glue "(" (erlang/element 1 pair) " " (emit (erlang/element 1 (erlang/element 2 pair)) operand) ")")))
        parameters (Enum/map (Enum/zip variables names) (fn [pair]
                     (glue "(" (ident (erlang/element 1 pair)) " " (erlang/element 2 pair) ")")))
-       ; A loop's initial value does not establish an inductive type fact.
-       ; Remove parameter facts; explicit guards inside its body refine them.
+       outer (or (:facts options) {})
        options (forget-facts options (fn [] variables))
+       facts (loop-facts parts outer (or (:facts options) {}))
+       options (if (empty? facts) options (assoc options :facts facts))
        body (emit (:body parts) (assoc options :loop {:self (:self parts) :name loop-name}))]
   (glue "(let* (" (spaced bindings) ") (let " loop-name " (" (spaced parameters)
        ") (h-tick) " body "))")))
