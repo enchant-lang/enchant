@@ -136,6 +136,20 @@
    (act [:eval "EnchantInspector.dispose();EnchantInspector.dispose();document.dispatchEvent(new CustomEvent('live:patch',{detail:{root:document.body,ops:[]}}));true"])
    (sees "(()=>{const d=EnchantInspector.debug();return d.disposed&&!d.pollScheduled&&!d.inFlight&&!d.drawScheduled&&!document.getElementById('enchant-inspector')&&!document.getElementById('enchant-inspector-overlays')})()" "Disposal is complete and idempotent")])
 
+(defn save-steps []
+  [(act [:navigate url])
+   (wait-for "!!window.EnchantInspector")
+   (act [:save "\n]" "failed"])
+   (act [:navigate url])
+   (wait-for (str "!!" shadow ".querySelector('[data-action=tools][data-error]')"))
+   (dock "[data-action=tools]")
+   (wait-for (str shadow ".querySelector('[data-action=copy-source]')?.textContent==='browser-save.bl:2'"))
+   (sees (str shadow ".querySelector('.body').textContent.includes('Run failed')") "A real save opens the offending file and line")
+   (act [:save "(ns browser-save)" "done"])
+   (act [:navigate url])
+   (wait-for "!!window.EnchantInspector")
+   (sees (str "!" shadow ".querySelector('[data-action=tools][data-error]')") "Repair clears the dock indicator on refresh")])
+
 (File/mkdir_p! output)
 (let [scratch (str "/tmp/enchant-inspector-browser-" (erlang/unique_integer (list :positive)))
       p (page/open! {:width 1280 :height 900
@@ -147,12 +161,15 @@
           world (assoc base :step! (fn [pg event]
             (let [term (nth event 2)]
               (case (first term)
+                :save (do
+                        (File/write! (System/fetch_env! "INSPECTOR_SAVE_FILE") (nth term 1))
+                        (page/wait! pg (str "fetch('/__enchant/snapshot.json').then(r=>r.json()).then(s=>s.activity.recent.find(r=>r.location?.path==='browser-save.bl')?.state==='" (nth term 2) "')")))
                 :dock (click-shadow! pg (nth term 1))
                 :back (go-back! pg)
                 :phone (page/cdp! pg "Emulation.setDeviceMetricsOverride" {"width" 390 "height" 844 "deviceScaleFactor" 1 "mobile" false})
                 :desktop (page/cdp! pg "Emulation.setDeviceMetricsOverride" {"width" 1280 "height" 900 "deviceScaleFactor" 1 "mobile" false})
                 ((:step! base) pg event)))))
-          result (s/run-world (s/scenario "Real tool inspector" {:developer {}} (steps)) world)
+          result (s/run-world (s/scenario "Real tool inspector" {:developer {}} (if (System/get_env "INSPECTOR_SAVE_FILE") (concat (steps) (save-steps)) (steps))) world)
           receipt (assoc (select-keys result [:ok :verdicts :bases])
                     :namespaces ["scenario" "browser.page" "browser.film"]
                     :sdk (BeamLisp.Tiers/priv_root))]

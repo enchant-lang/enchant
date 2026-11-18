@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--sdk', type=Path, required=True)
 parser.add_argument('--url', default='http://127.0.0.1:4057')
 parser.add_argument('--out', type=Path, required=True)
+parser.add_argument('--save-project', type=Path, help='Owned disposable project for the save scenario')
 args = parser.parse_args()
 sdk = args.sdk.resolve(strict=True)
 if not re.fullmatch(r'/nix/store/[a-z0-9]{32}-[^/]+', str(sdk)):
@@ -47,6 +48,11 @@ command = ['systemd-run', '--user', '--quiet', '--collect', '--wait', '--pipe',
            '--setenv=INSPECTOR_EVIDENCE=' + str(output),
            str(sdk / 'bin/bl'), '--cold', '-p', str(root / 'optional/browser-port/bl'),
            'run', str(source)]
+if args.save_project:
+    project = args.save_project.resolve(strict=True)
+    if not project.name.startswith("enchant-save-") or (project / "browser-save.bl").exists():
+        parser.error("Expected a fresh save scenario fixture")
+    command.insert(command.index(str(sdk / 'bin/bl')), '--setenv=INSPECTOR_SAVE_FILE=' + str(project / 'browser-save.bl'))
 with (output / 'run.log').open('w') as log:
     result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=500)
 scenario_path = output / 'scenario.json'
@@ -54,7 +60,7 @@ scenario = json.loads(scenario_path.read_text()) if scenario_path.exists() else 
 unchanged = all(hashlib.sha256((root / name).read_bytes()).hexdigest() == digest for name, digest in hashes.items())
 verdicts = scenario.get('verdicts', [])
 passed = (result.returncode == 0 and scenario.get('ok') is True and unchanged
-          and len(verdicts) == 21 and all(v.get('verdict') == 'witnessed' for v in verdicts))
+          and len(verdicts) == (23 if args.save_project else 21) and all(v.get('verdict') == 'witnessed' for v in verdicts))
 receipt = {'status': 'passed' if passed else 'failed', 'exit': result.returncode,
            'sdk': str(sdk), 'sdk_descriptor_sha256': hashlib.sha256(metadata).hexdigest(),
            'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),

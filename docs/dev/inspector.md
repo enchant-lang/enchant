@@ -53,8 +53,11 @@ authority or overrides an explicitly different realm.
 
 Activity records instrument `lsp/analyzed`, `bl.check/analyze-source` and
 `codebase/index-source`. They stay in the caller's environment and VM scope.
-A CLI command using the same warm realm appears with a CLI label. A separate
-cold CLI VM is a separate runtime.
+In a project with an `env.bl`, the Nix SDK routes ordinary `serve`, `check`
+and `codebase` commands through the project runtime. Run the commands from
+two terminals in that project. Explicit transport flags and the project's
+`:warm` setting take precedence. A CLI command using the serving runtime
+appears with a CLI label.
 
 ```sh
 bl check --quick src/app.bl   # reader errors and repeated definitions
@@ -65,6 +68,13 @@ The quick commands read one regular `.bl` file of at most 64 KiB. They share the
 parsed summary by exact source and reader revision. The outline reports totals
 and shows up to 32 definitions and imports. Full `bl check FILE` provides
 compiler diagnostics and house rules.
+
+Development listeners watch the served entry file’s directory for saves.
+A quiet window folds repeated filesystem events into one check. Only regular
+`.bl` files within the quick tools’ size limit are read. Refresh the page
+after a save. An error marks the existing Tools button and selecting it opens
+the run at the reader’s reported line. A corrected save clears that file’s
+mark on refresh. The dock derives its marker from the latest retained runs.
 
 No observer starts an editor request, check, index, projection subscription or
 worker. A hidden/closed dock has no polling; an open Tools/Server panel allows
