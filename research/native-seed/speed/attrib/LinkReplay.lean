@@ -33,4 +33,53 @@ theorem replay (old new : Key → Option Value) (computation : Computation Key V
 
 #print axioms replay
 
+section OrderedEffects
+
+variable {Key Value Result : Type} [DecidableEq Key]
+
+inductive Event (Key Value : Type) where
+  | read (key : Key) (outcome : Option Value)
+  | write (key : Key) (value : Option Value)
+
+inductive Staging (Key Value Result : Type) where
+  | done (result : Result)
+  | consult (key : Key) (next : Option Value → Staging Key Value Result)
+  | publish (key : Key) (value : Option Value) (next : Staging Key Value Result)
+
+def replace (state : Key → Option Value) (key : Key) (value : Option Value) : Key → Option Value :=
+  fun candidate => if candidate = key then value else state candidate
+
+def execute (state : Key → Option Value) : Staging Key Value Result → Result × List (Event Key Value)
+  | .done result => (result, [])
+  | .consult key next =>
+    let outcome := state key
+    let (result, events) := execute state (next outcome)
+    (result, .read key outcome :: events)
+  | .publish key value next =>
+    let (result, events) := execute (replace state key value) next
+    (result, .write key value :: events)
+
+def valid (state : Key → Option Value) : List (Event Key Value) → Prop
+  | [] => True
+  | .read key outcome :: tail => state key = outcome ∧ valid state tail
+  | .write key value :: tail => valid (replace state key value) tail
+
+theorem replayOrdered (old new : Key → Option Value) (program : Staging Key Value Result)
+    (checks : valid new (execute old program).2) : execute new program = execute old program := by
+  induction program generalizing old new with
+  | done result => rfl
+  | consult key next ih =>
+    have readAndTail : new key = old key ∧ valid new (execute old (next (old key))).2 := by
+      simpa [execute, valid] using checks
+    have tail := ih (old key) old new readAndTail.2
+    simp [execute, readAndTail.1, tail]
+  | publish key value next ih =>
+    have tailChecks : valid (replace new key value) (execute (replace old key value) next).2 := by
+      simpa [execute, valid] using checks
+    simp [execute, ih (replace old key value) (replace new key value) tailChecks]
+
+#print axioms replayOrdered
+
+end OrderedEffects
+
 end NativeLinkReplay
