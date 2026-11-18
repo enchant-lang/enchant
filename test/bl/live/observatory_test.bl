@@ -15,7 +15,7 @@
 (deftest authorization-and-method-checks-precede-owner-observation
   ;; An invalid scope crashes if snapshot is ever entered.
   (let [handler (view/handler {:scope nil} (fn [me] (= :developer me)))]
-    (doseq [path [view/path (str view/path "/snapshot.json")]]
+    (doseq [path [view/path (str view/path "/snapshot.json") (str view/receipt-path "0/1")]]
       (is (= 404 (:status (handler (conn "GET" path :visitor) path))))
       (is (= 405 (:status (handler (conn "POST" path :developer) path)))))
     (is (nil? (handler (conn "GET" "/other" :developer) "/other"))))
@@ -149,6 +149,44 @@
       (projection/retry! totals)
       (is (= :wake (receive [:data.projection/changed p t]
                      :when (and (= p owner) (= t token)) :wake (after 5000 :missing))))
+      (finally (projection/stop! totals)))))
+
+(deftest retained-answer-links-to-reader-authorized-bounded-decisions
+  (let [totals (projection/start-incremental! :observatory/receipts {:source-id "receipt/v1"})
+        reader (projection/reader totals)
+        observatory (view/open {:projections {:totals reader}})
+        handler (view/handler observatory #(= :developer %))
+        request (fn [url me] (handler (conn "GET" url me) url))]
+    (try
+      (projection/subscribe! totals)
+      (let [sample (view/snapshot observatory)
+            row (first (:projections sample))
+            url (:receipt-url row)
+            id (:receipt-id (projection/status reader))
+            response (request url :developer)
+            body (json/decode (:resp_body response))
+            published (get body "receipt")
+            start (request (get body "start-url") :developer)]
+        (is (= 200 (:status response) (:status start)))
+        (is (= 404 (:status (request url :visitor))))
+        (is (String/contains? (view/page sample) url))
+        (is (= "published" (get published "event")))
+        (is (= id (get published "id")))
+        (is (number? (get published "elapsed-ms")))
+        (is (= "started" (get-in (json/decode (:resp_body start)) ["receipt" "event"])))
+        (is (not (contains? published "revision")))
+        (is (not (contains? published "value")))
+        (is (= :refused (:status (projection/receipt (assoc reader :read :invalid) id))))
+        (is (= :missing (:status (projection/receipt reader (+ id 10000)))))
+        (let [before (projection/status reader)]
+          (doseq [_ (range 4)] (request url :developer))
+          (is (= before (projection/status reader))))
+        (doseq [_ (range projection/receipt-capacity)]
+          (projection/evict! totals)
+          (projection/retry! totals))
+        (is (= :expired (:status (projection/receipt reader id))))
+        (is (= 410 (:status (request url :developer))))
+        (is (= 404 (:status (request url :visitor)))))
       (finally (projection/stop! totals)))))
 
 (deftest rendering-escapes-labels-and-keeps-unknown-data-honest

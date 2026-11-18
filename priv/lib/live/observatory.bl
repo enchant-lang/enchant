@@ -5,6 +5,7 @@
             [runtime.activity :as activity] [data.projection :as projection] [live.hiccup :as h] [web]))
 
 (def path "/__enchant")
+(def receipt-path (str path "/receipts/"))
 (def schema "enchant.observatory.v1")
 (def max-owners 16)
 (def max-rows 32)
@@ -52,7 +53,12 @@
        :truncated (> (count rows) max-rows) :jobs (mapv job-view (take max-rows rows))})
     (catch _ {:name (label name) :available false :jobs []})))
 
-(defn- projection-view [[name reader]]
+(defn- receipt-url [index id] (str receipt-path index "/" id))
+
+(defn- ordered-projections [observatory]
+  (vec (sort-by (fn [[name _]] (str name)) (:projections observatory))))
+
+(defn- projection-view [index [name reader]]
   (try
     (let [result (projection/status reader)]
       {:name (label name) :status (state-label (:status result))
@@ -60,6 +66,7 @@
        :counts (select-keys (:counts result) [:started :coalesced :discarded :blocked])
        :wanted-basis (:wanted-basis result) :published-basis (:published-basis result)
        :work (:work result) :inputs (:inputs result)
+       :receipt-url (when-let [id (:receipt-id result)] (receipt-url index id))
        :retained-charge (:retained-charge result) :retention-limit (:retention-limit result)
        :demand (:demand result)})
     (catch _ {:name (label name) :status "unavailable"})))
@@ -86,7 +93,7 @@
    :runtime (runtime/query (:scope observatory) max-rows)
    :activity (with-links (activity/snapshot (:activity observatory)) (:source-link observatory) principal)
    :work (mapv work-view (sort-by (fn [[name _]] (str name)) (:work observatory)))
-   :projections (mapv projection-view (sort-by (fn [[name _]] (str name)) (:projections observatory)))
+   :projections (vec (map-indexed projection-view (ordered-projections observatory)))
    :limits {:owners max-owners :rows-per-owner max-rows}
    :coverage {:tooling-cache (if (:activity observatory) "recorded decisions" "not enabled")
               :admission (if (:activity observatory) "recorded waits" "not enabled")
@@ -192,6 +199,7 @@
               (mapv (fn [row] [:div {:class "owner"}
                 [:div {:class "owner-head"} [:b (:name row)] [:span {:class "status"} (:status row)]]
                 (when (:reason row) [:p {:class "sub"} (:reason row)])
+                (when-let [url (:receipt-url row)] [:p {:class "sub"} [:a {:href url} "Latest decision"]])
                 [:div {:class "counts"}
                  (mapv (fn [key] [:span (str (name key) " " (get (:counts row) key "—"))]) [:started :coalesced :discarded :blocked])]
                 (when (number? (:wanted-basis row))
@@ -225,20 +233,48 @@
           [:footer [:span "READ ONLY / manual sampling / no polling or background observer"]
            [:span (str schema " · sampled " (:sampled-at sample))]]]]]))))
 
+(defn- receipt-number [text]
+  (let [parsed (Integer/parse text)]
+    (when (and (erlang/is_tuple parsed) (= "" (elem parsed 1)))
+      (let [n (elem parsed 0)] (when (<= 0 n 9223372036854775807) n)))))
+
+(defn- receipt-route [requested-path]
+  (when (and (string? requested-path) (<= (erlang/byte_size requested-path) 96)
+             (String/starts_with? requested-path receipt-path))
+    (let [parts (vec (String/split (subs requested-path (count receipt-path)) "/"))]
+      (when (= 2 (count parts))
+        (let [index (receipt-number (first parts)) id (receipt-number (second parts))]
+          (when (and (some? index) (some? id) (pos? id)) [index id]))))))
+
+(defn- serve-receipt [observatory conn [index id]]
+  (let [reader (second (nth (ordered-projections observatory) index nil))
+        result (when reader (try (projection/receipt reader id) (catch _ nil)))]
+    (case (:status result)
+      :available
+        (let [row (:receipt result)]
+          (web/json conn
+           (cond-> result
+             (:previous-id row) (assoc :previous-url (receipt-url index (:previous-id row)))
+             (:start-id row) (assoc :start-url (receipt-url index (:start-id row))))))
+      :expired (web/json conn 410 {:status :expired})
+      (web/text conn 404 "not found"))))
+
 (defn handler
   "An app :http handler. Host supplies authorization over its resolved principal.
    Every HTML/JSON request is checked before any owners are sampled."
   [observatory authorize]
   (fn [conn requested-path]
-    (when (or (= requested-path path) (= requested-path (str path "/snapshot.json")))
+    (let [receipt (receipt-route requested-path)]
+    (when (or receipt (= requested-path path) (= requested-path (str path "/snapshot.json")))
       (let [conn (-> conn (web/resp-header "cache-control" "no-store")
                      (web/resp-header "x-content-type-options" "nosniff")
                      (web/resp-header "content-security-policy" "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"))]
         (cond
           (not= true (authorize (web/private conn :me))) (web/text conn 404 "not found")
           (not= "get" (web/method conn)) (web/text conn 405 "GET required")
+          receipt (serve-receipt observatory conn receipt)
           :else (let [sample (snapshot observatory (web/private conn :me))]
-            (if (= requested-path path) (web/html conn (page sample)) (web/json conn sample))))))))
+            (if (= requested-path path) (web/html conn (page sample)) (web/json conn sample)))))))))
 
 (defn attach
   "Opt in at app construction: (attach app {:enabled? dev? :authorize developer?}).

@@ -27,6 +27,59 @@
 (defn- authorized? [state token role] (= token (get state role)))
 (defn- refused [reason] {:status :refused :reason reason})
 
+(def receipt-capacity 24)
+(def ^:private receipt-reservation 16384)
+
+(defn- record-receipt [state event basis ticket details]
+  (let [id (inc (:receipt-id state))
+        row (merge {:id id :event event :ticket ticket
+                    :basis (when (and (int? basis) (<= 0 basis 9223372036854775807)) basis)
+                    :previous-id (when (> id 1) (dec id))}
+                   details)]
+    (-> state (assoc :receipt-id id)
+        (assoc-in [:receipts (rem id receipt-capacity)] row))))
+
+(defn- receipt-reason [reason]
+  (if (contains? #{:oversized :expired :expiry-pending :evicted :cancelled :failed
+                   :superseded-derivation :work-steps :work-bytes :work-deadline
+                   :capacity :timeout :blocked} reason)
+    reason :refused))
+
+(defn- record-transition [state before after event effects]
+  (let [wanted (:wanted after) running (:running before)
+        basis (:basis wanted) ticket (:ticket running)
+        run (first (filter #(= :run (:effect %)) effects))
+        changed
+        (case (:op event)
+          :source (if (= (:wanted before) wanted) state
+                    (record-receipt state
+                      (if (> (get-in after [:counts :coalesced]) (get-in before [:counts :coalesced]))
+                        :coalesced :source-changed)
+                      basis ticket {}))
+          :finish (if-not (and running (= ticket (:ticket event)) (not= running (:running after))) state
+                    (let [phase (cond
+                                  (> (get-in after [:counts :discarded]) (get-in before [:counts :discarded])) :discarded
+                                  (= :ready (:status after)) :published
+                                  :else :refused)
+                          start (:receipt-start state)]
+                      (-> (record-receipt state phase (:basis running) ticket
+                            {:start-id (:id start)
+                             :elapsed-ms (when start (max 0 (- (erlang/monotonic_time :millisecond) (:at start))))
+                             :reason (case phase
+                                       :refused (receipt-reason (:reason after))
+                                       :discarded :superseded
+                                       nil)})
+                          (assoc :receipt-start nil))))
+          :timeout (if (seq effects) (record-receipt state :timeout (:basis running) ticket {}) state)
+          :evict (if (seq effects) (record-receipt state :evicted (get-in before [:result :basis])
+                                                  (get-in before [:result :ticket]) {}) state)
+          :retry (if (= :blocked (:status before)) (record-receipt state :retry basis nil {}) state)
+          state)]
+    (if run
+      (let [started (record-receipt changed :started (:basis run) (:ticket run) {})]
+        (assoc started :receipt-start {:id (:receipt-id started) :at (erlang/monotonic_time :millisecond)}))
+      changed)))
+
 (defn- produce [parent tag ticket query source revision options context]
   ;; Only this fixed SDK adapter can execute. Supplied query data cannot call
   ;; Process/flag or substitute a function, custom store or computed provider.
@@ -75,8 +128,9 @@
           (update s :notified conj pid)))) state (keys (:subscribers state))))
 
 (defn- transition! [state event]
-  (let [[after effects] (policy/step (:policy state) event)
-        next (effects! (assoc state :policy after) effects)]
+  (let [before (:policy state)
+        [after effects] (policy/step before event)
+        next (effects! (record-transition (assoc state :policy after) before after event effects) effects)]
     (if (= (policy/observe (:policy state)) (policy/observe (:policy next))) next
       (notify! next))))
 
@@ -179,7 +233,7 @@
         query-charge (if (:query opts) (cache/footprint (:query opts)) 0)
         _ (when (nil? query-charge)
             (throw (ex-info "Projection declaration has no finite charge" {:kind :projection-capacity})))
-        charge (+ 4096 262144 (* 2 query-charge) (* 4 (:max-output-bytes options))
+        charge (+ 4096 262144 receipt-reservation (* 2 query-charge) (* 4 (:max-output-bytes options))
                                          (get-in opts [:aggregate :options :max-bytes] 0))
         reservation (erlang/make_ref) tag (erlang/make_ref)]
     (when-not (and (pool/register! (erlang/self)) (pool/reserve! (erlang/self) reservation charge))
@@ -194,6 +248,7 @@
                  :reservation reservation :completion tag :workers workers
                  :subscribers {} :notified #{} :retained nil :candidate nil :job nil :timer nil :terminal nil
                  :expiry-timer nil :expiry-ticket nil
+                 :receipt-id 0 :receipt-start nil :receipts {}
                  :policy (policy/initial (+ 256 (* 2 (:max-output-bytes options)))) :dirty? false}]
       (if (or (:aggregate state) (:derivation state)) (refresh-source! state)
         (do (datom/listen! (:source state) {:attrs (set (:attributes evidence)) :payload :basis})
@@ -233,8 +288,16 @@
                                            :charge (:bytes aggregate)
                                            :limit (get-in aggregate [:options :max-bytes])})
                  :work (select-keys (get-in state [:retained :work]) [:steps :bytes :changed :expired])
-                 :demand (get-in state [:policy :demand]) :limits (:options state)) state))
+                 :demand (get-in state [:policy :demand]) :limits (:options state)
+                 :receipt-id (when (pos? (:receipt-id state)) (:receipt-id state))) state))
       (reply (refused :projection-reader) state)))
+  (handle-call [:receipt token id] [_from state]
+    (reply (cond
+             (not (authorized? state token :read-token)) (refused :projection-reader)
+             (not (and (int? id) (<= 1 id (:receipt-id state)))) {:status :missing}
+             :else (let [row (get-in state [:receipts (rem id receipt-capacity)])]
+                     (if (= id (:id row)) {:status :available :receipt row} {:status :expired})))
+           state))
   (handle-call [:subscribe token] [from state]
     (if (authorized? state token :read-token)
       (let [after (subscribe-state! state (elem from 0))] (reply (response after) after))
@@ -369,6 +432,9 @@
   "Read metadata with a reader grant. Never decodes retained values, changes
    demand, acknowledges wakes, retries or refreshes the source."
   [handle] (call (:owner handle) [:status (:read handle)]))
+(defn receipt
+  "Read one bounded decision from this projection owner with the existing reader grant."
+  [handle id] (call (:owner handle) [:receipt (:read handle) id]))
 (defn subscribe! [handle] (read-value handle [:subscribe (:read handle)]))
 (defn unsubscribe! [handle] (read-value handle [:unsubscribe (:read handle)]))
 (defn refresh! [handle] (read-value handle [:control (:control handle) :refresh]))
