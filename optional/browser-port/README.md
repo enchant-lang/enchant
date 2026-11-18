@@ -247,3 +247,13 @@ through real input, and a changed/covered target is refused before mouse press.
 Rejected DevTools calls name their method in the error and its `:method` data.
 Parameters are excluded: a transport failure must be locatable without exposing
 page data or credentials. Errors remain failures and are never retried.
+
+
+`browser.page/navigate-document!` is an opt-in document-navigation barrier for
+journeys that need an observable destination rather than a `Page.navigate`
+protocol reply. It schedules one real `location.assign`, then observes the exact
+requested HTTP(S) URL and a newly parsed document, including same-URL reloads.
+It shares one timeout budget and never resubmits an uncertain navigation.
+Redirects to another URL fail. The returned document may be `interactive`:
+complete resources and application readiness require separate assertions.
+`navigate!` retains its existing raw CDP behavior.

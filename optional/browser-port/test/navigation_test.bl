@@ -41,3 +41,35 @@
                     (catch e (ex-message e)))))
         (is (= 1 @calls)))
       (finally (page/close! p) (Supervisor/stop server :normal 30000) (File/rm_rf! root)))))
+
+
+(deftest observed-document-navigation-proves-a-same-url-reload-and-never-retries-a-redirect
+ (let [root (str "/tmp/bl-document-navigation-test-" (erlang/unique_integer (list :positive)))
+       documents (atom 0) redirects (atom 0) port (free-port) origin (str "http://127.0.0.1:" port)
+       target (str origin "/document")
+       server (elem (web/serve {:port port :ip (tuple 127 0 0 1) :log :off
+                 :plug (fn [c]
+                  (case (web/path c)
+                   "/document" (web/html c 200 (str "<p id='version'>" (swap! documents inc) "</p>"))
+                   "/redirect" (do (swap! redirects inc) (web/redirect c "/document"))
+                   (web/html c 200 "<p>Fixture</p>")))}) 1)
+       p (page/open! {:width 640 :height 480 :launch
+            {"profile" (str root "/profile") "runtime" (str root "/runtime")
+             "chromium" (System/get_env "CHROMIUM") "compositor" (System/get_env "SWAY")
+             "vnc" (System/get_env "WAYVNC") "width" 640 "height" 580}})]
+  (try
+   (let [first (page/navigate-document! p target)]
+    (is (= target (get first "url") (page/current-url p))))
+   (is (= "1" (page/evaluate! p "document.querySelector('#version').textContent")))
+   (page/evaluate! p "window.oldDocumentSentinel=true;true")
+   (let [second (page/navigate-document! p target)]
+    (is (= false (get second "retried")))
+    (is (= "renderer-location-assign" (get second "method"))))
+   (is (= "2" (page/evaluate! p "document.querySelector('#version').textContent")))
+   (is (= true (page/evaluate! p "window.oldDocumentSentinel===undefined")))
+   (is (= 2 @documents))
+   (is (some? (try (page/navigate-document! p (str origin "/redirect") 1000) nil (catch e (ex-message e)))))
+   (is (= 1 @redirects))
+   (page/wait! p "!!document.querySelector('#version')")
+   (is (= 3 @documents))
+   (finally (page/close! p) (Supervisor/stop server :normal 30000) (File/rm_rf! root)))))
