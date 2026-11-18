@@ -5,6 +5,10 @@
  (native-text-check "backref replacement" (string=? "42/abc!" (native-regex-replace r "abc42!" "\\2/\\1"))))
 (native-text-check "combining grapheme" (= 1 (length (native-string-graphemes "é"))))
 (native-text-check "emoji joiner grapheme" (= 1 (length (native-string-graphemes "👩‍💻"))))
+(let ((size (native-leaf "Elixir.String/length/1")))
+ (native-text-check "grapheme count and segmentation agree"
+  (and (= 0 (size "")) (= 3 (size "abc"))
+       (= 4 (size "é\r\n👩‍💻x") (length (native-string-graphemes "é\r\n👩‍💻x"))))))
 (native-text-check "grapheme reverse" (string=? "xé" (native-join "" (reverse (native-string-graphemes "éx")))))
 (native-text-check "grapheme slice" (string=? "👩‍💻" (native-string-slice "a👩‍💻b" 1 1)))
 (native-text-check "regex split" (equal? (native-string-split "a  b c" (native-regex-compile " +") '()) '("a" "b" "c")))

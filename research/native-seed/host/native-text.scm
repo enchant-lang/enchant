@@ -32,7 +32,7 @@ static int bl_text_init(void) {
  #undef BL_PC_LOAD
  bl_text_library = library; return 1;
 }
-static void *bl_text_scan(char *pattern, unsigned long long plen, char *text, unsigned long long length, int global) {
+static void *bl_text_scan(char *pattern, unsigned long long plen, char *text, unsigned long long length, int global, int capture) {
  bl_text_result *r = calloc(1,sizeof(*r)); if (!r) return NULL;
  if (!bl_text_init()) { r->status = -10000; return r; }
  int error = 0; size_t error_offset = 0;
@@ -52,14 +52,15 @@ static void *bl_text_scan(char *pattern, unsigned long long plen, char *text, un
   }
   if (rc < 0) { r->status = rc; break; }
   if (r->rows >= 1048576) { r->status = -10001; break; }
-  if (r->rows == r->capacity) {
+  if (capture && r->rows == r->capacity) {
    size_t cap = r->capacity ? r->capacity*2 : 16;
    if (r->width > SIZE_MAX/(cap*2*sizeof(size_t))) { r->status=-10002; break; }
    size_t *next = realloc(r->offsets,cap*r->width*2*sizeof(size_t));
    if (!next) { r->status=-10002; break; } r->offsets=next; r->capacity=cap;
   }
   size_t *v = bl_pc_vector(data);
-  memcpy(r->offsets+r->rows*r->width*2,v,r->width*2*sizeof(size_t)); r->rows++;
+  if (capture) memcpy(r->offsets+r->rows*r->width*2,v,r->width*2*sizeof(size_t));
+  r->rows++;
   if (!global) break;
   offset = v[1]; empty = v[0] == v[1];
   if (offset > length) { r->status=-10003; break; }
@@ -71,14 +72,14 @@ static unsigned long long bl_text_rows(void *p) { return ((bl_text_result*)p)->r
 static unsigned long long bl_text_width(void *p) { return ((bl_text_result*)p)->width; }
 static long long bl_text_offset(void *p, unsigned long long row, unsigned long long group, int end) {
  bl_text_result *r=p;
- if (row>=r->rows || group>=r->width) return -1;
+ if (!r->offsets || row>=r->rows || group>=r->width) return -1;
  size_t offset=r->offsets[(row*r->width+group)*2+(end ? 1 : 0)];
  return offset == SIZE_MAX ? -1 : (long long)offset;
 }
 static void bl_text_release(void *p) { bl_text_result *r=p; free(r->offsets); free(r); }
 c-end
 )
-(define native-text-scan (c-lambda (UTF-8-string unsigned-long-long UTF-8-string unsigned-long-long int) (pointer void) "bl_text_scan"))
+(define native-text-scan (c-lambda (UTF-8-string unsigned-long-long UTF-8-string unsigned-long-long int int) (pointer void) "bl_text_scan"))
 (define native-text-status (c-lambda ((pointer void)) int "bl_text_status"))
 (define native-text-rows (c-lambda ((pointer void)) unsigned-long-long "bl_text_rows"))
 (define native-text-width (c-lambda ((pointer void)) unsigned-long-long "bl_text_width"))
@@ -86,8 +87,9 @@ c-end
 (define native-text-release (c-lambda ((pointer void)) void "bl_text_release"))
 (define native-regex-marker (list 'native-regex-marker))
 (define (native-regex? x) (and (vector? x) (= (vector-length x) 2) (eq? (vector-ref x 0) native-regex-marker)))
-(define (native-with-matches pattern text global? body)
- (let ((result (native-text-scan pattern (native-utf8-size pattern) text (native-utf8-size text) (if global? 1 0))))
+(define (native-with-matches pattern text global? body #!optional (capture? #t))
+ (let ((result (native-text-scan pattern (native-utf8-size pattern) text (native-utf8-size text)
+                 (if global? 1 0) (if capture? 1 0))))
   (if (not result) (h-raise "native PCRE2 allocation failed"))
   (dynamic-wind (lambda () #f)
    (lambda () (if (not (= (native-text-status result) 0))
@@ -142,6 +144,8 @@ c-end
    (let loop ((row (- (native-text-rows result) 1)) (out '()))
     (if (< row 0) out (loop (- row 1)
      (cons (native-byte-slice bytes (native-text-offset result row 0 0) (native-text-offset result row 0 1)) out)))))))))
+(set! native-grapheme-count (lambda (text)
+ (native-with-matches "\\X" text #t native-text-rows #f)))
 (native-add-leaf! "Elixir.Regex/compile!/1" native-regex-compile)
 (native-add-leaf! "Elixir.Regex/regex?/1" native-regex?)
 (native-add-leaf! "Elixir.Regex/run/2" native-regex-run)
