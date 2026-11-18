@@ -156,15 +156,25 @@
    (assoc effects category (update events key (fn [count] (inc (or count 0)))))
    (assoc effects :boundary-event-limit true))))
 
-(defn- other-table-event [effects operation table]
- (let [name (if (erlang/is_atom table) table :anonymous-table)
+(defn- other-table-event [effects operation arguments]
+ (let [table (first arguments)
+       name (if (erlang/is_atom table) table :anonymous-table)
        observed (boundary-event effects :other-tables [operation name])]
   (if (:ownership? effects)
    (let [[owner] (peek (:pending-env-reads effects))]
-    (boundary-event observed :table-read-owners
-     [operation name (cond owner (elem owner 1)
-                      (contains? effects :pending-code-read) :is_loaded
-                      :else :outside-observed-api)]))
+    (cond-> (boundary-event observed :table-read-owners
+             [operation name (cond owner (elem owner 1)
+                              (contains? effects :pending-code-read) :is_loaded
+                              :else :outside-observed-api)])
+     (and (= :lookup operation) (= :beam_lisp_source_extent_heads name))
+     (boundary-event :extent-read-kinds
+      (let [key (second arguments)]
+       (cond
+        (erlang/is_atom key) key
+        (erlang/is_pid key) :process
+        (and (erlang/is_tuple key) (pos? (erlang/tuple_size key)) (erlang/is_atom (elem key 0)))
+        [(elem key 0) (erlang/tuple_size key)]
+        :else :unknown)))))
    observed)))
 
 (defn- process-event [effects kind message target]
@@ -610,7 +620,7 @@
   (if (= :beam_lisp_vars (first arguments))
    (recur calls (second arguments) hits misses reads sources
     (if (:registry? effects) (registry-call effects [:lookup 2]) effects))
-   (recur calls pending hits misses reads sources (other-table-event effects :lookup (first arguments))))
+   (recur calls pending hits misses reads sources (other-table-event effects :lookup arguments)))
   [:trace _ :return_from [:ets :lookup 2] value]
   (let [effects (if (:registry-inputs? effects) (record-registry-input effects :lookup pending value) effects)]
   (if-not (link-key? pending) (recur calls nil hits misses reads sources effects)
@@ -676,7 +686,7 @@
     (recur calls pending hits misses reads sources (assoc effects :pending-code-read key))
     (and (:boundary? effects) (or (contains? table-lifecycle-operations entry)
                                 (and (contains? registry-operations entry) (not= :beam_lisp_vars key))))
-    (recur calls pending hits misses reads sources (other-table-event effects function key))
+    (recur calls pending hits misses reads sources (other-table-event effects function arguments))
     (= entry macro-entry)
     (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)
           next-effects (record-macro effects (:ns env) head key)
@@ -1128,7 +1138,7 @@
 
 (defn- compile-phase-member [closure rows ns macros calls]
  (let [member (get-in closure [:units ns])
-       before @calls
+       before (atomics/get calls 1)
        started (erlang/monotonic_time :microsecond)
        macros (if (= ns "core") [] macros)
        phase-callables (into {} (map (fn [[name entry]] [entry name]) macros))
@@ -1144,7 +1154,7 @@
        interpreted (reduce + 0 (keep (fn [[[_ _ route] n]] (when (vector? route) n))
                                      (get-in observation [:effects :macro-routes])))
        elapsed (- (erlang/monotonic_time :microsecond) started)]
-  (assert (= interpreted (- @calls before)))
+  (assert (= interpreted (- (atomics/get calls 1) before)))
   {:namespace ns :compile-us elapsed :interpreted-expansions interpreted
    :macro-lookup (macro-lookup-summary observation)
    :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))}))
@@ -1159,7 +1169,7 @@
                      (when (contains? #{"matched" "matched-after-canonicalization"} (get sample "status"))
                       (get sample "head"))) (get samples "samples")))))
        _ (assert (<= 1 (count names) 16))
-       sessions (volatile! []) calls (volatile! 0)
+       sessions (volatile! []) calls (atomics/new 1 (list))
        started (erlang/monotonic_time :microsecond)]
   (try
    (let [entries (mapv (fn [name]
@@ -1167,11 +1177,11 @@
                           (vswap! sessions conj [name session])
                           (let [invoke! (phase-invoker session (bind-core-macro! session name))]
                            [name (fn [& args]
-                                   (vswap! calls inc)
+                                   (atomics/add calls 1 1)
                                    (invoke! args))]))) names)
          prepared (erlang/monotonic_time :microsecond)
          result (action entries calls)]
-    (assoc result :preparation-us (- prepared started) :interpreted-expansions @calls
+    (assoc result :preparation-us (- prepared started) :interpreted-expansions (atomics/get calls 1)
      :sample-report-sha256 (artifact/sha bytes)
      :session-work (into {} (map (fn [[name session]]
                                   [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))))
@@ -1180,12 +1190,12 @@
 
 (defn- compile-with-phase-macros [closure baseline samples-path]
  (let [control (macro-miss-control closure baseline)
-       ordinary (mapv #(compile-phase-member closure (:rows baseline) % [] (volatile! 0)) (:order closure))]
+       ordinary (mapv #(compile-phase-member closure (:rows baseline) % [] (atomics/new 1 (list))) (:order closure))]
   (assert (every? :same-definitions ordinary))
   (with-phase-entries baseline samples-path
    (fn [entries calls]
     (let [interpreted (mapv #(compile-phase-member closure (:rows baseline) % entries calls) (:order closure))]
-     (assert (pos? @calls))
+     (assert (pos? (atomics/get calls 1)))
      {:schema "bl.native.interpreted-phase-compile" :version 2 :reuse-authority false
       :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
       :link-rows-sha256 (:sha256 baseline) :macro-miss-control control
@@ -1524,6 +1534,7 @@
                       :env-read-owners (vec (sort (:env-read-owners effects)))
                       :file-read-owners (vec (sort (:file-read-owners effects)))
                       :table-read-owners (vec (sort (:table-read-owners effects)))
+                      :extent-read-kinds (vec (sort (:extent-read-kinds effects)))
                       :code-server-owners (vec (sort (:code-server-owners effects)))
                       :rejected-env-reads (vec (sort (:rejected-env-reads effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
