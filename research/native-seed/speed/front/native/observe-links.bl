@@ -1970,12 +1970,14 @@
  ([closure candidate member entry entries change-env!]
   (replay-registry-member closure candidate member entry entries change-env! nil))
  ([closure candidate member entry entries change-env! retained-unit]
-  (replay-registry-member closure candidate member entry entries change-env! retained-unit true))
- ([closure candidate member entry entries change-env! retained-unit compare-clean?]
- (with-registry-stage closure (:rows candidate) member entries
+  (replay-registry-member closure candidate member entry entries change-env! retained-unit true nil))
+ ([closure candidate member entry entries change-env! retained-unit compare-clean? mark]
+ (let [ns (:ns member) start (when mark (mark))]
+  (with-registry-stage closure (:rows candidate) member entries
   (fn [prepared callables]
-   (when change-env! (change-env!))
-   (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))
+   (let [staged (when mark (mark :member-stage ns start))
+         _ (when change-env! (change-env!))
+         scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))
          changed (when-not (:reason entry)
                    (vec (take 12 (keep (fn [[key expected]]
                                         (let [current (registry-input-state key scope ancestors)]
@@ -2003,7 +2005,9 @@
          changed-resolver (when (and (nil? prior-reason) (contains? entry :resolver-reads))
                             (changed-resolver-reads (:resolver-reads entry)))
          reason (or prior-reason (when (seq changed-resolver) :resolver-input-changed))
+         validated (when mark (mark :member-validation ns staged))
          compiled (when reason (lower-with-snapshot prepared))
+         _ (when (and mark reason) (mark :member-lowering ns validated))
          ;; Retained definition bytes do not need decoding for the comparison.
          actual (when compare-clean? (if reason (def-bytes compiled) (:definition-bytes entry)))
          replayed-unit (when retained-unit
@@ -2031,7 +2035,7 @@
      (assoc :resolver-read-calls (:resolver-read-calls entry)
             :distinct-resolver-reads (count (:resolver-reads entry))
             :changed-resolver-reads changed-resolver)
-     retained-unit (assoc :replayed-unit replayed-unit)))))))
+     retained-unit (assoc :replayed-unit replayed-unit))))))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -2132,8 +2136,9 @@
    {:sha256 (artifact/sha bytes) :bytes (erlang/byte_size bytes) :exact-partitions (count results)})))
 
 (defn- replay-bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha
-                              control-root export-path update?]
- (let [anchor (qualified-donor donor qualification-path)
+                              control-root export-path update? mark]
+ (let [start (when mark (mark))
+       anchor (qualified-donor donor qualification-path)
        bytes (File/read! receipt-path)
        receipt (authenticated-registry bytes expected-sha anchor)]
   (when (and update? (not= :native-bound-registry-v9 (:schema receipt)))
@@ -2146,6 +2151,7 @@
                  (= (:links-sha256 anchor) (:base-links receipt))
                  (= (artifact/sha (File/read! samples-path)) (:sample-report-sha256 receipt)))
    (refuse-bound-registry :receipt-context-mismatch))
+  (when mark (mark :receipt-authentication nil start))
   ;; The qualified donor supplies definitions. The receipt carries only
   ;; inputs, and cannot supply a replacement payload for an accepted member.
   ;; Macro recipes are from the exact SDK and the sampling evidence belongs
@@ -2176,7 +2182,7 @@
                                mutation (when (and control-root (= "host.delay" ns))
                                           #(BeamLisp.Env/add_search_path control-root))]
                           (replay-registry-member closure candidate (get-in closure [:units ns])
-                                                  entry entries mutation (when (or export-path update?) old) (not update?))))
+                                                  entry entries mutation (when (or export-path update?) old) (not update?) mark)))
                        (:order closure))
           members (mapv #(dissoc % :replayed-unit) results)
           exported (when export-path (export-verified-closure! export-path closure results))
@@ -2196,12 +2202,15 @@
                      :changed (mapv :namespace (remove :reused members))
                      :added [] :order (:order closure))))))))
 
-(defn checked-update [closure rowset request]
+(defn checked-update [closure rowset request mark]
  (let [{:strs [receipt samples donor qualification sha256]} request]
   (when-not (every? #(and (string? %) (not (empty? %))) [receipt samples donor qualification sha256])
    (refuse-bound-registry :incomplete-update-request))
-  (replay-bound-registry closure rowset receipt samples (artifact/read-closure donor)
-                         qualification sha256 nil nil true)))
+  (let [start (when mark (mark))
+        donor-closure (artifact/read-closure donor)]
+   (when mark (mark :donor-load nil start))
+   (replay-bound-registry closure rowset receipt samples donor-closure
+                          qualification sha256 nil nil true mark))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
@@ -2417,7 +2426,7 @@
                             (or (nil? export-path) (= (Path/expand output) (Path/expand export-path))))
                   (throw (ex-info "Pass a separate new closure destination for --bound-export" {})))
                  (replay-bound-registry closure baseline comparison source-receipt
-                  (if (= partition mode) closure (artifact/read-closure mode)) qualification receipt-sha root export-path false))
+                  (if (= partition mode) closure (artifact/read-closure mode)) qualification receipt-sha root export-path false nil))
                 (= selected "--bound-registry-controls") (bound-registry-controls closure baseline comparison source-receipt mode)
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--ambient-roots") (ambient-root-report closure baseline comparison)

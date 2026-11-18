@@ -74,20 +74,35 @@
                   {:namespace ns :module module})))))
 
 ; --- compile ------------------------------------------------------------------
+(def relink-profile
+ (when (and (System/get_env "NATIVE_LINK_ROWS") (= "1" (System/get_env "NATIVE_RELINK_PROFILE")))
+  (volatile! [])))
+(defn profile-mark
+ ([]
+  [(erlang/monotonic_time :microsecond) (elem (erlang/process_info (erlang/self) :reductions) 1)])
+ ([phase ns [start-us start-reductions]]
+  (let [[now-us now-reductions :as next] (profile-mark)]
+   (vswap! relink-profile conj
+    {:phase phase :namespace ns :wall-us (- now-us start-us)
+     :caller-reductions (- now-reductions start-reductions)})
+   next)))
 (defn compile-unit [ns source-path allowed]
  (BeamLisp.Compiler/with_fresh_names
   (fn []
-   (let [prepared (build/prepare-ns source-path)
+   (let [start (when relink-profile (profile-mark))
+         prepared (build/prepare-ns source-path)
          _ (when-not (= ns (:ns prepared))
              (throw (ex-info "native update: namespace header mismatch" {:namespace ns :path source-path :header (:ns prepared)})))
          _ (doseq [[dependency _] (:requires prepared)]
              (when-not (or (contains? allowed dependency) (contains? stubs dependency))
               (throw (ex-info "native update: added dependency requires explicit closure extension"
                               {:namespace ns :dependency dependency}))))
+         staged (when start (profile-mark :member-stage ns start))
          ; The native checker is identity. Share declaration resolution for
          ; this lowering pass, then give the next member a fresh snapshot.
          compiled (BeamLisp.Loader/with_declaration_snapshot
                     (fn [] (dissoc (build/compile-prepared prepared {:check-node identity}) :cache-status :cache-key)))
+         _ (when staged (profile-mark :member-lowering ns staged))
          unit (assoc compiled :source (:source prepared)
                      :module (BeamLisp.Link/module_for ns) :base-module (BeamLisp.Emit/base_module_for ns))]
     (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits)
@@ -206,10 +221,13 @@
       (every? #(= (:path %) (get-in original [:units (:ns %) :path])) additions)))
 (defn checked-closure []
  (let [observer "native.observe-links"
-       request (json/decode (File/read! relink-request))]
+       request (json/decode (File/read! relink-request))
+       start (when relink-profile (profile-mark))]
   (BeamLisp.Loader/with_load_path "research/native-seed/speed/front"
    (fn [] (BeamLisp.Loader/load_provider observer)))
-  (let [result ((BeamLisp.Env/fetch_exact! observer "checked-update") original linked-rows-input request)
+  (when start (profile-mark :observer-load nil start))
+  (let [result ((BeamLisp.Env/fetch_exact! observer "checked-update") original linked-rows-input request
+                (when relink-profile profile-mark))
         allowed (into (set (:order original)) stubs)
         recompiled (set (:changed result))]
    (doseq [ns (:order original)]
@@ -267,6 +285,7 @@
                :artifact-sha256 (artifact/sha bytes)
                :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
                        {:namespace ns :source-sha256 (:source-sha256 u) :definitions (count (:defs u))})) order)}
+               relink-profile (assoc :phase-profile @relink-profile)
                checked-relink? (assoc :checked-relink
                                 {:receipt-sha256 (:receipt-sha256 result)
                                  :candidate-link-rows-sha256 (:candidate-link-rows-sha256 result)

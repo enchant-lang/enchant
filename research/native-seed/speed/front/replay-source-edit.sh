@@ -5,6 +5,7 @@
 # NATIVE_BOUND_REPLAY_EXPORT saves the checked closure ETF after bound replay.
 # NATIVE_RELINK_COMPARE=1 runs the updater's checked candidate before the
 # ordinary updater and compares both finished artifacts in the same overlay.
+# NATIVE_RELINK_PROFILE=1 also records linked-pass work by member and phase.
 set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
@@ -106,8 +107,9 @@ from pathlib import Path
 request = dict(zip(("receipt", "samples", "donor", "qualification", "sha256"), sys.argv[2:], strict=True))
 Path(sys.argv[1]).write_text(json.dumps(request))
 PY
-  run_update "$candidate" --setenv=NATIVE_RELINK_TIMINGS=1 --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
-  run_update "$edited" --setenv=NATIVE_RELINK_TIMINGS=1
+  instrumentation=(--setenv=NATIVE_RELINK_TIMINGS=1 --setenv=NATIVE_RELINK_PROFILE="${NATIVE_RELINK_PROFILE:-}")
+  run_update "$candidate" "${instrumentation[@]}" --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
+  run_update "$edited" "${instrumentation[@]}"
   cmp "$candidate/closure.etf" "$edited/closure.etf"
   cmp "$candidate/link-rows.etf" "$edited/link-rows.etf"
   python3 - "$candidate" "$edited" "$report" <<'PY'
