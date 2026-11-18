@@ -62,10 +62,10 @@ def call(argv, cwd, env=None):
 
 
 class Service:
-    def __init__(self, argv, cwd, log):
+    def __init__(self, argv, cwd, log, env=None):
         self.log = log.open('w')
         try:
-            self.proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            self.proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=self.log, text=True, bufsize=1)
         except BaseException:
             self.log.close()
@@ -92,8 +92,12 @@ class Service:
         return line
 
     def send(self, line):
-        self.proc.stdin.write(line + '\n')
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(line + '\n')
+            self.proc.stdin.flush()
+        except BrokenPipeError:
+            self.log.flush()
+            raise RuntimeError('Worker stopped: ' + Path(self.log.name).read_text()[-2000:]) from None
 
     def request(self, op, **kwargs):
         self.send(json.dumps(dict(op=op, **kwargs)))
@@ -102,7 +106,10 @@ class Service:
         return result
 
     def close(self):
-        self.proc.stdin.close()
+        try:
+            self.proc.stdin.close()
+        except BrokenPipeError:
+            pass
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -222,7 +229,8 @@ def run(out, edit, manual):
         native.send(f'(prime {json.dumps(str(entry))})')
         check(native.get() == 'PRIMED pixel,channel-table', 'stable entries did not compile')
         event('native compiler ready', pid=native.proc.pid)
-        owner = Service([sdk / 'bin/bl', '--cold', 'run', HERE / 'owner.bl'], ROOT, out / 'source.log')
+        owner = Service([sdk / 'bin/bl', '--cold', 'run', HERE / 'owner.bl'], ROOT, out / 'source.log',
+                        env=dict(os.environ, BEAM_LISP_RELOAD='1', ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1'))
         lifetime.callback(owner.close)
         check(json.loads(owner.get()) == {'ready': True}, 'Source slot did not start')
         proofs = Proofs(out)
