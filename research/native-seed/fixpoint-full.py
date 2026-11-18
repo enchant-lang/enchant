@@ -216,6 +216,8 @@ def main() -> None:
     parser.add_argument("--no-actors", action="store_true",
                         help="stop after stage3's Source corpus: stage2 = stage3 and Source equality are "
                              "witnessed, the actor corpus is NOT run, and the receipt says so")
+    parser.add_argument("--prepare-eval-bundle", action="store_true",
+                        help="materialize the macro-only bundle on all three stages and qualify it")
     parser.add_argument("--compile-stage1-only", action="store_true",
                         help="checkpoint the real native stage1 image; never qualify a fixpoint")
     parser.add_argument("--compile-stage1-actors-only", action="store_true",
@@ -233,6 +235,8 @@ def main() -> None:
         args.actor_diagnostic_prefix = args.actor_diagnostic_prefix.resolve()
     if args.compile_stage1_only and args.compile_stage1_actors_only:
         parser.error("select only one stage1 checkpoint mode")
+    if args.prepare_eval_bundle and (args.compile_stage1_only or args.compile_stage1_actors_only):
+        parser.error("--prepare-eval-bundle requires all three compilation stages")
     if args.compile_stage1_actors_only and not args.actor_manifest:
         parser.error("--compile-stage1-actors-only requires --actor-manifest")
     if args.self_emission_receipt and not args.stage1_receipt:
@@ -361,6 +365,8 @@ def main() -> None:
         if "eval_bundle_sha256" in export:
             eval_bundle = out / "eval-bundle.scm"
             bind(eval_bundle, export["eval_bundle_sha256"])
+        if args.prepare_eval_bundle and eval_bundle is None:
+            raise RuntimeError("--prepare-eval-bundle requires the checked macro-only bundle")
         if (out / "stage1.scm").read_bytes() != (out / "prelude.scm").read_bytes() + ENTRY:
             raise RuntimeError("stage1 differs from exact admitted prelude and compiler entry")
         host = (out / "host.scm").read_bytes()
@@ -731,6 +737,22 @@ def main() -> None:
                 if projected != output:
                     raise RuntimeError(name + " Source output differs with the evaluation bundle")
                 source_results[name]["eval_bundle_log_sha256"] = runs[-1]["log_sha256"]
+            if args.prepare_eval_bundle:
+                selected = out / "eval-prepared.scm"
+                prepared = selected if name == "stage1" else out / (name + "-eval-prepared.scm")
+                archive_output(prepared)
+                run(name + "-prepare-eval-bundle", [image, "--prepare-eval", eval_bundle, prepared], cwd=root)
+                if not prepared.is_file() or prepared.is_symlink():
+                    raise RuntimeError(name + " did not write its prepared evaluation bundle")
+                prepared_sha = bind(prepared)
+                if prepared.read_bytes() != selected.read_bytes():
+                    raise RuntimeError(name + " emitted different prepared evaluation bytes")
+                replay = run(name + "-prepared-source-corpus",
+                    [image, "--eval", selected, args.corpus], cwd=root)
+                if replay != output:
+                    raise RuntimeError(name + " Source output differs with the prepared evaluation bundle")
+                source_results[name]["prepared_eval_bundle_sha256"] = prepared_sha
+                source_results[name]["prepared_eval_log_sha256"] = runs[-1]["log_sha256"]
             return output
 
         if args.stage1_receipt:

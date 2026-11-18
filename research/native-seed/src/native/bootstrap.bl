@@ -76,17 +76,32 @@
   {:fixed (vec (sort (distinct (map second (filter #(= :fixed (first %)) shapes)))))
    :variadic (some (fn [[kind n]] (when (= :variadic kind) n)) shapes)}))
 (def source-macro-names ["core" "sugar"])
-(defn install-source-macros! [bundle]
- ; Same boot order as js/boot.mjs. The compiled definitions are present;
- ; macros remain SOURCE and are compiled in the native realm before any
- ; namespace's source is compiled. This also exercises Scheme eval directly.
+(defn- visit-source-macros! [bundle enter! visit!]
+ ; The boot order is the same as js/boot.mjs. Helpers are already linked.
  (doseq [name source-macro-names
          unit (:units bundle) :when (= name (:ns unit))]
   (BeamLisp.Env/in_ns name)
+  (enter! name)
   (doseq [form (rd/read-string (:source unit) (:path unit))
           :when (= "defmacro" (ev/head-symbol form))]
-   (ev/eval-form form)))
+   (visit! form)))
  (BeamLisp.Env/in_ns "user"))
+
+(defn install-source-macros! [bundle]
+ (visit-source-macros! bundle (fn [_] nil) (fn [form] (ev/eval-form form))))
+
+(defn- prepare-eval-bundle [bundle]
+ (when-not (= source-macro-names (mapv :ns (:units bundle)))
+  (throw (ex-info "native --prepare-eval requires the macro-only Source bundle" {})))
+ (let [forms (atom [])]
+  (visit-source-macros! bundle
+   (fn [name] (swap! forms conj (str "(native-in-ns " (scheme/text name) ")")))
+   (fn [form]
+    (let [emitted (ev/emit-macro form)]
+     ; Later macros must see this definition in the ordinary boot order.
+     (host/eval-scheme emitted)
+     (swap! forms conj emitted))))
+  (str "(begin\n" (string/join "\n" @forms) "\n" (data {:units []}) ")\n")))
 ; ---------------------------------------------------------------------------
 ; AOT link plan: the ONE linking context. The BEAM driver (native.chunks) and
 ; the native self-emission (compile-bundle, run by stage1 and stage2) both
@@ -386,5 +401,10 @@
    (let [bundle (host/eval-scheme (host/read-file (nth args 1)))]
     (install-source-macros! bundle)
     (ev/eval-string (host/read-file (nth args 2)) (nth args 2)))
+  (and (= 3 (count args)) (= "--prepare-eval" (first args)))
+   (let [bundle (host/eval-scheme (host/read-file (nth args 1)))]
+    (host/write-file (nth args 2) (prepare-eval-bundle bundle)))
   :else
-   (throw (ex-info "usage: native-compiler --compile bundle.scm host.scm output.scm | --eval bundle.scm source.bl" {:args args}))))
+   (throw (ex-info (str "usage: native-compiler --compile bundle.scm host.scm output.scm"
+                       " | --eval bundle.scm source.bl | --prepare-eval eval-bundle.scm output.scm")
+                  {:args args}))))
