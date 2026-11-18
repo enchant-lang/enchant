@@ -155,11 +155,22 @@
 
 (defn- fun-field [callable field] (elem (erlang/fun_info callable field) 1))
 
+(defn- pinned-module-identity [module name]
+ (let [identities (Process/get :native_observer_pinned_module_ids {})]
+  (if-let [cached (find identities module)]
+   (val cached)
+   (let [path (str (System/get_env "BL_SDK_PRODUCT") "/image/ebin/" name ".beam")
+         identity (when (File/regular? path) (beam_lib/md5 (String/to_charlist path)))]
+    ;; Memoize only the file in the checked immutable SDK. The callable's
+    ;; live module and local code identity still have to match every time.
+    (when (< (count identities) 256)
+     (Process/put :native_observer_pinned_module_ids (assoc identities module identity)))
+    identity))))
+
 (defn- fun-origin [callable]
  (let [module (fun-field callable :module) module-name (erlang/atom_to_binary module)
        md5 (try (erlang/apply module :module_info (list :md5)) (catch _ nil))
-       pinned-file (str (System/get_env "BL_SDK_PRODUCT") "/image/ebin/" module-name ".beam")
-       pinned (when (File/regular? pinned-file) (beam_lib/md5 (String/to_charlist pinned-file)))
+       pinned (pinned-module-identity module module-name)
        type (fun-field callable :type)
        pinned? (and md5 (= pinned (tuple :ok (tuple module md5)))
                     (or (= :external type) (= md5 (fun-field callable :new_uniq))))]
@@ -1168,6 +1179,7 @@
                                     (replay-registry-member closure candidate (get-in closure [:units ns]) entry entries)))
                                  (:order closure))}))]
    (assoc result :wall-us (- (erlang/monotonic_time :microsecond) started)
+    :pinned-module-identities (count (Process/get :native_observer_pinned_module_ids {}))
     :reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) reductions)))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
