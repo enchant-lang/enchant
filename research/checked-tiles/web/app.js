@@ -24,7 +24,7 @@ function connection() {
     'connection',
     online ? (busy ? 'Workstation checking' : 'Workstation ready') : 'Workstation offline',
   );
-  for (const id of ['check', 'rehearse']) el(id).disabled = !online || busy || sending;
+  for (const id of ['check', 'rehearse', 'run-actors']) el(id).disabled = !online || busy || sending;
 }
 function verdict(title, message, status) {
   text('verdict', title);
@@ -36,6 +36,27 @@ function showRun(job) {
     ? ' Run time ' + duration((job.finished - job.started) * 1000) + '.'
     : '';
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - job.started));
+  if (job.mode === 'actors') {
+    let message;
+    if (job.status === 'checking') {
+      message = 'Building and running on the workstation · ' + seconds + ' s';
+    } else if (job.status === 'exercised') {
+      const result = job.actors;
+      const choice = (policy) => result.revision.find((r) => r.arm === 'queue' && r.policy === policy);
+      const mixed = result.compiler.find((r) => r.policy === 'latest');
+      message = 'Pinned A consumed ' + choice('pinned').selected + '. Looking up B at wake consumed '
+        + choice('latest').selected + '. The mixed compiler emitted ' + mixed.pending_output
+        + ' and evaluation failed.';
+      text('actor-data', JSON.stringify(result, null, 2));
+      el('actor-detail').hidden = false;
+    } else {
+      message = job.error || 'Native run ended.';
+    }
+    text('actor-result', message);
+    verdict(job.status === 'exercised' ? 'Native experiment passed' : 'Native actor lab', message, job.status);
+    el('job-detail').hidden = true;
+    return;
+  }
   switch (job.status) {
     case 'ready':
       verdict('Ready to check', 'Choose a starting point or edit the BL function.', 'ready');
@@ -183,6 +204,7 @@ el('source').oninput = () => {
 };
 el('wipe').oninput = () => el('screen').style.setProperty('--wipe', el('wipe').value + '%');
 el('check').onclick = () => submit('edit');
+el('run-actors').onclick = () => submit('actors');
 el('rehearse').onclick = () => submit('rehearsal');
 (async function poll() {
   await refresh();

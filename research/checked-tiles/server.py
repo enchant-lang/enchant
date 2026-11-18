@@ -90,13 +90,13 @@ class Workbench:
 
     def start(self, req):
         mode, placement = req.get('mode'), req.get('placement')
-        if mode not in ('edit', 'rehearsal') or placement not in ('device', 'measured'):
-            raise ValueError('Choose an edit or rehearsal and a supported placement.')
+        if mode not in ('edit', 'rehearsal', 'actors') or placement not in ('device', 'measured'):
+            raise ValueError('Choose a supported experiment and placement.')
         source = web_source(req.get('source')) if mode == 'edit' else PRESETS['wash']
         with self.lock:
             if self.job['status'] == 'checking':
                 raise BlockingIOError('A run is already checking on this workstation.')
-            if req.get('base') != self.accepted['receipt']['revision']:
+            if mode != 'actors' and req.get('base') != self.accepted['receipt']['revision']:
                 raise BlockingIOError('The accepted revision changed. Review the frame and try again.')
             self.job = dict(id=uuid4().hex, mode=mode, placement=placement, status='checking', started=time())
             self.serial += 1
@@ -112,9 +112,11 @@ class Workbench:
                 draft.write_text(source)
                 argv = [sys.executable, '-B', str(HERE/'driver.py'), '--out', str(out),
                         '--source', str(draft), '--placement', job['placement']]
-                if job['mode'] == 'edit':
+                if job['mode'] == 'actors':
+                    argv = [sys.executable, '-B', str(HERE/'actor-lab/run.py'), '--quick', '--out', str(out)]
+                elif job['mode'] == 'edit':
                     argv.append('--once')
-                if job['placement'] == 'device':
+                if job['mode'] != 'actors' and job['placement'] == 'device':
                     argv.append('--require-gpu')
                 env = dict(os.environ, PATH=str(Path.home()/'.nix-profile/bin') + ':' + os.defpath
                            + ':' + os.environ.get('PATH', ''))
@@ -126,6 +128,11 @@ class Workbench:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.communicate()
                         raise RuntimeError('Run exceeded the ten-minute workstation limit.')
+                if job['mode'] == 'actors':
+                    if proc.returncode:
+                        raise RuntimeError(log.strip()[-3000:] or f'Native actor driver exited {proc.returncode}')
+                    job.update(status='exercised', actors=json.loads(out.read_text()))
+                    return
                 witness = next(out.glob('revision-*/rejected.json'), None)
                 if proc.returncode and witness and job['mode'] == 'edit':
                     job.update(status='rejected', witness=json.loads(witness.read_text()),
