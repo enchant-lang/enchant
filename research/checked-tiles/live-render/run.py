@@ -246,7 +246,7 @@ def run(out, edit, manual):
             row = dict(source_sha256=sha(files[1].read_bytes()), digest=reference['digest'], **reuse,
                        proof=proof, native_ms=emit_ms, source_prepare_and_observe_ms=source_ms, proof_ms=elapsed(t))
             evidence['revisions'][label] = row
-            return row, values
+            return row, values, reference['table']
 
         def render_accepted(label, row, values, expected):
             check(row['proof']['verdict'] == 'true', 'attempt to render unqualified grade')
@@ -273,8 +273,8 @@ def run(out, edit, manual):
             status('serving', label)
             evidence['source_published'].append(selected['digest'])
 
-        row_a, values_a = prepare('A', a)
-        render_accepted('A', row_a, values_a, values_a)
+        row_a, values_a, ref_a = prepare('A', a)
+        render_accepted('A', row_a, values_a, ref_a)
         publish('A', row_a, None)
         event('A visible', digest=row_a['digest'])
         for key in ('frame', 'compile'):
@@ -305,9 +305,9 @@ def run(out, edit, manual):
             save = time.perf_counter()
             b = materialize(out, 'B', edit.read_bytes(), entry)
             event('B source saved')
-            row_b, values_b = prepare('B', b)
+            row_b, values_b, ref_b = prepare('B', b)
             check(row_b['proof']['verdict'] == 'true', 'requested B edit violates law: ' + str(row_b['proof']['witness']))
-            render_accepted('B', row_b, values_b, values_b)
+            render_accepted('B', row_b, values_b, ref_b)
             check(row_b['frame_sha256'] != row_a['frame_sha256'], 'edit has no visible effect on selected frame')
             publish('B', row_b, row_a['digest'])
             evidence['save_to_readable_png_ms'] = elapsed(save)
@@ -319,8 +319,6 @@ def run(out, edit, manual):
         check(owner.request('observe',ticket='frame')['table'] == values_a, 'old frame Source lease lost')
         check(owner.request('select')['digest'] != row_a['digest'], 'stale frame eligible for publication')
         owner.request('release', ticket='frame')
-        waiting = owner.request('retire', id='A')
-        check(waiting['status'] == 'waiting', waiting)
         event('old frame discarded; compiler lease holds A')
         native.send('(resume)')
         _, old_values = compiled(native, 'outstanding')
@@ -328,6 +326,9 @@ def run(out, edit, manual):
         check(proofs.qualify(old_values)['reused'], 'unmodified table lost its evidence')
         stale = owner.request('publish', id='A', expected=row_a['digest'])
         check(stale == {'status': 'stale', 'digest': row_b['digest']}, stale)
+        waiting = owner.request('retire', id='A')
+        check(waiting['status'] == 'waiting', waiting)
+        event('A retirement waiting on compile registration')
         owner.request('release',ticket='compile')
         retired = owner.request('retire',id='A')
         check(retired['status'] == 'retired', retired)
@@ -341,13 +342,16 @@ def run(out, edit, manual):
         check(clean_values == values_b, 'warm edit differs from clean native compilation')
         evidence['clean_B'] = dict(**clean_work, same_values=True, proof_reused=proofs.qualify(clean_values)['reused'])
         bad = materialize(out, 'bad', (HERE / 'rejected.bl').read_bytes(), entry)
-        broken, _ = prepare('bad', bad)
+        broken, _, _ = prepare('bad', bad)
         check(broken['proof']['witness'] == [64, 63] and broken['proof']['verdict'] == 'false', 'missing rejection')
         still = owner.request('select')
         check(still['digest'] == row_b['digest'] and still['table'] == values_b, 'bad edit changed selection')
         check(sha((out/'B/frame.png').read_bytes()) == row_b['frame_sha256'], 'bad edit changed visible bytes')
         check(owner.request('retire', id='bad')['status'] == 'retired', 'rejected graph leak')
-        event('bad edit rejected; B still serving')
+        packed_again = draw(frame, lambda raw, w, h: worker.grade_rgba(raw, w, h, bytes(still['table'])))
+        check(sha(packed_again) == row_b['rgba_sha256'], 'fresh frame after rejection differs')
+        evidence['after_rejection'] = dict(digest=still['digest'], fresh_rgba_sha256=sha(packed_again))
+        event('bad edit rejected; new frame served from B')
         check(owner.request('close')['status'] == 'closed', 'slot shutdown failed')
         check(owner.request('retire', id='B')['status'] == 'retired', 'serving graph leaked at shutdown')
         for label in ('B', 'bad', 'cleanB'):
