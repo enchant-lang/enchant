@@ -240,8 +240,30 @@
          {} members))
 
 (defn- changed-links [baseline candidate]
- (filter (fn [key] (not= (get baseline key) (get candidate key)))
-         (into (set (keys baseline)) (keys candidate))))
+ (let [edits (reduce-kv (fn [keys key outcome]
+                          (if (= outcome (get baseline key)) keys (conj keys key))) [] candidate)]
+  (reduce-kv (fn [keys key _]
+               (if (contains? candidate key) keys (conj keys key))) edits baseline)))
+
+(defn- affected-members [consumers changed]
+ (reduce (fn [members key] (into members (get consumers key #{}))) #{} changed))
+
+(defn- directly-invalidated [members candidate]
+ (reduce (fn [selected [member _ receipt _]]
+           (if (receipt-matches? receipt candidate) selected (conj selected (:ns member))))
+         #{} members))
+
+(defn- compare-selection [members candidate consumers changed expected]
+ (let [samples (mapv (fn [_]
+                       (let [start (erlang/monotonic_time :microsecond)
+                             indexed (affected-members consumers changed)
+                             selected (erlang/monotonic_time :microsecond)
+                             direct (directly-invalidated members candidate)
+                             checked (erlang/monotonic_time :microsecond)]
+                        (assert (= expected indexed direct))
+                        [(- selected start) (- checked selected)])) (range 11))]
+  {:repetitions (count samples) :indexed-median-us (nth (sort (map first samples)) 5)
+   :direct-median-us (nth (sort (map second samples)) 5)}))
 
 (defn- ancestor-outcome [chain [index [ns name]]]
  (if-let [scope (nth chain index nil)]
@@ -514,9 +536,9 @@
        seeded (erlang/monotonic_time :microsecond)
        consumers (link-consumers prior)
        indexed (erlang/monotonic_time :microsecond)
-       changed (vec (changed-links (:local-links baseline) (:local-links candidate)))
+       changed (changed-links (:local-links baseline) (:local-links candidate))
        before-select (erlang/monotonic_time :microsecond)
-       invalidated (into #{} (mapcat #(get consumers % #{}) changed))
+       invalidated (affected-members consumers changed)
        selected (erlang/monotonic_time :microsecond)
        plan (mapv (fn [[member bytes receipt operations]]
                     (let [reuse? (not (contains? invalidated (:ns member)))]
@@ -530,7 +552,8 @@
                             exact? (erlang/=:= bytes (def-bytes member))]
                        {:namespace (:ns member) :reused reuse? :exact-clean-definitions exact?
                         :operations operations})) plan)
-       checked (erlang/monotonic_time :microsecond)]
+       checked (erlang/monotonic_time :microsecond)
+       selections (compare-selection prior (:local-links candidate) consumers changed invalidated)]
   {:schema "bl.native.link-replay-shadow" :version 2 :reuse-authority false
    :baseline-link-rows-sha256 (:sha256 baseline) :candidate-link-rows-sha256 (:sha256 candidate)
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
@@ -539,7 +562,7 @@
                    :consulted-changed-keys (count (filter #(contains? consumers %) changed))
                    :affected-members (vec (sort invalidated))
                    :index-us (- indexed seeded) :link-table-diff-us (- before-select indexed)
-                   :selection-us (- selected before-select)}
+                   :selection-us (- selected before-select) :warm-selection selections}
    :candidate-compilation-and-oracle-comparison-us (- checked planned)
    :members result}))
 
