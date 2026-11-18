@@ -1,0 +1,49 @@
+(ns speed.beam-optimize-fixture
+ (:require [anf :as a] [compiler :as c] [reader :as r] [reader-node :as rn]
+           [lower :as lower] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def path (first args))
+(def out (second args))
+(def source (File/read! path))
+(defn digest [s]
+ (Base/encode16 (crypto/hash :sha256 s) (list (tuple :case :lower))))
+(defn sample-module []
+ (BeamLisp.Loader/with_declaration_snapshot
+  (fn []
+   (let [forms (rest (r/read-string source path))
+         env (assoc (c/new-env "reader") :target :beam :file path)
+         clauses (mapv (fn [f]
+                        (let [decl (c/declaration-source f env)
+                              value (:value-form decl)
+                              pos (rn/node-pos f)
+                              value (if pos (rn/meta-node value pos) value)]
+                          (c/reset-fresh!)
+                          {:op :defn-clause :fname (erlang/binary_to_atom (rn/node-name (rn/node-form (:name decl))))
+                           :params (list) :guard nil :body (c/compile value env) :ann {}}))
+                      forms)]
+     (a/module :Elixir.Speedwork.ReaderCompile (apply list clauses)
+       (apply list (mapv (fn [clause] [(:fname clause) 0]) clauses)) (list))))))
+(def m (sample-module))
+(def baseline (BeamLisp.Optimize/module m))
+(def object (lower/descriptor->beam m {}))
+(def reductions (fn [] (elem (erlang/process_info (erlang/self) :reductions) 1)))
+(def samples
+ (mapv (fn [_]
+  (let [reds-before (reductions)
+        start (erlang/monotonic_time :microsecond)
+        p (BeamLisp.Optimize/module m)
+        p-end (erlang/monotonic_time :microsecond)
+        reds-after (reductions)
+        bytes (elem (lower/descriptor->beam m {}) 1)
+        end (erlang/monotonic_time :microsecond)]
+    (assert (= p baseline))
+    (assert (= bytes (elem object 1)))
+    {:optimize-us (- p-end start) :optimize-reductions (- reds-after reds-before)
+     :codegen-us (- end p-end)}))
+  (range 9)))
+(File/write! out
+ (json/encode {:source-sha256 (digest source) :definitions (count (:clauses m))
+   :raw-anf-sha256 (digest (erlang/term_to_binary m (list :deterministic)))
+   :optimized-anf-sha256 (digest (erlang/term_to_binary baseline (list :deterministic)))
+   :beam-sha256 (digest (elem object 1)) :samples samples}))
+(println "BEAM_OPTIMIZE_TIMED")
