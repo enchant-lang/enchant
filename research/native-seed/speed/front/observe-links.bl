@@ -152,7 +152,15 @@
    (assoc effects :boundary-event-limit true))))
 
 (defn- other-table-event [effects operation table]
- (boundary-event effects :other-tables [operation (if (erlang/is_atom table) table :anonymous-table)]))
+ (let [name (if (erlang/is_atom table) table :anonymous-table)
+       observed (boundary-event effects :other-tables [operation name])]
+  (if (:ownership? effects)
+   (let [[owner] (peek (:pending-env-reads effects))]
+    (boundary-event observed :table-read-owners
+     [operation name (cond owner (elem owner 1)
+                      (contains? effects :pending-code-read) :is_loaded
+                      :else :outside-observed-api)]))
+   observed)))
 
 (defn- process-event [effects kind message target]
  (let [destination (process-destination target)
@@ -173,6 +181,10 @@
    (let [parents (:pending-loader-owners effects)
          frame (fn [entry] (if entry [(elem entry 1) (elem entry 2)] [:outside-observed-api]))]
     (boundary-event observed :file-read-owners [operation (frame (first parents)) (frame (peek parents))]))
+   (and (:ownership? effects) (= :send kind) (= :code_server destination))
+   (let [rpc (when (and (= :code_call operation) (= 3 (erlang/tuple_size request))) (elem request 2))
+         outer (first (:pending-loader-owners effects))]
+    (boundary-event observed :code-server-owners [(message-operation rpc) (when outer (elem outer 1))]))
    :else observed)))
 
 (defn- record-source-probe [effects path outcome]
@@ -375,10 +387,20 @@
  (let [[expected key] (peek (:pending-env-reads effects))
        reads (:env-reads effects {})
        outcome (when (and key (= kind :return_from)) (env-read-result key value))
-       total (inc (:env-read-count effects 0))]
+       total (inc (:env-read-count effects 0))
+       rejected (or (nil? key) (nil? outcome) (= :unavailable outcome))]
   (when-not (= entry expected) (throw (ex-info "Unexpected Env read return" {:entry entry :expected expected})))
   (cond-> (-> effects (update :pending-env-reads pop) (assoc :env-read-count total))
-   (or (nil? key) (nil? outcome) (= :unavailable outcome)) (assoc :unknown-env-read true)
+   rejected (assoc :unknown-env-read true)
+   (and rejected (:ownership? effects))
+   (boundary-event :rejected-env-reads
+    [(elem entry 1) key (cond
+                        (not= kind :return_from) :exception
+                        (nil? key) :unsupported-arguments
+                        (erlang/is_tuple value) [:tuple (erlang/tuple_size value)]
+                        (erlang/is_map value) :map
+                        (erlang/is_list value) :list
+                        :else :other-value)])
    (and key (contains? reads key) (not= outcome (get reads key))) (assoc :unstable-env-read true)
    (and key (<= total registry-trace-limit) (< (count reads) registry-input-limit))
    (assoc-in [:env-reads key] outcome))))
@@ -1419,7 +1441,8 @@
     :members (mapv (fn [ns]
                     (let [member (get-in closure [:units ns])
                           [_ output observation]
-                          (try (observe-lowering closure rows member entries {:boundary? true :ownership? true :env-reads? true})
+                          (try (observe-lowering closure rows member entries {:boundary? true :ownership? true :env-reads? true
+                                                                               :runtime-reads? true :code-reads? true})
                                (catch error
                                 (throw (ex-info (str "Lowering probe failed for " ns ": " (pr-str (ex-data error)))
                                                 {:namespace ns :observation-error (ex-data error)}))))
@@ -1433,6 +1456,9 @@
                       :env-agent-readers (vec (sort (:env-agent-readers effects)))
                       :env-read-owners (vec (sort (:env-read-owners effects)))
                       :file-read-owners (vec (sort (:file-read-owners effects)))
+                      :table-read-owners (vec (sort (:table-read-owners effects)))
+                      :code-server-owners (vec (sort (:code-server-owners effects)))
+                      :rejected-env-reads (vec (sort (:rejected-env-reads effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (if selected [selected] (:order closure)))})))
 
