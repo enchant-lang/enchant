@@ -11,6 +11,7 @@
 ;;   PARTITION LINK_ROWS --macro-context-control REPORT
 ;;   PARTITION LINK_ROWS --phase-macros REPORT
 ;;   PARTITION LINK_ROWS --phase-compile REPORT PHASE_MACRO_SAMPLES
+;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
@@ -28,6 +29,19 @@
 (def macro-result-entry (tuple :Elixir.BeamLisp.Ns.Compiler :datum-macro-result 1))
 (def link-put-entry (tuple :ets :insert 2))
 (def link-delete-entry (tuple :ets :delete 2))
+(def registry-operations
+ (set (map (fn [[operation arity]] (tuple :ets operation arity))
+       [[:lookup 2] [:lookup_element 3] [:lookup_element 4] [:member 2] [:select 2] [:select 3]
+        [:match 2] [:match_object 2] [:tab2list 1]
+        [:insert 2] [:insert_new 2] [:update_counter 3] [:update_counter 4]
+        [:delete 1] [:delete 2] [:delete_object 2] [:delete_all_objects 1]
+        [:select_delete 2] [:select_replace 2] [:match_delete 2] [:take 2]])))
+(def registry-writes #{:insert :insert_new :update_counter :delete :delete_object
+                       :delete_all_objects :select_delete :select_replace :match_delete :take})
+(def registry-lookup-entry (tuple :ets :lookup 2))
+
+(defn- link-key? [key]
+ (and (erlang/is_tuple key) (= 4 (erlang/tuple_size key)) (= :link (elem key 1))))
 (defn- source-path [raw]
  (let [path (if (erlang/is_list raw) (unicode/characters_to_binary raw) raw)]
   (when (and (string? path) (<= (erlang/byte_size path) 4096)
@@ -123,21 +137,26 @@
 (defn- collector [calls pending hits misses reads sources effects]
  (receive
   [:trace _ :call [:ets :lookup arguments]]
-  (recur calls (second arguments) hits misses reads sources effects)
+  (let [key (second arguments)
+        effects (if (:registry? effects) (effect effects :registry-calls [:lookup 2]) effects)]
+   (recur calls key hits misses reads sources effects))
   [:trace _ :return_from [:ets :lookup 2] value]
+  (if-not (link-key? pending) (recur calls nil hits misses reads sources effects)
   (if (>= calls trace-limit) (recur (inc calls) nil hits misses reads sources effects)
    (let [key [(elem pending 2) (elem pending 3)]
          outcome (when-not (empty? value) (value-identity (elem (first value) 1)))
          next-effects (record-link effects :read pending outcome)]
     (if outcome
      (recur (inc calls) nil (conj hits key) misses reads sources next-effects)
-     (recur (inc calls) nil hits (conj misses key) reads sources next-effects))))
+     (recur (inc calls) nil hits (conj misses key) reads sources next-effects)))))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :expand-macro 4] _]
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
   (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
   [:trace _ :call [module function arguments]]
-  (let [entry (tuple module function (count arguments)) key (first arguments)]
+  (let [arity (count arguments) entry (tuple module function arity) key (first arguments)
+        effects (if (and (:registry? effects) (contains? registry-operations entry))
+                   (effect effects :registry-calls [function arity]) effects)]
    (cond
     (= entry macro-entry)
     (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)
@@ -154,11 +173,14 @@
      (update effects :pending-macro-lookups (fn [stack] (conj (or stack []) (vec arguments)))))
     (or (= entry link-put-entry) (= entry link-delete-entry))
     (let [writing? (= entry link-put-entry) row (second arguments)
-          key (if writing? (elem row 0) row)
-          outcome (when writing? (value-identity (elem row 1)))
-          kind (if writing? :link-writes :link-deletions)]
+          key (if (and writing? (erlang/is_tuple row)) (elem row 0) row)]
      (recur calls pending hits misses reads sources
-      (-> effects (effect kind [(elem key 2) (elem key 3)]) (record-link :write key outcome))))
+      (if (link-key? key)
+       (let [outcome (when writing? (value-identity (elem row 1))) kind (if writing? :link-writes :link-deletions)]
+        (-> effects (effect kind [(elem key 2) (elem key 3)]) (record-link :write key outcome)))
+       effects)))
+    (and (:registry? effects) (contains? registry-operations entry))
+    (recur calls pending hits misses reads sources effects)
     (contains? source-read-entry-set entry)
     (recur calls pending hits misses (conj reads [entry (source-path key)]) sources effects)
     :else (throw (ex-info "Unexpected native observation call" {:entry entry}))))
@@ -188,22 +210,29 @@
        observer (spawn (fn [] (collector 0 nil #{} #{} [] #{}
                                (assoc options :scope scope :ancestor-slots ancestors :sample-macros? sample-macros?))))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
-       match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))
+       match (list (tuple (list :beam_lisp_vars (if (:registry? options) :_ (tuple :_ :link :_ :_)))
+                     (list) (list (tuple :return_trace))))
        source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))
        link-key (tuple :_ :link :_ :_)
        returns (list (tuple :_ (list) (list (tuple :return_trace))))]
   (try
    (assert (= 1 (erlang/apply :trace :function
-                  (list session (tuple :ets :lookup 2) match (list :local)))))
+                  (list session registry-lookup-entry match (list :local)))))
    (doseq [entry source-read-entries]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
    (when sample-macros?
     (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
    (when (:macro-lookups? options)
     (assert (= 1 (erlang/apply :trace :function (list session macro-lookup-entry returns (list :local))))))
-   (doseq [[entry spec] [[macro-entry (if sample-macros? returns true)]
-                         [link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
-                         [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]]]
+   (assert (= 1 (erlang/apply :trace :function
+                 (list session macro-entry (if sample-macros? returns true) (list :local)))))
+   (doseq [[entry spec] (if (:registry? options)
+                         (map (fn [entry]
+                                [entry (list (tuple (apply list (cons :beam_lisp_vars (repeat (dec (elem entry 2)) :_)))
+                                               (list) (list)))])
+                              (disj registry-operations registry-lookup-entry))
+                         [[link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
+                          [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]])]
     (assert (= 1 (erlang/apply :trace :function (list session entry spec (list :local))))))
    (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
    (let [result (action)
@@ -583,6 +612,31 @@
    (finally
     (doseq [[_ session] @sessions] (BeamLisp.AOT/close_constructor_session! session))))))
 
+(defn- registry-phase-status [observation]
+ (let [calls (get-in observation [:effects :registry-calls])
+       writes (fn [[[operation _] _]] (contains? registry-writes operation))
+       summarize (fn [entries] (mapv (fn [[[operation arity] count]] [operation arity count]) (sort entries)))]
+  {:reads (summarize (remove writes calls)) :writes (summarize (filter writes calls))
+   :source-reads (count (:sources observation)) :link-reads (:calls observation)}))
+
+(defn- registry-phases [closure baseline]
+ {:schema "bl.native.registry-by-phase" :version 1 :reuse-authority false
+  :table "beam_lisp_vars" :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+  :members (mapv (fn [ns]
+                   (let [member (get-in closure [:units ns])]
+                    (BeamLisp.Env/isolated
+                     (fn []
+                      (install-rows! closure (:rows baseline))
+                      (BeamLisp.Compiler/with_fresh_names
+                       (fn []
+                        (let [options {:registry? true}
+                              [prepared staging] (trace! #(build/prepare-ns (:path member)) options)
+                              [compiled lowering] (trace! #(build/compile-prepared prepared {:check-node identity}) options)]
+                         (assert (erlang/=:= (def-bytes compiled) (def-bytes member)))
+                         {:namespace ns :same-definitions true
+                          :staging (registry-phase-status staging) :lowering (registry-phase-status lowering)})))))))
+                 (:order closure))})
+
 (defn- source-identity [path]
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
   (if (String/starts_with? absolute root) (subs absolute (count root)) absolute)))
@@ -793,6 +847,7 @@
                 (= selected "--macro-context-control") (macro-context-control closure baseline)
                 (= selected "--phase-macros") (sample-phase-macros closure baseline)
                 (= selected "--phase-compile") (compile-with-phase-macros closure baseline comparison)
+                (= selected "--registry-phases") (registry-phases closure baseline)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
