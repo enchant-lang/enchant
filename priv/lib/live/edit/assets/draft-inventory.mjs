@@ -24,24 +24,16 @@ export function retainedDrafts(scope, storage = globalThis.localStorage) {
   for (let index = 0; index < storage.length; index += 1) {
     const name = identity(storage.key(index), scope);
     if (!name) continue;
-    const raw = storage.getItem(name.key);
-    if (raw === null) continue;
-    let updated = 0, title;
-    try {
-      const record = JSON.parse(raw);
-      if (Number.isFinite(record?.updated) && record.updated > 0 && record.updated <= 8640000000000000) updated = record.updated;
-      if (name.type === 'editor') {
-        let checkpoint = record?.checkpoint;
-        if (record?.schema === 3 && typeof record.checkpointKey === 'string' && record.checkpointKey.startsWith(name.key + ':checkpoint:')) {
-          checkpoint = JSON.parse(storage.getItem(record.checkpointKey));
-        }
-        const localTitle = checkpoint?.document?.meta?.title;
-        if (typeof localTitle === 'string' && localTitle.trim()) title = Array.from(localTitle).slice(0, 120).join('');
-      }
-    } catch {
-      // Unreadable records still belong in the inventory and can be exported.
-    }
-    entries.push({key: name.key, resource: name.resource, tab: name.tab, type: name.type, updated, ...(title ? {title} : {})});
+    // A tab may settle its draft between enumeration and reading the record.
+    if (storage.getItem(name.key) === null) continue;
+    let draft;
+    try { draft = readRecord(scope, name.key, storage); }
+    catch { continue; }
+    const {record, checkpoint, readable} = draft;
+    const updated = Number.isFinite(record?.updated) && record.updated > 0 && record.updated <= 8640000000000000 ? record.updated : 0;
+    const localTitle = checkpoint?.document?.meta?.title;
+    const title = typeof localTitle === 'string' && localTitle.trim() ? Array.from(localTitle).slice(0, 120).join('') : null;
+    entries.push({key: name.key, resource: name.resource, tab: name.tab, type: name.type, updated, readable, ...(title ? {title} : {})});
   }
   return entries.sort((left, right) => right.updated - left.updated || left.key.localeCompare(right.key));
 }
@@ -56,14 +48,14 @@ function readRecord(scope, key, storage) {
   if (!name) throw Error('This draft is outside the active resource family.');
   const raw = storage.getItem(key);
   if (raw === null) throw Error('This draft is no longer stored on this device.');
-  let record, checkpointRaw = null;
+  let record, checkpoint, checkpointRaw = null;
   try {
     record = JSON.parse(raw);
     if (name.type === 'text') {
       if (record?.schema !== 1 || typeof record.value !== 'string' || typeof record.basis !== 'string') throw Error();
     } else {
       if (!record?.recovery || typeof record.recovery !== 'object' || Array.isArray(record.recovery)) throw Error();
-      let checkpoint = record.checkpoint;
+      checkpoint = record.checkpoint;
       if (record.schema === 3) {
         if (typeof record.checkpointKey !== 'string' || !record.checkpointKey.startsWith(key + ':checkpoint:')) throw Error();
         checkpointRaw = storage.getItem(record.checkpointKey);
@@ -78,7 +70,7 @@ function readRecord(scope, key, storage) {
     return {...name, raw, checkpointRaw, readable: false};
   }
   if (storage.getItem(key) !== raw) throw Error('This draft changed in another tab. Refresh the list.');
-  return {...name, raw, checkpointRaw, record, readable: true};
+  return {...name, raw, checkpointRaw, record, checkpoint, readable: true};
 }
 
 export function exportRetainedDraft(scope, key, storage = globalThis.localStorage) {
