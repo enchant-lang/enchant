@@ -181,8 +181,11 @@
     :args (mapv (fn [value] {:op :lit :val value}) arguments)}
    {} {"macro" identity})))
 
-(defn with-phase-entries [baseline samples-path action]
- (let [bytes (File/read! samples-path)
+(defn with-phase-entries
+ ([baseline samples-path action] (with-phase-entries baseline samples-path nil action))
+ ([baseline samples-path mark action]
+ (let [start (when mark (mark))
+       bytes (File/read! samples-path)
        samples (json/decode bytes)
        _ (assert (= "bl.native.pinned-macro-phase-samples" (get samples "schema")))
        _ (assert (= (:sdk-descriptor-sha256 artifact/validation-context) (get samples "sdk-descriptor-sha256")))
@@ -202,13 +205,16 @@
                                    (atomics/add calls 1 1)
                                    (invoke! args))]))) names)
          prepared (erlang/monotonic_time :microsecond)
+         _ (when mark (mark :macro-preparation nil start))
          result (action entries calls)]
     (assoc result :preparation-us (- prepared started) :interpreted-expansions (atomics/get calls 1)
      :sample-report-sha256 (artifact/sha bytes)
      :session-work (into {} (map (fn [[name session]]
                                   [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))))
    (finally
-    (doseq [[_ session] @sessions] (BeamLisp.AOT/close_constructor_session! session))))))
+    (let [closing (when mark (mark))]
+     (doseq [[_ session] @sessions] (BeamLisp.AOT/close_constructor_session! session))
+     (when mark (mark :macro-close nil closing))))))))
 
 (defn registry-input-state [input scope ancestors]
  (let [[operation slot key] input
@@ -247,7 +253,10 @@
       (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
      (BeamLisp.Compiler/with_fresh_names
       (fn []
-       (let [prepare! #(action (build/prepare-ns (:path member)) phase-callables staging)]
+       (when mark (mark :macro-install (:ns member) staging))
+       (let [prepare! (fn []
+                        (let [start (when mark (mark))]
+                         (action (build/prepare-ns (:path member)) phase-callables start)))]
         (if with-stage (with-stage prepare!) (prepare!)))))))))))
 
 (defn lower-with-snapshot [prepared]
@@ -461,10 +470,11 @@
   ;; inputs, and cannot supply a replacement payload for an accepted member.
   ;; Macro recipes are from the exact SDK and the sampling evidence belongs
   ;; to the donor. Staging and registry validation use the candidate rows.
-  (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path
+  (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path mark
    (fn [entries _]
     (let [results (mapv (fn [ns]
-                         (let [entry (read-registry-member (get-in receipt [:members ns]))
+                         (let [start (when mark (mark))
+                               entry (read-registry-member (get-in receipt [:members ns]))
                                old (get-in donor [:units ns])
                                entry (cond
                                        (:reason entry) entry
@@ -484,6 +494,7 @@
                                        (and (= :native-bound-registry-v9 (:schema receipt)) (not (true? (:checked-observable-effects entry))))
                                        {:reason :missing-effect-checks}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
+                               _ (when mark (mark :member-receipt ns start))
                                mutation (when (and control-root (= "host.delay" ns))
                                           #(BeamLisp.Env/add_search_path control-root))
                                ;; Known refusals need no matching callable identities.
