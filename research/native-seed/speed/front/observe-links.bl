@@ -9,6 +9,7 @@
 ;;   BASE_PARTITION BASE_LINK_ROWS --capture-source RECEIPT.etf
 ;;   EDITED_PARTITION EDITED_LINK_ROWS --source-shadow REPORT BASE_PARTITION RECEIPT.etf
 ;;   PARTITION LINK_ROWS --macro-context-control REPORT
+;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
 ;; retains the historical ambient naming mode for comparison.
@@ -76,11 +77,16 @@
        (update-in [:macro-bindings [ns head]] (fn [known] (conj (or known #{}) origin))))))
 
 (defn- record-link [effects op key value]
- (let [events (:ordered-links effects [])]
+ (let [events (:ordered-links effects []) scope (elem key 0) member [(elem key 2) (elem key 3)]]
   (cond
-   (not= (elem key 0) (:scope effects)) (update effects :outside-links (fn [n] (inc (or n 0))))
+   (not= scope (:scope effects))
+   (let [ancestor (get-in effects [:ancestor-slots scope])
+         next (update effects :outside-links (fn [n] (inc (or n 0))))]
+    (if (and (= op :read) ancestor)
+     (update next :ancestor-reads (fn [reads] (conj (or reads #{}) [ancestor member value])))
+     (assoc next :unexplained-scope true)))
    (>= (count events) (inc trace-limit)) effects
-   :else (assoc effects :ordered-links (conj events [op [(elem key 2) (elem key 3)] value])))))
+   :else (assoc effects :ordered-links (conj events [op member value])))))
 
 (defn- collector [calls pending hits misses reads sources effects]
  (receive
@@ -128,7 +134,8 @@
 
 (defn- trace! [action]
  (let [owner (erlang/self) scope (BeamLisp.Env/env_id)
-       observer (spawn (fn [] (collector 0 nil #{} #{} [] #{} {:scope scope})))
+       ancestors (into {} (map-indexed (fn [index id] [id index]) (rest (BeamLisp.Env/chain))))
+       observer (spawn (fn [] (collector 0 nil #{} #{} [] #{} {:scope scope :ancestor-slots ancestors})))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
        match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))
        source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))
@@ -193,6 +200,44 @@
 
 (defn- receipt-matches? [receipt initial]
  (every? (fn [[key outcome]] (= outcome (get initial key))) (:reads receipt)))
+
+(defn- ancestor-outcome [chain [index [ns name]]]
+ (if-let [scope (nth chain index nil)]
+  (let [rows (ets/lookup :beam_lisp_vars (BeamLisp.Env/pfx scope (tuple :link ns name)))]
+   (when (seq rows) (value-identity (elem (first rows) 1))))
+  :unavailable))
+
+(defn- ancestor-snapshot [receipts]
+ (let [chain (vec (BeamLisp.Env/chain))
+       keys (distinct (mapcat (fn [receipt]
+                               (map (fn [[index member _]] [index member]) (:ancestor-reads receipt))) receipts))]
+  (into {} (map (fn [key] [key (ancestor-outcome chain key)]) keys))))
+
+(defn- ancestor-matches? [receipt snapshot]
+ (and (not (:unexplained-scope receipt))
+      (every? (fn [[index member outcome]] (= outcome (get snapshot [index member] :unavailable)))
+              (:ancestor-reads receipt))))
+
+(defn- scope-receipt [observation]
+ {:ancestor-reads (vec (sort (get-in observation [:effects :ancestor-reads])))
+  :unexplained-scope (boolean (get-in observation [:effects :unexplained-scope]))})
+
+(defn- outer-control []
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [ns "native.ancestor-write-control" name "target" qualified (str ns "/" name)
+         initial (tuple :Elixir.BeamLisp.Ns.Compiler {} nil)
+         later (tuple :Elixir.BeamLisp.Env {} nil)
+         _ (BeamLisp.Env/put_link ns name initial)
+         [seen observation] (BeamLisp.Env/isolated (fn [] (trace! (fn [] (BeamLisp.Env/link ns qualified)))))
+         receipt (scope-receipt observation)]
+    (assert (= (tuple :ok initial) seen))
+    (assert (= [[0 [ns name] (value-identity initial)]] (:ancestor-reads receipt)))
+    (assert (ancestor-matches? receipt (ancestor-snapshot [receipt])))
+    (BeamLisp.Env/put_link ns name later)
+    (assert (not (ancestor-matches? receipt (ancestor-snapshot [receipt]))))
+    {:schema "bl.native.link-ancestor-control" :version 1
+     :verified-ancestor-reads (count (:ancestor-reads receipt)) :changed-parent-row-refused true}))))
 
 (defn- ordered-report [observation]
  (let [{:keys [reads writes]} (link-receipt observation)]
@@ -270,7 +315,7 @@
   (if (String/starts_with? absolute root) (subs absolute (count root)) absolute)))
 
 (defn- capture-source [closure baseline]
- {:schema :native-source-shadow-v1
+ {:schema :native-source-shadow-v2
   :sdk (:sdk-pin closure) :options (:options closure) :order (:order closure)
   :link-rows-sha256 (:sha256 baseline)
   :members (into {}
@@ -281,6 +326,7 @@
            (assert (erlang/=:= (def-bytes member) (def-bytes compiled)))
            (assert (:accepted (replay-links observed (:local-links baseline))))
            [ns {:defs (artifact/sha (def-bytes member)) :link-receipt (link-receipt observed)
+                :scope-receipt (scope-receipt observed)
                 :paths (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest])
                                                 (:sources observed)))))}]))
         (:order closure)))})
@@ -293,7 +339,7 @@
        bytes (File/read! receipt-path)
        _ (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
        receipt (erlang/binary_to_term bytes)
-       _ (assert (= :native-source-shadow-v1 (:schema receipt)))
+       _ (assert (= :native-source-shadow-v2 (:schema receipt)))
        _ (assert (= (:sdk-pin baseline) (:sdk-pin closure) (:sdk receipt)))
        _ (assert (= (:options baseline) (:options closure) (:options receipt)))
        _ (assert (= (:order baseline) (:order closure) (:order receipt)))
@@ -303,6 +349,7 @@
        before-scan (erlang/monotonic_time :microsecond)
        identities (into {} (map (fn [path] [path (read-source-identity path)])
                           (distinct (mapcat (fn [entry] (map first (:paths entry))) (vals (:members receipt))))))
+       outer (ancestor-snapshot (map :scope-receipt (vals (:members receipt))))
        started (erlang/monotonic_time :microsecond)
        plan (mapv (fn [ns]
                     (let [old (get-in baseline [:units ns]) new (get-in closure [:units ns])
@@ -311,11 +358,13 @@
                                                       (or (= digest :unavailable) (not= digest (get identities path))))
                                                     (:paths record)))
                           own? (not= (:source-sha256 old) (:source-sha256 new))
-                          links? (not (receipt-matches? (:link-receipt record) (:local-links candidate)))]
+                          links? (not (receipt-matches? (:link-receipt record) (:local-links candidate)))
+                          outer? (not (ancestor-matches? (:scope-receipt record) outer))]
                      (assert (= (:path old) (:path new)))
                      (assert (= (:defs record) (artifact/sha (def-bytes old))))
                      {:namespace ns :changed-source own? :changed-dependencies (mapv first changed-paths)
-                      :changed-links links? :reused (not (or own? links? (seq changed-paths)))}))
+                      :changed-links links? :changed-ancestor-links outer?
+                      :reused (not (or own? links? outer? (seq changed-paths)))}))
                   (:order closure))
        planned (erlang/monotonic_time :microsecond)
        results (mapv (fn [decision]
@@ -325,10 +374,11 @@
                         (assoc decision :exact-clean-definitions
                                (and (= (:source-sha256 actual) (:source-sha256 member))
                                     (erlang/=:= (def-bytes actual) (def-bytes member)))))) plan)]
-  {:schema "bl.native.source-replay-shadow" :version 1 :reuse-authority false
+  {:schema "bl.native.source-replay-shadow" :version 2 :reuse-authority false
    :baseline-receipt-sha256 (artifact/sha bytes) :candidate-link-rows-sha256 (:sha256 candidate)
    :baseline-link-rows-sha256 (:link-rows-sha256 receipt)
-   :observed-source-paths (count identities) :source-scan-us (- started before-scan) :plan-us (- planned started)
+   :observed-source-paths (count identities) :observed-ancestor-keys (count outer)
+   :source-and-ancestor-scan-us (- started before-scan) :plan-us (- planned started)
    :candidate-compilation-and-oracle-comparison-us (- (erlang/monotonic_time :microsecond) planned)
    :members results}))
 
@@ -454,6 +504,7 @@
                 (= selected "--capture-source") (capture-source closure baseline)
                 source-shadow? (source-shadow closure baseline comparison source-receipt)
                 (= selected "--macro-context-control") (macro-context-control closure baseline)
+                (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
                 (= selected "--sequential") (observe-sequential closure baseline false)
