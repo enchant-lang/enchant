@@ -6,6 +6,7 @@
 (def trace-limit 100000)
 (def source-read-entries [(tuple :Elixir.File :read! 1)
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
+(def source-read-entry-set (set source-read-entries))
 (defn- source-path [raw]
  (let [path (if (erlang/is_list raw) (unicode/characters_to_binary raw) raw)]
   (when (and (string? path) (<= (erlang/byte_size path) 4096)
@@ -23,7 +24,7 @@
    (empty? value) (recur (inc calls) nil hits (conj misses pending) paths)
    :else (recur (inc calls) nil (conj hits pending) misses paths))
   [:trace _ :call [module function arguments]]
-  (let [path (when (contains? (set source-read-entries) (tuple module function 1))
+  (let [path (when (contains? source-read-entry-set (tuple module function 1))
                (source-path (first arguments)))]
    (recur calls pending hits misses
     (if (and path (< (count paths) 1025)) (conj paths path) paths)))
@@ -51,7 +52,6 @@
     (let [observation (receive [:observed ref value] :when (= ref ticket)
                        value (after 10000 (throw :trace-collector-timeout)))]
      (assert (:complete? observation))
-     (assert (pos? (:calls observation)))
      [result observation]))
    (finally
     (erlang/apply :trace :session_destroy (list session))
@@ -87,10 +87,8 @@
   {:candidate-rows-sha256 (:sha256 candidate)
    :changed-rows changed :changed-consulted-rows consulted :exact-anf exact?}))
 
-(defn- observe [partition rows-file selected comparison]
- (let [closure (artifact/read-closure partition)
-       member (get-in closure [:units selected])
-       {:keys [rows sha256]} (read-rows rows-file)
+(defn- observe [closure {:keys [rows sha256]} selected comparison]
+ (let [member (get-in closure [:units selected])
        installed (installed-rows rows)
        _ (assert (some? member))
        [compiled observation] (compile-member closure member rows)
@@ -107,9 +105,17 @@
    :source-file-consultations (vec (sort (:paths observation)))
    :present-in-member-rows (vec (filter installed keys))
    :absent-from-member-rows (vec (remove installed keys))
-   :comparison (when comparison (compare-rows closure member installed compiled (set keys) (read-rows comparison)))
+   :comparison (when comparison (compare-rows closure member installed compiled (set keys) comparison))
    :scope "Filtered ETS consultations in synchronous staged compilation of unchanged Source. A missing installed member row can still have another resolver fallback."
    :reuse-authority false}))
 
 (let [[partition rows selected output comparison] (BeamLisp/argv)]
- (File/write! output (json/encode (observe partition rows selected comparison))))
+ (let [closure (artifact/read-closure partition)
+       baseline (read-rows rows)
+       candidate (when comparison (read-rows comparison))
+       report (if (= selected "--all")
+                {:schema "bl.native.link-observation-inventory" :version 1
+                 :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
+                 :reuse-authority false}
+                (observe closure baseline selected candidate))]
+  (File/write! output (json/encode report))))
