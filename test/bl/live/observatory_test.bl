@@ -111,6 +111,26 @@
         (erlang/trace_pattern (tuple :erlang :binary_to_term 2) false (list :local :call_count))
         (projection/stop! totals)))))
 
+(deftest incremental-projection-explains-published-work-and-retained-inputs
+  (let [totals (projection/start-incremental! :observatory/input-work
+                 {:source-id "input-work/v1" :group-by [:team]})
+        observation (view/open {:projections {:totals totals}})
+        now (erlang/system_time :millisecond)]
+    (try
+      (projection/subscribe! totals)
+      (projection/delta! totals {:sequence 1 :now now :upsert [{:id 1 :at now :team "private-input"}]})
+      (let [sample (view/snapshot observation)
+            row (first (:projections sample))
+            html (view/page sample)]
+        (is (= 1 (:wanted-basis row) (:published-basis row)))
+        (is (= {:changed 1 :expired 0} (:work row)))
+        (is (= 1 (get-in row [:inputs :rows])))
+        (is (<= 1 (get-in row [:inputs :charge]) (get-in row [:inputs :limit])))
+        (is (String/contains? html "published basis 1"))
+        (is (String/contains? html "1 changed rows"))
+        (is (not (String/contains? (json/encode sample) "private-input"))))
+      (finally (projection/stop! totals)))))
+
 (deftest metadata-read-does-not-acknowledge-a-subscriber-wake
   (let [totals (projection/start-incremental! :observatory/wake {:source-id "wake/v1"})
         owner (:owner totals) token (:read totals)]
