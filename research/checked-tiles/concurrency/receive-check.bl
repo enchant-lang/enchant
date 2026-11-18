@@ -1,0 +1,66 @@
+(ns checked-tiles.receive-check
+  (:require [oxiz.worker :as worker] [oxiz.oracle :as ox] [oracle] [z3pool] [bl.json :as json]))
+
+; Two ordered slots: 0 = an unmatched tag, 1 = preview, 2 = cancel.
+; Index -1 means the receive would wait at this snapshot. An unbounded
+; semantics of waiting belongs to the machine, outside this finite query.
+(def context
+  ['(declare-const h Int) '(declare-const t Int)
+   '(assert (and (<= 0 h) (<= h 2) (<= 0 t) (<= t 2)))
+   '(define-fun old ((x Int)) Bool (= x 2))
+   '(define-fun fresh ((x Int)) Bool (or (= x 1) (= x 2)))
+   '(define-fun chosen ((a Bool) (b Bool)) Int (ite a 0 (ite b 1 (- 1))))
+   '(define-fun before () Int (chosen (old h) (old t)))
+   '(define-fun after () Int (chosen (fresh h) (fresh t)))])
+(def questions
+  [[:changed-choice
+    ['(assert (and (>= before 0) (>= after 0) (not (= before after))))] :sat]
+   [:agreement-feasible
+    ['(assert (and (= (old h) (fresh h)) (= (old t) (fresh t)) (>= before 0)))] :sat]
+   [:same-match-different-slot
+    ['(assert (and (= (old h) (fresh h)) (= (old t) (fresh t)) (not (= before after))))] :unsat]])
+
+; Concrete BEAM selective receive uses real messages. Each run enqueues
+; exactly two private test tags and drains any residual tags before returning.
+(defn drain [n]
+  (loop [left n messages []]
+    (if (= left 0) messages
+      (let [m (receive :journal-other 0 :journal-preview 1 :journal-cancel 2 (after 0 :absent))]
+        (assert (int? m))
+        (recur (dec left) (conj messages m))))))
+(defn observe [h t newer]
+  (let [tags [:journal-other :journal-preview :journal-cancel]
+        pid (erlang/self)
+        _ (erlang/send pid (nth tags h))
+        _ (erlang/send pid (nth tags t))
+        chosen (if newer
+                 (receive :journal-preview 1 :journal-cancel 2 (after 0 -1))
+                 (receive :journal-cancel 2 (after 0 -1)))]
+    {:chosen chosen :remaining (drain (if (= chosen -1) 2 1))}))
+
+(defn replay [label answer]
+  (when (= :sat (:status answer))
+    (let [coords (:model answer) h (get coords "h") t (get coords "t")
+          _ (assert (and (int? h) (int? t) (<= 0 h) (<= h 2) (<= 0 t) (<= t 2)))
+          old (observe h t false) new (observe h t true)]
+      (case label
+        :changed-choice
+        (assert (and (= [1 2] [h t]) (= {:chosen 2 :remaining [1]} old)
+                     (= {:chosen 1 :remaining [2]} new)))
+        :agreement-feasible
+        (assert (and (not= h 1) (not= t 1) (= 2 (:chosen old)) (= old new))))
+      {:mailbox [h t] :old old :new new})))
+
+(try
+  (let [rows (mapv
+              (fn [[label extra expected]]
+                (let [result (worker/with-worker {}
+                               (fn [handle] (ox/compare handle (oracle/obligation label (into context extra)))))
+                      z (:decision result) o (:candidate result)]
+                  (assert (= expected (:status z)) (pr-str z))
+                  (assert (= expected (:status o)) (pr-str o))
+                  {:question label :z3 (:status z) :oxiz (:status o) :engine (:backend o)
+                   :z3-replay (replay label z) :oxiz-replay (replay label o)}))
+              questions)]
+    (println (json/encode {:sdk (System/get_env "BL_SDK_PRODUCT") :questions rows})))
+  (finally (z3pool/pool-stop!)))
