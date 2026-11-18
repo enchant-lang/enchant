@@ -317,7 +317,9 @@ def run(out, edit, manual):
             resume.set()
         check(sha(pending.result()) == row_a['rgba_sha256'], 'old frame changed during save')
         check(owner.request('observe',ticket='frame')['table'] == values_a, 'old frame Source lease lost')
-        check(owner.request('select')['digest'] != row_a['digest'], 'stale frame eligible for publication')
+        stale_frame = owner.request('publish', id='A', expected=row_a['digest'])
+        check(stale_frame == {'status': 'stale', 'digest': row_b['digest']}, stale_frame)
+        evidence['late_frame_publication'] = stale_frame
         owner.request('release', ticket='frame')
         event('old frame discarded; compiler lease holds A')
         native.send('(resume)')
@@ -329,6 +331,7 @@ def run(out, edit, manual):
         waiting = owner.request('retire', id='A')
         check(waiting['status'] == 'waiting', waiting)
         event('A retirement waiting on compile registration')
+        evidence['late_compile_publication'] = stale
         owner.request('release',ticket='compile')
         retired = owner.request('retire',id='A')
         check(retired['status'] == 'retired', retired)
