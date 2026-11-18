@@ -155,7 +155,7 @@ keeps the cost one analysis per file instead of one per function.
             ;; House rules may hold mutable guards. They ALWAYS execute; only
             ;; the compiler's compact facts are retained, never rule verdicts.
             smells (:smells (lint/lint-forms rules path src
-                              (or @forms (BeamLisp.Reader/read_string src))))]
+                              (or @forms (lsp/retained-forms digest) (BeamLisp.Reader/read_string src))))]
         (let [diagnostics (into (:diagnostic-info core) (typed/ambient-warnings))]
           (assoc core :path path :sha digest :smells (count smells) :smell-info (vec smells)
                  :diagnostic-info diagnostics :diagnostics (count diagnostics))))

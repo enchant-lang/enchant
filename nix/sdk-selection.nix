@@ -15,19 +15,24 @@ pkgs.runCommand "beam-lisp-sdk-selection" {
   ln -s ${coordinator} "$out/preparation-coordinator"
   # Selection adds product references, not a second runtime boot implementation.
   ln -s ${image}/boot.exs "$out/boot.exs"
-  cat > "$out/bin/bl" <<EOF
+  cat > "$out/bin/bl-cold" <<EOF
   #!${pkgs.runtimeShell}
   unset BL_INTERNAL_PRODUCER
   export PATH=${platform}/bin:\$PATH
   export BL_ARTIFACT_PLATFORM=${platform}/artifact-platform
   export BL_PREPARATION_COORDINATOR=${coordinator}
   export BL_SDK_PRODUCT="$out"
-  export BL_ROOT="$out/image" BL_EBIN="$out/image/ebin" BL_BUILD_ID=src BEAM_LISP_DEV=0
-  export BL_BIN=${platform}/bin/drop-launcher
+  export BL_ROOT="$out/image" BL_EBIN="$out/image/ebin" BEAM_LISP_DEV=0
+  export BL_BIN="$out/bin/bl"
   export BL_PREPARED_NATIVES="$(readlink -f ${platform}/native-products)"
   exec ${platform}/bin/elixir "$out/boot.exs" "\$@"
   EOF
-  chmod 555 "$out/bin/bl"
+  cat > "$out/bin/bl" <<EOF
+  #!${pkgs.runtimeShell}
+  export PATH=${platform}/bin:\$PATH
+  exec ${platform}/bin/drop-launcher --sdk-selection "$out" -- "\$@"
+  EOF
+  chmod 555 "$out/bin/bl" "$out/bin/bl-cold"
   python3 - <<'PY'
   import json, os
   from pathlib import Path

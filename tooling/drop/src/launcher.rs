@@ -450,7 +450,10 @@ fn maintenance(argv: &[String], t: &Trailer, sha8: &str) -> ! {
 /// The failure it prevents, seen for real: `bl vm start gateway` in an installed
 /// drop detached `setsid <payload>/bin/bl vm start gateway --foreground`, and the release script
 /// answered `Usage: bl COMMAND … ERROR: Unknown command gateway`.
+static SDK_SELECTION: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn self_bl() -> std::path::PathBuf {
+    if let Some(sdk) = SDK_SELECTION.get() { return sdk.join("bin/bl"); }
     if let Some(root) = checkout_root() { return root.join("bin/bl"); }
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("bl"))
 }
@@ -551,7 +554,9 @@ fn stop_daemon(bin: &std::path::Path, root: &std::path::Path) {
 /// lifecycle helpers use, so the entry expression is spelled once.
 fn release_command(bin: &std::path::Path) -> Command {
     let mut cmd = Command::new(bin);
-    if let Some(root) = checkout_root() {
+    if SDK_SELECTION.get().is_some() {
+        cmd.env("BL_BIN", self_bl());
+    } else if let Some(root) = checkout_root() {
         cmd.env("BL_CHECKOUT_COLD", root).env("BL_BIN", self_bl());
     } else {
         cmd.arg("eval").arg(CLI_ENTRY).env("BL_BIN", self_bl());
@@ -602,6 +607,18 @@ fn main() {
     if argv.first().map(String::as_str) == Some("--checkout-prerequisites") {
         checkout_prerequisites(&argv[1..]).unwrap_or_else(|error| fail(&error));
         return;
+    }
+    if argv.first().map(String::as_str) == Some("--sdk-selection") {
+        let sdk = argv.get(1).and_then(|s| std::fs::canonicalize(s).ok())
+            .filter(|p| p.to_str().is_some_and(nix_artifact::store_object)
+                && p.join("bin/bl-cold").is_file() && p.join("artifact.json").is_file())
+            .unwrap_or_else(|| fail("expected an immutable SDK selection"));
+        if argv.get(2).map(String::as_str) != Some("--") { fail("missing SDK argument separator"); }
+        for key in ["BL_CHECKOUT_ROOT", "BL_CHECKOUT_COLD", "BL_CHECKOUT_SOURCE_GENERATION",
+                    "BL_CHECKOUT_GENERATION", "BL_CHECKOUT_SDK_INPUTS"] { std::env::remove_var(key); }
+        SDK_SELECTION.set(sdk.clone()).unwrap();
+        let name = sdk.file_name().unwrap().to_string_lossy();
+        exec_payload(&sdk, &clean_build_id(&name), &argv[3..]);
     }
     if argv.first().map(String::as_str) == Some("--checkout") {
         checkout_main(&argv[1..]);
@@ -781,6 +798,9 @@ const IDLE_EXIT_FILE: &str = "idle.bl";
 
 /// The text of `priv/std/vm/<file>` in the payload at `dest`, if it has one.
 fn payload_vm_source(dest: &std::path::Path, file: &str) -> Option<String> {
+    if SDK_SELECTION.get().is_some() {
+        return std::fs::read_to_string(dest.join("image").join(VM_SOURCE_DIR).join(file)).ok();
+    }
     std::fs::read_dir(dest.join("lib"))
         .into_iter()
         .flatten()
@@ -811,7 +831,7 @@ fn payload_default_transport(dest: &std::path::Path, shared: bool) -> Transport 
 }
 
 fn command_vm_for(bin: &std::path::Path) -> bool {
-    checkout_root().is_some() || try_read_trailer(bin)
+    SDK_SELECTION.get().is_some() || checkout_root().is_some() || try_read_trailer(bin)
         .is_some_and(|t| supports_command_vm(&install_dir().join(sha8_of(&t))))
 }
 
@@ -844,15 +864,15 @@ fn exec_payload(dest: &std::path::Path, sha8: &str, argv: &[String]) -> ! {
     // `bl` through `BL_BIN` gets it again. Set before any thread exists. A
     // payload that predates build-named daemons gets no id, so the launcher
     // and that payload's daemon agree on the older `<tree>.sock`.
-    if checkout_root().is_some() || names_its_build(dest) {
+    if SDK_SELECTION.get().is_some() || checkout_root().is_some() || names_its_build(dest) {
         std::env::set_var("BL_BUILD_ID", sha8);
     } else {
         std::env::remove_var("BL_BUILD_ID");
     }
-    if checkout_root().is_none() { touch_used(dest); }
+    if SDK_SELECTION.get().is_none() && checkout_root().is_none() { touch_used(dest); }
     let argv = argv.to_vec();
 
-    let bin = dest.join(if cfg!(windows) { r"bin\bl.bat" } else { LAUNCHER_REL });
+    let bin = dest.join(if SDK_SELECTION.get().is_some() { "bin/bl-cold" } else if cfg!(windows) { r"bin\bl.bat" } else { LAUNCHER_REL });
 
     // ── warm-VM fast path (unix) ────────────────────────────────────────────
     // A warm VM serves the command over a socket in ~30ms instead of a ~1.2s
@@ -882,7 +902,15 @@ fn exec_payload(dest: &std::path::Path, sha8: &str, argv: &[String]) -> ! {
         let shared = checkout_root().is_none() && shared_for(&argv, env_bl.as_deref()) && supports_shared_vm(dest);
         // Whether the project shares its VM decides the DEFAULT transport (an own
         // VM attaches, a shared one starts); anything the user declared still wins.
-        let mut t = if checkout_root().is_some() {
+        let mut t = if SDK_SELECTION.get().is_some() {
+            let config = std::fs::read_to_string(config_path()).ok();
+            declared_transport(&argv, env_bl.as_deref(), config.as_deref()).unwrap_or_else(|| {
+                if env_bl.is_some() && matches!(verb_of(&argv).as_deref(),
+                    Some("serve" | "codebase" | "check" | "realm" | "vm")) {
+                    Transport::Require
+                } else { Transport::Cold }
+            })
+        } else if checkout_root().is_some() {
             let config = std::fs::read_to_string(config_path()).ok();
             checkout_transport(&argv, env_bl.as_deref(), config.as_deref())
         } else {

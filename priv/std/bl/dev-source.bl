@@ -16,14 +16,19 @@
                    (= :symbol (node/node-tag (node/node-form arg))))
           {:name (node/node-name (node/node-form arg)) :line (:line (node/node-pos form))})))))
 
-(defn- summary [src]
-  (let [forms (BeamLisp.Reader/read_string src)
-        [namespace requires] (BeamLisp.SourceGraph/header*-nodes forms)
+(defn- outline [forms]
+  (let [[namespace requires] (BeamLisp.SourceGraph/header*-nodes forms)
         definitions (vec (keep definition forms))
         repeated (->> definitions (map :name) frequencies (filter #(> (second %) 1)) (map first) sort)]
     {:namespace namespace :definitions (count definitions) :symbols (vec (take max-items definitions))
      :imports (count requires) :requires (vec (take max-items requires))
      :repeat-count (count repeated) :repeated (vec (take max-items repeated))}))
+
+(defn- summary [src]
+  (let [parsed (BeamLisp.Ns.Reader/read src {:diagnostics :collect})]
+    (if-let [error (:error parsed)]
+      {:error (select-keys error [:line :col :msg])}
+      (outline (:ok parsed)))))
 
 (defn inspect-source
   "Read and outline one source buffer. Tools share one exact parsed summary."
@@ -31,12 +36,15 @@
   (when-not (and (string? src) (<= (erlang/byte_size src) max-bytes))
     (throw (ex-info "Quick tools read at most 64 KiB from one source" {})))
   (let [digest (Base/encode16 (crypto/hash :sha256 src) (list (tuple :case :lower)))
-        namespaces ["bl.dev-source" "reader-node"]]
+        namespaces ["bl.dev-source" "reader" "reader-node" "diag"]]
     (activity/with-operation mode {:subject (or path "Document") :path path :source digest}
       (fn []
         (let [revision (provenance/namespace-revision namespaces)
               _ (activity/evidence! revision namespaces)
               result (flight/value :bl.dev-source.summary digest revision #(summary src))]
+          (when-let [error (:error result)]
+            (activity/source-line! (:line error))
+            (throw (ex-info (:msg error) error)))
           (activity/note! (if (= mode :quick-check)
                             {:repeated (:repeat-count result)}
                             {:definitions (:definitions result) :imports (:imports result)}))
@@ -53,6 +61,28 @@
       (String/starts_with? bytes "#!") (let [lines (String/split bytes "\n" (list (tuple :parts 2)))]
                                       (if (second lines) (str "\n" (second lines)) ""))
       :else bytes)))
+
+(defn- remember [entries relative digest]
+  (vec (take 64 (cons [relative digest] (remove #(= relative (first %)) entries)))))
+
+(defn watch! [root directory reader]
+  (let [seen (atom [])
+        saved (fn [path]
+                (let [relative (Path/relative_to path root)]
+                  (when (and (= ".bl" (Path/extname path)) (activity/location relative)
+                             (not-any? #(String/starts_with? % ".") (Path/split relative)))
+                    (if (File/regular? path)
+                      (try
+                        (let [src (read-bounded path) digest (sha256-hex src)]
+                          (when-not (some #{[relative digest]} @seen)
+                            (try (activity/with-reader reader #(inspect-source :quick-check relative src))
+                              (finally (swap! seen remember relative digest)))))
+                        (catch _ nil))
+                      (swap! seen #(vec (remove (fn [item] (= relative (first item))) %))))))
+                {:status :checked})]
+    (BeamLisp.ReloadWatcher/start_link
+      (u/kw [:name (tuple :global (tuple :dev-source (erlang/make_ref)))]
+            [:dirs (list directory)] [:on_save saved]))))
 
 (defn- show-summary [mode result]
   (if (= :quick-check mode)

@@ -9,10 +9,11 @@
     (File/read! (Path/join root file))
     (web/asset (str "lib/live/" file))))
 
-(defn- chip []
+(defn- chip [reader]
   (let [scale (json/encode (select-keys (token/theme) [:space :radius :color :text]))]
     [[:div {:id "enchant-inspector-source" :key "enchant-inspector"
             :data-tool-run (str (activity/current-id))
+            :data-check-error (str (activity/quick-error reader))
             :data-loom-scale (if (<= (count scale) 16384) scale "{}") }]
      [:script {:src "/__enchant/inspector.js" :defer true :key "enchant-inspector-script"}]]))
 
@@ -25,7 +26,7 @@
     (if (= true (authorize (:me context)))
       (activity/with-reader reader
         (fn [] (activity/with-operation :render {:subject "Page"}
-          (fn [] [:div {:data-enchant-app ""} (screen context) (chip)]))))
+          (fn [] [:div {:data-enchant-app ""} (screen context) (chip reader)]))))
       (screen context)))))
 
 (defn- instrument-intent [entry authorize reader]
@@ -38,6 +39,8 @@
         (if (map? entry) (assoc entry :perform wrapped) wrapped)))))
 
 (defn close! [app]
+  (when-let [pid (:live/save-watcher app)]
+    (when (Process/alive? pid) (GenServer/stop pid)))
   (when-let [reader (:live/inspector app)] (activity/close! reader))
   nil)
 
@@ -71,9 +74,16 @@
           model (try (observations/open (assoc options :activity reader))
                   (catch e (activity/close! reader) (throw e)))
           read-snapshot (observations/handler model authorize)
-          previous (:http app)]
+          previous (:http app)
+          watcher (when-let [entry (Process/get :bl.serve/entry)]
+                    (BeamLisp.Loader/ensure_loaded "bl.dev-source")
+                    (let [[status value] ((BeamLisp.Env/fetch! "bl.dev-source" "watch!")
+                                           (BeamLisp/cwd) (Path/dirname entry) reader)]
+                      (if (= :ok status) value
+                        (do (IO/puts :stderr (str "bl serve: save checks unavailable: " (pr-str value))) nil))))]
       (assoc app
         :live/inspector reader
+        :live/save-watcher watcher
         :intents (into {} (map (fn [[op entry]] [op (instrument-intent entry authorize reader)]) (:intents app {})))
         :routes (mapv (fn [[path screen]] [path (decorate screen authorize reader)]) (:routes app))
         :http (fn [conn path]

@@ -134,11 +134,14 @@ server; a program that starts its server and returns parks here forever.
     (if (or production? (= false requested) (= false (:devtools project))) :off :on)))
 
 (defn- run-entry! [entry mode]
-  (let [previous (Process/get :bl.serve/devtools)]
+  (let [previous (Process/get :bl.serve/devtools)
+        previous-entry (Process/get :bl.serve/entry)]
     (try
       (Process/put :bl.serve/devtools mode)
+      (Process/put :bl.serve/entry entry)
       (BeamLisp/run_file entry)
       (finally
+        (Process/put :bl.serve/entry previous-entry)
         (if (nil? previous)
           (Process/delete :bl.serve/devtools)
           (Process/put :bl.serve/devtools previous))))))

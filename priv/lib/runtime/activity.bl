@@ -64,6 +64,17 @@
        :recent (mapv #(public-row % time) (reverse (:recent t)))
        :dropped (:dropped t) :limits {:active max-active :recent max-recent}})))
 
+(defn quick-error [reader]
+  (let [t (get @tapes (:scope reader))]
+    (when (contains? (:readers t #{}) (:lease reader))
+      (loop [rows (reverse (:recent t)) seen #{}]
+        (when-let [row (first rows)]
+          (let [path (get-in row [:location :path])]
+            (if (and path (= :quick-check (:tool row)) (not (contains? seen path)))
+              (if (= "failed" (:state row)) (:id row)
+                (recur (rest rows) (conj seen path)))
+              (recur (rest rows) seen))))))))
+
 (defn receipt
   "Read a decision by its sequence within this tape. Retired entries expire
    without retaining a tombstone or revealing another tape's decisions."
@@ -118,6 +129,10 @@
   [bytes evictions]
   (edit! #(-> % (update-in [:cache :kept-bytes] (fn [n] (+ (or n 0) bytes)))
                (update-in [:cache :evictions] (fn [n] (+ (or n 0) evictions))))))
+
+(defn source-line! [line]
+  (when (and (int? line) (pos? line))
+    (edit! #(if (:location %) (assoc-in % [:location :line] line) %))))
 
 (defn note! [summary]
   (edit! #(assoc % :summary (select-keys summary [:repeated :definitions :imports]))))

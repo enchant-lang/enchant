@@ -159,6 +159,10 @@
     if(sample)text(actions,'button',copyStatus||'Copy report').dataset.action='copy-report';
     text(actions,'button','Refresh').dataset.action='refresh';
   }
+  function sourcePosition(row) {
+    const location=row?.location;
+    return location?.line ? `${location.path}:${location.line}` : location?.path;
+  }
   const toolName = kind => ({editor:'Editor',check:'Check',index:'Index',render:'Page','quick-check':'Quick check',outline:'Outline'}[kind]||'Tool');
   function report() {
     return {
@@ -191,7 +195,7 @@
     const rows=[...(tape.running||[]),...(tape.recent||[])];
     if(!rows.length){text(body,'div','No tool runs yet').className='empty';return;}
     const chosen=rows.find(r=>r.id===selectedRun);
-    if(selectedRun&&!chosen){text(body,'small','Run no longer retained');selectedRun=null;}
+    if(selectedRun&&!chosen&&!flight&&sample){text(body,'small','Run no longer retained');selectedRun=null;}
     if(chosen) {
       const head=text(body,'div','');head.className='selection';text(head,'b',toolName(chosen.tool));
       const back=text(head,'button','All runs');back.dataset.action='all-runs';
@@ -199,7 +203,7 @@
       if(receipt?.pathname.startsWith('/__enchant/receipts/')) {
         const link=text(head,'a','Receipt');link.href=receipt.href;
       }
-      const location=chosen.location?.path;
+      const location=sourcePosition(chosen);
       const subject=text(body,'div','');subject.className='selection';
       const target=sourceTarget(chosen.link);
       if(location&&target) {
@@ -323,9 +327,18 @@
       bars($('.spark'),false);if(open&&!sampling())render();if(selected)reposition();
     });
   }
+  const toolsButton=$('[data-action=tools]');
+  function syncCheck() {
+    const id=Number(source()?.dataset.checkError);
+    toolsButton.toggleAttribute('data-error',id>0);
+    toolsButton.title=id>0?'Open source error':'Tool activity';
+    toolsButton.setAttribute('aria-label',toolsButton.title);
+    return id>0?id:null;
+  }
   function onPatch(e) {
     if(suspended)return;
     if(!source()){dispose();return;}
+    syncCheck();
     const ops=e.detail?.ops||[];history.push({ops:ops.length,run:runId()});if(history.length>32)history.shift();
     if(paint&&boxes.size<16)ops.slice(0,Math.min(paintCredits,16-boxes.size)).forEach(op=>{
       // Same Live path lookup used by the older tooling/studio.js instrument.
@@ -338,6 +351,7 @@
   function onMount(e) {
     if(suspended)return;
     if(!source()){dispose();return;}
+    syncCheck();
     history.push({ops:null,run:runId()});if(history.length>32)history.shift();
     if(paint&&paintCredits>0){paintCredits--;paintLookups++;flash(e.detail.root);}
     if(selected&&!selected.isConnected){selected=null;pickBox.style.display='none';}
@@ -359,7 +373,7 @@
       case 'open':open?close():activate('updates');break;
       case 'updates':activate('updates');break;
       case 'all-runs':selectedRun=null;render();break;
-      case 'tools':selectedRun=null;activate('tools');break;
+      case 'tools':selectedRun=syncCheck();activate('tools');break;
       case 'server':activate('server');break;
       case 'pick':activate('element');setPicking(!picking);break;
       case 'paint':paint=!paint;paintCredits=16;button.setAttribute('aria-pressed',String(paint));if(!paint)clearFlashes();break;
@@ -367,7 +381,7 @@
       case 'copy-report':if(sample)copy(JSON.stringify(report(),null,2));break;
       case 'copy-source': {
         const row=[...(sample?.activity?.running||[]),...(sample?.activity?.recent||[])].find(r=>r.id===selectedRun);
-        if(row?.location?.path)copy(row.location.path);
+        if(row?.location?.path)copy(sourcePosition(row));
         break;
       }
     }
@@ -384,6 +398,7 @@
   function pageShow(event) {
     if(!event.persisted||!suspended)return;
     if(!source()){dispose();return;}
+    syncCheck();
     suspended=false;
     queueDraw();
     if(open&&sampling())refresh();
@@ -403,6 +418,7 @@
     window.removeEventListener('resize',reposition);window.removeEventListener('pagehide',pageHide);
     window.removeEventListener('pageshow',pageShow);
   }
+  syncCheck();
   document.addEventListener('live:patch',onPatch);document.addEventListener('live:mount',onMount);document.addEventListener('visibilitychange',visibility);
   document.addEventListener('keydown',onKey,true);document.addEventListener('scroll',reposition,true);
   window.addEventListener('resize',reposition);window.addEventListener('pagehide',pageHide);

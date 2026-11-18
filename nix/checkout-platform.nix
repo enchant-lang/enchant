@@ -29,6 +29,7 @@ in pkgs.runCommand "beam-lisp-checkout-platform" {} ''
   for executable in ${pkgs.nix}/bin/*; do
     ln -s "$executable" "$out/bin/$(basename "$executable")"
   done
+  ln -s ${pkgs.inotify-tools}/bin/inotifywait "$out/bin/inotifywait"
   ln -s ${pkgs.systemd}/bin/systemd-run "$out/bin/systemd-run"
   ln -s ${pkgs.systemd}/bin/systemctl "$out/bin/systemctl"
   ln -s ${recipes} "$out/artifact-platform"
