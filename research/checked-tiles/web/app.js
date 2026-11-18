@@ -254,13 +254,18 @@ async function filmProgress() {
       text('film-caption', 'Serving revision ' + next.visible + ' · 1920 × 1080');
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       displayedFilm = next.visible;
-      if (next.visible === 'B' && savedAt !== undefined) {
+    }
+    const timer = el('film-time');
+    if (displayedFilm === 'B' && savedAt !== undefined && !timer.dataset.ms && !document.hidden) {
+      const rect = el('film-image').getBoundingClientRect();
+      const visibleHeight = Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top);
+      if (visibleHeight >= rect.height / 2) {
         const ms = performance.now() - savedAt;
-        el('film-time').dataset.ms = ms.toFixed(2);
-        text('film-time', 'Save click to decoded frame at the next paint opportunity · ' + duration(ms));
+        timer.dataset.ms = ms.toFixed(2);
+        text('film-time', 'Save click to decoded frame in view at a paint opportunity · ' + duration(ms));
       }
     }
-    if (next.phase === 'awaiting-display' && displayedFilm === 'B' && savedAt !== undefined) {
+    if (next.phase === 'awaiting-display' && displayedFilm === 'B' && timer.dataset.ms) {
       await fetch('/api/film-displayed', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Checked-Tiles': '1' },
         body: JSON.stringify({id: next.id}),
@@ -280,6 +285,7 @@ el('film-save').onclick = async () => {
   filmSaving = true;
   el('film-save').disabled = true;
   savedAt = performance.now();
+  el('film-image').scrollIntoView({block: 'center'});
   try {
     const response = await fetch('/api/film-save', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Checked-Tiles': '1' },
