@@ -131,15 +131,29 @@
 ; native.bootstrap member here replaces that module). An existing linked
 ; generation is reusable when the entire compilation context matches.
 (def link-rows-path (System/get_env "NATIVE_LINK_ROWS"))
-(def link-rows (when link-rows-path (erlang/binary_to_term (File/read! link-rows-path))))
-(when link-rows (println (str "NATIVE_UPDATE_LINK_ROWS " (count link-rows) " from " link-rows-path)))
-(def linked-context
- (when link-rows
+(def prior-link-rows-path (System/get_env "NATIVE_PRIOR_LINK_ROWS"))
+(defn prior-link-rows []
+ ; A retained sidecar is a candidate only. The exact linked-context digest
+ ; from the checked closure must authenticate its decoded rows before use.
+ (when (and prior-link-rows-path (:linked-context-sha256 original))
+  (try
+   (let [bytes (File/read! prior-link-rows-path)]
+    (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
+    (erlang/binary_to_term bytes))
+   (catch _ nil))))
+(def candidate-link-rows
+ (if link-rows-path (erlang/binary_to_term (File/read! link-rows-path)) (prior-link-rows)))
+(def candidate-linked-context
+ (when candidate-link-rows
   (artifact/sha (erlang/term_to_binary
    ["native-linked-closure-v1" pin expected-options current-providers additions
-    (:order original) host-modules (:stubs original) (:core-links original) link-rows]
+    (:order original) host-modules (:stubs original) (:core-links original) candidate-link-rows]
    (list :deterministic)))))
-(def linked-reuse? (and linked-context (= linked-context (:linked-context-sha256 original))))
+(def linked-reuse? (and candidate-linked-context (= candidate-linked-context (:linked-context-sha256 original))))
+(def link-rows (when (or link-rows-path linked-reuse?) candidate-link-rows))
+(def linked-context (when link-rows candidate-linked-context))
+(when link-rows
+ (println (str "NATIVE_UPDATE_LINK_ROWS " (count link-rows) " from " (or link-rows-path prior-link-rows-path))))
 (def install-linked-rows? (and link-rows (not linked-reuse?)))
 (def recompile-all? (or repin? install-linked-rows?))
 (def result
