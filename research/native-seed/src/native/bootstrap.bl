@@ -99,7 +99,8 @@
    :table (into {} (map (fn [u] [(:ns u) (set (map :name (named u)))]) units))
    :defined (set (mapcat (fn [u] (map (fn [d] [(:ns u) (:name d)]) (named u))) units))
    :arities (into {} (mapcat (fn [u] (keep (fn [d] (when (= :fn (:kind d))
-                                                    [[(:ns u) (:name d)] (declaration-arities (:form d))]))
+                                                    (let [a (declaration-arities (:form d))]
+                                                     [[(:ns u) (:name d)] (assoc a :fixed-lookup (set (:fixed a)))])))
                                           (named u))) units))
    ; A pinned BL host module (`Elixir.BeamLisp.X`, metadata :host-modules) IS
    ; the definitions of its closure namespace, so a :remote to it links there.
@@ -113,19 +114,19 @@
    :ledger (:resolution metadata)}))
 (defn remote-key [n]
  (str (erlang/atom_to_binary (:mod n)) "/" (erlang/atom_to_binary (:fun n)) "/" (count (:args n))))
-(defn- logical-name [f] (if (string/ends-with? f "__bl_v") (subs f 0 (- (count f) 6)) f))
+(defn- logical-name [f variadic?] (if variadic? (subs f 0 (- (count f) 6)) f))
 (defn- remote-link-shape [plan ns logical mode arity]
  (let [arities (get (:arities plan) [ns logical])]
   (cond
    (= mode "rest-list-clause") (if (some? (:variadic arities)) "variadic" "dynamic")
-   (contains? (set (:fixed arities)) arity) "arity"
+   (contains? (:fixed-lookup arities) arity) "arity"
    (contains? (:defined plan) [ns logical]) "generic"
    :else "dynamic")))
 (defn compiled-target
  "The closure namespace whose definition is module/f, or nil."
  [plan module f]
- (let [ns (get (:by-module plan) module)]
-  (when (and ns (contains? (get (:table plan) ns) (logical-name f))) ns)))
+ (when-let [ns (get (:by-module plan) module)]
+  (when (contains? (get (:table plan) ns) (logical-name f (string/ends-with? f "__bl_v"))) ns)))
 (declare self-module)
 (defn remote-decision
  ; A compiled target wins over a host leaf with the same key; that leaf is
@@ -136,10 +137,14 @@
    ["self-module" (remote-key n) (erlang/atom_to_binary module)]
    (remote-decision plan n)))
  ([plan n]
- (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) key (remote-key n) ns (compiled-target plan m f)]
+ (let [m (:mod n) f (erlang/atom_to_binary (:fun n)) arity (count (:args n))
+       key (str (erlang/atom_to_binary m) "/" f "/" arity)
+       ns (get (:by-module plan) m) variadic? (and ns (string/ends-with? f "__bl_v"))
+       logical (logical-name f variadic?)]
   (cond
-   ns (let [logical (logical-name f) mode (if (string/ends-with? f "__bl_v") "rest-list-clause" "fixed-dispatch")]
-       ["compiled" key ns logical mode (remote-link-shape plan ns logical mode (count (:args n)))])
+   (and ns (contains? (get (:table plan) ns) logical))
+     (let [mode (if variadic? "rest-list-clause" "fixed-dispatch")]
+      ["compiled" key ns logical mode (remote-link-shape plan ns logical mode arity)])
    (contains? (:leaves plan) key) ["leaf" key]
    (contains? (:stub-modules plan) m) ["excluded-namespace" key]
    :else (throw (ex-info (str "native link: unresolved remote signature " key) {:remote key :ann (:ann n)}))))))
@@ -213,7 +218,7 @@
   (when (sealed-function? plan sel-kind sel-ns sel-name)
    (let [arities (get (:arities plan) [sel-ns sel-name])]
     (cond
-     (contains? (set (:fixed arities)) arity)
+     (contains? (:fixed-lookup arities) arity)
       (assoc (direct-call (arity-binding-name sel-ns sel-name arity)) :kind :compiled)
      ; No fixed arm of that arity: the variadic arm, as native-resolve-call picks it.
      (and (some? (:variadic arities)) (>= arity (:variadic arities)))
