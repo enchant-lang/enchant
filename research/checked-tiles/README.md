@@ -57,3 +57,18 @@ Read the journals as Org or open the Enchanted dossier renderer locally. It uses
     research/checked-tiles/journal/view discussion
 
 The original discussion and subsequent experiment are separate entries so the initial predictions can be compared with the measurements.
+
+## Browser workbench
+
+Run the web server from the checkout on the workstation with the pinned tools and ffmpeg available.
+
+```sh
+systemd-run --user --scope --quiet -p MemoryMax=2G -p MemorySwapMax=256M \
+  python3 -B research/checked-tiles/server.py
+```
+
+Open <http://127.0.0.1:8765/>. Choose **White wash**, select **Require physical GPU**, and press **Check & render**. Drag the divider or focus it and use the arrow keys. Open the receipt to see the exact accepted BL, generated Lean, axiom report, backend samples and SDK. The timing table reports medians of five frame calls. Lean time includes its process startup.
+
+Select **Broken edge** and check again. The counterexample identifies input 64 and output 63. The frame, receipt and revision continue to describe the last accepted run. **Run rehearsal** runs the fixed multi-revision CLI scenario, including the stale completion and ELF retirement checks, and publishes its final posterized frame. Its starting source is independent of the editor draft.
+
+The service accepts one run at a time across all browsers. Each edit uses the small BL channel grammar, with unary helpers named `mix-white` or `tile-…` and argument `x`. The server emits the parsed forms back to BL before running the CLI. The accepted bundle is atomically saved in `~/.local/state/checked-tiles-web/accepted.json`. The first visit to a fresh server shows the recorded wash example. Draft edits are local to the browser, and a restart clears last-run status. Set `CHECKED_TILES_STATE` to use a separate state directory, `HOST` and `PORT` to change the listener, and `CHECKED_TILES_HOSTS` to allow specific additional HTTP hostnames when using a private proxy. Everyone with access to this private workbench shares its accepted revision.

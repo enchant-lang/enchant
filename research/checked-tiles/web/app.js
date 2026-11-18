@@ -1,0 +1,103 @@
+'use strict';
+const el = id => document.getElementById(id);
+const labels = {cpu_1: 'CPU · 1 thread', cpu_4: 'CPU · 4 threads', cpu_lookup: 'CPU · byte lookup', gpu_whole_call: 'OpenCL · whole call'};
+let state, tag, sending = false, online = false;
+function text(id, value) { el(id).textContent = value; }
+function duration(ms) { return ms < 1 ? (ms * 1000).toFixed(1) + ' µs' : ms.toFixed(2) + ' ms'; }
+function connection() {
+  const busy = state?.job.status === 'checking';
+  el('connection').dataset.state = online ? (busy ? 'checking' : 'ready') : 'offline';
+  text('connection', online ? (busy ? 'Workstation checking' : 'Workstation ready') : 'Workstation offline');
+  for (const id of ['check', 'rehearse']) el(id).disabled = !online || busy || sending;
+}
+function verdict(title, message, status) {
+  text('verdict', title);
+  text('message', message);
+  el('feedback').dataset.status = status;
+}
+function showRun(job) {
+  const seconds = Math.max(0, Math.floor((Date.now()/1000 - job.started)));
+  switch (job.status) {
+    case 'ready': verdict('Ready to check', 'Choose a starting point or edit the function below its comment.', 'ready'); break;
+    case 'checking': verdict(job.mode === 'edit' ? 'Checking candidate' : 'Running live-edit rehearsal',
+      'Elapsed ' + seconds + ' s · The accepted frame stays on screen.', 'checking'); break;
+    case 'rejected': verdict('Candidate rejected', 'Lean checked the counterexample. Input ' + job.witness.input +
+      ' produced ' + job.witness.output + '. The accepted revision is still serving.', 'rejected'); break;
+    case 'accepted': verdict(job.exercise ? 'Rehearsal passed' : 'Candidate accepted',
+      job.exercise ? 'The stale frame was discarded, the old ELF was released, and the broken edit was rejected. Posterize is serving.' :
+      'Lean checked all 256 inputs. The published frame matches the compiled BEAM reference.', 'accepted'); break;
+    case 'failed': verdict('Run failed', job.error, 'failed'); break;
+  }
+  const details = job.exercise || (job.witness && {witness: job.witness, lean: job.proof});
+  el('job-detail').hidden = !details;
+  text('job-data', details ? (job.witness ? JSON.stringify(job.witness, null, 2) + '\n\n' + job.proof : JSON.stringify(details, null, 2)) : '');
+}
+function display(next) {
+  const a = next.accepted, r = a.receipt;
+  if (!state) {
+    el('source').value = localStorage.getItem('checked-tiles-draft') ?? next.presets.wash;
+    el('preset').value = Object.keys(next.presets).find(k => next.presets[k] === el('source').value) || 'custom';
+  }
+  el('input').src = a.original;
+  el('output').src = a.frame;
+  text('frame-label', a.origin + ' · accepted');
+  text('dims', r.width + ' × ' + r.height + ' RGB');
+  text('rev', r.revision.slice(0, 12));
+  text('backend', labels[r.backend] || r.backend);
+  text('lean-time', duration(r.lean_process_ms));
+  text('beam-time', duration(r.beam_frame_ms));
+  text('accepted-source', a.source);
+  text('proof', a.proof);
+  text('axioms', a.lean);
+  text('receipt', JSON.stringify(r, null, 2));
+  text('device', r.gpu ? r.gpu.device + ' · driver ' + r.gpu.driver : (r.gpu_unavailable || 'CPU execution'));
+  const body = el('timings');
+  body.replaceChildren();
+  for (const [name, timing] of Object.entries(r.timings)) {
+    const row = body.insertRow();
+    row.insertCell().textContent = labels[name] || name;
+    row.insertCell().textContent = duration(timing.median_ms);
+  }
+  state = next;
+  showRun(state.job);
+}
+async function refresh() {
+  try {
+    const response = await fetch('/api/state', {headers: tag ? {'If-None-Match': tag} : {}});
+    if (response.status === 304) {
+      if (state.job.status === 'checking') showRun(state.job);
+    } else {
+      if (!response.ok) throw Error('HTTP ' + response.status);
+      display(await response.json());
+      tag = response.headers.get('ETag');
+    }
+    online = true;
+  } catch { online = false; }
+  connection();
+}
+async function submit(mode) {
+  if (sending || !state) return;
+  sending = true;
+  connection();
+  try {
+    const response = await fetch('/api/runs', {method:'POST', headers:{'Content-Type':'application/json', 'X-Checked-Tiles':'1'},
+      body:JSON.stringify({base:state.accepted.receipt.revision, source:el('source').value, placement:el('placement').value, mode})});
+    const result = await response.json();
+    if (!response.ok) throw Error(result.error || 'HTTP ' + response.status);
+    state.job = result;
+    showRun(result);
+  } catch (error) { verdict('Request could not start', error.message, 'failed'); }
+  finally { sending = false; connection(); }
+}
+el('preset').onchange = () => {
+  el('source').value = state.presets[el('preset').value];
+  localStorage.setItem('checked-tiles-draft', el('source').value);
+};
+el('source').oninput = () => {
+  el('preset').value = 'custom';
+  localStorage.setItem('checked-tiles-draft', el('source').value);
+};
+el('wipe').oninput = () => el('screen').style.setProperty('--wipe', el('wipe').value + '%');
+el('check').onclick = () => submit('edit');
+el('rehearse').onclick = () => submit('rehearsal');
+(async function poll() { await refresh(); setTimeout(poll, 1200); })();
