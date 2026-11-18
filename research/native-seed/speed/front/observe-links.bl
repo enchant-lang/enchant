@@ -13,6 +13,7 @@
 ;;   PARTITION LINK_ROWS --phase-compile REPORT PHASE_MACRO_SAMPLES
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
+;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --outer-control REPORT
@@ -690,7 +691,7 @@
    :macro-lookup (macro-lookup-summary observation)
    :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))}))
 
-(defn- compile-with-phase-macros [closure baseline samples-path]
+(defn- with-phase-entries [baseline samples-path action]
  (let [bytes (File/read! samples-path)
        samples (json/decode bytes)
        _ (assert (= "bl.native.pinned-macro-phase-samples" (get samples "schema")))
@@ -700,12 +701,10 @@
                      (when (contains? #{"matched" "matched-after-canonicalization"} (get sample "status"))
                       (get sample "head"))) (get samples "samples")))))
        _ (assert (<= 1 (count names) 16))
-       sessions (volatile! []) calls (volatile! 0)]
+       sessions (volatile! []) calls (volatile! 0)
+       started (erlang/monotonic_time :microsecond)]
   (try
-   (let [control (macro-miss-control closure baseline)
-         ordinary (mapv #(compile-phase-member closure (:rows baseline) % [] calls) (:order closure))
-         started (erlang/monotonic_time :microsecond)
-         entries (mapv (fn [name]
+   (let [entries (mapv (fn [name]
                          (let [session (BeamLisp.AOT/open_constructor_session!)]
                           (vswap! sessions conj [name session])
                           (let [identity (bind-core-macro! session name)]
@@ -713,19 +712,26 @@
                                    (vswap! calls inc)
                                    (invoke-phase-macro session identity args))]))) names)
          prepared (erlang/monotonic_time :microsecond)
-         interpreted (mapv #(compile-phase-member closure (:rows baseline) % entries calls) (:order closure))]
-    (assert (every? :same-definitions ordinary))
-    (assert (pos? @calls))
-    {:schema "bl.native.interpreted-phase-compile" :version 2 :reuse-authority false
-     :sample-report-sha256 (artifact/sha bytes) :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
-     :link-rows-sha256 (:sha256 baseline) :preparation-us (- prepared started)
-     :interpreted-expansions @calls
-     :macro-miss-control control
+         result (action entries calls)]
+    (assoc result :preparation-us (- prepared started) :interpreted-expansions @calls
+     :sample-report-sha256 (artifact/sha bytes)
      :session-work (into {} (map (fn [[name session]]
-                                   [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))
-     :ordinary ordinary :interpreted interpreted})
+                                  [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))))
    (finally
     (doseq [[_ session] @sessions] (BeamLisp.AOT/close_constructor_session! session))))))
+
+(defn- compile-with-phase-macros [closure baseline samples-path]
+ (let [control (macro-miss-control closure baseline)
+       ordinary (mapv #(compile-phase-member closure (:rows baseline) % [] (volatile! 0)) (:order closure))]
+  (assert (every? :same-definitions ordinary))
+  (with-phase-entries baseline samples-path
+   (fn [entries calls]
+    (let [interpreted (mapv #(compile-phase-member closure (:rows baseline) % entries calls) (:order closure))]
+     (assert (pos? @calls))
+     {:schema "bl.native.interpreted-phase-compile" :version 2 :reuse-authority false
+      :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+      :link-rows-sha256 (:sha256 baseline) :macro-miss-control control
+      :ordinary ordinary :interpreted interpreted})))))
 
 (defn- registry-phase-status [observation]
  (let [calls (get-in observation [:effects :registry-calls])
@@ -736,8 +742,11 @@
 
 (defn- registry-input-state [input scope ancestors]
  (let [[operation slot key] input
-       owner (case slot :sdk nil :own scope (nth ancestors slot nil))
-       physical (if (= :sdk slot) key (when owner (BeamLisp.Env/pfx owner key)))]
+       physical (cond
+                 (= :sdk slot) key
+                 (not (erlang/is_tuple key)) nil
+                 (= :own slot) (erlang/insert_element 1 key scope)
+                 :else (when-let [owner (nth ancestors slot nil)] (erlang/insert_element 1 key owner)))]
   (if (nil? physical) :unavailable
     (normalized-registry-value operation
      (case operation
@@ -748,12 +757,15 @@
  (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))]
   (count (remove (fn [[input outcome]] (erlang/=:= outcome (registry-input-state input scope ancestors))) inputs))))
 
+(defn- registry-lowering-supported? [effects phase]
+ (and (empty? (:writes phase)) (not (:unexplained-registry-scope effects))
+      (not (:changing-registry-input effects))
+      (every? (fn [[operation _ _]] (contains? #{:lookup :member} operation)) (:reads phase))))
+
 (defn- registry-read-proof [closure baseline member observation phase]
  (let [effects (:effects observation)
        inputs (:registry-inputs effects {})
-       supported? (and (empty? (:writes phase)) (not (:unexplained-registry-scope effects))
-                       (not (:changing-registry-input effects))
-                       (every? (fn [[operation _ _]] (contains? #{:lookup :member} operation)) (:reads phase)))
+       supported? (registry-lowering-supported? effects phase)
        mismatches (when supported?
                     (BeamLisp.Env/isolated
                      (fn []
@@ -906,6 +918,70 @@
 
 (defn- read-source-identity [path]
  (try (artifact/sha (File/read! path)) (catch _ :unavailable)))
+
+(defn- with-registry-stage [closure rows member entries action]
+ (let [macros (if (= "core" (:ns member)) [] entries)
+       phase-callables (into {} (map (fn [[name entry]] [entry name]) macros))]
+  (BeamLisp.Env/isolated
+   (fn []
+    (install-rows! closure rows)
+    (doseq [[name entry] macros]
+     (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
+    (BeamLisp.Compiler/with_fresh_names
+     (fn []
+      (let [prepared (build/prepare-ns (:path member))]
+       (action prepared phase-callables))))))))
+
+(defn- lower-with-snapshot [prepared]
+ (BeamLisp.Loader/with_declaration_snapshot
+  (fn [] (build/compile-prepared prepared {:check-node identity}))))
+
+(defn- prepared-inputs [prepared]
+ (select-keys prepared [:ns :path :source-sha256 :requires :js-interop? :env :defs]))
+
+(defn- registry-shadow-member [closure baseline candidate member entries]
+ (let [[prior-inputs prior observation]
+       (with-registry-stage closure (:rows baseline) member entries
+        (fn [prepared callables]
+         (let [[compiled observed]
+               (trace! #(lower-with-snapshot prepared)
+                {:registry? true :registry-inputs? true :source-probes? true
+                 :macro-lookups? true :phase-callables callables})]
+          [(prepared-inputs prepared) compiled observed])))
+       effects (:effects observation)
+       inputs (:registry-inputs effects {})
+       supported? (registry-lowering-supported? effects (registry-phase-status observation))
+       macros? (:all-expansions-owned (macro-lookup-summary observation))
+       probes (source-probes observation)
+       paths? (and (empty? (changed-source-probes probes (presence-snapshot probes)))
+                   (every? (fn [[path digest]]
+                             (and (not= :unavailable digest) (= digest (read-source-identity path))))
+                           (:sources observation)))]
+  (with-registry-stage closure (:rows candidate) member entries
+   (fn [prepared _]
+    (let [same-prepared? (erlang/=:= prior-inputs (prepared-inputs prepared))
+          reason (cond
+                   (not supported?) :unaccounted-registry
+                   (not macros?) :ordinary-macro
+                   (not paths?) :source-input-changed
+                   (not same-prepared?) :prepared-input-changed
+                   (pos? (registry-input-mismatches inputs)) :registry-input-changed)
+          started (erlang/monotonic_time :microsecond)
+          actual (if reason (lower-with-snapshot prepared) prior)]
+     {:namespace (:ns member) :distinct-registry-inputs (count inputs)
+      :reason reason :reused (nil? reason)
+      :candidate-lowering-us (- (erlang/monotonic_time :microsecond) started)
+      :exact-clean-definitions (erlang/=:= (def-bytes actual) (def-bytes member))})))))
+
+(defn- registry-shadow [closure baseline candidate samples-path]
+ (assert (some? candidate))
+ (with-phase-entries candidate samples-path
+  (fn [entries _]
+   {:schema "bl.native.registry-lowering-shadow" :version 1 :reuse-authority false
+    :baseline-link-rows-sha256 (:sha256 baseline) :candidate-link-rows-sha256 (:sha256 candidate)
+    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+    :members (mapv (fn [ns] (registry-shadow-member closure baseline candidate (get-in closure [:units ns]) entries))
+                   (:order closure))})))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
@@ -1101,6 +1177,7 @@
                 (= selected "--phase-compile") (compile-with-phase-macros closure baseline comparison)
                 (= selected "--registry-phases") (registry-phases closure baseline comparison false)
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
+                (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
@@ -1115,7 +1192,7 @@
                 :else (observe closure baseline selected candidate))]
   (File/write! output (if (= selected "--capture-source")
                        (erlang/term_to_binary report (list :deterministic)) (json/encode report)))
-  (when (or (= selected "--shadow") source-shadow?)
+  (when (or (contains? #{"--shadow" "--registry-shadow"} selected) source-shadow?)
    (let [different (mapv :namespace (remove :exact-clean-definitions (:members report)))]
     (when (seq different)
      (throw (ex-info "Selective relink differs from the qualified clean closure" {:members different})))))
