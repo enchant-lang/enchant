@@ -21,6 +21,7 @@
            [compiler :as compiler] [reader-node :as rn]))
 
 (def trace-limit 100000)
+(def registry-trace-limit 1000000)
 (def source-read-entries [(tuple :Elixir.File :read! 1)
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
@@ -59,6 +60,12 @@
  (let [n (inc (:count effects 0))]
   (if (> n trace-limit) (assoc effects :count n)
    (-> effects (assoc :count n) (update-in [kind key] (fn [old] (inc (or old 0))))))))
+
+(defn- registry-call [effects operation]
+ (let [n (inc (:registry-call-count effects 0))
+       effects (assoc effects :registry-call-count n)]
+  (if (> n registry-trace-limit) effects
+   (update-in effects [:registry-calls operation] (fn [old] (inc (or old 0)))))))
 
 (defn- value-identity [value]
  (artifact/sha (erlang/term_to_binary value (list :deterministic))))
@@ -138,7 +145,7 @@
  (receive
   [:trace _ :call [:ets :lookup arguments]]
   (let [key (second arguments)
-        effects (if (:registry? effects) (effect effects :registry-calls [:lookup 2]) effects)]
+        effects (if (:registry? effects) (registry-call effects [:lookup 2]) effects)]
    (recur calls key hits misses reads sources effects))
   [:trace _ :return_from [:ets :lookup 2] value]
   (if-not (link-key? pending) (recur calls nil hits misses reads sources effects)
@@ -156,7 +163,7 @@
   [:trace _ :call [module function arguments]]
   (let [arity (count arguments) entry (tuple module function arity) key (first arguments)
         effects (if (and (:registry? effects) (contains? registry-operations entry))
-                   (effect effects :registry-calls [function arity]) effects)]
+                   (registry-call effects [function arity]) effects)]
    (cond
     (= entry macro-entry)
     (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)
@@ -198,6 +205,7 @@
     {:calls calls :hits hits :misses misses :sources sources :effects effects
      :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
                     (empty? (:pending-macro-lookups effects)) (<= (:macro-lookup-count effects 0) trace-limit)
+                    (<= (:registry-call-count effects 0) registry-trace-limit)
                     (<= (count (:ordered-links effects [])) trace-limit)
                     (<= (:count effects 0) trace-limit) (<= (count sources) 1024))}])))
 
@@ -247,10 +255,12 @@
     (let [observation (receive [:observed ref value] :when (= ref ticket)
                        value (after 10000 (throw :trace-collector-timeout)))]
      (when-not (:complete? observation)
-      (throw (ex-info "Native observation exceeded its bounds or returned a partial trace"
-              {:lookups (:calls observation) :source-reads (count (:sources observation))
-               :effects (get-in observation [:effects :count])
-               :macro-lookups (get-in observation [:effects :macro-lookup-count])})))
+      (let [details {:link-lookups (:calls observation) :source-reads (count (:sources observation))
+                     :effects (get-in observation [:effects :count])
+                     :macro-lookups (get-in observation [:effects :macro-lookup-count])
+                     :registry-calls (get-in observation [:effects :registry-call-count])}]
+       (throw (ex-info (str "Native observation exceeded its bounds or returned a partial trace " (pr-str details))
+                       details))))
      [result observation]))
    (finally
     (erlang/apply :trace :session_destroy (list session))
