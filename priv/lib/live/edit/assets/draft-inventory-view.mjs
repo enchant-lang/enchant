@@ -52,6 +52,7 @@ export function mountDraftInventory(root, initial) {
       opener.sessionStorage.setItem('enchant.edit.tab', tab);
       copyRetainedDraft(current.scope, entry.key, tab);
       opener.location.replace(target.href);
+      render();
       inform('Opened a copy in a new tab.');
     } catch (error) {
       opener.close();
@@ -95,6 +96,7 @@ export function mountDraftInventory(root, initial) {
   }
 
   window.addEventListener('storage', render, {signal: lifetime.signal});
+  window.addEventListener('focus', render, {signal: lifetime.signal});
   render();
   return {
     update(next) { model = next; render(); },
