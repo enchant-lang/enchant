@@ -854,9 +854,11 @@
          :selves (assoc (or (:selves options) {}) self local)
          :procedure-selves (if (= :fn (:op inner)) (conj procedures self) (disj procedures self))
          :self-cells (dissoc (or (:self-cells options) {}) self))))
+(defn- wrap-scaffold [local body]
+ (glue "(letrec ((" local " " body ")) " local ")"))
 (defn- emit-source-scaffold [n parts options]
  (let [self (:name n) local (ident self) inner (:inner parts)]
-  (glue "(letrec ((" local " " (emit inner (scaffold-options options self local inner)) ")) " local ")")))
+  (wrap-scaffold local (emit inner (scaffold-options options self local inner)))))
 
 (defn- multi-layout [n]
  ; The compiler's exact $blfn constructor, with checked inert function
@@ -985,11 +987,10 @@
   materializing their child text. The terminal expression uses normal emission."
  [node options first-scaffold]
  (loop [n node options options scaffold first-scaffold heads (list) tails (list)]
-  (if scaffold
-   (let [self (:name n) local (ident self) inner (:inner scaffold)]
-    (recur inner (scaffold-options options self local inner)
-           (when (= :let (:op inner)) (self-parts inner))
-           (cons (glue "(letrec ((" local " ") heads) (cons (glue ")) " local ")") tails)))
+  (let [self (:name n)
+        local (when scaffold (ident self))
+        n (if scaffold (:inner scaffold) n)
+        options (if scaffold (scaffold-options options self local n) options)]
    (if (= :fn (:op n))
     (let [inside (function-options n options)
           simple (simple-layout n)
@@ -999,18 +1000,21 @@
      (if (and simple (or next-scaffold (= :fn (:op body))))
       (let [formals (:formals simple)
             register? (:callable-arities? inside)
-            head (glue (if register? "(bl-register-callable! " "")
+            head (glue (if local (glue "(letrec ((" local " ") "")
+                       (if register? "(bl-register-callable! " "")
                        "(case-lambda ((" (spaced formals) ") "
                        (if (function-ticks? n inside) "(h-tick) " ""))
             tail (glue ") (" (if (empty? formals) "(extra . argv)" "argv")
                        " " clause-fallback "))"
-                       (if register? (glue " " (erlang/integer_to_binary arity) ")") ""))]
+                       (if register? (glue " " (erlang/integer_to_binary arity) ")") "")
+                       (if local (glue ")) " local ")") ""))]
        (recur body inside next-scaffold (cons head heads) (cons tail tails)))
       (let [function (if simple
                         (let [tick? (function-ticks? n inside)]
                          (fixed-function (:formals simple) (emit body inside) clause-fallback nil tick?))
-                        (function-expression n inside nil))]
-       (finish-wrapper-chain (register-function function arity inside) heads tails))))
+                        (function-expression n inside nil))
+            registered (register-function function arity inside)]
+       (finish-wrapper-chain (if local (wrap-scaffold local registered) registered) heads tails))))
     (finish-wrapper-chain (emit n options) heads tails)))))
 (defn- pairs-operands [pairs] (Enum/flat_map (items pairs) (fn [pair] (items pair))))
 (defn emit [n options]
