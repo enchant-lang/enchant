@@ -575,13 +575,9 @@
  '(("check_source_callable!" 1) ("check_source_invocation!" 2)
    ("check_source_invocation1!" 2) ("check_source_invocation2!" 3)
    ("assert_native_framework_execution!" 0)))
-;; Service: host.tiers globs priv/boot/*.bl on BEAM; the native image has no
-;; tier tree. This is the pinned SDK's answer (sorted wildcard, data-readers
-;; removed). It decides which callees get no readiness guard, so it must equal
-;; BEAM's for native and BEAM emission to agree (speed/services/RESULT.md).
+;; Boot tier membership comes from the pinned SDK that emitted this bundle.
 (native-add-leaf! "Elixir.BeamLisp.Tiers/boot_namespaces/0"
- (lambda () '("anf" "binding" "compiler" "core" "diag" "expand" "expand-source" "lower" "lower-core"
-              "optimize" "reader" "reader-node" "rt" "server-clause" "sugar" "syntax")))
+ (lambda () (native-vector-to-list (bl-get native-bundle-metadata (bl-key "boot-namespaces")))))
 ;; Elixir stdlib counterparts (category b) the compiled host.server/host.emit/
 ;; host.link naming paths call. Macro.camelize/1 is byte-wise ASCII; every
 ;; non-ASCII UTF-8 byte passes through unchanged, so codepoints are equivalent.
