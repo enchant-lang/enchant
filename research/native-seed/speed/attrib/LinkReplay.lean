@@ -95,29 +95,29 @@ theorem validIffInputKeys (receipt : List (Event Key Value)) (old new : Key → 
       simp only [valid] at baseline ⊢
       rw [ih old new baseline.2]
       constructor
-      · intro matches candidate member
+      · intro agrees candidate member
         simp only [inputKeys, List.mem_cons] at member
         rcases member with same | later
         · subst candidate
-          exact matches.1.trans baseline.1.symm
-        · exact matches.2 candidate later
-      · intro matches
-        exact ⟨(matches key (by simp [inputKeys])).trans baseline.1,
-               fun candidate member => matches candidate (by simp [inputKeys, member])⟩
+          exact agrees.1.trans baseline.1.symm
+        · exact agrees.2 candidate later
+      · intro agrees
+        exact ⟨(agrees key (by simp [inputKeys])).trans baseline.1,
+               fun candidate member => agrees candidate (by simp [inputKeys, member])⟩
     | write key outcome =>
       simp only [valid] at baseline ⊢
       rw [ih (replace old key outcome) (replace new key outcome) baseline]
       constructor
-      · intro matches candidate member
+      · intro agrees candidate member
         have selected := List.mem_filter.mp (by simpa only [inputKeys] using member)
         have distinct : candidate ≠ key := of_decide_eq_true selected.2
-        simpa [replace, distinct] using matches candidate selected.1
-      · intro matches candidate member
+        simpa [replace, distinct] using agrees candidate selected.1
+      · intro agrees candidate member
         by_cases same : candidate = key
         · simp [replace, same]
         · have selected : candidate ∈ inputKeys (.write key outcome :: tail) := by
             simp [inputKeys, same, member]
-          simpa [replace, same] using matches candidate selected
+          simpa [replace, same] using agrees candidate selected
 
 #print axioms validIffInputKeys
 
