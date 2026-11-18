@@ -1,4 +1,4 @@
-# lsp.rpc — the language server's protocol layer, as pure functions
+# lsp.rpc — the language server's protocol layer
 
 `lsp.bl` answers questions about a program: hover, definitions, references,
 document symbols, live diagnostics, and the proof-backed queries no standard
@@ -30,9 +30,11 @@ an editor.
 ## Server state
 
 State is a plain map: the open documents keyed by URI, the workspace root, and
-two flags. A document carries its text, its client-side version, and the
-namespace derived from its leading `(ns …)` form, so a request never re-derives
-what a change already knows.
+two flags. A document carries its text, client-side version, and namespace
+derived from its leading `(ns …)` form. The document also carries a local memo
+identity. Analysis and diagnostics for a new revision replace the previous
+revision's retained data within that identity. Closing the document releases
+the bundle through the bounded cache.
 
 ```beam-lisp
 (defn initial-state
