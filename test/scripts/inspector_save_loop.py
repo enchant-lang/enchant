@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -82,8 +83,27 @@ with tempfile.TemporaryDirectory(prefix="enchant-save-") as tmp:
             subprocess.run([root / "scripts/inspector-scenario", "--sdk", sdk, "--url", url,
                             "--out", args.browser_out.resolve(), "--save-project", project], check=True)
     finally:
+        if args.browser_out and args.browser_out.is_dir():
+            try:
+                (args.browser_out / "final-activity.json").write_text(json.dumps(rows(), indent=2))
+            except (URLError, TimeoutError):
+                pass
+            for log in (project / ".state").rglob("*.log"):
+                shutil.copyfile(log, args.browser_out / ("server-" + log.name))
+        server.terminate()
+        server.wait(timeout=10)
         try:
             subprocess.run([bl, "realm", "stop"], cwd=project, env=env, timeout=40)
         finally:
-            server.terminate()
-            server.wait(timeout=10)
+            # A held listener can defer realm retirement. Only reap a BEAM
+            # whose environment identifies this test's private runtime and SDK.
+            identity = {os.fsencode(f"XDG_RUNTIME_DIR={runtime}"), os.fsencode(f"BL_SDK_PRODUCT={sdk}")}
+            for process in Path("/proc").glob("[0-9]*"):
+                try:
+                    if (process / "comm").read_text().strip() != "beam.smp":
+                        continue
+                    with os.fdopen(os.pidfd_open(int(process.name)), "rb") as handle:
+                        if identity.issubset((process / "environ").read_bytes().split(b"\0")):
+                            signal.pidfd_send_signal(handle.fileno(), signal.SIGTERM)
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    pass
