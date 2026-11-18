@@ -12,6 +12,7 @@ the unit's numbering (direction chosen by the read-phase check below).
 """
 import bisect
 import collections
+from functools import cache
 import json
 import re
 import sys
@@ -125,6 +126,20 @@ class CodeMap:
         return entries[i][1] if i < len(entries) else None
 
 
+NAMED_BINDING = re.compile(r"(lv|v)_([0-9]+(?:_[0-9]+)*)(?:\$(?:[0-9]+|v|g))?$")
+
+
+@cache
+def named_frame(raw):
+    match = NAMED_BINDING.fullmatch(raw)
+    if match:
+        prefix, spelling = match.groups()
+        name = ''.join(chr(int(code)) for code in spelling.split('_'))
+        if '/' in name:
+            return ('host', 'leaf:' + name) if prefix == 'lv' else ('bl', name)
+    return None
+
+
 def frame(raw, codes, direction=None):
     if raw.startswith('sub:'):
         body = raw[4:]
@@ -137,6 +152,10 @@ def frame(raw, codes, direction=None):
         return ('bl', rest) if kind == 'bl' else ('host', name if kind == 'leaf' else rest)
     if raw.startswith('A-') or raw.startswith('##interp'):
         return ('driver', raw)
+    if raw.startswith(('v_', 'lv_')):
+        decoded = named_frame(raw)
+        if decoded:
+            return decoded
     return ('host', raw)
 
 
@@ -156,7 +175,8 @@ NATIVE_BUCKETS = [
     ('generic arithmetic (native-num, decimal? probes)', 'E1+E2', lambda run, op, bl: host_category(op) == 'arith'),
     ('generic equality (kernel-exact-equal?)', 'E6', lambda run, op, bl: host_category(op) == 'equality'),
     ('h-tick', 'N4', lambda run, op, bl: op == 'h-tick'),
-    ('emitter text assembly (join, write, string ports)', 'C2/V2e', lambda run, op, bl: host_category(op) in ('text', 'gambit-runtime')),
+    ('text assembly and string operations', 'C2/V2e', lambda run, op, bl: host_category(op) == 'text'),
+    ('Gambit runtime', '-', lambda run, op, bl: host_category(op) == 'gambit-runtime'),
     ('list BIFs and Enum leaves', '-', lambda run, op, bl: host_category(op) in ('list', 'leaf-other', 'runtime-state') or (op or '').startswith('leaf:')),
     ('other host procedures', '-', lambda run, op, bl: op is not None),
     ('compiled rt.bl kernel code (self)', 'N1+N2', lambda run, op, bl: bl and ns_of(bl) in ('rt', 'core')),
