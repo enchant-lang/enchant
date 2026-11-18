@@ -121,6 +121,40 @@ theorem validIffInputKeys (receipt : List (Event Key Value)) (old new : Key → 
 
 #print axioms validIffInputKeys
 
+theorem executeValid (state : Key → Option Value) (program : Staging Key Value Result) :
+    valid state (execute state program).2 := by
+  induction program generalizing state with
+  | done result => trivial
+  | consult key next ih =>
+    simpa [execute, valid] using ih (state key) state
+  | publish key value next ih =>
+    simpa [execute, valid] using ih (replace state key value)
+
+section ReverseIndex
+
+variable {Member : Type}
+
+def affected (consumers : Key → List Member) (changed : List Key) : List Member :=
+  changed.flatMap consumers
+
+theorem replayUnaffected (unit : Member) (consumers : Key → List Member) (changed : List Key)
+    (old new : Key → Option Value) (program : Staging Key Value Result)
+    (indexComplete : ∀ key ∈ inputKeys (execute old program).2, unit ∈ consumers key)
+    (changesComplete : ∀ key, new key ≠ old key → key ∈ changed)
+    (unaffected : unit ∉ affected consumers changed) :
+    execute new program = execute old program := by
+  apply replayOrdered
+  apply (validIffInputKeys _ old new (executeValid old program)).mpr
+  intro key read
+  by_cases equal : new key = old key
+  · exact equal
+  · exact False.elim (unaffected (List.mem_flatMap.mpr ⟨key, changesComplete key equal,
+      indexComplete key read⟩))
+
+#print axioms replayUnaffected
+
+end ReverseIndex
+
 end OrderedEffects
 
 end NativeLinkReplay
