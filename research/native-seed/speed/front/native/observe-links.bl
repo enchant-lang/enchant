@@ -28,7 +28,7 @@
 ;;   DONOR_PARTITION LINK_ROWS --bound-registry-controls REPORT RECEIPT QUALIFICATION RECEIPT_SHA
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --row-install-control REPORT
-;;   PARTITION LINK_ROWS --stage-link-subset REPORT [NAMESPACE]
+;;   PARTITION LINK_ROWS --stage-link-subset REPORT [NAMESPACE|--all] [--timed]
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --ambient-roots REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --ambient-roots-control REPORT
@@ -1986,7 +1986,14 @@
 (defn- select-indexed-link-rows [index inputs]
  (mapv second (sort-by first (mapcat #(get index % []) inputs))))
 
-(defn- stage-link-subset-member [closure rows row-index core-index ns]
+(defn- phase-cost [action]
+ (let [started (erlang/monotonic_time :microsecond)
+       before (elem (erlang/process_info (erlang/self) :reductions) 1)
+       result (action)]
+  [result {:wall-us (- (erlang/monotonic_time :microsecond) started)
+           :caller-reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)}]))
+
+(defn- stage-link-subset-member [closure rows row-index core-index ns timed?]
  (let [member (get-in closure [:units ns])
        _ (assert (some? member))
        compile! (fn []
@@ -1995,12 +2002,13 @@
                    [(prepared-inputs prepared)
                     (assoc (dissoc compiled :cache-status :cache-key) :source (:source prepared)
                            :module (BeamLisp.Link/module_for ns) :base-module (BeamLisp.Emit/base_module_for ns))]))
-       scoped (fn [context installed action]
+       scoped (fn [install action]
                 (BeamLisp.Env/isolated
                  (fn []
-                  (install-batched-rows! context installed)
+                  (install)
                   (BeamLisp.Compiler/with_fresh_names action))))
-       [full observed] (scoped closure rows #(trace! compile! {:registry? true :registry-inputs? true :link-scan-patterns? true}))
+       install-full #(install-batched-rows! closure rows)
+       [full observed] (scoped install-full #(trace! compile! {:registry? true :registry-inputs? true :link-scan-patterns? true}))
        effects (:effects observed)
        input-links (into (set (keys (:reads (link-receipt observed))))
                          (keep (fn [[_ slot key]]
@@ -2012,12 +2020,23 @@
        retained-core (select-indexed-link-rows core-index input-links)
        scans (:link-scan-patterns effects)
        _ (assert (= (get-in effects [:registry-calls [:match_object 2]] 0) (reduce + 0 (vals scans))))
-       subset (scoped (assoc closure :core-links retained-core) retained compile!)]
+       install-subset #(install-batched-rows! (assoc closure :core-links retained-core) retained)
+       subset (scoped install-subset compile!)
+       sample (when timed?
+                (fn [mode]
+                 (let [install (if (= :full mode) install-full install-subset)
+                       install-cost (volatile! nil)
+                       [result total] (phase-cost #(scoped (fn []
+                                                           (vreset! install-cost (second (phase-cost install))))
+                                                          compile!))]
+                  (assert (erlang/=:= full result) (str "Timed " (name mode) " changed output for " ns))
+                  {:mode mode :total total :row-install @install-cost})))]
   (assert (erlang/=:= member (second full)) (str "Full link run drifted for " ns))
   (assert (erlang/=:= full subset) (str "Stage or compilation changed after pruning rows for " ns))
   {:namespace ns :full-rows (+ (count rows) (count (:core-links closure)))
    :subset-rows (+ (count retained) (count retained-core)) :observed-link-reads (:calls observed)
    :exact-prepared-inputs true :exact-unit true
+   :untraced-samples (when timed? (mapv sample [:full :subset :subset :full]))
    :match-object-patterns (mapv (fn [[relation calls]] {:relation relation :calls calls
                                                        :disjoint-from-link-rows (disjoint-link-pattern? relation)})
                                 (sort-by (comp pr-str first) scans))
@@ -2029,17 +2048,18 @@
                  [operation arity calls]))
               (sort (:registry-calls effects))))}))
 
-(defn- stage-link-subset [closure rowset selected]
+(defn- stage-link-subset [closure rowset selected option]
  (let [rows (:rows rowset)
        row-index (indexed-link-rows rows (fn [[provider name _ _]] [provider name]))
        core-index (indexed-link-rows (:core-links closure) (fn [[name _]] ["core" name]))
        members (cond
                  (= selected "--all") (:order closure)
-                 selected [selected]
-                 :else ["rt" "compiler" "native.scheme" "host.link" "host.delay" "sugar"])]
-  {:schema "bl.native.stage-link-subset-shadow" :version 2 :reuse-authority false
+                 (and selected (not= selected "--timed")) [selected]
+                 :else ["rt" "compiler" "native.scheme" "host.link" "host.delay" "sugar"])
+       timed? (or (= selected "--timed") (= option "--timed"))]
+  {:schema "bl.native.stage-link-subset-shadow" :version 3 :reuse-authority false
    :link-rows-sha256 (:sha256 rowset) :pattern-controls (link-pattern-control)
-   :members (mapv #(stage-link-subset-member closure rows row-index core-index %) members)}))
+   :members (mapv #(stage-link-subset-member closure rows row-index core-index % timed?) members)}))
 
 (defn run-observation [argv]
  (let [[partition rows selected output comparison source-receipt mode qualification receipt-sha closure-output] argv]
@@ -2085,7 +2105,7 @@
                 (= selected "--ambient-roots-control") (ambient-root-control output)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--row-install-control") (row-install-control closure (:rows baseline))
-                (= selected "--stage-link-subset") (stage-link-subset closure baseline comparison)
+                (= selected "--stage-link-subset") (stage-link-subset closure baseline comparison source-receipt)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
