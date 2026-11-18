@@ -49,8 +49,8 @@ theorem nested_work (terminalBytes wrapperBytes n : Nat) :
   | zero => simp [nestedWork]
   | succ n ih =>
     rw [nestedWork, Nat.mul_add, ih]
-    simp [Nat.succ_eq_add_one, Nat.add_mul, Nat.mul_add, Nat.add_assoc,
-      Nat.add_left_comm, Nat.add_comm, Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+    simp [Nat.add_mul, Nat.mul_add, Nat.add_assoc, Nat.add_left_comm,
+      Nat.add_comm, Nat.mul_assoc, Nat.mul_comm]
 
 theorem output_bytes (terminal : List α) (wrappers : List (Wrapper α)) :
     (collect terminal [] [] wrappers).length =
