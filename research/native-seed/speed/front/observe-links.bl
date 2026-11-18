@@ -1092,7 +1092,8 @@
   (if reason
    {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
    {:prepared prepared-id :registry reads :probes (source-probes observed) :sources (:sources observed)
-    :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled) :defs (:defs compiled)})))
+    :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)
+    :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits)})))
 
 (defn- registry-member-bytes [entry]
  (BeamLisp.CompilerData/check_closed_etf!
@@ -1106,7 +1107,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema :native-portable-registry-v3 :sdk (:sdk-pin closure) :options (:options closure)
+   {:schema :native-portable-registry-v4 :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
                            [ns (registry-member-bytes
@@ -1126,6 +1127,7 @@
                                  (:registry entry)))))
          reason (or (:reason entry)
                     (cond
+                     (not (erlang/is_binary (:definition-bytes entry))) :missing-definition-bytes
                      (not= [(:module member) (:path member) (:source-sha256 member)]
                            [(:module entry) (:path entry) (:source-sha256 entry)]) :member-changed
                      (not (matches-captured-etf? (prepared-inputs prepared) (:prepared entry))) :prepared-input-changed
@@ -1134,10 +1136,12 @@
                                  (or (= :unavailable digest) (not= digest (read-source-identity path)))) (:sources entry)))
                      :source-input-changed
                      (seq changed) :registry-input-changed))
-         actual (if reason (lower-with-snapshot prepared) {:defs (:defs entry)})]
+         ;; The oracle compares exact deterministic bytes. The retained
+         ;; definition payload requires no decoding on this read path.
+         actual (if reason (def-bytes (lower-with-snapshot prepared)) (:definition-bytes entry))]
     {:namespace (:ns member) :reused (nil? reason) :reason reason :opaque-inputs (:opaque-inputs entry 0)
      :opaque-keys (:opaque-keys entry) :changed-registry-keys changed
-     :exact-clean-definitions (erlang/=:= (def-bytes actual) (def-bytes member))}))))
+     :exact-clean-definitions (erlang/=:= actual (def-bytes member))}))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -1145,7 +1149,7 @@
        bytes (when-not force? (File/read! receipt-path))
        receipt (when bytes (read-registry-member bytes))]
   (when receipt
-   (assert (= :native-portable-registry-v3 (:schema receipt)))
+   (assert (= :native-portable-registry-v4 (:schema receipt)))
    (assert (= (:sdk-pin closure) (:sdk receipt)))
    (assert (= (:options closure) (:options receipt)))
    (assert (= (:order closure) (:order receipt)))
