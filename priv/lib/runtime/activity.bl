@@ -1,5 +1,5 @@
 ;; An optional finite trace in the actual caller. No worker, timer or result cache.
-(ns runtime.activity)
+(ns runtime.activity (:require [data.provenance :as provenance]))
 
 (def max-scopes 16)
 (def max-active 64)
@@ -49,7 +49,7 @@
 
 (defn- alive? [row] (erlang/is_process_alive (:pid row)))
 (defn- public-row [row time]
-  (-> row (dissoc :pid :started :source)
+  (-> row (dissoc :pid :started :source :revision :providers :prior)
       (assoc :tool (name (:tool row)) :elapsed-ms (max 0 (- (or (:ended row) time) (:started row))))
       (dissoc :ended)))
 (defn snapshot
@@ -70,6 +70,48 @@
     (let [key (scope)]
       (swap! tapes (fn [all]
         (if (get-in all [key :active id]) (update-in all [key :active id] f) all))))))
+
+(defn location
+  "A bounded project-relative reference for developer tooling."
+  [path]
+  (when (and (string? path) (<= 1 (count path) 160) (= :relative (Path/type path))
+             (not (String/contains? path "\\"))
+             (not-any? #{".." ""} (String/split path "/")))
+    {:path path}))
+
+(defn evidence!
+  "Record the revision actually used by the memo and optional named providers."
+  [revision namespaces]
+  (when (and revision (current-id))
+    (let [providers (into {}
+                      (keep (fn [n] (when-let [v (provenance/namespace-revision [n])] [n v]))
+                            (take 8 namespaces)))]
+      (edit! (fn [row]
+        (if (:revision row) row
+          (let [prior (:prior row)
+                current (assoc row :revision revision :providers providers)]
+            (if (and (= "same-source" (:cause row)) (:revision prior) (not= revision (:revision prior)))
+              (let [changed (keep (fn [[namespace receipt]]
+                                    (let [before (get-in prior [:providers namespace])]
+                                      (when (and before (not= before receipt)) namespace)))
+                                  providers)]
+                (assoc current :cause "definitions-changed" :changed (vec (sort changed))))
+              current)))))))
+
+(defn cache!
+  "Charge only a confirmed cache admission in this run."
+  [bytes evictions]
+  (edit! #(-> % (update-in [:cache :kept-bytes] (fn [n] (+ (or n 0) bytes)))
+               (update-in [:cache :evictions] (fn [n] (+ (or n 0) evictions))))))
+
+(defn note! [summary]
+  (edit! #(assoc % :summary (select-keys summary [:repeated :definitions :imports]))))
+
+(defn with-cli [f]
+  (let [previous (Process/get :runtime.activity/origin)]
+    (try (Process/put :runtime.activity/origin "CLI") (f)
+      (finally (if (nil? previous) (Process/delete :runtime.activity/origin)
+                 (Process/put :runtime.activity/origin previous))))))
 
 (defn mark!
   "Record actual decisions, never inferred hits. Only sixteen bounded item labels."
@@ -102,10 +144,12 @@
   (let [key (scope)]
     (if-not (contains? @tapes key) (f)
       (let [id (erlang/unique_integer (list :positive :monotonic))
-            tool (if (contains? #{:editor :check :index :render} tool) tool :other)
+            tool (if (contains? #{:editor :check :index :render :quick-check :outline} tool) tool :other)
             parent (current-id) started (now)
             subject (or (label (:subject metadata)) "")
             source (label (:source metadata))
+            origin (Process/get :runtime.activity/origin)
+            location (location (:path metadata))
             admitted (get-in (swap! tapes (fn [all]
           (if-let [t (get all key)]
             (let [dead (filterv #(not (alive? %)) (vals (:active t)))
@@ -116,6 +160,7 @@
                 (assoc all key (assoc t :active active :recent recent :dropped (inc (:dropped t))))
                 (assoc all key (assoc t :recent recent :active
                     (assoc active id {:id id :parent parent :tool tool :subject subject
+                      :origin origin :location location :prior (select-keys previous [:revision :providers])
                       :source source :cause (cond (nil? previous) "first-use"
                         (nil? source) "requested" (= source (:source previous)) "same-source" :else "source-changed")
                       :pid (erlang/self) :started started :state "working" :wait-ms 0 :counts {} :items []}))))) all))) [key :active id])]
@@ -129,5 +174,5 @@
                 (if-let [r (get-in all [key :active id])]
                   (-> all (update-in [key :active] dissoc id)
                     (update-in [key :recent]
-                      #(retain (conj % (assoc r :ended (now)
+                      #(retain (conj % (assoc (dissoc r :prior) :ended (now)
                         :state (if (pos? (get-in r [:counts :failed] 0)) "failed" "done")))))) all))))))))))

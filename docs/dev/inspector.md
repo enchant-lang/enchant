@@ -1,6 +1,6 @@
 # Development inspector
 
-Start a Live app with `bl serve app.bl --dev` to show the collapsed dock to
+Start a Live app with `bl serve app.bl` to show the collapsed dock to
 developers. The app supplies the authorizer to `live.app/serve`:
 
 ```clojure
@@ -13,10 +13,17 @@ developers. The app supplies the authorizer to `live.app/serve`:
 
 `developer?` receives the app's resolved principal and must return exactly true.
 Use `{:devtools false}` in the project's `env.bl` to disable the inspector for
-all its `bl serve` launches. A listener can opt out with `:enabled? false`.
-Plain starts default off. Programmatic callers can opt in with `:enabled? true`
-and an authorizer. `--dev` requires a development environment and applies to
-listeners started directly by the entry program.
+all its `bl serve` launches. Use `--no-dev` for one launch or `:enabled? false`
+for one listener. The project's `:loading` declaration chooses the environment
+variable and production values. The defaults are `BL_ENV=production` and
+`BL_ENV=prod`. The setting applies to listeners started directly by the entry
+program. The app supplies the principal check.
+
+An OTP release launcher sets `BEAM_LISP_IMAGE=release` and defaults `BL_ENV`
+to `production`. Live keeps the dock off in that image. A Nix SDK selection
+is a development-capable toolchain and supplies its exact immutable identity
+to the panel. Programmatic starts outside `bl serve` can opt in with
+`:enabled? true` and an authorizer.
 
 Unauthorized viewers receive the original screen and a 404 for assets and
 snapshots. Existing HTTP handlers still compose. `app/stop!` releases the
@@ -26,9 +33,16 @@ The injected dock shows page updates, Loom spacing/colours/corners, real tool
 activity and registered owner status. The left Enchant button opens and closes
 the panel. Server shows the serving VM's Beam Lisp and Erlang/OTP versions and
 counts running jobs across all registered work owners, including jobs outside
-the visible list. Click an update to inspect its server
-render. Click a tool run to see actual cache computations, reuse decisions,
-admission waiting and child runs. Function labels come from actual analysis
+the visible list. Server can copy the SDK identity, timings and counters in a
+report that omits subjects, paths, symbols, source text and runtime handles.
+Click an update to inspect its server render. Click a tool run to see cache
+computations, reuse, recorded admission waiting and child runs. Elapsed time
+outside admission wait is wall time. Cache bytes and evictions describe
+confirmed admissions in that run. The reason identifies source changes or a
+new definition revision. Named providers appear when their observed
+generations differ. An app can supply `:source-link (fn [principal location] ...)`
+to link a relative source reference to a same-origin editor route. The default
+action copies the path. Function labels come from actual analysis
 worklist evaluations, with sixteen labels retained. They are not a complete
 function list. Check always runs house rules, including when compiler facts
 are reused. Browser update counts count patch operations, not CPU usage.
@@ -39,7 +53,19 @@ authority or overrides an explicitly different realm.
 
 Activity records instrument `lsp/analyzed`, `bl.check/analyze-source` and
 `codebase/index-source`. They stay in the caller's environment and VM scope.
-They describe work in this scope; a separate cold CLI VM is a separate runtime.
+A CLI command using the same warm realm appears with a CLI label. A separate
+cold CLI VM is a separate runtime.
+
+```sh
+bl check --quick src/app.bl   # reader errors and repeated definitions
+bl codebase src/app.bl        # top-level definitions and direct imports
+```
+
+The quick commands read one regular `.bl` file of at most 64 KiB. They share the
+parsed summary by exact source and reader revision. The outline reports totals
+and shows up to 32 definitions and imports. Full `bl check FILE` provides
+compiler diagnostics and house rules.
+
 No observer starts an editor request, check, index, projection subscription or
 worker. A hidden/closed dock has no polling; an open Tools/Server panel allows
 one request at a time with an abort deadline. Browser history caching pauses
@@ -79,7 +105,7 @@ scripts/inspector-scenario --sdk /nix/store/QUALIFIED-SDK \
 ```
 
 The runner requires the local optional browser helper/runtime. It retains native
-screenshots, nineteen witnessed claims, source/helper hashes and the exact SDK
+screenshots, twenty-one witnessed claims, source/helper hashes and the exact SDK
 pin, and rejects changed test inputs. It never produces an SDK or starts an app.
 
 Cold-start assertions are authoritative in canonical SDK qualification. Private

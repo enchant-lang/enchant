@@ -1,0 +1,77 @@
+;; One-file reader checks and an outline. Never evaluate source or discover a tree.
+(ns bl.dev-source
+  (:require [bl.util :as u] [reader-node :as node] [runtime.activity :as activity]
+            [data.provenance :as provenance] [data.single-flight :as flight]))
+
+(def max-bytes 65536)
+(def max-items 32)
+(def definition-heads #{"def" "defn" "defn-" "defmacro" "defmulti" "defprotocol" "defrecord" "deftype"})
+
+(defn- definition [form]
+  (let [bare (node/node-form form)]
+    (when (= :list (node/node-tag bare))
+      (let [[op arg] (node/node-items bare)]
+        (when (and (= :symbol (node/node-tag op))
+                   (contains? definition-heads (node/node-name op))
+                   (= :symbol (node/node-tag (node/node-form arg))))
+          {:name (node/node-name (node/node-form arg)) :line (:line (node/node-pos form))})))))
+
+(defn- summary [src]
+  (let [forms (BeamLisp.Reader/read_string src)
+        [namespace requires] (BeamLisp.SourceGraph/header*-nodes forms)
+        definitions (vec (keep definition forms))
+        repeated (->> definitions (map :name) frequencies (filter #(> (second %) 1)) (map first) sort)]
+    {:namespace namespace :definitions (count definitions) :symbols (vec (take max-items definitions))
+     :imports (count requires) :requires (vec (take max-items requires))
+     :repeat-count (count repeated) :repeated (vec (take max-items repeated))}))
+
+(defn inspect-source
+  "Read and outline one source buffer. Tools share one exact parsed summary."
+  [mode path src]
+  (when-not (and (string? src) (<= (erlang/byte_size src) max-bytes))
+    (throw (ex-info "Quick tools read at most 64 KiB from one source" {})))
+  (let [digest (Base/encode16 (crypto/hash :sha256 src) (list (tuple :case :lower)))
+        namespaces ["bl.dev-source" "reader-node"]]
+    (activity/with-operation mode {:subject (or path "Document") :path path :source digest}
+      (fn []
+        (let [revision (provenance/namespace-revision namespaces)
+              _ (activity/evidence! revision namespaces)
+              result (flight/value :bl.dev-source.summary digest revision #(summary src))]
+          (activity/note! (if (= mode :quick-check)
+                            {:repeated (:repeat-count result)}
+                            {:definitions (:definitions result) :imports (:imports result)}))
+          result)))))
+
+(defn- read-bounded [path]
+  (when-not (and (= ".bl" (Path/extname path)) (File/regular? path))
+    (throw (ex-info "Quick tools need a regular .bl file" {})))
+  (let [bytes (File/open! path (list :read :binary) #(IO/binread % (inc max-bytes)))]
+    (cond
+      (= :eof bytes) ""
+      (not (and (string? bytes) (<= (erlang/byte_size bytes) max-bytes)))
+      (throw (ex-info "Quick tools read at most 64 KiB from one source" {}))
+      (String/starts_with? bytes "#!") (let [lines (String/split bytes "\n" (list (tuple :parts 2)))]
+                                      (if (second lines) (str "\n" (second lines)) ""))
+      :else bytes)))
+
+(defn- show-summary [mode result]
+  (if (= :quick-check mode)
+    (str "Source reads · " (:repeat-count result) " repeated definitions"
+         (when (seq (:repeated result)) (str "\n" (join ", " (:repeated result)))))
+    (str (or (:namespace result) "Script") " · " (:definitions result) " definitions · " (:imports result) " imports"
+         (when (seq (:symbols result))
+           (str "\n" (join "\n" (map #(str (:line % "-") "  " (:name %)) (:symbols result)))))
+         (when (seq (:requires result)) (str "\nImports: " (join ", " (:requires result)))))))
+
+(defn- command [mode args st]
+  (if (or (not= 1 (count args)) (some #(get st %) [:fix :update :changed :install-hook]))
+    (u/usage-error (if (= mode :quick-check) "usage: bl check --quick FILE [--json]" "usage: bl codebase FILE [--json]"))
+    (let [path (u/resolve (first args))]
+      (try
+        (let [result (activity/with-cli #(inspect-source mode (u/rel-path path) (read-bounded path)))]
+          (u/emit st result #(show-summary mode %))
+          0)
+        (catch e (u/io-err (str (u/rel-path path) ": " (ex-message e))) 1)))))
+
+(defn check [args st] (command :quick-check args st))
+(defn run [args st] (command :outline args st))

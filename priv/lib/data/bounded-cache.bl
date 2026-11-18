@@ -1,7 +1,7 @@
 ;; Optional finite-value cache. Computation belongs to callers; one owner only
 ;; publishes entries after charging their complete retained data footprint.
 (ns data.bounded-cache (:require [data.cache-budget :as budget] [data.cache-pool :as pool]
-                                [proc.framework :as framework]))
+                                [proc.framework :as framework] [runtime.activity :as activity]))
 
 (def OWNER-TIMEOUT-MS 25)
 
@@ -183,7 +183,8 @@
             (erlang/demonitor (:monitor pending) (list :flush))
             (drop-claim! (:gate st) ticket)
             (publish-control! (:name st) (:gate st) state)
-            (reply (:accepted? decision) (assoc st :budget state :pending nil))))
+            (reply (when (:accepted? decision) {:bytes weight :evictions (count (:evict decision))})
+                   (assoc st :budget state :pending nil))))
         (reply false st))))
   (handle-cast [:cancel ticket] [st]
     ;; Sent only after reserve failure, NEVER after a queued put times out.
@@ -281,7 +282,10 @@
       (if (and key revision)
         (let [weight (footprint (tuple key revision value))]
           (if (budget/admissible? weight)
-            (publish-entry! name key revision value weight) false)) false))
+            (if-let [admission (publish-entry! name key revision value weight)]
+              (do (activity/cache! (:bytes admission) (:evictions admission)) true)
+              false)
+            false)) false))
     (catch _ false)))
 
 (defn computation-revision

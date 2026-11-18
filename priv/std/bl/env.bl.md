@@ -176,7 +176,7 @@ worst kind of configuration bug.
   claim those hostnames and serve their own root redirects through the gateway.
 - `:env` — name → value, the environment the tree expects.
 - `:devtools false` — turn off the Live inspector for this project's `bl serve`
-  launches. With the default setting, `bl serve --dev` shows the dock to viewers
+  launches. In development, ordinary `bl serve` shows the dock to viewers
   authorized by the app.
 - `:loading` — `{:environment-env "BL_ENV" :development :lazy :production :startup
   :roots []}`. `bl serve` initializes declared entry dependencies before running

@@ -1,5 +1,5 @@
 (ns runtime.activity-test
-  (:require [runtime.activity :as a] [data.single-flight :as flight] [lsp]
+  (:require [runtime.activity :as a] [data.single-flight :as flight] [lsp] [bl.cli :as cli]
             [bl.check :as check] [codebase :as cb]))
 (defn- rows [r] (:recent (a/snapshot r)))
 
@@ -14,6 +14,7 @@
       (is (= 1 @calls))
       (is (= 1 (get-in (first (rows r)) [:counts :reused])))
       (is (= 1 (get-in (second (rows r)) [:counts :computed])))
+      (is (pos? (get-in (second (rows r)) [:cache :kept-bytes])))
       (is (= "same-source" (:cause (first (rows r)))))
       (is (not (String/contains? (pr-str (a/snapshot r)) "secret")))
       (is (not (contains? (first (rows r)) :source)))
@@ -93,3 +94,37 @@
       (is (= 64 (count (rows r))))
       (is (= false (:available (a/snapshot (assoc r :lease (erlang/make_ref))))))
       (finally (doseq [pid @workers] (when (Process/alive? pid) (erlang/exit pid :kill))) (a/close! r)))))
+
+(deftest changed-evidence-is-explained-without-publishing-its-identities
+  (let [r (a/open)]
+    (try
+      (doseq [revision ["old-definition-hash" "new-definition-hash"]]
+        (a/with-operation :index {:subject "One" :path "src/one.bl" :source "source-hash"}
+          #(a/evidence! revision [])))
+      (let [row (first (rows r))]
+        (is (= "definitions-changed" (:cause row)))
+        (is (= {:path "src/one.bl"} (:location row)))
+        (is (not (contains? row :revision)))
+        (is (not (contains? row :prior)))
+        (is (not (String/contains? (pr-str (rows r)) "-hash"))))
+      (finally (a/close! r)))))
+
+(deftest cheap-cli-check-and-outline-share-the-app-tape-and-parse
+  (let [r (a/open)
+        file (str "inspector-quick-" (erlang/unique_integer (list :positive)) ".bl")]
+    (try
+      (File/write! file "(ns inspector.fixture (:require [bl.util]))\n(defn leaf [] :ok)\n(defn leaf [] :again)")
+      (is (= 0 (cli/dispatch-command "check" (cli/parse-argv (list "check" "--quick" file)))))
+      (is (= 0 (cli/dispatch-command "codebase" (cli/parse-argv (list "codebase" file)))))
+      (let [[outline check] (rows r)]
+        (is (= ["outline" "quick-check"] (mapv :tool [outline check])))
+        (is (= ["CLI" "CLI"] (mapv :origin [outline check])))
+        (is (= {:path file} (:location outline)))
+        (is (= {:definitions 2 :imports 1} (:summary outline)))
+        (is (= {:repeated 1} (:summary check)))
+        (is (= 1 (get-in check [:counts :computed])))
+        (is (= 1 (get-in outline [:counts :reused]))))
+      (File/write! file "(defn broken [")
+      (is (= 1 (cli/dispatch-command "check" (cli/parse-argv (list "check" "--quick" file)))))
+      (is (= "failed" (:state (first (rows r)))))
+      (finally (File/rm! file) (a/close! r)))))

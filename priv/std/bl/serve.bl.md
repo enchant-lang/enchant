@@ -125,9 +125,16 @@ returns 1 when the program raises, so a broken file never looks like a running
 server; a program that starts its server and returns parks here forever.
 
 ```beam-lisp
-(defn- run-entry! [project entry dev?]
-  (let [previous (Process/get :bl.serve/devtools)
-        mode (cond (= false (:devtools project)) :off dev? :on :else nil)]
+(defn devtools-mode
+  "Resolve the standard Live inspector mode once for this invocation."
+  [project requested packaged? environment]
+  (let [production? (or packaged? (= :startup (loading/mode (:loading project) environment)))]
+    (when (and (= true requested) production?)
+      (throw (ex-info "--dev requires a development environment" {})))
+    (if (or production? (= false requested) (= false (:devtools project))) :off :on)))
+
+(defn- run-entry! [entry mode]
+  (let [previous (Process/get :bl.serve/devtools)]
     (try
       (Process/put :bl.serve/devtools mode)
       (BeamLisp/run_file entry)
@@ -137,12 +144,12 @@ server; a program that starts its server and returns parks here forever.
           (Process/put :bl.serve/devtools previous))))))
 
 (defn run
-  "`bl serve FILE [--dev] [--port N] [--pretty-log] [-- args...]`. Run FILE, then park
+  "`bl serve FILE [--no-dev] [--port N] [--pretty-log] [-- args...]`. Run FILE, then park
    the VM so the server it started keeps answering. Returns 1 when the program
    raises."
   [args st]
   (if (empty? args)
-    (u/usage-error "usage: bl serve FILE [--dev] [--port N] [--pretty-log] [-- args...]")
+    (u/usage-error "usage: bl serve FILE [--no-dev] [--port N] [--pretty-log] [-- args...]")
     (let [target (first args)]
       (u/register-paths st)
       (reset! port-override (:port st))
@@ -155,12 +162,12 @@ server; a program that starts its server and returns parks here forever.
                   policy (:loading project)]
               (when (nil? policy)
                 (throw (ex-info "Invalid loading configuration" {:errors (:errors project)})))
-              (when (and (:dev st)
-                         (= :startup (loading/mode policy (System/get_env (:environment-env policy)))))
-                (throw (ex-info "--dev requires a development environment" {})))
-              (loading/prepare! project entry)
-              (run-entry! project entry (:dev st))
-              (loading/start-background! project entry))))
+              (let [mode (devtools-mode project (:dev st)
+                                        (= "release" (erlang/apply :Elixir.System :get_env (list "BEAM_LISP_IMAGE")))
+                                        (System/get_env (:environment-env policy)))]
+                (loading/prepare! project entry)
+                (run-entry! entry mode)
+                (loading/start-background! project entry)))))
         ;; The program has returned and its reader/compiler frames can unwind.
         ;; Collect this caller's transient initialization heap once before the
         ;; long idle wait; serving processes retain their own managed custody.

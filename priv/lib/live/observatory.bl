@@ -15,6 +15,16 @@
 
 (defn- state-label [value] (label (if (keyword? value) (name value) value)))
 
+(defn- sdk-id []
+  (let [selected (erlang/apply :Elixir.System :get_env (list "BL_SDK_PRODUCT"))
+        path (if (and (string? selected) (String/starts_with? selected "/nix/store/"))
+               selected (BeamLisp.Tiers/priv_root))
+        hash (when (and (string? path) (String/starts_with? path "/nix/store/"))
+               (first (String/split (nth (String/split path "/") 3 "") "-")))]
+    (when (and hash (= 32 (count hash))
+               (every? #(String/contains? "0123456789abcdfghijklmnpqrsvwxyz" %) (String/codepoints hash)))
+      hash)))
+
 (defn open
   "Capture the host scope once. Explicit grants are maps of names to existing
    work owners or projection readers, at most sixteen total. Starts no work."
@@ -25,7 +35,8 @@
                    (<= (+ (count jobs) (count results)) max-owners))
        (throw (ex-info "Observatory needs at most sixteen named owner grants" {})))
      {:scope (runtime/capture) :activity (:activity options) :work jobs
-      :versions {:bl (util/version)
+      :source-link (:source-link options)
+      :versions {:bl (util/version) :sdk (sdk-id)
                  :otp (erlang/list_to_binary (erlang/system_info :otp_release))}
       :projections (into {} (map (fn [[name reader]] [name (projection/reader reader)]) results))})))
 
@@ -53,21 +64,33 @@
        :demand (:demand result)})
     (catch _ {:name (label name) :status "unavailable"})))
 
+(defn- with-links [tape link principal]
+  (if-not (fn? link) tape
+    (let [attach (fn [row]
+                   (if-let [location (:location row)]
+                     (let [url (try (link principal location) (catch _ nil))]
+                       (if (and (string? url) (<= 1 (count url) 512)
+                                (String/starts_with? url "/") (not (String/starts_with? url "//"))
+                                (not (String/contains? url "\\")))
+                         (assoc row :link url) row)) row))]
+      (-> tape (update :running #(mapv attach %)) (update :recent #(mapv attach %))))))
+
 (defn snapshot
   "One bounded sample for browser or CLI. Reads never subscribe, retry, index,
    cancel or launch analysis. Projection values and executable handles stay private.
    Reductions are cumulative; this sample does not estimate CPU percentage."
-  [observatory]
+  ([observatory] (snapshot observatory nil))
+  ([observatory principal]
   {:schema schema :sampled-at (erlang/system_time :millisecond)
    :versions (:versions observatory)
    :runtime (runtime/query (:scope observatory) max-rows)
-   :activity (activity/snapshot (:activity observatory))
+   :activity (with-links (activity/snapshot (:activity observatory)) (:source-link observatory) principal)
    :work (mapv work-view (sort-by (fn [[name _]] (str name)) (:work observatory)))
    :projections (mapv projection-view (sort-by (fn [[name _]] (str name)) (:projections observatory)))
    :limits {:owners max-owners :rows-per-owner max-rows}
    :coverage {:tooling-cache (if (:activity observatory) "recorded decisions" "not enabled")
               :admission (if (:activity observatory) "recorded waits" "not enabled")
-              :cpu-rate "requires consecutive samples"}})
+              :cpu-rate "requires consecutive samples"}}))
 
 (def style
   (str
@@ -214,7 +237,7 @@
         (cond
           (not= true (authorize (web/private conn :me))) (web/text conn 404 "not found")
           (not= "get" (web/method conn)) (web/text conn 405 "GET required")
-          :else (let [sample (snapshot observatory)]
+          :else (let [sample (snapshot observatory (web/private conn :me))]
             (if (= requested-path path) (web/html conn (page sample)) (web/json conn sample))))))))
 
 (defn attach

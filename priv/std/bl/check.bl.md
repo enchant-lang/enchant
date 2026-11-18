@@ -136,7 +136,9 @@ keeps the cost one analysis per file instead of one per function.
             rules (vec (deodorant/all-rules))
             ns (u/ns-of src)
             forms (atom nil)
-            core (flight/value :bl.check.metrics digest (provenance/definition-revision)
+            revision (provenance/definition-revision)
+            _ (activity/evidence! revision ["lsp" "bl.lint" "deodorant" "system.arity.anf"])
+            core (flight/value :bl.check.metrics digest revision
               (fn []
                 (swap! core-builds inc)
                 (let [document (lsp/check-document src ns {:ambient? false})
@@ -164,7 +166,7 @@ keeps the cost one analysis per file instead of one per function.
 (defn analyze-source
   "Diagnostics, always-current house rules and function facts for one source."
   [path src]
-  (activity/with-operation :check {:subject path :source (sha256 src)}
+  (activity/with-operation :check {:subject path :path path :source (sha256 src)}
     (fn []
       (let [result (analyze-source* path src)]
         (when (:unreadable result) (activity/mark! :failed))
@@ -448,7 +450,7 @@ code carries the verdict.
                            (:update st) paths
                            (:changed st) (if (nil? base) paths (changed-paths base paths))
                            :else paths)
-                report (analyze-paths selected)]
+                report (activity/with-cli #(analyze-paths selected))]
             (cond
               (:update st)
               (do (write-baseline! baseline-path report)

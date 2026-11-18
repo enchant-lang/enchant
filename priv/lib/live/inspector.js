@@ -35,6 +35,7 @@
   const history = [], boxes = new Set(), timers = new Set();
   let open = false, tab = 'updates', paint = false, picking = false, selected = null;
   let selectedRun = null;
+  let copyStatus = '';
   const sampling = () => tab==='server'||tab==='tools';
   const runId = () => {const n=Number(source()?.dataset.toolRun);return Number.isSafeInteger(n)&&n>0?n:null;};
   let sample = null, error = false, poll = null, flight = null, generation = 0;
@@ -50,6 +51,7 @@
   overlay.append(pickBox);
   const text = (parent, tag, value) => {const n=document.createElement(tag);n.textContent=String(value);parent.append(n);return n;};
   const mb = n => Number.isFinite(n) ? `${Math.round(n/1048576)} MB` : '—';
+  const bytes = n => n<1024?`${n} B`:`${(n/1024).toFixed(1)} KiB`;
   const stateName = p => ({ready:'Ready',running:'Working',blocked:'Stopped',stale:'Out of date',unavailable:'Unavailable',refused:'Unavailable'}[p.status] || (p.demand ? 'Waiting' : 'Not used'));
   function bars(parent, big) {
     parent.replaceChildren();
@@ -68,7 +70,7 @@
   }
   function activate(next) {
     if (disposed) return;
-    stopSampling();tab=next;if(!open)showPanel(true);
+    stopSampling();if(tab!==next)copyStatus='';tab=next;if(!open)showPanel(true);
     root.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===tab)));
     $('#title').textContent={updates:'Updates',element:'Loom',server:'Server',tools:'Tools'}[tab];
     render(); if(sampling()) refresh();
@@ -148,13 +150,41 @@
         const versions=text(body,'div','');versions.className='versions';
         text(versions,'code',`BL ${sample.versions.bl}`);
         text(versions,'code',`OTP ${sample.versions.otp}`);
+        if(sample.versions.sdk)text(versions,'code',`SDK ${sample.versions.sdk.slice(0,12)}`).title=sample.versions.sdk;
       }
     }
     const footer=text(body,'div','');footer.className='footer';
     text(footer,'span',error?'Sample unavailable':lastAt?`Updated ${new Date(lastAt).toLocaleTimeString()}`:'');
-    const refreshButton=text(footer,'button','Refresh');refreshButton.dataset.action='refresh';
+    const actions=text(footer,'span','');
+    if(sample)text(actions,'button',copyStatus||'Copy report').dataset.action='copy-report';
+    text(actions,'button','Refresh').dataset.action='refresh';
   }
-  const toolName = kind => ({editor:'Editor',check:'Check',index:'Index',render:'Page'}[kind]||'Tool');
+  const toolName = kind => ({editor:'Editor',check:'Check',index:'Index',render:'Page','quick-check':'Quick check',outline:'Outline'}[kind]||'Tool');
+  function report() {
+    return {
+      schema:'enchant.inspector.report.v1',
+      versions:sample.versions,
+      memoryBytes:sample.runtime?.vm?.memory,
+      omittedRuns:sample.activity?.dropped||0,
+      tools:(sample.activity?.recent||[]).filter(r=>r.tool!=='render').slice(0,16).map(r=>({
+        tool:r.tool, state:r.state, cause:r.cause, origin:r.origin,
+        elapsedMs:r['elapsed-ms'], waitMs:r['wait-ms'],
+        counts:r.counts, cache:r.cache, summary:r.summary
+      }))
+    };
+  }
+  async function copy(value) {
+    try {await navigator.clipboard.writeText(value);copyStatus='Copied';}
+    catch {copyStatus='Copy unavailable';}
+    render();
+  }
+  function sourceTarget(href) {
+    if(!href)return null;
+    try {
+      const url=new URL(href,window.location.origin);
+      return url.origin===window.location.origin?url:null;
+    } catch {return null;}
+  }
   function renderTools() {
     const tape=sample?.activity;
     if(!tape?.available){text(body,'div',error?'Unavailable':sample?'Not enabled':'…').className='empty';return;}
@@ -165,13 +195,42 @@
     if(chosen) {
       const head=text(body,'div','');head.className='selection';text(head,'b',toolName(chosen.tool));
       const back=text(head,'button','All runs');back.dataset.action='all-runs';
-      text(body,'small',chosen.subject).className='subject';
+      const location=chosen.location?.path;
+      const subject=text(body,'div','');subject.className='selection';
+      const target=sourceTarget(chosen.link);
+      if(location&&target) {
+        const link=text(subject,'a',location);link.href=target.href;
+      } else if(location) {
+        const pathButton=text(subject,'button',location);pathButton.title='Copy source path';
+        pathButton.dataset.action='copy-source';
+      } else text(subject,'small',chosen.subject).className='subject';
+      if(chosen.origin)text(subject,'small',chosen.origin);
       const facts=text(body,'div','');facts.className='run-facts';
       const counts=chosen.counts||{};
       [[counts.computed||0,'Built'],[counts.reused||0,'Reused'],[`${chosen.wait_ms??chosen['wait-ms']??0} ms`,'Wait']].forEach(([v,label])=>{
         const cell=text(facts,'div','');text(cell,'strong',v);text(cell,'small',label);
       });
-      text(body,'div',({'first-use':'First request','same-source':'Same source','source-changed':'Source changed',requested:'Requested again'}[chosen.cause]||'Requested')).className='reason';
+      text(body,'div',({'first-use':'First request','same-source':'Same source','source-changed':'Source changed','definitions-changed':'Definitions changed',requested:'Requested again'}[chosen.cause]||'Requested')).className='reason';
+      if(chosen.changed?.length) {
+        const providers=text(body,'div','');providers.className='function-names';
+        chosen.changed.forEach(name=>text(providers,'code',name));
+      }
+      if(chosen['elapsed-ms']!=null) {
+        const wait=chosen['wait-ms']||0;
+        const timing=text(body,'div','');timing.className='line';
+        text(timing,'span',`${Math.max(0,chosen['elapsed-ms']-wait)} ms outside wait`).title='Wall time minus recorded admission wait';
+        text(timing,'small',`${chosen['elapsed-ms']} ms elapsed`);
+      }
+      if(chosen.cache) {
+        const cache=text(body,'div','');cache.className='line';
+        text(cache,'span',`${bytes(chosen.cache['kept-bytes'])} kept`);
+        text(cache,'small',`${chosen.cache.evictions} evicted`);
+      }
+      if(chosen.summary) {
+        const result=chosen.summary;
+        text(body,'small',result.repeated!=null?`${result.repeated} repeated definitions`:
+          `${result.definitions} definitions · ${result.imports} imports`);
+      }
       if(chosen.tool==='check')text(body,'small','Rules run each time');
       if(counts.unstable)text(body,'small','Definitions changed during work');
       if(counts.declined)text(body,'small','Answer not kept');
@@ -191,7 +250,7 @@
     function runRow(r,child) {
       const row=text(body,'button','');row.className='run-row'+(child?' child':'');row.dataset.run=r.id;row.dataset.runId=r.id;row.dataset.tool=r.tool;row.dataset.cause=r.cause;
       const label=text(row,'span','');text(label,'i','').className='dot '+(r.state==='working'||r.state==='waiting'?'running':r.state==='failed'?'blocked':'ready');
-      label.append(document.createTextNode(toolName(r.tool)));
+      label.append(document.createTextNode(toolName(r.tool)+(r.origin==='CLI'?' · CLI':'')));
       const state=r.state==='waiting'?'Waiting':r.state==='working'?'Working':r.state==='failed'?'Failed':r.state==='interrupted'?'Stopped':(r.counts?.reused&&!r.counts?.computed)?'Reused':'Done';
       text(row,'small',`${state} · ${r['elapsed-ms']} ms`);row.title=r.subject;
     }
@@ -301,6 +360,12 @@
       case 'pick':activate('element');setPicking(!picking);break;
       case 'paint':paint=!paint;paintCredits=16;button.setAttribute('aria-pressed',String(paint));if(!paint)clearFlashes();break;
       case 'refresh':refresh();break;
+      case 'copy-report':if(sample)copy(JSON.stringify(report(),null,2));break;
+      case 'copy-source': {
+        const row=[...(sample?.activity?.running||[]),...(sample?.activity?.recent||[])].find(r=>r.id===selectedRun);
+        if(row?.location?.path)copy(row.location.path);
+        break;
+      }
     }
   });
   function visibility(){stopSampling();if(!document.hidden&&open&&sampling())refresh();}
