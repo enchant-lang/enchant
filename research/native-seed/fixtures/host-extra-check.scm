@@ -382,6 +382,12 @@
       (bl-is-nil (bl-get 42 (bl-key "absent"))) (not (native-map-has? 42 (bl-key "absent")))
       (= 42 (native-map-remove 42 (bl-key "absent")))
       (= 1 (bl-get (bl-assoc 42 (bl-key "added") 1) (bl-key "added")))))
+(let* ((float-key (bl-float 1.0)) (source (bl-map 1 bl-nil float-key #f 2 9))
+       (selected ((native-leaf "maps/with/2") (list 1 float-key 3) source)))
+ (native-extra-check "raw map selection retains nil, false and exact numeric keys"
+  (and (= 2 (native-map-count selected))
+       (bl-is-nil (native-raw-get selected 1 native-missing))
+       (eq? #f (native-raw-get selected float-key native-missing)))))
 (native-extra-check "scalar text search preserves Unicode offsets and suffixes"
  (and (= 2 (native-string-index "λ😀/é/" "/"))
       (= 4 (native-string-index "λ😀/é/" "/" 3))

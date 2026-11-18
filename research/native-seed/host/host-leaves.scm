@@ -300,7 +300,12 @@
 (native-add-leaf! "maps/next/1" (lambda (i) (let ((ps (vector-ref i 1))) (if (null? ps) (bl-key "none") (bl-tuple (list (bl-nth (car ps) 0) (bl-nth (car ps) 1) (vector 'map-iterator (cdr ps))))))))
 (native-add-leaf! "maps/filter/2" native-map-filter)
 (native-add-leaf! "maps/without/2" (lambda (ks m) (let loop ((ks ks) (m (native-assert-map m))) (if (null? ks) m (loop (cdr ks) (native-raw-remove m (car ks)))))))
-(native-add-leaf! "maps/with/2" (lambda (ks m) (let loop ((ks ks) (out (bl-empty-map))) (if (null? ks) out (loop (cdr ks) (if (native-raw-has? m (car ks)) (native-raw-assoc out (car ks) (native-raw-get m (car ks))) out))))))
+(native-add-leaf! "maps/with/2"
+ (lambda (ks m)
+  (let loop ((ks ks) (out (bl-empty-map)))
+   (if (null? ks) out
+    (let* ((key (car ks)) (value (native-raw-get m key native-missing)))
+     (loop (cdr ks) (if (eq? value native-missing) out (native-raw-assoc out key value))))))))
 (native-add-leaf! "unicode/characters_to_list/1" (lambda (x) (h-str-codepoints (native-char-data x))))
 (native-add-leaf! "unicode/characters_to_binary/1" native-char-data)
 (native-add-leaf! "string/to_integer/1" native-parse-integer)
