@@ -678,7 +678,7 @@ Item | BEAM | Native | Needs
 A3 Attribute on a real corpus | ✓ | ✓ | —
 N1 Kernel emitter forms | — | ✓ | A3
 N3 Sealed direct links | ✓ | ✓ | Q4
-V2a–c Immediates, keywords, hash maps | — | ✓ | Q1, Q3
+V2c Hash maps | — | ✓ | Q1, Q3
 V2d Fixed-slot records | ✓ | ✓ | Core closed-record profile
 V2e Byte text | ✓ | ✓ | FL31 domains
 E1 Shared fact pass | ✓ | ✓ | FL51 for validation
@@ -811,11 +811,11 @@ profile identifies metadata wrappers as a remaining cost.
 :PROPERTIES:
 :AREA: values
 :TARGET: native
-:BLOCKED_BY: Q1 Q3
 :END:
-A hash array mapped trie for maps and sets, once Q1 removes the term-order
-guarantee. Emitted bytes stay identical because identity goes through
-=formal.identity=, not through storage order.
+Q1 leaves public map iteration order unspecified. Compare a hash array
+mapped trie against the current small-map and AVL storage on the real compiler
+profile. Honor Q3 and the raw exact-key API. Keep explicit term sorting at
+emission and identity boundaries, and measure that cost too.
 
 ** TODO V2d · Fixed-slot records
 :PROPERTIES:
@@ -919,11 +919,12 @@ strings, proven for Int.
 :PROPERTIES:
 :AREA: runtime
 :TARGET: native
-:BLOCKED_BY: N4 E2
+:BLOCKED_BY: E2
 :END:
-Start with counted loops whose rank is syntactic: an integer counter that
-strictly decreases towards a bound. Then accept author ranks through
-=formal/verify-loop= (FL60). On BEAM, reductions stay mandatory.
+Use a statically bounded amount of work for any native tick-elision candidate.
+A decreasing rank from =formal/verify-loop= (FL60) can establish termination.
+Native budgets also need a bound on the work one turn can perform. Check the
+actor traces and progress at budgets 17 and 41. BEAM retains reductions.
 
 ** TODO E8 · Unboxed floats
 :PROPERTIES:
@@ -1074,19 +1075,25 @@ leaves and the constraints on admitting NaN. Those cases bound V2c and E8.
   storage, source frames, lazy memo actors and the compiled POSIX fixture.
   Raw key comparison, persisted layouts, and legacy duplicate-row counts
   retain their existing contracts.
+  Commit =69a1742ed= counts insertions during the existing update walk.
+  Replacement of key 1,023 and insertion of key 1,024 each went from 22
+  comparisons to 11 on the same map. The old map retained its values and size.
 - =chunks.bl= builds the whole emission plan before each =build-next= window.
   Every row walks ANF, hashes its input and resolves link signatures. The
   next window reloads the closure in a fresh VM and starts over. The retained
   wave-1 run fits in one window with 81 jobs. A larger closure or a slow host
-  pays the whole-plan cost per window. Measure planning, emission and final
+  pays the whole-plan cost per window. Commit =20236ad4f= reuses verified
+  chunk bytes during assembly and keeps source fragments with their content
+  keys. Measure planning, emission and final
   validation independently. A plan owned by one frozen build request can
   survive window boundaries while final assembly still verifies every output.
 - The two-pass closure updater recompiles every member whenever it installs
   link rows. Wave 1's second pass reports all 34 members recompiled, with
-  zero added. This closes self-emission and leaves a new incremental cost.
-  A viable cache key would bind each unit to the link rows it actually
-  consulted, including missing resolutions, alongside its source and macro
-  dependencies. Test an unchanged request, a body edit and an arity edit.
+  zero added. Commit =592ce69d1= admits full linked-closure reuse under the
+  same compiler, providers, options and installed link rows. A later per-unit
+  cache can bind consulted link rows and missing resolutions alongside source
+  and macro dependencies. Test an unchanged request, a body edit and an arity
+  edit.
 - =scheme.bl= encodes each identifier into a Unicode codepoint list and a
   second list of Scheme spelling fragments on every occurrence. Source-site
   handling separately walks function bodies for ticks, and fact queries walk
@@ -1103,6 +1110,12 @@ leaves and the constraints on admitting NaN. Those cases bound V2c and E8.
   =Env/delete_key= paths still write the underlying rows. Attach the seal
   to the publication boundary and prove mutation refusal before wiring
   production activation.
+- The JavaScript builder analyzes each namespace's suspension twice, once
+  to select call shapes and once to write its evidence. The dependency walk
+  also rereads the full namespace when it revisits pending nodes and stages
+  a second parse during compilation. Count these passes on the production
+  actor bundle and reuse each build-local result while preserving staged
+  evaluation, evidence and the emitted module graph.
 - The native compiler already has a no-copy UTF-16 ordering path for scalar
   keys. Persistent vector reads still descend a binary trie one level per
   bit of the index. The earlier reader compile recorded 43,756 entries into
@@ -1161,7 +1174,7 @@ self-hosting gate.
 #+begin_rosetta
 | Remaining work | First acceptance boundary |
 | BEAM seal activation | Authenticate a release link plan and cover row mutation before adding a release caller. |
-| V2a–V2c and S2 | Measure representation changes separately. Preserve numeric and composite key parity, raw map leaves and canonical output before retiring host replicas. |
+| V2c and S2 | Measure representation changes separately. Preserve numeric and composite key parity, raw map leaves and canonical output before retiring host replicas. |
 | V2d–V2e | Use proven closed records and byte-offset lexical operations first. Preserve public grapheme and Unicode diagnostic behavior. |
 | E2–E4 and E7 | Prove facts at every back-edge. Qualify exception/cleanup behavior and bounded actor progress before removing checks or ticks. |
 | E5–E6, E8–E9 | Verify each rewrite against the applicable Core profile. Test overflow, signed zero, NaN, callback order and observable failures. |
