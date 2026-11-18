@@ -434,6 +434,10 @@ export const BEAM_ONLY = Object.fromEntries([
   "Elixir.BeamLisp.AOT/staged_macro_kind/2",
   "Elixir.BeamLisp.AOT/staged_macro_lookup/2",
   "Elixir.BeamLisp.Env/assert_native_framework_execution!/0",
+  // Sealed BEAM procedures and deferred filesystem Source are guarded in
+  // compiler.bl. These capabilities remain BEAM-only if called directly.
+  "Elixir.BeamLisp.Env/sealed_value/3", "erlang/fun_info/2",
+  "Elixir.BeamLisp.Loader/source_content/1", "Elixir.BeamLisp.Loader/with_search_dir/2", "erlang/md5/1",
   "Elixir.BeamLisp.Record/declaration_descriptor/4",
   "Elixir.BeamLisp.Record/declaration_descriptor/5",
   "Elixir.BeamLisp.Record/declaration_kind/3",

@@ -132,6 +132,9 @@ export const ENV = {
   },
   peek: (ns, name) => { const r = resolve(ns, name, varRow); return r ? T(OK, r[1]) : ERROR; },
   "bound?": (ns, name) => resolve(ns, name, varRow) !== null,
+  // Browser namespaces come from the module registry, without deferred
+  // filesystem search directories.
+  deferred_dirs: () => null,
   link: (ns, name) => { const r = resolve(ns, name, linkRow); return r ? T(OK, r[1]) : ERROR; },
   link_owner: (ns, name) => { const r = resolve(ns, name, linkRow); return r ? T(OK, r[0], r[1]) : ERROR; },
   put_link: (ns, name, info) => putKey(T(kw("link"), ns, name), info),
