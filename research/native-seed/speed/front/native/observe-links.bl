@@ -30,7 +30,7 @@
 ;;   PARTITION LINK_ROWS --row-install-control REPORT
 ;;   PARTITION LINK_ROWS --stage-link-subset REPORT [NAMESPACE|--all] [--timed]
 ;;   DONOR_PARTITION DONOR_LINK_ROWS --capture-stage-link-plan PLAN QUALIFICATION
-;;   EDITED_PARTITION EDITED_LINK_ROWS --replay-stage-link-plan REPORT PLAN PLAN_SHA
+;;   EDITED_PARTITION EDITED_LINK_ROWS --replay-stage-link-plan REPORT PLAN PLAN_SHA [OMISSION_CONTROL_NAMESPACE]
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --ambient-roots REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --ambient-roots-control REPORT
@@ -2064,7 +2064,7 @@
    :attempted-subset-rows (when-not initial-refusal (+ (count subset-rows) (count subset-core)))
    :omitted-inputs omitted :fallback-rows (if refusal (+ (count rows) (count (:core-links closure))) 0)}))
 
-(defn- replay-stage-link-plan [closure rowset path expected-sha]
+(defn- replay-stage-link-plan [closure rowset path expected-sha omission-control]
  (let [bytes (File/read! path)
        _ (assert (= expected-sha (artifact/sha bytes)))
        plan (read-registry-member bytes)
@@ -2074,10 +2074,21 @@
                       (= (:order plan) (:order closure))
                       (= (set (:order closure)) (set (keys (:members plan))))))
        rows (:rows rowset)
-       index (stage-row-index closure rows)]
+       index (stage-row-index closure rows)
+       members (if omission-control [omission-control] (:order closure))
+       results (mapv (fn [ns]
+                       (let [prior (get-in plan [:members ns])
+                             _ (assert (some? prior) ns)
+                             prior (if omission-control (assoc prior :inputs []) prior)
+                             result (replay-stage-link-member closure rows index ns prior)]
+                        (when omission-control
+                         (assert (= :candidate-link-not-installed (:fallback result)))
+                         (assert (seq (:omitted-inputs result))))
+                        result))
+                     members)]
   {:schema "bl.native.edited-stage-link-plan-shadow" :version 1 :reuse-authority false
    :donor (:donor plan) :plan-sha256 expected-sha :candidate-link-rows-sha256 (:sha256 rowset)
-   :members (mapv #(replay-stage-link-member closure rows index % (get-in plan [:members %])) (:order closure))}))
+   :omission-control omission-control :members results}))
 
 (defn- phase-cost [action]
  (let [started (erlang/monotonic_time :microsecond)
@@ -2206,7 +2217,7 @@
                 (= selected "--row-install-control") (row-install-control closure (:rows baseline))
                 (= selected "--stage-link-subset") (stage-link-subset closure baseline comparison source-receipt)
                 (= selected "--capture-stage-link-plan") (capture-stage-link-plan closure baseline comparison)
-                (= selected "--replay-stage-link-plan") (replay-stage-link-plan closure baseline comparison source-receipt)
+                (= selected "--replay-stage-link-plan") (replay-stage-link-plan closure baseline comparison source-receipt mode)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
