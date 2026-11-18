@@ -792,9 +792,11 @@
       (tuple n (refused state rule n :callback-inline-budget)))))
 
 (defn- rewrite [n env state mod]
-  (let [own (own-module n mod) numeric (numeric-domain n env)
-        consumer (first-filter-shape n)
-        invocation (BeamLisp.Ns.Anf/callable-invocation n)]
+  (let [op (getv n :op)
+        own (when (erlang/== op :remote) (own-module n mod))
+        numeric (when (erlang/== op :arith) (numeric-domain n env))
+        consumer (when (erlang/== op :remote) (first-filter-shape n))
+        private (when (erlang/== op :let) (private-fold n env))]
     (cond
       (some? own) (tuple own (applied state :own-module n :own-literal-closure))
       (some? numeric) (tuple numeric (applied state :numeric-domain n :non-map-operands))
@@ -815,21 +817,21 @@
                         :ownership :immediate-single-consumer :resources :ordinary-heap
                         :binding (if (some? (getv consumer :callee)) :captured-runtime-identity :direct-intrinsic)
                         :order :callee-then-packed-arguments :halt :first-matching-element}))))
-      (some? invocation)
-        (let [f (getv invocation :callee) unpacked (unpack (getv invocation :arguments))
+      (erlang/== op :invoke)
+        (let [invocation (BeamLisp.Ns.Anf/callable-invocation n)
+              f (getv invocation :callee) unpacked (unpack (getv invocation :arguments))
               arity (getv (expr f env) :arity)]
           (if (and (some? unpacked) (some? arity) (erlang/== arity (erlang/length (getv unpacked :args))))
             (let [p (ordered-apply f (getv unpacked :args) (getv n :ann) state)]
               (tuple (elem p 0) (applied (elem p 1) :native-call n
                                         {:arity arity :scope :lexical :arguments :ordered})))
             (tuple n (refused state :native-call n :unknown-or-mismatched-native-arity))))
-      (and (op? n :let) (some? (private-fold n env)))
-        (let [r (private-fold n env)]
-          (if (some? (getv r :node))
-            (checked-fold-result n (getv r :node) env state :strict-map-fold
-              {:domain :integer :callback :closed-total :ownership :private-let-single-consumer
-               :binding :definition-scope :order :sequential-left-fold :resources :ordinary-heap})
-            (tuple n (refused state :strict-map-fold n :private-use-not-provable))))
+      (some? private)
+        (if (some? (getv private :node))
+          (checked-fold-result n (getv private :node) env state :strict-map-fold
+            {:domain :integer :callback :closed-total :ownership :private-let-single-consumer
+             :binding :definition-scope :order :sequential-left-fold :resources :ordinary-heap})
+          (tuple n (refused state :strict-map-fold n :private-use-not-provable)))
       (call? n :lists :foldl)
         (let [fused (fuse-fold n env)]
           (if (some? fused)
@@ -843,7 +845,7 @@
                            (if (alias-only-fold? n env)
                              :callback-rematerialization-not-profitable
                              :unproven-domain-or-callback)))))))
-      (and (op? n :remote) (lists/member (getv n :mod) (list :Elixir.BeamLisp.Ns.Core (runtime-module)))
+      (and (erlang/== op :remote) (lists/member (getv n :mod) (list :Elixir.BeamLisp.Ns.Core (runtime-module)))
            (lists/member (getv n :fun) (list :reduce :transduce :map-indexed)))
         (tuple n (refused state :strict-map-fold n :live-provider-or-observable-lazy-demand))
       :else (tuple n state))))
@@ -941,7 +943,8 @@
             s (if (or (op? n :var) (op? n :let))
                 (put visited :used-names (put (getv visited :used-names) (getv n :name) true)) visited)
             p (children n env s mod)]
-        (if (getv (elem p 1) :limited?) p
+        (if (or (getv (elem p 1) :limited?)
+                (not (lists/member (getv n :op) '(:remote :arith :invoke :let)))) p
           (rewrite (elem p 0) env (elem p 1) mod)))))
 
 (defn run
