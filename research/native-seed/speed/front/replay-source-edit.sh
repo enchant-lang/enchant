@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
 # Rebuild the one-body edit in a private overlay, then check selective relinking.
-# NATIVE_CAPTURE_LOCAL=1 captures the qualified donor in that same overlay
-# before making the edit. This keeps configured absolute loader roots exact.
+# --capture-local captures the qualified donor in the same overlay before
+# making the edit. This keeps configured absolute loader roots exact.
 set -euo pipefail
-if [[ $# != 2 && $# != 6 && $# != 7 || $# == 7 && $7 != --arity ]]; then
+usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
+  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --capture-local QUALIFICATION PHASE_MACRO_SAMPLES [--arity]" >&2
   exit 2
-fi
-baseline=$(realpath "$1")
-report=$(realpath -m "$2")
-if [[ $# -ge 6 ]]; then
+}
+capture_local=false
+edit=
+if [[ "${3:-}" == --capture-local ]]; then
+  [[ $# == 5 || $# == 6 ]] || usage
+  capture_local=true
+  qualification=$(realpath "$4")
+  samples=$(realpath "$5")
+  edit=${6:-}
+elif [[ $# == 6 || $# == 7 ]]; then
   receipt=$(realpath "$3")
   receipt_sha=$4
   qualification=$(realpath "$5")
   samples=$(realpath "$6")
+  edit=${7:-}
+else
+  [[ $# == 2 ]] || usage
 fi
+[[ -z "$edit" || "$edit" == --arity ]] || usage
+baseline=$(realpath "$1")
+report=$(realpath -m "$2")
 root=$(cd "$(dirname "$0")/../../../.." && pwd -P)
 cd "$root"
 seed=research/native-seed
@@ -31,9 +44,7 @@ for item in run sdk-pin.json partition-closure.py speed; do
 done
 cp -a --reflink=auto "$seed/src" "$overlay/$seed/src"
 cp --reflink=auto "$baseline/partition.json" "$baseline/link-rows.etf" "$overlay/$edited/"
-if [[ "${NATIVE_CAPTURE_LOCAL:-}" == 1 ]]; then
-  : "${qualification:?local capture requires the qualified donor evidence}"
-  : "${samples:?local capture requires the donor macro samples}"
+if "$capture_local"; then
   receipt="$overlay/bound-donor.etf"
   (
     cd "$overlay"
@@ -43,7 +54,7 @@ if [[ "${NATIVE_CAPTURE_LOCAL:-}" == 1 ]]; then
   receipt_sha=$(sha256sum "$receipt")
   receipt_sha=${receipt_sha%% *}
 fi
-python3 - "$overlay/$seed/src/native/scheme.bl" "${7:-}" <<'PY'
+python3 - "$overlay/$seed/src/native/scheme.bl" "$edit" <<'PY'
 from pathlib import Path
 import sys
 
