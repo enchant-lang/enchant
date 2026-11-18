@@ -838,11 +838,12 @@
   (BeamLisp.AOT/bind_sdk_macro_constructor_session! session claim
    {:namespace "core" :form (BeamLisp.Reader/read_one (pr-str declaration))})))
 
-(defn- invoke-phase-macro [session identity arguments]
- (BeamLisp.AOT/eval_constructor_session! session
-  {:op :apply :fn {:op :var :name "macro"}
-   :args (mapv (fn [value] {:op :lit :val value}) arguments)}
-  {} {"macro" identity}))
+(defn- phase-invoker [session identity]
+ (fn [arguments]
+  (BeamLisp.AOT/eval_constructor_session! session
+   {:op :apply :fn {:op :var :name "macro"}
+    :args (mapv (fn [value] {:op :lit :val value}) arguments)}
+   {} {"macro" identity})))
 
 (defn- interpreted-macro [head origin {:keys [form args locals outcome]}]
  (if-not (pinned-core-macro? origin)
@@ -853,7 +854,7 @@
           before (:budget (BeamLisp.AOT/constructor_session_status session))
           environment (into {} (map (fn [name] [(rn/sym-node name) name]) locals))
           arguments (concat [(BeamLisp.Compiler/datum form) environment] (map BeamLisp.Compiler/datum args))
-          calculated (invoke-phase-macro session identity arguments)
+          calculated ((phase-invoker session identity) arguments)
           after (:budget (BeamLisp.AOT/constructor_session_status session))
           raw? (erlang/=:= outcome calculated)
           canonicalize (fn [value] (BeamLisp.Compiler/with_fresh_names #(compiler/datum-macro-result value)))
@@ -982,16 +983,15 @@
                       (get sample "head"))) (get samples "samples")))))
        _ (assert (<= 1 (count names) 16))
        sessions (volatile! []) calls (volatile! 0)
-       invoke! invoke-phase-macro
        started (erlang/monotonic_time :microsecond)]
   (try
    (let [entries (mapv (fn [name]
                          (let [session (BeamLisp.AOT/open_constructor_session!)]
                           (vswap! sessions conj [name session])
-                          (let [identity (bind-core-macro! session name)]
+                          (let [invoke! (phase-invoker session (bind-core-macro! session name))]
                            [name (fn [& args]
                                    (vswap! calls inc)
-                                   (invoke! session identity args))]))) names)
+                                   (invoke! args))]))) names)
          prepared (erlang/monotonic_time :microsecond)
          result (action entries calls)]
     (assoc result :preparation-us (- prepared started) :interpreted-expansions @calls
