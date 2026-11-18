@@ -67,7 +67,14 @@
                             (tuple :erlang :delete_module 1)
                             (tuple :erlang :finish_after_on_load 2)
                             (tuple :erts_internal :purge_module 2)
-                            (tuple :erlang :load_nif 2)])
+                            (tuple :erlang :load_nif 2)
+                            (tuple :code_server :add_path 6)
+                            (tuple :code_server :add_paths 6)
+                            (tuple :code_server :set_path 5)
+                            (tuple :code_server :del_path 4)
+                            (tuple :code_server :del_paths 4)
+                            (tuple :code_server :replace_path 6)
+                            (tuple :code :clear_cache 0)])
 
 (defn- link-key? [key]
  (and (erlang/is_tuple key) (= 4 (erlang/tuple_size key)) (= :link (elem key 1))))
@@ -381,15 +388,21 @@
  (into {} (map (fn [[module location]]
                  (let [[prior md5 :as initial] (get before module [false nil])
                        final (get after module [false nil])]
-                  [module (if (and (= prior location) (= initial final) (not= location :unavailable)
-                                   (or (false? location) (and (erlang/is_binary md5) (= 16 (erlang/byte_size md5)))))
-                            initial :unavailable)]))
+                  [module (cond
+                            (or (not= prior location) (not= initial final) (= location :unavailable)) :unavailable
+                            (false? location) (if (= :non_existing (code/which module))
+                                               [false nil :non_existing] :unavailable)
+                            (and (erlang/is_binary md5) (= 16 (erlang/byte_size md5))) initial
+                            :else :unavailable)]))
                observed)))
 
 (defn- changed-code-reads [reads]
  (vec (take 12 (keep (fn [[module expected]]
                        (let [location (code-location (code/is_loaded module))
-                             current [location (when-not (false? location) (live-code-md5 module))]]
+                             current (cond
+                                       (not (false? location)) [location (live-code-md5 module)]
+                                       (= 3 (count expected)) [false nil (code/which module)]
+                                       :else [false nil])]
                         (when (not= expected current) module)))
                      reads))))
 
@@ -1309,9 +1322,11 @@
   (assert (= :ok (elem compiled 0)))
   (elem compiled 2)))
 
-(defn- code-read-control []
+(defn- code-read-control [output]
  (let [module :bl_native_code_state_control
        filename (String/to_charlist "/native-code-state-control.beam")
+       root (Path/expand (str output ".beam-control-" (System/unique_integer (list :positive))))
+       root-chars (String/to_charlist root)
        first-code (code-control-binary module 1)
        second-code (code-control-binary module 2)
        capture (fn []
@@ -1319,9 +1334,21 @@
                       [_ trace] (trace! #(code/is_loaded module) {:code-reads? true})]
                  (captured-code-reads before (get-in trace [:effects :code-reads]) (code-snapshot))))]
   (assert (false? (code/is_loaded module)))
+  (File/mkdir! root)
   (try
    (let [absent (capture)]
-    (assert (= [false nil] (get absent module)))
+    (assert (= [false nil :non_existing] (get absent module)))
+    (assert (empty? (changed-code-reads absent)))
+    (File/write! (Path/join root "bl_native_code_state_control.beam") first-code)
+    (let [[_ changes] (with-code-mutation-observation
+                      (fn []
+                       (assert (= true (code/add_patha root-chars)))
+                       (assert (= [module] (changed-code-reads absent)))
+                       (assert (false? (code/is_loaded module)))
+                       (assert (= :unavailable (get (capture) module)))
+                       (assert (= true (code/del_path root-chars)))))]
+     (assert (pos? (get changes (tuple :code_server :add_path 6) 0)))
+     (assert (pos? (get changes (tuple :code_server :del_path 4) 0))))
     (assert (empty? (changed-code-reads absent)))
     (assert (= (tuple :module module) (code/load_binary module filename first-code)))
     (assert (= [module] (changed-code-reads absent)))
@@ -1348,12 +1375,15 @@
       (assert (empty? (changed-code-reads original)))
       (assert (<= 2 (get writes (tuple :erlang :finish_loading 1) 0))))))
    (finally
+    (code/del_path root-chars)
+    (File/rm_rf! root)
     (code/purge module)
     (code/delete module)
     (code/purge module)))
   (assert (false? (code/is_loaded module)))
-  {:schema "bl.native.code-read-control" :version 2 :reuse-authority false
+  {:schema "bl.native.code-read-control" :version 3 :reuse-authority false
    :recorded-absence true :loaded-after-miss true :same-path-code-replacement true
+   :unloaded-object-invalidates-miss true :path-change-and-restoration-observed true
    :changed-during-snapshot true :same-state-after-two-writes true :module-cleaned-up true}))
 
 (defn- registry-shadow-member [closure baseline candidate member entries]
@@ -1498,7 +1528,8 @@
        opaque (count (filter (fn [[_ fingerprint]] (nil? fingerprint)) reads))
        reason (or reason (when-not prepared-id :opaque-prepared-input) (when (pos? opaque) :opaque-registry-value))]
   (if reason
-   {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
+   (cond-> {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
+    (seq (:code-mutations effects)) (assoc :code-mutations (vec (sort (:code-mutations effects)))))
    (cond-> {:prepared prepared-id :registry reads :probes (source-probes observed)
             :sources (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest]) (:sources observed)))))
             :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)}
@@ -1518,7 +1549,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v4 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v5 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1569,7 +1600,8 @@
      (contains? entry :code-reads)
      (assoc :code-read-calls (:code-read-calls entry)
             :distinct-code-reads (count (:code-reads entry))
-            :changed-code-reads changed-code)))))))
+            :changed-code-reads changed-code)
+     (contains? entry :code-mutations) (assoc :code-mutations (:code-mutations entry)))))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -1625,7 +1657,7 @@
   (refuse-bound-registry :receipt-digest-mismatch))
  (let [receipt (read-registry-member bytes)]
   (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
-                             :native-bound-registry-v3 :native-bound-registry-v4} (:schema receipt))
+                             :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5} (:schema receipt))
                  (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
@@ -1675,7 +1707,8 @@
                                        (:reason entry) entry
                                        (and (not= :native-bound-registry-v1 (:schema receipt)) (not (map? (:env-reads entry))))
                                        {:reason :missing-env-reads}
-                                       (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4} (:schema receipt))
+                                       (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5}
+                                                       (:schema receipt))
                                             (not (map? (:code-reads entry))))
                                        {:reason :missing-code-reads}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
@@ -1894,7 +1927,7 @@
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison)
                 (= selected "--env-read-control") (env-read-control output)
-                (= selected "--code-read-control") (code-read-control)
+                (= selected "--code-read-control") (code-read-control output)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
                 (= selected "--capture-bound-registry") (capture-bound-registry closure baseline comparison source-receipt)
                 (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
