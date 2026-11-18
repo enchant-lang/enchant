@@ -476,16 +476,12 @@
   [ns]
   (str "./" ns ".mjs"))
 
-(defn emit-ns
-  "One compiled namespace → ES module text. `order` is the build's load order
-   (dependencies first)."
-  [cns table host missing leaves stubs order]
-  (admission/check!)
+(defn- emit-module
+  [cns table host missing leaves stubs order report]
   (e/reset-state!)
   (let [used (atom (set (filter (fn [ns] (contains? table ns))
                                 (map first (:requires cns)))))
         entry? (= (:ns cns) (last order))
-        report (evidence/analyze (:ns cns) (:defs cns))
         ctx (assoc (link-ctx cns table host missing leaves stubs used) :sync-proofs (:proofs report))
         body (mapcat (fn [d]
                        (let [r (e/emit (:node d) (assoc ctx :fn-label (:name d)))]
@@ -542,6 +538,14 @@
          (join ", " (map (fn [d] (str "[" (e/js-str (:name d)) "]: () => SELF_[" (e/js-str (str "d_" (e/mangle (:name d)))) "]"))
                           (filter (fn [d] (and (:name d) (not (:private? d)))) (:defs cns)))) "});\n"
          "L.registerNamespace(" (e/js-str (:ns cns)) ", " (e/js-str (name (BeamLisp.Link/module_for (:ns cns)))) ", SELF_);\n")))
+
+(defn emit-ns
+  "One compiled namespace → ES module text. `order` is the build's load order
+   (dependencies first)."
+  [cns table host missing leaves stubs order]
+  (admission/check!)
+  (emit-module cns table host missing leaves stubs order
+               (evidence/analyze (:ns cns) (:defs cns))))
 
 ; ─── the build ──────────────────────────────────────────────────────────────
 
@@ -637,10 +641,15 @@
                       (let [{:keys [order compiled]} (load-order roots entries stubs)
                             table (into {} (map (fn [ns] [ns (set (keep :name (:defs (get compiled ns))))]) order))
                             missing (atom [])
-                            texts (into {} (map (fn [ns] [ns (emit-ns (get compiled ns) table host missing leaves stubs order)]) order))]
-                        {:order order :compiled compiled :texts texts :missing @missing}))))
+                            emitted (into {} (map (fn [ns]
+                              (admission/check!)
+                              (let [unit (get compiled ns)
+                                    report (evidence/analyze ns (:defs unit))]
+                                [ns {:text (emit-module unit table host missing leaves stubs order report)
+                                     :report report}])) order))]
+                        {:order order :compiled compiled :emitted emitted :missing @missing}))))
         first-try (attempt (concat (or (:with opts) []) [entry]))
-        {:keys [order compiled texts missing]}
+        {:keys [order compiled emitted missing]}
           (loop [r first-try entries (concat (or (:with opts) []) [entry]) n 0]
             (let [extra (distinct (keep (fn [[_ kind nm]]
                                           (when (= kind "leaf")
@@ -677,8 +686,8 @@
                  (json/encode {"version" 1 "modules" (into {} (map (fn [ns] [ns (native-module-metadata (get compiled ns))]) order))}))
     (File/write! (str out "/evidence.json")
       (json/encode {:schema "bl.js.evidence" :version 1 :compiler (BeamLisp.AOTCache/compiler_key)
-        :namespaces (into {} (map (fn [ns] (let [unit (get compiled ns)]
-          [ns (evidence/provenance unit (evidence/analyze ns (:defs unit)))])) order))}))
+        :namespaces (into {} (map (fn [ns]
+          [ns (evidence/provenance (get compiled ns) (:report (get emitted ns)))]) order))}))
     (File/write! (str out "/dependencies.json")
       (json/encode
        {:schema "bl.js.dependencies" :version 1
@@ -693,7 +702,7 @@
                 :requires (mapv first (:requires unit))
                 :linked (get (Process/get :bl_js_link_dependencies) ns [])
                 :cache-status (:cache-status unit) :cache-key (:cache-key unit)}])) order))}))
-    (doseq [ns order] (File/write! (str out "/" (ns-file ns)) (get texts ns)))
-    {:modules order :bytes (reduce + 0 (map count (vals texts)))
+    (doseq [ns order] (File/write! (str out "/" (ns-file ns)) (:text (get emitted ns))))
+    {:modules order :bytes (reduce + 0 (map (fn [ns] (count (:text (get emitted ns)))) order))
      :cache (cache/stats)
      :sources (vec (map (fn [ns] (:path (get compiled ns))) order))}))
