@@ -13,6 +13,7 @@
 ;;   PARTITION LINK_ROWS --phase-compile REPORT PHASE_MACRO_SAMPLES
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
+;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION BASE_LINK_ROWS --capture-registry RECEIPT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
@@ -50,6 +51,7 @@
         [:select_delete 2] [:select_replace 2] [:match_delete 2] [:take 2]])))
 (def registry-writes #{:insert :insert_new :update_counter :delete :delete_object
                        :delete_all_objects :select_delete :select_replace :match_delete :take})
+(def table-lifecycle-operations #{(tuple :ets :new 2) (tuple :ets :rename 2) (tuple :ets :give_away 3)})
 (def registry-lookup-entry (tuple :ets :lookup 2))
 (def registry-member-entry (tuple :ets :member 2))
 
@@ -78,6 +80,24 @@
        effects (assoc effects :registry-call-count n)]
   (if (> n registry-trace-limit) effects
    (update-in effects [:registry-calls operation] (fn [old] (inc (or old 0)))))))
+
+(defn- process-destination [destination]
+ (if (erlang/is_pid destination)
+  (let [name (erlang/process_info destination :registered_name)]
+   (if (erlang/is_tuple name) (elem name 1) :unregistered))
+  (if (erlang/is_atom destination) destination :external-name)))
+
+(defn- boundary-event [effects category key]
+ (let [total (inc (:boundary-event-count effects 0))
+       events (get effects category {})
+       effects (assoc effects :boundary-event-count total)]
+  (if (and (<= total registry-trace-limit)
+           (or (contains? events key) (< (count events) 256)))
+   (assoc effects category (update events key (fn [count] (inc (or count 0)))))
+   (assoc effects :boundary-event-limit true))))
+
+(defn- other-table-event [effects operation table]
+ (boundary-event effects :other-tables [operation (if (erlang/is_atom table) table :anonymous-table)]))
 
 (defn- record-source-probe [effects path outcome]
  (let [n (inc (:source-probe-count effects 0))
@@ -242,9 +262,10 @@
 (defn- collector [calls pending hits misses reads sources effects]
  (receive
   [:trace _ :call [:ets :lookup arguments]]
-  (let [key (second arguments)
-        effects (if (:registry? effects) (registry-call effects [:lookup 2]) effects)]
-   (recur calls key hits misses reads sources effects))
+  (if (= :beam_lisp_vars (first arguments))
+   (recur calls (second arguments) hits misses reads sources
+    (if (:registry? effects) (registry-call effects [:lookup 2]) effects))
+   (recur calls pending hits misses reads sources (other-table-event effects :lookup (first arguments))))
   [:trace _ :return_from [:ets :lookup 2] value]
   (let [effects (if (:registry-inputs? effects) (record-registry-input effects :lookup pending value) effects)]
   (if-not (link-key? pending) (recur calls nil hits misses reads sources effects)
@@ -263,11 +284,22 @@
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
   (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
+  [:trace _ :send _ target]
+  (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:send (process-destination target)]))
+  [:trace _ :send_to_non_existing_process _ target]
+  (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:send-miss (process-destination target)]))
+  [:trace _ :spawn _ _]
+  (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:spawn]))
+  [:trace _ kind _] :when (contains? #{:link :unlink :getting_linked :getting_unlinked :register :unregister :exit} kind)
+  (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [kind]))
   [:trace _ :call [module function arguments]]
   (let [arity (count arguments) entry (tuple module function arity) key (first arguments)
-        effects (if (and (:registry? effects) (contains? registry-operations entry))
+        effects (if (and (:registry? effects) (contains? registry-operations entry) (= :beam_lisp_vars key))
                    (registry-call effects [function arity]) effects)]
    (cond
+    (and (:boundary? effects) (or (contains? table-lifecycle-operations entry)
+                                (and (contains? registry-operations entry) (not= :beam_lisp_vars key))))
+    (recur calls pending hits misses reads sources (other-table-event effects function key))
     (= entry macro-entry)
     (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)
           next-effects (record-macro effects (:ns env) head key)
@@ -313,11 +345,17 @@
     {:calls calls :hits hits :misses misses :sources sources :effects effects
      :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
                     (nil? (:pending-registry-member effects)) (not (:registry-input-limit effects))
+                    (not (:boundary-event-limit effects))
                     (empty? (:pending-macro-lookups effects)) (<= (:macro-lookup-count effects 0) trace-limit)
                     (<= (:registry-call-count effects 0) registry-trace-limit)
                     (<= (:source-probe-count effects 0) source-probe-limit)
                     (<= (count (:ordered-links effects [])) trace-limit)
                     (<= (:count effects 0) trace-limit) (<= (count sources) 1024))}])))
+
+(defn- registry-trace-spec [arity result? boundary?]
+ (let [args (apply list (repeat (dec arity) :_))
+       scoped (tuple (cons :beam_lisp_vars args) (list) (if result? (list (tuple :return_trace)) (list)))]
+  (if boundary? (list scoped (tuple (cons :_ args) (list) (list))) (list scoped))))
 
 (defn- trace!
  ([action] (trace! action {}))
@@ -328,11 +366,13 @@
        observer (spawn (fn [] (collector 0 nil #{} #{} [] #{}
                                (assoc options :scope scope :ancestor-slots ancestors :sample-macros? sample-macros?))))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
-       match (list (tuple (list :beam_lisp_vars (if (:registry? options) :_ (tuple :_ :link :_ :_)))
-                     (list) (list (tuple :return_trace))))
+       match (if (:registry? options)
+               (registry-trace-spec 2 true (:boundary? options))
+               (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace)))))
        source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))
        link-key (tuple :_ :link :_ :_)
-       returns (list (tuple :_ (list) (list (tuple :return_trace))))]
+       returns (list (tuple :_ (list) (list (tuple :return_trace))))
+       flags (if (:boundary? options) (list :call :send :procs) (list :call))]
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session registry-lookup-entry match (list :local)))))
@@ -346,18 +386,21 @@
                  (list session macro-entry (if sample-macros? returns true) (list :local)))))
    (doseq [[entry spec] (if (:registry? options)
                          (map (fn [entry]
-                                [entry (list (tuple (apply list (cons :beam_lisp_vars (repeat (dec (elem entry 2)) :_)))
-                                               (list) (if (and (:registry-inputs? options) (= entry registry-member-entry))
-                                                       (list (tuple :return_trace)) (list))))])
-                              (disj registry-operations registry-lookup-entry))
+                                [entry (registry-trace-spec (elem entry 2)
+                                         (and (:registry-inputs? options) (= entry registry-member-entry))
+                                         (:boundary? options))])
+                              (if (:boundary? options)
+                               (into (disj registry-operations registry-lookup-entry) table-lifecycle-operations)
+                               (disj registry-operations registry-lookup-entry)))
                          [[link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
                           [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]])]
     (let [matched (erlang/apply :trace :function (list session entry spec (list :local)))]
      (when-not (= 1 matched)
       (throw (ex-info (str "Native observation could not install trace " (pr-str entry))
                        {:entry entry :matched matched})))))
-   (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
+   (assert (= 1 (erlang/apply :trace :process (list session owner true flags))))
    (let [result (action)
+         _ (when (:boundary? options) (assert (= 1 (erlang/apply :trace :process (list session owner false flags)))))
          barrier (erlang/apply :trace :delivered (list session owner))
          ticket (erlang/make_ref)]
     (receive [:trace_delivered seen ref] :when (and (= seen owner) (= ref barrier))
@@ -956,19 +999,57 @@
 (defn- prepared-inputs [prepared]
  (select-keys prepared [:ns :path :source-sha256 :requires :js-interop? :env :defs]))
 
-(defn- observe-lowering [closure baseline member entries]
+(defn- observe-lowering
+ ([closure baseline member entries] (observe-lowering closure baseline member entries false))
+ ([closure baseline member entries boundary?]
  (with-registry-stage closure (:rows baseline) member entries
   (fn [prepared callables]
    (let [lower! (fn [] (build/compile-prepared prepared {:check-node identity}))
          [compiled observed]
                (trace! #(BeamLisp.Loader/with_declaration_snapshot lower!)
                 {:registry? true :registry-inputs? true :source-probes? true
-                 :macro-lookups? true :phase-callables callables})]
+                 :macro-lookups? true :phase-callables callables :boundary? boundary?})]
     (assert (not-any? (fn [[_ _ key]]
                         (and (erlang/is_tuple key) (> (erlang/tuple_size key) 1)
                              (= :fwd (elem key 0)) (= "native.observe-links" (elem key 1))))
                       (keys (get-in observed [:effects :registry-inputs]))))
-    [(prepared-inputs prepared) compiled observed callables]))))
+    [(prepared-inputs prepared) compiled observed callables])))))
+
+(defn- lowering-boundary-control []
+ (let [table (ets/new :native_lowering_boundary_control (list :set))]
+  (try
+   (let [[_ observation] (trace! (fn []
+                                  (ets/insert table (tuple :key 1))
+                                  (ets/lookup table :key)
+                                  (erlang/send (erlang/self) :lowering-boundary-control))
+                            {:registry? true :boundary? true})
+         effects (:effects observation)]
+    (receive :lowering-boundary-control :ok (after 1000 (throw :boundary-control-timeout)))
+    (assert (= 1 (get-in effects [:other-tables [:insert :anonymous-table]])))
+    (assert (= 1 (get-in effects [:other-tables [:lookup :anonymous-table]])))
+    (assert (= 1 (reduce + 0 (vals (:process-boundary effects)))))
+    {:table-read-observed true :table-write-observed true :message-observed true})
+   (finally (ets/delete table)))))
+
+(defn- lowering-effects [closure rows samples-path]
+ (with-phase-entries rows samples-path
+  (fn [entries _]
+   {:schema "bl.native.lowering-effects" :version 1 :reuse-authority false
+    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+    :link-rows-sha256 (:sha256 rows)
+    :control (lowering-boundary-control)
+    :members (mapv (fn [ns]
+                    (let [member (get-in closure [:units ns])
+                          [_ output observation] (observe-lowering closure rows member entries true)
+                          effects (:effects observation)
+                          phase (registry-phase-status observation)]
+                     (assert (erlang/=:= (def-bytes member) (def-bytes output)))
+                     {:namespace ns :same-definitions true
+                      :registry-supported (registry-lowering-supported? effects phase)
+                      :owned-macros (:all-expansions-owned (macro-lookup-summary observation))
+                      :other-tables (vec (sort (:other-tables effects)))
+                      :process-events (vec (sort (:process-boundary effects)))}))
+                   (:order closure))})))
 
 (defn- registry-shadow-member [closure baseline candidate member entries]
  (let [[prior-inputs prior observation] (observe-lowering closure baseline member entries)
@@ -1427,7 +1508,7 @@
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot"
-                                              "--cached-registry" "--capture-bound-registry" "--bound-registry"} selected)))
+                                              "--cached-registry" "--capture-bound-registry" "--bound-registry" "--lowering-effects"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -1438,6 +1519,7 @@
                 (= selected "--registry-phases") (registry-phases closure baseline comparison false)
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
+                (= selected "--lowering-effects") (lowering-effects closure baseline comparison)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
                 (= selected "--capture-bound-registry") (capture-bound-registry closure baseline comparison source-receipt)
                 (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
