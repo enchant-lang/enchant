@@ -122,15 +122,24 @@
              (checked-chunk-text (chunk-path key "source-unit.scm") (get report "source_unit_sha256")))}))
 (defn ready-chunk [row]
  (try (checked-chunk row) (catch _ nil)))
+(defn- emission-record-to-write [row]
+ (let [saved (get row "emission_record") key (get row "key")]
+  (if (= key (key-from-record saved)) saved
+   ;; Public JSON preserves decision values but can change their ETF
+   ;; representations. Reconstruct only the missing row before emitting it.
+   (let [current (emission-record row)]
+    (assert (= saved current))
+    (assert (= key (key-from-record current)))
+    current))))
 (defn emit-chunk! [row]
  (let [key (get row "key") u (get (:units closure) (get row "namespace"))
        offset (get row "offset") count* (get row "count")
-       _ (assert (= key (key-from-record (get row "emission_record"))))
+       record (emission-record-to-write row)
        defs (subvec (:defs u) offset (+ offset count*))
        functions (bootstrap/emit-functions link-plan u defs)
        initializers (bootstrap/emit-initializers link-plan u defs (= offset 0))
        source-unit (when (= offset 0) (bootstrap/data (select-keys u [:ns :path :source :requires :module :base-module])))
-       report {"key" key "emission_inputs" emission-input "emission_record" (get row "emission_record")
+       report {"key" key "emission_inputs" emission-input "emission_record" record
                "functions_sha256" (artifact/sha functions) "initializers_sha256" (artifact/sha initializers)
                "source_unit_sha256" (when source-unit (artifact/sha source-unit))}]
   (File/write! (chunk-path key "functions.scm") functions)
