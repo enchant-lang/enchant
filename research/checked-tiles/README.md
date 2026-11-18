@@ -23,11 +23,19 @@ The protected law requires input ≤ output ≤ 255 for every byte. The normal B
 
 See [the design discussion](journal/01-bend-and-enchant.bl.org) and [the experiment log](journal/02-experiment.bl.org).
 
+Add --sweep to measure the same operation on an 8×8 patch, a 320×180 RGB frame and a 1920×1080 RGB frame. The two larger inputs repeat the captured scene bytes. Each result is checked against the exhaustive table.
+
 The default placement runs every admitted route, checks identical output, and selects the lowest median whole-call time on this frame. The finite-domain lookup baseline uses the 256 observed and independently checked values as an executable table. Use --placement device to publish the GPU result whenever available. --require-gpu always requires a successful hardware render, including with measured placement.
 
 ### Compare Bend and FFmpeg on the same bytes
 
-Use the default exercise session. The optional comparison needs Bun, Clang 19+, and the pinned Bend source. GPU builds on Linux also need CUDA headers, libcuda and NVRTC under CUDA_HOME. The NVIDIA driver/OpenCL loader are sufficient for the main Enchant exercise.
+On this workstation, one command prepares pinned Bend 2.0.40 and NVIDIA CUDA 12.9 headers/NVRTC in temporary storage, runs the comparisons, and removes the temporary toolchain. It downloads the Bend source and about 93 MB of CUDA archives. BEND_TREE and CUDA_HOME select existing installations. Use the session directory printed by the main exercise.
+
+    research/checked-tiles/comparison/run SESSION
+
+The comparison includes prepared Enchant CPU and OpenCL processes, the independent Bend fork/join implementation, FFmpeg, and the existing film worker’s EGL executor with a hand-authored wash shader. Resident EGL draw times exclude upload/readback. The device and driver are recorded separately from the OpenCL device.
+
+For a manual Bend/FFmpeg comparison, use the default exercise session. The optional comparison needs Bun, Clang 19+, and the pinned Bend source. GPU builds on Linux also need CUDA headers, libcuda and NVRTC under CUDA_HOME. The NVIDIA driver/OpenCL loader are sufficient for the main Enchant exercise.
 
     git clone https://github.com/bendlang/bend /tmp/checked-tiles-bend
     git -C /tmp/checked-tiles-bend checkout --detach 9c586f094f4fc88bef440dc8b4d77a2f92c257cc

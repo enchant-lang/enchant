@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -61,10 +62,13 @@ def main():
     variants['FFmpeg lutrgb'] = ['ffmpeg','-nostdin','-v','error','-y','-f','rawvideo','-pix_fmt','rgb24',
                                  '-s', f"{receipt['width']}x{receipt['height']}", '-i','input.rgb',
                                  '-vf',f'lutrgb=r={rule}:g={rule}:b={rule}','-threads','1','-f','rawvideo','ffmpeg.rgb']
+    variants['Enchant prepared CPU process'] = [sys.executable, '-B', HERE/'prepared.py', rev, 'cpu']
+    if 'gpu' in receipt:
+        variants['Enchant OpenCL process'] = [sys.executable, '-B', HERE/'prepared.py', rev, 'gpu']
     for i in range(5):
         names = list(variants)
         for name in names[i%len(names):] + names[:i%len(names)]:
-            out = d/('ffmpeg.rgb' if name.startswith('FFmpeg') else 'bend.rgb')
+            out = d/('prepared.rgb' if name.startswith('Enchant') else 'ffmpeg.rgb' if name.startswith('FFmpeg') else 'bend.rgb')
             out.unlink(missing_ok=True)
             ms = run(variants[name], d)
             if out.read_bytes() != expected:
