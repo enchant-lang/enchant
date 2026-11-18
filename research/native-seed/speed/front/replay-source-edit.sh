@@ -106,23 +106,35 @@ from pathlib import Path
 request = dict(zip(("receipt", "samples", "donor", "qualification", "sha256"), sys.argv[2:], strict=True))
 Path(sys.argv[1]).write_text(json.dumps(request))
 PY
-  run_update "$candidate" --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
-  run_update "$edited"
+  run_update "$candidate" --setenv=NATIVE_RELINK_TIMINGS=1 --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
+  run_update "$edited" --setenv=NATIVE_RELINK_TIMINGS=1
   cmp "$candidate/closure.etf" "$edited/closure.etf"
   cmp "$candidate/link-rows.etf" "$edited/link-rows.etf"
-  python3 - "$candidate/update.json" "$edited/update.json" "$report" <<'PY'
+  python3 - "$candidate" "$edited" "$report" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-candidate, clean = (json.loads(Path(name).read_text()) for name in sys.argv[1:3])
+candidate_dir, clean_dir = map(Path, sys.argv[1:3])
+candidate, clean = (json.loads((directory / "update.json").read_text())
+                    for directory in (candidate_dir, clean_dir))
 members = candidate["checked-relink"]["members"]
 assert len(members) == len(clean["units"])
 assert any(member["reused"] for member in members)
 assert any(not member["reused"] for member in members)
 assert candidate["artifact-sha256"] == clean["artifact-sha256"]
-report = {"schema": "bl.native.checked-relink-comparison", "version": 1,
-          "exact-closure": True, "exact-link-rows": True, "candidate": candidate, "clean": clean}
+
+def timings(directory):
+    return {
+        phase: dict(zip(("wall", "user", "system"),
+                        map(float, (directory / f"{phase}.seconds").read_text().split()),
+                        strict=True))
+        for phase in ("source-pass", "member-rows", "first-partition", "linked-pass", "final-partition")
+    }
+
+report = {"schema": "bl.native.checked-relink-comparison", "version": 2,
+          "exact-closure": True, "exact-link-rows": True, "candidate": candidate, "clean": clean,
+          "phase-seconds": {"candidate": timings(candidate_dir), "clean": timings(clean_dir)}}
 Path(sys.argv[3]).write_text(json.dumps(report, indent=2) + "\n")
 PY
   exit 0
