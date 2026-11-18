@@ -160,6 +160,10 @@
  (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
  (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info)))
 
+(defn install-batched-rows! [closure rows]
+ ;; Each SDK put reenters the fence and advances its normal publication counters.
+ (BeamLisp.Env/with_scope_commit (BeamLisp.Env/env_id) #(install-rows! closure rows)))
+
 (defn def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
@@ -237,17 +241,14 @@
   (BeamLisp.Env/isolated
    (fn []
     (let [start (when mark (mark))
-          install #(install-rows! closure rows)]
-     ;; Retain the SDK's row writes and publication counters in the private
-     ;; member scope. Reenter the same commit fence for each individual put.
-     (if batch-rows? (BeamLisp.Env/with_scope_commit (BeamLisp.Env/env_id) install) (install))
-     (let [staging (when mark (mark :row-install (:ns member) start))]
-      (doseq [[name entry] macros]
-       (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
-      (BeamLisp.Compiler/with_fresh_names
-       (fn []
-        (let [prepared (build/prepare-ns (:path member))]
-         (action prepared phase-callables staging))))))))))
+          _ (if batch-rows? (install-batched-rows! closure rows) (install-rows! closure rows))
+          staging (when mark (mark :row-install (:ns member) start))]
+     (doseq [[name entry] macros]
+      (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
+     (BeamLisp.Compiler/with_fresh_names
+      (fn []
+       (let [prepared (build/prepare-ns (:path member))]
+        (action prepared phase-callables staging))))))))))
 
 (defn lower-with-snapshot [prepared]
  (BeamLisp.Loader/with_declaration_snapshot
