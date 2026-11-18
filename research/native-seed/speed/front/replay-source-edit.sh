@@ -14,7 +14,9 @@ mkdir -p .local
 overlay=$(mktemp -d "$root/.local/native-source-edit-XXXXXXXX")
 trap 'rm -rf -- "$overlay"' EXIT
 edited=$seed/out/edited
-mkdir -p "$overlay/$edited" "$overlay/runtime"
+mkdir -p "$overlay/$edited" "$overlay/runtime" "$overlay/$seed/.runtime"
+chmod 700 "$overlay/runtime"
+printf '%s\n' "$overlay/runtime" > "$overlay/$seed/.runtime/path"
 ln -s "$root/priv" "$overlay/priv"
 for item in run sdk-pin.json partition-closure.py speed; do
   ln -s "$root/$seed/$item" "$overlay/$seed/$item"
