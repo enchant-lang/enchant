@@ -36,13 +36,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build", type=Path)
     parser.add_argument("out", type=Path)
+    parser.add_argument("--prepared", action="store_true",
+                        help="include the qualified prepared macro bundle")
     args = parser.parse_args()
     build = args.build.resolve()
     image = build / "stage1"
     bundles = [build / "bundle.scm", build / "eval-bundle.scm"]
+    if args.prepared:
+        bundles.append(build / "eval-prepared.scm")
     observer = ATTRIB / "native-startup-phases.scm"
     outputs = [eval_one(image, bundle, CORPUS)[0] for bundle in bundles]
-    assert outputs[0] == outputs[1] and b"NATIVE_COMPILER_SOURCE_CORPUS_OK" in outputs[0]
+    assert all(output == outputs[0] for output in outputs)
+    assert b"NATIVE_COMPILER_SOURCE_CORPUS_OK" in outputs[0]
     records = {bundle.name: {"sha256": sha(bundle), "bytes": bundle.stat().st_size,
                             "milliseconds": [], "phases_ms": []} for bundle in bundles}
     order = (*bundles, *reversed(bundles))
