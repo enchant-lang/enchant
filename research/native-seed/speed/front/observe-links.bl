@@ -44,6 +44,37 @@
 (defn- value-identity [value]
  (artifact/sha (erlang/term_to_binary value (list :deterministic))))
 
+(defn- fun-field [callable field] (elem (erlang/fun_info callable field) 1))
+
+(defn- fun-origin [callable]
+ (let [module (fun-field callable :module) path (code/which module)
+       product (str (System/get_env "BL_SDK_PRODUCT") "/")
+       path (when (erlang/is_list path) (unicode/characters_to_binary path))
+       pinned? (and (string? path) (String/starts_with? path product))]
+  {:module (erlang/atom_to_binary module) :name (erlang/atom_to_binary (fun-field callable :name))
+   :arity (fun-field callable :arity) :type (fun-field callable :type)
+   :capture-count (count (fun-field callable :env)) :pinned-code-path (boolean pinned?)
+   :code-md5 (Base/encode16 (erlang/apply module :module_info (list :md5)) (list (tuple :case :lower)))}))
+
+(defn- macro-origin [callable]
+ (cond
+  (erlang/is_function callable) {:shape :beam-function :entries [(fun-origin callable)]}
+  (and (erlang/is_tuple callable) (= 3 (erlang/tuple_size callable)) (= :"$blfn" (elem callable 0)))
+  (let [entries (vals (elem callable 1)) variadic (elem callable 2)
+        entries (if variadic (cons (elem variadic 1) entries) entries)]
+   (if (every? erlang/is_function entries)
+    {:shape :multi-function :entries (vec (sort (map fun-origin entries)))}
+    {:shape :opaque}))
+  :else {:shape :opaque}))
+
+(defn- record-macro [effects ns head callable]
+ (let [cached (get-in effects [:macro-origins callable])
+       origin (or cached (macro-origin callable))
+       next (effect effects :expansions [ns head])]
+  (if (>= (:count next) trace-limit) next
+   (-> next (assoc-in [:macro-origins callable] origin)
+       (update-in [:macro-bindings [ns head]] (fn [known] (conj (or known #{}) origin))))))
+
 (defn- record-link [effects op key value]
  (let [events (:ordered-links effects [])]
   (cond
@@ -68,7 +99,7 @@
    (cond
     (= entry macro-entry)
     (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)]
-     (recur calls pending hits misses reads sources (effect effects :expansions [(:ns env) head])))
+     (recur calls pending hits misses reads sources (record-macro effects (:ns env) head key)))
     (or (= entry link-put-entry) (= entry link-delete-entry))
     (let [writing? (= entry link-put-entry) row (second arguments)
           key (if writing? (elem row 0) row)
@@ -338,6 +369,10 @@
                                      (sort (get-in observation [:effects kind])))])
                [:expansions :link-writes :link-deletions])))
 
+(defn- macro-report [observation]
+ (mapv (fn [[[ns head] origins]] [ns head (vec (sort origins))])
+       (sort (get-in observation [:effects :macro-bindings]))))
+
 (defn- observe-sequential [closure {:keys [rows sha256]} scoped?]
  (let [results (BeamLisp.Env/isolated
                 (fn []
@@ -352,6 +387,7 @@
                            :actual-definitions-sha256 (artifact/sha (def-bytes compiled))
                            :source-read-outcomes (vec (sort (:sources observed)))
                            :staging-effects (effect-report observed)
+                           :macro-origins (macro-report observed)
                            :ordered-links (ordered-report observed)
                            :lookup-hits (vec (sort (:hits observed)))
                            :lookup-misses (vec (sort (:misses observed)))}))
@@ -399,6 +435,7 @@
    :source-file-consultations (vec (sort (distinct (map first (:sources observation)))))
    :source-read-outcomes (vec (sort (:sources observation)))
    :staging-effects (effect-report observation)
+   :macro-origins (macro-report observation)
    :ordered-links (ordered-report observation)
    :present-in-member-rows (vec (filter installed keys))
    :absent-from-member-rows (vec (remove installed keys))
