@@ -195,6 +195,10 @@
     if(chosen) {
       const head=text(body,'div','');head.className='selection';text(head,'b',toolName(chosen.tool));
       const back=text(head,'button','All runs');back.dataset.action='all-runs';
+      const receipt=sourceTarget(chosen['receipt-url']);
+      if(receipt?.pathname.startsWith('/__enchant/receipts/')) {
+        const link=text(head,'a','Receipt');link.href=receipt.href;
+      }
       const location=chosen.location?.path;
       const subject=text(body,'div','');subject.className='selection';
       const target=sourceTarget(chosen.link);

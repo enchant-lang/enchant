@@ -50,6 +50,31 @@
     (is (= 1 @fallback))
     (inspector/close! application)))
 
+(deftest tool-receipts-use-the-inspectors-existing-authorized-mount
+  (let [me (atom :developer)
+        mounted (inspector/attach {:principal (fn [_] @me) :routes []} (options))
+        reader (:live/inspector mounted)]
+    (try
+      (activity/with-operation :editor {:subject "Document"}
+        #(activity/with-operation :index {:subject "Definitions"} (fn [] (activity/mark! :reused))))
+      (let [snapshot (app/router mounted (request "/__enchant/snapshot.json"))
+            rows (get-in (json/decode (:resp_body snapshot)) ["activity" "recent"])
+            url (get (first (filter #(= "index" (get % "tool")) rows)) "receipt-url")
+            response (app/router mounted (request url))
+            detail (json/decode (:resp_body response))
+            parent (app/router mounted (request (get detail "parent-url")))]
+        (is (= 200 (:status response) (:status parent)))
+        (is (= "index" (get-in detail ["receipt" "tool"])))
+        (is (= "editor" (get-in (json/decode (:resp_body parent)) ["receipt" "tool"])))
+        (reset! me :visitor)
+        (is (= 404 (:status (app/router mounted (request url)))))
+        (reset! me :developer)
+        (doseq [_ (range 64)] (activity/with-operation :check {} (fn [] nil)))
+        (is (= 410 (:status (app/router mounted (request url)))))
+        (inspector/close! mounted)
+        (is (= 404 (:status (app/router mounted (request url))))))
+      (finally (inspector/close! mounted)))))
+
 (deftest serve-devtools-option-defaults-off-and-owns-its-reader
   (let [application {:routes [["/" (fn [_] [:main "App"])]]}
         plain (app/serve application {:port 0 :ip (tuple 127 0 0 1) :log false})]

@@ -16,6 +16,11 @@
       (is (= 1 (get-in (second (rows r)) [:counts :computed])))
       (is (pos? (get-in (second (rows r)) [:cache :kept-bytes])))
       (is (= "same-source" (:cause (first (rows r)))))
+      (let [receipt-id (:receipt-id (second (rows r)))]
+        (is (= receipt-id (:previous-receipt-id (first (rows r)))))
+        (is (= (second (rows r)) (:receipt (a/receipt r receipt-id))))
+        (is (= :refused (:status (a/receipt (assoc r :lease :invalid) receipt-id))))
+        (is (= :missing (:status (a/receipt r 10000)))))
       (is (not (String/contains? (pr-str (a/snapshot r)) "secret")))
       (is (not (contains? (first (rows r)) :source)))
       (let [before (rows r)] (doseq [_ (range 40)] (a/snapshot r)) (is (= before (rows r))))
@@ -28,6 +33,7 @@
         (a/with-operation :editor {:subject (apply str (repeat 200 "x")) :source (str i)}
           #(doseq [_ (range 30)] (a/mark! :evaluated "function"))))
       (is (= 64 (count (rows r))))
+      (is (= :expired (:status (a/receipt r 1))))
       (is (= 16 (count (:items (first (rows r))))))
       (is (= 30 (get-in (first (rows r)) [:counts :evaluated])))
       (is (= 160 (count (:subject (first (rows r))))))
@@ -60,6 +66,24 @@
         (is (seq children))
         (is (every? #(some (fn [p] (= (:id p) (:parent %))) (rows r)) children)))
       (finally (a/close! r)))))
+
+(deftest independent-editor-documents-have-independent-causal-history
+  (let [reader (a/open) one (erlang/make_ref) two (erlang/make_ref)
+        src-one "(ns receipt.editor.one) (defn answer [] 1)"
+        src-two "(ns receipt.editor.two) (defn answer [] 2)"
+        edited "(ns receipt.editor.one) (defn answer [] 3)"]
+    (try
+      (lsp/with-document-memo one src-one #(lsp/analyzed src-one))
+      (lsp/with-document-memo two src-two #(lsp/analyzed src-two))
+      (lsp/with-document-memo one edited #(lsp/analyzed edited))
+      (let [[change second-open first-open] (filter #(= "editor" (:tool %)) (rows reader))]
+        (is (= ["source-changed" "first-use" "first-use"] (mapv :cause [change second-open first-open])))
+        (is (= (:receipt-id first-open) (:previous-receipt-id change)))
+        (is (nil? (:previous-receipt-id second-open)))
+        (is (not (contains? (:receipt (a/receipt reader (:receipt-id change))) :document-slot))))
+      (finally (lsp/release-document-memo! one)
+               (lsp/release-document-memo! two)
+               (a/close! reader)))))
 
 (deftest waiting-is-real-bounded-and-restored-after-refusal
   (let [r (a/open) parent (erlang/self) key [:activity.wait (erlang/unique_integer (list :positive))]
