@@ -1026,6 +1026,31 @@
    (let [rows (mapv (fn [row] (mapv #(registry-field-identity % callables) (erlang/tuple_to_list row))) value)]
     (when (every? (fn [row] (every? some? row)) rows) [:rows rows])))))
 
+(defn- receipt-key-description [input]
+ (let [[operation slot key] input]
+  [operation slot (if (erlang/is_tuple key) (vec (erlang/tuple_to_list key)) [key])]))
+
+(defn- opaque-value-shape [value depth]
+ (cond
+  (erlang/is_function value)
+  [:function (erlang/atom_to_binary (fun-field value :module)) (fun-field value :type)
+   (count (fun-field value :env))]
+  (erlang/is_reference value) :reference
+  (erlang/is_pid value) :pid
+  (and (erlang/is_tuple value) (pos? depth))
+  (mapv #(opaque-value-shape % (dec depth)) (take 8 (erlang/tuple_to_list value)))
+  (erlang/is_tuple value) :tuple
+  (erlang/is_map value) :map
+  (erlang/is_list value) :list
+  (erlang/is_atom value) value
+  :else :data))
+
+(defn- describe-opaque [reads inputs]
+ (mapv (fn [[input _]]
+         {:key (receipt-key-description input)
+          :shape (mapv #(opaque-value-shape % 4) (get inputs input))})
+       (take 12 (sort (filter (fn [[_ fingerprint]] (nil? fingerprint)) reads)))))
+
 (defn- capture-registry-member [closure baseline member entries]
  (let [[prepared compiled observed callables] (observe-lowering closure baseline member entries)
        effects (:effects observed)
@@ -1038,7 +1063,7 @@
        opaque (count (filter (fn [[_ fingerprint]] (nil? fingerprint)) reads))
        reason (or reason (when-not prepared-id :opaque-prepared-input) (when (pos? opaque) :opaque-registry-value))]
   (if reason
-   {:reason reason :opaque-inputs opaque}
+   {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
    {:prepared prepared-id :registry reads :probes (source-probes observed) :sources (:sources observed)
     :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled) :defs (:defs compiled)})))
 
@@ -1056,6 +1081,13 @@
  (with-registry-stage closure (:rows candidate) member entries
   (fn [prepared callables]
    (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))
+         changed (when-not (:reason entry)
+                   (vec (take 12 (keep (fn [[key expected]]
+                                        (let [current (registry-input-state key scope ancestors)]
+                                         (when (or (= current :unavailable)
+                                                   (not= expected (registry-value-signature current callables)))
+                                          (receipt-key-description key))))
+                                 (:registry entry)))))
          reason (or (:reason entry)
                     (cond
                      (not= [(:module member) (:path member) (:source-sha256 member)]
@@ -1065,13 +1097,10 @@
                          (some (fn [[path digest]]
                                  (or (= :unavailable digest) (not= digest (read-source-identity path)))) (:sources entry)))
                      :source-input-changed
-                     (some (fn [[key expected]]
-                             (let [current (registry-input-state key scope ancestors)]
-                              (or (= current :unavailable)
-                                  (not= expected (registry-value-signature current callables))))) (:registry entry))
-                     :registry-input-changed))
+                     (seq changed) :registry-input-changed))
          actual (if reason (lower-with-snapshot prepared) {:defs (:defs entry)})]
     {:namespace (:ns member) :reused (nil? reason) :reason reason :opaque-inputs (:opaque-inputs entry 0)
+     :opaque-keys (:opaque-keys entry) :changed-registry-keys changed
      :exact-clean-definitions (erlang/=:= (def-bytes actual) (def-bytes member))}))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path]
