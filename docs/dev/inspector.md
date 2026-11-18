@@ -35,6 +35,10 @@ the panel. Server shows the serving VM's Beam Lisp and Erlang/OTP versions and
 counts running jobs across all registered work owners, including jobs outside
 the visible list. Server can copy the SDK identity, timings and counters in a
 report that omits subjects, paths, symbols, source text and runtime handles.
+Select a projection status in Server to open its latest decision. The receipt
+links a publication to its admission and earlier decisions. Tool detail has a
+Receipt link to its recorded operation. Receipts use the same authorization as
+the Inspector and expire when the owner discards them.
 Click an update to inspect its server render. Click a tool run to see cache
 computations, reuse, recorded admission waiting and child runs. Elapsed time
 outside admission wait is wall time. Cache bytes and evictions describe
@@ -115,7 +119,7 @@ scripts/inspector-scenario --sdk /nix/store/QUALIFIED-SDK \
 ```
 
 The runner requires the local optional browser helper/runtime. It retains native
-screenshots, twenty-one witnessed claims, source/helper hashes and the exact SDK
+screenshots, twenty-three witnessed claims, source/helper hashes and the exact SDK
 pin, and rejects changed test inputs. It never produces an SDK or starts an app.
 
 Cold-start assertions are authoritative in canonical SDK qualification. Private
