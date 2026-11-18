@@ -29,9 +29,11 @@ const L = (a) => R.listFromArray(a);
 const arr = (l) => { const a = []; for (let p = l; p instanceof Cons; p = p.t) a.push(p.h); return a; };
 const isList = (x) => x === EMPTY || x instanceof Cons;
 const bool = (x) => x === true || x === false;
+const exactInteger = (x) => typeof x === "bigint" || Number.isSafeInteger(x);
 
 /** An Erlang-shaped raise: an `ArgumentError` / `badarg` the BEAM would give. */
 function badarg(what) { const e = new BLError("errors were found at the given arguments: " + what); e.blType = kw("Elixir.ArgumentError"); throw e; }
+function badarith() { const e = new BLError("bad argument in arithmetic expression"); e.blType = kw("Elixir.ArithmeticError"); throw e; }
 
 // ─── the tag protocol ────────────────────────────────────────────────────────
 
@@ -80,6 +82,13 @@ export const ERLANG = {
   "erlang/+/2": (a, b) => R.add(a, b),
   "erlang/-/2": (a, b) => R.sub(a, b),
   "erlang/*/2": (a, b) => R.mul(a, b),
+  "erlang///2": (a, b) => {
+    if (!(exactInteger(a) || a instanceof Flt) || !(exactInteger(b) || b instanceof Flt)) badarith();
+    const left = Number(num(a)), right = Number(num(b));
+    const quotient = left / right;
+    if (!Number.isFinite(left) || !Number.isFinite(right) || !Number.isFinite(quotient)) badarith();
+    return R.flt(quotient);
+  },
   "erlang/div/2": (a, b) => R.quot(a, b),
   "erlang/rem/2": (a, b) => R.rem(a, b),
   "erlang/abs/1": (a) => (a instanceof Flt ? R.flt(Math.abs(a.v)) : typeof a === "bigint" ? (a < 0n ? -a : a) : Math.abs(a)),
@@ -90,8 +99,18 @@ export const ERLANG = {
   // Number to signed 32). R.add folds the result back through the runtime's
   // one safe-range normalize: a fitting BigInt returns as a Number.
   "erlang/bnot/1": (a) => {
-    if (typeof a !== "bigint" && !(typeof a === "number" && Number.isSafeInteger(a))) badarg("bnot");
+    if (!exactInteger(a)) badarg("bnot");
     return R.add(~BigInt(a), 0);
+  },
+  "erlang/bsl/2": (a, b) => {
+    if (!exactInteger(a) || !exactInteger(b)) badarith();
+    try { return R.add(BigInt(a) << BigInt(b), 0); }
+    catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      const limit = new BLError("a system limit has been reached");
+      limit.blType = kw("Elixir.SystemLimitError");
+      throw limit;
+    }
   },
   "erlang/==/2": (a, b) => erlEq(a, b),
   "erlang//=/2": (a, b) => !erlEq(a, b),

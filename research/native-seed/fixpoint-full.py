@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -31,6 +32,7 @@ COMPILE_DEADLINE = 120
 STANDARD_BINDING_PRELUDE = "(declare (standard-bindings) (extended-bindings))"
 BUDGETS = ("default", "17", "41")
 ORIGINAL = "5f2ad8223fd9f053157b65266d3ee14e7fe8567b6196a78ed7ac955132b9a5c5"
+ORIGINAL_ACTOR_BODY = "4f97857ad1b357fa3c962e58e497fa84b02d43c1fabef3e7a924fa5b3e902a22"
 ZERO = {"procs": 0, "monitors": 0, "tables": 0, "names": 0, "table_names": 0,
         "runnable": 0, "input_sink": None, "critical": 0, "errors": 0}
 
@@ -197,6 +199,8 @@ def main() -> None:
     parser.add_argument("--actor-body", type=Path)
     parser.add_argument("--actor-manifest", type=Path,
                         help="explicit fresh actor capture; its unchanged body may live in the historical directory")
+    parser.add_argument("--actor-body-sha256", default=ORIGINAL_ACTOR_BODY,
+                        help="expected exact emitted body digest for the selected compiler generation")
     parser.add_argument("--stage1-receipt", type=Path,
                         help="reuse an exact already-built native stage1 checkpoint after strict hash/ABI admission")
     parser.add_argument("--self-emission-receipt", type=Path,
@@ -219,6 +223,8 @@ def main() -> None:
     parser.add_argument("--actor-diagnostic-prefix", type=Path,
                         help="observational prefix for a separate NONQUALIFIED actor image")
     args = parser.parse_args()
+    if not re.fullmatch(r"[0-9a-f]{64}", args.actor_body_sha256):
+        parser.error("--actor-body-sha256 requires a lowercase SHA-256 digest")
     if args.host_no_inline_functions and args.host_optimization != 1:
         parser.error("--host-no-inline-functions requires --host-optimization 1")
     if args.actor_diagnostic_prefix and not args.compile_stage1_actors_only:
@@ -394,7 +400,7 @@ def main() -> None:
                     or len(set(captured_link["emitted-bindings"])) != 405
                     or captured_link.get("helper-namespaces") != []
                     or captured_link.get("source-interpreter") is not False
-                    or captured["body"]["sha256"] != "4f97857ad1b357fa3c962e58e497fa84b02d43c1fabef3e7a924fa5b3e902a22"
+                    or captured["body"]["sha256"] != args.actor_body_sha256
                     or captured.get("clock-model") != CLOCK_MODEL or captured.get("clock") != "virtual-turn-ms-v1"
                     or captured_link.get("source-frames?") is not True
                     or path_for(captured["body"]["path"]).resolve() != args.actor_body
