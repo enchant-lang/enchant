@@ -33,12 +33,16 @@ def counts(snapshot):
     windows = snapshot["windows"]
     result = Counter({(row["uid"], row["route"]): row["requests"] for row in windows["30"]["rows"]})
     assert result == Counter({(row["uid"], row["route"]): row["requests"] for row in windows["7"]["rows"]})
-    for user, scoped in snapshot["people"].items():
+    people = snapshot["people"]
+    assert set(people) == {str(uid) for uid, _ in result}
+    for user, scoped in people.items():
         uid = int(user)
+        assert set(scoped) == {"7", "30"}
+        expected = Counter({route: count for (owner, route), count in result.items() if owner == uid})
         for window in scoped.values():
             assert {row["uid"] for row in window["requests"]} == {uid}
-            assert sum(row["requests"] for row in window["rows"]) == sum(
-                count for (owner, _), count in result.items() if owner == uid)
+            assert {row["uid"] for row in window["rows"]} == {uid}
+            assert Counter({row["route"]: row["requests"] for row in window["rows"]}) == expected
     return result
 
 
