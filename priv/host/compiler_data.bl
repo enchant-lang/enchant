@@ -25,7 +25,7 @@
 ; its beam IS the committed seed's bytes, source stamp and codegen key), while
 ; `test/bl/host_module_test.bl` compiles this file at a probe atom and compares
 ; it to the committed seed over a corpus that includes vectors, raw maps, an
-; improper list, and the no-op clauses. `invoke1`/`proper-listing` are private
+; improper list, and the no-op clauses. `unary-callback`/`proper-listing` are private
 ; helpers, not new API.
 ;
 ; Vector traversal delegates to Vector/to_list so source transforms remain
@@ -98,11 +98,12 @@
         {:outer outer :clause clause :inner inner})))))
    (catch _ nil)))
 
-(defn- invoke1
-  "Call the callable `f` with one argument through the runtime's invocation
-   contract — a beam-lisp fn, an Elixir fun, or a callable collection all work."
-  [f x]
-  (BeamLisp.Ns.Rt/invoke f (list x)))
+(defn- unary-callback [f]
+  ;; The pinned host can run against the preceding bootstrap floor. Select
+  ;; the runtime's guarded fixed-arity path once per traversal when available.
+  (if (erlang/function_exported :Elixir.BeamLisp.Ns.Rt :invoke1 2)
+    (fn [x] (BeamLisp.Ns.Rt/invoke1 f x))
+    (fn [x] (BeamLisp.Ns.Rt/invoke f (list x)))))
 
 (defn- invalid-input! []
   (erlang/error
@@ -162,26 +163,27 @@
   "`(eager_map f coll)` is `Enum.map` with `f` invoked through the runtime;
    `(eager_map f left right)` zips (to the shorter) and invokes `f` pairwise."
   ([f coll]
-   (Enum/map (eager_to_list coll) (fn [x] (invoke1 f x))))
+   (Enum/map (eager_to_list coll) (unary-callback f)))
   ([f left right]
    (Enum/map (Enum/zip (eager_to_list left) (eager_to_list right))
              (fn [pair] (BeamLisp.Ns.Rt/invoke f (list (erlang/element 1 pair) (erlang/element 2 pair)))))))
 
 (defn eager_filter [f coll]
-  (Enum/filter (eager_to_list coll) (fn [x] (invoke1 f x))))
+  (Enum/filter (eager_to_list coll) (unary-callback f)))
 
 (defn eager_concat [colls]
   (Enum/flat_map (eager_to_list colls) (fn [c] (eager_to_list c))))
 
 (defn eager_mapcat [f coll]
-  (Enum/flat_map (eager_to_list coll) (fn [item] (eager_to_list (invoke1 f item)))))
+  (let [items (eager_to_list coll) call (unary-callback f)]
+    (Enum/flat_map items (fn [item] (eager_to_list (call item))))))
 
 (defn eager_map_indexed [f coll]
   (Enum/map (Enum/with_index (eager_to_list coll))
             (fn [pair] (BeamLisp.Ns.Rt/invoke f (list (erlang/element 2 pair) (erlang/element 1 pair))))))
 
 (defn eager_sort_by [f coll]
-  (Enum/sort_by (eager_to_list coll) (fn [x] (invoke1 f x))))
+  (Enum/sort_by (eager_to_list coll) (unary-callback f)))
 
 (defn eager_group_by
   "Keys in source order, values in source order. Prepend-then-reverse per group,
@@ -189,13 +191,14 @@
    call order the recalled Elixir module produced (including its `Map.new/2`
    final pass)."
   [f coll]
-  (Map/new
-    (Enum/reduce (eager_to_list coll) {}
+  (let [items (eager_to_list coll) call (unary-callback f)]
+   (Map/new
+    (Enum/reduce items {}
       (fn [item groups]
-        (let [k (invoke1 f item)]
+        (let [k (call item)]
           (Map/update groups k (list item) (fn [vs] (cons item vs))))))
     (fn [pair]
-      (erlang/list_to_tuple (list (erlang/element 1 pair) (Enum/reverse (erlang/element 2 pair)))))))
+      (erlang/list_to_tuple (list (erlang/element 1 pair) (Enum/reverse (erlang/element 2 pair))))))))
 
 (defn eager_distinct [coll]
   (Enum/uniq (eager_to_list coll)))
