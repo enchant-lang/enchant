@@ -14,6 +14,7 @@
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
+;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
@@ -756,6 +757,37 @@
                       (assoc :registry-inputs (registry-read-proof closure baseline member lowering (:lowering summary)))))))
                  (if selected [selected] (:order closure)))})
 
+(defn- declaration-snapshot-sample [closure baseline member mode observed?]
+ (BeamLisp.Env/isolated
+  (fn []
+   (install-rows! closure (:rows baseline))
+   (BeamLisp.Compiler/with_fresh_names
+    (fn []
+     (let [prepared (build/prepare-ns (:path member))
+           lower (fn [] (build/compile-prepared prepared {:check-node identity}))
+           lower (if (= :snapshot mode) (fn [] (BeamLisp.Loader/with_declaration_snapshot lower)) lower)
+           before (elem (erlang/process_info (erlang/self) :reductions) 1)
+           started (erlang/monotonic_time :microsecond)
+           [compiled observation] (if observed? (trace! lower {:source-probes? true}) [(lower) nil])
+           elapsed (- (erlang/monotonic_time :microsecond) started)
+           reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)]
+      (assert (erlang/=:= (def-bytes compiled) (def-bytes member)))
+      (if observed?
+       {:mode mode :source-probes (get-in observation [:effects :source-probe-count] 0)
+        :distinct-outcomes (count (get-in observation [:effects :source-probes]))}
+       {:mode mode :wall-us elapsed :reductions reductions}))))))
+
+(defn- declaration-snapshot-report [closure baseline selected]
+ (let [member (get-in closure [:units selected])
+       _ (assert (some? member))
+       samples (mapv #(declaration-snapshot-sample closure baseline member % false)
+                     [:direct :snapshot :snapshot :direct])
+       observations (mapv #(declaration-snapshot-sample closure baseline member % true) [:direct :snapshot])]
+  {:schema "bl.native.declaration-snapshot-cost" :version 1
+   :namespace selected :exact-definitions true
+   :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+   :samples samples :observations observations}))
+
 (defn- source-identity [path]
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
   (if (String/starts_with? absolute root) (subs absolute (count root)) absolute)))
@@ -1006,7 +1038,7 @@
        baseline (pinned-rows rows)
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
-                            (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs"} selected)))
+                            (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -1016,6 +1048,7 @@
                 (= selected "--phase-compile") (compile-with-phase-macros closure baseline comparison)
                 (= selected "--registry-phases") (registry-phases closure baseline comparison false)
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
+                (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
