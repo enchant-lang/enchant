@@ -74,3 +74,14 @@ Open <http://127.0.0.1:8765/>. Choose **White wash**, select **Require physical 
 Select **Broken edge** and check again. The counterexample identifies input 64 and output 63. The frame, receipt and revision continue to describe the last accepted run. **Run rehearsal** runs the fixed multi-revision CLI scenario, including the stale completion and ELF retirement checks, and publishes its final posterized frame. Its starting source is independent of the editor draft.
 
 The service accepts one run at a time across all browsers. Each edit uses the small BL channel grammar, with unary helpers named `mix-white` or `tile-…` and argument `x`. The server emits the parsed forms back to BL before running the CLI. The accepted bundle is atomically saved in `~/.local/state/checked-tiles-web/accepted.json`. The first visit to a fresh server shows the recorded wash example. Draft edits are local to the browser, and a restart clears last-run status. Set `CHECKED_TILES_STATE` to use a separate state directory, `HOST` and `PORT` to change the listener, and `CHECKED_TILES_HOSTS` to allow specific additional HTTP hostnames when using a private proxy. Everyone with access to this private workbench shares its accepted revision.
+
+## Exercise a live change in the native actor and compiler
+
+Open the [native actor lab on the workstation](https://work.tailcb5318.ts.net:18180/#actors) and choose **Run native experiment**. The browser builds a native executable, runs two mailbox implementations and changes a compiler dependency while a compilation is suspended. The receipt includes the residual message, emitted Scheme, allocation counts and forced-GC observations. The browser runs the short fixture. To run the timing sweep from the checkout root:
+
+```sh
+research/checked-tiles/actor-lab/run --quick
+research/checked-tiles/actor-lab/run --out /tmp/my-native-actor-results.json
+```
+
+The output path must be new. The runner uses Python 3.10+, a systemd user session, pinned Gambit and Clang, and the workstation's retained qualified objects under `research/native-seed/out/real-actors`. The checked-in qualification names those exact artifacts. A source-only checkout also needs that native build capture and its SDK. The script checks its digests, rebuilds the final application unit, links the fixture in a temporary directory, and releases it on exit. The full run adds three trials at five depths and scheduling comparisons at the normal and 17-step budgets. [Native actor build background](../native-seed/real/README.md) · [Recorded full run](evidence/native-actor-lab.json) · [Research journal](journal/04-native-concurrent-core.bl.org)

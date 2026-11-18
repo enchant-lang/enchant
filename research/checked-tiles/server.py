@@ -188,6 +188,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.valid_host():
             return self.send(403)
+        if self.path == '/api/evidence/actors':
+            path = HERE / 'evidence/native-actor-lab.json'
+            return self.send(200, path.read_bytes()) if path.is_file() else self.send(404)
         if self.path == '/api/state':
             tag, state = self.server.bench.state(self.headers.get('If-None-Match'))
             return self.send(200, json.dumps(state).encode(), tag=tag) if state else self.send(304, tag=tag)
