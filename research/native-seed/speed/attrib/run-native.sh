@@ -5,6 +5,7 @@
 set -euo pipefail
 dir=$(realpath "$1")
 mapfile -d '' argv < <(python3 -c "import json,sys; print('\0'.join(json.load(open(sys.argv[1]))['argv']), end='')" "$dir/preparation.json")
-set +e
-timeout 1500 "${argv[@]}" > "$dir/native.log" 2>&1
-echo "exit $?" >> "$dir/native.log"
+status=0
+timeout 1500 "${argv[@]}" > "$dir/native.log" 2>&1 || status=$?
+printf 'exit %d\n' "$status" >> "$dir/native.log"
+exit "$status"

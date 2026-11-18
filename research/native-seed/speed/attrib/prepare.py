@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the A3 attribution run for the round-2 stage-1 image.
+"""Prepare the A3 attribution run for a retained stage-1 image.
 
 Starts no VM and no native process. Writes OUT/observer.scm (the --eval
 payload), OUT/targets.scm (every linked BL slot and host procedure the
@@ -52,6 +52,8 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--reps', type=int, default=5)
     parser.add_argument('--interval', default='0.0005')
+    parser.add_argument('--samples-only', action='store_true',
+                        help='omit the separately instrumented, high-overhead exact call count pass')
     args = parser.parse_args()
     build, out = args.build.resolve(), args.out.resolve()
     if out.exists():
@@ -65,7 +67,8 @@ def main():
                        '@BUNDLE@': scheme_string(str(build / 'bundle.scm')),
                        '@TARGETS@': scheme_string(str(out / 'targets.scm')),
                        '@OUT@': scheme_string(str(out)),
-                       '@REPS@': str(args.reps), '@INTERVAL@': args.interval}.items():
+                       '@REPS@': str(args.reps), '@INTERVAL@': args.interval,
+                       '@COUNTS@': '#f' if args.samples_only else '#t'}.items():
         observer = observer.replace(key, value)
     assert '@' not in re.sub(r'"[^"]*"', '', observer).replace('##', ''), 'unresolved placeholder'
     (out / 'observer.scm').write_text(observer)
@@ -74,6 +77,7 @@ def main():
                                           Path(__file__).resolve()]}
     result = {'schema': 'bl.native.a3-attribution-preparation', 'version': 1,
               'inputs': inputs, 'targets': sizes, 'reps': args.reps, 'interval': args.interval,
+              'instrument_calls': not args.samples_only,
               'argv': [str(build / 'stage1'), '--eval', str(out / 'observer.scm'), str(build / 'bundle.scm')]}
     (out / 'preparation.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result['argv']))
