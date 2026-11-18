@@ -15,7 +15,7 @@
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION BASE_LINK_ROWS --capture-registry RECEIPT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
-;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES
+;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --outer-control REPORT
@@ -1002,13 +1002,13 @@
     (artifact/sha bytes)
     (catch _ nil)))))
 
-(defn- callable-identity [value callables depth]
+(defn- callable-identity [value depth]
  (when (and (pos? depth) (erlang/is_function value))
   (let [{:keys [matches-pinned-module capture-count module name arity type code-md5]} (fun-origin value)]
    (when (and matches-pinned-module (<= capture-count 16))
     (let [captures (mapv (fn [capture]
                           (if (erlang/is_function capture)
-                           (callable-identity capture callables (dec depth))
+                           (callable-identity capture (dec depth))
                            (when-let [identity (closed-identity capture)] [:data identity])))
                          (fun-field value :env))]
      (when (every? some? captures)
@@ -1018,13 +1018,13 @@
 (defn- registry-field-identity [value callables]
  (cond
   (contains? callables value) [:phase (get callables value)]
-  (erlang/is_function value) (callable-identity value callables 4)
+  (erlang/is_function value) (callable-identity value 4)
   (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :"$macro" (elem value 0)))
   (when-let [identity (registry-field-identity (elem value 1) callables)] [:macro identity])
   (and (erlang/is_tuple value) (= 3 (erlang/tuple_size value)) (= :"$blfn" (elem value 0)))
-  (let [fixed (mapv (fn [[arity f]] [arity (callable-identity f callables 4)]) (sort (elem value 1)))
+  (let [fixed (mapv (fn [[arity f]] [arity (callable-identity f 4)]) (sort (elem value 1)))
         variadic (elem value 2)
-        rest-fn (when variadic (callable-identity (elem variadic 1) callables 4))]
+        rest-fn (when variadic (callable-identity (elem variadic 1) 4))]
    (when (and (every? second fixed) (or (nil? variadic) rest-fn))
     [:arity-dispatch fixed (when variadic [(elem variadic 0) rest-fn])]))
   :else (when-let [id (closed-identity value)] [:data id])))
@@ -1122,24 +1122,32 @@
      :opaque-keys (:opaque-keys entry) :changed-registry-keys changed
      :exact-clean-definitions (erlang/=:= (def-bytes actual) (def-bytes member))}))))
 
-(defn- cached-registry [closure candidate receipt-path samples-path]
- (let [bytes (File/read! receipt-path)
-       _ (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
-       receipt (erlang/binary_to_term bytes)
-       _ (assert (= :native-portable-registry-v3 (:schema receipt)))
-       _ (assert (= (:sdk-pin closure) (:sdk receipt)))
-       _ (assert (= (:options closure) (:options receipt)))
-       _ (assert (= (:order closure) (:order receipt)))
-       _ (assert (= (value-identity (:core-links closure)) (:core-links receipt)))
-       _ (assert (= (artifact/sha (File/read! samples-path)) (:sample-report-sha256 receipt)))]
-  (with-phase-entries candidate samples-path
-   (fn [entries _]
-    {:schema "bl.native.portable-registry-shadow" :version 1 :reuse-authority false
-     :receipt-sha256 (artifact/sha bytes) :receipt-bytes (erlang/byte_size bytes)
-     :baseline-link-rows-sha256 (:base-links receipt) :candidate-link-rows-sha256 (:sha256 candidate)
-     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
-     :members (mapv (fn [ns] (replay-registry-member closure candidate (get-in closure [:units ns])
-                              (read-registry-member (get-in receipt [:members ns])) entries)) (:order closure))}))))
+(defn- cached-registry [closure candidate receipt-path samples-path force?]
+ (let [started (erlang/monotonic_time :microsecond)
+       reductions (elem (erlang/process_info (erlang/self) :reductions) 1)
+       bytes (when-not force? (File/read! receipt-path))
+       receipt (when bytes (read-registry-member bytes))]
+  (when receipt
+   (assert (= :native-portable-registry-v3 (:schema receipt)))
+   (assert (= (:sdk-pin closure) (:sdk receipt)))
+   (assert (= (:options closure) (:options receipt)))
+   (assert (= (:order closure) (:order receipt)))
+   (assert (= (value-identity (:core-links closure)) (:core-links receipt)))
+   (assert (= (artifact/sha (File/read! samples-path)) (:sample-report-sha256 receipt))))
+  (let [result (with-phase-entries candidate samples-path
+                (fn [entries _]
+                 {:schema "bl.native.portable-registry-shadow" :version 2 :reuse-authority false
+                  :mode (if force? :force-lower :replay)
+                  :receipt-sha256 (when bytes (artifact/sha bytes)) :receipt-bytes (when bytes (erlang/byte_size bytes))
+                  :baseline-link-rows-sha256 (:base-links receipt) :candidate-link-rows-sha256 (:sha256 candidate)
+                  :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+                  :members (mapv (fn [ns]
+                                   (let [entry (if force? {:reason :force-lower}
+                                                (read-registry-member (get-in receipt [:members ns])))]
+                                    (replay-registry-member closure candidate (get-in closure [:units ns]) entry entries)))
+                                 (:order closure))}))]
+   (assoc result :wall-us (- (erlang/monotonic_time :microsecond) started)
+    :reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) reductions)))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
@@ -1318,7 +1326,7 @@
    :scope "Filtered ETS consultations in synchronous staged compilation of unchanged Source. A missing installed member row can still have another resolver fallback."
    :reuse-authority false}))
 
-(let [[partition rows selected output comparison source-receipt] (BeamLisp/argv)]
+(let [[partition rows selected output comparison source-receipt mode] (BeamLisp/argv)]
  (let [closure (artifact/read-closure partition)
        pinned-rows (fn [path] (let [rowset (read-rows path)]
                                (assoc rowset :local-links (local-links closure (:rows rowset)))))
@@ -1338,7 +1346,7 @@
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt)
-                (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt)
+                (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
