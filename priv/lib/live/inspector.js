@@ -24,15 +24,14 @@
     <section class="panel" id="dev-panel" hidden aria-label="Dev tools"><div class="head"><b id="title">Updates</b>
     <div class="tabs"><button data-tab="updates" aria-selected="true">Updates</button><button data-tab="tools" aria-selected="false">Tools</button><button data-tab="element" aria-selected="false">Loom</button><button data-tab="server" aria-selected="false">Server</button></div></div><div class="body"></div></section>
     <nav class="dock" aria-label="Dev tools">
-    <button class="tool brand" data-action="open" aria-label="Open dev tools" title="Dev tools" aria-expanded="false" aria-controls="dev-panel">${icon('logo')}</button>
+    <button class="tool brand" data-action="open" aria-label="Open dev tools" title="Open dev tools" aria-expanded="false" aria-controls="dev-panel">${icon('logo')}</button>
     <div class="spark" role="button" tabindex="0" data-action="updates" title="Page updates" aria-label="Page updates"></div><div class="rule"></div>
     <button class="tool" data-action="paint" aria-label="Highlight updates" title="Highlight updates" aria-pressed="false">${icon('paint')}</button>
     <button class="tool" data-action="pick" aria-label="Pick an element" title="Pick an element" aria-pressed="false">${icon('pick')}</button>
     <button class="tool" data-action="tools" aria-label="Tool activity" title="Tool activity">${icon('tools')}</button>
-    <button class="tool" data-action="server" aria-label="Server activity" title="Server activity">${icon('server')}</button>
-    <button class="tool" data-action="close" aria-label="Close panel" title="Close panel" hidden>${icon('close')}</button></nav>`;
+    <button class="tool" data-action="server" aria-label="Server activity" title="Server activity">${icon('server')}</button></nav>`;
   const $ = s => root.querySelector(s);
-  const panel = $('.panel'), body = $('.body');
+  const panel = $('.panel'), body = $('.body'), toggle = $('.brand');
   const history = [], boxes = new Set(), timers = new Set();
   let open = false, tab = 'updates', paint = false, picking = false, selected = null;
   let selectedRun = null;
@@ -57,10 +56,18 @@
     history.forEach(f=>{const bar=document.createElement(big&&f.run?'button':'i');if(big&&f.run){bar.dataset.run=String(f.run);bar.setAttribute('aria-label','Explain update');} bar.style.height=`${f.ops===null?(big?35:12):2+(f.ops/max)*(big?48:13)}px`;
       if(f.ops===null)bar.style.background='#a9b8aa';bar.title=f.ops===null?'Whole page updated':`${f.ops} changes`;if(big&&f.run)bar.title+=' · Explain';parent.append(bar);});
   }
+  function showPanel(visible) {
+    open=visible;
+    panel.hidden=!visible;
+    const label=visible?'Close dev tools':'Open dev tools';
+    toggle.setAttribute('aria-expanded',String(visible));
+    toggle.setAttribute('aria-label',label);
+    toggle.title=label;
+    toggle.innerHTML=icon(visible?'close':'logo');
+  }
   function activate(next) {
     if (disposed) return;
-    stopSampling(); open=true;tab=next;panel.hidden=false;$('[data-action="open"]').setAttribute('aria-expanded','true');
-    $('[data-action="close"]').hidden=false;
+    stopSampling();tab=next;if(!open)showPanel(true);
     root.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===tab)));
     $('#title').textContent={updates:'Updates',element:'Loom',server:'Server',tools:'Tools'}[tab];
     render(); if(sampling()) refresh();
@@ -70,7 +77,9 @@
     if(flight) flight.abort();
   }
   function close() {
-    open=false;panel.hidden=true;$('[data-action="close"]').hidden=true;$('[data-action="open"]').setAttribute('aria-expanded','false');
+    const returnFocus=panel.contains(root.activeElement);
+    if(open)showPanel(false);
+    if(returnFocus)toggle.focus();
     stopSampling();setPicking(false);selected=null;pickBox.style.display='none';
   }
   async function refresh() {
@@ -120,6 +129,11 @@
         text(row,'small',stateName(p));
       });
       jobs.slice(0,6).forEach(j=>{const row=text(body,'div','');row.className='line';text(row,'span',j.title);text(row,'small',j.status==='running'?'Working':j.status==='done'?'Done':j.status);});
+      if(sample.versions) {
+        const versions=text(body,'div','');versions.className='versions';
+        text(versions,'code',`BL ${sample.versions.bl}`);
+        text(versions,'code',`OTP ${sample.versions.otp}`);
+      }
     }
     const footer=text(body,'div','');footer.className='footer';
     text(footer,'span',error?'Unavailable':lastAt?'Sampled just now':'');
@@ -250,7 +264,7 @@
     queueDraw();
   }
   function onKey(e) {
-    if(e.key==='Escape'){setPicking(false);selected=null;pickBox.style.display='none';close();}
+    if(e.key==='Escape'&&open)close();
     if(ownEvent(e)&&(e.key==='Enter'||e.key===' ')) {
       const target=e.composedPath().find(n=>n?.dataset?.action==='updates');
       if(target){e.preventDefault();activate('updates');}
@@ -267,7 +281,6 @@
       case 'all-runs':selectedRun=null;render();break;
       case 'tools':selectedRun=null;activate('tools');break;
       case 'server':activate('server');break;
-      case 'close':close();break;
       case 'pick':activate('element');setPicking(!picking);break;
       case 'paint':paint=!paint;paintCredits=16;button.setAttribute('aria-pressed',String(paint));if(!paint){boxes.forEach(b=>b.remove());boxes.clear();timers.forEach(clearTimeout);timers.clear();}break;
       case 'refresh':refresh();break;

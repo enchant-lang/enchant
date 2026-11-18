@@ -16,7 +16,9 @@ and snapshots return 404. Existing HTTP handlers still compose. `app/stop!`
 releases the listener, internal shared connection and inspector reader.
 
 The injected dock shows page updates, Loom spacing/colours/corners, real tool
-activity and registered owner status. Click an update to inspect its server
+activity and registered owner status. The left Enchant button opens and closes
+the panel. Server shows the serving VM's Beam Lisp and Erlang/OTP versions.
+Click an update to inspect its server
 render. Click a tool run to see actual cache computations, reuse decisions,
 admission waiting and child runs. Function labels come from actual analysis
 worklist evaluations, with sixteen labels retained. They are not a complete
@@ -68,7 +70,7 @@ scripts/inspector-scenario --sdk /nix/store/QUALIFIED-SDK \
 ```
 
 The runner requires the local optional browser helper/runtime. It retains native
-screenshots, fourteen witnessed claims, source/helper hashes and the exact SDK
+screenshots, fifteen witnessed claims, source/helper hashes and the exact SDK
 pin, and rejects changed test inputs. It never produces an SDK or starts an app.
 
 Cold-start assertions are authoritative in canonical SDK qualification. Private
