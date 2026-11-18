@@ -13,7 +13,7 @@
 ; preconditions and the rewrites.
 (ns host.optimize)
 
-(defn version [] "optimize-4")
+(defn version [] "optimize-5")
 (defn- runtime-module [] :Elixir.BeamLisp.Ns.Rt)
 
 (defn- map [f xs] (BeamLisp.CompilerData/eager_map f xs))
@@ -857,14 +857,98 @@
       (let [pair (walk (erlang/hd rest) env s mod)]
         (recur (erlang/tl rest) (cons (elem pair 0) out) (elem pair 1))))))
 
-(defn- walk-clauses [clauses env state mod]
+(defn- walk-clauses [clauses env state mod entry-types]
   (loop [rest clauses out (list) s state]
     (if (erlang/== rest (list)) (tuple (lists/reverse out) s)
       (let [cl (erlang/hd rest) scoped (shadow env (getv cl :pats))
+            scoped (if entry-types (maps/merge scoped entry-types) scoped)
             gp (walk (getv cl :guard) scoped s mod)
             bp (walk (getv cl :body) (refine scoped (elem gp 0)) (elem gp 1) mod)
             new-cl (put (put cl :guard (elem gp 0)) :body (elem bp 0))]
         (recur (erlang/tl rest) (cons new-cl out) (elem bp 1))))))
+
+;; Check the self-application and every use of its self reference. A tail
+;; call of precisely (self self) is the only way to re-enter this inner fn.
+(defn- loop-backedge? [n self]
+  (let [knot (getv n :fn) args (getv knot :args)]
+    (and (op? n :apply) (op? knot :apply) (named? (getv knot :fn) self)
+         (erlang/== 1 (erlang/length args)) (named? (erlang/hd args) self))))
+
+(declare checked-loop-types)
+(defn- check-loop-nodes [nodes loop-info env candidates tail? fuel]
+  (if (erlang/== nodes (list)) (tuple candidates fuel)
+    (let [rest (erlang/tl nodes)
+          result (checked-loop-types (erlang/hd nodes) loop-info env candidates
+                                    (and tail? (erlang/== rest (list))) fuel)]
+      (when result
+        (check-loop-nodes rest loop-info env (elem result 0) tail? (elem result 1))))))
+
+(defn- preserve-loop-types [names args env candidates]
+  (if (erlang/== names (list)) candidates
+    (let [name (erlang/hd names) expected (getv (maps/get name candidates nil) :tag)
+          kept (if (and expected
+                        (erlang/=/= expected (tag (expr (erlang/hd args) env))))
+                 (maps/remove name candidates) candidates)]
+      (preserve-loop-types (erlang/tl names) (erlang/tl args) env kept))))
+
+(defn- checked-loop-types [n loop-info env candidates tail? fuel]
+  (when (erlang/> fuel 0)
+    (let [left (erlang/- fuel 1) self (getv loop-info :self) op (getv n :op)]
+      (cond
+        (erlang/== op :var)
+          (when-not (named? n self) (tuple candidates left))
+        (lists/member op '(:lit :binding :global :enil))
+          (tuple candidates left)
+        (loop-backedge? n self)
+          (let [args (getv n :args) names (getv loop-info :names)]
+            (when (and tail? (erlang/== (erlang/length args) (erlang/length names)))
+              (when-let [checked (check-loop-nodes args loop-info env candidates false left)]
+                (tuple (preserve-loop-types names args env (elem checked 0)) (elem checked 1)))))
+        (and (erlang/== op :let) (erlang/== self (getv n :name))) nil
+        (and tail? (erlang/== op :let))
+          (let [init (getv n :init)]
+            (when-let [checked (checked-loop-types init loop-info env candidates false left)]
+              (checked-loop-types (getv n :body) loop-info (bind env (getv n :name) init)
+                                  (elem checked 0) true (elem checked 1))))
+        (and tail? (erlang/== op :if))
+          (let [test (getv n :test)]
+            (when-let [checked (checked-loop-types test loop-info env candidates false left)]
+              (when-let [yes (checked-loop-types (getv n :then) loop-info (refine env test)
+                                                  (elem checked 0) true (elem checked 1))]
+                (checked-loop-types (getv n :else) loop-info env (elem yes 0) true (elem yes 1)))))
+        (and tail? (erlang/== op :do))
+          (check-loop-nodes (getv n :stmts) loop-info env candidates true left)
+        :else
+          (check-loop-nodes (BeamLisp.Ns.Anf/executable-children n) loop-info env candidates false left)))))
+
+(defn- initial-loop-types [names args env candidates]
+  (if (erlang/== names (list)) candidates
+    (let [known (tag (expr (erlang/hd args) env))
+          next (if (or (erlang/== :int known) (erlang/== :bool known))
+                 (put candidates (erlang/hd names) {:tag known}) candidates)]
+      (initial-loop-types (erlang/tl names) (erlang/tl args) env next))))
+
+(defn- loop-entry-facts [n env fuel]
+  (let [scaffold (getv n :fn) args (getv n :args)]
+    (when (and (op? scaffold :let) (erlang/> fuel 0)
+               (<= 1 (erlang/length args) 8))
+      (let [parts (BeamLisp.CompilerData/self_application_parts scaffold)
+            inner (getv parts :inner) cl (BeamLisp.CompilerData/simple_function_clause inner)
+            pats (getv cl :pats) self (getv scaffold :name)]
+        (when (and cl (erlang/== (erlang/length args) (erlang/length pats)))
+          (let [names (map (fn [p] (getv p :name)) pats)]
+            (when (and (distinct-names? names) (not (lists/member self names)))
+              (let [loop-info {:self self :names names}
+                    scope (forget env (cons self names))]
+                ;; An edge can depend on another loop parameter. Recheck after
+                ;; every loss, and decline after four walks if still changing.
+                (loop [candidates (initial-loop-types names args env {}) passes 4]
+                  (when (and (erlang/> passes 0) (erlang/> (erlang/map_size candidates) 0))
+                    (when-let [checked (checked-loop-types (getv cl :body) loop-info
+                                          (maps/merge scope candidates) candidates true fuel)]
+                      (let [kept (elem checked 0)]
+                        (if (erlang/=:= kept candidates) {:inner inner :types kept}
+                          (recur kept (erlang/- passes 1)))))))))))))))
 
 (defn- rebuilt-pair [pair k v]
   (cond
@@ -902,7 +986,11 @@
               ap (walk (getv n :arguments) env (elem cp 1) mod)]
           (tuple (put (put n :callee (elem cp 0)) :arguments (elem ap 0)) (elem ap 1)))
       (erlang/== op :apply)
-        (let [fp (field n :fn env state mod)] (fields-list (elem fp 0) :args env (elem fp 1) mod))
+        (let [budget (erlang/min 192 (erlang/- (getv state :max-nodes) (getv state :visited)))
+              entry (loop-entry-facts n env budget)
+              fn-env (if entry (put env :loop-entry-facts entry) env)
+              fp (field n :fn fn-env state mod)]
+          (fields-list (elem fp 0) :args env (elem fp 1) mod))
       (erlang/== op :fn)
         ; The backend's plain-fun shortcut binds every parameter name, including
         ; "_". Case-pattern wildcards do not bind it. Match that actual ABI.
@@ -911,10 +999,13 @@
                           (lists/all (fn [p] (erlang/== :pvar (getv p :pop))) (getv cl :pats)))
               scoped (if simple
                        (lists/foldl (fn [p e] (maps/remove (getv p :name) e)) env (getv cl :pats)) env)
-              p (walk-clauses cls scoped state mod)]
+              entry (getv env :loop-entry-facts)
+              types (when (and entry (erlang/=:= n (getv entry :inner))) (getv entry :types))
+              scoped (if types (maps/remove :loop-entry-facts scoped) scoped)
+              p (walk-clauses cls scoped state mod types)]
           (tuple (put n :clauses (elem p 0)) (elem p 1)))
       (erlang/== op :case)
-        (let [sp (walk (getv n :subj) env state mod) cp (walk-clauses (getv n :clauses) env (elem sp 1) mod)]
+        (let [sp (walk (getv n :subj) env state mod) cp (walk-clauses (getv n :clauses) env (elem sp 1) mod nil)]
           (tuple (put (put n :subj (elem sp 0)) :clauses (elem cp 0)) (elem cp 1)))
       (erlang/== op :do) (fields-list n :stmts env state mod)
       (erlang/== op :tuple) (fields-list n :elems env state mod)
@@ -924,11 +1015,11 @@
         (let [key (if (erlang/== op :map) :pairs :fields) p (walk-pairs (getv n key) env state mod)]
           (tuple (put n key (elem p 0)) (elem p 1)))
       (erlang/== op :try)
-        (let [bp (field n :body env state mod) cp (walk-clauses (getv n :catch) env (elem bp 1) mod)
+        (let [bp (field n :body env state mod) cp (walk-clauses (getv n :catch) env (elem bp 1) mod nil)
               base (put (elem bp 0) :catch (elem cp 0))]
           (field base :after env (elem cp 1) mod))
       (erlang/== op :recv)
-        (let [cp (walk-clauses (getv n :clauses) env state mod) base (put n :clauses (elem cp 0))
+        (let [cp (walk-clauses (getv n :clauses) env state mod nil) base (put n :clauses (elem cp 0))
               tp (field base :timeout env (elem cp 1) mod)]
           (field (elem tp 0) :after env (elem tp 1) mod))
       :else (tuple n state))))

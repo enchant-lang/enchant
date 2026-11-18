@@ -178,3 +178,32 @@
         (reset! seen [])
         (is (= reference (outcome optimized (list stop))))
         (is (= [:a] @seen))))))
+
+
+(deftest loop-arithmetic-uses-only-invariant-types
+  (let [source "(loop [i 0, sum 0]
+                  (if (erlang/< i 32) (recur (+ i 1) (+ sum i)) sum))"]
+    (is (= 496 (execute source false) (execute source true)))
+    (is (contains? (rules-used (report source)) :numeric-domain)))
+  (let [source "(fn [replacement]
+                  (loop [phase 0, value 1, dependent 0]
+                    (if (erlang/== phase 0)
+                      (recur 1 replacement value)
+                      (if (erlang/== phase 1)
+                        (recur 2 value value)
+                        (+ dependent 1)))))"
+        decimal (execute "1.5M" false)
+        expected (execute "2.5M" false)]
+    (is (= [:ok expected] (outcome (execute source false) (list decimal))))
+    (is (= [:ok expected] (outcome (execute source true) (list decimal))))
+    (is (not (contains? (rules-used (report source)) :numeric-domain)))))
+
+(deftest escaped-loop-self-does-not-give-parameter-facts
+  (let [self "self" value "value"
+        knot (a/app (a/var self) (list (a/var self)))
+        add (a/arith :add :+ (list (a/var value) (a/lit 1)))
+        inner (a/fnn (list (a/clause (list (a/pvar value)) nil
+                             (a/tup (list add (a/var self))))))
+        outer (a/fnn (list (a/clause (list (a/pvar self)) nil inner)))
+        expression (a/app (a/lett self outer knot) (list (a/lit 1)))]
+    (is (= expression (o/node expression)))))
