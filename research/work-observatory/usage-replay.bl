@@ -1,7 +1,7 @@
 ;; Replay the Station gateway recovery fixture's 3,000 events, two UIDs and
 ;; route distribution through an Enchant projection. No live audit is read.
 (ns observatory.usage-replay
- (:require [bl.json :as json] [data.projection :as projection]))
+ (:require [bl.json :as json] [data.projection :as projection] [live.observatory :as view] [web]))
 
 (defn now-us [] (erlang/monotonic_time :microsecond))
 (defn owner-reductions [owner] (elem (Process/info owner :reductions) 1))
@@ -111,12 +111,60 @@
        :blocked-reads 100 :restarts-after-eviction 0 :exact-groups true})))
    (finally (projection/stop! h)))))
 
-(let [refusal (seed-capacity-control 524288)]
- (assert (= :aggregate-bytes (:reason refusal)))
- (File/write! (first (BeamLisp/argv))
-  (json/encode {:schema "enchant.usage-projection-replay.v1"
-                :fixture "Station gateway recovery test event shape"
-                :observations (mapv (fn [[history readers]] (replay history readers))
-                                    [[300 1] [300 16] [1000 1] [1000 16]])
-                :capacity-control refusal
-                :original-window (seed-capacity-control 4194304)})))
+(defn- receipt-cost-sample [timestamp rows mode]
+ (let [h (start-replay :usage-replay/receipt-cost 4194304)
+       owner (:owner h)
+       batches (mapv vec (Enum/chunk_every rows 128))
+       publish-count 160
+       samples (if (= mode :observed) (quot publish-count 16) 0)]
+  (try
+   (doseq [[index batch] (map-indexed (fn [index batch] [index batch]) batches)]
+    (checkpoint! h (inc index) timestamp {:upsert batch}))
+   (projection/subscribe! h)
+   (let [observer (when (= mode :observed) (view/open {:projections {:totals h}}))
+         handler (when observer (view/handler observer #(= % :developer)))
+         initial (first rows)
+         before (owner-reductions owner)
+         started (now-us)
+         answer (reduce (fn [_ i]
+                          (let [basis (+ (count batches) i)
+                                row (assoc initial :route (if (odd? i) "anthropic" "codex"))
+                                answer (checkpoint! h basis timestamp {:upsert [row]})]
+                           (when (and observer (zero? (rem i 16)))
+                            (let [url (:receipt-url (first (:projections (view/snapshot observer))))
+                                  conn (web/put-private (erlang/apply :Elixir.Plug.Test :conn (list "GET" url "")) :me :developer)
+                                  resp (handler conn url)
+                                  decision (get (json/decode (:resp_body resp)) "receipt")]
+                             (assert (= 200 (:status resp)))
+                             (assert (= "published" (get decision "event")))
+                             (assert (= basis (get decision "basis")))))
+                           answer))
+                        nil (range 1 (inc publish-count)))
+         wall-us (- (now-us) started)
+         reductions (- (owner-reductions owner) before)]
+    (assert (= (expected-groups rows) (get-in answer [:value :groups])))
+    (assert (= (inc publish-count) (get-in answer [:counts :started])))
+    (assert (= (+ (count batches) publish-count) (:published-basis (projection/status h))))
+    {:mode mode :publications publish-count :observations samples :wall-us wall-us
+     :owner-reductions reductions :exact-groups true})
+   (finally (projection/stop! h)))))
+
+(defn- receipt-cost []
+ (let [timestamp (erlang/system_time :millisecond)
+       rows (events 3000 timestamp)]
+  (receipt-cost-sample timestamp rows :unobserved)
+  {:schema "enchant.projection-receipt-cost.v1" :seed-rows (count rows)
+   :samples (mapv #(receipt-cost-sample timestamp rows %) [:unobserved :observed :observed :unobserved])}))
+
+(let [[output mode] (BeamLisp/argv)
+      report (if (= "--receipt-cost" mode)
+               (receipt-cost)
+               (let [refusal (seed-capacity-control 524288)]
+                (assert (= :aggregate-bytes (:reason refusal)))
+                {:schema "enchant.usage-projection-replay.v1"
+                 :fixture "Station gateway recovery test event shape"
+                 :observations (mapv (fn [[history readers]] (replay history readers))
+                                     [[300 1] [300 16] [1000 1] [1000 16]])
+                 :capacity-control refusal
+                 :original-window (seed-capacity-control 4194304)}))]
+ (File/write! output (json/encode report)))
