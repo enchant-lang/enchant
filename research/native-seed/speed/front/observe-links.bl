@@ -16,7 +16,7 @@
 ;; retains the historical ambient naming mode for comparison.
 (ns native.observe-links
  (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]
-           [reader-node :as rn]))
+           [compiler :as compiler] [reader-node :as rn]))
 
 (def trace-limit 100000)
 (def source-read-entries [(tuple :Elixir.File :read! 1)
@@ -358,14 +358,20 @@
           claim (:sdk-macro (nth declaration 2))
           identity (BeamLisp.AOT/bind_sdk_macro_constructor_session! session claim
                     {:namespace "core" :form (BeamLisp.Reader/read_one (pr-str declaration))})
+          before (:budget (BeamLisp.AOT/constructor_session_status session))
           environment (into {} (map (fn [name] [(rn/sym-node name) name]) locals))
           arguments (concat [(BeamLisp.Compiler/datum form) environment] (map BeamLisp.Compiler/datum args))
           calculated (BeamLisp.AOT/eval_constructor_session! session
                        {:op :apply :fn {:op :var :name "macro"}
                         :args (mapv (fn [value] {:op :lit :val value}) arguments)}
-                       {} {"macro" identity})]
-     {:status (if (erlang/=:= outcome calculated) :matched :different)
-      :constructor-work (:budget (BeamLisp.AOT/constructor_session_status session))})
+                       {} {"macro" identity})
+          after (:budget (BeamLisp.AOT/constructor_session_status session))
+          raw? (erlang/=:= outcome calculated)
+          canonicalize (fn [value] (BeamLisp.Compiler/with_fresh_names #(compiler/datum-macro-result value)))
+          canonical? (or raw? (erlang/=:= (canonicalize outcome) (canonicalize calculated)))]
+     {:status (cond raw? :matched canonical? :matched-after-canonicalization :different)
+      :fresh-symbols-used (- (:fresh-symbols before) (:fresh-symbols after))
+      :constructor-work (into {} (map (fn [[key remaining]] [key (- (get before key) remaining)]) after))})
     (catch error {:status :declined :reason (or (:detail (ex-data error)) (:kind (ex-data error)) (ex-message error))})
     (finally (BeamLisp.AOT/close_constructor_session! session))))))
 
@@ -381,9 +387,9 @@
                             (assert (erlang/=:= (def-bytes unit) (def-bytes member)))
                             (assert (not (:sample-limit effects)))
                             (assert (= (count samples) (reduce + 0 (map count (vals (:macro-bindings effects))))))
-                            (reduce (fn [out [[namespace head origin] sample]]
+                            (reduce (fn [out [[_ head origin] sample]]
                                       (update out [head origin]
-                                       (fn [entry] {:namespaces (conj (:namespaces entry []) namespace)
+                                       (fn [entry] {:namespaces (conj (:namespaces entry []) ns)
                                                     :sample (or (:sample entry) sample)})))
                                     acc samples))) {} (:order closure))
         captured (erlang/monotonic_time :microsecond)
@@ -399,7 +405,7 @@
         denied (interpreted-macro head origin sample)]
    (assert (= 19 (:outcome sample)))
    (assert (= :not-pinned-core-macro (:reason denied)))
-   {:schema "bl.native.pinned-macro-phase-samples" :version 1 :reuse-authority false
+   {:schema "bl.native.pinned-macro-phase-samples" :version 2 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 baseline) :exact-members (count (:order closure))
     :capture-us (- captured started)
