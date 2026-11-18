@@ -65,6 +65,42 @@ theorem pop_items (ds : Digits α) :
     rcases a with ⟨w, a⟩
     cases a <;> simp [pop, items, Tree.items, List.append_assoc]
 
+def weighted : Digits α → Prop
+  | [] => True
+  | (w, t) :: rest => Sized w t ∧ weighted rest
+
+theorem push_weighted (x : α) (ds : Digits α) (ok : weighted ds) :
+    weighted (push x ds) := by
+  cases ds with
+  | nil => exact ⟨Sized.leaf x, trivial⟩
+  | cons a ds =>
+    rcases a with ⟨w,t⟩
+    cases ds with
+    | nil => exact ⟨Sized.leaf x, ok⟩
+    | cons b rest =>
+      rcases b with ⟨v,u⟩
+      by_cases same : w = v
+      · subst v
+        exact (by simpa [push, weighted] using
+          And.intro (Sized.node x ok.1 ok.2.1) ok.2.2)
+      · simpa [push, same, weighted] using And.intro (Sized.leaf x) ok
+
+theorem pop_weighted (ds tail : Digits α) (x : α) (ok : weighted ds)
+    (step : pop ds = some (x, tail)) : weighted tail := by
+  cases ds with
+  | nil => simp [pop] at step
+  | cons a rest =>
+    rcases a with ⟨w,t⟩
+    obtain ⟨weight, restOk⟩ := ok
+    cases weight with
+    | leaf y =>
+      simp [pop] at step
+      exact step.2 ▸ restOk
+    | node y left right =>
+      simp [pop] at step
+      obtain ⟨_, rfl⟩ := step
+      simpa [weighted] using And.intro left (And.intro right restOk)
+
 -- Fuel is the number of live rear entries. It makes the model total.
 def rotate : Nat → Digits α → Digits α → Digits α
   | 0, _, front => front
@@ -95,10 +131,12 @@ theorem rotate_items (n : Nat) (rear front : Digits α) (len : (items rear).leng
         simp [q] at view
         obtain ⟨rfl, eqtail⟩ := view
         have smaller : (items tail).length = n := by simpa [q, ← eqtail] using len
-        simp [rotate, e, ih tail (push x front) smaller, q, eqtail, push_items, List.append_assoc]
+        simp [rotate, e, ih tail (push x front) smaller, eqtail, push_items, List.append_assoc]
 
 #print axioms push_items
 #print axioms leaf_test
 #print axioms pop_items
+#print axioms push_weighted
+#print axioms pop_weighted
 #print axioms rotate_items
 end NativeMailbox
