@@ -36,6 +36,7 @@
                    (<= (+ (count jobs) (count results)) max-owners))
        (throw (ex-info "Observatory needs at most sixteen named owner grants" {})))
      {:scope (runtime/capture) :activity (:activity options) :work jobs
+      :receipt-origin (Base/encode16 (crypto/strong_rand_bytes 8) (list (tuple :case :lower)))
       :source-link (:source-link options)
       :versions {:bl (util/version) :sdk (sdk-id)
                  :otp (erlang/list_to_binary (erlang/system_info :otp_release))}
@@ -53,12 +54,12 @@
        :truncated (> (count rows) max-rows) :jobs (mapv job-view (take max-rows rows))})
     (catch _ {:name (label name) :available false :jobs []})))
 
-(defn- receipt-url [index id] (str receipt-path index "/" id))
+(defn- receipt-url [origin index id] (str receipt-path origin "/" index "/" id))
 
 (defn- ordered-projections [observatory]
   (vec (sort-by (fn [[name _]] (str name)) (:projections observatory))))
 
-(defn- projection-view [index [name reader]]
+(defn- projection-view [origin index [name reader]]
   (try
     (let [result (projection/status reader)]
       {:name (label name) :status (state-label (:status result))
@@ -66,7 +67,7 @@
        :counts (select-keys (:counts result) [:started :coalesced :discarded :blocked])
        :wanted-basis (:wanted-basis result) :published-basis (:published-basis result)
        :work (:work result) :inputs (:inputs result)
-       :receipt-url (when-let [id (:receipt-id result)] (receipt-url index id))
+       :receipt-url (when-let [id (:receipt-id result)] (receipt-url origin index id))
        :retained-charge (:retained-charge result) :retention-limit (:retention-limit result)
        :demand (:demand result)})
     (catch _ {:name (label name) :status "unavailable"})))
@@ -93,7 +94,8 @@
    :runtime (runtime/query (:scope observatory) max-rows)
    :activity (with-links (activity/snapshot (:activity observatory)) (:source-link observatory) principal)
    :work (mapv work-view (sort-by (fn [[name _]] (str name)) (:work observatory)))
-   :projections (vec (map-indexed projection-view (ordered-projections observatory)))
+   :projections (vec (map-indexed #(projection-view (:receipt-origin observatory) %1 %2)
+                                  (ordered-projections observatory)))
    :limits {:owners max-owners :rows-per-owner max-rows}
    :coverage {:tooling-cache (if (:activity observatory) "recorded decisions" "not enabled")
               :admission (if (:activity observatory) "recorded waits" "not enabled")
@@ -242,20 +244,23 @@
   (when (and (string? requested-path) (<= (erlang/byte_size requested-path) 96)
              (String/starts_with? requested-path receipt-path))
     (let [parts (vec (String/split (subs requested-path (count receipt-path)) "/"))]
-      (when (= 2 (count parts))
-        (let [index (receipt-number (first parts)) id (receipt-number (second parts))]
-          (when (and (some? index) (some? id) (pos? id)) [index id]))))))
+      (when (= 3 (count parts))
+        (let [[origin slot sequence] parts
+              index (receipt-number slot) id (receipt-number sequence)]
+          (when (and (= 16 (count origin)) (some? index) (some? id) (pos? id))
+            [origin index id]))))))
 
-(defn- serve-receipt [observatory conn [index id]]
-  (let [reader (second (nth (ordered-projections observatory) index nil))
+(defn- serve-receipt [observatory conn [origin index id]]
+  (let [reader (when (= origin (:receipt-origin observatory))
+                 (second (nth (ordered-projections observatory) index nil)))
         result (when reader (try (projection/receipt reader id) (catch _ nil)))]
     (case (:status result)
       :available
         (let [row (:receipt result)]
           (web/json conn
            (cond-> result
-             (:previous-id row) (assoc :previous-url (receipt-url index (:previous-id row)))
-             (:start-id row) (assoc :start-url (receipt-url index (:start-id row))))))
+             (:previous-id row) (assoc :previous-url (receipt-url origin index (:previous-id row)))
+             (:start-id row) (assoc :start-url (receipt-url origin index (:start-id row))))))
       :expired (web/json conn 410 {:status :expired})
       (web/text conn 404 "not found"))))
 
