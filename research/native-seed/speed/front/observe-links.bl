@@ -1073,14 +1073,23 @@
    {:prepared prepared-id :registry reads :probes (source-probes observed) :sources (:sources observed)
     :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled) :defs (:defs compiled)})))
 
+(defn- registry-member-bytes [entry]
+ (BeamLisp.CompilerData/check_closed_etf!
+  (erlang/term_to_binary entry (list :deterministic)) artifact/limits))
+
+(defn- read-registry-member [bytes]
+ (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
+ (erlang/binary_to_term bytes))
+
 (defn- capture-registry [closure baseline candidate samples-path]
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema :native-portable-registry-v2 :sdk (:sdk-pin closure) :options (:options closure)
+   {:schema :native-portable-registry-v3 :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
-                           [ns (capture-registry-member closure baseline (get-in closure [:units ns]) entries)])
+                           [ns (registry-member-bytes
+                                (capture-registry-member closure baseline (get-in closure [:units ns]) entries))])
                          (:order closure)))})))
 
 (defn- replay-registry-member [closure candidate member entry entries]
@@ -1113,7 +1122,7 @@
  (let [bytes (File/read! receipt-path)
        _ (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
        receipt (erlang/binary_to_term bytes)
-       _ (assert (= :native-portable-registry-v2 (:schema receipt)))
+       _ (assert (= :native-portable-registry-v3 (:schema receipt)))
        _ (assert (= (:sdk-pin closure) (:sdk receipt)))
        _ (assert (= (:options closure) (:options receipt)))
        _ (assert (= (:order closure) (:order receipt)))
@@ -1126,7 +1135,7 @@
      :baseline-link-rows-sha256 (:base-links receipt) :candidate-link-rows-sha256 (:sha256 candidate)
      :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
      :members (mapv (fn [ns] (replay-registry-member closure candidate (get-in closure [:units ns])
-                              (get-in receipt [:members ns]) entries)) (:order closure))}))))
+                              (read-registry-member (get-in receipt [:members ns])) entries)) (:order closure))}))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
