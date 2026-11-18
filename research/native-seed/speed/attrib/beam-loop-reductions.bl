@@ -1,0 +1,36 @@
+;; Run once per immutable SDK. The emission flag holds the optimizer off so
+;; the comparison measures the production Lower path alone.
+(ns speed.beam-loop-reductions
+  (:require [anf :as anf] [compiler :as compiler] [reader :as reader]
+            [lower :as lower] [bl.json :as json]))
+
+(def out (first (BeamLisp/argv)))
+(def source
+  "(fn [limit] (loop [i 0, sum 0]
+     (if (erlang/< i limit) (recur (+ i 1) (+ sum i)) sum)))")
+(def module :Elixir.Speedwork.Loop)
+(compiler/reset-fresh!)
+(def descriptor
+  (anf/module module
+    (list {:op :defn-clause :fname :run :params (list) :guard nil
+           :body (compiler/compile (reader/read_one source) (compiler/new-env "user"))
+           :ann {}})
+    (list [:run 0]) (list)))
+(def bytes (elem (lower/descriptor->beam descriptor {:enabled? false}) 1))
+(File/mkdir_p! out)
+(File/write! (str out "/loop.beam") bytes)
+(assert (= (tuple :module module) (code/load_binary module (list) bytes)))
+(def run (erlang/apply module :run (list)))
+
+(defn- observe []
+  (let [before (elem (erlang/process_info (erlang/self) :reductions) 1)
+        start (erlang/monotonic_time :microsecond)
+        result (run 250000)
+        elapsed (- (erlang/monotonic_time :microsecond) start)
+        reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)]
+    (assert (= 31249875000 result))
+    {:elapsed-us elapsed :reductions reductions}))
+
+(observe)
+(File/write! (str out "/loop.json")
+  (json/encode {:source source :samples (mapv (fn [_] (observe)) (range 12))}))
