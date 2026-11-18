@@ -16,6 +16,7 @@
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --env-read-control REPORT
 ;;   PARTITION LINK_ROWS --code-read-control REPORT
+;;   PARTITION LINK_ROWS --resolver-read-control REPORT
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION BASE_LINK_ROWS --capture-registry RECEIPT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
@@ -63,6 +64,8 @@
 (def env-read-entries #{(tuple :Elixir.BeamLisp.Env :loaded_ns? 1)
                         (tuple :Elixir.BeamLisp.Env :search_paths 0)})
 (def env-private-entry (tuple :Elixir.BeamLisp.Env :source_private 1))
+(def resolver-read-entries #{(tuple :Elixir.BeamLisp.Loader :source_decls 1)
+                             (tuple :Elixir.BeamLisp.Loader :source_path 1)})
 (def loader-owner-entries
  (set (map (fn [[name arity]] (tuple :Elixir.BeamLisp.Loader name arity))
            [[:source_decls 1] [:source_path 1] [:resolvable? 1]
@@ -365,6 +368,54 @@
                         (when (not= expected (env-read-result function current)) key)))
                      reads))))
 
+(defn- resolver-result [function value]
+ (if (or (nil? value)
+         (case function
+          :source_path (small-env-text? value)
+          :source_decls (and (erlang/is_map value) (<= (erlang/map_size value) 4096))))
+  [:observed value]
+  :unavailable))
+
+(defn- start-loader-read [effects entry argument]
+ (cond-> effects
+  (:ownership? effects)
+  (update :pending-loader-owners (fn [stack] (conj (or stack []) entry)))
+  (and (:resolver-reads? effects) (contains? resolver-read-entries entry))
+  (update :pending-resolver-reads
+   (fn [stack] (conj (or stack []) [entry (when (small-env-text? argument) [(elem entry 1) argument])])))))
+
+(defn- finish-loader-read [effects entry kind value]
+ (when (:ownership? effects)
+  (assert (= entry (peek (:pending-loader-owners effects)))))
+ (let [effects (cond-> effects (:ownership? effects) (update :pending-loader-owners pop))]
+  (if (and (:resolver-reads? effects) (contains? resolver-read-entries entry))
+   (let [[expected key] (peek (:pending-resolver-reads effects))
+         reads (:resolver-reads effects {})
+         outcome (if (= kind :return_from) (resolver-result (elem entry 1) value) :unavailable)
+         total (inc (:resolver-read-count effects 0))]
+    (assert (= entry expected))
+    (cond-> (-> effects (update :pending-resolver-reads pop) (assoc :resolver-read-count total))
+     (or (nil? key) (= :unavailable outcome)) (assoc :unknown-resolver-read true)
+     (and key (contains? reads key) (not= outcome (get reads key))) (assoc :unstable-resolver-read true)
+     (and key (<= total registry-trace-limit) (< (count reads) registry-input-limit))
+     (assoc-in [:resolver-reads key] outcome)))
+   effects)))
+
+(defn- resolver-receipt [effects]
+ (into {} (map (fn [[key outcome]] [key (value-identity outcome)]) (:resolver-reads effects))))
+
+(defn- changed-resolver-reads [reads]
+ (BeamLisp.Loader/with_declaration_snapshot
+  (fn []
+   (vec (take 12 (keep (fn [[[function ns :as key] expected]]
+                        (let [outcome (try (resolver-result function
+                                           (case function
+                                            :source_decls (BeamLisp.Loader/source_decls ns)
+                                            :source_path (BeamLisp.Loader/source_path ns)))
+                                           (catch _ :unavailable))]
+                         (when (or (= :unavailable outcome) (not= expected (value-identity outcome))) key)))
+                      reads))))))
+
 (defn- code-location [value]
  (cond
   (false? value) false
@@ -469,11 +520,10 @@
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources
    (finish-env-read effects (tuple :Elixir.BeamLisp.Env function arity) kind value))
-  [:trace _ kind [:Elixir.BeamLisp.Loader function arity] _]
+  [:trace _ kind [:Elixir.BeamLisp.Loader function arity] value]
   :when (or (= kind :return_from) (= kind :exception_from))
-  (do
-   (assert (= (tuple :Elixir.BeamLisp.Loader function arity) (peek (:pending-loader-owners effects))))
-   (recur calls pending hits misses reads sources (update effects :pending-loader-owners pop)))
+  (recur calls pending hits misses reads sources
+   (finish-loader-read effects (tuple :Elixir.BeamLisp.Loader function arity) kind value))
   [:trace _ kind [:code :is_loaded 1] value]
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources (finish-code-read effects kind value))
@@ -497,8 +547,7 @@
     (recur calls pending hits misses reads sources
      (update effects :pending-private-env (fn [stack] (conj (or stack []) (callback-name key)))))
     (contains? loader-owner-entries entry)
-    (recur calls pending hits misses reads sources
-     (update effects :pending-loader-owners (fn [stack] (conj (or stack []) entry))))
+    (recur calls pending hits misses reads sources (start-loader-read effects entry key))
     (= entry code-read-entry)
     (recur calls pending hits misses reads sources (assoc effects :pending-code-read key))
     (and (:boundary? effects) (or (contains? table-lifecycle-operations entry)
@@ -551,6 +600,8 @@
                     (nil? (:pending-registry-member effects)) (not (:registry-input-limit effects))
                     (not (:boundary-event-limit effects))
                     (empty? (:pending-loader-owners effects)) (empty? (:pending-private-env effects))
+                    (empty? (:pending-resolver-reads effects)) (< (count (:resolver-reads effects)) registry-input-limit)
+                    (<= (:resolver-read-count effects 0) registry-trace-limit)
                     (empty? (:pending-env-reads effects)) (< (count (:env-reads effects)) registry-input-limit)
                     (<= (:env-read-count effects 0) registry-trace-limit)
                     (not (contains? effects :pending-code-read)) (< (count (:code-reads effects)) registry-input-limit)
@@ -590,6 +641,7 @@
             (str "could not trace Source read " (pr-str entry))))
    (doseq [entry (cond-> (if (:env-reads? options) env-read-entries #{})
                   (:code-reads? options) (conj code-read-entry)
+                  (:resolver-reads? options) (into resolver-read-entries)
                   (:ownership? options) (into (conj loader-owner-entries env-private-entry)))]
     (let [matched (erlang/apply :trace :function
                     (list session entry (list (tuple :_ (list) (list (tuple :exception_trace)))) (list :local)))]
@@ -1439,6 +1491,46 @@
    :unloaded-object-invalidates-miss true :path-change-and-restoration-observed true
    :changed-during-snapshot true :same-state-after-two-writes true :module-cleaned-up true}))
 
+(defn- resolver-read-control [output]
+ (let [provider "native_resolver_read_control"
+       root (Path/expand (str output ".resolver-" (System/unique_integer (list :positive))))
+       preferred (Path/join root "preferred")
+       fallback (Path/join root "fallback")
+       filename (str provider ".bl")
+       preferred-file (Path/join preferred filename)
+       fallback-file (Path/join fallback filename)
+       keys #{[:source_decls provider] [:source_path provider]}
+       consult (fn [] (BeamLisp.Loader/with_declaration_snapshot
+                       (fn [] [(BeamLisp.Loader/source_decls provider)
+                               (BeamLisp.Loader/source_path provider)])))
+       capture (fn []
+                (let [[results trace] (trace! consult {:resolver-reads? true})]
+                 [results (resolver-receipt (:effects trace))]))]
+  (File/mkdir! root)
+  (try
+   (File/mkdir! preferred)
+   (File/mkdir! fallback)
+   (BeamLisp.Loader/with_ambient_dirs
+    (list preferred fallback)
+    (fn []
+     (let [[missing absent] (capture)]
+      (assert (= [nil nil] missing))
+      (assert (= keys (set (changed-resolver-reads (assoc absent [:source_path provider] "wrong digest"
+                                                         [:source_decls provider] "wrong digest")))))
+      (File/write! fallback-file (str "(ns " provider ")\n(defn old-name [] 1)\n"))
+      (assert (= keys (set (changed-resolver-reads absent))))
+      (let [[[_ previous] reads] (capture)]
+       (assert (= fallback-file previous))
+       (File/write! preferred-file "(ns wrong_provider)\n(defn other-name [] 2)\n")
+       (assert (empty? (changed-resolver-reads reads)))
+       (File/write! preferred-file (str "(ns " provider ")\n(defn new-name [] 2)\n"))
+       (assert (= keys (set (changed-resolver-reads reads))))
+       (assert (= preferred-file (second (consult))))))))
+   {:schema "bl.native.resolver-read-control" :version 1 :reuse-authority false
+    :namespace-miss-rechecked true :wrong-declaration-ignored true
+    :preferred-provider-detected true :declaration-change-detected true}
+   (finally (File/rm_rf! root)))))
+
 (defn- registry-shadow-member [closure baseline candidate member entries]
  (let [[prior-inputs prior observation] (observe-lowering closure baseline member entries)
        effects (:effects observation)
@@ -1562,7 +1654,8 @@
 
 (defn- capture-registry-member [closure baseline member entries bound?]
  (let [[prepared compiled observed callables]
-       (observe-lowering closure baseline member entries {:env-reads? bound? :code-reads? bound?})
+       (observe-lowering closure baseline member entries
+                        {:env-reads? bound? :code-reads? bound? :resolver-reads? bound?})
        _ (when (and bound? (not (erlang/=:= (def-bytes compiled) (def-bytes member))))
            (throw (ex-info "Native registry capture diverged from the qualified donor"
                     {:namespace (:ns member)})))
@@ -1574,6 +1667,8 @@
                 (:unstable-env-read effects) :unstable-env-read
                 (:unknown-code-read effects) :unknown-code-read
                 (seq (:code-mutations effects)) :code-mutated-during-lowering
+                (:unknown-resolver-read effects) :unknown-resolver-read
+                (:unstable-resolver-read effects) :unstable-resolver-read
                 (or (:unstable-code-read effects) (some #{:unavailable} (vals (:code-reads effects)))) :unstable-code-read)
        prepared-id (when-not reason (closed-identity prepared))
        reads (when prepared-id (into {} (map (fn [[key value]] [key (registry-value-signature value callables)])
@@ -1587,7 +1682,8 @@
             :sources (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest]) (:sources observed)))))
             :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)}
     bound? (assoc :env-reads (:env-reads effects {}) :env-read-calls (:env-read-count effects 0)
-                  :code-reads (:code-reads effects {}) :code-read-calls (:code-read-count effects 0))
+                  :code-reads (:code-reads effects {}) :code-read-calls (:code-read-count effects 0)
+                  :resolver-reads (resolver-receipt effects) :resolver-read-calls (:resolver-read-count effects 0))
     (not bound?) (assoc :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits))))))
 
 (defn- registry-member-bytes [entry]
@@ -1602,7 +1698,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v5 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v6 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1629,7 +1725,7 @@
          changed-code (when (contains? entry :code-reads) (changed-code-reads (:code-reads entry)))
          code-mutations (mapv (fn [[mfa calls]] [(vec (erlang/tuple_to_list mfa)) calls])
                               (:code-mutations entry))
-         reason (or (:reason entry)
+         prior-reason (or (:reason entry)
                     (cond
                      (not (erlang/is_binary (:definition-bytes entry))) :missing-definition-bytes
                      (not= [(:module member) (:path member) (:source-sha256 member)]
@@ -1642,6 +1738,9 @@
                      (seq changed-env) :env-input-changed
                      (seq changed-code) :code-input-changed
                      (seq changed) :registry-input-changed))
+         changed-resolver (when (and (nil? prior-reason) (contains? entry :resolver-reads))
+                            (changed-resolver-reads (:resolver-reads entry)))
+         reason (or prior-reason (when (seq changed-resolver) :resolver-input-changed))
          ;; The oracle compares exact deterministic bytes. The retained
          ;; definition payload requires no decoding on this read path.
          actual (if reason (def-bytes (lower-with-snapshot prepared)) (:definition-bytes entry))]
@@ -1657,7 +1756,11 @@
             :distinct-code-reads (count (:code-reads entry))
             :changed-code-reads changed-code)
      (contains? entry :code-mutations)
-     (assoc :code-mutations code-mutations)))))))
+     (assoc :code-mutations code-mutations)
+     (contains? entry :resolver-reads)
+     (assoc :resolver-read-calls (:resolver-read-calls entry)
+            :distinct-resolver-reads (count (:resolver-reads entry))
+            :changed-resolver-reads changed-resolver)))))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -1713,7 +1816,8 @@
   (refuse-bound-registry :receipt-digest-mismatch))
  (let [receipt (read-registry-member bytes)]
   (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
-                             :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5} (:schema receipt))
+                             :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5
+                             :native-bound-registry-v6} (:schema receipt))
                  (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
@@ -1763,10 +1867,13 @@
                                        (:reason entry) entry
                                        (and (not= :native-bound-registry-v1 (:schema receipt)) (not (map? (:env-reads entry))))
                                        {:reason :missing-env-reads}
-                                       (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5}
+                                       (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4
+                                                         :native-bound-registry-v5 :native-bound-registry-v6}
                                                        (:schema receipt))
                                             (not (map? (:code-reads entry))))
                                        {:reason :missing-code-reads}
+                                       (and (= :native-bound-registry-v6 (:schema receipt)) (not (map? (:resolver-reads entry))))
+                                       {:reason :missing-resolver-reads}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
                                mutation (when (and control-root (= "host.delay" ns))
                                           #(BeamLisp.Env/add_search_path control-root))]
@@ -1984,6 +2091,7 @@
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
                 (= selected "--env-read-control") (env-read-control output)
                 (= selected "--code-read-control") (code-read-control output)
+                (= selected "--resolver-read-control") (resolver-read-control output)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
                 (= selected "--capture-bound-registry") (capture-bound-registry closure baseline comparison source-receipt)
                 (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
