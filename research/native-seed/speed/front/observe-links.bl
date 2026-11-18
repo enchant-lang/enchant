@@ -88,6 +88,13 @@
    (if (erlang/is_tuple name) (elem name 1) :unregistered))
   (if (erlang/is_atom destination) destination :external-name)))
 
+(defn- message-operation [message]
+ (when (and (erlang/is_tuple message) (pos? (erlang/tuple_size message)))
+  (let [tag (elem message 0)
+        request (if (and (= :"$gen_call" tag) (= 3 (erlang/tuple_size message))) (elem message 2) message)
+        operation (if (and (erlang/is_tuple request) (pos? (erlang/tuple_size request))) (elem request 0) request)]
+   (when (erlang/is_atom operation) operation))))
+
 (defn- boundary-event [effects category key]
  (let [total (inc (:boundary-event-count effects 0))
        events (get effects category {})
@@ -285,10 +292,12 @@
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
   (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
-  [:trace _ :send _ target]
-  (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:send (process-destination target)]))
-  [:trace _ :send_to_non_existing_process _ target]
-  (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:send-miss (process-destination target)]))
+  [:trace _ :send message target]
+  (recur calls pending hits misses reads sources
+   (boundary-event effects :process-boundary [:send (process-destination target) (message-operation message)]))
+  [:trace _ :send_to_non_existing_process message target]
+  (recur calls pending hits misses reads sources
+   (boundary-event effects :process-boundary [:send-miss (process-destination target) (message-operation message)]))
   [:trace _ :spawn _ _]
   (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:spawn]))
   [:trace _ kind _] :when (or (= kind :link) (= kind :unlink) (= kind :getting_linked) (= kind :getting_unlinked)
@@ -1036,7 +1045,7 @@
 (defn- lowering-effects [closure rows samples-path]
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.lowering-effects" :version 1 :reuse-authority false
+   {:schema "bl.native.lowering-effects" :version 2 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :control (lowering-boundary-control)
@@ -1335,7 +1344,9 @@
    (refuse-bound-registry :receipt-context-mismatch))
   ;; The qualified donor supplies definitions. The receipt carries only
   ;; inputs, and cannot supply a replacement payload for an accepted member.
-  (with-phase-entries candidate samples-path
+  ;; Macro recipes are from the exact SDK and the sampling evidence belongs
+  ;; to the donor. Staging and registry validation use the candidate rows.
+  (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path
    (fn [entries _]
     {:schema "bl.native.bound-registry-shadow" :version 1 :reuse-authority false
      :donor anchor :receipt-sha256 expected-sha :receipt-bytes (erlang/byte_size bytes)

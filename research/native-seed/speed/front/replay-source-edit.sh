@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Rebuild the one-body edit in a private overlay, then check selective relinking.
 set -euo pipefail
-if [[ $# != 2 && $# != 6 ]]; then
-  echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES]" >&2
+if [[ $# != 2 && $# != 6 && $# != 7 || $# == 7 && $7 != --arity ]]; then
+  echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
   exit 2
 fi
 baseline=$(realpath "$1")
 report=$(realpath -m "$2")
-if [[ $# == 6 ]]; then
+if [[ $# -ge 6 ]]; then
   receipt=$(realpath "$3")
   receipt_sha=$4
   qualification=$(realpath "$5")
@@ -29,14 +29,19 @@ for item in run sdk-pin.json partition-closure.py speed; do
 done
 cp -a --reflink=auto "$seed/src" "$overlay/$seed/src"
 cp --reflink=auto "$baseline/partition.json" "$baseline/link-rows.etf" "$overlay/$edited/"
-python3 - "$overlay/$seed/src/native/scheme.bl" <<'PY'
+python3 - "$overlay/$seed/src/native/scheme.bl" "${7:-}" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 source = path.read_bytes()
-before = b'(Enum/join (cons "v" (Enum/map (unicode/characters_to_list s)'
-after = b'(Enum/join (cons "w" (Enum/map (unicode/characters_to_list s)'
+if sys.argv[2] == "--arity":
+    body = b'(Enum/join (cons "v" (Enum/map (unicode/characters_to_list s) (fn [c] (code-text c)))) "")'
+    before = b'(defn ident [s]\n ' + body + b')'
+    after = b'(defn ident\n ([s] ' + body + b')\n ([s prefix] (str prefix (ident s))))'
+else:
+    before = b'(Enum/join (cons "v" (Enum/map (unicode/characters_to_list s)'
+    after = b'(Enum/join (cons "w" (Enum/map (unicode/characters_to_list s)'
 assert source.count(before) == 1, "the retained emitter body does not match the edit fixture"
 path.write_bytes(source.replace(before, after, 1))
 PY
