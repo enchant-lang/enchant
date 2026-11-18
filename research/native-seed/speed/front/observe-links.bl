@@ -6,6 +6,8 @@
 ;;   PARTITION LINK_ROWS --sequential-scoped REPORT
 ;;   PARTITION LINK_ROWS --write-control REPORT
 ;;   QUALIFIED_PARTITION BASELINE_LINK_ROWS --shadow REPORT CANDIDATE_LINK_ROWS
+;;   BASE_PARTITION BASE_LINK_ROWS --capture-source RECEIPT.etf
+;;   EDITED_PARTITION EDITED_LINK_ROWS --source-shadow REPORT BASE_PARTITION RECEIPT.etf
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
 ;; retains the historical ambient naming mode for comparison.
@@ -211,6 +213,72 @@
 (defn- def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
+(defn- source-identity [path]
+ (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
+  (if (String/starts_with? absolute root) (subs absolute (count root)) absolute)))
+
+(defn- capture-source [closure baseline]
+ {:schema :native-source-shadow-v1
+  :sdk (:sdk-pin closure) :options (:options closure) :order (:order closure)
+  :link-rows-sha256 (:sha256 baseline)
+  :members (into {}
+   (map (fn [ns]
+          (let [member (get-in closure [:units ns])
+                [compiled observed] (compile-member closure member (:rows baseline))]
+           (assert (= (:source-sha256 member) (:source-sha256 compiled)))
+           (assert (erlang/=:= (def-bytes member) (def-bytes compiled)))
+           (assert (:accepted (replay-links observed (:local-links baseline))))
+           [ns {:defs (artifact/sha (def-bytes member)) :link-receipt (link-receipt observed)
+                :paths (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest])
+                                                (:sources observed)))))}]))
+        (:order closure)))})
+
+(defn- read-source-identity [path]
+ (try (artifact/sha (File/read! path)) (catch _ :unavailable)))
+
+(defn- source-shadow [closure candidate baseline-path receipt-path]
+ (let [baseline (artifact/read-closure baseline-path)
+       bytes (File/read! receipt-path)
+       _ (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
+       receipt (erlang/binary_to_term bytes)
+       _ (assert (= :native-source-shadow-v1 (:schema receipt)))
+       _ (assert (= (:sdk-pin baseline) (:sdk-pin closure) (:sdk receipt)))
+       _ (assert (= (:options baseline) (:options closure) (:options receipt)))
+       _ (assert (= (:order baseline) (:order closure) (:order receipt)))
+       _ (assert (= (:host-modules baseline) (:host-modules closure)))
+       _ (assert (= (:stubs baseline) (:stubs closure)))
+       _ (assert (= (:core-links baseline) (:core-links closure)))
+       identities (into {} (map (fn [path] [path (read-source-identity path)])
+                          (distinct (mapcat (fn [entry] (map first (:paths entry))) (vals (:members receipt)))))
+       started (erlang/monotonic_time :microsecond)
+       plan (mapv (fn [ns]
+                    (let [old (get-in baseline [:units ns]) new (get-in closure [:units ns])
+                          record (get-in receipt [:members ns])
+                          changed-paths (vec (filter (fn [[path digest]]
+                                                      (or (= digest :unavailable) (not= digest (get identities path))))
+                                                    (:paths record)))
+                          own? (not= (:source-sha256 old) (:source-sha256 new))
+                          links? (not (receipt-matches? (:link-receipt record) (:local-links candidate)))]
+                     (assert (= (:path old) (:path new)))
+                     (assert (= (:defs record) (artifact/sha (def-bytes old))))
+                     {:namespace ns :changed-source own? :changed-dependencies (mapv first changed-paths)
+                      :changed-links links? :reused (not (or own? links? (seq changed-paths)))}))
+                  (:order closure))
+       planned (erlang/monotonic_time :microsecond)
+       results (mapv (fn [decision]
+                       (let [ns (:namespace decision) member (get-in closure [:units ns])
+                             actual (if (:reused decision) (get-in baseline [:units ns])
+                                      (first (compile-member closure member (:rows candidate))))]
+                        (assoc decision :exact-clean-definitions
+                               (and (= (:source-sha256 actual) (:source-sha256 member))
+                                    (erlang/=:= (def-bytes actual) (def-bytes member)))))) plan)]
+  {:schema "bl.native.source-replay-shadow" :version 1 :reuse-authority false
+   :baseline-receipt-sha256 (artifact/sha bytes) :candidate-link-rows-sha256 (:sha256 candidate)
+   :baseline-link-rows-sha256 (:link-rows-sha256 receipt)
+   :observed-source-paths (count identities) :plan-us (- planned started)
+   :candidate-compilation-and-oracle-comparison-us (- (erlang/monotonic_time :microsecond) planned)
+   :members results}))
+
 (defn- observe-shadow [closure baseline candidate]
  ;; The qualified partition is the independent clean candidate oracle. Only
  ;; members that fail their baseline link receipt enter candidate compilation.
@@ -316,13 +384,16 @@
    :scope "Filtered ETS consultations in synchronous staged compilation of unchanged Source. A missing installed member row can still have another resolver fallback."
    :reuse-authority false}))
 
-(let [[partition rows selected output comparison] (BeamLisp/argv)]
+(let [[partition rows selected output comparison source-receipt] (BeamLisp/argv)]
  (let [closure (artifact/read-closure partition)
        pinned-rows (fn [path] (let [rowset (read-rows path)]
                                (assoc rowset :local-links (local-links closure (:rows rowset)))))
        baseline (pinned-rows rows)
-       candidate (when comparison (pinned-rows comparison))
+       source-shadow? (= selected "--source-shadow")
+       candidate (when (and comparison (not source-shadow?)) (pinned-rows comparison))
        report (cond
+                (= selected "--capture-source") (capture-source closure baseline)
+                source-shadow? (source-shadow closure baseline comparison source-receipt)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
                 (= selected "--sequential") (observe-sequential closure baseline false)
@@ -332,8 +403,9 @@
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
                 :else (observe closure baseline selected candidate))]
-  (File/write! output (json/encode report))
-  (when (= selected "--shadow")
+  (File/write! output (if (= selected "--capture-source")
+                       (erlang/term_to_binary report (list :deterministic)) (json/encode report)))
+  (when (or (= selected "--shadow") source-shadow?)
    (let [different (mapv :namespace (remove :exact-clean-definitions (:members report)))]
     (when (seq different)
      (throw (ex-info "Selective relink differs from the qualified clean closure" {:members different})))))))
