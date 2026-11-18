@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Round-3 closure update: pass 1 (recompile under the pin), member link rows,
-# pass 2 (recompile every member against those rows, as the native image links).
+# Round-3 closure update: pass 1 refreshes changed sources, then pass 2
+# compiles against the member link rows or reuses an exact linked generation.
 # Usage: closure-r3.sh CLOSURE_DIR   (repository root as cwd; runs under work run)
 set -euo pipefail
 dir=$1

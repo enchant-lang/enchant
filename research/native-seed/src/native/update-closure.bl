@@ -92,24 +92,65 @@
  (let [anchors (set (concat ["rt" "core" "sugar"] requires))
        last-at (reduce (fn [at [i x]] (if (contains? anchors x) i at)) -1 (map-indexed vector order))]
   (vec (concat (take (inc last-at) order) [ns] (drop (inc last-at) order)))))
+; --- providers ----------------------------------------------------------------
+; A provider is read from where the pinned compile LOADS it: closure members
+; and research/native-seed/src (on the -p path) from this checkout; every
+; other priv/ source from the pinned SDK's immutable Source (sdk-pin.json).
+(def members (set (concat (map :path (vals (:units original))) (map :path additions))))
+(def sdk-prefix (str sdk-source "/"))
+(defn checkout-origin? [p] (or (contains? members p) (String/starts_with? p "research/native-seed/src/")))
+(def provider-paths
+ (sort (distinct (concat members (Path/wildcard "research/native-seed/src/**/*.bl")
+  (map #(subs % (count sdk-prefix))
+       (mapcat #(Path/wildcard (str sdk-prefix % "/**/*.bl")) ["priv/boot" "priv/lib" "priv/std" "priv/compat"]))))))
+(defn providers [prior]
+ (let [previous (into {} (map (fn [p] [(:path p) p]) prior))]
+  (mapv (fn [p]
+   (let [origin (if (checkout-origin? p) "checkout" "sdk")
+         location (if (= origin "checkout") p (str sdk-prefix p))
+         source (File/read! location) sha (artifact/sha source) old (get previous p)]
+    (if (= sha (:sha256 old)) (assoc old :origin origin)
+     {:path p :sha256 sha :origin origin
+      :macro-provider? (and (String/contains? source "defmacro")
+                           (boolean (some build/defmacro? (build/read-forms location))))})))
+   provider-paths)))
+(def admitted (set (map :path additions)))
+(defn macro-identity [ps]
+ (vec (keep (fn [p] (when (and (:macro-provider? p) (not (contains? admitted (:path p)))) [(:path p) (:sha256 p)])) ps)))
+(def current-providers (providers (:provider-sources original)))
+(def macros (macro-identity current-providers))
+(when-not (or repin? (= macros (macro-identity (:provider-sources original))))
+ (throw (ex-info "native update: macro providers changed; capture a fresh closure"
+                 {:now macros :captured (macro-identity (:provider-sources original))})))
+
 ; Link rows (LINK P3/N3): the native image installs the link row of every
 ; closure member before compiling anything. BEAM must compile against the SAME
 ; rows, or a member's calls to itself and to unloaded members link differently.
 ; The rows come from member-rows.bl over a previous pass's closure (a separate
 ; process: computing them needs native.bootstrap loaded, and recompiling the
-; native.bootstrap member here replaces that module). With NATIVE_LINK_ROWS
-; set, the rows are installed in the isolated Env and every member recompiles.
+; native.bootstrap member here replaces that module). An existing linked
+; generation is reusable when the entire compilation context matches.
 (def link-rows-path (System/get_env "NATIVE_LINK_ROWS"))
 (def link-rows (when link-rows-path (erlang/binary_to_term (File/read! link-rows-path))))
 (when link-rows (println (str "NATIVE_UPDATE_LINK_ROWS " (count link-rows) " from " link-rows-path)))
-(def recompile-all? (or repin? (some? link-rows)))
+(def linked-context
+ (when link-rows
+  (artifact/sha (erlang/term_to_binary
+   ["native-linked-closure-v1" pin expected-options current-providers additions
+    (:order original) host-modules (:stubs original) (:core-links original) link-rows]
+   (list :deterministic)))))
+(def linked-reuse? (and linked-context (= linked-context (:linked-context-sha256 original))))
+(def install-linked-rows? (and link-rows (not linked-reuse?)))
+(def recompile-all? (or repin? install-linked-rows?))
 (def result
  (BeamLisp.Env/isolated
   (fn []
-   (doseq [[ns name info _] link-rows] (BeamLisp.Env/put_link ns name info))
+   (when install-linked-rows?
+    (doseq [[ns name info _] link-rows] (BeamLisp.Env/put_link ns name info)))
    ; With them, core's own rows exactly as native-install-bundle! installs
    ; :core-links (seeds included), so core calls link as they do natively.
-   (when link-rows (doseq [[name info] (:core-links original)] (BeamLisp.Env/put_link "core" name info)))
+   (when install-linked-rows?
+    (doseq [[name info] (:core-links original)] (BeamLisp.Env/put_link "core" name info)))
    (let [existing
          (reduce (fn [result ns]
           (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
@@ -150,43 +191,19 @@
              (throw (ex-info "native update: declared host module namespace is not a closure member" {:namespace ns})))]
   (check-host-module! ns (:source u) module)))
 
-; --- providers ----------------------------------------------------------------
-; A provider is read from where the pinned compile LOADS it: closure members
-; and research/native-seed/src (on the -p path) from this checkout; every
-; other priv/ source from the pinned SDK's immutable Source (sdk-pin.json).
-(def members (set (map :path (vals (:units result)))))
-(def sdk-prefix (str sdk-source "/"))
-(defn checkout-origin? [p] (or (contains? members p) (String/starts_with? p "research/native-seed/src/")))
-(def provider-paths
- (sort (distinct (concat members (Path/wildcard "research/native-seed/src/**/*.bl")
-  (map #(subs % (count sdk-prefix))
-       (mapcat #(Path/wildcard (str sdk-prefix % "/**/*.bl")) ["priv/boot" "priv/lib" "priv/std" "priv/compat"]))))))
-(defn providers [prior]
- (let [previous (into {} (map (fn [p] [(:path p) p]) prior))]
-  (mapv (fn [p]
-   (let [origin (if (checkout-origin? p) "checkout" "sdk")
-         location (if (= origin "checkout") p (str sdk-prefix p))
-         source (File/read! location) sha (artifact/sha source) old (get previous p)]
-    (if (= sha (:sha256 old)) (assoc old :origin origin)
-     {:path p :sha256 sha :origin origin
-      :macro-provider? (and (String/contains? source "defmacro")
-                           (boolean (some build/defmacro? (build/read-forms location))))})))
-   provider-paths)))
-(def admitted (set (map :path additions)))
-(defn macro-identity [ps]
- (vec (keep (fn [p] (when (and (:macro-provider? p) (not (contains? admitted (:path p)))) [(:path p) (:sha256 p)])) ps)))
-(def current-providers (providers (:provider-sources original)))
-(def macros (macro-identity current-providers))
-(when-not (or repin? (= macros (macro-identity (:provider-sources original))))
- (throw (ex-info "native update: macro providers changed; capture a fresh closure"
-                 {:now macros :captured (macro-identity (:provider-sources original))})))
 (def final-providers (providers current-providers))
-(assert (= macros (macro-identity final-providers)))
+(assert (= current-providers final-providers))
 (doseq [[ns u] (:units result)]
  (assert (= (:source-sha256 u) (artifact/sha (:source u))))
  (assert (= (:source-sha256 u) (artifact/sha (File/read! (:path u))))))
-(def closure (assoc original :units (:units result) :order order :provider-sources final-providers
-                    :host-modules host-modules :sdk-pin pin))
+(def closure
+ (let [next (assoc original :units (:units result) :order order :provider-sources final-providers
+                            :host-modules host-modules :sdk-pin pin)]
+  (cond
+   (and linked-context (empty? (:added result))) (assoc next :linked-context-sha256 linked-context)
+   (and (empty? (:changed result)) (empty? (:added result))
+        (= current-providers (:provider-sources original))) next
+   :else (dissoc next :linked-context-sha256))))
 (def bytes (erlang/term_to_binary closure (list :deterministic)))
 (File/write! (str out "/closure.etf") bytes)
 (File/write! (str out "/identity.json")
@@ -195,6 +212,7 @@
                :options (:options closure) :providers final-providers}))
 (File/write! (str out "/update.json")
  (json/encode {:schema "bl.native.closure-update" :version 2 :changed (:changed result) :added (:added result)
+               :linked-context-reused (boolean linked-reuse?)
                :additions-files additions-files
                :host-modules (mapv (fn [[ns module]] [ns (erlang/atom_to_binary module)]) host-modules)
                :artifact-sha256 (artifact/sha bytes)
