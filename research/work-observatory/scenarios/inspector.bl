@@ -16,6 +16,12 @@
 (defn wait-for [code] (act [:wait code]))
 (defn dock [selector] (act [:dock selector]))
 
+(defn go-back! [p]
+  (let [history (page/cdp! p "Page.getNavigationHistory" {})
+        previous (nth (get history "entries") (dec (get history "currentIndex")))]
+    (page/cdp! p "Page.navigateToHistoryEntry" {"entryId" (get previous "id")})
+    (page/wait-url! p #(= % (str url "/")))))
+
 (defn click-shadow! [p selector]
   ;; page/cdp! is the actual browser namespace; press/release are trusted input.
   ;; Hit-test the shadow target before pressing, just as page/click! does for CSS.
@@ -94,6 +100,10 @@
    (dock "[data-action=server]")
    (wait-for (str shadow ".querySelectorAll('.versions code').length===2"))
    (sees (str "EnchantInspector.debug().peakFlights===1&&" dock-layout "===closedDockLayout&&[..." shadow ".querySelectorAll('.versions code')].map(e=>e.textContent).join(' · ').match(/^BL [^ ]+ · OTP [0-9]+$/)!==null") "Server shows BL and OTP versions while sharing the single-flight sampler")
+   (act [:eval "window.beforeFocusRefresh=EnchantInspector.debug().requests"])
+   (dock "[data-action=refresh]")
+   (wait-for "EnchantInspector.debug().requests>beforeFocusRefresh&&!EnchantInspector.debug().inFlight")
+   (sees (str shadow ".activeElement?.dataset.action==='refresh'") "Refreshing the Server panel preserves button focus")
    (act [:eval "(()=>{window.realFetch=window.fetch;window.held=null;window.fetch=()=>new Promise(resolve=>{window.held=resolve});return true})()"])
    (dock "[data-action=refresh]")
    (wait-for "!!window.held")
@@ -103,6 +113,19 @@
    (act [:eval "(()=>{held({ok:true,json:async()=>({schema:'enchant.observatory.v1',runtime:{vm:{memory:999999999999}},work:[],projections:[]})});window.fetch=realFetch;return true})()"])
    (wait-for "EnchantInspector.debug().activeRequests===0")
    (sees (str "!EnchantInspector.debug().open&&!EnchantInspector.debug().pollScheduled&&EnchantInspector.debug().sampleMemory!==999999999999&&" dock-layout "===closedDockLayout") "Closing with the left toggle keeps the dock still, discards late completion and leaves no sampler")
+   (dock "[data-action=server]")
+   (wait-for "EnchantInspector.debug().pollScheduled")
+   (act [:eval "window.beforePause=EnchantInspector.debug().requests;window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true}));true"])
+   (sees "(()=>{const d=EnchantInspector.debug();return d.suspended&&!d.disposed&&!d.inFlight&&!d.pollScheduled&&d.requests===beforePause&&!!document.getElementById('enchant-inspector')})()" "A cached page keeps its dock and pauses sampling")
+   (act [:eval "window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true}));true"])
+   (wait-for "EnchantInspector.debug().requests>beforePause&&EnchantInspector.debug().pollScheduled")
+   (sees "(()=>{const d=EnchantInspector.debug();return !d.suspended&&d.open&&d.tab==='server'&&d.peakFlights===1})()" "Restoring a cached page resumes the same Server panel")
+   (act [:navigate (str url "/not-an-app-page")])
+   (act [:back])
+   (wait-for "location.pathname==='/'&&!!window.EnchantInspector&&!EnchantInspector.debug().disposed")
+   (dock "[data-action=server]")
+   (wait-for (str shadow ".querySelectorAll('.versions code').length===2"))
+   (sees "document.querySelectorAll('#enchant-inspector').length===1&&EnchantInspector.debug().tab==='server'&&!EnchantInspector.debug().suspended" "Browser Back leaves one usable dock")
    (act [:eval "EnchantInspector.dispose();EnchantInspector.dispose();document.dispatchEvent(new CustomEvent('live:patch',{detail:{root:document.body,ops:[]}}));true"])
    (sees "(()=>{const d=EnchantInspector.debug();return d.disposed&&!d.pollScheduled&&!d.inFlight&&!d.drawScheduled&&!document.getElementById('enchant-inspector')&&!document.getElementById('enchant-inspector-overlays')})()" "Disposal is complete and idempotent")])
 
@@ -118,6 +141,7 @@
             (let [term (nth event 2)]
               (case (first term)
                 :dock (click-shadow! pg (nth term 1))
+                :back (go-back! pg)
                 :phone (page/cdp! pg "Emulation.setDeviceMetricsOverride" {"width" 390 "height" 844 "deviceScaleFactor" 1 "mobile" false})
                 :desktop (page/cdp! pg "Emulation.setDeviceMetricsOverride" {"width" 1280 "height" 900 "deviceScaleFactor" 1 "mobile" false})
                 ((:step! base) pg event)))))

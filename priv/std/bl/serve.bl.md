@@ -125,13 +125,24 @@ returns 1 when the program raises, so a broken file never looks like a running
 server; a program that starts its server and returns parks here forever.
 
 ```beam-lisp
+(defn- run-entry! [project entry dev?]
+  (let [previous (Process/get :bl.serve/devtools)
+        mode (cond (= false (:devtools project)) :off dev? :on :else nil)]
+    (try
+      (Process/put :bl.serve/devtools mode)
+      (BeamLisp/run_file entry)
+      (finally
+        (if (nil? previous)
+          (Process/delete :bl.serve/devtools)
+          (Process/put :bl.serve/devtools previous))))))
+
 (defn run
-  "`bl serve FILE [-- args...] [--port N] [--pretty-log]`. Run FILE, then park
+  "`bl serve FILE [--dev] [--port N] [--pretty-log] [-- args...]`. Run FILE, then park
    the VM so the server it started keeps answering. Returns 1 when the program
    raises."
   [args st]
   (if (empty? args)
-    (u/usage-error "usage: bl serve FILE [-- args...] [--port N] [--pretty-log]")
+    (u/usage-error "usage: bl serve FILE [--dev] [--port N] [--pretty-log] [-- args...]")
     (let [target (first args)]
       (u/register-paths st)
       (reset! port-override (:port st))
@@ -139,12 +150,17 @@ server; a program that starts its server and returns parks here forever.
       (try
         (BeamLisp/with_argv (u/to-list (or (:dd st) []))
           (fn []
-            (let [project (env/project (BeamLisp/cwd))]
-              (when (nil? (:loading project))
+            (let [project (env/project (BeamLisp/cwd))
+                  entry (u/resolve target)
+                  policy (:loading project)]
+              (when (nil? policy)
                 (throw (ex-info "Invalid loading configuration" {:errors (:errors project)})))
-              (loading/prepare! project (u/resolve target))
-              (BeamLisp/run_file (u/resolve target))
-              (loading/start-background! project (u/resolve target)))))
+              (when (and (:dev st)
+                         (= :startup (loading/mode policy (System/get_env (:environment-env policy)))))
+                (throw (ex-info "--dev requires a development environment" {})))
+              (loading/prepare! project entry)
+              (run-entry! project entry (:dev st))
+              (loading/start-background! project entry))))
         ;; The program has returned and its reader/compiler frames can unwind.
         ;; Collect this caller's transient initialization heap once before the
         ;; long idle wait; serving processes retain their own managed custody.

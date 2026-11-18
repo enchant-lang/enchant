@@ -175,6 +175,9 @@ worst kind of configuration bug.
   (`0` = the OS chooses). Routes are optional local landing paths; applications
   claim those hostnames and serve their own root redirects through the gateway.
 - `:env` — name → value, the environment the tree expects.
+- `:devtools false` — turn off the Live inspector for this project's `bl serve`
+  launches. With the default setting, `bl serve --dev` shows the dock to viewers
+  authorized by the app.
 - `:loading` — `{:environment-env "BL_ENV" :development :lazy :production :startup
   :roots []}`. `bl serve` initializes declared entry dependencies before running
   the entry in production (`production` or `prod`), and stays lazy otherwise.
@@ -243,7 +246,7 @@ problems reports all three in one pass.
 
 ```beam-lisp silent
 (def known-keys [:name :instance :bl :warm :vm :realm :shadow :uses :paths :tasks :ports
-                 :schedules :env :loading :doc :app :build :release :deps :browser :catalog :foundry :android
+                 :schedules :env :devtools :loading :doc :app :build :release :deps :browser :catalog :foundry :android
                  :auth/imports :auth/realms :auth/realm :source/imports])
 
 ;; How `bl` reaches a warm VM for this tree. The LAUNCHER reads this key (it must
@@ -933,6 +936,8 @@ shape, whatever the file said.
         [ports porerr] (norm-ports (:ports m))
         [sched serr]   (norm-schedules (:schedules m))
         [env eerr]     (norm-env (:env m) ":env")
+        devtools       (get m :devtools true)
+        deverr         (if (or (= true devtools) (= false devtools)) [] [":devtools must be a boolean"])
         [load lerr]    (norm-loading (:loading m))
         [app aerr]     (norm-app (:app m))
         [bld berr]     (norm-build (:build m) root)
@@ -964,6 +969,7 @@ shape, whatever the file said.
      :ports ports
      :schedules sched
      :env env
+     :devtools (= true devtools)
      :loading load
      :app app
      :build bld
@@ -973,7 +979,7 @@ shape, whatever the file said.
      :browser brw
      :catalog cat
      :android andr
-     :errors (concat (source-import-errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr aerr berr rerr derr
+     :errors (concat (source-import-errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr deverr aerr berr rerr derr
                      fnderr brerr cerr lerr anderr
                      (map (fn [k] (str "unknown key " k)) (unknown-keys m known-keys)))}))
 
@@ -984,7 +990,7 @@ shape, whatever the file said.
   {:path nil :root root :name nil :instance nil :bl nil :warm nil :vm nil
    :realm nil :shadow [] :uses {} :paths [] :tasks {} :ports {}
    :schedules []
-   :env {} :loading loading/DEFAULTS :app nil :build nil :release nil :deps [] :browser nil :catalog nil :android nil
+   :env {} :devtools true :loading loading/DEFAULTS :app nil :build nil :release nil :deps [] :browser nil :catalog nil :android nil
    :errors []})
 ```
 

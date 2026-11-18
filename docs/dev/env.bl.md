@@ -51,6 +51,8 @@ The keys a project may declare:
   `{:web {:port 0}}` to let the OS choose. A name is what the port answers to —
   `http://web.<project>.test` — so nobody has to read the number.
 - `:env` — environment variables the project expects.
+- `:devtools false` — turn off the [Live inspector](inspector.md) for `bl serve`
+  launches in this project.
 - `:app` — what the tree IS as an OTP application (`:name :vsn :applications
   :mod`), so a build need not interrogate the running VM about itself.
 - `:build` — which roots hold build sources, where the output goes, which

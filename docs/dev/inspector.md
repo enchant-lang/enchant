@@ -1,24 +1,32 @@
 # Development inspector
 
-Enable the SDK dock when serving a development app:
+Start a Live app with `bl serve app.bl --dev` to show the collapsed dock to
+developers. The app supplies the authorizer to `live.app/serve`:
 
 ```clojure
 (app/serve application
   {:port 4040
-   :devtools {:enabled? true :authorize developer?
+   :devtools {:authorize developer?
               :work {:imports imports-owner}
               :projections {:totals totals-reader}}})
 ```
 
 `developer?` receives the app's resolved principal and must return exactly true.
-The default is off. Unauthorized viewers receive the original screen; assets
-and snapshots return 404. Existing HTTP handlers still compose. `app/stop!`
-releases the listener, internal shared connection and inspector reader.
+Use `{:devtools false}` in the project's `env.bl` to disable the inspector for
+all its `bl serve` launches. A listener can opt out with `:enabled? false`.
+Plain starts default off. Programmatic callers can opt in with `:enabled? true`
+and an authorizer. `--dev` requires a development environment and applies to
+listeners started directly by the entry program.
+
+Unauthorized viewers receive the original screen and a 404 for assets and
+snapshots. Existing HTTP handlers still compose. `app/stop!` releases the
+listener, internal shared connection and inspector reader.
 
 The injected dock shows page updates, Loom spacing/colours/corners, real tool
 activity and registered owner status. The left Enchant button opens and closes
-the panel. Server shows the serving VM's Beam Lisp and Erlang/OTP versions.
-Click an update to inspect its server
+the panel. Server shows the serving VM's Beam Lisp and Erlang/OTP versions and
+counts running jobs across all registered work owners, including jobs outside
+the visible list. Click an update to inspect its server
 render. Click a tool run to see actual cache computations, reuse decisions,
 admission waiting and child runs. Function labels come from actual analysis
 worklist evaluations, with sixteen labels retained. They are not a complete
@@ -34,7 +42,8 @@ Activity records instrument `lsp/analyzed`, `bl.check/analyze-source` and
 They describe work in this scope; a separate cold CLI VM is a separate runtime.
 No observer starts an editor request, check, index, projection subscription or
 worker. A hidden/closed dock has no polling; an open Tools/Server panel allows
-one request at a time with an abort deadline. Page updates use the existing
+one request at a time with an abort deadline. Browser history caching pauses
+sampling and resumes the same panel on restoration. Page updates use the existing
 Live events, with no additional socket.
 
 Trusted CLI/host code can use `runtime.activity/open`, `snapshot` and `close!`
@@ -70,7 +79,7 @@ scripts/inspector-scenario --sdk /nix/store/QUALIFIED-SDK \
 ```
 
 The runner requires the local optional browser helper/runtime. It retains native
-screenshots, fifteen witnessed claims, source/helper hashes and the exact SDK
+screenshots, nineteen witnessed claims, source/helper hashes and the exact SDK
 pin, and rejects changed test inputs. It never produces an SDK or starts an app.
 
 Cold-start assertions are authoritative in canonical SDK qualification. Private
