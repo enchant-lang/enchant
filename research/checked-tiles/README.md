@@ -21,7 +21,7 @@ The pure fragment admits natural literals, unary definitions and calls to preced
 
 The protected law requires input ≤ output ≤ 255 for every byte. The normal BL compiler executes the original function for the entire domain and the input image. Lean checks the lowered expression against all 256 observed values and checks the universal channel law. The geometric model covers unique tile ownership, reconstruction and clipped edges. Independent hardware differentials include every channel and partial tiles. The reader, emitter, proof/data export, C/OpenCL compiler, driver, and runtime remain trusted or tested implementation boundaries. Publication is a single-writer local prototype with an atomic symlink switch. Its historical build artifacts stay on disk for inspection.
 
-See [the design discussion](journal/01-bend-and-enchant.bl.org), [the experiment log](journal/02-experiment.bl.org), and [the live compiler design](journal/03-live-compiler.bl.org).
+See [the design discussion](journal/01-bend-and-enchant.bl.org), [the experiment log](journal/02-experiment.bl.org), [the live compiler design](journal/03-live-compiler.bl.org), and [the native concurrent Core proposal](journal/04-native-concurrent-core.bl.org).
 
 Add --sweep to measure the same operation on an 8×8 patch, a 320×180 RGB frame and a 1920×1080 RGB frame. The two larger inputs repeat the captured scene bytes. Each result is checked against the exhaustive table.
 
@@ -56,6 +56,7 @@ Read the journals as Org or open the Enchanted dossier renderer locally. It uses
     research/checked-tiles/journal/view
     research/checked-tiles/journal/view discussion
     research/checked-tiles/journal/view pipeline
+    research/checked-tiles/journal/view core
 
 The original discussion and subsequent experiment are separate entries so the initial predictions can be compared with the measurements.
 
