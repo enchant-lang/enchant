@@ -20,6 +20,7 @@
 ;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
 ;;   DONOR_PARTITION DONOR_LINK_ROWS --capture-bound-registry RECEIPT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --bound-registry REPORT RECEIPT PHASE_MACRO_SAMPLES DONOR_PARTITION QUALIFICATION RECEIPT_SHA
+;;   PARTITION LINK_ROWS --bound-env-control REPORT RECEIPT PHASE_MACRO_SAMPLES DONOR_PARTITION QUALIFICATION RECEIPT_SHA
 ;;   DONOR_PARTITION LINK_ROWS --bound-registry-controls REPORT RECEIPT QUALIFICATION RECEIPT_SHA
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
@@ -1374,9 +1375,13 @@
                                 (capture-registry-member closure baseline (get-in closure [:units ns]) entries (some? anchor)))])
                          (:order closure)))})))
 
-(defn- replay-registry-member [closure candidate member entry entries]
+(defn- replay-registry-member
+ ([closure candidate member entry entries]
+  (replay-registry-member closure candidate member entry entries nil))
+ ([closure candidate member entry entries change-env!]
  (with-registry-stage closure (:rows candidate) member entries
   (fn [prepared callables]
+   (when change-env! (change-env!))
    (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))
          changed (when-not (:reason entry)
                    (vec (take 12 (keep (fn [[key expected]]
@@ -1407,7 +1412,7 @@
      (contains? entry :env-reads)
      (assoc :env-read-calls (:env-read-calls entry)
             :distinct-env-reads (count (:env-reads entry))
-            :changed-env-reads changed-env))))))
+            :changed-env-reads changed-env)))))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -1488,7 +1493,7 @@
               :spliced-partitions :wrong-qualified-donor :wrong-donor-links :wrong-donor-links} observed))
   {:schema "bl.native.bound-registry-controls" :version 1 :donor anchor :checks observed}))
 
-(defn- bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha]
+(defn- bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha control-root]
  (let [anchor (qualified-donor donor qualification-path)
        bytes (File/read! receipt-path)
        receipt (authenticated-registry bytes expected-sha anchor)]
@@ -1505,20 +1510,29 @@
   ;; to the donor. Staging and registry validation use the candidate rows.
   (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path
    (fn [entries _]
-    {:schema "bl.native.bound-registry-shadow" :version 2 :reuse-authority false
-     :receipt-schema (:schema receipt)
-     :donor anchor :receipt-sha256 expected-sha :receipt-bytes (erlang/byte_size bytes)
-     :candidate-link-rows-sha256 (:sha256 candidate)
-     :members (mapv (fn [ns]
-                     (let [entry (read-registry-member (get-in receipt [:members ns]))
-                           old (get-in donor [:units ns])
-                           entry (cond
-                                   (:reason entry) entry
-                                   (and (= :native-bound-registry-v2 (:schema receipt)) (not (map? (:env-reads entry))))
-                                   {:reason :missing-env-reads}
-                                   :else (assoc entry :definition-bytes (def-bytes old)))]
-                      (replay-registry-member closure candidate (get-in closure [:units ns]) entry entries)))
-                   (:order closure))}))))
+    (let [members (mapv (fn [ns]
+                         (let [entry (read-registry-member (get-in receipt [:members ns]))
+                               old (get-in donor [:units ns])
+                               entry (cond
+                                       (:reason entry) entry
+                                       (and (= :native-bound-registry-v2 (:schema receipt)) (not (map? (:env-reads entry))))
+                                       {:reason :missing-env-reads}
+                                       :else (assoc entry :definition-bytes (def-bytes old)))
+                               mutation (when (and control-root (= "host.delay" ns))
+                                          #(BeamLisp.Env/add_search_path control-root))]
+                          (replay-registry-member closure candidate (get-in closure [:units ns]) entry entries mutation)))
+                       (:order closure))
+          control (when control-root
+                    (let [selected (first (filter #(= "host.delay" (:namespace %)) members))]
+                     (assert (= :env-input-changed (:reason selected)))
+                     (assert (= [[:search_paths]] (:changed-env-reads selected)))
+                     (assert (not (:reused selected)))
+                     selected))]
+     (cond-> {:schema "bl.native.bound-registry-shadow" :version 2 :reuse-authority false
+              :receipt-schema (:schema receipt)
+              :donor anchor :receipt-sha256 expected-sha :receipt-bytes (erlang/byte_size bytes)
+              :candidate-link-rows-sha256 (:sha256 candidate) :members members}
+      control (assoc :env-control control)))))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
@@ -1705,7 +1719,7 @@
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot" "--ambient-roots"
-                                              "--cached-registry" "--capture-bound-registry" "--bound-registry"
+                                              "--cached-registry" "--capture-bound-registry" "--bound-registry" "--bound-env-control"
                                               "--bound-registry-controls" "--lowering-effects"} selected)))
                    (pinned-rows comparison))
        report (cond
@@ -1722,9 +1736,11 @@
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
                 (= selected "--capture-bound-registry") (capture-bound-registry closure baseline comparison source-receipt)
                 (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
-                (= selected "--bound-registry") (bound-registry closure baseline comparison source-receipt
-                                                   (if (= partition mode) closure (artifact/read-closure mode))
-                                                   qualification receipt-sha)
+                (contains? #{"--bound-registry" "--bound-env-control"} selected)
+                (let [root (when (= selected "--bound-env-control") (Path/expand (str output ".unused-root")))]
+                 (assert (or (nil? root) (not (File/exists? root))))
+                 (bound-registry closure baseline comparison source-receipt
+                  (if (= partition mode) closure (artifact/read-closure mode)) qualification receipt-sha root))
                 (= selected "--bound-registry-controls") (bound-registry-controls closure baseline comparison source-receipt mode)
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--ambient-roots") (ambient-root-report closure baseline comparison)
@@ -1743,7 +1759,7 @@
   (File/write! output (if (contains? #{"--capture-source" "--capture-registry" "--capture-bound-registry"} selected)
                        (BeamLisp.CompilerData/check_closed_etf! (erlang/term_to_binary report (list :deterministic)) artifact/limits)
                        (json/encode report)))
-  (when (or (contains? #{"--shadow" "--registry-shadow" "--cached-registry" "--bound-registry"} selected) source-shadow?)
+  (when (or (contains? #{"--shadow" "--registry-shadow" "--cached-registry" "--bound-registry" "--bound-env-control"} selected) source-shadow?)
    (let [different (mapv :namespace (remove :exact-clean-definitions (:members report)))]
     (when (seq different)
      (throw (ex-info "Selective relink differs from the qualified clean closure" {:members different})))))
