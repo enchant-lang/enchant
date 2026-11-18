@@ -15,6 +15,7 @@
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --env-read-control REPORT
+;;   PARTITION LINK_ROWS --runtime-read-control REPORT
 ;;   PARTITION LINK_ROWS --code-read-control REPORT
 ;;   PARTITION LINK_ROWS --resolver-read-control REPORT
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
@@ -63,6 +64,10 @@
 (def registry-member-entry (tuple :ets :member 2))
 (def env-read-entries #{(tuple :Elixir.BeamLisp.Env :loaded_ns? 1)
                         (tuple :Elixir.BeamLisp.Env :search_paths 0)})
+(def runtime-read-entries #{(tuple :Elixir.BeamLisp.Env :op_of 2)
+                            (tuple :Elixir.BeamLisp.Env :source_head 0)
+                            (tuple :application_controller :get_env 2)
+                            (tuple :application_controller :get_env 3)})
 (def env-private-entry (tuple :Elixir.BeamLisp.Env :source_private 1))
 (def resolver-read-entries #{(tuple :Elixir.BeamLisp.Loader :source_decls 1)
                              (tuple :Elixir.BeamLisp.Loader :source_path 1)})
@@ -333,25 +338,43 @@
 (defn- small-env-text? [value]
  (and (erlang/is_binary value) (<= (erlang/byte_size value) 4096)))
 
-(defn- env-read-result [function value]
+(defn- application-setting [value]
+ (if (or (erlang/is_atom value) (erlang/is_integer value) (small-env-text? value))
+  [:application-value value]
+  :unavailable))
+
+(defn- env-read-result [[function :as key] value]
  (case function
+  :op_of (if (erlang/is_atom value) [:operation value] :unavailable)
+  :source_head (if (nil? value) :no-source-extent :unavailable)
+  :get_env (if (= 4 (count key))
+             (application-setting value)
+             (cond
+              (= :undefined value) :missing-application-setting
+              (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :ok (elem value 0)))
+              (application-setting (elem value 1))
+              :else :unavailable))
   :loaded_ns? (if (or (true? value) (false? value)) value :unavailable)
   :search_paths (if (and (erlang/is_list value)
                          (<= (count (take 65 value)) 64)
                          (every? small-env-text? value))
                   (vec value) :unavailable)))
 
-(defn- start-env-read [effects entry argument]
+(defn- start-env-read [effects entry arguments]
  (let [function (elem entry 1)
+       argument (first arguments)
        key (case function
             :loaded_ns? (when (small-env-text? argument) [function argument])
-            :search_paths [function])]
+            :search_paths [function]
+            :source_head [function]
+            :op_of (when (every? erlang/is_atom arguments) (into [function] arguments))
+            :get_env (when (every? erlang/is_atom arguments) (into [function] arguments)))]
   (update effects :pending-env-reads (fn [stack] (conj (or stack []) [entry key])))))
 
 (defn- finish-env-read [effects entry kind value]
  (let [[expected key] (peek (:pending-env-reads effects))
        reads (:env-reads effects {})
-       outcome (when (= kind :return_from) (env-read-result (elem entry 1) value))
+       outcome (when (and key (= kind :return_from)) (env-read-result key value))
        total (inc (:env-read-count effects 0))]
   (when-not (= entry expected) (throw (ex-info "Unexpected Env read return" {:entry entry :expected expected})))
   (cond-> (-> effects (update :pending-env-reads pop) (assoc :env-read-count total))
@@ -361,11 +384,21 @@
    (assoc-in [:env-reads key] outcome))))
 
 (defn- changed-env-reads [reads]
- (vec (take 12 (keep (fn [[[function argument :as key] expected]]
-                       (let [current (case function
+ (vec (take 12 (keep (fn [[[function argument name default :as key] expected]]
+                       (let [current (try
+                                      (case function
                                        :loaded_ns? (BeamLisp.Env/loaded_ns? argument)
-                                       :search_paths (BeamLisp.Env/search_paths))]
-                        (when (not= expected (env-read-result function current)) key)))
+                                       :search_paths (BeamLisp.Env/search_paths)
+                                       :op_of (if (= :undefined (ets/whereis :beam_lisp_ops))
+                                                :unavailable
+                                                (BeamLisp.Env/op_of argument name))
+                                       :source_head (when (BeamLisp.Env/source_execution_active?) :active)
+                                       :get_env (if (= 4 (count key))
+                                                 (application/get_env argument name default)
+                                                 (application/get_env argument name)))
+                                      (catch _ :unavailable))]
+                        (when (or (= :unavailable current)
+                                  (not= expected (env-read-result key current))) key)))
                      reads))))
 
 (defn- resolver-result [function value]
@@ -520,6 +553,10 @@
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources
    (finish-env-read effects (tuple :Elixir.BeamLisp.Env function arity) kind value))
+  [:trace _ kind [:application_controller :get_env arity] value]
+  :when (or (= kind :return_from) (= kind :exception_from))
+  (recur calls pending hits misses reads sources
+   (finish-env-read effects (tuple :application_controller :get_env arity) kind value))
   [:trace _ kind [:Elixir.BeamLisp.Loader function arity] value]
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources
@@ -541,8 +578,8 @@
         effects (if (and (:registry? effects) (contains? registry-operations entry) (= :beam_lisp_vars key))
                    (registry-call effects [function arity]) effects)]
    (cond
-    (contains? env-read-entries entry)
-    (recur calls pending hits misses reads sources (start-env-read effects entry key))
+    (or (contains? env-read-entries entry) (contains? runtime-read-entries entry))
+    (recur calls pending hits misses reads sources (start-env-read effects entry arguments))
     (= entry env-private-entry)
     (recur calls pending hits misses reads sources
      (update effects :pending-private-env (fn [stack] (conj (or stack []) (callback-name key)))))
@@ -640,6 +677,7 @@
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))
             (str "could not trace Source read " (pr-str entry))))
    (doseq [entry (cond-> (if (:env-reads? options) env-read-entries #{})
+                  (:runtime-reads? options) (into runtime-read-entries)
                   (:code-reads? options) (conj code-read-entry)
                   (:resolver-reads? options) (into resolver-read-entries)
                   (:ownership? options) (into (conj loader-owner-entries env-private-entry)))]
@@ -1418,6 +1456,41 @@
      :recorded-negative-read true :unchanged-outcomes true :changed-readiness true
      :changed-search-paths true :unstable-read-detected true}))))
 
+(defn- runtime-read-control []
+ (let [control :native_relink_runtime_control
+       operation-key [:op_of :erlang control]
+       setting-key [:get_env :kernel control]
+       default-key [:get_env :kernel control :fallback]
+       extent-key [:source_head]
+       read (fn []
+              (BeamLisp.Env/op_of :erlang control)
+              (application/get_env :kernel control)
+              (application/get_env :kernel control :fallback)
+              (BeamLisp.Env/source_execution_active?))
+       capture (fn [] (get-in (second (trace! read {:runtime-reads? true})) [:effects :env-reads]))]
+  (assert (= :undefined (application/get_env :kernel control)))
+  (assert (nil? (BeamLisp.Env/op_of :erlang control)))
+  (try
+   (let [before (capture)]
+    (assert (= {operation-key [:operation nil] setting-key :missing-application-setting
+                default-key [:application-value :fallback] extent-key :no-source-extent} before))
+    (assert (empty? (changed-env-reads before)))
+    (BeamLisp.Env/register_op :erlang control :read)
+    (assert (= [operation-key] (changed-env-reads before)))
+    (assert (= :ok (application/set_env :kernel control :undefined)))
+    (assert (= #{operation-key setting-key default-key} (set (changed-env-reads before))))
+    (let [after (capture)]
+     (assert (= [:application-value :undefined] (get after setting-key)))
+     (assert (empty? (changed-env-reads after))))
+    (assert (= :unavailable (env-read-result extent-key (tuple :unportable (erlang/self)))))
+    {:schema "bl.native.runtime-read-control" :version 1 :reuse-authority false
+     :operation-miss-tracked true :operation-change-detected true :application-change-detected true
+     :unset-distinguished-from-configured-undefined true
+     :no-source-extent-tracked true :live-source-extent-refused true})
+   (finally
+    (application/unset_env :kernel control)
+    (ets/delete :beam_lisp_ops (tuple :erlang control))))))
+
 (defn- code-control-binary [module value]
  (let [forms (list (tuple :attribute 1 :module module)
                    (tuple :attribute 1 :export (list (tuple :value 0)))
@@ -1666,7 +1739,7 @@
 (defn- capture-registry-member [closure baseline member entries bound?]
  (let [[prepared compiled observed callables]
        (observe-lowering closure baseline member entries
-                        {:env-reads? bound? :code-reads? bound? :resolver-reads? bound?})
+                        {:env-reads? bound? :code-reads? bound? :resolver-reads? bound? :runtime-reads? bound?})
        _ (when (and bound? (not (erlang/=:= (def-bytes compiled) (def-bytes member))))
            (throw (ex-info "Native registry capture diverged from the qualified donor"
                     {:namespace (:ns member)})))
@@ -1709,7 +1782,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v6 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v7 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1828,7 +1901,7 @@
  (let [receipt (read-registry-member bytes)]
   (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
                              :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5
-                             :native-bound-registry-v6} (:schema receipt))
+                             :native-bound-registry-v6 :native-bound-registry-v7} (:schema receipt))
                  (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
@@ -1879,11 +1952,12 @@
                                        (and (not= :native-bound-registry-v1 (:schema receipt)) (not (map? (:env-reads entry))))
                                        {:reason :missing-env-reads}
                                        (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4
-                                                         :native-bound-registry-v5 :native-bound-registry-v6}
+                                                         :native-bound-registry-v5 :native-bound-registry-v6 :native-bound-registry-v7}
                                                        (:schema receipt))
                                             (not (map? (:code-reads entry))))
                                        {:reason :missing-code-reads}
-                                       (and (= :native-bound-registry-v6 (:schema receipt)) (not (map? (:resolver-reads entry))))
+                                       (and (contains? #{:native-bound-registry-v6 :native-bound-registry-v7} (:schema receipt))
+                                            (not (map? (:resolver-reads entry))))
                                        {:reason :missing-resolver-reads}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
                                mutation (when (and control-root (= "host.delay" ns))
@@ -2101,6 +2175,7 @@
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
                 (= selected "--env-read-control") (env-read-control output)
+                (= selected "--runtime-read-control") (runtime-read-control)
                 (= selected "--code-read-control") (code-read-control output)
                 (= selected "--resolver-read-control") (resolver-read-control output)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
