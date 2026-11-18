@@ -3,7 +3,7 @@
 ; "reader", native.bootstrap/prepare's definition handling, native.eval/context
 ; as emission options), profiled per phase with OTP tprof (call_time) through
 ; bl.profile. One warm VM. Shares and call counts only; no timing claim.
-; Usage: run run speed/attrib/beam-attrib.bl -- SOURCE OUT_DIR REPS [snapshot]
+; Usage: run run speed/attrib/beam-attrib.bl -- SOURCE OUT_DIR REPS [snapshot] [timing]
 ; With `snapshot`, every profiled repetition runs inside
 ; BeamLisp.Loader/with_declaration_snapshot, as a real load/compile pass does;
 ; without it the bare compiler API re-resolves lowercase prefixes
@@ -19,6 +19,7 @@
 (def ns-name "reader")
 (def attribution "priv/boot/reader.bl")
 (def snapshot? (and (> (count argv) 3) (= "snapshot" (nth argv 3))))
+(def timing? (= "timing" (nth argv 4 nil)))
 (defn pass [action] (if snapshot? (BeamLisp.Loader/with_declaration_snapshot action) (action)))
 
 (defn read-all [] (reader/read-string source attribution))
@@ -52,7 +53,20 @@
   (doseq [r (:rows result)]
    (println (str "PROF\t" phase "\t" (:ns r) "\t" (:fn r) "\t" (:calls r) "\t" (:us r)
                  "\t" (:runtime? r))))))
-(report "read" read-all)
-(report "compile" (fn [] (compile-forms forms)))
-(report "emit" (fn [] (emit-nodes nodes)))
+(if timing?
+ (dotimes [_ reps]
+  (pass (fn []
+   (let [start (erlang/monotonic_time :microsecond)
+         forms (read-all)
+         read-end (erlang/monotonic_time :microsecond)
+         nodes (compile-forms forms)
+         compile-end (erlang/monotonic_time :microsecond)]
+    (emit-nodes nodes)
+    (let [emit-end (erlang/monotonic_time :microsecond)]
+     (println (str "A3_TIMING_US " (- read-end start) " " (- compile-end read-end) " " (- emit-end compile-end))))))))
+ (do
+  (report "read" read-all)
+  (report "compile" (fn [] (compile-forms forms)))
+  (report "emit" (fn [] (emit-nodes nodes)))))
+(when timing? (assert (= 0 @emit-failures)))
 (println "A3_DONE")
