@@ -29,6 +29,8 @@
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --row-install-control REPORT
 ;;   PARTITION LINK_ROWS --stage-link-subset REPORT [NAMESPACE|--all] [--timed]
+;;   DONOR_PARTITION DONOR_LINK_ROWS --capture-stage-link-plan PLAN QUALIFICATION
+;;   EDITED_PARTITION EDITED_LINK_ROWS --replay-stage-link-plan REPORT PLAN PLAN_SHA
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --ambient-roots REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --ambient-roots-control REPORT
@@ -1986,6 +1988,97 @@
 (defn- select-indexed-link-rows [index inputs]
  (mapv second (sort-by first (mapcat #(get index % []) inputs))))
 
+(defn- stage-row-index [closure rows]
+ [(indexed-link-rows rows (fn [[provider name _ _]] [provider name]))
+  (indexed-link-rows (:core-links closure) (fn [[name _]] ["core" name]))])
+
+(defn- stage-installed [closure rows member action]
+ (BeamLisp.Env/isolated
+  (fn []
+   (install-batched-rows! closure rows)
+   (BeamLisp.Compiler/with_fresh_names #(action member)))))
+
+(defn- stage-compile [member]
+ (let [prepared (build/prepare-ns (:path member))
+       compiled (lower-with-snapshot prepared)]
+  [(prepared-inputs prepared)
+   (assoc (dissoc compiled :cache-status :cache-key) :source (:source prepared)
+          :module (BeamLisp.Link/module_for (:ns member)) :base-module (BeamLisp.Emit/base_module_for (:ns member)))]))
+
+(defn- stage-trace [member]
+ (trace! #(stage-compile member) {:registry? true :registry-inputs? true :link-scan-patterns? true}))
+
+(defn- stage-link-inputs [observed]
+ (let [effects (:effects observed)
+       scans (:link-scan-patterns effects)
+       _ (assert (= (get-in effects [:registry-calls [:match_object 2]] 0) (reduce + 0 (vals scans))))
+       inputs (into (set (keys (:reads (link-receipt observed))))
+                    (keep (fn [[_ slot key]]
+                            (when (and (= :own slot) (erlang/is_tuple key) (= 3 (erlang/tuple_size key))
+                                       (= :link (elem key 0)))
+                             [(elem key 1) (elem key 2)]))
+                          (keys (:registry-inputs effects))))
+       remaining (vec (keep (fn [[[operation arity] calls]]
+                             (when-not (or (contains? registry-writes operation) (contains? #{:lookup :member} operation)
+                                           (and (= [:match_object 2] [operation arity])
+                                                (every? disjoint-link-pattern? (keys scans))))
+                              [operation arity calls]))
+                           (sort (:registry-calls effects))))]
+  {:inputs inputs :scans scans :unsupported remaining}))
+
+(defn- capture-stage-link-plan [closure rowset qualification]
+ (let [anchor (qualified-donor closure qualification)
+       _ (assert (= (:links-sha256 anchor) (:sha256 rowset)))
+       members (into {} (map (fn [ns]
+                              (let [member (get-in closure [:units ns])
+                                    [compiled observed] (stage-installed closure (:rows rowset) member stage-trace)
+                                    _ (assert (erlang/=:= member (second compiled)) ns)
+                                    {:keys [inputs unsupported]} (stage-link-inputs observed)]
+                               [ns {:source-sha256 (:source-sha256 member) :path (:path member)
+                                    :inputs (vec (sort inputs)) :unsupported unsupported}]))
+                            (:order closure)))]
+  {:schema :native-stage-link-plan-v1 :donor anchor :sdk (:sdk-pin closure)
+   :order (:order closure) :options (:options closure) :members members}))
+
+(defn- replay-stage-link-member [closure rows [row-index core-index] ns prior]
+ (let [member (get-in closure [:units ns])
+       retained (set (:inputs prior))
+       source-changed? (not= [(:path member) (:source-sha256 member)] [(:path prior) (:source-sha256 prior)])
+       initial-refusal (cond source-changed? :member-source-changed
+                             (seq (:unsupported prior)) :donor-table-read-unmodeled)
+       subset-rows (when-not initial-refusal (select-indexed-link-rows row-index retained))
+       subset-core (when-not initial-refusal (select-indexed-link-rows core-index retained))
+       [compiled observed] (when-not initial-refusal
+                             (stage-installed (assoc closure :core-links subset-core) subset-rows member stage-trace))
+       input (when observed (stage-link-inputs observed))
+       omitted (vec (sort (keep (fn [key]
+                                 (when (and (not (contains? retained key))
+                                            (or (contains? row-index key) (contains? core-index key)))
+                                  key))
+                               (:inputs input))))
+       refusal (or initial-refusal (when (seq (:unsupported input)) :candidate-table-read-unmodeled)
+                   (when (seq omitted) :candidate-link-not-installed))
+       result (if refusal (stage-installed closure rows member stage-compile) compiled)]
+  (assert (erlang/=:= member (second result)) (str "Edited stage plan changed output for " ns))
+  {:namespace ns :exact-unit true :used-subset (nil? refusal) :fallback refusal
+   :attempted-subset-rows (when-not initial-refusal (+ (count subset-rows) (count subset-core)))
+   :omitted-inputs omitted :fallback-rows (if refusal (+ (count rows) (count (:core-links closure))) 0)}))
+
+(defn- replay-stage-link-plan [closure rowset path expected-sha]
+ (let [bytes (File/read! path)
+       _ (assert (= expected-sha (artifact/sha bytes)))
+       plan (read-registry-member bytes)
+       _ (assert (and (= :native-stage-link-plan-v1 (:schema plan))
+                      (= (:sdk plan) (:sdk-pin closure))
+                      (= (:options plan) (:options closure))
+                      (= (:order plan) (:order closure))
+                      (= (set (:order closure)) (set (keys (:members plan))))))
+       rows (:rows rowset)
+       index (stage-row-index closure rows)]
+  {:schema "bl.native.edited-stage-link-plan-shadow" :version 1 :reuse-authority false
+   :donor (:donor plan) :plan-sha256 expected-sha :candidate-link-rows-sha256 (:sha256 rowset)
+   :members (mapv #(replay-stage-link-member closure rows index % (get-in plan [:members %])) (:order closure))}))
+
 (defn- phase-cost [action]
  (let [started (erlang/monotonic_time :microsecond)
        before (elem (erlang/process_info (erlang/self) :reductions) 1)
@@ -2075,6 +2168,7 @@
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot" "--ambient-roots" "--stage-link-subset"
+                                              "--capture-stage-link-plan" "--replay-stage-link-plan"
                                               "--cached-registry" "--capture-bound-registry" "--bound-registry" "--bound-env-control" "--bound-export"
                                               "--bound-registry-controls" "--lowering-effects"} selected)))
                    (pinned-rows comparison))
@@ -2111,6 +2205,8 @@
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--row-install-control") (row-install-control closure (:rows baseline))
                 (= selected "--stage-link-subset") (stage-link-subset closure baseline comparison source-receipt)
+                (= selected "--capture-stage-link-plan") (capture-stage-link-plan closure baseline comparison)
+                (= selected "--replay-stage-link-plan") (replay-stage-link-plan closure baseline comparison source-receipt)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
@@ -2121,7 +2217,7 @@
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
                 :else (observe closure baseline selected candidate))]
-  (File/write! output (if (contains? #{"--capture-source" "--capture-registry" "--capture-bound-registry"} selected)
+  (File/write! output (if (contains? #{"--capture-source" "--capture-registry" "--capture-bound-registry" "--capture-stage-link-plan"} selected)
                        (BeamLisp.CompilerData/check_closed_etf! (erlang/term_to_binary report (list :deterministic)) artifact/limits)
                        (json/encode report)))
   (when (or (contains? #{"--shadow" "--registry-shadow" "--cached-registry" "--bound-registry" "--bound-env-control" "--bound-export"} selected) source-shadow?)

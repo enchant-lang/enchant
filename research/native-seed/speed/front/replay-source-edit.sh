@@ -11,11 +11,18 @@ set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
   echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --capture-local QUALIFICATION PHASE_MACRO_SAMPLES [--arity]" >&2
+  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --stage-link-plan QUALIFICATION [--arity]" >&2
   exit 2
 }
 capture_local=false
+stage_link_plan=false
 edit=
-if [[ "${3:-}" == --capture-local ]]; then
+if [[ "${3:-}" == --stage-link-plan ]]; then
+  [[ $# == 4 || $# == 5 ]] || usage
+  stage_link_plan=true
+  qualification=$(realpath "$4")
+  edit=${5:-}
+elif [[ "${3:-}" == --capture-local ]]; then
   [[ $# == 5 || $# == 6 ]] || usage
   capture_local=true
   qualification=$(realpath "$4")
@@ -57,6 +64,16 @@ for item in run sdk-pin.json partition-closure.py speed; do
 done
 cp -a --reflink=auto "$seed/src" "$overlay/$seed/src"
 cp --reflink=auto "$baseline/partition.json" "$baseline/link-rows.etf" "$overlay/$edited/"
+if "$stage_link_plan"; then
+  plan="$overlay/stage-link-plan.etf"
+  (
+    cd "$overlay"
+    "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
+      "$baseline/link-rows.etf" --capture-stage-link-plan "$plan" "$qualification"
+  )
+  plan_sha=$(sha256sum "$plan")
+  plan_sha=${plan_sha%% *}
+fi
 if "$capture_local"; then
   receipt="$overlay/bound-donor.etf"
   capture_start=$(python3 -c 'import time; print(time.monotonic_ns())')
@@ -85,7 +102,7 @@ else:
 assert source.count(before) == 1, "the retained emitter body does not match the edit fixture"
 path.write_bytes(source.replace(before, after, 1))
 PY
-if [[ -z "${receipt:-}" ]]; then
+if [[ -z "${receipt:-}" ]] && ! "$stage_link_plan"; then
   "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
     "$baseline/link-rows.etf" --capture-source "$overlay/baseline.etf"
 fi
@@ -156,7 +173,10 @@ PY
   exit 0
 fi
 run_update "$edited"
-if [[ -n "${receipt:-}" ]]; then
+if "$stage_link_plan"; then
+  "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
+    "$edited/link-rows.etf" --replay-stage-link-plan "$report" "$plan" "$plan_sha"
+elif [[ -n "${receipt:-}" ]]; then
   mode=--bound-registry
   extra=()
   if [[ -n "$export_path" ]]; then
