@@ -62,6 +62,11 @@
 (def registry-member-entry (tuple :ets :member 2))
 (def env-read-entries #{(tuple :Elixir.BeamLisp.Env :loaded_ns? 1)
                         (tuple :Elixir.BeamLisp.Env :search_paths 0)})
+(def env-private-entry (tuple :Elixir.BeamLisp.Env :source_private 1))
+(def loader-owner-entries
+ (set (map (fn [[name arity]] (tuple :Elixir.BeamLisp.Loader name arity))
+           [[:source_decls 1] [:source_path 1] [:resolvable? 1]
+            [:find_file 1] [:find_file 2] [:search_dirs 0] [:ambient_dirs 0]])))
 (def code-read-entry (tuple :code :is_loaded 1))
 (def code-mutation-entries [(tuple :erlang :finish_loading 1)
                             (tuple :erlang :delete_module 1)
@@ -118,12 +123,15 @@
  (let [operation (if (and (erlang/is_tuple request) (pos? (erlang/tuple_size request))) (elem request 0) request)]
   (when (erlang/is_atom operation) operation)))
 
+(defn- callback-name [reader]
+ (if (erlang/is_function reader)
+  [(elem (erlang/fun_info reader :module) 1)
+   (elem (erlang/fun_info reader :name) 1)]
+  [:unclassified]))
+
 (defn- env-agent-reader [request]
- (if (and (erlang/is_tuple request) (= 2 (erlang/tuple_size request))
-          (erlang/is_function (elem request 1) 1))
-  (let [reader (elem request 1)]
-   [(elem (erlang/fun_info reader :module) 1)
-    (elem (erlang/fun_info reader :name) 1)])
+ (if (and (erlang/is_tuple request) (= 2 (erlang/tuple_size request)))
+  (callback-name (elem request 1))
   [:unclassified]))
 
 (defn- boundary-event [effects category key]
@@ -143,9 +151,21 @@
        request (message-request message)
        operation (message-operation request)
        observed (boundary-event effects :process-boundary [kind destination operation])]
-  (if (and (= :send kind) (= :Elixir.BeamLisp.Env destination) (= :get operation))
-   (boundary-event observed :env-agent-readers (env-agent-reader request))
-   observed)))
+  (cond
+   (and (= :send kind) (= :Elixir.BeamLisp.Env destination) (= :get operation))
+   (let [reader (env-agent-reader request)
+         observed (boundary-event observed :env-agent-readers reader)]
+    (if (:ownership? effects)
+     (boundary-event observed :env-read-owners
+      [reader (or (peek (:pending-private-env effects))
+                  (when-let [[entry _] (peek (:pending-env-reads effects))] [(elem entry 1)])
+                  [:outside-observed-api])])
+     observed))
+   (and (:ownership? effects) (= :send kind) (= :file_server_2 destination))
+   (let [parents (:pending-loader-owners effects)
+         frame (fn [entry] (if entry [(elem entry 1) (elem entry 2)] [:outside-observed-api]))]
+    (boundary-event observed :file-read-owners [operation (frame (first parents)) (frame (peek parents))]))
+   :else observed)))
 
 (defn- record-source-probe [effects path outcome]
  (let [n (inc (:source-probe-count effects 0))
@@ -442,10 +462,18 @@
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
   (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
+  [:trace _ kind [:Elixir.BeamLisp.Env :source_private 1] _]
+  :when (or (= kind :return_from) (= kind :exception_from))
+  (recur calls pending hits misses reads sources (update effects :pending-private-env pop))
   [:trace _ kind [:Elixir.BeamLisp.Env function arity] value]
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources
    (finish-env-read effects (tuple :Elixir.BeamLisp.Env function arity) kind value))
+  [:trace _ kind [:Elixir.BeamLisp.Loader function arity] _]
+  :when (or (= kind :return_from) (= kind :exception_from))
+  (do
+   (assert (= (tuple :Elixir.BeamLisp.Loader function arity) (peek (:pending-loader-owners effects))))
+   (recur calls pending hits misses reads sources (update effects :pending-loader-owners pop)))
   [:trace _ kind [:code :is_loaded 1] value]
   :when (or (= kind :return_from) (= kind :exception_from))
   (recur calls pending hits misses reads sources (finish-code-read effects kind value))
@@ -465,6 +493,12 @@
    (cond
     (contains? env-read-entries entry)
     (recur calls pending hits misses reads sources (start-env-read effects entry key))
+    (= entry env-private-entry)
+    (recur calls pending hits misses reads sources
+     (update effects :pending-private-env (fn [stack] (conj (or stack []) (callback-name key)))))
+    (contains? loader-owner-entries entry)
+    (recur calls pending hits misses reads sources
+     (update effects :pending-loader-owners (fn [stack] (conj (or stack []) entry))))
     (= entry code-read-entry)
     (recur calls pending hits misses reads sources (assoc effects :pending-code-read key))
     (and (:boundary? effects) (or (contains? table-lifecycle-operations entry)
@@ -516,6 +550,7 @@
      :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
                     (nil? (:pending-registry-member effects)) (not (:registry-input-limit effects))
                     (not (:boundary-event-limit effects))
+                    (empty? (:pending-loader-owners effects)) (empty? (:pending-private-env effects))
                     (empty? (:pending-env-reads effects)) (< (count (:env-reads effects)) registry-input-limit)
                     (<= (:env-read-count effects 0) registry-trace-limit)
                     (not (contains? effects :pending-code-read)) (< (count (:code-reads effects)) registry-input-limit)
@@ -553,7 +588,8 @@
    (doseq [entry (cond-> source-read-entries (:source-probes? options) (conj source-probe-entry))]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
    (doseq [entry (cond-> (if (:env-reads? options) env-read-entries #{})
-                  (:code-reads? options) (conj code-read-entry))]
+                  (:code-reads? options) (conj code-read-entry)
+                  (:ownership? options) (into (conj loader-owner-entries env-private-entry)))]
     (assert (= 1 (erlang/apply :trace :function
                    (list session entry (list (tuple :_ (list) (list (tuple :exception_trace)))) (list :local))))))
    (when sample-macros?
@@ -1275,13 +1311,14 @@
 (defn- lowering-effects [closure rows samples-path]
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.lowering-effects" :version 3 :reuse-authority false
+   {:schema "bl.native.lowering-effects" :version 4 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :control (lowering-boundary-control)
     :members (mapv (fn [ns]
                     (let [member (get-in closure [:units ns])
-                          [_ output observation] (observe-lowering closure rows member entries {:boundary? true})
+                          [_ output observation]
+                          (observe-lowering closure rows member entries {:boundary? true :ownership? true :env-reads? true})
                           effects (:effects observation)
                           phase (registry-phase-status observation)]
                      (assert (erlang/=:= (def-bytes member) (def-bytes output)))
@@ -1290,6 +1327,8 @@
                       :owned-macros (:all-expansions-owned (macro-lookup-summary observation))
                       :other-tables (vec (sort (:other-tables effects)))
                       :env-agent-readers (vec (sort (:env-agent-readers effects)))
+                      :env-read-owners (vec (sort (:env-read-owners effects)))
+                      :file-read-owners (vec (sort (:file-read-owners effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (:order closure))})))
 
