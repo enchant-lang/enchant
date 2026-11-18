@@ -85,3 +85,15 @@ research/checked-tiles/actor-lab/run --out /tmp/my-native-actor-results.json
 ```
 
 The output path must be new. The runner uses Python 3.10+, a systemd user session, pinned Gambit and Clang, and the workstation's retained qualified objects under `research/native-seed/out/real-actors`. The checked-in qualification names those exact artifacts. A source-only checkout also needs that native build capture and its SDK. The script checks its digests, rebuilds the final application unit, links the fixture in a temporary directory, and releases it on exit. The full run adds three trials at five depths and scheduling comparisons at the normal and 17-step budgets. [Native actor build background](../native-seed/real/README.md) · [Recorded full run](evidence/native-actor-lab.json) · [Research journal](journal/04-native-concurrent-core.bl.org)
+
+### Change a blend while the Ora film is running
+
+Open [Live film edit](https://work.tailcb5318.ts.net:18180/#film), choose **Prepare live scene**, then **Save blend edit** when frame A appears. An old render has completed half its CPU grade and an old compile is suspended inside the native identifier emitter. The button saves the displayed helper into the session. After B appears, the driver releases both old jobs, attempts stale publication twice, submits a broken helper, and renders another frame from the serving slot. Expand the receipt for digests and timings. The browser records the interval from click to a decoded image at a paint opportunity. The server measures source save to availability of the accepted PNG.
+
+From the checkout, pass a new directory for the immutable source snapshots, proofs, frames and receipt.
+
+    research/checked-tiles/live-render/run --out /tmp/ora-live-first
+
+To exercise your own trusted edit, add `--helper /path/to/blend.bl`. Define one ordinary unary `mix-white` function. A successful full rehearsal needs a visibly different bright-byte mapping from A. The fixed callers live in [entry.bl](live-render/entry.bl). The browser exercises the supplied change.
+
+The runner uses the exact SDK and Lean in [tools.json](tools.json), the retained stage-two executable and macro bundle in `research/native-seed/out/compiler-native-owner`, the compressed Ora scene plan, and an EGL/GLES device supporting the film renderer. The compiler inputs are checked against the [native bootstrap qualification](../native-seed/evidence/scheme-fixpoint/qualification.json). On another workstation provide equivalent EGL libraries via `SCENE_EGL` and `SCENE_GLES` and the appropriate Mesa vendor configuration. Warmup, setup of the two pending jobs, late completion and teardown are outside the save interval. A browser session waits up to three minutes for a save.
