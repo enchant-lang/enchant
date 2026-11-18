@@ -32,6 +32,7 @@ FOOTER = [
     '(native-real-finish)',
 ]
 COLUMNS = {
+    'branches': 'arm states',
     'drain': 'arm n trial enqueue_us drain_us allocated_bytes probes vector_input_slots head_advances transferred peer_turns peer_max_gap_us',
     'middle': 'arm n probes interior_visits elapsed_us',
     'revision': 'arm policy selected_revision selected next_revision residual_consumed weak_held weak_released live_held_bytes live_released_bytes',
@@ -97,6 +98,7 @@ def build_and_run(folder, quick):
     original_image = checked(DONOR / 'actors-posix', refs[DONOR / 'actors-posix'])
     fixture = checked(DONOR / 'fixture.so', refs[DONOR / 'fixture.so'])
     env = dict(os.environ, NATIVE_ACTOR_BUDGET='17', BL_NATIVE_FFI_FIXTURE=str(fixture))
+    env.pop('ENCHANT_LAB_WORKLOAD', None)
     control = command([original_image], folder, env)
     control_labels = [line[5:] for line in control.splitlines() if line.startswith('PASS ')]
     if len(control_labels) != 14 or 'NATIVE_ACTOR_POSIX_OK' not in control.splitlines():
@@ -132,8 +134,14 @@ def build_and_run(folder, quick):
             objects.append(checked(relocate(unit['object']['path']), unit['object']['sha256']))
     body = (HERE / 'main.scm').read_text()
     start = body.index('(for-each')
+    # The very same overlay must run the original BL application too. Give
+    # each workload a fresh process so clock, sampler and cleanup are isolated.
+    posix = """(begin (set! lab-candidate? (equal? (getenv "ENCHANT_LAB_WORKLOAD") "queue"))
+                     (kernel "bl-main" (native-global-exact "native.actor-posix" "main"))
+                     (native-real-finish))"""
     main = (body[:start] + '(with-exception-catcher (lambda (e) (display-exception e) (newline) (exit 1))'
-            + ' (lambda ()\n' + body[start:] + '))\n')
+            + ' (lambda () (if (getenv "ENCHANT_LAB_WORKLOAD" #f) ' + posix
+            + ' (begin\n' + body[start:] + '))))\n')
     compile_unit('actor_lab', '\n'.join([(HERE / 'mailbox.scm').read_text(), overlay(forms),
                                         (HERE / 'exercise.scm').read_text(), (HERE / 'compiler.scm').read_text(), main]))
     link, obj, image = [folder / s for s in ('lab_.c', 'lab_.o', 'actor-lab')]
@@ -141,6 +149,14 @@ def build_and_run(folder, quick):
     command([tools['clang'], *tool_id['flags'], '-c', link, '-o', obj], folder)
     command([tools['clang'], *objects, obj, *tool_id['link_flags'], '-o', image], folder)
     print('Exercising the native actor and compiler entries.', file=sys.stderr, flush=True)
+    posix_controls = {}
+    for arm in ('vector', 'queue'):
+        real_output = command([image], folder, dict(env, ENCHANT_LAB_WORKLOAD=arm))
+        labels = [line[5:] for line in real_output.splitlines() if line.startswith('PASS ')]
+        witnesses = [line for line in real_output.splitlines() if line.startswith('NATIVE_REAL_ACTOR_WITNESS ')]
+        if labels != control_labels or len(witnesses) != 1:
+            raise ValueError(f'POSIX differential failed for {arm}')
+        posix_controls[arm] = json.loads(witnesses[0].split(' ', 1)[1])
     output = command([image], folder, dict(env, ENCHANT_LAB_QUICK=str(int(quick))), timeout=240)
     rows = {name: [] for name in COLUMNS}
     for line in output.splitlines():
@@ -148,7 +164,7 @@ def build_and_run(folder, quick):
         if kind in rows:
             values = [int(s) if s.isdecimal() else s for s in fields]
             rows[kind].append(dict(zip(COLUMNS[kind].split(), values, strict=True)))
-    expected = dict(drain=4 if quick else 30, middle=2, revision=4, timeout=2, retired=2,
+    expected = dict(branches=2, drain=4 if quick else 30, middle=2, revision=6, timeout=2, retired=2,
                     compiler=2, invalidation=1 if quick else 3)
     if not output.endswith('complete\n') or any(len(rows[k]) != n for k, n in expected.items()):
         raise ValueError('Incomplete native run:\n' + output[-3000:])
@@ -156,7 +172,7 @@ def build_and_run(folder, quick):
                 runtime_sha256=manifest['runtime']['sha256'], sdk=sdk, donor_build_sha256=digest(receipt),
                 original_elf_sha256=digest(original_image), lab_elf_sha256=digest(image),
                 fixture_sha256={p.name: digest(p) for p in sorted(HERE.glob('*.scm'))},
-                driver_sha256=digest(Path(__file__)), original_control=control_labels, **rows)
+                driver_sha256=digest(Path(__file__)), original_control=control_labels, posix_controls=posix_controls, **rows)
 
 
 if __name__ == '__main__':

@@ -2,7 +2,8 @@
 (for-each
  (lambda (candidate?)
    (set! lab-candidate? candidate?)
-   (for-each collision '(pinned latest timeout retire))
+   (storage-branches)
+   (for-each collision '(pinned latest deadline timeout retire))
    (selective (if quick? 33 257)))
  '(#f #t))
 (for-each compiler-collision '(#t #f))
