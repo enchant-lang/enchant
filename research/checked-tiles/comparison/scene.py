@@ -32,8 +32,10 @@ def compare(directory, width, height, expected):
     for channel in range(3):
         rgba[channel::4] = raw[channel::3]
     upload = C.create_string_buffer(bytes(rgba))
-    libs = Path('/nix/store/1jzc6hzknfm9hx0676dqwqq82x55z47c-libglvnd-1.7.0/lib')
+    libs = Path('/nix/store/mj9klbkhzal0vc1aazsajrydkimhc0h2-libglvnd-1.7.0/lib')
     gpu = scene.GPU.__new__(scene.GPU)
+    gpu.context = gpu.display = None
+    os.environ.setdefault('__EGL_VENDOR_LIBRARY_FILENAMES', '/run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json')
     try:
         gpu.__init__(os.getenv('SCENE_EGL', str(libs/'libEGL.so.1')),
                      os.getenv('SCENE_GLES', str(libs/'libGLESv2.so.2')), width, height)
