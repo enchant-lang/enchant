@@ -225,6 +225,9 @@ const filmMessages = {
   idle: 'Ready to prepare a scene.',
   warming: 'Preparing the compiler, serving slot and renderer.',
   serving: 'Rendering and checking the selected revision.',
+  saving: 'Checking the saved blend while A serves.',
+  'awaiting-display': 'Revision B is ready. Waiting for the browser to decode its frame.',
+  'checking-late-jobs': 'B is serving. Checking late completions and the broken edit.',
   'ready-to-save': 'Revision A is visible. Its frame and compile are suspended. Save within three minutes.',
   complete: 'Revision B served another frame after Lean rejected the bad edit at input 64.',
 };
@@ -256,6 +259,12 @@ async function filmProgress() {
         text('film-time', 'Save click to decoded frame at the next paint opportunity · ' + duration(ms));
       }
     }
+    if (next.phase === 'awaiting-display' && displayedFilm === 'B') {
+      await fetch('/api/film-displayed', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Checked-Tiles': '1' },
+        body: JSON.stringify({id: next.id}),
+      });
+    }
     el('film-save').disabled = next.phase !== 'ready-to-save' || displayedFilm !== 'A' || filmSaving;
     text('film-status', next.error || (filmSaving && next.phase === 'ready-to-save'
       ? 'Saved. Checking revision B while A serves.' : filmMessages[next.phase]));
@@ -263,7 +272,7 @@ async function filmProgress() {
     text('film-status', error.message);
     el('film-save').disabled = true;
   }
-  setTimeout(filmProgress, next && ['warming', 'serving', 'ready-to-save'].includes(next.phase) ? 250 : 1200);
+  setTimeout(filmProgress, next && ['warming', 'serving', 'ready-to-save', 'saving', 'awaiting-display', 'checking-late-jobs'].includes(next.phase) ? 250 : 1200);
 }
 el('film-start').onclick = () => submit('film');
 el('film-save').onclick = async () => {

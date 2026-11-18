@@ -310,6 +310,7 @@ def run(out, edit, manual):
                 while not (out / 'save').exists():
                     check(time.monotonic() < limit, 'No save received within three minutes')
                     time.sleep(.025)
+            status('saving', 'A')
             save = time.perf_counter()
             b = materialize(out, 'B', edit.read_bytes(), entry)
             event('B source saved')
@@ -321,6 +322,14 @@ def run(out, edit, manual):
             evidence['save_to_readable_png_ms'] = elapsed(save)
             check(owner.request('select')['digest'] == row_b['digest'], 'reader did not select B')
             event('B visible while A frame and compile pending')
+            if manual:
+                status('awaiting-display', 'B')
+                limit = time.monotonic() + 60
+                while not (out / 'displayed').exists():
+                    check(time.monotonic() < limit, 'No decoded B frame acknowledged within one minute')
+                    time.sleep(.025)
+                event('browser acknowledged decoded B before old jobs resumed')
+            status('checking-late-jobs', 'B')
         finally:
             resume.set()
         check(sha(pending.result()) == row_a['rgba_sha256'], 'old frame changed during save')

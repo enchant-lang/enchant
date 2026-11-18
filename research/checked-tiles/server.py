@@ -94,19 +94,20 @@ class Workbench:
                 progress.update(phase='failed', error=self.job['error'])
             return dict(progress, id=self.film_id)
 
-    def film_save(self, req):
+    def film_signal(self, req, signal):
         with self.lock:
             if not self.film or self.job.get('id') != self.film_id or req.get('id') != self.film_id or self.job['status'] != 'checking':
                 raise BlockingIOError('This film session has ended.')
             root = Path(self.film.name) / 'session'
             state = root / 'state.json'
-            if not state.exists() or json.loads(state.read_text())['phase'] != 'ready-to-save':
-                raise BlockingIOError('The old frame and compile must be pending before saving.')
+            phase = 'ready-to-save' if signal == 'save' else 'awaiting-display'
+            if not state.exists() or json.loads(state.read_text())['phase'] != phase:
+                raise BlockingIOError('Film session is not waiting for ' + signal + '.')
             try:
-                (root / 'save').touch(exist_ok=False)
+                (root / signal).touch(exist_ok=False)
             except FileExistsError:
-                raise BlockingIOError('The blend edit was already saved.') from None
-            return {'saved': self.film_id}
+                raise BlockingIOError('Film session already received ' + signal + '.') from None
+            return {signal: self.film_id}
 
     def film_frame(self, session, revision):
         with self.lock:
@@ -258,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, (HERE/'web'/name).read_bytes(), mime + '; charset=utf-8')
 
     def do_POST(self):
-        if self.path not in ('/api/runs', '/api/film-save'):
+        if self.path not in ('/api/runs', '/api/film-save', '/api/film-displayed'):
             return self.send(404)
         if (not self.valid_host() or self.headers.get('X-Checked-Tiles') != '1'
                 or self.headers.get('Sec-Fetch-Site') == 'cross-site'):
@@ -272,7 +273,11 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(size))
             if not isinstance(req, dict):
                 raise ValueError('Expected a JSON object.')
-            job = self.server.bench.film_save(req) if self.path == '/api/film-save' else self.server.bench.start(req)
+            if self.path == '/api/runs':
+                job = self.server.bench.start(req)
+            else:
+                marker = 'save' if self.path == '/api/film-save' else 'displayed'
+                job = self.server.bench.film_signal(req, marker)
         except BlockingIOError as exc:
             return self.send(409, json.dumps({'error': str(exc)}).encode())
         except (ValueError, TypeError, RecursionError) as exc:
