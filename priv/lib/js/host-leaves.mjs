@@ -320,7 +320,8 @@ export const STRING = {
   "Elixir.String/graphemes/1": (s) => L(graphemes(s)),
   "Elixir.String/length/1": graphemeLength,
   "Elixir.String/slice/3": (s, start, len) => asciiUnits(s) ? s.slice(start, start + len) : graphemes(s).slice(start, start + len).join(""),
-  "Elixir.String/replace/3": (s, a, b) => s.split(a).join(b),
+  "Elixir.String/replace/3": (s, pat, rep) => pat instanceof Regex ? repl(pat, s, rep, true) : s.split(pat).join(rep),
+  "Elixir.String/valid?/1": (s) => typeof s === "string" && s.isWellFormed(),
   "Elixir.String/trim/1": (s) => s.replace(new RegExp("^" + WS + "+|" + WS + "+$", "g"), ""),
   "Elixir.String/trim_leading/1": (s) => s.replace(new RegExp("^" + WS + "+"), ""),
   "Elixir.String/trim_trailing/1": (s) => s.replace(new RegExp(WS + "+$"), ""),
@@ -340,21 +341,46 @@ export const STRING = {
 // drops TRAILING unmatched groups ((a)(x)?b on "zab" → ("ab" "a")), a
 // replacement's `\1` is group 1, `{:global false}` replaces once.
 export class Regex {
-  constructor(source) {
+  constructor(source, options = "") {
     this.source = source; this.blStruct = kw("Elixir.Regex");
-    try { this.re = new RegExp(source, "u"); }
+    try {
+      if (!/^[imsu]*$/.test(options)) throw new Error("unsupported options " + options);
+      // PCRE permits a leading flag declaration in addition to compile options.
+      const leading = source.match(/^\(\?([ims]+)\)/);
+      const flags = new Set("u" + options + (leading?.[1] ?? ""));
+      this.re = new RegExp(leading ? source.slice(leading[0].length) : source, [...flags].join(""));
+    }
     catch (e) { const err = new BLError("regex " + JSON.stringify(source) + " is not supported on the JS target: " + e.message); err.blType = kw("Elixir.Regex.CompileError"); throw err; }
   }
-  global() { return new RegExp(this.re.source, "gu"); }
+  global() { return new RegExp(this.re.source, this.re.flags + "g"); }
 }
 const trimGroups = (m) => { const a = [...m].map((x) => (x === undefined ? "" : x)); let n = m.length; while (n > 1 && m[n - 1] === undefined) n--; return L(a.slice(0, n)); };
 const jsTemplate = (t) => t.replace(/\$/g, "$$$$").replace(/\\(\d)/g, "$$$1");
 const reOpts = (o) => new Map(arr(o).map((t) => [t.items[0].fq, t.items[1]]));
+const utf8 = new TextEncoder();
+function runRegex(r, s, options) {
+  if (options.size === 0 || (options.size === 1 && options.get("return") === kw("binary"))) {
+    const match = r.re.exec(s);
+    return match ? trimGroups(match) : null;
+  }
+  if (options.size !== 1 || options.get("return") !== kw("index")) {
+    throw new BLError("Regex.run received unsupported options on the JS target.");
+  }
+  const match = new RegExp(r.re.source, r.re.flags + "d").exec(s);
+  if (!match) return null;
+  const ranges = match.indices;
+  let end = ranges.length;
+  while (end > 1 && ranges[end - 1] === undefined) end--;
+  return L(ranges.slice(0, end).map(range => range === undefined ? T(-1, 0) :
+    T(utf8.encode(s.slice(0, range[0])).length, utf8.encode(s.slice(range[0], range[1])).length)));
+}
 export const REGEX = {
   "Elixir.Regex/compile!/1": (s) => new Regex(s),
+  "Elixir.Regex/compile!/2": (s, flags) => new Regex(s, flags),
   "Elixir.Regex/regex?/1": (x) => x instanceof Regex,
   "Elixir.Regex/source/1": (r) => r.source,
   "Elixir.Regex/run/2": (r, s) => { const m = r.re.exec(s); return m ? trimGroups(m) : null; },
+  "Elixir.Regex/run/3": (r, s, opts) => runRegex(r, s, reOpts(opts)),
   "Elixir.Regex/scan/2": (r, s) => L([...s.matchAll(r.global())].map(trimGroups)),
   "Elixir.Regex/replace/3": (r, s, rep) => repl(r, s, rep, true),
   "Elixir.Regex/replace/4": (r, s, rep, o) => repl(r, s, rep, reOpts(o).get("global") !== false),
@@ -447,9 +473,9 @@ export const BEAM_ONLY = Object.fromEntries([
   "Elixir.BeamLisp.CompilerData/check_contextual_unit!/1",
   // Execution-entry fingerprints use deterministic ETF and native hashing.
   // JS has text binaries; it cannot supply an authentic ETF byte stream.
-  "erlang/term_to_binary/2",
+  "erlang/term_to_binary/1", "erlang/term_to_binary/2",
   "erlang/monitor/2", "erlang/exit/2",
-  "Elixir.Code/ensure_loaded?/1", "crypto/hash/2", "Elixir.Base/encode16/1",
+  "Elixir.Code/ensure_loaded?/1", "crypto/hash/2", "Elixir.Base/encode16/1", "Elixir.Base/encode16/2",
   "Elixir.BeamLisp.Trace/trace/3", "Elixir.BeamLisp.Trace/trace/4", "Elixir.BeamLisp.Trace/untrace/2",
   "Elixir.BeamLisp.Refs/spawn_exec/1", "Elixir.BeamLisp.Refs/spawn_exec/2",
 ].map((k) => [k, beamOnly(k)]));
