@@ -1,0 +1,93 @@
+;; Replay the Station gateway recovery fixture's 3,000 events, two UIDs and
+;; route distribution through an Enchant projection. No live audit is read.
+(ns observatory.usage-replay
+ (:require [bl.json :as json] [data.projection :as projection]))
+
+(defn now-us [] (erlang/monotonic_time :microsecond))
+(defn owner-reductions [owner] (elem (Process/info owner :reductions) 1))
+
+(defn events [n timestamp]
+ (mapv (fn [i]
+         {:id (str i) :at timestamp :uid (+ 1000 (mod i 2))
+          :route (if (zero? (mod i 3)) "codex" "anthropic")})
+       (range n)))
+
+(defn expected-groups [rows]
+ (reduce (fn [groups row]
+          (update groups [(:uid row) (:route row)]
+            (fn [previous] {:count (inc (:count previous 0)) :sums {}})))
+         {} rows))
+
+(defn checkpoint! [handle sequence at changes]
+ (let [result (projection/delta! handle (merge {:sequence sequence :now at} changes))]
+  (when (= :refused (:status result))
+   (throw (ex-info "Usage checkpoint was refused" {:sequence sequence :reason (:reason result)})))
+  result))
+
+(defn read-burst [reader n expected]
+ (let [parent (erlang/self)
+       ticket (erlang/make_ref)
+       workers (mapv (fn [_]
+                      (spawn (fn []
+                       (receive [:go request]
+                        (let [answer (projection/read reader)]
+                         (erlang/send parent [:usage-read ticket
+                           (and (= ticket request) (= :ready (:status answer))
+                                (= expected (get-in answer [:value :groups])))]))))))
+                     (range n))]
+  (doseq [worker workers] (erlang/send worker [:go ticket]))
+  (doseq [_ workers]
+   (assert (receive [:usage-read request exact] (and (= request ticket) exact) (after 10000 false))))))
+
+(defn replay [history viewers]
+ (let [timestamp (erlang/system_time :millisecond)
+       rows (events history timestamp)
+       expected (expected-groups rows)
+       name :usage-replay/totals
+       h (projection/start-incremental! name
+           {:source-id "station-gateway-recovery-fixture" :group-by [:uid :route]
+            :window-ms 2592000000 :max-events 4096 :max-groups 8
+            :max-delta 128 :max-bytes 4194304})
+       reader (projection/reader h)
+       batches (mapv vec (partition-all 128 rows))
+       seq-number (inc (count batches))]
+  (try
+   (doseq [[index batch] (map-indexed vector batches)]
+    (checkpoint! h (inc index) timestamp {:upsert batch}))
+   (assert (= 0 (get-in (projection/status reader) [:counts :started])))
+   (let [first-answer (projection/subscribe! reader)
+         before (owner-reductions (:owner h))
+         started (now-us)]
+    (assert (= expected (get-in first-answer [:value :groups])))
+    (read-burst reader viewers expected)
+    (let [elapsed (- (now-us) started)
+          reductions (- (owner-reductions (:owner h)) before)
+          warm (projection/status reader)
+          changed (assoc (first rows) :route "anthropic")
+          amendment {:upsert [changed] :remove [(:id (second rows))]}
+          latest (expected-groups (into [changed] (subvec rows 2)))
+          published (checkpoint! h seq-number timestamp amendment)]
+     (assert (= 1 (get-in warm [:counts :started])))
+     (assert (= seq-number (inc (:published-basis warm))))
+     (assert (= latest (get-in published [:value :groups])))
+     (assert (= 2 (get-in published [:work :changed])))
+     (checkpoint! h seq-number timestamp amendment)
+     (let [latest-status (projection/status reader)]
+      (assert (= 2 (get-in latest-status [:counts :started])))
+      (assert (= seq-number (:published-basis latest-status)))
+      (assert (= 2 (get-in latest-status [:work :changed])))
+      (projection/evict! h)
+      (dotimes [_ 100] (assert (= :blocked (:status (projection/read reader)))))
+      (assert (= 2 (get-in (projection/status reader) [:counts :started])))
+      {:events history :readers viewers :warm-read-us elapsed
+       :warm-owner-reductions reductions :warm-producer-starts 0
+       :reference-full-scan-rows (* history viewers) :changed-rows 2
+       :published-basis (:published-basis latest-status)
+       :blocked-reads 100 :restarts-after-eviction 0 :exact-groups true})))
+   (finally (projection/stop! h)))))
+
+(File/write! (first (BeamLisp/argv))
+ (json/encode {:schema "enchant.usage-projection-replay.v1"
+               :fixture "Station gateway recovery test event shape"
+               :observations (mapv (fn [[history readers]] (replay history readers))
+                                   [[300 1] [300 16] [3000 1] [3000 16]])}))

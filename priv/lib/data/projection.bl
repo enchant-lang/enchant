@@ -157,7 +157,9 @@
 (defn- response [state]
   (let [view (observed-state state)]
     (if (and (= :ready (:status view)) (:retained state))
-      (assoc view :value (erlang/binary_to_term (get-in state [:retained :bytes]) (list :safe))
+      ;; Send the retained binary across the process boundary. Decoding here
+      ;; allocates a tree on the owner and then copies it into each reader.
+      (assoc view ::payload (get-in state [:retained :bytes])
                   :work (get-in state [:retained :work]))
       view)))
 
@@ -221,10 +223,14 @@
       (reply (refused :projection-reader) state)))
   (handle-call [:status token] [_from state]
     (if (authorized? state token :read-token)
-      (reply (assoc (select-keys (observed-state state) [:status :reason :counts])
-               :retained-charge (get-in state [:policy :result :charge])
-               :retention-limit (get-in state [:policy :max-charge])
-               :demand (get-in state [:policy :demand]) :limits (:options state)) state)
+      (let [view (observed-state state)]
+        (reply (assoc (select-keys view [:status :reason :counts])
+                 :wanted-basis (get-in view [:wanted :basis])
+                 :published-basis (get-in view [:result :basis])
+                 :retained-charge (get-in view [:result :charge])
+                 :retention-limit (get-in state [:policy :max-charge])
+                 :work (select-keys (get-in state [:retained :work]) [:steps :bytes :changed :expired])
+                 :demand (get-in state [:policy :demand]) :limits (:options state)) state))
       (reply (refused :projection-reader) state)))
   (handle-call [:subscribe token] [from state]
     (if (authorized? state token :read-token)
@@ -348,20 +354,26 @@
                {:name (instance/name name)})]
      {:owner pid :read read-token :control control-token})))
 
+(defn- read-value [handle message]
+  (let [answer (call (:owner handle) message)]
+    (if-let [bytes (::payload answer)]
+      (assoc (dissoc answer ::payload) :value (erlang/binary_to_term bytes (list :safe)))
+      answer)))
+
 (defn reader [handle] (select-keys handle [:owner :read]))
-(defn read [handle] (call (:owner handle) [:read (:read handle)]))
+(defn read [handle] (read-value handle [:read (:read handle)]))
 (defn status
   "Read metadata with a reader grant. Never decodes retained values, changes
    demand, acknowledges wakes, retries or refreshes the source."
   [handle] (call (:owner handle) [:status (:read handle)]))
-(defn subscribe! [handle] (call (:owner handle) [:subscribe (:read handle)]))
-(defn unsubscribe! [handle] (call (:owner handle) [:unsubscribe (:read handle)]))
-(defn refresh! [handle] (call (:owner handle) [:control (:control handle) :refresh]))
-(defn retry! [handle] (call (:owner handle) [:control (:control handle) :retry]))
-(defn evict! [handle] (call (:owner handle) [:control (:control handle) :evict]))
+(defn subscribe! [handle] (read-value handle [:subscribe (:read handle)]))
+(defn unsubscribe! [handle] (read-value handle [:unsubscribe (:read handle)]))
+(defn refresh! [handle] (read-value handle [:control (:control handle) :refresh]))
+(defn retry! [handle] (read-value handle [:control (:control handle) :retry]))
+(defn evict! [handle] (read-value handle [:control (:control handle) :evict]))
 (defn delta! [handle delta]
   (data/check! delta {:max-nodes 8192 :max-bytes 4194304 :max-depth 32})
-  (call (:owner handle) [:delta (:control handle) delta]))
+  (read-value handle [:delta (:control handle) delta]))
 (defn stop! [handle]
   (when (and handle (Process/alive? (:owner handle)))
     (let [result (call (:owner handle) [:control (:control handle) :close])]
