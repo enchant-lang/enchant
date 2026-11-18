@@ -14,6 +14,7 @@
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES
+;;   PARTITION LINK_ROWS --env-read-control REPORT
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION BASE_LINK_ROWS --capture-registry RECEIPT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
@@ -57,6 +58,8 @@
 (def table-lifecycle-operations #{(tuple :ets :new 2) (tuple :ets :rename 2) (tuple :ets :give_away 3)})
 (def registry-lookup-entry (tuple :ets :lookup 2))
 (def registry-member-entry (tuple :ets :member 2))
+(def env-read-entries #{(tuple :Elixir.BeamLisp.Env :loaded_ns? 1)
+                        (tuple :Elixir.BeamLisp.Env :search_paths 0)})
 
 (defn- link-key? [key]
  (and (erlang/is_tuple key) (= 4 (erlang/tuple_size key)) (= :link (elem key 1))))
@@ -289,6 +292,44 @@
    (>= (count events) (inc trace-limit)) effects
    :else (assoc effects :ordered-links (conj events [op member value])))))
 
+(defn- small-env-text? [value]
+ (and (erlang/is_binary value) (<= (erlang/byte_size value) 4096)))
+
+(defn- env-read-result [function value]
+ (case function
+  :loaded_ns? (if (or (true? value) (false? value)) value :unavailable)
+  :search_paths (if (and (erlang/is_list value)
+                         (<= (count (take 65 value)) 64)
+                         (every? small-env-text? value))
+                  (vec value) :unavailable)))
+
+(defn- start-env-read [effects entry argument]
+ (let [function (elem entry 1)
+       key (case function
+            :loaded_ns? (when (small-env-text? argument) [function argument])
+            :search_paths [function])]
+  (update effects :pending-env-reads (fn [stack] (conj (or stack []) [entry key])))))
+
+(defn- finish-env-read [effects entry kind value]
+ (let [[expected key] (peek (:pending-env-reads effects))
+       reads (:env-reads effects {})
+       outcome (when (= kind :return_from) (env-read-result (elem entry 1) value))
+       total (inc (:env-read-count effects 0))]
+  (when-not (= entry expected) (throw (ex-info "Unexpected Env read return" {:entry entry :expected expected})))
+  (cond-> (-> effects (update :pending-env-reads pop) (assoc :env-read-count total))
+   (or (nil? key) (nil? outcome) (= :unavailable outcome)) (assoc :unknown-env-read true)
+   (and key (contains? reads key) (not= outcome (get reads key))) (assoc :unstable-env-read true)
+   (and key (<= total registry-trace-limit) (< (count reads) registry-input-limit))
+   (assoc-in [:env-reads key] outcome))))
+
+(defn- changed-env-reads [reads]
+ (vec (take 12 (keep (fn [[[function argument :as key] expected]]
+                       (let [current (case function
+                                       :loaded_ns? (BeamLisp.Env/loaded_ns? argument)
+                                       :search_paths (BeamLisp.Env/search_paths))]
+                        (when (not= expected (env-read-result function current)) key)))
+                     reads))))
+
 (defn- collector [calls pending hits misses reads sources effects]
  (receive
   [:trace _ :call [:ets :lookup arguments]]
@@ -314,6 +355,10 @@
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
   (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
+  [:trace _ kind [:Elixir.BeamLisp.Env function arity] value]
+  :when (or (= kind :return_from) (= kind :exception_from))
+  (recur calls pending hits misses reads sources
+   (finish-env-read effects (tuple :Elixir.BeamLisp.Env function arity) kind value))
   [:trace _ :send message target]
   (recur calls pending hits misses reads sources (process-event effects :send message target))
   [:trace _ :send_to_non_existing_process message target]
@@ -328,6 +373,8 @@
         effects (if (and (:registry? effects) (contains? registry-operations entry) (= :beam_lisp_vars key))
                    (registry-call effects [function arity]) effects)]
    (cond
+    (contains? env-read-entries entry)
+    (recur calls pending hits misses reads sources (start-env-read effects entry key))
     (and (:boundary? effects) (or (contains? table-lifecycle-operations entry)
                                 (and (contains? registry-operations entry) (not= :beam_lisp_vars key))))
     (recur calls pending hits misses reads sources (other-table-event effects function key))
@@ -377,6 +424,8 @@
      :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
                     (nil? (:pending-registry-member effects)) (not (:registry-input-limit effects))
                     (not (:boundary-event-limit effects))
+                    (empty? (:pending-env-reads effects)) (< (count (:env-reads effects)) registry-input-limit)
+                    (<= (:env-read-count effects 0) registry-trace-limit)
                     (empty? (:pending-macro-lookups effects)) (<= (:macro-lookup-count effects 0) trace-limit)
                     (<= (:registry-call-count effects 0) registry-trace-limit)
                     (<= (:source-probe-count effects 0) source-probe-limit)
@@ -409,6 +458,10 @@
                   (list session registry-lookup-entry match (list :local)))))
    (doseq [entry (cond-> source-read-entries (:source-probes? options) (conj source-probe-entry))]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
+   (when (:env-reads? options)
+    (doseq [entry env-read-entries]
+     (assert (= 1 (erlang/apply :trace :function
+                    (list session entry (list (tuple :_ (list) (list (tuple :exception_trace)))) (list :local)))))))
    (when sample-macros?
     (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
    (when (:macro-lookups? options)
@@ -1080,15 +1133,15 @@
  (select-keys prepared [:ns :path :source-sha256 :requires :js-interop? :env :defs]))
 
 (defn- observe-lowering
- ([closure baseline member entries] (observe-lowering closure baseline member entries false))
- ([closure baseline member entries boundary?]
+ ([closure baseline member entries] (observe-lowering closure baseline member entries {}))
+ ([closure baseline member entries options]
  (with-registry-stage closure (:rows baseline) member entries
   (fn [prepared callables]
    (let [lower! (fn [] (build/compile-prepared prepared {:check-node identity}))
          [compiled observed]
                (trace! #(BeamLisp.Loader/with_declaration_snapshot lower!)
-                {:registry? true :registry-inputs? true :source-probes? true
-                 :macro-lookups? true :phase-callables callables :boundary? boundary?})]
+                (merge {:registry? true :registry-inputs? true :source-probes? true
+                        :macro-lookups? true :phase-callables callables} options))]
     (assert (not-any? (fn [[_ _ key]]
                         (and (erlang/is_tuple key) (> (erlang/tuple_size key) 1)
                              (= :fwd (elem key 0)) (= "native.observe-links" (elem key 1))))
@@ -1124,7 +1177,7 @@
     :control (lowering-boundary-control)
     :members (mapv (fn [ns]
                     (let [member (get-in closure [:units ns])
-                          [_ output observation] (observe-lowering closure rows member entries true)
+                          [_ output observation] (observe-lowering closure rows member entries {:boundary? true})
                           effects (:effects observation)
                           phase (registry-phase-status observation)]
                      (assert (erlang/=:= (def-bytes member) (def-bytes output)))
@@ -1135,6 +1188,26 @@
                       :env-agent-readers (vec (sort (:env-agent-readers effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (:order closure))})))
+
+(defn- env-read-control [report-path]
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [provider "native_env_read_control"
+         root (Path/expand (str report-path ".control-root"))
+         capture (fn [action] (get-in (second (trace! action {:env-reads? true})) [:effects]))
+         consult (fn [] [(BeamLisp.Env/loaded_ns? provider) (BeamLisp.Env/search_paths)])
+         original (capture consult)
+         reads (:env-reads original)]
+    (assert (false? (get reads [:loaded_ns? provider])))
+    (assert (empty? (changed-env-reads reads)))
+    (let [unstable (capture (fn [] (consult) (BeamLisp.Env/mark_loaded provider) (consult)))]
+     (assert (:unstable-env-read unstable)))
+    (assert (= [[:loaded_ns? provider]] (changed-env-reads reads)))
+    (BeamLisp.Env/add_search_path root)
+    (assert (= #{[:loaded_ns? provider] [:search_paths]} (set (changed-env-reads reads))))
+    {:schema "bl.native.env-read-control" :version 1 :reuse-authority false
+     :recorded-negative-read true :unchanged-outcomes true :changed-readiness true
+     :changed-search-paths true :unstable-read-detected true}))))
 
 (defn- registry-shadow-member [closure baseline candidate member entries]
  (let [[prior-inputs prior observation] (observe-lowering closure baseline member entries)
@@ -1258,14 +1331,16 @@
        (take 12 (sort (filter (fn [[_ fingerprint]] (nil? fingerprint)) reads)))))
 
 (defn- capture-registry-member [closure baseline member entries bound?]
- (let [[prepared compiled observed callables] (observe-lowering closure baseline member entries)
+ (let [[prepared compiled observed callables] (observe-lowering closure baseline member entries {:env-reads? bound?})
        _ (when (and bound? (not (erlang/=:= (def-bytes compiled) (def-bytes member))))
            (throw (ex-info "Native registry capture diverged from the qualified donor"
                     {:namespace (:ns member)})))
        effects (:effects observed)
        reason (cond
                 (not (registry-lowering-supported? effects (registry-phase-status observed))) :unaccounted-registry
-                (not (:all-expansions-owned (macro-lookup-summary observed))) :ordinary-macro)
+                (not (:all-expansions-owned (macro-lookup-summary observed))) :ordinary-macro
+                (:unknown-env-read effects) :unknown-env-read
+                (:unstable-env-read effects) :unstable-env-read)
        prepared-id (when-not reason (closed-identity prepared))
        reads (when prepared-id (into {} (map (fn [[key value]] [key (registry-value-signature value callables)])
                                             (:registry-inputs effects))))
@@ -1276,6 +1351,7 @@
    (cond-> {:prepared prepared-id :registry reads :probes (source-probes observed)
             :sources (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest]) (:sources observed)))))
             :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)}
+    bound? (assoc :env-reads (:env-reads effects {}) :env-read-calls (:env-read-count effects 0))
     (not bound?) (assoc :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits))))))
 
 (defn- registry-member-bytes [entry]
@@ -1290,7 +1366,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v1 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v2 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1309,6 +1385,7 @@
                                                    (not (registry-value-matches? current expected callables)))
                                           (receipt-key-description key))))
                                  (:registry entry)))))
+         changed-env (when (contains? entry :env-reads) (changed-env-reads (:env-reads entry)))
          reason (or (:reason entry)
                     (cond
                      (not (erlang/is_binary (:definition-bytes entry))) :missing-definition-bytes
@@ -1319,13 +1396,18 @@
                          (some (fn [[path digest]]
                                  (or (= :unavailable digest) (not= digest (read-source-identity path)))) (:sources entry)))
                      :source-input-changed
+                     (seq changed-env) :env-input-changed
                      (seq changed) :registry-input-changed))
          ;; The oracle compares exact deterministic bytes. The retained
          ;; definition payload requires no decoding on this read path.
          actual (if reason (def-bytes (lower-with-snapshot prepared)) (:definition-bytes entry))]
-    {:namespace (:ns member) :reused (nil? reason) :reason reason :opaque-inputs (:opaque-inputs entry 0)
-     :opaque-keys (:opaque-keys entry) :changed-registry-keys changed
-     :exact-clean-definitions (erlang/=:= actual (def-bytes member))}))))
+    (cond-> {:namespace (:ns member) :reused (nil? reason) :reason reason :opaque-inputs (:opaque-inputs entry 0)
+             :opaque-keys (:opaque-keys entry) :changed-registry-keys changed
+             :exact-clean-definitions (erlang/=:= actual (def-bytes member))}
+     (contains? entry :env-reads)
+     (assoc :env-read-calls (:env-read-calls entry)
+            :distinct-env-reads (count (:env-reads entry))
+            :changed-env-reads changed-env))))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -1380,7 +1462,8 @@
  (when-not (= expected-sha (artifact/sha bytes))
   (refuse-bound-registry :receipt-digest-mismatch))
  (let [receipt (read-registry-member bytes)]
-  (when-not (and (= :native-bound-registry-v1 (:schema receipt)) (= donor (:donor receipt)))
+  (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2} (:schema receipt))
+                 (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
 
@@ -1422,13 +1505,18 @@
   ;; to the donor. Staging and registry validation use the candidate rows.
   (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path
    (fn [entries _]
-    {:schema "bl.native.bound-registry-shadow" :version 1 :reuse-authority false
+    {:schema "bl.native.bound-registry-shadow" :version 2 :reuse-authority false
+     :receipt-schema (:schema receipt)
      :donor anchor :receipt-sha256 expected-sha :receipt-bytes (erlang/byte_size bytes)
      :candidate-link-rows-sha256 (:sha256 candidate)
      :members (mapv (fn [ns]
                      (let [entry (read-registry-member (get-in receipt [:members ns]))
                            old (get-in donor [:units ns])
-                           entry (if (:reason entry) entry (assoc entry :definition-bytes (def-bytes old)))]
+                           entry (cond
+                                   (:reason entry) entry
+                                   (and (= :native-bound-registry-v2 (:schema receipt)) (not (map? (:env-reads entry))))
+                                   {:reason :missing-env-reads}
+                                   :else (assoc entry :definition-bytes (def-bytes old)))]
                       (replay-registry-member closure candidate (get-in closure [:units ns]) entry entries)))
                    (:order closure))}))))
 
@@ -1630,6 +1718,7 @@
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison)
+                (= selected "--env-read-control") (env-read-control output)
                 (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
                 (= selected "--capture-bound-registry") (capture-bound-registry closure baseline comparison source-receipt)
                 (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
