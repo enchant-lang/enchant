@@ -198,7 +198,11 @@ class Publication:
         with self.lock:
             if revision is not self.active:
                 return 'stale result discarded'
-            return 'current result confirmed'
+            path = revision.directory
+            tmp = path / '.completed.png'
+            tmp.write_bytes(rgb_png(frame, revision.receipt['width'], revision.receipt['height']))
+            tmp.replace(path / 'frame.png')
+            return 'current frame published'
 
 
 def main():
@@ -230,6 +234,7 @@ def main():
     source = args.source.read_text()
     first = prepare(source, root, raw, args)
     owner.accept(first)
+    require(owner.finish(first, first.frame) == 'current frame published', 'current publication failed')
     print(f'Open {root}/current/frame.png', flush=True)
     if args.watch:
         while True:

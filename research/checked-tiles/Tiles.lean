@@ -17,7 +17,7 @@ theorem owner (x tile block lane : Nat) (h : 0 < tile) (inside : lane < tile)
     x / tile = block ∧ x % tile = lane := by
   subst x
   simp [Nat.add_div, Nat.add_mod, Nat.mod_eq_of_lt inside, Nat.div_eq_of_lt inside,
-        Nat.mul_comm block tile, h, Nat.ne_of_gt h]
+        Nat.mul_comm block tile, h, inside]
 
 -- A block beyond the right or bottom edge produces no observable store.
 def storeAt (width height x y : Nat) (value : Nat) : Option Nat :=
