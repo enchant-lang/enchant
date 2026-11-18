@@ -382,6 +382,13 @@
       (bl-is-nil (bl-get 42 (bl-key "absent"))) (not (native-map-has? 42 (bl-key "absent")))
       (= 42 (native-map-remove 42 (bl-key "absent")))
       (= 1 (bl-get (bl-assoc 42 (bl-key "added") 1) (bl-key "added")))))
+(native-extra-check "scalar text search preserves Unicode offsets and suffixes"
+ (and (= 2 (native-string-index "λ😀/é/" "/"))
+      (= 4 (native-string-index "λ😀/é/" "/" 3))
+      (not (native-string-index "λ😀/é/" "ê"))
+      (native-prefix? "λ😀/é/" "λ😀")
+      (native-suffix? "λ😀/é/" "é/")
+      (= 6 (bl-nth (native-binary-match "λ😀/é/" "/") 0))))
 ;; Text assembly keeps the original ABI while avoiding growing-prefix copies.
 (native-extra-check "empty join ignores separator" (string=? "" (native-join 42 '())))
 (let ((part (list->string '(#\a #\b))))
