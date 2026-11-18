@@ -2,7 +2,7 @@
 #+subtitle: A native compiler, a semantics of running actors, and a precise job for OxiZ, Z3 and Lean.
 #+kicker: Checked tiles / research journal 04
 #+date: 2026-11-18
-#+status: Architectural proposal · paired solver witnesses replayed on BEAM · mailbox lemmas checked · native actor fixture rerun
+#+status: Native actor and self-compiler experiments · measured mailbox costs · replayable live-edit counterexamples
 
 * Start with a process that is already waiting
 
@@ -188,3 +188,77 @@ Run powers of two through the ordinary native actor entry, with enqueue time rep
 Before implementing, write one decision sentence, the variable to grow, the unit of work, the observable promise and a specific case that should fail. Use the existing ordinary entry and pinned artifacts. Run an unchanged control first. Alternate candidates on identical inputs, keep raw samples and check outputs outside the timed window. For asymptotic claims derive the cost under stated assumptions, count the actual operation across doubling sizes, and include setup, retirement, worst-case input and retained bytes separately. Wall time tests whether the reduction matters on this machine. For a constant-factor claim, compare at fixed shape and hardware. For a correctness claim, make a plausible wrong implementation fail. A twofold improvement in one counter can coexist with a slower application.
 
 I would run the mailbox drain first and the native version-switch control second, through the same actor entry. Then combine them: hold A's mailbox snapshot, drain a later queue under B, complete A, and verify both residual order and memory reclamation. That tests whether the two individually good ideas compose. Next take the native compiler invalidation experiment through a real edit while a prior compile is outstanding. Spend the next experimental slot on proof admission, timers or arithmetic according to the costs actually observed there or in the renderer. Use CakeML for compiler architecture and evidence, Bend for a matched pure compute workload, and warm Enchant as the baseline for edit latency. Each result should lead to one of three decisions: integrate at the named owner, retain a counterexample or reference control, or retire the candidate and record why. The useful deliverable is a decision another engineer will not need to rediscover.
+
+* An edit between a binding and its use
+
+A peer changes one compiler function while the native self-hosted emitter is writing a single expression. Before the edit the emitter writes =(let ((v_120 7)) v_120)=. After the edit it writes =(let ((w_120 7)) w_120)=. Both programs evaluate to 7. When an in-flight compile consults the latest provider at each call, it writes =(let ((v_120 7)) w_120)=. Evaluation raises an unbound-variable error. The edit changed only the spelling of an internal identifier. This is a reason to give compilation requests a revision of their own.
+
+The fixture places a scheduling barrier inside the first real identifier emission. A second native actor publishes a replacement in the native namespace. In the pinned arm the compile carries its provider across the yield in a request-scoped binding. The next compile on the very same worker sees B. This exercises the actual compiled =native.scheme/emit= on resolved ANF. The application harness and replacement provider are Scheme code linked into the experiment. Publishing a whole Source edit, pausing every compiler dependency, and installing a newly linked ELF are further boundaries. [[file:../actor-lab/compiler.scm][Compiler collision]] · [[file:../../native-seed/src/native/scheme.bl][Self-hosted emitter]]
+
+** Which message did the parked request own?
+
+A is waiting for a cancellation. The publisher observes the native process in its waiting state, installs B, and atomically sends a preview followed by a cancellation. On the existing receive, A consumes the cancellation. The next receive on that actor uses B and consumes the preview. The control that resolves the handler again on wake consumes the preview first. Both arms finish successfully, and both can be fully typed. The difference is observable in which request gets which message. It is the concrete native counterpart to the Z3/OxiZ witness and the earlier BEAM replay.
+
+The same schedule holds an immutable mailbox snapshot and enqueues sixteen 32 KiB payloads. B drains the remaining live queue. A full GC still finds all sixteen payloads through the saved root. After the root is released, a second GC finds zero through weak references. Other runs wake the actor with an unmatched message, deliver at the original deadline, and kill a monitored waiter before delivering a late completion. The deadline tie selects the queued message. An unmatched wake preserves the original deadline and offers the unmatched message once. The late delivery to the retired actor yields no terminal reply. These schedules use virtual time. Each storage implementation also ran the original BL application with a real clock, blocking foreign call and eventfd wake and passed its fourteen checks. [[file:../actor-lab/exercise.scm][Schedules and lifetime observations]] · [[file:../evidence/native-actor-lab.json][Native receipt]]
+
+** What did changing the data structure buy?
+
+The candidate uses two immutable skew-binary random-access lists. New messages enter the rear. When the front is empty, the first head removal reverses the rear into a new front. Within one queue history each item makes that trip at most once between interior rebuilds. Skew-tree prepend and head removal each touch a bounded number of nodes, and an indexed lookup takes O(log N) worst case. A FIFO drain therefore needs O(N) removal work in this fixture. Ordinary selective receive still needs to ask the matcher about preceding messages. The interior fallback visits the entire queue and performs indexed reads to preserve residual order. [[file:../actor-lab/mailbox.scm][Mailbox implementation]]
+
+The comparison uses the compiled BL actor kernel for send, scan, park, wake, registration and retirement. The runner verifies the archived build, changes the mailbox operations at seven named emitted definitions, and leaves ordinary runtime vectors in place. Both sides enter the scheduler and use the same instrumentation. The probe and selected-body thunks for the revision and timing cases enter through the compiled receive ABI. The separate POSIX application exercises Source-compiled receive clauses on the overlay. [[file:../actor-lab/run.py][Exact substitutions and runner]]
+
+A depth sweep uses 17 reductions per actor turn, a yielding peer and three trials per depth. The timed drain includes both actors and their scheduler. Enqueue is timed separately. Allocation is cumulative process allocation from Gambit, including the peer. The survivor check runs after timing. Numbers are medians within each arm. Raw trials include the first receive and the longest observed peer gap.
+
+#+begin_rosetta
+Queue depth | Vector drain | Candidate drain | Vector / candidate allocated
+128 | 344.73 ms | 343.03 ms | 71.6 / 67.3 MiB
+256 | 615.47 ms | 606.63 ms | 153.1 / 134.7 MiB
+512 | 1,441.02 ms | 1,270.70 ms | 349.3 / 269.3 MiB
+1,024 | 2,999.35 ms | 2,449.11 ms | 882.5 / 538.6 MiB
+2,048 | 7,499.12 ms | 5,006.63 ms | 2,549.2 / 1,077.3 MiB
+#+end_rosetta
+
+At depth 2,048, both matchers ran 2,048 times. The vector removal loop received a total of 2,098,176 slots. The candidate advanced 2,048 heads and transferred 2,048 entries. The vector count sums measured input lengths of the real native rebuild calls, whose loop walks each input once. Time improved by 1.50× at this depth. Allocations fell by 58%. Most of the candidate's whole-drain allocation remains outside the queue operation budget.
+
+Single-sample controls at depth 256 expose the sensitivity to how we exercise the runtime. The normal scheduler budget is 200. This table shows the candidate through the same native send and receive entries.
+
+#+begin_rosetta
+Turn budget | Yielding peer | Drain | Process allocation
+200 | no | 109.78 ms | 21.7 MiB
+200 | yes | 179.70 ms | 33.1 MiB
+17 | no | 291.18 ms | 66.2 MiB
+17 | yes | 607.72 ms | 134.7 MiB
+#+end_rosetta
+
+The 257-message middle match took 129 probes in both arms. Its candidate fallback visited all 257 slots. Another test forked eight operations from the same 1,024-message rear-only root. Each branch independently rotated that rear and together transferred 8,192 entries. A long first rotation also runs inside the removal critical section. These findings narrow the optimization claim to a common FIFO history. They make a bounded rotation or chunked deque worth comparing on bursty traffic with a peer latency target. The forest follows Okasaki's skew-binary random-access list design. [[https://doi.org/10.1145/224164.224187][Okasaki, Purely functional random-access lists]] · [[file:../actor-lab/exercise.scm][Branching and peer controls]]
+
+Lean checks that prepending, exposing a head, and rotating a forest preserve the logical message sequence. It also checks the leaf test under the cached-weight invariant. The native differential traverses 3,736 small append/remove histories per representation, including old roots, duplicate messages, false and nil. The translation from those Scheme operations to the Lean model, the duration of a critical section, collector behavior and arbitrary actor schedules each need their own evidence. [[file:../concurrency/Mailbox.lean][Forest laws]] · [[file:../concurrency/Receive.lean][Receive observations]]
+
+One web run passed the peer's real elapsed-time test and subsequently failed the original POSIX assertion requiring entry into a timed wait. A scheduled peer can reach an already due deadline, so the elapsed-time observation alone cannot establish that it slept in the native wait. The gate reported failure. The retained full run includes positive timed-wait and eventfd-wake observations for both arms. Real-clock observations and deterministic deadline ordering answer different questions.
+
+** Which compiler work can a live edit safely avoid?
+
+For this edit the dependency is unusually legible. During the first emission the fixture records which definition calls the identifier provider. On a change of that provider it consults the reverse index and re-emits those definitions into a small patch over the immutable previous output. On 16, 64 and 256 definitions, one was dirty each time. At 256, 255 reused bodies and one replacement agreed byte for byte with a clean native emission of all 256. The old bytes for the affected definition differed and the harness rejects them. The fixture uses one binding expression and independent literals. Its clean comparison scans the full corpus, and the measured patch time excludes initial admission and building the index.
+
+This result suggests where to join the existing compiler work. Admit a request with its environment, macro inputs and compiler generation. Record what each compiled definition actually reads against that immutable context, including failed lookups. Reuse its artifact when those observations still hold. Publish a complete generation and let earlier requests finish against their own roots. The existing closure replay already tracks registry inputs and has cases that fall back to a clean compile. An identifier-only index cannot justify reusing an arbitrary macro expansion. [[file:../../native-seed/speed/front/observe-links.bl][Existing link-replay implementation]] · [[file:../../native-seed/speed/attrib/raw/bound-runtime-replay.json][Fuller closure-replay controls]]
+
+I would integrate request-scoped generation selection into the warm native compiler first. It fixes a small, executable counterexample at a boundary that also owns cache validity. I would keep the mailbox candidate in research until a real service supplies a distribution of queue depths, match positions and fork frequency. The scheduling controls give us a second inquiry at shallow depths: count allocations in process-map updates, callable dispatch and run-turn bookkeeping separately. We can then decide whether the next experiment should change the queue, the scheduler, or the core value representation. For comparison with Bend use a matched pure program and end-to-end latency. For correctness work, the CakeML lesson here is to state an observation and prove what one pass preserves. A useful addition after generation pinning is an independent lexical-scope check on emitted code. It would catch this mixed identifier; preserving effects and message ownership needs stronger observations. [[https://cakeml.org/jfp19.pdf][CakeML verified backend]]
+
+#+begin_src beam-lisp :id native-actor-lab-receipt
+(let [r (Jason/decode! (File/read! "research/checked-tiles/evidence/native-actor-lab.json"))
+      runs (get r "drain")
+      high (filter (fn [row] (= 2048 (get row "n"))) runs)
+      comp (get r "compiler")
+      q (first (filter (fn [row] (= "queue" (get row "arm"))) high))
+      v (first (filter (fn [row] (= "vector" (get row "arm"))) high))
+      proof (last (get r "invalidation"))]
+  (assert (= 30 (count runs)))
+  (assert (= [2098176 2048 2048] [(get v "vector_input_slots") (get q "head_advances") (get q "transferred")]))
+  (assert (= [7 "unbound"] (mapv (fn [row] (get row "evaluated")) comp)))
+  (assert (= 255 (get proof "reused")))
+  (assert (= 8192 (get (first (get r "fork_cost")) "transferred")))
+  {:head-probes (get q "probes") :weak-after-release (get (first (get r "revision")) "weak_released")
+   :re-emitted (get proof "re_emitted") :pending-control (get (second comp) "pending_output")})
+#+end_src
+
+Open the [[https://work.tailcb5318.ts.net:18180/#actors][native actor lab]] and choose *Run native experiment* to exercise the short run. The full timing sweep is available alongside the button. From the checkout, =research/checked-tiles/actor-lab/run --quick= runs the short fixture and =research/checked-tiles/actor-lab/run= runs the full set. [[file:../README.md][Prerequisites and commands]]
