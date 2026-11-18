@@ -182,7 +182,8 @@
          frame (fn [entry] (if entry [(elem entry 1) (elem entry 2)] [:outside-observed-api]))]
     (boundary-event observed :file-read-owners [operation (frame (first parents)) (frame (peek parents))]))
    (and (:ownership? effects) (= :send kind) (= :code_server destination))
-   (let [rpc (when (and (= :code_call operation) (= 3 (erlang/tuple_size request))) (elem request 2))
+   (let [rpc (when (and (= :code_call operation) (erlang/is_tuple request)
+                        (= 3 (erlang/tuple_size request))) (elem request 2))
          outer (first (:pending-loader-owners effects))]
     (boundary-event observed :code-server-owners [(message-operation rpc) (when outer (elem outer 1))]))
    :else observed)))
@@ -359,6 +360,11 @@
  (case function
   :op_of (if (erlang/is_atom value) [:operation value] :unavailable)
   :source_head (if (nil? value) :no-source-extent :unavailable)
+  :application-setting (cond
+                        (= :undefined value) :missing-application-setting
+                        (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :ok (elem value 0)))
+                        (application-setting (elem value 1))
+                        :else :unavailable)
   :get_env (if (= 4 (count key))
              (application-setting value)
              (cond
@@ -380,13 +386,22 @@
             :search_paths [function]
             :source_head [function]
             :op_of (when (every? erlang/is_atom arguments) (into [function] arguments))
-            :get_env (when (every? erlang/is_atom arguments) (into [function] arguments)))]
-  (update effects :pending-env-reads (fn [stack] (conj (or stack []) [entry key])))))
+            :get_env (let [name (second arguments)]
+                       (when (and (erlang/is_atom argument) (erlang/is_atom name))
+                        [:application-setting argument name])))]
+  (update effects :pending-env-reads
+   (fn [stack] (conj (or stack []) [entry key (when (= :get_env function) (nth arguments 2 nil))])))))
 
 (defn- finish-env-read [effects entry kind value]
- (let [[expected key] (peek (:pending-env-reads effects))
+ (let [[expected key default] (peek (:pending-env-reads effects))
        reads (:env-reads effects {})
-       outcome (when (and key (= kind :return_from)) (env-read-result key value))
+       outcome (when (and key (= kind :return_from))
+                 (if (= entry (tuple :application_controller :get_env 3))
+                  ;; A fresh opaque default (as used by Application) is not
+                  ;; an input. Confirm this apparent miss via get_env/2
+                  ;; before persisting an application key.
+                  (if (erlang/=:= default value) :missing-application-setting (application-setting value))
+                  (env-read-result key value)))
        total (inc (:env-read-count effects 0))
        rejected (or (nil? key) (nil? outcome) (= :unavailable outcome))]
   (when-not (= entry expected) (throw (ex-info "Unexpected Env read return" {:entry entry :expected expected})))
@@ -415,6 +430,7 @@
                                                 :unavailable
                                                 (BeamLisp.Env/op_of argument name))
                                        :source_head (when (BeamLisp.Env/source_execution_active?) :active)
+                                       :application-setting (application/get_env argument name)
                                        :get_env (if (= 4 (count key))
                                                  (application/get_env argument name default)
                                                  (application/get_env argument name)))
@@ -1485,13 +1501,12 @@
 (defn- runtime-read-control []
  (let [control :native_relink_runtime_control
        operation-key [:op_of :erlang control]
-       setting-key [:get_env :kernel control]
-       default-key [:get_env :kernel control :fallback]
+       setting-key [:application-setting :kernel control]
        extent-key [:source_head]
        read (fn []
               (BeamLisp.Env/op_of :erlang control)
               (application/get_env :kernel control)
-              (application/get_env :kernel control :fallback)
+              (application/get_env :kernel control (erlang/make_ref))
               (BeamLisp.Env/source_execution_active?))
        capture (fn [] (get-in (second (trace! read {:runtime-reads? true})) [:effects :env-reads]))]
   (assert (= :undefined (application/get_env :kernel control)))
@@ -1499,19 +1514,22 @@
   (try
    (let [before (capture)]
     (assert (= {operation-key [:operation nil] setting-key :missing-application-setting
-                default-key [:application-value :fallback] extent-key :no-source-extent} before))
+                extent-key :no-source-extent} before))
     (assert (empty? (changed-env-reads before)))
     (BeamLisp.Env/register_op :erlang control :read)
     (assert (= [operation-key] (changed-env-reads before)))
     (assert (= :ok (application/set_env :kernel control :undefined)))
-    (assert (= #{operation-key setting-key default-key} (set (changed-env-reads before))))
+    (assert (= #{operation-key setting-key} (set (changed-env-reads before))))
     (let [after (capture)]
      (assert (= [:application-value :undefined] (get after setting-key)))
      (assert (empty? (changed-env-reads after))))
+    (let [[_ observed] (trace! #(application/get_env :kernel control :undefined) {:runtime-reads? true})]
+     (assert (= [setting-key] (changed-env-reads (get-in observed [:effects :env-reads])))))
     (assert (= :unavailable (env-read-result extent-key (tuple :unportable (erlang/self)))))
     {:schema "bl.native.runtime-read-control" :version 1 :reuse-authority false
      :operation-miss-tracked true :operation-change-detected true :application-change-detected true
      :unset-distinguished-from-configured-undefined true
+     :opaque-application-default-excluded true :configured-default-collision-refused true
      :no-source-extent-tracked true :live-source-extent-refused true})
    (finally
     (application/unset_env :kernel control)
@@ -1770,11 +1788,13 @@
            (throw (ex-info "Native registry capture diverged from the qualified donor"
                     {:namespace (:ns member)})))
        effects (:effects observed)
+       application-reads (filter (fn [[[function] _]] (= :application-setting function)) (:env-reads effects))
        reason (cond
                 (not (registry-lowering-supported? effects (registry-phase-status observed))) :unaccounted-registry
                 (not (:all-expansions-owned (macro-lookup-summary observed))) :ordinary-macro
                 (:unknown-env-read effects) :unknown-env-read
                 (:unstable-env-read effects) :unstable-env-read
+                (seq (changed-env-reads application-reads)) :unstable-application-read
                 (:unknown-code-read effects) :unknown-code-read
                 (seq (:code-mutations effects)) :code-mutated-during-lowering
                 (:unknown-resolver-read effects) :unknown-resolver-read
@@ -1860,6 +1880,7 @@
      (contains? entry :env-reads)
      (assoc :env-read-calls (:env-read-calls entry)
             :distinct-env-reads (count (:env-reads entry))
+            :env-read-keys-by-function (frequencies (map first (keys (:env-reads entry))))
             :changed-env-reads changed-env)
      (contains? entry :code-reads)
      (assoc :code-read-calls (:code-read-calls entry)
