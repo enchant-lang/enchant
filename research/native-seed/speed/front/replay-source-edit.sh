@@ -11,15 +11,19 @@ set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
   echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --capture-local QUALIFICATION PHASE_MACRO_SAMPLES [--arity]" >&2
-  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --stage-link-plan QUALIFICATION [--arity]" >&2
+  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json {--stage-link-plan|--stage-link-guard} QUALIFICATION [--arity]" >&2
   exit 2
 }
 capture_local=false
 stage_link_plan=false
 edit=
-if [[ "${3:-}" == --stage-link-plan ]]; then
+if [[ "${3:-}" == --stage-link-plan || "${3:-}" == --stage-link-guard ]]; then
   [[ $# == 4 || $# == 5 ]] || usage
   stage_link_plan=true
+  stage_replay_mode=--replay-stage-link-plan
+  if [[ "$3" == --stage-link-guard ]]; then
+    stage_replay_mode=--guard-stage-link-plan
+  fi
   qualification=$(realpath "$4")
   edit=${5:-}
 elif [[ "${3:-}" == --capture-local ]]; then
@@ -175,7 +179,7 @@ fi
 run_update "$edited"
 if "$stage_link_plan"; then
   "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
-    "$edited/link-rows.etf" --replay-stage-link-plan "$report" "$plan" "$plan_sha"
+    "$edited/link-rows.etf" "$stage_replay_mode" "$report" "$plan" "$plan_sha"
 elif [[ -n "${receipt:-}" ]]; then
   mode=--bound-registry
   extra=()
