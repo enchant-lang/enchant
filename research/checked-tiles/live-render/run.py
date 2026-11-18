@@ -275,11 +275,15 @@ def run(out, edit, manual):
             row.update(frame_sha256=sha(path.read_bytes()), rgba_sha256=sha(packed), render_and_png_ms=elapsed(t))
 
         def publish(label, row, previous):
+            if row['proof']['verdict'] != 'true':
+                return {'status': 'rejected', 'witness': row['proof']['witness']}
+            check((out / label / 'frame.png').is_file(), 'qualified candidate missing a complete frame')
             selected = owner.request('publish', id=label, expected=previous)
             check(selected == {'status': 'applied', 'digest': row['digest']}, selected)
             # The new frame exists in immutable storage before the serving slot flips.
             status('serving', label)
             evidence['source_published'].append(selected['digest'])
+            return selected
 
         row_a, values_a, ref_a = prepare('A', a)
         render_accepted('A', row_a, values_a, ref_a)
@@ -364,6 +368,9 @@ def run(out, edit, manual):
         bad = materialize(out, 'bad', (HERE / 'rejected.bl').read_bytes(), entry)
         broken, _, _ = prepare('bad', bad)
         check(broken['proof']['witness'] == [64, 63] and broken['proof']['verdict'] == 'false', 'missing rejection')
+        rejected = publish('bad', broken, row_b['digest'])
+        check(rejected == {'status': 'rejected', 'witness': [64, 63]}, rejected)
+        evidence['rejected_publication'] = rejected
         still = owner.request('select')
         check(still['digest'] == row_b['digest'] and still['table'] == values_b, 'bad edit changed selection')
         check(sha((out/'B/frame.png').read_bytes()) == row_b['frame_sha256'], 'bad edit changed visible bytes')

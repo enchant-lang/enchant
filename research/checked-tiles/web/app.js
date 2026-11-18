@@ -243,6 +243,7 @@ async function filmProgress() {
       filmSaving = false;
       el('film-image').hidden = el('film-details').hidden = true;
       text('film-time', '');
+      delete el('film-time').dataset.ms;
       text('film-caption', '');
     }
     if (next.visible && displayedFilm !== next.visible) {
@@ -259,7 +260,7 @@ async function filmProgress() {
         text('film-time', 'Save click to decoded frame at the next paint opportunity · ' + duration(ms));
       }
     }
-    if (next.phase === 'awaiting-display' && displayedFilm === 'B') {
+    if (next.phase === 'awaiting-display' && displayedFilm === 'B' && savedAt !== undefined) {
       await fetch('/api/film-displayed', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Checked-Tiles': '1' },
         body: JSON.stringify({id: next.id}),
