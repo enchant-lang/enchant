@@ -393,9 +393,23 @@ export class Editor {
     }catch(error){event.preventDefault();this.report(error);}
   }
   download(format='json'){
-    const doc=this.session.export(),body=this.recoveryFailure?JSON.stringify(this.recoveryFailure,null,2):format==='markdown'?markdown(doc):JSON.stringify(doc,null,2)+'\n';
-    const url=URL.createObjectURL(new Blob([body],{type:format==='markdown'?'text/markdown':'application/json'}));
-    const a=document.createElement('a');a.href=url;a.download=(doc.meta.title||'Untitled').replaceAll(/[\\/:*?"<>|]/g,'-')+(format==='markdown'?'.md':'.enchant.json');a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    let output;
+    try {
+      if(this.recoveryFailure){
+        output={body:JSON.stringify(this.recoveryFailure,null,2),mime:'application/json',extension:'.enchant.json'};
+      }else if(format==='json'){
+        output={body:JSON.stringify(this.session.export(),null,2)+'\n',mime:'application/json',extension:'.enchant.json'};
+      }else if(format==='markdown'){
+        output={body:markdown(this.session.export()),mime:'text/markdown',extension:'.md'};
+      }else{
+        output=this.session.exportSource(format);
+      }
+    } catch(error) {
+      return this.report(Error('Could not export this draft. Download the Enchant draft to keep your edits.',{cause:error}));
+    }
+    const url=URL.createObjectURL(new Blob([output.body],{type:output.mime}));
+    const a=document.createElement('a');a.href=url;a.download=(this.session.read().meta.title||'Untitled').replaceAll(/[\\/:*?"<>|]/g,'-')+output.extension;
+    a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
   dispose(){
     if(this.disposed)return;this.persist();this.disposed=true;this.controller.abort();this.unsubscribe();

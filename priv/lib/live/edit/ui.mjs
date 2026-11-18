@@ -168,7 +168,12 @@ class DefaultUI {
         if(!removed){this.editor.report(Error('The saved draft could not be cleared. Keep the download and try again.'));return;}
         this.editor.recoveryFailure=null;this.editor.message='';
         if(reload)location.reload();else this.editor.run('use-confirmed');});confirmed.append(element('span','',label));
-      const actions=element('div','ed-conflict-actions');actions.append(download,confirmed);content.append(actions);this.conflict.append(content);
+      const actions=element('div','ed-conflict-actions');
+      for(const format of this.editor.recoveryFailure?[]:this.editor.session.exportFormats()){
+        const exportDraft=button(format.label,'download',()=>this.editor.download(format.id));
+        exportDraft.append(element('span','',format.label));actions.append(exportDraft);
+      }
+      actions.append(download,confirmed);content.append(actions);this.conflict.append(content);
     }else if(!conflict){this.conflict.hidden=true;this.conflictShown=false;}
     const focus=this.editor.canvas.contains(document.activeElement),touch=matchMedia('(pointer: coarse)').matches;
     this.mobile.dataset.visible=String(touch&&focus&&!conflict&&!this.editor.composing);
@@ -363,12 +368,17 @@ class DefaultUI {
   }
   documentMenu(anchor){
     const token=this.panelTarget(),content=element('div','ed-document-menu');
-    for(const item of (this.editor.model['document-actions']||[
+    const actions=this.editor.model['document-actions']||[
       {label:'Download Enchant source',icon:'download',action:()=>this.editor.download()},
       {label:'Export Markdown',icon:'text',action:()=>this.editor.download('markdown')},
       {label:'View source',icon:'code',action:()=>this.source()},
       {label:'Switch appearance',icon:'moon',action:()=>{const value=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=value;for(const view of this.editor.surfaces.owned.values())view.element.dataset.theme=value;localStorage.setItem('enchant.edit.theme',value);}},
-    ]))content.append(this.menuRow(item,()=>{this.panel.hide('choose');item.action?.();}));this.openPanel(content,token,anchor);
+    ];
+    const formats=this.editor.recoveryFailure?[]:this.editor.session.exportFormats().map(format=>({
+      label:format.label,icon:'download',action:()=>this.editor.download(format.id),
+    }));
+    for(const item of [...formats,...actions])content.append(this.menuRow(item,()=>{this.panel.hide('choose');item.action?.();}));
+    this.openPanel(content,token,anchor);
   }
   source(){
     const dialog=element('dialog','ed-source-dialog');dialog.setAttribute('aria-label','Document source');
