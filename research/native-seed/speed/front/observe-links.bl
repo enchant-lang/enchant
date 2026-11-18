@@ -994,13 +994,22 @@
     :members (mapv (fn [ns] (registry-shadow-member closure baseline candidate (get-in closure [:units ns]) entries))
                    (:order closure))})))
 
-(defn- closed-identity [value]
+(defn- bounded-etf [value]
  (when (<= (erlang/external_size value) (:max-bytes artifact/limits))
-  (let [bytes (erlang/term_to_binary value (list :deterministic))]
-   (try
-    (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
-    (artifact/sha bytes)
-    (catch _ nil)))))
+  (erlang/term_to_binary value (list :deterministic))))
+
+(defn- closed-identity [value]
+ (when-let [bytes (bounded-etf value)]
+  (try
+   (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
+   (artifact/sha bytes)
+   (catch _ nil))))
+
+(defn- matches-captured-etf? [value digest]
+ ;; Capture checked the exact bytes. Replay hashes its encoded value for
+ ;; equality with that digest and never decodes the candidate bytes.
+ (when-let [bytes (bounded-etf value)]
+  (= digest (artifact/sha bytes))))
 
 (defn- callable-identity [value depth]
  (when (and (pos? depth) (erlang/is_function value))
@@ -1029,12 +1038,20 @@
     [:arity-dispatch fixed (when variadic [(elem variadic 0) rest-fn])]))
   :else (when-let [id (closed-identity value)] [:data id])))
 
+(defn- registry-row-signature [value callables]
+ (when (vector? value)
+  (let [rows (mapv (fn [row] (mapv #(registry-field-identity % callables) (erlang/tuple_to_list row))) value)]
+   (when (every? (fn [row] (every? some? row)) rows) [:rows rows]))))
+
 (defn- registry-value-signature [value callables]
- (if-let [identity (closed-identity value)]
-  [:closed identity]
-  (when (vector? value)
-   (let [rows (mapv (fn [row] (mapv #(registry-field-identity % callables) (erlang/tuple_to_list row))) value)]
-    (when (every? (fn [row] (every? some? row)) rows) [:rows rows])))))
+ (if-let [identity (closed-identity value)] [:closed identity]
+  (registry-row-signature value callables)))
+
+(defn- registry-value-matches? [value expected callables]
+ (case (first expected)
+  :closed (matches-captured-etf? value (second expected))
+  :rows (= expected (registry-row-signature value callables))
+  false))
 
 (defn- receipt-key-description [input]
  (let [[operation slot key] input]
@@ -1104,14 +1121,14 @@
                    (vec (take 12 (keep (fn [[key expected]]
                                         (let [current (registry-input-state key scope ancestors)]
                                          (when (or (= current :unavailable)
-                                                   (not= expected (registry-value-signature current callables)))
+                                                   (not (registry-value-matches? current expected callables)))
                                           (receipt-key-description key))))
                                  (:registry entry)))))
          reason (or (:reason entry)
                     (cond
                      (not= [(:module member) (:path member) (:source-sha256 member)]
                            [(:module entry) (:path entry) (:source-sha256 entry)]) :member-changed
-                     (not= (:prepared entry) (closed-identity (prepared-inputs prepared))) :prepared-input-changed
+                     (not (matches-captured-etf? (prepared-inputs prepared) (:prepared entry))) :prepared-input-changed
                      (or (seq (changed-source-probes (:probes entry) (presence-snapshot (:probes entry))))
                          (some (fn [[path digest]]
                                  (or (= :unavailable digest) (not= digest (read-source-identity path)))) (:sources entry)))
