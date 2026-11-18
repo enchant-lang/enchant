@@ -99,7 +99,8 @@ theorem pop_weighted (ds tail : Digits α) (x : α) (ok : weighted ds)
     | node y left right =>
       simp [pop] at step
       obtain ⟨_, rfl⟩ := step
-      simpa [weighted] using And.intro left (And.intro right restOk)
+      have half (n : Nat) : (2 * n + 1) / 2 = n := by omega
+      simpa [weighted, half] using And.intro left (And.intro right restOk)
 
 -- Fuel is the number of live rear entries. It makes the model total.
 def rotate : Nat → Digits α → Digits α → Digits α
