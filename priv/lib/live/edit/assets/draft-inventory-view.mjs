@@ -69,7 +69,7 @@ export function mountDraftInventory(root, initial) {
       for (const entry of rows) {
         const item = template.content.cloneNode(true);
         const [kind, resource] = label(entry);
-        item.querySelector('[data-draft-inventory-kind]').textContent = kind;
+        item.querySelector('[data-draft-inventory-kind]').textContent = entry.readable ? kind : kind + ' · Recovery data only';
         item.querySelector('[data-draft-inventory-resource]').textContent = resource;
         const time = item.querySelector('time');
         if (entry.updated > 0) {
@@ -80,7 +80,7 @@ export function mountDraftInventory(root, initial) {
           time.hidden = true;
         }
         const open = item.querySelector('[data-draft-inventory-open]');
-        open.hidden = !model.location;
+        open.hidden = !model.location || !entry.readable;
         open.addEventListener('click', () => reopen(entry, open));
         item.querySelector('[data-draft-inventory-download]').addEventListener('click', () => {
           try { download(model.scope, entry); inform('Downloaded the original recovery data.'); }

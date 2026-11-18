@@ -27,8 +27,8 @@ test('lists scoped recovery from every tab without leaking content or checkpoint
     [other, '{"updated":9}']
   ]);
   assert.deepEqual(retainedDrafts('alice/',storage),[
-    {key:rich, resource:'alice/doc', tab:'tab-b', type:'editor', updated:6},
-    {key:text, resource:'alice/doc/source', tab:'tab-a', type:'text', updated:5}
+    {key:rich, resource:'alice/doc', tab:'tab-b', type:'editor', updated:6, readable:true},
+    {key:text, resource:'alice/doc/source', tab:'tab-a', type:'text', updated:5, readable:true}
   ]);
   assert.deepEqual(retainedDrafts('',storage),[]);
   assert.throws(() => exportRetainedDraft('alice/',other,storage),/outside/);
@@ -71,7 +71,7 @@ test('unreadable and foreign pointers never open another recovery', () => {
   const foreign = key('edit.v2','bob/doc','tab-a')+':checkpoint:foreign';
   const damaged = key('text.v1','alice/doc/source','tab-b');
   const storage = memory([[rich,JSON.stringify({schema:3,checkpointKey:foreign,recovery})],[foreign,checkpoint],[damaged,'{']]);
-  assert.equal(retainedDrafts('alice/',storage).length,2);
+  assert.deepEqual(retainedDrafts('alice/',storage).map(draft=>draft.readable),[false,false]);
   assert.equal(exportRetainedDraft('alice/',rich,storage).checkpointRaw,null);
   assert.equal(exportRetainedDraft('alice/',damaged,storage).raw,'{');
   assert.throws(() => copyRetainedDraft('alice/',rich,'tab-c',storage),/unreadable/);
