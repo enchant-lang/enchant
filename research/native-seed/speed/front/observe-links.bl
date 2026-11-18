@@ -42,34 +42,57 @@
     (erlang/apply :trace :session_destroy (list session))
     (Process/exit observer :kill)))))
 
-(defn- observe [partition rows-file selected]
+(defn- read-rows [path]
+ (let [text (File/read! path)]
+  (BeamLisp.CompilerData/check_closed_etf! text artifact/limits)
+  {:sha256 (artifact/sha text) :rows (erlang/binary_to_term text)}))
+
+(defn- installed-rows [rows]
+ (into {} (map (fn [[ns name info private?]] [[ns name] [info private?]]) rows)))
+
+(defn- compile-member [closure member rows]
+ (BeamLisp.Env/isolated
+  (fn []
+   (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
+   (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info))
+   (BeamLisp.Compiler/with_fresh_names
+    (fn [] (trace! (fn []
+                    (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity}))))))))
+
+(defn- compare-rows [closure member installed compiled consulted-keys candidate]
+ (let [incoming (installed-rows (:rows candidate))
+       changed (vec (filter (fn [key] (not= (get installed key) (get incoming key)))
+                           (sort (into (set (keys installed)) (keys incoming)))))
+       consulted (vec (filter consulted-keys changed))
+       [next _] (compile-member closure member (:rows candidate))
+       exact? (erlang/=:= (erlang/term_to_binary (:defs compiled) (list :deterministic))
+                         (erlang/term_to_binary (:defs next) (list :deterministic)))]
+  (when (and (empty? consulted) (not exact?))
+   (throw (ex-info "The recorded links missed an actual ANF change" {:changed changed})))
+  {:candidate-rows-sha256 (:sha256 candidate)
+   :changed-rows changed :changed-consulted-rows consulted :exact-anf exact?}))
+
+(defn- observe [partition rows-file selected comparison]
  (let [closure (artifact/read-closure partition)
        member (get-in closure [:units selected])
-       rows-text (File/read! rows-file)
-       _ (BeamLisp.CompilerData/check_closed_etf! rows-text artifact/limits)
-       rows (erlang/binary_to_term rows-text)
-       installed (set (mapv (fn [[ns name _ _]] [ns name]) rows))
+       {:keys [rows sha256]} (read-rows rows-file)
+       installed (installed-rows rows)
        _ (assert (some? member))
-       [compiled observation]
-       (BeamLisp.Env/isolated
-        (fn []
-         (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
-         (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info))
-         (trace! (fn []
-                  (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity})))))
+       [compiled observation] (compile-member closure member rows)
        keys (sort (into (:hits observation) (:misses observation)))]
   (assert (= (:source-sha256 member) (:source-sha256 compiled)))
   {:schema "bl.native.installed-link-observation" :version 1
    :namespace selected :source-sha256 (:source-sha256 member)
-   :link-rows-sha256 (artifact/sha rows-text)
+   :link-rows-sha256 sha256
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :lookups (:calls observation)
    :lookup-hits (vec (sort (:hits observation)))
    :lookup-misses (vec (sort (:misses observation)))
    :present-in-member-rows (vec (filter installed keys))
    :absent-from-member-rows (vec (remove installed keys))
-   :scope "Filtered ETS consultations in one synchronous staged compile. A missing installed member row can still have another resolver fallback."
+   :comparison (when comparison (compare-rows closure member installed compiled (set keys) (read-rows comparison)))
+   :scope "Filtered ETS consultations in synchronous staged compilation of unchanged Source. A missing installed member row can still have another resolver fallback."
    :reuse-authority false}))
 
-(let [[partition rows selected output] (BeamLisp/argv)]
- (File/write! output (json/encode (observe partition rows selected))))
+(let [[partition rows selected output comparison] (BeamLisp/argv)]
+ (File/write! output (json/encode (observe partition rows selected comparison))))
