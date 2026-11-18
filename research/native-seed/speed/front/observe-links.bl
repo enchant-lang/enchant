@@ -9,6 +9,7 @@
 ;;   BASE_PARTITION BASE_LINK_ROWS --capture-source RECEIPT.etf
 ;;   EDITED_PARTITION EDITED_LINK_ROWS --source-shadow REPORT BASE_PARTITION RECEIPT.etf
 ;;   PARTITION LINK_ROWS --macro-context-control REPORT
+;;   PARTITION LINK_ROWS --phase-macros REPORT
 ;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
@@ -22,6 +23,7 @@
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
 (def macro-entry (tuple :Elixir.BeamLisp.Ns.Compiler :expand-macro 4))
+(def macro-result-entry (tuple :Elixir.BeamLisp.Ns.Compiler :datum-macro-result 1))
 (def link-put-entry (tuple :ets :insert 2))
 (def link-delete-entry (tuple :ets :delete 2))
 (defn- source-path [raw]
@@ -77,6 +79,22 @@
    (-> next (assoc-in [:macro-origins callable] origin)
        (update-in [:macro-bindings [ns head]] (fn [known] (conj (or known #{}) origin)))))))
 
+(defn- start-macro-sample [effects [callable form args env] head]
+ (let [key [(:ns env) head (get-in effects [:macro-origins callable])]
+       samples (:macro-samples effects {})
+       sample (when-not (or (contains? samples key) (>= (count samples) 32))
+                {:key key :form form :args args :locals (keys (:locals env))})]
+  (-> effects
+      (update :macro-stack (fn [stack] (conj (or stack []) sample)))
+      (cond-> (and (nil? sample) (not (contains? samples key))) (assoc :sample-limit true)))))
+
+(defn- record-macro-sample [effects value]
+ (if-let [{:keys [key] :as sample} (peek (:macro-stack effects))]
+  (if (contains? (get-in effects [:macro-samples key] {}) :outcome)
+   effects
+   (assoc-in effects [:macro-samples key] (assoc (dissoc sample :key) :outcome value)))
+  effects))
+
 (defn- record-link [effects op key value]
  (let [events (:ordered-links effects []) scope (elem key 0) member [(elem key 2) (elem key 3)]]
   (cond
@@ -101,12 +119,18 @@
     (if outcome
      (recur (inc calls) nil (conj hits key) misses reads sources next-effects)
      (recur (inc calls) nil hits (conj misses key) reads sources next-effects))))
+  [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :expand-macro 4] _]
+  (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :call [module function arguments]]
   (let [entry (tuple module function (count arguments)) key (first arguments)]
    (cond
     (= entry macro-entry)
-    (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)]
-     (recur calls pending hits misses reads sources (record-macro effects (:ns env) head key)))
+    (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)
+          next-effects (record-macro effects (:ns env) head key)]
+     (recur calls pending hits misses reads sources
+      (if (:sample-macros? effects) (start-macro-sample next-effects arguments head) next-effects)))
+    (= entry macro-result-entry)
+    (recur calls pending hits misses reads sources (record-macro-sample effects key))
     (or (= entry link-put-entry) (= entry link-delete-entry))
     (let [writing? (= entry link-put-entry) row (second arguments)
           key (if writing? (elem row 0) row)
@@ -129,14 +153,16 @@
   [:finish parent ticket]
   (erlang/send parent [:observed ticket
     {:calls calls :hits hits :misses misses :sources sources :effects effects
-     :complete? (and (nil? pending) (empty? reads) (<= calls trace-limit)
+     :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
                     (<= (count (:ordered-links effects [])) trace-limit)
                     (<= (:count effects 0) trace-limit) (<= (count sources) 1024))}])))
 
 (defn- trace! [action]
  (let [owner (erlang/self) scope (BeamLisp.Env/env_id)
+       sample-macros? (Process/get :native_phase_macro_samples false)
        ancestors (into {} (map-indexed (fn [index id] [id index]) (rest (BeamLisp.Env/chain))))
-       observer (spawn (fn [] (collector 0 nil #{} #{} [] #{} {:scope scope :ancestor-slots ancestors})))
+       observer (spawn (fn [] (collector 0 nil #{} #{} [] #{} {:scope scope :ancestor-slots ancestors
+                                                              :sample-macros? sample-macros?})))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
        match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))
        source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))
@@ -146,7 +172,11 @@
                   (list session (tuple :ets :lookup 2) match (list :local)))))
    (doseq [entry source-read-entries]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
-   (doseq [[entry spec] [[macro-entry true]
+   (when sample-macros?
+    (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
+   (doseq [[entry spec] [[macro-entry (if sample-macros?
+                                       (list (tuple :_ (list) (list (tuple :return_trace))))
+                                       true)]
                          [link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
                          [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]]]
     (assert (= 1 (erlang/apply :trace :function (list session entry spec (list :local))))))
@@ -310,6 +340,74 @@
    :source-sha256 (:source-sha256 left) :link-rows-sha256 (:sha256 baseline)
    :same-source-read-outcomes same-files? :same-link-receipt same-links?
    :same-definition-bytes same-anf? :input "process dictionary read during a staged macro"}))
+
+(defn- pinned-core-macro? [origin]
+ (let [entries (:entries origin)]
+  (and (seq entries)
+       (every? (fn [entry] (and (:matches-pinned-module entry)
+                                (= "Elixir.BeamLisp.Ns.Init.Core.Macros" (:module entry))
+                                (zero? (:capture-count entry)))) entries))))
+
+(defn- interpreted-macro [head origin {:keys [form args locals outcome]}]
+ (if-not (pinned-core-macro? origin)
+  {:status :declined :reason :not-pinned-core-macro}
+  (let [session (BeamLisp.AOT/open_constructor_session!)]
+   (try
+    (let [binding (BeamLisp.AOT/sdk_binding! "core" head)
+          declaration (BeamLisp.CompilerData/sdk_macro_declaration binding)
+          claim (:sdk-macro (nth declaration 2))
+          identity (BeamLisp.AOT/bind_sdk_macro_constructor_session! session claim
+                    {:namespace "core" :form (BeamLisp.Reader/read_one (pr-str declaration))})
+          environment (into {} (map (fn [name] [(rn/sym-node name) name]) locals))
+          arguments (concat [(BeamLisp.Compiler/datum form) environment] (map BeamLisp.Compiler/datum args))
+          calculated (BeamLisp.AOT/eval_constructor_session! session
+                       {:op :apply :fn {:op :var :name "macro"}
+                        :args (mapv (fn [value] {:op :lit :val value}) arguments)}
+                       {} {"macro" identity})]
+     {:status (if (erlang/=:= outcome calculated) :matched :different)
+      :constructor-work (:budget (BeamLisp.AOT/constructor_session_status session))})
+    (catch error {:status :declined :reason (or (:detail (ex-data error)) (:kind (ex-data error)) (ex-message error))})
+    (finally (BeamLisp.AOT/close_constructor_session! session))))))
+
+(defn- sample-phase-macros [closure baseline]
+ (Process/put :native_phase_macro_samples true)
+ (try
+  (let [started (erlang/monotonic_time :microsecond)
+        observed (reduce (fn [acc ns]
+                           (let [member (get-in closure [:units ns])
+                                 [unit observation] (compile-member closure member (:rows baseline))
+                                 effects (:effects observation)
+                                 samples (:macro-samples effects {})]
+                            (assert (erlang/=:= (def-bytes unit) (def-bytes member)))
+                            (assert (not (:sample-limit effects)))
+                            (assert (= (count samples) (reduce + 0 (map count (vals (:macro-bindings effects))))))
+                            (reduce (fn [out [[namespace head origin] sample]]
+                                      (update out [head origin]
+                                       (fn [entry] {:namespaces (conj (:namespaces entry []) namespace)
+                                                    :sample (or (:sample entry) sample)})))
+                                    acc samples))) {} (:order closure))
+        captured (erlang/monotonic_time :microsecond)
+        results (mapv (fn [[[head origin] {:keys [namespaces sample]}]]
+                        (assoc (interpreted-macro head origin sample)
+                               :head head :origin origin :affected-members (vec (sort (distinct namespaces)))))
+                      (sort observed))
+        control-path "research/native-seed/speed/front/macro-context-fixture.bl"
+        _ (Process/put :native_relink_context_fixture 19)
+        [unit control] (compile-member closure {:path control-path} (:rows baseline))
+        [[[_ head origin] sample]] (filter (fn [[[_ head _] _]] (= "staged-input" head))
+                                           (get-in control [:effects :macro-samples]))
+        denied (interpreted-macro head origin sample)]
+   (assert (= 19 (:outcome sample)))
+   (assert (= :not-pinned-core-macro (:reason denied)))
+   {:schema "bl.native.pinned-macro-phase-samples" :version 1 :reuse-authority false
+    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+    :link-rows-sha256 (:sha256 baseline) :exact-members (count (:order closure))
+    :capture-us (- captured started)
+    :interpreter-and-control-us (- (erlang/monotonic_time :microsecond) captured)
+    :samples results :ambient-control denied})
+  (finally
+   (Process/delete :native_relink_context_fixture)
+   (Process/delete :native_phase_macro_samples))))
 
 (defn- source-identity [path]
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
@@ -505,6 +603,7 @@
                 (= selected "--capture-source") (capture-source closure baseline)
                 source-shadow? (source-shadow closure baseline comparison source-receipt)
                 (= selected "--macro-context-control") (macro-context-control closure baseline)
+                (= selected "--phase-macros") (sample-phase-macros closure baseline)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
