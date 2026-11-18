@@ -79,14 +79,39 @@
 (defn- installed-rows [rows]
  (into {} (map (fn [[ns name info private?]] [[ns name] [info private?]]) rows)))
 
+(defn- install-rows! [closure rows]
+ (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
+ (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info)))
+
+(defn- compile-staged [member]
+ (trace! (fn [] (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity}))))
+
 (defn- compile-member [closure member rows]
  (BeamLisp.Env/isolated
   (fn []
-   (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
-   (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info))
-   (BeamLisp.Compiler/with_fresh_names
-    (fn [] (trace! (fn []
-                    (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity}))))))))
+   (install-rows! closure rows)
+   (BeamLisp.Compiler/with_fresh_names (fn [] (compile-staged member))))))
+
+(defn- def-bytes [unit]
+ (erlang/term_to_binary (:defs unit) (list :deterministic)))
+
+(defn- observe-sequential [closure {:keys [rows sha256]}]
+ (let [results (BeamLisp.Env/isolated
+                (fn []
+                 (install-rows! closure rows)
+                 (mapv (fn [ns]
+                         (let [member (get-in closure [:units ns])
+                               [compiled observed] (compile-staged member)]
+                          (assert (= (:source-sha256 member) (:source-sha256 compiled)))
+                          {:namespace ns :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))
+                           :actual-definitions-sha256 (artifact/sha (def-bytes compiled))
+                           :source-read-outcomes (vec (sort (:sources observed)))
+                           :lookup-hits (vec (sort (:hits observed)))
+                           :lookup-misses (vec (sort (:misses observed)))}))
+                       (:order closure))))]
+  {:schema "bl.native.link-sequential-observation" :version 1 :link-rows-sha256 sha256
+   :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+   :members results :reuse-authority false}))
 
 (defn- compare-rows [closure member installed compiled consulted-keys candidate]
  (let [incoming (installed-rows (:rows candidate))
@@ -94,8 +119,7 @@
                            (sort (into (set (keys installed)) (keys incoming)))))
        consulted (vec (filter consulted-keys changed))
        [next next-observation] (compile-member closure member (:rows candidate))
-       exact? (erlang/=:= (erlang/term_to_binary (:defs compiled) (list :deterministic))
-                         (erlang/term_to_binary (:defs next) (list :deterministic)))]
+       exact? (erlang/=:= (def-bytes compiled) (def-bytes next))]
   (when (and (empty? consulted) (not exact?))
    (throw (ex-info "The recorded links missed an actual ANF change" {:changed changed})))
   {:candidate-rows-sha256 (:sha256 candidate)
@@ -130,9 +154,11 @@
  (let [closure (artifact/read-closure partition)
        baseline (read-rows rows)
        candidate (when comparison (read-rows comparison))
-       report (if (= selected "--all")
+       report (cond
+                (= selected "--sequential") (observe-sequential closure baseline)
+                (= selected "--all")
                 {:schema "bl.native.link-observation-inventory" :version 2
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
-                (observe closure baseline selected candidate))]
+                :else (observe closure baseline selected candidate))]
   (File/write! output (json/encode report))))
