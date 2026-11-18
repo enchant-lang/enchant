@@ -2047,8 +2047,22 @@
          (list true)))
    tables))))
 
+(defn- namespace-existence-match? [pattern limit caller]
+ ;; The pinned Env callback checks only whether the first page has one row.
+ ;; A continuation or ordering-sensitive consumer stays on the full path.
+ (and (= caller (tuple :Elixir.BeamLisp.Env :"-ns_exists_uncached?/1-anonymous-0-" 1))
+      (= 1 limit)
+      (erlang/is_tuple pattern) (= 2 (erlang/tuple_size pattern)) (= :_ (elem pattern 1))
+      (let [key (elem pattern 0)]
+       (and (erlang/is_tuple key) (= 3 (erlang/tuple_size key))
+            (erlang/is_binary (elem key 1)) (= :_ (elem key 2))))))
+
 (defn- stage-link-guard-collector [events omitted unsupported]
  (receive
+  [:trace _ :call [:ets :match [_ pattern limit]] caller]
+  (recur (inc events) omitted
+   (if (namespace-existence-match? pattern limit caller) unsupported
+    (conj unsupported [:match 3 (pr-str caller)])))
   [:trace _ :call [:ets operation arguments]]
   (let [point? (contains? #{:lookup :member :lookup_element :update_counter :update_element :take} operation)
         info-item (when (and (= operation :info) (= 2 (count arguments))) (second arguments))
@@ -2080,7 +2094,7 @@
                               [:update_counter 3] [:update_counter 4] [:update_element 3] [:update_element 4] [:take 2]]]
     (when (erlang/function_exported :ets operation arity)
      (install operation arity (omitted-link-spec tables scope live retained arity))))
-   (doseq [[operation arity] [[:match_object 2] [:match_object 3] [:match 2] [:match 3]
+   (doseq [[operation arity] [[:match_object 2] [:match_object 3] [:match 2]
                               [:select 2] [:select 3] [:select_count 2] [:select_reverse 2] [:select_reverse 3] [:tab2list 1]
                               [:first 1] [:last 1] [:next 2] [:prev 2] [:slot 2]
                               [:first_lookup 1] [:last_lookup 1] [:next_lookup 2] [:prev_lookup 2] [:info 1] [:info 2]
@@ -2091,6 +2105,8 @@
        (tuple (apply list (cons table (repeat (dec arity) :_))) (list) (list true))) tables)))))
    (doseq [operation [:match_object :match :select :select_reverse]]
     (install operation 1 (list (tuple (list :_) (list) (list true)))))
+   (install :match 3 (apply list (map (fn [table]
+    (tuple (list table :_ :_) (list) (list (tuple :message (tuple :caller))))) tables)))
    ;; put/replace alone does not inspect the old value. insert_new does.
    ;; Watch single link objects and conservatively refuse row lists.
    (install :insert_new 2 (apply list (mapcat (fn [table]
@@ -2119,11 +2135,13 @@
          [result evidence] (guard-stage-links scope {(tuple "control" "omitted") true} {}
                              (fn [] (ets/lookup table key)
                               (ets/match_object table (tuple (tuple scope :_ :_ :_) :_))
+                              (ets/match table (tuple (tuple scope "control" :_) :_) 1)
                               (ets/info table :size)
                               :checked))]
     (assert (= :checked result))
     (assert (= [["control" "omitted"]] (:omitted-inputs evidence)))
-    (assert (= #{[:info 2 :size] [:match_object 2]} (set (:unsupported evidence))))
+    (assert (= #{[:info 2] [:match_object 2] [:match 3]}
+               (set (map #(subvec % 0 2) (:unsupported evidence)))))
     evidence))))
 
 (defn- capture-stage-link-plan [closure rowset qualification]
