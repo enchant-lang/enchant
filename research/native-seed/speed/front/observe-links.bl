@@ -85,18 +85,40 @@
   (mapv (fn [row] (erlang/delete_element 1 row)) value)
   value))
 
+(defn- registry-key-shape [key]
+ (cond
+  (erlang/is_atom key) [:atom key]
+  (erlang/is_tuple key)
+  (let [head (elem key 0)
+        kind (cond
+              (erlang/is_atom head) head
+              (erlang/is_tuple head) :environment
+              :else :other)
+        second (when (> (erlang/tuple_size key) 1) (elem key 1))]
+   [:tuple (erlang/tuple_size key) kind
+    (cond (erlang/is_atom second) second (erlang/is_pid second) :pid :else :data)])
+  :else [:other]))
+
+(defn- note-input-shape [effects field operation key]
+ (let [shapes (get effects field {})
+       shape [operation (registry-key-shape key)]]
+  (if (or (contains? shapes shape) (< (count shapes) 64))
+   (assoc effects field (update shapes shape (fn [n] (inc (or n 0)))))
+   (assoc effects :truncated-registry-shapes true))))
+
 (defn- record-registry-input [effects operation key value]
  (let [scope (when (erlang/is_tuple key) (elem key 0))
        slot (if (= scope (:scope effects)) :own (get (:ancestor-slots effects) scope))
        inputs (:registry-inputs effects {})]
   (cond
-   (nil? slot) (assoc effects :unexplained-registry-scope true)
+   (nil? slot) (note-input-shape (assoc effects :unexplained-registry-scope true) :unknown-registry-shapes operation key)
    :else
    (let [input [operation slot (erlang/delete_element 1 key)]
          prior (find inputs input)
          outcome (normalized-registry-value operation value)]
     (cond
-     prior (if (erlang/=:= (val prior) outcome) effects (assoc effects :changing-registry-input true))
+     prior (if (erlang/=:= (val prior) outcome) effects
+            (note-input-shape (assoc effects :changing-registry-input true) :changing-registry-shapes operation key))
      (< (count inputs) registry-input-limit) (assoc effects :registry-inputs (assoc inputs input outcome))
      :else (assoc effects :registry-input-limit true))))))
 
@@ -718,6 +740,9 @@
   {:distinct-inputs (count inputs) :rewritable-reads supported?
    :unexplained-scope (boolean (:unexplained-registry-scope effects))
    :changed-during-lowering (boolean (:changing-registry-input effects))
+   :unknown-key-shapes (vec (sort (:unknown-registry-shapes effects)))
+   :changing-key-shapes (vec (sort (:changing-registry-shapes effects)))
+   :truncated-key-shapes (boolean (:truncated-registry-shapes effects))
    :fresh-stage-mismatches mismatches}))
 
 (defn- registry-input-control []
