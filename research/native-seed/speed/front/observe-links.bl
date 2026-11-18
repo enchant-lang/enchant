@@ -8,12 +8,16 @@
 ;; staging environment and scopes generated names per member. --sequential
 ;; retains the historical ambient naming mode for comparison.
 (ns native.observe-links
- (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]))
+ (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]
+           [reader-node :as rn]))
 
 (def trace-limit 100000)
 (def source-read-entries [(tuple :Elixir.File :read! 1)
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
+(def macro-entry (tuple :Elixir.BeamLisp.Ns.Compiler :expand-macro 4))
+(def link-put-entry (tuple :Elixir.BeamLisp.Env :put_key 2))
+(def link-delete-entry (tuple :Elixir.BeamLisp.Env :delete_key 1))
 (defn- source-path [raw]
  (let [path (if (erlang/is_list raw) (unicode/characters_to_binary raw) raw)]
   (when (and (string? path) (<= (erlang/byte_size path) 4096)
@@ -27,42 +31,60 @@
                (elem value 1)))]
   (if (erlang/is_binary bytes) (artifact/sha bytes) :unavailable)))
 
-(defn- collector [calls pending hits misses reads sources]
+(defn- effect [effects kind key]
+ (let [n (inc (:count effects 0))]
+  (if (> n trace-limit) (assoc effects :count n)
+   (-> effects (assoc :count n) (update-in [kind key] (fn [old] (inc (or old 0))))))))
+
+(defn- collector [calls pending hits misses reads sources effects]
  (receive
   [:trace _ :call [:ets :lookup arguments]]
   (let [key (second arguments)]
-   (recur calls [(elem key 2) (elem key 3)] hits misses reads sources))
+   (recur calls [(elem key 2) (elem key 3)] hits misses reads sources effects))
   [:trace _ :return_from [:ets :lookup 2] value]
   (cond
-   (>= calls trace-limit) (recur (inc calls) nil hits misses reads sources)
-   (empty? value) (recur (inc calls) nil hits (conj misses pending) reads sources)
-   :else (recur (inc calls) nil (conj hits pending) misses reads sources))
+   (>= calls trace-limit) (recur (inc calls) nil hits misses reads sources effects)
+   (empty? value) (recur (inc calls) nil hits (conj misses pending) reads sources effects)
+   :else (recur (inc calls) nil (conj hits pending) misses reads sources effects))
+  [:trace _ :call [:Elixir.BeamLisp.Ns.Compiler :expand-macro [_ form _ env]]]
+  (let [head (rn/node-name (first (rn/node-items form)))]
+   (recur calls pending hits misses reads sources (effect effects :expansions [(:ns env) head])))
+  [:trace _ :call [:Elixir.BeamLisp.Env :put_key [key _]]]
+  (recur calls pending hits misses reads sources (effect effects :link-writes [(elem key 1) (elem key 2)]))
+  [:trace _ :call [:Elixir.BeamLisp.Env :delete_key [key]]]
+  (recur calls pending hits misses reads sources (effect effects :link-deletions [(elem key 1) (elem key 2)]))
   [:trace _ :call [module function arguments]]
   (let [entry (tuple module function 1)]
    (assert (contains? source-read-entry-set entry))
-   (recur calls pending hits misses (conj reads [entry (source-path (first arguments))]) sources))
+   (recur calls pending hits misses (conj reads [entry (source-path (first arguments))]) sources effects))
   [:trace _ kind [module function 1] value] :when (or (= kind :return_from) (= kind :exception_from))
   (let [[entry path] (peek reads)]
    (assert (= entry (tuple module function 1)))
    (recur calls pending hits misses (pop reads)
     (if (and path (< (count sources) 1025))
      (conj sources [path (if (= kind :return_from) (source-result entry value) :unavailable)])
-     sources)))
+     sources) effects))
   [:finish parent ticket]
   (erlang/send parent [:observed ticket
-    {:calls calls :hits hits :misses misses :sources sources
-     :complete? (and (nil? pending) (empty? reads) (<= calls trace-limit) (<= (count sources) 1024))}])))
+    {:calls calls :hits hits :misses misses :sources sources :effects effects
+     :complete? (and (nil? pending) (empty? reads) (<= calls trace-limit)
+                    (<= (:count effects 0) trace-limit) (<= (count sources) 1024))}])))
 
 (defn- trace! [action]
- (let [owner (erlang/self) observer (spawn (fn [] (collector 0 nil #{} #{} [] #{})))
+ (let [owner (erlang/self) observer (spawn (fn [] (collector 0 nil #{} #{} [] #{} {})))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
        match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))
-       source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))]
+       source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))
+       link-key (tuple :link :_ :_)]
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session (tuple :ets :lookup 2) match (list :local)))))
    (doseq [entry source-read-entries]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
+   (doseq [[entry spec] [[macro-entry true]
+                         [link-put-entry (list (tuple (list link-key :_) (list) (list))) ]
+                         [link-delete-entry (list (tuple (list link-key) (list) (list)))]]]
+    (assert (= 1 (erlang/apply :trace :function (list session entry spec (list :local))))))
    (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
    (let [result (action)
          barrier (erlang/apply :trace :delivered (list session owner))
@@ -102,6 +124,11 @@
 (defn- def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
+(defn- effect-report [observation]
+ (into {} (map (fn [kind] [kind (mapv (fn [[[ns name] occurrences]] [ns name occurrences])
+                                     (sort (get-in observation [:effects kind])))])
+               [:expansions :link-writes :link-deletions])))
+
 (defn- observe-sequential [closure {:keys [rows sha256]} scoped?]
  (let [results (BeamLisp.Env/isolated
                 (fn []
@@ -115,10 +142,11 @@
                           {:namespace ns :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))
                            :actual-definitions-sha256 (artifact/sha (def-bytes compiled))
                            :source-read-outcomes (vec (sort (:sources observed)))
+                           :staging-effects (effect-report observed)
                            :lookup-hits (vec (sort (:hits observed)))
                            :lookup-misses (vec (sort (:misses observed)))}))
                        (:order closure))))]
-  {:schema "bl.native.link-sequential-observation" :version 1 :link-rows-sha256 sha256
+  {:schema "bl.native.link-sequential-observation" :version 2 :link-rows-sha256 sha256
    :per-member-fresh-names scoped?
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :members results :reuse-authority false}))
@@ -134,6 +162,7 @@
    (throw (ex-info "The recorded links missed an actual ANF change" {:changed changed})))
   {:candidate-rows-sha256 (:sha256 candidate)
    :changed-rows changed :changed-consulted-rows consulted :exact-anf exact?
+   :staging-effects (effect-report next-observation)
    :source-read-outcomes (vec (sort (:sources next-observation)))}))
 
 (defn- observe [closure {:keys [rows sha256]} selected comparison]
@@ -145,7 +174,7 @@
   (assert (= (:source-sha256 member) (:source-sha256 compiled)))
   (assert (some (fn [[path sha]] (and (= (Path/expand (:path member)) (Path/expand path))
                                      (= (:source-sha256 member) sha))) (:sources observation)))
-  {:schema "bl.native.installed-link-observation" :version 2
+  {:schema "bl.native.installed-link-observation" :version 3
    :namespace selected :source-sha256 (:source-sha256 member)
    :definitions-sha256 (artifact/sha (def-bytes compiled))
    :link-rows-sha256 sha256
@@ -155,6 +184,7 @@
    :lookup-misses (vec (sort (:misses observation)))
    :source-file-consultations (vec (sort (distinct (map first (:sources observation)))))
    :source-read-outcomes (vec (sort (:sources observation)))
+   :staging-effects (effect-report observation)
    :present-in-member-rows (vec (filter installed keys))
    :absent-from-member-rows (vec (remove installed keys))
    :comparison (when comparison (compare-rows closure member installed compiled (set keys) comparison))
@@ -169,7 +199,7 @@
                 (= selected "--sequential") (observe-sequential closure baseline false)
                 (= selected "--sequential-scoped") (observe-sequential closure baseline true)
                 (= selected "--all")
-                {:schema "bl.native.link-observation-inventory" :version 2
+                {:schema "bl.native.link-observation-inventory" :version 3
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
                 :else (observe closure baseline selected candidate))]
