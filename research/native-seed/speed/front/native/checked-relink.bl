@@ -184,6 +184,8 @@
 (defn with-phase-entries
  ([baseline samples-path action] (with-phase-entries baseline samples-path nil action))
  ([baseline samples-path mark action]
+  (with-phase-entries baseline samples-path mark false action))
+ ([baseline samples-path mark lazy? action]
  (let [start (when mark (mark))
        bytes (File/read! samples-path)
        samples (json/decode bytes)
@@ -195,19 +197,31 @@
                       (get sample "head"))) (get samples "samples")))))
        _ (assert (<= 1 (count names) 16))
        sessions (volatile! []) calls (atomics/new 1 (list))
+       bind-env (when lazy? (BeamLisp.Env/env_id))
+       bind! (fn [name]
+               (let [session (BeamLisp.AOT/open_constructor_session!)]
+                (vswap! sessions conj [name session])
+                (phase-invoker session (bind-core-macro! session name))))
        started (erlang/monotonic_time :microsecond)]
   (try
    (let [entries (mapv (fn [name]
-                         (let [session (BeamLisp.AOT/open_constructor_session!)]
-                          (vswap! sessions conj [name session])
-                          (let [invoke! (phase-invoker session (bind-core-macro! session name))]
-                           [name (fn [& args]
+                         (let [invoker (volatile! (when-not lazy? (bind! name)))]
+                          [name (fn [& args]
+                                  (let [invoke! (or @invoker
+                                                  (let [binding (when mark (mark))
+                                                        invoke! (BeamLisp.Env/with_env bind-env
+                                                                   #(BeamLisp.Compiler/with_fresh_names
+                                                                      (fn [] (bind! name))))]
+                                                   (when mark (mark :macro-bind-on-demand name binding))
+                                                   (vreset! invoker invoke!)))]
                                    (atomics/add calls 1 1)
-                                   (invoke! args))]))) names)
+                                   (invoke! args)))])) names)
          prepared (erlang/monotonic_time :microsecond)
          _ (when mark (mark :macro-preparation nil start))
          result (action entries calls)]
     (assoc result :preparation-us (- prepared started) :interpreted-expansions (atomics/get calls 1)
+     :macro-constructors {:mode (if lazy? :on-demand :eager) :available (count names)
+                          :bound (mapv first @sessions)}
      :sample-report-sha256 (artifact/sha bytes)
      :session-work (into {} (map (fn [[name session]]
                                   [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))))
@@ -471,6 +485,7 @@
   ;; Macro recipes are from the exact SDK and the sampling evidence belongs
   ;; to the donor. Staging and registry validation use the candidate rows.
   (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path mark
+   (and stage-trial (= "1" (System/get_env "NATIVE_RELINK_LAZY_MACROS")))
    (fn [entries _]
     (let [results (mapv (fn [ns]
                          (let [start (when mark (mark))

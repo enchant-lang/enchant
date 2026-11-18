@@ -7,6 +7,7 @@
 # ordinary updater and compares both finished artifacts in the same overlay.
 # NATIVE_RELINK_PROFILE=1 also records linked-pass work by member and phase.
 # NATIVE_RELINK_CLEAN_FIRST=1 reverses the timed comparison order.
+# NATIVE_RELINK_LAZY_MACROS=1 binds macro constructors on first use in --stage-link-reuse.
 set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
@@ -176,7 +177,8 @@ PY
   fi
   instrumentation=(--setenv=NATIVE_RELINK_TIMINGS=1 --setenv=NATIVE_RELINK_PROFILE="${NATIVE_RELINK_PROFILE:-}")
   run_candidate() {
-    run_update "$candidate" "${instrumentation[@]}" --setenv="$request_variable=$request"
+    run_update "$candidate" "${instrumentation[@]}" --setenv="$request_variable=$request" \
+      --setenv=NATIVE_RELINK_LAZY_MACROS="${NATIVE_RELINK_LAZY_MACROS:-}"
   }
   if [[ "${NATIVE_RELINK_CLEAN_FIRST:-}" == 1 ]]; then
     order=(clean candidate)
