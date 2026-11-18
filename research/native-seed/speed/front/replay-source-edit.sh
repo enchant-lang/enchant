@@ -180,6 +180,24 @@ run_update "$edited"
 if "$stage_link_plan"; then
   "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
     "$edited/link-rows.etf" "$stage_replay_mode" "$report" "$plan" "$plan_sha"
+  if [[ "$stage_replay_mode" == --guard-stage-link-plan && "${NATIVE_STAGE_LINK_COMPARE_TRACE:-}" == 1 ]]; then
+    "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$edited/partition.json" \
+      "$edited/link-rows.etf" --replay-stage-link-plan "$report.full-trace.json" "$plan" "$plan_sha"
+    python3 - "$report" "$report.full-trace.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+guard, full = (json.loads(Path(path).read_text()) for path in sys.argv[1:])
+assert guard["guarded"] and not full["guarded"]
+assert guard["plan-sha256"] == full["plan-sha256"]
+assert guard["candidate-link-rows-sha256"] == full["candidate-link-rows-sha256"]
+features = ("namespace", "exact-unit", "used-subset", "fallback", "attempted-subset-rows")
+assert [tuple(row[k] for k in features) for row in guard["members"]] == [
+    tuple(row[k] for k in features) for row in full["members"]
+]
+PY
+  fi
 elif [[ -n "${receipt:-}" ]]; then
   mode=--bound-registry
   extra=()
