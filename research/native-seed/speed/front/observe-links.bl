@@ -4,19 +4,25 @@
  (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]))
 
 (def trace-limit 100000)
-(defn- collector [calls keys]
+(defn- collector [calls pending hits misses]
  (receive
   [:trace _ :call [:ets :lookup arguments]]
   (let [key (second arguments)]
-   (recur (inc calls)
-    (if (< calls trace-limit) (conj keys [(elem key 2) (elem key 3)]) keys)))
+   (recur calls [(elem key 2) (elem key 3)] hits misses))
+  [:trace _ :return_from [:ets :lookup 2] value]
+  (cond
+   (>= calls trace-limit) (recur (inc calls) nil hits misses)
+   (empty? value) (recur (inc calls) nil hits (conj misses pending))
+   :else (recur (inc calls) nil (conj hits pending) misses))
   [:finish parent ticket]
-  (erlang/send parent [:observed ticket {:calls calls :keys keys :complete? (<= calls trace-limit)}])))
+  (erlang/send parent [:observed ticket
+    {:calls calls :hits hits :misses misses
+     :complete? (and (nil? pending) (<= calls trace-limit))}])))
 
 (defn- trace! [action]
- (let [owner (erlang/self) observer (spawn (fn [] (collector 0 #{})))
+ (let [owner (erlang/self) observer (spawn (fn [] (collector 0 nil #{} #{})))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
-       match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list)))]
+       match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))]
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session (tuple :ets :lookup 2) match (list :local)))))
@@ -51,13 +57,15 @@
          (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info))
          (trace! (fn []
                   (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity})))))
-       keys (sort (:keys observation))]
+       keys (sort (into (:hits observation) (:misses observation)))]
   (assert (= (:source-sha256 member) (:source-sha256 compiled)))
   {:schema "bl.native.installed-link-observation" :version 1
    :namespace selected :source-sha256 (:source-sha256 member)
    :link-rows-sha256 (artifact/sha rows-text)
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :lookups (:calls observation)
+   :lookup-hits (vec (sort (:hits observation)))
+   :lookup-misses (vec (sort (:misses observation)))
    :present-in-member-rows (vec (filter installed keys))
    :absent-from-member-rows (vec (remove installed keys))
    :scope "Filtered ETS consultations in one synchronous staged compile. A missing installed member row can still have another resolver fallback."
