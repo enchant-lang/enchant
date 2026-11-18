@@ -22,6 +22,7 @@
 ;;   DONOR_PARTITION LINK_ROWS --bound-registry-controls REPORT RECEIPT QUALIFICATION RECEIPT_SHA
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
+;;   PARTITION LINK_ROWS --ambient-roots REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
@@ -919,16 +920,31 @@
     (fn []
      (let [prepared (build/prepare-ns (:path member))
            lower (fn [] (build/compile-prepared prepared {:check-node identity}))
-           lower (if (= :snapshot mode) (fn [] (BeamLisp.Loader/with_declaration_snapshot lower)) lower)
+           lower (if (= :direct mode) lower (fn [] (BeamLisp.Loader/with_declaration_snapshot lower)))
+           lower (if (= :ambient mode)
+                  (fn []
+                   ;; This paired probe uses the checkout runner's static roots.
+                   ;; The full Loader path remains responsible for dynamic roots.
+                   (assert (contains? #{nil ""} (System/get_env "BEAM_LISP_PATH")))
+                   (assert (nil? (Process/get :bl_ambient_dirs)))
+                   (BeamLisp.Loader/with_ambient_dirs
+                    (cons (File/cwd!) (BeamLisp.Env/search_paths))
+                    lower))
+                  lower)
            before (elem (erlang/process_info (erlang/self) :reductions) 1)
            started (erlang/monotonic_time :microsecond)
-           [compiled observation] (if observed? (trace! lower {:source-probes? true}) [(lower) nil])
+           [compiled observation] (if observed? (trace! lower observed?) [(lower) nil])
            elapsed (- (erlang/monotonic_time :microsecond) started)
            reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)]
       (assert (erlang/=:= (def-bytes compiled) (def-bytes member)))
       (if observed?
-       {:mode mode :source-probes (get-in observation [:effects :source-probe-count] 0)
-        :distinct-outcomes (count (get-in observation [:effects :source-probes]))}
+       (let [effects (:effects observation)]
+        (cond-> {:mode mode :source-probes (:source-probe-count effects 0)
+                 :distinct-outcomes (count (:source-probes effects))}
+         (:boundary? observed?)
+         (assoc :cwd-queries (get-in effects [:process-boundary [:send :file_server_2 :get_cwd]] 0)
+                :search-path-reads (get-in effects
+                                    [:env-agent-readers [:Elixir.BeamLisp.Env :"-search_paths/0-anonymous-0-"]] 0))))
        {:mode mode :wall-us elapsed :reductions reductions})))))))
 
 (defn- declaration-snapshot-report [closure baseline selected]
@@ -936,11 +952,23 @@
        _ (assert (some? member))
        samples (mapv #(declaration-snapshot-sample closure baseline member % false)
                      [:direct :snapshot :snapshot :direct])
-       observations (mapv #(declaration-snapshot-sample closure baseline member % true) [:direct :snapshot])]
+       observations (mapv #(declaration-snapshot-sample closure baseline member % {:source-probes? true})
+                          [:direct :snapshot])]
   {:schema "bl.native.declaration-snapshot-cost" :version 1
    :namespace selected :exact-definitions true
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :samples samples :observations observations}))
+
+(defn- ambient-root-report [closure baseline selected]
+ (let [member (get-in closure [:units selected])
+       _ (assert (some? member))
+       sample (fn [options mode] (declaration-snapshot-sample closure baseline member mode options))]
+  {:schema "bl.native.ambient-root-cost" :version 1 :reuse-authority false
+   :namespace selected :exact-definitions true :link-rows-sha256 (:sha256 baseline)
+   :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+   :samples (mapv #(sample nil %) [:snapshot :ambient :ambient :snapshot])
+   :observations (mapv #(sample {:source-probes? true :boundary? true :registry? true} %)
+                       [:snapshot :ambient])}))
 
 (defn- source-identity [path]
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
@@ -1565,7 +1593,7 @@
        baseline (pinned-rows rows)
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
-                            (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot"
+                            (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot" "--ambient-roots"
                                               "--cached-registry" "--capture-bound-registry" "--bound-registry"
                                               "--bound-registry-controls" "--lowering-effects"} selected)))
                    (pinned-rows comparison))
@@ -1587,6 +1615,7 @@
                                                    qualification receipt-sha)
                 (= selected "--bound-registry-controls") (bound-registry-controls closure baseline comparison source-receipt mode)
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
+                (= selected "--ambient-roots") (ambient-root-report closure baseline comparison)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
