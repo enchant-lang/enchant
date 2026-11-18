@@ -99,10 +99,15 @@
                 {:op (:op n) :module (:mod n) :function (:fun n) :ann (:ann n)})))
 
 (declare emit)
-(defn- operand-options [options] (assoc options :tail? false))
+(defn- operand-options [options]
+ (if (and (erlang/=/= nil options) (maps/get :tail? options false))
+  (assoc options :tail? false) options))
 (def ^:private operand-table (erlang/list_to_tuple (Enum/map (lists/seq 0 63) (fn [i] (str "a" i)))))
 (defn- operand-name [i] (if (< i 64) (erlang/element (inc i) operand-table) (glue "a" (erlang/integer_to_binary i))))
-(defn- operand-names [n] (Enum/map (lists/seq 0 (dec n)) (fn [i] (operand-name i))))
+(defn- operand-names [n]
+ (case n
+  0 "" 1 "a0" 2 "a0 a1" 3 "a0 a1 a2" 4 "a0 a1 a2 a3"
+  (spaced (Enum/map (lists/seq 0 (dec n)) (fn [i] (operand-name i))))))
 (defn- source-call-frame [n options]
  (let [ann (:ann n)]
   {:file (:file ann) :line (:line ann) :col (:col ann)
@@ -151,11 +156,11 @@
  (let [args (items args)
        binds (operand-bindings args options)]
   (glue "(let ((callee " callee ")) (let* (" (spaced binds) ") (callee "
-       (spaced (operand-names (count args))) ")))")))
+       (operand-names (count args)) ")))")))
 
 (defn- ordered-call [node callee args options]
  (let [args (items args)
-       names (spaced (operand-names (count args)))
+       names (operand-names (count args))
        binds (operand-bindings args options)
        invoke (if (:source-frames? options)
                 (glue "(bl-invoke callee (list " names "))")
@@ -174,14 +179,16 @@
   variable or literal operand (no effect, no order) is passed in place.
   Returns [binds operands]: an Erlang list of bindings, a vector of operands."
  [inline? args options]
- (let [operand (operand-options options)
-       parts (Enum/map (indexed args) (fn [pair]
-               (let [arg (erlang/element 1 pair) i (erlang/element 2 pair)
-                     value (emit arg operand)]
-                (if (and inline? (or (= :var (:op arg)) (= :lit (:op arg)))) [nil value]
-                 [(glue "(" (operand-name i) " " value ")") (operand-name i)]))))]
-  [(Enum/filter (Enum/map parts (fn [part] (first part))) (fn [b] (some? b)))
-   (vec (Enum/map parts (fn [part] (second part))))]))
+ (let [operand (operand-options options)]
+  (loop [remaining (items args) index 0 binds (list) operands (list)]
+   (if (erlang/=:= remaining (list))
+    [(lists/reverse binds) (vec (lists/reverse operands))]
+    (let [arg (erlang/hd remaining) value (emit arg operand)]
+     (if (and inline? (let [op (maps/get :op arg nil)] (or (erlang/=:= op :var) (erlang/=:= op :lit))))
+      (recur (erlang/tl remaining) (erlang/+ index 1) binds (cons value operands))
+      (let [local (operand-name index)]
+       (recur (erlang/tl remaining) (erlang/+ index 1)
+        (cons (glue "(" local " " value ")") binds) (cons local operands)))))))))
 (defn- linked-call
  "An AOT-linked remote: {:call (fn [operands] expression) :inline? bool}.
   The target cell is read after its operands, as the live wrapper did."
