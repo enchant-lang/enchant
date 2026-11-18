@@ -36,7 +36,15 @@
 ;; retains the historical ambient naming mode for comparison.
 (ns native.observe-links
  (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]
-           [compiler :as compiler] [reader-node :as rn]))
+           [compiler :as compiler] [reader-node :as rn]
+           [native.checked-relink :refer [normalized-registry-value value-identity fun-field fun-origin
+                   small-env-text? application-setting env-read-result changed-env-reads
+                   resolver-result changed-resolver-reads code-location live-code-md5 changed-code-reads
+                   install-rows! def-bytes bind-core-macro! phase-invoker with-phase-entries
+                   registry-input-state presence-snapshot changed-source-probes read-source-identity
+                   with-registry-stage lower-with-snapshot prepared-inputs closed-identity
+                   registry-row-signature receipt-key-description read-registry-member replay-registry-member
+                   refuse-bound-registry qualified-donor authenticated-registry replay-bound-registry]]))
 
 (def trace-limit 100000)
 (def registry-trace-limit 1000000)
@@ -220,11 +228,6 @@
   (if (> n source-probe-limit) effects
    (update effects :source-probes (fn [seen] (conj (or seen #{}) [path outcome]))))))
 
-(defn- normalized-registry-value [operation value]
- (if (= operation :lookup)
-  (mapv (fn [row] (erlang/delete_element 1 row)) value)
-  value))
-
 (defn- registry-key-shape [key]
  (cond
   (erlang/is_atom key) [:atom key]
@@ -287,35 +290,6 @@
      (< (count inputs) registry-input-limit) (assoc effects :registry-inputs (assoc inputs input outcome))
      :else (assoc effects :registry-input-limit true))))))
 
-(defn- value-identity [value]
- (artifact/sha (erlang/term_to_binary value (list :deterministic))))
-
-(defn- fun-field [callable field] (elem (erlang/fun_info callable field) 1))
-
-(defn- pinned-module-identity [module name]
- (let [identities (Process/get :native_observer_pinned_module_ids {})]
-  (if-let [cached (find identities module)]
-   (val cached)
-   (let [path (str (System/get_env "BL_SDK_PRODUCT") "/image/ebin/" name ".beam")
-         identity (when (File/regular? path) (beam_lib/md5 (String/to_charlist path)))]
-    ;; Memoize only the file in the checked immutable SDK. The callable's
-    ;; live module and local code identity still have to match every time.
-    (when (< (count identities) 256)
-     (Process/put :native_observer_pinned_module_ids (assoc identities module identity)))
-    identity))))
-
-(defn- fun-origin [callable]
- (let [module (fun-field callable :module) module-name (erlang/atom_to_binary module)
-       md5 (try (erlang/apply module :module_info (list :md5)) (catch _ nil))
-       pinned (pinned-module-identity module module-name)
-       type (fun-field callable :type)
-       pinned? (and md5 (= pinned (tuple :ok (tuple module md5)))
-                    (or (= :external type) (= md5 (fun-field callable :new_uniq))))]
-  {:module module-name :name (erlang/atom_to_binary (fun-field callable :name))
-   :arity (fun-field callable :arity) :type type
-   :capture-count (count (fun-field callable :env)) :matches-pinned-module (boolean pinned?)
-   :code-md5 (when md5 (Base/encode16 md5 (list (tuple :case :lower))))}))
-
 (defn- macro-origin [callable]
  (cond
   (erlang/is_function callable) {:shape :beam-function :entries [(fun-origin callable)]}
@@ -374,53 +348,6 @@
    (>= (count events) (inc trace-limit)) effects
    :else (assoc effects :ordered-links (conj events [op member value])))))
 
-(defn- small-env-text? [value]
- (and (erlang/is_binary value) (<= (erlang/byte_size value) 4096)))
-
-(defn- application-setting [value]
- (if (or (erlang/is_atom value) (erlang/is_integer value) (small-env-text? value))
-  [:application-value value]
-  :unavailable))
-
-(defn- code-directory-result [value]
- (cond
-  (= (tuple :error :bad_name) value) :missing-code-directory
-  (and (erlang/is_list value) (<= (count (take 4097 value)) 4096))
-  (let [path (unicode/characters_to_binary value)]
-   (if (small-env-text? path) [:code-directory path] :unavailable))
-  :else :unavailable))
-
-(defn- env-read-result [[function :as key] value]
- (case function
-  :op_of (if (erlang/is_atom value) [:operation value] :unavailable)
-  :source_head (if (nil? value) :no-source-extent :unavailable)
-  :cwd! (if (small-env-text? value) value :unavailable)
-  :dir? (if (or (true? value) (false? value)) value :unavailable)
-  :source_target_declaration! (if (contains? #{:public :refuse :external} value) value :unavailable)
-  :lib_dir (code-directory-result value)
-  :priv_dir (code-directory-result value)
-  :ensure_loaded (cond
-                   (= (tuple :module (second key)) value) :loaded-module
-                   (= (tuple :error :nofile) value) :missing-module
-                   :else :unavailable)
-  :application-setting (cond
-                        (= :undefined value) :missing-application-setting
-                        (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :ok (elem value 0)))
-                        (application-setting (elem value 1))
-                        :else :unavailable)
-  :get_env (if (= 4 (count key))
-             (application-setting value)
-             (cond
-              (= :undefined value) :missing-application-setting
-              (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :ok (elem value 0)))
-              (application-setting (elem value 1))
-              :else :unavailable))
-  :loaded_ns? (if (or (true? value) (false? value)) value :unavailable)
-  :search_paths (if (and (erlang/is_list value)
-                         (<= (count (take 65 value)) 64)
-                         (every? small-env-text? value))
-                  (vec value) :unavailable)))
-
 (defn- start-env-read [effects entry arguments]
  (let [function (elem entry 1)
        argument (first arguments)
@@ -472,43 +399,6 @@
    (and key (<= total registry-trace-limit) (< (count reads) registry-input-limit))
    (assoc-in [:env-reads key] outcome))))
 
-(defn- changed-env-reads [reads]
- (vec (take 12 (keep (fn [[[function argument name default :as key] expected]]
-                       (let [current (try
-                                      (case function
-                                       :loaded_ns? (BeamLisp.Env/loaded_ns? argument)
-                                       :search_paths (BeamLisp.Env/search_paths)
-                                       :op_of (if (= :undefined (ets/whereis :beam_lisp_ops))
-                                                :unavailable
-                                                (BeamLisp.Env/op_of argument name))
-                                       :source_head (when (BeamLisp.Env/source_execution_active?) :active)
-                                       :cwd! (File/cwd!)
-                                       :dir? (File/dir? argument)
-                                       :source_target_declaration! (BeamLisp.Env/source_target_declaration! argument name default)
-                                       :lib_dir (code/lib_dir argument)
-                                       :priv_dir (code/priv_dir argument)
-                                       :ensure_loaded (cond
-                                                       (erlang/module_loaded argument) (tuple :module argument)
-                                                       (and (= :interactive (code/get_mode)) (= :non_existing (code/which argument)))
-                                                       (tuple :error :nofile)
-                                                       :else :unavailable)
-                                       :application-setting (application/get_env argument name)
-                                       :get_env (if (= 4 (count key))
-                                                 (application/get_env argument name default)
-                                                 (application/get_env argument name)))
-                                      (catch _ :unavailable))]
-                        (when (or (= :unavailable current)
-                                  (not= expected (env-read-result key current))) key)))
-                     reads))))
-
-(defn- resolver-result [function value]
- (if (or (nil? value)
-         (case function
-          :source_path (small-env-text? value)
-          :source_decls (and (erlang/is_map value) (<= (erlang/map_size value) 4096))))
-  [:observed value]
-  :unavailable))
-
 (defn- start-loader-read [effects entry argument]
  (cond-> effects
   (:ownership? effects)
@@ -536,32 +426,6 @@
 
 (defn- resolver-receipt [effects]
  (into {} (map (fn [[key outcome]] [key (value-identity outcome)]) (:resolver-reads effects))))
-
-(defn- changed-resolver-reads [reads]
- (BeamLisp.Loader/with_declaration_snapshot
-  (fn []
-   (vec (take 12 (keep (fn [[[function ns :as key] expected]]
-                        (let [outcome (try (resolver-result function
-                                           (case function
-                                            :source_decls (BeamLisp.Loader/source_decls ns)
-                                            :source_path (BeamLisp.Loader/source_path ns)))
-                                           (catch _ :unavailable))]
-                         (when (or (= :unavailable outcome) (not= expected (value-identity outcome))) key)))
-                      reads))))))
-
-(defn- code-location [value]
- (cond
-  (false? value) false
-  (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :file (elem value 0)))
-  (let [path (elem value 1)
-        text (if (and (erlang/is_list path) (<= (count (take 4097 path)) 4096))
-               (unicode/characters_to_binary path)
-               path)]
-   (if (or (erlang/is_atom path) (small-env-text? text)) text :unavailable))
-  :else :unavailable))
-
-(defn- live-code-md5 [module]
- (try (erlang/get_module_info module :md5) (catch _ :unavailable)))
 
 (defn- code-snapshot []
  (into {} (map (fn [row]
@@ -609,16 +473,6 @@
               (assoc observed module :unavailable)))
             observed))
          (:code-reads effects {}) (:env-reads effects)))
-
-(defn- changed-code-reads [reads]
- (vec (take 12 (keep (fn [[module expected]]
-                       (let [location (code-location (code/is_loaded module))
-                             current (cond
-                                       (not (false? location)) [location (live-code-md5 module)]
-                                       (= 3 (count expected)) [false nil (code/which module)]
-                                       :else [false nil])]
-                        (when (not= expected current) module)))
-                     reads))))
 
 (defn- finish-code-read [effects kind value]
  (let [module (:pending-code-read effects)
@@ -993,10 +847,6 @@
     {:schema "bl.native.link-order-write-control" :version 1 :events events
      :changed-value-refused-before-write true :changed-value-accepted-after-write true}))))
 
-(defn- install-rows! [closure rows]
- (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
- (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info)))
-
 (defn- compile-staged
  ([member] (compile-staged member {}))
  ([member options]
@@ -1009,9 +859,6 @@
    (fn []
     (install-rows! closure rows)
     (BeamLisp.Compiler/with_fresh_names (fn [] (compile-staged member options)))))))
-
-(defn- def-bytes [unit]
- (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
 (defn- macro-context-control [closure baseline]
  (let [path "research/native-seed/speed/front/macro-context-fixture.bl"
@@ -1039,20 +886,6 @@
        (every? (fn [entry] (and (:matches-pinned-module entry)
                                 (= "Elixir.BeamLisp.Ns.Init.Core.Macros" (:module entry))
                                 (zero? (:capture-count entry)))) entries))))
-
-(defn- bind-core-macro! [session name]
- (let [binding (BeamLisp.AOT/sdk_binding! "core" name)
-       declaration (BeamLisp.CompilerData/sdk_macro_declaration binding)
-       claim (:sdk-macro (nth declaration 2))]
-  (BeamLisp.AOT/bind_sdk_macro_constructor_session! session claim
-   {:namespace "core" :form (BeamLisp.Reader/read_one (pr-str declaration))})))
-
-(defn- phase-invoker [session identity]
- (fn [arguments]
-  (BeamLisp.AOT/eval_constructor_session! session
-   {:op :apply :fn {:op :var :name "macro"}
-    :args (mapv (fn [value] {:op :lit :val value}) arguments)}
-   {} {"macro" identity})))
 
 (defn- interpreted-macro [head origin {:keys [form args locals outcome]}]
  (if-not (pinned-core-macro? origin)
@@ -1181,35 +1014,6 @@
    :macro-lookup (macro-lookup-summary observation)
    :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))}))
 
-(defn- with-phase-entries [baseline samples-path action]
- (let [bytes (File/read! samples-path)
-       samples (json/decode bytes)
-       _ (assert (= "bl.native.pinned-macro-phase-samples" (get samples "schema")))
-       _ (assert (= (:sdk-descriptor-sha256 artifact/validation-context) (get samples "sdk-descriptor-sha256")))
-       _ (assert (= (:sha256 baseline) (get samples "link-rows-sha256")))
-       names (vec (sort (distinct (keep (fn [sample]
-                     (when (contains? #{"matched" "matched-after-canonicalization"} (get sample "status"))
-                      (get sample "head"))) (get samples "samples")))))
-       _ (assert (<= 1 (count names) 16))
-       sessions (volatile! []) calls (atomics/new 1 (list))
-       started (erlang/monotonic_time :microsecond)]
-  (try
-   (let [entries (mapv (fn [name]
-                         (let [session (BeamLisp.AOT/open_constructor_session!)]
-                          (vswap! sessions conj [name session])
-                          (let [invoke! (phase-invoker session (bind-core-macro! session name))]
-                           [name (fn [& args]
-                                   (atomics/add calls 1 1)
-                                   (invoke! args))]))) names)
-         prepared (erlang/monotonic_time :microsecond)
-         result (action entries calls)]
-    (assoc result :preparation-us (- prepared started) :interpreted-expansions (atomics/get calls 1)
-     :sample-report-sha256 (artifact/sha bytes)
-     :session-work (into {} (map (fn [[name session]]
-                                  [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))))
-   (finally
-    (doseq [[_ session] @sessions] (BeamLisp.AOT/close_constructor_session! session))))))
-
 (defn- compile-with-phase-macros [closure baseline samples-path]
  (let [control (macro-miss-control closure baseline)
        ordinary (mapv #(compile-phase-member closure (:rows baseline) % [] (atomics/new 1 (list))) (:order closure))]
@@ -1229,19 +1033,6 @@
        summarize (fn [entries] (mapv (fn [[[operation arity] count]] [operation arity count]) (sort entries)))]
   {:reads (summarize (remove writes calls)) :writes (summarize (filter writes calls))
    :source-reads (count (:sources observation)) :link-reads (:calls observation)}))
-
-(defn- registry-input-state [input scope ancestors]
- (let [[operation slot key] input
-       physical (cond
-                 (= :sdk slot) key
-                 (not (erlang/is_tuple key)) nil
-                 (= :own slot) (erlang/insert_element 1 key scope)
-                 :else (when-let [owner (nth ancestors slot nil)] (erlang/insert_element 1 key owner)))]
-  (if (nil? physical) :unavailable
-    (normalized-registry-value operation
-     (case operation
-      :lookup (ets/lookup :beam_lisp_vars physical)
-      :member (ets/member :beam_lisp_vars physical))))))
 
 (defn- registry-input-mismatches [inputs]
  (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))]
@@ -1400,12 +1191,6 @@
  (vec (sort (distinct (map (fn [[path present?]] [(source-identity path) present?])
                            (get-in observation [:effects :source-probes]))))))
 
-(defn- presence-snapshot [probes]
- (into {} (map (fn [path] [path (File/regular? path)]) (distinct (map first probes)))))
-
-(defn- changed-source-probes [probes snapshot]
- (vec (keep (fn [[path expected]] (when (not= expected (get snapshot path :unavailable)) path)) probes)))
-
 (defn- source-probe-control [report-path]
  (let [root (Path/expand (str report-path ".probe-" (System/unique_integer (list :positive))))
        nested (str root "/native")
@@ -1455,26 +1240,6 @@
                                                 (:sources observed)))))}]))
         (:order closure)))})
 
-(defn- read-source-identity [path]
- (try (artifact/sha (File/read! path)) (catch _ :unavailable)))
-
-(defn- with-registry-stage [closure rows member entries action]
- (let [macros (if (= "core" (:ns member)) [] entries)
-       phase-callables (into {} (map (fn [[name entry]] [entry name]) macros))]
-  (BeamLisp.Env/isolated
-   (fn []
-    (install-rows! closure rows)
-    (doseq [[name entry] macros]
-     (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
-    (BeamLisp.Compiler/with_fresh_names
-     (fn []
-      (let [prepared (build/prepare-ns (:path member))]
-       (action prepared phase-callables))))))))
-
-(defn- lower-with-snapshot [prepared]
- (BeamLisp.Loader/with_declaration_snapshot
-  (fn [] (build/compile-prepared prepared {:check-node identity}))))
-
 (defn- observed-effect-refusals [effects]
  (let [tables #{[:lookup :beam_lisp_ops :op_of]
                 [:lookup :beam_lisp_source_extent_heads :source_head]
@@ -1495,9 +1260,6 @@
          (map (fn [entry] [:env entry]) (sort (remove (fn [[_ owner]] (contains? #{[:loaded_ns?] [:search_paths]} owner))
                                          (keys (:env-read-owners effects)))))
          (map (fn [entry] [:process entry]) (sort (remove messages (keys (:process-boundary effects))))))))))
-
-(defn- prepared-inputs [prepared]
- (select-keys prepared [:ns :path :source-sha256 :requires :js-interop? :env :defs]))
 
 (defn- observe-lowering
  ([closure baseline member entries] (observe-lowering closure baseline member entries {}))
@@ -1523,7 +1285,7 @@
                               (observe!))]
     (let [self-reads (filter (fn [[_ _ key]]
                                (and (erlang/is_tuple key) (> (erlang/tuple_size key) 1)
-                                    (= :fwd (elem key 0)) (= "native.observe-links" (elem key 1))))
+                                    (= :fwd (elem key 0)) (contains? #{"native.observe-links" "native.checked-relink"} (elem key 1))))
                             (keys (get-in observed [:effects :registry-inputs])))]
      (assert (empty? self-reads)
              (str "Probe leaked into lowering reads for " (:ns member) ": " (pr-str self-reads))))
@@ -1819,68 +1581,9 @@
     :members (mapv (fn [ns] (registry-shadow-member closure baseline candidate (get-in closure [:units ns]) entries))
                    (:order closure))})))
 
-(defn- bounded-etf [value]
- (when (<= (erlang/external_size value) (:max-bytes artifact/limits))
-  (erlang/term_to_binary value (list :deterministic))))
-
-(defn- closed-identity [value]
- (when-let [bytes (bounded-etf value)]
-  (try
-   (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
-   (artifact/sha bytes)
-   (catch _ nil))))
-
-(defn- matches-captured-etf? [value digest]
- ;; Capture checked the exact bytes. Replay hashes its encoded value for
- ;; equality with that digest and never decodes the candidate bytes.
- (when-let [bytes (bounded-etf value)]
-  (= digest (artifact/sha bytes))))
-
-(defn- callable-identity [value depth]
- (when (and (pos? depth) (erlang/is_function value))
-  (let [{:keys [matches-pinned-module capture-count module name arity type code-md5]} (fun-origin value)]
-   (when (and matches-pinned-module (<= capture-count 16))
-    (let [captures (mapv (fn [capture]
-                          (if (erlang/is_function capture)
-                           (callable-identity capture (dec depth))
-                           (when-let [identity (closed-identity capture)] [:data identity])))
-                         (fun-field value :env))]
-     (when (every? some? captures)
-      [:sdk module name arity type code-md5
-       (when (= :local type) (fun-field value :new_index)) captures]))))))
-
-(defn- registry-field-identity [value callables]
- (cond
-  (contains? callables value) [:phase (get callables value)]
-  (erlang/is_function value) (callable-identity value 4)
-  (and (erlang/is_tuple value) (= 2 (erlang/tuple_size value)) (= :"$macro" (elem value 0)))
-  (when-let [identity (registry-field-identity (elem value 1) callables)] [:macro identity])
-  (and (erlang/is_tuple value) (= 3 (erlang/tuple_size value)) (= :"$blfn" (elem value 0)))
-  (let [fixed (mapv (fn [[arity f]] [arity (callable-identity f 4)]) (sort (elem value 1)))
-        variadic (elem value 2)
-        rest-fn (when variadic (callable-identity (elem variadic 1) 4))]
-   (when (and (every? second fixed) (or (nil? variadic) rest-fn))
-    [:arity-dispatch fixed (when variadic [(elem variadic 0) rest-fn])]))
-  :else (when-let [id (closed-identity value)] [:data id])))
-
-(defn- registry-row-signature [value callables]
- (when (vector? value)
-  (let [rows (mapv (fn [row] (mapv #(registry-field-identity % callables) (erlang/tuple_to_list row))) value)]
-   (when (every? (fn [row] (every? some? row)) rows) [:rows rows]))))
-
 (defn- registry-value-signature [value callables]
  (if-let [identity (closed-identity value)] [:closed identity]
   (registry-row-signature value callables)))
-
-(defn- registry-value-matches? [value expected callables]
- (case (first expected)
-  :closed (matches-captured-etf? value (second expected))
-  :rows (= expected (registry-row-signature value callables))
-  false))
-
-(defn- receipt-key-description [input]
- (let [[operation slot key] input]
-  [operation slot (if (erlang/is_tuple key) (vec (erlang/tuple_to_list key)) [key])]))
 
 (defn- opaque-value-shape [value depth]
  (cond
@@ -1948,10 +1651,6 @@
  (BeamLisp.CompilerData/check_closed_etf!
   (erlang/term_to_binary entry (list :deterministic)) artifact/limits))
 
-(defn- read-registry-member [bytes]
- (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
- (erlang/binary_to_term bytes))
-
 (defn- capture-registry [closure baseline candidate samples-path anchor]
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
@@ -1963,79 +1662,6 @@
                            [ns (registry-member-bytes
                                 (capture-registry-member closure baseline (get-in closure [:units ns]) entries (some? anchor)))])
                          (:order closure)))})))
-
-(defn- replay-registry-member
- ([closure candidate member entry entries]
-  (replay-registry-member closure candidate member entry entries nil))
- ([closure candidate member entry entries change-env!]
-  (replay-registry-member closure candidate member entry entries change-env! nil))
- ([closure candidate member entry entries change-env! retained-unit]
-  (replay-registry-member closure candidate member entry entries change-env! retained-unit true nil))
- ([closure candidate member entry entries change-env! retained-unit compare-clean? mark]
- (let [ns (:ns member) start (when mark (mark))]
-  (with-registry-stage closure (:rows candidate) member entries
-  (fn [prepared callables]
-   (let [staged (when mark (mark :member-stage ns start))
-         _ (when change-env! (change-env!))
-         scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))
-         changed (when-not (:reason entry)
-                   (vec (take 12 (keep (fn [[key expected]]
-                                        (let [current (registry-input-state key scope ancestors)]
-                                         (when (or (= current :unavailable)
-                                                   (not (registry-value-matches? current expected callables)))
-                                          (receipt-key-description key))))
-                                 (:registry entry)))))
-         changed-env (when (contains? entry :env-reads) (changed-env-reads (:env-reads entry)))
-         changed-code (when (contains? entry :code-reads) (changed-code-reads (:code-reads entry)))
-         code-mutations (mapv (fn [[mfa calls]] [(vec (erlang/tuple_to_list mfa)) calls])
-                              (:code-mutations entry))
-         prior-reason (or (:reason entry)
-                    (cond
-                     (not (erlang/is_binary (:definition-bytes entry))) :missing-definition-bytes
-                     (not= [(:module member) (:path member) (:source-sha256 member)]
-                           [(:module entry) (:path entry) (:source-sha256 entry)]) :member-changed
-                     (not (matches-captured-etf? (prepared-inputs prepared) (:prepared entry))) :prepared-input-changed
-                     (or (seq (changed-source-probes (:probes entry) (presence-snapshot (:probes entry))))
-                         (some (fn [[path digest]]
-                                 (or (= :unavailable digest) (not= digest (read-source-identity path)))) (:sources entry)))
-                     :source-input-changed
-                     (seq changed-env) :env-input-changed
-                     (seq changed-code) :code-input-changed
-                     (seq changed) :registry-input-changed))
-         changed-resolver (when (and (nil? prior-reason) (contains? entry :resolver-reads))
-                            (changed-resolver-reads (:resolver-reads entry)))
-         reason (or prior-reason (when (seq changed-resolver) :resolver-input-changed))
-         validated (when mark (mark :member-validation ns staged))
-         compiled (when reason (lower-with-snapshot prepared))
-         _ (when (and mark reason) (mark :member-lowering ns validated))
-         ;; Retained definition bytes do not need decoding for the comparison.
-         actual (when compare-clean? (if reason (def-bytes compiled) (:definition-bytes entry)))
-         replayed-unit (when retained-unit
-                         (if reason
-                          (assoc (dissoc compiled :cache-status :cache-key) :source (:source prepared)
-                                 :module (BeamLisp.Link/module_for (:ns prepared))
-                                 :base-module (BeamLisp.Emit/base_module_for (:ns prepared)))
-                          retained-unit))]
-    (cond-> {:namespace (:ns member) :reused (nil? reason) :reason reason :opaque-inputs (:opaque-inputs entry 0)
-             :opaque-keys (:opaque-keys entry) :changed-registry-keys changed}
-     compare-clean? (assoc :exact-clean-definitions (erlang/=:= actual (def-bytes member)))
-     (contains? entry :env-reads)
-     (assoc :env-read-calls (:env-read-calls entry)
-            :distinct-env-reads (count (:env-reads entry))
-            :env-read-keys-by-function (frequencies (map first (keys (:env-reads entry))))
-            :changed-env-reads changed-env)
-     (contains? entry :code-reads)
-     (assoc :code-read-calls (:code-read-calls entry)
-            :distinct-code-reads (count (:code-reads entry))
-            :changed-code-reads changed-code)
-     (contains? entry :code-mutations)
-     (assoc :code-mutations code-mutations)
-     (contains? entry :effect-refusals) (assoc :effect-refusals (:effect-refusals entry))
-     (contains? entry :resolver-reads)
-     (assoc :resolver-read-calls (:resolver-read-calls entry)
-            :distinct-resolver-reads (count (:resolver-reads entry))
-            :changed-resolver-reads changed-resolver)
-     retained-unit (assoc :replayed-unit replayed-unit))))))))
 
 (defn- cached-registry [closure candidate receipt-path samples-path force?]
  (let [started (erlang/monotonic_time :microsecond)
@@ -2066,38 +1692,11 @@
     :pinned-module-identities (count (Process/get :native_observer_pinned_module_ids {}))
     :reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) reductions)))))
 
-(defn- refuse-bound-registry [reason]
- (throw (ex-info (str "Bound native registry receipt refused " (name reason)) {:kind reason})))
-
-(defn- qualified-donor [donor qualification-path]
- (let [evidence-bytes (File/read! qualification-path)
-       evidence (json/decode evidence-bytes)
-       recorded (get evidence "native-updater-check")
-       closure-sha (get recorded "candidate-closure-sha256")]
-  (when-not (and (true? (get-in evidence ["native-fixpoint" "compiled-source-and-actor-fixpoint"]))
-                 (= (:sdk-descriptor-sha256 artifact/validation-context) (get evidence "sdk-descriptor-sha256"))
-                 (= closure-sha (value-identity donor)))
-   (refuse-bound-registry :wrong-qualified-donor))
-  {:closure-sha256 closure-sha :links-sha256 (get recorded "installed-link-sha256")
-   :qualification-sha256 (artifact/sha evidence-bytes)}))
-
 (defn- capture-bound-registry [closure rows samples-path qualification-path]
  (let [donor (qualified-donor closure qualification-path)]
   (when-not (= (:links-sha256 donor) (:sha256 rows))
    (refuse-bound-registry :wrong-donor-links))
   (capture-registry closure rows rows samples-path donor)))
-
-(defn- authenticated-registry [bytes expected-sha donor]
- (when-not (= expected-sha (artifact/sha bytes))
-  (refuse-bound-registry :receipt-digest-mismatch))
- (let [receipt (read-registry-member bytes)]
-  (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
-                             :native-bound-registry-v3 :native-bound-registry-v4 :native-bound-registry-v5
-                             :native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8
-                             :native-bound-registry-v9} (:schema receipt))
-                 (= donor (:donor receipt)))
-   (refuse-bound-registry :receipt-donor-mismatch))
-  receipt))
 
 (defn- refusal-kind [action]
  (try (action) :accepted (catch error (:kind (ex-data error)))))
@@ -2119,98 +1718,6 @@
   (assert (= {:receipt-bytes :receipt-digest-mismatch :other-donor :receipt-donor-mismatch
               :spliced-partitions :wrong-qualified-donor :wrong-donor-links :wrong-donor-links} observed))
   {:schema "bl.native.bound-registry-controls" :version 1 :donor anchor :checks observed}))
-
-(defn- export-verified-closure! [path clean results]
- (let [different (vec (keep (fn [{:keys [namespace replayed-unit]}]
-                             (when-not (erlang/=:= replayed-unit (get-in clean [:units namespace])) namespace))
-                           results))]
-  (when (seq different)
-   (throw (ex-info (str "Native replay partition differs from the clean build " (pr-str different))
-                    {:members different})))
-  (let [replayed (assoc clean :units (into {} (map (juxt :namespace :replayed-unit) results)))
-        bytes (erlang/term_to_binary replayed (list :deterministic))
-        clean-bytes (erlang/term_to_binary clean (list :deterministic))]
-   (when-not (erlang/=:= bytes clean-bytes)
-    (throw (ex-info "Reassembled native replay differs from the clean closure" {})))
-   (File/write! path bytes (list :exclusive))
-   {:sha256 (artifact/sha bytes) :bytes (erlang/byte_size bytes) :exact-partitions (count results)})))
-
-(defn- replay-bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha
-                              control-root export-path update? mark]
- (let [start (when mark (mark))
-       anchor (qualified-donor donor qualification-path)
-       bytes (File/read! receipt-path)
-       receipt (authenticated-registry bytes expected-sha anchor)]
-  (when (and update? (not= :native-bound-registry-v9 (:schema receipt)))
-   (refuse-bound-registry :missing-observable-effect-schema))
-  (when-not (and (= (:sdk-pin closure) (:sdk-pin donor) (:sdk receipt))
-                 (= (:options closure) (:options donor) (:options receipt))
-                 (= (:order closure) (:order donor) (:order receipt))
-                 (= (value-identity (:core-links closure)) (value-identity (:core-links donor)) (:core-links receipt))
-                 (= (:stubs closure) (:stubs donor))
-                 (= (:links-sha256 anchor) (:base-links receipt))
-                 (= (artifact/sha (File/read! samples-path)) (:sample-report-sha256 receipt)))
-   (refuse-bound-registry :receipt-context-mismatch))
-  (when mark (mark :receipt-authentication nil start))
-  ;; The qualified donor supplies definitions. The receipt carries only
-  ;; inputs, and cannot supply a replacement payload for an accepted member.
-  ;; Macro recipes are from the exact SDK and the sampling evidence belongs
-  ;; to the donor. Staging and registry validation use the candidate rows.
-  (with-phase-entries {:sha256 (:links-sha256 anchor)} samples-path
-   (fn [entries _]
-    (let [results (mapv (fn [ns]
-                         (let [entry (read-registry-member (get-in receipt [:members ns]))
-                               old (get-in donor [:units ns])
-                               entry (cond
-                                       (:reason entry) entry
-                                       (and (not= :native-bound-registry-v1 (:schema receipt)) (not (map? (:env-reads entry))))
-                                       {:reason :missing-env-reads}
-                                       (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4
-                                                         :native-bound-registry-v5 :native-bound-registry-v6 :native-bound-registry-v7
-                                                         :native-bound-registry-v8 :native-bound-registry-v9}
-                                                       (:schema receipt))
-                                            (not (map? (:code-reads entry))))
-                                       {:reason :missing-code-reads}
-                                       (and (contains? #{:native-bound-registry-v6 :native-bound-registry-v7 :native-bound-registry-v8
-                                                         :native-bound-registry-v9}
-                                                       (:schema receipt))
-                                            (not (map? (:resolver-reads entry))))
-                                       {:reason :missing-resolver-reads}
-                                       (and (= :native-bound-registry-v9 (:schema receipt)) (not (true? (:checked-observable-effects entry))))
-                                       {:reason :missing-effect-checks}
-                                       :else (assoc entry :definition-bytes (def-bytes old)))
-                               mutation (when (and control-root (= "host.delay" ns))
-                                          #(BeamLisp.Env/add_search_path control-root))]
-                          (replay-registry-member closure candidate (get-in closure [:units ns])
-                                                  entry entries mutation (when (or export-path update?) old) (not update?) mark)))
-                       (:order closure))
-          members (mapv #(dissoc % :replayed-unit) results)
-          exported (when export-path (export-verified-closure! export-path closure results))
-          control (when control-root
-                    (let [selected (first (filter #(= "host.delay" (:namespace %)) members))]
-                     (assert (= :env-input-changed (:reason selected)))
-                     (assert (= [[:search_paths]] (:changed-env-reads selected)))
-                     (assert (not (:reused selected)))
-                     selected))]
-     (cond-> {:schema "bl.native.bound-registry-shadow" :version 2 :reuse-authority false
-              :receipt-schema (:schema receipt)
-              :donor anchor :receipt-sha256 expected-sha :receipt-bytes (erlang/byte_size bytes)
-              :candidate-link-rows-sha256 (:sha256 candidate) :members members}
-      control (assoc :env-control control)
-      exported (assoc :exported-closure exported)
-      update? (assoc :units (into {} (map (juxt :namespace :replayed-unit) results))
-                     :changed (mapv :namespace (remove :reused members))
-                     :added [] :order (:order closure))))))))
-
-(defn checked-update [closure rowset request mark]
- (let [{:strs [receipt samples donor qualification sha256]} request]
-  (when-not (every? #(and (string? %) (not (empty? %))) [receipt samples donor qualification sha256])
-   (refuse-bound-registry :incomplete-update-request))
-  (let [start (when mark (mark))
-        donor-closure (artifact/read-closure donor)]
-   (when mark (mark :donor-load nil start))
-   (replay-bound-registry closure rowset receipt samples donor-closure
-                          qualification sha256 nil nil true mark))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
