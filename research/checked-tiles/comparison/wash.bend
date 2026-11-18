@@ -36,8 +36,8 @@ def frame(pair: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(Unit):
   do IO<Unit>:
     +xs : List<&2, U32> <- IO.pass(List<&2, U32>, result)
     u : Unit <- File.close(f)
-    rows = split(5n, List.length(&2, U32, xs), xs)
-    output = render!(rows)
+    rows : Rows = split(5n, List.length(&2, U32, xs), xs)
+    output : List<&2, U32> = render!(rows)
     out : File <- IO.try(File, File.open("bend.rgb", "w"))
     written : File & Result<&1, &1, U32 & String, Unit> <- File.write_bytes(out, output)
     finish(written)
