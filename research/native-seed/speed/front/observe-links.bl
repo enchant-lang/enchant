@@ -5,6 +5,7 @@
 ;;   PARTITION LINK_ROWS --all REPORT [CANDIDATE_LINK_ROWS]
 ;;   PARTITION LINK_ROWS --sequential-scoped REPORT
 ;;   PARTITION LINK_ROWS --write-control REPORT
+;;   QUALIFIED_PARTITION BASELINE_LINK_ROWS --shadow REPORT CANDIDATE_LINK_ROWS
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
 ;; retains the historical ambient naming mode for comparison.
@@ -210,6 +211,38 @@
 (defn- def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
+(defn- observe-shadow [closure baseline candidate]
+ ;; The qualified partition is the independent clean candidate oracle. Only
+ ;; members that fail their baseline link receipt enter candidate compilation.
+ (assert (some? candidate))
+ (let [started (erlang/monotonic_time :microsecond)
+       prior (mapv (fn [ns]
+                     (let [member (get-in closure [:units ns])
+                           [compiled observed] (compile-member closure member (:rows baseline))
+                           receipt (link-receipt observed)]
+                      (assert (= (:source-sha256 member) (:source-sha256 compiled)))
+                      (assert (:accepted (replay-links observed (:local-links baseline))))
+                      [member (def-bytes compiled) receipt (ordered-report observed)]))
+                   (:order closure))
+       seeded (erlang/monotonic_time :microsecond)
+       plan (mapv (fn [[member bytes receipt operations]]
+                    {:member member :baseline-bytes bytes :operations operations
+                     :reuse? (receipt-matches? receipt (:local-links candidate))}) prior)
+       planned (erlang/monotonic_time :microsecond)
+       result (mapv (fn [{:keys [member baseline-bytes operations reuse?]}]
+                      (let [bytes (if reuse? baseline-bytes
+                                   (def-bytes (first (compile-member closure member (:rows candidate)))))
+                            exact? (erlang/=:= bytes (def-bytes member))]
+                       {:namespace (:ns member) :reused reuse? :exact-clean-definitions exact?
+                        :operations operations})) plan)
+       checked (erlang/monotonic_time :microsecond)]
+  {:schema "bl.native.link-replay-shadow" :version 1 :reuse-authority false
+   :baseline-link-rows-sha256 (:sha256 baseline) :candidate-link-rows-sha256 (:sha256 candidate)
+   :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+   :baseline-compilation-us (- seeded started) :plan-us (- planned seeded)
+   :candidate-compilation-and-oracle-comparison-us (- checked planned)
+   :members result}))
+
 (defn- effect-report [observation]
  (into {} (map (fn [kind] [kind (mapv (fn [[[ns name] occurrences]] [ns name occurrences])
                                      (sort (get-in observation [:effects kind])))])
@@ -291,6 +324,7 @@
        candidate (when comparison (pinned-rows comparison))
        report (cond
                 (= selected "--write-control") (write-control)
+                (= selected "--shadow") (observe-shadow closure baseline candidate)
                 (= selected "--sequential") (observe-sequential closure baseline false)
                 (= selected "--sequential-scoped") (observe-sequential closure baseline true)
                 (= selected "--all")
