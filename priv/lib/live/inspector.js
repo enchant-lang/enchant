@@ -108,11 +108,12 @@
   function render() {
     if(!open||disposed||suspended)return;
     const focused=root.activeElement;
-    const key=body.contains(focused) && (focused.dataset.run ?? focused.dataset.action);
+    const focusKey=node=>node.dataset.receipt ?? node.dataset.run ?? node.dataset.action;
+    const key=body.contains(focused) && focusKey(focused);
     renderPanel();
     if(key) {
-      const replacement=[...body.querySelectorAll('button[data-run],button[data-action]')]
-        .find(button=>(button.dataset.run ?? button.dataset.action)===key);
+      const replacement=[...body.querySelectorAll('button[data-run],button[data-action],a[data-receipt]')]
+        .find(node=>focusKey(node)===key);
       replacement?.focus({preventScroll:true});
     }
   }
@@ -142,8 +143,11 @@
       results.slice(0,8).forEach(p=>{
         const row=text(body,'div','');row.className='line';
         const label=text(row,'span','');const dot=text(label,'i','');dot.className=`dot ${['ready','running','blocked'].includes(p.status)?p.status:''}`;
-        label.append(document.createTextNode(String(p.name).replace(/^:/,'')));
-        text(row,'small',stateName(p));
+        const name=String(p.name).replace(/^:/,'');
+        label.append(document.createTextNode(name));
+        const state=text(row,'small','');
+        const status=stateName(p);
+        if(!receiptLink(state,p['receipt-url'],status,name))state.textContent=status;
       });
       jobs.slice(0,6).forEach(j=>{const row=text(body,'div','');row.className='line';text(row,'span',j.title);text(row,'small',j.status==='running'?'Working':j.status==='done'?'Done':j.status);});
       if(sample.versions) {
@@ -189,6 +193,15 @@
       return url.origin===window.location.origin?url:null;
     } catch {return null;}
   }
+  function receiptLink(parent,href,label,projection) {
+    const url=sourceTarget(href);
+    if(!url?.pathname.startsWith('/__enchant/receipts/'))return null;
+    const link=text(parent,'a',label);
+    link.href=url.href;
+    link.dataset.receipt=projection===undefined?url.pathname:url.pathname.slice(0,url.pathname.lastIndexOf('/'));
+    if(projection!==undefined)link.setAttribute('aria-label',`${label}, latest decision for ${projection}`);
+    return link;
+  }
   function renderTools() {
     const tape=sample?.activity;
     if(!tape?.available){text(body,'div',error?'Unavailable':sample?'Not enabled':'…').className='empty';return;}
@@ -199,10 +212,7 @@
     if(chosen) {
       const head=text(body,'div','');head.className='selection';text(head,'b',toolName(chosen.tool));
       const back=text(head,'button','All runs');back.dataset.action='all-runs';
-      const receipt=sourceTarget(chosen['receipt-url']);
-      if(receipt?.pathname.startsWith('/__enchant/receipts/')) {
-        const link=text(head,'a','Receipt');link.href=receipt.href;
-      }
+      receiptLink(head,chosen['receipt-url'],'Receipt');
       const location=sourcePosition(chosen);
       const subject=text(body,'div','');subject.className='selection';
       const target=sourceTarget(chosen.link);
