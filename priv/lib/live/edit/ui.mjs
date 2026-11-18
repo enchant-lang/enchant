@@ -110,6 +110,7 @@ class DefaultUI {
     const search=button('Search actions','search',()=>this.commandPalette());search.append(element('span','ed-search-label','Search actions'));
     const searchGroup=element('div','ed-search-action');searchGroup.append(search,element('kbd','','⇧ P'));
     const exportButton=button('Export document','more',()=>this.documentMenu(exportButton));
+    exportButton.setAttribute('aria-haspopup','dialog');exportButton.setAttribute('aria-expanded','false');
     actions.append(this.save,searchGroup,exportButton);this.nav.append(breadcrumb,actions);this.root.prepend(this.nav);
     this.header=element('header','ed-document-header');const top=element('div','ed-document-eyebrow');
     top.append(element('span','ed-eyebrow',this.editor.model.appearance?.label||'A SPACE TO THINK'));
@@ -283,7 +284,7 @@ class DefaultUI {
   }
   menuRow(item,action){
     const row=item.href?element('a','ed-menu-row'):button(item.label,item.icon||'function',action,'ed-menu-row');
-    if(item.href){row.href=item.href;row.setAttribute('aria-label',item.label);if(item.download)row.download=item.download===true?'':item.download;row.addEventListener('click',action);}
+    if(item.href){row.append(icon(item.icon||'link'));row.href=item.href;row.setAttribute('aria-label',item.label);if(item.download)row.download=item.download===true?'':item.download;row.addEventListener('click',action);}
     if(item.id)row.dataset.command=item.id;row.append(element('span','ed-menu-row-label',item.label));
     if(item.description)row.append(element('span','ed-menu-row-description',item.description));
     if(item.shortcut)row.append(element('kbd','',item.shortcut.replace('Mod-','⌘ ').replace('Shift-','⇧ ')));
@@ -374,11 +375,22 @@ class DefaultUI {
       {label:'View source',icon:'code',action:()=>this.source()},
       {label:'Switch appearance',icon:'moon',action:()=>{const value=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=value;for(const view of this.editor.surfaces.owned.values())view.element.dataset.theme=value;localStorage.setItem('enchant.edit.theme',value);}},
     ];
-    const formats=this.editor.recoveryFailure?[]:this.editor.session.exportFormats().map(format=>({
+    const supported=this.editor.session.exportFormats();
+    const formats=this.editor.recoveryFailure?[]:supported.map(format=>({
       label:format.label,icon:'download',action:()=>this.editor.download(format.id),
     }));
-    for(const item of [...formats,...actions])content.append(this.menuRow(item,()=>{this.panel.hide('choose');item.action?.();}));
-    this.openPanel(content,token,anchor);
+    const fallback=this.editor.model['document-actions']&&(supported.length||this.editor.recoveryFailure)
+      ? [{label:'Download recovery copy',icon:'download',action:()=>this.editor.download()}] : [];
+    const items=[...formats,...actions,...fallback];
+    if(!items.length){this.editor.session.release(token);return;}
+    for(const item of items)content.append(this.menuRow(item,()=>{this.panel.hide('choose');item.action?.();}));
+    content.firstElementChild.tabIndex=0;
+    anchor.setAttribute('aria-expanded','true');
+    this.openPanel(content,token,anchor,{focus:content.firstElementChild,onClose:reason=>{
+      anchor.setAttribute('aria-expanded','false');
+      if(reason==='escape')requestAnimationFrame(()=>anchor.focus());
+    }});
+    this.keyboardMenu(content);
   }
   source(){
     const dialog=element('dialog','ed-source-dialog');dialog.setAttribute('aria-label','Document source');

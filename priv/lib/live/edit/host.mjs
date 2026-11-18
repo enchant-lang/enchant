@@ -405,7 +405,7 @@ export class Editor {
         output=this.session.exportSource(format);
       }
     } catch(error) {
-      return this.report(Error('Could not export this draft. Download the Enchant draft to keep your edits.',{cause:error}));
+      return this.report(Error('Could not export this draft. Download a recovery copy to keep your edits.',{cause:error}));
     }
     const url=URL.createObjectURL(new Blob([output.body],{type:output.mime}));
     const a=document.createElement('a');a.href=url;a.download=(this.session.read().meta.title||'Untitled').replaceAll(/[\\/:*?"<>|]/g,'-')+output.extension;
