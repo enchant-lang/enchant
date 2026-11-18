@@ -52,6 +52,35 @@ theorem nested_work (terminalBytes wrapperBytes n : Nat) :
     simp [Nat.add_mul, Nat.mul_add, Nat.add_assoc, Nat.add_left_comm,
       Nat.add_comm, Nat.mul_assoc, Nat.mul_comm]
 
+def weighted (depth : Nat) : List Nat → Nat
+  | [] => 0
+  | size :: rest => depth * size + weighted (depth + 1) rest
+
+theorem weighted_step (sizes : List Nat) (depth : Nat) :
+    weighted (depth + 1) sizes = weighted depth sizes + sizes.sum := by
+  induction sizes generalizing depth with
+  | nil => simp [weighted]
+  | cons size remaining ih =>
+    simp only [weighted, List.sum_cons, Nat.add_mul, Nat.one_mul, ih]
+    ac_rfl
+
+def nestedVariableWork (terminalBytes : Nat) : List Nat → Nat
+  | [] => 0
+  | size :: rest =>
+      terminalBytes + size + rest.sum + nestedVariableWork terminalBytes rest
+
+-- Each wrapper's bytes are copied once per enclosing join, including its own.
+-- The terminal's bytes are copied at every join.
+theorem nested_weighted_work (sizes : List Nat) (terminalBytes : Nat) :
+    nestedVariableWork terminalBytes sizes =
+      sizes.length * terminalBytes + weighted 1 sizes := by
+  induction sizes with
+  | nil => simp [nestedVariableWork, weighted]
+  | cons size remaining ih =>
+    simp only [nestedVariableWork, ih, List.length_cons, weighted, Nat.add_mul, Nat.one_mul]
+    rw [weighted_step remaining 1]
+    ac_rfl
+
 theorem output_bytes (terminal : List α) (wrappers : List (Wrapper α)) :
     (collect terminal [] [] wrappers).length =
       terminal.length + (wrappers.map (fun w => w.1.length + w.2.length)).sum := by
@@ -67,6 +96,7 @@ example : collect ([] : List Nat) [] [] [([1], [4]), ([2], [3])] ≠ [1, 2, 4, 3
 
 #print axioms flattened_bytes
 #print axioms nested_work
+#print axioms nested_weighted_work
 #print axioms output_bytes
 
 end NativeWrapperEmission
