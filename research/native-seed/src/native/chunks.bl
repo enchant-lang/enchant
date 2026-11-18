@@ -13,6 +13,7 @@
 (def host-path (or (nth args 2 nil) "research/native-seed/out/compiler-closure/host.scm"))
 (def out (or (nth args 3 nil) "research/native-seed/out/compiler-closure"))
 (def leaves-path (or (nth args 4 nil) (str out "/leaves.json")))
+(def host-source (File/read! host-path))
 (def closure (artifact/read-closure artifact-path))
 (def manifest (json/decode (File/read! artifact-path)))
 (def units (mapv #(get (:units closure) %) (:order closure)))
@@ -26,7 +27,7 @@
  {"artifact_sha256" (get manifest "artifact_sha256")
   "sdk_descriptor_sha256" (:sdk-descriptor-sha256 artifact/validation-context)
   "abi_sha256" (artifact/sha (File/read! leaves-path))
-  "host_sha256" (artifact/sha (File/read! host-path))
+  "host_sha256" (artifact/sha host-source)
   "emitter_sha256" (artifact/sha (File/read! "research/native-seed/src/native/scheme.bl"))
   "eval_sha256" (artifact/sha (File/read! "research/native-seed/src/native/eval.bl"))
   "bootstrap_sha256" (artifact/sha (File/read! "research/native-seed/src/native/bootstrap.bl"))
@@ -141,8 +142,8 @@
   (println (str "NATIVE_CHUNK " (:ns u) " " offset " " count* " " key))))
 (defn ensure-plan! []
  (let [path (str out "/chunks.json")
-       previous (when (File/regular? path)
-                  (try (json/decode (File/read! path)) (catch _ nil)))
+       previous-text (when (File/regular? path) (try (File/read! path) (catch _ nil)))
+       previous (when previous-text (try (json/decode previous-text) (catch _ nil)))
        requested (nth args 5 nil)
        size (if requested (String/to_integer requested)
                (let [prior-size (get previous "size")]
@@ -151,22 +152,48 @@
        ; Construct and validate every current IR/signature record exactly
        ; once. Existing files are reused only after this current plan proves
        ; complete coverage and all referenced capabilities again.
-       current (make-plan size)]
+       current (make-plan size)
+       same? (= previous current)
+       text (if same? previous-text (json/encode current))]
   (File/mkdir_p! (str out "/chunks"))
-  (when-not (= previous current)
+  (when-not same?
    (when (File/regular? (str out "/chunk-export.json")) (File/rm! (str out "/chunk-export.json")))
-   (File/write! path (json/encode current))
+   (File/write! path text)
    (println (str "NATIVE_CHUNK_PLAN " (count (get current "chunks")) " jobs"))
    (report-dead-leaves!))
-  current))
-(defn emit-window! [plan]
+  [current (artifact/sha text)]))
+
+(defn resume-plan [expected]
+ ; The driver obtains this digest from a successful earlier window of the
+ ; same request. A plan on disk alone never grants reuse. Each new process
+ ; still checks current assembly inputs and the persisted chunk bytes.
+ (when (seq expected)
+  (try
+   (let [text (File/read! (str out "/chunks.json"))]
+    (when (= expected (artifact/sha text))
+     (let [plan (json/decode text)
+           size (get plan "size")
+           requested (nth args 5 nil)]
+      (when (and (= "bl.native.chunk-plan" (get plan "schema"))
+                 (= 2 (get plan "version"))
+                 (integer? size) (<= 1 size 128)
+                 (or (nil? requested) (= size (String/to_integer requested)))
+                 (= key-input (get plan "assembly_inputs"))
+                 (= emission-input (get plan "inputs"))
+                 (= (row-layout size)
+                    (mapv #(select-keys % ["namespace" "offset" "count"]) (get plan "chunks"))))
+       (println (str "NATIVE_CHUNK_PLAN_RESUMED " (count (get plan "chunks")) " jobs"))
+       [plan expected]))))
+   (catch _ nil))))
+
+(defn emit-window! [plan max-built]
  (let [start (erlang/monotonic_time :millisecond)]
   (loop [rows (get plan "chunks") checked [] built 0 reused 0]
    (if (empty? rows) {:chunks checked :built built :reused reused}
     (let [row (first rows)]
      (if-let [chunk (ready-chunk row)]
       (recur (rest rows) (conj checked chunk) built (inc reused))
-      (if (>= (- (erlang/monotonic_time :millisecond) start) 110000)
+      (if (or (= built max-built) (>= (- (erlang/monotonic_time :millisecond) start) 110000))
        {:next (count checked) :built built :reused reused}
        (do (emit-chunk! row)
            (recur (rest rows) (conj checked (checked-chunk row)) (inc built) reused)))))))))
@@ -183,7 +210,7 @@
         macro-sources (keep-indexed (fn [i source]
                         (when (contains? macro-names (:ns (nth units i))) source)) sources)
         eval-bundle (str "(bl-map (bl-key \"units\") (bl-vec (list " (string/join "\n" macro-sources) ")))")
-        prelude (str ";; BL native compiler. Generated from canonical BL source.\n" (File/read! host-path) "\n"
+        prelude (str ";; BL native compiler. Generated from canonical BL source.\n" host-source "\n"
                      (bootstrap/bundle-install-source metadata) functions initializers
                      (bootstrap/seal-source link-plan))]
    (File/write! (str out "/bundle.scm") bundle)
@@ -234,12 +261,16 @@
    (File/write! (str out "/seed-links.scm") (bootstrap/seed-links link-plan))
    (println (str "NATIVE_CHUNKS_INSPECT " (count wanted))))
  (= mode "build-next")
-  (let [plan (ensure-plan!) progress (emit-window! plan)]
+  (let [max-built (when-let [limit (System/get_env "NATIVE_CHUNK_WINDOW_JOBS")]
+                    (let [limit (String/to_integer limit)] (assert (pos? limit)) limit))
+        [plan digest] (or (resume-plan (System/get_env "NATIVE_CHUNK_PLAN_SHA")) (ensure-plan!))
+        progress (emit-window! plan max-built)]
    (if-let [chunks (:chunks progress)]
     (do
      (assemble! chunks)
      (println (str "NATIVE_BUILD_COMPLETE built=" (:built progress) " reused=" (:reused progress))))
-    (println (str "NATIVE_BUILD_YIELD next=" (:next progress) " built=" (:built progress) " reused=" (:reused progress)))))
+    (println (str "NATIVE_BUILD_YIELD next=" (:next progress) " built=" (:built progress)
+                  " reused=" (:reused progress) " plan_sha=" digest))))
  (= mode "dead-leaves") (report-dead-leaves!)
  ; Focused unit build: emit every chunk row of the named namespaces (args 5 =
  ; "ns,ns,...", 6 = optional size) into OUT/chunks with the same keys and
