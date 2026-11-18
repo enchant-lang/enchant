@@ -55,7 +55,7 @@ def rgb_png(data, width, height):
 
 
 def elapsed(start):
-    return round((time.perf_counter() - start) * 1000, 3)
+    return round((time.perf_counter() - start) * 1000, 6)
 
 
 def timings(render, expected, count=5):
@@ -66,6 +66,18 @@ def timings(render, expected, count=5):
         samples.append(elapsed(start))
         require(got == expected, "frame differs from compiled BEAM reference")
     return {'samples_ms': samples, 'median_ms': statistics.median(samples)}
+
+
+def check_backend(render, table):
+    for w, h, tile in [(0, 3, 8), (4, 0, 8), (1, 1, 1), (16, 16, 4), (257, 1, 16), (17, 19, 8)]:
+        data = bytes(i % 256 for i in range(w*h))
+        actual = render(data, w, h, tile)
+        expected = data.translate(table)
+        require(len(actual) == len(expected), f"wrong output size at {w}x{h}")
+        if actual != expected:
+            i = next(i for i in range(len(data)) if actual[i] != expected[i])
+            raise ValueError(f"{w}x{h} tile {tile}, channel ({i%w},{i//w}): "
+                             f"{data[i]} became {actual[i]}, expected {expected[i]}")
 
 
 class NativeRegion:
@@ -171,11 +183,7 @@ theorem channel_verdict : {theorem} := by decide
                'lean_process_ms': lean_ms, 'cpu_compile_ms': cpu_build_ms, 'output_sha256': digest(ref),
                'law': 'all 256 channels brighten or preserve, remain bytes; checked model of tiled indexing',
                'reference': 'original BL compiled on BEAM', 'timings': {}}
-    def check_backend(render):
-        for w, h, tile in [(0, 3, 8), (4, 0, 8), (1, 1, 1), (16, 16, 4), (257, 1, 16), (17, 19, 8)]:
-            data = bytes(i % 256 for i in range(w*h))
-            require(render(data, w, h, tile) == data.translate(table), f"edge/domain differential failed {w}x{h}")
-    check_backend(cpu)
+    check_backend(cpu, table)
     for threads in (1, 4):
         receipt['timings'][f'cpu_{threads}'] = timings(lambda: cpu(raw, stride, args.height, args.tile, threads), ref)
     receipt['timings']['cpu_lookup'] = timings(lambda: raw.translate(table), ref)
@@ -199,7 +207,7 @@ theorem channel_verdict : {theorem} := by decide
             with Device(TOOLS['opencl'], gpu_source) as gpu:
                 receipt['gpu_setup_ms'] = elapsed(start)
                 receipt['gpu'] = gpu.info
-                check_backend(gpu.render)
+                check_backend(gpu.render, table)
                 if args.sweep:
                     sweep('gpu_whole_call', gpu.render)
                 receipt['timings']['gpu_whole_call'] = timings(lambda: gpu.render(raw, stride, args.height, args.tile), ref)
