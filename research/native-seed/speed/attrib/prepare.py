@@ -52,23 +52,29 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--reps', type=int, default=5)
     parser.add_argument('--interval', default='0.0005')
-    parser.add_argument('--samples-only', action='store_true',
-                        help='omit the separately instrumented, high-overhead exact call count pass')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--samples-only', action='store_true',
+                      help='omit the separately instrumented, high-overhead exact call count pass')
+    mode.add_argument('--timing-only', action='store_true',
+                      help='time the same read, compile and emit work without instrumentation')
     args = parser.parse_args()
     build, out = args.build.resolve(), args.out.resolve()
     if out.exists():
         parser.error('select a fresh output directory')
     out.mkdir(parents=True)
     here = Path(__file__).resolve().parent
-    listing, sizes = targets(build / 'stage1.scm')
-    (out / 'targets.scm').write_text(listing)
+    sizes = {}
+    if not args.timing_only:
+        listing, sizes = targets(build / 'stage1.scm')
+        (out / 'targets.scm').write_text(listing)
     observer = (here / 'native-attrib.scm.in').read_text()
     for key, value in {'@SOURCE@': scheme_string(str(args.source.resolve())),
                        '@BUNDLE@': scheme_string(str(build / 'bundle.scm')),
                        '@TARGETS@': scheme_string(str(out / 'targets.scm')),
                        '@OUT@': scheme_string(str(out)),
                        '@REPS@': str(args.reps), '@INTERVAL@': args.interval,
-                       '@COUNTS@': '#f' if args.samples_only else '#t'}.items():
+                       '@COUNTS@': '#f' if args.samples_only or args.timing_only else '#t',
+                       '@TIMINGS@': '#t' if args.timing_only else '#f'}.items():
         observer = observer.replace(key, value)
     assert '@' not in re.sub(r'"[^"]*"', '', observer).replace('##', ''), 'unresolved placeholder'
     (out / 'observer.scm').write_text(observer)
@@ -77,7 +83,8 @@ def main():
                                           Path(__file__).resolve()]}
     result = {'schema': 'bl.native.a3-attribution-preparation', 'version': 1,
               'inputs': inputs, 'targets': sizes, 'reps': args.reps, 'interval': args.interval,
-              'instrument_calls': not args.samples_only,
+              'instrument_calls': not args.samples_only and not args.timing_only,
+              'timing_only': args.timing_only,
               'argv': [str(build / 'stage1'), '--eval', str(out / 'observer.scm'), str(build / 'bundle.scm')]}
     (out / 'preparation.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result['argv']))

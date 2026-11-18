@@ -13,6 +13,7 @@
 (define A-out @OUT@)
 (define A-reps @REPS@)
 (define A-counts? @COUNTS@)
+(define A-timings? @TIMINGS@)
 (define A-ns "reader")
 (define A-attribution "priv/boot/reader.bl")
 
@@ -267,6 +268,12 @@
 
 (define A-targets '())
 (define (A-no-eval . arguments) (error "authored Scheme evaluation during attribution"))
+(define (A-timed-round)
+ (let* ((start (real-time)) (forms (A-read)) (read-end (real-time))
+        (nodes (A-compile-forms forms)) (compile-end (real-time)))
+  (A-emit-nodes nodes)
+  (let ((emit-end (real-time)))
+   (A-log "A3_TIMING " (- read-end start) " " (- compile-end read-end) " " (- emit-end compile-end)))))
 (define (A-run)
  (let ((bundle (native-eval-string (native-read-file A-bundle-path))))
   (A-call (A-select "native.bootstrap" "install-source-macros!") bundle))
@@ -276,12 +283,16 @@
    (native-write-file (string-append A-out "/native.scm") text)
    (A-log "A3_FIXTURE forms " (length forms) " definitions " (length nodes)
           " emit-failures " A-emit-failures " chars " (string-length text))
-   (set! A-targets (native-eval-string (native-read-file A-targets-path)))
-   (A-label-codes! A-targets)
+   (if (not A-timings?)
+    (begin (set! A-targets (native-eval-string (native-read-file A-targets-path)))
+           (A-label-codes! A-targets)))
    ;; After the fixture is set up, any authored-Scheme eval is a fault.
    (set! native-eval-string A-no-eval)
    (set! native-leaf-registry (bl-assoc native-leaf-registry "host/eval-scheme/1" A-no-eval))
    (A-log "A3_SETUP_DONE " (real-time))
+   (if A-timings?
+    (A-repeat A-reps A-timed-round)
+    (begin
    ;; pass 1
    (##interrupt-vector-set! 2 A-heartbeat!)
    (##set-heartbeat-interval! @INTERVAL@)
@@ -307,7 +318,8 @@
             (nodes2 (A-counted "compile" (lambda () (A-compile-forms forms2))))
             (texts2 (A-counted "emit" (lambda () (A-emit-nodes nodes2)))))
       (native-write-file (string-append A-out "/native-counted.scm") (A-join texts2)))
-     (A-print-calib)))
+     (A-print-calib)))))
+   (if (and A-timings? (not (= A-emit-failures 0))) (error "native attribution could not emit the fixture"))
    (A-log "A3_DONE"))))
 (with-exception-catcher
  (lambda (failure) (display-exception failure) (newline) (force-output) (exit 1))
