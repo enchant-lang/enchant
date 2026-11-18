@@ -49,7 +49,10 @@
                    registry-input-state presence-snapshot changed-source-probes read-source-identity
                    with-registry-stage lower-with-snapshot prepared-inputs closed-identity
                    registry-row-signature receipt-key-description read-registry-member replay-registry-member
-                   refuse-bound-registry qualified-donor authenticated-registry replay-bound-registry]]))
+                   refuse-bound-registry qualified-donor authenticated-registry replay-bound-registry]]
+           [native.stage-link-guard :as guard
+            :refer [link-pattern-relation disjoint-link-pattern? indexed-link-rows select-indexed-link-rows
+                    stage-row-index stage-installed stage-compile phase-cost link-key-membership guard-stage-links]]))
 
 (def trace-limit 100000)
 (def registry-trace-limit 1000000)
@@ -135,25 +138,6 @@
        effects (assoc effects :registry-call-count n)]
   (if (> n registry-trace-limit) effects
    (update-in effects [:registry-calls operation] (fn [old] (inc (or old 0)))))))
-
-(defn- link-pattern-relation [pattern]
- ;; Installed link objects are {{scope, :link, namespace, name}, info}.
- ;; ETS wildcards and match variables can bind a whole key or its tag.
- (if (and (erlang/is_tuple pattern) (= 2 (erlang/tuple_size pattern)))
-  (let [key (elem pattern 0)]
-   (cond
-    (not (erlang/is_tuple key)) :possible-key
-    (not= 4 (erlang/tuple_size key)) [:different-key-arity (erlang/tuple_size key)]
-    :else (let [tag (elem key 1)]
-            (if (and (erlang/is_atom tag) (not (contains? #{:link :_} tag))
-                     (not (String/starts_with? (erlang/atom_to_binary tag) "$")))
-             :different-key-tag
-             :possible-key-tag))))
-  :possible-object))
-
-(defn- disjoint-link-pattern? [relation]
- (or (= :different-key-tag relation)
-     (and (vector? relation) (= :different-key-arity (first relation)))))
 
 (defn- process-destination [destination]
  (if (erlang/is_pid destination)
@@ -1981,31 +1965,6 @@
    (count cases)
    (finally (ets/delete table)))))
 
-(defn- indexed-link-rows [rows key-of]
- (reduce-kv (fn [index position row]
-              (update index (key-of row) #(conj (or % []) [position row])))
-             {} rows))
-
-(defn- select-indexed-link-rows [index inputs]
- (mapv second (sort-by first (mapcat #(get index % []) inputs))))
-
-(defn- stage-row-index [closure rows]
- [(indexed-link-rows rows (fn [[provider name _ _]] [provider name]))
-  (indexed-link-rows (:core-links closure) (fn [[name _]] ["core" name]))])
-
-(defn- stage-installed [closure rows member action]
- (BeamLisp.Env/isolated
-  (fn []
-   (install-batched-rows! closure rows)
-   (BeamLisp.Compiler/with_fresh_names #(action member)))))
-
-(defn- stage-compile [member]
- (let [prepared (build/prepare-ns (:path member))
-       compiled (lower-with-snapshot prepared)]
-  [(prepared-inputs prepared)
-   (assoc (dissoc compiled :cache-status :cache-key) :source (:source prepared)
-          :module (BeamLisp.Link/module_for (:ns member)) :base-module (BeamLisp.Emit/base_module_for (:ns member)))]))
-
 (defn- stage-trace [member]
  (trace! #(stage-compile member) {:registry? true :registry-inputs? true :link-scan-patterns? true}))
 
@@ -2026,106 +1985,6 @@
                               [operation arity calls]))
                            (sort (:registry-calls effects))))]
   {:inputs inputs :scans scans :unsupported remaining}))
-
-(defn- phase-cost [action]
- (let [started (erlang/monotonic_time :microsecond)
-       before (elem (erlang/process_info (erlang/self) :reductions) 1)
-       result (action)]
-  [result {:wall-us (- (erlang/monotonic_time :microsecond) started)
-           :caller-reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)}]))
-
-(defn- link-key-membership [keys]
- (into {} (map (fn [[ns name]] [(tuple ns name) true]) keys)))
-
-(defn- omitted-link-spec [tables scope live retained arity]
- (let [key (tuple (tuple :$2 :$3))]
-  (apply list (map (fn [table]
-   (tuple (apply list (concat [table (tuple :$1 :link :$2 :$3)] (repeat (- arity 2) :_)))
-         (list (tuple :"=:=" :$1 (tuple :const scope))
-               (tuple :is_map_key key (tuple :const live))
-               (tuple :not (tuple :is_map_key key (tuple :const retained))))
-         (list true)))
-   tables))))
-
-(defn- namespace-existence-match? [pattern limit caller]
- ;; The pinned Env callback checks only whether the first page has one row.
- ;; A continuation or ordering-sensitive consumer stays on the full path.
- (and (= caller (tuple :Elixir.BeamLisp.Env :"-ns_exists_uncached?/1-anonymous-0-" 2))
-      (= 1 limit)
-      (erlang/is_tuple pattern) (= 2 (erlang/tuple_size pattern)) (= :_ (elem pattern 1))
-      (let [key (elem pattern 0)]
-       (and (erlang/is_tuple key) (= 3 (erlang/tuple_size key))
-            (erlang/is_binary (elem key 1)) (= :_ (elem key 2))))))
-
-(defn- stage-link-guard-collector [events omitted unsupported]
- (receive
-  [:trace _ :call [:ets :match arguments] caller]
-  (let [[_ pattern limit] arguments]
-   (recur (inc events) omitted
-    (if (namespace-existence-match? pattern limit caller) unsupported
-     (conj unsupported [:match 3 (pr-str caller)]))))
-  [:trace _ :call [:ets operation arguments]]
-  (let [point? (contains? #{:lookup :member :lookup_element :update_counter :update_element :take} operation)
-        info-item (when (and (= operation :info) (= 2 (count arguments))) (second arguments))
-        metadata? (contains? #{:owner :name :type :protection :named_table :keypos :node :id} info-item)
-        scan-ok? (and (= operation :match_object) (<= 2 (count arguments))
-                      (disjoint-link-pattern? (link-pattern-relation (second arguments))))
-        omitted (if (and point? (< (count omitted) 32))
-                   (let [key (second arguments)] (conj omitted [(elem key 2) (elem key 3)]))
-                   omitted)
-        unsupported (if (or point? scan-ok? metadata?) unsupported
-                     (conj unsupported (cond-> [operation (count arguments)]
-                                        (and (some? info-item) (erlang/is_atom info-item)) (conj info-item))))]
-   (recur (inc events) omitted unsupported))
-  [:finish owner ticket]
-  (erlang/send owner [:stage-link-guard ticket {:trace-events events :complete? (<= events trace-limit)
-                                                :omitted-inputs (vec (sort omitted))
-                                                :unsupported (vec (sort unsupported))}])))
-
-(defn- guard-stage-links [scope live retained action]
- (let [owner (erlang/self)
-       observer (spawn #(stage-link-guard-collector 0 #{} #{}))
-       session (erlang/apply :trace :session_create (list :native_stage_link_guard observer (list)))
-       tables [:beam_lisp_vars (ets/whereis :beam_lisp_vars)]
-       install (fn [operation arity spec]
-                 (assert (= 1 (erlang/apply :trace :function
-                               (list session (tuple :ets operation arity) spec (list :local))))))]
-  (try
-   (doseq [[operation arity] [[:lookup 2] [:member 2] [:lookup_element 3] [:lookup_element 4]
-                              [:update_counter 3] [:update_counter 4] [:update_element 3] [:update_element 4] [:take 2]]]
-    (when (erlang/function_exported :ets operation arity)
-     (install operation arity (omitted-link-spec tables scope live retained arity))))
-   (doseq [[operation arity] [[:match_object 2] [:match_object 3] [:match 2]
-                              [:select 2] [:select 3] [:select_count 2] [:select_reverse 2] [:select_reverse 3] [:tab2list 1]
-                              [:first 1] [:last 1] [:next 2] [:prev 2] [:slot 2]
-                              [:first_lookup 1] [:last_lookup 1] [:next_lookup 2] [:prev_lookup 2] [:info 1] [:info 2]
-                              [:select_delete 2] [:select_replace 2] [:match_delete 2]
-                              [:delete_all_objects 1] [:delete 1]]]
-    (when (erlang/function_exported :ets operation arity)
-     (install operation arity (apply list (map (fn [table]
-       (tuple (apply list (cons table (repeat (dec arity) :_))) (list) (list true))) tables)))))
-   (doseq [operation [:match_object :match :select :select_reverse]]
-    (install operation 1 (list (tuple (list :_) (list) (list true)))))
-   (install :match 3 (apply list (map (fn [table]
-    (tuple (list table :_ :_) (list) (list (tuple :message (tuple :caller))))) tables)))
-   ;; put/replace alone does not inspect the old value. insert_new does.
-   ;; Watch single link objects and conservatively refuse row lists.
-   (install :insert_new 2 (apply list (mapcat (fn [table]
-      [(tuple (list table (tuple (tuple :_ :link :_ :_) :_)) (list) (list true))
-       (tuple (list table :$1) (list (tuple :is_list :$1)) (list true))]) tables)))
-   (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
-   (let [compiled (action)
-         _ (assert (= 1 (erlang/apply :trace :process (list session owner false (list :call)))))
-         barrier (erlang/apply :trace :delivered (list session owner))
-         ticket (erlang/make_ref)]
-    (receive [:trace_delivered seen ref] :when (and (= seen owner) (= ref barrier))
-     :ready (after 10000 (throw :stage-link-guard-delivery-timeout)))
-    (erlang/send observer [:finish owner ticket])
-    [compiled (receive [:stage-link-guard ref result] :when (= ref ticket)
-                result (after 10000 (throw :stage-link-guard-collector-timeout)))])
-   (finally
-    (erlang/apply :trace :session_destroy (list session))
-    (Process/exit observer :kill)))))
 
 (defn- stage-link-table-id-control []
  (BeamLisp.Env/isolated
@@ -2159,7 +2018,7 @@
   {:schema :native-stage-link-plan-v1 :donor anchor :sdk (:sdk-pin closure)
    :order (:order closure) :options (:options closure) :members members}))
 
-(defn- replay-stage-link-member [closure rows [row-index core-index] ns prior live]
+(defn- trace-stage-link-member [closure rows [row-index core-index] ns prior]
  (let [member (get-in closure [:units ns])
        retained (set (:inputs prior))
        source-changed? (not= [(:path member) (:source-sha256 member)] [(:path prior) (:source-sha256 prior)])
@@ -2167,21 +2026,16 @@
                              (seq (:unsupported prior)) :donor-table-read-unmodeled)
        subset-rows (when-not initial-refusal (select-indexed-link-rows row-index retained))
        subset-core (when-not initial-refusal (select-indexed-link-rows core-index retained))
-       action (if live (fn [member] (guard-stage-links (BeamLisp.Env/env_id) live
-                                                      (link-key-membership retained) #(stage-compile member)))
-                       stage-trace)
        [[compiled observed] verification-cost] (when-not initial-refusal
                                                  (phase-cost #(stage-installed (assoc closure :core-links subset-core)
-                                                                                subset-rows member action)))
-       input (when observed (if live observed (stage-link-inputs observed)))
-       omitted (if live (:omitted-inputs input [])
-                (vec (sort (keep (fn [key]
+                                                                                subset-rows member stage-trace)))
+       input (when observed (stage-link-inputs observed))
+       omitted (vec (sort (keep (fn [key]
                                  (when (and (not (contains? retained key))
                                             (or (contains? row-index key) (contains? core-index key)))
                                   key))
-                               (:inputs input)))))
-       refusal (or initial-refusal (when (false? (:complete? input)) :candidate-trace-incomplete)
-                   (when (seq (:unsupported input)) :candidate-table-read-unmodeled)
+                               (:inputs input))))
+       refusal (or initial-refusal (when (seq (:unsupported input)) :candidate-table-read-unmodeled)
                    (when (seq omitted) :candidate-link-not-installed))
        result (if refusal (stage-installed closure rows member stage-compile) compiled)]
   (assert (erlang/=:= member (second result)) (str "Edited stage plan changed output for " ns))
@@ -2192,14 +2046,7 @@
    :omitted-inputs omitted :fallback-rows (if refusal (+ (count rows) (count (:core-links closure))) 0)}))
 
 (defn- replay-stage-link-plan [closure rowset path expected-sha omission-control guarded?]
- (let [bytes (File/read! path)
-       _ (assert (= expected-sha (artifact/sha bytes)))
-       plan (read-registry-member bytes)
-       _ (assert (and (= :native-stage-link-plan-v1 (:schema plan))
-                      (= (:sdk plan) (:sdk-pin closure))
-                      (= (:options plan) (:options closure))
-                      (= (:order plan) (:order closure))
-                      (= (set (:order closure)) (set (keys (:members plan))))))
+ (let [plan (guard/read-stage-plan closure path expected-sha)
        rows (:rows rowset)
        [row-index core-index :as index] (stage-row-index closure rows)
        live (when guarded? (link-key-membership (concat (keys row-index) (keys core-index))))
@@ -2208,7 +2055,12 @@
                        (let [prior (get-in plan [:members ns])
                              _ (assert (some? prior) ns)
                              prior (if omission-control (assoc prior :inputs []) prior)
-                             result (replay-stage-link-member closure rows index ns prior live)]
+                             result (if guarded?
+                                     (let [member (get-in closure [:units ns])
+                                           [compiled receipt] (guard/compile-guarded-member closure rows index live member prior)]
+                                      (assert (erlang/=:= compiled member) ns)
+                                      (assoc receipt :exact-unit true))
+                                     (trace-stage-link-member closure rows index ns prior))]
                         (when omission-control
                          (assert (= :candidate-link-not-installed (:fallback result)))
                          (assert (seq (:omitted-inputs result))))

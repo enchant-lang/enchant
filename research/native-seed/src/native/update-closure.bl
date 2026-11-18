@@ -153,6 +153,8 @@
 (def link-rows-path (System/get_env "NATIVE_LINK_ROWS"))
 (def prior-link-rows-path (System/get_env "NATIVE_PRIOR_LINK_ROWS"))
 (def relink-request (System/get_env "NATIVE_CHECKED_RELINK_REQUEST"))
+(def stage-link-request (System/get_env "NATIVE_STAGE_LINK_PLAN_REQUEST"))
+(assert (not (and relink-request stage-link-request)))
 (defn read-link-rows [path]
  (let [bytes (File/read! path)]
   (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
@@ -215,19 +217,22 @@
             (update :order insert-after-dependencies ns requires))))))
      existing additions)))))
 
-(def checked-relink?
- (and relink-request link-rows-path install-linked-rows? (not repin?)
+(def eligible-relink?
+ (and link-rows-path install-linked-rows? (not repin?)
       (= host-modules (:host-modules original))
       (every? #(= (:path %) (get-in original [:units (:ns %) :path])) additions)))
-(defn checked-closure []
- (let [relink "native.checked-relink"
-       request (json/decode (File/read! relink-request))
+(def checked-relink? (and relink-request eligible-relink?))
+(def stage-link-candidate? (and stage-link-request eligible-relink?))
+(defn checked-closure [provider entry request-path profile?]
+ (let [request (json/decode (File/read! request-path))
        start (when relink-profile (profile-mark))]
   (BeamLisp.Loader/with_load_path "research/native-seed/speed/front"
-   (fn [] (BeamLisp.Loader/load_provider relink)))
+   (fn [] (BeamLisp.Loader/load_provider provider)))
   (when start (profile-mark :relink-module-load nil start))
-  (let [result ((BeamLisp.Env/fetch_exact! relink "checked-update") original linked-rows-input request
-                (when relink-profile profile-mark))
+  (let [compile! (BeamLisp.Env/fetch_exact! provider entry)
+        result (if profile?
+                (compile! original linked-rows-input request (when relink-profile profile-mark))
+                (compile! original linked-rows-input request))
         allowed (into (set (:order original)) stubs)
         recompiled (set (:changed result))]
    (doseq [ns (:order original)]
@@ -244,7 +249,11 @@
       (BeamLisp.CompilerData/check_compiler_data! unit artifact/limits))))
    result)))
 
-(def result (if checked-relink? (checked-closure) (compile-closure)))
+(def result
+ (cond
+  stage-link-candidate? (checked-closure "native.stage-link-guard" "guarded-update" stage-link-request false)
+  checked-relink? (checked-closure "native.checked-relink" "checked-update" relink-request true)
+  :else (compile-closure)))
 (def order (:order result))
 ; Order check: every closure dependency of a unit precedes it.
 (let [at (into {} (map-indexed (fn [i ns] [ns i]) order))]
@@ -286,6 +295,7 @@
                :units (mapv (fn [ns] (let [u (get (:units closure) ns)]
                        {:namespace ns :source-sha256 (:source-sha256 u) :definitions (count (:defs u))})) order)}
                relink-profile (assoc :phase-profile @relink-profile)
+               stage-link-candidate? (assoc :stage-link-candidate (:stage-link-candidate result))
                checked-relink? (assoc :checked-relink
                                 {:receipt-sha256 (:receipt-sha256 result)
                                  :candidate-link-rows-sha256 (:candidate-link-rows-sha256 result)

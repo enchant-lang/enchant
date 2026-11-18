@@ -11,18 +11,22 @@ set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
   echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json --capture-local QUALIFICATION PHASE_MACRO_SAMPLES [--arity]" >&2
-  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json {--stage-link-plan|--stage-link-guard} QUALIFICATION [--arity]" >&2
+  echo "       $0 QUALIFIED_CLOSURE_DIR REPORT.json {--stage-link-plan|--stage-link-guard|--stage-link-candidate} QUALIFICATION [--arity]" >&2
   exit 2
 }
 capture_local=false
 stage_link_plan=false
+stage_link_candidate=false
 edit=
-if [[ "${3:-}" == --stage-link-plan || "${3:-}" == --stage-link-guard ]]; then
+if [[ "${3:-}" == --stage-link-plan || "${3:-}" == --stage-link-guard || "${3:-}" == --stage-link-candidate ]]; then
   [[ $# == 4 || $# == 5 ]] || usage
   stage_link_plan=true
   stage_replay_mode=--replay-stage-link-plan
   if [[ "$3" == --stage-link-guard ]]; then
     stage_replay_mode=--guard-stage-link-plan
+  fi
+  if [[ "$3" == --stage-link-candidate ]]; then
+    stage_link_candidate=true
   fi
   qualification=$(realpath "$4")
   edit=${5:-}
@@ -69,6 +73,7 @@ done
 cp -a --reflink=auto "$seed/src" "$overlay/$seed/src"
 cp --reflink=auto "$baseline/partition.json" "$baseline/link-rows.etf" "$overlay/$edited/"
 if "$stage_link_plan"; then
+  capture_start=$(python3 -c 'import time; print(time.monotonic_ns())')
   plan="$overlay/stage-link-plan.etf"
   (
     cd "$overlay"
@@ -77,6 +82,7 @@ if "$stage_link_plan"; then
   )
   plan_sha=$(sha256sum "$plan")
   plan_sha=${plan_sha%% *}
+  capture_end=$(python3 -c 'import time; print(time.monotonic_ns())')
 fi
 if "$capture_local"; then
   receipt="$overlay/bound-donor.etf"
@@ -119,11 +125,23 @@ run_update() {
     --property=KillMode=control-group --setenv=XDG_RUNTIME_DIR="$overlay/runtime" \
     "$@" "$seed/speed/final/closure-r3.sh" "$directory"
 }
-if [[ "${NATIVE_RELINK_COMPARE:-}" == 1 ]]; then
+if [[ "${NATIVE_RELINK_COMPARE:-}" == 1 ]] || "$stage_link_candidate"; then
   candidate=$seed/out/checked
   cp -a "$edited" "$candidate"
   request="$overlay/relink.json"
-  python3 - "$request" "$receipt" "$samples" "$baseline/partition.json" "$qualification" "$receipt_sha" <<'PY'
+  if "$stage_link_candidate"; then
+    request_variable=NATIVE_STAGE_LINK_PLAN_REQUEST
+    python3 - "$request" "$plan" "$plan_sha" "$qualification" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = dict(zip(("plan", "sha256", "qualification"), sys.argv[2:], strict=True))
+Path(sys.argv[1]).write_text(json.dumps(request))
+PY
+  else
+    request_variable=NATIVE_CHECKED_RELINK_REQUEST
+    python3 - "$request" "$receipt" "$samples" "$baseline/partition.json" "$qualification" "$receipt_sha" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -131,9 +149,10 @@ from pathlib import Path
 request = dict(zip(("receipt", "samples", "donor", "qualification", "sha256"), sys.argv[2:], strict=True))
 Path(sys.argv[1]).write_text(json.dumps(request))
 PY
+  fi
   instrumentation=(--setenv=NATIVE_RELINK_TIMINGS=1 --setenv=NATIVE_RELINK_PROFILE="${NATIVE_RELINK_PROFILE:-}")
   run_candidate() {
-    run_update "$candidate" "${instrumentation[@]}" --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
+    run_update "$candidate" "${instrumentation[@]}" --setenv="$request_variable=$request"
   }
   if [[ "${NATIVE_RELINK_CLEAN_FIRST:-}" == 1 ]]; then
     order=(clean candidate)
@@ -154,10 +173,12 @@ from pathlib import Path
 candidate_dir, clean_dir = map(Path, sys.argv[1:3])
 candidate, clean = (json.loads((directory / "update.json").read_text())
                     for directory in (candidate_dir, clean_dir))
-members = candidate["checked-relink"]["members"]
+section, key = (("stage-link-candidate", "used-subset") if "stage-link-candidate" in candidate
+                else ("checked-relink", "reused"))
+members = candidate[section]["members"]
 assert len(members) == len(clean["units"])
-assert any(member["reused"] for member in members)
-assert any(not member["reused"] for member in members)
+assert any(member[key] for member in members)
+assert any(not member[key] for member in members)
 assert candidate["artifact-sha256"] == clean["artifact-sha256"]
 
 def timings(directory):
