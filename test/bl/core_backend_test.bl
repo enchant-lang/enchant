@@ -1,6 +1,6 @@
 ; core_backend_test.bl — public canonical ANF evaluated via the lower/eval-anf path.
 
-(ns core-backend.test (:require [compiler :as c] [lower :as sc]))
+(ns core-backend.test (:require [anf :as anf] [compiler :as c] [lower :as sc]))
 (def kenv (assoc (c/new-env "user") :ns "user"))
 (defn- compile-anf [src] (c/compile (BeamLisp.Reader/read_one src) kenv))
 (defn- via-runtime [src] (BeamLisp.Compiler/eval_string src))
@@ -55,5 +55,49 @@
     (eval-anf (compile-anf "(defn cbt-mk [k] :v3)"))
     (eval-anf (compile-anf "(defn cbt-mk [k] :v4)"))
     (is (= [:v1 7] (clo 7))) (is (= :v4 (BeamLisp.Ns.User/cbt-mk 0)))))
+
+(defn- local-recursion? [node]
+  (cerl_trees/fold (fn [c found] (or found (= :letrec (cerl/type c))))
+                   false (sc/lower-anf node)))
+
+(deftest closed-loop-uses-local-recursion
+  (let [source "(loop [i 0, sum 0]
+                  (if (erlang/< i 100) (recur (+ i 1) (+ sum i)) sum))"]
+    (is (local-recursion? (compile-anf source)))
+    (is (= 4950 (via-core source))))
+  (is (= 18 (via-core "(loop [outer 0, sum 0]
+    (if (< outer 3)
+      (recur (inc outer) (+ sum (loop [inner 0, total 0]
+        (if (< inner 4) (recur (inc inner) (+ total inner)) total))))
+      sum))"))))
+
+(deftest loop-call-keeps-operand-effects-and-protected-failure
+  (let [source "(fn [record] (loop [i (do (record :initial-i) 0)
+                                   v (do (record :initial-v) 10)]
+    (if (erlang/< i 2)
+      (recur (do (record :again-i) (erlang/+ i 1))
+             (do (record :again-v) (erlang/+ v 1))) v)))"
+        f (via-core source)
+        run (fn [fail?]
+              (let [seen (atom [])
+                    result (try (f (fn [step]
+                                    (swap! seen conj step)
+                                    (when (and fail? (= step :again-i)) (erlang/throw :abort))))
+                                (catch-raw [kind reason stack] [kind reason]))]
+                [result @seen]))]
+    (is (= [12 [:initial-i :initial-v :again-i :again-v :again-i :again-v]] (run false)))
+    (is (= [[:throw :abort] [:initial-i :initial-v :again-i]] (run true)))))
+
+(deftest escaping-loop-self-keeps-the-callable-value
+  (let [self "self" value "value"
+        knot (anf/app (anf/var self) (list (anf/var self)))
+        inner (anf/fnn (list (anf/clause (list (anf/pvar value)) nil
+                               (anf/tup (list (anf/var value) (anf/var self))))))
+        outer (anf/fnn (list (anf/clause (list (anf/pvar self)) nil inner)))
+        expression (anf/app (anf/lett self outer knot) (list (anf/lit 5)))
+        result (eval-anf expression)]
+    (is (= false (local-recursion? expression)))
+    (is (= 5 (elem result 0)))
+    (is (erlang/is_function (elem result 1) 1))))
 
 (run-tests)

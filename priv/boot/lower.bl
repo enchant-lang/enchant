@@ -242,6 +242,94 @@
         (cerl/set_ann c (to-list (concat (cerl/get_ann c) adds))))
       c)))
 
+(defn- loop-self? [node name]
+  (and (erlang/=:= :var (:op node)) (erlang/=:= name (:name node))))
+
+(defn- loop-backedge? [node name]
+  (let [knot (:fn node)]
+    (and (erlang/=:= :apply (:op node)) (erlang/=:= :apply (:op knot))
+         (loop-self? (:fn knot) name)
+         (erlang/=:= 1 (erlang/length (:args knot)))
+         (loop-self? (erlang/hd (:args knot)) name))))
+
+(declare loop-control)
+(defn- loop-control-list [nodes name arity last-tail? fuel]
+  (loop [nodes nodes remaining fuel]
+    (if (erlang/=:= nodes (list)) remaining
+      (let [rest (erlang/tl nodes)
+            left (loop-control (erlang/hd nodes) name arity (and last-tail? (erlang/=:= rest (list))) remaining)]
+        (when left (recur rest left))))))
+
+(defn- loop-control
+  "Refuse any reference to self outside an exact tail call through its knot.
+   A bounded walk over the canonical grammar also considers lexical closures
+   and executable pattern keys."
+  [node name arity tail? fuel]
+  (when (erlang/> fuel 0)
+    (let [op (:op node) left (erlang/- fuel 1)]
+      (cond
+        (erlang/=:= :var op) (when-not (loop-self? node name) left)
+        (lists/member op '(:lit :global :binding :enil)) left
+        (and (erlang/=:= :apply op) (loop-backedge? node name))
+          (when (and tail? (erlang/=:= arity (erlang/length (:args node))))
+            (loop-control-list (:args node) name arity false left))
+        (and (erlang/=:= :let op) (erlang/=:= name (:name node))) nil
+        (and tail? (erlang/=:= :let op))
+          (when-let [rest (loop-control (:init node) name arity false left)]
+            (loop-control (:body node) name arity true rest))
+        (and tail? (erlang/=:= :if op))
+          (when-let [rest (loop-control (:test node) name arity false left)]
+            (when-let [rest (loop-control (:then node) name arity true rest)]
+              (loop-control (:else node) name arity true rest)))
+        (and tail? (erlang/=:= :do op))
+          (loop-control-list (:stmts node) name arity true left)
+        :else (loop-control-list (anf/executable-children node) name arity false left)))))
+
+(defn- local-loop [node]
+  (let [scaffold (:fn node)]
+    (when (erlang/=:= :let (:op scaffold))
+      (let [shape (BeamLisp.CompilerData/self_application_parts scaffold)
+            clause (BeamLisp.CompilerData/simple_function_clause (:inner shape))
+            self (:name scaffold)
+            arity (erlang/length (:args node))]
+        (when (and clause (<= 1 arity 8) (erlang/=:= arity (erlang/length (:pats clause))))
+          (let [names (map (fn [p] (:name p)) (:pats clause))]
+            (when (and (erlang/=:= arity (erlang/length (lists/usort names)))
+                       (not (lists/member self names))
+                       (some? (loop-control (:body clause) self arity true 192)))
+              {:self self :params names :body (:body clause) :arity arity})))))))
+
+(defn- local-loop-call [node target]
+  (let [call (capply target (map (fn [arg] (lower-anf arg)) (:args node)))
+        annotations (cerl/get_ann (anno-cerl node call))]
+    (if (empty? annotations) call (core-ir/annotate-call call annotations))))
+
+(declare local-loop-tail)
+(defn- local-loop-do [nodes self target]
+  (let [rest (erlang/tl nodes)]
+    (if (erlang/=:= rest (list))
+      (local-loop-tail (erlang/hd nodes) self target)
+      (cseq (lower-anf (erlang/hd nodes)) (local-loop-do rest self target)))))
+
+(defn- local-loop-tail [node self target]
+  (case (:op node)
+    :let (anno-cerl node
+           (clet (cvar (erlang/binary_to_atom (:name node))) (lower-anf (:init node))
+                 (local-loop-tail (:body node) self target)))
+    :if (anno-cerl node
+          (anf-if->case (lower-anf (:test node))
+                       (local-loop-tail (:then node) self target)
+                       (local-loop-tail (:else node) self target)))
+    :do (anno-cerl node (local-loop-do (:stmts node) self target))
+    :apply (if (loop-backedge? node self) (local-loop-call node target) (lower-anf node))
+    (lower-anf node)))
+
+(defn- lower-local-loop [node loop-plan]
+  (let [target (cerl/c_fname (cerl/var_name (fresh "loop")) (:arity loop-plan))
+        args (map (fn [name] (cvar (erlang/binary_to_atom name))) (:params loop-plan))
+        body (local-loop-tail (:body loop-plan) (:self loop-plan) target)]
+    (cerl/c_letrec (list (tuple target (cfun args body))) (local-loop-call node target))))
+
 (defn- lower-anf-node
   [n]
   (let [op (:op n)]
@@ -271,7 +359,9 @@
           (clet callee (lower-anf (:callee n))
             (clet arguments (lower-anf (:arguments n))
               (ccall :Elixir.BeamLisp.Ns.Rt :invoke (list callee arguments)))))
-      (= op :apply) (capply (lower-anf (:fn n)) (to-list (map (fn [value] (lower-anf value)) (:args n))))
+      (= op :apply) (if-let [plan (local-loop n)]
+                      (lower-local-loop n plan)
+                      (capply (lower-anf (:fn n)) (to-list (map (fn [value] (lower-anf value)) (:args n)))))
       (= op :let) (clet (cvar (erlang/binary_to_atom (:name n))) (lower-anf (:init n)) (lower-anf (:body n)))
       (= op :if) (anf-if->case (lower-anf (:test n)) (lower-anf (:then n)) (lower-anf (:else n)))
       (= op :do) (reduce (fn [acc s] (cseq acc (lower-anf s)))
