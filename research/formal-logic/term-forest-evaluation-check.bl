@@ -21,6 +21,25 @@
                                      (coordinate (t/sort-of variable) (= :alternate mode)))]) variables))))
 (def calls (atom 0))
 (defn deny [& _] (swap! calls inc) (throw :graph-evaluation-must-not-query))
+(def argv (BeamLisp/argv))
+(def compare-shared? (= "--compare-shared" (second argv)))
+(defn- compare-shared [data roots points]
+ (let [started (erlang/monotonic_time :microsecond)]
+  (sdk/with-graph-admission data roots {:profile point/profile}
+   (fn [scope]
+    (let [admitted (erlang/monotonic_time :microsecond)
+          readings
+          (mapv (fn [{:keys [assignments checking values]}]
+                 (let [before (erlang/monotonic_time :microsecond)
+                       result ((:with-point scope) assignments
+                               (fn [point]
+                                (assert (= :shared-scope (:admission-account point)))
+                                (let [values (mapv (:resolve point) roots)]
+                                 {:values values :checking ((:checking point))})))
+                       after (erlang/monotonic_time :microsecond)]
+                  (assert (erlang/=:= {:values values :checking checking} result))
+                  (- after before))) points)]
+     {:admission-us (- admitted started) :point-us readings :exact-values-and-checking true})))))
 (def rows
  (oracle/with-oracle {:query deny :query-graph deny :script deny}
   #(vec (mapcat
@@ -43,18 +62,21 @@
                       (assert (erlang/=:= expected (:values actual)))
                       (assert (= (graph/reference data) (:data-reference actual)))
                       (assert (= false (:compiler-proof-authority actual)))
-                      {:mode mode :exact-values true :roots (count roots)
+                      (cond-> {:mode mode :exact-values true :roots (count roots)
                        :unavailable (count (filter sdk/unavailable? expected))
                        :value-reference (graph/reference (graph/encode expected))
                        :checking (:checking actual)
-                       :timing-ms {:graph-evaluation (- middle start) :legacy-evaluation (- end middle)}}))
+                       :timing-ms {:graph-evaluation (- middle start) :legacy-evaluation (- end middle)}}
+                       compare-shared? (assoc :assignments assignments :values (:values actual)))))
                    [:absent :zero :alternate :ill-sorted])]
-        {:id (:id item) :family family :data-reference (graph/reference data)
-         :variables (count variables) :points points :compiler-proof-authority false})) cases))
+        (cond-> {:id (:id item) :family family :data-reference (graph/reference data)
+                 :variables (count variables) :points points :compiler-proof-authority false}
+         compare-shared? (assoc :shared-comparison (compare-shared data source-roots points)
+                                :points (mapv #(dissoc % :assignments :values) points))))) cases))
     [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
 (assert (= 187 (count rows)))
 (assert (= 0 @calls))
-(File/write! (first (BeamLisp/argv))
+(File/write! (first argv)
  (json/encode {:schema "enchant.formal.term-forest-evaluation-corpus.v1" :rows rows
                :managed-query-calls @calls :native-execution :not-invoked
                :scope "Exact point-evaluation agreement with the selected SDK on four deterministic point maps per existing question. Missing, zero, alternate and ill-sorted assignments are compatibility fixtures, not exhaustive semantics or checked model certificates."

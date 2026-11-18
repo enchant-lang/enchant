@@ -382,23 +382,27 @@
         (forest/prepare-numeric data roots (select-keys policy [:rational :admission-work-units]))
        policy (forest/prepare-bool-int data roots) :else (forest/prepare data roots)))
 
+(defn- graph-point-index [roots prepared]
+ (let [incomplete? (= :incomplete (get-in prepared [:admission :status]))]
+  {:nodes (into {} (map (fn [[id op sort children datum]]
+                         [id {:op (erlang/binary_to_existing_atom op :utf8)
+                              :sort sort :children children :data datum}]) (:nodes prepared)))
+   :root-ids (zipmap roots (if incomplete? roots (:roots prepared)))
+   :admission-incomplete? incomplete?}))
+
 (defn- with-prepared-graph-point*
  "Use an SDK-owned admitted graph point while consuming demanded root values.
   The callback receives source-root lookup and diagnostic snapshot functions;
   both retire on return or failure. Only the original admitted roots can be
   looked up. These functions are local implementation plumbing, not portable
   query terms, accepted prepared views, native handles or proof authority."
- [data roots assignments assignment-data policy selected-profile prepared consume]
+ [roots assignments assignment-data policy selected-profile prepared
+  {:keys [nodes root-ids admission-incomplete?]} consume]
  (let [texts? (= text-graph-profile selected-profile)
        words? (or texts? (= word-graph-profile selected-profile))
        numeric? (or words? (= numeric-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
        direct? (or words? (= direct-graph-profile selected-profile) (= direct-numeric-graph-profile selected-profile))
-       admission-incomplete? (= :incomplete (get-in prepared [:admission :status]))
-       nodes (into {} (map (fn [[id op sort children datum]]
-                            [id {:op (erlang/binary_to_existing_atom op :utf8)
-                                 :sort sort :children children :data datum}]) (:nodes prepared)))
        memo (atom {}) active (atom true) owner (erlang/self)
-       root-ids (zipmap roots (if admission-incomplete? roots (:roots prepared)))
        accounting (atom (merge {:evaluated-nodes 0 :sdk-calls 0 :integer-primitive-calls 0
                                 :charged-work-units 0 :refusals []}
                          (when numeric? {:rational-primitive-calls 0 :rational-value-check-calls 0})
@@ -658,7 +662,8 @@
  (let [{:keys [profile policy]} (graph-options options)
        assignment-data (point-assignment-data assignments profile)
        prepared (prepare-graph-point data roots policy profile)]
-  (with-prepared-graph-point* data roots assignments assignment-data policy profile prepared consume)))
+  (with-prepared-graph-point* roots assignments assignment-data policy profile prepared
+   (graph-point-index roots prepared) consume)))
 
 (defn with-graph-admission
  "Fresh admission before point coordinates are known, for a local owner turn.
@@ -671,6 +676,9 @@
  [data roots options consume]
  (let [{:keys [profile policy]} (graph-options options)
        prepared (prepare-graph-point data roots policy profile)
+       ;; One routing index per admission, built only if a point is requested.
+       ;; Point values, quota accounts and refusal history remain per point.
+       point-index (atom nil)
        owner (erlang/self) active (atom true)
        admission-reference (graph/of {:data-reference (:data-reference prepared) :source-roots roots
                                       :profile profile :limits policy})
@@ -687,11 +695,12 @@
      :with-point
       (fn [assignments consume-point]
        (live!)
-       (let [assignment-data (point-assignment-data assignments profile)]
-        (with-prepared-graph-point* data roots assignments assignment-data policy profile prepared
+       (let [assignment-data (point-assignment-data assignments profile)
+             index (or @point-index (reset! point-index (graph-point-index roots prepared)))]
+        (with-prepared-graph-point* roots assignments assignment-data policy profile prepared index
          (fn [point] (consume-point (assoc point :admission-account :shared-scope
                                                :admission-reference admission-reference))))))})
-   (finally (reset! active false)))))
+   (finally (reset! active false) (reset! point-index nil)))))
 
 (defn graph-values
  "Evaluate term-based graph points through the same private SDK mathematics as
