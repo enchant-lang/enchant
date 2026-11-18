@@ -12,6 +12,7 @@
 ;;   PARTITION LINK_ROWS --phase-macros REPORT
 ;;   PARTITION LINK_ROWS --phase-compile REPORT PHASE_MACRO_SAMPLES
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
+;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
@@ -25,6 +26,7 @@
 (def source-read-entries [(tuple :Elixir.File :read! 1)
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
+(def source-probe-entry (tuple :Elixir.File :regular? 1))
 (def macro-entry (tuple :Elixir.BeamLisp.Ns.Compiler :expand-macro 4))
 (def macro-lookup-entry (tuple :Elixir.BeamLisp.Ns.Compiler :macro-lookup 2))
 (def macro-result-entry (tuple :Elixir.BeamLisp.Ns.Compiler :datum-macro-result 1))
@@ -46,7 +48,7 @@
 (defn- source-path [raw]
  (let [path (if (erlang/is_list raw) (unicode/characters_to_binary raw) raw)]
   (when (and (string? path) (<= (erlang/byte_size path) 4096)
-             (or (String/ends_with? path ".bl") (String/ends_with? path ".bl.md")))
+             (or (String/ends_with? path ".bl") (String/ends_with? path ".bl.md") (String/ends_with? path ".bl.org")))
    path)))
 
 (defn- source-result [entry value]
@@ -188,7 +190,7 @@
        effects)))
     (and (:registry? effects) (contains? registry-operations entry))
     (recur calls pending hits misses reads sources effects)
-    (contains? source-read-entry-set entry)
+    (or (contains? source-read-entry-set entry) (= entry source-probe-entry))
     (recur calls pending hits misses (conj reads [entry (source-path key)]) sources effects)
     :else (throw (ex-info "Unexpected native observation call" {:entry entry}))))
   [:trace _ kind [module function 1] value] :when (or (= kind :return_from) (= kind :exception_from))
@@ -196,10 +198,13 @@
    (when-not (= entry (tuple module function 1))
     (throw (ex-info "Unexpected Source read return"
              {:module module :function function :pending-entry entry})))
-   (recur calls pending hits misses (pop reads)
-    (if (and path (< (count sources) 1025))
-     (conj sources [path (if (= kind :return_from) (source-result entry value) :unavailable)])
-     sources) effects))
+   (if (= entry source-probe-entry)
+    (recur calls pending hits misses (pop reads) sources
+     (if path (effect effects :source-probes [path (if (= kind :return_from) value :unavailable)]) effects))
+    (recur calls pending hits misses (pop reads)
+     (if (and path (< (count sources) 1025))
+      (conj sources [path (if (= kind :return_from) (source-result entry value) :unavailable)])
+      sources) effects)))
   [:finish parent ticket]
   (erlang/send parent [:observed ticket
     {:calls calls :hits hits :misses misses :sources sources :effects effects
@@ -226,7 +231,7 @@
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session registry-lookup-entry match (list :local)))))
-   (doseq [entry source-read-entries]
+   (doseq [entry (conj source-read-entries source-probe-entry)]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
    (when sample-macros?
     (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
@@ -658,8 +663,49 @@
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
   (if (String/starts_with? absolute root) (subs absolute (count root)) absolute)))
 
+(defn- source-probes [observation]
+ (vec (sort (distinct (map (fn [[path present?]] [(source-identity path) present?])
+                           (keys (get-in observation [:effects :source-probes])))))))
+
+(defn- presence-snapshot [probes]
+ (into {} (map (fn [path] [path (File/regular? path)]) (distinct (map first probes)))))
+
+(defn- changed-source-probes [probes snapshot]
+ (vec (keep (fn [[path expected]] (when (not= expected (get snapshot path :unavailable)) path)) probes)))
+
+(defn- source-probe-control [report-path]
+ (let [root (Path/expand (str report-path ".probe-" (System/unique_integer (list :positive))))
+       nested (str root "/native")
+       preferred (str nested "/probe-provider.bl")
+       fallback (str nested "/probe_provider.bl")
+       ns "native.probe-provider"
+       contents (str "(ns " ns ")\n")
+       resolve (fn [] (BeamLisp.Loader/with_search_dir root #(BeamLisp.Loader/source_path ns)))]
+  (File/mkdir! root)
+  (try
+   (File/mkdir! nested)
+   (File/write! fallback contents)
+   (let [[prior observation] (trace! resolve)
+         probes (source-probes observation)
+         preferred-key (source-identity preferred)]
+    (assert (= fallback prior))
+    (assert (some #{[preferred-key false]} probes))
+    (assert (empty? (changed-source-probes probes (presence-snapshot probes))))
+    (File/write! preferred contents)
+    (assert (= preferred (resolve)))
+    (assert (= [preferred-key] (changed-source-probes probes (presence-snapshot probes))))
+    (assert (= contents (File/read! fallback)))
+    {:schema "bl.native.negative-source-probe-control" :version 1 :reuse-authority false
+     :receipted-probes (count probes) :old-source-bytes-match true :changed-probes 1
+     :preferred-source-replaced-fallback true})
+   (finally
+    (File/rm preferred)
+    (File/rm fallback)
+    (File/rmdir nested)
+    (File/rmdir root)))))
+
 (defn- capture-source [closure baseline]
- {:schema :native-source-shadow-v2
+ {:schema :native-source-shadow-v3
   :sdk (:sdk-pin closure) :options (:options closure) :order (:order closure)
   :link-rows-sha256 (:sha256 baseline)
   :members (into {}
@@ -671,6 +717,7 @@
            (assert (:accepted (replay-links observed (:local-links baseline))))
            [ns {:defs (artifact/sha (def-bytes member)) :link-receipt (link-receipt observed)
                 :scope-receipt (scope-receipt observed)
+                :source-probes (source-probes observed)
                 :paths (vec (sort (distinct (map (fn [[path digest]] [(source-identity path) digest])
                                                 (:sources observed)))))}]))
         (:order closure)))})
@@ -683,7 +730,7 @@
        bytes (File/read! receipt-path)
        _ (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
        receipt (erlang/binary_to_term bytes)
-       _ (assert (= :native-source-shadow-v2 (:schema receipt)))
+       _ (assert (= :native-source-shadow-v3 (:schema receipt)))
        _ (assert (= (:sdk-pin baseline) (:sdk-pin closure) (:sdk receipt)))
        _ (assert (= (:options baseline) (:options closure) (:options receipt)))
        _ (assert (= (:order baseline) (:order closure) (:order receipt)))
@@ -693,6 +740,7 @@
        before-scan (erlang/monotonic_time :microsecond)
        identities (into {} (map (fn [path] [path (read-source-identity path)])
                           (distinct (mapcat (fn [entry] (map first (:paths entry))) (vals (:members receipt))))))
+       probe-snapshot (presence-snapshot (mapcat :source-probes (vals (:members receipt))))
        outer (ancestor-snapshot (map :scope-receipt (vals (:members receipt))))
        started (erlang/monotonic_time :microsecond)
        plan (mapv (fn [ns]
@@ -701,6 +749,7 @@
                           changed-paths (vec (filter (fn [[path digest]]
                                                       (or (= digest :unavailable) (not= digest (get identities path))))
                                                     (:paths record)))
+                          changed-probes (changed-source-probes (:source-probes record) probe-snapshot)
                           own? (not= (:source-sha256 old) (:source-sha256 new))
                           links? (not (receipt-matches? (:link-receipt record) (:local-links candidate)))
                           outer? (not (ancestor-matches? (:scope-receipt record) outer))]
@@ -708,7 +757,8 @@
                      (assert (= (:defs record) (artifact/sha (def-bytes old))))
                      {:namespace ns :changed-source own? :changed-dependencies (mapv first changed-paths)
                       :changed-links links? :changed-ancestor-links outer?
-                      :reused (not (or own? links? outer? (seq changed-paths)))}))
+                      :changed-source-probes changed-probes
+                      :reused (not (or own? links? outer? (seq changed-paths) (seq changed-probes)))}))
                   (:order closure))
        planned (erlang/monotonic_time :microsecond)
        results (mapv (fn [decision]
@@ -718,10 +768,11 @@
                         (assoc decision :exact-clean-definitions
                                (and (= (:source-sha256 actual) (:source-sha256 member))
                                     (erlang/=:= (def-bytes actual) (def-bytes member)))))) plan)]
-  {:schema "bl.native.source-replay-shadow" :version 2 :reuse-authority false
+  {:schema "bl.native.source-replay-shadow" :version 3 :reuse-authority false
    :baseline-receipt-sha256 (artifact/sha bytes) :candidate-link-rows-sha256 (:sha256 candidate)
    :baseline-link-rows-sha256 (:link-rows-sha256 receipt)
    :observed-source-paths (count identities) :observed-ancestor-keys (count outer)
+   :observed-source-probes (count probe-snapshot)
    :source-and-ancestor-scan-us (- started before-scan) :plan-us (- planned started)
    :candidate-compilation-and-oracle-comparison-us (- (erlang/monotonic_time :microsecond) planned)
    :members results}))
@@ -867,6 +918,7 @@
                 (= selected "--phase-macros") (sample-phase-macros closure baseline)
                 (= selected "--phase-compile") (compile-with-phase-macros closure baseline comparison)
                 (= selected "--registry-phases") (registry-phases closure baseline comparison)
+                (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
