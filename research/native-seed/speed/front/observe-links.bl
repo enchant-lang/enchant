@@ -63,6 +63,11 @@
 (def env-read-entries #{(tuple :Elixir.BeamLisp.Env :loaded_ns? 1)
                         (tuple :Elixir.BeamLisp.Env :search_paths 0)})
 (def code-read-entry (tuple :code :is_loaded 1))
+(def code-mutation-entries [(tuple :erlang :finish_loading 1)
+                            (tuple :erlang :delete_module 1)
+                            (tuple :erlang :finish_after_on_load 2)
+                            (tuple :erts_internal :purge_module 2)
+                            (tuple :erlang :load_nif 2)])
 
 (defn- link-key? [key]
  (and (erlang/is_tuple key) (= 4 (erlang/tuple_size key)) (= :link (elem key 1))))
@@ -352,6 +357,25 @@
                  (let [module (elem row 0)]
                   [module [(code-location (tuple :file (elem row 1))) (live-code-md5 module)]]))
                (code/all_loaded))))
+
+(defn- with-code-mutation-observation [action]
+ ;; These counters cover calls on the VM, including code_server and the code
+ ;; purger. Use counters so the tracer never receives compiled binaries.
+ (let [session (erlang/apply :trace :session_create (list :native_code_mutations (erlang/self) (list)))
+       flags (list :call_count)]
+  (try
+   (doseq [entry code-mutation-entries]
+    (assert (= 1 (erlang/apply :trace :function (list session entry true flags)))))
+   (let [result (action)]
+    (doseq [entry code-mutation-entries]
+     (assert (= 1 (erlang/apply :trace :function (list session entry :pause flags)))))
+    [result (into {} (keep (fn [entry]
+                            (let [info (erlang/apply :trace :info (list session entry :call_count))
+                                  calls (elem info 1)]
+                             (assert (and (= :call_count (elem info 0)) (int? calls)))
+                             (when (pos? calls) [entry calls])))
+                          code-mutation-entries))])
+   (finally (erlang/apply :trace :session_destroy (list session))))))
 
 (defn- captured-code-reads [before observed after]
  (into {} (map (fn [[module location]]
@@ -1195,15 +1219,20 @@
  (with-registry-stage closure (:rows baseline) member entries
   (fn [prepared callables]
    (let [lower! (fn [] (build/compile-prepared prepared {:check-node identity}))
-         before (when (:code-reads? options) (code-snapshot))
-         [compiled observed]
-               (trace! #(BeamLisp.Loader/with_declaration_snapshot lower!)
-                (merge {:registry? true :registry-inputs? true :source-probes? true
-                        :macro-lookups? true :phase-callables callables} options))
-         observed (if (:code-reads? options)
-                    (assoc-in observed [:effects :code-reads]
-                     (captured-code-reads before (get-in observed [:effects :code-reads]) (code-snapshot)))
-                    observed)]
+         observe! #(trace! (fn [] (BeamLisp.Loader/with_declaration_snapshot lower!))
+                            (merge {:registry? true :registry-inputs? true :source-probes? true
+                                    :macro-lookups? true :phase-callables callables} options))
+         [compiled observed] (if (:code-reads? options)
+                              (let [[[compiled observed] mutations]
+                                    (with-code-mutation-observation
+                                     (fn []
+                                      (let [before (code-snapshot)
+                                            [compiled observed] (observe!)
+                                            reads (captured-code-reads before (get-in observed [:effects :code-reads])
+                                                                       (code-snapshot))]
+                                       [compiled (assoc-in observed [:effects :code-reads] reads)])))]
+                               [compiled (assoc-in observed [:effects :code-mutations] mutations)])
+                              (observe!))]
     (assert (not-any? (fn [[_ _ key]]
                         (and (erlang/is_tuple key) (> (erlang/tuple_size key) 1)
                              (= :fwd (elem key 0)) (= "native.observe-links" (elem key 1))))
@@ -1302,15 +1331,30 @@
      (assert (= (tuple :module module) (code/load_binary module filename second-code)))
      (assert (= location (code/is_loaded module)))
      (assert (= [module] (changed-code-reads present)))
-     (assert (= :unavailable (get (captured-code-reads present {module (code-location location)} (code-snapshot)) module)))))
+     (assert (= :unavailable (get (captured-code-reads present {module (code-location location)} (code-snapshot)) module)))
+     (let [twice (fn []
+                  (code/purge module)
+                  (assert (= (tuple :module module) (code/load_binary module filename first-code)))
+                  (code/purge module)
+                  (assert (= (tuple :module module) (code/load_binary module filename second-code))))
+           original (capture)
+           ;; The calls happen through a different actor and code_server.
+           [_ writes] (with-code-mutation-observation
+                       (fn []
+                        (let [parent (erlang/self) done (erlang/make_ref)]
+                         (spawn (fn [] (twice) (erlang/send parent done)))
+                         (receive reply :when (= done reply) :ok
+                           (after 3000 (throw :code-control-worker-timeout))))))]
+      (assert (empty? (changed-code-reads original)))
+      (assert (<= 2 (get writes (tuple :erlang :finish_loading 1) 0))))))
    (finally
     (code/purge module)
     (code/delete module)
     (code/purge module)))
   (assert (false? (code/is_loaded module)))
-  {:schema "bl.native.code-read-control" :version 1 :reuse-authority false
+  {:schema "bl.native.code-read-control" :version 2 :reuse-authority false
    :recorded-absence true :loaded-after-miss true :same-path-code-replacement true
-   :changed-during-snapshot true :module-cleaned-up true}))
+   :changed-during-snapshot true :same-state-after-two-writes true :module-cleaned-up true}))
 
 (defn- registry-shadow-member [closure baseline candidate member entries]
  (let [[prior-inputs prior observation] (observe-lowering closure baseline member entries)
@@ -1446,6 +1490,7 @@
                 (:unknown-env-read effects) :unknown-env-read
                 (:unstable-env-read effects) :unstable-env-read
                 (:unknown-code-read effects) :unknown-code-read
+                (seq (:code-mutations effects)) :code-mutated-during-lowering
                 (or (:unstable-code-read effects) (some #{:unavailable} (vals (:code-reads effects)))) :unstable-code-read)
        prepared-id (when-not reason (closed-identity prepared))
        reads (when prepared-id (into {} (map (fn [[key value]] [key (registry-value-signature value callables)])
@@ -1473,7 +1518,7 @@
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema (if anchor :native-bound-registry-v3 :native-portable-registry-v4)
+   {:schema (if anchor :native-bound-registry-v4 :native-portable-registry-v4)
     :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
@@ -1579,7 +1624,8 @@
  (when-not (= expected-sha (artifact/sha bytes))
   (refuse-bound-registry :receipt-digest-mismatch))
  (let [receipt (read-registry-member bytes)]
-  (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2 :native-bound-registry-v3} (:schema receipt))
+  (when-not (and (contains? #{:native-bound-registry-v1 :native-bound-registry-v2
+                             :native-bound-registry-v3 :native-bound-registry-v4} (:schema receipt))
                  (= donor (:donor receipt)))
    (refuse-bound-registry :receipt-donor-mismatch))
   receipt))
@@ -1629,7 +1675,8 @@
                                        (:reason entry) entry
                                        (and (not= :native-bound-registry-v1 (:schema receipt)) (not (map? (:env-reads entry))))
                                        {:reason :missing-env-reads}
-                                       (and (= :native-bound-registry-v3 (:schema receipt)) (not (map? (:code-reads entry))))
+                                       (and (contains? #{:native-bound-registry-v3 :native-bound-registry-v4} (:schema receipt))
+                                            (not (map? (:code-reads entry))))
                                        {:reason :missing-code-reads}
                                        :else (assoc entry :definition-bytes (def-bytes old)))
                                mutation (when (and control-root (= "host.delay" ns))
