@@ -95,13 +95,15 @@
 (defn- def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
-(defn- observe-sequential [closure {:keys [rows sha256]}]
+(defn- observe-sequential [closure {:keys [rows sha256]} scoped?]
  (let [results (BeamLisp.Env/isolated
                 (fn []
                  (install-rows! closure rows)
                  (mapv (fn [ns]
                          (let [member (get-in closure [:units ns])
-                               [compiled observed] (compile-staged member)]
+                               [compiled observed] (if scoped?
+                                                     (BeamLisp.Compiler/with_fresh_names (fn [] (compile-staged member)))
+                                                     (compile-staged member))]
                           (assert (= (:source-sha256 member) (:source-sha256 compiled)))
                           {:namespace ns :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))
                            :actual-definitions-sha256 (artifact/sha (def-bytes compiled))
@@ -110,6 +112,7 @@
                            :lookup-misses (vec (sort (:misses observed)))}))
                        (:order closure))))]
   {:schema "bl.native.link-sequential-observation" :version 1 :link-rows-sha256 sha256
+   :per-member-fresh-names scoped?
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :members results :reuse-authority false}))
 
@@ -137,6 +140,7 @@
                                      (= (:source-sha256 member) sha))) (:sources observation)))
   {:schema "bl.native.installed-link-observation" :version 2
    :namespace selected :source-sha256 (:source-sha256 member)
+   :definitions-sha256 (artifact/sha (def-bytes compiled))
    :link-rows-sha256 sha256
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :lookups (:calls observation)
@@ -155,7 +159,8 @@
        baseline (read-rows rows)
        candidate (when comparison (read-rows comparison))
        report (cond
-                (= selected "--sequential") (observe-sequential closure baseline)
+                (= selected "--sequential") (observe-sequential closure baseline false)
+                (= selected "--sequential-scoped") (observe-sequential closure baseline true)
                 (= selected "--all")
                 {:schema "bl.native.link-observation-inventory" :version 2
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
