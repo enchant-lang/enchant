@@ -84,6 +84,40 @@
       (is (nil? (:value (projection/read h))))
       (finally (projection/stop! h) (d/close! c)))))
 
+(deftest projection-receipts-link-a-superseded-run-to-the-next-publication
+  (let [c (source) driver (erlang/self) request (erlang/make_ref)
+        h (projection/start-derived! :projection/receipt-race (d/db c) :v1
+            (fn [_]
+              (erlang/send driver [:projection-receipt-ready request (erlang/self)])
+              (receive [:projection-receipt-continue token] :when (= request token)
+                {:answer 42} (after 10000 (throw (ex-info "Missing test release" {})))))
+            {:timeout-ms 60000})
+        next-worker (fn []
+                      (receive [:projection-receipt-ready token pid] :when (= request token) pid
+                        (after 10000 (throw (ex-info "Missing projection worker" {})))))]
+    (try
+      (projection/subscribe! h)
+      (let [worker (next-worker)
+            original-start (:receipt-id (projection/status h))]
+        (BeamLisp.Env/put_key (tuple "data.projection-test" "receipt-race-marker") request)
+        (projection/refresh! h)
+        (let [coalesced (:receipt (projection/receipt h (:receipt-id (projection/status h))))]
+          (is (= :coalesced (:event coalesced)))
+          (is (= original-start (:previous-id coalesced))))
+        (erlang/send worker [:projection-receipt-continue request])
+        (erlang/send (next-worker) [:projection-receipt-continue request])
+        (is (= {:answer 42} (:value (settled h))))
+        (let [published (:receipt (projection/receipt h (:receipt-id (projection/status h))))
+              latest-start (:receipt (projection/receipt h (:start-id published)))
+              discarded (:receipt (projection/receipt h (:previous-id latest-start)))]
+          (is (= :published (:event published)))
+          (is (= :started (:event latest-start)))
+          (is (= :discarded (:event discarded)))
+          (is (= :superseded (:reason discarded)))
+          (is (= original-start (:start-id discarded)))
+          (is (= (:ticket latest-start) (:ticket published)))))
+      (finally (projection/stop! h) (d/close! c)))))
+
 (deftest executable-query-input-is-refused-before-owner-allocation
   (let [c (source) effects (atom 0)]
     (try
