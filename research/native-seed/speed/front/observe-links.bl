@@ -24,6 +24,7 @@
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
 (def macro-entry (tuple :Elixir.BeamLisp.Ns.Compiler :expand-macro 4))
+(def macro-lookup-entry (tuple :Elixir.BeamLisp.Ns.Compiler :macro-lookup 2))
 (def macro-result-entry (tuple :Elixir.BeamLisp.Ns.Compiler :datum-macro-result 1))
 (def link-put-entry (tuple :ets :insert 2))
 (def link-delete-entry (tuple :ets :delete 2))
@@ -80,6 +81,17 @@
    (-> next (assoc-in [:macro-origins callable] origin)
        (update-in [:macro-bindings [ns head]] (fn [known] (conj (or known #{}) origin)))))))
 
+(defn- macro-route [effects callable]
+ (if (nil? callable) :miss
+  (if-let [name (get (:phase-callables effects) callable)] [:interpreted name] :fallback)))
+
+(defn- record-macro-lookup [effects callable]
+ (let [[ns name] (peek (:pending-macro-lookups effects))
+       n (inc (:macro-lookup-count effects 0))
+       effects (-> effects (update :pending-macro-lookups pop) (assoc :macro-lookup-count n))]
+  (if (> n trace-limit) effects
+   (update effects :macro-lookups (fn [events] (conj (or events []) [ns name (macro-route effects callable)]))))))
+
 (defn- start-macro-sample [effects [callable form args env] head]
  (let [key [(:ns env) head (get-in effects [:macro-origins callable])]
        samples (:macro-samples effects {})
@@ -122,16 +134,24 @@
      (recur (inc calls) nil hits (conj misses key) reads sources next-effects))))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :expand-macro 4] _]
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
+  [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
+  (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
   [:trace _ :call [module function arguments]]
   (let [entry (tuple module function (count arguments)) key (first arguments)]
    (cond
     (= entry macro-entry)
     (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)
-          next-effects (record-macro effects (:ns env) head key)]
+          next-effects (record-macro effects (:ns env) head key)
+          next-effects (if (:macro-lookups? effects)
+                         (effect next-effects :macro-routes [(:ns env) head (macro-route effects key)])
+                         next-effects)]
      (recur calls pending hits misses reads sources
       (if (:sample-macros? effects) (start-macro-sample next-effects arguments head) next-effects)))
     (= entry macro-result-entry)
     (recur calls pending hits misses reads sources (record-macro-sample effects key))
+    (= entry macro-lookup-entry)
+    (recur calls pending hits misses reads sources
+     (update effects :pending-macro-lookups (fn [stack] (conj (or stack []) (vec arguments)))))
     (or (= entry link-put-entry) (= entry link-delete-entry))
     (let [writing? (= entry link-put-entry) row (second arguments)
           key (if writing? (elem row 0) row)
@@ -155,19 +175,23 @@
   (erlang/send parent [:observed ticket
     {:calls calls :hits hits :misses misses :sources sources :effects effects
      :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
+                    (empty? (:pending-macro-lookups effects)) (<= (:macro-lookup-count effects 0) trace-limit)
                     (<= (count (:ordered-links effects [])) trace-limit)
                     (<= (:count effects 0) trace-limit) (<= (count sources) 1024))}])))
 
-(defn- trace! [action]
+(defn- trace!
+ ([action] (trace! action {}))
+ ([action options]
  (let [owner (erlang/self) scope (BeamLisp.Env/env_id)
        sample-macros? (Process/get :native_phase_macro_samples false)
        ancestors (into {} (map-indexed (fn [index id] [id index]) (rest (BeamLisp.Env/chain))))
-       observer (spawn (fn [] (collector 0 nil #{} #{} [] #{} {:scope scope :ancestor-slots ancestors
-                                                              :sample-macros? sample-macros?})))
+       observer (spawn (fn [] (collector 0 nil #{} #{} [] #{}
+                               (assoc options :scope scope :ancestor-slots ancestors :sample-macros? sample-macros?))))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
        match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))
        source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))
-       link-key (tuple :_ :link :_ :_)]
+       link-key (tuple :_ :link :_ :_)
+       returns (list (tuple :_ (list) (list (tuple :return_trace))))]
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session (tuple :ets :lookup 2) match (list :local)))))
@@ -175,9 +199,9 @@
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
    (when sample-macros?
     (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
-   (doseq [[entry spec] [[macro-entry (if sample-macros?
-                                       (list (tuple :_ (list) (list (tuple :return_trace))))
-                                       true)]
+   (when (:macro-lookups? options)
+    (assert (= 1 (erlang/apply :trace :function (list session macro-lookup-entry returns (list :local))))))
+   (doseq [[entry spec] [[macro-entry (if sample-macros? returns true)]
                          [link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
                          [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]]]
     (assert (= 1 (erlang/apply :trace :function (list session entry spec (list :local))))))
@@ -194,7 +218,7 @@
      [result observation]))
    (finally
     (erlang/apply :trace :session_destroy (list session))
-    (Process/exit observer :kill)))))
+    (Process/exit observer :kill))))))
 
 (defn- read-rows [path]
  (let [text (File/read! path)]
@@ -455,19 +479,71 @@
    (Process/delete :native_relink_context_fixture)
    (Process/delete :native_phase_macro_samples))))
 
+(defn- macro-lookup-summary [observation]
+ (let [effects (:effects observation)
+       lookups (:macro-lookups effects [])
+       misses (filter (fn [[_ _ route]] (= :miss route)) lookups)
+       routes (:macro-routes effects {})
+       fallback (filter (fn [[[ns name route] _]] (= :fallback route)) routes)]
+  {:lookups (count lookups) :misses (count misses)
+   :distinct-miss-keys (count (set (map (fn [[ns name _]] [ns name]) misses)))
+   :resolution-sha256 (value-identity (mapv (fn [[ns name route]] [ns name (not= :miss route)]) lookups))
+   :fallback-expansions (mapv (fn [[[ns name _] calls]] [ns name calls]) (sort fallback))
+   :all-expansions-owned (empty? fallback)}))
+
+(defn- macro-miss-control [closure baseline]
+ (let [path "research/native-seed/speed/front/macro-miss-fixture.bl"
+       scope "native.macro-miss-fixture"
+       name "selected-value"
+       compile-under (fn [transformer]
+                       (BeamLisp.Env/isolated
+                        (fn []
+                         (install-rows! closure (:rows baseline))
+                         (BeamLisp.Compiler/with_fresh_names
+                          (fn []
+                           (trace! (fn []
+                                     (let [prepared (build/prepare-ns path
+                                                       {:after-staging (fn [_]
+                                                         (when transformer
+                                                          (BeamLisp.Env/put_key (tuple scope name)
+                                                           (tuple :"$macro" transformer))))})]
+                                      (build/compile-prepared prepared {:check-node identity})))
+                            {:macro-lookups? true}))))))
+       [old before] (compile-under nil)
+       [new after] (compile-under (fn [_form _locals] 19))
+       outcomes (fn [observation]
+                  (set (keep (fn [[ns head route]] (when (= [scope name] [ns head]) route))
+                             (get-in observation [:effects :macro-lookups]))))]
+  (assert (= (:source-sha256 old) (:source-sha256 new)))
+  (assert (= (:sources before) (:sources after)))
+  (assert (receipt-matches? (link-receipt before) (:local-links baseline)))
+  (assert (= #{:miss} (outcomes before)))
+  (assert (= #{:fallback} (outcomes after)))
+  (assert (not (erlang/=:= (def-bytes old) (def-bytes new))))
+  {:name name :installed-link-inputs-still-match true :source-inputs-still-match true
+   :lookup-before :miss :lookup-after :fallback :same-definition-bytes false}))
+
 (defn- compile-phase-member [closure rows ns macros calls]
  (let [member (get-in closure [:units ns])
        before @calls
        started (erlang/monotonic_time :microsecond)
-       compiled (BeamLisp.Env/isolated
+       macros (if (= ns "core") [] macros)
+       phase-callables (into {} (map (fn [[name entry]] [entry name]) macros))
+       [compiled observation] (BeamLisp.Env/isolated
                   (fn []
                    (install-rows! closure rows)
-                   (doseq [[name entry] macros :when (not= ns "core")]
+                   (doseq [[name entry] macros]
                     (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
                    (BeamLisp.Compiler/with_fresh_names
-                    (fn [] (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity})))))
+                    (fn []
+                     (trace! (fn [] (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity}))
+                             {:macro-lookups? true :phase-callables phase-callables})))))
+       interpreted (reduce + 0 (keep (fn [[[_ _ route] n]] (when (vector? route) n))
+                                     (get-in observation [:effects :macro-routes])))
        elapsed (- (erlang/monotonic_time :microsecond) started)]
-  {:namespace ns :compile-us elapsed :interpreted-expansions (- @calls before)
+  (assert (= interpreted (- @calls before)))
+  {:namespace ns :compile-us elapsed :interpreted-expansions interpreted
+   :macro-lookup (macro-lookup-summary observation)
    :same-definitions (erlang/=:= (def-bytes compiled) (def-bytes member))}))
 
 (defn- compile-with-phase-macros [closure baseline samples-path]
@@ -482,7 +558,8 @@
        _ (assert (<= 1 (count names) 16))
        sessions (volatile! []) calls (volatile! 0)]
   (try
-   (let [ordinary (mapv #(compile-phase-member closure (:rows baseline) % {} calls) (:order closure))
+   (let [control (macro-miss-control closure baseline)
+         ordinary (mapv #(compile-phase-member closure (:rows baseline) % [] calls) (:order closure))
          started (erlang/monotonic_time :microsecond)
          entries (mapv (fn [name]
                          (let [session (BeamLisp.AOT/open_constructor_session!)]
@@ -495,10 +572,11 @@
          interpreted (mapv #(compile-phase-member closure (:rows baseline) % entries calls) (:order closure))]
     (assert (every? :same-definitions ordinary))
     (assert (pos? @calls))
-    {:schema "bl.native.interpreted-phase-compile" :version 1 :reuse-authority false
+    {:schema "bl.native.interpreted-phase-compile" :version 2 :reuse-authority false
      :sample-report-sha256 (artifact/sha bytes) :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
      :link-rows-sha256 (:sha256 baseline) :preparation-us (- prepared started)
      :interpreted-expansions @calls
+     :macro-miss-control control
      :session-work (into {} (map (fn [[name session]]
                                    [name (BeamLisp.AOT/constructor_session_status session)]) @sessions))
      :ordinary ordinary :interpreted interpreted})
