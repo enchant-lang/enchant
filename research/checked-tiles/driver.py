@@ -1,5 +1,7 @@
 import argparse
 import ctypes as C
+import _ctypes
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
@@ -65,11 +67,28 @@ def timings(render, expected, count=5):
     return {'samples_ms': samples, 'median_ms': statistics.median(samples)}
 
 
+class NativeRegion:
+    """A request retaining this object also retains its ELF mapping."""
+    def __init__(self, path):
+        self.library = C.CDLL(str(path))
+        self.release = weakref.finalize(self, _ctypes.dlclose, self.library._handle)
+        self.fn = self.library.render
+        self.fn.argtypes = [C.c_char_p, C.c_void_p, C.c_uint, C.c_uint, C.c_uint, C.c_int]
+        self.fn.restype = None
+
+    def __call__(self, data, w, h, tile, threads=1):
+        require(self.release.alive and len(data) == w*h and 0 <= w*h < 2**32
+                and 1 <= tile <= 16, "invalid CPU launch")
+        buf = C.create_string_buffer(len(data))
+        self.fn(data, buf, w, h, tile, threads)
+        return buf.raw
+
+
 @dataclass
 class Candidate:
     directory: Path
     table: bytes
-    cpu: object
+    cpu: NativeRegion
     frame: bytes
     receipt: dict
 
@@ -125,17 +144,7 @@ theorem protected_channel : ∀ x : Fin 256, x.val ≤ {entry} x.val ∧ {entry}
     (d / 'region.cl').write_text(gpu_source)
     start = time.perf_counter()
     command(TOOLS['cc'], '-O3', '-fopenmp', '-shared', '-fPIC', d / 'region.c', '-o', d / 'region.so')
-    library = C.CDLL(str(d / 'region.so'))
-    fn = library.render
-    fn.argtypes = [C.c_char_p, C.c_void_p, C.c_uint, C.c_uint, C.c_uint, C.c_int]
-    fn.restype = None
-
-    def cpu(data, w, h, tile, threads=1):
-        require(len(data) == w*h and 0 <= w*h < 2**32 and 1 <= tile <= 16, "invalid CPU launch")
-        buf = C.create_string_buffer(len(data))
-        fn(data, buf, w, h, tile, threads)
-        return buf.raw
-
+    cpu = NativeRegion(d / 'region.so')
     cpu_build_ms = elapsed(start)
     stride = args.width * 3
     identity = {name: digest((d / name).read_bytes()) for name in
@@ -172,6 +181,16 @@ theorem protected_channel : ∀ x : Fin 256, x.val ≤ {entry} x.val ∧ {entry}
             if args.require_gpu:
                 raise
             receipt['gpu_unavailable'] = str(exc)
+    if args.placement == 'measured':
+        # The native/GPU paths have all been checked. Select from whole-call
+        # times on this exact input; lookup is an executable finite specialization.
+        # The GPU result above is retained until this decision.
+        fastest = min(receipt['timings'], key=lambda k: receipt['timings'][k]['median_ms'])
+        if fastest == 'cpu_lookup':
+            frame = raw.translate(table)
+        elif fastest in ('cpu_1', 'cpu_4'):
+            frame = cpu(raw, stride, args.height, args.tile, int(fastest[-1]))
+        receipt['backend'] = fastest if fastest != 'gpu_whole_call' else 'OpenCL / ' + receipt['gpu']['device']
     require(frame == ref, 'last render failed differential')
     (d / 'frame.png').write_bytes(rgb_png(frame, args.width, args.height))
     write_json(d / 'receipt.json', receipt)
@@ -212,6 +231,7 @@ def main():
     p.add_argument('--width', type=int, default=129)
     p.add_argument('--height', type=int, default=73)
     p.add_argument('--tile', type=int, choices=range(1, 17), default=8)
+    p.add_argument('--placement', choices=['measured', 'device'], default='measured')
     group = p.add_mutually_exclusive_group()
     group.add_argument('--cpu-only', action='store_true')
     group.add_argument('--require-gpu', action='store_true')
@@ -237,6 +257,7 @@ def main():
     require(owner.finish(first, first.frame) == 'current frame published', 'current publication failed')
     print(f'Open {root}/current/frame.png', flush=True)
     if args.watch:
+        del first
         while True:
             time.sleep(.4)
             try:
@@ -275,6 +296,8 @@ def main():
             resume.set()
         stale = task.result()
     require(stale == 'stale result discarded', 'stale completion accepted')
+    first.cpu.release()
+    require(not first.cpu.release.alive, 'retired native mapping still owned')
     third = prepare((HERE/'examples/poster.bl').read_text(), root, raw, args)
     owner.accept(third)
     try:
@@ -285,7 +308,7 @@ def main():
         raise RuntimeError('broken edit passed')
     require((root/'current').resolve() == third.directory, 'rejection changed serving revision')
     trace = {'first': first.receipt['revision'], 'edited': second.receipt['revision'], 'in_flight': stale,
-             'second_operation': third.receipt['revision'], 'rejected': witness,
+             'old_elf_released_after_join': not first.cpu.release.alive, 'second_operation': third.receipt['revision'], 'rejected': witness,
              'serving': str((root/'current').resolve().name)}
     write_json(root/'exercise.json', trace)
     print(json.dumps(trace, indent=2))
