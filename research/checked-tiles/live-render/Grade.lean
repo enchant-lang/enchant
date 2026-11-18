@@ -10,7 +10,7 @@ def exactGrade (xs : List Nat) : Bool :=
 theorem atIndex (xs : List Nat) (ok : exactGrade xs = true) (i : Nat) (h : i < xs.length) :
     CheckedTiles.BrightByte i xs[i] := by
   have all := (Bool.and_eq_true_iff.mp ok).2
-  have member : (xs[i], i) ∈ xs.zipIdx := by simp [List.mem_zipIdx_iff_getElem, h]
+  have member : (xs[i], i) ∈ xs.zipIdx := by simp [List.mk_mem_zipIdx_iff_getElem?, h]
   exact of_decide_eq_true ((List.all_eq_true.mp all) _ member)
 
 end FilmGrade
