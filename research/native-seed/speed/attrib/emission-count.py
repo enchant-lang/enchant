@@ -21,7 +21,8 @@ REPLACEMENTS = {
 (defn- glue [& parts]
  (record! "glue_calls" 1)
  (record! "glue_input_bytes"
-          (Enum/reduce parts 0 (fn [total part] (+ total (erlang/byte_size part)))))
+          (Enum/reduce parts 0 (fn [total part]
+            (+ total (erlang/byte_size (if (erlang/is_binary part) part (String.Chars/to_string part)))))))
  (Enum/join parts ""))''',
     "[value tail active state]\n (cond": '[value tail active state]\n (record! "loop_walk_visits" 1)\n (cond',
     "(defn- body-calls? [n ctx]\n (cond": '(defn- body-calls? [n ctx]\n (record! "body_call_visits" 1)\n (cond',
