@@ -3,6 +3,8 @@
 # --capture-local captures the qualified donor in the same overlay before
 # making the edit. This keeps configured absolute loader roots exact.
 # NATIVE_BOUND_REPLAY_EXPORT saves the checked closure ETF after bound replay.
+# NATIVE_RELINK_COMPARE=1 runs the updater's checked candidate before the
+# ordinary updater and compares both finished artifacts in the same overlay.
 set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
@@ -27,6 +29,9 @@ else
   [[ $# == 2 ]] || usage
 fi
 [[ -z "$edit" || "$edit" == --arity ]] || usage
+if [[ "${NATIVE_RELINK_COMPARE:-}" == 1 ]]; then
+  [[ "$capture_local" == true && -z "${NATIVE_BOUND_REPLAY_EXPORT:-}" ]] || usage
+fi
 baseline=$(realpath "$1")
 report=$(realpath -m "$2")
 export_path=
@@ -81,10 +86,48 @@ if [[ -z "${receipt:-}" ]]; then
     "$baseline/link-rows.etf" --capture-source "$overlay/baseline.etf"
 fi
 cd "$overlay"
-systemd-run --user --quiet --collect --wait --pipe --working-directory="$overlay" \
-  --property=MemoryMax=3G --property=MemorySwapMax=0 --property=RuntimeMaxSec=420 \
-  --property=KillMode=control-group --setenv=XDG_RUNTIME_DIR="$overlay/runtime" \
-  "$seed/speed/final/closure-r3.sh" "$edited"
+run_update() {
+  local directory=$1
+  shift
+  systemd-run --user --quiet --collect --wait --pipe --working-directory="$overlay" \
+    --property=MemoryMax=3G --property=MemorySwapMax=0 --property=RuntimeMaxSec=420 \
+    --property=KillMode=control-group --setenv=XDG_RUNTIME_DIR="$overlay/runtime" \
+    "$@" "$seed/speed/final/closure-r3.sh" "$directory"
+}
+if [[ "${NATIVE_RELINK_COMPARE:-}" == 1 ]]; then
+  candidate=$seed/out/checked
+  cp -a "$edited" "$candidate"
+  request="$overlay/relink.json"
+  python3 - "$request" "$receipt" "$samples" "$baseline/partition.json" "$qualification" "$receipt_sha" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+request = dict(zip(("receipt", "samples", "donor", "qualification", "sha256"), sys.argv[2:], strict=True))
+Path(sys.argv[1]).write_text(json.dumps(request))
+PY
+  run_update "$candidate" --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
+  run_update "$edited"
+  cmp "$candidate/closure.etf" "$edited/closure.etf"
+  cmp "$candidate/link-rows.etf" "$edited/link-rows.etf"
+  python3 - "$candidate/update.json" "$edited/update.json" "$report" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+candidate, clean = (json.loads(Path(name).read_text()) for name in sys.argv[1:3])
+members = candidate["checked-relink"]["members"]
+assert len(members) == len(clean["units"])
+assert any(member["reused"] for member in members)
+assert any(not member["reused"] for member in members)
+assert candidate["artifact-sha256"] == clean["artifact-sha256"]
+report = {"schema": "bl.native.checked-relink-comparison", "version": 1,
+          "exact-closure": True, "exact-link-rows": True, "candidate": candidate, "clean": clean}
+Path(sys.argv[3]).write_text(json.dumps(report, indent=2) + "\n")
+PY
+  exit 0
+fi
+run_update "$edited"
 if [[ -n "${receipt:-}" ]]; then
   mode=--bound-registry
   extra=()
