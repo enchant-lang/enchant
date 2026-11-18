@@ -55,13 +55,15 @@
                    (every? (fn [field] (let [n (get row field)] (or (nil? n) (and (int? n) (<= 0 n)))))
                            (:sum options)))
       (refuse :invalid-aggregate-row))
-    (let [row (select-keys row (concat [:id :at] (:group-by options) (:sum options)))
-          expiry (+ at (:window-ms options)) state (remove-row state id)]
+    (let [expiry (+ at (:window-ms options)) state (remove-row state id)]
       (if (<= expiry now) state
         (let [group (mapv #(get row %) (:group-by options))
-              charge (+ 512 (* 2 (cache/footprint [row group expiry id])))]
-          (-> (adjust state group row 1)
-              (assoc-in [:events id] {:row row :group group :expiry expiry :charge charge})
+              ;; Removal needs only the group's meter contributions. Identity,
+              ;; grouping fields and expiry already have separate custody.
+              meters (select-keys row (:sum options))
+              charge (+ 512 (* 2 (cache/footprint [meters group expiry id])))]
+          (-> (adjust state group meters 1)
+              (assoc-in [:events id] {:row meters :group group :expiry expiry :charge charge})
               (update :bytes + charge)
               (update :expiry (fn [tree] (gb_trees/enter (tuple expiry id) id tree)))))))))
 
