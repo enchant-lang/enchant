@@ -8,8 +8,9 @@ closure=$seed/${1:-out/speed-closure}
 out=$seed/${2:-out/speed-build}
 resume=
 for i in $(seq 1 60); do
-  if ! line=$(NATIVE_CHUNK_PLAN_SHA=$resume "$seed/run" run "$seed/src/native/chunks.bl" -- build-next \
-    "$closure/partition.json" "$out/host.scm" "$out" "$out/leaves.json" 2>&1 |
+  if ! line=$("$seed/run" run "$seed/src/native/chunks.bl" -- build-next \
+    "$closure/partition.json" "$out/host.scm" "$out" "$out/leaves.json" "" \
+    "$resume" "${NATIVE_CHUNK_WINDOW_JOBS:-}" 2>&1 |
     tee -a "$out/emit.log" | awk '/NATIVE_BUILD_(COMPLETE|YIELD)|Error|error/ {line = $0} END {print line}'); then
     echo "emission command failed in window $i; see $out/emit.log" >&2
     exit 1
