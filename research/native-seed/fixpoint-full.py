@@ -355,6 +355,12 @@ def main() -> None:
             raise RuntimeError("stage zero lacks the qualified SDK-bound chunk export")
         bind(out / "prelude.scm", export["prelude_sha256"])
         bind(out / "host.scm", export["inputs"]["host_sha256"])
+        if "bundle_sha256" in export:
+            bind(out / "bundle.scm", export["bundle_sha256"])
+        eval_bundle = None
+        if "eval_bundle_sha256" in export:
+            eval_bundle = out / "eval-bundle.scm"
+            bind(eval_bundle, export["eval_bundle_sha256"])
         if (out / "stage1.scm").read_bytes() != (out / "prelude.scm").read_bytes() + ENTRY:
             raise RuntimeError("stage1 differs from exact admitted prelude and compiler entry")
         host = (out / "host.scm").read_bytes()
@@ -719,6 +725,12 @@ def main() -> None:
                 raise RuntimeError(name + " lacks its actual original Source compilation/execution witness")
             source_results[name] = {"image_sha256": digest(image), "corpus_sha256": digest(args.corpus),
                 "output_sha256": hashlib.sha256(output.encode()).hexdigest(), "log_sha256": runs[-1]["log_sha256"]}
+            if eval_bundle is not None:
+                projected = run(name + "-projected-source-corpus",
+                    [image, "--eval", eval_bundle, args.corpus], cwd=root, timeout=COMPILE_DEADLINE)
+                if projected != output:
+                    raise RuntimeError(name + " Source output differs with the evaluation bundle")
+                source_results[name]["eval_bundle_log_sha256"] = runs[-1]["log_sha256"]
             return output
 
         if args.stage1_receipt:

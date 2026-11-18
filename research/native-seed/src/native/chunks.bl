@@ -177,16 +177,23 @@
         functions (string/join "" (map :functions chunks))
         initializers (string/join "" (map :initializers chunks))
         sources (vec (keep :source chunks))
+        _ (assert (= (count units) (count sources)))
+        bundle (str "(bl-assoc " metadata-source " (bl-key \"units\") (bl-vec (list " (string/join "\n" sources) ")))")
+        macro-names (set bootstrap/source-macro-names)
+        macro-sources (keep-indexed (fn [i source]
+                        (when (contains? macro-names (:ns (nth units i))) source)) sources)
+        eval-bundle (str "(bl-map (bl-key \"units\") (bl-vec (list " (string/join "\n" macro-sources) ")))")
         prelude (str ";; BL native compiler. Generated from canonical BL source.\n" (File/read! host-path) "\n"
                      (bootstrap/bundle-install-source metadata) functions initializers
                      (bootstrap/seal-source link-plan))]
-   (assert (= (count units) (count sources)))
-   (File/write! (str out "/bundle.scm") (str "(bl-assoc " metadata-source " (bl-key \"units\") (bl-vec (list " (string/join "\n" sources) ")))"))
+   (File/write! (str out "/bundle.scm") bundle)
+   (File/write! (str out "/eval-bundle.scm") eval-bundle)
    (File/write! (str out "/prelude.scm") prelude)
    (File/write! (str out "/stage1.scm") (str prelude "(native-main (native-command-line))\n"))
    (File/write! (str out "/chunk-export.json")
     (json/encode {"schema" "bl.native.chunk-export" "version" 2 "inputs" key-input "emission_inputs" emission-input
-                  "jobs" (count chunks) "prelude_sha256" (artifact/sha prelude)}))
+                  "jobs" (count chunks) "prelude_sha256" (artifact/sha prelude)
+                  "bundle_sha256" (artifact/sha bundle) "eval_bundle_sha256" (artifact/sha eval-bundle)}))
    (println (str "NATIVE_CHUNKS_ASSEMBLED " (count chunks) " checked jobs"))))
 (cond
  (= mode "plan")
