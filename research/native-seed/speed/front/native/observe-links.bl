@@ -2016,11 +2016,14 @@
                                             (= :link (elem key 0)))
                                   [(elem key 1) (elem key 2)]))
                                (keys (:registry-inputs effects))))
-       retained (select-indexed-link-rows row-index input-links)
-       retained-core (select-indexed-link-rows core-index input-links)
+       select-member #(vector (select-indexed-link-rows row-index input-links)
+                              (select-indexed-link-rows core-index input-links))
+       [retained retained-core] (select-member)
        scans (:link-scan-patterns effects)
        _ (assert (= (get-in effects [:registry-calls [:match_object 2]] 0) (reduce + 0 (vals scans))))
-       install-subset #(install-batched-rows! (assoc closure :core-links retained-core) retained)
+       install-subset (fn []
+                       (let [[rows core-links] (select-member)]
+                        (install-batched-rows! (assoc closure :core-links core-links) rows)))
        subset (scoped install-subset compile!)
        sample (when timed?
                 (fn [mode]
@@ -2050,15 +2053,16 @@
 
 (defn- stage-link-subset [closure rowset selected option]
  (let [rows (:rows rowset)
-       row-index (indexed-link-rows rows (fn [[provider name _ _]] [provider name]))
-       core-index (indexed-link-rows (:core-links closure) (fn [[name _]] ["core" name]))
+       [[row-index core-index] index-cost]
+       (phase-cost #(vector (indexed-link-rows rows (fn [[provider name _ _]] [provider name]))
+                            (indexed-link-rows (:core-links closure) (fn [[name _]] ["core" name]))))
        members (cond
                  (= selected "--all") (:order closure)
                  (and selected (not= selected "--timed")) [selected]
                  :else ["rt" "compiler" "native.scheme" "host.link" "host.delay" "sugar"])
        timed? (or (= selected "--timed") (= option "--timed"))]
   {:schema "bl.native.stage-link-subset-shadow" :version 3 :reuse-authority false
-   :link-rows-sha256 (:sha256 rowset) :pattern-controls (link-pattern-control)
+   :link-rows-sha256 (:sha256 rowset) :pattern-controls (link-pattern-control) :index-build index-cost
    :members (mapv #(stage-link-subset-member closure rows row-index core-index % timed?) members)}))
 
 (defn run-observation [argv]
