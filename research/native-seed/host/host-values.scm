@@ -276,15 +276,16 @@
 (define (native-tree-ref n k)
  (let ((node (native-tree-find n k)))
   (if node (cons (vector-ref node 0) (vector-ref node 1)) native-missing)))
-(define (native-tree-put n k v)
- (if (not n) (native-node k v #f #f)
+(define (native-tree-put n k v #!optional (on-insert #f))
+ (if (not n)
+  (begin (if on-insert (on-insert)) (native-node k v #f #f))
   (let ((c (bl-key-compare k (vector-ref n 0))))
    (native-balance
     (cond ((= c 0) (native-node (vector-ref n 0) v (native-left n) (native-right n)))
           ((< c 0) (native-node (vector-ref n 0) (vector-ref n 1)
-                    (native-tree-put (native-left n) k v) (native-right n)))
+                    (native-tree-put (native-left n) k v on-insert) (native-right n)))
           (else (native-node (vector-ref n 0) (vector-ref n 1)
-                 (native-left n) (native-tree-put (native-right n) k v))))))))
+                 (native-left n) (native-tree-put (native-right n) k v on-insert))))))))
 (define (native-tree-min n) (if (native-left n) (native-tree-min (native-left n)) n))
 (define (native-tree-remove n k)
  (if (not n) #f
@@ -468,11 +469,11 @@
     (if (or (>= found 0) (< count native-small-map-limit))
      (native-small-map-assoc storage k v found)
      (native-map-with-root (native-tree-put (native-small-map-root storage) k v) (+ count 1) #f)))
-   (let* ((root (native-map-root m)) (added (not (native-tree-find root k)))
-          (count (+ (native-map-count m) (if added 1 0))))
-    ;; Legacy alist writes retain their former AVL normalization, including
-    ;; its count semantics; existing valid AVL storage may become flat.
-    (native-map-with-root (native-tree-put root k v) count (native-map-tree? storage))))))
+   (let ((added 0))
+    (let ((root (native-tree-put (native-map-root m) k v (lambda () (set! added 1)))))
+     ;; Legacy alist writes retain their former AVL normalization, including
+     ;; its count semantics; existing valid AVL storage may become flat.
+     (native-map-with-root root (+ (native-map-count m) added) (native-map-tree? storage)))))))
 (set! bl-assoc (lambda (m k v) (native-raw-assoc m (native-key-canon k) v)))
 (define (native-raw-remove m k)
  (if (not (bl-tag? m 'map)) m
