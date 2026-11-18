@@ -6,6 +6,8 @@
    (for-each collision '(pinned latest deadline timeout retire))
    (selective (if quick? 33 257)))
  '(#f #t))
+(set! lab-candidate? #t)
+(branch-rotations (if quick? 32 1024) 8)
 (for-each compiler-collision '(#t #f))
 (for-each incremental (if quick? '(8) '(16 64 256)))
 (let trials ((trial 0))

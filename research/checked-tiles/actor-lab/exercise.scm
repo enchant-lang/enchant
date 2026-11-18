@@ -32,26 +32,29 @@
   (check (= 0 (h-vec-size (field seed-state "runnable"))) "runnable entry after drain")
   (check (= 0 seed-critical) "unbalanced critical section"))
 
+(define peer-enabled? #t)
 (define (bench n trial)
-  (let ((probes 0) (peer-done #f) (turns 0) (max-gap 0) (orders (make-vector n)))
+  (let ((probes 0) (peer-done #f) (turns 0) (max-gap 0) (first-us 0) (orders (make-vector n)))
     (run-actors
      (lambda ()
        (let ((pid (h-self)) (start (micros)))
          (let fill ((i 0))
            (if (< i n) (begin (kernel "rt-send" pid i) (fill (+ i 1)))))
          (let ((enqueue-us (elapsed start)))
-           (spawn (lambda ()
+           (when peer-enabled?
+             (spawn (lambda ()
              (let pulse ((last (micros)))
                (if (not peer-done)
                    (begin (set! turns (+ turns 1)) (h-park "yield")
                           (set! max-gap (max max-gap (elapsed last))) (pulse (micros)))))))
-           (wait-for (lambda () (> turns 0)))
+           (wait-for (lambda () (> turns 0))))
            (set! lab-heads 0) (set! lab-transfers 0) (set! lab-base-slots 0)
            (let ((bytes (allocated)) (t (micros)))
              (let drain ((i 0))
                (if (< i n)
                    (let ((x (receive-with (lambda (m) (set! probes (+ probes 1)) (anything m))
                                           unexpected 0)))
+                     (if (= i 0) (set! first-us (elapsed t)))
                      (vector-set! orders i x) (drain (+ i 1)))))
              (let ((drain-us (elapsed t)) (alloc (inexact->exact (- (allocated) bytes))))
                (set! peer-done #t)
@@ -62,7 +65,7 @@
                (check (if lab-candidate? (= lab-heads lab-transfers n)
                           (= lab-base-slots (quotient (* n (+ n 1)) 2))) "removal cost")
                (report "drain" (arm) n trial enqueue-us drain-us alloc probes lab-base-slots
-                       lab-heads lab-transfers turns max-gap)))))))))
+                       lab-heads lab-transfers turns max-gap first-us)))))))))
 
 (define (selective n)
   (run-actors
@@ -197,3 +200,19 @@
                          (remove (cons (car right) left) (cdr right) (+ i 1))))))))
     (walk (lab-empty) '() 9)
     (report "branches" (arm) branches)))
+
+;; The same rear-only snapshot is drained once per branch. Every branch pays
+;; its own rotation, which exposes the limit of the linear-history cost claim.
+(define (branch-rotations n forks)
+  (let fill ((i 0) (root (lab-empty)))
+    (if (< i n) (fill (+ i 1) (lab-append root i))
+        (begin
+          (set! lab-transfers 0)
+          (let branch ((k 0))
+            (if (< k forks)
+                (let ((next (lab-remove root 0)))
+                  (check (and (= n (lab-size root)) (= 0 (lab-ref root 0))
+                              (= (- n 1) (lab-size next)) (= 1 (lab-ref next 0))) "forked rotation")
+                  (branch (+ k 1)))))
+          (check (= lab-transfers (* n forks)) "per-fork reversal cost")
+          (report "fork_cost" n forks lab-transfers)))))

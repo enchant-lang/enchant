@@ -32,13 +32,14 @@ FOOTER = [
     '(native-real-finish)',
 ]
 COLUMNS = {
+    'fork_cost': 'n forks transferred',
     'branches': 'arm states',
-    'drain': 'arm n trial enqueue_us drain_us allocated_bytes probes vector_input_slots head_advances transferred peer_turns peer_max_gap_us',
+    'drain': 'arm n trial enqueue_us drain_us allocated_bytes probes vector_input_slots head_advances transferred peer_turns peer_max_gap_us first_receive_us',
     'middle': 'arm n probes interior_visits elapsed_us',
     'revision': 'arm policy selected_revision selected next_revision residual_consumed weak_held weak_released live_held_bytes live_released_bytes',
     'timeout': 'arm original_deadline repark_deadline completed_at probes',
     'retired': 'arm terminal_replies',
-    'compiler': 'policy clean_a clean_b pending_output evaluated',
+    'compiler': 'policy clean_a clean_b pending_output evaluated next_on_same_actor',
     'invalidation': 'definitions re_emitted reused update_us clean_and_compare_us',
 }
 
@@ -85,7 +86,21 @@ def command(argv, cwd, env=None, timeout=120):
     return completed.stdout
 
 
+def parse_rows(output):
+    rows = {name: [] for name in COLUMNS}
+    for line in output.splitlines():
+        kind, *fields = line.split('\t')
+        if kind in rows:
+            values = [int(s) if s.isdecimal() else s for s in fields]
+            rows[kind].append(dict(zip(COLUMNS[kind].split(), values, strict=True)))
+    if not output.endswith('complete\n'):
+        raise ValueError('Native run ended before its final witness')
+    return rows
+
+
 def build_and_run(folder, quick):
+    fixture_sha = {p.name: digest(p) for p in sorted(HERE.glob('*.scm'))}
+    driver_sha = digest(Path(__file__))
     qualification = SEED / 'evidence/real-actors/qualification.json'
     refs = {relocate(k): v for k, v in json.loads(qualification.read_text())['inputs'].items()}
     receipt = DONOR / 'build.json'
@@ -139,9 +154,14 @@ def build_and_run(folder, quick):
     posix = """(begin (set! lab-candidate? (equal? (getenv "ENCHANT_LAB_WORKLOAD") "queue"))
                      (kernel "bl-main" (native-global-exact "native.actor-posix" "main"))
                      (native-real-finish))"""
+    cadence = """(begin (set! peer-enabled? (equal? (getenv "ENCHANT_LAB_PEER") "1"))
+                       (for-each (lambda (arm) (set! lab-candidate? arm) (bench 256 0)) '(#f #t))
+                       (report "complete"))"""
+    workload = '(getenv "ENCHANT_LAB_WORKLOAD" #f)'
+    dispatch = (f'(cond ((equal? {workload} "cadence") {cadence}) '
+                f'({workload} {posix}) (else {body[start:]}))')
     main = (body[:start] + '(with-exception-catcher (lambda (e) (display-exception e) (newline) (exit 1))'
-            + ' (lambda () (if (getenv "ENCHANT_LAB_WORKLOAD" #f) ' + posix
-            + ' (begin\n' + body[start:] + '))))\n')
+            + ' (lambda () ' + dispatch + '))\n')
     compile_unit('actor_lab', '\n'.join([(HERE / 'mailbox.scm').read_text(), overlay(forms),
                                         (HERE / 'exercise.scm').read_text(), (HERE / 'compiler.scm').read_text(), main]))
     link, obj, image = [folder / s for s in ('lab_.c', 'lab_.o', 'actor-lab')]
@@ -157,22 +177,29 @@ def build_and_run(folder, quick):
         if labels != control_labels or len(witnesses) != 1:
             raise ValueError(f'POSIX differential failed for {arm}')
         posix_controls[arm] = json.loads(witnesses[0].split(' ', 1)[1])
+    scheduler_controls = []
+    if not quick:
+        for budget in ('default', '17'):
+            for peer in (False, True):
+                cadence_output = command([image], folder, dict(env, NATIVE_ACTOR_BUDGET=budget,
+                                         ENCHANT_LAB_WORKLOAD='cadence', ENCHANT_LAB_PEER=str(int(peer))))
+                control_rows = parse_rows(cadence_output)['drain']
+                if len(control_rows) != 2 or any((r['peer_turns'] > 0) != peer for r in control_rows):
+                    raise ValueError('Invalid scheduling control')
+                scheduler_controls.extend(dict(r, budget=budget, peer=peer) for r in control_rows)
     output = command([image], folder, dict(env, ENCHANT_LAB_QUICK=str(int(quick))), timeout=240)
-    rows = {name: [] for name in COLUMNS}
-    for line in output.splitlines():
-        kind, *fields = line.split('\t')
-        if kind in rows:
-            values = [int(s) if s.isdecimal() else s for s in fields]
-            rows[kind].append(dict(zip(COLUMNS[kind].split(), values, strict=True)))
-    expected = dict(branches=2, drain=4 if quick else 30, middle=2, revision=6, timeout=2, retired=2,
+    rows = parse_rows(output)
+    expected = dict(fork_cost=1, branches=2, drain=4 if quick else 30, middle=2, revision=6, timeout=2, retired=2,
                     compiler=2, invalidation=1 if quick else 3)
     if not output.endswith('complete\n') or any(len(rows[k]) != n for k, n in expected.items()):
         raise ValueError('Incomplete native run:\n' + output[-3000:])
+    for name, sha in fixture_sha.items():
+        checked(HERE / name, sha)
+    checked(Path(__file__), driver_sha)
     return dict(mode='quick' if quick else 'full', actor_budget=17, virtual_deadlines=True,
                 runtime_sha256=manifest['runtime']['sha256'], sdk=sdk, donor_build_sha256=digest(receipt),
                 original_elf_sha256=digest(original_image), lab_elf_sha256=digest(image),
-                fixture_sha256={p.name: digest(p) for p in sorted(HERE.glob('*.scm'))},
-                driver_sha256=digest(Path(__file__)), original_control=control_labels, posix_controls=posix_controls, **rows)
+                fixture_sha256=fixture_sha, driver_sha256=driver_sha, original_control=control_labels, posix_controls=posix_controls, scheduler_controls=scheduler_controls, **rows)
 
 
 if __name__ == '__main__':

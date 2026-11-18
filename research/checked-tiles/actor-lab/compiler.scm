@@ -14,8 +14,9 @@
 (define (emit-node n) (bl-invoke lab-emitter (list n (bl-empty-map))))
 (define (evaluate-program s) (eval (with-input-from-string s read)))
 
+(define compiler-ident-pin (make-parameter #f))
 (define (compiler-collision pinned?)
-  (let ((arrived #f) (edited #f) (bytes #f) (old #f) (new #f))
+  (let ((arrived #f) (edited #f) (bytes #f) (following #f) (old #f) (new #f))
     (install-ident lab-ident) (set! old (emit-node binding-node))
     (install-ident new-ident) (set! new (emit-node binding-node))
     (check (and (not (string=? old new)) (= 7 (evaluate-program old) (evaluate-program new))) "clean emit oracles")
@@ -23,26 +24,28 @@
      (lambda ()
        ;; Interpose exactly at the first identifier emission. Keep the saved
        ;; target for this individual invocation even if the peer publishes B.
-       (let ((job-owner (h-self)))
-         (install-ident
-          (lambda (s)
+       (install-ident
+        (lambda (s)
+          (let ((target (or (compiler-ident-pin) lab-ident)))
             (set! arrived #t)
             (wait-for (lambda () edited))
-            (bl-invoke lab-ident (list s))))
-         (spawn (lambda ()
-                  (wait-for (lambda () arrived))
-                  (install-ident
-                   (lambda (s)
-                     (if (and pinned? (bl-equal? (h-self) job-owner))
-                         (bl-invoke lab-ident (list s)) (new-ident s))))
-                  (set! edited #t)))
-         (set! bytes (emit-node binding-node)))))
-    (let ((result (with-exception-catcher (lambda (ex) 'error) (lambda () (evaluate-program bytes)))))
+            (bl-invoke target (list s)))))
+       (spawn (lambda ()
+                (wait-for (lambda () arrived))
+                (install-ident (lambda (s) (bl-invoke (or (compiler-ident-pin) new-ident) (list s))))
+                (set! edited #t)))
+       (parameterize ((compiler-ident-pin (and pinned? lab-ident)))
+         (set! bytes (emit-node binding-node)))
+       ;; A second request handled by the same long-lived worker sees B.
+       (set! following (emit-node binding-node))))
+    (let ((result (with-exception-catcher
+                   (lambda (ex) (if (unbound-global-exception? ex) 'unbound (raise ex)))
+                   (lambda () (evaluate-program bytes)))))
       (check (if pinned? (and (equal? result 7) (string=? bytes old))
-                 (and (eq? result 'error) (not (string=? bytes old)) (not (string=? bytes new))))
+                 (and (eq? result 'unbound) (not (string=? bytes old)) (not (string=? bytes new))))
              "mixed-generation compiler control")
-      (check (string=? new (emit-node binding-node)) "fresh compile after edit")
-      (report "compiler" (if pinned? 'pinned 'latest) old new bytes result))
+      (check (string=? new following) "next compile on the same actor must see B")
+      (report "compiler" (if pinned? 'pinned 'latest) old new bytes result following))
     (install-ident lab-ident)))
 
 (define (incremental n)
