@@ -88,12 +88,23 @@
    (if (erlang/is_tuple name) (elem name 1) :unregistered))
   (if (erlang/is_atom destination) destination :external-name)))
 
-(defn- message-operation [message]
- (when (and (erlang/is_tuple message) (pos? (erlang/tuple_size message)))
-  (let [tag (elem message 0)
-        request (if (and (= :"$gen_call" tag) (= 3 (erlang/tuple_size message))) (elem message 2) message)
-        operation (if (and (erlang/is_tuple request) (pos? (erlang/tuple_size request))) (elem request 0) request)]
-   (when (erlang/is_atom operation) operation))))
+(defn- message-request [message]
+ (if (and (erlang/is_tuple message) (= 3 (erlang/tuple_size message))
+          (= :"$gen_call" (elem message 0)))
+  (elem message 2)
+  message))
+
+(defn- message-operation [request]
+ (let [operation (if (and (erlang/is_tuple request) (pos? (erlang/tuple_size request))) (elem request 0) request)]
+  (when (erlang/is_atom operation) operation)))
+
+(defn- env-agent-reader [request]
+ (if (and (erlang/is_tuple request) (= 2 (erlang/tuple_size request))
+          (erlang/is_function (elem request 1) 1))
+  (let [reader (elem request 1)]
+   [(elem (erlang/fun_info reader :module) 1)
+    (elem (erlang/fun_info reader :name) 1)])
+  [:unclassified]))
 
 (defn- boundary-event [effects category key]
  (let [total (inc (:boundary-event-count effects 0))
@@ -106,6 +117,15 @@
 
 (defn- other-table-event [effects operation table]
  (boundary-event effects :other-tables [operation (if (erlang/is_atom table) table :anonymous-table)]))
+
+(defn- process-event [effects kind message target]
+ (let [destination (process-destination target)
+       request (message-request message)
+       operation (message-operation request)
+       observed (boundary-event effects :process-boundary [kind destination operation])]
+  (if (and (= :send kind) (= :Elixir.BeamLisp.Env destination) (= :get operation))
+   (boundary-event observed :env-agent-readers (env-agent-reader request))
+   observed)))
 
 (defn- record-source-probe [effects path outcome]
  (let [n (inc (:source-probe-count effects 0))
@@ -293,11 +313,9 @@
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
   (recur calls pending hits misses reads sources (record-macro-lookup effects callable))
   [:trace _ :send message target]
-  (recur calls pending hits misses reads sources
-   (boundary-event effects :process-boundary [:send (process-destination target) (message-operation message)]))
+  (recur calls pending hits misses reads sources (process-event effects :send message target))
   [:trace _ :send_to_non_existing_process message target]
-  (recur calls pending hits misses reads sources
-   (boundary-event effects :process-boundary [:send-miss (process-destination target) (message-operation message)]))
+  (recur calls pending hits misses reads sources (process-event effects :send-miss message target))
   [:trace _ :spawn _ _]
   (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [:spawn]))
   [:trace _ kind _] :when (or (= kind :link) (= kind :unlink) (= kind :getting_linked) (= kind :getting_unlinked)
@@ -1032,20 +1050,24 @@
    (let [[_ observation] (trace! (fn []
                                   (ets/insert table (tuple :key 1))
                                   (ets/lookup table :key)
+                                  (Agent/get :Elixir.BeamLisp.Env (fn [_] :lowering-env-control))
                                   (erlang/send (erlang/self) :lowering-boundary-control))
                             {:registry? true :boundary? true})
          effects (:effects observation)]
     (receive :lowering-boundary-control :ok (after 1000 (throw :boundary-control-timeout)))
     (assert (= 1 (get-in effects [:other-tables [:insert :anonymous-table]])))
     (assert (= 1 (get-in effects [:other-tables [:lookup :anonymous-table]])))
-    (assert (= 1 (reduce + 0 (vals (:process-boundary effects)))))
-    {:table-read-observed true :table-write-observed true :message-observed true})
+    (assert (= 2 (reduce + 0 (vals (:process-boundary effects)))))
+    (assert (= 1 (get-in effects [:process-boundary [:send :Elixir.BeamLisp.Env :get]])))
+    (assert (= 1 (reduce + 0 (vals (:env-agent-readers effects)))))
+    (assert (not (contains? (:env-agent-readers effects) [:unclassified])))
+    {:table-read-observed true :table-write-observed true :message-observed true :env-reader-observed true})
    (finally (ets/delete table)))))
 
 (defn- lowering-effects [closure rows samples-path]
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.lowering-effects" :version 2 :reuse-authority false
+   {:schema "bl.native.lowering-effects" :version 3 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :control (lowering-boundary-control)
@@ -1059,6 +1081,7 @@
                       :registry-supported (registry-lowering-supported? effects phase)
                       :owned-macros (:all-expansions-owned (macro-lookup-summary observation))
                       :other-tables (vec (sort (:other-tables effects)))
+                      :env-agent-readers (vec (sort (:env-agent-readers effects)))
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (:order closure))})))
 
