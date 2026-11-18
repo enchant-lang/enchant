@@ -1,9 +1,10 @@
 (ns bl.js.anf-cache-test (:require [js.build :as build] [js.cache :as cache]))
-(defn- with-cache [f]
+(defn- with-cache-mode [mode f]
  (let [prior (System/get_env "BL_JS_CACHE")]
-  (System/put_env "BL_JS_CACHE" "on")
+  (System/put_env "BL_JS_CACHE" mode)
   (try (f)
    (finally (if prior (System/put_env "BL_JS_CACHE" prior) (System/delete_env "BL_JS_CACHE"))))))
+(defn- with-cache [f] (with-cache-mode "on" f))
 (defn- with-native-compiler [action]
  ;; Use the unchanged SDK compiler and initialize dependencies in the actual
  ;; receiving scope, independent of prior files or parent namespace vars.
@@ -11,6 +12,20 @@
   (fn [] (BeamLisp.Loader/ensure_loaded "js.build") (action))))
 (defn- compiled [path]
  (with-native-compiler (fn [] (build/compile-ns path))))
+(deftest repeated-compilation-owns-generated-names-without-a-cache
+ (with-cache-mode "off"
+  (fn []
+   (let [root (str (System/tmp_dir!) "/js-anf-names-" (System/unique_integer (list :positive)))
+         path (str root "/names.bl")]
+    (File/mkdir_p! root)
+    (try
+     (File/write! path (str "(ns cache.names)\n"
+                            "(defmacro once [value] `(let [result# ~value] result#))\n"
+                            "(defn plus [x] (once (+ x 1)))\n"))
+     (let [first (compiled path) second (compiled path)]
+      (is (= :declined (:cache-status first)))
+      (is (= first second)))
+     (finally (File/rm_rf! root)))))))
 (deftest scoped-core-overrides-do-not-become-portable-compiler-authority
  (let [baseline (BeamLisp.Env/with_env :global #(BeamLisp.AOT/local_package_authority))
        called (atom 0) token (erlang/make_ref)]
