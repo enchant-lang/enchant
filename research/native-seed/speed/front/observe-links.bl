@@ -13,35 +13,49 @@
              (or (String/ends_with? path ".bl") (String/ends_with? path ".bl.md")))
    path)))
 
-(defn- collector [calls pending hits misses paths]
+(defn- source-result [entry value]
+ (let [bytes (if (= entry (first source-read-entries)) value
+              (when (and (erlang/is_tuple value) (= (erlang/tuple_size value) 2)
+                         (= (elem value 0) :ok))
+               (elem value 1)))]
+  (if (erlang/is_binary bytes) (artifact/sha bytes) :unavailable)))
+
+(defn- collector [calls pending hits misses reads sources]
  (receive
   [:trace _ :call [:ets :lookup arguments]]
   (let [key (second arguments)]
-   (recur calls [(elem key 2) (elem key 3)] hits misses paths))
+   (recur calls [(elem key 2) (elem key 3)] hits misses reads sources))
   [:trace _ :return_from [:ets :lookup 2] value]
   (cond
-   (>= calls trace-limit) (recur (inc calls) nil hits misses paths)
-   (empty? value) (recur (inc calls) nil hits (conj misses pending) paths)
-   :else (recur (inc calls) nil (conj hits pending) misses paths))
+   (>= calls trace-limit) (recur (inc calls) nil hits misses reads sources)
+   (empty? value) (recur (inc calls) nil hits (conj misses pending) reads sources)
+   :else (recur (inc calls) nil (conj hits pending) misses reads sources))
   [:trace _ :call [module function arguments]]
-  (let [path (when (contains? source-read-entry-set (tuple module function 1))
-               (source-path (first arguments)))]
-   (recur calls pending hits misses
-    (if (and path (< (count paths) 1025)) (conj paths path) paths)))
+  (let [entry (tuple module function 1)]
+   (assert (contains? source-read-entry-set entry))
+   (recur calls pending hits misses (conj reads [entry (source-path (first arguments))]) sources))
+  [:trace _ kind [module function 1] value] :when (or (= kind :return_from) (= kind :exception_from))
+  (let [[entry path] (peek reads)]
+   (assert (= entry (tuple module function 1)))
+   (recur calls pending hits misses (pop reads)
+    (if (and path (< (count sources) 1025))
+     (conj sources [path (if (= kind :return_from) (source-result entry value) :unavailable)])
+     sources)))
   [:finish parent ticket]
   (erlang/send parent [:observed ticket
-    {:calls calls :hits hits :misses misses :paths paths
-     :complete? (and (nil? pending) (<= calls trace-limit) (<= (count paths) 1024))}])))
+    {:calls calls :hits hits :misses misses :sources sources
+     :complete? (and (nil? pending) (empty? reads) (<= calls trace-limit) (<= (count sources) 1024))}])))
 
 (defn- trace! [action]
- (let [owner (erlang/self) observer (spawn (fn [] (collector 0 nil #{} #{} #{})))
+ (let [owner (erlang/self) observer (spawn (fn [] (collector 0 nil #{} #{} [] #{})))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
-       match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))]
+       match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list (tuple :return_trace))))
+       source-match (list (tuple (list :_) (list) (list (tuple :exception_trace))))]
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session (tuple :ets :lookup 2) match (list :local)))))
    (doseq [entry source-read-entries]
-    (assert (= 1 (erlang/apply :trace :function (list session entry true (list :local))))))
+    (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
    (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
    (let [result (action)
          barrier (erlang/apply :trace :delivered (list session owner))
@@ -79,13 +93,14 @@
        changed (vec (filter (fn [key] (not= (get installed key) (get incoming key)))
                            (sort (into (set (keys installed)) (keys incoming)))))
        consulted (vec (filter consulted-keys changed))
-       [next _] (compile-member closure member (:rows candidate))
+       [next next-observation] (compile-member closure member (:rows candidate))
        exact? (erlang/=:= (erlang/term_to_binary (:defs compiled) (list :deterministic))
                          (erlang/term_to_binary (:defs next) (list :deterministic)))]
   (when (and (empty? consulted) (not exact?))
    (throw (ex-info "The recorded links missed an actual ANF change" {:changed changed})))
   {:candidate-rows-sha256 (:sha256 candidate)
-   :changed-rows changed :changed-consulted-rows consulted :exact-anf exact?}))
+   :changed-rows changed :changed-consulted-rows consulted :exact-anf exact?
+   :source-read-outcomes (vec (sort (:sources next-observation)))}))
 
 (defn- observe [closure {:keys [rows sha256]} selected comparison]
  (let [member (get-in closure [:units selected])
@@ -94,15 +109,17 @@
        [compiled observation] (compile-member closure member rows)
        keys (sort (into (:hits observation) (:misses observation)))]
   (assert (= (:source-sha256 member) (:source-sha256 compiled)))
-  (assert (some (fn [path] (= (Path/expand (:path member)) (Path/expand path))) (:paths observation)))
-  {:schema "bl.native.installed-link-observation" :version 1
+  (assert (some (fn [[path sha]] (and (= (Path/expand (:path member)) (Path/expand path))
+                                     (= (:source-sha256 member) sha))) (:sources observation)))
+  {:schema "bl.native.installed-link-observation" :version 2
    :namespace selected :source-sha256 (:source-sha256 member)
    :link-rows-sha256 sha256
    :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
    :lookups (:calls observation)
    :lookup-hits (vec (sort (:hits observation)))
    :lookup-misses (vec (sort (:misses observation)))
-   :source-file-consultations (vec (sort (:paths observation)))
+   :source-file-consultations (vec (sort (distinct (map first (:sources observation)))))
+   :source-read-outcomes (vec (sort (:sources observation)))
    :present-in-member-rows (vec (filter installed keys))
    :absent-from-member-rows (vec (remove installed keys))
    :comparison (when comparison (compare-rows closure member installed compiled (set keys) comparison))
@@ -114,7 +131,7 @@
        baseline (read-rows rows)
        candidate (when comparison (read-rows comparison))
        report (if (= selected "--all")
-                {:schema "bl.native.link-observation-inventory" :version 1
+                {:schema "bl.native.link-observation-inventory" :version 2
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
                 (observe closure baseline selected candidate))]
