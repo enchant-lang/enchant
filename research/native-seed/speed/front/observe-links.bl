@@ -16,6 +16,8 @@
 ;;   PARTITION BASE_LINK_ROWS --registry-shadow REPORT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION BASE_LINK_ROWS --capture-registry RECEIPT NEW_LINK_ROWS PHASE_MACRO_SAMPLES
 ;;   PARTITION NEW_LINK_ROWS --cached-registry REPORT RECEIPT PHASE_MACRO_SAMPLES [--force-lower]
+;;   DONOR_PARTITION DONOR_LINK_ROWS --capture-bound-registry RECEIPT PHASE_MACRO_SAMPLES QUALIFICATION
+;;   PARTITION LINK_ROWS --bound-registry REPORT RECEIPT PHASE_MACRO_SAMPLES DONOR_PARTITION QUALIFICATION RECEIPT_SHA
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --declaration-snapshot REPORT NAMESPACE
 ;;   PARTITION LINK_ROWS --outer-control REPORT
@@ -1089,8 +1091,11 @@
           :shape (mapv #(opaque-value-shape % 4) (get inputs input))})
        (take 12 (sort (filter (fn [[_ fingerprint]] (nil? fingerprint)) reads)))))
 
-(defn- capture-registry-member [closure baseline member entries]
+(defn- capture-registry-member [closure baseline member entries bound?]
  (let [[prepared compiled observed callables] (observe-lowering closure baseline member entries)
+       _ (when (and bound? (not (erlang/=:= (def-bytes compiled) (def-bytes member))))
+           (throw (ex-info "Native registry capture diverged from the qualified donor"
+                    {:namespace (:ns member)})))
        effects (:effects observed)
        reason (cond
                 (not (registry-lowering-supported? effects (registry-phase-status observed))) :unaccounted-registry
@@ -1102,9 +1107,9 @@
        reason (or reason (when-not prepared-id :opaque-prepared-input) (when (pos? opaque) :opaque-registry-value))]
   (if reason
    {:reason reason :opaque-inputs opaque :opaque-keys (describe-opaque reads (:registry-inputs effects))}
-   {:prepared prepared-id :registry reads :probes (source-probes observed) :sources (:sources observed)
-    :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)
-    :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits)})))
+   (cond-> {:prepared prepared-id :registry reads :probes (source-probes observed) :sources (:sources observed)
+            :module (:module member) :path (:path member) :source-sha256 (:source-sha256 compiled)}
+    (not bound?) (assoc :definition-bytes (BeamLisp.CompilerData/check_closed_etf! (def-bytes compiled) artifact/limits))))))
 
 (defn- registry-member-bytes [entry]
  (BeamLisp.CompilerData/check_closed_etf!
@@ -1114,15 +1119,16 @@
  (BeamLisp.CompilerData/check_closed_etf! bytes artifact/limits)
  (erlang/binary_to_term bytes))
 
-(defn- capture-registry [closure baseline candidate samples-path]
+(defn- capture-registry [closure baseline candidate samples-path anchor]
  (assert (some? candidate))
  (with-phase-entries candidate samples-path
   (fn [entries _]
-   {:schema :native-portable-registry-v4 :sdk (:sdk-pin closure) :options (:options closure)
+   {:schema (if anchor :native-bound-registry-v1 :native-portable-registry-v4)
+    :donor anchor :sdk (:sdk-pin closure) :options (:options closure)
     :order (:order closure) :base-links (:sha256 baseline) :core-links (value-identity (:core-links closure))
     :members (into {} (map (fn [ns]
                            [ns (registry-member-bytes
-                                (capture-registry-member closure baseline (get-in closure [:units ns]) entries))])
+                                (capture-registry-member closure baseline (get-in closure [:units ns]) entries (some? anchor)))])
                          (:order closure)))})))
 
 (defn- replay-registry-member [closure candidate member entry entries]
@@ -1181,6 +1187,60 @@
    (assoc result :wall-us (- (erlang/monotonic_time :microsecond) started)
     :pinned-module-identities (count (Process/get :native_observer_pinned_module_ids {}))
     :reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) reductions)))))
+
+(defn- refuse-bound-registry [reason]
+ (throw (ex-info (str "Bound native registry receipt refused " (name reason)) {:kind reason})))
+
+(defn- qualified-donor [donor qualification-path]
+ (let [evidence-bytes (File/read! qualification-path)
+       evidence (json/decode evidence-bytes)
+       recorded (get evidence "native-updater-check")
+       closure-sha (get recorded "candidate-closure-sha256")]
+  (when-not (and (true? (get-in evidence ["native-fixpoint" "compiled-source-and-actor-fixpoint"]))
+                 (= (:sdk-descriptor-sha256 artifact/validation-context) (get evidence "sdk-descriptor-sha256"))
+                 (= closure-sha (value-identity donor)))
+   (refuse-bound-registry :wrong-qualified-donor))
+  {:closure-sha256 closure-sha :links-sha256 (get recorded "installed-link-sha256")
+   :qualification-sha256 (artifact/sha evidence-bytes)}))
+
+(defn- capture-bound-registry [closure rows samples-path qualification-path]
+ (let [donor (qualified-donor closure qualification-path)]
+  (when-not (= (:links-sha256 donor) (:sha256 rows))
+   (refuse-bound-registry :wrong-donor-links))
+  (capture-registry closure rows rows samples-path donor)))
+
+(defn- authenticated-registry [bytes expected-sha donor]
+ (when-not (= expected-sha (artifact/sha bytes))
+  (refuse-bound-registry :receipt-digest-mismatch))
+ (let [receipt (read-registry-member bytes)]
+  (when-not (and (= :native-bound-registry-v1 (:schema receipt)) (= donor (:donor receipt)))
+   (refuse-bound-registry :receipt-donor-mismatch))
+  receipt))
+
+(defn- bound-registry [closure candidate receipt-path samples-path donor qualification-path expected-sha]
+ (let [anchor (qualified-donor donor qualification-path)
+       bytes (File/read! receipt-path)
+       receipt (authenticated-registry bytes expected-sha anchor)]
+  (when-not (and (= (:sdk-pin closure) (:sdk-pin donor) (:sdk receipt))
+                 (= (:options closure) (:options donor) (:options receipt))
+                 (= (:order closure) (:order donor) (:order receipt))
+                 (= (value-identity (:core-links closure)) (:core-links receipt))
+                 (= (:links-sha256 anchor) (:base-links receipt))
+                 (= (artifact/sha (File/read! samples-path)) (:sample-report-sha256 receipt)))
+   (refuse-bound-registry :receipt-context-mismatch))
+  ;; The qualified donor supplies definitions. The receipt carries only
+  ;; inputs, and cannot supply a replacement payload for an accepted member.
+  (with-phase-entries candidate samples-path
+   (fn [entries _]
+    {:schema "bl.native.bound-registry-shadow" :version 1 :reuse-authority false
+     :donor anchor :receipt-sha256 expected-sha :receipt-bytes (erlang/byte_size bytes)
+     :candidate-link-rows-sha256 (:sha256 candidate)
+     :members (mapv (fn [ns]
+                     (let [entry (read-registry-member (get-in receipt [:members ns]))
+                           old (get-in donor [:units ns])
+                           entry (if (:reason entry) entry (assoc entry :definition-bytes (def-bytes old)))]
+                      (replay-registry-member closure candidate (get-in closure [:units ns]) entry entries)))
+                   (:order closure))}))))
 
 (defn- source-shadow [closure candidate baseline-path receipt-path]
  (let [baseline (artifact/read-closure baseline-path)
@@ -1359,7 +1419,7 @@
    :scope "Filtered ETS consultations in synchronous staged compilation of unchanged Source. A missing installed member row can still have another resolver fallback."
    :reuse-authority false}))
 
-(let [[partition rows selected output comparison source-receipt mode] (BeamLisp/argv)]
+(let [[partition rows selected output comparison source-receipt mode qualification receipt-sha] (BeamLisp/argv)]
  (let [closure (artifact/read-closure partition)
        pinned-rows (fn [path] (let [rowset (read-rows path)]
                                (assoc rowset :local-links (local-links closure (:rows rowset)))))
@@ -1367,7 +1427,7 @@
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot"
-                                              "--cached-registry"} selected)))
+                                              "--cached-registry" "--capture-bound-registry" "--bound-registry"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -1378,8 +1438,12 @@
                 (= selected "--registry-phases") (registry-phases closure baseline comparison false)
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
-                (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt)
+                (= selected "--capture-registry") (capture-registry closure baseline candidate source-receipt nil)
+                (= selected "--capture-bound-registry") (capture-bound-registry closure baseline comparison source-receipt)
                 (= selected "--cached-registry") (cached-registry closure baseline comparison source-receipt (= "--force-lower" mode))
+                (= selected "--bound-registry") (bound-registry closure baseline comparison source-receipt
+                                                   (if (= partition mode) closure (artifact/read-closure mode))
+                                                   qualification receipt-sha)
                 (= selected "--declaration-snapshot") (declaration-snapshot-report closure baseline comparison)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
@@ -1392,10 +1456,10 @@
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
                 :else (observe closure baseline selected candidate))]
-  (File/write! output (if (contains? #{"--capture-source" "--capture-registry"} selected)
+  (File/write! output (if (contains? #{"--capture-source" "--capture-registry" "--capture-bound-registry"} selected)
                        (BeamLisp.CompilerData/check_closed_etf! (erlang/term_to_binary report (list :deterministic)) artifact/limits)
                        (json/encode report)))
-  (when (or (contains? #{"--shadow" "--registry-shadow" "--cached-registry"} selected) source-shadow?)
+  (when (or (contains? #{"--shadow" "--registry-shadow" "--cached-registry" "--bound-registry"} selected) source-shadow?)
    (let [different (mapv :namespace (remove :exact-clean-definitions (:members report)))]
     (when (seq different)
      (throw (ex-info "Selective relink differs from the qualified clean closure" {:members different})))))
