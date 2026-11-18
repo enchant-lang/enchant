@@ -12,6 +12,7 @@
 ;;   PARTITION LINK_ROWS --phase-macros REPORT
 ;;   PARTITION LINK_ROWS --phase-compile REPORT PHASE_MACRO_SAMPLES
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
+;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --source-probe-control REPORT
 ;;   PARTITION LINK_ROWS --outer-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
@@ -23,6 +24,7 @@
 
 (def trace-limit 100000)
 (def registry-trace-limit 1000000)
+(def registry-input-limit 16384)
 (def source-read-entries [(tuple :Elixir.File :read! 1)
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
@@ -42,6 +44,7 @@
 (def registry-writes #{:insert :insert_new :update_counter :delete :delete_object
                        :delete_all_objects :select_delete :select_replace :match_delete :take})
 (def registry-lookup-entry (tuple :ets :lookup 2))
+(def registry-member-entry (tuple :ets :member 2))
 
 (defn- link-key? [key]
  (and (erlang/is_tuple key) (= 4 (erlang/tuple_size key)) (= :link (elem key 1))))
@@ -68,6 +71,26 @@
        effects (assoc effects :registry-call-count n)]
   (if (> n registry-trace-limit) effects
    (update-in effects [:registry-calls operation] (fn [old] (inc (or old 0)))))))
+
+(defn- normalized-registry-value [operation value]
+ (if (= operation :lookup)
+  (mapv (fn [row] (erlang/delete_element 1 row)) value)
+  value))
+
+(defn- record-registry-input [effects operation key value]
+ (let [scope (when (erlang/is_tuple key) (elem key 0))
+       slot (if (= scope (:scope effects)) :own (get (:ancestor-slots effects) scope))
+       inputs (:registry-inputs effects {})]
+  (cond
+   (nil? slot) (assoc effects :unexplained-registry-scope true)
+   :else
+   (let [input [operation slot (erlang/delete_element 1 key)]
+         prior (find inputs input)
+         outcome (normalized-registry-value operation value)]
+    (cond
+     prior (if (erlang/=:= (val prior) outcome) effects (assoc effects :changing-registry-input true))
+     (< (count inputs) registry-input-limit) (assoc effects :registry-inputs (assoc inputs input outcome))
+     :else (assoc effects :registry-input-limit true))))))
 
 (defn- value-identity [value]
  (artifact/sha (erlang/term_to_binary value (list :deterministic))))
@@ -150,6 +173,7 @@
         effects (if (:registry? effects) (registry-call effects [:lookup 2]) effects)]
    (recur calls key hits misses reads sources effects))
   [:trace _ :return_from [:ets :lookup 2] value]
+  (let [effects (if (:registry-inputs? effects) (record-registry-input effects :lookup pending value) effects)]
   (if-not (link-key? pending) (recur calls nil hits misses reads sources effects)
   (if (>= calls trace-limit) (recur (inc calls) nil hits misses reads sources effects)
    (let [key [(elem pending 2) (elem pending 3)]
@@ -157,7 +181,11 @@
          next-effects (record-link effects :read pending outcome)]
     (if outcome
      (recur (inc calls) nil (conj hits key) misses reads sources next-effects)
-     (recur (inc calls) nil hits (conj misses key) reads sources next-effects)))))
+     (recur (inc calls) nil hits (conj misses key) reads sources next-effects))))))
+  [:trace _ :return_from [:ets :member 2] value]
+  (let [key (:pending-registry-member effects)]
+   (recur calls pending hits misses reads sources
+    (record-registry-input (dissoc effects :pending-registry-member) :member key value)))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :expand-macro 4] _]
   (recur calls pending hits misses reads sources (update effects :macro-stack pop))
   [:trace _ :return_from [:Elixir.BeamLisp.Ns.Compiler :macro-lookup 2] callable]
@@ -180,6 +208,8 @@
     (= entry macro-lookup-entry)
     (recur calls pending hits misses reads sources
      (update effects :pending-macro-lookups (fn [stack] (conj (or stack []) (vec arguments)))))
+    (and (:registry-inputs? effects) (= entry registry-member-entry))
+    (recur calls pending hits misses reads sources (assoc effects :pending-registry-member (second arguments)))
     (or (= entry link-put-entry) (= entry link-delete-entry))
     (let [writing? (= entry link-put-entry) row (second arguments)
           key (if (and writing? (erlang/is_tuple row)) (elem row 0) row)]
@@ -209,6 +239,7 @@
   (erlang/send parent [:observed ticket
     {:calls calls :hits hits :misses misses :sources sources :effects effects
      :complete? (and (nil? pending) (empty? reads) (empty? (:macro-stack effects)) (<= calls trace-limit)
+                    (nil? (:pending-registry-member effects)) (not (:registry-input-limit effects))
                     (empty? (:pending-macro-lookups effects)) (<= (:macro-lookup-count effects 0) trace-limit)
                     (<= (:registry-call-count effects 0) registry-trace-limit)
                     (<= (count (:ordered-links effects [])) trace-limit)
@@ -242,7 +273,8 @@
    (doseq [[entry spec] (if (:registry? options)
                          (map (fn [entry]
                                 [entry (list (tuple (apply list (cons :beam_lisp_vars (repeat (dec (elem entry 2)) :_)))
-                                               (list) (list)))])
+                                               (list) (if (and (:registry-inputs? options) (= entry registry-member-entry))
+                                                       (list (tuple :return_trace)) (list))))])
                               (disj registry-operations registry-lookup-entry))
                          [[link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
                           [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]])]
@@ -641,22 +673,74 @@
   {:reads (summarize (remove writes calls)) :writes (summarize (filter writes calls))
    :source-reads (count (:sources observation)) :link-reads (:calls observation)}))
 
-(defn- registry-phases [closure baseline selected]
+(defn- registry-input-state [input scope ancestors]
+ (let [[operation slot key] input
+       owner (if (= :own slot) scope (nth ancestors slot nil))]
+  (if (nil? owner) :unavailable
+   (let [key (BeamLisp.Env/pfx owner key)]
+    (normalized-registry-value operation
+     (case operation
+      :lookup (ets/lookup :beam_lisp_vars key)
+      :member (ets/member :beam_lisp_vars key)))))))
+
+(defn- registry-input-mismatches [inputs]
+ (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))]
+  (count (remove (fn [[input outcome]] (erlang/=:= outcome (registry-input-state input scope ancestors))) inputs))))
+
+(defn- registry-read-proof [closure baseline member observation phase]
+ (let [effects (:effects observation)
+       inputs (:registry-inputs effects {})
+       supported? (and (empty? (:writes phase)) (not (:unexplained-registry-scope effects))
+                       (not (:changing-registry-input effects))
+                       (every? (fn [[operation _ _]] (contains? #{:lookup :member} operation)) (:reads phase)))
+       mismatches (when supported?
+                    (BeamLisp.Env/isolated
+                     (fn []
+                      (install-rows! closure (:rows baseline))
+                      (BeamLisp.Compiler/with_fresh_names
+                       (fn []
+                        (build/prepare-ns (:path member))
+                        (registry-input-mismatches inputs))))))]
+  {:distinct-inputs (count inputs) :rewritable-reads supported?
+   :unexplained-scope (boolean (:unexplained-registry-scope effects))
+   :changed-during-lowering (boolean (:changing-registry-input effects))
+   :fresh-stage-mismatches mismatches}))
+
+(defn- registry-input-control []
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [key (tuple :alias "native.registry-input-control" "route")
+         physical (BeamLisp.Env/key key)
+         [_ first] (trace! (fn [] [(ets/lookup :beam_lisp_vars physical) (ets/member :beam_lisp_vars physical)])
+                           {:registry? true :registry-inputs? true})
+         inputs (get-in first [:effects :registry-inputs])]
+    (assert (= 2 (count inputs)))
+    (assert (= 0 (registry-input-mismatches inputs)))
+    (BeamLisp.Env/put_key key "rebound")
+    (assert (= 2 (registry-input-mismatches inputs)))
+    {:lookup-and-membership-miss-invalidated true}))))
+
+(defn- registry-phases [closure baseline selected inputs?]
  {:schema "bl.native.registry-by-phase" :version 1 :reuse-authority false
   :table "beam_lisp_vars" :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+  :input-control (when inputs? (registry-input-control))
   :members (mapv (fn [ns]
                    (let [member (get-in closure [:units ns])]
-                    (BeamLisp.Env/isolated
+                    (let [[summary lowering] (BeamLisp.Env/isolated
                      (fn []
                       (install-rows! closure (:rows baseline))
                       (BeamLisp.Compiler/with_fresh_names
                        (fn []
                         (let [options {:registry? true}
                               [prepared staging] (trace! #(build/prepare-ns (:path member)) options)
-                              [compiled lowering] (trace! #(build/compile-prepared prepared {:check-node identity}) options)]
+                              [compiled lowering] (trace! #(build/compile-prepared prepared {:check-node identity})
+                                                    (assoc options :registry-inputs? inputs?))]
                          (assert (erlang/=:= (def-bytes compiled) (def-bytes member)))
-                         {:namespace ns :same-definitions true
-                          :staging (registry-phase-status staging) :lowering (registry-phase-status lowering)})))))))
+                         [{:namespace ns :same-definitions true
+                           :staging (registry-phase-status staging) :lowering (registry-phase-status lowering)}
+                          lowering])))))]
+                     (cond-> summary inputs?
+                      (assoc :registry-inputs (registry-read-proof closure baseline member lowering (:lowering summary)))))))
                  (if selected [selected] (:order closure)))})
 
 (defn- source-identity [path]
@@ -909,7 +993,7 @@
        baseline (pinned-rows rows)
        source-shadow? (= selected "--source-shadow")
        candidate (when (and comparison (not source-shadow?)
-                            (not (contains? #{"--phase-compile" "--registry-phases"} selected)))
+                            (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -917,7 +1001,8 @@
                 (= selected "--macro-context-control") (macro-context-control closure baseline)
                 (= selected "--phase-macros") (sample-phase-macros closure baseline)
                 (= selected "--phase-compile") (compile-with-phase-macros closure baseline comparison)
-                (= selected "--registry-phases") (registry-phases closure baseline comparison)
+                (= selected "--registry-phases") (registry-phases closure baseline comparison false)
+                (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
