@@ -181,21 +181,27 @@
            "                \" source=\" (attr :bl_source_hash)\n"
            "                \" key=\" (attr :bl_compiler_key)\n"
            "                \" bytes=\" (Base/encode16 (crypto/hash :sha256 (File/read! (unicode/characters_to_binary (code/which m))))))))\n"))
-    (let [tool (or (System/get_env "BL_QUALIFY_CANDIDATE")
-                   (let [sdk (System/fetch_env! "BL_SDK_PRODUCT")]
-                    (assert (= (Path/expand (Path/join sdk "image/priv")) (Path/expand (BeamLisp.Tiers/priv_root))))
-                    (Path/join sdk "bin/bl")))
-          r (System/cmd tool
-              (to-list (list "--cold" "run" probe))
-              (to-list (list (erlang/list_to_tuple (list :cd root))
-                             (erlang/list_to_tuple (list :stderr_to_stdout true)))))
-          out (elem r 0)
-          code (elem r 1)]
-      (is (= 0 code) (str "a fresh bin/bl boots and answers:\n" out))
-      (is (includes? out (str "source=" hash))
-          "a process that compiled nothing carries the seed beam's source digest")
-      (is (includes? out "key=")
-          "and reports its (absent) key attribute")
-      (is (includes? out (str "bytes=" (Base/encode16 (crypto/hash :sha256 (File/read! installed)))))
-          "the fresh receiver loads the same immutable bytes through its own package path"))
-    (File/rm! probe)))
+    (try
+      (let [tool (or (System/get_env "BL_QUALIFY_CANDIDATE")
+                     (let [sdk (System/fetch_env! "BL_SDK_PRODUCT")
+                           selected (File/stat! (Path/join sdk "image/priv"))
+                           running (File/stat! (BeamLisp.Tiers/priv_root))]
+                       ;; The launcher and the selection can name the same
+                       ;; immutable directory through different links.
+                       (assert (= [:directory (:major_device selected) (:inode selected)]
+                                  [(:type running) (:major_device running) (:inode running)]))
+                       (Path/join sdk "bin/bl")))
+            r (System/cmd tool
+                (to-list (list "--cold" "run" probe))
+                (to-list (list (erlang/list_to_tuple (list :cd root))
+                               (erlang/list_to_tuple (list :stderr_to_stdout true)))))
+            out (elem r 0)
+            code (elem r 1)]
+        (is (= 0 code) (str "a fresh bin/bl boots and answers:\n" out))
+        (is (includes? out (str "source=" hash))
+            "a process that compiled nothing carries the seed beam's source digest")
+        (is (includes? out "key=")
+            "and reports its (absent) key attribute")
+        (is (includes? out (str "bytes=" (Base/encode16 (crypto/hash :sha256 (File/read! installed)))))
+            "the fresh receiver loads the same immutable bytes through its own package path"))
+      (finally (File/rm! probe)))))
