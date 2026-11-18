@@ -773,6 +773,18 @@
     (when (and (= 2 (count args)) (Enum/all? (items args) (fn [arg] (integer-operand? arg options))))
      primitive)))))
 
+(defn- emit-linked-remote [node link options]
+ ; The link resolver has already admitted the exact primitive. When both
+ ; operands are proved integers, keep its call boundary and replace the
+ ; template's dynamic type tests with exact Scheme arithmetic.
+ (if-let [primitive (when (= :template (:kind link)) (integer-intrinsic node options))]
+  (do
+   (when (:emission-counts options)
+    (swap! (:emission-counts options) update :integer-intrinsics (fnil inc 0)))
+   (linked-call node {:inline? true :call (fn [args] (glue "(" primitive " " (spaced args) ")"))}
+                (:args node) options))
+  (linked-call node link (:args node) options)))
+
 (def ^:private loop-initial-table
  (erlang/list_to_tuple (Enum/map (lists/seq 0 63) (fn [i] (str "loop-initial-" i)))))
 (defn- retained-loop-facts [n self variables facts candidates]
@@ -992,7 +1004,7 @@
                     (= :apply (:fun n)) (= 2 (count (:args n))))
             (ordered-target-call n (first (:args n)) (second (:args n)) "native-raw-apply" options)
             (if-let [link (when-let [aot (:aot-link options)] ((:remote aot) n))]
-             (linked-call n link (:args n) options)
+             (emit-linked-remote n link options)
             (let [callee (remote n options) intrinsic (integer-intrinsic n options)]
              ; Resolve first so the exact pinned primitive remains in the
              ; artifact's activation check even when its call is eliminated.
