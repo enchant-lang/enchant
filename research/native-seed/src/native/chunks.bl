@@ -42,6 +42,20 @@
         ; v2: a compiled target wins over a leaf of the same key, and pinned
         ; host modules (metadata :host-modules) link to their namespace.
         "resolver_policy" "native-aot-link-v2"))
+(def ^:private decision-cache (atom {}))
+(defn- record-decision [ns node remote?]
+ ; fun_info can resolve to the emitting namespace based on operand shape.
+ ; Other decisions can share a cache for this invocation's fixed link plan.
+ (let [key (if remote?
+            (when-not (and (= :erlang (:mod node)) (= :fun_info (:fun node)))
+             (tuple :remote (:mod node) (:fun node) (count (:args node))))
+            (tuple :global (:ns node) (:name node) (:lookup node)))
+       decisions @decision-cache]
+  (or (when key (maps/get key decisions nil))
+      (let [decision (if remote? (bootstrap/remote-decision link-plan node ns)
+                                (bootstrap/global-decision link-plan node))]
+       (when key (reset! decision-cache (maps/put key decision decisions)))
+       decision))))
 (defn decisions-for [ns defs]
  ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
  ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
@@ -51,8 +65,8 @@
   (if (erlang/== todo (list)) (vec (sort-by str decisions))
    (let [node (erlang/hd todo)
          decision (case (:op node)
-                   :remote (bootstrap/remote-decision link-plan node ns)
-                   :global (bootstrap/global-decision link-plan node) nil)]
+                   :remote (record-decision ns node true)
+                   :global (record-decision ns node false) nil)]
     (recur (lists/append (anf/executable-children node) (erlang/tl todo))
            (if decision (conj decisions decision) decisions))))))
 (defn dead-leaves
