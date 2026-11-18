@@ -1,0 +1,24 @@
+(ns speed.profile-js-paired
+ (:require [bl.js :as js] [bl.profile :as profile] [bl.json :as json]))
+(def args (BeamLisp/argv))
+(def out (first args))
+(def expected (second args))
+(def profile? (= "profile" (nth args 2 nil)))
+(def source (BeamLisp.Loader/source_path "js.build"))
+(defn digest [data] (Base/encode16 (crypto/hash :sha256 data) (list (tuple :case :lower))))
+(assert (erlang/is_binary source))
+(assert (= (digest (File/read! source)) (digest (File/read! expected))) [source expected])
+(defn build [name] (js/build! "core" {:out (str out "/" name)}))
+(File/mkdir_p! out)
+(let [observations (mapv (fn [run]
+                          (let [start (erlang/monotonic_time :microsecond)
+                                result (build (str "canonical-" run))]
+                            {:elapsed-us (- (erlang/monotonic_time :microsecond) start)
+                             :build result}))
+                         [1 2])
+      report (when profile? (profile/call-time (fn [] (build "profiled"))))]
+ (File/write! (str out "/timing.json")
+  (json/encode {:js-build-source source :js-build-sha256 (digest (File/read! expected))
+                :observations observations :profiled? (:profiled? report)
+                :total-us (:total-us report) :rows (:rows report)}))
+ (println "JS_PAIRED_OBSERVED"))
