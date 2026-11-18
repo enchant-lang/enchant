@@ -4,6 +4,8 @@
  (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]))
 
 (def trace-limit 100000)
+(def source-read-entries [(tuple :Elixir.File :read! 1)
+                          (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (defn- source-path [raw]
  (let [path (if (erlang/is_list raw) (unicode/characters_to_binary raw) raw)]
   (when (and (string? path) (<= (erlang/byte_size path) 4096)
@@ -20,8 +22,9 @@
    (>= calls trace-limit) (recur (inc calls) nil hits misses paths)
    (empty? value) (recur (inc calls) nil hits (conj misses pending) paths)
    :else (recur (inc calls) nil (conj hits pending) misses paths))
-  [:trace _ :call [:file :read_file arguments]]
-  (let [path (source-path (first arguments))]
+  [:trace _ :call [module function arguments]]
+  (let [path (when (contains? (set source-read-entries) (tuple module function 1))
+               (source-path (first arguments)))]
    (recur calls pending hits misses
     (if (and path (< (count paths) 1025)) (conj paths path) paths)))
   [:finish parent ticket]
@@ -36,8 +39,8 @@
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session (tuple :ets :lookup 2) match (list :local)))))
-   (assert (= 1 (erlang/apply :trace :function
-                  (list session (tuple :file :read_file 1) true (list :local)))))
+   (doseq [entry source-read-entries]
+    (assert (= 1 (erlang/apply :trace :function (list session entry true (list :local))))))
    (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
    (let [result (action)
          barrier (erlang/apply :trace :delivered (list session owner))
@@ -93,6 +96,7 @@
        [compiled observation] (compile-member closure member rows)
        keys (sort (into (:hits observation) (:misses observation)))]
   (assert (= (:source-sha256 member) (:source-sha256 compiled)))
+  (assert (some (fn [path] (= (Path/expand (:path member)) (Path/expand path))) (:paths observation)))
   {:schema "bl.native.installed-link-observation" :version 1
    :namespace selected :source-sha256 (:source-sha256 member)
    :link-rows-sha256 sha256
