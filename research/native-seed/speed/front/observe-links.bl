@@ -8,6 +8,7 @@
 ;;   QUALIFIED_PARTITION BASELINE_LINK_ROWS --shadow REPORT CANDIDATE_LINK_ROWS
 ;;   BASE_PARTITION BASE_LINK_ROWS --capture-source RECEIPT.etf
 ;;   EDITED_PARTITION EDITED_LINK_ROWS --source-shadow REPORT BASE_PARTITION RECEIPT.etf
+;;   PARTITION LINK_ROWS --macro-context-control REPORT
 ;; --all isolates each member. --sequential-scoped keeps the updater's shared
 ;; staging environment and scopes generated names per member. --sequential
 ;; retains the historical ambient naming mode for comparison.
@@ -213,6 +214,26 @@
 (defn- def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
 
+(defn- macro-context-control [closure baseline]
+ (let [path "research/native-seed/speed/front/macro-context-fixture.bl"
+       compile-under (fn [value]
+                        (Process/put :native_relink_context_fixture value)
+                        (compile-member closure {:path path} (:rows baseline)))
+       [left left-observation] (compile-under 1)
+       [right right-observation] (compile-under 2)
+       same-links? (= (link-receipt left-observation) (link-receipt right-observation))
+       same-source? (= (:source-sha256 left) (:source-sha256 right))
+       same-files? (= (:sources left-observation) (:sources right-observation))
+       same-anf? (erlang/=:= (def-bytes left) (def-bytes right))]
+  (assert same-source?)
+  (assert same-links?)
+  (assert same-files?)
+  (assert (not same-anf?))
+  {:schema "bl.native.macro-context-control" :version 1 :reuse-authority false
+   :source-sha256 (:source-sha256 left) :link-rows-sha256 (:sha256 baseline)
+   :same-source-read-outcomes same-files? :same-link-receipt same-links?
+   :same-definition-bytes same-anf? :input "process dictionary read during a staged macro"}))
+
 (defn- source-identity [path]
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
   (if (String/starts_with? absolute root) (subs absolute (count root)) absolute)))
@@ -394,6 +415,7 @@
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
                 source-shadow? (source-shadow closure baseline comparison source-receipt)
+                (= selected "--macro-context-control") (macro-context-control closure baseline)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
                 (= selected "--sequential") (observe-sequential closure baseline false)
