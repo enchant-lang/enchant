@@ -228,18 +228,26 @@
 (defn read-source-identity [path]
  (try (artifact/sha (File/read! path)) (catch _ :unavailable)))
 
-(defn with-registry-stage [closure rows member entries action]
+(defn with-registry-stage
+ ([closure rows member entries action]
+  (with-registry-stage closure rows member entries {} (fn [prepared callables _] (action prepared callables))))
+ ([closure rows member entries {:keys [batch-rows? mark]} action]
  (let [macros (if (= "core" (:ns member)) [] entries)
        phase-callables (into {} (map (fn [[name entry]] [entry name]) macros))]
   (BeamLisp.Env/isolated
    (fn []
-    (install-rows! closure rows)
-    (doseq [[name entry] macros]
-     (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
-    (BeamLisp.Compiler/with_fresh_names
-     (fn []
-      (let [prepared (build/prepare-ns (:path member))]
-       (action prepared phase-callables))))))))
+    (let [start (when mark (mark))
+          install #(install-rows! closure rows)]
+     ;; Retain the SDK's row writes and publication counters in the private
+     ;; member scope. Reenter the same commit fence for each individual put.
+     (if batch-rows? (BeamLisp.Env/with_scope_commit (BeamLisp.Env/env_id) install) (install))
+     (let [staging (when mark (mark :row-install (:ns member) start))]
+      (doseq [[name entry] macros]
+       (BeamLisp.Env/put_key (tuple "core" name) (tuple :"$macro" entry)))
+      (BeamLisp.Compiler/with_fresh_names
+       (fn []
+        (let [prepared (build/prepare-ns (:path member))]
+         (action prepared phase-callables staging))))))))))
 
 (defn lower-with-snapshot [prepared]
  (BeamLisp.Loader/with_declaration_snapshot
@@ -319,10 +327,11 @@
  ([closure candidate member entry entries change-env! retained-unit]
   (replay-registry-member closure candidate member entry entries change-env! retained-unit true nil))
  ([closure candidate member entry entries change-env! retained-unit compare-clean? mark]
- (let [ns (:ns member) start (when mark (mark))]
+ (let [ns (:ns member)]
   (with-registry-stage closure (:rows candidate) member entries
-  (fn [prepared callables]
-   (let [staged (when mark (mark :member-stage ns start))
+   {:batch-rows? (not compare-clean?) :mark mark}
+  (fn [prepared callables staging]
+   (let [staged (when mark (mark :member-stage ns staging))
          _ (when change-env! (change-env!))
          scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))
          changed (when-not (:reason entry)

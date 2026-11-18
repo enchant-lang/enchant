@@ -6,6 +6,7 @@
 # NATIVE_RELINK_COMPARE=1 runs the updater's checked candidate before the
 # ordinary updater and compares both finished artifacts in the same overlay.
 # NATIVE_RELINK_PROFILE=1 also records linked-pass work by member and phase.
+# NATIVE_RELINK_CLEAN_FIRST=1 reverses the timed comparison order.
 set -euo pipefail
 usage() {
   echo "usage: $0 QUALIFIED_CLOSURE_DIR REPORT.json [RECEIPT RECEIPT_SHA QUALIFICATION PHASE_MACRO_SAMPLES [--arity]]" >&2
@@ -58,6 +59,7 @@ cp -a --reflink=auto "$seed/src" "$overlay/$seed/src"
 cp --reflink=auto "$baseline/partition.json" "$baseline/link-rows.etf" "$overlay/$edited/"
 if "$capture_local"; then
   receipt="$overlay/bound-donor.etf"
+  capture_start=$(python3 -c 'import time; print(time.monotonic_ns())')
   (
     cd "$overlay"
     "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
@@ -65,6 +67,7 @@ if "$capture_local"; then
   )
   receipt_sha=$(sha256sum "$receipt")
   receipt_sha=${receipt_sha%% *}
+  capture_end=$(python3 -c 'import time; print(time.monotonic_ns())')
 fi
 python3 - "$overlay/$seed/src/native/scheme.bl" "$edit" <<'PY'
 from pathlib import Path
@@ -108,11 +111,21 @@ request = dict(zip(("receipt", "samples", "donor", "qualification", "sha256"), s
 Path(sys.argv[1]).write_text(json.dumps(request))
 PY
   instrumentation=(--setenv=NATIVE_RELINK_TIMINGS=1 --setenv=NATIVE_RELINK_PROFILE="${NATIVE_RELINK_PROFILE:-}")
-  run_update "$candidate" "${instrumentation[@]}" --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
-  run_update "$edited" "${instrumentation[@]}"
+  run_candidate() {
+    run_update "$candidate" "${instrumentation[@]}" --setenv=NATIVE_CHECKED_RELINK_REQUEST="$request"
+  }
+  if [[ "${NATIVE_RELINK_CLEAN_FIRST:-}" == 1 ]]; then
+    order=(clean candidate)
+    run_update "$edited" "${instrumentation[@]}"
+    run_candidate
+  else
+    order=(candidate clean)
+    run_candidate
+    run_update "$edited" "${instrumentation[@]}"
+  fi
   cmp "$candidate/closure.etf" "$edited/closure.etf"
   cmp "$candidate/link-rows.etf" "$edited/link-rows.etf"
-  python3 - "$candidate" "$edited" "$report" <<'PY'
+  python3 - "$candidate" "$edited" "$report" "$((capture_end - capture_start))" "${order[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -134,7 +147,8 @@ def timings(directory):
         for phase in ("source-pass", "member-rows", "first-partition", "linked-pass", "final-partition")
     }
 
-report = {"schema": "bl.native.checked-relink-comparison", "version": 2,
+report = {"schema": "bl.native.checked-relink-comparison", "version": 3,
+          "order": sys.argv[5:], "receipt-capture-wall-seconds": int(sys.argv[4]) / 1e9,
           "exact-closure": True, "exact-link-rows": True, "candidate": candidate, "clean": clean,
           "phase-seconds": {"candidate": timings(candidate_dir), "clean": timings(clean_dir)}}
 Path(sys.argv[3]).write_text(json.dumps(report, indent=2) + "\n")
