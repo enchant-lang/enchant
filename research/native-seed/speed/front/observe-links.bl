@@ -146,10 +146,25 @@
     (recur (if outcome (assoc state key outcome) (dissoc state key)) (next events)))
    {:accepted true})))
 
+(defn- link-receipt [observation]
+ ;; Once a link has been written by this unit, subsequent reads depend on
+ ;; that write. Keep the reads before the first write and the last write.
+ (reduce (fn [receipt [op key outcome]]
+           (if (= op :write)
+            (assoc-in receipt [:writes key] outcome)
+            (if (contains? (:writes receipt) key) receipt
+             (assoc-in receipt [:reads key] outcome))))
+  {:reads {} :writes {}} (get-in observation [:effects :ordered-links] [])))
+
+(defn- receipt-matches? [receipt initial]
+ (every? (fn [[key outcome]] (= outcome (get initial key))) (:reads receipt)))
+
 (defn- ordered-report [observation]
- {:local-operations (count (get-in observation [:effects :ordered-links] []))
-  :outside-operations (get-in observation [:effects :outside-links] 0)
-  :local-operation-sha256 (value-identity (get-in observation [:effects :ordered-links] []))})
+ (let [{:keys [reads writes]} (link-receipt observation)]
+  {:local-operations (count (get-in observation [:effects :ordered-links] []))
+   :outside-operations (get-in observation [:effects :outside-links] 0)
+   :local-operation-sha256 (value-identity (get-in observation [:effects :ordered-links] []))
+   :external-read-keys (count reads) :final-write-keys (count writes)}))
 
 (defn- write-control []
  (BeamLisp.Env/isolated
@@ -173,6 +188,9 @@
     (assert (:accepted (replay-links observation {})))
     (assert (= key (:different-read (replay-links observation different))))
     (assert (:accepted (replay-links overwritten different)))
+    (assert (receipt-matches? (link-receipt observation) {}))
+    (assert (not (receipt-matches? (link-receipt observation) different)))
+    (assert (receipt-matches? (link-receipt overwritten) different))
     {:schema "bl.native.link-order-write-control" :version 1 :events events
      :changed-value-refused-before-write true :changed-value-accepted-after-write true}))))
 
@@ -228,6 +246,7 @@
        [next next-observation] (compile-member closure member (:rows candidate))
        prediction (replay-links observation (:local-links candidate))
        exact? (erlang/=:= (def-bytes compiled) (def-bytes next))]
+  (assert (= (:accepted prediction) (receipt-matches? (link-receipt observation) (:local-links candidate))))
   (when (and (empty? consulted) (not exact?))
    (throw (ex-info "The recorded links missed an actual ANF change" {:changed changed})))
   {:candidate-rows-sha256 (:sha256 candidate)
