@@ -106,19 +106,44 @@
    (assoc effects field (update shapes shape (fn [n] (inc (or n 0)))))
    (assoc effects :truncated-registry-shapes true))))
 
+(defn- sdk-registry-key? [key]
+ (or (= :bl_code_evidence_generation key)
+     (and (erlang/is_tuple key) (= 2 (erlang/tuple_size key))
+          (= :bl_sdk_emission (elem key 0)) (erlang/is_atom (elem key 1)))))
+
+(defn- registry-input-key [effects operation key]
+ (let [scope (when (and (erlang/is_tuple key) (pos? (erlang/tuple_size key))) (elem key 0))
+       slot (if (= scope (:scope effects)) :own (get (:ancestor-slots effects) scope))]
+  (cond
+   (some? slot) [operation slot (erlang/delete_element 1 key)]
+   (sdk-registry-key? key) [operation :sdk key])))
+
+(defn- record-changing-input [effects operation key prior outcome]
+ (let [next (note-input-shape (assoc effects :changing-registry-input true) :changing-registry-shapes operation key)]
+  (if (and (= :lookup operation) (erlang/is_tuple key) (= 4 (erlang/tuple_size key))
+           (= :meta (elem key 1)))
+   (let [a (first prior) b (first outcome)
+         a (when a (elem a 0)) b (when b (elem b 0))
+         fields (if (and (map? a) (map? b))
+                   (vec (sort (filter (fn [field] (not= (find a field) (find b field)))
+                                     (into (set (keys a)) (keys b)))))
+                   [:row-shape])
+         changes (:changing-metadata next #{})]
+    (assoc next :changing-metadata (if (< (count changes) 64)
+                                   (conj changes [(elem key 2) (elem key 3) fields]) changes)))
+   next)))
+
 (defn- record-registry-input [effects operation key value]
- (let [scope (when (erlang/is_tuple key) (elem key 0))
-       slot (if (= scope (:scope effects)) :own (get (:ancestor-slots effects) scope))
+ (let [input (registry-input-key effects operation key)
        inputs (:registry-inputs effects {})]
   (cond
-   (nil? slot) (note-input-shape (assoc effects :unexplained-registry-scope true) :unknown-registry-shapes operation key)
+   (nil? input) (note-input-shape (assoc effects :unexplained-registry-scope true) :unknown-registry-shapes operation key)
    :else
-   (let [input [operation slot (erlang/delete_element 1 key)]
-         prior (find inputs input)
+   (let [prior (find inputs input)
          outcome (normalized-registry-value operation value)]
     (cond
      prior (if (erlang/=:= (val prior) outcome) effects
-            (note-input-shape (assoc effects :changing-registry-input true) :changing-registry-shapes operation key))
+            (record-changing-input effects operation key (val prior) outcome))
      (< (count inputs) registry-input-limit) (assoc effects :registry-inputs (assoc inputs input outcome))
      :else (assoc effects :registry-input-limit true))))))
 
@@ -711,13 +736,13 @@
 
 (defn- registry-input-state [input scope ancestors]
  (let [[operation slot key] input
-       owner (if (= :own slot) scope (nth ancestors slot nil))]
-  (if (nil? owner) :unavailable
-   (let [key (BeamLisp.Env/pfx owner key)]
+       owner (case slot :sdk nil :own scope (nth ancestors slot nil))
+       physical (if (= :sdk slot) key (when owner (BeamLisp.Env/pfx owner key)))]
+  (if (nil? physical) :unavailable
     (normalized-registry-value operation
      (case operation
-      :lookup (ets/lookup :beam_lisp_vars key)
-      :member (ets/member :beam_lisp_vars key)))))))
+      :lookup (ets/lookup :beam_lisp_vars physical)
+      :member (ets/member :beam_lisp_vars physical))))))
 
 (defn- registry-input-mismatches [inputs]
  (let [scope (BeamLisp.Env/env_id) ancestors (vec (rest (BeamLisp.Env/chain)))]
@@ -742,6 +767,7 @@
    :changed-during-lowering (boolean (:changing-registry-input effects))
    :unknown-key-shapes (vec (sort (:unknown-registry-shapes effects)))
    :changing-key-shapes (vec (sort (:changing-registry-shapes effects)))
+   :changing-metadata (vec (sort (:changing-metadata effects)))
    :truncated-key-shapes (boolean (:truncated-registry-shapes effects))
    :fresh-stage-mismatches mismatches}))
 
@@ -762,6 +788,7 @@
 (defn- registry-phases [closure baseline selected inputs?]
  {:schema "bl.native.registry-by-phase" :version 1 :reuse-authority false
   :table "beam_lisp_vars" :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+  :scoped-declarations inputs?
   :input-control (when inputs? (registry-input-control))
   :members (mapv (fn [ns]
                    (let [member (get-in closure [:units ns])]
@@ -772,7 +799,8 @@
                        (fn []
                         (let [options {:registry? true}
                               [prepared staging] (trace! #(build/prepare-ns (:path member)) options)
-                              [compiled lowering] (trace! #(build/compile-prepared prepared {:check-node identity})
+                              lower (fn [] (build/compile-prepared prepared {:check-node identity}))
+                              [compiled lowering] (trace! (if inputs? #(BeamLisp.Loader/with_declaration_snapshot lower) lower)
                                                     (assoc options :registry-inputs? inputs?))]
                          (assert (erlang/=:= (def-bytes compiled) (def-bytes member)))
                          [{:namespace ns :same-definitions true
