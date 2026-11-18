@@ -115,3 +115,13 @@ node research/native-seed/browser-check.mjs
 Run one substantive check at a time under the existing memory and time limits.
 `fixpoint-full.py` is the complete Scheme qualification driver;
 `check-compiler.py` is a focused preflight and does not establish self-hosting.
+
+The round-three final driver produces `eval-prepared.scm` alongside the
+macro-only Source bundle. Each of the three compiled stages prepares it
+independently, and the Source gate requires identical bundle bytes and
+results. Use the prepared bundle with the stage image recorded in its
+qualification receipt.
+
+```sh
+./stage1 --eval eval-prepared.scm source.bl
+```
