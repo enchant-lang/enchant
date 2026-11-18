@@ -148,6 +148,24 @@ theorem replayWithInitialSubset (state : Key → Option Value)
 
 #print axioms replayWithInitialSubset
 
+/- Check the trace obtained from the subset against the full candidate table.
+   The full-table trace need not be available to verify the subset run. A
+   candidate hit at any omitted pre-write key invalidates this certificate. -/
+theorem verifySubsetAgainstFull (state : Key → Option Value)
+    (program : Staging Key Value Result) (keep : Key → Bool)
+    (coversHits : ∀ key ∈ inputKeys (execute (fun k => if keep k then state k else none) program).2,
+      keep key = true ∨ state key = none) :
+    execute state program =
+      execute (fun key => if keep key then state key else none) program := by
+  apply replayOrdered
+  apply (validIffInputKeys _ _ state (executeValid _ program)).mpr
+  intro key read
+  rcases coversHits key read with kept | absent
+  · simp [kept]
+  · simp [absent]
+
+#print axioms verifySubsetAgainstFull
+
 section ReverseIndex
 
 variable {Member : Type}
