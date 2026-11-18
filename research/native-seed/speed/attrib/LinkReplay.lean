@@ -137,7 +137,8 @@ variable {Member : Type}
 def affected (consumers : Key → List Member) (changed : List Key) : List Member :=
   changed.flatMap consumers
 
-theorem replayUnaffected (unit : Member) (consumers : Key → List Member) (changed : List Key)
+theorem replayUnaffected [DecidableEq Value] (unit : Member)
+    (consumers : Key → List Member) (changed : List Key)
     (old new : Key → Option Value) (program : Staging Key Value Result)
     (indexComplete : ∀ key ∈ inputKeys (execute old program).2, unit ∈ consumers key)
     (changesComplete : ∀ key, new key ≠ old key → key ∈ changed)
