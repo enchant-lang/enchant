@@ -1,0 +1,66 @@
+;; Observe exact installed-link row consultations during one real source compile.
+;; This diagnostic has no authority to reuse a namespace.
+(ns native.observe-links
+ (:require [native.artifact :as artifact] [js.build :as build] [bl.json :as json]))
+
+(def trace-limit 100000)
+(defn- collector [calls keys]
+ (receive
+  [:trace _ :call [:ets :lookup [_ key]]]
+  (recur (inc calls)
+    (if (< calls trace-limit) (conj keys [(elem key 2) (elem key 3)]) keys))
+  [:finish parent ticket]
+  (erlang/send parent [:observed ticket {:calls calls :keys keys :complete? (<= calls trace-limit)}])))
+
+(defn- trace! [action]
+ (let [owner (erlang/self) observer (spawn (fn [] (collector 0 #{})))
+       session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
+       match (list (tuple (list :beam_lisp_vars (tuple :_ :link :_ :_)) (list) (list)))]
+  (try
+   (assert (= 1 (erlang/apply :trace :function
+                  (list session (tuple :ets :lookup 2) match (list :local)))))
+   (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
+   (let [result (action)
+         barrier (erlang/apply :trace :delivered (list session owner))
+         ticket (erlang/make_ref)]
+    (receive [:trace_delivered seen ref] :when (and (= seen owner) (= ref barrier))
+      :ready (after 10000 (throw :trace-delivery-timeout)))
+    (erlang/send observer [:finish owner ticket])
+    (let [observation (receive [:observed ref value] :when (= ref ticket)
+                       value (after 10000 (throw :trace-collector-timeout)))]
+     (assert (:complete? observation))
+     (assert (pos? (:calls observation)))
+     [result observation]))
+   (finally
+    (erlang/apply :trace :session_destroy (list session))
+    (Process/exit observer :kill)))))
+
+(defn- observe [partition rows-file selected]
+ (let [closure (artifact/read-closure partition)
+       member (get-in closure [:units selected])
+       rows-text (File/read! rows-file)
+       _ (BeamLisp.CompilerData/check_closed_etf! rows-text artifact/limits)
+       rows (erlang/binary_to_term rows-text)
+       installed (set (mapv (fn [[ns name _ _]] [ns name]) rows))
+       _ (assert (some? member))
+       [compiled observation]
+       (BeamLisp.Env/isolated
+        (fn []
+         (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
+         (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info))
+         (trace! (fn []
+                  (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity})))))
+       keys (sort (:keys observation))]
+  (assert (= (:source-sha256 member) (:source-sha256 compiled)))
+  {:schema "bl.native.installed-link-observation" :version 1
+   :namespace selected :source-sha256 (:source-sha256 member)
+   :link-rows-sha256 (artifact/sha rows-text)
+   :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+   :lookups (:calls observation)
+   :present-in-member-rows (vec (filter installed keys))
+   :absent-from-member-rows (vec (remove installed keys))
+   :scope "Filtered ETS consultations in one synchronous staged compile. A missing installed member row can still have another resolver fallback."
+   :reuse-authority false}))
+
+(let [[partition rows selected output] (BeamLisp/argv)]
+ (File/write! output (json/encode (observe partition rows selected))))
