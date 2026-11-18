@@ -25,27 +25,31 @@
                    {:sequence sequence :reason (:reason result)})))
   result))
 
-(defn- seed-capacity-control []
+(defn- start-replay [name max-bytes]
+ (projection/start-incremental! name
+  {:source-id "station-gateway-recovery-fixture" :group-by [:uid :route]
+   :window-ms 2592000000 :max-events 4096 :max-groups 8
+   :max-delta 128 :max-bytes max-bytes}))
+
+(defn- seed-capacity-control [max-bytes]
  (let [timestamp (erlang/system_time :millisecond)
-       h (projection/start-incremental! :usage-replay/capacity
-           {:source-id "station-gateway-recovery-fixture" :group-by [:uid :route]
-            :window-ms 2592000000 :max-events 4096 :max-groups 8
-            :max-delta 128 :max-bytes 524288})]
+       h (start-replay :usage-replay/capacity max-bytes)]
   (try
    (let [batches (mapv vec (Enum/chunk_every (events 3000 timestamp) 128))]
     (loop [sequence 1 accepted 0]
-     (let [batch (nth batches (dec sequence))
-           result (projection/delta! h {:sequence sequence :now timestamp :upsert batch})]
-      (if (= :refused (:status result))
+     (if-let [batch (nth batches (dec sequence) nil)]
+      (let [result (projection/delta! h {:sequence sequence :now timestamp :upsert batch})]
+       (if (= :refused (:status result))
        (let [answer (projection/subscribe! h)
              retained (reduce + 0 (map :count (vals (get-in answer [:value :groups]))))]
         (assert (= :aggregate-bytes (:reason result)))
         (assert (pos? accepted))
         (assert (= accepted retained))
         (assert (= (dec sequence) (get-in answer [:value :cursor])))
-        {:attempted 3000 :accepted-before-refusal retained :reason (:reason result)
+        {:attempted 3000 :byte-limit max-bytes :retained-rows retained :reason (:reason result)
          :checkpoint-unchanged true})
-       (recur (inc sequence) (+ accepted (count batch)))))))
+        (recur (inc sequence) (+ accepted (count batch)))))
+      {:attempted 3000 :byte-limit max-bytes :retained-rows accepted})))
    (finally (projection/stop! h)))))
 
 (defn read-burst [reader n expected]
@@ -67,11 +71,7 @@
  (let [timestamp (erlang/system_time :millisecond)
        rows (events history timestamp)
        expected (expected-groups rows)
-       name :usage-replay/totals
-       h (projection/start-incremental! name
-           {:source-id "station-gateway-recovery-fixture" :group-by [:uid :route]
-            :window-ms 2592000000 :max-events 4096 :max-groups 8
-            :max-delta 128 :max-bytes 4194304})
+       h (start-replay :usage-replay/totals 4194304)
        reader (projection/reader h)
        batches (mapv vec (Enum/chunk_every rows 128))
        seq-number (inc (count batches))]
@@ -111,9 +111,12 @@
        :blocked-reads 100 :restarts-after-eviction 0 :exact-groups true})))
    (finally (projection/stop! h)))))
 
-(File/write! (first (BeamLisp/argv))
- (json/encode {:schema "enchant.usage-projection-replay.v1"
-               :fixture "Station gateway recovery test event shape"
-               :observations (mapv (fn [[history readers]] (replay history readers))
-                                   [[300 1] [300 16] [1000 1] [1000 16]])
-               :capacity-control (seed-capacity-control)}))
+(let [refusal (seed-capacity-control 524288)]
+ (assert (= :aggregate-bytes (:reason refusal)))
+ (File/write! (first (BeamLisp/argv))
+  (json/encode {:schema "enchant.usage-projection-replay.v1"
+                :fixture "Station gateway recovery test event shape"
+                :observations (mapv (fn [[history readers]] (replay history readers))
+                                    [[300 1] [300 16] [1000 1] [1000 16]])
+                :capacity-control refusal
+                :original-window (seed-capacity-control 4194304)})))
