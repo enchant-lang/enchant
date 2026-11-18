@@ -98,4 +98,18 @@
  (bl-equal? (bl-source-site-frame (vector #f (lambda () (bl-map (bl-key "x") (bl-float 1.5)))))
             (bl-map (bl-key "x") (bl-float 1.5))))
 (native-frame-check "datum site nil" (eq? bl-nil (bl-get (bl-source-site-frame (vector #f (bl-key "fn") (void))) (bl-key "fn"))))
+(native-frame-check "prelude call clears a pending tail site"
+ (native-test-call 80 (lambda ()
+   (bl-source-tail (native-test-site "tail-prelude" 81 "tail"))
+   (native-linked-external-call (lambda () (not native-source-pending)) '()))))
+(native-frame-check "prelude call keeps a pending non-tail site"
+ (native-test-call 82 (lambda ()
+   (let ((entry native-source-pending))
+    (native-linked-external-call (lambda () (eq? native-source-pending entry)) '())))))
+(let ((variadic (bl-tuple (list (bl-key "$blfn") (bl-empty-map)
+                  (bl-tuple (list 0 (lambda (rest) (and (not native-source-pending) (equal? rest '(7 8))))))))))
+ (native-frame-check "packed prelude call clears a pending tail site and keeps its arguments"
+  (native-test-call 83 (lambda ()
+    (bl-source-tail (native-test-site "tail-packed-prelude" 84 "tail"))
+    (native-linked-external-packed-call variadic '((7 8)))))))
 (display "native source-frame checks passed") (newline)

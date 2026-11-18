@@ -15,8 +15,12 @@
 ;; (a lazy force in tail position returned its monitor reference; see
 ;; speed/actor/RESULT.md). The tail entry is dropped at this boundary; a
 ;; non-tail entry is kept, so frame attribution is unchanged.
+(define (native-drop-external-tail-site!)
+ (let ((entry native-source-pending))
+  (if (and entry (vector-ref entry 2)) (set! native-source-pending #f))))
 (define (native-linked-external-call value arguments)
- (let ((entry (native-next-source-call)))
-  (if (and entry (vector-ref entry 2))
-   (parameterize ((native-next-source-call #f)) (bl-invoke value arguments))
-   (bl-invoke value arguments))))
+ (native-drop-external-tail-site!)
+ (bl-invoke value arguments))
+(define (native-linked-external-packed-call value arguments)
+ (native-drop-external-tail-site!)
+ (native-linked-packed-call value arguments))

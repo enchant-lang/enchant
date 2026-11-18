@@ -37,7 +37,7 @@ def main():
     inputs = sources + ["host/native-posix.scm", "fixtures/host-values-check.scm",
                        "fixtures/native-posix-check.scm", "fixtures/native-memo-check.scm", "fixtures/native-memo-actor-check.scm", "fixtures/host-extra-check.scm", "fixtures/ffi-fixture.c",
                        "sdk-pin.json", "toolchain-pin.json", "check-host.py", "host/host-compiler.scm",
-                       "host/host-source-frames.scm", "fixtures/host-source-frames-check.scm",
+                       "host/host-source-frames.scm", "host/host-proc-link.scm", "fixtures/host-source-frames-check.scm",
                        "fixtures/host-link-check.scm", "fixtures/host-global-cache-check.scm",
                        "fixtures/host-symbol-name-check.scm", "fixtures/host-raw-map-get-check.scm", "fixtures/host-array-check.scm",
                        "fixtures/host-runtime-id-check.scm", "fixtures/host-input-wait-check.scm"]
@@ -86,6 +86,7 @@ def main():
         + (BASE / "fixtures/host-link-check.scm").read_text() + "\n"
         + (BASE / "fixtures/host-global-cache-check.scm").read_text() + "\n"
         + (BASE / "host/host-source-frames.scm").read_text() + "\n"
+        + (BASE / "host/host-proc-link.scm").read_text() + "\n"
         + (BASE / "fixtures/host-source-frames-check.scm").read_text())
     frames = run("source-frames", [GAMBIT / "bin/gsi", "source-frames.scm"], timeout=20)
     assert "native link checks: 56" in frames, frames
