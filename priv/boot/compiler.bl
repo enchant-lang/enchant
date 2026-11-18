@@ -140,7 +140,15 @@
     (let [references (:contextual-bindings env)]
       (when-not (and (erlang/is_map references) (not (maps/is_key :__struct__ references)))
         (compile-error env "Invalid contextual reference table"))))
-  env)
+  ;; This setting is internal to one compile. Browser, managed, and
+  ;; contextual entry points select their bindings independently.
+  (if (and (erlang/=:= :beam (maps/get :target env :beam))
+           (not (:managed-source env))
+           (not (maps/is_key :contextual-bindings env))
+           (erlang/function_exported :Elixir.BeamLisp.Env :sealed? 0)
+           (BeamLisp.Env/sealed?))
+    (maps/put :sealed-linking? true env)
+    (maps/remove :sealed-linking? env)))
 
 (defn- compile-warning!
   "Report a survivable fact about the code being compiled: one line on stderr,
@@ -911,8 +919,7 @@
    when the arity does not match. The answer comes from the var the runtime
    fetch would select (`Env/sealed_value`), which sealing makes immutable."
   [callee arg-nodes env]
-  (when (and (= :global (:op callee))
-             (erlang/function_exported :Elixir.BeamLisp.Env :sealed_value 3))
+  (when (and (maps/get :sealed-linking? env false) (erlang/=:= :global (:op callee)))
     (let [r (BeamLisp.Env/sealed_value (:ns callee) (:name callee) (= :exact (:lookup callee)))
           info (when (erlang/is_tuple r) (sealed-link-info (erlang/element 2 r)))]
       (when info (linked-call info arg-nodes env)))))

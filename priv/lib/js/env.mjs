@@ -132,6 +132,7 @@ export const ENV = {
   },
   peek: (ns, name) => { const r = resolve(ns, name, varRow); return r ? T(OK, r[1]) : ERROR; },
   "bound?": (ns, name) => resolve(ns, name, varRow) !== null,
+  "sealed?": () => false,
   // Browser namespaces come from the module registry, without deferred
   // filesystem search directories.
   deferred_dirs: (_ns) => null,

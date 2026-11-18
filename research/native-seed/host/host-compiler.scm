@@ -481,6 +481,7 @@
 ;; native compiler answers like an unsealed BEAM build, so compiled ANF stays
 ;; a function of source (stage parity). The image's own seal is link time.
 (native-env-leaf! "sealed_value" 3 (lambda (ns name exact?) (bl-key "error")))
+(native-env-leaf! "sealed?" 0 (lambda () #f))
 (native-env-leaf! "refuse_sealed_redefinition!" 2 (lambda (ns name)
  (if (and native-image-sealed? (table-ref native-sealed-slots (string-append ns "/" name) #f))
   (native-sealed-refuse! (string-append ns "/" name)))
