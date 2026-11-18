@@ -18,7 +18,7 @@ def run(args, cwd):
     start = time.perf_counter()
     proc = subprocess.run(args, cwd=cwd, capture_output=True, timeout=180)
     if proc.returncode:
-        raise RuntimeError((proc.stderr + proc.stdout).decode(errors='replace'))
+        raise RuntimeError(f'{args[0]} exited {proc.returncode}: ' + (proc.stderr + proc.stdout).decode(errors='replace'))
     return round((time.perf_counter() - start) * 1000, 3)
 
 

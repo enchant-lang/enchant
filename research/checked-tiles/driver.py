@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import statistics
 import subprocess
@@ -70,6 +71,9 @@ def timings(render, expected, count=5):
 class NativeRegion:
     """A request retaining this object also retains its ELF mapping."""
     def __init__(self, path):
+        # libgomp workers can outlive the last region. Keep the shared runtime
+        # mapped for the process lifetime; each region ELF can still retire.
+        self.scheduler = C.CDLL(TOOLS['openmp'], mode=os.RTLD_NODELETE)
         self.library = C.CDLL(str(path))
         self.release = weakref.finalize(self, _ctypes.dlclose, self.library._handle)
         self.fn = self.library.render
@@ -322,7 +326,9 @@ def main():
         stale = task.result()
     require(stale == 'stale result discarded', 'stale completion accepted')
     first.cpu.release()
-    require(not first.cpu.release.alive, 'retired native mapping still owned')
+    old_path = str(first.directory/'region.so')
+    unmapped = old_path not in Path('/proc/self/maps').read_text()
+    require(unmapped and not first.cpu.release.alive, 'retired region ELF is still mapped')
     third = prepare((HERE/'examples/poster.bl').read_text(), root, raw, args)
     owner.accept(third)
     try:
@@ -333,7 +339,7 @@ def main():
         raise RuntimeError('broken edit passed')
     require((root/'current').resolve() == third.directory, 'rejection changed serving revision')
     trace = {'first': first.receipt['revision'], 'edited': second.receipt['revision'], 'in_flight': stale,
-             'old_elf_released_after_join': not first.cpu.release.alive, 'second_operation': third.receipt['revision'], 'rejected': witness,
+             'old_elf_released_after_join': unmapped, 'second_operation': third.receipt['revision'], 'rejected': witness,
              'serving': str((root/'current').resolve().name)}
     write_json(root/'exercise.json', trace)
     print(json.dumps(trace, indent=2))
