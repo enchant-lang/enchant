@@ -388,6 +388,16 @@
   (and (= 2 (native-map-count selected))
        (bl-is-nil (native-raw-get selected 1 native-missing))
        (eq? #f (native-raw-get selected float-key native-missing)))))
+(let* ((map-update (native-leaf "Elixir.Map/update/4"))
+       (float-key (bl-float 1.0)) (source (bl-map 1 bl-nil float-key #f))
+       (updated (map-update source float-key "default" (lambda (value) (if value "true" "false"))))
+       (inserted (map-update updated 2 "default" (lambda (value) (error "absent map key")))))
+ (native-extra-check "raw map update distinguishes a false value from an absent key"
+  (and (= 3 (native-map-count inserted))
+       (bl-is-nil (native-raw-get inserted 1 native-missing))
+       (string=? "false" (native-raw-get inserted float-key native-missing))
+       (string=? "default" (native-raw-get inserted 2 native-missing))
+       (eq? #f (native-raw-get source float-key native-missing)))))
 (native-extra-check "scalar text search preserves Unicode offsets and suffixes"
  (and (= 2 (native-string-index "λ😀/é/" "/"))
       (= 4 (native-string-index "λ😀/é/" "/" 3))
