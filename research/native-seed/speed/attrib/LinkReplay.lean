@@ -130,6 +130,24 @@ theorem executeValid (state : Key → Option Value) (program : Staging Key Value
   | publish key value next ih =>
     simpa [execute, valid] using ih (replace state key value)
 
+/- A private scope can install a subset of its initial rows if every observed
+   pre-write hit is kept. Initial misses stay misses, and the computation's
+   own publications still override the initial table. -/
+theorem replayWithInitialSubset (state : Key → Option Value)
+    (program : Staging Key Value Result) (keep : Key → Bool)
+    (coversHits : ∀ key ∈ inputKeys (execute state program).2,
+      keep key = true ∨ state key = none) :
+    execute (fun key => if keep key then state key else none) program =
+      execute state program := by
+  apply replayOrdered
+  apply (validIffInputKeys _ state _ (executeValid state program)).mpr
+  intro key read
+  rcases coversHits key read with kept | absent
+  · simp [kept]
+  · simp [absent]
+
+#print axioms replayWithInitialSubset
+
 section ReverseIndex
 
 variable {Member : Type}
