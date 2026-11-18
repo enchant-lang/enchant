@@ -23,6 +23,11 @@
 (defn deny [& _] (swap! calls inc) (throw :graph-evaluation-must-not-query))
 (def argv (BeamLisp/argv))
 (def compare-shared? (= "--compare-shared" (second argv)))
+;; The optional per-family prefix keeps iteration cheap on a retained SDK.
+(def case-limit (when-let [value (nth argv 2 nil)]
+                  (let [n (String/to_integer value)]
+                   (assert (and compare-shared? (<= 1 n 12)))
+                   n)))
 (defn- compare-shared [data roots points]
  (let [started (erlang/monotonic_time :microsecond)]
   (sdk/with-graph-admission data roots {:profile point/profile}
@@ -72,9 +77,10 @@
         (cond-> {:id (:id item) :family family :data-reference (graph/reference data)
                  :variables (count variables) :points points :compiler-proof-authority false}
          compare-shared? (assoc :shared-comparison (compare-shared data source-roots points)
-                                :points (mapv (fn [row] (dissoc row :assignments :values)) points))))) cases))
+                                :points (mapv (fn [row] (dissoc row :assignments :values)) points)))))
+      (if case-limit (take case-limit cases) cases)))
     [[:advanced (advanced/cases)] [:features (features/all-cases)] [:native (native/cases)]]))))
-(assert (= 187 (count rows)))
+(assert (= (if case-limit (* 3 case-limit) 187) (count rows)))
 (assert (= 0 @calls))
 (File/write! (first argv)
  (json/encode {:schema "enchant.formal.term-forest-evaluation-corpus.v1" :rows rows
