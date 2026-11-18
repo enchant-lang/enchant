@@ -46,20 +46,23 @@
    (>= calls trace-limit) (recur (inc calls) nil hits misses reads sources effects)
    (empty? value) (recur (inc calls) nil hits (conj misses pending) reads sources effects)
    :else (recur (inc calls) nil (conj hits pending) misses reads sources effects))
-  [:trace _ :call [:Elixir.BeamLisp.Ns.Compiler :expand-macro [_ form _ env]]]
-  (let [head (rn/node-name (first (rn/node-items form)))]
-   (recur calls pending hits misses reads sources (effect effects :expansions [(:ns env) head])))
-  [:trace _ :call [:Elixir.BeamLisp.Env :put_key [key _]]]
-  (recur calls pending hits misses reads sources (effect effects :link-writes [(elem key 1) (elem key 2)]))
-  [:trace _ :call [:Elixir.BeamLisp.Env :delete_key [key]]]
-  (recur calls pending hits misses reads sources (effect effects :link-deletions [(elem key 1) (elem key 2)]))
   [:trace _ :call [module function arguments]]
-  (let [entry (tuple module function 1)]
-   (assert (contains? source-read-entry-set entry))
-   (recur calls pending hits misses (conj reads [entry (source-path (first arguments))]) sources effects))
+  (let [entry (tuple module function (count arguments)) key (first arguments)]
+   (cond
+    (= entry macro-entry)
+    (let [head (rn/node-name (first (rn/node-items (second arguments)))) env (nth arguments 3)]
+     (recur calls pending hits misses reads sources (effect effects :expansions [(:ns env) head])))
+    (or (= entry link-put-entry) (= entry link-delete-entry))
+    (let [kind (if (= entry link-put-entry) :link-writes :link-deletions)]
+     (recur calls pending hits misses reads sources (effect effects kind [(elem key 1) (elem key 2)])))
+    (contains? source-read-entry-set entry)
+    (recur calls pending hits misses (conj reads [entry (source-path key)]) sources effects)
+    :else (throw (ex-info "Unexpected native observation call" {:entry entry}))))
   [:trace _ kind [module function 1] value] :when (or (= kind :return_from) (= kind :exception_from))
   (let [[entry path] (peek reads)]
-   (assert (= entry (tuple module function 1)))
+   (when-not (= entry (tuple module function 1))
+    (throw (ex-info "Unexpected Source read return"
+             {:module module :function function :pending-entry entry})))
    (recur calls pending hits misses (pop reads)
     (if (and path (< (count sources) 1025))
      (conj sources [path (if (= kind :return_from) (source-result entry value) :unavailable)])
