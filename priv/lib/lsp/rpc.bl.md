@@ -378,8 +378,9 @@ it is how a closed or clean document clears its squiggles.
         ;; try with the analysis, because a publish has one job — never take
         ;; the didOpen down with it — and the analysis is only one of the two
         ;; things that can fail on the way to the wire.
-        ds (try (into [] (map (fn [x] (diagnostic->lsp text x))
-                              (lsp/diagnostics text ns)))
+        ds (try (lsp/with-document-memo (:memo-slot d) text
+                  (fn [] (into [] (map (fn [x] (diagnostic->lsp text x))
+                                       (lsp/diagnostics text ns)))))
                 (catch e [(diagnostic->lsp text {:msg (str "parse error: " (ex-message e))
                                                  :line 1 :col 1})]))]
     (notification "textDocument/publishDiagnostics"
@@ -677,8 +678,7 @@ request before `initialize` is refused with -32002, an unknown request with
 -32601, and an unknown notification is ignored — exactly as the spec requires.
 
 ```beam-lisp
-(defn handle
-  "One inbound message → [state' out]. Pure: no ports, no globals."
+(defn- handle-request
   [state msg]
   (let [method (get msg "method")
         id (get msg "id")
@@ -693,14 +693,19 @@ request before `initialize` is refused with -32002, an unknown request with
 
       (= method "initialized") [state []]
       (= method "shutdown") [(assoc state :shutdown? true) [(response id nil)]]
-      (= method "exit") [(assoc state :exit? true) []]
+      (= method "exit")
+      (do
+        (doseq [doc (vals (:docs state))] (lsp/release-document-memo! (:memo-slot doc)))
+        [(assoc state :exit? true) []])
 
       (= method "textDocument/didOpen")
       (let [td (get params "textDocument")
             uri (get td "uri")
             text (get td "text")
+            _ (lsp/release-document-memo! (get-in state [:docs uri :memo-slot]))
             state' (assoc-in state [:docs uri]
                              {:text text :version (get td "version") :ns (ns-of text)
+                              :memo-slot (erlang/make_ref)
                               :parseable (parseable? text)})]
         [state' [(publish-diagnostics state' uri)]])
 
@@ -711,6 +716,7 @@ request before `initialize` is refused with -32002, an unknown request with
             state' (assoc-in state [:docs uri]
                              {:text text
                               :version (get-in params ["textDocument" "version"])
+                              :memo-slot (or (get-in state [:docs uri :memo-slot]) (erlang/make_ref))
                               :ns (ns-of text)
                               :parseable (parseable? text)})]
         [state' [(publish-diagnostics state' uri)]])
@@ -720,7 +726,8 @@ request before `initialize` is refused with -32002, an unknown request with
         [state [(publish-diagnostics state uri)]])
 
       (= method "textDocument/didClose")
-      (let [uri (get-in params ["textDocument" "uri"])]
+      (let [uri (get-in params ["textDocument" "uri"])
+            _ (lsp/release-document-memo! (get-in state [:docs uri :memo-slot]))]
         [(update state :docs dissoc uri)
          [(notification "textDocument/publishDiagnostics" {"uri" uri "diagnostics" []})]])
 
@@ -751,4 +758,13 @@ request before `initialize` is refused with -32002, an unknown request with
 
       has-id [state [(error-resp id -32601 (str "Method not found: " method))]]
       :else [state []])))
+
+(defn handle
+  "Return the new state and outgoing messages for one request. Open documents
+   share diagnostics and feature analysis through their own bounded memo slot."
+  [state msg]
+  (let [params (get msg "params")
+        uri (or (get-in params ["textDocument" "uri"]) (get params "uri"))
+        doc (get-in state [:docs uri])]
+    (lsp/with-document-memo (:memo-slot doc) (:text doc) (fn [] (handle-request state msg)))))
 ```

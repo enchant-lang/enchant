@@ -173,6 +173,30 @@
       (is (= before (:builds (lsp/memo-stats)))
           "hover + symbols + references added no analysis"))))
 
+(deftest document-edits-replace-retention-and-close-releases-the-bundle
+  (let [uri "file:///memo-lifetime.bl"
+        source (fn [n] (str "(defn memo-edit [x] (+ x " n "))"))
+        [initialized _] (rpc/handle (rpc/initial-state)
+                          {"jsonrpc" "2.0" "id" 1 "method" "initialize" "params" {}})
+        [opened _] (rpc/handle initialized
+                     {"method" "textDocument/didOpen"
+                      "params" {"textDocument" {"uri" uri "version" 1 "text" (source 1)}}})
+        initial (lsp/memo-stats)
+        last-doc (reduce (fn [state version]
+                          (first (rpc/handle state
+                                   {"method" "textDocument/didChange"
+                                    "params" {"textDocument" {"uri" uri "version" version}
+                                              "contentChanges" [{"text" (source version)}]}})))
+                         opened (range 2 10))
+        edited (lsp/memo-stats)
+        [closed _] (rpc/handle last-doc {"method" "textDocument/didClose"
+                                       "params" {"textDocument" {"uri" uri}}})
+        retired (lsp/memo-stats)]
+    (is (= (+ 8 (:builds initial)) (:builds edited)))
+    (is (= (:analyzed initial) (:analyzed edited)))
+    (is (nil? (get-in closed [:docs uri])))
+    (is (< (:bytes retired) (:bytes edited)))))
+
 (deftest definition-publication-invalidates-an-existing-bundle
   (let [src "(defn provider-cache-probe [x] (+ x 9))"]
     (lsp/analyzed src)

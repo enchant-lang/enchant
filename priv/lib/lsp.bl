@@ -86,23 +86,52 @@
 
 (defn- memo-context [] (provenance/definition-revision))
 
+(defn- document-key [slot] (tuple (env/id) :document slot))
+
+(defn with-document-memo
+  "Use a document owner's slot while answering this request. The source and
+   code identities still select the exact answer within that slot."
+  [slot src f]
+  (let [previous (Process/get :lsp/document-memo)]
+    (try
+      (Process/put :lsp/document-memo (when slot [slot (sha256-hex src)]))
+      (f)
+      (finally
+        (if (nil? previous) (Process/delete :lsp/document-memo)
+          (Process/put :lsp/document-memo previous))))))
+
+(defn release-document-memo! [slot]
+  ;; The document's request owner serializes close and publication. Replace
+  ;; the four bounded entries with tiny retired markers using the existing
+  ;; cache admission protocol. An optional cache refusal leaves normal FIFO
+  ;; eviction in charge of releasing the old revision.
+  (when slot
+    (doseq [name [analyzed-cache growth-cache diagnostics-cache defn-cache]]
+      (when (Process/whereis name)
+        (cache/put! name (document-key slot) :retired nil))))
+  nil)
+
 (defn- memo-value
   ([name key compute]
    (cache/ready! name)
    (memo-value name key (memo-context) compute))
   ([name key before compute]
    (cache/ready! name)
-   (let [run (fn []
-     (let [hit (when before (cache/lookup name key before))]
+   (let [[slot document-source] (Process/get :lsp/document-memo)
+         slot (when (= document-source (elem key (dec (erlang/tuple_size key)))) slot)
+         revision (when before (if slot (tuple before key) before))
+         key (if slot (document-key slot) key)
+         run (fn []
+     (let [hit (when revision (cache/lookup name key revision))]
        (if (and (:hit? hit) (= before (memo-context))) (do (activity/mark! :reused) (:value hit))
          (let [_ (activity/mark! :computed) value (compute)]
            (if (and before (= before (memo-context)))
-             (when-not (cache/put! name key before value) (activity/mark! :declined) (swap! declined-retention inc))
+             (when-not (cache/put! name key revision value) (activity/mark! :declined) (swap! declined-retention inc))
              (do (activity/mark! :unstable) (swap! changed-during-build inc)))
            value))))]
-     (let [hit (when before (cache/lookup name key before))]
+     (let [hit (when revision (cache/lookup name key revision))]
        (if (and (:hit? hit) (= before (memo-context))) (do (activity/mark! :reused) (:value hit))
-         (if before (flight/with-key [name key before] run) (run)))))))
+         (if revision (flight/with-key [name key revision] run) (run)))))))
 
 (defn- ready-analysis! []
   (ready-engines! :analysis ["data.single-flight" "data.worklist" "reader-node" "typed" "system.ir" "termination"
