@@ -24,7 +24,7 @@ function connection() {
     'connection',
     online ? (busy ? 'Workstation checking' : 'Workstation ready') : 'Workstation offline',
   );
-  for (const id of ['check', 'rehearse', 'run-actors']) el(id).disabled = !online || busy || sending;
+  for (const id of ['check', 'rehearse', 'run-actors', 'film-start']) el(id).disabled = !online || busy || sending;
 }
 function verdict(title, message, status) {
   text('verdict', title);
@@ -36,6 +36,15 @@ function showRun(job) {
     ? ' Run time ' + duration((job.finished - job.started) * 1000) + '.'
     : '';
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - job.started));
+  if (job.mode === 'film') {
+    if (job.film) {
+      text('film-receipt', JSON.stringify(job.film, null, 2));
+      el('film-details').hidden = false;
+    }
+    verdict('Live film edit', job.error || 'The film section shows the selected frame and run status.', job.status);
+    el('job-detail').hidden = true;
+    return;
+  }
   if (job.mode === 'actors') {
     let message;
     if (job.status === 'checking') {
@@ -210,3 +219,67 @@ el('rehearse').onclick = () => submit('rehearsal');
   await refresh();
   setTimeout(poll, 1200);
 })();
+
+let filmSession, displayedFilm, savedAt, filmSaving = false;
+const filmMessages = {
+  idle: 'Ready to prepare a scene.',
+  warming: 'Preparing the compiler, serving slot and renderer.',
+  serving: 'Rendering and checking the selected revision.',
+  'ready-to-save': 'Revision A is visible. Its frame and compile are suspended. Save within three minutes.',
+  complete: 'Revision B served another frame after Lean rejected the bad edit at input 64.',
+};
+async function filmProgress() {
+  let next;
+  try {
+    const response = await fetch('/api/film');
+    if (!response.ok) throw Error('Film status unavailable.');
+    next = await response.json();
+    if (filmSession !== next.id) {
+      filmSession = next.id;
+      displayedFilm = savedAt = undefined;
+      filmSaving = false;
+      el('film-image').hidden = el('film-details').hidden = true;
+      text('film-time', '');
+      text('film-caption', '');
+    }
+    if (next.visible && displayedFilm !== next.visible) {
+      const img = el('film-image');
+      img.src = '/api/film-frame/' + next.id + '/' + next.visible;
+      await img.decode();
+      img.hidden = false;
+      text('film-caption', 'Serving revision ' + next.visible + ' · 1920 × 1080');
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      displayedFilm = next.visible;
+      if (next.visible === 'B' && savedAt !== undefined) {
+        const ms = performance.now() - savedAt;
+        el('film-time').dataset.ms = ms.toFixed(2);
+        text('film-time', 'Save click to decoded frame at the next paint opportunity · ' + duration(ms));
+      }
+    }
+    el('film-save').disabled = next.phase !== 'ready-to-save' || displayedFilm !== 'A' || filmSaving;
+    text('film-status', next.error || (filmSaving && next.phase === 'ready-to-save'
+      ? 'Saved. Checking revision B while A serves.' : filmMessages[next.phase]));
+  } catch (error) {
+    text('film-status', error.message);
+    el('film-save').disabled = true;
+  }
+  setTimeout(filmProgress, next && ['warming', 'serving', 'ready-to-save'].includes(next.phase) ? 250 : 1200);
+}
+el('film-start').onclick = () => submit('film');
+el('film-save').onclick = async () => {
+  filmSaving = true;
+  el('film-save').disabled = true;
+  savedAt = performance.now();
+  try {
+    const response = await fetch('/api/film-save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Checked-Tiles': '1' },
+      body: JSON.stringify({ id: filmSession }),
+    });
+    if (!response.ok) throw Error((await response.json()).error);
+  } catch (error) {
+    filmSaving = false;
+    savedAt = undefined;
+    text('film-status', error.message);
+  }
+};
+filmProgress();

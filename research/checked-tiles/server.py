@@ -81,6 +81,44 @@ class Workbench:
         self.file = STATE / 'accepted.json'
         self.accepted = json.loads(self.file.read_text()) if self.file.exists() else recorded()
         self.job = {'status': 'ready'}
+        self.film = None
+        self.film_id = None
+
+    def film_state(self):
+        with self.lock:
+            if self.film is None:
+                return {'phase': 'idle', 'visible': None}
+            path = Path(self.film.name) / 'session/state.json'
+            progress = json.loads(path.read_text()) if path.exists() else {'phase': 'warming', 'visible': None}
+            if self.job.get('id') == self.film_id and self.job['status'] == 'failed':
+                progress.update(phase='failed', error=self.job['error'])
+            return dict(progress, id=self.film_id)
+
+    def film_save(self, req):
+        with self.lock:
+            if not self.film or self.job.get('id') != self.film_id or req.get('id') != self.film_id or self.job['status'] != 'checking':
+                raise BlockingIOError('This film session has ended.')
+            root = Path(self.film.name) / 'session'
+            state = root / 'state.json'
+            if not state.exists() or json.loads(state.read_text())['phase'] != 'ready-to-save':
+                raise BlockingIOError('The old frame and compile must be pending before saving.')
+            try:
+                (root / 'save').touch(exist_ok=False)
+            except FileExistsError:
+                raise BlockingIOError('The blend edit was already saved.') from None
+            return {'saved': self.film_id}
+
+    def film_frame(self, session, revision):
+        with self.lock:
+            if self.film_id != session or revision not in ('A', 'B'):
+                return None
+            root = Path(self.film.name) / 'session'
+            state = root / 'state.json'
+            visible = json.loads(state.read_text())['visible'] if state.exists() else None
+            if visible is None or (revision == 'B' and visible != 'B'):
+                return None
+            return (root / revision / 'frame.png').read_bytes()
+
 
     def state(self, client_tag):
         with self.lock:
@@ -90,17 +128,22 @@ class Workbench:
 
     def start(self, req):
         mode, placement = req.get('mode'), req.get('placement')
-        if mode not in ('edit', 'rehearsal', 'actors') or placement not in ('device', 'measured'):
+        if mode not in ('edit', 'rehearsal', 'actors', 'film') or placement not in ('device', 'measured'):
             raise ValueError('Choose a supported experiment and placement.')
         source = web_source(req.get('source')) if mode == 'edit' else PRESETS['wash']
         with self.lock:
             if self.job['status'] == 'checking':
                 raise BlockingIOError('A run is already checking on this workstation.')
-            if mode != 'actors' and req.get('base') != self.accepted['receipt']['revision']:
+            if mode in ('edit', 'rehearsal') and req.get('base') != self.accepted['receipt']['revision']:
                 raise BlockingIOError('The accepted revision changed. Review the frame and try again.')
             self.job = dict(id=uuid4().hex, mode=mode, placement=placement, status='checking', started=time())
             self.serial += 1
             job = self.job.copy()
+            if mode == 'film':
+                if self.film:
+                    self.film.cleanup()
+                self.film = TemporaryDirectory(prefix='checked-film-web-')
+                self.film_id = job['id']
         Thread(target=self.run, args=(job, source), daemon=True).start()
         return job
 
@@ -112,11 +155,14 @@ class Workbench:
                 draft.write_text(source)
                 argv = [sys.executable, '-B', str(HERE/'driver.py'), '--out', str(out),
                         '--source', str(draft), '--placement', job['placement']]
-                if job['mode'] == 'actors':
+                if job['mode'] == 'film':
+                    out = Path(self.film.name) / 'session'
+                    argv = [sys.executable, '-B', str(HERE/'live-render/run.py'), '--out', str(out), '--wait-for-save']
+                elif job['mode'] == 'actors':
                     argv = [sys.executable, '-B', str(HERE/'actor-lab/run.py'), '--quick', '--out', str(out)]
                 elif job['mode'] == 'edit':
                     argv.append('--once')
-                if job['mode'] != 'actors' and job['placement'] == 'device':
+                if job['mode'] in ('edit', 'rehearsal') and job['placement'] == 'device':
                     argv.append('--require-gpu')
                 env = dict(os.environ, PATH=str(Path.home()/'.nix-profile/bin') + ':' + os.defpath
                            + ':' + os.environ.get('PATH', ''))
@@ -128,6 +174,11 @@ class Workbench:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.communicate()
                         raise RuntimeError('Run exceeded the ten-minute workstation limit.')
+                if job['mode'] == 'film':
+                    if proc.returncode:
+                        raise RuntimeError(log.strip()[-3000:] or f'Film driver exited {proc.returncode}')
+                    job.update(status='exercised', film=json.loads((out/'receipt.json').read_text()))
+                    return
                 if job['mode'] == 'actors':
                     if proc.returncode:
                         raise RuntimeError(log.strip()[-3000:] or f'Native actor driver exited {proc.returncode}')
@@ -188,6 +239,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.valid_host():
             return self.send(403)
+        if self.path == '/api/film':
+            return self.send(200, json.dumps(self.server.bench.film_state()).encode())
+        if self.path.startswith('/api/film-frame/'):
+            parts = self.path.split('/')
+            data = self.server.bench.film_frame(*parts[3:]) if len(parts) == 5 else None
+            return self.send(200, data, 'image/png') if data else self.send(404)
         if self.path == '/api/evidence/actors':
             path = HERE / 'evidence/native-actor-lab.json'
             return self.send(200, path.read_bytes()) if path.is_file() else self.send(404)
@@ -201,7 +258,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, (HERE/'web'/name).read_bytes(), mime + '; charset=utf-8')
 
     def do_POST(self):
-        if self.path != '/api/runs':
+        if self.path not in ('/api/runs', '/api/film-save'):
             return self.send(404)
         if (not self.valid_host() or self.headers.get('X-Checked-Tiles') != '1'
                 or self.headers.get('Sec-Fetch-Site') == 'cross-site'):
@@ -215,7 +272,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(size))
             if not isinstance(req, dict):
                 raise ValueError('Expected a JSON object.')
-            job = self.server.bench.start(req)
+            job = self.server.bench.film_save(req) if self.path == '/api/film-save' else self.server.bench.start(req)
         except BlockingIOError as exc:
             return self.send(409, json.dumps({'error': str(exc)}).encode())
         except (ValueError, TypeError, RecursionError) as exc:
@@ -223,7 +280,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(202, json.dumps(job).encode())
 
     def log_request(self, code='-', size='-'):
-        if self.path != '/api/state' or code not in (200, 304):
+        if self.path not in ('/api/state', '/api/film') or code not in (200, 304):
             super().log_request(code, size)
 
 
