@@ -166,6 +166,22 @@ theorem verifySubsetAgainstFull (state : Key → Option Value)
 
 #print axioms verifySubsetAgainstFull
 
+/- Once the sparse stage trace verifies against the complete initial table,
+   a checked lowering receipt can act on its prepared result. The lowering
+   equality is independent evidence about the admitted compiler inputs. -/
+theorem reuseAfterGuardedStage {Unit : Type} (state : Key → Option Value)
+    (stage : Staging Key Value Result) (keep : Key → Bool) (lower : Result → Unit)
+    (donorInput : Result) (donorUnit : Unit)
+    (coversHits : ∀ key ∈ inputKeys (execute (fun k => if keep k then state k else none) stage).2,
+      keep key = true ∨ state key = none)
+    (samePrepared : (execute (fun k => if keep k then state k else none) stage).1 = donorInput)
+    (loweringChecked : lower donorInput = donorUnit) :
+    lower (execute state stage).1 = donorUnit := by
+  rw [verifySubsetAgainstFull state stage keep coversHits, samePrepared]
+  exact loweringChecked
+
+#print axioms reuseAfterGuardedStage
+
 section ReverseIndex
 
 variable {Member : Type}
