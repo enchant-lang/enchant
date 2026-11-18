@@ -1,0 +1,39 @@
+; Run the unmodified and instrumented emitters on exactly the same compiled ANF.
+(ns native.emission-count
+ (:require [reader :as reader] [reader-node :as rn] [compiler :as compiler]
+           [native.eval :as ev] [native.scheme :as baseline]
+           [native.speed-counted :as counted] [bl.json :as json]))
+
+(def attribution "priv/boot/reader.bl")
+(def target-ns "reader")
+(def counter-key :native-speed/emission-counts)
+
+(defn definition? [form]
+ (contains? #{"defn" "defn-" "def"} (ev/head-symbol form)))
+
+(defn compile-definition [form]
+ (let [env (assoc (compiler/new-env target-ns) :file attribution)
+       value (:value-form (compiler/declaration-source form env))
+       pos (rn/node-pos form)]
+  (compiler/reset-fresh!)
+  (compiler/compile (if pos (rn/meta-node value pos) value) (assoc env :target :js))))
+
+(defn measure [path]
+ (let [forms (rest (reader/read-string (File/read! path) attribution))
+       nodes (BeamLisp.Loader/with_declaration_snapshot
+              (fn [] (mapv compile-definition (filter definition? forms))))
+       options (ev/context target-ns)
+       expected (mapv (fn [node] (baseline/emit node options)) nodes)]
+  (assert (seq nodes))
+  (erlang/put counter-key {})
+  (try
+   (let [actual (mapv (fn [node] (counted/emit node options)) nodes)
+         counts (erlang/get counter-key)]
+    (assert (= expected actual))
+    {"definitions" (count nodes)
+     "scheme_bytes" (reduce (fn [total code] (+ total (erlang/byte_size code))) 0 actual)
+     "counts" counts})
+   (finally (erlang/erase counter-key)))))
+
+(doseq [path (BeamLisp/argv)]
+ (println (str "EMISSION_COUNT " (json/encode (measure path)))))
