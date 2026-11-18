@@ -25,6 +25,7 @@
 (def trace-limit 100000)
 (def registry-trace-limit 1000000)
 (def registry-input-limit 16384)
+(def source-probe-limit 1000000)
 (def source-read-entries [(tuple :Elixir.File :read! 1)
                           (tuple :file :read_file 1) (tuple :prim_file :read_file 1)])
 (def source-read-entry-set (set source-read-entries))
@@ -71,6 +72,12 @@
        effects (assoc effects :registry-call-count n)]
   (if (> n registry-trace-limit) effects
    (update-in effects [:registry-calls operation] (fn [old] (inc (or old 0)))))))
+
+(defn- record-source-probe [effects path outcome]
+ (let [n (inc (:source-probe-count effects 0))
+       effects (assoc effects :source-probe-count n)]
+  (if (> n source-probe-limit) effects
+   (update effects :source-probes (fn [seen] (conj (or seen #{}) [path outcome]))))))
 
 (defn- normalized-registry-value [operation value]
  (if (= operation :lookup)
@@ -230,7 +237,7 @@
              {:module module :function function :pending-entry entry})))
    (if (= entry source-probe-entry)
     (recur calls pending hits misses (pop reads) sources
-     (if path (effect effects :source-probes [path (if (= kind :return_from) value :unavailable)]) effects))
+     (if path (record-source-probe effects path (if (= kind :return_from) value :unavailable)) effects))
     (recur calls pending hits misses (pop reads)
      (if (and path (< (count sources) 1025))
       (conj sources [path (if (= kind :return_from) (source-result entry value) :unavailable)])
@@ -242,6 +249,7 @@
                     (nil? (:pending-registry-member effects)) (not (:registry-input-limit effects))
                     (empty? (:pending-macro-lookups effects)) (<= (:macro-lookup-count effects 0) trace-limit)
                     (<= (:registry-call-count effects 0) registry-trace-limit)
+                    (<= (:source-probe-count effects 0) source-probe-limit)
                     (<= (count (:ordered-links effects [])) trace-limit)
                     (<= (:count effects 0) trace-limit) (<= (count sources) 1024))}])))
 
@@ -262,7 +270,7 @@
   (try
    (assert (= 1 (erlang/apply :trace :function
                   (list session registry-lookup-entry match (list :local)))))
-   (doseq [entry (conj source-read-entries source-probe-entry)]
+   (doseq [entry (cond-> source-read-entries (:source-probes? options) (conj source-probe-entry))]
     (assert (= 1 (erlang/apply :trace :function (list session entry source-match (list :local))))))
    (when sample-macros?
     (assert (= 1 (erlang/apply :trace :function (list session macro-result-entry true (list :local))))))
@@ -295,7 +303,8 @@
       (let [details {:link-lookups (:calls observation) :source-reads (count (:sources observation))
                      :effects (get-in observation [:effects :count])
                      :macro-lookups (get-in observation [:effects :macro-lookup-count])
-                     :registry-calls (get-in observation [:effects :registry-call-count])}]
+                     :registry-calls (get-in observation [:effects :registry-call-count])
+                     :source-probes (get-in observation [:effects :source-probe-count])}]
        (throw (ex-info (str "Native observation exceeded its bounds or returned a partial trace " (pr-str details))
                        details))))
      [result observation]))
@@ -450,14 +459,18 @@
  (doseq [[ns name info _] rows] (BeamLisp.Env/put_link ns name info))
  (doseq [[name info] (:core-links closure)] (BeamLisp.Env/put_link "core" name info)))
 
-(defn- compile-staged [member]
- (trace! (fn [] (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity}))))
+(defn- compile-staged
+ ([member] (compile-staged member {}))
+ ([member options]
+  (trace! (fn [] (build/compile-prepared (build/prepare-ns (:path member)) {:check-node identity})) options)))
 
-(defn- compile-member [closure member rows]
- (BeamLisp.Env/isolated
-  (fn []
-   (install-rows! closure rows)
-   (BeamLisp.Compiler/with_fresh_names (fn [] (compile-staged member))))))
+(defn- compile-member
+ ([closure member rows] (compile-member closure member rows {}))
+ ([closure member rows options]
+  (BeamLisp.Env/isolated
+   (fn []
+    (install-rows! closure rows)
+    (BeamLisp.Compiler/with_fresh_names (fn [] (compile-staged member options)))))))
 
 (defn- def-bytes [unit]
  (erlang/term_to_binary (:defs unit) (list :deterministic)))
@@ -749,7 +762,7 @@
 
 (defn- source-probes [observation]
  (vec (sort (distinct (map (fn [[path present?]] [(source-identity path) present?])
-                           (keys (get-in observation [:effects :source-probes])))))))
+                           (get-in observation [:effects :source-probes]))))))
 
 (defn- presence-snapshot [probes]
  (into {} (map (fn [path] [path (File/regular? path)]) (distinct (map first probes)))))
@@ -769,7 +782,7 @@
   (try
    (File/mkdir! nested)
    (File/write! fallback contents)
-   (let [[prior observation] (trace! resolve)
+   (let [[prior observation] (trace! resolve {:source-probes? true})
          probes (source-probes observation)
          preferred-key (source-identity preferred)]
     (assert (= fallback prior))
@@ -795,7 +808,7 @@
   :members (into {}
    (map (fn [ns]
           (let [member (get-in closure [:units ns])
-                [compiled observed] (compile-member closure member (:rows baseline))]
+                [compiled observed] (compile-member closure member (:rows baseline) {:source-probes? true})]
            (assert (= (:source-sha256 member) (:source-sha256 compiled)))
            (assert (erlang/=:= (def-bytes member) (def-bytes compiled)))
            (assert (:accepted (replay-links observed (:local-links baseline))))
