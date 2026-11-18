@@ -57,7 +57,8 @@ def compare_beam(image, prepared, fixture, pin_path):
             env=environment, capture_output=True, check=True,
         )
         elapsed_ms = (time.perf_counter_ns() - start) / 1_000_000
-        assert result.stdout.strip() == b"42", result.stdout
+        expected = b"42\n:ok" if target == "beam" else b"42"
+        assert result.stdout.strip() == expected, result.stdout
         user_s, system_s, rss_kib = map(float, usage.read_text().split())
         counts[target].append({"elapsed_ms": elapsed_ms, "cpu_s": user_s + system_s, "max_rss_kib": int(rss_kib)})
     return {
