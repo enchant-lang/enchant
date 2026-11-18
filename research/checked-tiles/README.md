@@ -42,3 +42,18 @@ For a manual Bend/FFmpeg comparison, use the default exercise session. The optio
     systemd-run --user --scope -p MemoryMax=2G python3 research/checked-tiles/comparison/compare.py SESSION /tmp/checked-tiles-bend --require-gpu
 
 Set BUN and CC to the executable paths when they are outside PATH. Remove --require-gpu for a CPU-only Bend build. The comparator verifies Bend compiler source identities and compares the entire output with the accepted BEAM wash. It measures fresh processes including file IO, alternates launch order, and records build time. The Enchant receipt measures warm transform calls. The FFmpeg comparator uses its standard lutrgb filter on a decoded frame; the existing scene worker supplied the retained input image.
+
+### Recheck and read the record
+
+Run the negative controls against a session with an accepted revision:
+
+    python3 -B research/checked-tiles/controls.py SESSION
+
+They compile a deliberately wrong GPU boundary, submit an incorrect coordinate theorem to Lean, and try four inadmissible source functions. All run outside the published directory. The archived evidence includes the original, first wash, helper edit and posterized output.
+
+Read the journals as Org or open the Enchanted dossier renderer locally. It uses ~/projects/enchanted-skills by default and binds only to loopback. Ctrl-C stops it.
+
+    research/checked-tiles/journal/view
+    research/checked-tiles/journal/view discussion
+
+The original discussion and subsequent experiment are separate entries so the initial predictions can be compared with the measurements.
