@@ -233,7 +233,10 @@
                               (disj registry-operations registry-lookup-entry))
                          [[link-put-entry (list (tuple (list :beam_lisp_vars (tuple link-key :_)) (list) (list)))]
                           [link-delete-entry (list (tuple (list :beam_lisp_vars link-key) (list) (list)))]])]
-    (assert (= 1 (erlang/apply :trace :function (list session entry spec (list :local))))))
+    (let [matched (erlang/apply :trace :function (list session entry spec (list :local)))]
+     (when-not (= 1 matched)
+      (throw (ex-info (str "Native observation could not install trace " (pr-str entry))
+                       {:entry entry :matched matched})))))
    (assert (= 1 (erlang/apply :trace :process (list session owner true (list :call)))))
    (let [result (action)
          barrier (erlang/apply :trace :delivered (list session owner))
@@ -243,7 +246,11 @@
     (erlang/send observer [:finish owner ticket])
     (let [observation (receive [:observed ref value] :when (= ref ticket)
                        value (after 10000 (throw :trace-collector-timeout)))]
-     (assert (:complete? observation))
+     (when-not (:complete? observation)
+      (throw (ex-info "Native observation exceeded its bounds or returned a partial trace"
+              {:lookups (:calls observation) :source-reads (count (:sources observation))
+               :effects (get-in observation [:effects :count])
+               :macro-lookups (get-in observation [:effects :macro-lookup-count])})))
      [result observation]))
    (finally
     (erlang/apply :trace :session_destroy (list session))
@@ -619,7 +626,7 @@
   {:reads (summarize (remove writes calls)) :writes (summarize (filter writes calls))
    :source-reads (count (:sources observation)) :link-reads (:calls observation)}))
 
-(defn- registry-phases [closure baseline]
+(defn- registry-phases [closure baseline selected]
  {:schema "bl.native.registry-by-phase" :version 1 :reuse-authority false
   :table "beam_lisp_vars" :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
   :members (mapv (fn [ns]
@@ -635,7 +642,7 @@
                          (assert (erlang/=:= (def-bytes compiled) (def-bytes member)))
                          {:namespace ns :same-definitions true
                           :staging (registry-phase-status staging) :lowering (registry-phase-status lowering)})))))))
-                 (:order closure))})
+                 (if selected [selected] (:order closure)))})
 
 (defn- source-identity [path]
  (let [absolute (Path/expand path) root (str (File/cwd!) "/")]
@@ -840,14 +847,16 @@
                                (assoc rowset :local-links (local-links closure (:rows rowset)))))
        baseline (pinned-rows rows)
        source-shadow? (= selected "--source-shadow")
-       candidate (when (and comparison (not source-shadow?) (not= selected "--phase-compile")) (pinned-rows comparison))
+       candidate (when (and comparison (not source-shadow?)
+                            (not (contains? #{"--phase-compile" "--registry-phases"} selected)))
+                   (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
                 source-shadow? (source-shadow closure baseline comparison source-receipt)
                 (= selected "--macro-context-control") (macro-context-control closure baseline)
                 (= selected "--phase-macros") (sample-phase-macros closure baseline)
                 (= selected "--phase-compile") (compile-with-phase-macros closure baseline comparison)
-                (= selected "--registry-phases") (registry-phases closure baseline)
+                (= selected "--registry-phases") (registry-phases closure baseline comparison)
                 (= selected "--outer-control") (outer-control)
                 (= selected "--write-control") (write-control)
                 (= selected "--shadow") (observe-shadow closure baseline candidate)
