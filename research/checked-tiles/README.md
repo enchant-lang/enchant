@@ -143,3 +143,9 @@ To build just those four objects in a new directory, run `scripts/bl-mem` and th
 Compare the same semantic observations with the original receipts after a full replay. This also prints both timing panels. The completed workstation replay is at `research/native-seed/out/checked-boot-replay`.
 
     python3 -B research/checked-tiles/boot/compare.py /tmp/my-native-boot-run
+
+To attribute the compiler gap on the successful pipeline replay, run the two comparisons sequentially. The first queries the pinned SDK once and measures phase costs, procedure calls and stack samples in separate native processes. The second compiles the boot macros and compares them with the evaluated bundle. See the journal for the allocator counter caveat.
+
+    scripts/bl-mem
+    systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B research/checked-tiles/boot/cost.py research/native-seed/out/checked-boot-replay/pipeline --out /tmp/my-compiler-cost
+    systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B research/checked-tiles/boot/macro-cost.py research/native-seed/out/checked-boot-replay/pipeline --out /tmp/my-macro-cost

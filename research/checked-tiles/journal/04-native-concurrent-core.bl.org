@@ -596,6 +596,12 @@ Compilation and emission alone crossed the small-map search binding 345,962 time
 
 A separate run sampled the stage two stacks without the counting wrappers. Of the 459 read samples, 19.0% were attributed to native symbol-budget accounting and 13.9% to constructing small maps. During emission, raw map reads, generic calls and string joins were the three leading attributed host operations. Compilation spread its time across many operations. Garbage collection used 35 ms of a 615 ms median compile in the separately timed run. Dropping that pause entirely would leave most of the time in place. The allocator byte counter produced an implausibly large compile-phase delta. I retained its raw value with a caveat and excluded it from the diagnosis. The counts and clock measurements support the work-amplification diagnosis; they do not apportion every millisecond of the gap between the two engines. [[file:../evidence/boot-cost.json][Timing, garbage collection and 8,624 stack samples]]
 
+** Does the native compiler secretly interpret its work?
+
+The native image contains machine code for the reader, compiler and emitter. There is a real exception at startup. The prepared boot bundle contains emitted Scheme, and loading it registers 38 interpreted procedures. To isolate their effect I compiled exactly the same bundle into a native object, preserved its initialization order and return value, and inspected the procedures while the original registrar received them. Native loading registered 38 compiled procedures and zero interpreted ones. The existing observer also rejects a fresh call to the Scheme source evaluator during its timed compiler rounds.
+
+A first paired run made the ordinary compiled bundle 7.6% slower than the evaluated one. A second run rotated three variants through every order position. The median whole job took 1,077 ms with the evaluated bundle, 1,024 ms with ordinary ahead-of-time compilation and 1,013 ms with optimized ahead-of-time compilation. Each arm had 12 warm rounds in the second run. Every session emitted the same bytes. On this source, converting the remaining macro procedures into machine code changes the result by single-digit percentages in either direction across runs. It cannot explain the observed factor of five. Macro-heavy programs and first-command latency have their own performance questions. [[file:../evidence/boot-macro-cost-first.json][First counterbalanced pair]] · [[file:../evidence/boot-macro-cost.json][Rotated experiment and procedure classifications]]
+
 ** The next compiler change I would fund
 
 Start with the emitter. Carry the resolved identity and arity of a call into emission. Encode the printed name once for the job and append its pieces to the output in order. The emitter already resolves some direct calls and hoists some constants. The change is to reuse those facts at the remaining measured sites. A newer held-out comparison measured emitter-only name reuse on two other real namespaces. Whole-job time improved from 1,415 to 1,313 ms on ANF and from 119 to 109 ms on diagnostics, with identical bytes. The earlier combined experiment that regressed on diagnostics also cached compiler-side name splitting. This narrower change is inexpensive to validate on all three files. [[file:../../native-seed/speed/attrib/raw/native-heldout-emitter.json][Stock, emitter-only, combined and BEAM results]]
@@ -603,3 +609,20 @@ Start with the emitter. Carry the resolved identity and arity of a call into emi
 For a larger gain, specialize the storage used between compiler passes. Start with four common closed shapes such as literals, variables, conditionals and calls. Give them direct field access and compact span or symbol references in the native compiler. Keep the first-party BL constructors and operations as the authority. Materialize the public form when it escapes to code that observes it. Let the emitter consume these records directly so the compiler does not immediately rebuild every map it avoided. Compare equivalent output, source spans, errors, guard behavior and evaluation order. Measure the drop in generic searches and whole-job time. A faster field-access microbenchmark alone cannot justify a new representation.
 
 For repeated edits, reuse the compiled definition and dependency results that already have a verified owner. A build with one changed function should pay for that function and its affected callers, including macro and reader dependencies. An imported macro edit may invalidate many definitions. An unrelated function body edit may invalidate very few. A 100× improvement on the second request is a sensible experiment when 99% of the old work can be skipped cheaply. Compare it against the warm SDK on the same edit. That is a different measurement from a full translation of previously unseen source. [[file:../../native-seed/speed/attrib/raw/native-prepared-eval-qualification.json][Existing unchanged-release reuse]]
+
+#+begin_src beam-lisp :id native-compiler-cost
+(let [read-r (fn [n] (Jason/decode! (File/read! (str "research/checked-tiles/evidence/boot-" n ".json"))))
+      profile (read-r "cost") macros (read-r "macro-cost") pairs (get macros "runs")
+      calls (get profile "confirmed_calls")
+      searches (+ (get-in calls ["compile" "native-small-map-search"]) (get-in calls ["emit" "native-small-map-search"]))]
+  (assert (= ":jit" (get profile "beam_emulator")))
+  (assert (= 6082 (get profile "anf_node_occurrences")))
+  (assert (= 345962 searches))
+  (assert (= 9 (count pairs)))
+  (assert (every? (fn [r] (and (= (get profile "emitted_sha256") (get r "output"))
+                                (= 38 (+ (get r "compiled") (get r "interpreted")))
+                                (= (if (= "evaluated" (get r "mode")) 38 0) (get r "interpreted")))) pairs))
+  {:executable-node-occurrences 6082 :compile-and-emit-searches searches :macro-variants 3})
+#+end_src
+
+For a local replay, point the cost and macro experiments at the existing pipeline session. Each writes fresh observations to the output directory named on the command line. [[file:../README.md][Workstation replay commands]]
