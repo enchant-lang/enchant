@@ -1572,22 +1572,86 @@
     {:transient-registry-record-excluded true :retained-registry-record-detected true})
    (finally (ets/delete :beam_lisp_vars transient) (ets/delete :beam_lisp_vars retained)))))
 
+(def generation-publication-entry (tuple :Elixir.BeamLisp.Env :with_code_evidence_publication 1))
+
+(defn- generation-publication-collector [caller count sites]
+ (receive
+  [:trace writer :call entry origin] :when (= entry generation-publication-entry)
+  (let [next-count (inc count)
+        site [(if (= writer caller) :staging-caller :other-process)
+              (if (erlang/is_tuple origin) (vec (erlang/tuple_to_list origin)) [:unknown])]]
+   (recur caller next-count (if (<= next-count 256) (update sites site #(inc (or % 0))) sites)))
+  [:finish owner ticket]
+  (erlang/send owner [:generation-publications ticket count sites])))
+
+(defn- generation-frontier []
+ (let [rows (ets/lookup :beam_lisp_vars :bl_code_evidence_generation)]
+  (if (empty? rows) [0 0]
+   [(elem (first rows) 1) (elem (first rows) 2)])))
+
+(defn- with-generation-publication-observation [action]
+ (let [owner (erlang/self)
+       observer (spawn #(generation-publication-collector owner 0 {}))
+       session (erlang/apply :trace :session_create (list :native_generation_publications observer (list)))
+       spec (list (tuple (list :_) (list) (list (tuple :message (tuple :caller)))))
+       flags (list :call :arity)]
+  (try
+   (assert (= 1 (erlang/apply :trace :function (list session generation-publication-entry spec (list :local)))))
+   (erlang/apply :trace :process (list session :all true flags))
+   (let [[before active-before] (generation-frontier)
+         result (action)
+         [after active-after] (generation-frontier)
+         _ (erlang/apply :trace :process (list session :all false flags))
+         barrier (erlang/apply :trace :delivered (list session :all))
+         ticket (erlang/make_ref)]
+    (receive [:trace_delivered :all ref] :when (= ref barrier)
+     :ready (after 10000 (throw :generation-publication-delivery-timeout)))
+    (erlang/send observer [:finish owner ticket])
+    (receive [:generation-publications ref n sites] :when (= ref ticket)
+     (let [delta (- after before)]
+      (assert (<= n 256) "Staging generation observation exceeds its event bound")
+      [result {:generation-delta delta :active-before active-before :active-after active-after
+               :matches-publications (and (= 0 active-before active-after) (= delta (* 2 n)))
+               :publications (mapv (fn [[[actor origin] calls]] {:actor actor :caller origin :count calls})
+                                   (sort sites))}])
+     (after 10000 (throw :generation-publication-collector-timeout))))
+   (finally
+    (erlang/apply :trace :session_destroy (list session))
+    (Process/exit observer :kill)))))
+
+(defn- staging-generation-publication-control []
+ (let [[_ observed] (with-generation-publication-observation
+                     (fn []
+                      (BeamLisp.Env/with_code_evidence_publication (fn [] :ok))
+                      (let [[pid ref] (vec (erlang/tuple_to_list
+                                       (erlang/spawn_monitor
+                                        (fn [] (BeamLisp.Env/with_code_evidence_publication (fn [] :ok))))))]
+                       (receive [:DOWN monitor :process worker :normal] :when (and (= monitor ref) (= worker pid))
+                        :ready (after 10000 (throw :staging-generation-control-timeout))))))
+       publications (:publications observed)]
+  (assert (and (:matches-publications observed) (= 4 (:generation-delta observed))
+               (= {:staging-caller 1 :other-process 1} (into {} (map (juxt :actor :count) publications))))
+          (pr-str observed))
+  {:caller-and-worker-generation-publications-detected true}))
+
 (defn- staged-effect-run [closure rows member entries consume]
- (let [[observed registry] (around-staging-registry staging-external-registry-records
-                             #(staging-effects-member closure rows member entries consume))]
-  (assoc observed :external-registry-after-scope registry)))
+ (let [[[observed registry] generation] (with-generation-publication-observation
+                                         #(around-staging-registry staging-external-registry-records
+                                           (fn [] (staging-effects-member closure rows member entries consume))))]
+  (assoc observed :external-registry-after-scope registry :code-generation-publications generation)))
 
 (defn- staging-effects [closure rows samples-path selected]
  (when (and selected (not (contains? (:units closure) selected)))
   (throw (ex-info "Unknown native staging member" {:namespace selected})))
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.staging-effects" :version 6 :reuse-authority false
+   {:schema "bl.native.staging-effects" :version 7 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :source-members (count (:order closure))
     :controls (merge (lowering-boundary-control) (staging-env-write-control)
-                     (staging-registry-write-control) (staging-external-registry-control))
+                     (staging-registry-write-control) (staging-external-registry-control)
+                     (staging-generation-publication-control))
     :members (mapv (fn [ns]
                      (let [member (get-in closure [:units ns])
                            consume #(closed-identity (prepared-inputs %))
