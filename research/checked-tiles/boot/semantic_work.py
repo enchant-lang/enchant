@@ -83,6 +83,10 @@ def run(pipeline,out):
             actual=next((r for r in possible if '.Ns.Body.' in r['module']),None)
             if not actual and len(possible)==1: actual=possible[0]
             if actual: matched[phase][name]=actual['calls']
+    for phase,native_counts in counts.items():
+        expected={name:n for name,n in native_counts.items() if n}
+        if matched[phase]!=expected:
+            raise ValueError(f'Compiler entries differ in {phase}: {matched[phase]} vs {expected}')
     write(out/'work.json',dict(image=qual['images']['stage2'],sdk=sdk_info['descriptor_sha256'],
         fixture=sha(source),output=expected,cells=cells,native=counts,beam=matched,beam_mfas=entries))
     for phase in matched:

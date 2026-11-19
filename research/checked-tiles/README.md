@@ -149,3 +149,38 @@ To attribute the compiler gap on the successful pipeline replay, run the two com
     scripts/bl-mem
     systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B research/checked-tiles/boot/cost.py research/native-seed/out/checked-boot-replay/pipeline --out /tmp/my-compiler-cost
     systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B research/checked-tiles/boot/macro-cost.py research/native-seed/out/checked-boot-replay/pipeline --out /tmp/my-macro-cost
+
+### Reproduce the compiler changes on main
+
+From the checkout root, these commands exercise the real native build and the pinned SDK using the retained workstation inputs described above. Use fresh output directories. The matched panel measures one warm translation eight times per arm, checks identical emission, and counts physical ANF layouts outside the timer. The work census counts exact fixed-arity BL bodies on both engines. The boundary clock measures the time spent inside individual BL operations. Its nested measurements overlap.
+
+```sh
+scripts/bl-mem
+boot=research/checked-tiles/boot
+seed=research/native-seed
+pipeline=$seed/out/checked-boot-replay/pipeline
+build=$seed/out/checked-fields-build
+cap() { systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=512M "$@"; }
+cap "$seed/run" run "$boot/definition-edits.bl" -- /tmp/my-definition-edits
+cap "$build/stage1" --eval "$boot/symbol-budget.scm" unused
+cap python3 "$boot/field_pipeline.py" "$pipeline" "$seed/out/perf-declaration-snapshot-build" "$build" --before-symbols "$seed/out/checked-fields-before-symbols" --out /tmp/my-field-panel
+cap python3 "$boot/semantic_work.py" "$pipeline" --out /tmp/my-work-counts
+cap python3 "$boot/boundary_clock.py" "$pipeline" --out /tmp/my-boundary-clocks
+cap python3 "$boot/primitive_cost.py" "$pipeline" --out /tmp/my-byte-cost
+cap python3 "$boot/runtime_flags.py" "$pipeline" --out /tmp/my-compiler-flags
+```
+
+To rebuild the current sources into a separate native image on this workstation, start from the captured compiler closure. The stage-one build reads the updated closure and emits it using the first-party BL emitter. The qualification command then runs the compiler and actor corpus and rebuilds the compiler using its own native executable. The checkout selects the immutable toolchain and SDK recorded under `research/native-seed`. The timing panel selects its exercising SDK from `research/checked-tiles/tools.json`.
+
+```sh
+export ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1'
+closure=$seed/out/my-closure
+build=$seed/out/my-build
+cap python3 "$seed/snapshot-closure.py" "$seed/out/perf-declaration-snapshot-closure" "$closure"
+cap "$seed/speed/final/closure-r3.sh" "$closure"
+mkdir "$build"
+cp "$closure/identity.json" "$closure/partition.json" "$build/"
+cap python3 "$seed/prepare-host.py" --out "$build"
+cap "$seed/speed/final/emit.sh" out/my-closure out/my-build
+cap "$boot/verify-native-build" "$build" "$seed/out/my-actors" .local/native-speed-integration/wave1-compiled-actors/javascript-corpus-fixed/manifest.json
+```
