@@ -84,7 +84,8 @@ def main():
         row.update({'header': mode, 'sdk': pin['descriptor_sha256'],
                     'overrides': {str(path.relative_to(overlay)): source[str(path.relative_to(overlay))]
                                   for path in (update_source, closure_source, driver, *preview.glob('*.bl'))},
-                    'linked-pass-seconds': m['timings'](result / 'linked-pass.seconds')})
+                    'linked-pass-seconds': m['timings'](result / 'linked-pass.seconds'),
+                    'final-partition-seconds': m['timings'](result / 'final-partition.seconds')})
         passes.append(row)
         print(f'{index}-{mode}: {len(update["changed"])} exact linked members', flush=True)
     save(out / 'comparison.json', {'revision': revision, 'inputs': inputs, 'passes': passes,
