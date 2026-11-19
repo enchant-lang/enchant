@@ -1,0 +1,48 @@
+(ns js.namespace-stage)
+
+(def ^:private operations
+  #{[:Elixir.BeamLisp.Env :declare_ns 1]
+    [:Elixir.BeamLisp.Env :in_ns 1]
+    [:Elixir.BeamLisp.Env :put_key 2]
+    [:Elixir.BeamLisp.Env :add_alias 3]
+    [:Elixir.BeamLisp.Env :add_refer 3]
+    [:Elixir.BeamLisp.Env :add_refer_all 2]
+    [:Elixir.BeamLisp.Env :add_import 3]
+    [:Elixir.BeamLisp.Env :add_core_excludes 2]
+    [:Elixir.BeamLisp.Loader :declare_require 3]
+    [:Elixir.BeamLisp.Loader :ensure_loaded 1]
+    [:Elixir.String :to_atom 1]})
+
+(defn- namespace-argument? [arg binding]
+  (or (= :lit (:op arg)) (and (= :var (:op arg)) (= binding (:name arg)))))
+
+(defn- namespace-operation? [node binding]
+  (let [args (:args node)]
+    (and (= :remote (:op node)) (erlang/is_list args)
+         (contains? operations [(:mod node) (:fun node) (count args)])
+         (every? #(namespace-argument? % binding) args))))
+
+(defn- namespace-operations [node]
+  (let [binding (:name node) initial (:init node) body (:body node) steps (:stmts body)]
+    (when (and (= :let (:op node)) (= "ns" binding)
+               (= :lit (:op initial)) (string? (:val initial))
+               (= :do (:op body)) (erlang/is_list steps) (seq steps)
+               (every? #(namespace-operation? % binding) steps))
+      [(:val initial) steps])))
+
+(defn stage!
+  "Stage the compiler's namespace program without loading an eval module.
+   The complete program must have the compiler's literal namespace shape
+   before any operation runs. Other shapes use the ordinary evaluator."
+  [form text path]
+  (BeamLisp.Env/assert_native_framework_execution!)
+  (let [env (BeamLisp.Compiler/new_env "user")]
+    (BeamLisp.Env/in_ns (:ns env))
+    (if-let [[namespace steps] (namespace-operations (BeamLisp.Compiler/compile form (assoc env :file path)))]
+      (do
+        (doseq [step steps]
+          (erlang/apply (:mod step) (:fun step)
+                        (apply list (map #(if (= :var (:op %)) namespace (:val %)) (:args step)))))
+        (when (erlang/function_exported :Elixir.BeamLisp.Link :settle 0)
+          (BeamLisp.Link/settle)))
+      (BeamLisp.Compiler/eval_string text env path))))
