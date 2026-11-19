@@ -123,6 +123,7 @@ def run(out,smoke):
     names=[]
     for name,payload in {'empty':b'', 'CRLF':b'a\r\nb\rc','nul':b'a\0b',
                          'nonbmp':'é😀é'.encode(), 'bad':b'a\xffz','truncated':b'a\xf0\x9f',
+                         'one-block':b'A'*4096, 'two-blocks':b'A'*4096+b'B'*4096,
                          'across-buffer':b'A'*16383+'😀'.encode()+b'\r\nZ'}.items():
         (control/name).write_bytes(payload)
         names.append(str(control/name))

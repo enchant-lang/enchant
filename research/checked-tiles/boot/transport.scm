@@ -5,4 +5,3 @@
     (lambda (port)
       (let ((text (read-line port #f)))
         (if (eof-object? text) "" text)))))
-
