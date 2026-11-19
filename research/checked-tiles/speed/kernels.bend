@@ -72,35 +72,39 @@ def dispatch(f: File, k: Nat, n: U32, seed: U32) -> IO(File):
         p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, n)
         bytes((U32.from_nat(rest) + 3 : U32), p)
 
-law serve:
-  for fuel : Nat
-  for f : File
-  IO(Unit)
-
-def header(fuel: Nat, f: File, h: List<&2, U32>) -> IO(Unit):
+def header(f: File, h: List<&2, U32>) -> IO(File):
   match h:
-    case k <> hi <> lo <> seed <> Nil{}:
-      do IO<Unit>:
-        next : File <- dispatch(f, U32.to_nat(k), (hi * 256 + lo : U32), seed)
-        serve(fuel, next)
-    case Nil{}: File.close(f)
-    case _: IO.die(Unit, 2, "incomplete request")
+    case k <> hi <> lo <> seed <> Nil{}: dispatch(f, U32.to_nat(k), (hi * 256 + lo : U32), seed)
+    case _: IO.die(File, 2, "incomplete request")
 
-def received(fuel: Nat, p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(Unit):
+def received(p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(File):
   (src, res) = p
-  do IO<Unit>:
+  do IO<File>:
     h : List<&2, U32> <- IO.pass(List<&2, U32>, res)
-    header(fuel, src, h)
+    header(src, h)
 
-def serve(fuel, f):
+def serve(fuel: Nat, f: File) -> IO(Unit):
   match fuel:
     case 0n: File.close(f)
     case 1n+p:
       do IO<Unit>:
         h : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, 4)
-        received(p, h)
+        next : File <- received(h)
+        serve(p, next)
+
+def counted(f: File, h: List<&2, U32>) -> IO(Unit):
+  match h:
+    case hi <> lo <> Nil{}: serve(U32.to_nat((hi * 256 + lo : U32)), f)
+    case _: IO.die(Unit, 2, "incomplete count")
+
+def start(p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(Unit):
+  (f, res) = p
+  do IO<Unit>:
+    h : List<&2, U32> <- IO.pass(List<&2, U32>, res)
+    counted(f, h)
 
 def main() -> IO(Unit):
   do IO<Unit>:
     f : File <- IO.try(File, File.open("/dev/stdin", "r"))
-    serve(65536n, f)
+    p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, 2)
+    start(p)
