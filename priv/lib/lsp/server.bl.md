@@ -14,8 +14,8 @@ Two rules keep it honest as a transport:
   error response, a raising handler becomes -32603, and the next frame is read
   as if nothing happened.
 
-The loop ends at `exit` or at end of input, and `run` returns an exit code so
-`bl lsp serve` behaves like any other `bl` verb.
+The loop ends at `exit` or at end of input. Both paths release the session's
+document memo slots before `run` returns an exit code.
 
 ```beam-lisp
 (ns lsp.server
@@ -115,7 +115,7 @@ allowed to end the process.
   (loop [state (rpc/initial-state)]
     (let [fr (read-frame)]
       (cond
-        (= fr :eof) 0
+        (= fr :eof) (do (rpc/release-documents! state) 0)
 
         (contains? fr :error)
         (do (u/io-err (str "bl lsp serve: " (name (:error fr))))

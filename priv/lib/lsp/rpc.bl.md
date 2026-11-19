@@ -680,6 +680,13 @@ request before `initialize` is refused with -32002, an unknown request with
 -32601, and an unknown notification is ignored — exactly as the spec requires.
 
 ```beam-lisp
+(defn release-documents!
+  "Release document-owned memo slots and drop the session's retained text."
+  [state]
+  (doseq [doc (vals (:docs state))]
+    (lsp/release-document-memo! (:memo-slot doc)))
+  (assoc state :docs {}))
+
 (defn- handle-request
   [state msg]
   (let [method (get msg "method")
@@ -696,9 +703,7 @@ request before `initialize` is refused with -32002, an unknown request with
       (= method "initialized") [state []]
       (= method "shutdown") [(assoc state :shutdown? true) [(response id nil)]]
       (= method "exit")
-      (do
-        (doseq [doc (vals (:docs state))] (lsp/release-document-memo! (:memo-slot doc)))
-        [(assoc state :exit? true) []])
+      [(assoc (release-documents! state) :exit? true) []]
 
       (= method "textDocument/didOpen")
       (let [td (get params "textDocument")

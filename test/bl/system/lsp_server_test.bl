@@ -6,7 +6,8 @@
 ; multi-byte bodies, and a malformed header must be reported rather than crash
 ; the loop. Run: bl test test/bl/system/lsp_server_test.bl
 (ns system.lsp-server-test
-  (:require [lsp.rpc :as rpc]
+  (:require [lsp :as lsp]
+            [lsp.rpc :as rpc]
             [lsp.server :as server]))
 
 (deftest encode-then-decode-is-identity
@@ -24,3 +25,29 @@
 
 (deftest read-frame-is-the-loop-s-reader
   (is (some? server/read-frame) "the loop exposes its frame reader"))
+
+(deftest input-closure-releases-open-documents
+  (let [init {"jsonrpc" "2.0" "id" 1 "method" "initialize" "params" {}}
+        document {"uri" "file:///stdio-eof.bl" "version" 1
+                  "text" "(defn eof-probe [x] (+ x 2))"}
+        opened {"jsonrpc" "2.0" "method" "textDocument/didOpen"
+                "params" {"textDocument" document}}
+        [state _] (rpc/handle (rpc/initial-state) init)
+        [warm _] (rpc/handle state opened)
+        retained (lsp/memo-stats)
+        _ (rpc/handle warm {"method" "exit"})
+        before (lsp/memo-stats)
+        device (elem (StringIO/open (str (rpc/encode-frame init) (rpc/encode-frame opened))) 1)
+        leader (erlang/group_leader)]
+    (is (> (:bytes retained) (:bytes before)))
+    (let [status (try
+                  (erlang/group_leader device (erlang/self))
+                  (server/run [] {})
+                  (finally
+                    (erlang/group_leader leader (erlang/self))
+                    (StringIO/close device)))]
+      (is (= 0 status))
+      (let [after (lsp/memo-stats)]
+        (is (= (inc (:builds before)) (:builds after)))
+        (is (= (:analyzed before) (:analyzed after)))
+        (is (= (:bytes before) (:bytes after)))))))
