@@ -1017,26 +1017,13 @@
        (finish-wrapper-chain (if local (wrap-scaffold local registered) registered) heads tails))))
     (finish-wrapper-chain (emit n options) heads tails)))))
 (defn- pairs-operands [pairs] (Enum/flat_map (items pairs) (fn [pair] (items pair))))
+(defn- local-ident [n options]
+ ((or (:local-ident options) ident) (:name n)))
+
 (defn emit [n options]
- (if-let [layout (multi-layout n)] (emit-multi layout options)
- ; Checked self-recursive loops become named lets, in release and in
- ; source-frame emission alike; an unchecked one runs as calls.
- (if-let [plan (loop-plan n options)]
-  (let [options (assoc options :loop-verdicts (:verdicts plan))]
-   (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit n options)))
- (cond
-  (and (:loop options) (recur-node? n (:self (:loop options))))
-   (ordered (:name (:loop options)) (:args n) (operand-options options))
-  (self-knot? n options) (get (:selves options) (:name (:fn n)))
-  (and (= :let (:op n)) (self-parts n))
-  (let [parts (self-parts n)]
-   (if (:source-frames? options) (emit-source-scaffold n parts options)
-    (emit-unframed-chain n options parts)))
-  (boolean-junction? n options) (emit-junction n options)
-  :else
  (case (:op n)
   :lit (hoisted (literal (:val n)) options)
-  :var (ident (:name n))
+  :var (local-ident n options)
   :global (or (when-let [resolver (:global-resolver options)] (resolver n))
           (if (and (= (:ns options) (:ns n)) (contains? (:definitions options) (:name n)))
             (ident (:name n))
@@ -1055,9 +1042,20 @@
              (ordered-call n (or intrinsic callee) (:args n) options))))
   :arith (if-let [f (or (when-let [resolver (:arithmetic-resolver options)] (resolver n))
                        (get arithmetic (:fun n)))] (ordered f (:args n) options) (refuse n))
-  :apply (ordered-language-call n (:fn n) (argument-list (:args n)) options)
+  :apply (if-let [plan (loop-plan n options)]
+           (let [options (assoc options :loop-verdicts (:verdicts plan))]
+            (if (:parts plan) (emit-source-loop n (:parts plan) options) (emit n options)))
+           (cond (and (:loop options) (recur-node? n (:self (:loop options))))
+                  (ordered (:name (:loop options)) (:args n) (operand-options options))
+                 (self-knot? n options) (get (:selves options) (:name (:fn n)))
+                 :else (ordered-language-call n (:fn n) (argument-list (:args n)) options)))
   :invoke (ordered-language-call n (:callee n) (:arguments n) options)
-  :let (glue "(let ((" (ident (:name n)) " " (emit (:init n) (operand-options options)) ")) " (emit (:body n) (integer-binding options (:name n) (:init n))) ")")
+  :let (if-let [parts (self-parts n)]
+         (if (:source-frames? options) (emit-source-scaffold n parts options)
+          (emit-unframed-chain n options parts))
+         (if (boolean-junction? n options) (emit-junction n options)
+          (glue "(let ((" (local-ident n options) " " (emit (:init n) (operand-options options)) ")) "
+                (emit (:body n) (integer-binding options (:name n) (:init n))) ")")))
   :if (if-let [dispatch (keyword-dispatch n options)] (emit-keyword-dispatch dispatch options)
        (branch (:test n) (emit (:test n) (operand-options options))
                (emit (:then n) (integer-branch options (:test n))) (emit (:else n) options) options))
@@ -1077,7 +1075,8 @@
           (glue "(let* ((timeout " timeout ") (selection " receive ")) ((bl-nth selection 1)))"))
 
   :try (emit-try n options)
-  :tuple (ordered "bl-make-tuple" (:elems n) options)
+  :tuple (if-let [layout (multi-layout n)] (emit-multi layout options)
+           (ordered "bl-make-tuple" (:elems n) options))
   :map (ordered "bl-map" (pairs-operands (:pairs n)) options)
   :cons (ordered "cons" [(:head n) (:tail n)] options)
   :enil "'()"
@@ -1086,7 +1085,7 @@
             (ordered "bl-make-vec" (:elems (second (first (:fields n)))) options)
             (glue "(bl-struct " (literal (:mod n)) " "
               (ordered "bl-map" (pairs-operands (:fields n)) options) ")"))
-  (refuse n))))))
+  (refuse n)))
 
 (defn emit-definition [definition options]
  (try

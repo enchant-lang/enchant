@@ -1,0 +1,35 @@
+; Durable, host-side cache of emitted definition text. The immutable input is
+; supplied by the AOT linker. Datom owns blob addressing and atomic publication.
+(ns native.fragments
+ (:require [datom.blob :as blob] [datom.blob-fs :as fs] [datom.file :as file]))
+
+(defn digest [data]
+ (file/sha-hex (file/sha256 (erlang/term_to_binary data (list :deterministic)))))
+
+(defn open [directory]
+ (File/mkdir_p! (str directory "/recipes"))
+ {:root directory :store (fs/open (str directory "/bytes"))})
+
+(defn- read-text [store path key]
+ (try
+  (when (File/regular? path)
+   (let [receipt (File/read! path)]
+    (when (and (= 129 (erlang/byte_size receipt))
+               (= (str key " ") (erlang/binary_part receipt 0 65)))
+     (let [sha (Base/decode16! (erlang/binary_part receipt 65 64) (list (tuple :case :mixed)))
+           bytes (blob/-blob-get store sha)]
+      (when (and bytes (= sha (file/sha256 bytes))) bytes)))))
+  (catch _ nil)))
+
+(defn emit [cache contract ns definition render]
+ (let [key (digest [contract ns definition])
+       path (str (:root cache) "/recipes/" key) store (:store cache)]
+  (or (read-text store path key)
+   (let [bytes (render) sha (file/sha256 bytes)
+         tmp (str path "." (erlang/list_to_binary (os/getpid)) "." (erlang/unique_integer (list :positive)))]
+    (blob/-blob-put store sha bytes)
+    (try
+     (File/write! tmp (str key " " (file/sha-hex sha)))
+     (File/rename! tmp path)
+     (finally (File/rm tmp)))
+    bytes))))

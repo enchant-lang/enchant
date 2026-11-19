@@ -9,21 +9,33 @@
   :lt "native-arith-lt" :gt "native-arith-gt" :le "native-arith-le" :ge "native-arith-ge"
   :num_eq "native-arith-num-eq"})
 
+(defn- name-encoder [encode]
+ ; Only immutable spellings enter this table. The context owns its lifetime.
+ (let [names (atom {})]
+  (fn [s]
+   (or (get @names s)
+       (let [printed (encode s)]
+        (when (and (< (count @names) 512) (<= (erlang/byte_size s) 128))
+         (swap! names assoc s printed))
+        printed)))))
+
 (defn context [ns]
+ (let [quoted (name-encoder scheme/text)]
  {:ns ns :namespace ns :namespace-qualified? true :callable-arities? true
+  :local-ident (name-encoder scheme/ident)
   :global-resolver
    (fn [n] (str "(" (if (= :exact (:lookup n)) "native-global-exact" "native-global")
-                 " " (scheme/text (:ns n)) " " (scheme/text (:name n)) ")"))
+                 " " (quoted (:ns n)) " " (quoted (:name n)) ")"))
   :remote-resolver
    (fn [n] (str "(native-remote "
-    (scheme/text (str (erlang/atom_to_binary (:mod n)) "/"
-                      (erlang/atom_to_binary (:fun n)) "/" (count (:args n)))) ")"))
+    (quoted (str (erlang/atom_to_binary (:mod n)) "/"
+                 (erlang/atom_to_binary (:fun n)) "/" (count (:args n)))) ")"))
   ; Named two-operand host procedures (host-compiler.scm); no closure is
   ; allocated per operation. Any other operator keeps the generic dispatcher.
   :arithmetic-resolver
    (fn [n] (or (get arithmetic-procedures (:fun n))
                (str "(lambda (a b) (bl-arithmetic " (scheme/literal (:fun n)) " a b))")))
-  :binding-resolver (fn [n] (throw (ex-info "native eval: contextual Source binding requires native custody" {:reference (:reference n)})))})
+  :binding-resolver (fn [n] (throw (ex-info "native eval: contextual Source binding requires native custody" {:reference (:reference n)})))}))
 
 (defn head-symbol [form]
  (let [node (rn/node-form form)]

@@ -4,7 +4,7 @@
 ; emit-definition are the one implementation, shared with the native
 ; self-emission (bootstrap --compile). See speed/closure/RESULT.md.
 (ns native.chunks
- (:require [native.artifact :as artifact] [native.bootstrap :as bootstrap]
+ (:require [native.artifact :as artifact] [native.fragments :as fragments] [native.bootstrap :as bootstrap]
            [bl.json :as json] [clojure.string :as string] [anf]
            [native.resolution-ledger :as ledger]))
 (def args (BeamLisp/argv))
@@ -31,17 +31,19 @@
   "emitter_sha256" (artifact/sha (File/read! "research/native-seed/src/native/scheme.bl"))
   "eval_sha256" (artifact/sha (File/read! "research/native-seed/src/native/eval.bl"))
   "bootstrap_sha256" (artifact/sha (File/read! "research/native-seed/src/native/bootstrap.bl"))
+  "fragments_sha256" (artifact/sha (File/read! "research/native-seed/src/native/fragments.bl"))
   "driver_sha256" (artifact/sha (File/read! "research/native-seed/src/native/chunks.bl"))
   "resolution_sha256" (artifact/sha (File/read! "research/native-seed/src/native/resolution.bl"))
   "resolution_ledger_sha256" (artifact/sha (File/read! "research/native-seed/src/native/resolution-ledger.bl"))
   "intrinsics_sha256" (artifact/sha (File/read! "research/native-seed/src/native/intrinsics.bl"))
   "options_sha256" (artifact/sha (erlang/term_to_binary (:options closure) (list :deterministic)))})
 (def emission-input
- (assoc (select-keys key-input ["sdk_descriptor_sha256" "emitter_sha256" "eval_sha256"
+ (assoc (select-keys key-input ["sdk_descriptor_sha256" "emitter_sha256" "eval_sha256" "fragments_sha256"
                               "bootstrap_sha256" "options_sha256" "driver_sha256" "resolution_sha256"
                               "resolution_ledger_sha256" "intrinsics_sha256"])
         ; v2: a compiled target wins over a leaf of the same key, and pinned
         ; host modules (metadata :host-modules) link to their namespace.
+        "link_interface_sha256" (fragments/digest link-plan)
         "resolver_policy" "native-aot-link-v2"))
 (defn decisions-for [ns defs]
  ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
@@ -131,13 +133,19 @@
     (assert (= saved current))
     (assert (= key (key-from-record current)))
     current))))
+(def fragment-store (delay (fragments/open (str out "/definitions"))))
+(def fragment-contract (fragments/digest emission-input))
+(defn- definition-text [u d]
+ (fragments/emit @fragment-store fragment-contract (:ns u) d
+                 (fn [] (bootstrap/emit-definition link-plan u d))))
 (defn emit-chunk! [row]
  (let [key (get row "key") u (get (:units closure) (get row "namespace"))
        offset (get row "offset") count* (get row "count")
        record (emission-record-to-write row)
        defs (subvec (:defs u) offset (+ offset count*))
-       functions (bootstrap/emit-functions link-plan u defs)
-       initializers (bootstrap/emit-initializers link-plan u defs (= offset 0))
+       functions (string/join "" (map #(definition-text u %) (filter #(= :fn (:kind %)) defs)))
+       initializers (str (bootstrap/emit-initializers link-plan u [] (= offset 0))
+                        (string/join "" (map #(definition-text u %) (remove #(= :fn (:kind %)) defs))))
        source-unit (when (= offset 0) (bootstrap/data (select-keys u [:ns :path :source :requires :module :base-module])))
        report {"key" key "emission_inputs" emission-input "emission_record" record
                "functions_sha256" (artifact/sha functions) "initializers_sha256" (artifact/sha initializers)
