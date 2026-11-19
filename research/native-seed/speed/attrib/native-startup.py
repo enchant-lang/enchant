@@ -33,12 +33,17 @@ def eval_one(image, operand, argument):
     return result.stdout, (time.perf_counter_ns() - start) / 1_000_000
 
 
-def compare_beam(image, prepared, fixture, pin_path):
+def pinned_sdk(pin_path):
     pin = json.loads(pin_path.read_bytes())
     sdk = Path(pin["sdk"])
     descriptor = sdk / "artifact.json"
     if sha(descriptor) != pin["descriptor_sha256"] or json.loads(descriptor.read_bytes())["source"] != pin["source"]:
         raise ValueError("The selected BEAM SDK differs from the immutable pin")
+    return sdk, pin["descriptor_sha256"]
+
+
+def compare_beam(image, prepared, fixture, pin_path):
+    sdk, descriptor_sha = pinned_sdk(pin_path)
     meter = shutil.which("time")
     timeout = shutil.which("timeout")
     if meter is None or timeout is None:
@@ -63,12 +68,100 @@ def compare_beam(image, prepared, fixture, pin_path):
         counts[target].append({"elapsed_ms": elapsed_ms, "cpu_s": user_s + system_s, "max_rss_kib": int(rss_kib)})
     return {
         "scope": "Fresh process through exact result and exit. Warm filesystem caches.",
-        "sdk_descriptor_sha256": sha(descriptor),
+        "sdk_descriptor_sha256": descriptor_sha,
         "native_bundle_sha256": sha(prepared),
         "samples": counts,
         "median_elapsed_ms": {target: statistics.median(row["elapsed_ms"] for row in rows)
                               for target, rows in counts.items()},
     }
+
+
+def qualified_inputs(build, qualification):
+    record = json.loads(qualification.read_bytes())
+    replay = record["unchanged_release_replay"]["identical_artifacts"]
+    for name, identity in record["images"].items():
+        if sha(build / name) != identity:
+            raise ValueError(f"{name} differs from its qualified image")
+    bundles = ("bundle.scm", "eval-bundle.scm", "eval-prepared.scm")
+    for name in bundles:
+        if sha(build / name) != replay[name]:
+            raise ValueError(f"{name} differs from its qualified bundle")
+    if (sha(CORPUS) != record["source_corpus_sha256"]
+            or replay["eval-prepared.scm"] != record["prepared_macro_bundle_sha256"]):
+        raise ValueError("Source or prepared macro identity differs from qualification")
+    receipt = build / Path(record["receipt"]["path"]).name
+    if sha(receipt) != record["receipt"]["sha256"]:
+        raise ValueError("Native fixpoint receipt differs from qualification")
+    fixpoint = json.loads(receipt.read_bytes())
+    required = ("stage2-stage3-byte-equal", "stage3-built-and-executed",
+                "stage1-stage2-stage3-source-corpus-equal",
+                "stage1-stage2-stage3-original-actor-corpus-equal",
+                "each-stage-own-core-and-original-body")
+    if (fixpoint["status"] != "qualified" or not all(fixpoint.get(k) is True for k in required)
+            or set(fixpoint["all-actor-budgets"]) != {"default", "17", "41"}):
+        raise ValueError("Incomplete native Source, actor, or fixpoint qualification")
+    return record, bundles
+
+
+def compare_source_workflow(build, qualification, pin_path):
+    record, bundles = qualified_inputs(build, qualification)
+    sdk, descriptor_sha = pinned_sdk(pin_path)
+    meter = shutil.which("time")
+    timeout = shutil.which("timeout")
+    if meter is None or timeout is None:
+        raise RuntimeError("GNU time and timeout must be on PATH")
+    commands = {name: [build / "stage1", "--eval", build / name] for name in bundles}
+    commands["beam"] = [sdk / "bin/bl", "--cold", "run"]
+    modes = tuple(commands)
+    order = (modes + tuple(reversed(modes))) * 2
+    samples = {mode: [] for mode in modes}
+    failures = {}
+    with tempfile.TemporaryDirectory(prefix="native-corpus-workflow-") as directory:
+        workspace = Path(directory)
+        runtime = workspace / "runtime"
+        runtime.mkdir(mode=0o700)
+        usage = workspace / "usage"
+        environment = dict(os.environ, LC_ALL="C", BL_NATIVE_TRACE="0", XDG_RUNTIME_DIR=str(runtime),
+                           ERL_FLAGS="+S 2:2 +SDcpu 1:1 +SDio 1")
+        corpus = workspace / CORPUS.name
+        shutil.copyfile(CORPUS, corpus)
+        for mode in order:
+            start = time.perf_counter_ns()
+            result = subprocess.run([meter, "-f", "%U %S %M", "-o", usage,
+                                     timeout, "-k", "2s", "60s", *commands[mode], corpus],
+                                    cwd=workspace, env=environment, capture_output=True)
+            elapsed = (time.perf_counter_ns() - start) / 1_000_000
+            if result.returncode:
+                raise RuntimeError(f"{mode} exited {result.returncode}: {result.stderr[-4000:]!r}")
+            output = result.stdout
+            if mode == "beam":
+                if not output.endswith(b":ok\n"):
+                    raise ValueError(f"BEAM CLI final value differs: {output[-160:]!r}")
+                output = output.removesuffix(b":ok\n")
+            if hashlib.sha256(output).hexdigest() != record["source_result_sha256"]:
+                raise ValueError(f"{mode} output differs from the qualified corpus: {output[-1500:]!r}")
+            user_s, sys_s, rss = map(float, usage.read_text().split())
+            samples[mode].append({"wall_ms": elapsed, "cpu_s": user_s + sys_s, "peak_rss_kib": int(rss)})
+        malformed = workspace / "malformed.bl"
+        malformed.write_text("]\n")
+        for mode, command in commands.items():
+            refusal = subprocess.run([timeout, "-k", "2s", "60s", *command, malformed],
+                                     cwd=workspace, env=environment, capture_output=True)
+            if refusal.returncode <= 0 or refusal.returncode >= 124 or refusal.stdout:
+                raise ValueError(f"{mode} failed to reject malformed Source: {refusal.returncode}")
+            failures[mode] = {"exit": refusal.returncode, "stdout_bytes": len(refusal.stdout)}
+        if sha(corpus) != record["source_corpus_sha256"]:
+            raise ValueError("The benchmark Source changed during the comparison")
+    return {"schema": "bl.native.qualified-source-workflow.v1",
+            "scope": "Cold command through exact original Source corpus and exit. BEAM prints an additional :ok CLI value.",
+            "source_sha256": record["source_corpus_sha256"],
+            "stdout_sha256": record["source_result_sha256"], "image_sha256": record["images"]["stage1"],
+            "bundle_sha256": {name: sha(build / name) for name in bundles},
+            "qualification_sha256": sha(qualification), "fixpoint_receipt_sha256": record["receipt"]["sha256"],
+            "sdk_descriptor_sha256": descriptor_sha, "order": order,
+            "samples": samples, "malformed_source": failures,
+            "median": {mode: {key: statistics.median(row[key] for row in rows) for key in rows[0]}
+                       for mode, rows in samples.items()}}
 
 
 def main():
@@ -79,7 +172,16 @@ def main():
                         help="include the qualified prepared macro bundle")
     parser.add_argument("--beam-pin", type=Path,
                         help="also compare the prepared route with this exact BEAM SDK")
+    parser.add_argument("--source-qualification", type=Path,
+                        help="compare the complete original Source corpus on the qualified native and BEAM products")
     args = parser.parse_args()
+    if args.source_qualification:
+        if args.beam_pin is None:
+            parser.error("--source-qualification requires --beam-pin")
+        report = compare_source_workflow(args.build.resolve(), args.source_qualification, args.beam_pin)
+        args.out.write_text(json.dumps(report, indent=2) + "\n")
+        print("NATIVE_QUALIFIED_SOURCE_WORKFLOW_OBSERVED")
+        return
     if args.beam_pin and not args.prepared:
         parser.error("--beam-pin requires --prepared")
     build = args.build.resolve()
