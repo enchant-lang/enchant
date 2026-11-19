@@ -133,8 +133,13 @@
   // excluded (hiccup never emits them). This is the indexing the whole op
   // set is computed against; `elementChildren` below is only for the two
   // element-only concerns (root normalization + keyed lookup).
+  // HTML keeps template descendants in an inert DocumentFragment on first paint.
+  function childContainer(el) {
+    return el.localName === "template" && el.content ? el.content : el;
+  }
+
   function domChildren(el) {
-    return Array.prototype.filter.call(el.childNodes, function (n) {
+    return Array.prototype.filter.call(childContainer(el).childNodes, function (n) {
       return n.nodeType === 1 || n.nodeType === 3;
     });
   }
@@ -149,7 +154,7 @@
     // Parents precede descendants: splitting a parent's text first restores
     // the child indices by which its descendants are subsequently addressed.
     for (const [path, fragments] of layouts || []) {
-      const parent = at(root, path);
+      const parent = childContainer(at(root, path));
       let cursor = domChildren(parent)[0] || null;
       let leading = /^(PRE|TEXTAREA|LISTING)$/.test(parent.tagName);
       let previousCR = false;
@@ -189,7 +194,7 @@
   // root normalization and for keyed lookups (a `:key` is always on an
   // element, and a keyed child list is all-element by construction).
   function elementChildren(el) {
-    return Array.prototype.filter.call(el.childNodes, function (n) {
+    return Array.prototype.filter.call(childContainer(el).childNodes, function (n) {
       return n.nodeType === 1;
     });
   }
@@ -259,7 +264,7 @@
     const appendKids = (kids) => {
       for (const child of kids) {
         if (Array.isArray(child) && typeof child[0] !== "string") appendKids(child);
-        else el.appendChild(render(child, inSvg));
+        else childContainer(el).appendChild(render(child, inSvg));
       }
     };
     appendKids(rest);
@@ -463,7 +468,7 @@
       // a text op's path ends at a child slot that is a TEXT node. Walk the
       // parent's ALL child nodes (text + element) to the slot and set its
       // data, so a text change beside sibling elements does not clobber them.
-      const parent = at(root, path.slice(0, -1));
+      const parent = childContainer(at(root, path.slice(0, -1)));
       const slot = path[path.length - 1];
       const node = domChildren(parent)[slot];
       if (node && node.nodeType === 3) {
@@ -483,13 +488,13 @@
         const next = render(tree); el.replaceWith(next); syncRegions(root);
       }
     } else if (kind === "replace") {
-      const parent = at(root, path.slice(0, -1));
+      const parent = childContainer(at(root, path.slice(0, -1)));
       const idx = path[path.length - 1];
       // children-of index (text+element), matching the server differ
       const el = domChildren(parent)[idx];
       parent.replaceChild(render(op[2]), el);
     } else if (kind === "remove") {
-      const parent = at(root, path);
+      const parent = childContainer(at(root, path));
       const el = childByKey(parent, op[2]);
       if (el) parent.removeChild(el);
     } else if (kind === "remove-at") {
@@ -497,11 +502,11 @@
       // index (text+element), matching the server differ. The differ emits
       // these high-index-first, so sequential application keeps the remaining
       // indices valid.
-      const parent = at(root, path);
+      const parent = childContainer(at(root, path));
       const el = domChildren(parent)[op[2]];
       if (el) parent.removeChild(el);
     } else if (kind === "insert") {
-      const parent = at(root, path);
+      const parent = childContainer(at(root, path));
       const idx = op[3];
       const node = render(op[4]);
       // insert before the child now at the children-of index (text+element),
@@ -509,7 +514,7 @@
       const ref = domChildren(parent)[idx] || null;
       parent.insertBefore(node, ref);
     } else if (kind === "move") {
-      const parent = at(root, path);
+      const parent = childContainer(at(root, path));
       const el = childByKey(parent, op[2]);
       const idx = op[3];
       if (el) {
