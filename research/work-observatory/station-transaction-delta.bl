@@ -2,7 +2,8 @@
 ;; the accounting schema and committed Datom reports in an owned memory DB.
 (ns observatory.station-transaction-delta
  (:require [bl.json :as json] [datom] [datom.db :as db] [datom.watch :as watch]
-           [data.delta-aggregate :as aggregate] [gateway.accounting :as accounting]
+           [data.delta-aggregate :as aggregate] [data.bounded-cache :as cache]
+           [gateway.accounting :as accounting]
            [gateway.json :as report-json]))
 
 (def fact-query
@@ -170,6 +171,58 @@
   (list (binary/part header 0 (dec (erlang/byte_size header)))
         ",\"windows\":" global ",\"people\":{" (Enum/intersperse rows ",") "}}")))
 
+(defn- cache-user-windows [people now limit]
+ (reduce (fn [state [uid events]]
+           (let [windows (report-windows events now)
+                 charge (cache/footprint (tuple uid events windows))]
+            (if (and charge (<= (+ (:bytes state) charge) limit))
+             (-> state (update :bytes + charge) (assoc-in [:rows uid] {:events events :windows windows}))
+             state)))
+         {:bytes 0 :rows {}} (sort-by first people)))
+
+(defn- retime-windows [windows now]
+ (into {} (map (fn [[days window]] [days (assoc window :at now)]) windows)))
+
+(defn- verify-clock-reuse [prior current now]
+ ;; Under nil billing, reuse is valid up to Station's next fact or attempt
+ ;; deadline. A new observation always writes both window timestamps.
+ (let [initial (accounting/publication-input prior {:schema 1 :at now :source "accounting"} nil true)
+       valid-until (:valid-until initial)
+       limit (* 16 1024 1024)
+       [cached seed-cost] (measured #(cache-user-windows (:people initial) now limit))
+       check (fn [label at retained]
+               (let [{:keys [envelope events people]}
+                     (accounting/publication-input current {:schema 1 :at at :source "accounting"} nil false)
+                     clock-valid? (and (<= now at) (or (nil? valid-until) (< at valid-until)))
+                     [full reference-cost]
+                     (measured #(into {} (map (fn [[uid owned]] [uid (report-windows owned at)]) people)))
+                     [[reused actual] reuse-cost]
+                     (measured #(reduce-kv
+                                 (fn [[n windows] uid owned]
+                                  (let [entry (get-in retained [:rows uid])]
+                                   (if (and clock-valid? entry (= owned (:events entry)))
+                                    [(inc n) (assoc windows uid (retime-windows (:windows entry) at))]
+                                    [n (assoc windows uid (report-windows owned at))])))
+                                 [0 {}] people))
+                     global (encoded-windows (report-windows events at))
+                     encoded (fn [windows]
+                               (erlang/iolist_to_binary
+                                (report-body envelope global
+                                 (into {} (map (fn [[uid value]] [uid (encoded-windows value)]) windows)))))]
+                (assert (= full actual))
+                (assert (= (encoded full) (encoded actual)))
+                {:case label :clock-valid clock-valid? :uids (count people) :reused-uids reused
+                 :exact-bytes true :full-uid-shaping reference-cost :retained-uid-shaping reuse-cost}))
+       _ (assert (and valid-until (< (+ now 1000) valid-until)))
+       warm (check :advanced (+ now 1000) cached)
+       expired (check :expiry valid-until cached)
+       rollback (check :rollback (dec now) cached)
+       refused (check :zero-budget (+ now 1000) (cache-user-windows (:people initial) now 0))]
+  (assert (pos? (:reused-uids warm)))
+  (assert (= 0 (:reused-uids expired) (:reused-uids rollback) (:reused-uids refused)))
+  {:seed seed-cost :retained-bytes (:bytes cached) :byte-budget limit
+   :cached-uids (count (:rows cached)) :cases [warm expired rollback refused]}))
+
 (defn- measure-file! [path body size]
  (let [[_ write] (measured #(File/write! path body))
        [fingerprint verify]
@@ -304,7 +357,7 @@
   {:mode (if bulk? :bulk-fresh-facts :ordinary-transactions)
    :elapsed-us (- (erlang/monotonic_time :microsecond) started)}))
 
-(defn- replay [n bulk? report-path]
+(defn- replay [n bulk? report-path clock-reuse?]
  (let [conn (datom/connect accounting/schema)
        stamp 1790000000000]
   (try
@@ -332,6 +385,7 @@
          _ (assert (= (:facts full) (:facts delta)))
          [publication publication-cost]
          (fixture-phase "check publication parity" #(verify-publication conn current prior initial delta stamp report-path))
+         clock-reuse (when clock-reuse? (verify-clock-reuse prior current (+ stamp 1)))
          [cursor-only cursor-cost]
          (fixture-phase "commit cursor-only change"
           #(datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}]))
@@ -351,21 +405,23 @@
                  overtaken (advance cursor-result missed observed)]
             (assert (= :full-rebuild (:path rebuilt) (:path overtaken)))
             (assert (= (fact-index observed) (:facts rebuilt) (:facts overtaken)))))]
-    {:seed-requests n :seed seed :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
+    (cond-> {:seed-requests n :seed seed :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
      :delta delta-cost :full full-cost :publication publication
      :fixture-phases {:open-attempt open-cost :original-index seed-index-cost :commit-changes commit-cost
                       :publication-parity publication-cost :commit-cursor cursor-cost
                       :commit-gap gap-cost :fallback-parity fallback-cost}
      :controls {:attempt-finish-exact true :cursor-only-ignored true
-                :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}})
+                :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}}
+     clock-reuse (assoc :clock-reuse clock-reuse)))
    (finally (datom/close! conn)))))
 
 (let [[output size & flags] (BeamLisp/argv)
       requests (if size (String/to_integer size) 3000)
       flags (set flags)
       bulk? (contains? flags "--bulk-seed")
-      report? (contains? flags "--complete-report")]
- (assert (every? #{"--bulk-seed" "--complete-report"} flags))
+      report? (contains? flags "--complete-report")
+      clock-reuse? (contains? flags "--clock-reuse")]
+ (assert (every? #{"--bulk-seed" "--complete-report" "--clock-reuse"} flags))
  (assert (and (string? output) (<= 1 requests 74000)))
  (File/write! output (json/encode {:schema "enchant.station-transaction-delta-replay.v1"
-                                  :result (replay requests bulk? (when report? (str output ".candidate")))})))
+                                  :result (replay requests bulk? (when report? (str output ".candidate")) clock-reuse?)})))
