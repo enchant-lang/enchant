@@ -19,8 +19,11 @@ def main():
                        help='lower the four proved operations to unchecked primitives inside their own lambdas')
     style.add_argument('--frame-aware', action='store_true',
                        help='select a tick-free copy only outside actor turns')
+    style.add_argument('--word', action='store_true',
+                       help='compile the proved standalone region as unboxed uint32 C')
     args=p.parse_args()
-    mode='machine' if args.machine or args.frame_aware else 'direct' if args.direct else 'value'
+    frame_aware=args.frame_aware or args.word
+    mode='machine' if args.machine or frame_aware else 'direct' if args.direct else 'value'
     old=args.session.resolve()
     out=args.out.resolve()
     out.mkdir()
@@ -37,7 +40,11 @@ def main():
     if 'sorryAx' in proof or 'SerialRegion.invariant' not in proof:
         raise ValueError('Unclosed invariant')
     raw=out/'serial.scm'
-    job([sdk/'bin/bl','--cold','-p',SEED/'src','run',HERE/'bounded.bl','--',HERE/'kernels.bl',raw,
+    driver=HERE/'bounded.bl'
+    if args.word:
+        driver=out/'emit-word.bl'
+        driver.write_text((HERE/'word.bl').read_text()+'\n'+(HERE/'bounded.bl').read_text())
+    job([sdk/'bin/bl','--cold','-p',SEED/'src','run',driver,'--',HERE/'kernels.bl',raw,
          mode],env=env)
     ordinary=(HERE/'arithmetic.scm').read_bytes()+(old/'shapes.scm').read_bytes()
     if digest(ordinary)!=expected['modules']['shapes-O2']['source_sha256']:
@@ -45,11 +52,14 @@ def main():
     body=raw.read_text()
     selector=HERE/'select.scm'
     extra=''
-    if args.frame_aware:
+    if frame_aware:
         # Enrolled pure recurrence, with one scheduler poll and no callbacks.
         if body.count('(h-tick)') != 1 or body.count('speed-raw-serial') != 1:
             raise ValueError('Unexpected scheduler or definition shape')
         extra=body.replace('speed-raw-serial','speed-standalone-serial').replace('(h-tick)','')
+        if args.word:
+            word=(out/'serial.scm.word.c').read_text()
+            extra='(c-declare '+json.dumps(word)+')\n(define speed-standalone-serial (c-lambda (unsigned-int unsigned-int) unsigned-int "speed_word"))\n'
         selector=HERE/'frame-select.scm'
     code=ordinary+(body+extra).encode()+selector.read_bytes()
     cfg=native_elf.configuration(SEED,True,checked)
@@ -65,7 +75,7 @@ def main():
     if boundary != '12 boundary and fallback controls passed':
         raise ValueError(boundary)
     trace=[]
-    if args.frame_aware:
+    if frame_aware:
         output=job([image,'--eval',HERE/'frame-control.scm',obj['path']])
         trace=output.strip().splitlines()
         if len(trace) != 3:
@@ -80,8 +90,11 @@ def main():
     external=[op for op in ['##fx+', '##fx-', '##fx*', '##fx<'] if ('"'+op+'"') in generated]
     if mode=='machine' and (external or '___FIXADD(' not in generated or '___FIXMUL(' not in generated):
         raise ValueError('Proved operations still require dynamic calls')
-    r=dict(intrinsic_call=mode, frame_aware=args.frame_aware, traces=trace, external_primitives=external,proof=proof,boundary=boundary,source_sha256=checked(HERE/'kernels.bl'),raw_sha256=checked(raw),
+    r=dict(intrinsic_call=mode, frame_aware=frame_aware,word=args.word, traces=trace, external_primitives=external,proof=proof,boundary=boundary,source_sha256=checked(HERE/'kernels.bl'),raw_sha256=checked(raw),
            proof_sha256=checked(HERE/'Bound.lean'),elf_sha256=obj['sha256'],runs={},order=[])
+    if args.word:
+        r['generated_c']=word
+        r['word_emitter_sha256']=checked(HERE/'word.bl')
     for block in range(3):
         trials=[[case(1,n,17+trial*23+block) for n in (64,4096,32768,65535)] for trial in range(5)]
         order=list(commands)[block:]+list(commands)[:block]

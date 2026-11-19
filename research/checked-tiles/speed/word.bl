@@ -1,0 +1,55 @@
+(ns speed.word (:require [reader :as rd] [reader-node :as rn]))
+
+; A fixed, source-enrolled scalar region. The caller owns the range proof,
+; input and scheduler guards. Identifiers are limited to this function.
+(defn items [node] (rn/node-items (rn/node-form node)))
+(defn name-of [node] (rn/node-name (rn/node-form node)))
+(defn head-of [node] (name-of (first (items node))))
+(def operators {"+" "+" "-" "-" "*" "*" "<" "<"})
+(defn local [node]
+  (let [name (name-of node)]
+    (assert (contains? #{"i" "n" "x" "seed" "t" "y"} name))
+    name))
+
+(defn expr [node]
+  (let [form (rn/node-form node) tag (rn/node-tag form)]
+    (case tag
+      :scalar (do (assert (and (int? form) (<= 0 form 131042))) (str form "u"))
+      :symbol (local node)
+      :list (let [[op a b c] (items node) op (name-of op)]
+              (if (= "if" op)
+                (str "(" (expr a) " ? " (expr b) " : " (expr c) ")")
+                (let [token (get operators op)]
+                  (assert token)
+                  (str "(" (expr a) " " token " " (expr b) ")"))))
+      (throw (ex-info "Unrecognized scalar expression" {})))))
+
+(defn bindings [vector-node]
+  (apply str (mapv (fn [[key value]] (str "uint32_t " (local key) " = " (expr value) ";\n"))
+                    (partition 2 (items vector-node)))))
+
+(defn emit [path]
+  (let [source (File/read! path)
+        hash (Base/encode16 (crypto/hash :sha256 source) (list (tuple :case :lower)))
+        _ (assert (= hash "3d8f2bf18655ad648770a52e43dc4aca611fa15b916ba99a051d4a13d6c5ad4d"))
+        decl (second (rd/read-string source path))
+        [_ fname params body] (items decl)
+        [_ init test] (items body)
+        [_ cond result step] (items test)
+        [_ temps next] (items step)
+        [_ ni nx] (items next)]
+    (assert (= "serial" (name-of fname)))
+    (assert (= ["n" "seed"] (mapv local (items params))))
+    (assert (= ["loop" "if" "let" "recur"] (mapv head-of [body test step next])))
+    (assert (= ["i" "x"] (mapv (fn [pair] (local (first pair))) (partition 2 (items init)))))
+    (str "#include <stdint.h>\n#include <limits.h>\n"
+         "_Static_assert(UINT_MAX == UINT32_MAX, \"unexpected unsigned width\");\n"
+         "static unsigned int speed_word(unsigned int n, unsigned int seed) {\n"
+         (bindings init)
+         "for (;;) {\nif (" (expr cond) ") return " (expr result) ";\n"
+         (bindings temps)
+         "uint32_t next_i = " (expr ni) ";\nuint32_t next_x = " (expr nx) ";\n"
+         "i = next_i; x = next_x;\n}\n}\n")))
+
+(let [[path out] (clojure.io/current-command-line-args)]
+  (File/write! (str out ".word.c") (emit path)))
