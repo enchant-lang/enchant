@@ -2,7 +2,8 @@
 ;; the accounting schema and committed Datom reports in an owned memory DB.
 (ns observatory.station-transaction-delta
  (:require [bl.json :as json] [datom] [datom.db :as db] [datom.watch :as watch]
-           [data.delta-aggregate :as aggregate] [gateway.accounting :as accounting]))
+           [data.delta-aggregate :as aggregate] [gateway.accounting :as accounting]
+           [gateway.json :as report-json]))
 
 (def fact-query
  '[:find ?e ?id ?at ?type ?data :where
@@ -149,8 +150,96 @@
   (assert (= expected groups))
   {:exact true :changed-users (count delta) :expired expired :timing cost}))
 
-(defn- verify-publication [conn current initial delta stamp]
- (let [since (- stamp (* 31 86400000))
+(defn- grouped-events [events]
+ (into {} (map (fn [[uid owned]] [(str uid) owned]) (dissoc (group-by #(get % "uid") events) nil))))
+
+(defn- report-windows [events now]
+ {"7" (accounting/project events now 7) "30" (accounting/project events now 30)})
+
+(defn- encoded-windows [windows]
+ (list "{\"7\":" (report-json/encode (get windows "7"))
+       ",\"30\":" (report-json/encode (get windows "30")) "}"))
+
+(defn- report-body [envelope global people]
+ (let [header (report-json/encode envelope)
+       rows (map (fn [[uid windows]] (list (report-json/encode uid) ":" windows)) (sort-by first people))]
+  (list (binary/part header 0 (dec (erlang/byte_size header)))
+        ",\"windows\":" global ",\"people\":{" (Enum/intersperse rows ",") "}}")))
+
+(defn- measure-file! [path body size]
+ (let [[_ write] (measured #(File/write! path body))
+       [fingerprint verify]
+       (measured
+        #(let [opened (file/open (String/to_charlist path) (list :read :binary :raw)) handle (elem opened 1)]
+          (assert (= :ok (elem opened 0)))
+          (try
+           (loop [read 0 hash (crypto/hash_init :sha256)]
+            (let [chunk (file/read handle 65536)]
+             (if (= :eof chunk)
+              (do (assert (= size read)) (crypto/hash_final hash))
+              (do (assert (= :ok (elem chunk 0)))
+                  (let [bytes (elem chunk 1) next-read (+ read (erlang/byte_size bytes))]
+                   (assert (<= next-read size))
+                   (recur next-read (crypto/hash_update hash bytes)))))))
+           (finally (file/close handle)))))]
+  (assert (= fingerprint (crypto/hash :sha256 body)))
+  {:write write :verify verify}))
+
+(defn- verify-complete-report [current before expected actual changed now path]
+ ;; All windows are computed at the same observation time and without billing.
+ ;; A production owner must also detect clock, policy and provider changes.
+ (let [baseline (grouped-events before)
+       [prior-encoded prior-cost]
+       (measured #(into {} (map (fn [[uid events]] [uid (encoded-windows (report-windows events now))]) baseline)))
+       [reference preparation]
+       (measured #(accounting/publication-input current {:schema 1 :at now :source "accounting"} nil false))
+       people (:people reference) envelope (:envelope reference)
+       [candidate grouping] (measured #(grouped-events actual))
+       _ (assert (= expected (:events reference)))
+       _ (assert (= people candidate))
+       ;; Revalidate the ordered UID input before reusing bytes. A Datom query
+       ;; need not preserve tie ordering after a basis change.
+       [dirty selection]
+       (measured #(reduce-kv (fn [uids uid events]
+                              (if (and (not (contains? changed uid)) (= (get baseline uid) events))
+                               uids (conj uids uid))) #{} candidate))
+       report (fn [events rows reuse?]
+                (let [[windows shaping]
+                      (measured #(into {} (keep (fn [[uid events]]
+                                                 (when (or (not reuse?) (contains? dirty uid))
+                                                  [uid (report-windows events now)])) rows)))
+                      [global global-shaping] (measured #(report-windows events now))
+                      [body encoding]
+                      (measured #(report-body envelope (encoded-windows global)
+                                 (reduce-kv (fn [m uid _]
+                                             (assoc m uid (if-let [window (get windows uid)]
+                                                           (encoded-windows window) (get prior-encoded uid)))) {} rows)))]
+                 [body {:uid-shaping shaping :global-shaping global-shaping :encoding encoding}]))
+       [full full-timing] (report (:events reference) people false)
+       [retained retained-timing] (report actual candidate true)
+       bytes (erlang/iolist_size full)
+       limit (* 16 1024 1024)]
+  (assert (= bytes (erlang/iolist_size retained)))
+  (assert (= (erlang/iolist_to_binary full) (erlang/iolist_to_binary retained)))
+  (let [file-work (when (<= bytes limit)
+                   (let [work (str path "-" (Base/encode16 (crypto/strong_rand_bytes 12)))
+                         candidate-file (Path/join work "report.json")]
+                    (File/mkdir! work)
+                    (try
+                     (File/chmod! work 448)
+                     {:full (measure-file! candidate-file full bytes)
+                      :retained (measure-file! candidate-file retained bytes)}
+                     (finally (File/rm candidate-file) (File/rmdir work)))))]
+   {:exact-bytes true :bytes bytes :byte-limit limit :uids (count people) :recomputed-uids (count dirty)
+    :reused-uids (- (count people) (count dirty))
+    :status (if (<= bytes limit) :verified-private-file :over-managed-publisher-limit)
+    :prior-uid-encoding prior-cost :full-preparation preparation :retained-grouping grouping :uid-selection selection
+    :full (merge full-timing (:full file-work))
+    :retained (merge retained-timing (:retained file-work))})))
+
+(defn- verify-publication [conn current prior initial delta stamp report-path]
+ (let [now (+ stamp 1)
+       since (- now (* 31 86400000))
        baseline-index (into {} (map (fn [[id row]] [id (decoded-event row)]) (:facts initial)))
        reference #(accounting/facts conn since)
        candidate #(ordered-events current since (update-decoded baseline-index delta))
@@ -167,7 +256,6 @@
        actual-by-uid (group-by #(get % "uid") actual)
        decoded (update-decoded baseline-index delta)
        has-seed-request (some #(= "request:seed-1" (get % "id")) expected)
-       now (+ stamp 1)
        windows (mapv (fn [days]
                        (let [from-reference (accounting/project expected now days)
                              from-delta (accounting/project actual now days)]
@@ -183,9 +271,14 @@
                      [7 30])]
   (when (>= (count expected) 10)
    (assert (< (:requests (first windows)) (:requests (second windows)))))
-  {:events (count actual) :exact-ordered-events true :decoded-updates (count (:changed delta))
-   :history-preparation timing
-   :windows windows}))
+  (cond-> {:events (count actual) :exact-ordered-events true :decoded-updates (count (:changed delta))
+           :history-preparation timing :windows windows}
+   report-path
+   (assoc :complete-report
+    (let [before (ordered-events prior since baseline-index)
+          changed (into #{} (keep #(when-let [uid (get % "uid")] (str uid)))
+                          (mapcat #(vector (get baseline-index %) (get decoded %)) (:changed delta)))]
+     (verify-complete-report current before expected actual changed now report-path))))))
 
 (defn- seed! [conn n stamp bulk?]
  (let [started (erlang/monotonic_time :microsecond)]
@@ -202,7 +295,7 @@
   {:mode (if bulk? :bulk-fresh-facts :ordinary-transactions)
    :elapsed-us (- (erlang/monotonic_time :microsecond) started)}))
 
-(defn- replay [n bulk?]
+(defn- replay [n bulk? report-path]
  (let [conn (datom/connect accounting/schema)
        stamp 1790000000000]
   (try
@@ -210,7 +303,8 @@
          _ (println (str "Station fixture seeded " n " requests"))
          attempt {"attempt-id" "one" "request-id" "seed-1" "uid" 1001 "provider" "codex"}
          _ (datom/transact! conn [(fact -1 "attempt:one" stamp "attempt" (assoc attempt "event" "attempt-started"))])
-         initial (rebuild (datom/db conn))
+         prior (datom/db conn)
+         initial (rebuild prior)
          written (datom/transact! conn [(fact -1 "attempt:one" (+ stamp 1) "attempt"
                                          (assoc attempt "event" "attempt-finished" "complete" true))
                                         (fact -2 "gap:one" stamp "gap" {"event" "gap"})
@@ -223,7 +317,7 @@
          _ (assert (= :transaction-delta (:path delta)))
          _ (assert (= 3 (count (:changed delta))))
          _ (assert (= (:facts full) (:facts delta)))
-         publication (verify-publication conn current initial delta stamp)
+         publication (verify-publication conn current prior initial delta stamp report-path)
          cursor-only (datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}])
          cursor-result (advance delta cursor-only (datom/db conn))
          _ (assert (= :transaction-delta (:path cursor-result)))
@@ -242,10 +336,12 @@
                 :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}})
    (finally (datom/close! conn)))))
 
-(let [[output size mode] (BeamLisp/argv)
+(let [[output size & flags] (BeamLisp/argv)
       requests (if size (String/to_integer size) 3000)
-      bulk? (= mode "--bulk-seed")]
- (assert (or (nil? mode) bulk?))
+      flags (set flags)
+      bulk? (contains? flags "--bulk-seed")
+      report? (contains? flags "--complete-report")]
+ (assert (every? #{"--bulk-seed" "--complete-report"} flags))
  (assert (and (string? output) (<= 1 requests 74000)))
  (File/write! output (json/encode {:schema "enchant.station-transaction-delta-replay.v1"
-                                  :result (replay requests bulk?)})))
+                                  :result (replay requests bulk? (when report? (str output ".candidate")))})))
