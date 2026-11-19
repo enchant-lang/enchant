@@ -256,7 +256,102 @@
   (assert (= fingerprint (crypto/hash :sha256 body)))
   {:write write :verify verify}))
 
-(defn- verify-complete-report [current before expected actual changed now path]
+(defn- report-sha [body]
+ (Base/encode16 (crypto/hash :sha256 body)))
+
+(defn- read-scoped-window [root entry limit]
+ (when entry
+  (let [path (Path/join root (get entry "file"))
+        bytes (get entry "bytes")]
+   (assert (and (<= 1 bytes limit) (= bytes (:size (File/stat! path)))))
+   (let [body (File/read! path)]
+    (assert (= bytes (erlang/byte_size body)))
+    (assert (= (get entry "sha256") (report-sha body)))
+    body))))
+
+(defn- scoped-generation! [root generation basis envelope global people prior dirty limits]
+ (let [{:keys [part total]} limits
+       parts (assoc people :global global)
+       sizes (into {} (map (fn [[scope body]] [scope (erlang/iolist_size body)]) parts))
+       bytes (reduce + 0 (vals sizes))]
+  (if (or (some #(> % part) (vals sizes)) (> (+ bytes (:logical-bytes prior 0)) total))
+   {:status :oversized}
+   (let [directory (Path/join root generation)]
+    (File/mkdir! directory)
+    (let [[state elapsed]
+          (measured #(reduce-kv
+                      (fn [state scope body]
+                       (let [filename (if (= scope :global) "global.json" (str (report-sha scope) ".json"))
+                             relative (Path/join generation filename)
+                             destination (Path/join root relative)
+                             previous (get-in prior [:parts scope])
+                             size (get sizes scope)
+                             shared? (and (not= scope :global) previous (not (contains? dirty scope)))
+                             sha (if shared? (get previous "sha256") (report-sha body))
+                             entry {"file" relative "bytes" size "sha256" sha}]
+                        (if shared?
+                         (do (assert (= size (get previous "bytes")))
+                             (File/ln! (Path/join root (get previous "file")) destination))
+                         (do (File/write! destination body) (read-scoped-window root entry part)))
+                        (-> state
+                         (update (if shared? :reused-bytes :written-bytes) + size)
+                         (assoc-in [:parts scope] entry))))
+                      {:written-bytes 0 :reused-bytes 0 :parts {}} parts))
+          entries (:parts state)
+          index (json/encode {:basis basis :generation generation :envelope envelope
+                              :global (get entries :global) :people (dissoc entries :global)})
+          index-bytes (erlang/byte_size index)
+          logical-bytes (+ bytes index-bytes)]
+     (if (or (> index-bytes part) (> (+ logical-bytes (:logical-bytes prior 0)) total))
+      (do (File/rm_rf! directory) {:status :oversized})
+      (assoc state :status :ready :basis basis :index index :logical-bytes logical-bytes :timing elapsed)))))))
+
+(defn- select-scoped-generation! [root generation basis]
+ (cond
+  (not= :ready (:status generation)) (:status generation)
+  (not= basis (:basis generation)) :stale
+  :else (let [stage (Path/join root "staged-index.json") current (Path/join root "current.json")]
+         (File/write! stage (:index generation))
+         (File/rename! stage current)
+         :published)))
+
+(defn- verify-scoped-report [root prior-basis current-basis envelope prior-global prior-people global people dirty full part]
+ (let [limits {:part part :total (* 64 1024 1024)}
+       first (scoped-generation! root "prior" prior-basis envelope prior-global prior-people nil #{} limits)
+       _ (assert (= :published (select-scoped-generation! root first prior-basis)))
+       read-current #(File/read! (Path/join root "current.json"))
+       old-bytes (read-current)
+       old (json/decode old-bytes)
+       refused-total (scoped-generation! root "refused-total" current-basis envelope global people first dirty (assoc limits :total 1))
+       refused-part (scoped-generation! root "refused-part" current-basis envelope global people first dirty (assoc limits :part 1))
+       next (scoped-generation! root "current" current-basis envelope global people first dirty limits)
+       _ (assert (= :ready (:status next)))
+       _ (assert (= :oversized (select-scoped-generation! root refused-total current-basis)
+                              (select-scoped-generation! root refused-part current-basis)))
+       _ (assert (= :stale (select-scoped-generation! root next prior-basis)))
+       _ (assert (= old-bytes (read-current)))
+       _ (assert (= :published (select-scoped-generation! root next current-basis)))
+       current (json/decode (read-current))
+       scoped (fn [view uid] (read-scoped-window root (get-in view ["people" uid]) part))
+       [parts reading] (measured #(into {} (map (fn [[uid entry]] [uid (read-scoped-window root entry part)]) (get current "people"))))
+       actual (report-body envelope (read-scoped-window root (get current "global") part) parts)]
+  (assert (= prior-basis (get old "basis")))
+  (assert (= current-basis (get current "basis")))
+  (assert (= (json/decode (json/encode envelope)) (get current "envelope")))
+  (assert (= (erlang/iolist_to_binary prior-global) (read-scoped-window root (get old "global") part)))
+  (doseq [uid ["1000" "1001"]]
+   (let [bytes #(when % (erlang/iolist_to_binary %))]
+    (assert (= (bytes (get prior-people uid)) (scoped old uid)))
+    (assert (= (bytes (get people uid)) (scoped current uid)))))
+  (assert (nil? (scoped current "absent")))
+  (assert (= (erlang/iolist_to_binary full) (erlang/iolist_to_binary actual)))
+  {:exact-reconstruction true :old-reader-retained true :total-cap-refusal true :part-cap-refusal true :stale-refused true
+   :part-limit part :generation-limit (:total limits) :scope-count (+ 1 (count parts))
+   :prior-logical-bytes (:logical-bytes first) :current-logical-bytes (:logical-bytes next)
+   :written-bytes (:written-bytes next) :reused-bytes (:reused-bytes next)
+   :read-personal-files reading :initial-parts (:timing first) :updated-parts (:timing next)}))
+
+(defn- verify-complete-report [prior current before expected actual changed now path scoped?]
  ;; All windows are computed at the same observation time and without billing.
  ;; A production owner must also detect clock, policy and provider changes.
  (let [baseline (grouped-events before)
@@ -300,7 +395,15 @@
        limit (* 16 1024 1024)]
   (assert (= bytes (erlang/iolist_size retained)))
   (assert (= (erlang/iolist_to_binary full) (erlang/iolist_to_binary retained)))
-  (let [file-work (when (<= bytes limit)
+  (let [scoped (when scoped?
+                 (let [work (str path "-scoped-" (Base/encode16 (crypto/strong_rand_bytes 12)))]
+                  (File/mkdir! work)
+                  (try
+                   (File/chmod! work 448)
+                   (verify-scoped-report work (datom/basis-t prior) (datom/basis-t current) envelope
+                    (encoded-windows (report-windows before now)) prior-encoded global individual dirty full limit)
+                   (finally (File/rm_rf! work)))))
+        file-work (when (<= bytes limit)
                    (let [work (str path "-" (Base/encode16 (crypto/strong_rand_bytes 12)))
                          candidate-file (Path/join work "report.json")]
                     (File/mkdir! work)
@@ -309,16 +412,17 @@
                      {:full (measure-file! candidate-file full bytes)
                       :retained (measure-file! candidate-file retained bytes)}
                      (finally (File/rm candidate-file) (File/rmdir work)))))]
-   {:exact-bytes true :bytes bytes :byte-limit limit :uids (count people) :recomputed-uids (count dirty)
+   (cond-> {:exact-bytes true :bytes bytes :byte-limit limit :uids (count people) :recomputed-uids (count dirty)
     :components (report-component-sizes global individual bytes limit)
     :reused-uids (- (count people) (count dirty))
     :retained-uid-encoded-bytes retained-uid-bytes :reused-uid-encoded-bytes reused-uid-bytes
     :status (if (<= bytes limit) :verified-private-file :over-managed-publisher-limit)
     :prior-uid-encoding prior-cost :full-preparation preparation :retained-grouping grouping :uid-selection selection
     :full (merge full-timing (:full file-work))
-    :retained (merge retained-timing (:retained file-work))})))
+    :retained (merge retained-timing (:retained file-work))}
+    scoped (assoc :scoped-report scoped)))))
 
-(defn- verify-publication [conn current prior initial delta stamp report-path]
+(defn- verify-publication [conn current prior initial delta stamp report-path scoped?]
  (let [now (+ stamp 1)
        since (- now (* 31 86400000))
        baseline-index (into {} (map (fn [[id row]] [id (decoded-event row)]) (:facts initial)))
@@ -359,7 +463,7 @@
     (let [before (ordered-events prior since baseline-index)
           changed (into #{} (keep #(when-let [uid (get % "uid")] (str uid))
                            (mapcat (fn [id] [(get baseline-index id) (get decoded id)]) (:changed delta))))]
-     (verify-complete-report current before expected actual changed now report-path))))))
+     (verify-complete-report prior current before expected actual changed now report-path scoped?))))))
 
 (defn- seed! [conn n stamp bulk?]
  (let [started (erlang/monotonic_time :microsecond)]
@@ -376,7 +480,7 @@
   {:mode (if bulk? :bulk-fresh-facts :ordinary-transactions)
    :elapsed-us (- (erlang/monotonic_time :microsecond) started)}))
 
-(defn- replay [n bulk? report-path clock-reuse?]
+(defn- replay [n bulk? report-path clock-reuse? scoped?]
  (let [conn (datom/connect accounting/schema)
        stamp 1790000000000]
   (try
@@ -403,7 +507,7 @@
          _ (assert (= 3 (count (:changed delta))))
          _ (assert (= (:facts full) (:facts delta)))
          [publication publication-cost]
-         (fixture-phase "check publication parity" #(verify-publication conn current prior initial delta stamp report-path))
+         (fixture-phase "check publication parity" #(verify-publication conn current prior initial delta stamp report-path scoped?))
          clock-reuse (when clock-reuse? (verify-clock-reuse prior current (+ stamp 1)))
          [cursor-only cursor-cost]
          (fixture-phase "commit cursor-only change"
@@ -438,9 +542,10 @@
       requests (if size (String/to_integer size) 3000)
       flags (set flags)
       bulk? (contains? flags "--bulk-seed")
-      report? (contains? flags "--complete-report")
+      scoped? (contains? flags "--scoped-report")
+      report? (or scoped? (contains? flags "--complete-report"))
       clock-reuse? (contains? flags "--clock-reuse")]
- (assert (every? #{"--bulk-seed" "--complete-report" "--clock-reuse"} flags))
+ (assert (every? #{"--bulk-seed" "--complete-report" "--clock-reuse" "--scoped-report"} flags))
  (assert (and (string? output) (<= 1 requests 74000)))
  (File/write! output (json/encode {:schema "enchant.station-transaction-delta-replay.v1"
-                                  :result (replay requests bulk? (when report? (str output ".candidate")) clock-reuse?)})))
+                                  :result (replay requests bulk? (when report? (str output ".candidate")) clock-reuse? scoped?)})))
