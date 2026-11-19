@@ -1,0 +1,15 @@
+(with-exception-catcher
+ (lambda (e) (display-exception e (current-error-port)) (exit 1))
+ (lambda ()
+  (load (caddr (native-command-line)))
+  (let ((selected (native-global-exact "speed.kernels" "serial"))
+        (large (expt 2 70)))
+    (for-each
+      (lambda (row)
+        (let* ((n (car row)) (x (cadr row)) (expect-fast (caddr row)))
+          (if (not (eq? (speed-in-domain? n x) expect-fast)) (error "selection differs" row))
+          (if (not (equal? (selected n x) (speed-general-serial n x))) (error "value differs" row))))
+      (list '(0 0 #t) '(1 21839 #t) '(1 21840 #t) '(1 43680 #t) '(1 43681 #t)
+            '(65535 65520 #t) '(65536 127 #f) '(-1 5 #f) '(2 -1 #f)
+            '(1 65521 #f) (list 1 large #f) (list (- large) 2 #f)))
+    (display "12 boundary and fallback controls passed") (newline) (exit 0))))
