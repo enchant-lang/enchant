@@ -1,38 +1,55 @@
 ;; Pure FIFO policy: one revision per key, bounded count and charged bytes.
 ;; Evict only the entries needed to admit the new value; never clear a warm
-;; cache because one new entry crossed a limit. The queue holds one key each.
+;; cache because one new entry crossed a limit. The ordered index holds one
+;; key per live entry, including when a caller closes one exact cache slot.
 (ns data.cache-budget)
 
 (def MAX-BYTES (* 32 1024 1024))
 (def MAX-ENTRY (* 8 1024 1024))
 (def MAX-ENTRIES 4096)
 
-(defn empty-state [] {:entries {} :bytes 0 :order (queue/new)})
+(defn empty-state [] {:entries {} :bytes 0 :order (gb_trees/empty) :next-position 0})
 
 (defn admissible? [weight]
   (and (erlang/is_integer weight) (> weight 0) (<= weight MAX-ENTRY)))
 
+(defn- append-key [state key entry]
+  (let [position (:next-position state)]
+    (-> state
+        (assoc-in [:entries key] (assoc entry :position position))
+        (update :order #(gb_trees/insert position key %))
+        (update :next-position inc))))
+
+(defn- ordered-state [state]
+  (if (contains? state :next-position) state
+    ;; Existing cache owners can retain a legacy queue across code reload.
+    ;; Migrate in FIFO order and keep the charged values and leases.
+    (let [entries (:entries state)
+          keys (if-let [order (:order state)] (queue/to_list order) (keys entries))]
+      (reduce (fn [current key] (append-key current key (get entries key)))
+              (assoc (empty-state) :bytes (:bytes state)) keys))))
+
+(defn discard [state key]
+  (let [state (ordered-state state)]
+    (if-let [entry (get-in state [:entries key])]
+      (-> state (update :entries dissoc key) (update :bytes - (:weight entry))
+                (update :order #(gb_trees/delete (:position entry) %)))
+      state)))
+
 (defn offer [state key revision weight]
   (if (not (admissible? weight))
     {:accepted? false :clear? false :evict [] :state state}
-    (let [old (get (:entries state) key)
-          bytes (+ (- (:bytes state) (or (:weight old) 0)) weight)
-          ;; Hot replacement may inherit the previous clear-all policy state.
-          ;; Its finite entries can seed a queue once without dropping values.
-          existing-order (or (:order state) (queue/from_list (to-list (keys (:entries state)))))
-          order (if old existing-order (queue/in key existing-order))]
-      (loop [entries (assoc (:entries state) key {:revision revision :weight weight})
-             order order bytes bytes evicted []]
-        (if (and (<= bytes MAX-BYTES) (<= (count entries) MAX-ENTRIES))
-          {:accepted? true :clear? false :evict evicted
-           :state {:entries entries :bytes bytes :order order}}
-          (let [popped (queue/out order)
-                victim (erlang/element 2 (erlang/element 1 popped))
-                remaining (erlang/element 2 popped)]
+    (let [state (ordered-state state)
+          old (get-in state [:entries key])
+          entry {:revision revision :weight weight}
+          updated (if old (assoc-in state [:entries key] (assoc entry :position (:position old)))
+                        (append-key state key entry))]
+      (loop [updated (update updated :bytes + (- weight (:weight old 0))) evicted []]
+        (if (and (<= (:bytes updated) MAX-BYTES) (<= (count (:entries updated)) MAX-ENTRIES))
+          {:accepted? true :clear? false :evict evicted :state updated}
+          (let [[_ victim] (gb_trees/smallest (:order updated))]
             ;; A larger replacement must not evict itself. Rotate that one
             ;; key once; its admissible weight always fits after older peers.
             (if (= victim key)
-              (recur entries (queue/in victim remaining) bytes evicted)
-              (recur (dissoc entries victim) remaining
-                     (- bytes (:weight (get entries victim)))
-                     (conj evicted victim)))))))))
+              (recur (-> (discard updated key) (append-key key entry) (update :bytes + weight)) evicted)
+              (recur (discard updated victim) (conj evicted victim)))))))))

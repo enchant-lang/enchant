@@ -168,22 +168,31 @@
     (let [pending (:pending st)]
       (if (and pending (= ticket (:ticket pending)) (= weight (:weight pending))
                (= (:caller pending) (erlang/element 1 from)))
-        (let [decision (budget/offer (:budget st) key revision weight)
-              old (get-in st [:budget :entries key :lease])]
+        (let [entry (get-in st [:budget :entries key])
+              forget? (nil? revision)
+              decision (if forget?
+                         {:accepted? true :state (budget/discard (:budget st) key)
+                          :evict (if entry [key] [])}
+                         (budget/offer (:budget st) key revision weight))]
           (if (:accepted? decision)
             (do
               (doseq [victim (:evict decision)]
                 (ets/delete (:name st) victim)
                 (pool/release! (erlang/self) (get-in st [:budget :entries victim :lease])))
-              (ets/insert (:name st) (tuple key revision value))
-              (pool/retain! (erlang/self) ticket)
-              (when old (pool/release! (erlang/self) old)))
+              (if forget?
+                (pool/release! (erlang/self) ticket)
+                (do
+                  (ets/insert (:name st) (tuple key revision value))
+                  (pool/retain! (erlang/self) ticket)
+                  (when-let [old (:lease entry)] (pool/release! (erlang/self) old)))))
             (pool/release! (erlang/self) ticket))
-          (let [state (if (:accepted? decision) (assoc-in (:state decision) [:entries key :lease] ticket) (:state decision))]
+          (let [state (if (and (:accepted? decision) (not forget?))
+                        (assoc-in (:state decision) [:entries key :lease] ticket)
+                        (:state decision))]
             (erlang/demonitor (:monitor pending) (list :flush))
             (drop-claim! (:gate st) ticket)
             (publish-control! (:name st) (:gate st) state)
-            (reply (when (:accepted? decision) {:bytes weight :evictions (count (:evict decision))})
+            (reply (when (:accepted? decision) {:bytes (if forget? 0 weight) :evictions (count (:evict decision))})
                    (assoc st :budget state :pending nil))))
         (reply false st))))
   (handle-cast [:cancel ticket] [st]
@@ -288,6 +297,20 @@
                   true)
               false)
             false)) false))
+    (catch _ false)))
+
+(defn forget!
+  "Release a logical key through the ordinary bounded owner admission. The
+   caller must serialize this operation with any computation for that key."
+  [name key]
+  (try
+    (when (Process/whereis name)
+      (when-let [key (key-data key 0)]
+        (let [weight (footprint key)]
+          (when (budget/admissible? weight)
+            ;; A nil wire revision is reserved for removal. Normal values,
+            ;; including a nil logical revision, use normalized revision data.
+            (boolean (publish-entry! name key nil nil weight))))))
     (catch _ false)))
 
 (defn computation-revision

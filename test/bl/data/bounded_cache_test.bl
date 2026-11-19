@@ -9,7 +9,7 @@
     (is (= 1 (count (:entries s))))
     (is (= 1000 (:bytes s)))
     (is (= 9999 (get-in s [:entries :one :revision])))
-    (is (= 1 (queue/len (:order s))))))
+    (is (= 1 (gb_trees/size (:order s))))))
 
 (deftest generated-insertions-always-respect-byte-and-count-bounds
   (loop [n 0 s (budget/empty-state)]
@@ -37,6 +37,23 @@
   (is (not (:hit? (cache/lookup NAME :key 1))))
   (is (= {:value "new"} (:value (cache/lookup NAME :key 2))))
   (is (= 1 (:size (cache/stats NAME)))))
+
+(deftest exact-removal-releases-the-key-and-preserves-fifo-order
+  (cache/clear! NAME)
+  (cache/put! NAME :keep nil "keep")
+  (cache/put! NAME :drop nil "drop")
+  (let [before (cache/stats NAME)]
+    (is (cache/forget! NAME :drop))
+    (is (= (dec (:size before)) (:size (cache/stats NAME))))
+    (is (< (:bytes (cache/stats NAME)) (:bytes before)))
+    (is (not (:hit? (cache/lookup NAME :drop nil))))
+    (is (= "keep" (:value (cache/lookup NAME :keep nil)))))
+  (let [legacy {:entries {:a {:weight 3} :b {:weight 4} :c {:weight 5}}
+                :order (queue/from_list (list :c :a :b)) :bytes 12}
+        removed (budget/discard legacy :a)
+        offered (:state (budget/offer removed :a 1 2))]
+    (is (= [:c :b :a] (mapv second (gb_trees/to_list (:order offered)))))
+    (is (= 11 (:bytes offered)))))
 
 (deftest reference-identities-do-not-collide-with-forged-container-keys
   (cache/clear! NAME)
