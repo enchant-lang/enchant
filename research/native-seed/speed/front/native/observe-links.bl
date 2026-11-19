@@ -16,6 +16,7 @@
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --staging-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
+;;   PARTITION LINK_ROWS --owned-staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --env-read-control REPORT
 ;;   PARTITION LINK_ROWS --runtime-read-control REPORT
 ;;   PARTITION LINK_ROWS --code-read-control REPORT
@@ -1373,7 +1374,10 @@
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (if selected [selected] (:order closure)))})))
 
-(defn- staging-effects-member [closure rowset member entries consume]
+(defn- staging-effects-member
+ ([closure rowset member entries consume]
+  (staging-effects-member closure rowset member entries consume nil))
+ ([closure rowset member entries consume on-module]
  (let [callables (if (= "core" (:ns member)) {}
                   (into {} (map (fn [[name entry]] [entry name]) entries)))
        observe (fn [stage!]
@@ -1396,7 +1400,8 @@
                     [prepared (assoc observed :effects (assoc effects :code-reads reads :staging-code-states states))])))]
                   [[(consume prepared) observation] mutations]))
        [[result observation] mutations]
-       (with-registry-stage closure (:rows rowset) member entries {:batch-rows? true :with-stage observe}
+       (with-registry-stage closure (:rows rowset) member entries
+        {:batch-rows? true :with-stage observe :on-staged-eval on-module}
         (fn [prepared _ _] prepared))
        effects (:effects observation)]
   {:namespace (:ns member)
@@ -1419,7 +1424,7 @@
    :unexplained-registry-scope (boolean (:unexplained-registry-scope effects))
    :unknown-env-read (boolean (:unknown-env-read effects))
    :unknown-code-read (boolean (:unknown-code-read effects))
-   :unknown-resolver-read (boolean (:unknown-resolver-read effects))}))
+   :unknown-resolver-read (boolean (:unknown-resolver-read effects))})))
 
 (defn- staging-effects [closure rows samples-path selected]
  (when (and selected (not (contains? (:units closure) selected)))
@@ -1442,13 +1447,16 @@
                        :interpreted (assoc (dissoc interpreted :result) :prepared-identity (:result interpreted))}))
                    (if selected [selected] (:order closure)))})))
 
-(defn- retire-staging-control! [observation]
- ;; This control runs in the owned cold qualification VM for the checked
- ;; donor. Only destinations of observed loads by this staging process enter
- ;; the experiment. Production needs explicit publication custody.
+(defn- retire-staging-control! [observation inventory]
+ ;; Run in the owned cold qualification VM for the checked donor. The
+ ;; compiler inventory supplies the batch when available. The trace is an
+ ;; independent check of the allocated names and the legacy control input.
  (let [loads (set (keep (fn [[operation module _]] (when (= :load_module operation) module))
                         (:code-server-targets observation)))
-       modules (mapv :module (filter :after-scope (:code-server-module-states observation)))]
+       observed (mapv :module (filter :after-scope (:code-server-module-states observation)))
+       modules (or inventory observed)]
+  (assert (= (count observed) (count modules) (count (set modules))))
+  (assert (= (set observed) (set modules)))
   (assert (and (seq modules) (<= (count modules) 128)))
   (doseq [{:keys [module before after-stage after-scope]} (:code-server-module-states observation)
           :when after-scope]
@@ -1465,23 +1473,28 @@
    {:retired-modules (count modules) :borrow-guard true :code-bytes-before before
     :code-bytes-after (erlang/memory :code)})))
 
-(defn- staging-retirement-control [closure rowset samples-path qualification]
+(defn- staging-retirement-control [closure rowset samples-path qualification owned?]
  (let [anchor (qualified-donor closure qualification)]
   (assert (= (:sha256 rowset) (:links-sha256 anchor)))
   (with-phase-entries rowset samples-path
    (fn [entries _]
-    {:schema "bl.native.staging-retirement-control" :version 2 :reuse-authority false
+    {:schema "bl.native.staging-retirement-control" :version (if owned? 3 2) :reuse-authority false
      :donor anchor :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
      :checks (mapv (fn [[ns mode selected]]
                       (let [member (get-in closure [:units ns])
                             _ (assert (= (:source-sha256 member) (artifact/sha (File/read! (:path member)))))
+                            inventory (when owned? (volatile! []))
                             observation (staging-effects-member closure rowset member selected
-                                          #(def-bytes (lower-with-snapshot %)))]
+                                          #(def-bytes (lower-with-snapshot %))
+                                          (when inventory #(vswap! inventory conj %)))
+                            modules (when inventory @inventory)]
                        (assert (erlang/=:= (def-bytes member) (:result observation)))
                        (let [retained? (boolean (some :after-scope (:code-server-module-states observation)))
                              _ (assert (= retained? (contains? #{"core" "sugar"} ns)))
-                             retirement (if retained? (retire-staging-control! observation) {:retired-modules 0})]
-                        (assoc retirement :namespace ns :mode mode :exact-definitions true))))
+                             retirement (if retained? (retire-staging-control! observation modules)
+                                           (do (assert (empty? modules)) {:retired-modules 0}))]
+                        (cond-> (assoc retirement :namespace ns :mode mode :exact-definitions true)
+                         owned? (assoc :compiler-owned-modules (count modules))))))
                    (vec (for [[mode selected] [[:ordinary []] [:interpreted entries]] ns (:order closure)]
                           [ns mode selected])))}))))
 
@@ -2281,7 +2294,7 @@
                                               "--capture-stage-link-plan" "--replay-stage-link-plan" "--guard-stage-link-plan"
                                               "--cached-registry" "--capture-bound-registry" "--bound-registry" "--bound-env-control" "--bound-export"
                                               "--bound-registry-controls" "--lowering-effects" "--staging-effects"
-                                              "--staging-retirement-control"} selected)))
+                                              "--staging-retirement-control" "--owned-staging-retirement-control"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -2294,7 +2307,9 @@
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
                 (= selected "--staging-effects") (staging-effects closure baseline comparison source-receipt)
-                (= selected "--staging-retirement-control") (staging-retirement-control closure baseline comparison source-receipt)
+                (contains? #{"--staging-retirement-control" "--owned-staging-retirement-control"} selected)
+                (staging-retirement-control closure baseline comparison source-receipt
+                 (= selected "--owned-staging-retirement-control"))
                 (= selected "--env-read-control") (env-read-control output)
                 (= selected "--runtime-read-control") (runtime-read-control)
                 (= selected "--code-read-control") (code-read-control output)

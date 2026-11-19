@@ -31,6 +31,7 @@
             [system.ir :as ir]
             [system.js :as native] [js.evidence :as evidence]
             [js.namespace-stage :as namespace-stage]
+            [lower :as lower]
             [bl.json :as json]
             [js.cache :as cache] [proc.admission :as admission]))
 
@@ -172,6 +173,31 @@
                  (into out (map (fn [s] (get by-name s)) syms))))))))
 
 
+(defn- eval-staged-form [form env on-module]
+  (if-not on-module
+    (BeamLisp.Compiler/eval_form form env)
+    (do
+      (BeamLisp.Env/assert_native_framework_execution!)
+      (let [node (BeamLisp.Compiler/compile form env)
+            module (erlang/binary_to_atom (str "Elixir.BeamLisp.Eval.M" (System/unique_integer (list :positive))))
+            value (lower/eval-anf module node)]
+        ;; The allocator identifies this evaluation, even when nested macro
+        ;; expansion or a provider adds other code in the same VM.
+        (when (erlang/module_loaded module) (on-module module))
+        value))))
+
+(defn- stage-macro! [text name path on-module]
+  (let [env (BeamLisp.Compiler/new_env name)]
+    (if-not on-module
+      (BeamLisp.Compiler/eval_string text env path)
+      (do
+        (BeamLisp.Env/assert_native_framework_execution!)
+        (BeamLisp.Env/in_ns name)
+        (doseq [form (BeamLisp.Reader/read_string text path)]
+          (eval-staged-form form (assoc env :ns (BeamLisp.Env/current_ns)) on-module))
+        (when (erlang/function_exported :Elixir.BeamLisp.Link :settle 0)
+          (BeamLisp.Link/settle))))))
+
 (defn- stage-forms
   [path source texts options]
   (let [forms (mapv first texts)
@@ -215,14 +241,15 @@
             (let [name (rn-name (second (rn-items f)))
                   value (when (BeamLisp.Env/bound? ns name) (BeamLisp.Env/fetch_exact! ns name))]
               (BeamLisp.Env/intern ns name value)))
+        on-module (:on-staged-eval options)
         _ (doseq [[f text] (if has-head? (rest texts) texts)
                   :when (or (defmacro? f) (some (fn [n] (identical? n f)) needed))]
             (try
               (if (defmacro? f)
-                (BeamLisp.Compiler/eval_string text (BeamLisp.Compiler/new_env ns) path)
+                (stage-macro! text ns path on-module)
                 (BeamLisp.Env/intern ns (rn-name (second (rn-items f)))
-                  (BeamLisp.Compiler/eval_form (helper-value-form f)
-                    (assoc (BeamLisp.Compiler/new_env ns) :file path :target :beam))))
+                  (eval-staged-form (helper-value-form f)
+                    (assoc (BeamLisp.Compiler/new_env ns) :file path :target :beam) on-module)))
                  (catch ex
                    (throw (ex-info (str path ": staging " (rn-name (second (rn-items f))) ": " (ex-message ex))
                                    {:path path :ns ns :form f})))))
@@ -239,6 +266,8 @@
    their statically referenced helpers, never application initializers. Caller
    owns Env isolation. :after-ns installs target links inside that isolation;
    :after-staging masks compile-time helper links before runtime lowering;
+   :on-staged-eval records retained modules owned by successful macro and
+   helper evaluations for the caller's staging lifetime;
    :fallback-ns supports headerless actor fragments during migration."
   ([path] (prepare-ns path {}))
   ([path options]
