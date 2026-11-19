@@ -100,8 +100,9 @@ def capture(work, request):
             continue
         started = time.monotonic()
         subprocess.run([*base, mode, output, *args], cwd=overlay, check=True)
+        elapsed = time.monotonic() - started
         verify_source(state["source"], overlay)
-        state["finished"][filename] = {"sha256": digest(output), "wall-seconds": time.monotonic() - started}
+        state["finished"][filename] = {"sha256": digest(output), "wall-seconds": elapsed}
         save(marker, state)
     verify_source(state["source"], overlay)
     return overlay, sum(row["wall-seconds"] for row in state["finished"].values())
