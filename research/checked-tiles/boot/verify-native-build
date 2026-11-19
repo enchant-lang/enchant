@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run from the checkout root, under a memory cap. The build is a prepared,
+# emitted native closure. Pass a fresh actor directory. The paired JS capture
+# supplies an independent oracle for the actor behavior of the same sources.
+set -euo pipefail
+build=$(realpath "$1")
+actors=$(realpath -m "$2")
+javascript=$(realpath "$3")
+[[ ! -e "$actors" ]] || { echo "Use a fresh actor directory" >&2; exit 2; }
+seed=research/native-seed
+"$seed/run" run "$seed/corpus/prepare.bl" -- "$build" "$actors"
+actor_sha=$(jq -r .body.sha256 "$actors/manifest.json")
+fixpoint=(python3 "$seed/fixpoint-full.py" --root "$PWD" --out "$build" --standard-bindings
+          --corpus "$seed/fixtures/compiler-source.bl" --actor-manifest "$actors/manifest.json"
+          --actor-body-sha256 "$actor_sha")
+"${fixpoint[@]}" --compile-stage1-actors-only
+python3 "$seed/corpus/qualify.py" --javascript "$javascript" --native "$actors/manifest.json" \
+  --native-executable "$build/stage1-actors" --native-build "$build/stage1-actors-build.json" \
+  --evidence "$actors/paired"
+"${fixpoint[@]}" --prepare-eval-bundle --actor-oracle "$actors/paired/oracle.json"
+python3 "$seed/speed/final/compare-stages.py" "$build"
