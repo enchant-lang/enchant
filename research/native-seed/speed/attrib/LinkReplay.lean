@@ -246,6 +246,23 @@ theorem resumeAfterDischargedPublications {Unit : Type} (old current : Key → O
 
 #print axioms resumeAfterDischargedPublications
 
+/- A write followed by restoration can pass every final-state check while an
+   intervening reader observes a different value at the written key. -/
+theorem transientPublicationIsObservable (state : Key → Option Value)
+    (key : Key) (temporary : Option Value) (changesValue : temporary ≠ state key) :
+    (∀ observed,
+      publishedState state [(key, temporary), (key, state key)] observed = state observed) ∧
+      publishedState state [(key, temporary)] key ≠ state key := by
+  constructor
+  · intro observed
+    by_cases same : key = observed
+    · subst observed
+      simp [publishedState, lastPublication]
+    · simp [publishedState, lastPublication, same]
+  · simpa [publishedState, lastPublication] using changesValue
+
+#print axioms transientPublicationIsObservable
+
 section ReverseIndex
 
 variable {Member : Type}
