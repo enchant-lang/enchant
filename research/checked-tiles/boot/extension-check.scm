@@ -6,6 +6,8 @@
 (define (arguments mode)
  (cond ((string=? mode "source") (list source "fixture.bl")) ((string=? mode "bare") (list source))
        ((string=? mode "invalid") (list "[}" "fixture.bl")) ((string=? mode "nil") (list bl-nil))
+       ((string=? mode "unterminated") (list "(a \"abc" "fixture.bl"))
+       ((string=? mode "exception") (list "example"))
        ((string=? mode "context") (list ctx)) ((string=? mode "identifier") (list (sym "hello") ctx))
        (else (list source "fixture.bl" ctx))))
 (define (one root phase row)

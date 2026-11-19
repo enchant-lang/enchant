@@ -49,6 +49,11 @@ def run(out):
     args=[['reader-read','host.reader','read_string','source'],['reader-syntax','host.reader','read_syntax','source'],
           ['reader-bare','host.reader','read_all','bare'],['reader-one','host.reader','read_one','bare'],
           ['reader-first','host.reader','read_first','source'],['reader-invalid','host.reader','read_string','invalid'],
+          ['reader-unterminated','host.reader','read_string','unterminated'],
+          ['syntax-invalid','host.reader','read_syntax','invalid'],
+          ['syntax-unterminated','host.reader','read_syntax','unterminated'],
+          ['syntax-exception','host.reader-exception.syntax','exception','exception'],
+          ['limit-exception','host.reader-exception.limit','exception','exception'],
           ['identifier-false','syntax','identifier?','nil'],['context','syntax','context','context'],
           ['identifier','syntax','identifier','identifier'],['read-context','syntax','read','read-context']]
     (out/'probes.scm').write_text(sexp(args))
