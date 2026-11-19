@@ -137,7 +137,11 @@
 (def admitted (set (map :path additions)))
 (defn macro-identity [ps]
  (vec (keep (fn [p] (when (and (:macro-provider? p) (not (contains? admitted (:path p)))) [(:path p) (:sha256 p)])) ps)))
-(def current-providers (providers (:provider-sources original)))
+(def current-providers
+ (let [start (when relink-profile (profile-mark))
+       inventory (providers (:provider-sources original))]
+  (when start (profile-mark :provider-inventory nil start))
+  inventory))
 (def macros (macro-identity current-providers))
 (when-not (or repin? (= macros (macro-identity (:provider-sources original))))
  (throw (ex-info "native update: macro providers changed; capture a fresh closure"
@@ -191,9 +195,11 @@
      (when start (profile-mark :row-install nil start))))
    (let [existing
          (reduce (fn [result ns]
-          (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)
-                source (File/read! (:path old)) sha (artifact/sha source)]
-           (if (and (not recompile-all?) (= sha (:source-sha256 old)))
+          (let [old (dissoc (get (:units original) ns) :cache-status :cache-key)]
+           ;; Full linked passes already read the member through prepare-ns.
+           ;; Hash here only when the result can admit retained definitions.
+           (if (and (not recompile-all?)
+                    (= (artifact/sha (File/read! (:path old))) (:source-sha256 old)))
             (do (println (str "NATIVE_UPDATE_REUSED " ns)) (assoc-in result [:units ns] old))
             (let [_ (println (str "NATIVE_UPDATE_COMPILE " ns))
                   unit (compile-unit ns (:path old) (into (set (:order original)) declared))]
