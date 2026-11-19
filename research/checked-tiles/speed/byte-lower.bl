@@ -1,0 +1,43 @@
+(ns speed.byte-lower (:require [reader :as rd] [lower2 :as l] [compiler :as c] [termination :as term] [speed.bytes :as bytes]))
+
+; Adapt the existing reader-node lowerer to the existing checked read-only fold ABI.
+; The caller enrolls the exact source because the machine bounds are fixture-specific.
+(defn lower [decl]
+  (let [items (l/nitems decl) name (l/nname (nth items 1))
+        body (nth items 3) lp-node (l/find-loop body)
+        _ (assert (= 4 (count items)))
+        _ (assert (= ["buf" "n"] (mapv l/nname (l/nitems (nth items 2)))))
+        _ (l/check-pure! body)
+        verdict (term/check-loop (c/compile lp-node (c/new-env "speed.bytes")))
+        _ (assert (= :accepted (:status verdict)))
+        lp (l/parse-loop lp-node)
+        divisor (if (= body lp-node) 1
+                  (do (assert (= "quot" (l/head-name body)))
+                      (assert (= lp-node (first (l/call-args body))))
+                      (assert (= 2 (count (l/call-args body))))
+                      (assert (= 2 (l/int-val (second (l/call-args body))))) 2))]
+    (assert (= :fold (:kind lp)))
+    (assert (= 0 (l/int-val (:ctr0 lp))))
+    (assert (= 1 (:step lp)))
+    (assert (= "n" (l/nname (:bound lp))))
+    (assert (= (:acc lp) (l/nname (:ret lp))))
+    (reset! l/stms nil)
+    (reset! l/nvar 4)
+    (l/emit! "init 3 0")
+    (let [v (l/lower-expr! {:syms {"buf" 0 "n" 1 (:ctr lp) 3 (:acc lp) 2}} (:next lp))]
+      (l/emit! (str "mov 2 " v))
+      (l/emit! "loop 3 1 1")
+      (l/emit! "ret 2")
+      [name divisor (l/ir-text {:name name :nparams 3 :lines (reverse (vec @l/stms))})])))
+
+(let [[path out] (clojure.io/current-command-line-args)
+      source (File/read! path)
+      forms (rd/read-string source path)
+      controls (Jason/decode! (File/read! (str out "/controls.json")))
+      actual (mapv (fn [data] (let [b (erlang/list_to_binary (to-list data)) n (count data)]
+                                [(bytes/grade b n) (bytes/scan b n)])) controls)]
+  (File/write! (str out "/answers.json") (Jason/encode! (to-list (mapv to-list actual))))
+  (doseq [decl (rest forms)]
+    (let [[name divisor ir] (lower decl)]
+      (File/write! (str out "/" name ".ir") ir)
+      (File/write! (str out "/" name ".div") (str divisor)))))

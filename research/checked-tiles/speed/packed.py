@@ -36,7 +36,7 @@ def port_frame(proc):
     return read_bytes(proc,size)
 
 
-def run_arm(command, is_port, env, requests, warm_count, log):
+def run_arm(command, is_port, env, requests, warm_count, log, *, init_from_seed=True, divisor=1):
     runs = {}
     inner = {}
     started = time.perf_counter_ns()
@@ -50,12 +50,13 @@ def run_arm(command, is_port, env, requests, warm_count, log):
             else:
                 proc.stdin.write(struct.pack('>H',len(requests)))
             for i,(k,n,seed,data,want) in enumerate(requests):
-                message = ((struct.pack('>IQ',len(data)+8,seed) if is_port else
+                message = ((struct.pack('>IQ',len(data)+8,seed if init_from_seed else 0) if is_port else
                             struct.pack('>BHB',k,n,seed)) + data)
                 t = time.perf_counter_ns()
                 proc.stdin.write(message)
                 if is_port:
                     got, duration = struct.unpack('>QQ',port_frame(proc))
+                    got //= divisor
                 else:
                     if not select.select([proc.stdout],[],[],30)[0]:
                         raise TimeoutError('Bend did not return')
