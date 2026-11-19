@@ -8,7 +8,10 @@ import subprocess
 
 from run import HERE, BASE, IMAGE, QUAL, ROOT, command, native_elf, native_module, sexp, sha, write
 
-MODULES={'host.reader':'priv/host/reader.bl','syntax':'priv/boot/syntax.bl'}
+EXCEPTIONS={'host.reader-exception.syntax':'Elixir.BeamLisp.Reader.SyntaxError',
+            'host.reader-exception.limit':'Elixir.BeamLisp.Reader.AtomLimitError'}
+MODULES={'host.reader':'priv/host/reader.bl','syntax':'priv/boot/syntax.bl',
+         **{ns:'priv/host/reader_exception.bl' for ns in EXCEPTIONS}}
 
 
 def run(out):
@@ -18,8 +21,12 @@ def run(out):
     sha(image,qual['images']['stage2'])
     bundle=IMAGE/'eval-prepared.scm'
     sha(bundle,qual['prepared_macro_bundle_sha256'])
-    (out/'modules.scm').write_text(sexp(list(map(list,MODULES.items()))))
-    env=dict(os.environ,BOOT_BUNDLE=str(bundle),BOOT_OUT=str(out))
+    (out/'modules.scm').write_text(sexp([[name,path,*([EXCEPTIONS[name]] if name in EXCEPTIONS else [])] for name,path in MODULES.items()]))
+    tools=json.loads((HERE.parent/'tools.json').read_text())
+    sdk=Path(tools['sdk'])
+    sha(sdk/'artifact.json',tools['descriptor_sha256'])
+    env=dict(os.environ,BOOT_BUNDLE=str(bundle),BOOT_OUT=str(out),BOOT_WIRE=str(HERE/'wire.scm'),
+             BOOT_LINKS=str(HERE/'links.scm'),ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
     def native(payload,log):
         return command([image,'--eval',payload,'unused'],env,out/log)
     emissions=native(HERE/'extend.scm','emit.log').splitlines()
@@ -41,15 +48,27 @@ def run(out):
     print([(ns,len(v['names'])) for ns,v in report['modules'].items()],flush=True)
     args=[['reader-read','host.reader','read_string','source'],['reader-syntax','host.reader','read_syntax','source'],
           ['reader-bare','host.reader','read_all','bare'],['reader-one','host.reader','read_one','bare'],
-          ['reader-first','host.reader','read_first','bare'],['reader-invalid','host.reader','read_string','invalid'],
+          ['reader-first','host.reader','read_first','source'],['reader-invalid','host.reader','read_string','invalid'],
           ['identifier-false','syntax','identifier?','nil'],['context','syntax','context','context'],
           ['identifier','syntax','identifier','identifier'],['read-context','syntax','read','read-context']]
     (out/'probes.scm').write_text(sexp(args))
+    beam_driver=out/'oracle.bl'
+    beam_driver.write_text((HERE/'wire.bl').read_text()+'\n'+(HERE/'extension-oracle.bl').read_text())
+    command([sdk/'bin/bl','--cold','run',beam_driver,'--',out],env,out/'beam.log')
     result=native(HERE/'extension-check.scm','execution.log')
-    report['observations']=[line.split('\t',2) for line in result.splitlines() if line.startswith(('OK\t','ERROR\t'))]
-    if len(report['observations'])!=len(args): raise ValueError('Missing native observations')
+    report['observations']=[]
+    for line in result.splitlines():
+        phase,name,status=line.split('\t',2)
+        gold=sha(out/('beam-'+name+'.wire'))
+        value=sha(out/(phase+'-'+name+'.wire'))
+        report['observations'].append(dict(phase=phase,name=name,status=status,
+                                           beam=gold,native=value,equal=gold==value))
+    if len(report['observations'])!=2*len(args): raise ValueError('Missing native observations')
+    report['sdk']=tools['descriptor_sha256']
+    report['inputs']={name:sha(HERE/name) for name in ['extend.scm','extension-check.scm','links.scm','extension-oracle.bl','wire.bl','wire.scm']}
     write(out/'extension.json',report)
-    print(report['observations'])
+    print([(r['phase'],r['name'],r['equal']) for r in report['observations']])
+
 
 
 if __name__=='__main__':

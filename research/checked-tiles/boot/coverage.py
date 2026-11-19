@@ -83,8 +83,7 @@ def audit(session,out):
                 key=ns+'/'+name
                 if key in entries: raise ValueError('Duplicate qualified declaration: '+key)
                 entries[key]=dict(path=path,kind=kind)
-    (out/'names.scm').write_text(sexp([k.rsplit('/',1) if '/' not in k.split('/',1)[1]
-                                        else k.split('/',1) for k in entries]))
+    (out/'names.scm').write_text(sexp([k.split('/',1) for k in entries]))
     env=dict(os.environ,BOOT_OUT=str(out),BOOT_BUNDLE=str(bundle))
     result=command([image,'--eval',HERE/'coverage.scm','unused'], env,out/'coverage.log')
     for line in result.splitlines():

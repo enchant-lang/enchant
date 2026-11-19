@@ -102,7 +102,7 @@ def run(out,smoke):
     (out/'jobs.scm').write_text(sexp([[r[k] for k in ('id','mode','path','label','reps')] for r in rows]))
     obj=transport_object(out)
     env=dict(os.environ,ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1',
-             BOOT_OUT=str(out), BOOT_TRANSPORT=str(obj))
+             BOOT_OUT=str(out), BOOT_TRANSPORT=str(obj), BOOT_WIRE=str(HERE/'wire.scm'))
     exe=lambda observer:[image,'--eval',HERE/observer,'unused']
     control=out/'control'
     control.mkdir()
@@ -117,7 +117,9 @@ def run(out,smoke):
     env['BOOT_CONTROLS']=str(out/'control.scm')
     controls=command(exe('transport-control.scm'),env,out/'control.log').splitlines()
     print(f'{len(controls)} transport controls',flush=True)
-    beam=command([sdk/'bin/bl','--cold','run',HERE/'beam.bl','--',out],env,out/'beam.log')
+    beam_driver=out/'oracle.bl'
+    beam_driver.write_text((HERE/'wire.bl').read_text()+'\n'+(HERE/'beam.bl').read_text())
+    beam=command([sdk/'bin/bl','--cold','run',beam_driver,'--',out],env,out/'beam.log')
     print('BEAM observations complete',flush=True)
     logs=command(exe('native.scm'),env,out/'native.log')
     values={r['id']:dict(source=r['label'],mode=r['mode'],source_sha256=sha(r['path']),
@@ -150,7 +152,7 @@ def run(out,smoke):
         if not {'beam.parse','native.parse'}<=set(row['timings_us']): raise ValueError(i)
     receipt=dict(qualified_image=sha(image),sdk=tools['descriptor_sha256'],qualification=sha(QUAL),
           transport_object=sha(obj), cpu=next(l.split(':',1)[1].strip() for l in Path('/proc/cpuinfo').read_text().splitlines() if l.startswith('model name')),
-          source={p.name:sha(p) for p in [HERE/'run.py',HERE/'beam.bl',HERE/'native.scm',HERE/'transport.scm',HERE/'transport-control.scm']},
+          source={p.name:sha(p) for p in [HERE/'run.py',HERE/'beam.bl',HERE/'native.scm',HERE/'transport.scm',HERE/'transport-control.scm',HERE/'wire.scm',HERE/'wire.bl']},
           smoke=smoke, transport_controls=[line.replace(str(control)+'/','') for line in controls],rows=list(values.values()))
     write(out/'reader.json',receipt)
     print('Complete witnesses agree:',sum(r['same'] for r in values.values()),'/',len(values))
