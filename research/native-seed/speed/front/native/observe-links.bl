@@ -1518,21 +1518,81 @@
    :unknown-code-read (boolean (:unknown-code-read effects))
    :unknown-resolver-read (boolean (:unknown-resolver-read effects))})))
 
+(def staging-external-registry-records
+ [[:bl_code_evidence_generation 3]
+  [:bl_code_lease_capacity_lock 3]
+  [(tuple :bl_scope_commit_lock :Elixir.BeamLisp.Env :_) 3]
+  [(tuple :bl_native_publication_lock :Elixir.BeamLisp.Env :_) 3]
+  [(tuple :bl_server_execution_ticket :_ :_) 2]
+  [(tuple :bl_server_execution_release :_ :_) 2]])
+
+(defn- staging-external-registry-state [records]
+ (let [spec (apply list (map (fn [[key arity]]
+                             (tuple (apply tuple (cons key (repeat (dec arity) :_))) (list) (list :"$_")))
+                           records))]
+  (loop [page (ets/select :beam_lisp_vars spec 257) rows {}]
+   (if (= :"$end_of_table" page) rows
+    (let [next-rows (reduce (fn [m row] (assoc m (elem row 0) row)) rows (elem page 0))]
+     (assert (<= (count next-rows) 256) "Staging registry comparison exceeds its record bound")
+     (let [continuation (elem page 1)]
+      (if (= :"$end_of_table" continuation) next-rows
+       (recur (ets/select continuation) next-rows))))))))
+
+(defn- around-staging-registry [records action]
+ (let [before (staging-external-registry-state records)
+       result (action)
+       after (staging-external-registry-state records)
+       keys (into (set (keys before)) (keys after))
+       changed (frequencies (keep (fn [key]
+                                    (when-not (erlang/=:= (get before key) (get after key))
+                                     [(cond (not (contains? before key)) :added
+                                            (not (contains? after key)) :removed
+                                            :else :changed)
+                                      (registry-key-shape key)]))
+                                  keys))]
+  [result {:before (count before) :after (count after)
+           :differences (mapv (fn [[[change shape] n]] {:change change :key-shape shape :count n})
+                              (sort changed))}]))
+
+(defn- staging-external-registry-control []
+ (let [transient :native-staging-transient-control
+       retained :native-staging-retained-control
+       records [[transient 2] [retained 2]]]
+  (try
+   (let [[_ result] (around-staging-registry records
+                     (fn []
+                      (BeamLisp.Env/isolated
+                       (fn []
+                        (ets/insert :beam_lisp_vars (tuple transient 1))
+                        (ets/insert :beam_lisp_vars (tuple retained 1))
+                        (ets/delete :beam_lisp_vars transient)))))]
+    (assert (= {:before 0 :after 1
+                :differences [{:change :added :key-shape [:atom retained] :count 1}]}
+               result) (pr-str result))
+    {:transient-registry-record-excluded true :retained-registry-record-detected true})
+   (finally (ets/delete :beam_lisp_vars transient) (ets/delete :beam_lisp_vars retained)))))
+
+(defn- staged-effect-run [closure rows member entries consume]
+ (let [[observed registry] (around-staging-registry staging-external-registry-records
+                             #(staging-effects-member closure rows member entries consume))]
+  (assoc observed :external-registry-after-scope registry)))
+
 (defn- staging-effects [closure rows samples-path selected]
  (when (and selected (not (contains? (:units closure) selected)))
   (throw (ex-info "Unknown native staging member" {:namespace selected})))
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.staging-effects" :version 5 :reuse-authority false
+   {:schema "bl.native.staging-effects" :version 6 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :source-members (count (:order closure))
-    :controls (merge (lowering-boundary-control) (staging-env-write-control) (staging-registry-write-control))
+    :controls (merge (lowering-boundary-control) (staging-env-write-control)
+                     (staging-registry-write-control) (staging-external-registry-control))
     :members (mapv (fn [ns]
                      (let [member (get-in closure [:units ns])
                            consume #(closed-identity (prepared-inputs %))
-                           ordinary (staging-effects-member closure rows member [] consume)
-                           interpreted (staging-effects-member closure rows member entries consume)]
+                           ordinary (staged-effect-run closure rows member [] consume)
+                           interpreted (staged-effect-run closure rows member entries consume)]
                       {:namespace ns
                        :same-prepared-inputs (and (some? (:result ordinary)) (= (:result ordinary) (:result interpreted)))
                        :ordinary (assoc (dissoc ordinary :result) :prepared-identity (:result ordinary))
