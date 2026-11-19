@@ -1,0 +1,90 @@
+;; Use the real position-bearing reader on Source. Trace only function arity
+;; and token lengths so no source suffixes enter the collector mailbox.
+(ns native.beam-reader-token-lengths
+ (:require [reader :as reader] [bl.json :as json]))
+
+(defn- sha256 [bytes]
+ (Base/encode16 (crypto/hash :sha256 bytes) (list (tuple :case :lower))))
+
+(defn- token-body []
+ (let [selected (BeamLisp.Env/selected_ns_definitions "reader" (list "read-string"))
+       modules (set (map #(elem % 4) (maps/get "read-string" selected (list))))
+       entries (keep (fn [module]
+                       (when (some #(= (tuple :"token-length" 2) %)
+                                   (erlang/apply module :module_info (list :functions)))
+                        (tuple module :"token-length" 2)))
+                     modules)]
+  (assert (= 1 (count entries)) "Expected one physical reader token-length function")
+  (first entries)))
+
+(defn- length-bucket [length]
+ (cond (<= length 4) "0–4" (<= length 16) "5–16" (<= length 64) "17–64" :else "65+"))
+
+(defn- collect-lengths [owner entry calls returns maximum buckets]
+ (receive
+  [:trace reader :call seen] :when (and (= reader owner) (= seen entry))
+  (recur owner entry (inc calls) returns maximum buckets)
+  [:trace reader :return_from seen length] :when (and (= reader owner) (= seen entry))
+  (let [bucket (length-bucket length)]
+   (recur owner entry calls (inc returns) (max maximum length)
+          (-> buckets (update-in [bucket :calls] #(+ (or % 0) 1))
+                       (update-in [bucket :codepoints] #(+ (or % 0) length)))))
+  [:finish ticket]
+  (erlang/send owner [:reader-token-lengths ticket
+                      {:calls calls :returns returns :max-codepoints maximum :buckets buckets}])))
+
+(defn- trace-read [entry source file]
+ (let [owner (erlang/self)
+       observer (spawn #(collect-lengths owner entry 0 0 0 {}))
+       session (erlang/apply :trace :session_create (list :reader_token_lengths observer (list)))
+       flags (list :call :arity)
+       spec (list (tuple (list :_ :_) (list) (list (tuple :return_trace))))]
+  (try
+   (assert (= 1 (erlang/apply :trace :function (list session entry spec (list :local)))))
+   (assert (= 1 (erlang/apply :trace :process (list session owner true flags))))
+   (let [forms (reader/read-string source file)
+         _ (erlang/apply :trace :process (list session owner false flags))
+         barrier (erlang/apply :trace :delivered (list session owner))
+         ticket (erlang/make_ref)]
+    (receive [:trace_delivered reader reference] :when (and (= reader owner) (= reference barrier))
+     :delivered (after 10000 (throw :reader-token-trace-delivery-timeout)))
+    (erlang/send observer [:finish ticket])
+    (receive [:reader-token-lengths reference report] :when (= reference ticket)
+     (do
+      (assert (= (:calls report) (:returns report)))
+      (assert (pos? (:returns report)))
+      [forms report])
+     (after 10000 (throw :reader-token-trace-drain-timeout))))
+   (finally
+    (erlang/apply :trace :session_destroy (list session))
+    (Process/exit observer :kill)))))
+
+(defn- timed-read [source file expected]
+ (let [before (erlang/monotonic_time :microsecond)
+       work (elem (Process/info (erlang/self) :reductions) 1)
+       forms (reader/read-string source file)
+       cost {:wall-us (- (erlang/monotonic_time :microsecond) before)
+             :caller-reductions (- (elem (Process/info (erlang/self) :reductions) 1) work)}]
+  (assert (= expected forms))
+  cost))
+
+(let [[output & paths] (BeamLisp/argv)
+      _ (assert (and (string? output) (seq paths) (<= (count paths) 34)))
+      entry (token-body)
+      sdk (System/fetch_env! "BL_SDK_PRODUCT")
+      rows (mapv (fn [file]
+                   (assert (<= (:size (File/stat! file)) 1048576))
+                   (let [source (File/read! file)
+                         expected (reader/read-string source file)
+                         samples (mapv (fn [_] (timed-read source file expected)) (range 3))
+                         [observed report] (trace-read entry source file)]
+                    (assert (= expected observed))
+                    {:path file :sha256 (sha256 source) :bytes (erlang/byte_size source)
+                     :forms (count observed) :untraced samples :token-lengths report}))
+                 paths)]
+ (File/write! output
+  (json/encode {:schema "bl.native.reader-token-length-profile.v1"
+                :sdk-descriptor-sha256 (sha256 (File/read! (str sdk "/artifact.json")))
+                :reader-mfa (vec (erlang/tuple_to_list entry))
+                :reader-module-md5 (Base/encode16 (erlang/apply (elem entry 0) :module_info (list :md5)))
+                :exact-forms true :samples rows})))
