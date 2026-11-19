@@ -21,6 +21,9 @@
   (for-each
    (lambda (form)
     (let ((head (call "native.eval" "head-symbol" form)))
+     (if (equal? head "declare")
+       (call "native.eval" "eval-form" form)
+       (begin
      (if (not (member head '("defn" "defn-" "def"))) (error "unhandled declaration" ns head))
      (let* ((decl (call "compiler" "declaration-source" form env))
             (name (call "reader-node" "node-name" (call "reader-node" "node-form" (bl-get decl (bl-key "name")))))
@@ -32,7 +35,7 @@
               (text (call "native.scheme" "emit" ir (options ns module))))
         (display "(native-intern " port) (write ns port) (display " " port) (write name port)
         (display " " port) (display text port) (display ")" port) (newline port)
-        (display "EMIT\t") (display ns) (display "\t") (display name) (newline)))))
+        (display "EMIT\t") (display ns) (display "\t") (display name) (newline)))))))
    (cdr forms))))
 (with-exception-catcher
  (lambda (e) (display-exception e (current-error-port)) (exit 1))
