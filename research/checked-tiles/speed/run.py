@@ -140,7 +140,7 @@ def build(out, gpu):
         raise ValueError('Ordinary BEAM and independent oracle differ')
     receipt['ordinary_beam_observations'] = len(rows)
     commands = {}
-    for policy, opt in [('reference',0),('reference',2),('guarded',2),('linked',2),('hoisted',2)]:
+    for policy, opt in [('reference',0),('reference',2),('guarded',2),('linked',2),('hoisted',2),('shapes',2)]:
         name = f'{policy}-O{opt}'
         code = (HERE/'arithmetic.scm').read_bytes() + (out/(policy+'.scm')).read_bytes()
         cfg = native_elf.configuration(SEED, True, checked)

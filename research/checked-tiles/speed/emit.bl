@@ -2,6 +2,23 @@
   (:require [native.eval :as ev] [native.scheme :as scheme] [compiler :as c]
             [reader :as rd] [reader-node :as rn]))
 
+; Fast paths for this sealed snapshot. Every unhandled input still invokes the
+; exact captured import. Operands have already been evaluated by linked-call.
+(defn import-call [policy code cell args]
+  (let [a (first args) ordinary (str "(" cell " " (Enum/join (to-list args) " ") ")")]
+    (if (not= policy "shapes") ordinary
+      (case code
+        "(native-remote \"erlang/hd/1\")" (str "(if (pair? " a ") (car " a ") " ordinary ")")
+        "(native-remote \"erlang/tl/1\")" (str "(if (pair? " a ") (cdr " a ") " ordinary ")")
+        "(native-remote \"Elixir.BeamLisp.Ns.Rt/empty?/1\")"
+          (str "(cond ((null? " a ") #t) ((pair? " a ") #f) (else " ordinary "))")
+        "(native-remote \"Elixir.BeamLisp.Ns.Rt/not_/1\")"
+          (str "(if (boolean? " a ") (not " a ") " ordinary ")")
+        "(native-remote \"Elixir.BeamLisp.Ns.Core/quot/2\")"
+          (if (= "2" (second args))
+            (str "(if (fixnum? " a ") (quotient " a " 2) " ordinary ")") ordinary)
+        ordinary))))
+
 (defn emit-file [path source policy]
   (let [ns "speed.kernels"
         forms (rd/read-string source path)
@@ -18,12 +35,12 @@
         options (if native? options
                   (assoc options :aot-link
                     {:remote (fn [node]
-                       (when (= policy "hoisted")
+                       (when (or (= policy "hoisted") (= policy "shapes"))
                          (let [code (remote node)
                                cell (str "speed-import-" (or (get @captures code) (count @captures)))]
                            (when-not (contains? @captures code)
                              (swap! captures assoc code (count @captures)))
-                           {:inline? true :call (fn [args] (str "(" cell " " (Enum/join (to-list args) " ") ")"))})))}))
+                           {:inline? true :call (fn [args] (import-call policy code cell args))})))}))
         bodies
         (apply str
       (mapv (fn [form]
