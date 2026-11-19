@@ -171,6 +171,20 @@
   (list (binary/part header 0 (dec (erlang/byte_size header)))
         ",\"windows\":" global ",\"people\":{" (Enum/intersperse rows ",") "}}")))
 
+(defn- report-component-sizes [global people bytes limit]
+ (let [global-bytes (erlang/iolist_size global)
+       users (reduce-kv (fn [sizes _ windows]
+                         (let [size (erlang/iolist_size windows)]
+                          (-> sizes
+                           (update :uid-bytes + size)
+                           (update :largest-uid-bytes max size)
+                           (update :uids-over-limit + (if (> size limit) 1 0)))))
+                        {:uid-bytes 0 :largest-uid-bytes 0 :uids-over-limit 0} people)
+       framing-bytes (- bytes global-bytes (:uid-bytes users))]
+  (assert (pos? framing-bytes))
+  (assoc users :global-bytes global-bytes :global-over-limit (> global-bytes limit)
+               :framing-bytes framing-bytes)))
+
 (defn- cache-user-windows [people now limit]
  (reduce (fn [state [uid events]]
            (let [windows (report-windows events now)
@@ -270,14 +284,18 @@
                                                  (when (or (not reuse?) (contains? dirty uid))
                                                   [uid (report-windows events now)])) rows)))
                       [global global-shaping] (measured #(report-windows events now))
-                      [body encoding]
-                      (measured #(report-body envelope (encoded-windows global)
-                                 (reduce-kv (fn [m uid _]
-                                             (assoc m uid (if-let [window (get windows uid)]
-                                                           (encoded-windows window) (get prior-encoded uid)))) {} rows)))]
-                 [body {:uid-shaping shaping :global-shaping global-shaping :encoding encoding}]))
+                      [[body all individual] encoding]
+                      (measured #(let [all (encoded-windows global)
+                                       individual
+                                       (reduce-kv (fn [encoded uid _]
+                                                   (let [value (if-let [window (get windows uid)]
+                                                                (encoded-windows window)
+                                                                (get prior-encoded uid))]
+                                                    (assoc encoded uid value))) {} rows)]
+                                  [(report-body envelope all individual) all individual]))]
+                 [body {:uid-shaping shaping :global-shaping global-shaping :encoding encoding} all individual]))
        [full full-timing] (report (:events reference) people false)
-       [retained retained-timing] (report actual candidate true)
+       [retained retained-timing global individual] (report actual candidate true)
        bytes (erlang/iolist_size full)
        limit (* 16 1024 1024)]
   (assert (= bytes (erlang/iolist_size retained)))
@@ -292,6 +310,7 @@
                       :retained (measure-file! candidate-file retained bytes)}
                      (finally (File/rm candidate-file) (File/rmdir work)))))]
    {:exact-bytes true :bytes bytes :byte-limit limit :uids (count people) :recomputed-uids (count dirty)
+    :components (report-component-sizes global individual bytes limit)
     :reused-uids (- (count people) (count dirty))
     :retained-uid-encoded-bytes retained-uid-bytes :reused-uid-encoded-bytes reused-uid-bytes
     :status (if (<= bytes limit) :verified-private-file :over-managed-publisher-limit)
