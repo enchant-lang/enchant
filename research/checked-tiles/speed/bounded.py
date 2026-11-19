@@ -12,9 +12,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('session',type=Path)
     p.add_argument('--out',required=True,type=Path)
-    p.add_argument('--direct', action='store_true',
+    style=p.add_mutually_exclusive_group()
+    style.add_argument('--direct', action='store_true',
                    help='keep the machine primitive in operator position inside a lexical lambda')
+    style.add_argument('--machine', action='store_true',
+                       help='lower the four proved operations to unchecked primitives inside their own lambdas')
     args=p.parse_args()
+    mode='machine' if args.machine else 'direct' if args.direct else 'value'
     old=args.session.resolve()
     out=args.out.resolve()
     out.mkdir()
@@ -32,7 +36,7 @@ def main():
         raise ValueError('Unclosed invariant')
     raw=out/'serial.scm'
     job([sdk/'bin/bl','--cold','-p',SEED/'src','run',HERE/'bounded.bl','--',HERE/'kernels.bl',raw,
-         'direct' if args.direct else 'value'],env=env)
+         mode],env=env)
     ordinary=(HERE/'arithmetic.scm').read_bytes()+(old/'shapes.scm').read_bytes()
     if digest(ordinary)!=expected['modules']['shapes-O2']['source_sha256']:
         raise ValueError('Prepared control changed')
@@ -55,7 +59,11 @@ def main():
     commands={'shapes':[image,'--eval',HERE/'serve.scm',base],
               'bounded':[image,'--eval',HERE/'serve.scm',obj['path']],
               'bend-cpu1':[old/'bend','+RTS','--threads','1','--gpu','off']}
-    r=dict(intrinsic_call='direct' if args.direct else 'value',proof=proof,boundary=boundary,source_sha256=checked(HERE/'kernels.bl'),raw_sha256=checked(raw),
+    generated=next(out.glob('*.dynamic.c')).read_text()
+    external=[op for op in ['##fx+', '##fx-', '##fx*', '##fx<'] if ('"'+op+'"') in generated]
+    if args.machine and (external or '___FIXADD(' not in generated or '___FIXMUL(' not in generated):
+        raise ValueError('Proved operations still require dynamic calls')
+    r=dict(intrinsic_call=mode, external_primitives=external,proof=proof,boundary=boundary,source_sha256=checked(HERE/'kernels.bl'),raw_sha256=checked(raw),
            proof_sha256=checked(HERE/'Bound.lean'),elf_sha256=obj['sha256'],runs={},order=[])
     for block in range(3):
         trials=[[case(1,n,17+trial*23+block) for n in (64,4096,32768,65535)] for trial in range(5)]
