@@ -25,3 +25,4 @@
  (check (refused (lambda () (native-atom-account "field-trial-β😀"))))
  (check (= 1 native-reader-symbol-count)))
 (display "SYMBOL_BUDGET_OK") (newline)
+(exit 0)
