@@ -14,7 +14,7 @@
 ;;   PARTITION LINK_ROWS --registry-phases REPORT
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
-;;   PARTITION LINK_ROWS --staging-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
+;;   PARTITION LINK_ROWS --staging-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE|--all [--repeat-pubs]]
 ;;   PARTITION LINK_ROWS --staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --owned-staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --capture-stage-link-plan PLAN QUALIFICATION [CHECKPOINT_DIR [NEW_MEMBER_LIMIT]]
@@ -1573,16 +1573,20 @@
    (finally (ets/delete :beam_lisp_vars transient) (ets/delete :beam_lisp_vars retained)))))
 
 (def generation-publication-entry (tuple :Elixir.BeamLisp.Env :with_code_evidence_publication 1))
+(def staging-preload-entry (tuple :Elixir.BeamLisp.AOT :"preload_sdk_image_closure!" 1))
 
-(defn- generation-publication-collector [caller publication count sites]
+(defn- generation-publication-collector [caller publication preload count sites roots]
  (receive
   [:trace writer :call entry origin] :when (= entry publication)
   (let [next-count (inc count)
         site [(if (= writer caller) :staging-caller :other-process)
               (if (erlang/is_tuple origin) (vec (erlang/tuple_to_list origin)) [:unknown])]]
-   (recur caller publication next-count (if (<= next-count 256) (update sites site #(inc (or % 0))) sites)))
+   (recur caller publication preload next-count
+          (if (<= next-count 256) (update sites site #(inc (or % 0))) sites) roots))
+  [:trace _ :call entry root] :when (= entry preload)
+  (recur caller publication preload count sites (if (< (count roots) 256) (conj roots root) roots))
   [:finish owner ticket]
-  (erlang/send owner [:generation-publications ticket count sites])))
+  (erlang/send owner [:generation-publications ticket count sites roots])))
 
 (defn- generation-frontier []
  (let [rows (ets/lookup :beam_lisp_vars :bl_code_evidence_generation)]
@@ -1591,12 +1595,16 @@
 
 (defn- with-generation-publication-observation [action]
  (let [owner (erlang/self)
-       observer (spawn #(generation-publication-collector owner generation-publication-entry 0 {}))
+       observer (spawn #(generation-publication-collector owner generation-publication-entry staging-preload-entry 0 {} []))
        session (erlang/apply :trace :session_create (list :native_generation_publications observer (list)))
        spec (list (tuple (list :_) (list) (list (tuple :message (tuple :caller)))))
+       preload-spec (list (tuple (list :$1) (list (tuple :is_binary :$1)
+                                                 (tuple :"=<" (tuple :byte_size :$1) 128))
+                                (list (tuple :message :$1))))
        flags (list :call :arity)]
   (try
    (assert (= 1 (erlang/apply :trace :function (list session generation-publication-entry spec (list :local)))))
+   (assert (= 1 (erlang/apply :trace :function (list session staging-preload-entry preload-spec (list :local)))))
    (erlang/apply :trace :process (list session :all true flags))
    (let [[before active-before] (generation-frontier)
          result (action)
@@ -1607,10 +1615,12 @@
     (receive [:trace_delivered :all ref] :when (= ref barrier)
      :ready (after 10000 (throw :generation-publication-delivery-timeout)))
     (erlang/send observer [:finish owner ticket])
-    (receive [:generation-publications ref n sites] :when (= ref ticket)
+    (receive [:generation-publications ref n sites roots] :when (= ref ticket)
      (let [delta (- after before)]
       (assert (<= n 256) "Staging generation observation exceeds its event bound")
+      (assert (< (count roots) 256) "Staging SDK preload observation exceeds its event bound")
       [result {:generation-delta delta :active-before active-before :active-after active-after
+               :sdk-preload-roots (vec (sort (distinct roots)))
                :matches-publications (and (= 0 active-before active-after) (= delta (* 2 n)))
                :publications (mapv (fn [[[actor origin] calls]] {:actor actor :caller origin :count calls})
                                    (sort sites))}])
@@ -1640,12 +1650,12 @@
                                            (fn [] (staging-effects-member closure rows member entries consume))))]
   (assoc observed :external-registry-after-scope registry :code-generation-publications generation)))
 
-(defn- staging-effects [closure rows samples-path selected]
+(defn- staging-effects [closure rows samples-path selected repeat-pubs?]
  (when (and selected (not (contains? (:units closure) selected)))
   (throw (ex-info "Unknown native staging member" {:namespace selected})))
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.staging-effects" :version 7 :reuse-authority false
+   {:schema "bl.native.staging-effects" :version 8 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :source-members (count (:order closure))
@@ -1656,11 +1666,16 @@
                      (let [member (get-in closure [:units ns])
                            consume #(closed-identity (prepared-inputs %))
                            ordinary (staged-effect-run closure rows member [] consume)
+                           repeated (when (and repeat-pubs? (pos? (get-in ordinary [:code-generation-publications :generation-delta])))
+                                      (staged-effect-run closure rows member [] consume))
                            interpreted (staged-effect-run closure rows member entries consume)]
-                      {:namespace ns
+                      (cond-> {:namespace ns
                        :same-prepared-inputs (and (some? (:result ordinary)) (= (:result ordinary) (:result interpreted)))
                        :ordinary (assoc (dissoc ordinary :result) :prepared-identity (:result ordinary))
-                       :interpreted (assoc (dissoc interpreted :result) :prepared-identity (:result interpreted))}))
+                       :interpreted (assoc (dissoc interpreted :result) :prepared-identity (:result interpreted))}
+                       repeated (assoc :ordinary-repeat
+                                 (assoc (dissoc repeated :result)
+                                        :same-prepared-inputs (= (:result ordinary) (:result repeated)))))))
                    (if selected [selected] (:order closure)))})))
 
 (defn- retire-staging-control! [observation inventory]
@@ -2580,7 +2595,9 @@
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
-                (= selected "--staging-effects") (staging-effects closure baseline comparison source-receipt)
+                (= selected "--staging-effects") (staging-effects closure baseline comparison
+                                                   (when-not (= source-receipt "--all") source-receipt)
+                                                   (= mode "--repeat-pubs"))
                 (contains? #{"--staging-retirement-control" "--owned-staging-retirement-control"} selected)
                 (staging-retirement-control closure baseline comparison source-receipt
                  (= selected "--owned-staging-retirement-control"))
