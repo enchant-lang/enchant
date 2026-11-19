@@ -100,6 +100,7 @@ def capture(work, request):
             continue
         started = time.monotonic()
         subprocess.run([*base, mode, output, *args], cwd=overlay, check=True)
+        verify_source(state["source"], overlay)
         state["finished"][filename] = {"sha256": digest(output), "wall-seconds": time.monotonic() - started}
         save(marker, state)
     verify_source(state["source"], overlay)
@@ -116,17 +117,19 @@ def prepare(work, request):
         shutil.copyfile(captured / path.name, path)
     subprocess.run(["python3", FRONT / "edit-relink-fixture.py", SEED / "src/native/scheme.bl",
                     request["edit"]], cwd=overlay, check=True)
+    source = seal(source_paths(overlay), overlay)
     staged = overlay / "prepared"
     staged.mkdir()
     for name in ("partition.json", "link-rows.etf"):
         shutil.copyfile(baseline / name, staged / name)
     run_update(overlay, staged, "--prepare", {})
+    verify_source(source, overlay)
     save(overlay / "linked-request.json",
          {"donor": str(baseline / "partition.json"), "qualification": str(qualification),
           "samples": str(samples), "receipt": str(receipt), "sha256": digest(receipt),
           "plan": str(plan), "stage-plan-sha256": digest(plan)})
     return {"overlay": str(overlay), "capture-wall-seconds": capture_seconds,
-            "source": seal(source_paths(overlay), overlay),
+            "source": source,
             "inputs": seal([plan, receipt, overlay / "linked-request.json",
                             staged / "link-rows.etf", *partition_paths(staged / "partition.json")], overlay)}
 
@@ -188,6 +191,16 @@ def verify_source(mapping, overlay):
         raise ValueError("Retained Source inventory differs from the prepared request")
 
 
+def verify_donor(inputs, request):
+    if seal(inputs) != request["inputs"]:
+        raise ValueError("Donor inputs changed during the comparison")
+
+
+def verify_prepared(prepared, overlay):
+    verify_source(prepared["source"], overlay)
+    verify(prepared["inputs"], overlay)
+
+
 def timings(path):
     wall, user, system = map(float, path.read_text().split())
     return {"wall": wall, "user": user, "system": system, "cpu": round(user + system, 3)}
@@ -230,11 +243,12 @@ def main():
             save(plan, request)
         preparation = work / "preparation.json"
         if not preparation.exists():
-            save(preparation, prepare(work, request))
+            prepared = prepare(work, request)
+            verify_donor(inputs, request)
+            save(preparation, prepared)
         prepared = read(preparation)
         overlay = Path(prepared["overlay"])
-        verify_source(prepared["source"], overlay)
-        verify(prepared["inputs"], overlay)
+        verify_prepared(prepared, overlay)
         passes = []
         for i, mode in enumerate(order[:args.stop_after], 1):
             marker = work / f"pass-{i}.json"
@@ -246,12 +260,13 @@ def main():
                 print(f"Reused {mode} pass {i}", flush=True)
             else:
                 row = run_link(overlay, work, mode, args.profile)
+                verify_prepared(prepared, overlay)
+                verify_donor(inputs, request)
                 row["preparation"] = digest(preparation)
                 save(marker, row)
             passes.append(row)
-        verify(prepared["inputs"], overlay)
-        if seal(inputs) != request["inputs"]:
-            raise ValueError("Donor inputs changed during the comparison")
+        verify_prepared(prepared, overlay)
+        verify_donor(inputs, request)
         if len(passes) < len(order):
             return
         for name in ("closure.etf", "link-rows.etf"):
