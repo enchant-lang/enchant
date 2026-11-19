@@ -43,19 +43,23 @@
                               "resolution_ledger_sha256" "intrinsics_sha256"])
         ; v2: a compiled target wins over a leaf of the same key, and pinned
         ; host modules (metadata :host-modules) link to their namespace.
-        "link_interface_sha256" (fragments/digest link-plan)
+        "sealed" (:sealed? link-plan)
         "resolver_policy" "native-aot-link-v2"))
-(defn decisions-for [ns defs]
+(defn decisions-for [ns definition]
  ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
  ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
  ; A call site's emitted shape depends on its TARGET's kind and declared
  ; arities, so each compiled decision carries that shape.
- (loop [todo (BeamLisp.CompilerData/eager_map :node defs) decisions #{}]
+ (loop [todo (list (:node definition)) decisions #{}]
   (if (erlang/== todo (list)) (vec (sort-by str decisions))
    (let [node (erlang/hd todo)
          decision (case (:op node)
                    :remote (bootstrap/remote-decision link-plan node ns)
-                   :global (bootstrap/global-decision link-plan node) nil)]
+                   :global (let [selected (bootstrap/global-decision link-plan node)
+                                  target [(nth selected 5) (nth selected 6)]
+                                  arities (get (:arities link-plan) target)]
+                              [selected (:fixed arities) (:variadic arities)])
+                   nil)]
     (recur (lists/append (anf/executable-children node) (erlang/tl todo))
            (if decision (conj decisions decision) decisions))))))
 (defn dead-leaves
@@ -75,14 +79,16 @@
                  "host_modules" (mapv (fn [[ns module]] [ns (erlang/atom_to_binary module)]) (:host-modules metadata))}))
   (doseq [key dead] (println (str "NATIVE_DEAD_LEAF " key)))
   (println (str "NATIVE_DEAD_LEAVES " (count dead)))))
+(def fragment-contract (fragments/digest emission-input))
+(def core-prefix (delay (bootstrap/emit-initializers link-plan {:ns "core"} [] true)))
 (defn emission-record [row]
  (let [u (get (:units closure) (get row "namespace")) offset (get row "offset")
        defs (subvec (:defs u) offset (+ offset (get row "count")))]
   {"row" (select-keys row ["namespace" "offset" "count"])
-   "ir_sha256" (artifact/sha (erlang/term_to_binary defs (list :deterministic)))
+   "definition_keys" (mapv #(fragments/digest [fragment-contract (:ns u) % (decisions-for (:ns u) %)]) defs)
+   "seed_sha256" (when (and (= 0 offset) (= "core" (:ns u))) (artifact/sha @core-prefix))
    "source_unit_sha256" (when (= offset 0)
-     (artifact/sha (erlang/term_to_binary (select-keys u [:ns :path :source :requires :module :base-module]) (list :deterministic))))
-   "decisions" (decisions-for (get row "namespace") defs)}))
+     (artifact/sha (erlang/term_to_binary (select-keys u [:ns :path :source :requires :module :base-module]) (list :deterministic))))}))
 (defn key-from-record [record]
  (artifact/sha (erlang/term_to_binary [emission-input record] (list :deterministic))))
 (defn chunk-path [key extension] (str out "/chunks/" key "." extension))
@@ -134,18 +140,20 @@
     (assert (= key (key-from-record current)))
     current))))
 (def fragment-store (delay (fragments/open (str out "/definitions"))))
-(def fragment-contract (fragments/digest emission-input))
-(defn- definition-text [u d]
- (fragments/emit @fragment-store fragment-contract (:ns u) d
-                 (fn [] (bootstrap/emit-definition link-plan u d))))
+(defn- definition-text [u pair]
+ (let [[d key] pair]
+  (fragments/emit @fragment-store key
+                 (fn [] (bootstrap/emit-definition link-plan u d)))))
 (defn emit-chunk! [row]
  (let [key (get row "key") u (get (:units closure) (get row "namespace"))
        offset (get row "offset") count* (get row "count")
        record (emission-record-to-write row)
        defs (subvec (:defs u) offset (+ offset count*))
-       functions (string/join "" (map #(definition-text u %) (filter #(= :fn (:kind %)) defs)))
-       initializers (str (bootstrap/emit-initializers link-plan u [] (= offset 0))
-                        (string/join "" (map #(definition-text u %) (remove #(= :fn (:kind %)) defs))))
+       members (mapv vector defs (get record "definition_keys"))
+       function? (fn [pair] (= :fn (:kind (first pair))))
+       functions (string/join "" (map #(definition-text u %) (filter function? members)))
+       initializers (str (when (and (= 0 offset) (= "core" (:ns u))) @core-prefix)
+                        (string/join "" (map #(definition-text u %) (remove function? members))))
        source-unit (when (= offset 0) (bootstrap/data (select-keys u [:ns :path :source :requires :module :base-module])))
        report {"key" key "emission_inputs" emission-input "emission_record" record
                "functions_sha256" (artifact/sha functions) "initializers_sha256" (artifact/sha initializers)

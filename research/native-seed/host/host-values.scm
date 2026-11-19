@@ -253,7 +253,7 @@
           (cond ((fx= i (vector-length fields))
                  ;; Alternate keyword encodings compare by BL atom spelling.
                  (if (or (bl-tag? key 'utf16-keyword)
-                         (and (symbol? key) (not (eq? key (string->symbol (symbol->string key))))))
+                         (uninterned-symbol? key))
                   (let exact ((j 0))
                    (cond ((fx= j (vector-length fields)) #f)
                          ((zero? (bl-key-compare key (vector-ref fields j))) (fx+ j 1))
