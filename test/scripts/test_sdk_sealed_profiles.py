@@ -48,7 +48,8 @@ class SealedProfiles(unittest.TestCase):
         # Thirty-six scalar compatibility checks preserve Decimal and legacy-vector admission.
         # Compiler-owned deftype reads8 and canonical actor retained-refusal7 keep strict admission.
         # JavaScript staging now includes nine literal-header assertions.
-        self.assertEqual(9 + 1010 + 92 + 71 + 60 + 30 + 5 + 2 + 32 + 16 + 106 + 34 + 24 + 1 + 24 + 107 + 41 + 40 + 150 + 105 + 4 + 12 + 75 + 82 + 16 + 4 + 14 + 4 + 7 + 19 + 18 + 27 + 18 + 13 + 71 + 19 + 14 + 4 + 5 + 2 + 2 + 19 + 78 + 13 + 66 + 14 + 103 + 56 + 9 + 16 + 62 + 101 + 47 + 51 + 174 + 47 + 20 + 32 + 16 + 29 + 9 + 25 + 7 + 3 + 23 + 27 + 32 + 29 + 68 + 1 + 20 + 2 + 29 + 16 + 32 + 32 + 43 + 25 + 11 + 6 + 58 + 12 + 22 + 28 + 3 + 1 + 16 + 26 + 43 + 22 + 40 + 34 + 4 + 10 + 7 + 6 + 2 + 3 + 3 + 10 + 22 + 23 + 79 + 56 + 38 + 35 + 60 + 157 + 52 + 111 + 37 + 86 + 19 + 15 + 24 + 27 + 20 + 21 + 3 + 6 + 28 + 22 + 8 + 7 + 6 + 41 + 36, selection['assertions'])
+        # Interrupted profile retirement adds two membership-index assertions.
+        self.assertEqual(2 + 9 + 1010 + 92 + 71 + 60 + 30 + 5 + 2 + 32 + 16 + 106 + 34 + 24 + 1 + 24 + 107 + 41 + 40 + 150 + 105 + 4 + 12 + 75 + 82 + 16 + 4 + 14 + 4 + 7 + 19 + 18 + 27 + 18 + 13 + 71 + 19 + 14 + 4 + 5 + 2 + 2 + 19 + 78 + 13 + 66 + 14 + 103 + 56 + 9 + 16 + 62 + 101 + 47 + 51 + 174 + 47 + 20 + 32 + 16 + 29 + 9 + 25 + 7 + 3 + 23 + 27 + 32 + 29 + 68 + 1 + 20 + 2 + 29 + 16 + 32 + 32 + 43 + 25 + 11 + 6 + 58 + 12 + 22 + 28 + 3 + 1 + 16 + 26 + 43 + 22 + 40 + 34 + 4 + 10 + 7 + 6 + 2 + 3 + 3 + 10 + 22 + 23 + 79 + 56 + 38 + 35 + 60 + 157 + 52 + 111 + 37 + 86 + 19 + 15 + 24 + 27 + 20 + 21 + 3 + 6 + 28 + 22 + 8 + 7 + 6 + 41 + 36, selection['assertions'])
         self.assertEqual('complete', selection['mode'])
         self.assertTrue(selection['pipeline'])
         self.assertTrue(selection['solver'])
@@ -111,7 +112,7 @@ class SealedProfiles(unittest.TestCase):
         selection = PROFILE['plan'](['sealed-loader'])
         self.assertIn('test.support.source-fixtures', selection['roots'])
         self.assertTrue({'vm.core', 'vm.manager', 'vm.realm', 'vm.session', 'vm.client'}.issubset(selection['roots']))
-        self.assertIn(('test/bl/contextual_profile_recovery_test.bl', 11),
+        self.assertIn(('test/bl/contextual_profile_recovery_test.bl', 13),
                       PROFILE['GROUPS']['factory-admission'][0])
         self.assertIn(('test/bl/contextual_allocation_custody_test.bl', 25),
                       PROFILE['GROUPS']['factory-admission'][0])
