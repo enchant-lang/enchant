@@ -1,0 +1,38 @@
+;; Read the forms the first-party emitter actually produced. A quoted datum
+;; is not a runtime call. Ask the selected image about every literal remote.
+(define (visit expr)
+ (if (pair? expr)
+     (cond ((eq? 'quote (car expr)) #f)
+           ((and (memq (car expr) '(native-remote native-global-exact))
+                 (pair? (cdr expr)) (string? (cadr expr)))
+            (display (car expr)) (for-each (lambda (x) (display "\t") (display x)) (cdr expr)) (newline))
+           (else (visit (car expr)) (visit (cdr expr))))))
+(define (guard f)
+ (with-exception-catcher
+  (lambda (e) (display "failure\t") (write (native-exception-reason e)) (newline))
+  (lambda () (f) (display "success") (newline))))
+(with-exception-catcher
+ (lambda (e) (display-exception e (current-error-port)) (exit 1))
+ (lambda ()
+  (let ((root (getenv "BOOT_OUT")))
+   (for-each (lambda (k) (display "excluded\t") (display k) (newline))
+             native-excluded-host-leaves)
+   (for-each
+    (lambda (row)
+     (display "unit\t") (display (car row)) (newline)
+     (call-with-input-file (cadr row)
+      (lambda (p) (let loop () (let ((x (read p))) (if (not (eof-object? x)) (begin (visit x) (loop)))))))
+    (call-with-input-file (string-append root "/emitted.scm") read))
+   (for-each
+    (lambda (row)
+     (display "link\t") (display (car row)) (display "\t")
+     (display (if (native-remote-available-uncached? (cadr row) (caddr row) (list-ref row 3)) "available" "absent"))
+     (newline))
+    (call-with-input-file (string-append root "/remotes.scm") read))
+   (bl-invoke (native-global-exact "native.bootstrap" "install-source-macros!")
+              (list (native-eval-string (native-read-file (getenv "BOOT_BUNDLE")))))
+   (for-each (lambda (row)
+      (display "load\t") (display (car row)) (display "\t")
+      (guard (lambda () (load (cadr row)))))
+    (call-with-input-file (string-append root "/objects.scm") read))
+   (exit 0))))
