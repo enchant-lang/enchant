@@ -139,3 +139,7 @@ To try your own file after the extension job completes, use the native public re
 To build just those four objects in a new directory, run `scripts/bl-mem` and then:
 
     systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B research/checked-tiles/boot/extension.py --out /tmp/my-reader-extension
+
+Compare the same semantic observations with the original receipts after a full replay. This also prints both timing panels. The completed workstation replay is at `research/native-seed/out/checked-boot-replay`.
+
+    python3 -B research/checked-tiles/boot/compare.py /tmp/my-native-boot-run
