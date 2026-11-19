@@ -67,6 +67,8 @@ def run(pipeline,out):
     if any('definitions 104 emit-failures 0' not in log for log in (native,beam)):
         raise ValueError('Incomplete pipeline')
     counts={r.split()[1]:dict(zip(cells,map(int,r.split()[2:]),strict=True)) for r in native.splitlines() if r.startswith('WORK ')}
+    if set(counts) != {'read','compile','emit'} or any(not any(row[n] for row in counts.values()) for n in cells):
+        raise ValueError('Missing native compiler entries')
     entries={phase:[] for phase in counts}
     for line in beam.splitlines():
         if line.startswith('ENTRY\t'):
