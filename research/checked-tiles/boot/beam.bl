@@ -1,0 +1,49 @@
+(ns boot.oracle (:require [reader :as reader]))
+
+; Length-tagged values distinguish an atom, binary, tuple, list and vector.
+; Maps in reader metadata/diagnostics use the canonical Erlang ordering.
+(defn field [tag text] (list tag (erlang/integer_to_binary (erlang/byte_size text)) ":" text))
+(declare wire)
+(defn sequence-wire [tag xs]
+  (list tag (erlang/integer_to_binary (erlang/length xs)) ":" (Enum/map xs wire)))
+(defn wire [x]
+  (cond
+    (erlang/is_atom x) (field "A" (erlang/atom_to_binary x))
+    (erlang/is_binary x) (field "S" x)
+    (erlang/is_integer x) (field "I" (erlang/integer_to_binary x))
+    (erlang/is_float x) (let [r (Float/ratio x)] (sequence-wire "F" (erlang/tuple_to_list r)))
+    (erlang/is_list x) (sequence-wire "L" x)
+    (erlang/is_tuple x) (sequence-wire "T" (erlang/tuple_to_list x))
+    (vector? x) (sequence-wire "V" (to-list x))
+    (erlang/is_map x) (sequence-wire "M" (lists/sort (maps/to_list x)))
+    :else (throw (ex-info "Unsupported reader witness" {}))))
+
+(defn stream-view [source label]
+  (loop [st (reader/stream source label) rows ()]
+    (let [r (reader/read-next-string st)]
+      (if (= :ok (first r))
+        (recur (last r) (cons (list (nth r 1) (nth r 2)) rows))
+        (list (lists/reverse rows) (:pos (last r)))))))
+(defn observe [mode source label]
+  (try
+    (list :ok (case mode "read" (BeamLisp.Reader/read_string source label)
+                    "syntax" (BeamLisp.Reader/read_syntax source label)
+                    "stream" (stream-view source label)
+                    "raw" (reader/read-string source label)))
+    (catch e (list :error (if (= mode "read") (list (get e :__struct__) (ex-message e))
+                           (or (get e :original) (get e :message) (pr-str e)))))))
+
+(let [[folder] (clojure.io/current-command-line-args)
+      rows (Jason/decode! (File/read! (str folder "/jobs.json")))]
+  (doseq [r rows]
+    (let [path (get r "path") label (get r "label") id (get r "id")
+          source (File/read! path) mode (get r "mode")
+          action (fn [] (observe mode source label))
+          measured (fn [] (let [mem0 (elem (erlang/process_info (erlang/self) :reductions) 1)
+                                t0 (erlang/monotonic_time :microsecond) answer (action)
+                                us (- (erlang/monotonic_time :microsecond) t0)
+                                work (- (elem (erlang/process_info (erlang/self) :reductions) 1) mem0)]
+                            (list us work)))
+          answer (action) bytes (erlang/iolist_to_binary (wire answer))]
+      (File/write! (str folder "/beam-" id ".wire") bytes)
+      (println "BEAM" id (first answer) (pr-str (Enum/map (lists/seq 1 (get r "reps")) (fn [_] (measured)))))))))
