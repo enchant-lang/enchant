@@ -37,23 +37,35 @@ def run(pipeline,out):
     sha(pipeline/'reader.bl',prior['source_sha256'])
     # Preserve the return value as well as the ordered module initialization.
     source=b'(define cost-bundle-result\n'+bundle.read_bytes()+b'\n)\n'
-    cfg=native_elf.configuration(BASE,True,sha)
     def cc(label,argv,cwd,build):
         subprocess.run(argv,cwd=cwd,check=True,capture_output=True,timeout=180)
-    obj=native_module.build_module(out/'module',source,hashlib.sha256(source).hexdigest(),cfg,
-                       cache=out/'objects',report={},bind=sha,run=cc,save=lambda:None)['artifacts']['module']
+    artifacts={}
+    loads={'evaluated':'(native-eval-string (native-read-file A-bundle-path))'}
+    for flag in ('-O0','-O2'):
+        cfg=native_elf.configuration(BASE,True,sha)
+        cfg['flags'][0]=flag
+        cfg['tool_identity']['flags']=cfg['flags']
+        mode='aot'+flag
+        obj=native_module.build_module(out/mode,source,hashlib.sha256(source).hexdigest(),cfg,
+                  cache=out/'objects',report={},bind=sha,run=cc,save=lambda:None)['artifacts']['module']
+        loads[mode]='(begin (load '+sexp(str(obj['path']))+') cost-bundle-result)'
+        artifacts[mode]=dict(sha256=obj['sha256'],flags=cfg['flags'])
     template=(pipeline/'observer.scm').read_text().replace(sexp(str(pipeline)),sexp(str(out)))
     key='(native-eval-string (native-read-file A-bundle-path))'
     assert template.count(key)==1
-    loads={'evaluated':key,'aot':'(begin (load '+sexp(str(obj['path']))+') cost-bundle-result)'}
     runs=[]
-    for block,order in enumerate([['evaluated','aot'],['aot','evaluated']]):
+    modes=list(loads)
+    for block in range(len(modes)):
+        order=modes[block:]+modes[:block]
         for mode in order:
             file=out/(mode+'.scm')
             file.write_text(REGISTER+template.replace(key,'(observed-install (lambda () '+loads[mode]+'))'))
             log=command([image,'--eval',file,'unused'],os.environ,out/f'{mode}-{block}.log')
             compiled,interpreted=next([int(v) for v in line.split()[1:]] for line in log.splitlines() if line.startswith('BUNDLE_PROCEDURES '))
-            assert (compiled>0 and interpreted==0) if mode=='aot' else (interpreted>0 and compiled==0)
+            if mode=='evaluated':
+                assert compiled==0 and interpreted==38
+            else:
+                assert compiled==38 and interpreted==0
             trials=[[float(v)*1000 for v in line.split()[1:]] for line in log.splitlines() if line.startswith('A3_TIMING ')]
             assert len(trials)==4 and 'definitions 104 emit-failures 0' in log
             runs.append(dict(mode=mode,block=block,compiled=compiled,interpreted=interpreted,trials_ms=trials,
@@ -62,7 +74,7 @@ def run(pipeline,out):
     for mode in loads:
         samples=[t for r in runs if r['mode']==mode for t in r['trials_ms']]
         medians[mode]=[statistics.median(values) for values in zip(*samples)]+[statistics.median(map(sum,samples))]
-    write(out/'macro-cost.json',dict(image=sha(image),bundle=sha(bundle),object=obj['sha256'],flags=cfg['flags'],
+    write(out/'macro-cost.json',dict(image=sha(image),bundle=sha(bundle),artifacts=artifacts,
           driver=sha(Path(__file__)),source=prior['source_sha256'],medians_ms=medians,runs=runs,
           scope='Counterbalanced warm Source read, compile and emit. Only the preparation of boot macro bodies differs.'))
     print(medians)
