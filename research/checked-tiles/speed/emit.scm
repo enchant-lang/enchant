@@ -1,0 +1,15 @@
+(with-exception-catcher
+ (lambda (e) (display-exception e (current-error-port)) (exit 1))
+ (lambda ()
+  (let* ((args (cddr (native-command-line)))
+         (bundle (car args)) (adapter (cadr args)) (source (caddr args))
+         (out (cadddr args)))
+    (bl-invoke (native-global-exact "native.bootstrap" "install-source-macros!")
+               (list (native-eval-string (native-read-file bundle))))
+    (bl-invoke (native-global-exact "native.eval" "eval-string") (list (native-read-file adapter) adapter))
+    (for-each
+      (lambda (policy)
+        (let ((code (bl-invoke (native-global-exact "speed.emit" "emit-file") (list source policy))))
+          (call-with-output-file (string-append out "/" policy ".scm")
+            (lambda (port) (display code port)))))
+      '("reference" "guarded")))))

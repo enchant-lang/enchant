@@ -1,0 +1,17 @@
+(with-exception-catcher
+ (lambda (e) (display-exception e (current-error-port)) (exit 1))
+ (lambda ()
+   (load (caddr (native-command-line)))
+   (let ((fns (list->vector (map (lambda (name) (native-global-exact "speed.kernels" name))
+                                 '("serial" "tree" "scan" "mapped" "fused")))))
+     (let loop ()
+       (let ((k (read-u8)))
+         (if (not (eof-object? k))
+             (let* ((hi (read-u8)) (lo (read-u8)) (seed (read-u8)) (n (+ (* hi 256) lo))
+                    (result (cond ((= k 0) seed)
+                                  ((<= k 2) (bl-invoke (vector-ref fns (- k 1)) (list n seed)))
+                                  (else
+                                   (let ((data (make-u8vector n)))
+                                     (if (not (= n (read-subu8vector data 0 n))) (error "short payload"))
+                                     (bl-invoke (vector-ref fns (- k 1)) (list (u8vector->list data))))))))
+               (display result) (newline) (force-output) (loop))))))))

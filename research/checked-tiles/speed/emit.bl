@@ -1,0 +1,24 @@
+(ns speed.emit
+  (:require [native.eval :as ev] [native.scheme :as scheme] [compiler :as c]
+            [reader :as rd] [reader-node :as rn]))
+
+(defn emit-file [path policy]
+  (let [ns "speed.kernels"
+        forms (rd/read-string (host/read-file path) path)
+        _ (ev/eval-form (first forms))
+        context (ev/context ns)
+        arithmetic (:arithmetic-resolver context)
+        fast {:add "speed-add" :sub "speed-sub" :mul "speed-mul" :lt "speed-lt"}
+        options (if (= policy "guarded")
+                  (assoc context :arithmetic-resolver
+                         (fn [node] (or (get fast (:fun node)) (arithmetic node)))) context)]
+    (apply str
+      (mapv (fn [form]
+        (let [env (assoc (c/new-env ns) :target :js)
+              decl (c/declaration-source form env)
+              name (rn/node-name (rn/node-form (:name decl)))
+              _ (BeamLisp.Env/intern ns name nil)
+              _ (c/reset-fresh!)
+              ir (c/compile (:value-form decl) env)]
+          (str "(native-intern \"speed.kernels\" \"" name "\" " (scheme/emit ir options) ")\n")))
+        (rest forms)))))
