@@ -18,6 +18,16 @@ CLOCK = """(define (A-timed-round)
       (error "timed translation differs from warmup"))))
 """
 
+CENSUS = """(define (field-census nodes)
+ (let ((children (A-select "anf" "executable-children")))
+  (let visit ((todo nodes) (compact 0) (total 0))
+   (if (null? todo) (A-log "LAYOUT " compact " " total)
+    (let* ((node (car todo)) (storage (vector-ref node 1))
+           (shared (and (vector? storage) (vector? (vector-ref storage 0)))))
+     (visit (append (A-call children node) (cdr todo))
+            (if shared (+ compact 1) compact) (+ total 1)))))))
+"""
+
 
 def rows(log, mark, factor):
     result = [[float(s)*factor for s in line.split()[1:]]
@@ -55,7 +65,8 @@ def run(pipeline, control, candidate, out):
                     .replace('"priv/boot/reader.bl"', sexp(attr)))
         old_bundle = next(s for s in observer.splitlines() if s.startswith('(define A-bundle-path '))
         observer = observer.replace(old_bundle, '(define A-bundle-path '+sexp(str(bundle))+')')
-        observer = observer.replace('(define (A-run)', CLOCK+'\n(define (A-run)')
+        observer = observer.replace('(define (A-run)', CLOCK+CENSUS+'\n(define (A-run)')
+        observer = observer.replace('(A-log "A3_FIXTURE', '(field-census nodes) (A-log "A3_FIXTURE')
         beam = job/'driver.bl'
         beam.write_text((BASE/'speed/attrib/beam-attrib.bl').read_text()
                         .replace('(def ns-name "reader")','(def ns-name '+sexp(ns)+')')
@@ -78,7 +89,11 @@ def run(pipeline, control, candidate, out):
                     raise ValueError('Incomplete translation')
                 wall = rows(log,'A3_TIMING_US',0.001) if arm=='beam' else rows(log,'WALL',1000)
                 digest = sha(job/('beam.scm' if arm=='beam' else 'native.scm'))
-                runs.append(dict(arm=arm,output=digest,wall_ms=wall,
+                layout = None if arm=='beam' else next([int(v) for v in l.split()[1:]]
+                    for l in log.splitlines() if l.startswith('LAYOUT '))
+                if layout and ((layout[0]>0)!=(arm=='candidate') or layout[1]<1):
+                    raise ValueError(f'Construction switch was ineffective: {arm} {layout}')
+                runs.append(dict(arm=arm,output=digest,wall_ms=wall,layout=layout,
                                  cpu_ms=None if arm=='beam' else rows(log,'CPU',1000)))
         if len({r['output'] for r in runs}) != 1:
             raise ValueError('Compiler output mismatch for '+ns+': '+str([(r['arm'],r['output']) for r in runs]))

@@ -60,7 +60,7 @@ def main():
     common = "\n".join((BASE / p).read_text() for p in sources)
     (out / "values.scm").write_text(common + "\n" + (BASE / "fixtures/host-values-check.scm").read_text())
     values = run("values-control", [GAMBIT / "bin/gsi", "values.scm"])
-    assert "native value/control checks: 27" in values, values
+    assert "native value/control checks: 60" in values, values
     (out / "lazy.scm").write_text(common + "\n" + (BASE / "fixtures/native-memo-check.scm").read_text())
     lazy = run("lazy-memo", [GAMBIT / "bin/gsi", "lazy.scm"])
     assert "native memo checks: 27" in lazy, lazy
