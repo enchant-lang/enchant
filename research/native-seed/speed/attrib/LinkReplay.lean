@@ -182,6 +182,35 @@ theorem reuseAfterGuardedStage {Unit : Type} (state : Key → Option Value)
 
 #print axioms reuseAfterGuardedStage
 
+def externalWrites (external : Key → Bool) : List (Event Key Value) → List (Key × Option Value)
+  | [] => []
+  | .read _ _ :: tail => externalWrites external tail
+  | .write key value :: tail =>
+      if external key then (key, value) :: externalWrites external tail
+      else externalWrites external tail
+
+/- An isolated member may reuse a checked unit without applying a staging
+   effect only when the validated trace's external publications are empty.
+   The runtime must establish that its trace accounts for every effect and
+   that the saved unit comes from the checked lowering. -/
+theorem resumeClosedMember {Unit : Type} (old current : Key → Option Value)
+    (stage : Staging Key Value Result) (lower : Result → Unit)
+    (external : Key → Bool) (saved : Unit)
+    (stagingChecked : valid current (execute old stage).2)
+    (closed : externalWrites external (execute old stage).2 = [])
+    (loweringChecked : lower (execute old stage).1 = saved) :
+    (lower (execute current stage).1, externalWrites external (execute current stage).2) =
+      (saved, []) := by
+  rw [replayOrdered old current stage stagingChecked, loweringChecked, closed]
+
+theorem externalPublicationIneligible (external : Key → Bool) (key : Key) (value : Option Value)
+    (tail : List (Event Key Value)) (visible : external key = true) :
+    externalWrites external (.write key value :: tail) ≠ [] := by
+  simp [externalWrites, visible]
+
+#print axioms resumeClosedMember
+#print axioms externalPublicationIneligible
+
 section ReverseIndex
 
 variable {Member : Type}
