@@ -1,0 +1,48 @@
+;; Experimental fast path at the *existing* canonical-gensyms/1 boundary.
+;; If this ordinary reader tree cannot change under that operation, return it
+;; directly. Delegate every possible fresh name or metadata normalization.
+(define (hygiene-list? xs check)
+ (or (null? xs) (and (pair? xs) (check (car xs)) (hygiene-list? (cdr xs) check))))
+(define (hygiene-pair? pair)
+ (and (bl-tag? pair 'tuple)
+      (let ((v (vector-ref pair 1)))
+       (and (= (vector-length v) 2) (hygiene-unchanged? (vector-ref v 0))
+            (hygiene-unchanged? (vector-ref v 1))))))
+(define (hygiene-unchanged? form)
+ (if (not (bl-tag? form 'tuple))
+  (or (number? form) (string? form) (symbol? form) (boolean? form) (null? form))
+  (let* ((v (vector-ref form 1)) (size (vector-length v)))
+   (and (>= size 2)
+    (let ((inner (vector-ref v 1)))
+     (case (vector-ref v 0)
+      ((|:symbol|)
+       (and (= size 2) (string? inner)
+        (let ((n (string-length inner)))
+         ;; The original recognizes base__N__auto, optionally followed by LF.
+         (or (= n 0) (not (memv (string-ref inner (- n 1)) '(#\o #\newline)))))))
+      ((|:meta|) (and (= size 3) (bl-tag? inner 'tuple) (hygiene-unchanged? inner)))
+      ((|:list| |:vector| |:set|) (and (= size 2) (hygiene-list? inner hygiene-unchanged?)))
+      ((|:map|) (and (= size 2) (hygiene-list? inner hygiene-pair?)))
+      ((|:keyword|) (= size 2))
+      (else #f)))))))
+(define hygiene-yes 0)
+(define hygiene-no 0)
+(define (primitive-install! mode)
+ (if (not (string=? mode "stock"))
+  (let* ((name "compiler/canonical-gensyms")
+         (cell (##make-global-var
+                (string->symbol (apply string-append "v"
+                  (append (map (lambda (c) (string-append "_" (number->string (char->integer c))))
+                               (string->list name)) (list "$1"))))))
+         (base (##global-var-ref cell)) (verify (string=? mode "verify")))
+   (##global-var-set! cell
+    (lambda (form)
+     (if (and (not seed-frame) (hygiene-unchanged? form))
+      (begin
+       (if verify (begin (set! hygiene-yes (+ 1 hygiene-yes))
+                   (if (not (equal? form (base form))) (error "hygiene guard changed result"))))
+       form)
+      (begin (if verify (set! hygiene-no (+ 1 hygiene-no))) (base form))))))))
+(define (primitive-report!)
+ (display "FAST unchanged ") (display hygiene-yes) (newline)
+ (display "FAST fallback ") (display hygiene-no) (newline))
