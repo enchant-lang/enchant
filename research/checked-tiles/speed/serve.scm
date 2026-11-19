@@ -6,7 +6,7 @@
                                  '("serial" "tree" "scan" "mapped" "fused")))))
      (let loop ()
        (let ((k (read-u8)))
-         (if (not (eof-object? k))
+         (if (eof-object? k) (exit 0)
              (let* ((hi (read-u8)) (lo (read-u8)) (seed (read-u8)) (n (+ (* hi 256) lo))
                     (result (cond ((= k 0) seed)
                                   ((<= k 2) (bl-invoke (vector-ref fns (- k 1)) (list n seed)))
