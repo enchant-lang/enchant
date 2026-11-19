@@ -8,11 +8,18 @@
  '[:find ?e ?id ?at ?type ?data :where
    [?e :fact/id ?id] [?e :fact/at ?at] [?e :fact/type ?type] [?e :fact/data ?data]])
 
+(def history-query
+ '[:find ?e :in $ ?since :where [?e :fact/at ?at] [(>= ?at ?since)]])
+
 (defn fact-index [database]
  (into {} (map (juxt first identity) (datom/q fact-query database))))
 
+(defn- decoded-event [[_ id _ type data]]
+ (assoc (json/decode data) "id" id "type" type))
+
 (defn rebuild [current]
- {:basis (db/view-key current) :facts (fact-index current) :path :full-rebuild})
+ (let [facts (fact-index current)]
+  {:basis (db/view-key current) :facts facts :path :full-rebuild}))
 
 (defn advance [previous report current]
  (let [{:keys [db-before db-after tx tx-datoms]} report
@@ -38,7 +45,53 @@
            :caller-reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)}]))
 
 (defn- fact [tempid id at type data]
- {:db/id tempid :fact/id id :fact/at at :fact/type type :fact/data (json/encode data)})
+ {:db/id tempid :fact/id id :fact/at at :fact/type type :fact/data (json/encode (assoc data "at" at))})
+
+(defn- seed-request [index stamp]
+ (let [id (str "seed-" index)
+       at (if (zero? (mod index 10)) (- stamp (* 7 86400000)) stamp)
+       route (if (zero? (mod index 3)) "anthropic" "codex")]
+  (fact (- -1 index) (str "request:" id) at "request"
+        {"request-id" id "uid" (+ 1000 (mod index 150)) "route" route "provider" route
+         "status" (if (zero? (mod index 7)) 429 200)
+         "input_tokens" (when (odd? index) 8) "output_tokens" (when (odd? index) 5)
+         "fallback" (zero? (mod index 13))})))
+
+(defn- update-decoded [before change]
+ (reduce (fn [events id]
+           (if-let [row (get-in change [:facts id])]
+            (assoc events id (decoded-event row))
+            (dissoc events id)))
+         before (:changed change)))
+
+(defn- ordered-events [database since events]
+ ;; Use Station's existing history selection order before rendering. Tied
+ ;; timestamps rank by that order, which a map keyed by entity cannot supply.
+ (mapv (fn [[entity]]
+         (let [event (get events entity)]
+          (assert (some? event))
+          event))
+       (datom/q history-query database since)))
+
+(defn- verify-publication [conn current initial delta stamp]
+ (let [since (- stamp (* 31 86400000))
+       baseline-index (into {} (map (fn [[id row]] [id (decoded-event row)]) (:facts initial)))
+       decoded (update-decoded baseline-index delta)
+       [actual candidate-cost] (measured #(ordered-events current since decoded))
+       [expected reference-cost] (measured #(accounting/facts conn since))
+       now (+ stamp 1)
+       windows (mapv (fn [days]
+                       (let [from-reference (accounting/project expected now days)
+                             from-delta (accounting/project actual now days)]
+                        (assert (= from-reference from-delta))
+                        {:days days :exact true :requests (reduce + 0 (map :requests (:rows from-delta)))}))
+                     [7 30])]
+  (assert (= expected actual))
+  (when (>= (count expected) 10)
+   (assert (< (:requests (first windows)) (:requests (second windows)))))
+  {:events (count actual) :exact-ordered-events true :decoded-updates (count (:changed delta))
+   :history-preparation {:from-retained-events candidate-cost :from-full-pulls reference-cost}
+   :windows windows}))
 
 (defn- replay [n]
  (let [conn (datom/connect accounting/schema)
@@ -47,7 +100,7 @@
    (doseq [batch (range (erlang/div (+ n 499) 500))]
     (let [start (* batch 500)]
      (datom/load-facts! conn
-      (mapv #(fact (- -1 %) (str "request:" %) stamp "request" {"uid" (+ 1000 (mod % 150))})
+      (mapv #(seed-request % stamp)
             (range start (min n (+ start 500)))))))
    (let [start! (fn [] (datom/transact! conn [(fact -1 "attempt:one" stamp "attempt" {"event" "attempt-started"})]))
          _ (start!)
@@ -61,6 +114,7 @@
          _ (assert (= :transaction-delta (:path delta)))
          _ (assert (= 2 (count (:changed delta))))
          _ (assert (= (:facts full) (:facts delta)))
+         publication (verify-publication conn current initial delta stamp)
          cursor-only (datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}])
          cursor-result (advance delta cursor-only (datom/db conn))
          _ (assert (= :transaction-delta (:path cursor-result)))
@@ -74,7 +128,7 @@
     (assert (= :full-rebuild (:path rebuilt) (:path overtaken)))
     (assert (= (fact-index observed) (:facts rebuilt) (:facts overtaken)))
     {:seed-requests n :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
-     :delta delta-cost :full full-cost
+     :delta delta-cost :full full-cost :publication publication
      :controls {:attempt-finish-exact true :cursor-only-ignored true
                 :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}})
    (finally (datom/close! conn)))))
