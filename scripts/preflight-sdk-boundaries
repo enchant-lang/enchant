@@ -69,6 +69,24 @@ def consumer_receipts(path, tests):
     return rows, [row for row in events if row.get('type') == 'handover']
 
 
+def frozen_drift(expected, current):
+    changed = {}
+    for group in sorted(expected.keys() | current.keys()):
+        before, after = expected.get(group), current.get(group)
+        if before == after:
+            continue
+        if group in {'inputs', 'floor', 'SDK_receiver_bytes'}:
+            changed[group] = {
+                'added': sorted(after.keys() - before.keys()),
+                'removed': sorted(before.keys() - after.keys()),
+                'changed': {key: {'before': before[key], 'after': after[key]}
+                            for key in sorted(before.keys() & after.keys()) if before[key] != after[key]},
+            }
+        else:
+            changed[group] = {'before': before, 'after': after}
+    return changed
+
+
 def main():
     preparation_started = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -272,17 +290,21 @@ def main():
               'SDK_receiver_initial_files': receiver_files,
               'preparation_seconds': round(time.monotonic() - preparation_started, 3)}
 
+    def assert_frozen(where):
+        changed = frozen_drift(frozen, capture())
+        if changed:
+            report['input_drift'] = {'where': where, 'sections': changed}
+            raise RuntimeError('frozen inputs changed ' + where)
+
     def stage(name, command, cwd=None, extra_env=None):
-        if capture() != frozen:
-            raise RuntimeError('frozen inputs changed before ' + name)
+        assert_frozen('before ' + name)
         start = time.monotonic()
         deadline = start + (2400 if name == 'consumers' else 1000)
         batches = [command]
         executions, status = [], 0
         with (output / (name + '.log')).open('w') as log:
             for index, batch in enumerate(batches):
-                if capture() != frozen:
-                    raise RuntimeError('frozen inputs changed before process ' + str(index))
+                assert_frozen(f'before {name} process {index}')
                 began = time.monotonic()
                 with tempfile.TemporaryDirectory(prefix='bl-preflight-',
                         dir=os.environ.get('XDG_RUNTIME_DIR')) as runtime:
@@ -304,8 +326,7 @@ def main():
         report['stages'][name]['slowest_tests'] = timings((output / (name + '.log')).read_text())
         if status:
             raise RuntimeError(name + ' failed; see retained log')
-        if capture() != frozen:
-            raise RuntimeError('frozen inputs changed during ' + name)
+        assert_frozen('during ' + name)
 
     try:
         if sdk is not None and set(report['boundaries']) & {'preboot-identity', 'unit-metadata', 'constructor-and-scope'}:
