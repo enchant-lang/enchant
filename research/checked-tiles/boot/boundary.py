@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from run import BASE, HERE, IMAGE, QUAL, ROOT, command, native_elf, native_module, sexp, sha, write
+from run import BASE, HERE, HOST_VALUES, IMAGE, QUAL, ROOT, command, native_elf, native_module, reader_leaf, sexp, sha, transport_source, write
 
 
 def run(out):
@@ -34,11 +34,8 @@ def run(out):
             registry.append(dict(phase=phase, tag=name, equal=gold == value, beam=gold, native=value))
     # Copy the exact image implementation under another symbol. Only its name
     # changes. All three emitted controls now share one Gambit unit and flags.
-    host = (IMAGE/'host.scm').read_text()
-    start = host.index('(define (native-read-file path)')
-    stock = host[start:host.index('(define (native-write-file', start)]
-    source = (stock.replace('(native-read-file path)', '(boot-copy-read-file path)', 1)
-              + (HERE/'transport.scm').read_text()).encode()
+    stock = reader_leaf(IMAGE/'host.scm', 'native-read-file')
+    source = reader_leaf(IMAGE/'host.scm', 'boot-copy-read-file').encode() + transport_source()
     cfg = native_elf.configuration(BASE, True, sha)
     cfg['flags'][0] = '-O2'
     cfg['tool_identity']['flags'] = cfg['flags']
@@ -57,7 +54,7 @@ def run(out):
     write(out/'boundary.json', dict(image=sha(image), sdk=tools['descriptor_sha256'], bundle=sha(bundle),
           stock_source=hashlib.sha256(stock.encode()).hexdigest(), native_module=product['sha256'],
           compiler_flags=cfg['flags'], files={p.name:sha(p) for p in paths},
-          inputs={p:sha(HERE/p) for p in ('registry.bl','registry.scm','io.scm','transport.scm','observations.scm')},
+          inputs={p.name:sha(p) for p in (HOST_VALUES, HERE/'registry.bl', HERE/'registry.scm', HERE/'io.scm', HERE/'transport.scm', HERE/'observations.scm')},
           registrations=registry, activation_log=log, timings_ms=times))
     print([(r['phase'], r['tag'], r['equal']) for r in registry])
 

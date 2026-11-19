@@ -14,6 +14,7 @@ ROOT = HERE.parents[2]
 BASE = ROOT/'research/native-seed'
 IMAGE = BASE/'out/native-prepared-eval-build'
 QUAL = BASE/'speed/attrib/raw/native-prepared-eval-qualification.json'
+HOST_VALUES = BASE/'host/host-values.scm'
 sys.path.insert(0, str(BASE))
 import native_elf
 import native_module
@@ -48,14 +49,26 @@ def command(args, env, log, timeout=420):
     return log.read_text(errors='replace')
 
 
+def reader_leaf(path, name):
+    source = path.read_text()
+    start = source.index('(define (native-read-file path)')
+    stop = source.index('(define (native-write-file', start)
+    return source[start:stop].replace('(native-read-file path)', f'({name} path)', 1)
+
+
+def transport_source():
+    return ((HERE/'transport.scm').read_text()
+            + reader_leaf(HOST_VALUES, 'boot-block-read-file')).encode()
+
+
 def transport_object(out):
     cfg = native_elf.configuration(BASE, True, sha)
     cfg['flags'][0] = '-O2'
     cfg['tool_identity']['flags'] = cfg['flags']
-    source = (HERE/'transport.scm').read_bytes()
+    source = transport_source()
     def compile_step(label, argv, cwd, build):
         subprocess.run(argv,cwd=cwd,check=True,stdout=subprocess.DEVNULL,timeout=90)
-    r = native_module.build_module(out/'transport', source, sha(HERE/'transport.scm'), cfg,
+    r = native_module.build_module(out/'transport', source, hashlib.sha256(source).hexdigest(), cfg,
             cache=out/'objects',report={},bind=sha,run=compile_step,save=lambda:None)
     return Path(r['artifacts']['module']['path'])
 
@@ -153,7 +166,7 @@ def run(out,smoke):
         if not {'beam.parse','native.parse'}<=set(row['timings_us']): raise ValueError(i)
     receipt=dict(qualified_image=sha(image),sdk=tools['descriptor_sha256'],qualification=sha(QUAL),
           transport_object=sha(obj), cpu=next(l.split(':',1)[1].strip() for l in Path('/proc/cpuinfo').read_text().splitlines() if l.startswith('model name')),
-          source={p.name:sha(p) for p in [HERE/'run.py',HERE/'beam.bl',HERE/'native.scm',HERE/'transport.scm',HERE/'transport-control.scm',HERE/'wire.scm',HERE/'wire.bl',HERE/'observations.scm']},
+          source={p.name:sha(p) for p in [HOST_VALUES,HERE/'run.py',HERE/'beam.bl',HERE/'native.scm',HERE/'transport.scm',HERE/'transport-control.scm',HERE/'wire.scm',HERE/'wire.bl',HERE/'observations.scm']},
           smoke=smoke, transport_controls=[line.replace(str(control)+'/','') for line in controls],rows=list(values.values()))
     write(out/'reader.json',receipt)
     print('Complete witnesses agree:',sum(r['same'] for r in values.values()),'/',len(values))
