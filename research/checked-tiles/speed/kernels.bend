@@ -87,7 +87,11 @@ def header(f: File, h: List<&2, U32>) -> IO(Unit):
 def serve(f: File) -> IO(Unit):
   do IO<Unit>:
     p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, 4)
-    (src, res) = p
+    received(p)
+
+def received(p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(Unit):
+  (src, res) = p
+  do IO<Unit>:
     h : List<&2, U32> <- IO.pass(List<&2, U32>, res)
     header(src, h)
 
