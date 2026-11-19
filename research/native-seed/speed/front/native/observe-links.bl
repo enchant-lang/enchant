@@ -304,6 +304,24 @@
    (some? slot) [operation slot (erlang/delete_element 1 key)]
    (sdk-registry-key? key) [operation :sdk key])))
 
+(defn- staging-registry-write [effects operation arguments]
+ (let [operand (second arguments)
+       keys (case operation
+              (:insert :insert_new :delete_object)
+              (let [rows (if (erlang/is_list operand) operand (list operand))]
+               (map (fn [row] (when (and (erlang/is_tuple row) (pos? (erlang/tuple_size row)))
+                               (elem row 0))) rows))
+              (:delete :take :update_counter) (list operand)
+              (list nil))]
+  (reduce (fn [result key]
+            (let [slot (second (registry-input-key effects operation key))
+                  scope (cond (= :own slot) :own
+                              (integer? slot) :ancestor
+                              (some? key) :external
+                              :else :unclassified)]
+             (boundary-event result :staging-registry-writes [operation scope (registry-key-shape key)])))
+          effects keys)))
+
 (defn- record-changing-input [effects operation key prior outcome]
  (let [next (note-input-shape (assoc effects :changing-registry-input true) :changing-registry-shapes operation key)]
   (if (and (= :lookup operation) (erlang/is_tuple key) (= 4 (erlang/tuple_size key))
@@ -591,6 +609,11 @@
   (recur calls pending hits misses reads sources (boundary-event effects :process-boundary [kind]))
   [:trace _ :call [module function arguments]]
   (let [arity (count arguments) entry (tuple module function arity) key (first arguments)
+        effects (if (and (:staging-targets? effects)
+                         (contains? registry-operations entry) (contains? registry-writes function)
+                         (or (= :beam_lisp_vars key) (= (:staging-registry-table effects) key)))
+                   (staging-registry-write effects function arguments)
+                   effects)
         effects (if (and (:registry? effects) (contains? registry-operations entry) (= :beam_lisp_vars key))
                    (cond-> (registry-call effects [function arity])
                     (and (:link-scan-patterns? effects) (= :match_object function) (= 2 arity))
@@ -680,7 +703,8 @@
        sample-macros? (Process/get :native_phase_macro_samples false)
        ancestors (into {} (map-indexed (fn [index id] [id index]) (rest (BeamLisp.Env/chain))))
        observer (spawn (fn [] (collector 0 nil #{} #{} [] #{}
-                               (assoc options :scope scope :ancestor-slots ancestors :sample-macros? sample-macros?))))
+                               (cond-> (assoc options :scope scope :ancestor-slots ancestors :sample-macros? sample-macros?)
+                                (:staging-targets? options) (assoc :staging-registry-table (ets/whereis :beam_lisp_vars))))))
        session (erlang/apply :trace :session_create (list :native_link_observation observer (list)))
        match (if (:registry? options)
                (registry-trace-spec 2 true (:boundary? options))
@@ -1371,6 +1395,28 @@
                (reduce (fn [counts [[_ slot] n]] (update counts slot #(+ (or % 0) n))) {} writes)))
     {:own-write-observed true :unclassified-write-observed true}))))
 
+(defn- staging-registry-write-control []
+ (BeamLisp.Env/isolated
+  (fn []
+   (let [key (tuple :native-staging-write-control "entry")
+         parent-key (BeamLisp.Env/key key)
+         table (ets/whereis :beam_lisp_vars)]
+    (BeamLisp.Env/isolated
+     (fn []
+      (let [[_ observation]
+            (trace! (fn []
+                     (ets/insert table (list (tuple (BeamLisp.Env/key key) true) (tuple parent-key true)))
+                     (ets/delete :beam_lisp_vars :native-staging-write-control-unbound)
+                     (ets/match_delete :beam_lisp_vars (tuple :native-staging-write-control-unbound :_)))
+                    {:registry? true :boundary? true :staging-targets? true})
+            writes (get-in observation [:effects :staging-registry-writes])
+            observed (into #{} (map (fn [[[operation scope _] _]] [operation scope]) writes))]
+       (assert (= #{[:insert :own] [:insert :ancestor] [:delete :external]
+                    [:match_delete :unclassified]} observed)))))
+    (assert (= [(tuple parent-key true)] (vec (ets/lookup table parent-key))))
+    {:own-registry-write-observed true :ancestor-registry-write-observed true
+     :external-registry-write-observed true :unclassified-registry-write-observed true}))))
+
 (defn- lowering-effects [closure rows samples-path selected]
  (when (and selected (not (contains? (:units closure) selected)))
   (throw (ex-info "Unknown native lowering member" {:namespace selected})))
@@ -1455,6 +1501,9 @@
                                   (:staging-code-states effects))
    :env-agent-writes (mapv (fn [[[origin scope] n]] {:callback origin :scope scope :count n})
                            (sort (:staging-env-writes effects)))
+   :registry-write-targets (mapv (fn [[[operation scope shape] n]]
+                                 {:operation operation :scope scope :key-shape shape :count n})
+                                (sort (:staging-registry-writes effects)))
    :effect-refusals (observed-effect-refusals effects)
    :unstable-registry (boolean (:changing-registry-input effects))
    :unexplained-registry-scope (boolean (:unexplained-registry-scope effects))
@@ -1467,11 +1516,11 @@
   (throw (ex-info "Unknown native staging member" {:namespace selected})))
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.staging-effects" :version 4 :reuse-authority false
+   {:schema "bl.native.staging-effects" :version 5 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :source-members (count (:order closure))
-    :controls (merge (lowering-boundary-control) (staging-env-write-control))
+    :controls (merge (lowering-boundary-control) (staging-env-write-control) (staging-registry-write-control))
     :members (mapv (fn [ns]
                      (let [member (get-in closure [:units ns])
                            consume #(closed-identity (prepared-inputs %))
