@@ -27,7 +27,7 @@ import workstation
 
 TOOLS = json.loads((TILES / 'tools.json').read_text())
 BUN = '/nix/store/0gk371kgjyv7s0az07hxjrl8g9k0pf3m-bun-1.4.4/bin/bun'
-NAMES = ['ping', 'serial', 'tree', 'scan', 'mapped', 'fused', 'moments']
+NAMES = ['ping', 'serial', 'tree', 'scan', 'mapped', 'fused', 'moments', 'pipeline']
 CORPUS = (ROOT / 'priv/boot/compiler.bl').read_bytes()
 
 
@@ -69,9 +69,11 @@ def sample(k, n, seed, data=b''):
         value = sum(math.comb(n, i) * ((seed+i)**2+1) for i in range(n+1))
     elif k == 3:
         value = len(re.findall(rb'[0-9]+', data))
+    elif k == 7:
+        value = seed + sum(y for x in data if (y := (3*x+7)%256) < 128)
     else:
         value = sum((x+255)//2 for x in data)
-    if not 0 <= value < 2**32 or (k in (3, 4, 5) and len(data) != n):
+    if not 0 <= value < 2**32 or (k in (3, 4, 5, 7) and len(data) != n):
         raise ValueError('Input outside shared numeric or payload domain')
     return k, n, seed, data, value
 
@@ -82,17 +84,17 @@ def case(k, n, seed):
     if k == 3:
         start = seed * 43
         data = CORPUS[start:start+n]
-    elif k in (4, 5):
+    elif k in (4, 5, 7):
         data = (bytes((i*37+seed) % 256 for i in range(256)) * ((n+255)//256))[:n]
     return sample(k, n, seed, data)
 
 
 def controls():
     edge = b'//09a0\x00\xff1_234/55:58'
-    rows = [case(k, 0, 0) for k in range(7)]
-    rows += [case(k, n, s) for k in range(7) for n, s in ((1, 255), (7, 13))]
-    rows += [sample(k, len(edge), 127, edge) for k in (3, 4, 5)]
-    rows += [sample(k, 256, 99, bytes(range(256))) for k in (3, 4, 5)]
+    rows = [case(k, 0, 0) for k in range(len(NAMES))]
+    rows += [case(k, n, s) for k in range(len(NAMES)) for n, s in ((1, 255), (7, 13))]
+    rows += [sample(k, len(edge), 127, edge) for k in (3, 4, 5, 7)]
+    rows += [sample(k, 256, 99, bytes(range(256))) for k in (3, 4, 5, 7)]
     return rows
 
 
@@ -131,7 +133,7 @@ def build(out, gpu):
     env = dict(os.environ, SPEED_FIXTURES=str(HERE), SPEED_OUTPUT=str(out))
     timed('stage-two read/compile/emit both policies', [image, '--eval', HERE/'emit.scm', bundle], env=env)
     driver = out/'oracle.bl'
-    driver.write_text('\n'.join((HERE/f).read_text() for f in ('kernels.bl','emit.bl','oracle.bl')))
+    driver.write_text((ROOT/'research/rt-selfhost/fusion/pipeline.bl').read_text()+'\n'+'\n'.join((HERE/f).read_text() for f in ('kernels.bl','emit.bl','oracle.bl')))
     rows = controls()
     save(out/'oracle-input.json', [dict(id=k,n=n,seed=s,data=list(d)) for k,n,s,d,_ in rows])
     timed('pinned BEAM oracle and current emitter', [sdk/'bin/bl','--cold','-p',SEED/'src','run',driver,

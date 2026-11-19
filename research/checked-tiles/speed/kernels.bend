@@ -50,6 +50,18 @@ def fused(xs: List<&2, U32>, total: U32) -> U32:
     case Nil{}: total
     case x <> tail: fused(tail, (grade(x) + total : U32))
 
+def take_y(y: U32, acc: U32, keep: Bool) -> U32:
+  match keep:
+    case True{}: (acc + y : U32)
+    case False{}: acc
+
+def pipeline(xs: List<&2, U32>, acc: U32) -> U32:
+  match xs:
+    case Nil{}: acc
+    case x <> tail:
+      +y = ((3 * x + 7) % 256 : U32)
+      pipeline(tail, take_y(y, acc, U32.is_lt(y, 128)))
+
 def consume(xs: List<&2, U32>, scan_it: Bool, map_it: Bool) -> U32:
   match scan_it map_it:
     case True{} _: scan(xs, False{}, 0)
@@ -61,11 +73,16 @@ def finish(f: File, result: U32) -> IO(File):
     u : Unit <- IO.print(U32.show(result))
     return f
 
-def bytes(+k: U32, p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(File):
+def consume_or_pipeline(xs: List<&2, U32>, seed: U32, run_pipe: Bool, run_scan: Bool, run_map: Bool) -> U32:
+  match run_pipe:
+    case True{}: pipeline(xs, seed)
+    case False{}: consume(xs, run_scan, run_map)
+
+def bytes(+k: U32, seed: U32, p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(File):
   (f, res) = p
   do IO<File>:
     xs : List<&2, U32> <- IO.pass(List<&2, U32>, res)
-    finish(f, consume(xs, U32.is_eq(k, 3), U32.is_eq(k, 4)))
+    finish(f, consume_or_pipeline(xs, seed, U32.is_eq(k, 7), U32.is_eq(k, 3), U32.is_eq(k, 4)))
 
 def dispatch(f: File, k: Nat, n: U32, seed: U32) -> IO(File):
   match k:
@@ -76,7 +93,7 @@ def dispatch(f: File, k: Nat, n: U32, seed: U32) -> IO(File):
     case 1n+1n+1n+rest:
       do IO<File>:
         p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, n)
-        bytes((U32.from_nat(rest) + 3 : U32), p)
+        bytes((U32.from_nat(rest) + 3 : U32), seed, p)
 
 def header(f: File, h: List<&2, U32>) -> IO(File):
   match h:

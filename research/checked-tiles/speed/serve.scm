@@ -3,7 +3,7 @@
  (lambda ()
    (load (caddr (native-command-line)))
    (let ((fns (list->vector (map (lambda (name) (native-global-exact "speed.kernels" name))
-                                 '("serial" "tree" "scan" "mapped" "fused" "moments")))))
+                                 '("serial" "tree" "scan" "mapped" "fused" "moments" "pipeline")))))
      (let* ((hi (read-u8)) (count (+ (* hi 256) (read-u8))))
      (let loop ((left count))
        (if (= left 0) (exit 0)
@@ -14,5 +14,6 @@
                                   (else
                                    (let ((data (make-u8vector n)))
                                      (if (not (= n (read-subu8vector data 0 n))) (error "short payload"))
-                                     (bl-invoke (vector-ref fns (- k 1)) (list (u8vector->list data))))))))
+                                     (let ((xs (u8vector->list data)))
+                                       (bl-invoke (vector-ref fns (- k 1)) (if (= k 7) (list xs seed) (list xs)))))))))
                (display result) (newline) (force-output) (loop (- left 1))))))))))
