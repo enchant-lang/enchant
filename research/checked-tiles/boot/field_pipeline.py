@@ -43,15 +43,22 @@ def medians(samples):
 
 def run(pipeline, control, candidate, out):
     out.mkdir()
-    sdk_info = json.loads((BASE/'sdk-pin.json').read_text())
+    sdk_info = json.loads((HERE.parent/'tools.json').read_text())
     sdk = Path(sdk_info['sdk'])
     sha(sdk/'artifact.json', sdk_info['descriptor_sha256'])
+    sdk_source = Path(json.loads((sdk/'artifact.json').read_text())['source'])
+    core = {}
+    for build in [control, candidate]:
+        providers = {r['path']:r['sha256'] for r in json.loads((build/'identity.json').read_text())['providers']}
+        for p in ('priv/boot/reader.bl','priv/boot/compiler.bl','priv/boot/anf.bl','priv/boot/rt.bl',
+                  'priv/boot/core.bl','priv/boot/sugar.bl','priv/host/compiler_data.bl','priv/host/optimize.bl'):
+            core[p] = sha(sdk_source/p,providers[p])
     bundle = control/'eval-prepared.scm'
     template = (pipeline/'observer.scm').read_text()
     reference = json.loads((pipeline/'pipeline.json').read_text())
     sha(pipeline/'reader.bl', reference['source_sha256'])
     env = dict(os.environ, ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
-    report = dict(sdk=sdk_info['descriptor_sha256'], prepared_macros=sha(bundle),
+    report = dict(sdk=sdk_info['descriptor_sha256'], core_sources=core, prepared_macros=sha(bundle),
                   images={k:sha(v/'stage1') for k,v in [('control',control),('candidate',candidate)]},
                   boot_sources={k:sha(v/'stage1.scm') for k,v in [('control',control),('candidate',candidate)]},
                   jobs={})
