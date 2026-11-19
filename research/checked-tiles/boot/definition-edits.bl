@@ -1,0 +1,38 @@
+; Exercise the exact input keys and Datom blobs used by native.chunks.
+(ns checked.definition-edits
+ (:require [anf] [compiler] [reader] [native.bootstrap :as boot] [native.fragments :as fragments]))
+(def dir (first (BeamLisp/argv)))
+(def cache (fragments/open dir))
+(defn unit [source]
+ (let [forms (reader/read-string source "piece.bl")
+       defs (boot/definition-values (rest forms) "piece" "piece.bl")]
+  {:ns "piece" :defs (mapv (fn [d] (compiler/reset-fresh!)
+                            (assoc d :node (compiler/compile (:form d) (assoc (compiler/new-env "piece") :target :js))))
+                          defs)}))
+(def before (unit "(ns piece) (def a 1) (def b 2) (def c 3)"))
+(def after  (unit "(ns piece) (def a 1) (def b 4) (def c 3)"))
+(def plan (boot/link-plan {:sealed true} [before]))
+(defn read-unit [u]
+ (let [rendered (atom [])]
+  [(mapv (fn [d]
+    (let [key (fragments/definition-key "fixture" plan (:ns u) d)]
+     (fragments/emit cache key (fn [] (swap! rendered conj (:name d)) (boot/emit-definition plan u d))))) (:defs u))
+   @rendered]))
+(let [[old fresh] (read-unit before) [changed work] (read-unit after) [restored back] (read-unit before)]
+ (assert (= ["a" "b" "c"] fresh))
+ (assert (= ["b"] work)) (assert (= [] back))
+ (assert (= old restored))
+ (assert (= changed (mapv #(boot/emit-definition plan after %) (:defs after))))
+ (assert (= [true false true] (mapv = old changed))))
+(let [d (first (:defs before)) key (fragments/definition-key "fixture" plan "piece" d)]
+ (File/write! (str dir "/recipes/" key) "truncated")
+ (assert (= ["a"] (second (read-unit before)))))
+(let [caller {:kind :expr :node (anf/global "piece" "a")}
+      target ["piece" "a"]
+      one (assoc-in plan [:arities target] {:fixed [1] :fixed-lookup #{1}})
+      two (assoc-in plan [:arities target] {:fixed [2] :fixed-lookup #{2}})
+      unrelated (assoc-in one [:arities ["piece" "b"]] {:fixed [3] :fixed-lookup #{3}})
+      key (fn [p] (fragments/definition-key "fixture" p "piece" caller))]
+ (assert (= (key one) (key unrelated)))
+ (assert (not= (key one) (key two))))
+(println "EDIT_OK first=3 edit=1 reversal=0 corrupt=1 global-arity=invalidated unrelated=retained")

@@ -1,10 +1,30 @@
 ; Durable, host-side cache of emitted definition text. The immutable input is
 ; supplied by the AOT linker. Datom owns blob addressing and atomic publication.
 (ns native.fragments
- (:require [datom.blob :as blob] [datom.blob-fs :as fs] [datom.file :as file]))
+ (:require [anf] [native.bootstrap :as bootstrap] [datom.blob :as blob] [datom.blob-fs :as fs] [datom.file :as file]))
 
 (defn digest [data]
  (file/sha-hex (file/sha256 (erlang/term_to_binary data (list :deterministic)))))
+
+(defn- decisions-for [plan ns definition]
+ ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
+ ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
+ ; A call site's emitted shape depends on its TARGET's kind and declared
+ ; arities, so each compiled decision carries that shape.
+ (loop [todo (list (:node definition)) decisions #{}]
+  (if (erlang/== todo (list)) (vec (sort-by str decisions))
+   (let [node (erlang/hd todo)
+         decision (case (:op node)
+                   :remote (bootstrap/remote-decision plan node ns)
+                   :global (let [selected (bootstrap/global-decision plan node)
+                                  target [(nth selected 5) (nth selected 6)]
+                                  arities (get (:arities plan) target)]
+                              [selected (:fixed arities) (:variadic arities)])
+                   nil)]
+    (recur (lists/append (anf/executable-children node) (erlang/tl todo))
+           (if decision (conj decisions decision) decisions))))))
+(defn definition-key [contract plan ns definition]
+ (digest [contract ns definition (decisions-for plan ns definition)]))
 
 (defn open [directory]
  (File/mkdir_p! (str directory "/recipes"))

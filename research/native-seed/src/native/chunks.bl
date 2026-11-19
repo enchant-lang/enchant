@@ -5,7 +5,7 @@
 ; self-emission (bootstrap --compile). See speed/closure/RESULT.md.
 (ns native.chunks
  (:require [native.artifact :as artifact] [native.fragments :as fragments] [native.bootstrap :as bootstrap]
-           [bl.json :as json] [clojure.string :as string] [anf]
+           [bl.json :as json] [clojure.string :as string]
            [native.resolution-ledger :as ledger]))
 (def args (BeamLisp/argv))
 (def mode (or (nth args 0 nil) "plan"))
@@ -45,23 +45,6 @@
         ; host modules (metadata :host-modules) link to their namespace.
         "sealed" (:sealed? link-plan)
         "resolver_policy" "native-aot-link-v2"))
-(defn decisions-for [ns definition]
- ; A finite syntax walk, not an evaluator. Use only raw proper-list append;
- ; no LazySeq/mapcat chains enter the cache identity or traversal worklist.
- ; A call site's emitted shape depends on its TARGET's kind and declared
- ; arities, so each compiled decision carries that shape.
- (loop [todo (list (:node definition)) decisions #{}]
-  (if (erlang/== todo (list)) (vec (sort-by str decisions))
-   (let [node (erlang/hd todo)
-         decision (case (:op node)
-                   :remote (bootstrap/remote-decision link-plan node ns)
-                   :global (let [selected (bootstrap/global-decision link-plan node)
-                                  target [(nth selected 5) (nth selected 6)]
-                                  arities (get (:arities link-plan) target)]
-                              [selected (:fixed arities) (:variadic arities)])
-                   nil)]
-    (recur (lists/append (anf/executable-children node) (erlang/tl todo))
-           (if decision (conj decisions decision) decisions))))))
 (defn dead-leaves
  "Registered host leaves whose key now links to a compiled closure definition
   (compiled wins). Their owning workstream deletes them."
@@ -85,7 +68,7 @@
  (let [u (get (:units closure) (get row "namespace")) offset (get row "offset")
        defs (subvec (:defs u) offset (+ offset (get row "count")))]
   {"row" (select-keys row ["namespace" "offset" "count"])
-   "definition_keys" (mapv #(fragments/digest [fragment-contract (:ns u) % (decisions-for (:ns u) %)]) defs)
+   "definition_keys" (mapv #(fragments/definition-key fragment-contract link-plan (:ns u) %) defs)
    "seed_sha256" (when (and (= 0 offset) (= "core" (:ns u))) (artifact/sha @core-prefix))
    "source_unit_sha256" (when (= offset 0)
      (artifact/sha (erlang/term_to_binary (select-keys u [:ns :path :source :requires :module :base-module]) (list :deterministic))))}))
