@@ -17,6 +17,7 @@
 ;;   PARTITION LINK_ROWS --staging-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --owned-staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
+;;   PARTITION LINK_ROWS --capture-stage-link-plan PLAN QUALIFICATION [CHECKPOINT_DIR [NEW_MEMBER_LIMIT]]
 ;;   PARTITION LINK_ROWS --env-read-control REPORT
 ;;   PARTITION LINK_ROWS --runtime-read-control REPORT
 ;;   PARTITION LINK_ROWS --code-read-control REPORT
@@ -2227,19 +2228,77 @@
                (set (map #(subvec % 0 2) (:unsupported evidence)))))
     evidence))))
 
-(defn- capture-stage-link-plan [closure rowset qualification]
+(defn- capture-stage-link-member [closure rowset member]
+ (let [[compiled observed] (stage-installed closure (:rows rowset) member stage-trace)
+       _ (assert (erlang/=:= member (second compiled)) (:ns member))
+       {:keys [inputs unsupported]} (stage-link-inputs observed)]
+  {:source-sha256 (:source-sha256 member) :path (:path member)
+   :inputs (vec (sort inputs)) :unsupported unsupported}))
+
+(defn- stage-plan-checkpoint-key [plan]
+ (let [front "research/native-seed/speed/front/native/"
+       sources [(str front "observe-links.bl") (str front "stage-link-guard.bl")
+                (str front "checked-relink.bl") "research/native-seed/src/native/artifact.bl"]
+       identities (mapv read-source-identity sources)]
+  (assert (every? string? identities))
+  (closed-identity [:native-stage-plan-checkpoint-v1 plan (:sdk-descriptor-sha256 artifact/validation-context)
+                    (File/cwd!) identities])))
+
+(defn- atomic-plan-write! [path value]
+ (let [partial (str path "." (System/pid) "-" (erlang/unique_integer (list :positive)) ".tmp")
+       bytes (BeamLisp.CompilerData/check_closed_etf! (erlang/term_to_binary value (list :deterministic)) artifact/limits)]
+  (try
+   (File/write! partial bytes (list :exclusive :sync))
+   (File/rename! partial path)
+   (finally (File/rm partial)))))
+
+(defn- staged-plan-member [path key namespace source]
+ (try
+  (when (and (File/regular? path) (<= (:size (File/stat! path)) (:max-bytes artifact/limits)))
+   (let [{:keys [identity member digest]} (read-registry-member (File/read! path))]
+    (when (and (= [key namespace source] identity) (= source (select-keys member [:path :source-sha256]))
+               (vector? (:inputs member)) (vector? (:unsupported member))
+               (every? (fn [input] (and (vector? input) (= 2 (count input)) (every? string? input)))
+                       (:inputs member))
+               (string? digest) (= digest (closed-identity member)))
+     member)))
+  (catch _ nil)))
+
+(defn- resume-stage-link-plan [closure rowset plan directory limit]
+ (let [key (stage-plan-checkpoint-key plan)
+       _ (assert (string? key))
+       _ (File/mkdir_p! directory)
+       members (mapv #(get-in closure [:units %]) (:order plan))]
+  (doseq [{:keys [path source-sha256]} members]
+   (assert (= source-sha256 (read-source-identity path)) path))
+  (loop [pending members saved {} resumed 0 built 0]
+   (if-let [{:keys [ns] :as member} (first pending)]
+    (let [source (select-keys member [:path :source-sha256])
+          path (Path/join directory (str key "-" (artifact/sha ns) ".etf"))]
+     (if-let [retained (staged-plan-member path key ns source)]
+      (recur (next pending) (assoc saved ns retained) (inc resumed) built)
+      (if (= built limit)
+       (do (println (str "NATIVE_STAGE_PLAN_PENDING captured " built " resumed " resumed)) nil)
+       (let [entry (capture-stage-link-member closure rowset member)]
+        (atomic-plan-write! path {:identity [key ns source] :member entry :digest (closed-identity entry)})
+        (recur (next pending) (assoc saved ns entry) resumed (inc built))))))
+    (do (println (str "NATIVE_STAGE_PLAN_READY captured " built " resumed " resumed))
+        (assoc plan :members saved))))))
+
+(defn- capture-stage-link-plan [closure rowset qualification directory budget]
  (let [anchor (qualified-donor closure qualification)
        _ (assert (= (:links-sha256 anchor) (:sha256 rowset)))
-       members (into {} (map (fn [ns]
-                              (let [member (get-in closure [:units ns])
-                                    [compiled observed] (stage-installed closure (:rows rowset) member stage-trace)
-                                    _ (assert (erlang/=:= member (second compiled)) ns)
-                                    {:keys [inputs unsupported]} (stage-link-inputs observed)]
-                               [ns {:source-sha256 (:source-sha256 member) :path (:path member)
-                                    :inputs (vec (sort inputs)) :unsupported unsupported}]))
-                            (:order closure)))]
-  {:schema :native-stage-link-plan-v1 :donor anchor :sdk (:sdk-pin closure)
-   :order (:order closure) :options (:options closure) :members members}))
+       plan {:schema :native-stage-link-plan-v1 :donor anchor :sdk (:sdk-pin closure)
+             :order (:order closure) :options (:options closure)}
+       limit (when budget (String/to_integer budget))]
+  ;; A saved plan row proposes link keys only. The updater still checks the
+  ;; sparse stage against the full candidate table and validates lowering.
+  (when budget (assert (and (seq directory) (<= 1 limit (count (:order plan))))))
+  (if directory
+   (resume-stage-link-plan closure rowset plan directory limit)
+   (assoc plan :members (into {} (map (fn [ns]
+                                       [ns (capture-stage-link-member closure rowset (get-in closure [:units ns]))])
+                                     (:order plan)))))))
 
 (defn- trace-stage-link-member [closure rows [row-index core-index] ns prior]
  (let [member (get-in closure [:units ns])
@@ -2418,7 +2477,7 @@
                 (= selected "--source-probe-control") (source-probe-control output)
                 (= selected "--row-install-control") (row-install-control closure (:rows baseline))
                 (= selected "--stage-link-subset") (stage-link-subset closure baseline comparison source-receipt)
-                (= selected "--capture-stage-link-plan") (capture-stage-link-plan closure baseline comparison)
+                (= selected "--capture-stage-link-plan") (capture-stage-link-plan closure baseline comparison source-receipt mode)
                 (contains? #{"--replay-stage-link-plan" "--guard-stage-link-plan"} selected)
                 (replay-stage-link-plan closure baseline comparison source-receipt mode (= selected "--guard-stage-link-plan"))
                 (= selected "--outer-control") (outer-control)
@@ -2431,9 +2490,12 @@
                  :members (mapv (fn [ns] (observe closure baseline ns candidate)) (:order closure))
                  :reuse-authority false}
                 :else (observe closure baseline selected candidate))]
-  (File/write! output (if (contains? #{"--capture-source" "--capture-registry" "--capture-bound-registry" "--capture-stage-link-plan"} selected)
+  (when report
+   (if (and (= selected "--capture-stage-link-plan") source-receipt)
+    (atomic-plan-write! output report)
+    (File/write! output (if (contains? #{"--capture-source" "--capture-registry" "--capture-bound-registry" "--capture-stage-link-plan"} selected)
                        (BeamLisp.CompilerData/check_closed_etf! (erlang/term_to_binary report (list :deterministic)) artifact/limits)
-                       (json/encode report)))
+                       (json/encode report)))))
   (when (or (contains? #{"--shadow" "--registry-shadow" "--cached-registry" "--bound-registry" "--bound-env-control" "--bound-export"} selected) source-shadow?)
    (let [different (mapv :namespace (remove :exact-clean-definitions (:members report)))]
     (when (seq different)
