@@ -212,6 +212,40 @@ theorem externalPublicationIneligible (external : Key → Bool) (key : Key) (val
 #print axioms resumeClosedMember
 #print axioms externalPublicationIneligible
 
+def lastPublication (key : Key) : List (Key × Option Value) → Option (Option Value)
+  | [] => none
+  | (written, value) :: tail =>
+      (lastPublication key tail).orElse (fun _ => if written = key then some value else none)
+
+def publishedState (state : Key → Option Value) (writes : List (Key × Option Value))
+    (key : Key) : Option Value :=
+  (lastPublication key writes).getD (state key)
+
+/- At a sequential boundary, a transient publication may be erased if the
+   final value of each written key agrees with the current input state. The
+   runtime must establish complete effect coverage and exclusive ownership
+   through teardown. A matching snapshot alone cannot establish that no
+   concurrent observer saw the intermediate writes. -/
+theorem resumeAfterDischargedPublications {Unit : Type} (old current : Key → Option Value)
+    (stage : Staging Key Value Result) (lower : Result → Unit)
+    (external : Key → Bool) (saved : Unit)
+    (stagingChecked : valid current (execute old stage).2)
+    (discharged : ∀ key value,
+      lastPublication key (externalWrites external (execute old stage).2) = some value →
+        value = current key)
+    (loweringChecked : lower (execute old stage).1 = saved) :
+    lower (execute current stage).1 = saved ∧
+      ∀ key, publishedState current (externalWrites external (execute current stage).2) key =
+        current key := by
+  rw [replayOrdered old current stage stagingChecked, loweringChecked]
+  refine ⟨rfl, ?_⟩
+  intro key
+  cases last : lastPublication key (externalWrites external (execute old stage).2) with
+  | none => simp [publishedState, last]
+  | some value => simpa [publishedState, last] using discharged key value last
+
+#print axioms resumeAfterDischargedPublications
+
 section ReverseIndex
 
 variable {Member : Type}
