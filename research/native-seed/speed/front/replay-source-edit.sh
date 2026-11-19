@@ -110,22 +110,7 @@ if "$capture_local"; then
   receipt_sha=${receipt_sha%% *}
   capture_end=$(python3 -c 'import time; print(time.monotonic_ns())')
 fi
-python3 - "$overlay/$seed/src/native/scheme.bl" "$edit" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-source = path.read_bytes()
-if sys.argv[2] == "--arity":
-    body = b'(Enum/join (cons "v" (Enum/map (unicode/characters_to_list s) (fn [c] (code-text c)))) "")'
-    before = b'(defn ident [s]\n ' + body + b')'
-    after = b'(defn ident\n ([s] ' + body + b')\n ([s prefix] (str prefix (ident s))))'
-else:
-    before = b'(Enum/join (cons "v" (Enum/map (unicode/characters_to_list s)'
-    after = b'(Enum/join (cons "w" (Enum/map (unicode/characters_to_list s)'
-assert source.count(before) == 1, "the retained emitter body does not match the edit fixture"
-path.write_bytes(source.replace(before, after, 1))
-PY
+python3 "$seed/speed/front/edit-relink-fixture.py" "$overlay/$seed/src/native/scheme.bl" "$edit"
 if [[ -z "${receipt:-}" ]] && ! "$stage_link_plan"; then
   "$seed/run" run "$seed/speed/front/observe-links.bl" -- "$baseline/partition.json" \
     "$baseline/link-rows.etf" --capture-source "$overlay/baseline.etf"
