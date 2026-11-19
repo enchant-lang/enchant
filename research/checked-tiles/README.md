@@ -130,3 +130,12 @@ For the full experiment, give the runner a fresh directory. It runs one capped p
     python3 research/checked-tiles/boot/summary.py /tmp/my-native-boot-run
 
 The reader session retains the source list, complete typed terms and mismatch excerpts. The other sessions retain individual timings, compiled objects, binding and import inventories, and the actual stdout, stderr and exit codes. The compiler comparison times reading through emitted Scheme in already-running processes. The CLI comparison invokes cold processes separately. Results for a losing candidate and for an unsupported operation remain visible in both. [Read the journal](journal/04-native-concurrent-core.bl.org) · [Native image qualification](../native-seed/speed/attrib/raw/native-prepared-eval-qualification.json)
+
+To try your own file after the extension job completes, use the native public reader. It verifies the built objects, installs the first-party reader exports and evaluates the actual built-in data-reader registrations before reading the input. Its stdout is the tree rendered by the Enchant printer. Syntax errors go to stderr and exit 1.
+
+    printf '%s\n' '#time"2026-06-15"' | research/checked-tiles/boot/read /tmp/my-native-boot-run/extension -
+    research/checked-tiles/boot/read /tmp/my-native-boot-run/extension --syntax priv/boot/reader-node.bl
+
+To build just those four objects in a new directory, run `scripts/bl-mem` and then:
+
+    systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B research/checked-tiles/boot/extension.py --out /tmp/my-reader-extension

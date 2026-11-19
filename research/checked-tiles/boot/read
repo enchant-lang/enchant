@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Read a user file through the independently built native public reader."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+from run import HERE, IMAGE, QUAL, ROOT, sexp, sha
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('extension', type=Path, help='extension directory from boot/replay')
+p.add_argument('file', help='input BL source path, or - for stdin')
+p.add_argument('--syntax', action='store_true', help='include symbol spans')
+a = p.parse_args()
+q = json.loads(QUAL.read_text())
+ext = a.extension.resolve()
+receipt = json.loads((ext/'extension.json').read_text())
+image = IMAGE/'stage2'
+sha(image,q['images']['stage2'])
+sha(image,receipt['image'])
+bundle = IMAGE/'eval-prepared.scm'
+sha(bundle,q['prepared_macro_bundle_sha256'])
+links = HERE/'links.scm'
+sha(links,receipt['inputs']['links.scm'])
+units = []
+for ns,row in receipt['modules'].items():
+    unit, = (ext/ns).glob('*.o1')
+    sha(unit,row['object'])
+    units.append(str(unit))
+with tempfile.TemporaryDirectory(prefix='enchant-public-reader-') as scratch:
+    work = Path(scratch)
+    manifest = work/'objects.scm'
+    manifest.write_text(sexp(units))
+    source = Path(a.file).resolve()
+    if a.file=='-':
+        source = work/'stdin.bl'
+        with source.open('wb') as f:
+            import shutil
+            shutil.copyfileobj(sys.stdin.buffer,f)
+    env=dict(os.environ,BOOT_OBJECTS=str(manifest),BOOT_LINKS=str(links),BOOT_BUNDLE=str(bundle),
+             BOOT_PROGRAM=str(source),BOOT_LABEL='<stdin>' if a.file=='-' else a.file,
+             BOOT_METHOD='read_syntax' if a.syntax else 'read_string')
+    sys.exit(subprocess.run([image,'--eval',HERE/'read.scm','unused'],env=env,cwd=ROOT).returncode)
