@@ -1,0 +1,16 @@
+(with-exception-catcher
+ (lambda (e) (display-exception e (current-error-port)) (exit 1))
+ (lambda ()
+   (let* ((args (native-command-line)) (module (caddr args)) (paths (cdddr args)))
+     (load module)
+     (define (observe reader path)
+       (with-exception-catcher
+         (lambda (e) (list 'error (call-with-output-string "" (lambda (p) (display-exception e p)))))
+         (lambda () (list 'ok (reader path)))))
+     (for-each (lambda (path)
+                 (let ((a (observe native-read-file path)) (b (observe boot-bulk-read-file path)))
+                   (if (not (equal? a b)) (error "text transport differs" path a b))
+                   (display path) (display "\t") (display (car a))
+                   (display "\t") (if (eq? (car a) 'ok) (display (string-length (cadr a))) (write (cadr a)))
+                   (newline))) paths)
+     (exit 0))))
