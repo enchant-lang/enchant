@@ -8,8 +8,8 @@ def next (x : Nat) :=
 
 theorem intermediates (x : Nat) (h : x < 65521) :
     3*x + 1 < 196563 ∧ next x < 65521 ∧ next x = (3*x+1) % 65521 := by
-  unfold next
-  split <;> try split <;> omega
+  by_cases lo : 3*x + 1 < 65521 <;> by_cases hi : 3*x + 1 < 131042 <;>
+    simp [next, lo, hi] <;> omega
 
 def run : Nat → Nat → Nat
   | 0, x => x
