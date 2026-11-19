@@ -15,6 +15,7 @@
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --staging-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
+;;   PARTITION LINK_ROWS --staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --env-read-control REPORT
 ;;   PARTITION LINK_ROWS --runtime-read-control REPORT
 ;;   PARTITION LINK_ROWS --code-read-control REPORT
@@ -1372,11 +1373,11 @@
                       :process-events (vec (sort (:process-boundary effects)))}))
                    (if selected [selected] (:order closure)))})))
 
-(defn- staging-effects-member [closure rowset member entries]
+(defn- staging-effects-member [closure rowset member entries consume]
  (let [callables (if (= "core" (:ns member)) {}
                   (into {} (map (fn [[name entry]] [entry name]) entries)))
        observe (fn [stage!]
-                 (with-code-mutation-observation
+                 (let [[[prepared observation] mutations] (with-code-mutation-observation
                   (fn []
                    (let [before (code-snapshot)
                          [prepared observed] (trace! stage! {:registry? true :registry-inputs? true
@@ -1392,13 +1393,14 @@
                          states (mapv (fn [module]
                                          [module (contains? before module) (contains? after module)
                                           (= (get before module) (get after module))]) modules)]
-                    [prepared (assoc observed :effects (assoc effects :code-reads reads :staging-code-states states))]))))
-       [[prepared observation] mutations]
+                    [prepared (assoc observed :effects (assoc effects :code-reads reads :staging-code-states states))])))]
+                  [[(consume prepared) observation] mutations]))
+       [[result observation] mutations]
        (with-registry-stage closure (:rows rowset) member entries {:batch-rows? true :with-stage observe}
-        (fn [prepared _ _] (prepared-inputs prepared)))
+        (fn [prepared _ _] prepared))
        effects (:effects observation)]
   {:namespace (:ns member)
-   :prepared-identity (closed-identity prepared)
+   :result result
    :registry (registry-phase-status observation)
    :owned-macros (:all-expansions-owned (macro-lookup-summary observation))
    :source-probes (count (source-probes observation))
@@ -1431,14 +1433,54 @@
     :controls (lowering-boundary-control)
     :members (mapv (fn [ns]
                      (let [member (get-in closure [:units ns])
-                           ordinary (staging-effects-member closure rows member [])
-                           interpreted (staging-effects-member closure rows member entries)]
+                           consume #(closed-identity (prepared-inputs %))
+                           ordinary (staging-effects-member closure rows member [] consume)
+                           interpreted (staging-effects-member closure rows member entries consume)]
                       {:namespace ns
-                       :same-prepared-inputs (and (some? (:prepared-identity ordinary))
-                                                  (= (:prepared-identity ordinary)
-                                                     (:prepared-identity interpreted)))
-                       :ordinary ordinary :interpreted interpreted}))
+                       :same-prepared-inputs (and (some? (:result ordinary)) (= (:result ordinary) (:result interpreted)))
+                       :ordinary (assoc (dissoc ordinary :result) :prepared-identity (:result ordinary))
+                       :interpreted (assoc (dissoc interpreted :result) :prepared-identity (:result interpreted))}))
                    (if selected [selected] (:order closure)))})))
+
+(defn- retire-staging-control! [observation]
+ ;; This control runs in the owned cold qualification VM for the checked
+ ;; donor. Only destinations of observed loads by this staging process enter
+ ;; the experiment. Production needs explicit publication custody.
+ (let [loads (set (keep (fn [[operation module _]] (when (= :load_module operation) module))
+                        (:code-server-targets observation)))
+       modules (mapv :module (filter :after-scope (:code-server-module-states observation)))]
+  (assert (and (seq modules) (<= (count modules) 128)))
+  (doseq [{:keys [module before after-stage after-scope]} (:code-server-module-states observation)
+          :when after-scope]
+   (assert (and (not before) after-stage (contains? loads module)
+                (String/starts_with? (Atom/to_string module) "Elixir.BeamLisp.Eval.M"))))
+  (let [lease (BeamLisp.Env/retain_code! [(first modules)])]
+   (try
+    (assert (= false (BeamLisp.Env/retire_modules! modules)))
+    (assert (every? #(erlang/module_loaded %) modules))
+    (finally (BeamLisp.Env/release_code! lease))))
+  (let [before (erlang/memory :code)]
+   (assert (= true (BeamLisp.Env/retire_modules! modules)))
+   (assert (not-any? #(erlang/module_loaded %) modules))
+   {:retired-modules (count modules) :borrow-guard true :code-bytes-before before
+    :code-bytes-after (erlang/memory :code)})))
+
+(defn- staging-retirement-control [closure rowset samples-path qualification]
+ (let [anchor (qualified-donor closure qualification)]
+  (assert (= (:sha256 rowset) (:links-sha256 anchor)))
+  (with-phase-entries rowset samples-path
+   (fn [entries _]
+    {:schema "bl.native.staging-retirement-control" :version 1 :reuse-authority false
+     :donor anchor :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+     :checks (mapv (fn [[ns mode selected]]
+                      (let [member (get-in closure [:units ns])
+                            _ (assert (= (:source-sha256 member) (artifact/sha (File/read! (:path member)))))
+                            observation (staging-effects-member closure rowset member selected
+                                          #(def-bytes (lower-with-snapshot %)))]
+                       (assert (erlang/=:= (def-bytes member) (:result observation)))
+                       (assoc (retire-staging-control! observation) :namespace ns :mode mode :exact-definitions true)))
+                   (vec (for [_ (range 2) ns ["core" "sugar"] [mode selected] [[:ordinary []] [:interpreted entries]]]
+                          [ns mode selected])))}))))
 
 (defn- env-read-control [report-path]
  (BeamLisp.Env/isolated
@@ -2235,7 +2277,8 @@
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot" "--ambient-roots" "--stage-link-subset"
                                               "--capture-stage-link-plan" "--replay-stage-link-plan" "--guard-stage-link-plan"
                                               "--cached-registry" "--capture-bound-registry" "--bound-registry" "--bound-env-control" "--bound-export"
-                                              "--bound-registry-controls" "--lowering-effects" "--staging-effects"} selected)))
+                                              "--bound-registry-controls" "--lowering-effects" "--staging-effects"
+                                              "--staging-retirement-control"} selected)))
                    (pinned-rows comparison))
        report (cond
                 (= selected "--capture-source") (capture-source closure baseline)
@@ -2248,6 +2291,7 @@
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
                 (= selected "--staging-effects") (staging-effects closure baseline comparison source-receipt)
+                (= selected "--staging-retirement-control") (staging-retirement-control closure baseline comparison source-receipt)
                 (= selected "--env-read-control") (env-read-control output)
                 (= selected "--runtime-read-control") (runtime-read-control)
                 (= selected "--code-read-control") (code-read-control output)
