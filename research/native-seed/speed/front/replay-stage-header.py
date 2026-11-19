@@ -28,6 +28,25 @@ def retarget(text, old, new):
     return text.replace(old, new, 1)
 
 
+def verify_trace(data, sdk_sha, links_sha):
+    if (data['sdk-descriptor-sha256'] != sdk_sha
+            or data['link-rows-sha256'] != links_sha or data['reuse-authority']):
+        raise ValueError('The trace names a different SDK, link table or reuse scope')
+    members = data['members']
+    if not members or len({row['namespace'] for row in members}) != len(members):
+        raise ValueError('The trace is empty or repeats a member')
+    if len(members) != data['source-members']:
+        raise ValueError('The trace does not cover the complete closure')
+    for row in members:
+        repeat = row.get('ordinary-repeat')
+        scopes = [row['ordinary'], row['interpreted']]
+        if repeat is not None:
+            scopes.append(repeat)
+        if (not row['same-prepared-inputs'] or (repeat is not None and not repeat['same-prepared-inputs'])
+                or not all(scope['code-generation-publications']['matches-publications'] for scope in scopes)):
+            raise ValueError(f"{row['namespace']}: incomplete publication trace or mismatched prepared inputs")
+
+
 def run(args):
     tools = runpy.run_path(str(MATRIX))
     digest, read, save = (tools[name] for name in ('digest', 'read', 'save'))
@@ -77,13 +96,9 @@ def run(args):
         raise ValueError('Retained donor or comparison inputs changed')
     baseline, candidate = read(args.baseline), read(output)
     scopes = ('ordinary', 'interpreted')
+    links_sha = inputs[str(links)]
     for data in (baseline, candidate):
-        if (data['sdk-descriptor-sha256'] != pin['descriptor_sha256']
-                or data['link-rows-sha256'] != digest(links)
-                or data['reuse-authority']):
-            raise ValueError('The trace names a different SDK, link table or reuse scope')
-        if not all(row['same-prepared-inputs'] for row in data['members']):
-            raise ValueError('Interpreted staging disagreed with ordinary staging')
+        verify_trace(data, pin['descriptor_sha256'], links_sha)
     members = []
     for old, new in zip(baseline['members'], candidate['members'], strict=True):
         namespace = new['namespace']
