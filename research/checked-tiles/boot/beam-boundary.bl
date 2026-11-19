@@ -1,0 +1,21 @@
+;; The fixture supplies the closures and reference values. Trace just ONE
+;; physical body at a time so nested work is charged to the selected function.
+(defn report [phase action]
+ (profile/call-time (fn [] nil))
+ (doseq [[p owner f arity] observed :when (= phase p)]
+  (dotimes [_ reps]
+   (erlang/apply :tprof :start (list {:type :call_time}))
+   (try
+    (erlang/apply :tprof :enable_trace (list (list (erlang/self))))
+    (erlang/apply :tprof :set_pattern (list owner f arity))
+    (let [start (erlang/monotonic_time :microsecond) value (pass action)
+          duration (- (erlang/monotonic_time :microsecond) start)
+          _ (erlang/apply :tprof :disable_trace (list (list (erlang/self))))
+          sample (erlang/apply :tprof :collect (list))
+          inspected (erlang/apply :tprof :inspect (list sample :total :measurement))
+          raw (erlang/element 3 (erlang/apply :maps :get (list :all inspected)))]
+     (assert (= (case phase "read" forms "compile" nodes "emit" texts) value))
+     (doseq [r raw :when (= owner (erlang/element 1 r))]
+      (println (str "BOUND " phase " " (erlang/atom_to_binary f) " " (erlang/element 3 r)
+                    " " (/ (erlang/element 4 r) 1000) " " (/ duration 1000)))))
+    (finally (erlang/apply :tprof :stop (list)))))))
