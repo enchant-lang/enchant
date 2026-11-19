@@ -14,7 +14,7 @@ theorem scan_step (runs byte : Nat) (inside : Bool) :
     2*(runs + (if 48 ≤ byte ∧ byte < 58 ∧ inside = false then 1 else 0))
     + (if 48 ≤ byte ∧ byte < 58 then 1 else 0) := by
   cases inside <;> by_cases lo : byte < 48 <;> by_cases hi : byte < 58 <;>
-    simp_all [update, bit] <;> omega
+    by_cases above : 48 ≤ byte <;> simp [update, bit, lo, hi, above] <;> (repeat' split) <;> omega
 
 theorem byte_grade (b : Nat) (h : b < 256) : (b + 255) / 2 ≤ 255 := by omega
 #print axioms scan_step
