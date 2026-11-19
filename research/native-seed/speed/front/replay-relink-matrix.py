@@ -2,6 +2,7 @@
 """Compare and resume eager, on-demand and ordinary linking on retained inputs."""
 
 import argparse
+import filecmp
 import fcntl
 import hashlib
 import json
@@ -73,13 +74,12 @@ def prepare(work, request):
     (seed_runtime / "path").write_text(str(runtime) + "\n")
     plan = overlay / "stage-plan.etf"
     receipt = overlay / "bound-donor.etf"
-    capture = Path("research/native-seed/speed/front/observe-links.bl")
-    base = [str(SEED / "run"), "run", str(capture), "--",
+    base = [overlay / SEED / "run", "run", FRONT / "observe-links.bl", "--",
             str(baseline / "partition.json"), str(baseline / "link-rows.etf")]
     started = time.monotonic()
     for args in (["--capture-stage-link-plan", plan, qualification],
                  ["--capture-bound-registry", receipt, samples, qualification]):
-        subprocess.run([*(overlay / Path(base[0]), *base[1:]), *args], cwd=overlay, check=True)
+        subprocess.run([*base, *args], cwd=overlay, check=True)
     capture_seconds = time.monotonic() - started
     subprocess.run(["python3", FRONT / "edit-relink-fixture.py", SEED / "src/native/scheme.bl",
                     request["edit"]], cwd=overlay, check=True)
@@ -149,6 +149,11 @@ def verify(mapping, base):
         raise ValueError(f"Retained inputs or results changed under {base}")
 
 
+def timings(path):
+    wall, user, system = map(float, path.read_text().split())
+    return {"wall": wall, "user": user, "system": system, "cpu": round(user + system, 3)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("baseline", type=Path)
@@ -189,8 +194,9 @@ def main():
             save(preparation, prepare(work, request))
         prepared = read(preparation)
         overlay = Path(prepared["overlay"])
-        if seal(source_paths(overlay), overlay) != prepared["source"]:
-            raise ValueError("Retained Source differs from the prepared request")
+        verify(prepared["source"], overlay)
+        if set(source_paths(overlay)) != {overlay / path for path in prepared["source"]}:
+            raise ValueError("Retained Source inventory differs from the prepared request")
         verify(prepared["inputs"], overlay)
         passes = []
         for i, mode in enumerate(order[:args.stop_after], 1):
@@ -212,10 +218,16 @@ def main():
         if len(passes) < len(order):
             return
         for name in ("closure.etf", "link-rows.etf"):
-            if len({row["files"][name] for row in passes}) != 1:
+            first = Path(passes[0]["directory"]) / name
+            if not all(filecmp.cmp(first, Path(row["directory"]) / name, shallow=False)
+                       for row in passes[1:]):
                 raise ValueError(f"Linked artifacts disagree on {name}")
+        for row in passes:
+            row["linked-pass-seconds"] = timings(Path(row["directory"]) / "linked-pass.seconds")
         report = {"request": request, "capture-wall-seconds": prepared["capture-wall-seconds"],
                   "preparation-sha256": digest(preparation), "passes": passes,
+                  "preparation-seconds": {phase: timings(overlay / "prepared" / f"{phase}.seconds")
+                                          for phase in ("source-pass", "member-rows", "first-partition")},
                   "exact-closure": True, "exact-link-rows": True}
         save(work / "comparison.json", report)
 
