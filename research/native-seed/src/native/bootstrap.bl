@@ -112,6 +112,10 @@
 (defn link-plan [metadata units]
  (let [named (fn [u] (filter :name (:defs u)))]
   {:leaves (set (:leaves metadata))
+   ; The closed linker owns each binding spelling. Every call and value read
+   ; of that target shares the same encoding for this plan.
+   :binding-names (into {} (mapcat (fn [u] (map (fn [d]
+                     [[(:ns u) (:name d)] (binding-name (:ns u) (:name d))]) (named u))) units))
    :table (into {} (map (fn [u] [(:ns u) (set (map :name (named u)))]) units))
    :defined (set (mapcat (fn [u] (map (fn [d] [(:ns u) (:name d)]) (named u))) units))
    :arities (into {} (mapcat (fn [u] (keep (fn [d] (when (= :fn (:kind d))
@@ -165,6 +169,8 @@
    (contains? (:stub-modules plan) m) ["excluded-namespace" key]
    :else (throw (ex-info (str "native link: unresolved remote signature " key) {:remote key :ann (:ann n)}))))))
 (defn global-decision [plan n] (resolution/global-decision (:ledger plan) (:table plan) n))
+(defn- planned-binding [plan ns name]
+ (or (get (:binding-names plan) [ns name]) (binding-name ns name)))
 (defn- direct-call [target]
  {:inline? true :call (fn [operands] (str "(" target (string/join "" (map #(str " " %) operands)) ")"))})
 (defn- variadic-call
@@ -212,10 +218,11 @@
     "leaf" (assoc (direct-call (leaf-binding-name (second decision))) :kind :leaf)
     "compiled"
      (let [[_ _ ns logical _ shape] decision
+           binding (planned-binding plan ns logical)
            link (case shape
-                 "arity" (direct-call (arity-binding-name ns logical (count (:args n))))
-                 "variadic" (direct-call (variadic-binding-name ns logical))
-                 "generic" (generic-call (binding-name ns logical))
+                 "arity" (direct-call (str binding "$" (count (:args n))))
+                 "variadic" (direct-call (str binding "$v"))
+                 "generic" (generic-call binding)
                  nil)]
       (when link (assoc link :kind :compiled)))
      nil))))))
@@ -235,10 +242,10 @@
    (let [arities (get (:arities plan) [sel-ns sel-name])]
     (cond
      (contains? (:fixed-lookup arities) arity)
-      (assoc (direct-call (arity-binding-name sel-ns sel-name arity)) :kind :compiled)
+      (assoc (direct-call (str (planned-binding plan sel-ns sel-name) "$" arity)) :kind :compiled)
      ; No fixed arm of that arity: the variadic arm, as native-resolve-call picks it.
      (and (some? (:variadic arities)) (>= arity (:variadic arities)))
-      (assoc (variadic-call (variadic-binding-name sel-ns sel-name) (:variadic arities)) :kind :compiled)
+      (assoc (variadic-call (str (planned-binding plan sel-ns sel-name) "$v") (:variadic arities)) :kind :compiled)
      :else nil)))))
 (defn link-context [plan ns]
  ; native.eval/context plus :aot-link. Every remote must have an exact
@@ -254,8 +261,8 @@
    (fn [n]
     (let [[_ _ _ _ sel-kind sel-ns sel-name] (global-decision plan n)]
      (if (sealed-function? plan sel-kind sel-ns sel-name)
-      (binding-name sel-ns sel-name)
-      (global-binding-name sel-ns sel-name)))))))
+      (planned-binding plan sel-ns sel-name)
+      (str (planned-binding plan sel-ns sel-name) "$g")))))))
 (defn- sealed-link-definition
  ; N3: every cell is defined once from the compiled value and never set!, so
  ; Gambit sees constant top-level bindings. A compiled :fn has no global-view
@@ -318,14 +325,15 @@
  (string/join "" (map (fn [[name text]] (str "(define " name " " text ")\n")) (:rows @sink))))
 (defn emit-definition [plan unit d]
  (let [ns (:ns unit) sink (atom {:index {} :rows []})
-       context (if (:name d) (assoc (link-context plan ns) :constants sink :constant-prefix (binding-name ns (:name d)))
+       binding (when (:name d) (planned-binding plan ns (:name d)))
+       namespace-text (when binding (scheme/text ns)) name-text (when binding (scheme/text (:name d)))
+       context (if (:name d) (assoc (link-context plan ns) :constants sink :constant-prefix binding)
                  (link-context plan ns))
        arities (when (and (:name d) (= :fn (:kind d))) (declaration-arities (:form d)))
        raw (when (:name d) (sealed-raw plan ns d arities context))
        value (if raw (:value raw) (scheme/emit (:node d) context))]
   (if (:name d)
-   (let [binding (binding-name ns (:name d))
-         constants (constant-defines sink)
+   (let [constants (constant-defines sink)
          cells (link-definition (:sealed? plan) ns (:name d) (:kind d) arities
                                 (if raw {(:arity raw) (:lambda raw)} {}))]
     ; A function's value is a closure, so its constants follow its head (and
@@ -338,11 +346,11 @@
         ; module's own functions on BEAM) reaches local calls too. Dev images
         ; register first: native-link! initializes its cells from the registry.
         (if (:sealed? plan) cells "")
-        "(native-register! " (scheme/text ns) " " (scheme/text (:name d)) " " binding ")\n"
-        "(native-put-meta " (scheme/text ns) " " (scheme/text (:name d))
+        "(native-register! " namespace-text " " name-text " " binding ")\n"
+        "(native-put-meta " namespace-text " " name-text
         " (bl-map (bl-key \"private\") " (if (:private? d) "#t" "#f") "))\n"
         (when arities
-         (str "(native-register-arities! " (scheme/text ns) " " (scheme/text (:name d)) " "
+         (str "(native-register-arities! " namespace-text " " name-text " "
               (data (:fixed arities)) " " (data (:variadic arities)) ")\n"))
         (if (:sealed? plan) "" cells)))
    (str value "\n"))))
