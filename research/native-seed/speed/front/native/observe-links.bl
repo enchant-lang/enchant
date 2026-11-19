@@ -15,6 +15,7 @@
 ;;   PARTITION LINK_ROWS --registry-inputs REPORT [NAMESPACE]
 ;;   PARTITION LINK_ROWS --lowering-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE]
 ;;   PARTITION LINK_ROWS --staging-effects REPORT PHASE_MACRO_SAMPLES [NAMESPACE|--all [--repeat-pubs]]
+;;   PARTITION LINK_ROWS --staging-timing REPORT
 ;;   PARTITION LINK_ROWS --staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --owned-staging-retirement-control REPORT PHASE_MACRO_SAMPLES QUALIFICATION
 ;;   PARTITION LINK_ROWS --capture-stage-link-plan PLAN QUALIFICATION [CHECKPOINT_DIR [NEW_MEMBER_LIMIT]]
@@ -1660,6 +1661,27 @@
                                            (fn [] (staging-effects-member closure rows member entries consume))))]
   (assoc observed :external-registry-after-scope registry :code-generation-publications generation)))
 
+(defn- timed-staging-member [closure rowset ns]
+ (let [member (get-in closure [:units ns])
+       [[prepared compiled staging lowering] total]
+       (phase-cost (fn []
+                    (stage-installed closure (:rows rowset) member
+                     (fn [unit]
+                      (let [[prepared staging] (phase-cost #(build/prepare-ns (:path unit)))
+                            [compiled lowering] (phase-cost #(lower-with-snapshot prepared))]
+                       [prepared compiled staging lowering])))))
+       prepared-id (closed-identity (prepared-inputs prepared))
+       definitions (def-bytes compiled)]
+  (assert (and (some? prepared-id) (erlang/=:= definitions (def-bytes member))) ns)
+  {:namespace ns :prepared-identity prepared-id :definition-sha256 (artifact/sha definitions)
+   :staging staging :lowering lowering :total total}))
+
+(defn- staging-timing [closure rowset]
+ {:schema "bl.native.staging-timing" :version 1 :reuse-authority false
+  :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
+  :link-rows-sha256 (:sha256 rowset) :source-members (count (:order closure))
+  :members (mapv #(timed-staging-member closure rowset %) (:order closure))})
+
 (defn- staging-effects [closure rows samples-path selected repeat-pubs?]
  (when (and selected (not (contains? (:units closure) selected)))
   (throw (ex-info "Unknown native staging member" {:namespace selected})))
@@ -2592,7 +2614,7 @@
                             (not (contains? #{"--phase-compile" "--registry-phases" "--registry-inputs" "--declaration-snapshot" "--ambient-roots" "--stage-link-subset"
                                               "--capture-stage-link-plan" "--replay-stage-link-plan" "--guard-stage-link-plan"
                                               "--cached-registry" "--capture-bound-registry" "--bound-registry" "--bound-env-control" "--bound-export"
-                                              "--bound-registry-controls" "--lowering-effects" "--staging-effects"
+                                              "--bound-registry-controls" "--lowering-effects" "--staging-effects" "--staging-timing"
                                               "--staging-retirement-control" "--owned-staging-retirement-control"} selected)))
                    (pinned-rows comparison))
        report (cond
@@ -2605,6 +2627,7 @@
                 (= selected "--registry-inputs") (registry-phases closure baseline comparison true)
                 (= selected "--registry-shadow") (registry-shadow closure baseline candidate source-receipt)
                 (= selected "--lowering-effects") (lowering-effects closure baseline comparison source-receipt)
+                (= selected "--staging-timing") (staging-timing closure baseline)
                 (= selected "--staging-effects") (staging-effects closure baseline comparison
                                                    (when-not (= source-receipt "--all") source-receipt)
                                                    (= mode "--repeat-pubs"))
