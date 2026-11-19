@@ -1,0 +1,84 @@
+;; Run with the Station gateway Source on the load path. The replay uses
+;; the accounting schema and committed Datom reports in an owned memory DB.
+(ns observatory.station-transaction-delta
+ (:require [bl.json :as json] [datom] [datom.db :as db] [datom.watch :as watch]
+           [gateway.accounting :as accounting]))
+
+(def fact-query
+ '[:find ?e ?id ?at ?type ?data :where
+   [?e :fact/id ?id] [?e :fact/at ?at] [?e :fact/type ?type] [?e :fact/data ?data]])
+
+(defn fact-index [database]
+ (into {} (map (juxt first identity) (datom/q fact-query database))))
+
+(defn rebuild [current]
+ {:basis (db/view-key current) :facts (fact-index current) :path :full-rebuild})
+
+(defn advance [previous report current]
+ (let [{:keys [db-before db-after tx tx-datoms]} report
+       current-key (db/view-key current)]
+  (if (and db-before db-after
+           (= (:basis previous) (db/view-key db-before))
+           (= current-key (db/view-key db-after))
+           (= tx (datom/basis-t db-after)))
+   (let [{:keys [removed added]} (watch/delta-diff fact-query [] db-before db-after tx tx-datoms)
+         old (:facts previous)
+         changed (into (set (map first removed)) (map first added))
+         facts (into (reduce (fn [rows row] (dissoc rows (first row))) old removed)
+                     (map (juxt first identity) added))]
+    {:basis current-key :facts facts :path :transaction-delta
+     :changed changed :transaction-datoms (count tx-datoms)})
+   (rebuild current))))
+
+(defn- measured [action]
+ (let [start (erlang/monotonic_time :microsecond)
+       before (elem (erlang/process_info (erlang/self) :reductions) 1)
+       result (action)]
+  [result {:elapsed-us (- (erlang/monotonic_time :microsecond) start)
+           :caller-reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)}]))
+
+(defn- fact [tempid id at type data]
+ {:db/id tempid :fact/id id :fact/at at :fact/type type :fact/data (json/encode data)})
+
+(defn- replay [n]
+ (let [conn (datom/connect accounting/schema)
+       stamp 1790000000000]
+  (try
+   (doseq [batch (partition-all 500 (range n))]
+    (datom/load-facts! conn
+     (mapv #(fact (- -1 %) (str "request:" %) stamp "request" {"uid" (+ 1000 (mod % 150))}) batch)))
+   (let [start! (fn [] (datom/transact! conn [(fact -1 "attempt:one" stamp "attempt" {"event" "attempt-started"})]))
+         _ (start!)
+         initial (rebuild (datom/db conn))
+         written (datom/transact! conn [(fact -1 "attempt:one" (+ stamp 1) "attempt" {"event" "attempt-finished"})
+                                        (fact -2 "gap:one" stamp "gap" {"event" "gap"})
+                                        {:db/id -3 :cursor/id "audit:fixture" :cursor/offset 10}])
+         current (datom/db conn)
+         [delta delta-cost] (measured #(advance initial written current))
+         [full full-cost] (measured #(rebuild current))
+         _ (assert (= :transaction-delta (:path delta)))
+         _ (assert (= 2 (count (:changed delta))))
+         _ (assert (= (:facts full) (:facts delta)))
+         cursor-only (datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}])
+         cursor-result (advance delta cursor-only (datom/db conn))
+         _ (assert (= :transaction-delta (:path cursor-result)))
+         _ (assert (empty? (:changed cursor-result)))
+         _ (assert (= (:facts delta) (:facts cursor-result)))
+         missed (datom/transact! conn [(fact -1 "request:missed" stamp "request" {"uid" 1000})])
+         latest (datom/transact! conn [(fact -1 "request:latest" stamp "request" {"uid" 1001})])
+         observed (datom/db conn)
+         rebuilt (advance cursor-result latest observed)
+         overtaken (advance cursor-result missed observed)]
+    (assert (= :full-rebuild (:path rebuilt) (:path overtaken)))
+    (assert (= (fact-index observed) (:facts rebuilt) (:facts overtaken)))
+    {:seed-requests n :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
+     :delta delta-cost :full full-cost
+     :controls {:attempt-finish-exact true :cursor-only-ignored true
+                :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}})
+   (finally (datom/close! conn)))))
+
+(let [[output size] (BeamLisp/argv)
+      requests (if size (String/to_integer size) 3000)]
+ (assert (and (string? output) (<= 1 requests 74000)))
+ (File/write! output (json/encode {:schema "enchant.station-transaction-delta-replay.v1"
+                                  :result (replay requests)})))
