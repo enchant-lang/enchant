@@ -2,10 +2,50 @@
 """Measure a complete linked pass with either exact namespace header implementation."""
 
 import argparse
+import hashlib
 from pathlib import Path
 import runpy
 import shutil
 import subprocess
+
+
+def metadata_fields(directory, read, etf):
+    partition = read(directory / 'partition.json')
+    data = (directory / partition['metadata']['path']).read_bytes()
+    reader = etf(data)
+    if data[1] != 116:
+        raise ValueError('Expected partition metadata map')
+    offset, fields = 6, {}
+    for _ in range(reader.integer(2, 4)):
+        key = reader.text(offset, atom=True)
+        start = reader.span(offset)
+        offset = reader.span(start)
+        fields[key] = hashlib.sha256(data[start:offset]).hexdigest()
+    if offset != len(data):
+        raise ValueError('Unexpected metadata payload after map')
+    return fields
+
+
+def verify_reference(baseline, candidate, updater, new_updater_sha, read, etf):
+    old, new = (read(path / 'partition.json') for path in (baseline, candidate))
+    if [(row['namespace'], row['sha256']) for row in old['units']] != [
+            (row['namespace'], row['sha256']) for row in new['units']]:
+        raise ValueError('Linked pass changed a retained member unit')
+    old_fields, new_fields = (metadata_fields(path, read, etf) for path in (baseline, candidate))
+    changed_fields = {key for key in old_fields.keys() | new_fields.keys()
+                      if old_fields.get(key) != new_fields.get(key)}
+    if changed_fields != {'provider-sources', 'linked-context-sha256'}:
+        raise ValueError(f'Unexpected linked metadata changes: {sorted(changed_fields)}')
+    old_identity, new_identity = (read(path / 'identity.json') for path in (baseline, candidate))
+    if old_identity['artifact-sha256'] != old['artifact_sha256'] or new_identity['artifact-sha256'] != new['artifact_sha256']:
+        raise ValueError('Provider inventory names a different artifact')
+    expected = old_identity['providers']
+    rewrites = [row for row in expected if row['path'] == str(updater) and row['origin'] == 'checkout']
+    if len(rewrites) != 1:
+        raise ValueError('Retained inventory does not bind the checkout updater')
+    rewrites[0]['sha256'] = new_updater_sha
+    if new_identity['providers'] != expected:
+        raise ValueError('Provider inventory changed beyond the retargeted updater')
 
 
 def main():
@@ -17,6 +57,7 @@ def main():
     scripts = Path(__file__).resolve().parent
     m = runpy.run_path(str(scripts / 'replay-relink-matrix.py'))
     h = runpy.run_path(str(scripts / 'replay-stage-header.py'))
+    etf = runpy.run_path(str(m['ROOT'] / m['SEED'] / 'partition-closure.py'))['ETF']
     read, save, digest = m['read'], m['save'], m['digest']
     matrix, out = args.matrix.resolve(strict=True), args.out.resolve()
     preparation = matrix / 'preparation.json'
@@ -28,11 +69,13 @@ def main():
     original = Path(prepared['overlay'])
     baseline = next(row for row in retained['passes'] if row['mode'] == 'ordinary')
     baseline_directory = Path(baseline['directory'])
-    inputs = m['seal']([preparation, comparison])
+    baseline_identity = baseline_directory / 'identity.json'
+    retained_paths = [preparation, comparison, baseline_identity]
+    inputs = m['seal'](retained_paths)
 
     def verify_inputs():
         m['verify_prepared'](prepared, original)
-        if m['seal']([preparation, comparison]) != inputs:
+        if m['seal'](retained_paths) != inputs:
             raise ValueError('Retained relink receipts changed')
         m['verify'](baseline['files'], baseline_directory)
 
@@ -79,8 +122,11 @@ def main():
         result = Path(row['directory'])
         update = read(result / 'update.json')
         if (update['changed'] != old_update['changed'] or update['linked-context-reused']
-                or any(row['files'][name] != baseline['files'][name] for name in ('closure.etf', 'link-rows.etf'))):
-            raise ValueError('Linked pass differs from the retained exact ordinary output')
+                or row['files']['link-rows.etf'] != baseline['files']['link-rows.etf']):
+            raise ValueError('Linked pass changes the original member selection or link rows')
+        verify_reference(baseline_directory, result, updater, source[str(updater)], read, etf)
+        if passes and row['files']['closure.etf'] != passes[0]['files']['closure.etf']:
+            raise ValueError('Full linked closure bytes differ between timing runs')
         row.update({'header': mode, 'sdk': pin['descriptor_sha256'],
                     'overrides': {str(path.relative_to(overlay)): source[str(path.relative_to(overlay))]
                                   for path in (update_source, closure_source, driver, *preview.glob('*.bl'))},
@@ -89,7 +135,8 @@ def main():
         passes.append(row)
         print(f'{index}-{mode}: {len(update["changed"])} exact linked members', flush=True)
     save(out / 'comparison.json', {'revision': revision, 'inputs': inputs, 'passes': passes,
-                                    'exact-closure': True, 'exact-link-rows': True})
+                                    'same-experimental-closure-bytes': True, 'exact-retained-member-units': True,
+                                    'exact-retained-link-rows': True})
 
 
 if __name__ == '__main__':
