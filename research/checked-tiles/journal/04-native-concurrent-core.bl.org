@@ -667,3 +667,45 @@ The chunk builder now keys emitted definitions independently of their position i
 I relinked the original stage-two objects with their recorded options and recovered the original executable digest. Holding the generated C and all other objects fixed, changing Gambit's C procedure layout in the host unit took the median job from 1,028 to 1,307 ms of CPU at -O0. At that new layout, compiling that unit at -O1 took it to 3,193 ms. The single-host -O1 attempt on the large host translation unit was stopped after 738 CPU seconds without an object. It has no runtime measurement. These are effects of a particular procedure layout, C compiler and unit, so the production build policy stays bound to the tested configuration. [[file:../evidence/boot-host-flags.json][Reconstructed ELF, object hashes, flag changes and counterbalanced timings]]
 
 Another intervention kept the original image and flags and changed its binary indexing and slicing for guarded ASCII values that could avoid a linked list of UTF-8 bytes. A separate arm checked each admitted result against the existing operation. Median whole-job CPU moved from 1,098 to 1,043 ms. Specializing scalar equality and key normalization in the same way made the job slower despite reaching hundreds of thousands of calls. Call frequency by itself is a poor guide to savings. Cheap guards, representation conversion, the fallback path and the cost of crossing a procedure boundary all contribute to the result. [[file:../evidence/boot-primitive-cost.json][Verified primitive interventions and full runs]]
+
+On the original machine code, I then replaced only the 17 translation units whose fixed-arity definitions all belonged to the BL compiler. Their generated C was held fixed. Changing those units to the tested multiple-host/-O1 policy took 989 ms versus 987 ms stock in the same counterbalanced block. Replacing the host unit as well took 3,042 ms. The combined experiment retains the original host-only block, so its pooled stock median differs from the within-block comparator quoted here. None of these outcomes supports enabling those flags across the build. [[file:../evidence/boot-compiler-flags.json][Object hashes and both blocks in execution order]]
+
+** Where does the extra time inside the same function calls go?
+
+I traced one physical BL body at a time on each engine, checked its invocation count and compared its returned phase value with the uninstrumented result. On native a compiled wrapper timed the outermost activation. On BEAM OTP tprof traced only the selected body in the caller process, so its cost includes the untraced callees. Each row is the median of three independent passes through the phase. Native elapsed time and BEAM process call time are different clocks. The whole-phase clocks and the raw triples are in the receipt. This identifies expensive operations and their scale. The rows overlap when one function calls another.
+
+#+begin_rosetta
+Historical reader job, inclusive time per translation | Calls on each engine | Native ms | BEAM ms
+Reading an atom | 4,759 | 32 | 4
+Expanding a datum macro | 392 | 223 | 14
+Checking, converting and hygienically renaming the macro result, inside expansion | 392 | 155 | 9
+Looking up a macro | 2,169 | 75 | 44
+Compiling a symbol | 1,662 | 35 | 3
+Encoding an emitted identifier | 2,301 | 28 | 7
+Quoting emitted text | 1,512 | 47 | 9
+#+end_rosetta
+
+The biggest measured difference here is about 209 ms inside the same 392 expansions. About 146 ms of that difference sits inside the macro result boundary. Adding those two figures would charge the same work twice. The macro execution probe earlier in this journal compiled the macro *procedures* themselves. That left validation of each returned datum, rebuilding its reader form and canonicalizing fresh names in place. This explains how ahead-of-time macro compilation can have little effect even while the macro path is fourteen to sixteen times slower. Checking the right result at the wrong boundary led to the wrong optimization priority. [[file:../evidence/boot-boundaries.json][Matched calls, inclusive measurements and phase clocks]]
+
+** Did the changed compiler still build itself?
+
+The new stage one compiled the original BL boot sources. The resulting native stage two compiled them again. Stages two and three have identical emitted compiler source and identical executable SHA-256. Both self-emissions took about 37.5 seconds on this run. The BEAM-produced stage-one source differed from stage two only in local generated spellings under the existing 14,228-line stage comparison. All three executables produced the same source-corpus output, and their actor programs matched the independent JavaScript oracle at the default, 17-step and 41-step budgets. The host suite also passed its 60 value/control checks and its storage, raw-leaf, source-frame and POSIX gates. This is qualification of the native seed; the downstream SDK and command-specific differences catalogued earlier in the journal have their own qualification path. [[file:../evidence/boot-compiler-qualification.json][Generations, images, actor oracle, edit repair and host outcomes]]
+
+#+begin_src beam-lisp :id native-work-by-generation
+(let [load-r (fn [name] (Jason/decode! (File/read! (str "research/checked-tiles/evidence/boot-" name ".json"))))
+      work (load-r "semantic-work") panel (load-r "fields") q (load-r "compiler-qualification")
+      actual (get work "beam") native (get work "native")
+      counts (for [[phase rows] actual [name n] rows] (= n (get-in native [phase name])))
+      sample (get-in panel ["jobs" "reader" "runs"])
+      layout (get (first (filter #(= "candidate" (get % "arm")) sample)) "layout")]
+  (assert (= 12 (count counts)))
+  (assert (every? identity counts))
+  (assert (= [4733 6082] layout))
+  (assert (= (get work "output") (get-in panel ["jobs" "reader" "output"])))
+  (assert (= "qualified" (get q "status")))
+  (assert (= (get-in q ["images" "stage2"]) (get-in q ["images" "stage3"])))
+  (assert (get q "stage1-stage2-stage3-original-actor-corpus-equal"))
+  {:matched-functions (count counts) :compact-occurrences (first layout) :native-generations 3})
+#+end_src
+#+RESULTS: native-work-by-generation
+: {:matched-functions 12, :compact-occurrences 4733, :native-generations 3}
