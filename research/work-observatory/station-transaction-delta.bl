@@ -44,6 +44,10 @@
   [result {:elapsed-us (- (erlang/monotonic_time :microsecond) start)
            :caller-reductions (- (elem (erlang/process_info (erlang/self) :reductions) 1) before)}]))
 
+(defn- fixture-phase [label action]
+ (println (str "Station fixture: " label))
+ (measured action))
+
 (defn- fact [tempid id at type data]
  {:db/id tempid :fact/id id :fact/at at :fact/type type :fact/data (json/encode (assoc data "at" at))})
 
@@ -302,36 +306,50 @@
    (let [seed (seed! conn n stamp bulk?)
          _ (println (str "Station fixture seeded " n " requests"))
          attempt {"attempt-id" "one" "request-id" "seed-1" "uid" 1001 "provider" "codex"}
-         _ (datom/transact! conn [(fact -1 "attempt:one" stamp "attempt" (assoc attempt "event" "attempt-started"))])
+         [_ open-cost]
+         (fixture-phase "commit open attempt"
+          #(datom/transact! conn [(fact -1 "attempt:one" stamp "attempt" (assoc attempt "event" "attempt-started"))]))
          prior (datom/db conn)
-         initial (rebuild prior)
-         written (datom/transact! conn [(fact -1 "attempt:one" (+ stamp 1) "attempt"
+         [initial seed-index-cost] (fixture-phase "build original fact index" #(rebuild prior))
+         [written commit-cost]
+         (fixture-phase "commit changed facts"
+          #(datom/transact! conn [(fact -1 "attempt:one" (+ stamp 1) "attempt"
                                          (assoc attempt "event" "attempt-finished" "complete" true))
                                         (fact -2 "gap:one" stamp "gap" {"event" "gap"})
                                         (fact -4 "request:added" (+ stamp 1) "request"
                                          {"uid" 1000 "route" "codex" "status" 200 "input_tokens" 3})
-                                        {:db/id -3 :cursor/id "audit:fixture" :cursor/offset 10}])
+                                  {:db/id -3 :cursor/id "audit:fixture" :cursor/offset 10}]))
          current (datom/db conn)
-         [delta delta-cost] (measured #(advance initial written current))
-         [full full-cost] (measured #(rebuild current))
+         [delta delta-cost] (fixture-phase "extract committed delta" #(advance initial written current))
+         [full full-cost] (fixture-phase "rebuild current fact index" #(rebuild current))
          _ (assert (= :transaction-delta (:path delta)))
          _ (assert (= 3 (count (:changed delta))))
          _ (assert (= (:facts full) (:facts delta)))
-         publication (verify-publication conn current prior initial delta stamp report-path)
-         cursor-only (datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}])
+         [publication publication-cost]
+         (fixture-phase "check publication parity" #(verify-publication conn current prior initial delta stamp report-path))
+         [cursor-only cursor-cost]
+         (fixture-phase "commit cursor-only change"
+          #(datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}]))
          cursor-result (advance delta cursor-only (datom/db conn))
          _ (assert (= :transaction-delta (:path cursor-result)))
          _ (assert (empty? (:changed cursor-result)))
          _ (assert (= (:facts delta) (:facts cursor-result)))
-         missed (datom/transact! conn [(fact -1 "request:missed" stamp "request" {"uid" 1000})])
-         latest (datom/transact! conn [(fact -1 "request:latest" stamp "request" {"uid" 1001})])
+         [[missed latest] gap-cost]
+         (fixture-phase "commit twice for gap and overtaken-basis controls"
+          #(vector (datom/transact! conn [(fact -1 "request:missed" stamp "request" {"uid" 1000})])
+                   (datom/transact! conn [(fact -1 "request:latest" stamp "request" {"uid" 1001})])))
          observed (datom/db conn)
-         rebuilt (advance cursor-result latest observed)
-         overtaken (advance cursor-result missed observed)]
-    (assert (= :full-rebuild (:path rebuilt) (:path overtaken)))
-    (assert (= (fact-index observed) (:facts rebuilt) (:facts overtaken)))
+         [_ fallback-cost]
+         (fixture-phase "check both fallback index results"
+          #(let [rebuilt (advance cursor-result latest observed)
+                 overtaken (advance cursor-result missed observed)]
+            (assert (= :full-rebuild (:path rebuilt) (:path overtaken)))
+            (assert (= (fact-index observed) (:facts rebuilt) (:facts overtaken)))))]
     {:seed-requests n :seed seed :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
      :delta delta-cost :full full-cost :publication publication
+     :fixture-phases {:open-attempt open-cost :original-index seed-index-cost :commit-changes commit-cost
+                      :publication-parity publication-cost :commit-cursor cursor-cost
+                      :commit-gap gap-cost :fallback-parity fallback-cost}
      :controls {:attempt-finish-exact true :cursor-only-ignored true
                 :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}})
    (finally (datom/close! conn)))))
