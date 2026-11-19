@@ -58,10 +58,8 @@ def source_paths(root):
         yield from (file for file in path.rglob("*") if file.is_file()) if path.is_dir() else (path,)
 
 
-def prepare(work, request):
-    revision = request["revision"]
-    baseline, qualification, samples = map(Path, request["arguments"])
-    overlay = Path(tempfile.mkdtemp(prefix="overlay-", dir=work))
+def new_overlay(work, revision, prefix):
+    overlay = Path(tempfile.mkdtemp(prefix=prefix, dir=work))
     with tempfile.TemporaryFile() as archive:
         subprocess.run(["git", "archive", revision, "--", *SOURCES],
                        stdout=archive, cwd=ROOT, check=True)
@@ -72,15 +70,50 @@ def prepare(work, request):
     seed_runtime = overlay / SEED / ".runtime"
     seed_runtime.mkdir()
     (seed_runtime / "path").write_text(str(runtime) + "\n")
-    plan = overlay / "stage-plan.etf"
-    receipt = overlay / "bound-donor.etf"
+    return overlay
+
+
+def capture(work, request):
+    baseline, qualification, samples = map(Path, request["arguments"])
+    marker = work / "capture.json"
+    request_digest = digest(work / "plan.json")
+    if marker.exists():
+        state = read(marker)
+        if state["request"] != request_digest:
+            raise ValueError("Capture belongs to a different request")
+        overlay = Path(state["overlay"])
+        verify_source(state["source"], overlay)
+    else:
+        overlay = new_overlay(work, request["revision"], "capture-")
+        state = {"overlay": str(overlay), "request": request_digest,
+                 "source": seal(source_paths(overlay), overlay), "finished": {}}
+        save(marker, state)
     base = [overlay / SEED / "run", "run", FRONT / "observe-links.bl", "--",
             str(baseline / "partition.json"), str(baseline / "link-rows.etf")]
-    started = time.monotonic()
-    for args in (["--capture-stage-link-plan", plan, qualification],
-                 ["--capture-bound-registry", receipt, samples, qualification]):
-        subprocess.run([*base, *args], cwd=overlay, check=True)
-    capture_seconds = time.monotonic() - started
+    for filename, mode, args in (
+            ("stage-plan.etf", "--capture-stage-link-plan", [qualification, overlay / "stage-checkpoints"]),
+            ("bound-donor.etf", "--capture-bound-registry", [samples, qualification])):
+        output = overlay / filename
+        saved = state["finished"].get(filename)
+        if saved:
+            verify({filename: saved["sha256"]}, overlay)
+            continue
+        started = time.monotonic()
+        subprocess.run([*base, mode, output, *args], cwd=overlay, check=True)
+        state["finished"][filename] = {"sha256": digest(output), "wall-seconds": time.monotonic() - started}
+        save(marker, state)
+    verify_source(state["source"], overlay)
+    return overlay, sum(row["wall-seconds"] for row in state["finished"].values())
+
+
+def prepare(work, request):
+    baseline, qualification, samples = map(Path, request["arguments"])
+    captured, capture_seconds = capture(work, request)
+    overlay = new_overlay(work, request["revision"], "overlay-")
+    plan = overlay / "stage-plan.etf"
+    receipt = overlay / "bound-donor.etf"
+    for path in (plan, receipt):
+        shutil.copyfile(captured / path.name, path)
     subprocess.run(["python3", FRONT / "edit-relink-fixture.py", SEED / "src/native/scheme.bl",
                     request["edit"]], cwd=overlay, check=True)
     staged = overlay / "prepared"
@@ -149,6 +182,12 @@ def verify(mapping, base):
         raise ValueError(f"Retained inputs or results changed under {base}")
 
 
+def verify_source(mapping, overlay):
+    verify(mapping, overlay)
+    if set(source_paths(overlay)) != {overlay / path for path in mapping}:
+        raise ValueError("Retained Source inventory differs from the prepared request")
+
+
 def timings(path):
     wall, user, system = map(float, path.read_text().split())
     return {"wall": wall, "user": user, "system": system, "cpu": round(user + system, 3)}
@@ -194,9 +233,7 @@ def main():
             save(preparation, prepare(work, request))
         prepared = read(preparation)
         overlay = Path(prepared["overlay"])
-        verify(prepared["source"], overlay)
-        if set(source_paths(overlay)) != {overlay / path for path in prepared["source"]}:
-            raise ValueError("Retained Source inventory differs from the prepared request")
+        verify_source(prepared["source"], overlay)
         verify(prepared["inputs"], overlay)
         passes = []
         for i, mode in enumerate(order[:args.stop_after], 1):
