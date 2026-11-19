@@ -41,7 +41,7 @@ def medians(samples):
     return [statistics.median(col) for col in zip(*samples)] + [statistics.median(map(sum, samples))]
 
 
-def run(pipeline, control, candidate, out, before_symbols=None):
+def run(pipeline, control, candidate, out, before_symbols=None, self_hosted=False):
     out.mkdir()
     sdk_info = json.loads((HERE.parent/'tools.json').read_text())
     sdk = Path(sdk_info['sdk'])
@@ -67,6 +67,13 @@ def run(pipeline, control, candidate, out, before_symbols=None):
         report['boot_sources']['fields'] = sha(before_symbols/'stage1.scm')
     arms = ['control','flat','candidate','beam']
     if before_symbols: arms.insert(2,'fields')
+    if self_hosted:
+        receipt = json.loads((candidate/'full-fixpoint.json').read_text())
+        if receipt['status']!='qualified' or not receipt['stage2-stage3-byte-equal']:
+            raise ValueError('The self-hosted image requires its completed fixpoint')
+        report['images']['stage2'] = sha(candidate/'stage2',receipt['source_results']['stage2']['image_sha256'])
+        report['boot_sources']['stage2'] = sha(candidate/'stage2.scm',receipt['stage2-sha256'])
+        arms = ['candidate','stage2','beam']
     for ns, path in [('reader',pipeline/'reader.bl'),('anf',ROOT/'priv/boot/anf.bl'),('diag',ROOT/'priv/boot/diag.bl')]:
         job = out/ns
         job.mkdir()
@@ -95,7 +102,8 @@ def run(pipeline, control, candidate, out, before_symbols=None):
                     switch = '(set! native-field-map (lambda (pairs size) #f))\n' if arm=='flat' else ''
                     payload.write_text(switch+observer)
                     image = control if arm=='control' else before_symbols if arm=='fields' else candidate
-                    argv = [image/'stage1','--eval',payload,bundle]
+                    binary = 'stage2' if arm=='stage2' else 'stage1'
+                    argv = [image/binary,'--eval',payload,bundle]
                 log = command(argv,env,job/(str(len(runs))+'-'+arm+'.log'),timeout=360)
                 if 'emit-failures 0' not in log or 'A3_DONE' not in log:
                     raise ValueError('Incomplete translation')
@@ -103,7 +111,7 @@ def run(pipeline, control, candidate, out, before_symbols=None):
                 digest = sha(job/('beam.scm' if arm=='beam' else 'native.scm'))
                 layout = None if arm=='beam' else next([int(v) for v in l.split()[1:]]
                     for l in log.splitlines() if l.startswith('LAYOUT '))
-                if layout and ((layout[0]>0)!=(arm in ('candidate','fields')) or layout[1]<1):
+                if layout and ((layout[0]>0)!=(arm in ('candidate','fields','stage2')) or layout[1]<1):
                     raise ValueError(f'Construction switch was ineffective: {arm} {layout}')
                 runs.append(dict(arm=arm,output=digest,wall_ms=wall,layout=layout,
                                  cpu_ms=None if arm=='beam' else rows(log,'CPU',1000)))
@@ -122,5 +130,7 @@ if __name__=='__main__':
         parser.add_argument(arg,type=Path)
     parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--before-symbols',type=Path)
+    parser.add_argument('--self-hosted',action='store_true',help='Compare qualified native stage two, stage one and BEAM')
     a=parser.parse_args()
-    run(a.pipeline.resolve(),a.control.resolve(),a.candidate.resolve(),a.out.resolve(),a.before_symbols.resolve() if a.before_symbols else None)
+    run(a.pipeline.resolve(),a.control.resolve(),a.candidate.resolve(),a.out.resolve(),
+        a.before_symbols.resolve() if a.before_symbols else None,a.self_hosted)
