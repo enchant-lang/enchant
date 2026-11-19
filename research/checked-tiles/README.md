@@ -116,3 +116,17 @@ To reproduce an individual arithmetic ablation, point the runner at a completed 
 
     scripts/bl-mem
     systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=256M python3 -B research/checked-tiles/speed/bounded.py /tmp/my-enchant-speed/corpus --frame-aware --out /tmp/my-frame-replay
+
+## How close is the native compiler to running the whole boot?
+
+Read the journal or print the recorded comparisons on any machine with Python 3.10 or newer. The second command runs the current self-hosted reader against the pinned downstream SDK on this workstation.
+
+    python3 research/checked-tiles/boot/summary.py
+    research/checked-tiles/boot/replay /tmp/my-reader-run --smoke
+
+For the full experiment, give the runner a fresh directory. It runs one capped process tree at a time. The compiler jobs need the qualified Gambit stage-two executable and its native split build at `research/native-seed/out/native-prepared-eval-build`, its prepared macro file, the immutable SDK selected by `tools.json`, retained source history and the matching Nix compilation tools. The first-party run checks the image and SDK digests. For a checkout without those local artifacts, the committed observations and the summary remain readable.
+
+    research/checked-tiles/boot/replay /tmp/my-native-boot-run
+    python3 research/checked-tiles/boot/summary.py /tmp/my-native-boot-run
+
+The reader session retains the source list, complete typed terms and mismatch excerpts. The other sessions retain individual timings, compiled objects, binding and import inventories, and the actual stdout, stderr and exit codes. The compiler comparison times reading through emitted Scheme in already-running processes. The CLI comparison invokes cold processes separately. Results for a losing candidate and for an unsupported operation remain visible in both. [Read the journal](journal/04-native-concurrent-core.bl.org) · [Native image qualification](../native-seed/speed/attrib/raw/native-prepared-eval-qualification.json)

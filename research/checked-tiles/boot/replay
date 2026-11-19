@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+if [[ $# -lt 1 || $# -gt 2 || ${2-} != "" && ${2-} != "--smoke" ]]; then
+  echo "usage: $0 NEW_DIRECTORY [--smoke]" >&2
+  exit 2
+fi
+root=$(realpath -m -- "$1")
+mkdir -m 700 -- "$root"
+run_case() {
+  "$here/../../../scripts/bl-mem" | tail -2
+  systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=256M python3 -B "$here/$1.py" "${@:2}"
+}
+if [[ ${2-} == "--smoke" ]]; then
+  "$here/run" --smoke --out "$root/reader"
+  echo "Reader observations in $root/reader/reader.json"
+  exit 0
+fi
+"$here/run" --out "$root/reader"
+run_case pipeline --out "$root/pipeline"
+run_case coverage "$root/reader" --out "$root/coverage"
+run_case cli --out "$root/cli"
+run_case extension --out "$root/extension"
+run_case boundary --out "$root/boundary"
+run_case surface "$root/coverage" --out "$root/surface"
+run_case behavior "$root/surface" --out "$root/behavior"
+run_case relink "$root/pipeline" --out "$root/relink"
+run_case regions "$root/reader" "$root/pipeline" --out "$root/regions"
+run_case names "$root/pipeline" --out "$root/names"
+run_case heldout "$root/pipeline" "$root/names" --out "$root/heldout"
+python3 -B "$here/summary.py" "$root"
