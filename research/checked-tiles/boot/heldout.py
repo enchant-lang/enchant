@@ -7,7 +7,7 @@ import statistics
 from run import BASE, HERE, IMAGE, QUAL, ROOT, command, sexp, sha, write
 
 
-def run(pipeline, names, out):
+def run(pipeline, names, out, include_emit=False):
     out.mkdir()
     tools = json.loads((HERE.parent/'tools.json').read_text())
     sdk = Path(tools['sdk'])
@@ -21,6 +21,7 @@ def run(pipeline, names, out):
     template = (pipeline/'observer.scm').read_text()
     beamt = (BASE/'speed/attrib/beam-attrib.bl').read_text()
     env = dict(os.environ,ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
+    modes = ['stock','emit','both','beam'] if include_emit else ['stock','both','beam']
     report = {}
     for ns, size in [('anf',100),('diag',22)]:
         folder = out/ns
@@ -36,7 +37,7 @@ def run(pipeline, names, out):
                    .replace('"priv/boot/reader.bl"',sexp(attribution))
                    .replace('(start (real-time)) (forms (A-read))','(start (real-time)) (reset (memo-reset!)) (forms (A-read))'))
         runs = []
-        for block,order in enumerate([['stock','both','beam'],['beam','both','stock']]):
+        for block,order in enumerate([modes,list(reversed(modes))]):
             for mode in order:
                 if mode=='beam':
                     argv=[sdk/'bin/bl','--cold','-p',pipeline/'pinned','run',beam,'--',source,folder,'4','snapshot','timing']
@@ -54,7 +55,7 @@ def run(pipeline, names, out):
         if len({r['sha256'] for r in runs if r['mode']!='beam'})!=1:
             raise ValueError('Native optimization changed emitted code')
         medians={}
-        for mode in ('stock','both','beam'):
+        for mode in modes:
             samples=[t for r in runs if r['mode']==mode for t in r['timings_ms']]
             medians[mode]=[statistics.median(c) for c in zip(*samples)]+[statistics.median(map(sum,samples))]
         report[ns]=dict(source=sha(source),definitions=size,runs=runs,medians_ms=medians,
@@ -68,5 +69,7 @@ if __name__=='__main__':
     p.add_argument('pipeline',type=Path)
     p.add_argument('names',type=Path)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--include-emit',action='store_true',
+                   help='include emitter-only name reuse in both held-out workloads')
     a=p.parse_args()
-    run(a.pipeline.resolve(),a.names.resolve(),a.out.resolve())
+    run(a.pipeline.resolve(),a.names.resolve(),a.out.resolve(),a.include_emit)
