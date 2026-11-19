@@ -47,7 +47,7 @@ def main():
     if expected != json.loads((out / 'answers.json').read_text()):
         raise ValueError('Source functions on BEAM disagree with independent answers')
     report = dict(proof=proof, cpu=packed['cpu'], sdk=TOOLS['descriptor_sha256'],
-                  files={m.name:checked(m) for m in [*modules,HERE/'Bytes.lean',Path(__file__)]},
+                  files={m.name:checked(m) for m in [*modules,HERE/'Bytes.lean',HERE/'packed.py',Path(__file__)]},
                   bend=checked(bend), probe=checked(probe), controls=expected, jobs={})
     for k, name in [(5,'grade'),(3,'scan')]:
         ir = out / (name + '.ir')

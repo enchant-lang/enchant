@@ -17,23 +17,39 @@ RUST = Path('/nix/store/yhmi70ln28n1j6wn82h61b8r8q4g562i-rustc-1.95.0')
 CARGO = Path('/nix/store/85qbwr3vzfs58m7ywnjblz105p8ahbrv-cargo-1.95.0-x86_64-unknown-linux-gnu/bin/cargo')
 
 
-def read_bytes(proc, n):
-    data = bytearray()
-    while len(data) < n:
-        if not select.select([proc.stdout], [], [], 30)[0]:
-            raise TimeoutError('Worker did not return its frame')
-        chunk = os.read(proc.stdout.fileno(), n-len(data))
+class Replies:
+    """Collect either protocol in one pipe read when the whole response is ready."""
+    def __init__(self, stream):
+        self.stream = stream
+        self.pending = bytearray()
+
+    def receive(self):
+        if not select.select([self.stream], [], [], 30)[0]:
+            raise TimeoutError('Worker did not return its reply')
+        chunk = os.read(self.stream.fileno(), 64)
         if not chunk:
             raise RuntimeError('Worker closed before its reply was complete')
-        data.extend(chunk)
-    return bytes(data)
+        self.pending.extend(chunk)
 
+    def take(self, size):
+        while len(self.pending) < size:
+            self.receive()
+        data = bytes(self.pending[:size])
+        del self.pending[:size]
+        return data
 
-def port_frame(proc):
-    size = struct.unpack('>I', read_bytes(proc,4))[0]
-    if size not in (5,16):
-        raise RuntimeError(f'Unexpected fold frame length {size}')
-    return read_bytes(proc,size)
+    def line(self):
+        while b'\n' not in self.pending:
+            if len(self.pending) > 32:
+                raise ValueError('Unexpected decimal reply')
+            self.receive()
+        return self.take(self.pending.index(10) + 1)
+
+    def frame(self):
+        size = struct.unpack('>I', self.take(4))[0]
+        if size not in (5,16):
+            raise RuntimeError(f'Unexpected fold frame length {size}')
+        return self.take(size)
 
 
 def run_arm(command, is_port, env, requests, warm_count, log, *, init_from_seed=True, divisor=1):
@@ -43,9 +59,10 @@ def run_arm(command, is_port, env, requests, warm_count, log, *, init_from_seed=
     with log.open('wb') as sink:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=sink, env=env, bufsize=0)
+        replies = Replies(proc.stdout)
         try:
             if is_port:
-                if port_frame(proc) != b'READY':
+                if replies.frame() != b'READY':
                     raise RuntimeError('Compiled fold worker did not admit the IR')
             else:
                 proc.stdin.write(struct.pack('>H',len(requests)))
@@ -55,12 +72,10 @@ def run_arm(command, is_port, env, requests, warm_count, log, *, init_from_seed=
                 t = time.perf_counter_ns()
                 proc.stdin.write(message)
                 if is_port:
-                    got, duration = struct.unpack('>QQ',port_frame(proc))
+                    got, duration = struct.unpack('>QQ',replies.frame())
                     got //= divisor
                 else:
-                    if not select.select([proc.stdout],[],[],30)[0]:
-                        raise TimeoutError('Bend did not return')
-                    got = int(proc.stdout.readline())
+                    got = int(replies.line())
                 elapsed = ms(t)
                 if got != want:
                     raise ValueError(f'n={n} seed={seed}: expected {want}, got {got}')
