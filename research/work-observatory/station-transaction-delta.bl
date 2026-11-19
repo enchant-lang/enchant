@@ -2,7 +2,7 @@
 ;; the accounting schema and committed Datom reports in an owned memory DB.
 (ns observatory.station-transaction-delta
  (:require [bl.json :as json] [datom] [datom.db :as db] [datom.watch :as watch]
-           [gateway.accounting :as accounting]))
+           [data.delta-aggregate :as aggregate] [gateway.accounting :as accounting]))
 
 (def fact-query
  '[:find ?e ?id ?at ?type ?data :where
@@ -80,6 +80,75 @@
               (some #(= "attempt-finished" (get % "event")) (get request "attempts"))))
        (:requests window)))
 
+(def window-sums [:refused :inputTokens :outputTokens :fallbackRequests])
+
+(defn- request-contribution [entity event]
+ (when (and (= "request" (get event "type")) (string? (get event "route")))
+  (let [tokens (fn [field]
+                 (let [value (get event field)]
+                  (cond (nil? value) 0
+                        (and (int? value) (<= 0 value)) value
+                        :else (throw (ex-info "Replay requires nonnegative integer token meters" {:field field})))))]
+   {:id entity :at (get event "at") :uid (get event "uid") :route (get event "route")
+    :refused (if (and (number? (get event "status")) (>= (get event "status") 400)) 1 0)
+    :inputTokens (tokens "input_tokens") :outputTokens (tokens "output_tokens")
+    :fallbackRequests (if (get event "fallback") 1 0)})))
+
+(defn- window-counter [days]
+ ;; The publisher includes an event at the cutoff itself.
+ (aggregate/initial {:source-id "station-window-replay" :group-by [:route] :sum window-sums
+                      :window-ms (inc (* days 86400000))
+                      :max-events 4096 :max-groups 16 :max-delta 128 :max-bytes 4194304}))
+
+(defn- apply-counter [state now changes]
+ (aggregate/apply-delta state (assoc changes :sequence (inc (:cursor state)) :now now)))
+
+(defn- seed-counters [decoded days now]
+ (let [people (group-by :uid (keep (fn [[eid event]] (request-contribution eid event)) decoded))]
+  (into {} (map (fn [[uid rows]]
+                  [uid (reduce (fn [counter batch] (apply-counter counter now {:upsert (vec batch)}))
+                               (window-counter days) (Enum/chunk_every rows 128))])
+                people))))
+
+(defn- counter-changes [baseline decoded ids]
+ (reduce (fn [changes eid]
+           (let [before (request-contribution eid (get baseline eid))
+                 after (request-contribution eid (get decoded eid))]
+            (cond-> changes
+             before (update-in [(:uid before) :remove] (fn [xs] (conj (or xs []) eid)))
+             after (update-in [(:uid after) :upsert] (fn [xs] (conj (or xs []) after))))))
+         {} ids))
+
+(defn- drain-counter [state now]
+ (loop [state state expired 0]
+  (let [next (aggregate/expire state now)
+        expired (+ expired (get-in next [:work :expired]))]
+   (if (:more? next) (recur next expired) [next expired]))))
+
+(defn- counter-result [counters]
+ (into {} (mapcat (fn [[uid state]]
+                   (let [{:keys [status groups]} (aggregate/view state)]
+                    (assert (= :ready status))
+                    (map (fn [[[route] group]] [[uid route] (assoc (:sums group) :requests (:count group))]) groups)))
+                 counters)))
+
+(defn- verify-window-counters [baseline decoded ids expected days now]
+ (let [initial (seed-counters baseline days (dec now))
+       delta (counter-changes baseline decoded ids)
+       [[live expired] cost]
+       (measured #(reduce (fn [[live expired] [uid state]]
+                            (let [[current removed] (drain-counter state now)]
+                             [(assoc live uid current) (+ expired removed)]))
+                          [{} 0]
+                          (reduce (fn [current [uid changes]]
+                                    (assoc current uid (apply-counter (get current uid (window-counter days)) now changes)))
+                                  initial delta)))
+       groups (counter-result live)
+       expected (into {} (map (fn [row] [[(:uid row) (:route row)]
+                                       (select-keys row (conj window-sums :requests))]) (:rows expected)))]
+  (assert (= expected groups))
+  {:exact true :changed-users (count delta) :expired expired :timing cost}))
+
 (defn- verify-publication [conn current initial delta stamp]
  (let [since (- stamp (* 31 86400000))
        baseline-index (into {} (map (fn [[id row]] [id (decoded-event row)]) (:facts initial)))
@@ -96,6 +165,7 @@
                [:from-full-pulls :from-retained-events :from-retained-events :from-full-pulls])
        expected-by-uid (group-by #(get % "uid") expected)
        actual-by-uid (group-by #(get % "uid") actual)
+       decoded (update-decoded baseline-index delta)
        has-seed-request (some #(= "request:seed-1" (get % "id")) expected)
        now (+ stamp 1)
        windows (mapv (fn [days]
@@ -108,6 +178,7 @@
                         (when has-seed-request (assert (completed-attempt? from-delta)))
                         {:days days :exact true :exact-uid-windows 2
                          :attempt-join-checked (boolean has-seed-request)
+                         :incremental-counters (verify-window-counters baseline-index decoded (:changed delta) from-reference days now)
                          :requests (reduce + 0 (map :requests (:rows from-delta)))}))
                      [7 30])]
   (when (>= (count expected) 10)
@@ -131,12 +202,14 @@
          written (datom/transact! conn [(fact -1 "attempt:one" (+ stamp 1) "attempt"
                                          (assoc attempt "event" "attempt-finished" "complete" true))
                                         (fact -2 "gap:one" stamp "gap" {"event" "gap"})
+                                        (fact -4 "request:added" (+ stamp 1) "request"
+                                         {"uid" 1000 "route" "codex" "status" 200 "input_tokens" 3})
                                         {:db/id -3 :cursor/id "audit:fixture" :cursor/offset 10}])
          current (datom/db conn)
          [delta delta-cost] (measured #(advance initial written current))
          [full full-cost] (measured #(rebuild current))
          _ (assert (= :transaction-delta (:path delta)))
-         _ (assert (= 2 (count (:changed delta))))
+         _ (assert (= 3 (count (:changed delta))))
          _ (assert (= (:facts full) (:facts delta)))
          publication (verify-publication conn current initial delta stamp)
          cursor-only (datom/transact! conn [{:db/id -1 :cursor/id "audit:fixture" :cursor/offset 20}])
