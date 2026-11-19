@@ -15,9 +15,12 @@ TARGETS = {
                 'compiler/macro-lookup', 'compiler/compile-symbol'),
     'emit': ('native.scheme/ident', 'native.scheme/text', 'native.scheme/literal'),
 }
+MACRO = {'compile': ('compiler/expand-macro', 'compiler/datum', 'compiler/datum-macro-result',
+                     'host.compiler-data/check_first_order!', 'compiler/data->form', 'compiler/renumber',
+                     'compiler/gensym-base')}
 
 
-def run(pipeline, out):
+def run(pipeline, out, targets=TARGETS):
     out.mkdir()
     original = json.loads((pipeline/'pipeline.json').read_text())
     image = IMAGE/'stage2'
@@ -38,16 +41,23 @@ def run(pipeline, out):
     definitions = (IMAGE/'stage2.scm').read_text()
     observed = []
     clocks = []
-    for phase, targets in TARGETS.items():
+    for phase, names in targets.items():
         action = {'read':'A-read','compile':'(lambda () (A-compile-forms forms))',
                   'emit':'(lambda () (A-emit-nodes nodes))'}[phase]
         reference = {'read':'forms','compile':'nodes','emit':'texts'}[phase]
-        for name in targets:
+        for name in names:
             owner, fn = name.split('/')
             stem = 'v'+''.join('_'+str(ord(c)) for c in name)+'$'
-            arity, = re.findall(r'^\(define '+re.escape(stem)+r'(\d+) ',definitions,re.M)
+            arities = re.findall(r'^\(define '+re.escape(stem)+r'(\d+) ',definitions,re.M)
             module_name = '.'.join(part.capitalize() for part in owner.split('.'))
-            observed.append(f'["{phase}" :Elixir.BeamLisp.Ns.Body.{module_name} :"{fn}" {arity}]')
+            physical_module = 'Elixir.BeamLisp.Ns.Body.'+module_name
+            if owner=='host.compiler-data':
+                arity = '2'
+                if arity not in arities: raise ValueError(name)
+                physical_module = 'Elixir.BeamLisp.CompilerData'
+            else:
+                arity, = arities
+            observed.append(f'["{phase}" :{physical_module} :"{fn}" {arity}]')
             clocks.append(f'(A-repeat 3 (lambda () (boundary-clock "{phase}" "{fn}" "{stem}{arity}" {action} {reference})))')
     native = native.replace('(A-repeat A-reps A-timed-round)','(begin '+'\n'.join(clocks)+')')
     (out/'observer.scm').write_text('(load '+sexp(module['path'])+')\n'+native)
@@ -69,8 +79,8 @@ def run(pipeline, out):
                 samples.setdefault(name,{}).setdefault(engine,[]).append(
                     dict(phase=phase,calls=int(count),elapsed_ms=float(elapsed),phase_ms=float(duration)))
     result = {}
-    for targets in TARGETS.values():
-        for full in targets:
+    for names in targets.values():
+        for full in names:
             name = full.split('/')[1]
             matched = samples[name]
             if (set(matched) != {'native','beam'} or any(len(v)!=3 for v in matched.values())
@@ -87,5 +97,6 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('pipeline',type=Path)
     parser.add_argument('--out',type=Path,required=True)
+    parser.add_argument('--macro-detail',action='store_true')
     args=parser.parse_args()
-    run(args.pipeline.resolve(),args.out.resolve())
+    run(args.pipeline.resolve(),args.out.resolve(),MACRO if args.macro_detail else TARGETS)
