@@ -7,7 +7,7 @@
                  (pair? (cdr expr)) (string? (cadr expr)))
             (display (car expr)) (for-each (lambda (x) (display "\t") (display x)) (cdr expr)) (newline))
            (else (visit (car expr)) (visit (cdr expr))))))
-(define (guard f)
+(define (surface-guard f)
  (with-exception-catcher
   (lambda (e) (display "failure\t") (write (native-exception-reason e)) (newline))
   (lambda () (f) (display "success") (newline))))
@@ -21,7 +21,7 @@
     (lambda (row)
      (display "unit\t") (display (car row)) (newline)
      (call-with-input-file (cadr row)
-      (lambda (p) (let loop () (let ((x (read p))) (if (not (eof-object? x)) (begin (visit x) (loop)))))))
+      (lambda (p) (let loop () (let ((x (read p))) (if (not (eof-object? x)) (begin (visit x) (loop))))))))
     (call-with-input-file (string-append root "/emitted.scm") read))
    (for-each
     (lambda (row)
@@ -33,6 +33,6 @@
               (list (native-eval-string (native-read-file (getenv "BOOT_BUNDLE")))))
    (for-each (lambda (row)
       (display "load\t") (display (car row)) (display "\t")
-      (guard (lambda () (load (cadr row)))))
+      (surface-guard (lambda () (load (cadr row)))))
     (call-with-input-file (string-append root "/objects.scm") read))
    (exit 0))))

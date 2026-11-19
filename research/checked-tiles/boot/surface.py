@@ -1,7 +1,6 @@
 """Compile the entire set of missing boot declarations and inspect emitted link requirements."""
 import argparse
 from collections import Counter
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,6 +35,17 @@ def run(coverage, out):
         log = out/(ns+'.log')
         p = subprocess.run([image,'--eval',HERE/'extend.scm','unused'],cwd=ROOT,env=env,
                            capture_output=True, timeout=120)
+        if p.returncode and objects:
+            row['standalone_error'] = (p.stdout+p.stderr).decode(errors='replace')[-300:]
+            # Make prior units available only after their actual native object
+            # initialized. Then let the namespace form process its own requires.
+            stage = out/'with-providers.scm'
+            (out/'providers.scm').write_text(sexp(objects))
+            stage.write_text('(for-each (lambda (row) (load (cadr row)) (native-declare-ns (car row))) '
+                             '(call-with-input-file '+sexp(str(out/'providers.scm'))+' read))\n'
+                             '(load '+sexp(str(HERE/'extend.scm'))+')\n')
+            p = subprocess.run([image,'--eval',stage,'unused'],cwd=ROOT,env=env,
+                               capture_output=True,timeout=120)
         log.write_bytes(p.stdout+p.stderr)
         row['emitted'] = [l.split('\t')[2] for l in log.read_text().splitlines() if l.startswith('EMIT\t')]
         scheme = out/(ns+'.scm')
