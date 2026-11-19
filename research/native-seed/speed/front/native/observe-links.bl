@@ -1559,17 +1559,27 @@
        retained :native-staging-retained-control
        records [[transient 2] [retained 2]]]
   (try
-   (let [[_ result] (around-staging-registry records
+   (let [[intermediate result] (around-staging-registry records
                      (fn []
                       (BeamLisp.Env/isolated
                        (fn []
                         (ets/insert :beam_lisp_vars (tuple transient 1))
-                        (ets/insert :beam_lisp_vars (tuple retained 1))
-                        (ets/delete :beam_lisp_vars transient)))))]
+                        (let [owner (erlang/self) ticket (erlang/make_ref)
+                              reader (erlang/spawn (fn []
+                                       (erlang/send owner (tuple ticket (ets/lookup :beam_lisp_vars transient)))))]
+                         (try
+                          (let [intermediate (receive [seen rows] :when (= seen ticket) rows
+                                               (after 5000 (throw :staging-registry-reader-timeout)))]
+                           (ets/insert :beam_lisp_vars (tuple retained 1))
+                           (ets/delete :beam_lisp_vars transient)
+                           intermediate)
+                          (finally (Process/exit reader :kill))))))))]
+    (assert (= (list (tuple transient 1)) intermediate))
     (assert (= {:before 0 :after 1
                 :differences [{:change :added :key-shape [:atom retained] :count 1}]}
                result) (pr-str result))
-    {:transient-registry-record-excluded true :retained-registry-record-detected true})
+    {:transient-registry-record-excluded true :retained-registry-record-detected true
+     :transient-registry-record-observable true})
    (finally (ets/delete :beam_lisp_vars transient) (ets/delete :beam_lisp_vars retained)))))
 
 (def generation-publication-entry (tuple :Elixir.BeamLisp.Env :with_code_evidence_publication 1))
