@@ -715,3 +715,22 @@ The same three jobs run through the actually self-emitted, qualified stage two t
 ** What does it cost to return one macro result?
 
 I repeated the matched boundary experiment one call level deeper. Macro expansion took 182/12 ms native/BEAM in this run; its result processing took 141/9 ms. Three operations inside that result path stood out. The first-party first-order validator took 57/3 ms over the same 392 invocations. Reconstructing reader forms took 20/3 ms over 16,013 visits. Walking them for hygienic renaming took 68/6 ms over 16,013 visits. Within renaming, 8,603 checks for a baked gensym name took 29/2 ms. The callers and callees were clocked independently, so these figures describe overlapping regions and include measurement overhead. At each level the result was checked. The validation path enforces node, byte and depth budgets and rejects opaque or effectful values. Renaming also preserves quoting, drops positions on certain bare values, and assigns fresh names in a deterministic order. Both requirements are visible in the source and affect which work can safely be avoided. [[file:../evidence/boot-macro-boundaries.json][Physical validation, conversion, hygiene and name boundaries]] · [[file:../../../priv/boot/compiler.bl][Macro conversion and canonicalization]] · [[file:../../../priv/host/compiler_data.bl][First-party validator]]
+
+I tested one consequence in the original stage-two process. A compiled guard returned the existing reader tree only when every supported node was already in the form that canonical-gensyms would produce. Potential template symbols, metadata over bare values, active actor frames and unfamiliar shapes took the original path. In a separate verification arm every accepted tree was compared with the original operation's result. Across warmup and four rounds the guard admitted 990 trees and delegated 970, or 198 admitted of 392 per translation. Median whole-job CPU fell from 875 to 852 ms in the timed blocks. All outputs matched. This is a useful 23 ms experiment. It also puts a number on the opportunity cost of doing a separate tree scan just to decide whether another walk is necessary. [[file:../evidence/boot-hygiene-cost.json][Counterbalanced whole-job runs and verified admissions]] · [[file:../boot/hygiene-cost.scm][Exact guard and fallback]]
+
+The next implementation I would prioritize is a first-party BL change at datum-macro-result. Have the conversion record whether the resulting tree can need hygiene or normalization while it already has each node in hand. Share original subtrees wherever the result is identical. Keep canonical key ordering before assigning fresh names in maps and sets. Keep quote boundaries, metadata over scalars, fresh-name sequencing and actor behavior observable in the checks. Measure the validator separately and carry forward only budgets already proved for that exact input. A rejected macro must still fail before its result affects a compilation. This aims at a measured expense in first translation. For edits, feed the existing Codebase identities and revision dependencies into invalidation as the boot gains contextual bindings. That is the path that can avoid compiling an unaffected definition altogether. [[file:../README.md][Run the controls and the qualified compiler]]
+
+#+begin_src beam-lisp :id native-macro-evidence
+(let [load-r (fn [name] (Jason/decode! (File/read! (str "research/checked-tiles/evidence/boot-" name ".json"))))
+      detail (get (load-r "macro-boundaries") "samples")
+      probe (load-r "hygiene-cost") verified (get-in probe ["runs" 0 "verified"])
+      q (load-r "compiler-qualification") full (load-r "self-hosted-fields")]
+  (assert (= 392 (get-in detail ["check_first_order!" "native" 0 "calls"])))
+  (assert (= 16013 (get-in detail ["renumber" "beam" 0 "calls"])))
+  (assert (= 1960 (+ (get verified "unchanged") (get verified "fallback"))))
+  (assert (= (get-in q ["images" "stage2"]) (get-in full ["images" "stage2"])))
+  (assert (= (get-in full ["jobs" "reader" "output"]) (get-in probe ["runs" 0 "output"])))
+  {:checked-expansions 392 :guard-admissions-per-translation (quot (get verified "unchanged") 5)})
+#+end_src
+#+RESULTS: native-macro-evidence
+: {:checked-expansions 392, :guard-admissions-per-translation 198}

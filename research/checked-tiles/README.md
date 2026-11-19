@@ -166,7 +166,10 @@ cap "$build/stage1" --eval "$boot/symbol-budget.scm" unused
 cap python3 "$boot/field_pipeline.py" "$pipeline" "$seed/out/perf-declaration-snapshot-build" "$build" --before-symbols "$seed/out/checked-fields-before-symbols" --out /tmp/my-field-panel
 cap python3 "$boot/semantic_work.py" "$pipeline" --out /tmp/my-work-counts
 cap python3 "$boot/boundary_clock.py" "$pipeline" --out /tmp/my-boundary-clocks
+cap python3 "$boot/boundary_clock.py" "$pipeline" --macro-detail --out /tmp/my-macro-boundaries
 cap python3 "$boot/primitive_cost.py" "$pipeline" --out /tmp/my-byte-cost
+cap python3 "$boot/primitive_cost.py" "$pipeline" --hygiene --out /tmp/my-hygiene-cost
+cap python3 "$boot/field_pipeline.py" "$pipeline" "$seed/out/perf-declaration-snapshot-build" "$build" --self-hosted --out /tmp/my-stage-two-panel
 cap python3 "$boot/runtime_flags.py" "$pipeline" --out /tmp/my-compiler-flags
 ```
 
