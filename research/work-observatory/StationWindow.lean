@@ -53,8 +53,41 @@ theorem stillVisibleAtCutoff (oldCutoff : Nat) (group : Group) (fact : Fact Grou
     expiring oldCutoff fact.timestamp group fact = 0 := by
   simp [expiring]
 
+section Publication
+
+variable {UID Event Context Bytes : Type} [DecidableEq Event] [DecidableEq Context]
+
+/- Context includes every non-event input to the encoder, such as the
+   observation time and publisher definitions. Inputs are ordered lists, so
+   even permutations with identical memberships can force a fresh window. -/
+def retainedWindow (encode : Context → UID → List Event → Bytes)
+    (previous current : Context) (dirty : UID → Bool)
+    (oldRows rows : UID → List Event) (cached : UID → Bytes) (uid : UID) : Bytes :=
+  if dirty uid = false ∧ previous = current ∧ oldRows uid = rows uid then
+    cached uid
+  else
+    encode current uid (rows uid)
+
+theorem retainedReportEquivalence (encode : Context → UID → List Event → Bytes)
+    (compose : List Bytes → Bytes) (previous current : Context) (dirty : UID → Bool)
+    (oldRows rows : UID → List Event) (cached : UID → Bytes) (uids : List UID)
+    (authentic : ∀ uid, cached uid = encode previous uid (oldRows uid)) :
+    compose (uids.map (retainedWindow encode previous current dirty oldRows rows cached)) =
+      compose (uids.map (fun uid => encode current uid (rows uid))) := by
+  congr 1
+  apply List.map_congr_left
+  intro uid _
+  unfold retainedWindow
+  split
+  · rename_i unchanged
+    simpa [unchanged.2.1, unchanged.2.2] using authentic uid
+  · rfl
+
+end Publication
+
 #print axioms committedReplacement
 #print axioms expiryChangesOnlyCrossingFacts
 #print axioms stillVisibleAtCutoff
+#print axioms retainedReportEquivalence
 
 end StationWindow
