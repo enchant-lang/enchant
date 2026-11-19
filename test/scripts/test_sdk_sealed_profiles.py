@@ -10,6 +10,11 @@ PROFILE = runpy.run_path(str(ROOT / 'scripts/sdk_sealed_profiles.py'))
 
 
 class SealedProfiles(unittest.TestCase):
+    def test_contextual_pipeline_carries_lazily_loaded_dispatch_and_owner_analysis(self):
+        selection = PROFILE['plan'](['contextual-pipeline-identity'])
+        self.assertIn('java.manifest', selection['roots'])
+        self.assertIn('proc.message-domain', selection['roots'])
+
     def test_runtime_factory_keeps_dynamic_world_cli_provider(self):
         selection = PROFILE['plan'](['native-custody'])
         self.assertIn('bl.world', selection['roots'])
