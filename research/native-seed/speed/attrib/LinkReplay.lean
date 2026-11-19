@@ -203,6 +203,7 @@ theorem resumeClosedMember {Unit : Type} (old current : Key → Option Value)
       (saved, []) := by
   rw [replayOrdered old current stage stagingChecked, loweringChecked, closed]
 
+omit [DecidableEq Key] in
 theorem externalPublicationIneligible (external : Key → Bool) (key : Key) (value : Option Value)
     (tail : List (Event Key Value)) (visible : external key = true) :
     externalWrites external (.write key value :: tail) ≠ [] := by

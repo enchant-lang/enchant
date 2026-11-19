@@ -224,11 +224,16 @@
    (and (:ownership? effects) (= :send kind) (= :code_server destination))
    (let [rpc (when (and (= :code_call operation) (erlang/is_tuple request)
                         (= 3 (erlang/tuple_size request))) (elem request 2))
+         call (message-operation rpc)
          outer (first (:pending-loader-owners effects))
          [owner] (peek (:pending-env-reads effects))]
-    (-> observed
-        (boundary-event :code-server-owners [(message-operation rpc) (when outer (elem outer 1))])
-        (boundary-event :code-server-read-owners [(message-operation rpc) (when owner (elem owner 1))])))
+    (cond-> (-> observed
+                 (boundary-event :code-server-owners [call (when outer (elem outer 1))])
+                 (boundary-event :code-server-read-owners [call (when owner (elem owner 1))]))
+     (and (:staging-targets? effects) (contains? #{:delete :load_module :soft_purge} call))
+     (boundary-event :staging-code-targets
+      [call (if (and (erlang/is_tuple rpc) (< 1 (erlang/tuple_size rpc)) (erlang/is_atom (elem rpc 1)))
+              (elem rpc 1) :unknown-module)])))
    :else observed)))
 
 (defn- record-source-probe [effects path outcome]
@@ -1372,7 +1377,8 @@
                                                              :source-probes? true :macro-lookups? true
                                                              :env-reads? true :code-reads? true
                                                              :resolver-reads? true :runtime-reads? true
-                                                             :boundary? true :ownership? true :phase-callables callables})
+                                                             :boundary? true :ownership? true :staging-targets? true
+                                                             :phase-callables callables})
                          after (code-snapshot)
                          reads (captured-code-reads before (observed-code-modules (:effects observed) after) after)]
                     [prepared (assoc-in observed [:effects :code-reads] reads)]))))
@@ -1389,6 +1395,8 @@
    :code-reads (count (:code-reads effects))
    :resolver-reads (count (resolver-receipt effects))
    :code-mutations (mapv (fn [[mfa count]] [(vec (erlang/tuple_to_list mfa)) count]) (sort mutations))
+   :code-server-targets (mapv (fn [[[operation module] count]] [operation module count])
+                             (sort (:staging-code-targets effects)))
    :effect-refusals (observed-effect-refusals effects)
    :unstable-registry (boolean (:changing-registry-input effects))
    :unexplained-registry-scope (boolean (:unexplained-registry-scope effects))
@@ -1401,7 +1409,7 @@
   (throw (ex-info "Unknown native staging member" {:namespace selected})))
  (with-phase-entries rows samples-path
   (fn [entries _]
-   {:schema "bl.native.staging-effects" :version 1 :reuse-authority false
+   {:schema "bl.native.staging-effects" :version 2 :reuse-authority false
     :sdk-descriptor-sha256 (:sdk-descriptor-sha256 artifact/validation-context)
     :link-rows-sha256 (:sha256 rows)
     :source-members (count (:order closure))
