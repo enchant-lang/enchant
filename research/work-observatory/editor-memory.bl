@@ -4,6 +4,7 @@
  (:require [bl.json :as json] [clojure.string :as string] [lsp :as lsp] [lsp.rpc :as rpc]))
 
 (def uri "file:///enchant-editor-memory.bl")
+(def peer-uri "file:///enchant-editor-memory-peer.bl")
 (def edits 32)
 (def source-prefix
  (str "(ns observatory.memory-fixture)\n"
@@ -41,35 +42,98 @@
   :os-kib (or (linux-sample "/proc/self/smaps_rollup" #{"Rss" "Pss" "SwapPss"})
               (linux-sample "/proc/self/status" #{"VmRSS" "VmSwap"}))})
 
-(defn edit [state revision]
+(defn diagnostics-for? [messages target]
+ (some #(and (= "textDocument/publishDiagnostics" (get % "method"))
+             (= target (get-in % ["params" "uri"]))) messages))
+
+(defn edit [state target revision]
  (let [[updated messages] (request state "textDocument/didChange"
-                            {"textDocument" {"uri" uri "version" revision}
+                            {"textDocument" {"uri" target "version" revision}
                              "contentChanges" [{"text" (source revision)}]})]
-  (assert (= revision (get-in updated [:docs uri :version])))
-  (assert (some #(= "textDocument/publishDiagnostics" (get % "method")) messages))
+  (assert (= revision (get-in updated [:docs target :version])))
+  (assert (diagnostics-for? messages target))
   updated))
 
-(let [[idle _] (rpc/handle (rpc/initial-state)
-                {"jsonrpc" "2.0" "id" 1 "method" "initialize" "params" {}})
+(defn initialized []
+ (first (rpc/handle (rpc/initial-state)
+         {"jsonrpc" "2.0" "id" 1 "method" "initialize" "params" {}})))
+
+(defn open-document [state target revision]
+ (let [[opened messages] (request state "textDocument/didOpen"
+                          {"textDocument" {"uri" target "version" revision "text" (source revision)}})]
+  (assert (diagnostics-for? messages target))
+  opened))
+
+(defn close-document [state target]
+ (let [[closed messages] (request state "textDocument/didClose" {"textDocument" {"uri" target}})]
+  (assert (diagnostics-for? messages target))
+  (assert (empty? (get-in (first messages) ["params" "diagnostics"])))
+  (assert (nil? (get-in closed [:docs target])))
+  closed))
+
+(defn single-replay []
+ (let [idle (initialized)
       before (sample "idle" idle)
-      [opened _] (request idle "textDocument/didOpen"
-                   {"textDocument" {"uri" uri "version" 1 "text" (source 1)}})
+      opened (open-document idle uri 1)
       _ (assert (= 1 (count (:docs opened))))
       after-open (sample "opened" opened)
       {:keys [closed observations]}
       (loop [state opened n 2 rows [before after-open]]
        (if (> n (inc edits))
         (let [before-close (sample "edited" state)
-              [closed _] (request state "textDocument/didClose" {"textDocument" {"uri" uri}})]
+              closed (close-document state uri)]
          {:closed closed :observations (conj rows before-close)})
-        (let [state (edit state n)]
+        (let [state (edit state uri n)]
          (recur state (inc n)
           (if (zero? (mod (dec n) 8)) (conj rows (sample (str "after-" (dec n) "-edits") state)) rows)))))
       _ (assert (empty? (:docs closed)))
       after-close (sample "closed" closed)]
- (erlang/garbage_collect)
- (File/write! (first (BeamLisp/argv))
-  (json/encode {:schema "enchant.editor-memory-replay.v1"
+  (erlang/garbage_collect)
+  {:schema "enchant.editor-memory-replay.v1"
                 :scope "One LSP request process. Dedicated VM exits after the final sample."
                 :memory-units {:vm "bytes" :editor "bytes or heap words by key" :os-kib "KiB"}
-                :edits edits :samples (conj observations after-close (sample "closed-after-gc" closed))})))
+                :edits edits :samples (conj observations after-close (sample "closed-after-gc" closed))}))
+
+(defn interleaved-replay []
+ (let [idle (initialized)
+       idle-sample (sample "idle" idle)
+       opened (open-document (open-document idle uri 1) peer-uri 1001)
+       open-sample (sample "two-documents-open" opened)
+       {:keys [final-state samples]}
+       (reduce (fn [{:keys [final-state samples]} round]
+                 (let [before (get-in final-state [:docs uri :memo-slot])
+                       peer-before (get-in final-state [:docs peer-uri :memo-slot])
+                       edited (reduce (fn [state version]
+                                       (edit (edit state uri version) peer-uri (+ 1000 version)))
+                                      final-state (range (+ 2 (* 4 round)) (+ 6 (* 4 round))))
+                       edited-bytes (:bytes (lsp/memo-stats))
+                       closed (close-document edited uri)
+                       closed-sample (sample (str "primary-closed-" round) closed)
+                       peer-builds (:builds (:lsp-retention closed-sample))
+                       [saved messages] (request closed "textDocument/didSave"
+                                          {"textDocument" {"uri" peer-uri}})
+                       reopened (open-document saved uri 1)]
+                  (assert (diagnostics-for? messages peer-uri))
+                  (assert (< (get-in closed-sample [:lsp-retention :bytes]) edited-bytes))
+                  (assert (= before (get-in edited [:docs uri :memo-slot])))
+                  (assert (not= before (get-in reopened [:docs uri :memo-slot])))
+                  (assert (= peer-before (get-in reopened [:docs peer-uri :memo-slot])))
+                  ;; The peer's save uses the retained analysis. Only reopening
+                  ;; the primary document should build one more bundle.
+                  (assert (= (inc peer-builds) (:builds (lsp/memo-stats))))
+                  {:final-state reopened :samples (conj samples closed-sample
+                                                    (sample (str "primary-reopened-" round) reopened))}))
+               {:final-state opened :samples [idle-sample open-sample]} (range 4))
+       closed (close-document (close-document final-state uri) peer-uri)
+       before-gc (sample "both-closed" closed)]
+  (assert (empty? (:docs closed)))
+  (erlang/garbage_collect)
+  {:schema "enchant.interleaved-editor-memory-replay.v1"
+   :scope "Two open documents through the serial LSP request owner in a private VM."
+   :memory-units {:vm "bytes" :editor "bytes or heap words by key" :os-kib "KiB"}
+   :edits 32 :reopens 4 :peer-saves-reused true
+   :samples (conj samples before-gc (sample "both-closed-after-gc" closed))}))
+
+(let [[output mode] (BeamLisp/argv)
+      report (if (= "--interleaved" mode) (interleaved-replay) (single-replay))]
+ (File/write! output (json/encode report)))
