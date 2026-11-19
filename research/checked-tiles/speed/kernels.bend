@@ -20,6 +20,11 @@ def tree(d: Nat, +x: U32) -> U32:
       l r = tree(p, x) tree(p, (x + 1 : U32))
       (l + r : U32)
 
+def moments(d: Nat, +x: U32, +a: U32, +b: U32, +c: U32) -> U32:
+  match d:
+    case 0n: (a * x * x + b * x + c : U32)
+    case 1n+p: moments(p, x, (a + a : U32), (a + a + b + b : U32), (a + b + c + c : U32))
+
 def scan(xs: List<&2, U32>, inside: Bool, runs: U32) -> U32:
   match xs:
     case Nil{}: runs
@@ -67,6 +72,7 @@ def dispatch(f: File, k: Nat, n: U32, seed: U32) -> IO(File):
     case 0n: finish(f, seed)
     case 1n+0n: finish(f, serial(U32.to_nat(n), seed))
     case 1n+1n+0n: finish(f, tree!(U32.to_nat(n), seed))
+    case 1n+1n+1n+1n+1n+1n+0n: finish(f, moments(U32.to_nat(n), seed, 1, 0, 1))
     case 1n+1n+1n+rest:
       do IO<File>:
         p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, n)
