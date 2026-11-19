@@ -30,4 +30,4 @@
      (let walk ((pending nodes) (n 0))
        (if (null? pending)
            (begin (display "ANF_OCCURRENCES ") (display n) (newline))
-           (walk (append (bl-items (A-call children (car pending))) (cdr pending)) (+ n 1)))))))
+           (walk (append (A-call children (car pending)) (cdr pending)) (+ n 1)))))))
