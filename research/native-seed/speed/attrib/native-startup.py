@@ -103,7 +103,51 @@ def qualified_inputs(build, qualification):
     return record, bundles
 
 
-def compare_source_workflow(build, qualification, pin_path):
+def benchmark_source(source, commands, order, workspace, environment, meter, timeout,
+                     expected=None, allow_beam_refusal=False):
+    fixture = workspace / source.name
+    shutil.copyfile(source, fixture)
+    source_sha = sha(fixture)
+    samples = {mode: [] for mode in commands}
+    refused = {}
+    attempted = []
+    usage = workspace / "usage"
+    for mode in order:
+        if mode in refused:
+            continue
+        attempted.append(mode)
+        start = time.perf_counter_ns()
+        result = subprocess.run([meter, "-f", "%U %S %M", "-o", usage,
+                                 timeout, "-k", "2s", "60s", *commands[mode], fixture],
+                                cwd=workspace, env=environment, capture_output=True)
+        elapsed = (time.perf_counter_ns() - start) / 1_000_000
+        if result.returncode:
+            if mode == "beam" and allow_beam_refusal and 0 < result.returncode < 124:
+                refused[mode] = {"exit": result.returncode,
+                                 "diagnostic": result.stderr.decode(errors="replace").splitlines()[:2]}
+                continue
+            raise RuntimeError(f"{mode} exited {result.returncode}: {(result.stdout + result.stderr)[-4000:]!r}")
+        output = result.stdout
+        if mode == "beam":
+            if not output.endswith(b":ok\n"):
+                raise ValueError(f"BEAM CLI final value differs: {output[-160:]!r}")
+            output = output.removesuffix(b":ok\n")
+        identity = hashlib.sha256(output).hexdigest()
+        if expected is None and output.strip():
+            expected = identity
+        if identity != expected:
+            raise ValueError(f"{mode} output differs from the reference: {output[-1500:]!r}")
+        user_s, sys_s, rss = map(float, usage.read_text().split())
+        samples[mode].append({"wall_ms": elapsed, "cpu_s": user_s + sys_s, "peak_rss_kib": int(rss)})
+    if sha(source) != source_sha or sha(fixture) != source_sha:
+        raise ValueError("The benchmark Source changed during the comparison")
+    return {"source_sha256": source_sha, "stdout_sha256": expected, "order": attempted,
+            "samples": samples, "refused": refused,
+            "median": {mode: {key: statistics.median(row[key] for row in rows) for key in rows[0]}
+                       for mode, rows in samples.items() if rows}}
+
+
+def compare_source_workflow(build, qualification, pin_path, workflow):
     record, bundles = qualified_inputs(build, qualification)
     sdk, descriptor_sha = pinned_sdk(pin_path)
     meter = shutil.which("time")
@@ -114,54 +158,35 @@ def compare_source_workflow(build, qualification, pin_path):
     commands["beam"] = [sdk / "bin/bl", "--cold", "run"]
     modes = tuple(commands)
     order = (modes + tuple(reversed(modes))) * 2
-    samples = {mode: [] for mode in modes}
-    failures = {}
     with tempfile.TemporaryDirectory(prefix="native-corpus-workflow-") as directory:
         workspace = Path(directory)
         runtime = workspace / "runtime"
         runtime.mkdir(mode=0o700)
-        usage = workspace / "usage"
-        environment = dict(os.environ, LC_ALL="C", BL_NATIVE_TRACE="0", XDG_RUNTIME_DIR=str(runtime),
+        environment = dict(os.environ, LC_ALL="C.UTF-8", BL_NATIVE_TRACE="0", XDG_RUNTIME_DIR=str(runtime),
                            ERL_FLAGS="+S 2:2 +SDcpu 1:1 +SDio 1")
-        corpus = workspace / CORPUS.name
-        shutil.copyfile(CORPUS, corpus)
-        for mode in order:
-            start = time.perf_counter_ns()
-            result = subprocess.run([meter, "-f", "%U %S %M", "-o", usage,
-                                     timeout, "-k", "2s", "60s", *commands[mode], corpus],
-                                    cwd=workspace, env=environment, capture_output=True)
-            elapsed = (time.perf_counter_ns() - start) / 1_000_000
-            if result.returncode:
-                raise RuntimeError(f"{mode} exited {result.returncode}: {result.stderr[-4000:]!r}")
-            output = result.stdout
-            if mode == "beam":
-                if not output.endswith(b":ok\n"):
-                    raise ValueError(f"BEAM CLI final value differs: {output[-160:]!r}")
-                output = output.removesuffix(b":ok\n")
-            if hashlib.sha256(output).hexdigest() != record["source_result_sha256"]:
-                raise ValueError(f"{mode} output differs from the qualified corpus: {output[-1500:]!r}")
-            user_s, sys_s, rss = map(float, usage.read_text().split())
-            samples[mode].append({"wall_ms": elapsed, "cpu_s": user_s + sys_s, "peak_rss_kib": int(rss)})
+        corpus = benchmark_source(CORPUS, commands, order, workspace, environment, meter, timeout,
+                                  expected=record["source_result_sha256"], allow_beam_refusal=True)
+        example = None
+        if workflow:
+            example = benchmark_source(workflow, commands, order, workspace, environment, meter, timeout)
+            example["source"] = str(workflow)
+        failures = {}
         malformed = workspace / "malformed.bl"
         malformed.write_text("]\n")
         for mode, command in commands.items():
             refusal = subprocess.run([timeout, "-k", "2s", "60s", *command, malformed],
                                      cwd=workspace, env=environment, capture_output=True)
-            if refusal.returncode <= 0 or refusal.returncode >= 124 or refusal.stdout:
+            if refusal.returncode <= 0 or refusal.returncode >= 124 or not (refusal.stdout or refusal.stderr):
                 raise ValueError(f"{mode} failed to reject malformed Source: {refusal.returncode}")
-            failures[mode] = {"exit": refusal.returncode, "stdout_bytes": len(refusal.stdout)}
-        if sha(corpus) != record["source_corpus_sha256"]:
-            raise ValueError("The benchmark Source changed during the comparison")
+            failures[mode] = {"exit": refusal.returncode, "stdout_bytes": len(refusal.stdout),
+                              "stderr_bytes": len(refusal.stderr)}
     return {"schema": "bl.native.qualified-source-workflow.v1",
-            "scope": "Cold command through exact original Source corpus and exit. BEAM prints an additional :ok CLI value.",
-            "source_sha256": record["source_corpus_sha256"],
-            "stdout_sha256": record["source_result_sha256"], "image_sha256": record["images"]["stage1"],
+            "scope": "Fresh command through original Source and exit. BEAM prints an additional :ok CLI value.",
+            "image_sha256": record["images"]["stage1"],
             "bundle_sha256": {name: sha(build / name) for name in bundles},
             "qualification_sha256": sha(qualification), "fixpoint_receipt_sha256": record["receipt"]["sha256"],
-            "sdk_descriptor_sha256": descriptor_sha, "order": order,
-            "samples": samples, "malformed_source": failures,
-            "median": {mode: {key: statistics.median(row[key] for row in rows) for key in rows[0]}
-                       for mode, rows in samples.items()}}
+            "sdk_descriptor_sha256": descriptor_sha, "corpus": corpus, "workflow": example,
+            "malformed_source": failures}
 
 
 def main():
@@ -174,11 +199,16 @@ def main():
                         help="also compare the prepared route with this exact BEAM SDK")
     parser.add_argument("--source-qualification", type=Path,
                         help="compare the complete original Source corpus on the qualified native and BEAM products")
+    parser.add_argument("--source-workflow", type=Path,
+                        help="also compare a standalone Source script on all four routes")
     args = parser.parse_args()
+    if args.source_workflow and not args.source_qualification:
+        parser.error("--source-workflow requires --source-qualification")
     if args.source_qualification:
         if args.beam_pin is None:
             parser.error("--source-qualification requires --beam-pin")
-        report = compare_source_workflow(args.build.resolve(), args.source_qualification, args.beam_pin)
+        report = compare_source_workflow(args.build.resolve(), args.source_qualification, args.beam_pin,
+                                         args.source_workflow)
         args.out.write_text(json.dumps(report, indent=2) + "\n")
         print("NATIVE_QUALIFIED_SOURCE_WORKFLOW_OBSERVED")
         return
