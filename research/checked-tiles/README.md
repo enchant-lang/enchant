@@ -97,3 +97,22 @@ From the checkout, pass a new directory for the immutable source snapshots, proo
 To exercise your own trusted edit, add `--helper /path/to/blend.bl`. Define one ordinary unary `mix-white` function. A successful full rehearsal needs a visibly different bright-byte mapping from A. The fixed callers live in [entry.bl](live-render/entry.bl). The browser exercises the supplied change.
 
 The runner uses the exact SDK and Lean in [tools.json](tools.json), the retained stage-two executable and macro bundle in `research/native-seed/out/compiler-native-owner`, the compressed Ora scene plan, and an EGL/GLES device supporting the film renderer. The compiler inputs are checked against the [native bootstrap qualification](../native-seed/evidence/scheme-fixpoint/qualification.json). On another workstation provide equivalent EGL libraries via `SCENE_EGL` and `SCENE_GLES` and the appropriate Mesa vendor configuration. Warmup, setup of the two pending jobs, late completion and teardown are outside the save interval. A browser session waits up to three minutes for a save.
+
+## Measure ordinary Enchant against Bend
+
+The speed corpus checks five resident jobs using runtime inputs. It exercises a qualified self-hosted native compiler, the checkout's newer native emitter hosted on the pinned SDK, and Bend 2.0.40. The follow-up runs compile two ordinary byte loops, replay the map/filter/sum descriptor through Cranelift, and compile a bounded recurrence to an unboxed machine loop with an actor-aware fallback. [Journal and results](journal/04-native-concurrent-core.bl.org) · [Speed harness](speed/)
+
+On the research workstation, from the checkout root, give the replay a **new** directory. Each phase runs under a memory cap, writes its own receipt and stops its workers.
+
+    research/checked-tiles/speed/replay /tmp/my-enchant-speed
+
+For the smaller CPU-only initial corpus and the same specialist checks, use the following command.
+
+    research/checked-tiles/speed/replay /tmp/my-enchant-speed-small --cpu-only --quick
+
+The replay needs the immutable SDK and Lean from tools.json, the retained stage-two executable and bundle in research/native-seed/out/compiler-native-owner, the pinned Gambit, Clang, Bun and Rust/Cargo tools, and the locked Cranelift crate dependencies. The initial corpus prepares the pinned Bend sources and, for the GPU run, CUDA tooling. Set BEND_TREE, CUDA_HOME and CARGO_TARGET_DIR to reuse existing copies. The quick option reduces the initial corpus to one block and two sizes. The published full run used three blocks, nine configurations and a hardware GPU. The byte follow-ups use 20 trials per size and arm. [Native compiler qualification](../native-seed/evidence/scheme-fixpoint/qualification.json) · [Raw corpus](evidence/speed-corpus.json) · [Ordinary byte loops](evidence/speed-ordinary-bytes.json) · [Packed descriptor](evidence/speed-packed.json) · [Scalar region](evidence/speed-bounds-word.json)
+
+To reproduce an individual arithmetic ablation, point the runner at a completed corpus directory. The default measures a machine primitive used as a value. Pass --direct, --machine, --frame-aware or --word for the successive lowerings. Each output directory must be new.
+
+    scripts/bl-mem
+    systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=256M python3 -B research/checked-tiles/speed/bounded.py /tmp/my-enchant-speed/corpus --frame-aware --out /tmp/my-frame-replay
