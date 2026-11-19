@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
 from run import HERE, BASE, IMAGE, QUAL, command, sexp, sha, write
@@ -29,7 +30,6 @@ def run(pipeline,out):
     for name,arity in NAMES.items():
         stem='v'+''.join('_'+str(ord(c)) for c in name)+'$'
         # Older reader providers have distinct fixed arities.
-        import re
         fixed=re.findall(r'^\(define '+re.escape(stem)+r'(\d+) ',actual,re.M)
         if not fixed: raise ValueError(name)
         if str(arity) not in fixed:
@@ -56,21 +56,35 @@ def run(pipeline,out):
     (out/'observer.scm').write_text(obs.replace('(define (A-run)',marked+'\n(define (A-run)'))
     env=dict(os.environ,ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
     native=command([IMAGE/'stage2','--eval',out/'observer.scm','unused'],env,out/'native.log')
-    beam=command([sdk/'bin/bl','--cold','-p',pipeline/'pinned','run',BASE/'speed/attrib/beam-attrib.bl',
+    driver=(BASE/'speed/attrib/beam-attrib.bl').read_text()
+    names=' '.join(sexp(n.split('/')[1]) for n in cells)
+    source_report='(def observed-fns #{'+names+'})\n'+(HERE/'beam-work.bl').read_text()
+    (out/'beam-work.bl').write_text(driver[:driver.index('(defn report')]+source_report+'\n'+driver[driver.index('(defn reductions'):])
+    beam=command([sdk/'bin/bl','--cold','-p',pipeline/'pinned','run',out/'beam-work.bl',
                   '--',source,out,'1','snapshot'],env,out/'beam.log',timeout=480)
     expected=baseline['runs'][0]['emitted_sha256']
     for platform in ['native','beam']: sha(out/(platform+'.scm'),expected)
     if any('definitions 104 emit-failures 0' not in log for log in (native,beam)):
         raise ValueError('Incomplete pipeline')
     counts={r.split()[1]:dict(zip(cells,map(int,r.split()[2:]),strict=True)) for r in native.splitlines() if r.startswith('WORK ')}
-    matched={phase:{} for phase in counts}
+    entries={phase:[] for phase in counts}
     for line in beam.splitlines():
-        if line.startswith('PROF\t'):
-            _,phase,ns,fun,n,us,runtime=line.split('\t')
-            name=ns+'/'+fun
-            if name in cells: matched[phase][name]=int(n)
+        if line.startswith('ENTRY\t'):
+            _,phase,module,fun,arity,n=line.split('\t')
+            entries[phase].append(dict(module=module,function=fun,arity=int(arity),calls=int(n)))
+    matched={phase:{} for phase in counts}
+    for phase, candidates in entries.items():
+        for name,cell in cells.items():
+            if not counts[phase][name]: continue
+            owner,fun=name.split('/')
+            module='.'.join(part.capitalize() for part in owner.split('.'))
+            possible=[r for r in candidates if r['module'] in ['Elixir.BeamLisp.Ns.Body.'+module,'Elixir.BeamLisp.Ns.'+module]
+                      and r['function']==fun and r['arity']==int(cell.split('$')[-1])]
+            actual=next((r for r in possible if '.Ns.Body.' in r['module']),None)
+            if not actual and len(possible)==1: actual=possible[0]
+            if actual: matched[phase][name]=actual['calls']
     write(out/'work.json',dict(image=qual['images']['stage2'],sdk=sdk_info['descriptor_sha256'],
-        fixture=sha(source),output=expected,cells=cells,native=counts,beam=matched))
+        fixture=sha(source),output=expected,cells=cells,native=counts,beam=matched,beam_mfas=entries))
     for phase in matched:
         print(phase,[(n,counts[phase][n],b) for n,b in matched[phase].items()])
 
