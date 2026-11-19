@@ -1,19 +1,23 @@
 import Base
 
-def serial(n: U32, +x: U32) -> U32:
-  match U32.is_zero(n):
+def serial(+n: U32, x: U32) -> U32:
+  serial.go(n, x, U32.is_zero(n))
+
+def serial.go(n: U32, +x: U32, done: Bool) -> U32:
+  match done:
     case True{}: x
     case False{}:
       +t = (x * 3 + 1 : U32)
       serial((n - 1 : U32), wrap(t))
 
 def wrap(+t: U32) -> U32:
-  match U32.is_lt(t, 65521):
-    case True{}: t
-    case False{}:
-      match U32.is_lt(t, 131042):
-        case True{}: (t - 65521 : U32)
-        case False{}: (t - 131042 : U32)
+  wrap.go(t, U32.is_lt(t, 65521), U32.is_lt(t, 131042))
+
+def wrap.go(t: U32, small: Bool, medium: Bool) -> U32:
+  match small medium:
+    case True{} _: t
+    case False{} True{}: (t - 65521 : U32)
+    case False{} False{}: (t - 131042 : U32)
 
 def tree(d: Nat, +x: U32) -> U32:
   match d:
@@ -25,7 +29,7 @@ def tree(d: Nat, +x: U32) -> U32:
 def scan(xs: List<&2, U32>, inside: Bool, runs: U32) -> U32:
   match xs:
     case Nil{}: runs
-    case c <> tail:
+    case +c <> tail:
       +digit = Bool.and(U32.is_lt(47, c), U32.is_lt(c, 58))
       scan(tail, digit, (runs + Bool.to_u32(Bool.and(digit, Bool.not(inside))) : U32))
 
@@ -52,34 +56,31 @@ def finish(f: File, result: U32) -> IO(Unit):
     u : Unit <- IO.print(U32.show(result))
     serve(f)
 
-def bytes(k: U32, p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(Unit):
+def bytes(+k: U32, p: File & Result<&1, &1, U32 & String, List<&2, U32>>) -> IO(Unit):
   (f, res) = p
   do IO<Unit>:
     xs : List<&2, U32> <- IO.pass(List<&2, U32>, res)
-    match U32.is_eq(k, 3):
-      case True{}: finish(f, scan(xs, False{}, 0))
-      case False{}:
-        match U32.is_eq(k, 4):
-          case True{}: finish(f, sum(graded(xs), 0))
-          case False{}: finish(f, fused(xs, 0))
+    finish(f, consume(xs, U32.is_eq(k, 3), U32.is_eq(k, 4)))
 
-def dispatch(f: File, +k: U32, n: U32, seed: U32) -> IO(Unit):
-  match U32.is_zero(k):
-    case True{}: finish(f, seed)
-    case False{}:
-      match U32.is_eq(k, 1):
-        case True{}: finish(f, serial(n, seed))
-        case False{}:
-          match U32.is_eq(k, 2):
-            case True{}: finish(f, tree!(U32.to_nat(n), seed))
-            case False{}:
-              do IO<Unit>:
-                p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, n)
-                bytes(k, p)
+def consume(xs: List<&2, U32>, scan_it: Bool, map_it: Bool) -> U32:
+  match scan_it map_it:
+    case True{} _: scan(xs, False{}, 0)
+    case False{} True{}: sum(graded(xs), 0)
+    case False{} False{}: fused(xs, 0)
+
+def dispatch(f: File, k: Nat, n: U32, seed: U32) -> IO(Unit):
+  match k:
+    case 0n: finish(f, seed)
+    case 1n+0n: finish(f, serial(n, seed))
+    case 1n+1n+0n: finish(f, tree!(U32.to_nat(n), seed))
+    case 1n+1n+1n+rest:
+      do IO<Unit>:
+        p : File & Result<&1, &1, U32 & String, List<&2, U32>> <- File.read_bytes(f, n)
+        bytes((U32.from_nat(rest) + 3 : U32), p)
 
 def header(f: File, h: List<&2, U32>) -> IO(Unit):
   match h:
-    case k <> hi <> lo <> seed <> Nil{}: dispatch(f, k, (hi * 256 + lo : U32), seed)
+    case k <> hi <> lo <> seed <> Nil{}: dispatch(f, U32.to_nat(k), (hi * 256 + lo : U32), seed)
     case Nil{}: File.close(f)
     case _: IO.die(Unit, 2, "incomplete request")
 
