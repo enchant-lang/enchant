@@ -41,7 +41,7 @@ def medians(samples):
     return [statistics.median(col) for col in zip(*samples)] + [statistics.median(map(sum, samples))]
 
 
-def run(pipeline, control, candidate, out):
+def run(pipeline, control, candidate, out, before_symbols=None):
     out.mkdir()
     sdk_info = json.loads((HERE.parent/'tools.json').read_text())
     sdk = Path(sdk_info['sdk'])
@@ -62,6 +62,11 @@ def run(pipeline, control, candidate, out):
                   images={k:sha(v/'stage1') for k,v in [('control',control),('candidate',candidate)]},
                   boot_sources={k:sha(v/'stage1.scm') for k,v in [('control',control),('candidate',candidate)]},
                   jobs={})
+    if before_symbols:
+        report['images']['fields'] = sha(before_symbols/'stage1')
+        report['boot_sources']['fields'] = sha(before_symbols/'stage1.scm')
+    arms = ['control','flat','candidate','beam']
+    if before_symbols: arms.insert(2,'fields')
     for ns, path in [('reader',pipeline/'reader.bl'),('anf',ROOT/'priv/boot/anf.bl'),('diag',ROOT/'priv/boot/diag.bl')]:
         job = out/ns
         job.mkdir()
@@ -79,7 +84,7 @@ def run(pipeline, control, candidate, out):
                         .replace('(def ns-name "reader")','(def ns-name '+sexp(ns)+')')
                         .replace('priv/boot/reader.bl',attr))
         runs = []
-        for order in [('control','flat','candidate','beam'),('beam','candidate','flat','control')]:
+        for order in [arms, list(reversed(arms))]:
             for arm in order:
                 payload = job/'observer.scm'
                 if arm == 'beam':
@@ -89,7 +94,7 @@ def run(pipeline, control, candidate, out):
                     # remain readable through every ordinary map operation.
                     switch = '(set! native-field-map (lambda (pairs size) #f))\n' if arm=='flat' else ''
                     payload.write_text(switch+observer)
-                    image = control if arm=='control' else candidate
+                    image = control if arm=='control' else before_symbols if arm=='fields' else candidate
                     argv = [image/'stage1','--eval',payload,bundle]
                 log = command(argv,env,job/(str(len(runs))+'-'+arm+'.log'),timeout=360)
                 if 'emit-failures 0' not in log or 'A3_DONE' not in log:
@@ -98,7 +103,7 @@ def run(pipeline, control, candidate, out):
                 digest = sha(job/('beam.scm' if arm=='beam' else 'native.scm'))
                 layout = None if arm=='beam' else next([int(v) for v in l.split()[1:]]
                     for l in log.splitlines() if l.startswith('LAYOUT '))
-                if layout and ((layout[0]>0)!=(arm=='candidate') or layout[1]<1):
+                if layout and ((layout[0]>0)!=(arm in ('candidate','fields')) or layout[1]<1):
                     raise ValueError(f'Construction switch was ineffective: {arm} {layout}')
                 runs.append(dict(arm=arm,output=digest,wall_ms=wall,layout=layout,
                                  cpu_ms=None if arm=='beam' else rows(log,'CPU',1000)))
@@ -116,5 +121,6 @@ if __name__=='__main__':
     for arg in ('pipeline','control','candidate'):
         parser.add_argument(arg,type=Path)
     parser.add_argument('--out',type=Path,required=True)
+    parser.add_argument('--before-symbols',type=Path)
     a=parser.parse_args()
-    run(a.pipeline.resolve(),a.control.resolve(),a.candidate.resolve(),a.out.resolve())
+    run(a.pipeline.resolve(),a.control.resolve(),a.candidate.resolve(),a.out.resolve(),a.before_symbols.resolve() if a.before_symbols else None)

@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from field_pipeline import CLOCK, medians, rows
 from run import IMAGE, QUAL, command, sexp, sha, write
 
 
-def run(pipeline, out):
+def run(pipeline, out, host_report=None):
     out.mkdir()
     reference = json.loads((pipeline/'pipeline.json').read_text())
     q = json.loads(QUAL.read_text())
@@ -62,27 +63,52 @@ def run(pipeline, out):
                       old=unit['object_sha256'],new=sha(obj),flags=flags,seconds=time.monotonic()-start))
         return obj
     host, = [u for u in stage['units'] if u['indivisible_ffi_host']]
+    if host_report:
+        saved = json.loads(host_report.read_text())
+        if (saved['image'] != expected or saved['fixture'] != reference['source_sha256']
+                or len(saved['objects']) != 2):
+            raise ValueError('Wrong host experiment')
+        for row in saved['objects']:
+            if row['unit'] != host['ordinal'] or row['c'] != sha(host['c']) or row['old'] != sha(host['object']):
+                raise ValueError('Wrong host object')
+            level = row['flags'][0]
+            flags = list(host['c_flags'])
+            flags[0] = level
+            flags[flags.index('-D___SINGLE_HOST')] = '-D___MULTIPLE_HOSTS'
+            if level not in ('-O0','-O1') or row['flags'] != flags:
+                raise ValueError('Wrong host C policy')
+            obj = host_report.parent/f'unit-{host["ordinal"]}{level}.o'
+            sha(obj,row['new'])
+            relink('runtime'+level,{host['object']:obj})
+            sha(out/('runtime'+level),saved['images']['runtime'+level])
+            if level == '-O1': host_optimized = obj
+        report.update(objects=saved['objects'],runs=saved['runs'],host_receipt=sha(host_report))
+    else:
+        for level in ['-O0','-O1']:
+            obj = compile_unit(host,level)
+            relink('runtime'+level,{host['object']:obj})
+            if level=='-O1': host_optimized=obj
+        measure(['stock','runtime-O0','runtime-O1'])
+    # Change only procedures defined by the self-hosted compiler. Mixed
+    # initializer/rt units and the emitter/reader keep their original flags.
     optimized = {}
-    for level in ['-O0','-O1']:
-        replacements = {host['object']:compile_unit(host,level)}
-        relink('runtime'+level,replacements)
-        if level=='-O1': optimized.update(replacements)
-    measure(['stock','runtime-O0','runtime-O1'])
     for unit in stage['units']:
-        if unit is host: continue
-        # Unit 1 is bundle metadata initialization alone, already finished at
-        # the timing boundary. Retain each data-only object byte for byte.
         source = manifest.parent/unit['file']
         sha(source,unit['sha256'])
-        if '(define v_' in source.read_text():
+        targets = re.findall(r'^\(define (v_[0-9_]+)\$[0-9]+ \(lambda ',source.read_text(),re.M)
+        owners = {''.join(chr(int(c)) for c in n[2:].split('_')).split('/')[0] for n in targets}
+        if owners == {'compiler'}:
             optimized[unit['object']] = compile_unit(unit,'-O1')
-    relink('compiler-O1',optimized)
-    measure(['stock','runtime-O1','compiler-O1'])
+    if not optimized: raise ValueError('No pure compiler units')
+    relink('language-O1',optimized)
+    relink('combined-O1',{**optimized,host['object']:host_optimized})
+    measure(['stock','language-O1','combined-O1','runtime-O1'])
 
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('pipeline',type=Path)
     p.add_argument('--out',required=True,type=Path)
+    p.add_argument('--host-report',type=Path,help='Reuse both verified host experiments')
     a=p.parse_args()
-    run(a.pipeline.resolve(),a.out.resolve())
+    run(a.pipeline.resolve(),a.out.resolve(),a.host_report.resolve() if a.host_report else None)
