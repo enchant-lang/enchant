@@ -1,12 +1,12 @@
 (with-exception-catcher
  (lambda (e) (display-exception e (current-error-port)) (exit 1))
  (lambda ()
-   (let* ((args (native-command-line)) (module (caddr args)) (paths (cdddr args)))
-     (load module)
+   (let ((module (getenv "BOOT_TRANSPORT")) (paths (call-with-input-file (getenv "BOOT_CONTROLS") read)))
      (define (observe reader path)
        (with-exception-catcher
          (lambda (e) (list 'error (call-with-output-string "" (lambda (p) (display-exception e p)))))
          (lambda () (list 'ok (reader path)))))
+     (load module)
      (for-each (lambda (path)
                  (let ((a (observe native-read-file path)) (b (observe boot-bulk-read-file path)))
                    (if (not (equal? a b)) (error "text transport differs" path a b))
