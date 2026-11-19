@@ -48,7 +48,9 @@
 
 (defn- seed-request [index stamp]
  (let [id (str "seed-" index)
-       at (if (zero? (mod index 10)) (- stamp (* 7 86400000)) stamp)
+       at (cond (= index 1) (+ stamp 1)
+                (zero? (mod index 10)) (- stamp (* 7 86400000))
+                :else stamp)
        route (if (zero? (mod index 3)) "anthropic" "codex")]
   (fact (- -1 index) (str "request:" id) at "request"
         {"request-id" id "uid" (+ 1000 (mod index 150)) "route" route "provider" route
@@ -72,24 +74,46 @@
           event))
        (datom/q history-query database since)))
 
+(defn- completed-attempt? [window]
+ (some (fn [request]
+         (and (= "seed-1" (get request "request-id"))
+              (some #(= "attempt-finished" (get % "event")) (get request "attempts"))))
+       (:requests window)))
+
 (defn- verify-publication [conn current initial delta stamp]
  (let [since (- stamp (* 31 86400000))
        baseline-index (into {} (map (fn [[id row]] [id (decoded-event row)]) (:facts initial)))
-       decoded (update-decoded baseline-index delta)
-       [actual candidate-cost] (measured #(ordered-events current since decoded))
-       [expected reference-cost] (measured #(accounting/facts conn since))
+       reference #(accounting/facts conn since)
+       candidate #(ordered-events current since (update-decoded baseline-index delta))
+       expected (reference)
+       {:keys [actual timing]}
+       (reduce (fn [{:keys [actual timing]} path]
+                 (let [[events cost] (measured (if (= :from-retained-events path) candidate reference))]
+                  (assert (= expected events))
+                  {:actual (if (= :from-retained-events path) events actual)
+                   :timing (update timing path (fn [samples] (conj (or samples []) cost)))}))
+               {:actual [] :timing {}}
+               [:from-full-pulls :from-retained-events :from-retained-events :from-full-pulls])
+       expected-by-uid (group-by #(get % "uid") expected)
+       actual-by-uid (group-by #(get % "uid") actual)
+       has-seed-request (some #(= "request:seed-1" (get % "id")) expected)
        now (+ stamp 1)
        windows (mapv (fn [days]
                        (let [from-reference (accounting/project expected now days)
                              from-delta (accounting/project actual now days)]
                         (assert (= from-reference from-delta))
-                        {:days days :exact true :requests (reduce + 0 (map :requests (:rows from-delta)))}))
+                        (doseq [uid [1000 1001]]
+                         (assert (= (accounting/project (get expected-by-uid uid) now days)
+                                    (accounting/project (get actual-by-uid uid) now days))))
+                        (when has-seed-request (assert (completed-attempt? from-delta)))
+                        {:days days :exact true :exact-uid-windows 2
+                         :attempt-join-checked (boolean has-seed-request)
+                         :requests (reduce + 0 (map :requests (:rows from-delta)))}))
                      [7 30])]
-  (assert (= expected actual))
   (when (>= (count expected) 10)
    (assert (< (:requests (first windows)) (:requests (second windows)))))
   {:events (count actual) :exact-ordered-events true :decoded-updates (count (:changed delta))
-   :history-preparation {:from-retained-events candidate-cost :from-full-pulls reference-cost}
+   :history-preparation timing
    :windows windows}))
 
 (defn- replay [n]
