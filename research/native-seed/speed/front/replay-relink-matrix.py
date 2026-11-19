@@ -147,8 +147,8 @@ def run_update(overlay, directory, step, environment):
     subprocess.run(command, cwd=overlay, check=True)
 
 
-def run_link(overlay, work, mode, profile):
-    staged = overlay / "prepared"
+def run_link(overlay, work, mode, profile, staged=None):
+    staged = staged if staged is not None else overlay / "prepared"
     destination = Path(tempfile.mkdtemp(prefix=mode + "-", dir=work))
     manifest = read(staged / "partition.json")
     for row in [manifest["metadata"], *manifest["units"]]:

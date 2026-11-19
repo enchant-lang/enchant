@@ -14,11 +14,13 @@ MATRIX = Path(__file__).with_name('replay-relink-matrix.py')
 EVAL_HEADER = '(BeamLisp.Compiler/eval_string (second (first texts)) (BeamLisp.Compiler/new_env "user") path)'
 LITERAL_HEADER = '(namespace-stage/stage! (first forms) (second (first texts)) path)'
 
-DRIVER = '''(ns tooling.staging-header-candidate)
+PREVIEW = '''(ns tooling.staging-header-candidate)
 (let [dir (Path/expand "preview")]
  (doseq [file ["namespace-stage.bl" "build.bl"]]
   (BeamLisp.AOT/compile_file (Path/join dir file) (list (tuple :output_dir dir) (tuple :mark_loaded? true)))))
-(BeamLisp.Loader/with_load_path "research/native-seed/speed/front"
+'''
+
+DRIVER = PREVIEW + '''(BeamLisp.Loader/with_load_path "research/native-seed/speed/front"
  (fn [] (BeamLisp.Loader/load_provider "native.observe-links")))
 ((BeamLisp.Env/fetch_exact! "native.observe-links" "run-observation") (BeamLisp/argv))
 '''
@@ -49,22 +51,26 @@ def verify_trace(data, sdk_sha, links_sha):
             raise ValueError(f"{row['namespace']}: incomplete publication trace or mismatched prepared inputs")
 
 
-def preview_overlay(tools, directory, revision, literal=True):
-    digest = tools['digest']
-    overlay = tools['new_overlay'](directory, revision, 'source-')
-    edited = {}
+def write_preview(overlay, sources, literal):
     preview = overlay / 'preview'
     preview.mkdir()
-    for name in ('namespace-stage', 'build'):
-        source = overlay / 'priv/lib/js' / (name + '.bl')
-        text = retarget(source.read_text(), f'(ns js.{name}', f'(ns staging-preview.{name}')
+    for name, source in sources.items():
+        text = retarget(source, f'(ns js.{name}', f'(ns staging-preview.{name}')
         if name == 'build':
             text = retarget(text, '[js.namespace-stage :as namespace-stage]',
                             '[staging-preview.namespace-stage :as namespace-stage]')
             if not literal:
                 text = retarget(text, LITERAL_HEADER, EVAL_HEADER)
-        (preview / source.name).write_text(text)
-        edited[str(source.relative_to(overlay))] = digest(source)
+        (preview / (name + '.bl')).write_text(text)
+    return preview
+
+
+def preview_overlay(tools, directory, revision, literal=True):
+    digest = tools['digest']
+    overlay = tools['new_overlay'](directory, revision, 'source-')
+    paths = {name: overlay / 'priv/lib/js' / (name + '.bl') for name in ('namespace-stage', 'build')}
+    preview = write_preview(overlay, {name: path.read_text() for name, path in paths.items()}, literal)
+    edited = {str(path.relative_to(overlay)): digest(path) for path in paths.values()}
     for name in ('observe-links', 'checked-relink', 'stage-link-guard'):
         module = overlay / FRONT / (name + '.bl')
         edited[str(module.relative_to(overlay))] = digest(module)
