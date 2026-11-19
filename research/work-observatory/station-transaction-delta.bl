@@ -187,16 +187,28 @@
    :history-preparation timing
    :windows windows}))
 
-(defn- replay [n]
+(defn- seed! [conn n stamp bulk?]
+ (let [started (erlang/monotonic_time :microsecond)]
+  (doseq [batch (range (erlang/div (+ n 499) 500))]
+   (let [start (* batch 500)
+         rows (mapv (fn [index]
+                      (let [row (seed-request index stamp)]
+                       ;; The fixture owns a fresh DB. This high ID range is
+                       ;; reserved for new seed rows and never overlaps the
+                       ;; temporary IDs resolved by the later transactions.
+                       (if bulk? (assoc row :db/id (+ 10000000 index)) row)))
+                    (range start (min n (+ start 500))))]
+    (if bulk? (datom/load-facts! conn rows) (datom/transact! conn rows))))
+  {:mode (if bulk? :bulk-fresh-facts :ordinary-transactions)
+   :elapsed-us (- (erlang/monotonic_time :microsecond) started)}))
+
+(defn- replay [n bulk?]
  (let [conn (datom/connect accounting/schema)
        stamp 1790000000000]
   (try
-   (doseq [batch (range (erlang/div (+ n 499) 500))]
-    (let [start (* batch 500)]
-     (datom/transact! conn
-      (mapv #(seed-request % stamp)
-            (range start (min n (+ start 500)))))))
-   (let [attempt {"attempt-id" "one" "request-id" "seed-1" "uid" 1001 "provider" "codex"}
+   (let [seed (seed! conn n stamp bulk?)
+         _ (println (str "Station fixture seeded " n " requests"))
+         attempt {"attempt-id" "one" "request-id" "seed-1" "uid" 1001 "provider" "codex"}
          _ (datom/transact! conn [(fact -1 "attempt:one" stamp "attempt" (assoc attempt "event" "attempt-started"))])
          initial (rebuild (datom/db conn))
          written (datom/transact! conn [(fact -1 "attempt:one" (+ stamp 1) "attempt"
@@ -224,14 +236,16 @@
          overtaken (advance cursor-result missed observed)]
     (assert (= :full-rebuild (:path rebuilt) (:path overtaken)))
     (assert (= (fact-index observed) (:facts rebuilt) (:facts overtaken)))
-    {:seed-requests n :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
+    {:seed-requests n :seed seed :changed-facts (count (:changed delta)) :transaction-datoms (:transaction-datoms delta)
      :delta delta-cost :full full-cost :publication publication
      :controls {:attempt-finish-exact true :cursor-only-ignored true
                 :missed-transaction-rebuilt true :overtaken-transaction-rebuilt true}})
    (finally (datom/close! conn)))))
 
-(let [[output size] (BeamLisp/argv)
-      requests (if size (String/to_integer size) 3000)]
+(let [[output size mode] (BeamLisp/argv)
+      requests (if size (String/to_integer size) 3000)
+      bulk? (= mode "--bulk-seed")]
+ (assert (or (nil? mode) bulk?))
  (assert (and (string? output) (<= 1 requests 74000)))
  (File/write! output (json/encode {:schema "enchant.station-transaction-delta-replay.v1"
-                                  :result (replay requests)})))
+                                  :result (replay requests bulk?)})))
