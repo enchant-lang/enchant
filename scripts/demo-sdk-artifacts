@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--seed', type=Path)
+    parser.add_argument('--runtime-sdk', type=Path, help='use this immutable SDK floor, runtime and dependencies')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--all-sdk', action='store_true', help='build the actual self-build library selection')
     parser.add_argument('--activation-smoke', action='store_true', help='build the actual activation dependency graph before the full inventory gate')
@@ -41,6 +43,18 @@ def main():
         parser.error('--source-free requires --all-sdk or --activation-smoke')
     root, output = args.root.resolve(), args.out.absolute()
     seed = (args.seed or root / 'priv/bootstrap/seed').resolve()
+    runtime_sdk = args.runtime_sdk.resolve(strict=True) if args.runtime_sdk else None
+    if runtime_sdk is not None:
+        if not re.fullmatch(r'/nix/store/[0-9a-z]{32}-[^/]+', str(runtime_sdk)):
+            parser.error('runtime SDK must be an immutable Nix store product')
+        descriptor = json.loads((runtime_sdk / 'artifact.json').read_text())
+        if descriptor.get('kind') != 'sdk' or descriptor.get('version') != 1:
+            parser.error('unsupported runtime SDK product')
+        sdk_seed = (runtime_sdk / 'image/priv/bootstrap/seed').resolve(strict=True)
+        if args.seed is not None and seed != sdk_seed:
+            parser.error('runtime SDK requires its exact compiler floor')
+        seed = sdk_seed
+        os.environ.setdefault('BEAM_LISP_Z3', str(runtime_sdk / 'image/priv/z3/bin/z3'))
     profiles = runpy.run_path(str(root / 'scripts/sdk_sealed_profiles.py'))
     timings = runpy.run_path(str(root / 'scripts/test_timings.py'))['slowest']
     try:
@@ -136,14 +150,25 @@ def main():
     consumer_boot = boot.replace('BeamLisp.AOT.boot()',
                                 '{:ok, _} = Application.ensure_all_started(:beam_lisp)')
     (image / 'consumer-boot.exs').write_text(consumer_boot)
-    deps = list(dict.fromkeys(p.resolve() for p in [*sorted((root / 'deps').glob('*/ebin')),
-                                                  *sorted((root / '_build').glob('*/lib/*/ebin'))]))
-    command = ['elixir']
+    if runtime_sdk is not None:
+        platform = Path(descriptor['platform'])
+        deps = [path for path in sorted((runtime_sdk / 'lib').glob('*/ebin'))
+                if not path.parent.name.startswith('beam_lisp-')]
+        command = [str(platform / 'bin/elixir')]
+    else:
+        deps = list(dict.fromkeys(p.resolve() for p in [*sorted((root / 'deps').glob('*/ebin')),
+                                                      *sorted((root / '_build').glob('*/lib/*/ebin'))]))
+        command = ['elixir']
     for dep in deps:
         command += ['-pa', str(dep)]
     command += ['-pa', str(app / 'ebin'), str(image / 'boot.exs')]
     env = dict(os.environ, BL_ROOT=str(image), BL_DAEMON='off', BL_SDK_ARTIFACT_OUT=str(output), BL_TEST_TIMES='1',
                XDG_CACHE_HOME=str(image / 'cache'), ELIXIR_ERL_OPTIONS='+S 4:4 +SDcpu 2:2 +SDio 1:1')
+    if runtime_sdk is not None:
+        env.update(PATH=str(platform / 'bin') + os.pathsep + os.environ.get('PATH', os.defpath),
+                   BL_ARTIFACT_PLATFORM=str(platform / 'artifact-platform'),
+                   BL_PREPARATION_COORDINATOR=descriptor['coordinator'],
+                   BL_PREPARED_NATIVES=str((platform / 'native-products').resolve(strict=True)))
     if args.activation_smoke:
         env['BL_SDK_ARTIFACT_SMOKE'] = 'yes'
     if args.contextual_tests:
