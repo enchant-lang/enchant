@@ -869,7 +869,13 @@ fn exec_payload(dest: &std::path::Path, sha8: &str, argv: &[String]) -> ! {
     } else {
         std::env::remove_var("BL_BUILD_ID");
     }
-    if SDK_SELECTION.get().is_none() && checkout_root().is_none() { touch_used(dest); }
+    if SDK_SELECTION.get().is_none() && checkout_root().is_none() {
+        touch_used(dest);
+        // Carry the same serve default through cold startup and warm requests.
+        if verb_of(argv).as_deref() == Some("serve") && std::env::var_os("BL_ENV").is_none() {
+            std::env::set_var("BL_ENV", "development");
+        }
+    }
     let argv = argv.to_vec();
 
     let bin = dest.join(if SDK_SELECTION.get().is_some() { "bin/bl-cold" } else if cfg!(windows) { r"bin\bl.bat" } else { LAUNCHER_REL });

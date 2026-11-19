@@ -333,7 +333,7 @@
                     "# RELEASE_* overrides here (RELEASE_DISTRIBUTION, RELEASE_NODE,\n"
                     "# RELEASE_MODE, RELEASE_TMP, ...).\n"
                     "#\n"
-                    "# This image is marked BEAM_LISP_IMAGE=release by the\n"
+                    "# This packaged image is identified by the\n"
                     "# launcher: that is what makes `reload` treat a mutating\n"
                     "# reload here as prod, needing BEAM_LISP_RELOAD=1 to opt in.\n")))
 
@@ -392,15 +392,13 @@
    code is on the path but nothing is started) and `start` boots the release
    itself. Both pass `--boot-var RELEASE_LIB`, which is what the rewritten
    `$RELEASE_LIB` paths in the boot script resolve against."
-  [name]
+  [drop?]
   ["#!/bin/sh"
    "# A release launcher: enough to run this release, and nothing that guesses."
    "set -e"
-   "# Declare the KIND of image this is. `reload` gates MUTATING reloads on"
-   "# it, and the answer it used to use — whether Mix was loaded — stops"
-   "# existing the day Mix is deleted, which would refuse mutating reloads in"
-   "# every development image. A drop states the same thing with BL_BIN."
-   "export BEAM_LISP_IMAGE=release"
+   (if drop?
+     "export BEAM_LISP_IMAGE=drop"
+     "export BEAM_LISP_IMAGE=release")
    "export BL_ENV=\"${BL_ENV:-production}\""
    "SELF=$(cd \"$(dirname \"$0\")\" && pwd -P)/$(basename \"$0\")"
    "ROOT=$(CDPATH='' cd \"$(dirname \"$SELF\")/..\" && pwd -P)"
@@ -432,9 +430,9 @@
    "    ;;"
    "esac"])
 
-(defn- write-launcher! [out name]
+(defn- write-launcher! [out name drop?]
   (let [path (Path/join (Path/join out "bin") "bl")
-        body (String/replace (join "\n" (launch-lines name)) "NAME" name)]
+        body (String/replace (join "\n" (launch-lines drop?)) "NAME" name)]
     (File/write! path (str body "\n"))
     (File/chmod! path 493)
     path))
@@ -577,7 +575,7 @@
    not a warning; then the `.rel`s, then the boot scripts, then what a script
    cannot generate (the Elixir wrappers, the templates, the launcher, the
    cookie)."
-  [v out]
+  [v out drop?]
   (let [name (:name v) vsn (:vsn v) erts-vsn (:vsn (:erts v))
         releases-dir (Path/join out "releases")
         rel-dir (Path/join releases-dir vsn)
@@ -614,7 +612,7 @@
               (write-elixir-cli! rel-dir erts-vsn)
               (File/write! (Path/join releases-dir "start_erl.data") (str erts-vsn " " vsn))
               (File/write! (Path/join releases-dir "COOKIE") (cookie!))
-              (write-launcher! out name)
+              (write-launcher! out name drop?)
               {:ok? true :out out :apps (count (:apps v))
                :warnings (+ (:warnings start) (:warnings clean)) :errors []})))))))
 
@@ -637,7 +635,7 @@
   ([v out opts]
    (let [check (check-solver v opts)]
      (if (:ok? check)
-       (assemble-tree v out)
+       (assemble-tree v out (:drop? opts))
        {:ok? false :out out :apps 0 :warnings 0 :errors (:errors check)}))))
 
 ; Compiled programs use the same release assembler, with a runtime app resource

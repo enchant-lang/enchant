@@ -62,6 +62,9 @@ row = dict(store=str(root), cwd=os.getcwd(), xdg={name: os.environ[name] for nam
 print('beam-lisp fixture')
 '''.replace('PROVIDER_NAMES', repr(PROVIDERS)))
             candidate.chmod(0o755)
+            fixture = Path('test/fixtures/drop-inspector.bl')
+            (work / fixture).parent.mkdir(parents=True)
+            (work / fixture).write_bytes((ROOT / fixture).read_bytes())
             before = candidate.read_bytes()
             existing = root / 'already-installed'
             existing.mkdir()

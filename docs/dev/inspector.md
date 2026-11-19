@@ -19,7 +19,10 @@ variable and production values. The defaults are `BL_ENV=production` and
 `BL_ENV=prod`. The setting applies to listeners started directly by the entry
 program. The app supplies the principal check.
 
-An OTP release launcher sets `BEAM_LISP_IMAGE=release` and defaults `BL_ENV`
+The portable `bl` drop defaults `bl serve` to development when `BL_ENV` is
+unset. The collapsed dev button uses the same app authorizer as the SDK.
+
+An application OTP release launcher sets `BEAM_LISP_IMAGE=release` and defaults `BL_ENV`
 to `production`. Live keeps the dock off in that image. A Nix SDK selection
 is a development-capable toolchain and supplies its exact immutable identity
 to the panel. Programmatic starts outside `bl serve` can opt in with
