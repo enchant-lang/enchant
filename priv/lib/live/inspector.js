@@ -167,7 +167,7 @@
     const location=row?.location;
     return location?.line ? `${location.path}:${location.line}` : location?.path;
   }
-  const toolName = kind => ({editor:'Editor',check:'Check',index:'Index',render:'Page','quick-check':'Quick check',outline:'Outline'}[kind]||'Tool');
+  const toolName = kind => ({editor:'Editor',check:'Check',index:'Index',render:'Page','quick-check':'Quick check',outline:'Outline','formal-graph':'Formal graph'}[kind]||'Tool');
   function report() {
     return {
       schema:'enchant.inspector.report.v1',
@@ -225,7 +225,8 @@
       if(chosen.origin)text(subject,'small',chosen.origin);
       const facts=text(body,'div','');facts.className='run-facts';
       const counts=chosen.counts||{};
-      [[counts.computed||0,'Built'],[counts.reused||0,'Reused'],[`${chosen.wait_ms??chosen['wait-ms']??0} ms`,'Wait']].forEach(([v,label])=>{
+      const formalGraph=chosen.tool==='formal-graph';
+      [[counts.computed||0,formalGraph?'Index builds':'Built'],[counts.reused||0,formalGraph?'Index reuses':'Reused'],[`${chosen.wait_ms??chosen['wait-ms']??0} ms`,'Wait']].forEach(([v,label])=>{
         const cell=text(facts,'div','');text(cell,'strong',v);text(cell,'small',label);
       });
       text(body,'div',({'first-use':'First request','same-source':'Same source','source-changed':'Source changed','definitions-changed':'Definitions changed',requested:'Requested again'}[chosen.cause]||'Requested')).className='reason';
@@ -251,7 +252,7 @@
       }
       if(chosen.tool==='check')text(body,'small','Rules run each time');
       if(counts.unstable)text(body,'small','Definitions changed during work');
-      if(counts.declined)text(body,'small','Answer not kept');
+      if(counts.declined)text(body,'small',formalGraph?'Graph admission exceeded its resource limit':'Answer not kept');
       if(chosen.state==='failed'||chosen.state==='interrupted')text(body,'small',chosen.state==='failed'?'Run failed':'Caller stopped');
       if(counts.evaluated) {
         text(body,'small',`${counts.evaluated} function evaluations`);

@@ -2,7 +2,8 @@
  (:require [formal.term :as t] [formal.ieee-arithmetic :as ieee]
            [formal.data-graph :as graph] [formal.graph-terms :as forest]
            [formal.resources.integer :as integer] [formal.resources.rational :as rational] [formal.resources.word :as word]
-           [formal.resources.text :as text] [formal.scalar-text-value :as text-value]))
+           [formal.resources.text :as text] [formal.scalar-text-value :as text-value]
+           [runtime.activity :as activity]))
 
 ;; This evaluator is deliberately independent of a native solver's get-value.
 ;; It reads assignments only for free variables. Unsupported mathematics stays
@@ -665,17 +666,11 @@
   (with-prepared-graph-point* roots assignments assignment-data policy profile prepared
    (graph-point-index roots prepared) consume)))
 
-(defn with-graph-admission
- "Fresh admission before point coordinates are known, for a local owner turn.
-  The forest is diagnostic data. Only the SDK's captured original admission is
-  used by with-point; a copied/edited forest cannot replace it. Admission work
-  belongs to this outer scope, while every point has fresh private evaluation
-  accounts. Source lookups and both levels of callback retire on return/failure
-  and can only run in their creating process. This is local implementation
-  plumbing, not portable query data, a native handle or proof authority."
- [data roots options consume]
+(defn- with-graph-admission*
+ [data roots options consume receipt]
  (let [{:keys [profile policy]} (graph-options options)
        prepared (prepare-graph-point data roots policy profile)
+       incomplete? (= :incomplete (get-in prepared [:admission :status]))
        ;; One routing index per admission, built only if a point is requested.
        ;; Point values, quota accounts and refusal history remain per point.
        point-index (atom nil)
@@ -687,6 +682,7 @@
                 (throw (ex-info "formal.evaluate: admission belongs to another process" {:profile profile})))
                (when-not @active
                 (throw (ex-info "formal.evaluate: admission operation retired" {:profile profile}))))]
+  (when (and receipt incomplete?) (activity/mark! :declined))
   (try
    (consume
     {:profile profile :forest prepared :data-reference (:data-reference prepared) :source-roots roots
@@ -696,11 +692,29 @@
       (fn [assignments consume-point]
        (live!)
        (let [assignment-data (point-assignment-data assignments profile)
-             index (or @point-index (reset! point-index (graph-point-index roots prepared)))]
+             previous @point-index
+             index (or previous (reset! point-index (graph-point-index roots prepared)))]
+        (when (and receipt (not incomplete?) (= receipt (activity/current-id)))
+         (activity/mark! (if previous :reused :computed)))
         (with-prepared-graph-point* roots assignments assignment-data policy profile prepared index
          (fn [point] (consume-point (assoc point :admission-account :shared-scope
                                                :admission-reference admission-reference))))))})
    (finally (reset! active false) (reset! point-index nil)))))
+
+(defn with-graph-admission
+ "Fresh admission before point coordinates are known, for a local owner turn.
+  The forest is diagnostic data. Only the SDK's captured original admission is
+  used by with-point; a copied/edited forest cannot replace it. Admission work
+  belongs to this outer scope, while every point has fresh private evaluation
+  accounts. Source lookups and both levels of callback retire on return/failure
+  and can only run in their creating process. This is local implementation
+  plumbing, not portable query data, a native handle or proof authority."
+ [data roots options consume]
+ (let [parent (activity/current-id)]
+  (activity/with-operation :formal-graph {:subject "Graph admission"}
+   (fn []
+    (let [current (activity/current-id)]
+     (with-graph-admission* data roots options consume (when (not= parent current) current)))))))
 
 (defn graph-values
  "Evaluate term-based graph points through the same private SDK mathematics as
