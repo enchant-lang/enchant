@@ -3,7 +3,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import statistics
 import subprocess
 import sys
@@ -28,6 +27,11 @@ def run(pipeline, out):
     gold = prior['runs'][0]['emitted_sha256']
     baseline = (pipeline/'observer.scm').read_text().replace(sexp(str(pipeline)),sexp(str(out)))
 
+    def replace_round(source):
+        start=baseline.index('(define (A-timed-round)')
+        stop=baseline.index('(define (A-run)',start)
+        return baseline[:start]+(HERE/source).read_text()+baseline[stop:]
+
     def observe(name, source):
         payload=out/(name+'.scm')
         payload.write_text(source)
@@ -36,10 +40,8 @@ def run(pipeline, out):
         sha(out/'native.scm',gold)
         return log
 
-    start=baseline.index('(define (A-timed-round)')
-    stop=baseline.index('(define (A-run)',start)
-    allocation=observe('allocation',baseline[:start]+(HERE/'cost-phases.scm').read_text()+baseline[stop:])
-    fields=('wall_ms','user_ms','sys_ms','gc_ms','collections','allocated_bytes')
+    allocation=observe('allocation',replace_round('cost-phases.scm'))
+    fields=('wall_ms','user_ms','sys_ms','gc_ms','collections','raw_allocator_bytes')
     phases={p:[] for p in ('read','compile','emit')}
     for line in allocation.splitlines():
         if line.startswith('COST '):
@@ -50,6 +52,19 @@ def run(pipeline, out):
     assert all(len(v)==4 for v in phases.values())
     median={p:{k:statistics.median(r[k] for r in rows) for k in fields} for p,rows in phases.items()}
 
+    counted=observe('operations',replace_round('cost-operations.scm').replace('(define A-reps 4)','(define A-reps 1)'))
+    calls={}
+    for line in counted.splitlines():
+        if line.startswith('CALLS '):
+            _,phase,*items=line.split()
+            calls[phase]={k:int(v) for k,v in (item.split('=') for item in items)}
+    assert calls.keys()==phases.keys()
+    nodes,=[int(line.split()[1]) for line in counted.splitlines() if line.startswith('ANF_OCCURRENCES ')]
+    sdk_pin=json.loads((HERE.parent/'tools.json').read_text())
+    sdk=Path(sdk_pin['sdk'])
+    sha(sdk/'artifact.json',prior['sdk'])
+    flavor=command([sdk/'bin/bl','--cold','eval','(erlang/system_info :emu_flavor)'],
+                   dict(os.environ,BL_DAEMON='off',ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1'),out/'beam-flavor.log').strip()
     listing,_=targets(IMAGE/'stage2.scm')
     target_file=out/'targets.scm'
     target_file.write_text(listing)
@@ -60,10 +75,12 @@ def run(pipeline, out):
     subprocess.run([sys.executable,'-B',ATTR/'analyze.py','native',out],check=True,stdout=subprocess.DEVNULL)
     profile=json.loads((out/'native-summary.json').read_text())
     assert all(profile['phases'][p]['samples']>0 for p in phases)
-    inputs={p.name:sha(p) for p in (HERE/'cost.py',HERE/'cost-phases.scm',ATTR/'prepare.py',ATTR/'analyze.py',
+    inputs={p.name:sha(p) for p in (HERE/'cost.py',HERE/'cost-phases.scm',HERE/'cost-operations.scm',ATTR/'prepare.py',ATTR/'analyze.py',
                                     pipeline/'observer.scm',pipeline/'reader.bl')}
     write(out/'cost.json',dict(image=sha(image),sdk=prior['sdk'],input_bytes=(pipeline/'reader.bl').stat().st_size,
         emitted_sha256=gold,emitted_bytes=(out/'native.scm').stat().st_size,inputs=inputs,
+        confirmed_calls=calls,anf_node_occurrences=nodes,beam_emulator=flavor,
+        allocator_caveat='Compile-phase byte counter has implausible discontinuities. Do not use the byte field to infer allocation volume or ratios.',
         timings=phases,medians=median,samples={p:{k:v[k] for k in ('samples','host_entry_op','entry_category')}
         for p,v in profile['phases'].items()},allocation_source='Gambit v4.9.5 lib/_repl.scm ##exec-stats',
         scope='Four warm full rounds with per-phase allocator statistics, then a separate four-round stack sample without call wrappers.'))

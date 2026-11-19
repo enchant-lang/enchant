@@ -1,0 +1,33 @@
+;; Observe calls that cross these procedure cells. Any calls inlined into
+;; generated code will bypass them. Counts are collected in a separate run.
+(define cost-bindings
+ '(native-small-map-search native-small-map-build native-raw-get native-raw-has?
+   native-known-ns? native-ensure-loaded native-join bl-invoke))
+(define cost-counts (make-vector (length cost-bindings) 0))
+(define (install-counter! name i)
+ (let* ((cell (##make-global-var name)) (old (##global-var-ref cell)))
+  (if (not (procedure? old)) (error "missing counted procedure" name))
+  (##global-var-set! cell (lambda args
+    (vector-set! cost-counts i (+ 1 (vector-ref cost-counts i)))
+    (apply old args)))))
+(define (count-phase phase thunk)
+ (vector-fill! cost-counts 0)
+ (let ((result (thunk)))
+  (display "CALLS ") (display phase)
+  (for-each (lambda (name n)
+    (display " ") (display name) (display "=") (display n)) cost-bindings (vector->list cost-counts))
+  (newline)
+  result))
+(define (A-timed-round)
+ (let loop ((names cost-bindings) (i 0))
+  (if (pair? names) (begin (install-counter! (car names) i) (loop (cdr names) (+ i 1)))))
+ (let* ((forms (count-phase "read" A-read))
+        (nodes (count-phase "compile" (lambda () (A-compile-forms forms))))
+        (texts (count-phase "emit" (lambda () (A-emit-nodes nodes)))))
+   (if (not (string=? (A-join texts) (native-read-file (string-append A-out "/native.scm"))))
+       (error "counted compiler output differs"))
+   (let ((children (A-select "anf" "executable-children")))
+     (let walk ((pending nodes) (n 0))
+       (if (null? pending)
+           (begin (display "ANF_OCCURRENCES ") (display n) (newline))
+           (walk (append (bl-items (A-call children (car pending))) (cdr pending)) (+ n 1)))))))
