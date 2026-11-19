@@ -2113,6 +2113,16 @@
 (defn- refusal-kind [action]
  (try (action) :accepted (catch error (:kind (ex-data error)))))
 
+(defn- different-sdk-donor-control [closure qualification-path]
+ (let [file (Path/join (System/tmp_dir!)
+              (str "native-donor-sdk-" (Base/encode16 (crypto/strong_rand_bytes 16)) ".json"))
+       changed (assoc (json/decode (File/read! qualification-path))
+                 "sdk-descriptor-sha256" (artifact/sha "different SDK descriptor"))]
+  (try
+   (File/write! file (json/encode changed))
+   (refusal-kind #(qualified-donor closure file))
+   (finally (File/rm file)))))
+
 (defn- bound-registry-controls [closure rows receipt-path qualification-path expected-sha]
  (let [anchor (qualified-donor closure qualification-path)
        data (File/read! receipt-path)
@@ -2123,11 +2133,13 @@
        unrelated (update-in closure [:units first-member :source] str "\n; unrelated closure")
        observed {:receipt-bytes (refusal-kind #(authenticated-registry changed-bytes expected-sha anchor))
                  :other-donor (refusal-kind #(authenticated-registry data expected-sha stale-anchor))
+                 :different-sdk (different-sdk-donor-control closure qualification-path)
                  :spliced-partitions (refusal-kind #(qualified-donor unrelated qualification-path))
                  :wrong-donor-links (refusal-kind #(capture-bound-registry
                                                     closure (assoc rows :sha256 (artifact/sha "different links"))
                                                     nil qualification-path))}]
   (assert (= {:receipt-bytes :receipt-digest-mismatch :other-donor :receipt-donor-mismatch
+              :different-sdk :wrong-qualified-donor
               :spliced-partitions :wrong-qualified-donor :wrong-donor-links :wrong-donor-links} observed))
   {:schema "bl.native.bound-registry-controls" :version 1 :donor anchor :checks observed}))
 
