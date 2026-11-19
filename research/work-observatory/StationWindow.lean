@@ -85,9 +85,57 @@ theorem retainedReportEquivalence (encode : Context → UID → List Event → B
 
 end Publication
 
+section Clock
+
+theorem inclusiveWindowDeadline (stamp now width : Int) :
+    now - width ≤ stamp ↔ now < stamp + width + 1 := by
+  omega
+
+theorem attemptDeadline (stamp now timeout : Int) :
+    now - stamp < timeout ↔ now < stamp + timeout := by
+  omega
+
+theorem clockGuardStable (old now deadline : Int) (forward : old ≤ now)
+    (beforeNext : old < deadline → now < deadline) :
+    decide (old < deadline) = decide (now < deadline) := by
+  by_cases present : old < deadline
+  · simp [present, beforeNext present]
+  · have absent : ¬ now < deadline := fun later => present (Int.lt_of_le_of_lt forward later)
+    simp [present, absent]
+
+variable {Event Output : Type}
+
+def clockedEvents (deadlines : Event → List Int) (now : Int) (events : List Event) :
+    List (Event × List Bool) :=
+  events.map fun event => (event, (deadlines event).map fun boundary => decide (now < boundary))
+
+/- A deterministic window computation over ordered facts and their clock
+   guards can reuse its shape and update the observation timestamp. The
+   runtime must validate the ordered facts and the complete deadline set. -/
+theorem restampWindow (shape : List (Event × List Bool) → Output)
+    (deadlines : Event → List Int) (old now : Int) (events : List Event)
+    (forward : old ≤ now)
+    (beforeNext : ∀ event ∈ events, ∀ boundary ∈ deadlines event,
+      old < boundary → now < boundary) :
+    (now, shape (clockedEvents deadlines old events)) =
+      (now, shape (clockedEvents deadlines now events)) := by
+  refine congrArg (fun observations => (now, shape observations)) ?_
+  unfold clockedEvents
+  apply List.map_congr_left
+  intro event member
+  simp only [Prod.mk.injEq, true_and]
+  apply List.map_congr_left
+  intro boundary named
+  exact clockGuardStable old now boundary forward (beforeNext event member boundary named)
+
+end Clock
+
 #print axioms committedReplacement
 #print axioms expiryChangesOnlyCrossingFacts
 #print axioms stillVisibleAtCutoff
 #print axioms retainedReportEquivalence
+#print axioms inclusiveWindowDeadline
+#print axioms attemptDeadline
+#print axioms restampWindow
 
 end StationWindow
