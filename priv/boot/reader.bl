@@ -1392,7 +1392,8 @@
   ([chars in-fn? pos state]
    (if (erlang/=:= state nil)
      (read-form-core chars in-fn? pos nil)
-     (let [kind (source-kind chars pos)
+     (let [record-events? (not (:symbol-spans state))
+           kind (when record-events? (source-kind chars pos))
            result (read-form-core chars in-fn? pos state)
            form (erlang/element 1 result)
            after (erlang/element 2 result)
@@ -1405,13 +1406,15 @@
            ;; enclosing list. Keep an existing target span under ^metadata.
            form (if (and (:symbol-spans next-state) (erlang/=:= :symbol tag)
                          (nil? (:offset (rn/node-pos form))))
-                  (meta-node bare (merge (rn/node-pos form) (pos-meta-span pos end))) form)
-           first-child (when (erlang/=:= tag :list) (rn/node-form (first (rn/node-items bare))))
-           event {:start (pos-offset pos) :end (pos-offset end) :kind kind
-                  :tag tag :name (when (or (erlang/=:= tag :symbol) (erlang/=:= tag :keyword)) (rn/node-name bare))
-                  :head (when (erlang/=:= :symbol (rn/node-tag first-child)) (rn/node-name first-child))
-                  :keyword-head (when (erlang/=:= :keyword (rn/node-tag first-child)) (rn/node-name first-child))}]
-       (tuple4 form after end (assoc next-state :source-spans (cons event (:source-spans next-state))))))))
+                  (meta-node bare (merge (rn/node-pos form) (pos-meta-span pos end))) form)]
+       (if record-events?
+         (let [first-child (when (erlang/=:= tag :list) (rn/node-form (first (rn/node-items bare))))
+               event {:start (pos-offset pos) :end (pos-offset end) :kind kind
+                      :tag tag :name (when (or (erlang/=:= tag :symbol) (erlang/=:= tag :keyword)) (rn/node-name bare))
+                      :head (when (erlang/=:= :symbol (rn/node-tag first-child)) (rn/node-name first-child))
+                      :keyword-head (when (erlang/=:= :keyword (rn/node-tag first-child)) (rn/node-name first-child))}]
+           (tuple4 form after end (assoc next-state :source-spans (cons event (:source-spans next-state)))))
+         (tuple4 form after end next-state))))))
 
 (defn- unwrap-deep
   "Strip every {:meta node pos} source-position wrapper, top-level and nested,
@@ -1566,7 +1569,7 @@
 (defn read-syntax
   "Contextual tooling entry with exact codepoint spans on physical symbol
    tokens. Generated prefix/shorthand identifiers keep their existing origin.
-   The ordinary Reader shapes and source-event API remain unchanged."
+   Returns positioned forms without collecting physical source events."
   [src file] (:forms (read-source* src file true)))
 
 (defn read
