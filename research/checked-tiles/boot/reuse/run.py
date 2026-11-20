@@ -61,10 +61,11 @@ def coordinator(lab, argv):
     pins = read(TILES/'tools.json')
     sdk = Path(pins['sdk'])
     evidence = TILES/'evidence/boot-self-hosted-fields.json'
-    q = read(evidence)
+    captured = lab/'qualification.json'
+    shutil.copyfile(evidence,captured)
+    q = read(captured)
     build = SEED/'out/checked-fields-build'
-    contract = [pins['descriptor_sha256'], digest(evidence), digest(HERE/'request.bl'), digest(HERE/'sdk.bl'),
-                digest(SEED/'src/native/fragments.bl')]
+    contract = [pins['descriptor_sha256'], digest(captured)]
     if digest(sdk/'artifact.json') != contract[0]:
         raise ValueError('SDK digest mismatch')
     # The worker opens only private copies after verification. No mutable image
@@ -76,11 +77,22 @@ def coordinator(lab, argv):
         if digest(dest)!=sha:
             raise ValueError('Native compiler input mismatch: '+name)
         contract.append(sha)
+    # Lazy BL loads must observe the same emitter and index adapter that
+    # selected this cache. Bind relative names and the actual private bytes.
+    sources=lab/'sources'
+    provider_root=SEED/'src'
+    providers=[(p.relative_to(provider_root),p) for p in sorted(provider_root.rglob('*.bl'))]
+    providers.extend((Path('reuse')/name,HERE/name) for name in ('request.bl','sdk.bl','driver.bl'))
+    for name,src in providers:
+        dest=sources/name
+        dest.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(src,dest)
+        contract.append([str(name),digest(dest)])
     tool = hashlib.sha256(json.dumps(contract).encode()).hexdigest()
     env = dict(os.environ,BL_REPEAT_LAB=str(lab),BL_REPEAT_BUNDLE=str(lab/'eval-prepared.scm'),
                BL_REPEAT_TOOL=tool,ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
     def server_args(cache,endpoint):
-        return [sdk/'bin/bl','--cold','-p',SEED/'src','-p',HERE.parent,'run',HERE/'driver.bl','--',cache,endpoint]
+        return [sdk/'bin/bl','--cold','-p',sources,'run',sources/'reuse/driver.bl','--',cache,endpoint]
 
     @contextmanager
     def server(cache):
