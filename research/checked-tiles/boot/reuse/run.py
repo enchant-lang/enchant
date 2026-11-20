@@ -64,13 +64,28 @@ def coordinator(lab, argv):
     captured = lab/'qualification.json'
     shutil.copyfile(evidence,captured)
     q = read(captured)
-    build = SEED/'out/checked-fields-build'
+    build = (argv.candidate or SEED/'out/checked-fields-build').resolve()
     contract = [pins['descriptor_sha256'], digest(captured)]
     if digest(sdk/'artifact.json') != contract[0]:
         raise ValueError('SDK digest mismatch')
     # The worker opens only private copies after verification. No mutable image
     # or macro bundle path is consulted between two requests in a session.
-    for name, sha in [('stage2',q['images']['stage2']),('eval-prepared.scm',q['prepared_macros']),
+    image, macros = q['images']['stage2'], q['prepared_macros']
+    if argv.candidate:
+        receipt = read(build/'full-fixpoint.json')
+        if (receipt['status'] != 'qualified' or not receipt['stage2-stage3-byte-equal']
+                or not receipt['stage3-built-and-executed']
+                or not receipt['stage1-stage2-stage3-source-corpus-equal']
+                or not receipt['stage1-stage2-stage3-original-actor-corpus-equal']
+                or not receipt['all-actor-budgets']):
+            raise ValueError('Candidate has no qualified native fixed point')
+        stage2 = receipt['source_results']['stage2']
+        image = stage2['image_sha256']
+        macros = stage2['prepared_eval_bundle_sha256']
+        if image != receipt['source_results']['stage3']['image_sha256']:
+            raise ValueError('Candidate machine images differ across generations')
+        contract.append(digest(build/'full-fixpoint.json'))
+    for name, sha in [('stage2',image),('eval-prepared.scm',macros),
                       ('translate.scm',digest(HERE/'translate.scm'))]:
         dest = lab/name
         shutil.copy2((HERE if name=='translate.scm' else build)/name,dest)
@@ -168,6 +183,11 @@ def coordinator(lab, argv):
         jobs.append(reader('sdk-clean-'+str(i),True,'sdk'))
     jobs.append(reader('sdk-first',False,'sdk'))
     jobs.extend(reader('sdk-hit-'+str(i),False,'sdk') for i in range(12))
+    for namespace in ('anf','diag'):
+        label=f'priv/boot/{namespace}.bl'
+        for mode,clean in [('first',False),('repeat',False),('sdk',True)]:
+            jobs.append(job(f'{namespace}-{mode}',ROOT/label,label,namespace,clean,
+                            'sdk' if mode=='sdk' else 'staged'))
     before=out/'before.bl'
     after=out/'after.bl'
     before.write_text('(ns repeat.demo)\n(defn p-leaf [] 41)\n(defn p-mid [] (p-leaf))\n'
@@ -207,6 +227,10 @@ def coordinator(lab, argv):
     assert by_name['sdk-first']['compiled']==104
     expected=q['jobs']['reader']['output']
     assert all(r['sha256']==expected for r in rows if r['job'].startswith(('reader','baseline','sdk')))
+    for namespace in ('anf','diag'):
+        first,repeat,sdk_job=(by_name[f'{namespace}-{mode}'] for mode in ('first','repeat','sdk'))
+        assert first['sha256']==repeat['sha256']==sdk_job['sha256']==q['jobs'][namespace]['output']
+        assert first['compiled']==sdk_job['compiled']>0 and repeat['route']=='artifact'
     assert all(r['route']=='artifact' and r['compiled']==0 for r in rows if '-hit' in r['job'])
     assert by_name['graph-first']['compiled']==4
     assert by_name['graph-first']['codebase']=='indexed' and by_name['graph-edit']['codebase']=='reused'
@@ -293,7 +317,7 @@ def coordinator(lab, argv):
     summary.update(roundtrip_hit_ms=hit_transport/1000,roundtrip_clean_ms=clean_transport/1000,
                    roundtrip_speedup=clean_transport/hit_transport)
     summary['native_cli_ms']={arm:statistics.median(samples) for arm,samples in native_client_times.items()}
-    report=dict(tool=tool,sdk=contract[0],image=q['images']['stage2'],input=digest(boot),
+    report=dict(tool=tool,sdk=contract[0],image=image,input=digest(boot),
                 outputs=rows+[durable,repair,repaired],summary=summary,invalid_edit_preserved_output=True,
                 executed=executed,standalone_client_samples_ms=process_times,native_cli_samples_ms=native_client_times,
                 native_client_sha256=digest(client),first_batch_with_startup_ms=elapsed)
@@ -304,6 +328,7 @@ def coordinator(lab, argv):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--bench',type=Path,help='Write the replay to a fresh directory')
+    p.add_argument('--candidate',type=Path,help='A rebuilt native compiler with a complete fixed-point receipt')
     p.add_argument('--serve',type=Path,help='Start a resident compiler on a private Unix socket')
     p.add_argument('--connect',type=Path,help='Use an existing resident compiler')
     p.add_argument('--stop',action='store_true')
