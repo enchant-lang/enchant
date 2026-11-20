@@ -256,3 +256,15 @@ cap python3 research/checked-tiles/boot/cutover-timing.py "$build" --out "$lab/t
 cap python3 research/checked-tiles/boot/worker-reuse.py --build "$build" --out "$lab/workers"
 cap python3 research/checked-tiles/boot/run.py --candidate "$build" --out "$lab/reader"
 ```
+
+For a Reader Source change, compare two qualified generations with identical
+compiler Source. The projection replay checks actual plain forms, positioned
+syntax forms and physical source events, including malformed and Unicode input.
+An optional immutable SDK compiles the candidate Reader Source into a private
+namespace for the same-runtime differential.
+
+```sh
+cap python3 research/checked-tiles/boot/reader-projections.py \
+  research/native-seed/out/cutover-core-build-v2 \
+  research/native-seed/out/cutover-core-build-v3 --sdk "$sdk" --out "$lab/projections"
+```

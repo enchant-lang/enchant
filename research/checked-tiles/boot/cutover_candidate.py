@@ -28,7 +28,7 @@ def qualified(build):
     expected = receipt['inputs'].get(str(identity))
     if expected is None or digest(identity) != expected:
         raise ValueError(f'Native compiler Source identity disagrees with {receipt_path}')
-    compiler = next(row['sha256'] for row in json.loads(identity.read_text())['providers']
-                    if row['path'] == 'priv/boot/compiler.bl')
-    return dict(image=image, bundle=macros, compiler_source=compiler,
+    providers = {row['path']: row['sha256'] for row in json.loads(identity.read_text())['providers']}
+    return dict(image=image, bundle=macros, compiler_source=providers['priv/boot/compiler.bl'],
+                reader_source=providers['priv/boot/reader.bl'],
                 qualification=hashlib.sha256(receipt_bytes).hexdigest())

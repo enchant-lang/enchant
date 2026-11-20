@@ -13,8 +13,15 @@ from run import HERE, ROOT, command, sexp, sha, write
 def run(baseline, candidate, out, sdk):
     builds = {'baseline': baseline, 'candidate': candidate}
     identities = {arm: qualified(build) for arm, build in builds.items()}
-    if identities['baseline']['image'] == identities['candidate']['image']:
-        raise ValueError('The two images must be independent native generations')
+    stock, changed = identities['baseline'], identities['candidate']
+    if stock['reader_source'] == changed['reader_source'] or stock['compiler_source'] != changed['compiler_source']:
+        raise ValueError('Select changed Reader Source and the same compiler Source')
+    providers = [{row['path']: row['sha256'] for row in json.loads((build/'identity.json').read_text())['providers']}
+                 for build in builds.values()]
+    before, after = providers
+    changed_providers = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    if changed_providers != {'priv/boot/reader.bl'}:
+        raise ValueError(f'Reader Source comparison has other changed providers: {changed_providers}')
     out.mkdir()
     cases = {'reader': (ROOT/'priv/boot/reader.bl').read_bytes(),
              'diag': (ROOT/'priv/boot/diag.bl').read_bytes(),
@@ -33,6 +40,7 @@ def run(baseline, candidate, out, sdk):
     beam = None
     if sdk:
         original = ROOT/'priv/boot/reader.bl'
+        sha(original, changed['reader_source'])
         source = original.read_text()
         header = '(ns reader\n'
         if source.count(header) != 1:
