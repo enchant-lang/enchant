@@ -1,12 +1,14 @@
 #+title: What it would mean for Enchant to know its own behavior
 #+subtitle: A native compiler, a semantics of running actors, and a precise job for OxiZ, Z3 and Lean.
 #+kicker: Checked tiles / research journal 04
-#+date: 2026-11-19
-#+status: 85 native reader trees agree · seven boot namespaces compiled · matched compiler jobs still favor BEAM
+#+date: 2026-11-20
+#+status: Qualified stage-two compiler · durable repeat compilation · measured Codebase-directed edits
 
 The November 19 speed experiments compare ordinary native Enchant, four kinds of specialization, and Bend on matched requests. Three byte jobs and a bounded scalar loop now beat the measured Bend implementations. A fork/join tree still takes 39 times as long. [[https://work.tailcb5318.ts.net:18187/#speed-before-live-updating][Read the timings, losing experiments and proposed compiler change]]
 
 The native boot investigation follows one ordinary source file from text to positioned forms, machine code and public behavior. The same first-party reader can serve both engines. All seven missing boot namespaces now compile as research modules. The timed compiler is still slower than the SDK, and Source ownership and OTP artifact generation each have a concrete failing job. [[https://work.tailcb5318.ts.net:18187/#the-reader-and-the-native-boot-boundary][Read the boot results and proposed order of work]]
+
+The November 20 replay times first compilation, unchanged artifacts and a real edit separately. An unchanged native CLI request returned the complete reader in 3.60 ms against 1,213 ms forced. A 51-definition edit recompiled two definitions. [[#how-fast-can-the-second-compilation-be][Read the repeat compilation experiments]]
 
 * Start with a process that is already waiting
 
@@ -734,3 +736,67 @@ The next implementation I would prioritize is a first-party BL change at datum-m
 #+end_src
 #+RESULTS: native-macro-evidence
 : {:checked-expansions 392, :guard-admissions-per-translation 198}
+
+* How fast can the second compilation be?
+
+The reader is a real compiler workload with 104 definitions. A fresh native translation still runs those definitions through the self-hosted frontend and emits 247,750 bytes of Scheme. On an unchanged request the caller already knows the namespace, logical filename and source bytes. The missing ingredient was a durable identity for the compiler and everything this particular translation could observe. With that identity in hand, the coordinator can decide before opening the reader. It still reads the complete input, verifies the stored output, writes the whole requested file, atomically renames it and returns a receipt. The caller can use a different output filename for every request. [[file:../boot/reuse/request.bl][Request, admission and invalidation]] · [[file:../../native-seed/src/native/fragments.bl][Datom blob and recipe integrity]]
+
+#+begin_rosetta
+Same reader and same published bytes | Forced native | Forced BEAM SDK | Unchanged native artifact
+Resident caller, new connection per request | 1,218 ms | 228 ms | 1.93 ms
+New native CLI process, coordinator already running | 1,213 ms | 209 ms | 3.60 ms
+#+end_rosetta
+
+The resident comparison uses twelve exact hits, four forced staged native translations and eight forced SDK translations. The shell comparison runs each arm five times and includes process creation, argument serialization, output publication, receipt decoding and process exit. Against forced native work the repeat is 630× faster at the socket and 337× faster from the shell. Against forced SDK work the same comparisons give 118× and 58.2×. Giving the SDK its own exact artifact key also returns the same reader in 1.52 ms over the socket. The win comes from identifying completed work early enough for either compiler to reuse it. The native client is a small transport executable. All admission, indexing, invalidation and publication decisions remain in first-party BL. [[file:../evidence/boot-repeat-compilation.json][Every request, output hash, executable identity and client sample]] · [[file:../boot/reuse/client.go][Native client]] · [[file:../evidence/boot-repeat-previous-panels.json][Earlier runs under different host load]]
+
+The compiler artifact survives a coordinator restart. A new BL process on the same cache returned a hit in 1.91 ms inside the service, but the waiting caller paid 9.90 s to start that process and get the first answer. The standalone Python client to an already running service took 72.2 ms. Keeping a compiler alive and keeping its evidence on disk solve different problems. Damaging the reader blob forced all 104 declarations to compile again. The repaired blob then gave another exact hit. An unresolved or wrong-arity call failed without replacing the previously published output. The benchmark verifies the actual files and executes both edited programs. [[file:../boot/reuse/run.py][Replay, process timers, corruption, arity and execution checks]]
+
+** What should Codebase own when one body changes?
+
+In the editable profile a source miss opens the existing positioned BL reader and Codebase indexes its forms. A closed grammar gives an independent inventory of legal parameters, primitives, declarations, call sites and arities. The coordinator checks Codebase's resolved calls against that inventory, queries the qualified edges in Datom and retains the graph by content. A definition's compilation key includes its positioned form, origin, compiler contract and transitive local callee keys. A value edit with the same call topology can reuse the checked graph. Changing a call target creates a different graph. Moving a definition or shifting its source positions can invalidate it because those positions are part of the emitted artifact. Cycles take the full translation path. [[file:../../../priv/std/codebase.bl][Source indexing and qualified call facts]] · [[file:../boot/reuse/request.bl][Qualified graph and definition keys]]
+
+#+begin_rosetta
+One changed source through the resident socket | Definitions compiled | Incremental | Forced whole translation
+Four definitions, change the leaf of a three-deep chain | 3 of 4 | 196 ms | 197 ms
+Four definitions, retarget the top caller at equal source width | 1 of 4 | 326 ms | 168 ms
+51 definitions, change the shared arithmetic result | 2 of 51 | 248 ms | 820 ms
+51 definitions, restore the original bytes | 0 of 51 | 0.94 ms | Original output digest recovered
+#+end_rosetta
+
+The arithmetic module has 14,505 source bytes, 965 indexed call sites and 91,071 output bytes. Forty-eight independent definitions each contain twenty arithmetic calls. The edit recompiles the seed and its one caller. In a fresh native process the public result moves from 47 to 48 and back to 47, while the unaffected row still returns 192. The small module returns 41, then 42, then 12 after rewiring, then 41 on restoring the source. A smaller work count helps wall time when the skipped work covers the cost of indexing, checking and starting the worker. The retargeting case shows the cost of building a new topology for one inexpensive function. These edit timings are individual requests. [[file:../evidence/boot-repeat-compilation.json][Work lists, verified outputs and native execution values]]
+
+The first tracked arithmetic build originally took 4,259 ms. Its receipt puts 3,132 ms in Codebase indexing and only 7 ms in admission and reading. Codebase's call walker asks whether an unfamiliar head expands as a macro. That includes ordinary arithmetic in this example. Without a declaration snapshot, successive requests for the same provider have to observe the live sources again. I timed the same index operation in both orders, comparing every returned fact. Scoping the existing declaration cache to that one pass took the median from 1,871 to 141 ms, a 13.3× improvement. Each new pass gets a fresh snapshot. The compiler now uses this path on the closed edit profile. The full first build of the same 51 definitions took 1,070 ms after the change and emitted exactly the same 91,071 bytes. That is roughly 4.0× faster on the two end-to-end runs. [[file:../../../priv/lib/system/source.bl][Call walker and macro resolution]] · [[file:../../../priv/host/loader.bl][Lifetime of a declaration snapshot]] · [[file:../evidence/boot-repeat-graph.json][Counterbalanced index trials]]
+
+The second cost was what we asked Datom to retain for invalidation. Codebase emitted 51 declaration facts and 965 call facts. The dependency query needed two distinct qualified pairs. I ran the same query against fresh Datom connections in both orders. Storing all 1,016 rows and retrieving the two edges took a median 2,121 ms. Projecting the two edges first and storing just those took 112 ms, about 19× faster for this operation. Both queries had to produce exactly the expected graph. Checking the complete Codebase inventory before projection preserves the arity and coverage evidence. These two measured savings come from different stages. The complete first build also pays for source admission, native translation and persisting definitions. [[file:../evidence/boot-repeat-graph.json][Datom trials and source hash]] · [[file:../boot/reuse/graph-cost.bl][Same-facts control]]
+
+** How far does this carry into the compiler users run?
+
+The public contextual build producer already reuses real compiled artifacts. I built a two-namespace world with an imported transformer and an exported runtime function, ran its published program, forced a rebuild, edited the transformer, and restored it. The first build took 2,515 ms. An unchanged build took a median 338 ms over five trials with zero compilations. A forced build in the warm process took 646 ms. Editing the macro took 681 ms and changed 42 to 43. Restoring its earlier source took 461 ms, recovered the original runtime module and returned 42. The unchanged improvement on this job is about 1.9× against warm forced compilation. [[file:../evidence/boot-repeat-world.json][Compiled modules and runtime digests]] · [[file:../boot/reuse/world.bl][Public world build exercise]]
+
+On a local hit the public producer captures its input and checks the complete selection again before returning it. The selected SDK in this run contains compiler Source. Timing one physical function at a time showed two selection identity computations costing 152 ms combined, including two pipeline identity computations costing 61 ms and four live compiler-key computations costing 68 ms. Reading the verified unit cost about 6 ms. Those inclusive numbers overlap. The build key currently reads the live compiler key again. A single owner can compute both keys from one live snapshot per check, while preserving the independent validation at publication. A sealed installed SDK and a mutable checkout have different grounds for trusting that snapshot. [[file:../evidence/boot-repeat-world-cost.json][Per-function timings and counts]] · [[file:../../../priv/std/compile/world.bl][Selection and publication]] · [[file:../../../priv/host/aot_cache.bl][Live key derivation]]
+
+I would pursue first translation and revision reuse together. For native first translation, the largest specifically attributed gap on the reader remains the 392 datum-macro expansions, especially validation, reconstruction and hygiene. Emitting each declaration as soon as it was lowered moved native worker time from 1,018.7 to 1,016.3 ms in this panel. That result is small beside the gap to the SDK, and the direction has varied between runs. For repeated work, use the existing warm checkout transport and the compiler's authoritative identities for macro providers, bindings, effects, source locations and target ABI. Index the facts each consumer needs, retain verified artifacts in Datom, and keep the fast lookup before expensive frontend work. The current editable grammar and the three exact boot inputs establish that the mechanism works. Arbitrary downstream BL and activation of a running application still need their own qualification. [[file:../README.md][Replay commands and a private compiler you can exercise]]
+
+#+begin_src beam-lisp :id durable-native-compilation
+(let [read-r (fn [n] (Jason/decode! (File/read! (str "research/checked-tiles/evidence/boot-repeat-" n ".json"))))
+      r (read-r "compilation") outputs (get r "outputs")
+      job (fn [name] (first (filter #(= name (get % "job")) outputs)))
+      world (get (read-r "world") "runs") graph (read-r "graph")
+      exact (job "reader-first") large (job "arithmetic-first") change (job "arithmetic-edit")
+      sample (fn [k] (first (filter #(= k (get % "mode")) (get graph "runs"))))]
+  (assert (= 104 (get exact "compiled")))
+  (assert (= 247750 (get exact "bytes")))
+  (assert (every? #(= (get exact "sha256") (get (job %) "sha256"))
+            ["reader-hit-0" "sdk-first" "sdk-hit-0" "reader-restart" "reader-repair" "reader-repaired-hit"]))
+  (assert (= 104 (get (job "reader-repair") "compiled")))
+  (assert (= 0 (get (job "reader-repaired-hit") "compiled")))
+  (assert (= [51 965 2] [(get large "compiled") (get large "indexed-calls") (get large "stored-edges")]))
+  (assert (= ["p-seed" "p-join"] (get change "names")))
+  (assert (= (get change "sha256") (get (job "arithmetic-edit-clean") "sha256")))
+  (assert (= "48 192" (get-in r ["executed" "arithmetic-edit"])))
+  (assert (get r "invalid_edit_preserved_output"))
+  (assert (= 8 (count (get graph "index-runs"))))
+  (assert (= [1016 2] [(get (sample "all") "rows") (get (sample "edges") "rows")]))
+  (assert (= [43 42] (mapv #(get % "value") (filter #(contains? #{"macro-edit" "macro-revert"} (get % "job")) world))))
+  {:reader-bytes (get exact "bytes") :changed-definitions (get change "compiled") :dependency-edges (get large "stored-edges")})
+#+end_src

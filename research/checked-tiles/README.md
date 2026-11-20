@@ -187,3 +187,52 @@ cap python3 "$seed/prepare-host.py" --out "$build"
 cap "$seed/speed/final/emit.sh" out/my-closure out/my-build
 cap "$boot/verify-native-build" "$build" "$seed/out/my-actors" .local/native-speed-integration/wave1-compiled-actors/javascript-corpus-fixed/manifest.json
 ```
+
+## Repeat a native compilation or change one definition
+
+From the repository root, run the file-to-file experiment on the workstation with the retained qualified stage two. The benchmark builds the native socket client once with the Go toolchain pinned in `tools.json`. The BL coordinator, Codebase and Datom own the compilation decisions. The output directory must be new. The runner stops both coordinator sessions it starts.
+
+```sh
+bench=research/checked-tiles/boot/reuse
+seed=research/native-seed
+lab=$(mktemp -d)
+cap() { systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=384M "$@"; }
+scripts/bl-mem
+cap python3 "$bench/run.py" --bench "$lab/replay"
+jq '.summary' "$lab/replay/repeat.json"
+```
+
+The replay publishes the complete Scheme for the reader, runs the edited four-definition program, and compares the 51-definition edit with a clean translation. It also restarts the service, damages a disposable cache blob and checks recovery. Compare the socket timings and the native client's process-to-exit timings separately. The Python CLI is convenient for inspecting requests and has its own startup cost.
+
+To issue your own requests from the same shell, reuse the client built above. The coordinator accepts one request at a time. Its socket belongs in a private directory. A new coordinator pays the SDK startup cost once. The logical source name participates in its cache keys and source positions.
+
+```sh
+sock=$lab/compiler.sock
+client=$lab/replay/repeat-client
+source=$seed/out/checked-boot-replay/pipeline/reader.bl
+cap python3 "$bench/run.py" --serve "$sock" --cache "$lab/cache" &
+server=$!
+while [ ! -S "$sock" ] && kill -0 "$server" 2>/dev/null; do sleep .1; done
+"$client" "$sock" reader priv/boot/reader.bl "$source" "$lab/reader.scm"
+"$client" "$sock" reader priv/boot/reader.bl "$source" "$lab/reader.scm"
+"$client" -clean "$sock" reader priv/boot/reader.bl "$source" "$lab/reader-clean.scm"
+cmp "$lab/reader.scm" "$lab/reader-clean.scm"
+"$client" "$sock" repeat.demo demo.bl "$lab/replay/arithmetic.bl" "$lab/app.scm"
+"$client" "$sock" repeat.demo demo.bl "$lab/replay/arithmetic-edited.bl" "$lab/app.scm"
+python3 "$bench/run.py" --connect "$sock" --stop
+wait "$server"
+```
+
+The qualified reader is the exact historical input captured with the native build. The editable profile accepts a plain `repeat.*` namespace and fixed-arity `p-*` functions whose expressions use integers, `x-*` parameters, local calls and binary `erlang/+`, `erlang/-` or `erlang/*`. Other boot snapshots must match both their qualified source digests and their emitted digests. Each output contains the emitted expressions in declaration order. The controls below use the same immutable SDK and exercise the ordinary contextual build producer on an imported macro and function.
+
+```sh
+sdk=$(jq -r .sdk research/checked-tiles/tools.json)
+export ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1'
+mkdir "$lab/world"
+export BEAM_LISP_AOT_CACHE_DIR="$lab/world/cache"
+cap "$sdk/bin/bl" --cold run "$bench/world.bl" -- "$lab/world"
+cap "$sdk/bin/bl" --cold run "$bench/world-cost.bl" -- "$lab/world"
+cap "$sdk/bin/bl" --cold -p "$seed/src" -p "$bench/.." run "$bench/graph-cost.bl" -- "$lab/replay/arithmetic.bl" "$lab/graph-cost.json"
+```
+
+[Measurements and interpretation](journal/04-native-concurrent-core.bl.org) · [Per-request receipts](evidence/boot-repeat-compilation.json) · [Datom projection control](evidence/boot-repeat-graph.json) · [Contextual build results](evidence/boot-repeat-world.json)
