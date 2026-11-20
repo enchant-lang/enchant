@@ -16,6 +16,7 @@ IMAGE = BASE/'out/native-prepared-eval-build'
 QUAL = BASE/'speed/attrib/raw/native-prepared-eval-qualification.json'
 HOST_VALUES = BASE/'host/host-values.scm'
 sys.path.insert(0, str(BASE))
+from cutover_candidate import qualified
 import native_elf
 import native_module
 
@@ -101,13 +102,19 @@ def inputs(out, smoke):
     return rows
 
 
-def run(out,smoke):
+def run(out,smoke,candidate=None):
     qual=json.loads(QUAL.read_text())
     tools=json.loads((HERE.parent/'tools.json').read_text())
     sdk=Path(tools['sdk'])
-    image=IMAGE/'stage2'
-    sha(image,qual['images']['stage2'])
-    sha(IMAGE/'eval-prepared.scm',qual['prepared_macro_bundle_sha256'])
+    if candidate:
+        candidate_identity = qualified(candidate)
+        image = candidate/'stage2'
+        qualification = candidate_identity['qualification']
+    else:
+        image = IMAGE/'stage2'
+        sha(image,qual['images']['stage2'])
+        sha(IMAGE/'eval-prepared.scm',qual['prepared_macro_bundle_sha256'])
+        qualification = sha(QUAL)
     sha(sdk/'artifact.json',tools['descriptor_sha256'])
     out.mkdir(mode=0o700)
     rows=inputs(out,smoke)
@@ -165,7 +172,7 @@ def run(out,smoke):
             row['first_difference']=dict(offset=start,beam=x[max(0,start-12):start+90].decode(errors='replace'),
                                          native=y[max(0,start-12):start+90].decode(errors='replace'))
         if not {'beam.parse','native.parse'}<=set(row['timings_us']): raise ValueError(i)
-    receipt=dict(qualified_image=sha(image),sdk=tools['descriptor_sha256'],qualification=sha(QUAL),
+    receipt=dict(qualified_image=sha(image),sdk=tools['descriptor_sha256'],qualification=qualification,
           transport_object=sha(obj), cpu=next(l.split(':',1)[1].strip() for l in Path('/proc/cpuinfo').read_text().splitlines() if l.startswith('model name')),
           source={p.name:sha(p) for p in [HOST_VALUES,HERE/'run.py',HERE/'beam.bl',HERE/'native.scm',HERE/'transport.scm',HERE/'transport-control.scm',HERE/'wire.scm',HERE/'wire.bl',HERE/'observations.scm']},
           smoke=smoke, transport_controls=[line.replace(str(control)+'/','') for line in controls],rows=list(values.values()))
@@ -177,5 +184,6 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--smoke',action='store_true')
+    parser.add_argument('--candidate',type=Path)
     args=parser.parse_args()
-    run(args.out.resolve(),args.smoke)
+    run(args.out.resolve(),args.smoke,args.candidate.resolve() if args.candidate else None)

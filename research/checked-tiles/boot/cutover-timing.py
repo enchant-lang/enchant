@@ -4,24 +4,9 @@ import json
 import os
 from pathlib import Path
 
+from cutover_candidate import qualified
 from field_pipeline import CLOCK, medians, rows
 from run import BASE, HERE, ROOT, command, sexp, sha, write
-
-
-def inputs(build):
-    path = build / 'full-fixpoint.json'
-    receipt = json.loads(path.read_text())
-    if (receipt['status'] != 'qualified' or not receipt['stage2-stage3-byte-equal']
-            or not receipt['stage3-built-and-executed']):
-        raise ValueError(f'{build} lacks a completed native fixed point')
-    s2 = receipt['source_results']['stage2']
-    bundle = build / 'eval-prepared.scm'
-    image = build / 'stage2'
-    compiler = next(row['sha256'] for row in json.loads((build/'identity.json').read_text())['providers']
-                    if row['path'] == 'priv/boot/compiler.bl')
-    return dict(image=sha(image, s2['image_sha256']),
-                bundle=sha(bundle, s2['prepared_eval_bundle_sha256']),
-                qualification=sha(path), compiler_source=compiler)
 
 
 def run(baseline, candidate, out):
@@ -29,7 +14,7 @@ def run(baseline, candidate, out):
     pipeline = BASE / 'out/checked-boot-replay/pipeline'
     template = (pipeline / 'observer.scm').read_text()
     selected = {'baseline': baseline, 'candidate': candidate}
-    generations = {arm: inputs(build) for arm, build in selected.items()}
+    generations = {arm: qualified(build) for arm, build in selected.items()}
     if generations['baseline']['compiler_source'] == generations['candidate']['compiler_source']:
         raise ValueError('The two generations contain identical compiler Source')
     qualification = json.loads((HERE.parent/'evidence/boot-self-hosted-fields.json').read_text())

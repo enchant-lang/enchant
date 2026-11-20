@@ -18,6 +18,8 @@ HERE = Path(__file__).resolve().parent
 TILES = HERE.parent.parent
 ROOT = TILES.parents[1]
 SEED = ROOT/'research/native-seed'
+sys.path.insert(0, str(HERE.parent))
+from cutover_candidate import qualified
 
 
 def digest(path):
@@ -72,19 +74,9 @@ def coordinator(lab, argv):
     # or macro bundle path is consulted between two requests in a session.
     image, macros = q['images']['stage2'], q['prepared_macros']
     if argv.candidate:
-        receipt = read(build/'full-fixpoint.json')
-        if (receipt['status'] != 'qualified' or not receipt['stage2-stage3-byte-equal']
-                or not receipt['stage3-built-and-executed']
-                or not receipt['stage1-stage2-stage3-source-corpus-equal']
-                or not receipt['stage1-stage2-stage3-original-actor-corpus-equal']
-                or not receipt['all-actor-budgets']):
-            raise ValueError('Candidate has no qualified native fixed point')
-        stage2 = receipt['source_results']['stage2']
-        image = stage2['image_sha256']
-        macros = stage2['prepared_eval_bundle_sha256']
-        if image != receipt['source_results']['stage3']['image_sha256']:
-            raise ValueError('Candidate machine images differ across generations')
-        contract.append(digest(build/'full-fixpoint.json'))
+        candidate = qualified(build)
+        image, macros = candidate['image'], candidate['bundle']
+        contract.append(candidate['qualification'])
     for name, sha in [('stage2',image),('eval-prepared.scm',macros),
                       ('translate.scm',digest(HERE/'translate.scm'))]:
         dest = lab/name
