@@ -905,3 +905,31 @@ The public reader comparison reproduced 117 of 121 complete SDK observations and
 : {:reader-observations 121, :same-native-generations true, :transport-controls 20, :runtime-checked-edits 7}
 
 The next cold-read experiment should measure token classification and positioned span construction independently on the same bytes. The warm experiment should run the ordinary macro-bearing build using the native target and the existing artifact and Datom owners. Together those controls exercise the remaining gap to a single native request path.
+
+** What did the syntax reader do with work the caller discarded?
+
+The syntax entry attaches source spans to physical symbols and returns only the forms. The shared parser used to classify the source spelling, build an event map and accumulate it at every form even on that entry. The change skips those operations when the caller requests positioned syntax. The physical-event entry still emits complete events, and the plain entry follows its existing path. [[file:../../../priv/boot/reader.bl][Shared reader with three projections]]
+
+#+begin_rosetta
+Projection on the same Reader Source, native milliseconds | Previous generation | Skip unused events
+Plain forms | 56.4 | 56.9
+Positioned syntax forms | 580.0 | 533.4
+Physical events and forms | 138.2 | 151.3
+#+end_rosetta
+
+This is an 8% improvement for positioned syntax and a 9% slowdown for the physical-event projection on the Reader Source fixture. The diagnostic file showed the same direction in both projections. Keeping the change prioritizes the positioned syntax path, with the physical-event cost recorded explicitly. Each pair of processes produced identical plain forms, positioned forms, source events and diagnostic data on all 18 job/projection combinations. That panel includes real reader and diagnostic Source, Unicode, CRLF, metadata, prefixes and two malformed files. The optional SDK control compiled the candidate Source into an isolated namespace and checked all 18 observations against the normal SDK reader in the same process. Its timing is intentionally excluded from this table because the overlay and boot reader came through different compilation paths. [[file:../evidence/boot-cutover-reader-projections.json][Every native sample and overlay comparison]]
+
+This result narrows the first-read problem. Event construction took measurable time that syntax could skip. Adding symbol spans still costs much more than collecting events on this fixture. The next cold-read investigation should measure the repeated metadata lookups, position maps and wrapper allocation on the symbol path. The plain-read control leaves token classification as a separate target. The reader-only source change also reproduced a new byte-identical native fixed point and passed the same compiler and actor corpora. [[file:../evidence/boot-cutover-reader-generation.json][Reader-only generation receipt]]
+
+#+begin_src beam-lisp :id cutover-reader-projections
+(let [load-r (fn [name] (Jason/decode! (File/read! (str "research/checked-tiles/evidence/boot-cutover-reader-" name ".json"))))
+      q (load-r "generation") runs (load-r "projections") engine (get-in runs ["generations" "candidate"])]
+  (assert (= "qualified" (get q "status")))
+  (assert (= (get q "reader_source_sha256") (get engine "reader_source")
+             (get-in runs ["beam_overlay" "reader_source"])))
+  (assert (= (get-in q ["images" "stage2"]) (get-in q ["images" "stage3"]) (get engine "image")))
+  (assert (get q "actor_corpus_equal"))
+  (assert (= 18 (count (keys (get runs "witness")))))
+  (assert (= 18 (count (get-in runs ["beam_overlay" "runs"]))))
+  {:verified-projections (count (keys (get runs "witness"))) :native-fixed-point true})
+#+end_src
