@@ -1,6 +1,28 @@
 (ns reuse.driver (:require [reuse.request :as request] [bl.json :as json]))
-(let [[cache instructions] (BeamLisp/argv) s (request/session cache)]
- (doseq [job (Jason/decode! (File/read! instructions))]
-  (let [[name path label ns output clean order] job
-        result (request/compile-file! s path label ns output clean order)]
-   (println (str "COMPILED " (json/encode (assoc result :job name :sha256 (request/sha (File/read! output)))))))))
+(defn dispatch [session job]
+ (let [[name path label ns output clean order] job]
+  (when-not (and (= 7 (count job)) (every? string? [name path label ns output])
+                 (or (= clean true) (= clean false)) (contains? #{"stream" "staged"} order))
+    (throw (ex-info "Invalid compile request" {})))
+  (assoc (request/compile-file! session path label ns output clean order)
+         :job name :sha256 (request/sha (File/read! output)))))
+(defn result! [result]
+ (if (= :ok (elem result 0)) (elem result 1) (throw (ex-info (pr-str result) {}))))
+(defn serve [session path]
+ (let [socket (result! (gen_tcp/listen 0 (list (tuple :inet_backend :inet) :local
+               (tuple :ifaddr (tuple :local (erlang/binary_to_list path))) :binary
+               (tuple :packet 4) (tuple :packet_size 65536) (tuple :active false))))]
+  (try
+   (File/chmod! path 384)
+   (loop []
+    (let [client (result! (gen_tcp/accept socket))
+          stop? (try
+            (let [job (Jason/decode! (result! (gen_tcp/recv client 0 3000)))
+                  stop? (= job "stop")
+                  response (if stop? {:stopped true} (dispatch session job))]
+             (gen_tcp/send client (json/encode {:ok response})) stop?)
+            (catch e (gen_tcp/send client (json/encode {:error (ex-message e)})) false)
+            (finally (gen_tcp/close client)))]
+     (when-not stop? (recur))))
+   (finally (gen_tcp/close socket) (File/rm path)))))
+(let [[cache path] (BeamLisp/argv)] (serve (request/session cache) path))

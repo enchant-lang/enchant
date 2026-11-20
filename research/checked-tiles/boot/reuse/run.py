@@ -1,10 +1,13 @@
 """Exercise file-to-file native compilation and verified Datom reuse on one resident coordinator."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import struct
 import statistics
 import subprocess
 import tempfile
@@ -26,6 +29,31 @@ def read(path):
 
 def median(rows, column='us'):
     return statistics.median(r[column] for r in rows)
+
+
+def exchange(endpoint, job):
+    start=time.monotonic_ns()
+    payload=json.dumps(job).encode()
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(180)
+        client.connect(str(endpoint))
+        client.sendall(struct.pack('!I',len(payload))+payload)
+        with client.makefile('rb') as response:
+            header=response.read(4)
+            if len(header)!=4:
+                raise RuntimeError('Incomplete response header')
+            size,=struct.unpack('!I',header)
+            if size>1024*1024:
+                raise RuntimeError('Oversized compiler receipt')
+            answer=json.loads(response.read(size))
+    if 'error' in answer:
+        raise ValueError(answer['error'])
+    return dict(answer['ok'],roundtrip_us=(time.monotonic_ns()-start)/1000)
+
+
+def compile_args(args):
+    src=args.source.resolve()
+    return ['compile',str(src),args.label or str(src),args.namespace,str(args.output.resolve()),args.clean,'staged']
 
 
 def coordinator(lab, argv):
@@ -50,30 +78,64 @@ def coordinator(lab, argv):
     tool = hashlib.sha256(json.dumps(contract).encode()).hexdigest()
     env = dict(os.environ,BL_REPEAT_LAB=str(lab),BL_REPEAT_BUNDLE=str(lab/'eval-prepared.scm'),
                BL_REPEAT_TOOL=tool,ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
+    def server_args(cache,endpoint):
+        return [sdk/'bin/bl','--cold','-p',SEED/'src','-p',HERE.parent,'run',HERE/'driver.bl','--',cache,endpoint]
+
+    @contextmanager
+    def server(cache):
+        endpoint=lab/'compiler.sock'
+        with (lab/'server.log').open('w+') as log, subprocess.Popen(server_args(cache,endpoint),cwd=ROOT,
+                 env=env,stdout=log,stderr=subprocess.STDOUT) as proc:
+            try:
+                deadline=time.monotonic()+90
+                while not endpoint.exists():
+                    if proc.poll() is not None or time.monotonic()>deadline:
+                        log.seek(0)
+                        raise RuntimeError('Compiler did not start: '+log.read()[-2000:])
+                    time.sleep(.02)
+                yield endpoint
+            finally:
+                try:
+                    if proc.poll() is None and endpoint.exists():
+                        exchange(endpoint,'stop')
+                        proc.wait(timeout=4)
+                finally:
+                    if proc.poll() is None:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+
     def run(jobs,cache,allow_failure=False):
-        manifest=lab/'jobs.json'
-        manifest.write_text(json.dumps(jobs))
         start=time.monotonic_ns()
-        result=subprocess.run([sdk/'bin/bl','--cold','-p',SEED/'src','-p',HERE.parent,'run',
-                    HERE/'driver.bl','--',cache,manifest],cwd=ROOT,env=env,
-                    text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=240)
-        wall=(time.monotonic_ns()-start)/1000000
-        if allow_failure:
-            if not result.returncode or 'Repeat compile:' not in result.stdout:
-                raise RuntimeError('Expected profile refusal: '+result.stdout[-1500:])
-            return
-        if result.returncode:
-            raise RuntimeError(result.stdout[-3000:])
-        rows=[json.loads(l[9:]) for l in result.stdout.splitlines() if l.startswith('COMPILED ')]
-        if len(rows)!=len(jobs):
-            raise RuntimeError('Incomplete job list: '+result.stdout[-600:])
-        return rows,wall
+        with server(cache) as endpoint:
+            rows=[]
+            for job in jobs:
+                try:
+                    row=exchange(endpoint,job)
+                except ValueError as exc:
+                    if allow_failure and 'Repeat compile:' in str(exc):
+                        return
+                    raise
+                if allow_failure:
+                    raise ValueError('Invalid request was accepted')
+                rows.append(row)
+            wall=(time.monotonic_ns()-start)/1000000
+            return rows,wall
+    if argv.serve:
+        endpoint=argv.serve.absolute()
+        parent=endpoint.parent.stat()
+        if parent.st_uid!=os.getuid() or parent.st_mode & 0o077:
+            raise ValueError('Place the socket in a private directory owned by the current user (mode 0700)')
+        if os.path.lexists(endpoint):
+            raise FileExistsError(endpoint)
+        print('Compiler socket will be available at '+str(endpoint),flush=True)
+        subprocess.run(server_args(argv.cache.resolve(),endpoint),cwd=ROOT,env=env,check=True)
+        return
     if not argv.bench:
-        ns=argv.namespace
-        source=argv.source.resolve()
-        label=argv.label or str(source)
-        rows,wall=run([['compile',str(source),label,ns,str(argv.output.resolve()),argv.clean,'stream']],
-                      argv.cache.resolve())
+        rows,wall=run([compile_args(argv)],argv.cache.resolve())
         print(json.dumps(dict(request=rows[0],cold_coordinator_ms=wall),indent=2))
         return
     out=argv.bench.resolve()
@@ -130,9 +192,13 @@ def coordinator(lab, argv):
         selected=[r for r in rows if r['job'].startswith('baseline') and r['job'].endswith(mode)]
         totals[mode]=dict(request_ms=median(selected)/1000,native_ms=median(selected,'native-us')/1000)
     hot=median(hits)
+    clean_transport=median([r for r in rows if r['job'].startswith('baseline') and r['job'].endswith('staged')],'roundtrip_us')
+    hit_transport=median(hits,'roundtrip_us')
     summary=dict(first_ms=by_name['reader-first']['us']/1000,hit_ms=hot/1000,
                  clean_over_hit=totals['stream']['request_ms']*1000/hot,
                  clean=totals,restarted_request_ms=durable[0]['us']/1000,cold_coordinator_hit_ms=restart)
+    summary.update(roundtrip_hit_ms=hit_transport/1000,roundtrip_clean_ms=clean_transport/1000,
+                   roundtrip_speedup=clean_transport/hit_transport)
     report=dict(tool=tool,sdk=contract[0],image=q['images']['stage2'],input=digest(boot),
                 outputs=rows+durable,summary=summary,invalid_edit_preserved_output=True,
                 first_coordinator_ms=elapsed)
@@ -143,6 +209,9 @@ def coordinator(lab, argv):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--bench',type=Path,help='Write the replay to a fresh directory')
+    p.add_argument('--serve',type=Path,help='Start a resident compiler on a private Unix socket')
+    p.add_argument('--connect',type=Path,help='Use an existing resident compiler')
+    p.add_argument('--stop',action='store_true')
     p.add_argument('--cache',type=Path)
     p.add_argument('--namespace')
     p.add_argument('--label',help='Logical source filename used in diagnostics/emitted code')
@@ -150,7 +219,14 @@ def main():
     p.add_argument('source',type=Path,nargs='?')
     p.add_argument('output',type=Path,nargs='?')
     args=p.parse_args()
-    if not args.bench and not all((args.source,args.output,args.namespace,args.cache)):
+    if args.connect:
+        if not args.stop and not all((args.source,args.output,args.namespace)):
+            p.error('--connect requires --stop or --namespace NS SOURCE OUTPUT')
+        print(json.dumps(exchange(args.connect,'stop' if args.stop else compile_args(args)),indent=2))
+        return
+    if args.serve and not args.cache:
+        p.error('--serve requires --cache DIR')
+    if not (args.serve or args.bench) and not all((args.source,args.output,args.namespace,args.cache)):
         p.error('supply --bench DIR or --cache DIR --namespace NS SOURCE OUTPUT')
     with tempfile.TemporaryDirectory(prefix='enchant-repeat-') as lab:
         coordinator(Path(lab),args)
