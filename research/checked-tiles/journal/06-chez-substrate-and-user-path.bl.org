@@ -1,0 +1,75 @@
+#+title: The same compiler on Chez, and what a user waits for
+#+subtitle: A substrate swap reaches warm-BEAM parity on the matched job; the user's wait is mostly outside the compiler.
+#+date: 2026-11-20
+#+status: Research port · byte-identical on reader.bl · actor, corpus and fixpoint gates not yet run on Chez
+
+* Why this experiment
+
+The handoff left the native compiler 4.8–8.9× slower than warm BEAM. Its diagnosis pointed at the value model the host gives BL, not at a lack of machine code. That left open how much of the gap belongs to Gambit itself: generated C compiled at =-O0=, a large C toolchain in the loop, and a hand-built turn budget. The cheapest way to separate the two was to run the *same* qualified compiler Scheme on Chez Scheme 10.4.1 and change nothing else. [[file:05-native-compiler-handoff.bl.org][Handoff]] · [[file:04-native-concurrent-core.bl.org::Why the native compiler is slower][Earlier diagnosis]]
+
+* What changed between the two runs
+
+=research/substrate-ab/translate.ss= reads =cutover-core-build-v3/prelude.scm= (6.1 MB, 11,101 forms) and writes Chez forms. It rewrites four =#!optional= / =#!rest= lambda lists, five =##= global-variable primitives, the one embedded PCRE2 C block and its six =c-lambda= procedures. It also renames five Gambit procedures whose Chez namesakes take different arguments: =error=, =with-output-to-string=, =getenv=, =call-with-output-file= and =eval=. =chez-shim.ss= supplies Gambit tables, =with-exception-catcher=, error objects and a few string and vector moves. The macro bundle evaluated at run time passes through the same rewrite. No BL source, emitter or compiler algorithm changed. [[file:../../substrate-ab/translate.ss][Translator]] · [[file:../../substrate-ab/chez-shim.ss][Shim]]
+
+* The matched job on three engines
+
+The job is the journal's reader translation: 86,200 bytes, 104 definitions, read, compile and emit inside an already running process. Each arm ran 8 warm rounds in two counterbalanced blocks on Work. The BEAM arm is the pinned SDK running =beam-attrib.bl= with the image's pinned emitter sources, as in =boot/pipeline.py=. All six runs emitted the same 247,738 characters (SHA-256 =9b92b9f2…=). [[file:../../substrate-ab/compare.py][Driver]] · [[file:../evidence/substrate-ab.json][Evidence]]
+
+#+begin_rosetta
+Median ms per translation on Work | Read | Compile | Emit | Total
+Gambit stage two (qualified image) | 52.3 | 534.6 | 245.2 | 833.8
+Chez, optimize-level 2 (safe) | 10.4 | 112.4 | 43.4 | 169.2
+Warm BEAM, pinned SDK | 8.4 | 114.4 | 34.3 | 158.3
+#+end_rosetta
+
+On the build station (older i7-4770, shared with a running QEMU test) the same arms gave 1,052 ms for Gambit, 242 ms for Chez at level 2 and 215 ms at level 3 (unsafe). Even the Chez *interpreter* produced identical bytes. The swap alone made the compiler 4.9× faster and brought it within 7% of warm BEAM. Compilation is at parity; reading and emission are still 24–27% slower than BEAM.
+
+* What it costs to produce and start the image
+
+#+begin_rosetta
+Same 6.1 MB of compiler Scheme | Gambit (qualified recipe) | Chez 10.4.1
+Scheme to native code, build station | 54.5 CPU s gsc + 96.9 CPU s clang -O0, 65 units | 9.2 s, one process
+Scheme to native code, Work | not rerun | 5.4 s
+External toolchain | gsc, clang, link step | none
+Launch to first full translation, Work | 2.0 s | 0.86 s
+#+end_rosetta
+
+Chez needs about one sixteenth of Gambit's build CPU and no C compiler. That matters more than the runtime figure. Native code for an edited definition can be produced inside the running process, so the native target and live reload no longer wait on clang. The earlier journal found that raising Gambit's C optimization made the host unit slower or impossible to build. Chez's optimization is a compiler parameter.
+
+* What a user waits for today
+
+=research/substrate-ab/user-path.sh= times the installed =bl= (build =f5ee4ce9=) on a two-namespace project with an imported macro.
+
+#+begin_rosetta
+Request | Observed
+=bl --cold run hello.bl= | 21.0 s
+First =bl run= (starts the persistent VM) | 6.6 s
+Warm =hello.bl= / =(+ 1 2)= | 56–175 ms
+=bl --version= | 53–130 ms
+Unchanged two-namespace app | 110–219 ms
+After a body edit / a macro-provider edit | 170–269 ms / 167–169 ms
+#+end_rosetta
+
+The client is one socket request with negligible CPU. A request that compiles nothing still spends 50–170 ms inside the server VM, and that spread is wide because Work is in swap. For a small project the compiler is not what the user waits for. The fixed request path and VM startup are. A 200× gain on unchanged requests has to remove that floor. Caching compiler output alone cannot reach it.
+
+* What this changes in the plan
+
+- Use Chez as the native substrate. The decision is now backed by measurements instead of preference. Keep the Gambit image as the qualified control until the Chez image passes the same gates.
+- Qualify the Chez image next: the 461-check actor corpus at the three budgets, the source corpus, and a self-emission fixpoint where the Chez-hosted compiler builds itself. Map the turn budget onto Chez engines only after the existing scheduler passes unchanged.
+- Measure the warm request floor inside the VM before building a new cache. If the floor is transport, realm admission or loading rather than compilation, removing it serves every engine and every user immediately.
+- The typed private IR, compact nodes and fused macro-result walk remain the route past parity. They now start from 169 ms on this job, not 834.
+
+#+begin_src beam-lisp :id substrate-ab
+(let [e (Jason/decode! (File/read! "research/checked-tiles/evidence/substrate-ab.json"))
+      c (get e "work_compare") m (get c "medians_ms")
+      total (fn [arm] (get-in m [arm "total"]))]
+  (assert (get c "same_emitted_bytes"))
+  (assert (= 6 (count (get c "runs"))))
+  (assert (every? (fn [r] (= 8 (count (get r "timings_ms")))) (get c "runs")))
+  (assert (< (total "chez") (/ (total "gambit") 4)))
+  (assert (< (total "chez") (* 1.1 (total "beam"))))
+  {:gambit-ms (erlang/round (total "gambit")) :chez-ms (erlang/round (total "chez")) :beam-ms (erlang/round (total "beam"))
+   :same-bytes (get c "same_emitted_bytes")})
+#+end_src
+#+RESULTS: substrate-ab
+: {:gambit-ms 834, :chez-ms 169, :beam-ms 158, :same-bytes true}
