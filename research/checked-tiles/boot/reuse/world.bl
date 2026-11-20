@@ -1,0 +1,30 @@
+;; Public world build producer with an imported transformer and a runtime function.
+(ns reuse.world (:require [compile.world :as world] [bl.json :as json]))
+(let [[root] (BeamLisp/argv)
+      manifest (Path/join root "world.bl") provider (Path/join root "library.bl")
+      out (Path/join root "output") entry (Path/join root "app.bl")
+      lib (fn [n] (str "(ns library) (defsyntax offset [form ctx] (syntax-literal " n ")) "
+                         "(defn apply-offset [x] (erlang/+ x (offset)))"))
+      build (fn [label forced]
+             (let [start (erlang/monotonic_time :microsecond)
+                   result (world/build! manifest out forced)
+                   us (- (erlang/monotonic_time :microsecond) start)
+                   value (world/run-unit (:out result) [])]
+              (assert (empty? (:errors result)))
+              {:job label :us us :compiled (:compiled result) :restored (:cached result) :value value
+               :beams (:digests (first (vals (:runtime-manifest result))))}))]
+ (File/write! provider (lib 2))
+ (File/write! entry "(ns app) (import-world 'library 'current :only [apply-offset]) (apply-offset 40)")
+ (File/write! manifest "{:version 1 :profile 'syntax-v1 :entry ['app 'current] :sources [{:namespace 'library :revision 'current :file \"library.bl\"} {:namespace 'app :revision 'current :file \"app.bl\"}] :libraries []}")
+ (let [first-build (build "first" false)
+       hits (mapv #(build (str "repeat-" %) false) (range 5))
+       forced (build "force" true)
+       _ (File/write! provider (lib 3)) edit (build "macro-edit" false)
+       _ (File/write! provider (lib 2)) revert (build "macro-revert" false)]
+  (assert (= 1 (:compiled first-build)))
+  (assert (= 1 (:compiled forced)))
+  (assert (every? #(and (= 0 (:compiled %)) (= 42 (:value %)) (= (:beams first-build) (:beams %))) hits))
+  (assert (= [1 43] [(:compiled edit) (:value edit)]))
+  (assert (= [0 1 42] [(:compiled revert) (:restored revert) (:value revert)]))
+  (File/write! (Path/join root "world.json") (json/encode (concat [first-build] hits [forced edit revert])))
+  (println "WORLD_REPEAT_OK")))

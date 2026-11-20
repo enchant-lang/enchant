@@ -36,23 +36,33 @@
        names (set (map :name rows))]
   (require! (and (seq rows) (<= (count rows) 256) (= (count names) (count rows))
                  (every? #(or (nil? (:target %)) (contains? names (:target %))) rows)) "unresolved or duplicate definition")
-  rows))
+  {:rows rows :forms forms}))
 
-(defn- indexed-keys [rows source label ns contract]
+(defn- index-calls [forms ns names expected]
  (let [conn (code/connect-codebase)]
   (try
-   (let [facts (code/index-source {} ns source {:mode :calls :path label})
+   ;; Admission checked the plain (ns NAME) header. Index the positioned forms
+   ;; already in hand; the Source indexer would open a second reader.
+   (let [facts (code/index-forms {} ns forms nil {:mode :calls})
          _ (datom/transact! conn (concat (:fn facts) (:calls facts)))
-         db (datom/db conn) qualify (fn [name] (str ns "/" name))
          edges (datom/q '[:find ?from ?to :where [?e :call/caller-qualified ?from]
-                              [?e :call/callee-qualified ?to]] db)
-         graph (Map/new (Enum/map edges #(tuple (get % 0) (get % 1))))
-         expected (Map/new (keep #(when (:target %) (tuple (qualify (:name %)) (qualify (:target %)))) rows))
-         _ (require! (and (= (set (map #(qualify (:name %)) rows)) (set (map :fn/qualified (:fn facts))))
-                          (= (count expected) (count (:calls facts))) (= graph expected))
-                     "Codebase call coverage")
-         bodies (Map/new (map #(tuple (qualify (:name %)) (:digest %)) rows))
-         memo (atom {})]
+                             [?e :call/callee-qualified ?to]] (datom/db conn))
+         graph (Map/new (Enum/map edges #(tuple (get % 0) (get % 1))))]
+    (require! (and (= names (set (map :fn/qualified (:fn facts))))
+                   (= (count expected) (count (:calls facts))) (= graph expected)) "Codebase call coverage")
+    (Jason/encode! graph))
+   (finally (datom/close! conn)))))
+
+(defn- indexed-keys [s parsed label ns contract work]
+ (let [rows (:rows parsed) qualify (fn [name] (str ns "/" name))
+       bodies (Map/new (map #(tuple (qualify (:name %)) (:digest %)) rows))
+       names (set (keys bodies))
+       expected (Map/new (keep #(when (:target %) (tuple (qualify (:name %)) (qualify (:target %)))) rows))
+       graph-key (fragments/digest [:closed-call-graph (:tool s) ns (sort names) expected])
+       graph (Jason/decode! (fragments/emit (:cache s) graph-key
+              (fn [] (swap! work assoc :codebase "indexed") (index-calls (:forms parsed) ns names expected))))
+       _ (require! (= graph expected) "cached call graph differs from admitted syntax")
+       memo (atom {})]
     ;; A target's recipe binds its dependencies recursively. Memoize one digest
     ;; per declaration, including shared leaves. Cycles take whole-unit compilation.
     (letfn [(visit [name active]
@@ -62,8 +72,7 @@
                 (when (or (nil? to) child)
                  (let [key (fragments/digest [:definition contract label ns name (get bodies name) child])]
                   (swap! memo assoc name key) key))))))]
-     (mapv #(visit (qualify (:name %)) #{}) rows)))
-   (finally (datom/close! conn)))))
+     (mapv #(visit (qualify (:name %)) #{}) rows))))
 
 (defn- native! [s source label ns order selected]
  (let [root (str (:lab s) "/" (erlang/unique_integer (list :positive)))
@@ -83,16 +92,17 @@
              (mapv #(File/read! (str root "/" %)) selected))}))
    (finally (File/rm_rf! root)))))
 
-(defn- edited [s source label ns order contract rows work]
- (let [keys (indexed-keys rows source label ns contract) cache (:cache s)]
+(defn- edited [s source label ns order contract parsed work]
+ (swap! work assoc :codebase "reused")
+ (let [rows (:rows parsed) keys (indexed-keys s parsed label ns contract work) cache (:cache s)]
   (if (some nil? keys)
    (let [r (native! s source label ns order :all)]
-    (reset! work {:route "cycle" :compiled (:count r)}) (:text r))
+    (swap! work assoc :route "cycle" :compiled (:count r)) (:text r))
    (let [cached (mapv #(fragments/lookup cache %) keys)
          miss (vec (filter #(nil? (nth cached %)) (range (count rows))))
          fresh (when (seq miss) (:text (native! s source label ns order miss)))
          by-index (Map/new (map (fn [i text] (tuple i text)) miss fresh))]
-    (reset! work {:route "definitions" :compiled (count miss) :names (mapv #(:name (nth rows %)) miss)})
+    (swap! work assoc :route "definitions" :compiled (count miss) :names (mapv #(:name (nth rows %)) miss))
     (string/join "\n" (map-indexed
      (fn [i key] (or (nth cached i) (fragments/emit cache key #(get by-index i)))) keys))))))
 
@@ -114,4 +124,5 @@
        bytes (if clean? (render) (fragments/emit cache key render))
        temporary (str output ".writing-" (System/pid) "-" (erlang/unique_integer (list :positive)))]
   (try (File/write! temporary bytes) (File/rename! temporary output) (finally (File/rm temporary)))
-  (assoc @work :us (- (erlang/monotonic_time :microsecond) start) :bytes (erlang/byte_size bytes))))
+  (let [checksum (sha bytes)]
+   (assoc @work :sha256 checksum :us (- (erlang/monotonic_time :microsecond) start) :bytes (erlang/byte_size bytes)))))
