@@ -51,23 +51,33 @@
             "unresolved, duplicate or wrong-arity definition")
   {:rows rows :forms forms}))
 
-(defn- index-calls [forms ns names sites expected]
+(defn dependency-rows [local-sites]
+ ;; Multiplicity and arity are checked on the original Codebase output.
+ ;; Reachability consumes only the two qualified endpoints of distinct edges.
+ (distinct (map #(select-keys % [:call/caller-qualified :call/callee-qualified]) local-sites)))
+
+(defn stored-graph [rows]
  (let [conn (code/connect-codebase)]
   (try
-   ;; Admission checked the plain (ns NAME) header. Index the positioned forms
-   ;; already in hand; the Source indexer would open a second reader.
-   (let [facts (code/index-forms {} ns forms nil {:mode :calls})
-         _ (datom/transact! conn (concat (:fn facts) (:calls facts)))
+   (let [_ (when (seq rows) (datom/transact! conn rows))
          edges (datom/q '[:find ?from ?to :where [?e :call/caller-qualified ?from]
-                             [?e :call/callee-qualified ?to]] (datom/db conn))
-         graph (Enum/reduce edges {} (fn [edge acc]
-                 (update acc (get edge 0) #(conj (or % #{}) (get edge 1)))))
-         local-sites (remove #(contains? primitives (:call/callee %)) (:calls facts))]
-    (require! (and (= names (set (map :fn/qualified (:fn facts))))
-                   (= sites (frequencies (map #(vector (:call/caller %) (:call/callee %) (:call/arity %)) local-sites)))
-                   (= graph expected)) "Codebase call coverage")
-    (Jason/encode! (Map/new (map (fn [[name deps]] (tuple name (Enum/sort (to-list deps)))) graph))))
+                             [?e :call/callee-qualified ?to]] (datom/db conn))]
+    (Enum/reduce edges {} (fn [edge acc]
+      (update acc (get edge 0) #(conj (or % #{}) (get edge 1))))))
    (finally (datom/close! conn)))))
+
+(defn- index-calls [forms ns names sites expected work]
+ ;; The header and all call kinds were checked before indexing these forms.
+ (let [facts (code/index-forms {} ns forms nil {:mode :calls})
+       local-sites (remove #(contains? primitives (:call/callee %)) (:calls facts))
+       _ (require! (and (= names (set (map :fn/qualified (:fn facts))))
+                        (= sites (frequencies (map #(vector (:call/caller %) (:call/callee %) (:call/arity %)) local-sites)))
+                        (every? :call/callee-qualified local-sites)) "Codebase call coverage")
+       rows (vec (dependency-rows local-sites))
+       graph (stored-graph rows)]
+  (require! (= graph expected) "Codebase dependency graph")
+  (swap! work assoc :indexed-calls (count (:calls facts)) :stored-edges (count rows))
+  (Jason/encode! (Map/new (map (fn [[name deps]] (tuple name (Enum/sort (to-list deps)))) graph)))))
 
 (defn- indexed-keys [s parsed label ns contract work]
  (let [rows (:rows parsed) qualify (fn [name] (str ns "/" name))
@@ -78,7 +88,7 @@
                        (tuple (qualify (:name r)) (set (map #(qualify (first %)) (:calls r)))))) rows))
        graph-key (fragments/digest [:closed-call-graph (:tool s) ns (sort names) sites])
        graph (Jason/decode! (fragments/emit (:cache s) graph-key
-              (fn [] (swap! work assoc :codebase "indexed") (index-calls (:forms parsed) ns names sites expected))))
+              (fn [] (swap! work assoc :codebase "indexed") (index-calls (:forms parsed) ns names sites expected work))))
        memo (atom {})]
     ;; A target's recipe binds its dependencies recursively. Memoize one digest
     ;; per declaration, including shared leaves. Cycles take whole-unit compilation.

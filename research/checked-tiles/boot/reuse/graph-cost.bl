@@ -1,0 +1,20 @@
+;; Same positioned Codebase facts and Datom query, varying the rows persisted.
+(ns reuse.graph-cost (:require [reuse.request :as request] [codebase :as code] [reader] [bl.json :as json]))
+(let [[source output] (BeamLisp/argv)
+      forms (reader/read-string (File/read! source) "demo.bl")
+      facts (code/index-forms {} "repeat.demo" forms nil {:mode :calls})
+      all (vec (concat (:fn facts) (:calls facts)))
+      edges (vec (request/dependency-rows (filter :call/callee-qualified (:calls facts))))
+      expected {"repeat.demo/p-join" #{"repeat.demo/p-seed" "repeat.demo/p-cost"}}
+      trial (fn [mode]
+              (let [rows (if (= mode "all") all edges)
+                    start (erlang/monotonic_time :microsecond)
+                    actual (request/stored-graph rows)
+                    us (- (erlang/monotonic_time :microsecond) start)]
+               (assert (= expected actual))
+               {:mode mode :rows (count rows) :us us}))
+      _ (trial "edges") _ (trial "all")
+      runs (mapv trial ["edges" "all" "all" "edges" "all" "edges" "edges" "all"])]
+ (File/write! output (json/encode {:source-sha256 (request/sha (File/read! source))
+                                   :definitions (count (:fn facts)) :calls (count (:calls facts)) :runs runs}))
+ (println "GRAPH_COST_OK"))

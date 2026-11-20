@@ -133,6 +133,9 @@ def coordinator(lab, argv):
         return
     out=argv.bench.resolve()
     out.mkdir()
+    client=out/'repeat-client'
+    subprocess.run([pins['go'],'build','-trimpath','-o',client,HERE/'client.go'],check=True,cwd=HERE,
+                   env=dict(os.environ,GO111MODULE='off',GOTOOLCHAIN='local',CGO_ENABLED='0',GOFLAGS='-p=2'))
     cache=out/'datom'
     rows=[]
     jobs=[]
@@ -208,6 +211,7 @@ def coordinator(lab, argv):
     bad_arity=out/'bad-arity.bl'
     bad_arity.write_text(before.read_text().replace('(p-mid  )','(p-mid 1)'))
     process_times=[]
+    native_client_times={'hit':[],'clean':[],'sdk':[]}
     begin=time.monotonic_ns()
     with server(cache) as endpoint:
         durable=exchange(endpoint,reader('reader-restart'))
@@ -219,6 +223,15 @@ def coordinator(lab, argv):
                     '--label','priv/boot/reader.bl',str(boot),str(out/'client.scm')],text=True,timeout=60)
             process_times.append((time.monotonic_ns()-begin)/1e6)
             assert json.loads(receipt)['route']=='artifact' and digest(out/'client.scm')==expected
+        for i in range(5):
+            for arm in (('clean','hit','sdk') if i%2==0 else ('sdk','hit','clean')):
+                flags=[] if arm=='hit' else ['-'+arm]
+                begin=time.monotonic_ns()
+                receipt=subprocess.check_output([client,*flags,endpoint,'reader','priv/boot/reader.bl',
+                                                boot,out/'client.scm'],timeout=60)
+                native_client_times[arm].append((time.monotonic_ns()-begin)/1e6)
+                assert json.loads(receipt)['route']==('artifact' if arm=='hit' else 'full')
+                assert digest(out/'client.scm')==expected
         for rejected in (bad,bad_arity):
             negative=edit('graph-edit',rejected)
             unchanged=digest(Path(negative[4]))
@@ -255,9 +268,11 @@ def coordinator(lab, argv):
     summary.update(sdk_clean_ms=sdk_roundtrip/1000,sdk_clean_over_native_hit=sdk_roundtrip/hit_transport)
     summary.update(roundtrip_hit_ms=hit_transport/1000,roundtrip_clean_ms=clean_transport/1000,
                    roundtrip_speedup=clean_transport/hit_transport)
+    summary['native_cli_ms']={arm:statistics.median(samples) for arm,samples in native_client_times.items()}
     report=dict(tool=tool,sdk=contract[0],image=q['images']['stage2'],input=digest(boot),
                 outputs=rows+[durable,repair,repaired],summary=summary,invalid_edit_preserved_output=True,
-                executed=executed,standalone_client_samples_ms=process_times,first_batch_with_startup_ms=elapsed)
+                executed=executed,standalone_client_samples_ms=process_times,native_cli_samples_ms=native_client_times,
+                native_client_sha256=digest(client),first_batch_with_startup_ms=elapsed)
     (out/'repeat.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(summary,indent=2))
 
