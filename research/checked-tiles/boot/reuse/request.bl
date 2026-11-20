@@ -14,31 +14,44 @@
  (let [node (rn/node-form form)] (when (= :symbol (rn/node-tag node)) (rn/node-name node))))
 (defn- items [form kind]
  (let [node (rn/node-form form)] (when (= kind (rn/node-tag node)) (rn/node-items node))))
-(defn- direct-name? [s] (and (string? s) (Regex/match? (Regex/compile! "^p-[a-z][a-z0-9-]*$") s)))
+(def def-name (Regex/compile! "^p-[a-z][a-z0-9-]*$"))
+(def arg-name (Regex/compile! "^x-[a-z][a-z0-9-]*$"))
+(def primitives #{"erlang/+" "erlang/-" "erlang/*"})
+(defn- matches? [pattern s] (and (string? s) (Regex/match? pattern s)))
+(defn- calls-in [form params]
+ (loop [todo (list form) calls []]
+  (if (empty? todo) calls
+   (let [f (first todo) tail (rest todo) xs (items f :list)]
+    (if (or (erlang/is_integer (rn/node-form f)) (contains? params (symbol-name f)))
+     (recur tail calls)
+     (let [callee (symbol-name (first xs)) args (rest xs) arity (count args)]
+      (require! (or (matches? def-name callee) (and (contains? primitives callee) (= arity 2)))
+                "expected integer, argument, arithmetic or local call")
+      (recur (lists/append args tail) (if (contains? primitives callee) calls (conj calls [callee arity])))))))))
 
 (defn- editable-rows [source label ns]
  ;; Finite edit profile. No user macros, reader tags, runtime initializers,
  ;; ambient calls, lexical shadows or namespace directives enter a certificate.
  (require! (and (Regex/match? (Regex/compile! "^repeat[.][a-z][a-z0-9-]*$") ns)
-                (Regex/match? (Regex/compile! "\\A[a-z0-9.()\\[\\]\\- \\t\\n\\r]+\\z") source))
+                (Regex/match? (Regex/compile! "\\A[a-z0-9./+*()\\[\\]\\- \\t\\n\\r]+\\z") source))
            "use the closed repeat.* profile or an exact qualified boot input")
  (let [forms (reader/read-string source label) header (items (first forms) :list)
        _ (require! (= ["ns" ns] (mapv symbol-name header)) "namespace")
        rows (mapv (fn [form]
               (let [xs (items form :list) name (symbol-name (second xs))
-                    params (items (nth xs 2 nil) :vector) body (nth xs 3 nil)
-                    call (items body :list) target (when (= 1 (count call)) (symbol-name (first call)))]
-               (require! (and (= 4 (count xs)) (= "defn" (symbol-name (first xs))) (direct-name? name)
-                              (some? params) (empty? params)
-                              (or (erlang/is_integer (rn/node-form body)) (direct-name? target)))
-                         "expected a zero-arity p-* definition returning an integer or a local p-* call")
-               {:name name :digest (fragments/digest form) :target target})) (rest forms))
-       names (set (map :name rows))]
-  (require! (and (seq rows) (<= (count rows) 256) (= (count names) (count rows))
-                 (every? #(or (nil? (:target %)) (contains? names (:target %))) rows)) "unresolved or duplicate definition")
+                    params (items (nth xs 2 nil) :vector) args (mapv symbol-name params)]
+               (require! (and (= 4 (count xs)) (= "defn" (symbol-name (first xs))) (matches? def-name name)
+                              (some? params) (= (count args) (count (set args))) (every? #(matches? arg-name %) args))
+                         "expected a fixed-arity p-* definition with x-* arguments")
+               {:name name :arity (count args) :digest (fragments/digest form)
+                :calls (calls-in (nth xs 3) (set args))})) (rest forms))
+       arities (Map/new (map #(tuple (:name %) (:arity %)) rows))]
+  (require! (and (seq rows) (<= (count rows) 256) (= (count arities) (count rows))
+                 (every? (fn [r] (every? (fn [[name arity]] (= arity (get arities name))) (:calls r))) rows))
+            "unresolved, duplicate or wrong-arity definition")
   {:rows rows :forms forms}))
 
-(defn- index-calls [forms ns names expected]
+(defn- index-calls [forms ns names sites expected]
  (let [conn (code/connect-codebase)]
   (try
    ;; Admission checked the plain (ns NAME) header. Index the positioned forms
@@ -47,31 +60,35 @@
          _ (datom/transact! conn (concat (:fn facts) (:calls facts)))
          edges (datom/q '[:find ?from ?to :where [?e :call/caller-qualified ?from]
                              [?e :call/callee-qualified ?to]] (datom/db conn))
-         graph (Map/new (Enum/map edges #(tuple (get % 0) (get % 1))))]
+         graph (Enum/reduce edges {} (fn [edge acc]
+                 (update acc (get edge 0) #(conj (or % #{}) (get edge 1)))))
+         local-sites (remove #(contains? primitives (:call/callee %)) (:calls facts))]
     (require! (and (= names (set (map :fn/qualified (:fn facts))))
-                   (= (count expected) (count (:calls facts))) (= graph expected)) "Codebase call coverage")
-    (Jason/encode! graph))
+                   (= sites (frequencies (map #(vector (:call/caller %) (:call/callee %) (:call/arity %)) local-sites)))
+                   (= graph expected)) "Codebase call coverage")
+    (Jason/encode! (Map/new (map (fn [[name deps]] (tuple name (Enum/sort (to-list deps)))) graph))))
    (finally (datom/close! conn)))))
 
 (defn- indexed-keys [s parsed label ns contract work]
  (let [rows (:rows parsed) qualify (fn [name] (str ns "/" name))
        bodies (Map/new (map #(tuple (qualify (:name %)) (:digest %)) rows))
        names (set (keys bodies))
-       expected (Map/new (keep #(when (:target %) (tuple (qualify (:name %)) (qualify (:target %)))) rows))
-       graph-key (fragments/digest [:closed-call-graph (:tool s) ns (sort names) expected])
+       sites (frequencies (mapcat (fn [r] (map (fn [[name arity]] [(:name r) name arity]) (:calls r))) rows))
+       expected (Map/new (keep (fn [r] (when (seq (:calls r))
+                       (tuple (qualify (:name r)) (set (map #(qualify (first %)) (:calls r)))))) rows))
+       graph-key (fragments/digest [:closed-call-graph (:tool s) ns (sort names) sites])
        graph (Jason/decode! (fragments/emit (:cache s) graph-key
-              (fn [] (swap! work assoc :codebase "indexed") (index-calls (:forms parsed) ns names expected))))
-       _ (require! (= graph expected) "cached call graph differs from admitted syntax")
+              (fn [] (swap! work assoc :codebase "indexed") (index-calls (:forms parsed) ns names sites expected))))
        memo (atom {})]
     ;; A target's recipe binds its dependencies recursively. Memoize one digest
     ;; per declaration, including shared leaves. Cycles take whole-unit compilation.
     (letfn [(visit [name active]
              (or (get @memo name)
-              (when-not (contains? active name)
-               (let [to (get graph name) child (when to (visit to (conj active name)))]
-                (when (or (nil? to) child)
-                 (let [key (fragments/digest [:definition contract label ns name (get bodies name) child])]
-                  (swap! memo assoc name key) key))))))]
+              (if (contains? active name) :cycle
+               (let [children (mapv #(visit % (conj active name)) (get graph name []))
+                     key (if (some #(= :cycle %) children) :cycle
+                           (fragments/digest [:definition contract label ns name (get bodies name) children]))]
+                (swap! memo assoc name key) key))))]
      (mapv #(visit (qualify (:name %)) #{}) rows))))
 
 (defn- native! [s source label ns order selected]
@@ -95,7 +112,7 @@
 (defn- edited [s source label ns order contract parsed work]
  (swap! work assoc :codebase "reused")
  (let [rows (:rows parsed) keys (indexed-keys s parsed label ns contract work) cache (:cache s)]
-  (if (some nil? keys)
+  (if (some #(= :cycle %) keys)
    (let [r (native! s source label ns order :all)]
     (swap! work assoc :route "cycle" :compiled (:count r)) (:text r))
    (let [cached (mapv #(fragments/lookup cache %) keys)

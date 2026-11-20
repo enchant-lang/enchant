@@ -156,20 +156,35 @@ def coordinator(lab, argv):
     before=out/'before.bl'
     after=out/'after.bl'
     before.write_text('(ns repeat.demo)\n(defn p-leaf [] 41)\n(defn p-mid [] (p-leaf))\n'
-                      '(defn p-main [] (p-mid))\n(defn p-other [] 12)\n')
+                      '(defn p-main [] (p-mid  ))\n(defn p-other [] 12)\n')
     after.write_text(before.read_text().replace('41','42'))
     def edit(name,src,clean=False,label='demo.bl'):
         return job(name,src,label,'repeat.demo',clean)
     cyclic=out/'cycle.bl'
     cyclic.write_text(before.read_text().replace('[] 41','[] (p-main)'))
     rewired=out/'rewired.bl'
-    rewired.write_text(after.read_text().replace('(p-mid)','(p-other)'))
+    rewired.write_text(after.read_text().replace('(p-mid  )','(p-other)'))
     jobs += [edit('graph-first',before),edit('graph-hit',before),edit('graph-edit',after),
              edit('graph-edit-clean',after,True),edit('graph-revert',before),
              edit('graph-clean',before,True),edit('graph-moved',before,label='moved.bl'),
              edit('graph-rewired',rewired),edit('graph-rewired-clean',rewired,True),
              edit('graph-cycle',cyclic),edit('graph-cycle-clean',cyclic,True)]
+    large=out/'arithmetic.bl'
+    leaf='(defn p-seed [x-one] (erlang/+ x-one 41))'
+    other='(defn p-cost [x-one] (erlang/* x-one 2))'
+    lines=[leaf,other,'(defn p-join [x-one] (erlang/+ (p-seed x-one) (p-cost x-one)))']
+    for i in range(48):
+        expr='x-one'
+        for j in range(20):
+            expr=f'(erlang/+ {j} {expr})'
+        lines.append(f'(defn p-row{i} [x-one] {expr})')
+    large.write_text('(ns repeat.demo)\n'+'\n'.join(lines)+'\n')
+    changed=out/'arithmetic-edited.bl'
+    changed.write_text(large.read_text().replace(leaf,leaf.replace('41','42')))
+    jobs.extend([edit('arithmetic-first',large),edit('arithmetic-repeat',large),edit('arithmetic-edit',changed),
+                 edit('arithmetic-edit-clean',changed,True),edit('arithmetic-revert',large)])
     rows,elapsed=run(jobs,cache)
+    (out/'requests.json').write_text(json.dumps(rows,indent=2)+'\n')
     by_name={r['job']:r for r in rows}
     assert all(r['sha256']==digest(out/(r['job']+'.scm')) for r in rows)
     assert by_name['reader-first']['compiled']==104
@@ -186,6 +201,9 @@ def coordinator(lab, argv):
     assert by_name['graph-first']['sha256']==by_name['graph-clean']['sha256']==by_name['graph-revert']['sha256']
     assert by_name['graph-moved']['compiled']==4
     assert by_name['graph-cycle']['route']=='cycle' and by_name['graph-cycle']['sha256']==by_name['graph-cycle-clean']['sha256']
+    assert by_name['arithmetic-edit']['names']==['p-seed','p-join']
+    assert by_name['arithmetic-edit']['sha256']==by_name['arithmetic-edit-clean']['sha256']
+    assert by_name['arithmetic-revert']['sha256']==by_name['arithmetic-first']['sha256']
     executed={}
     for name,want in [('graph-first','41 12'),('graph-edit','42 12'),('graph-rewired','12 12'),('graph-revert','41 12')]:
         result=subprocess.check_output([lab/'stage2','--eval',HERE/'check-result.scm','unused'],
@@ -195,7 +213,7 @@ def coordinator(lab, argv):
     durable,restart=run([reader('reader-restart')],cache)
     assert durable[0]['route']=='artifact' and durable[0]['sha256']==expected
     bad=out/'bad.bl'
-    bad.write_text(before.read_text().replace('(p-mid)','(p-absent)'))
+    bad.write_text(before.read_text().replace('(p-mid  )','(p-absent)'))
     negative=edit('graph-edit',bad)
     unchanged=digest(Path(negative[4]))
     run([negative],cache,True)
