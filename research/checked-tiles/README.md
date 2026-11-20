@@ -246,3 +246,13 @@ cap research/checked-tiles/boot/rebuild-cutover my-cutover-closure my-cutover-bu
 cap python3 research/checked-tiles/boot/reuse/run.py \
   --candidate research/native-seed/out/my-cutover-build --bench "$lab/cutover"
 ```
+
+The following checks separate the compiler change from process startup and
+exercise the same public reader observations as the original qualification.
+
+```sh
+build=research/native-seed/out/my-cutover-build
+cap python3 research/checked-tiles/boot/cutover-timing.py "$build" --out "$lab/timing"
+cap python3 research/checked-tiles/boot/worker-reuse.py --build "$build" --out "$lab/workers"
+cap python3 research/checked-tiles/boot/run.py --candidate "$build" --out "$lab/reader"
+```
