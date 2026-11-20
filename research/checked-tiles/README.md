@@ -236,3 +236,13 @@ cap "$sdk/bin/bl" --cold -p "$seed/src" -p "$bench/.." run "$bench/graph-cost.bl
 ```
 
 [Measurements and interpretation](journal/04-native-concurrent-core.bl.org) · [Per-request receipts](evidence/boot-repeat-compilation.json) · [Datom projection control](evidence/boot-repeat-graph.json) · [Contextual build results](evidence/boot-repeat-world.json)
+
+## Rehearse a rebuilt native compiler
+
+The native rehearsal starts from the retained qualified input closure and creates two fresh directories under `research/native-seed/out`. It verifies the native self-hosting fixed point and actor corpus. Run the commands sequentially using the memory cap above. The candidate replay compares reader, ANF and diagnostic bytes to the pinned SDK and tests unchanged requests, edits, rejection, restart and repair.
+
+```sh
+cap research/checked-tiles/boot/rebuild-cutover my-cutover-closure my-cutover-build
+cap python3 research/checked-tiles/boot/reuse/run.py \
+  --candidate research/native-seed/out/my-cutover-build --bench "$lab/cutover"
+```
