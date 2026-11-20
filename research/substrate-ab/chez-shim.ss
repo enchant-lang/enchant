@@ -66,3 +66,22 @@
 (define (ab-call-with-output-file path proc) (call-with-output-file path proc '(replace)))
 (load (string-append (getenv "AB_HERE") "/gambit-forms.ss"))
 (define (ab-eval form . env) (eval (xform form) (if (pair? env) (car env) (interaction-environment))))
+;; Gambit's map applies its procedure left to right; Chez leaves the order
+;; unspecified. The compiler's fresh-name counters depend on that order.
+(define ab-map
+  (case-lambda
+    ((f xs) (let loop ((xs xs) (acc '())) (if (pair? xs) (loop (cdr xs) (cons (f (car xs)) acc)) (reverse acc))))
+    ((f xs ys) (let loop ((xs xs) (ys ys) (acc '()))
+                 (if (and (pair? xs) (pair? ys)) (loop (cdr xs) (cdr ys) (cons (f (car xs) (car ys)) acc)) (reverse acc))))
+    ((f . lists) (let loop ((ls lists) (acc '()))
+                   (if (ormap null? ls) (reverse acc) (loop (map cdr ls) (cons (apply f (map car ls)) acc)))))))
+;; Quoted data holding Gambit #!void (see gambit-forms.ss): substitute once, cache by literal.
+(define (ab-void-data x)
+  (cond ((eq? x 'ab:void-literal) (void))
+        ((pair? x) (cons (ab-void-data (car x)) (ab-void-data (cdr x))))
+        ((vector? x) (vector-map ab-void-data x))
+        (else x)))
+(define ab-void-cache (make-weak-eq-hashtable))
+(define (ab-void-subst datum)
+  (or (hashtable-ref ab-void-cache datum #f)
+      (let ((v (ab-void-data datum))) (hashtable-set! ab-void-cache datum v) v)))

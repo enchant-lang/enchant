@@ -20,7 +20,7 @@
 (define (read-gambit path)
   (let* ((text (extract-c-declare (call-with-input-file path get-string-all)))
          (text (fold-left (lambda (t r) (string-replace t (car r) (cdr r))) text
-                 '(("#!optional" . "ab:optional") ("#!rest" . "ab:rest") ("##make-global-var" . "ab-make-global-var")
+                 '(("#!optional" . "ab:optional") ("#!rest" . "ab:rest") ("#!void" . "ab:void-literal") ("##make-global-var" . "ab-make-global-var")
                    ("##global-var-ref" . "ab-global-var-ref") ("##global-var-set!" . "ab-global-var-set!")
                    ("##unbound?" . "ab-unbound?") ("##gc" . "collect")))))
     (let ((p (open-input-string text)))

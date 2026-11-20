@@ -1,7 +1,7 @@
 #+title: The same compiler on Chez, and what a user waits for
 #+subtitle: A substrate swap reaches warm-BEAM parity on the matched job; the user's wait is mostly outside the compiler.
 #+date: 2026-11-20
-#+status: Research port · byte-identical on reader.bl · actor, corpus and fixpoint gates not yet run on Chez
+#+status: Chez image qualified on every Gambit gate · warm floor traced to lock polling · fix pending
 
 * Why this experiment
 
@@ -73,3 +73,29 @@ The client is one socket request with negligible CPU. A request that compiles no
 #+end_src
 #+RESULTS: substrate-ab
 : {:gambit-ms 834, :chez-ms 169, :beam-ms 158, :same-bytes true}
+
+* The Chez image passes the Gambit qualification
+
+=research/substrate-ab/chez-fixpoint.py= builds a Chez image from each stage's Scheme and checks it against the recorded Gambit receipt. Stage one on Chez runs the source corpus with the recorded output under both macro bundles. It self-emits stage two Scheme byte-identical to the Gambit stage one's (=a38d6de4…=). The Chez stage two then emits stage three byte-identical to itself. The original actor overlay passes all 461 checks with the JavaScript oracle's labels and traces at the default, 17-step and 41-step budgets, on stage one and stage two. The driver reuses =observe= from =fixpoint-full.py=, so the acceptance rules are the original code. [[file:../evidence/substrate-chez-fixpoint.json][Chez qualification receipt]]
+
+Two host assumptions surfaced. Gambit's =map= applies its procedure left to right, and the compiler's fresh-name counters depended on that order. The first self-emission therefore differed from Gambit's in 5,264 generated local spellings until the translation used an ordered =map=. The actor body also carries Gambit's =#!void= literal 10,185 times inside quoted metadata. The translator substitutes Chez's void object once per literal.
+
+#+begin_rosetta
+Seconds on Work | Gambit receipt | Chez
+Stage one builds stage two | 33.4 | 11.9
+Stage two builds stage three | 33.5 | 15.0
+Source corpus | 0.78 | 0.88
+Prepared source corpus | 0.33 | 0.57
+Actor corpus, budget 17 | 3.74 | 1.59
+Actor corpus, budget 41 | 1.98 | 1.04
+#+end_rosetta
+
+The prepared corpus is slower on Chez because =eval= compiles every one-shot form, where Gambit interprets it. Chez's =interpret= is the obvious control for evaluated bundles.
+
+* Where a warm request waits
+
+A 1 ms stack sampler in the realm VM found a running process in 58 of 520 ticks across 15 warm =bl run= requests. The VM is idle for most of a request. Timed call/return tracing then attributed the wall time. Over 10 requests the user command itself took 251 ms, and =compile:forms= plus =code:load_binary= took 33 ms. Contended node-local lock acquisitions waited in =wait_for_local_lock_retry= 1,910 times, for 4.3 s across processes. The contended key is =bl_native_publication_lock= for the already-loaded SDK modules =BeamLisp.Execution=, =Refs=, =Vm.Session=, =Vm.Net= and =Vm.Io=. About 84 acquisitions per request hold it, through =run_code_callback_entry!=, =retain_code_components!=, =register_code_callback!=, =close_execution_registration!= and =release_eval_module!=. Each retry sleeps on a fresh 1 ms timer whether or not the holder has already released. The full-table ETS scans that =tprof= first ranked highest cost 0.1–0.7 ms each untraced, about 5–7 ms per request. The probes are in [[file:../../substrate-ab/floor/][substrate-ab/floor]].
+
+Two smaller findings. The checkout client recomputes runtime identity with =find= and =sha256sum= on every command, about 0.4 s of CPU. The installed client does not. And the warm VM reports “exit 1 and no output” for errors that a cold run prints in full, including a plain =badarg= or an unbound var.
+
+The next change is a release notification for =with_local_lock= waiters. It keeps the exact-ticket dead-owner recovery and the timer as a backstop, and uses a process alias so a late notification cannot leak into a caller's mailbox. The custody operations per request are the larger structural cost behind it.
