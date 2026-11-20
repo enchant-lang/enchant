@@ -759,6 +759,15 @@
        (let ((scale (max p2 p5)))
         (bl-decimal (* n (expt 2 (- scale p2)) (expt 5 (- scale p5))) scale)))))))))
 (define (native-num op a b)
+ (if (and (fixnum? a) (fixnum? b))
+  ;; Both operands are small exact integers: no decimal or float promotion
+  ;; applies, term order is numeric order and results stay exact.
+  (case op
+   ((lt) (fx< a b)) ((gt) (fx> a b)) ((le) (fx<= a b)) ((ge) (fx>= a b)) ((num_eq) (fx= a b))
+   ((add) (+ a b)) ((sub) (- a b)) ((mul) (* a b))
+   (else (native-num-general op a b)))
+  (native-num-general op a b)))
+(define (native-num-general op a b)
  (cond
   ((or (eq? op 'lt) (eq? op 'gt) (eq? op 'le) (eq? op 'ge) (eq? op 'num_eq))
    ;; host/num.bl keeps raw term order/equality for non-decimal operands;
