@@ -239,6 +239,8 @@ cap "$sdk/bin/bl" --cold -p "$seed/src" -p "$bench/.." run "$bench/graph-cost.bl
 
 ## Rehearse a rebuilt native compiler
 
+[Handoff for the next compiler agent](journal/05-native-compiler-handoff.bl.org)
+
 The native rehearsal starts from the retained qualified input closure and creates two fresh directories under `research/native-seed/out`. It verifies the native self-hosting fixed point and actor corpus. Run the commands sequentially using the memory cap above. The candidate replay compares reader, ANF and diagnostic bytes to the pinned SDK and tests unchanged requests, edits, rejection, restart and repair.
 
 ```sh
