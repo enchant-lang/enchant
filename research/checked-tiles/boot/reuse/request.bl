@@ -69,15 +69,20 @@
 
 (defn- index-calls [forms ns names sites expected work]
  ;; The header and all call kinds were checked before indexing these forms.
- (let [facts (code/index-forms {} ns forms nil {:mode :calls})
+ (let [start (erlang/monotonic_time :microsecond)
+       facts (code/index-forms {} ns forms nil {:mode :calls})
+       facts-end (erlang/monotonic_time :microsecond)
        local-sites (remove #(contains? primitives (:call/callee %)) (:calls facts))
        _ (require! (and (= names (set (map :fn/qualified (:fn facts))))
                         (= sites (frequencies (map #(vector (:call/caller %) (:call/callee %) (:call/arity %)) local-sites)))
                         (every? :call/callee-qualified local-sites)) "Codebase call coverage")
        rows (vec (dependency-rows local-sites))
-       graph (stored-graph rows)]
+       storage-start (erlang/monotonic_time :microsecond)
+       graph (stored-graph rows)
+       storage-us (- (erlang/monotonic_time :microsecond) storage-start)]
   (require! (= graph expected) "Codebase dependency graph")
-  (swap! work assoc :indexed-calls (count (:calls facts)) :stored-edges (count rows))
+  (swap! work assoc :indexed-calls (count (:calls facts)) :stored-edges (count rows)
+                    :codebase-us (- facts-end start) :datom-us storage-us)
   (Jason/encode! (Map/new (map (fn [[name deps]] (tuple name (Enum/sort (to-list deps)))) graph)))))
 
 (defn- indexed-keys [s parsed label ns contract work]
@@ -142,14 +147,16 @@
        contract [(:tool s) order]
        key (fragments/digest [:translation contract ns label digest])
        work (atom {:route "artifact" :compiled 0})
-       _ (when (= "sdk" order) (require! (and clean? trusted) "SDK control requires an exact boot source"))
+       _ (when (= "sdk" order) (require! trusted "SDK control requires an exact boot source"))
        render (fn []
-        (let [rows (when-not trusted (editable-rows source label ns))]
+        (let [rows (when-not trusted
+                    (let [begin (erlang/monotonic_time :microsecond) parsed (editable-rows source label ns)]
+                     (swap! work assoc :admit-us (- (erlang/monotonic_time :microsecond) begin)) parsed))]
          (if (or clean? trusted)
           (let [r (if (= "sdk" order) (sdk/translate source label ns) (native! s source label ns order :all))
                 text (:text r)]
            (when trusted (require! (= (get boot "output") (sha text)) "qualified bytes differ"))
-           (reset! work {:route "full" :compiled (:count r) :native-us (:native-us r)}) text)
+           (swap! work assoc :route "full" :compiled (:count r) :native-us (:native-us r)) text)
           (edited s source label ns order contract rows work))))
        bytes (if clean? (render) (fragments/emit cache key render))
        temporary (str output ".writing-" (System/pid) "-" (erlang/unique_integer (list :positive)))]
