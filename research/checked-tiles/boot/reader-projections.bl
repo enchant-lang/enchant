@@ -1,0 +1,28 @@
+;; Compare the candidate source in a separate namespace on the same SDK.
+(ns boot.reader-projections
+ (:require [reader :as baseline] [cutover.reader :as candidate] [bl.json :as json]))
+
+(defn observe [entry source label]
+ (try (list :ok (entry source label))
+  (catch e (list :error (or (get e :original) (ex-message e))))))
+
+(let [[directory jobs-path] (BeamLisp/argv)
+      jobs (Jason/decode! (File/read! jobs-path))
+      entries {"read" [baseline/read-string candidate/read-string]
+               "syntax" [baseline/read-syntax candidate/read-syntax]
+               "spans" [baseline/read-source-spans candidate/read-source-spans]}
+      rows (mapv (fn [[id mode path label]]
+             (let [[stock changed] (get entries mode)
+                   source (File/read! path)
+                   expected (observe stock source label)
+                   _ (assert (= expected (observe changed source label)))
+                   timed (fn [entry]
+                           (let [start (erlang/monotonic_time :microsecond) actual (observe entry source label)
+                                 us (- (erlang/monotonic_time :microsecond) start)]
+                            (assert (= expected actual)) us))]
+               {:id id :status (first expected)
+                :runs (mapv (fn [arm] {:arm arm :us (timed (if (= arm "stock") stock changed))})
+                         ["stock" "changed" "changed" "stock" "changed" "stock" "stock" "changed"])}))
+             jobs)]
+ (File/write! (Path/join directory "beam.json") (json/encode rows))
+ (println "BEAM_READER_PROJECTIONS_OK" (count rows)))
