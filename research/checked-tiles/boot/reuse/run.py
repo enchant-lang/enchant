@@ -62,7 +62,7 @@ def coordinator(lab, argv):
     evidence = TILES/'evidence/boot-self-hosted-fields.json'
     q = read(evidence)
     build = SEED/'out/checked-fields-build'
-    contract = [pins['descriptor_sha256'], digest(evidence), digest(HERE/'request.bl'),
+    contract = [pins['descriptor_sha256'], digest(evidence), digest(HERE/'request.bl'), digest(HERE/'sdk.bl'),
                 digest(SEED/'src/native/fragments.bl')]
     if digest(sdk/'artifact.json') != contract[0]:
         raise ValueError('SDK digest mismatch')
@@ -152,6 +152,7 @@ def coordinator(lab, argv):
     jobs.extend(reader('reader-hit-'+str(i)) for i in range(12))
     for i,order in enumerate(['staged','stream','stream','staged']*2):
         jobs.append(reader('baseline-'+str(i)+'-'+order,True,order))
+        jobs.append(reader('sdk-'+str(i),True,'sdk'))
     before=out/'before.bl'
     after=out/'after.bl'
     before.write_text('(ns repeat.demo)\n(defn p-leaf [] 41)\n(defn p-mid [] (p-leaf))\n'
@@ -161,23 +162,36 @@ def coordinator(lab, argv):
         return job(name,src,label,'repeat.demo',clean)
     cyclic=out/'cycle.bl'
     cyclic.write_text(before.read_text().replace('[] 41','[] (p-main)'))
+    rewired=out/'rewired.bl'
+    rewired.write_text(after.read_text().replace('(p-mid)','(p-other)'))
     jobs += [edit('graph-first',before),edit('graph-hit',before),edit('graph-edit',after),
              edit('graph-edit-clean',after,True),edit('graph-revert',before),
              edit('graph-clean',before,True),edit('graph-moved',before,label='moved.bl'),
+             edit('graph-rewired',rewired),edit('graph-rewired-clean',rewired,True),
              edit('graph-cycle',cyclic),edit('graph-cycle-clean',cyclic,True)]
     rows,elapsed=run(jobs,cache)
     by_name={r['job']:r for r in rows}
+    assert all(r['sha256']==digest(out/(r['job']+'.scm')) for r in rows)
     assert by_name['reader-first']['compiled']==104
     expected=q['jobs']['reader']['output']
-    assert all(r['sha256']==expected for r in rows if r['job'].startswith(('reader','baseline')))
+    assert all(r['sha256']==expected for r in rows if r['job'].startswith(('reader','baseline','sdk')))
     assert all(r['route']=='artifact' and r['compiled']==0 for r in rows if '-hit' in r['job'])
     assert by_name['graph-first']['compiled']==4
+    assert by_name['graph-first']['codebase']=='indexed' and by_name['graph-edit']['codebase']=='reused'
+    assert by_name['graph-rewired']['names']==['p-main'] and by_name['graph-rewired']['codebase']=='indexed'
+    assert by_name['graph-rewired']['sha256']==by_name['graph-rewired-clean']['sha256']
     assert by_name['graph-edit']['names']==['p-leaf','p-mid','p-main']
     assert by_name['graph-edit']['sha256']==by_name['graph-edit-clean']['sha256']!=by_name['graph-first']['sha256']
     assert by_name['graph-revert']['route']=='artifact'
     assert by_name['graph-first']['sha256']==by_name['graph-clean']['sha256']==by_name['graph-revert']['sha256']
     assert by_name['graph-moved']['compiled']==4
     assert by_name['graph-cycle']['route']=='cycle' and by_name['graph-cycle']['sha256']==by_name['graph-cycle-clean']['sha256']
+    executed={}
+    for name,want in [('graph-first','41 12'),('graph-edit','42 12'),('graph-rewired','12 12'),('graph-revert','41 12')]:
+        result=subprocess.check_output([lab/'stage2','--eval',HERE/'check-result.scm','unused'],
+                      text=True,env=dict(env,BL_REPEAT_RESULT=str(out/(name+'.scm'))),timeout=60).strip()
+        assert result==want, (name,result)
+        executed[name]=result
     durable,restart=run([reader('reader-restart')],cache)
     assert durable[0]['route']=='artifact' and durable[0]['sha256']==expected
     bad=out/'bad.bl'
@@ -197,10 +211,12 @@ def coordinator(lab, argv):
     summary=dict(first_ms=by_name['reader-first']['us']/1000,hit_ms=hot/1000,
                  clean_over_hit=totals['stream']['request_ms']*1000/hot,
                  clean=totals,restarted_request_ms=durable[0]['us']/1000,cold_coordinator_hit_ms=restart)
+    sdk_roundtrip=median([r for r in rows if r['job'].startswith('sdk-')],'roundtrip_us')
+    summary.update(sdk_clean_ms=sdk_roundtrip/1000,sdk_clean_over_native_hit=sdk_roundtrip/hit_transport)
     summary.update(roundtrip_hit_ms=hit_transport/1000,roundtrip_clean_ms=clean_transport/1000,
                    roundtrip_speedup=clean_transport/hit_transport)
     report=dict(tool=tool,sdk=contract[0],image=q['images']['stage2'],input=digest(boot),
-                outputs=rows+durable,summary=summary,invalid_edit_preserved_output=True,
+                outputs=rows+durable,summary=summary,invalid_edit_preserved_output=True,executed=executed,
                 first_coordinator_ms=elapsed)
     (out/'repeat.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(summary,indent=2))
