@@ -1,0 +1,117 @@
+(ns reuse.request
+ (:require [reader] [reader-node :as rn] [codebase :as code] [datom] [datom.file :as file]
+           [native.fragments :as fragments] [clojure.string :as string]))
+
+(defn sha [bytes] (file/sha-hex (file/sha256 bytes)))
+(defn session [dir]
+ {:cache (fragments/open dir)
+  :tool (System/fetch_env! "BL_REPEAT_TOOL")
+  :lab (System/fetch_env! "BL_REPEAT_LAB")
+  :qualified (get (Jason/decode! (File/read! "research/checked-tiles/evidence/boot-self-hosted-fields.json")) "jobs")})
+(defn- require! [value why]
+ (when-not value (throw (ex-info (str "Repeat compile: " why) {:kind :unsupported-repeat-input}))))
+(defn- symbol-name [form]
+ (let [node (rn/node-form form)] (when (= :symbol (rn/node-tag node)) (rn/node-name node))))
+(defn- items [form kind]
+ (let [node (rn/node-form form)] (when (= kind (rn/node-tag node)) (rn/node-items node))))
+(defn- direct-name? [s] (and (string? s) (Regex/match? (Regex/compile! "^p-[a-z][a-z0-9-]*$") s)))
+
+(defn- editable-rows [source label ns]
+ ;; Finite edit profile. No user macros, reader tags, runtime initializers,
+ ;; ambient calls, lexical shadows or namespace directives enter a certificate.
+ (require! (and (Regex/match? (Regex/compile! "^repeat[.][a-z][a-z0-9-]*$") ns)
+                (Regex/match? (Regex/compile! "\\A[a-z0-9.()\\[\\]\\- \\t\\n\\r]+\\z") source))
+           "use the closed repeat.* profile or an exact qualified boot input")
+ (let [forms (reader/read-string source label) header (items (first forms) :list)
+       _ (require! (= ["ns" ns] (mapv symbol-name header)) "namespace")
+       rows (mapv (fn [form]
+              (let [xs (items form :list) name (symbol-name (second xs))
+                    params (items (nth xs 2 nil) :vector) body (nth xs 3 nil)
+                    call (items body :list) target (when (= 1 (count call)) (symbol-name (first call)))]
+               (require! (and (= 4 (count xs)) (= "defn" (symbol-name (first xs))) (direct-name? name)
+                              (some? params) (empty? params)
+                              (or (erlang/is_integer (rn/node-form body)) (direct-name? target)))
+                         "expected a zero-arity p-* definition returning an integer or a local p-* call")
+               {:name name :digest (fragments/digest form) :target target})) (rest forms))
+       names (set (map :name rows))]
+  (require! (and (seq rows) (<= (count rows) 256) (= (count names) (count rows))
+                 (every? #(or (nil? (:target %)) (contains? names (:target %))) rows)) "unresolved or duplicate definition")
+  rows))
+
+(defn- indexed-keys [rows source label ns contract]
+ (let [conn (code/connect-codebase)]
+  (try
+   (let [facts (code/index-source {} ns source {:mode :calls :path label})
+         _ (datom/transact! conn (concat (:fn facts) (:calls facts)))
+         db (datom/db conn) qualify (fn [name] (str ns "/" name))
+         edges (datom/q '[:find ?from ?to :where [?e :call/caller-qualified ?from]
+                              [?e :call/callee-qualified ?to]] db)
+         graph (Map/new (Enum/map edges #(tuple (get % 0) (get % 1))))
+         expected (Map/new (keep #(when (:target %) (tuple (qualify (:name %)) (qualify (:target %)))) rows))
+         _ (require! (and (= (set (map #(qualify (:name %)) rows)) (set (map :fn/qualified (:fn facts))))
+                          (= (count expected) (count (:calls facts))) (= graph expected))
+                     "Codebase call coverage")
+         bodies (Map/new (map #(tuple (qualify (:name %)) (:digest %)) rows))
+         memo (atom {})]
+    ;; A target's recipe binds its dependencies recursively. Memoize one digest
+    ;; per declaration, including shared leaves. Cycles take whole-unit compilation.
+    (letfn [(visit [name active]
+             (or (get @memo name)
+              (when-not (contains? active name)
+               (let [to (get graph name) child (when to (visit to (conj active name)))]
+                (when (or (nil? to) child)
+                 (let [key (fragments/digest [:definition contract label ns name (get bodies name) child])]
+                  (swap! memo assoc name key) key))))))]
+     (mapv #(visit (qualify (:name %)) #{}) rows)))
+   (finally (datom/close! conn)))))
+
+(defn- native! [s source label ns order selected]
+ (let [root (str (:lab s) "/" (erlang/unique_integer (list :positive)))
+       chosen (if (= :all selected) "all" (str "(" (string/join " " selected) ")"))]
+  (File/mkdir! root)
+  (try
+   (File/write! (str root "/source") source)
+   (File/write! (str root "/selected") chosen)
+   (let [env (list (tuple "BL_REPEAT_JOB" root) (tuple "BL_REPEAT_LABEL" label)
+                   (tuple "BL_REPEAT_NS" ns) (tuple "BL_REPEAT_ORDER" order))
+         result (System/cmd (str (:lab s) "/stage2") (list "--eval" (str (:lab s) "/translate.scm") "unused")
+                  (list (tuple :env env) (tuple :stderr_to_stdout true)))]
+    (when-not (= 0 (elem result 1)) (throw (ex-info (elem result 0) {:kind :native-repeat-compile})))
+    (let [[amount micros] (String/split (String/trim (elem result 0)) " ")]
+    {:count (String/to_integer amount) :native-us (String/to_integer micros)
+     :text (if (= :all selected) (File/read! (str root "/result"))
+             (mapv #(File/read! (str root "/" %)) selected))}))
+   (finally (File/rm_rf! root)))))
+
+(defn- edited [s source label ns order contract rows work]
+ (let [keys (indexed-keys rows source label ns contract) cache (:cache s)]
+  (if (some nil? keys)
+   (let [r (native! s source label ns order :all)]
+    (reset! work {:route "cycle" :compiled (:count r)}) (:text r))
+   (let [cached (mapv #(fragments/lookup cache %) keys)
+         miss (vec (filter #(nil? (nth cached %)) (range (count rows))))
+         fresh (when (seq miss) (:text (native! s source label ns order miss)))
+         by-index (Map/new (map (fn [i text] (tuple i text)) miss fresh))]
+    (reset! work {:route "definitions" :compiled (count miss) :names (mapv #(:name (nth rows %)) miss)})
+    (string/join "\n" (map-indexed
+     (fn [i key] (or (nth cached i) (fragments/emit cache key #(get by-index i)))) keys))))))
+
+(defn compile-file! [s path label ns output clean? order]
+ (let [start (erlang/monotonic_time :microsecond)
+       source (File/read! path) digest (sha source) cache (:cache s)
+       boot (get (:qualified s) ns)
+       trusted (and (= digest (get boot "source")) (= label (str "priv/boot/" ns ".bl")))
+       contract [(:tool s) order]
+       key (fragments/digest [:translation contract ns label digest])
+       work (atom {:route "artifact" :compiled 0})
+       render (fn []
+        (let [rows (when-not trusted (editable-rows source label ns))]
+         (if (or clean? trusted)
+          (let [r (native! s source label ns order :all) text (:text r)]
+           (when trusted (require! (= (get boot "output") (sha text)) "qualified bytes differ"))
+           (reset! work {:route "full" :compiled (:count r) :native-us (:native-us r)}) text)
+          (edited s source label ns order contract rows work))))
+       bytes (if clean? (render) (fragments/emit cache key render))
+       temporary (str output ".writing-" (System/pid) "-" (erlang/unique_integer (list :positive)))]
+  (try (File/write! temporary bytes) (File/rename! temporary output) (finally (File/rm temporary)))
+  (assoc @work :us (- (erlang/monotonic_time :microsecond) start) :bytes (erlang/byte_size bytes))))
