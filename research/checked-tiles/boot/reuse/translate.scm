@@ -1,11 +1,7 @@
-;; Fresh qualified native process. Input bytes belong to this request.
+;; Qualified native worker. Input bytes belong to the selected request.
 (define (job-call ns name . args) (bl-invoke (native-global-exact ns name) args))
-(define root (getenv "BL_REPEAT_JOB"))
-(define (path name) (string-append root "/" name))
-(define ns (getenv "BL_REPEAT_NS"))
-(define label (getenv "BL_REPEAT_LABEL"))
 (define (head form) (job-call "native.eval" "head-symbol" form))
-(define (compile-one form)
+(define (compile-one ns label form)
  (let* ((env (bl-assoc (job-call "compiler" "new-env" ns) (bl-key "file") label))
         (declaration (job-call "compiler" "declaration-source" form env))
         (value (bl-get declaration (bl-key "value-form")))
@@ -14,15 +10,14 @@
   (job-call "compiler" "compile" (if (bl-truthy position)
     (job-call "reader-node" "meta-node" value position) value)
     (bl-assoc env (bl-key "target") (bl-key "js")))))
-(define (request!)
- (job-call "native.bootstrap" "install-source-macros!"
-           (native-eval-string (native-read-file (getenv "BL_REPEAT_BUNDLE"))))
+(define (request! root ns label order)
+ (define (path name) (string-append root "/" name))
  (let* ((start (real-time))
         (forms (job-call "reader" "read-string" (native-read-file (path "source")) label))
         (selection (call-with-input-file (path "selected") read))
         (all? (eq? selection 'all))
         (indices (make-table))
-        (staged? (string=? "staged" (getenv "BL_REPEAT_ORDER"))))
+        (staged? (string=? "staged" order)))
   (if (not all?) (for-each (lambda (i) (table-set! indices i #t)) selection))
   (job-call "native.eval" "eval-form" (car forms))
   (let* ((context (job-call "native.eval" "context" ns))
@@ -36,9 +31,9 @@
                   (if (or all? (table-ref indices index #f))
                       (cons (cons index (car todo)) found) found))))))
          (rows (if staged?
-                (let ((nodes (map (lambda (r) (compile-one (cdr r))) chosen)))
+                (let ((nodes (map (lambda (r) (compile-one ns label (cdr r))) chosen)))
                  (map (lambda (r n) (cons (car r) (emit n))) chosen nodes))
-                (map (lambda (r) (cons (car r) (emit (compile-one (cdr r))))) chosen))))
+                (map (lambda (r) (cons (car r) (emit (compile-one ns label (cdr r))))) chosen))))
    (if all?
     (call-with-output-file (path "result")
      (lambda (p) (let loop ((todo rows))
@@ -48,6 +43,16 @@
      (if (not (= (length rows) (length selection))) (error "selected definition missing"))
      (for-each (lambda (r) (native-write-file (path (number->string (car r))) (cdr r))) rows)))
    (display (length rows)) (display " ") (display (inexact->exact (round (* 1000000 (- (real-time) start))))) (newline))))
+(define (worker!)
+ (job-call "native.bootstrap" "install-source-macros!"
+           (native-eval-string (native-read-file (getenv "BL_REPEAT_BUNDLE"))))
+ (let ((batch (getenv "BL_REPEAT_FIXED_BATCH" #f)))
+  (if batch
+   ;; Only the independent, fixed boot benchmark uses retained native state.
+   ;; A failed request exits this worker. Admission remains with its caller.
+   (for-each (lambda (job) (apply request! job)) (call-with-input-file batch read))
+   (request! (getenv "BL_REPEAT_JOB") (getenv "BL_REPEAT_NS")
+             (getenv "BL_REPEAT_LABEL") (getenv "BL_REPEAT_ORDER")))))
 (with-exception-catcher
  (lambda (e) (display-exception e (current-error-port)) (exit 1))
- (lambda () (request!) (exit 0)))
+ (lambda () (worker!) (exit 0)))

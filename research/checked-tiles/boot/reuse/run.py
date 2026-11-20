@@ -98,6 +98,7 @@ def coordinator(lab, argv):
     tool = hashlib.sha256(json.dumps(contract).encode()).hexdigest()
     env = dict(os.environ,BL_REPEAT_LAB=str(lab),BL_REPEAT_BUNDLE=str(lab/'eval-prepared.scm'),
                BL_REPEAT_TOOL=tool,ELIXIR_ERL_OPTIONS='+S 2:2 +SDcpu 1:1 +SDio 1')
+    env.pop('BL_REPEAT_FIXED_BATCH', None)
     def server_args(cache,endpoint):
         return [sdk/'bin/bl','--cold','-p',sources,'run',sources/'reuse/driver.bl','--',cache,endpoint]
 
