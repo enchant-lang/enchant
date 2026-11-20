@@ -146,6 +146,11 @@ def coordinator(lab, argv):
         return job(name,boot,'priv/boot/reader.bl','reader',clean,order)
     jobs.append(reader('reader-first'))
     jobs.extend(reader('reader-hit-'+str(i)) for i in range(12))
+    # A client can request an edit profile before any SDK translation has
+    # initialized optional namespaces in the coordinator.
+    solo=out/'standalone.bl'
+    solo.write_text('(ns repeat.init)\n(defn p-a [x-a] (erlang/+ x-a 2))\n(defn p-b [x-b] (p-a x-b))\n')
+    jobs.append(job('standalone-first',solo,'init.bl','repeat.init',order='staged'))
     for i,order in enumerate(['staged','stream','stream','staged']*2):
         jobs.append(reader('baseline-'+str(i)+'-'+order,True,order))
         jobs.append(reader('sdk-clean-'+str(i),True,'sdk'))
@@ -186,6 +191,7 @@ def coordinator(lab, argv):
     by_name={r['job']:r for r in rows}
     assert all(r['sha256']==digest(out/(r['job']+'.scm')) for r in rows)
     assert by_name['reader-first']['compiled']==104
+    assert by_name['standalone-first']['names']==['p-a','p-b']
     assert by_name['sdk-first']['compiled']==104
     expected=q['jobs']['reader']['output']
     assert all(r['sha256']==expected for r in rows if r['job'].startswith(('reader','baseline','sdk')))
