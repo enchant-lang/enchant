@@ -2,7 +2,16 @@
 (ns reuse.graph-cost (:require [reuse.request :as request] [codebase :as code] [reader] [bl.json :as json]))
 (let [[source output] (BeamLisp/argv)
       forms (reader/read-string (File/read! source) "demo.bl")
-      facts (code/index-forms {} "repeat.demo" forms nil {:mode :calls})
+      index (fn [] (code/index-forms {} "repeat.demo" forms nil {:mode :calls}))
+      facts (index)
+      index-trial (fn [mode]
+                    (let [start (erlang/monotonic_time :microsecond)
+                          actual (if (= mode "snapshot") (BeamLisp.Loader/with_declaration_snapshot index) (index))
+                          us (- (erlang/monotonic_time :microsecond) start)]
+                     (assert (= facts actual))
+                     {:mode mode :us us}))
+      _ (index-trial "snapshot")
+      index-runs (mapv index-trial ["direct" "snapshot" "snapshot" "direct" "snapshot" "direct" "direct" "snapshot"])
       all (vec (concat (:fn facts) (:calls facts)))
       edges (vec (request/dependency-rows (filter :call/callee-qualified (:calls facts))))
       expected {"repeat.demo/p-join" #{"repeat.demo/p-seed" "repeat.demo/p-cost"}}
@@ -16,5 +25,6 @@
       _ (trial "edges") _ (trial "all")
       runs (mapv trial ["edges" "all" "all" "edges" "all" "edges" "edges" "all"])]
  (File/write! output (json/encode {:source-sha256 (request/sha (File/read! source))
-                                   :definitions (count (:fn facts)) :calls (count (:calls facts)) :runs runs}))
+                                   :definitions (count (:fn facts)) :calls (count (:calls facts))
+                                   :index-runs index-runs :runs runs}))
  (println "GRAPH_COST_OK"))
