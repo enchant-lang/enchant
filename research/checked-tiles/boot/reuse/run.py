@@ -10,6 +10,7 @@ import socket
 import struct
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -108,20 +109,12 @@ def coordinator(lab, argv):
                             proc.kill()
                             proc.wait()
 
-    def run(jobs,cache,allow_failure=False):
+    def run(jobs,cache):
         start=time.monotonic_ns()
         with server(cache) as endpoint:
             rows=[]
             for job in jobs:
-                try:
-                    row=exchange(endpoint,job)
-                except ValueError as exc:
-                    if allow_failure and 'Repeat compile:' in str(exc):
-                        return
-                    raise
-                if allow_failure:
-                    raise ValueError('Invalid request was accepted')
-                rows.append(row)
+                rows.append(exchange(endpoint,job))
             wall=(time.monotonic_ns()-start)/1000000
             return rows,wall
     if argv.serve:
@@ -146,7 +139,7 @@ def coordinator(lab, argv):
     boot=SEED/'out/checked-boot-replay/pipeline/reader.bl'
     def job(name,path,label,ns,clean=False,order='stream'):
         return [name,str(path),label,ns,str(out/(name+'.scm')),clean,order]
-    def reader(name,clean=False,order='stream'):
+    def reader(name,clean=False,order='staged'):
         return job(name,boot,'priv/boot/reader.bl','reader',clean,order)
     jobs.append(reader('reader-first'))
     jobs.extend(reader('reader-hit-'+str(i)) for i in range(12))
@@ -210,14 +203,42 @@ def coordinator(lab, argv):
                       text=True,env=dict(env,BL_REPEAT_RESULT=str(out/(name+'.scm'))),timeout=60).strip()
         assert result==want, (name,result)
         executed[name]=result
-    durable,restart=run([reader('reader-restart')],cache)
-    assert durable[0]['route']=='artifact' and durable[0]['sha256']==expected
     bad=out/'bad.bl'
     bad.write_text(before.read_text().replace('(p-mid  )','(p-absent)'))
-    negative=edit('graph-edit',bad)
-    unchanged=digest(Path(negative[4]))
-    run([negative],cache,True)
-    assert digest(Path(negative[4]))==unchanged
+    bad_arity=out/'bad-arity.bl'
+    bad_arity.write_text(before.read_text().replace('(p-mid  )','(p-mid 1)'))
+    process_times=[]
+    begin=time.monotonic_ns()
+    with server(cache) as endpoint:
+        durable=exchange(endpoint,reader('reader-restart'))
+        restart=(time.monotonic_ns()-begin)/1e6
+        assert durable['route']=='artifact' and durable['sha256']==expected
+        for _ in range(5):
+            begin=time.monotonic_ns()
+            receipt=subprocess.check_output([sys.executable,__file__,'--connect',str(endpoint),'--namespace','reader',
+                    '--label','priv/boot/reader.bl',str(boot),str(out/'client.scm')],text=True,timeout=60)
+            process_times.append((time.monotonic_ns()-begin)/1e6)
+            assert json.loads(receipt)['route']=='artifact' and digest(out/'client.scm')==expected
+        for rejected in (bad,bad_arity):
+            negative=edit('graph-edit',rejected)
+            unchanged=digest(Path(negative[4]))
+            try:
+                exchange(endpoint,negative)
+            except ValueError as exc:
+                if 'unresolved, duplicate or wrong-arity' not in str(exc):
+                    raise
+            else:
+                raise ValueError('Invalid request was accepted')
+            assert digest(Path(negative[4]))==unchanged
+        # Damage only the disposable replay's blob. Reproduction must repair
+        # both its content and the next pre-reader hit on this running service.
+        blob=cache/'bytes'/expected[:2]/expected[2:4]/expected
+        assert digest(blob)==expected
+        blob.write_bytes(b'damaged replay blob')
+        repair=exchange(endpoint,reader('reader-repair'))
+        repaired=exchange(endpoint,reader('reader-repaired-hit'))
+        assert repair['compiled']==104 and repair['sha256']==digest(blob)==expected
+        assert repaired['route']=='artifact' and digest(out/'reader-repaired-hit.scm')==expected
     hits=[r for r in rows if r['job'].startswith('reader-hit-')]
     totals={}
     for mode in ('staged','stream'):
@@ -227,15 +248,16 @@ def coordinator(lab, argv):
     clean_transport=median([r for r in rows if r['job'].startswith('baseline') and r['job'].endswith('staged')],'roundtrip_us')
     hit_transport=median(hits,'roundtrip_us')
     summary=dict(first_ms=by_name['reader-first']['us']/1000,hit_ms=hot/1000,
-                 clean_over_hit=totals['stream']['request_ms']*1000/hot,
-                 clean=totals,restarted_request_ms=durable[0]['us']/1000,cold_coordinator_hit_ms=restart)
+                 clean_over_hit=totals['staged']['request_ms']*1000/hot,
+                 clean=totals,restarted_request_ms=durable['us']/1000,cold_coordinator_hit_ms=restart,
+                 standalone_client_ms=statistics.median(process_times))
     sdk_roundtrip=median([r for r in rows if r['job'].startswith('sdk-')],'roundtrip_us')
     summary.update(sdk_clean_ms=sdk_roundtrip/1000,sdk_clean_over_native_hit=sdk_roundtrip/hit_transport)
     summary.update(roundtrip_hit_ms=hit_transport/1000,roundtrip_clean_ms=clean_transport/1000,
                    roundtrip_speedup=clean_transport/hit_transport)
     report=dict(tool=tool,sdk=contract[0],image=q['images']['stage2'],input=digest(boot),
-                outputs=rows+durable,summary=summary,invalid_edit_preserved_output=True,executed=executed,
-                first_coordinator_ms=elapsed)
+                outputs=rows+[durable,repair,repaired],summary=summary,invalid_edit_preserved_output=True,
+                executed=executed,standalone_client_samples_ms=process_times,first_batch_with_startup_ms=elapsed)
     (out/'repeat.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(summary,indent=2))
 
