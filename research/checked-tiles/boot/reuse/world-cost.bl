@@ -1,0 +1,33 @@
+(ns reuse.world-cost (:require [compile.world :as world] [bl.profile :as profile] [bl.json :as json]))
+(let [[root] (BeamLisp/argv) file (Path/join root "world.bl") out (Path/join root "output")
+      build (fn [] (world/build! file out false))
+      targets [[:Elixir.BeamLisp.Ns.Body.Compile.World :capture 1]
+               [:Elixir.BeamLisp.Ns.Body.Compile.World :read-manifest 1]
+               [:Elixir.BeamLisp.Ns.Body.Compile.World :selection-identity 2]
+               [:Elixir.BeamLisp.Ns.Body.Compile.World :pipeline-identity 0]
+               [:Elixir.BeamLisp.Ns.Body.Compile.World :read-unit 1]
+               [:Elixir.BeamLisp.AOT :sdk_pipeline_identity! 1]
+               [:Elixir.BeamLisp.AOTCache :current_compiler_key 0]
+               [:Elixir.BeamLisp.Bootstrap :packaged_keys! 0]
+               [:Elixir.BeamLisp.AOT :runtime_image_key 0]]]
+ (assert (= 0 (:compiled (build))))
+ (profile/call-time (fn [] nil))
+ (let [samples
+        (for [[mod f arity] targets trial (range 3)]
+         (do (erlang/apply :tprof :start (list {:type :call_time}))
+          (try
+           (erlang/apply :tprof :enable_trace (list (list (erlang/self))))
+           (erlang/apply :tprof :set_pattern (list mod f arity))
+           (let [start (erlang/monotonic_time :microsecond) built (build)
+                 total (- (erlang/monotonic_time :microsecond) start)
+                 _ (erlang/apply :tprof :disable_trace (list (list (erlang/self))))
+                 data (erlang/apply :tprof :collect (list))
+                 stats (erlang/apply :tprof :inspect (list data :total :measurement))
+                 all (maps/get :all stats nil)
+                 row (when all (first (filter #(= mod (elem % 0)) (elem all 2))))]
+            (assert (= 0 (:compiled built)))
+            {:fn (erlang/atom_to_binary f) :trial trial :wall-us total
+             :calls (if row (elem row 2) 0) :us (if row (elem row 3) 0)})
+           (finally (erlang/apply :tprof :stop (list))))))]
+  (File/write! (Path/join root "world-cost.json") (json/encode (vec samples)))
+  (println "WORLD_COST_OK")))
