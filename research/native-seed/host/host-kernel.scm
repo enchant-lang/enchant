@@ -91,13 +91,18 @@
 ;; symbols compare by opaque identity); only symbol × nil/boolean may share
 ;; an atom name, and pair × pair recurses — both go to the leaf.
 (define (kernel-simple-equal a b leaf)
- (if (eq? a b) #t
+ (cond ((eq? a b) #t)
+  ;; the two commonest unequal pairs, answered before classifying either side
+  ;; (exactly what the class table answers for them)
+  ((and (fixnum? a) (fixnum? b)) #f)
+  ((and (symbol? a) (symbol? b)) #f)
+  (else
   (let ((ca (kernel-simple-class a)) (cb (kernel-simple-class b)))
    (cond ((or (not ca) (not cb)) (leaf a b))
          ((eq? ca cb)
           (case ca ((2) (string=? a b)) ((3) (leaf a b)) (else #f)))
          ((or (and (eq? ca 1) (eq? cb 5)) (and (eq? ca 5) (eq? cb 1))) (leaf a b))
-         (else #f)))))
+         (else #f))))))
 (define (kernel-erlang-equal? a b) (kernel-simple-equal a b kernel-leaf-==))
 (define (kernel-exact-equal? a b) (kernel-simple-equal a b kernel-leaf-=:=))
 (define (kernel-tuple-to-list t)
@@ -113,8 +118,14 @@
    (vector 'tuple items))
   (kernel-leaf-make-tuple n x)))
 (define (kernel-list-to-tuple xs)
- (let loop ((p xs))
-  (cond ((null? p) (vector 'tuple (list->vector xs))) ((pair? p) (loop (cdr p)))
+ ;; One walk to validate and count, one to fill: list->vector would walk twice more.
+ (let loop ((p xs) (n 0))
+  (cond ((null? p)
+         (let ((items (make-vector n)))
+          (let fill ((p xs) (i 0))
+           (if (fx< i n) (begin (vector-set! items i (car p)) (fill (cdr p) (fx+ i 1)))
+            (vector 'tuple items)))))
+        ((pair? p) (loop (cdr p) (fx+ n 1)))
         (else (kernel-leaf-list-to-tuple xs)))))
 (define (kernel-length xs)
  (let loop ((p xs) (n 0))

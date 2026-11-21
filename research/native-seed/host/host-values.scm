@@ -1047,7 +1047,10 @@
        (else (bl-show x))))
 (set! h-str-cat (lambda xs (apply string-append (map h-to-str xs))))
 (define h-str-size string-length)
-(define (h-str-codepoints s) (map char->integer (string->list s)))
+(define (h-str-codepoints s)
+ (if (not (string? s)) (map char->integer (string->list s))
+ (let loop ((i (fx- (string-length s) 1)) (out '()))
+  (if (fx< i 0) out (loop (fx- i 1) (cons (char->integer (string-ref s i)) out))))))
 (define h-str-slice substring)
 (define h-str-cmp native-compare-string)
 (define (h-ex-kind e) (native-exception-kind e))
@@ -1240,6 +1243,14 @@
 ;; Actor strings use JavaScript UTF16 offsets independently of canonical
 ;; Elixir.String grapheme APIs and Unicode/UTF8 binary APIs.
 (define (native-utf16-units text)
+ (if (not (string? text)) (native-utf16-units-list text)
+  (let loop ((i (fx- (string-length text) 1)) (out '()))
+   (if (fx< i 0) out
+    (let ((cp (char->integer (string-ref text i))))
+     (if (fx< cp 65536) (loop (fx- i 1) (cons cp out))
+      (let ((n (fx- cp 65536)))
+       (loop (fx- i 1) (cons (fx+ 55296 (fxquotient n 1024)) (cons (fx+ 56320 (fxmodulo n 1024)) out))))))))))
+(define (native-utf16-units-list text)
  (let loop ((cs (string->list text)) (out '()))
   (if (null? cs) (reverse out) (let ((cp (char->integer (car cs))))
    (if (< cp 65536) (loop (cdr cs) (cons cp out))

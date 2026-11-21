@@ -48,7 +48,9 @@
          (lambda-of (cadr x) (map xform (cddr x))))
         ((eq? (car x) 'quote) (if (has-void? (cadr x)) `(ab-void-subst ,x) x))
         (else (let loop ((x x)) (cond ((pair? x) (cons (xform (car x)) (loop (cdr x)))) (else (ab-rename x)))))))
-;; Gambit procedures whose Chez namesakes have different signatures.
+;; Gambit procedures whose Chez namesakes have different signatures, or (map,
+;; reverse) a different evaluation order or cost.
 (define renames '((error . ab-error) (with-output-to-string . ab-with-output-to-string)
-                  (getenv . ab-getenv) (map . ab-map) (call-with-output-file . ab-call-with-output-file) (eval . ab-eval)))
+                  (getenv . ab-getenv) (map . ab-map) (call-with-output-file . ab-call-with-output-file) (eval . ab-eval)
+                  (reverse . ab-reverse)))
 (define (ab-rename x) (cond ((and (symbol? x) (assq x renames)) => cdr) (else x)))

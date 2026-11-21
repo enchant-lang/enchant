@@ -5,6 +5,12 @@
 ;; the observer; call (ab-profile-start!) and (ab-profile-stop! path).
 (define ab-self (make-hashtable string-hash string=?))
 (define ab-incl (make-hashtable string-hash string=?))
+;; Anonymous closures have no code name; charge their samples to the nearest
+;; named frame as well, so the leaf table is not dominated by "?".
+(define ab-named (make-hashtable string-hash string=?))
+;; "leaf <- caller": the leaf frame's name and the nearest named frame that
+;; differs from it, to say which code drives a hot primitive.
+(define ab-edges (make-hashtable string-hash string=?))
 (define ab-samples 0)
 (define ab-ticks (or (and (getenv "AB_TICKS") (string->number (getenv "AB_TICKS"))) 20000))
 (define ab-profiling #f)
@@ -25,6 +31,13 @@
                              ((string=? (car ns) "$event-and-resume") (cdr ns))
                              (else (skip (cdr ns)))))))
           (when (pair? names) (hashtable-update! ab-self (car names) add1 0))
+          (let ((named (let find ((ns names)) (cond ((null? ns) #f) ((string=? (car ns) "?") (find (cdr ns))) (else (car ns))))))
+            (when named (hashtable-update! ab-named named add1 0))
+            (when named
+              (let ((caller (let find ((ns names)) (cond ((null? ns) #f)
+                                                         ((or (string=? (car ns) "?") (string=? (car ns) named)) (find (cdr ns)))
+                                                         (else (car ns))))))
+                (hashtable-update! ab-edges (string-append named " <- " (or caller "-")) add1 0))))
           (let ((seen (make-hashtable string-hash string=?)))
             (for-each (lambda (nm) (unless (hashtable-ref seen nm #f)
                                      (hashtable-set! seen nm #t)
@@ -43,6 +56,10 @@
     (lambda (p)
       (fprintf p "samples ~a\n== self\n" ab-samples)
       (for-each (lambda (r) (fprintf p "~a ~a\n" (cdr r) (car r))) (ab-top ab-self 70))
+      (fprintf p "== nearest named\n")
+      (for-each (lambda (r) (fprintf p "~a ~a\n" (cdr r) (car r))) (ab-top ab-named 70))
+      (fprintf p "== leaf <- caller\n")
+      (for-each (lambda (r) (fprintf p "~a ~a\n" (cdr r) (car r))) (ab-top ab-edges 120))
       (fprintf p "== inclusive\n")
       (for-each (lambda (r) (fprintf p "~a ~a\n" (cdr r) (car r))) (ab-top ab-incl 90)))
     '(replace)))

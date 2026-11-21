@@ -68,11 +68,31 @@
 (define (ab-eval form . env) (eval (xform form) (if (pair? env) (car env) (interaction-environment))))
 ;; Gambit's map applies its procedure left to right; Chez leaves the order
 ;; unspecified. The compiler's fresh-name counters depend on that order.
+;; Chez's safe reverse walks the list twice (list-length, then the copy). Gambit's
+;; refuses an improper list too; this does it in the one copying pass.
+(define (ab-reverse xs)
+  (let loop ((xs xs) (acc '()))
+    (cond ((pair? xs) (loop (cdr xs) (cons (car xs) acc)))
+          ((null? xs) acc)
+          (else (ab-error "reverse: improper list" xs)))))
 (define ab-map
+  ;; One pass, building the result front to back on fresh pairs: the same calls in
+  ;; the same order as an accumulate-and-reverse, without the second walk.
   (case-lambda
-    ((f xs) (let loop ((xs xs) (acc '())) (if (pair? xs) (loop (cdr xs) (cons (f (car xs)) acc)) (reverse acc))))
-    ((f xs ys) (let loop ((xs xs) (ys ys) (acc '()))
-                 (if (and (pair? xs) (pair? ys)) (loop (cdr xs) (cdr ys) (cons (f (car xs) (car ys)) acc)) (reverse acc))))
+    ((f xs) (if (pair? xs)
+                (let ((head (cons (f (car xs)) '())))
+                  (let loop ((xs (cdr xs)) (tail head))
+                    (if (pair? xs)
+                        (let ((cell (cons (f (car xs)) '()))) (set-cdr! tail cell) (loop (cdr xs) cell))
+                        head)))
+                '()))
+    ((f xs ys) (if (and (pair? xs) (pair? ys))
+                   (let ((head (cons (f (car xs) (car ys)) '())))
+                     (let loop ((xs (cdr xs)) (ys (cdr ys)) (tail head))
+                       (if (and (pair? xs) (pair? ys))
+                           (let ((cell (cons (f (car xs) (car ys)) '()))) (set-cdr! tail cell) (loop (cdr xs) (cdr ys) cell))
+                           head)))
+                   '()))
     ((f . lists) (let loop ((ls lists) (acc '()))
                    (if (ormap null? ls) (reverse acc) (loop (map cdr ls) (cons (apply f (map car ls)) acc)))))))
 ;; Quoted data holding Gambit #!void (see gambit-forms.ss): substitute once, cache by literal.
