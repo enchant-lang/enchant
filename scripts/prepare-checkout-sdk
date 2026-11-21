@@ -35,6 +35,32 @@ directory="$root/.bl/sdks/$fingerprint"
 mkdir -p "$directory"
 retained="$directory/result-sdk"
 
+# Retired preparations keep their SDK closures alive through out-link GC roots;
+# 200 of them filled the store. Under the preparation lock, after a publish,
+# keep the current fingerprint, any directory whose foundry job is still queued
+# or running, any directory one of whose links resolves to the current SDK or
+# the previous preparation, and the BL_SDK_KEEP (default 4) newest others;
+# remove the rest.
+prune_preparations() {
+  local keep=${BL_SDK_KEEP:-4} sdks="$root/.bl/sdks" current previous kept=0 dir target protected
+  current=$(readlink -f "$sdks/current-sdk" 2>/dev/null || true)
+  previous=$(readlink -f "$sdks/previous-preparation" 2>/dev/null || true)
+  while IFS= read -r dir; do
+    [ "$dir" = "$directory" ] && continue
+    # A foundry worker can outlive its wrapper: a job its ledger still calls
+    # queued or running keeps its directory. An active-job pointer alone is a
+    # leftover of a finished or abandoned attempt (this lock is held).
+    if grep -lqsE '"status": *"(queued|running)"' "$dir"/job-*/foundry-state/ledger/jobs/*.json 2>/dev/null; then continue; fi
+    protected=no
+    while IFS= read -r target; do
+      if [ -n "$target" ] && { [ "$target" = "$current" ] || [ "$target" = "$previous" ]; }; then protected=yes; break; fi
+    done < <(find "$dir" -maxdepth 3 -type l -exec readlink -f {} \; 2>/dev/null)
+    [ "$protected" = yes ] && continue
+    if [ "$kept" -lt "$keep" ]; then kept=$((kept + 1)); continue; fi
+    rm -rf -- "$dir"
+  done < <(find "$sdks" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9a-f]{64}' -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
+}
+
 bounded() {
   local name
   local nix_environment=()
@@ -102,6 +128,7 @@ if [ -f "$retained/artifact.json" ]; then
   fi
   ln -sfn "$output" "$root/.bl/sdks/current-sdk.tmp"
   mv -T "$root/.bl/sdks/current-sdk.tmp" "$root/.bl/sdks/current-sdk"
+  prune_preparations
   emit_selection "$output"
   exit 0
 fi
@@ -265,4 +292,5 @@ ln -sfn "$output" "$directory/result-sdk.tmp"
 mv -T "$directory/result-sdk.tmp" "$retained"
 ln -sfn "$output" "$root/.bl/sdks/current-sdk.tmp"
 mv -T "$root/.bl/sdks/current-sdk.tmp" "$root/.bl/sdks/current-sdk"
+prune_preparations
 emit_selection "$output"

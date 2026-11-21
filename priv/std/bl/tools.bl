@@ -6,8 +6,9 @@
    `nix build --inputs-from ROOT`, so `nixpkgs#…` is the project flake's locked
    nixpkgs (the registry's, for a tree without a flake). The store path is
    recorded under ~/.cache/beam-lisp/tools, keyed by the project root, the
-   declaration and the flake.lock bytes; a recorded path is reused only while it
-   exists. Nothing here runs when a tree merely declares tools."
+   declaration and the flake.lock bytes, beside an out-link that keeps it a GC
+   root; a recorded path is reused only while it exists. Nothing here runs when
+   a tree merely declares tools."
   (:require [bl.env :as env] [bl.json :as json] [clojure.string :as string]))
 
 (defn- hex [bytes] (String/downcase (Base/encode16 bytes)))
@@ -29,8 +30,11 @@
                                                 (if (File/regular? lock) (sha (File/read! lock)) "no-lock")]))
                     ".json"))))
 
-(defn- build! [project spec]
-  (let [r (System/cmd "nix" (list "build" "--no-link" "--print-out-paths" "--inputs-from" (:root project) (:package spec))
+(defn- build! [project spec root-link]
+  ;; --out-link makes the package a GC root, so a store collection cannot
+  ;; remove a tool this tree declared while its record still names it.
+  (File/mkdir_p! (Path/dirname root-link))
+  (let [r (System/cmd "nix" (list "build" "--out-link" root-link "--print-out-paths" "--inputs-from" (:root project) (:package spec))
                       (list (tuple :stderr_to_stdout true) (tuple :cd (:root project))))
         out (elem r 0)]
     (when-not (= 0 (elem r 1))
@@ -49,7 +53,7 @@
            known (when (File/regular? record) (get (json/decode (File/read! record)) "out"))]
        (if (and (string? known) (File/dir? known))
          known
-         (let [out (build! project spec)]
+         (let [out (build! project spec (str (String/replace_suffix record ".json" "") "-root"))]
            (File/mkdir_p! (Path/dirname record))
            (let [tmp (str record ".tmp-" (erlang/unique_integer (list :positive)))]
              (File/write! tmp (json/encode {"out" out "package" (:package spec)}))

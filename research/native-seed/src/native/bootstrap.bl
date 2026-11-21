@@ -391,6 +391,150 @@
        (seal-source plan)
        entry-source))))
 
+; ---------------------------------------------------------------------------
+; Bundle refresh: the native self-hosted export. A qualified bundle's units are
+; replaced by checkout sources (or kept, with --refresh-bundle-own), and every
+; metadata row that is a function of those sources is recomputed here with the
+; same rules the BEAM driver used (native.resolution-ledger, BeamLisp.AOT's
+; namespace header). Closure facts that no unit source determines (core link
+; rows, boot-tier stub link rows, boot namespaces, leaves, options) travel from
+; the qualified bundle unchanged.
+(defn- unmeta-node [f] (if (and (erlang/is_tuple f) (= 3 (erlang/tuple_size f)) (= :meta (erlang/element 1 f))) (erlang/element 2 f) f))
+(defn- tagged2? [x tag] (and (erlang/is_tuple x) (= 2 (erlang/tuple_size x)) (erlang/== tag (erlang/element 1 x))))
+(defn- refresh-refuse! [message data] (throw (ex-info (str "native bundle refresh: " message) data)))
+
+(defn namespace-header
+ "BeamLisp.AOT/namespace_header's :require_specs, :refer_alls, :requires and
+  :core-excludes for the `(ns …)` form of namespace `ns`."
+ [form ns]
+ (BeamLisp.CompilerData/check_reader_data! form)
+ (let [list-form (unmeta-node form)
+       items (when (tagged2? list-form :list) (erlang/element 2 list-form))]
+  (when-not (and items (>= (count items) 2) (tagged2? (first items) :symbol) (= "ns" (erlang/element 2 (first items)))
+                 (tagged2? (unmeta-node (second items)) :symbol) (= ns (erlang/element 2 (unmeta-node (second items)))))
+   (refresh-refuse! "namespace header mismatch" {:namespace ns}))
+  (let [clauses (mapv unmeta-node (BeamLisp.CompilerData/namespace_clauses (rest (rest items))))
+        head (fn [c] (when (and (tagged2? c :list) (seq (erlang/element 2 c)))
+                      (let [h (unmeta-node (first (erlang/element 2 c)))]
+                       (when (or (tagged2? h :keyword) (tagged2? h :symbol)) (erlang/element 2 h)))))
+        specs (vec (mapcat (fn [c] (if (and (tagged2? (unmeta-node (first (erlang/element 2 c))) :keyword) (= "require" (head c)))
+                                    (map #(BeamLisp.CompilerData/namespace_require_spec %) (rest (erlang/element 2 c)))
+                                    []))
+                           clauses))]
+   {:require_specs specs
+    :requires (vec (distinct (map #(erlang/element 1 %) specs)))
+    :refer_alls (vec (keep #(when (erlang/== :all (erlang/element 3 %)) (erlang/element 1 %)) specs))
+    :core-excludes (BeamLisp.CompilerData/namespace_core_excludes
+                    (to-list (mapcat (fn [c] (if (= "refer-clojure" (head c)) (rest (erlang/element 2 c)) [])) clauses)))})))
+
+(defn- symbol-named? [node name]
+ (let [n (rn/node-form node)] (and (= :symbol (rn/node-tag n)) (= name (rn/node-name n)))))
+(defn- rt-definition [defs name]
+ (or (first (filter #(= name (:name %)) defs)) (refresh-refuse! "missing rt seed declaration" {:name name})))
+(defn- seed-function-body [d]
+ (let [items (rn/node-items (:form d))]
+  (when-not (and (symbol-named? (first items) "fn") (symbol-named? (second items) (:name d))
+                 (= :vector (rn/node-tag (rn/node-form (nth items 2)))) (empty? (rn/node-items (nth items 2))) (= 4 (count items)))
+   (refresh-refuse! "seed declaration changed shape" {:name (:name d)}))
+  (nth items 3)))
+(defn- quoted-seed-rows
+ "The inert quoted rows of rt seed `name`, read from its compiled literal."
+ [defs ns path name]
+ (let [d (rt-definition defs name)
+       body (seed-function-body d)]
+  (when-not (and (= :list (rn/node-tag (rn/node-form body))) (= 2 (count (rn/node-items body)))
+                 (symbol-named? (first (rn/node-items body)) "quote"))
+   (refresh-refuse! "seed rows must remain inert quote data" {:name name}))
+  (c/reset-fresh!)
+  (let [node (c/compile (:form d) (assoc (c/new-env ns) :file path :target :js))
+        function (if (= :fn (:op node)) node (:inner (BeamLisp.CompilerData/self_application_parts node)))
+        clauses (:clauses function)
+        clause (when (and (erlang/is_list clauses) (= 1 (count clauses))) (first clauses))
+        literal (:body clause)]
+   (when-not (and (= :fn (:op function)) (some? clause) (nil? (:guard clause))
+                  (erlang/is_list (:pats clause)) (empty? (:pats clause)) (= :lit (:op literal)))
+    (refresh-refuse! "seed is not one unguarded zero-parameter literal function" {:name name}))
+   (:val literal))))
+(defn- seed-closure-names [defs]
+ (let [items (rn/node-items (seed-function-body (rt-definition defs "seed-closures")))
+       bindings (rn/node-items (second items))]
+  (when-not (and (symbol-named? (first items) "let") (= 2 (count bindings)) (symbol-named? (first bindings) "put"))
+   (refresh-refuse! "seed-closure publisher changed" {}))
+  (mapv (fn [form] (let [call (rn/node-items form) name (rn/node-form (second call))]
+                    (when-not (and (symbol-named? (first call) "put") (string? name))
+                     (refresh-refuse! "nonliteral seed closure name" {}))
+                    name))
+        (drop 2 items))))
+
+(defn- unit-definitions [u]
+ (definition-values (rest (rd/read-string (:source u) (:path u))) (:ns u) (:path u)))
+
+(defn refresh-metadata
+ "Metadata for `units` (in closure order): resolution headers, seeds and public
+  names, and member link rows, recomputed from their sources; every other row
+  from `metadata`."
+ [metadata units]
+ (let [defs (into {} (map (fn [u] [(:ns u) (unit-definitions u)]) units))
+       rt (first (filter #(= "rt" (:ns %)) units))
+       core-links (:core-links metadata)
+       core (set (concat (map first core-links)
+                         (map first (quoted-seed-rows (defs "rt") "rt" (:path rt) "seed-rows"))
+                         (seed-closure-names (defs "rt"))))
+       cpp (set (map first (quoted-seed-rows (defs "rt") "rt" (:path rt) "seed-cpp-rows")))
+       seeds {"core" (vec (sort core)) "cpp" (vec (sort cpp))}
+       order (mapv :ns units)
+       public (reduce (fn [m ns] (assoc m ns (set (concat (get seeds ns [])
+                                                         (keep (fn [d] (when (and (:name d) (not (:private? d))) (:name d))) (defs ns))))))
+                      {"core" core "cpp" cpp} order)
+       stubs (set (:stubs metadata))
+       raw-headers (into {} (map (fn [u] [(:ns u) (namespace-header (first (rd/read-string (:source u) (:path u))) (:ns u))]) units))
+       headers (into {} (map (fn [ns]
+                (let [raw (raw-headers ns)
+                      replay (reduce (fn [state request]
+                               (let [target (erlang/element 1 request) alias (erlang/element 2 request) refers (erlang/element 3 request)
+                                     names (if (erlang/== :all refers) (get public target #{}) refers)
+                                     _ (when-not (or (contains? defs target) (contains? stubs target) (contains? seeds target))
+                                         (refresh-refuse! "dependency absent from closure" {:namespace ns :target target}))
+                                     state (if alias (assoc-in state [:aliases alias] target) state)]
+                                (reduce (fn [st name] (assoc-in st [:refers name] target)) state names)))
+                              {:aliases {} :refers {}} (reverse (:require_specs raw)))]
+                 [ns (assoc replay :refer-alls (:refer_alls raw) :core-excludes (vec (:core-excludes raw))
+                            :require-specs (:require_specs raw))]))
+               order))
+       member-links (vec (mapcat (fn [u]
+                       (keep (fn [d]
+                              (when (and (:name d) (= :fn (:kind d)))
+                               (let [a (declaration-arities (:form d)) fname (erlang/binary_to_atom (:name d))]
+                                [(:ns u) (:name d)
+                                 (erlang/list_to_tuple (list (:module u) (reduce (fn [m n] (assoc m n fname)) {} (:fixed a))
+                                                             (when (some? (:variadic a))
+                                                              (erlang/list_to_tuple (list (:variadic a) (erlang/binary_to_atom (str (:name d) "__bl_v")))))))
+                                 false])))
+                             (defs (:ns u))))
+                      (remove #(= "core" (:ns %)) units)))
+       stub-links (filterv #(contains? stubs (first %)) (:namespace-links metadata))]
+  (assoc metadata
+   :resolution {:version 1 :seed-names seeds :headers headers}
+   :namespace-links (vec (concat member-links stub-links))
+   :namespace-modules (mapv (fn [u] [(:ns u) (:module u) (:base-module u)]) units))))
+
+(defn- unit-data [u] (data (select-keys u [:ns :path :source :requires :module :base-module])))
+
+(defn refresh-bundle
+ "[bundle-text eval-bundle-text] for `bundle` with its units' sources taken
+  from `source-of` (ns, path → text)."
+ [bundle source-of]
+ (let [units (mapv (fn [u] (let [source (source-of u)
+                                 header (namespace-header (first (rd/read-string source (:path u))) (:ns u))]
+                             (assoc u :source source :requires (:requires header))))
+                   (:units bundle))
+       metadata (refresh-metadata (dissoc bundle :units) units)
+       sources (mapv unit-data units)
+       macro-names (set source-macro-names)]
+  [(str "(bl-assoc " (data metadata) " (bl-key \"units\") (bl-vec (list " (string/join "\n" sources) ")))")
+   (str "(bl-map (bl-key \"units\") (bl-vec (list "
+        (string/join "\n" (keep-indexed (fn [i text] (when (contains? macro-names (:ns (nth units i))) text)) sources)) ")))")]))
+
 (defn compile-bundle [bundle host-source]
  (install-source-macros! bundle)
  (let [bundle (if (contains? bundle :boot-namespaces) bundle
@@ -405,6 +549,13 @@
          output (compile-bundle bundle host-source)]
     (host/write-file (nth args 3) output)
     (println (str "NATIVE_SELF_COMPILE " (count (:units bundle)) " namespaces")))
+  (and (= 4 (count args)) (contains? #{"--refresh-bundle" "--refresh-bundle-own"} (first args)))
+   (let [bundle (host/eval-scheme (host/read-file (nth args 1)))
+         own? (= "--refresh-bundle-own" (first args))
+         [text eval-text] (refresh-bundle bundle (fn [u] (if own? (:source u) (host/read-file (:path u)))))]
+    (host/write-file (nth args 2) text)
+    (host/write-file (nth args 3) eval-text)
+    (println (str "NATIVE_BUNDLE_REFRESH " (count (:units bundle)) " namespaces")))
   (and (= 3 (count args)) (= "--eval" (first args)))
    (let [bundle (host/eval-scheme (host/read-file (nth args 1)))]
     (install-source-macros! bundle)
@@ -414,5 +565,6 @@
     (host/write-file (nth args 2) (prepare-eval-bundle bundle)))
   :else
    (throw (ex-info (str "usage: native-compiler --compile bundle.scm host.scm output.scm"
-                       " | --eval bundle.scm source.bl | --prepare-eval eval-bundle.scm output.scm")
+                       " | --eval bundle.scm source.bl | --prepare-eval eval-bundle.scm output.scm"
+                       " | --refresh-bundle[-own] bundle.scm out-bundle.scm out-eval-bundle.scm")
                   {:args args}))))

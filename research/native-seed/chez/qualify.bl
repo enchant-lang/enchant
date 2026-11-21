@@ -5,6 +5,7 @@
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- derive    --image DIR --out DIR [--base REV]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR [--reps N] [--rounds N]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR [--reps N] [--ticks N]
+;;   ./bin/bl run research/native-seed/chez/qualify.bl -- refresh   --image DIR --out DIR [--own]
 ;;
 ;; Tools come from the repository env.bl's :tools (bl.tools): Chez Scheme and the
 ;; C compiler for the host's text FFI as packages of the locked nixpkgs. No tool
@@ -102,6 +103,13 @@
  [host-c]
  (let [c (File/read! host-c) dir (Path/join (cache-dir) (str "hosts/" (sha c) "-" (sha (:gcc (tools)))))
        so (Path/join dir "host.so")]
+  ;; The FFI dlopens the PCRE2 library at the store path the host C names; keep
+  ;; that path realised and rooted, or a store collection breaks every stage.
+  (when-let [pcre (second (Regex/run (Regex/compile! "#define BL_PCRE_PATH \"(/nix/store/[^/\"]+)") c))]
+   (let [link (Path/join (cache-dir) (str "gcroots/" (Path/basename pcre)))]
+    (when-not (and (File/exists? link) (File/dir? pcre))
+     (File/mkdir_p! (Path/dirname link))
+     (check! "realise PCRE2" (cmd! "nix-store" ["--realise" pcre "--add-root" link "--indirect"] {})))))
   (when-not (File/exists? so)
    (let [tmp (str dir ".tmp-" (unique))]
     (File/mkdir_p! tmp)
@@ -591,12 +599,36 @@
    (say (string/join "\n" (take 40 (string/split-lines decoded))))
    nil)))
 
+;; ── refresh: the bundle metadata, recomputed by the native compiler ─────────
+
+(defn refresh!
+ "Have IMAGE's stage 1 recompute its bundle (native.bootstrap --refresh-bundle):
+  unit sources from this checkout, or with `own` the bundle's own sources. With
+  `own`, the result must be the image's bundle byte for byte."
+ [image out {:keys [own fresh]}]
+ (File/mkdir_p! out)
+ (let [b (build! (Path/join image "stage1.scm"))
+       bundle (Path/join out "bundle.scm") eval-bundle (Path/join out "eval-bundle.scm")
+       r (check! "refresh" (cmd! (:scheme (tools))
+                                 ["--script" (:launcher b) (if own "--refresh-bundle-own" "--refresh-bundle")
+                                  (Path/join image "bundle.scm") bundle eval-bundle]
+                                 {:env (chez-env)}))
+       same (= (File/read! bundle) (File/read! (Path/join image "bundle.scm")))
+       same-eval (= (File/read! eval-bundle) (File/read! (Path/join image "eval-bundle.scm")))
+       receipt {"schema" "bl.native-chez.refresh.v1" "image" image "own_sources" (boolean own) "ms" (:ms r)
+                "bundle_sha256" (sha-file bundle) "eval_bundle_sha256" (sha-file eval-bundle)
+                "same_bundle" same "same_eval_bundle" same-eval}]
+  (write-atomic! (Path/join out "refresh.json") (json/encode receipt {:pretty 1}))
+  (say "refresh " (:ms r) "ms; same bundle " same ", same eval bundle " same-eval)
+  (when (and own (not (and same same-eval))) (throw (ex-info "own-source refresh differs from the bundle" {:out out})))
+  receipt))
+
 ;; ── command line ────────────────────────────────────────────────────────────
 
 (defn- options [args]
  (loop [xs args m {}]
   (cond (empty? xs) m
-        (contains? #{"--fresh" "--skip-actors"} (first xs)) (recur (rest xs) (assoc m (keyword (subs (first xs) 2)) true))
+        (contains? #{"--fresh" "--skip-actors" "--own"} (first xs)) (recur (rest xs) (assoc m (keyword (subs (first xs) 2)) true))
         :else (recur (drop 2 xs) (assoc m (keyword (subs (first xs) 2)) (second xs))))))
 
 (defn main [args]
@@ -610,6 +642,7 @@
    "pair" (pair! (abs (:base o)) (abs (:cand o)) (abs (:out o))
                  {:reps (String/to_integer (or (:reps o) "8")) :rounds (String/to_integer (or (:rounds o) "2"))
                   :prepared (abs (:prepared o))})
+   "refresh" (refresh! (abs (:image o)) (abs (:out o)) o)
    "profile" (profile! (abs (:prelude o)) (abs (:out o))
                        {:reps (String/to_integer (or (:reps o) "10")) :ticks (String/to_integer (or (:ticks o) "20000"))
                         :prepared (abs (:prepared o)) :focus (:focus o)})
