@@ -9,9 +9,9 @@ holds the reasoning.
 
 | | Work | Why | Done when |
 |---|---|---|---|
-| 🔨 | Structural: direct tuple construction | `(tuple …)` / `(erlang/list_to_tuple (list …))` build a list and convert it | Codegen candidate: fixpoint at S3 = S4, 13/13 gates ✅; pairing, then `main` and BEAM SDK tests |
+| 🔨 | Structural: direct tuple construction (merged, `cc49cd44d`) | `(tuple …)` / `(erlang/list_to_tuple (list …))` build a list and convert it | Codegen candidate: fixpoint at S3 = S4, 13/13 gates ✅; pairing, then `main` and BEAM SDK tests |
 | 🅿️ | Disk: daemon `min-free`/`max-free` | This account is not a trusted Nix user, and the daemon runs with `min-free = 0` | Root sets `nix.settings.min-free` / `nix.gc.automatic` on Work |
-| 🔨 | Foundry: sharded unit compilation | A compiler edit recompiles 659 units **serially** (575 s); "jobs 4" covered only restoration | Implemented, off by default (`26a7e6fee`); a `sdkShardVerify` build must show byte-identical units before `sdkShards` is raised |
+| 🔨 | Foundry: sharded unit compilation | A compiler edit recompiles 659 units **serially** (575 s); "jobs 4" covered only restoration | Implemented, **off** (`26a7e6fee` … `affcd8dc2`). Verify builds now get past custody (`:follower` context), but each shard child's `unit-store/produce!` refuses its root: `physical_sdk_path(priv_root)` ≠ the stage root. Next: log both paths in the shard child, then give it a real copied root rather than a link |
 | ⏳ | Foundry: incremental SDK for runtime edits | 6.4 min for about 1 s of compilation | Runtime-edit SDK under 30 s |
 | ⏳ | Structural compiler work | Env reads 18%, positions 22% of lookups; macro walks about 7% | Each step qualified and paired |
 
