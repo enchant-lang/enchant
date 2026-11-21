@@ -1,0 +1,66 @@
+(ns bl.tools
+  "The programs a project declares under `:tools` in its env.bl, as Nix packages.
+
+   `(executable \"scheme\")` answers the absolute path of the declared tool's
+   executable, building its package on first use with
+   `nix build --inputs-from ROOT`, so `nixpkgs#…` is the project flake's locked
+   nixpkgs (the registry's, for a tree without a flake). The store path is
+   recorded under ~/.cache/beam-lisp/tools, keyed by the project root, the
+   declaration and the flake.lock bytes; a recorded path is reused only while it
+   exists. Nothing here runs when a tree merely declares tools."
+  (:require [bl.env :as env] [bl.json :as json] [clojure.string :as string]))
+
+(defn- hex [bytes] (String/downcase (Base/encode16 bytes)))
+(defn- sha [data] (hex (crypto/hash :sha256 data)))
+
+(defn- cache-root []
+  (let [base (or (not-empty (System/get_env "XDG_CACHE_HOME")) (Path/join (System/fetch_env! "HOME") ".cache"))]
+    (Path/join base "beam-lisp/tools")))
+
+(defn declared
+  "The project's normalized `:tools`: name → {:package :bin}."
+  ([] (declared (env/project (BeamLisp/cwd))))
+  ([project] (:tools project)))
+
+(defn- record-path [project name spec]
+  (let [lock (Path/join (:root project) "flake.lock")]
+    (Path/join (cache-root)
+               (str (sha (string/join "\u0000" [(:root project) name (:package spec) (:bin spec)
+                                                (if (File/regular? lock) (sha (File/read! lock)) "no-lock")]))
+                    ".json"))))
+
+(defn- build! [project spec]
+  (let [r (System/cmd "nix" (list "build" "--no-link" "--print-out-paths" "--inputs-from" (:root project) (:package spec))
+                      (list (tuple :stderr_to_stdout true) (tuple :cd (:root project))))
+        out (elem r 0)]
+    (when-not (= 0 (elem r 1))
+      (throw (ex-info (str "nix build " (:package spec) " failed:\n" out) {:package (:package spec)})))
+    ;; the last line is the (first) output path; earlier lines are Nix's notes
+    (last (filter #(String/starts_with? % "/nix/store/") (string/split-lines out)))))
+
+(defn package
+  "The store path of declared tool `name`, building it on first use."
+  ([name] (package (env/project (BeamLisp/cwd)) name))
+  ([project name]
+   (let [spec (get (declared project) name)]
+     (when-not spec
+       (throw (ex-info (str "env.bl declares no tool " (pr-str name)) {:tool name :root (:root project)})))
+     (let [record (record-path project name spec)
+           known (when (File/regular? record) (get (json/decode (File/read! record)) "out"))]
+       (if (and (string? known) (File/dir? known))
+         known
+         (let [out (build! project spec)]
+           (File/mkdir_p! (Path/dirname record))
+           (let [tmp (str record ".tmp-" (erlang/unique_integer (list :positive)))]
+             (File/write! tmp (json/encode {"out" out "package" (:package spec)}))
+             (File/rename! tmp record))
+           out))))))
+
+(defn executable
+  "The absolute path of declared tool `name`'s executable (`bin/<:bin>`)."
+  ([name] (executable (env/project (BeamLisp/cwd)) name))
+  ([project name]
+   (let [path (Path/join (package project name) (str "bin/" (:bin (get (declared project) name))))]
+     (when-not (File/regular? path)
+       (throw (ex-info (str "tool " name " has no executable " path) {:tool name :path path})))
+     path)))

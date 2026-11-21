@@ -175,6 +175,12 @@ worst kind of configuration bug.
   (`0` = the OS chooses). Routes are optional local landing paths; applications
   claim those hostnames and serve their own root redirects through the gateway.
 - `:env` — name → value, the environment the tree expects.
+- `:tools` — name → a Nix installable, or `{:package INSTALLABLE :bin NAME}` when
+  the executable is not named after the tool: the programs this tree runs, as
+  packages rather than whatever is on PATH. `"nixpkgs#chez"` names the
+  project flake's locked nixpkgs. `bl.tools/executable` builds a tool on first
+  use and answers its store path; declaring tools starts nothing and touches no
+  command's environment.
 - `:devtools false` — turn off the Live inspector for this project's `bl serve`
   launches. In development, ordinary `bl serve` shows the dock to viewers
   authorized by the app.
@@ -246,7 +252,7 @@ problems reports all three in one pass.
 
 ```beam-lisp silent
 (def known-keys [:name :instance :bl :warm :vm :realm :shadow :uses :paths :tasks :ports
-                 :schedules :env :devtools :loading :doc :app :build :release :deps :browser :catalog :foundry :android
+                 :schedules :env :tools :devtools :loading :doc :app :build :release :deps :browser :catalog :foundry :android
                  :auth/imports :auth/realms :auth/realm :source/imports])
 
 ;; How `bl` reaches a warm VM for this tree. The LAUNCHER reads this key (it must
@@ -506,6 +512,27 @@ problems reports all three in one pass.
 ```
 
 ```beam-lisp
+(defn- norm-tools
+  "name → {:package INSTALLABLE :bin NAME}. A string is the package, its
+   executable named after the tool. Names and executables are plain file names;
+   an installable is a nonempty string without whitespace."
+  [v]
+  (let [plain? (fn [x] (and (string? x) (Regex/match? (Regex/compile! "^[A-Za-z0-9._+-]+$") x)))
+        installable? (fn [x] (and (string? x) (Regex/match? (Regex/compile! "^\\S+$") x)))
+        one (fn [[k x]]
+             (let [name (if (keyword? k) (name k) k)
+                   spec (if (string? x) {:package x :bin name}
+                            (when (map? x) {:package (:package x) :bin (or (:bin x) name)}))]
+              (if (and (plain? name) spec (installable? (:package spec)) (plain? (:bin spec))
+                       (or (string? x) (empty? (remove #{:package :bin} (keys x)))))
+               [[name spec] nil]
+               [nil (str ":tools " (pr-str k) " must be an installable string or {:package INSTALLABLE :bin NAME}")])))]
+   (cond
+    (nil? v) [{} []]
+    (map? v) (let [rows (map one v)]
+              [(into {} (keep first rows)) (vec (keep second rows))])
+    :else [{} [":tools must be a map of name → installable"]])))
+
 (defn- norm-app
   "`:app` — what this tree IS as an OTP application, or nil for a tree that does
    not claim to be one. A missing `:mod` is a library, not an error."
@@ -936,6 +963,7 @@ shape, whatever the file said.
         [ports porerr] (norm-ports (:ports m))
         [sched serr]   (norm-schedules (:schedules m))
         [env eerr]     (norm-env (:env m) ":env")
+        [tools toerr]  (norm-tools (:tools m))
         devtools       (get m :devtools true)
         deverr         (if (or (= true devtools) (= false devtools)) [] [":devtools must be a boolean"])
         [load lerr]    (norm-loading (:loading m))
@@ -969,6 +997,7 @@ shape, whatever the file said.
      :ports ports
      :schedules sched
      :env env
+     :tools tools
      :devtools (= true devtools)
      :loading load
      :app app
@@ -979,7 +1008,7 @@ shape, whatever the file said.
      :browser brw
      :catalog cat
      :android andr
-     :errors (concat (source-import-errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr deverr aerr berr rerr derr
+     :errors (concat (source-import-errors (:source/imports m)) (auth-errors m) perr nerr ierr blerr werr vmerr rlmerr shderr useserr terr porerr serr eerr toerr deverr aerr berr rerr derr
                      fnderr brerr cerr lerr anderr
                      (map (fn [k] (str "unknown key " k)) (unknown-keys m known-keys)))}))
 
@@ -990,7 +1019,7 @@ shape, whatever the file said.
   {:path nil :root root :name nil :instance nil :bl nil :warm nil :vm nil
    :realm nil :shadow [] :uses {} :paths [] :tasks {} :ports {}
    :schedules []
-   :env {} :devtools true :loading loading/DEFAULTS :app nil :build nil :release nil :deps [] :browser nil :catalog nil :android nil
+   :env {} :tools {} :devtools true :loading loading/DEFAULTS :app nil :build nil :release nil :deps [] :browser nil :catalog nil :android nil
    :errors []})
 ```
 

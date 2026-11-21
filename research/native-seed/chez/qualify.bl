@@ -6,9 +6,9 @@
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- pair      --base PRELUDE --cand PRELUDE --out DIR [--reps N] [--rounds N]
 ;;   ./bin/bl run research/native-seed/chez/qualify.bl -- profile   --prelude PRELUDE --out DIR [--reps N] [--ticks N]
 ;;
-;; Tools come from Nix: Chez Scheme and the C compiler for the host's text FFI are
-;; this repository's locked nixpkgs (`nix build --inputs-from`), recorded per
-;; flake.lock. No tool is taken from PATH.
+;; Tools come from the repository env.bl's :tools (bl.tools): Chez Scheme and the
+;; C compiler for the host's text FFI as packages of the locked nixpkgs. No tool
+;; is taken from PATH.
 ;;
 ;; Everything expensive is content-addressed under ~/.cache/beam-lisp/native-chez:
 ;;   builds/KEY  one translated, compiled stage; KEY hashes the stage source, the
@@ -33,7 +33,7 @@
 ;; `profile` samples the reader job's frames (chez-profile.ss) and spells the
 ;; emitted binding names as BL names.
 (ns native-chez.qualify
- (:require [bl.json :as json] [clojure.string :as string]))
+ (:require [bl.json :as json] [bl.env] [bl.tools :as tools] [clojure.string :as string]))
 
 (def ENTRY "(native-main (native-command-line))\n")
 (def BUDGETS ["default" "17" "41"])
@@ -79,25 +79,15 @@
  (when-not (String/ends_with? text ENTRY) (throw (ex-info "stage source lacks its entry form" {})))
  (binary/part text 0 (- (erlang/byte_size text) (erlang/byte_size ENTRY))))
 
-;; ── tools from Nix ──────────────────────────────────────────────────────────
+;; ── tools: the project's env.bl :tools (bl.tools) ─────────────────────────
 
 (def ^:private tool-memo (atom nil))
 (defn- tools
- "{:scheme :gcc} store paths from the locked nixpkgs, cached per flake.lock."
+ "{:scheme :gcc} executables, from the repository env.bl's :tools packages."
  []
  (or @tool-memo
-  (let [lock (sha-file (Path/join (root) "flake.lock"))
-        record (Path/join (cache-dir) (str "tools-" lock ".json"))
-        cached (when (File/exists? record) (json/decode (File/read! record)))
-        ok? (fn [t] (and t (File/exists? (get t "scheme")) (File/exists? (get t "gcc"))))
-        t (if (ok? cached) cached
-           (let [out (fn [pkg] (string/trim (:out (check! (str "nix build " pkg)
-                                 (cmd! "nix" ["build" "--no-link" "--print-out-paths" "--inputs-from" (root) pkg] {})))))
-                 chez (out "nixpkgs#chez") gcc (out "nixpkgs#gcc")
-                 t {"scheme" (str (last (string/split-lines chez)) "/bin/scheme")
-                    "gcc" (str (last (string/split-lines gcc)) "/bin/gcc")}]
-            (write-atomic! record (json/encode t)) t))]
-   (reset! tool-memo {:scheme (get t "scheme") :gcc (get t "gcc")}))))
+     (let [project (bl.env/project (root))]
+      (reset! tool-memo {:scheme (tools/executable project "scheme") :gcc (tools/executable project "gcc")}))))
 
 (defn- chez-env [] {"BL_CHEZ_HOST_DIR" (here)})
 
